@@ -739,8 +739,25 @@ struct FillOpConversionRewrite : public OpRewritePattern<linalg::FillOp> {
                             [&](auto typedOp) {
                                 if (typedOp.getOutputs()[0] == srcOp.getResults()[0]) {
 
-                                    if (markOpFuseGroup(typedOp, rewriter, maybeFuseGroupAttr))
+                                    if (_markFuseGroups) {
+                                        // Use the id of typedOp to mark srcOp, as typedOp is the
+                                        // principal operation.
+                                        maybeFuseGroupAttr =
+                                            typedOp->template getAttrOfType<IntegerAttr>(
+                                                TORQ_FUSE_GROUP_ID
+                                            );
+                                        markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr);
+                                        // Make sure typedOp is also marked. We have to do it
+                                        // because typedOp might not have a principal pattern (e.g.
+                                        // tests/testdata/tosa_ops/matmul-in-int8-out-int32.mlir
+                                        // breaks without the marking here).
+                                        // NB: this could break the marking of typedOp if it's
+                                        // principal pattern has not run yet. Hence the
+                                        // FillOpConversionRewrite should run after all other
+                                        // patterns.
+                                        markOpFuseGroup(typedOp, rewriter, maybeFuseGroupAttr);
                                         return true;
+                                    }
 
                                     srcOp.getResults()[0].replaceAllUsesWith(srcOp.getOutputs()[0]);
                                     rewriter.eraseOp(srcOp);
@@ -752,9 +769,7 @@ struct FillOpConversionRewrite : public OpRewritePattern<linalg::FillOp> {
                         )
                         .Default([&](Operation *op) { return false; });
         }
-
         if (fused) {
-            markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr);
             return success();
         }
 
@@ -5071,6 +5086,8 @@ void populateLinalgToTorqHLPatterns(
 ) {
     if (markFuseGroups) {
         patterns.insert<TransposeOpConversionRewrite>(context, markFuseGroups);
+        // NB: FillOpConversionRewrite must be the last markFuseGroups pattern (see comment inline
+        // in the fuse case).
         patterns.insert<FillOpConversionRewrite>(context, markFuseGroups);
         return;
     }
