@@ -67,6 +67,8 @@ class HalInterfaceBindingSubspanPattern
         // remove unused information from the output type
         auto outputType = MemRefType::get(origType.getShape(), origType.getElementType());
 
+        LLVM_DEBUG({ subspanOp.dump(); });
+
         auto byteOffset = mlir::cast<IntegerAttr>(
             subspanOp.getByteOffset().getDefiningOp<arith::ConstantOp>().getValueAttr()
         );

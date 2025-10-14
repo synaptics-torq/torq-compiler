@@ -450,11 +450,17 @@ LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
     const DType elementType = getDType(type.getElementType());
     assert(elementType != DType::none && "Invalid element type");
     const int elementSize = sizeofType(elementType);
-    auto shape = type.getShape();
-    auto strides = getEncodedStridesElements(type);
+
     Shape dataShape;
-    for (int i = 0; i < shape.size(); ++i) {
-        dataShape.push_back({shape[i], strides[i] * elementSize});
+    if (type.getRank() > 0) {
+        auto shape = type.getShape();
+        auto strides = getEncodedStridesElements(type);
+        for (int i = 0; i < shape.size(); ++i) {
+            dataShape.push_back({shape[i], strides[i] * elementSize});
+        }
+    }
+    else {
+        dataShape.push_back({1, elementSize});
     }
 
     setElementType(elementType);

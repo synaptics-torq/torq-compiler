@@ -331,6 +331,8 @@ static FailureOr<func::FuncOp> getDispatchFunction(ModuleOp moduleOp) {
 
 void TORQLowerExecutableTargetPass::runOnOperation() {
 
+    LLVM_DEBUG({ llvm::dbgs() << "Lowering dispatch " << getOperation().getSymName() << "\n"; });
+
     // find the dispatch function we are processing
     auto maybeDispatchFuncOp = getDispatchFunction(getOperation());
 

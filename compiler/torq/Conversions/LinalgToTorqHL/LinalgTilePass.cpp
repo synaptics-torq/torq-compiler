@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/SCF/Transforms/Transforms.h"
@@ -428,7 +429,25 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
             return failure();
         }
 
+        // fallback any sqrt operation to host because we don't know how to compile this yet for CSS
+        auto ret = srcOp.walk([](Operation *op) {
+            if (isa<math::SqrtOp, math::RsqrtOp, math::PowFOp, math::ErfOp, arith::DivFOp>(op)) {
+                return WalkResult::interrupt();
+            }
+
+            return WalkResult::advance();
+        });
+
+        if (ret.wasInterrupted()) {
+            rewriter.modifyOpInPlace(srcOp, [&]() {
+                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
+            });
+
+            return success();
+        }
+
         if (clFallbackF32ToHost) {
+
             // FIXME: this is a quick workaround to avoid tiling operations that we want on the host
             auto isFp32Op = false;
 
