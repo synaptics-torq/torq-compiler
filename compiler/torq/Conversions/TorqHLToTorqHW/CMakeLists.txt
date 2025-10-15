@@ -1,0 +1,75 @@
+iree_tablegen_library(
+  NAME
+    PassesIncGen
+  TD_FILE
+    Passes.td
+  OUTS
+    --gen-pass-decls Passes.h.inc
+)
+
+set(sources
+    ActPattern.cpp
+    AddPattern.cpp
+    ArgMaxPattern.cpp
+    AvgpoolPattern.cpp
+    Conv2DPattern.cpp
+    ConvertPattern.cpp
+    DWPattern.cpp
+    FCPattern.cpp
+    FillPattern.cpp
+    FMAPattern.cpp
+    GatherPattern.cpp
+    IdentityPattern.cpp
+    MatMulPattern.cpp
+    MaxPool2dPattern.cpp
+    MulPattern.cpp
+    Passes.cpp
+    Patterns.cpp
+    SegmentationPattern.cpp
+    TablePattern.cpp
+    TransposePattern.cpp
+    ReducePattern.cpp
+    ElementWiseBinaryPattern.cpp
+    ElementWiseUnaryPattern.cpp
+    ElementWiseShiftPattern.cpp
+    ScatterPattern.cpp
+    Conv2DToHw.cpp
+    TransposeToHw.cpp
+    ResizeNearestNeighborPattern.cpp
+    BroadcastPattern.cpp
+    TransposeReshapePattern.cpp
+    Conv1DPattern.cpp
+    DepthToSpacePattern.cpp
+    ReduceMeanPattern.cpp
+)
+
+if(TORQ_ENABLE_TORQ_GENERIC)
+  list(APPEND sources GenericOpPattern.cpp)
+  list(APPEND defines ENABLE_TORQ_GENERIC)
+endif()
+
+iree_cc_library(
+  NAME
+    TorqHLToTorqHW
+  DEFINES
+    ${defines}
+  HDRS
+    PassesDetail.h
+    Passes.h
+    Passes.h.inc
+    Patterns.h
+  SRCS
+    ${sources}
+  DEPS
+    ::PassesIncGen
+    MLIRArithDialect
+    MLIRFunctionInterfaces
+    MLIRIR
+    MLIRPass
+    MLIRTransformUtils
+    iree::compiler::Dialect::Util::IR
+    iree::target::torq::Utils
+    iree::target::torq::Dialect::TorqHW::Dialect
+    iree::target::torq::Dialect::TorqHL::Dialect
+  PUBLIC
+)

@@ -1,0 +1,130 @@
+
+<html>
+<head>
+    <title>NDL Viewer</title>
+    <style>
+        .good {
+            background-color: #FFFF00;
+        }    
+    </style>
+</head>
+<body>
+<h1>NDL Viewer</h1>
+
+<form method="POST">
+    <div style="margin-bottom: 10px;">
+        <label for="memref" style="display: inline-block; width: 100px;">Memref type</label>
+        <input name="memref" size="300" value="{{data.memref}}">
+    </div>
+    <div style="margin-bottom: 10px;">
+        <label for="ndl" style="display: inline-block; width: 100px;">NDL</label>
+        <input name="ndl" size="300" value="{{data.ndl}}">
+    </div>
+    <div style="margin-bottom: 10px;">
+        <label for="offset" style="display: inline-block; width: 100px;">Offset</label>
+        <input name="offset" value="{{data.offset}}">
+    </div>
+    <div style="margin-bottom: 10px;">
+        <label for="memory_width" style="display: inline-block; width: 100px;">Memory width</label>
+        <input name="memory_width" value="{{data.memory_width}}" >
+    </div>
+    <div>
+        <input type="submit" style="margin-left: 100px;">
+    </div>
+</form>
+
+{% if data.error %}
+<pre style="color: red">
+{{data.error}}
+</pre>
+{% endif %}
+
+{% if data and not data.error %}
+
+<h2>Base tensor</h2>
+<table>
+<tr><th>Dimension</th><th>Count</th><th>Stride</th></tr>
+{% for size in data.tensor_sizes %}
+<tr>
+    <td>{{loop.index}}</td>
+    <td>{{size}}</td>
+    <td>{{data.tensor_strides[loop.index - 1]}}</td>
+</tr>
+{% endfor %}
+</table>
+
+<h2>NDL</h2>
+
+<p>Total H iterations: {{ data.total_l_iterations }}</p>
+
+<h3>ldims</h3>
+
+<p>NDL base offset: {{data.offset}}</p>
+<p>NDL block size: {{data.l_dim}}</p>
+<p>NDL block address offset and stride: {{data.l2_dim}}</p>
+
+<h3>hdims</h3>
+<table>
+<tr><th>Variable</th><th>Count</th><th>Stride</th></tr>
+{% for hdim in data.h_dims %}
+<tr><td>i{{loop.index}}</td><td>{{ hdim[0] }}</td><td>{{ hdim[1] }}</td></tr>
+{% endfor %}
+</table>
+
+{% if data.overscan %}
+<div style="color: red">NDL is accessing memory outside the memref</div>
+{% endif %}
+
+<h2>Memory</h2>
+
+<style>
+table {
+    text-align: center;
+    border-collapse: collapse;
+}
+
+table.data {
+    width: 100%;
+}
+
+td, th {
+    border: 1px solid #999;
+}
+</style>
+
+<p><b>Legend</b>: colors indicate the position in the tensor, number indicate the iteration count in the NDL used to read the data</p>
+<table class="data">
+<tr>
+<th>#</th>
+<th>Address</th>
+{% for col in range(data.scan_order.shape[1]) %}
+<th>{{col}}</th>
+{% endfor %}
+</tr>
+{% for row in range(data.scan_order.shape[0]) %}
+<tr>
+<th>{{row}}</th><th>{{ row * data.scan_order.shape[1] }}</th>
+{% for col in range(data.scan_order.shape[1]) %}
+<td style="background-color: {{data.tensor_footprint[row][col]}};">{{data.scan_order[row][col]}}</td>
+{% endfor %}
+</tr>
+{% endfor %}
+
+</table>
+
+{% if data.overscan %}
+<h2>Overscanned indexes</h2>
+
+<table>
+<tr><th>Address</th><th>Linear index</th><th>Hdim Index</th><th>Ldim index</th></tr>
+{% for overscan in data.overscan %}
+<tr>
+    {%for d in overscan %}
+        <td>{{d}}</td>
+    {% endfor %}
+</tr>
+{% endfor %}
+
+{% endif %}
+
+{% endif %}

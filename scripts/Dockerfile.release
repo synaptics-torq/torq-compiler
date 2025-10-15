@@ -1,0 +1,23 @@
+FROM ubuntu:24.04
+
+# Copy release package list from release
+COPY apt-packages.txt /opt/release/
+
+# Install dependencies
+RUN apt-get update && \
+    xargs -a /opt/release/apt-packages.txt apt-get install -y --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy release files
+COPY . /opt/release
+
+# Create and set up the venv
+RUN /opt/release/setup.sh /opt/venv
+
+# After copying, set executable permissions for all files in /opt/release/scripts
+RUN chmod a+x /opt/release/scripts/*
+
+# Setup PATH and LD_LIBRARY_PATH as if the user enabled the venv
+# so that it is not required to activate the venv when using the docker
+ENV PATH="/opt/venv/bin:/opt/release/tools:/opt/release/scripts:$PATH"
+ENV LD_LIBRARY_PATH="/opt/release/lib"
