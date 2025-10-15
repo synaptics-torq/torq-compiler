@@ -1,0 +1,32 @@
+iree_tablegen_library(
+  NAME
+    PassesIncGen
+  TD_FILE
+    Passes.td
+  OUTS
+    --gen-pass-decls Passes.h.inc
+)
+
+iree_cc_library(
+  NAME
+    Transforms
+  HDRS
+    PassesDetail.h
+    Passes.h
+    Passes.h.inc
+  SRCS
+    FoldConstantsPass.cpp
+    GeneralizeLinalgNamedOpsPass.cpp
+    OptimizeLinalgForTorqPass.cpp
+    OptimizeElementwiseBinaryOpPattern.cpp
+  DEPS
+    ::PassesIncGen
+    MLIRArithDialect
+    MLIRFunctionInterfaces
+    MLIRIR
+    MLIRPass
+    MLIRTransformUtils
+    iree::compiler::Dialect::Util::IR
+    iree::target::torq::Dialect::TorqHL::Dialect
+  PUBLIC
+)
