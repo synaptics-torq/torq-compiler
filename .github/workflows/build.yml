@@ -26,5 +26,5 @@ jobs:
       uses: syna-astra-dev/action-doc-publish/.github/workflows/process.yml@v3
       with:
         checkout_submodules: false
-        doc_directory: doc
+        doc_directory: doc/user-manual
         update_site: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
