@@ -1,0 +1,170 @@
+// Copyright 2019 The IREE Authors
+// Copyright 2024 Synaptics
+//
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+namespace iree.hal.torq;
+
+// 'Torq Executable'.
+file_identifier "SNPU";
+file_extension "torq";
+
+// Segment of a program that is loaded to XRAM
+table Segment {
+  // address where the segment has to be loaded in XRAM
+  xram_address: uint32;
+
+  // data of the segment
+  data: [ubyte] (required);
+}
+
+// Mapping of a code argument in virtual memory visible from the NPU
+table Binding {
+
+  // id of the binding to map
+  id: uint32;
+
+  // XRAM address where the binding should be mapped
+  address: uint32;
+
+  // offset of the binding buffer that should be mapped in bytes
+  offset: uint32;
+
+  // size of the data that should be be mapped in bytes
+  size: uint32;
+
+  // binding buffer property
+  is_read_only: bool;
+  is_write_only: bool;
+
+}
+
+// Location of a buffer
+enum BufferType : uint32 {
+  LRAM = 0,
+  XRAM = 1,
+  ITCM = 2,
+  DTCM = 3,
+  OTHER = 4
+}
+
+// Element types of buffers
+enum ElementType : uint32 {
+  I8 = 0,
+  I16 = 1,
+  I32 = 2,
+  F32 = 3,
+  BF16 = 4,
+  OTHER = 5
+}
+
+// Debug information about buffers used in the program
+table BufferDebugInfo {
+  id: uint64;
+  allocation_action: int64;
+  deallocation_action: int64;
+  last_use_action: int64;
+  buffer_type : BufferType;
+  address : uint32;
+  size : uint32;
+  shape: [uint32];
+  element_type: ElementType;
+  strides: [uint32];
+}
+
+// Action to copy data between locations
+// the input and output buffers are considered to be
+// tensors of elements of size element_size_bytes 
+// given shape (the input and output shape are the same)
+// the memory layout is such that the address of 
+// element idx = (i1, i2, ...) in the input buffer is given 
+// by "input_address + idx dot input_strides_bytes" (resp. 
+// output_address / output_strides_bytes for the output tensor)
+table HostCopyParams {
+  input_buffer_type: BufferType;
+  output_buffer_type: BufferType;
+  input_address: uint32;
+  output_address: uint32;  
+  input_strides_bytes: [uint32];
+  output_strides_bytes: [uint32];
+  shape: [uint32];
+  element_size_bytes: uint32;
+}
+
+// Action to start NSS CFG at a given address
+table StartNSSParams {
+  start_address: uint32;
+  starts_slice1: bool;
+  starts_slice2: bool;
+  starts_dma_in: bool;
+  starts_dma_out: bool;
+}
+
+// Action to wait for NSS CFG completion
+table WaitNSSParams {
+  returned_buffers_ids: [uint64];
+}
+
+// Action to start an host program
+table StartHostParams {
+  function_name: string;
+  args: [uint64];
+  sizes: [uint64];
+}
+
+// Action to wait for an host program to complete
+table WaitHostParams {
+  returned_buffers_ids: [uint64];
+}
+
+// Action to allocate a buffer
+table AllocParams {
+  id: uint64;
+  address: uint64;
+  size: uint64;
+  buffer_type: BufferType;
+}
+
+// Action to deallocate a buffer
+table DeallocParams {
+  id: uint64;
+}
+
+union HostActionParams {
+  HostCopyParams, StartNSSParams, WaitNSSParams, 
+  StartHostParams, WaitHostParams, AllocParams, DeallocParams
+}
+
+// Action to be executed on the host
+table HostAction {
+  params: HostActionParams (required);
+  location: string;
+}
+
+// A Torq module and runtime configuration description.
+// This information is used to setup the Torq hardware and run the program.
+table ExecutableDef {
+  
+  // name of the hal.executable.export in MLIR
+  executable_name: string; 
+
+  // segments of the code that need to be either copied to LRAM or mapped into XRAM
+  code: [Segment] (required);
+
+  // tracks where the code expects all the bindings to be mapped in XRAM
+  bindings : [Binding] (required);
+
+  // action to execute on the host
+  actions: [HostAction] (required);
+
+  // debug information about buffers in the program (optional)
+  buffers_debug_info: [BufferDebugInfo];
+
+  // host code (an elf file containing the host programs)
+  host_code : [uint8];
+
+}
+
+root_type ExecutableDef;

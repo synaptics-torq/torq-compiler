@@ -1,0 +1,5 @@
+#!/bin/bash
+set -e
+BASE_DIR=$(pwd)/..
+IREE_DIR=${BASE_DIR}/iree
+docker run -it --rm -v ${BASE_DIR}:${BASE_DIR} -u $(id -u):$(id -g) -w ${IREE_DIR} fpga

@@ -1,0 +1,27 @@
+#!/bin/bash
+
+set -e
+
+function usage() {
+    echo "Usage: $0 [path-to-iree-compile] <iree-options ... >"
+    exit 1
+}
+
+IREE_COMPILER=""
+
+# Check if first parameter is an executable command
+if command -v $1 2>&1 >/dev/null ; then
+    IREE_COMPILER="$1"
+    shift
+fi
+# Case 2: auto-detect from PATH
+if [[ -z "$IREE_COMPILER" ]]; then
+    if command -v iree-compile >/dev/null 2>&1; then
+        IREE_COMPILER="$(command -v iree-compile)"
+    else
+        usage
+        exit 1
+    fi
+fi
+
+exec "${IREE_COMPILER}" --iree-input-type=tosa-torq --iree-flow-enable-pad-handling --iree-flow-inline-constants-max-byte-length=100000000 --iree-hal-target-backends=torq "$@"

@@ -1,0 +1,30 @@
+name: Build and test
+
+on: 
+  workflow_dispatch:
+  pull_request:    
+  push:
+    branches:
+       - main
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number || github.sha }}
+  cancel-in-progress: true  
+
+jobs:
+  site_build:
+      name: Build documentation site
+
+      permissions:
+          actions: write
+          contents: write
+          pages: write
+          id-token: write
+
+      uses: syna-astra-dev/action-doc-publish/.github/workflows/process.yml@v3
+      with:
+        checkout_submodules: false
+        doc_directory: doc/user-manual
+        update_site: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
