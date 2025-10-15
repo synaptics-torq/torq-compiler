@@ -12,8 +12,7 @@ namespace mlir::syna::torq {
 static llvm::cl::opt<TorqHw::Type> clTorqHw(
     "torq-hw", llvm::cl::desc("Specify the hardware family"),
     llvm::cl::values(
-        clEnumValN(TorqHw::SL261X, "SL261X", "Synaptics SL261X (default)"),
-        clEnumValN(TorqHw::SR25X, "SR25X", "Synaptics SR25X"),
+        clEnumValN(TorqHw::SL2610, "SL2610", "Synaptics SL2610 (default)"),
         clEnumValN(TorqHw::CUSTOM, "custom", "Custom hardware (see torq-hw-custom option)")
     )
 );
@@ -42,22 +41,13 @@ class TorqHwCustom : public TorqHw {
     size_t _availableMemoryForTiling;
 };
 
-class TorqHwSL261X : public TorqHw {
+class TorqHwSL2610 : public TorqHw {
   public:
-    TorqHwSL261X() : TorqHw(SL261X) {}
-    std::string getString() const { return "Synaptics SL261X SoC family"; }
+    TorqHwSL2610() : TorqHw(SL2610) {}
+    std::string getString() const { return "Synaptics SL2610 SoC family"; }
     size_t getLramSize() const { return 512 * 1024; } // 512 KB
     size_t getSliceCount() const { return 2; }
     size_t getAvailableMemoryForTiling() const { return 400 * 1024; }
-};
-
-class TorqHwSR25X : public TorqHw {
-  public:
-    TorqHwSR25X() : TorqHw(SR25X) {}
-    std::string getString() const { return "Synaptics SR25X SoC family"; }
-    size_t getLramSize() const { return 256 * 1024; } // 256 KB
-    size_t getSliceCount() const { return 1; }
-    size_t getAvailableMemoryForTiling() const { return 200 * 1024; }
 };
 
 TorqHw::~TorqHw() { delete _instance; }
@@ -84,10 +74,7 @@ const TorqHw &TorqHw::get() {
         break;
     }
     case TorqHw::SL261X:
-        _instance = new TorqHwSL261X;
-        break;
-    case TorqHw::SR25X:
-        _instance = new TorqHwSR25X;
+        _instance = new TorqHwSL2610;
         break;
     default:
         // This should never happen if the command line option is correctly defined

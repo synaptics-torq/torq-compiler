@@ -36,7 +36,7 @@ The Torq compiler is delivered in two formats:
 - Supported operating systems:
   - For the release package: Ubuntu 24.04
   - For the Docker image: Any system that supports Docker
-- Supported hardware: Synaptics Torq hardware (SL261X and SR25X SoC families)
+- Supported hardware: Synaptics Torq hardware (SL2610 SoC families)
 
 ### Getting Started
 Refer to the [Getting Started](./getting_started.md) for installation and setup instructions. Ensure your system meets the requirements above before proceeding.
