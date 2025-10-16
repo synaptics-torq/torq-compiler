@@ -378,69 +378,82 @@ inline int64_t midpoint(int64_t min, int64_t max) { return min + ((max - min) / 
 // availableMemoryBytes.
 llvm::FailureOr<bool> fitTileToMemory(
     IRRewriter &rewriter, Operation *consumerOp, const SetVector<Operation *> &producerOps,
-    const SmallVector<int64_t> &tilingDimOrder, size_t availableMemoryBytes,
+    ArrayRef<int64_t> tilingDimOrder, size_t availableMemoryBytes, ArrayRef<int64_t> originalSizes,
     MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
 ) {
-    // TODO: change the binary search to look for a factor
-
     LLVM_DEBUG({
         llvm::dbgs() << availableMemoryBytes << " bytes of available memory for tiling\n";
     });
 
     // First establish that the original tile is not big enough.
-    auto opsFitsInMem = checkTileFitsInMemory(
+    auto tileFits = checkTileFitsInMemory(
         rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
     );
-    if (failed(opsFitsInMem)) {
+    if (failed(tileFits)) {
         return LogicalResult::failure();
     }
-    if (*opsFitsInMem) {
+    if (*tileFits) {
         // ops fit in memory, no need to change the tile
         return false;
     }
 
+    auto one = getAsIndexOpFoldResult(rewriter.getContext(), 1);
+
+    // For each dimension, find a factor such that originalSizes[dim]/factor fits in memory, or set
+    // sizes[dim] to 1 and move to the next dimension. We first establish bounds for factor, and
+    // then do a binary search to find the optimal factor.
     for (auto dim : tilingDimOrder) {
-        int64_t maxSize = *getConstantIntValue(sizes[dim]);
-        if (maxSize == 1) {
+        int64_t size = *getConstantIntValue(sizes[dim]);
+        if (size == 1) {
+            // This dimension can't be split anymore, move to the next dimension.
             continue;
         }
 
-        sizes[dim] = getAsIndexOpFoldResult(rewriter.getContext(), 1);
-        auto checkResult = checkTileFitsInMemory(
+        size_t minFactor = originalSizes[dim] / size;
+        // NB: `size` is too big and `size <= div_ceil(originalSizes[dim], minFactor)`
+
+        sizes[dim] = one;
+        tileFits = checkTileFitsInMemory(
             rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
         );
-        if (failed(checkResult)) {
+        if (failed(tileFits)) {
             return LogicalResult::failure();
         }
-        if (!*checkResult) {
+        if (!*tileFits) {
+            // the tile does not fit even when sizes[dim] is set to 1, so keep it set to 1 and move
+            // to the next dimension.
             continue;
         }
 
-        int64_t minSize = 1;
+        int64_t maxFactor = originalSizes[dim];
+        // NB: 1 fits (maybe smaller than needed) and `1 == div_ceil(originalSizes[dim], maxFactor)`
 
-        // Loop invariant: consumerOp tiled to sizes fits in availableMemoryBytes, when sizes[dim]
-        // is set to minSize, and does not fit when it is set to maxSize.
-        // NB: from the above, it is clear that `maxSize != minSize` is always true, hence the while
-        // condition is as it is.
-        while (maxSize != minSize + 1) {
-            int64_t midSize = midpoint(minSize, maxSize);
-            sizes[dim] = rewriter.getIndexAttr(midSize);
+        // Invariant: consumerOp tiled to sizes (and fused with producerOps) fits in
+        // availableMemoryBytes, when sizes[dim] is set to div_ceil(originalSizes[dim], maxFactor),
+        // and does not fit when it is set to div_ceil(originalSizes[dim], minFactor).
 
-            auto checkResult = checkTileFitsInMemory(
+        // While keeping the invariant, decrease maxFactor, and increase minFactor, until they are
+        // consecutive, by splitting the difference in each step.
+        while (maxFactor != minFactor + 1) {
+            int64_t midFactor = midpoint(minFactor, maxFactor);
+            // NB: minFactor < midFactor < maxFactor
+            sizes[dim] = rewriter.getIndexAttr(div_ceil(originalSizes[dim], midFactor));
+
+            tileFits = checkTileFitsInMemory(
                 rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
             );
-            if (failed(checkResult)) {
+            if (failed(tileFits)) {
                 return LogicalResult::failure();
             }
 
-            if (*checkResult) {
-                minSize = midSize;
+            if (*tileFits) {
+                maxFactor = midFactor;
             }
             else {
-                maxSize = midSize;
+                minFactor = midFactor;
             }
         }
-        sizes[dim] = rewriter.getIndexAttr(minSize);
+        sizes[dim] = rewriter.getIndexAttr(div_ceil(originalSizes[dim], maxFactor));
 
         return true;
     }
@@ -599,6 +612,12 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
     auto [iterOffsets, iterSizes, iterStrides] =
         getOffsetsSizesAndStrides(tilingInterfaceOp.getIterationDomain(rewriter));
 
+    auto iterIntSizes = getConstantIntValues(iterSizes);
+    if (!iterIntSizes) {
+        tilingInterfaceOp.emitError("iteration domain sizes are not constants");
+        return;
+    }
+
     SmallVector<OpFoldResult> tileOffsets(iterOffsets), tileSizes(iterSizes);
 
     // Get the order in which we should tile the dimensions.
@@ -606,7 +625,8 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
 
     // Find a tile that can fit op, starting from tileSizes.
     auto tileChanged = fitTileToMemory(
-        rewriter, op, {}, tilingDimOrder, availableMemoryBytes, tileOffsets, tileSizes
+        rewriter, op, {}, tilingDimOrder, availableMemoryBytes, *iterIntSizes, tileOffsets,
+        tileSizes
     );
     if (failed(tileChanged)) {
         op->emitError("failed to find a tile size for op");
@@ -650,7 +670,7 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
     // Now that we know which producers were fused, find a tile that fits them too.
     tileChanged = fitTileToMemory(
         rewriter, op, tiledResults->fusedProducers, tilingDimOrder, availableMemoryBytes,
-        tileOffsets, tileSizes
+        *iterIntSizes, tileOffsets, tileSizes
     );
     if (failed(tileChanged)) {
         op->emitError("failed to find a tile size for producers");
