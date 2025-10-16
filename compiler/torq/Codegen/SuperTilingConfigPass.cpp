@@ -260,11 +260,12 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
 ) {
     // How it works: we start from consumerOp, we calculate for each operand the slice needed for
     // the tile, and sum up the bytes for all the slices. If the sum is greater than
-    // availableMemoryBytes, we return false; otherwise, we compute the iteration domain for the
-    // operand based on the its slice (it might have more loops), and add it to the queue. We
-    // process elements in the queue in the same way until it is empty. For members of fuse groups,
-    // we don't check the sum of their immediate operands, instead we check the sum of operands that
-    // are not in the same group.
+    // availableMemoryBytes, we return false; otherwise, we compute the iteration domain for each
+    // operand based on its slice (it might have more loops), and add them to the queue. We process
+    // elements in the queue in the same way until it is empty. For members of fuse groups, we don't
+    // check the sum of their immediate operands, instead we check the sum of operands that are not
+    // in the same group. We also don't count the init operands for fuse-group memebers, except for
+    // the init of the group's ouput operator (this seems to match what the rewrite patterns do).
 
     // FIXME: we currently check that each operation/fuse-group can fit in availableMemoryBytes.
     // This does not take into account that while computing an operand, other operands already take
@@ -272,10 +273,6 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
 
     // Accumulate for each fuse-group the size of operands external to the group.
     llvm::DenseMap<IntegerAttr, int64_t> fusedGroupsBytes;
-    // Keep track of which operands we already counted, so we don't count them multiple times (e.g.
-    // usually the same tensor.empty is used multiple times by the same group; we want to count it
-    // only once).
-    llvm::DenseMap<IntegerAttr, SetVector<Operation *>> fusedGroupsOperands;
 
     std::deque<OpIterationDomain> queue;
     queue.push_back(std::make_tuple(
@@ -317,8 +314,7 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
 
             // Compute memory usage
             int64_t operandBytes = bytesOfSlice(opResult.getType(), resultSizes);
-            totalOpBytes += operandBytes;
-            if (totalOpBytes > availableMemoryBytes && !isMarkedFuseGroup(op)) {
+            if ((totalOpBytes += operandBytes) > availableMemoryBytes && !isMarkedFuseGroup(op)) {
                 return false;
             }
 
@@ -330,20 +326,23 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
                 auto operandFuseGroupAttr = resultOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
 
                 for (auto intAttr : fuseGroupAttr.getAsRange<IntegerAttr>()) {
-                    if (operandFuseGroupAttr &&
-                        std::find(
-                            operandFuseGroupAttr.begin(), operandFuseGroupAttr.end(), intAttr
-                        ) != operandFuseGroupAttr.end()) {
-
+                    if (operandFuseGroupAttr && llvm::is_contained(operandFuseGroupAttr, intAttr)) {
                         shareFuseGroup = true;
+                        continue;
                     }
-                    else {
-                        if (fusedGroupsOperands[intAttr].insert(resultOp)) {
-                            fusedGroupsBytes[intAttr] += operandBytes;
-                            if (fusedGroupsBytes[intAttr] > availableMemoryBytes) {
-                                return false;
-                            }
+
+                    // Don't count tensor::EmptyOp feeding the output operand, except for the output
+                    // op of the group.
+                    auto opDsoi = dyn_cast<DestinationStyleOpInterface>(op);
+                    if (isa<tensor::EmptyOp>(resultOp) && !isFuseGroupOutput(op) && opDsoi) {
+                        auto inits = opDsoi.getDpsInits();
+                        if (llvm::is_contained(inits, opResult)) {
+                            continue;
                         }
+                    }
+
+                    if ((fusedGroupsBytes[intAttr] += operandBytes) > availableMemoryBytes) {
+                        return false;
                     }
                 }
             }
@@ -401,8 +400,6 @@ llvm::FailureOr<bool> fitTileToMemory(
     }
 
     for (auto dim : tilingDimOrder) {
-        LLVM_DEBUG({ llvm::dbgs() << "tiling dim " << dim << "\n"; });
-
         int64_t maxSize = *getConstantIntValue(sizes[dim]);
         if (maxSize == 1) {
             continue;

@@ -142,7 +142,7 @@ bool markOpFuseGroup(
         // op->setAttr(TORQ_FUSE_GROUP, fuseGroupAttr);
         SmallVector<Attribute> newAttr;
         if (auto oldAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
-            if (std::find(oldAttr.begin(), oldAttr.end(), *maybeFuseGroupAttr) != oldAttr.end()) {
+            if (llvm::is_contained(oldAttr, *maybeFuseGroupAttr)) {
                 return;
             }
 
@@ -173,7 +173,7 @@ void markFuseGroupBackward(
 
         // If we already visited this op, no need to do it again.
         if (auto attr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-            attr && std::find(attr.begin(), attr.end(), fuseGroupAttr) != attr.end()) {
+            attr && llvm::is_contained(attr, fuseGroupAttr)) {
             continue;
         }
         markOpFuseGroup(op, rewriter, fuseGroupAttr);
@@ -195,8 +195,8 @@ SmallVector<Value> getFuseGroupOperands(Operation *root, const IntegerAttr &fuse
         assert(op != nullptr && "Expected an op");
 
         if (auto attr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-            !attr || std::find(attr.begin(), attr.end(), fuseGroupAttr) == attr.end()) {
-            if (std::find(inputs.begin(), inputs.end(), output) == inputs.end()) {
+            !attr || !llvm::is_contained(attr, fuseGroupAttr)) {
+            if (!llvm::is_contained(inputs, output)) {
                 inputs.push_back(output);
             }
             continue;
@@ -208,6 +208,11 @@ SmallVector<Value> getFuseGroupOperands(Operation *root, const IntegerAttr &fuse
     return inputs;
 }
 
+bool isFuseGroupPrincipalOp(Operation *op, IntegerAttr fuseGroupAttr) {
+    auto fuseGroupIdAttr = op->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
+    return fuseGroupIdAttr && fuseGroupIdAttr == fuseGroupAttr;
+}
+
 Operation *getFuseGroupPrincipalOpBackward(Operation *op) {
     ArrayAttr fuseGroupArrAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
     assert(fuseGroupArrAttr && "op is not part of a fuse-group");
@@ -216,8 +221,7 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *op) {
     IntegerAttr fuseGroupAttr = *fuseGroupArrAttr.getAsRange<IntegerAttr>().begin();
 
     while (true) {
-        if (auto fuseGroupIdAttr = op->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
-            fuseGroupIdAttr == fuseGroupAttr) {
+        if (isFuseGroupPrincipalOp(op, fuseGroupAttr)) {
             return op;
         }
 
@@ -227,7 +231,7 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *op) {
         for (auto operand : op->getOperands()) {
             auto srcOp = operand.getDefiningOp();
             if (auto attr = srcOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-                attr && std::find(attr.begin(), attr.end(), fuseGroupAttr) != attr.end()) {
+                attr && llvm::is_contained(attr, fuseGroupAttr)) {
                 op = srcOp;
                 foundSrc = true;
                 break;
@@ -257,9 +261,7 @@ std::optional<int64_t> isFuseGroupOutput(Operation *op) {
         bool foundUser = false;
         for (auto user : op->getUsers()) {
             if (auto userFuseGroupAttr = user->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-                userFuseGroupAttr &&
-                std::find(userFuseGroupAttr.begin(), userFuseGroupAttr.end(), intAttr) !=
-                    userFuseGroupAttr.end()) {
+                userFuseGroupAttr && llvm::is_contained(userFuseGroupAttr, intAttr)) {
                 foundUser = true;
                 break;
             }
@@ -538,8 +540,7 @@ ScaleClampInfo foldForwardScaleClamp(
     }
 
     auto initOpOperand = genericOp.getDpsInitOperand(0);
-    auto initOperand = genericOp.getOperands()[initOpOperand->getOperandNumber()];
-    auto initType = dyn_cast<ShapedType>(initOperand.getType());
+    auto initType = dyn_cast<ShapedType>(initOpOperand->get().getType());
     if (!initType) {
         LLVM_DEBUG({ llvm::dbgs() << "matching error init type is not a ShapedType!\n"; });
         return {};

@@ -126,6 +126,10 @@ void markFuseGroupBackward(
 // root - the bottom most operation in the fuse group.
 SmallVector<Value> getFuseGroupOperands(Operation *root, const IntegerAttr &fuseGroupAttr);
 
+// Return true iff op is the principal Operation of the the fuse group fuseGroupAttr (i.e. the
+// operation from which the pattern matching started).
+bool isFuseGroupPrincipalOp(Operation *op, IntegerAttr fuseGroupAttr);
+
 // Return the principal Operation of the fuse group (i.e. the operation from
 // which the pattern matching started) op belongs to, or nullptr if something
 // goes wrong.
