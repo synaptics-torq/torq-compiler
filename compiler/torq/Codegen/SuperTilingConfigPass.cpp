@@ -6,7 +6,6 @@
 
 #include "PassesDetail.h"
 
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
@@ -483,6 +482,70 @@ void applyTiledResults(
     }
 }
 
+std::tuple<bool, bool> fuseControl(
+    IRRewriter &rewriter, tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
+    bool isDestinationOperand
+) {
+    Operation *producerOp = producerOpResult.getOwner();
+
+    // TODO: if producer has users outside of the tiling fuse group, maybe we should yield it?
+    bool yieldProducerReplacement = false;
+
+    // FIXME: should we not fuse destination operands?
+    // if (isDestinationOperand) {
+    //     // Don't fuse
+    //     return std::make_tuple(false, yieldProducerReplacement);
+    // }
+
+    // From here on we check if the producer can be tiled on the dimensions that
+    // are being tiled. The first element in the return tuple indicates if the
+    // producer should be fused (true) or not (false).
+
+    if (!isMarkedFuseGroup(producerOp)) {
+        // Not part of a pattern-fuse-group; there are no restrictions on the dimensions.
+        return std::make_tuple(true, yieldProducerReplacement);
+    }
+
+    if (!isFuseGroupOutput(producerOp)) {
+        // Is part of a pattern-fuse-group, but not the output operation (bottom most).
+        // We only check the output operation of such group.
+        return std::make_tuple(true, yieldProducerReplacement);
+    }
+
+    auto producerTi = cast<TilingInterface>(producerOp);
+
+    // The dimensions the producer can be tiled over
+    auto dimOrder = getTilingDimOrder(producerTi);
+    llvm::SmallSetVector<int64_t, 4> tilingDims{dimOrder.begin(), dimOrder.end()};
+
+    SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
+    if (failed(producerTi.getIterationDomainTileFromResultTile(
+            rewriter, producerOpResult.getResultNumber(), candidateSliceOp.getMixedOffsets(),
+            candidateSliceOp.getMixedSizes(), mappedOffsets, mappedSizes
+        ))) {
+        // Don't fuse
+        return std::make_tuple(false, yieldProducerReplacement);
+    }
+
+    auto [iterOffsets, iterSizes, iterStrides] =
+        getOffsetsSizesAndStrides(producerTi.getIterationDomain(rewriter));
+
+    assert(
+        mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
+    );
+
+    // Don't fuse if we are tiling a dimension the producer can not be tiled over
+    for (size_t index = 0; index < iterSizes.size(); ++index) {
+        if (mappedSizes[index] != iterSizes[index] && !tilingDims.contains(index)) {
+            // Don't fuse
+            return std::make_tuple(false, yieldProducerReplacement);
+        }
+    }
+
+    // Producer can be fused
+    return std::make_tuple(true, yieldProducerReplacement);
+}
+
 FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
     IRRewriter &rewriter, TilingInterface tilingInterfaceOp,
     llvm::ArrayRef<OpFoldResult> completeIterSizes, ArrayRef<OpFoldResult> tileIterSizes
@@ -510,6 +573,10 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
     scf::SCFTileAndFuseOptions options{};
     // Consider using setSCFTileSizes from iree/compiler/Codegen/Utils/Utils.h
     options.tilingOptions.setTileSizes(getAsIndexOpFoldResult(rewriter.getContext(), tileSizes));
+    options.setFusionControlFn([&](tensor::ExtractSliceOp candidateSliceOp,
+                                   OpResult producerOpResult, bool isDestinationOperand) {
+        return fuseControl(rewriter, candidateSliceOp, producerOpResult, isDestinationOperand);
+    });
 
     return scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp, options);
 }

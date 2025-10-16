@@ -33,6 +33,7 @@
 #include "iree/hal/local/executable_library.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
+#include <deque>
 #include <numeric>
 #include <optional>
 
@@ -148,8 +149,7 @@ bool markOpFuseGroup(
             newAttr.append(oldAttr.begin(), oldAttr.end());
         }
         newAttr.push_back(*maybeFuseGroupAttr);
-        OpBuilder builder(op);
-        op->setAttr(TORQ_FUSE_GROUP, builder.getArrayAttr(newAttr));
+        op->setAttr(TORQ_FUSE_GROUP, rewriter.getArrayAttr(newAttr));
     });
 
     return true;
@@ -159,9 +159,10 @@ void markFuseGroupBackward(
     const Value &output, const llvm::SmallVector<Value> &inputs, PatternRewriter &rewriter,
     const IntegerAttr &fuseGroupAttr
 ) {
-    SmallVector<Value, 2> stack = {output};
+    std::deque<Value> stack = {output};
     while (!stack.empty()) {
-        auto output = stack.pop_back_val();
+        auto output = stack.front();
+        stack.pop_front();
 
         if (llvm::find(inputs, output) != inputs.end()) {
             continue;
@@ -177,7 +178,9 @@ void markFuseGroupBackward(
         }
         markOpFuseGroup(op, rewriter, fuseGroupAttr);
 
-        stack.append(op->getOperands().begin(), op->getOperands().end());
+        for (auto operand : op->getOperands()) {
+            stack.push_back(operand);
+        }
     }
 }
 
