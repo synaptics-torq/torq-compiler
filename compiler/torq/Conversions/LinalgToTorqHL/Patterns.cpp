@@ -952,7 +952,7 @@ struct ReduceOpConversion : public OpConversionPattern<linalg::ReduceOp> {
     }
 };
 
-static Value createTensorFromScalar(
+static Value create1DimTensorFromScalar(
     arith::ConstantOp constOp, const Type &elementType, PatternRewriter &rewriter
 ) {
     if (!constOp)
@@ -1077,7 +1077,7 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         if (constOp) {
 
-            Value v = createTensorFromScalar(constOp, input1ElementType, rewriter);
+            Value v = create1DimTensorFromScalar(constOp, input1ElementType, rewriter);
             if (!v) {
                 return rewriter.notifyMatchFailure(srcOp, "");
             }
@@ -3548,6 +3548,76 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
 
+    LogicalResult scalarProcessing(
+        linalg::GenericOp srcOp, tosa::ApplyScaleOp applyScaleOp, PatternRewriter &rewriter
+    ) const {
+        Value input = applyScaleOp.getValue();
+        if (!input) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected a defining operation for apply_scale operand to be a value"
+            );
+        }
+
+        auto ms = getMultiplierAndShift(srcOp, applyScaleOp, 1);
+        if (!ms) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Failed to get multiplier and shift from apply_scale operation"
+            );
+        }
+
+        double scaleFactor = static_cast<double>(ms.multiplier[0]) / (1l << ms.shift[0]);
+
+        if (auto constOp = dyn_cast<arith::ConstantOp>(input.getDefiningOp())) {
+            auto attr = constOp.getValue();
+            int32_t data = 0;
+
+            if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+                data = intAttr.getInt();
+            }
+            else if (auto denseAttr = dyn_cast<DenseIntElementsAttr>(attr)) {
+                if (denseAttr.isSplat() || denseAttr.getNumElements() == 1) {
+                    data = (*denseAttr.begin()).getSExtValue();
+                }
+                else {
+                    llvm::errs() << "constant is not scalar \n";
+                    return rewriter.notifyMatchFailure(
+                        srcOp, "Expected constant input to be a scalar for RescaleOpConversion"
+                    );
+                }
+            }
+            else {
+                llvm::errs() << "unsupported constant type \n";
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Expected constant input to be IntegerAttr or DenseIntElementsAttr"
+                );
+            }
+
+            data = static_cast<int32_t>(std::round(data * scaleFactor));
+
+            auto outputType = cast<RankedTensorType>(srcOp.getResults()[0].getType());
+            auto outputElementType = outputType.getElementType();
+
+            RankedTensorType constType = RankedTensorType::get({}, outputElementType);
+            DenseElementsAttr value;
+
+            if (outputElementType.isInteger(16)) {
+                value = DenseIntElementsAttr::get(constType, static_cast<int16_t>(data));
+            }
+            else if (outputElementType.isInteger(32)) {
+                value = DenseIntElementsAttr::get(constType, data);
+            }
+            else if (outputElementType.isInteger(8)) {
+                value = DenseIntElementsAttr::get(constType, static_cast<int8_t>(data));
+            }
+            auto output = rewriter.create<arith::ConstantOp>(constOp.getLoc(), constType, value);
+
+            srcOp.getResults()[0].replaceAllUsesWith(output.getResult());
+            rewriter.eraseOp(srcOp);
+            return success();
+        }
+        return failure();
+    }
+
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
         // TODO: this code could be reimplemented using foldForwardScaleClamp
@@ -3558,23 +3628,9 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         }
 
         const int dpsInputCount = srcOp.getNumDpsInputs();
-        if (dpsInputCount != 1) {
+        if (dpsInputCount > 1) {
             return rewriter.notifyMatchFailure(
-                srcOp, "Expected exactly one input tensor for RescaleOpConversion"
-            );
-        }
-
-        auto input = srcOp.getInputs()[0];
-        auto inputType = dyn_cast<RankedTensorType>(input.getType());
-        auto inputElementType = inputType.getElementType();
-
-        auto outputType = cast<RankedTensorType>(srcOp.getResults()[0].getType());
-        auto outputElementType = outputType.getElementType();
-
-        if (inputElementType.isF32() || inputElementType.isBF16() || outputElementType.isF32() ||
-            outputElementType.isBF16()) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Unsupported element fp type for RescaleOpConversion"
+                srcOp, "Expected exactly one or zero(const) input tensor for RescaleOpConversion"
             );
         }
 
@@ -3591,6 +3647,7 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
                 srcOp, "Expected exactly one yield value for RescaleOpConversion"
             );
         }
+
         int32_t outputMin = 0, outputMax = 0;
         int32_t outputZp = 0, input_zp = 0;
 
@@ -3600,70 +3657,110 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         double rnd_err = 0.5;
 
         tosa::ApplyScaleOp applyScaleOp;
-        if (inputElementType.isInteger() && outputElementType.isInteger(32)) {
+        Value input;
 
+        auto outputType = cast<RankedTensorType>(srcOp.getResults()[0].getType());
+        auto outputElementType = outputType.getElementType();
+
+        // scalar input case
+        if (dpsInputCount == 0) {
             applyScaleOp = yieldValues[0].getDefiningOp<tosa::ApplyScaleOp>();
+            if (!applyScaleOp) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Expected a defining operation for yield operand to be tosa.apply_scale"
+                );
+            }
+            input = applyScaleOp.getValue();
+            if (!input) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Expected a defining operation for apply_scale operand to be a value"
+                );
+            }
 
-            outputMin = std::numeric_limits<int32_t>::min();
-            outputMax = std::numeric_limits<int32_t>::max();
+            return scalarProcessing(srcOp, applyScaleOp, rewriter);
         }
         else {
-            auto truncOp = yieldValues[0].getDefiningOp<arith::TruncIOp>();
-            if (!truncOp) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Expected a defining operation for yield operand to be arith.trunci"
-                );
-            }
-            auto minOp = truncOp.getIn().getDefiningOp<arith::MinSIOp>();
-            if (!minOp) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Expected a defining operation for yield operand to be arith.minsi"
-                );
-            }
-            // The max constant is used in the min operation
-            auto maybeMaxConst = getConstIntValue(minOp.getRhs());
-            if (!maybeMaxConst) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "matching error minOp.getRhs() is not a constant!"
-                );
-            }
-            outputMax = *maybeMaxConst;
 
-            auto maxOp = minOp.getLhs().getDefiningOp<arith::MaxSIOp>();
-            if (!maxOp) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Expected a defining operation for yield operand to be arith.maxsi"
-                );
-            }
-            // The min constant is used in the max operation
-            auto maybeMinConst = getConstIntValue(maxOp.getRhs());
-            if (!maybeMinConst) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "matching error maxOp.getRhs() is not a constant!"
-                );
-            }
-            outputMin = *maybeMinConst;
-
-            if (outputElementType.isInteger(8) &&
-                (inputElementType.isInteger(16) || inputElementType.isInteger(32))) {
-                // FIXME: not clear in which cases we actually need this shiftFactor
-                // TODO: compute this shiftFactor instead of hardcoding it
-                // 12 to make sure rescaled value doens't overflow 64bit
-                shiftFactor = 12;
+            input = srcOp.getInputs()[0];
+            if (!input) {
+                llvm::errs() << "RescaleOpConversion: input is null\n";
             }
 
-            if (auto addOp = maxOp.getLhs().getDefiningOp<arith::AddIOp>()) {
-                auto maybeAddConst = getConstIntValue(addOp.getRhs());
-                if (!maybeAddConst) {
-                    return rewriter.notifyMatchFailure(
-                        srcOp, "matching error addOp.getRhs() is not a constant!"
-                    );
-                }
-                outputZp = *maybeAddConst;
-                applyScaleOp = addOp.getLhs().getDefiningOp<tosa::ApplyScaleOp>();
+            auto inputType = dyn_cast<RankedTensorType>(input.getType());
+            auto inputElementType = inputType.getElementType();
+
+            if (inputElementType.isF32() || inputElementType.isBF16() ||
+                outputElementType.isF32() || outputElementType.isBF16()) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Unsupported element fp type for RescaleOpConversion"
+                );
+            }
+
+            if (inputElementType.isInteger() && outputElementType.isInteger(32)) {
+
+                applyScaleOp = yieldValues[0].getDefiningOp<tosa::ApplyScaleOp>();
+
+                outputMin = std::numeric_limits<int32_t>::min();
+                outputMax = std::numeric_limits<int32_t>::max();
             }
             else {
-                applyScaleOp = maxOp.getLhs().getDefiningOp<tosa::ApplyScaleOp>();
+                auto truncOp = yieldValues[0].getDefiningOp<arith::TruncIOp>();
+                if (!truncOp) {
+                    return rewriter.notifyMatchFailure(
+                        srcOp, "Expected a defining operation for yield operand to be arith.trunci"
+                    );
+                }
+                auto minOp = truncOp.getIn().getDefiningOp<arith::MinSIOp>();
+                if (!minOp) {
+                    return rewriter.notifyMatchFailure(
+                        srcOp, "Expected a defining operation for yield operand to be arith.minsi"
+                    );
+                }
+                // The max constant is used in the min operation
+                auto maybeMaxConst = getConstIntValue(minOp.getRhs());
+                if (!maybeMaxConst) {
+                    return rewriter.notifyMatchFailure(
+                        srcOp, "matching error minOp.getRhs() is not a constant!"
+                    );
+                }
+                outputMax = *maybeMaxConst;
+
+                auto maxOp = minOp.getLhs().getDefiningOp<arith::MaxSIOp>();
+                if (!maxOp) {
+                    return rewriter.notifyMatchFailure(
+                        srcOp, "Expected a defining operation for yield operand to be arith.maxsi"
+                    );
+                }
+                // The min constant is used in the max operation
+                auto maybeMinConst = getConstIntValue(maxOp.getRhs());
+                if (!maybeMinConst) {
+                    return rewriter.notifyMatchFailure(
+                        srcOp, "matching error maxOp.getRhs() is not a constant!"
+                    );
+                }
+                outputMin = *maybeMinConst;
+
+                if (outputElementType.isInteger(8) &&
+                    (inputElementType.isInteger(16) || inputElementType.isInteger(32))) {
+                    // FIXME: not clear in which cases we actually need this shiftFactor
+                    // TODO: compute this shiftFactor instead of hardcoding it
+                    // 12 to make sure rescaled value doens't overflow 64bit
+                    shiftFactor = 12;
+                }
+
+                if (auto addOp = maxOp.getLhs().getDefiningOp<arith::AddIOp>()) {
+                    auto maybeAddConst = getConstIntValue(addOp.getRhs());
+                    if (!maybeAddConst) {
+                        return rewriter.notifyMatchFailure(
+                            srcOp, "matching error addOp.getRhs() is not a constant!"
+                        );
+                    }
+                    outputZp = *maybeAddConst;
+                    applyScaleOp = addOp.getLhs().getDefiningOp<tosa::ApplyScaleOp>();
+                }
+                else {
+                    applyScaleOp = maxOp.getLhs().getDefiningOp<tosa::ApplyScaleOp>();
+                }
             }
         }
 
