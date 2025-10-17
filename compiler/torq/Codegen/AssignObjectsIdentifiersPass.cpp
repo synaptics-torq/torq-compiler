@@ -10,6 +10,7 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Dialect/TorqHW/TorqHWOps.h"
 #include "torq/Utils/InvocationUtils.h"
+#include "torq/Utils/MemoryUtils.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -72,11 +73,11 @@ void AssignObjectsIdentifiersPass::runOnOperation() {
     // Assign action numbers to all the runtime actions
     auto actionId = 0;
     for (auto &op : funcOp.getFunctionBody().getOps()) {
-
+        if (isDerivedMemRefOperation(&op)) {
+            continue;
+        }
         if (isa<torq_hl::ProgramOp, torq_hl::CreateInvocationOp, torq_hl::ConstOp,
-                torq_hl::MapBindingOp, memref::SubViewOp, func::ReturnOp, torq_hl::ImportProgramOp>(
-                op
-            )) {
+                torq_hl::MapBindingOp, func::ReturnOp, torq_hl::ImportProgramOp>(op)) {
             continue; // skip these ops
         }
 

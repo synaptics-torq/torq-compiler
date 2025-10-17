@@ -15,7 +15,10 @@ namespace synaptics {
 class TorqSimulator: public TorqHw {
   public:
     TorqSimulator(uint32_t xram_start_addr, size_t xram_size, std::string dump_dir = "", TorqEventLog* eventLog = nullptr)
-        : TorqHw(eventLog), _xram_start_addr(xram_start_addr), _xram(xram_size, (uint8_t)0), _dump_dir{dump_dir} {}
+        // Init memory to some non-null value. Kernels must not rely on uninitialized memory being at 0.
+        // We use 0x77 which is visually visible and a big value as both an int and a float exponent
+        // so it is more likely to show up in the results if used by mistake.
+        : TorqHw(eventLog), _xram_start_addr(xram_start_addr), _xram(xram_size, (uint8_t)0x77), _dump_dir{dump_dir} {}
 
     bool open() override;
     bool close() override;
