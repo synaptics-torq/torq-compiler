@@ -538,6 +538,64 @@ bool isTorqNegateOp(Operation *op, std::string &failReason) {
 
 namespace {
 
+static Value create1DimTensorFromRescaleScalar(
+    linalg::GenericOp srcOp, tosa::ApplyScaleOp applyScaleOp, const Type &elementType,
+    PatternRewriter &rewriter
+) {
+
+    Value input = applyScaleOp.getValue();
+    if (!input) {
+        return nullptr;
+    }
+
+    auto ms = getMultiplierAndShift(srcOp, applyScaleOp, 1);
+    if (!ms) {
+        return nullptr;
+    }
+
+    double scaleFactor = static_cast<double>(ms.multiplier[0]) / (1l << ms.shift[0]);
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(input.getDefiningOp())) {
+        auto attr = constOp.getValue();
+        int32_t data = 0;
+
+        if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+            data = intAttr.getInt();
+        }
+        else if (auto denseAttr = dyn_cast<DenseIntElementsAttr>(attr)) {
+            if (denseAttr.isSplat() || denseAttr.getNumElements() == 1) {
+                data = (*denseAttr.begin()).getSExtValue();
+            }
+            else {
+                llvm::errs() << "constant is not scalar \n";
+                return nullptr;
+            }
+        }
+        else {
+            llvm::errs() << "unsupported constant type \n";
+            return nullptr;
+        }
+
+        data = static_cast<int32_t>(std::round(data * scaleFactor));
+
+        RankedTensorType constType = RankedTensorType::get({}, elementType);
+        DenseElementsAttr value;
+
+        if (elementType.isInteger(16)) {
+            value = DenseIntElementsAttr::get(constType, static_cast<int16_t>(data));
+        }
+        else if (elementType.isInteger(32)) {
+            value = DenseIntElementsAttr::get(constType, data);
+        }
+        else if (elementType.isInteger(8)) {
+            value = DenseIntElementsAttr::get(constType, static_cast<int8_t>(data));
+        }
+        auto output = rewriter.create<arith::ConstantOp>(constOp.getLoc(), constType, value);
+        return output.getResult();
+    }
+    return nullptr;
+}
+
 // NOTE: this struct is duplicated below (TransposeOpConversionRewrite) as a OpRewritePattern.
 // Any change here should be reflected there too. Ultimately, we should get rid of
 // TransposeOpConversion.
@@ -1677,13 +1735,13 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             auto bOutputShape = bcastOp.getInit().getType().getShape();
             auto bOutputType = RankedTensorType::get(bOutputShape, bcastInputElementType);
 
-            auto op = rewriter.create<torq_hl::BroadcastOp>(
-                loc, bOutputType, createInitTensor(bcastOp, rewriter, bOutputType),
-                bcastOp.getDimensionsAttr(), bcastOp.getInput()
+            auto op = rewriter.create<linalg::BroadcastOp>(
+                loc, bcastOp.getInput(), createInitTensor(bcastOp, rewriter, bOutputType),
+                bcastOp.getDimensionsAttr()
             );
-            rewriter.replaceOp(bcastOp, op.getOutput());
+            rewriter.replaceOp(bcastOp, op.getResults()[0]);
 
-            input1 = op.getOutput();
+            input1 = op.getResults()[0];
         }
 
         // Generate torq_hl op with input in the expected format
@@ -3551,70 +3609,19 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
     LogicalResult scalarProcessing(
         linalg::GenericOp srcOp, tosa::ApplyScaleOp applyScaleOp, PatternRewriter &rewriter
     ) const {
-        Value input = applyScaleOp.getValue();
-        if (!input) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Expected a defining operation for apply_scale operand to be a value"
-            );
-        }
 
-        auto ms = getMultiplierAndShift(srcOp, applyScaleOp, 1);
-        if (!ms) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Failed to get multiplier and shift from apply_scale operation"
-            );
-        }
+        auto outputType = cast<RankedTensorType>(srcOp.getResults()[0].getType());
+        auto outputElementType = outputType.getElementType();
 
-        double scaleFactor = static_cast<double>(ms.multiplier[0]) / (1l << ms.shift[0]);
+        auto output =
+            create1DimTensorFromRescaleScalar(srcOp, applyScaleOp, outputElementType, rewriter);
 
-        if (auto constOp = dyn_cast<arith::ConstantOp>(input.getDefiningOp())) {
-            auto attr = constOp.getValue();
-            int32_t data = 0;
-
-            if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
-                data = intAttr.getInt();
-            }
-            else if (auto denseAttr = dyn_cast<DenseIntElementsAttr>(attr)) {
-                if (denseAttr.isSplat() || denseAttr.getNumElements() == 1) {
-                    data = (*denseAttr.begin()).getSExtValue();
-                }
-                else {
-                    llvm::errs() << "constant is not scalar \n";
-                    return rewriter.notifyMatchFailure(
-                        srcOp, "Expected constant input to be a scalar for RescaleOpConversion"
-                    );
-                }
-            }
-            else {
-                llvm::errs() << "unsupported constant type \n";
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Expected constant input to be IntegerAttr or DenseIntElementsAttr"
-                );
-            }
-
-            data = static_cast<int32_t>(std::round(data * scaleFactor));
-
-            auto outputType = cast<RankedTensorType>(srcOp.getResults()[0].getType());
-            auto outputElementType = outputType.getElementType();
-
-            RankedTensorType constType = RankedTensorType::get({}, outputElementType);
-            DenseElementsAttr value;
-
-            if (outputElementType.isInteger(16)) {
-                value = DenseIntElementsAttr::get(constType, static_cast<int16_t>(data));
-            }
-            else if (outputElementType.isInteger(32)) {
-                value = DenseIntElementsAttr::get(constType, data);
-            }
-            else if (outputElementType.isInteger(8)) {
-                value = DenseIntElementsAttr::get(constType, static_cast<int8_t>(data));
-            }
-            auto output = rewriter.create<arith::ConstantOp>(constOp.getLoc(), constType, value);
-
-            srcOp.getResults()[0].replaceAllUsesWith(output.getResult());
+        if (output) {
+            srcOp.getResults()[0].replaceAllUsesWith(output);
             rewriter.eraseOp(srcOp);
             return success();
         }
+
         return failure();
     }
 
