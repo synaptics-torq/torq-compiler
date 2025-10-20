@@ -4,10 +4,6 @@ project(TORQ ASM C CXX)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-if(NOT APPLE)
-  add_subdirectory(third_party/fpga_mgmt)
-endif()
-
 set(TORQ_HW_DIR ${CMAKE_CURRENT_LIST_DIR}/third_party/torq-hw)
 add_subdirectory(third_party/torq-hw/ct)
 add_subdirectory(third_party/torq-hw/cm)
