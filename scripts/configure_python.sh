@@ -50,7 +50,7 @@ pip install -r third_party/iree/runtime/bindings/python/iree/runtime/build_requi
 pip install -r third_party/iree/integrations/tensorflow/test/requirements.txt
 pip install third_party/iree/integrations/tensorflow/python_projects/iree_tf
 pip install third_party/iree/integrations/tensorflow/python_projects/iree_tflite
-pip install -r tests/requirements.txt
+pip install -r requirements.txt
 
 # pre-register build outputs in virtual env
 cat > $(python -c "import site; print(site.getsitepackages()[0])")/iree.pth << EOF

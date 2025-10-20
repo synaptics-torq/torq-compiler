@@ -1,0 +1,41 @@
+# This file must contain only pinned versions of dependencies
+
+# Python testing (matches ubuntu 24.04 packages)
+pytest==7.4.4
+pytest-xdist==3.4.0
+
+# Connection to huggingface
+huggingface_hub==0.30.2
+
+# Used for apps
+streamlit==1.45.1
+
+# force tensorflow that is compatible with IREE version we use
+# (iree has a >= dependency which is picking up 2.19.0 which is not compatible)
+tensorflow==2.18.1
+
+# Used for image_to_tensor.py utility tools
+opencv-python-headless==4.12.0.88
+
+# for diff-tensors.py
+matplotlib==3.10.5
+
+# for gantt_plotly.py
+plotly==6.3.0
+
+# for annotate_profiling.py
+xlsxwriter==3.2.5
+
+# for documentation
+# versions are based on latest https://github.com/syna-astra-dev/synaptics-sphinx-theme/blob/main/Dockerfile
+# which uses a base image built with https://github.com/sphinx-doc/sphinx-docker-images/blob/7.4.7/base/Dockerfile
+
+# base image packages
+Sphinx==7.4.7
+pillow==10.4.0
+
+# head of synaptics theme
+https://github.com/syna-astra-dev/synaptics-sphinx-theme/archive/refs/heads/main.zip
+
+# this is to automatically rebuild upon edit the documentation
+sphinx-autobuild==2025.8.25
