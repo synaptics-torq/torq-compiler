@@ -8,9 +8,9 @@ namespace mlir::syna::torq {
 class TorqHw {
   public:
     enum Type {
-        SL2610, // Synaptics SL2610 family hardware
+        SL2610,        // Synaptics SL2610 family hardware
         SL2610_1SLICE, // Synaptics SL2610 family hardware with 1 slice
-        CUSTOM  // Custom hardware configuration
+        CUSTOM         // Custom hardware configuration
     };
 
     virtual ~TorqHw();

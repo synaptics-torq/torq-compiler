@@ -1,0 +1,16 @@
+name: Check Format
+
+on: pull_request
+
+jobs:
+    check-format:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v2
+
+            - name: Run format check
+              run: |
+                    scripts/format-code
+                    git diff --exit-code
