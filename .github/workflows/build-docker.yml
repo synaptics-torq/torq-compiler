@@ -1,0 +1,44 @@
+name: Build Docker for local dev
+
+on:
+    workflow_dispatch:
+
+    push:
+        branches:
+            - main
+        paths:            
+            - '.github/workflows/build-docker.yml'
+            - 'scripts/Dockerfile.localdev'
+            - 'scripts/install_dependencies.sh'
+
+jobs:
+
+    build-and-push:
+
+        permissions:
+            contents: read
+            packages: write
+            attestations: write
+            id-token: write
+
+        runs-on: ubuntu-latest
+
+        steps:
+        - name: Checkout repository
+          uses: actions/checkout@v4
+
+        - name: Log in to Docker Registry
+          uses: docker/login-action@v3
+          with:
+            registry: ghcr.io
+            username: ${{ github.actor }}
+            password: ${{ secrets.github_token }}
+
+        - name: Build and push Docker image
+          uses: docker/build-push-action@v6
+          id: push
+          with:
+            context: .
+            file: scripts/Dockerfile.localdev
+            push: ${{ github.ref == 'refs/heads/main' }}
+            tags: ghcr.io/${{ github.repository }}/builder:latest

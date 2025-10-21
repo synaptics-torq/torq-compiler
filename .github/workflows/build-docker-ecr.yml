@@ -1,0 +1,64 @@
+name: Build Docker Image for CI
+
+on:
+    workflow_dispatch:
+
+    push:
+        branches:
+             - main
+        paths:
+            - 'scripts/Dockerfile.ci'
+            - 'scripts/install_dependencies.sh'
+            - 'scripts/configure_python.sh'
+            - 'requirements.txt'
+            - 'third_party/iree'
+            - '.github/workflows/build-docker.yml'
+     
+jobs:
+
+    build-and-push:
+
+        if: ${{ vars.ECR_REPOSITORY != '' }}
+
+        permissions:
+            contents: read
+            packages: write
+            attestations: write
+            id-token: write
+
+        runs-on: codebuild-${{vars.CODEBUILD_PROJECT_DOCKER}}-${{ github.run_id }}-${{ github.run_attempt }}
+
+        steps:
+            
+          - name: Checkout repository
+            uses: actions/checkout@v4
+            with:
+              lfs: true
+
+          - name: Checkout required submodules
+            shell: bash
+            run: |
+              bash scripts/checkout_submodules.sh
+
+          - name: Remove credentials from checkout
+            run: |
+              set -x
+
+              # remove the token from the main repository
+              git config --local --unset-all http.https://github.com/.extraheader
+
+              # remove the token from the submodules that have it
+              git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+
+          - name: Log in to ECR
+            run:
+              aws ecr get-login-password --region ${{ vars.AWS_REGION }} | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
+
+          - name: Build and push Docker image
+            uses: docker/build-push-action@v6
+            id: push
+            with:
+              context: .
+              file: scripts/Dockerfile.ci
+              push: ${{ github.ref == 'refs/heads/main' }}
+              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
