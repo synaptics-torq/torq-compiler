@@ -7,6 +7,7 @@
 #include "Patterns.h"
 #include "torq/Utils/TorqUtils.h"
 
+#include "torq/Utils/Kernel.h"
 #include "llvm/Support/Debug.h"
 
 #include <algorithm>
@@ -17,6 +18,112 @@
 using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
+
+LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewriter) {
+    auto inputMemrefType = llvm::cast<MemRefType>(op.getInput().getType());
+    auto weightMemrefType = llvm::cast<MemRefType>(op.getWeights().getType());
+    auto biasMemrefType = llvm::cast<MemRefType>(op.getScaleBias().getType());
+    auto outputMemrefType = llvm::dyn_cast<MemRefType>(op.getInit().getType());
+
+    auto inputShape = inputMemrefType.getShape();
+    auto weightShape = weightMemrefType.getShape();
+    auto outputShape = outputMemrefType.getShape();
+    auto biasShape = biasMemrefType.getShape();
+    const auto dataType = getDType(inputMemrefType.getElementType());
+    const auto outputType = getDType(outputMemrefType.getElementType());
+    const auto weightType = getDType(weightMemrefType.getElementType());
+    const auto biasType = getDType(biasMemrefType.getElementType());
+
+    const int32_t batchCount = inputShape[0];
+    const int32_t inputChannels = inputShape[1];
+    const int32_t outputChannels = outputShape[1];
+    const int32_t inputWidth = inputShape[3];
+    const int32_t outputWidth = outputShape[3];
+    const int32_t kernelWidth = weightShape[3];
+    const int32_t stride = op.getStride()[0];
+
+    assert(
+        inputShape.size() == 4 && weightShape.size() == 4 && outputShape.size() == 5 &&
+        biasShape.size() == 1
+    );
+    assert(inputShape[2] == 1 && outputShape[2] == 1);
+    assert(biasShape[0] == outputChannels);
+    assert(dataType == DType::bf16 && weightType == DType::bf16 && biasType == DType::fp32);
+
+    Slice slice;
+    const int32_t inBlockSize = slice.alu.iWidth(dataType, weightType);
+    const int32_t wBlockSize = slice.alu.wWidth(dataType);
+    const int32_t blockSize = std::min(std::min(inBlockSize, wBlockSize), kernelWidth);
+    const int32_t blockCount = div_ceil(kernelWidth, blockSize);
+    const int32_t actBlockSize = std::min(slice.act.width(dataType, weightType), blockSize);
+    const int32_t actBlockCount = div_ceil(blockSize, actBlockSize);
+
+    // TODO: here use actual strides from memrefs
+    LData input(
+        {batchCount,
+         {inputChannels, inputWidth * sizeofType(dataType)},
+         {outputWidth, stride * sizeofType(dataType)},
+         blockCount,
+         blockSize},
+        dataType
+    );
+    LData output(
+        {batchCount,
+         outputChannels,
+         {outputWidth, kernelWidth * sizeofType(outputType)},
+         blockCount,
+         actBlockCount,
+         actBlockSize},
+        outputType
+    );
+    LData weight(
+        {outputChannels,
+         {inputChannels, kernelWidth * sizeofType(weightType)},
+         blockCount,
+         blockSize},
+        weightType
+    );
+    LData biasScale({outputChannels}, biasType);
+
+    // Note: outputs are generated in order, so no need to pad each channel
+    // we just need a padding area at the end of the output tensor
+
+    For(auto batch = slice.iterate(batchCount)) {
+        For(auto oc = slice.iterate(outputChannels)) {
+            BData bdata = slice.bram.load(biasScale[oc]);
+            For(auto ow = slice.iterate(outputWidth)) {
+                PData pdata;
+                For(auto b = slice.iterate(blockCount)) {
+                    For(auto ic = slice.iterate(inputChannels)) {
+                        IData idata = slice.iram.load(input[batch][ic][ow][b]);
+                        WData wdata = slice.wram.load(weight[oc][ic][b]);
+                        pdata = slice.alu.elementwiseProductAccumulate(idata, wdata);
+                    }
+                    For(auto a = slice.iterate(actBlockCount)) {
+                        QData res = slice.act.rescaleClamp(
+                            pdata[a], bdata, op.getShiftFactor(), op.getOutputZp(),
+                            op.getOutputMin(), op.getOutputMax()
+                        );
+                        slice.store(output[batch][oc][ow][b][a], res);
+                    }
+                }
+            }
+        }
+    }
+
+    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
+        op,                                      // Operation to replace
+        "Conv1DWithReduce",                      // Task name
+        op.getInput(),                           // Input tensor
+        op.getWeights(),                         // Weights
+        op.getScaleBias(),                       // BiasScale tensor,
+        op.getInit(),                            // Output tensor initializer
+        slice.getCfgAttr(rewriter.getContext()), // Slice configuration
+        slice.getNdls()                          // NDLs
+    );
+
+    return success();
+}
 
 // To program the Conv1D in hardware we need to generate the following descriptors:
 // ref, dedr, dewr, debr, deqw, cedw, cedr, ceww, cewr, cepr, acpr, acbw, acbr
@@ -33,9 +140,7 @@ namespace mlir::syna::torq {
 // 8. The output is rescaled to int8 in blocks of 16 pixels
 // 9. The output is written back to LRAM
 // 10. Take the next block of 64 pixels and repeat the process.
-
-template <>
-LogicalResult Conv1DPattern::transform(torq_hl::Conv1DOp op, PatternRewriter &rewriter) const {
+LogicalResult transformWithTransposeReshape(torq_hl::Conv1DOp op, PatternRewriter &rewriter) {
     // input
     auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
     auto weight_type = llvm::cast<MemRefType>(op.getWeights().getType());
@@ -94,7 +199,7 @@ LogicalResult Conv1DPattern::transform(torq_hl::Conv1DOp op, PatternRewriter &re
     const uint32_t ksize_x = weight_shape[K_SIZE_X];
     const uint32_t ksize_y = weight_shape[K_SIZE_Y];
 
-    uint32_t max_input = alu_group_width;
+    uint32_t max_input = HwInfo::max_input;
 
     max_input = max_input /
                 ddat_width; // The total pixel that can be processed reduces based on the data width
@@ -460,6 +565,19 @@ LogicalResult Conv1DPattern::transform(torq_hl::Conv1DOp op, PatternRewriter &re
     );
 
     return success();
+}
+
+template <>
+LogicalResult Conv1DPattern::transform(torq_hl::Conv1DOp op, PatternRewriter &rewriter) const {
+    auto outputMemrefType = llvm::dyn_cast<MemRefType>(op.getInit().getType());
+    auto outputShape = outputMemrefType.getShape();
+    switch (outputShape.size()) {
+    case 5:
+        return transformWithReduce(op, rewriter);
+    case 4:
+        return transformWithTransposeReshape(op, rewriter);
+    }
+    return op.emitError("unsupported output shape for Conv1D");
 }
 
 } // namespace mlir::syna::torq

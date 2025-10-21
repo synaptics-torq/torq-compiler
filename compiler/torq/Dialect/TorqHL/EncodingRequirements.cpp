@@ -199,6 +199,8 @@ static KernelTensorEncoding defaultEncoding(ShapedType type, int channelAlign = 
     return {align, alignWithType};
 }
 
+static KernelTensorEncoding pad256Encoding() { return {{}, 256}; }
+
 template <typename ConvT> static KernelEncoding getConvLikeKernelEncoding(ConvT op) {
 
     VectorizationModeEnum mode = op.getVectorizationMode();
@@ -291,6 +293,7 @@ static KernelEncoding getDefault1InputEncoding(Operation *op) {
     auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
     return {{}, defaultEncoding(resultType)};
 }
+static KernelEncoding getPaddedOutEncoding(Operation *op) { return {{}, pad256Encoding()}; }
 template <typename OpT> static KernelEncoding getResizeLikeEncoding(OpT op) {
     RankedTensorType resultType = cast<RankedTensorType>(op->getResult(0).getType());
 
@@ -550,7 +553,7 @@ KernelEncoding DepthwiseConv2DOp::getKernelEncoding() { return getConvLikeKernel
 
 KernelEncoding FullyConnectedOp::getKernelEncoding() { return getDefault1InputEncoding(*this); }
 
-KernelEncoding Conv1DOp::getKernelEncoding() { return getDefault1InputEncoding(*this); }
+KernelEncoding Conv1DOp::getKernelEncoding() { return getPaddedOutEncoding(*this); }
 
 KernelEncoding ActOp::getKernelEncoding() { return getActLikeEncoding(*this); }
 

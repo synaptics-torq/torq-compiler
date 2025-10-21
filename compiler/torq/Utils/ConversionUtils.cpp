@@ -46,6 +46,24 @@ void getDTypeRange(uint32_t element_size, int32_t *v_min, int32_t *v_max) {
     }
 }
 
+Value createZeroConstant(OpBuilder &b, Location loc, Type elemTy) {
+    TypedAttr attr;
+    if (isa<IndexType>(elemTy)) {
+        // builder helper for index attribute
+        attr = b.getIndexAttr(0);
+    }
+    else if (auto intTy = dyn_cast<IntegerType>(elemTy)) {
+        attr = b.getIntegerAttr(intTy, llvm::APInt::getZero(intTy.getWidth()));
+    }
+    else if (auto fTy = dyn_cast<FloatType>(elemTy)) {
+        attr = FloatAttr::get(fTy, llvm::APFloat(fTy.getFloatSemantics()));
+    }
+    else {
+        llvm_unreachable("unsupported element type for zero constant");
+    }
+    return b.create<arith::ConstantOp>(loc, attr).getResult();
+}
+
 std::vector<int32_t>
 interleave(const std::vector<int32_t> &a, const std::vector<int32_t> &b, bool broadcast_b) {
     if (a.size() != b.size()) {

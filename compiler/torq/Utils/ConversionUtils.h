@@ -41,6 +41,8 @@ Value createInitTensor(T &srcOp, R &rewriter, RankedTensorType type) {
         .getResult();
 }
 
+Value createZeroConstant(OpBuilder &b, Location loc, Type elemTy);
+
 template <class T> IntegerAttr MakeI32Attr(T &op, int32_t value) {
     return IntegerAttr::get(IntegerType::get(op.getContext(), 32), value);
 }

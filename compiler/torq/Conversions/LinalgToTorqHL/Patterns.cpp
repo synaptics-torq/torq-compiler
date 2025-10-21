@@ -2298,6 +2298,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         int64_t batch = inputType.getShape()[0];
         int64_t channels = inputType.getShape()[3];
         int64_t out_len = outputType.getShape()[2];
+        int64_t outputChannels = outputType.getShape()[3];
 
         auto weightType = cast<RankedTensorType>(weights.getType());
         int64_t filter_len = weightType.getShape()[1];
@@ -2312,26 +2313,68 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         llvm::SmallVector<int64_t> permVals = {1, 0};
         auto permAttr = mlir::DenseI64ArrayAttr::get(rewriter.getContext(), permVals);
 
-        auto transposeReshape = rewriter.create<torq_hl::TransposeReshapeOp>(
-            loc, transposedType, createInitTensor(convOp, rewriter, transposedType),
-            attrValues(convOp.getStrides()), weightType.getShape(), permAttr, input
-        );
+        auto torqOutType = transposeType(output.getType(), _dataPerm);
 
-        // Reset stride to 1 for Conv1DOp as the actual stride is handled in TransposeReshape
-        strideValue = 1;
+        // Decide whether to use Conv1D with reduction or TransposeReshape + Conv1D
+        // The former is completely generic but probably less efficient for single-channel cases
+        // The latter is more efficient but only works for single-channel input and outputs.
+        bool useConv1dWithReduce = channels > 1 || outputChannels > 1;
+        if (useConv1dWithReduce) {
+            input = transposeValue(input, _dataPerm, loc, rewriter);
+            // Create type for Conv1D output with an extra dimension at the end.
+            // This will be reduced later with linalg.reduce.
+            llvm::SmallVector<int64_t> torqOutShape(
+                torqOutType.getShape().begin(), torqOutType.getShape().end()
+            );
+            torqOutShape.push_back(filter_len);
+            torqOutType = RankedTensorType::get(torqOutShape, torqOutType.getElementType());
+        }
+        else {
+            auto transposeReshape = rewriter.create<torq_hl::TransposeReshapeOp>(
+                loc, transposedType, createInitTensor(convOp, rewriter, transposedType),
+                attrValues(convOp.getStrides()), weightType.getShape(), permAttr, input
+            );
+            input = transposeReshape.getOutput();
+            // Reset stride to 1 for Conv1DOp as the actual stride is handled in TransposeReshape
+            strideValue = 1;
+        }
 
         llvm::SmallVector<int64_t> zeroPad(4, 0);
         llvm::SmallVector<int64_t> stride = {strideValue};
-
-        auto torqOutType = transposeType(output.getType(), _dataPerm);
 
         auto torqConv1Op = rewriter.create<torq_hl::Conv1DOp>(
             loc, torqOutType, createInitTensor(convOp, rewriter, torqOutType), 0, weightZp,
             scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift, groups, zeroPad, stride,
             attrValues(convOp.getDilations()), torq_hl::VectorizationModeEnum::None, torqWeights,
-            biasScale, transposeReshape.getOutput()
+            biasScale, input
         );
-        auto torqOut = transposeValue(torqConv1Op.getOutput(), _dataPerm.reverse(), loc, rewriter);
+        Value torqOut = torqConv1Op.getOutput();
+
+        if (useConv1dWithReduce) {
+            // Add linalg.reduce to remove the extra dimension
+            // Create reducedType from torqOutType by removing the last dimension
+            auto reducedShape = torqOutType.getShape().drop_back();
+
+            // Create a tensor filled with zeros of type torqOutType.getElementType()
+            Value zeroValue = createZeroConstant(rewriter, loc, torqOutType.getElementType());
+            auto cEmpty =
+                rewriter.create<tensor::EmptyOp>(loc, reducedShape, torqOutType.getElementType());
+            Value zeroTensor =
+                rewriter.create<linalg::FillOp>(loc, ValueRange{zeroValue}, ValueRange{cEmpty})
+                    .result();
+            linalg::ReduceOp reduceOp = rewriter.create<linalg::ReduceOp>(
+                loc, ValueRange{torqOut}, ValueRange{zeroTensor}, 4,
+                [&](OpBuilder &b, Location l, ValueRange args) {
+                    b.create<linalg::YieldOp>(
+                        l, ValueRange{b.create<arith::AddFOp>(l, args[0], args[1])}
+                    );
+                }
+            );
+
+            torqOut = reduceOp->getResult(0);
+        }
+
+        torqOut = transposeValue(torqOut, _dataPerm.reverse(), loc, rewriter);
 
         rewriter.replaceOp(output.getDefiningOp(), torqOut);
         return success();
@@ -2548,13 +2591,19 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
         auto dilationsAttr = convOp.getDilations();
 
         // Convert 1D strides/dilations to 2D (add height dimension)
-        SmallVector<int64_t> strides2d = {1, stridesAttr.getValues<int64_t>()[0]};
-        SmallVector<int64_t> dilations2d = {1, dilationsAttr.getValues<int64_t>()[0]};
+        SmallVector<int64_t> strides2d = {1};
+        strides2d.push_back(stridesAttr.getValues<int64_t>()[0]);
+        SmallVector<int64_t> dilations2d = {1};
+        dilations2d.push_back(dilationsAttr.getValues<int64_t>()[0]);
+
+        auto attrType = RankedTensorType::get({2}, rewriter.getIntegerType(64));
+        auto stridesAttr2d = DenseIntElementsAttr::get(attrType, strides2d);
+        auto dilationsAttr2d = DenseIntElementsAttr::get(attrType, dilations2d);
 
         // Create Conv2D
         auto conv2d = rewriter.create<linalg::Conv2DNhwcHwcfOp>(
             loc, nhwcOutput.getType(), ValueRange{nhwcInput, hwcfFilter}, ValueRange{nhwcOutput},
-            rewriter.getDenseI64ArrayAttr(strides2d), rewriter.getDenseI64ArrayAttr(dilations2d)
+            stridesAttr2d, dilationsAttr2d
         );
 
         // Transpose result back: [N,1,W,F] -> [N,F,1,W]
