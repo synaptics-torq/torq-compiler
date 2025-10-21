@@ -2699,7 +2699,7 @@ struct FCMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
 
         if (_markFuseGroups) {
             markFuseGroupBackward(
-                output, {inputB}, rewriter,
+                output, {inputA, inputB}, rewriter,
                 srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();
