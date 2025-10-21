@@ -3,5 +3,4 @@ FROM ubuntu:24.04
 COPY scripts/install_dependencies.sh .
 RUN ./install_dependencies.sh && rm -rf /var/lib/apt/lists/*
 
-LABEL org.opencontainers.image.source https://github.com/syna-astra-dev/iree-synaptics-synpu
 
