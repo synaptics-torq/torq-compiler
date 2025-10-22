@@ -79,6 +79,30 @@ jobs:
         run: |
           cmake --build . --target iree-run-module
 
+      - name: Set tag variable
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "release" ] && [ "${{ github.event.action }}" = "published" ]; then
+            echo "TAG=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+        
+      - name: Gather release files
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          /workspace/code/scripts/assemble_release_docker.sh /workspace/build /workspace/build-soc release
+          echo "${{ steps.vars.outputs.TAG }}" > release/VERSION
+          tar -zcf release.tar.gz release
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release.tar.gz
+          retention-days: 30
+
   user_doc_build:
       name : Build user guide
       runs-on: ubuntu-latest

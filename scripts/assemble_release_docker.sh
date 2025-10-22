@@ -49,7 +49,6 @@ cp ${BUILD_DIR}/third_party/iree/tools/iree-run-module ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-compile ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-opt ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/lib/libIREECompiler.so ${INSTALL_DIR}/lib
-cp ${BASE_DIR}/third_party/fpga_mgmt/x86_64-Linux/*.so* ${INSTALL_DIR}/lib
 
 cp ${TARGET_BUILD_DIR}/third_party/iree/tools/iree-run-module ${INSTALL_DIR}/tools/armhf-iree-run-module
 
@@ -70,14 +69,12 @@ cp -rL ${BUILD_DIR}/third_party/iree/runtime/bindings/python/iree ${INSTALL_DIR}
 
 cat ${BASE_DIR}/third_party/iree/runtime/bindings/python/iree/runtime/build_requirements.txt \
     ${BASE_DIR}/third_party/iree/integrations/tensorflow/test/requirements.txt \
-    ${BASE_DIR}/tests/requirements.txt > ${INSTALL_DIR}/python/requirements.txt
+    ${BASE_DIR}/requirements.txt > ${INSTALL_DIR}/python/requirements.txt
 
 cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tf ${INSTALL_DIR}/python
 cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tflite ${INSTALL_DIR}/python
 
 mkdir ${INSTALL_DIR}/samples
-# Download release models from HF
-python3 ${BASE_DIR}/scripts/model_release.py ${INSTALL_DIR}/samples
 
 # remove redundant libIREECompiler.so library
 rm ${INSTALL_DIR}/python/compiler/iree/compiler/_mlir_libs/libIREECompiler.so
