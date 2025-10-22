@@ -1,0 +1,154 @@
+name: Build and Test
+
+on: 
+  workflow_dispatch:
+  pull_request:    
+  push:
+    branches:
+       - main
+
+concurrency:
+  # from iree CI:
+  # A PR number if a pull request and otherwise the commit hash. This cancels
+  # queued and in-progress runs for the same PR (presubmit) or commit
+  # (postsubmit). The workflow name is prepended to avoid conflicts between
+  # different workflows.
+  group: ${{ github.workflow }}-${{ github.event.number || github.sha }}
+  cancel-in-progress: true  
+
+jobs:
+
+  build:
+    if: ${{ vars.CODEBUILD_PROJECT_CODE != '' }}
+
+    name: Build code
+    runs-on:
+      - codebuild-${{ vars.CODEBUILD_PROJECT_CODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    env:
+      SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+      SCCACHE_REGION: ${{ vars.AWS_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ vars.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      SCCACHE_S3_KEY_PREFIX: clang-build
+
+    steps:
+
+      - name: Make cached checkout visible to workflow
+        run: |
+          # actions/checkout and uses keyword can only access files within the current workflow workspace
+          ln -s /workspace/code .
+
+      - name: Update checkout
+        uses: actions/checkout@v4
+        with:
+          path: code
+          lfs: true
+
+      - name: Update required submodules
+        working-directory: /workspace/code
+        run: |
+          bash scripts/checkout_submodules.sh        
+
+      - name: Configure python venv for host build and test
+        working-directory: /workspace/code
+        run: |
+          ./scripts/configure_python.sh /workspace/venv /workspace/build
+
+      - name: Configure build for host
+        working-directory: /workspace/code
+        run: |
+          ./scripts/configure_build.sh /workspace/build
+
+      - name: Build for host
+        working-directory: /workspace/build
+        env:
+          SCCACHE_SERVER_UDS: ${{github.workspace}}/sccache.sock
+        run: |
+          sccache --start-server
+          cmake --build .
+          sccache --show-stats
+
+      - name: Configure build for soc
+        working-directory: /workspace/code
+        run: |
+          ./scripts/configure_soc_build.sh /workspace/build-soc /workspace/build
+
+      - name: Build for soc
+        working-directory: /workspace/build-soc
+        run: |
+          cmake --build . --target iree-run-module
+
+  user_doc_build:
+      name : Build user guide
+      runs-on: ubuntu-latest
+      steps:
+          - name: Checkout repository              
+            uses: actions/checkout@v4
+            with:
+              lfs: true
+              submodules: false
+
+          - name: Build documentation              
+            uses: syna-astra-dev/action-doc-publish/actions/doc-build@v3
+            with:
+              doc_dir: doc/user-manual
+
+          - name: Upload documentation artifact              
+            uses: actions/upload-artifact@v4
+            with:
+              name: user-manual
+              path: _build/html     
+              retention-days: 7
+
+  docker_release:
+    name: Release Docker image
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'release' && github.event.action == 'published') }}
+    needs: [build, user_doc_build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Download the compiler and runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+
+      - name: Extract the compiler and runtime
+        working-directory: release
+        run: |
+          tar -zxf release.tar.gz --strip-components=1
+
+      - name: Docker meta (generate tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/compiler
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=branch,enable=${{ github.ref == 'refs/heads/main' }}
+
+            type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' && github.event.action == 'published' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.action == 'published' }}
+
+      - name: Log in to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.github_token }}
+      
+      - name: Build and push release docker
+        uses: docker/build-push-action@v6
+        with:
+          context: release
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          

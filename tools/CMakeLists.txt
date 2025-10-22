@@ -1,0 +1,17 @@
+iree_cc_binary(
+    NAME
+        torq-mlir-lsp-server
+    SRCS
+        "torq-mlir-lsp-server.cc"
+    DEPS
+        MLIRIR
+        MLIRLspServerLib
+        MLIRSupport
+        iree::compiler::Tools::init_passes_and_dialects
+        iree::compiler::bindings::c::headers
+        iree::target::torq::Utils
+        iree::target::torq::Dialect::TorqHL::Dialect
+        iree::target::torq::Dialect::TorqHW::Dialect
+        MLIRTosaDialect
+    SETUP_INSTALL_RPATH
+)

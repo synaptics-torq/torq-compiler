@@ -73,7 +73,7 @@ const TorqHw &TorqHw::get() {
         _instance = new TorqHwCustom(lramSize, sliceCount, availableMemoryForTiling);
         break;
     }
-    case TorqHw::SL261X:
+    case TorqHw::SL2610:
         _instance = new TorqHwSL2610;
         break;
     default:
