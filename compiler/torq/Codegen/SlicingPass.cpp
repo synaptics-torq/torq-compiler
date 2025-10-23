@@ -159,7 +159,7 @@ class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp>
         const auto weightsGrouping = weightsShape[weightsShape.size() - 1];
         // Make channel count for each slice a multiple of the weights grouping
         channels /= kSliceCount;
-        if (channels % weightsGrouping) {
+        if (channels == 0 || channels % weightsGrouping) {
             // TODO: support non-multiple of weightsGrouping channel counts
             return failure();
         }
@@ -275,7 +275,7 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
         const auto weightsType = op.getWeights().getType();
         const auto weightsShape = weightsType.getShape();
         const auto weightsGrouping = weightsShape[weightsShape.size() - 1];
-        if (channels % (kSliceCount * weightsGrouping)) {
+        if (channels == 0 || channels % (kSliceCount * weightsGrouping)) {
             return failure();
         }
         channels /= kSliceCount;
@@ -394,7 +394,7 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
         const auto weightsType = op.getWeights().getType();
         const auto weightsShape = weightsType.getShape();
         const auto weightsGrouping = weightsShape[weightsShape.size() - 1];
-        if (channels % (kSliceCount * weightsGrouping)) {
+        if (channels == 0 || channels % (kSliceCount * weightsGrouping)) {
             return failure();
         }
         channels /= kSliceCount;
