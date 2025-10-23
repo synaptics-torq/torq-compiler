@@ -4798,6 +4798,137 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
     }
 };
 
+class BfloatGenericErfPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    // using OpRewritePattern::OpRewritePattern;
+    BfloatGenericErfPattern(MLIRContext *context)
+        : OpRewritePattern<linalg::GenericOp>(context, /*benefit=*/0) {
+        setDebugName("BfloatGenericErfPattern");
+    }
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (!cast<RankedTensorType>(srcOp.getType(0)).getElementType().isBF16() ||
+            !isa_and_nonnull<math::ErfOp>(getElementwiseUnaryOp(srcOp))) {
+            return rewriter.notifyMatchFailure(srcOp, "Expected bf16 erf");
+        }
+        rewriter.replaceOp(srcOp, rewriter.create<math::ErfOp>(srcOp.getLoc(), srcOp.getInputs()));
+        return success();
+    }
+};
+
+struct BfloatErfPattern : public OpRewritePattern<math::ErfOp> {
+    BfloatErfPattern(MLIRContext *context) : OpRewritePattern<math::ErfOp>(context, /*benefit=*/0) {
+        setDebugName("BfloatErfPattern");
+    }
+    LogicalResult matchAndRewrite(math::ErfOp op, PatternRewriter &rewriter) const override {
+
+        // checks
+        if (!cast<RankedTensorType>(op.getType()).getElementType().isBF16()) {
+            return rewriter.notifyMatchFailure(op, "Expected bf16 output");
+        }
+
+        // useful meta-values.
+        auto loc = op.getLoc();
+        auto ctx = rewriter.getContext();
+        auto bfTensorType = cast<RankedTensorType>(op.getType());
+        auto bf16 = bfTensorType.getElementType();
+        auto rank = (size_t)bfTensorType.getRank();
+
+        // helper functions.
+        auto emptyLike = [&](Value v) {
+            return rewriter.create<tensor::EmptyOp>(loc, v.getType(), ValueRange{});
+        };
+        auto broadcast = [&](Value v, auto func) {
+            return rewriter
+                .create<linalg::GenericOp>(
+                    loc, TypeRange{v.getType()}, ValueRange{v}, ValueRange{emptyLike(v)},
+                    SmallVector<AffineMap>(2, AffineMap::getMultiDimIdentityMap(rank, ctx)),
+                    SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel), func
+                )
+                .getResult(0);
+        };
+        // only works if x and y are tensor and z is a scalar constants.
+        auto fma = [&](Value x, Value y, Value z) {
+            auto xy = rewriter.create<arith::MulFOp>(loc, x, y);
+            return broadcast(xy, [&](OpBuilder &b, Location l, ValueRange args) {
+                b.create<linalg::YieldOp>(l, ValueRange{b.create<arith::AddFOp>(l, args[0], z)});
+            });
+        };
+        auto fmaConstant = [&](Value x, Value y, Value z) {
+            auto xy = broadcast(y, [&](OpBuilder &b, Location l, ValueRange args) {
+                b.create<linalg::YieldOp>(l, ValueRange{b.create<arith::MulFOp>(l, x, args[0])});
+            });
+            return broadcast(xy, [&](OpBuilder &b, Location l, ValueRange args) {
+                b.create<linalg::YieldOp>(l, ValueRange{b.create<arith::AddFOp>(l, args[0], z)});
+            });
+        };
+        // expects tenor x and contant scalar y
+        auto mul = [&](Value x, Value y) {
+            return broadcast(x, [&](OpBuilder &b, Location l, ValueRange args) {
+                b.create<linalg::YieldOp>(l, ValueRange{b.create<arith::MulFOp>(l, args[0], y)});
+            });
+        };
+        auto fpConst = [&](float fp) {
+            return rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(bf16, fp));
+        };
+
+        // set some constants
+        float pi = 3.141592653589793;
+        auto scale = fpConst(2 / sqrt(pi));
+        auto one = fpConst(1.0);
+        auto mone = fpConst(-1.0);
+        // Since odd terms have negative sign on leading term, you
+        // would need to clip on input instead of output because the
+        // approximation will switch signs at large values. The
+        // maximum discrepancy in bits (i.e. 0b100 diff is 8 bits) for
+        // number of terms is:
+        /* 2 terms -> 21 bits */
+        /* 4 terms -> 10 bits */
+        /* 6 terms ->  5 bits */
+        // FIXME: These values are obtained from taylor expansion
+        // instead of Remez Algorithm to enable work on lowering now
+        // to meet deadlines.  They should be updated to Remez
+        // Algorithm values in the future.
+        auto c0 = one; // fpConst(1.0);
+        auto c1 = fpConst(-1.0 / 3.0);
+        auto c2 = fpConst(1.0 / 10.0);
+        auto c3 = fpConst(-1.0 / 42.0);
+        auto c4 = fpConst(1.0 / 216.0);
+        auto c5 = fpConst(-1.0 / 1320.0);
+        auto c6 = fpConst(1.0 / 9360.0);
+
+        // run the algorithm
+        auto x = op.getOperand();
+        auto x2 = rewriter.create<arith::MulFOp>(loc, x, x);
+        auto terms =
+            fma(fma(fma(fma(fma(fmaConstant(c6, x2, c5), x2, c4), x2, c3), x2, c2), x2, c1), x2,
+                c0);
+        auto unclamped = rewriter.create<arith::MulFOp>(loc, terms, mul(x, scale));
+        auto outAlloc = rewriter.create<tensor::EmptyOp>(loc, x.getType(), ValueRange{});
+        auto erf =
+            rewriter
+                .create<linalg::GenericOp>(
+                    loc, TypeRange{outAlloc.getType()}, ValueRange{unclamped}, ValueRange{outAlloc},
+                    SmallVector<AffineMap>(2, AffineMap::getMultiDimIdentityMap(rank, ctx)),
+                    SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel),
+                    [&](OpBuilder &b, Location loc, ValueRange args) {
+                        auto tooLarge =
+                            b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OLT, one, args[0]);
+                        auto clamped1 = b.create<arith::SelectOp>(loc, tooLarge, one, args[0]);
+                        auto tooSmall =
+                            b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OGT, mone, clamped1);
+                        auto clamped2 = b.create<arith::SelectOp>(loc, tooSmall, mone, clamped1);
+                        b.create<linalg::YieldOp>(loc, ValueRange{clamped2});
+                    }
+                )
+                .getResult(0);
+
+        rewriter.replaceOp(op, erf);
+        return success();
+    }
+};
+
 // This doesn't get its own rewriter because it only works with
 // negative inputs, which can't in general be inferred at compile
 // time.  Use this function in other algos when you know what you are
@@ -5194,6 +5325,8 @@ struct BfloatSoftmaxPattern : OpRewritePattern<linalg::SoftmaxOp> {
 void populateLinalgToTorqHLPrePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
+    patterns.insert<BfloatGenericErfPattern>(context);
+    patterns.insert<BfloatErfPattern>(context);
     patterns.insert<BfloatSoftmaxPattern>(context);
     patterns.insert<BfloatReciprocalPattern>(context);
     patterns.insert<TensorBitcastPattern>(context);
@@ -5306,9 +5439,9 @@ void populateLinalgToTorqHLPatterns(
 
     // for add/sub op, currently we have two ways/steps to process:
     // it will be converted firstly in
-    // populateLinalgToTorqHLPrePatternsLowPrio::EltwiseBinaryConvert, if converted successfully,
-    // its tiling will be done by TilePass, if converted failed, it will go through the general
-    // linalg path, which is linalg tiling then will be converted by
+    // populateLinalgToTorqHLPrePatternsLowPrio::EltwiseBinaryConvert, if converted
+    // successfully, its tiling will be done by TilePass, if converted failed, it will go
+    // through the general linalg path, which is linalg tiling then will be converted by
     // populateLinalgToTorqHLPatterns::AddOpPattern to torq_hl::AddOp
     // now rescaled add/sub uses populateLinalgToTorqHLPrePatternsLowPrio
     // non-rescaled add/sub uses populateLinalgToTorqHLPatterns::AddOpPattern
