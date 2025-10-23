@@ -735,11 +735,16 @@ struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expected a ConstantOp defining the value");
         }
 
-        Attribute valueAttr = constantOp.getValue();
+        TypedAttr valueAttr = constantOp.getValue();
         mlir::IntegerAttr bitPatternAttr;
+        int fillElementSize = valueAttr.getType().getIntOrFloatBitWidth() / 8;
         if (auto intAttr = mlir::dyn_cast<IntegerAttr>(valueAttr)) {
             // Already an integer constant
-            bitPatternAttr = rewriter.getI32IntegerAttr(intAttr.getInt());
+            int fillValue = intAttr.getInt();
+            if (fillElementSize > 2 && fillValue != 0) {
+                return rewriter.notifyMatchFailure(srcOp, "Unsupported 32-bits int value");
+            }
+            bitPatternAttr = rewriter.getI32IntegerAttr(fillValue);
         }
         else if (auto floatAttr = mlir::dyn_cast<mlir::FloatAttr>(valueAttr)) {
             // Get the bit pattern of the float
@@ -747,6 +752,13 @@ struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
             uint64_t bits;
             if (&apf.getSemantics() == &llvm::APFloat::BFloat()) {
                 bits = apf.bitcastToAPInt().getZExtValue(); // 16-bit
+                bitPatternAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(bits));
+            }
+            else if (&apf.getSemantics() == &llvm::APFloat::IEEEsingle()) {
+                bits = apf.bitcastToAPInt().getZExtValue(); // 32-bit
+                if (fillElementSize > 2 && bits != 0) {
+                    return rewriter.notifyMatchFailure(srcOp, "Unsupported 32-bits float value");
+                }
                 bitPatternAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(bits));
             }
             else {
@@ -783,8 +795,9 @@ struct FillOpConversionRewrite : public OpRewritePattern<linalg::FillOp> {
 
         std::optional<IntegerAttr> maybeFuseGroupAttr = std::nullopt;
         if (_markFuseGroups) {
-            if (isMarkedFuseGroup(srcOp))
+            if (isMarkedFuseGroup(srcOp)) {
                 return rewriter.notifyMatchFailure(srcOp, "Already marked");
+            }
 
             maybeFuseGroupAttr = srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
         }
@@ -837,11 +850,16 @@ struct FillOpConversionRewrite : public OpRewritePattern<linalg::FillOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expected a ConstantOp defining the value");
         }
 
-        Attribute valueAttr = constantOp.getValue();
+        TypedAttr valueAttr = constantOp.getValue();
         mlir::IntegerAttr bitPatternAttr;
+        int fillElementSize = valueAttr.getType().getIntOrFloatBitWidth() / 8;
         if (auto intAttr = mlir::dyn_cast<IntegerAttr>(valueAttr)) {
             // Already an integer constant
-            bitPatternAttr = rewriter.getI32IntegerAttr(intAttr.getInt());
+            int fillValue = intAttr.getInt();
+            if (fillElementSize > 2 && fillValue != 0) {
+                return rewriter.notifyMatchFailure(srcOp, "Unsupported 32-bits int value");
+            }
+            bitPatternAttr = rewriter.getI32IntegerAttr(fillValue);
         }
         else if (auto floatAttr = mlir::dyn_cast<mlir::FloatAttr>(valueAttr)) {
             // Get the bit pattern of the float
@@ -849,6 +867,13 @@ struct FillOpConversionRewrite : public OpRewritePattern<linalg::FillOp> {
             uint64_t bits;
             if (&apf.getSemantics() == &llvm::APFloat::BFloat()) {
                 bits = apf.bitcastToAPInt().getZExtValue(); // 16-bit
+                bitPatternAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(bits));
+            }
+            else if (&apf.getSemantics() == &llvm::APFloat::IEEEsingle()) {
+                bits = apf.bitcastToAPInt().getZExtValue(); // 32-bit
+                if (fillElementSize > 2 && bits != 0) {
+                    return rewriter.notifyMatchFailure(srcOp, "Unsupported 32-bits float value");
+                }
                 bitPatternAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(bits));
             }
             else {
@@ -859,8 +884,9 @@ struct FillOpConversionRewrite : public OpRewritePattern<linalg::FillOp> {
             return rewriter.notifyMatchFailure(srcOp, "Unsupported constant type");
         }
 
-        if (markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr))
+        if (markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr)) {
             return success();
+        }
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
         rewriter.replaceOpWithNewOp<torq_hl::FillOp>(
@@ -2373,6 +2399,13 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
 
             torqOut = reduceOp->getResult(0);
         }
+        // // Overwrite torqOut with init tensor for debugging
+        // torqOut = createInitTensor(convOp, rewriter, cast<RankedTensorType>(torqOut.getType()));
+        // // Fill input with 1s for debugging
+        // torqOut = rewriter.create<torq_hl::FillOp>(
+        //     loc, cast<RankedTensorType>(torqOut.getType()), torqOut,
+        //     rewriter.getI32IntegerAttr(/*0x3f800000*//*0x00003f80*/0)
+        // ).getOutput();
 
         torqOut = transposeValue(torqOut, _dataPerm.reverse(), loc, rewriter);
 

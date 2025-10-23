@@ -446,7 +446,8 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
             return success();
         }
 
-        if (clFallbackF32ToHost && !isa<linalg::TransposeOp>(srcOp)) {
+        if (clFallbackF32ToHost && !isa<linalg::TransposeOp>(srcOp) &&
+            !isa<linalg::FillOp>(srcOp)) {
 
             // FIXME: this is a quick workaround to avoid tiling operations that we want on the host
             auto isFp32Op = false;

@@ -22,9 +22,11 @@ LogicalResult FillPattern::transform(torq_hl::FillOp op, PatternRewriter &rewrit
     // The tensor to be filled can have any number of dimensions with any stride
     // Note: padding areas are not filled
     auto output_type = llvm::dyn_cast<MemRefType>(op.getInit().getType());
+    int32_t val = op.getValue();
+    assert(val >= -32768 && val <= 65535 && "Fill value out of range");
     Slice slice;
     LData output(output_type);
-    For(auto ii = slice.iterate(output.dims())) { slice.store(output[ii], op.getValue()); }
+    For(auto ii = slice.iterate(output.dims())) { slice.store(output[ii], val); }
 
     rewriter.replaceOpWithNewOp<SliceTaskOp>(
         op,                                      // Operation to replace
