@@ -26,7 +26,6 @@ def TensorOrMemref :
 
 class TorqHL_LayerOp<string mnemonic, list<Trait> traits = []>: 
         TorqHL_Op<mnemonic, !listconcat(traits, [
-                              DeclareOpInterfaceMethods<TilingInterface>,
                               DeclareOpInterfaceMethods<KernelInterface, ["getKernelEncoding"]>,
                               MemoryEffectsOpInterface])> {
   dag commonArgs = (ins
