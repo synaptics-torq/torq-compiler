@@ -28,10 +28,10 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
 
-#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <deque>
@@ -49,6 +49,31 @@ using namespace mlir::iree_compiler;
 namespace mlir::syna::torq {
 
 namespace {
+
+enum class SuperTilingProducersFuseMode { MaxSize, MaxProducers, OnlyPatterns, NoFuse };
+
+static llvm::cl::opt<SuperTilingProducersFuseMode> clTorqSuperTilingProducersFuseMode(
+    "torq-super-tiling-producers-fuse-mode",
+    llvm::cl::desc("Selects one of three predefined values"),
+    llvm::cl::values(
+        clEnumValN(
+            SuperTilingProducersFuseMode::MaxSize, "max-size",
+            "Prefer bigger tile over fusing more producers: tile size is set to make the consumer "
+            "fit in memory; producers are fused only if they fit in the same tile size)"
+        ),
+        clEnumValN(
+            SuperTilingProducersFuseMode::MaxProducers, "max-producers",
+            "Prefer more producers over tile size: tile size is the biggest size that can still "
+            "fit all the producers"
+        ),
+        clEnumValN(
+            SuperTilingProducersFuseMode::OnlyPatterns, "only-patterns",
+            "Fuse producers only whene required to preserve patterns"
+        ),
+        clEnumValN(SuperTilingProducersFuseMode::NoFuse, "no-fuse", "Do not fuse producers")
+    ),
+    llvm::cl::init(SuperTilingProducersFuseMode::MaxSize) // Default value
+);
 
 class SuperTilingConfigPass : public SuperTilingConfigBase<SuperTilingConfigPass> {
   public:
@@ -294,10 +319,13 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
                 .Case<linalg::LinalgOp>([&](auto linalgOp) {
                     return linalgOperandSlicesFromIterDomain(rewriter, linalgOp, offsets, sizes);
                 })
-                .Case<tensor::PadOp>([&](tensor::PadOp padOp) {
+                .Case<tensor::PadOp>([&](auto padOp) {
                     return tensorPadOperandSlicesFromIterDomain(rewriter, padOp, offsets, sizes);
                 })
-                .Default([](auto) { return LogicalResult::failure(); });
+                .Default([&](auto) {
+                    LLVM_DEBUG({ llvm::dbgs() << "unknown op type: " << op->getName() << "\n"; });
+                    return LogicalResult::failure();
+                });
 
         if (failed(operandSlices)) {
             op->emitError("failed to compute operand slices");
@@ -381,10 +409,6 @@ llvm::FailureOr<bool> fitTileToMemory(
     ArrayRef<int64_t> tilingDimOrder, size_t availableMemoryBytes, ArrayRef<int64_t> originalSizes,
     MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
 ) {
-    LLVM_DEBUG({
-        llvm::dbgs() << availableMemoryBytes << " bytes of available memory for tiling\n";
-    });
-
     // First establish that the original tile is not big enough.
     auto tileFits = checkTileFitsInMemory(
         rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
@@ -458,6 +482,8 @@ llvm::FailureOr<bool> fitTileToMemory(
         return true;
     }
 
+    LLVM_DEBUG({ llvm::dbgs() << __func__ << ": failed, no more dimensions\n"; });
+
     return LogicalResult::failure();
 }
 
@@ -492,19 +518,105 @@ void applyTiledResults(
     }
 }
 
-std::tuple<bool, bool> fuseControl(
-    IRRewriter &rewriter, tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
-    bool isDestinationOperand
+std::tuple<bool, bool> fuseControlMaxSize(
+    IRRewriter &rewriter, int64_t availableMemoryBytes, tensor::ExtractSliceOp candidateSliceOp,
+    OpResult producerOpResult, bool isDestinationOperand
 ) {
+    const auto doNotFuse = std::make_tuple(false, false);
+
     Operation *producerOp = producerOpResult.getOwner();
+
+    auto producerTi = dyn_cast<TilingInterface>(producerOp);
+    if (!producerTi) {
+        // Producer has no TilingInterface
+        return doNotFuse;
+    }
 
     // TODO: if producer has users outside of the tiling fuse group, maybe we should yield it?
     bool yieldProducerReplacement = false;
 
     // FIXME: should we not fuse destination operands?
     // if (isDestinationOperand) {
-    //     // Don't fuse
-    //     return std::make_tuple(false, yieldProducerReplacement);
+    //     return doNotFuse;
+    // }
+
+    SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
+    if (failed(producerTi.getIterationDomainTileFromResultTile(
+            rewriter, producerOpResult.getResultNumber(), candidateSliceOp.getMixedOffsets(),
+            candidateSliceOp.getMixedSizes(), mappedOffsets, mappedSizes
+        ))) {
+        return doNotFuse;
+    }
+
+    if (!isMarkedFuseGroup(producerOp)) {
+        // Not part of a pattern-fuse-group; there are no restrictions on the dimensions.
+
+        auto producerFits = checkTileFitsInMemory(
+            rewriter, producerOp, mappedOffsets, mappedSizes, {}, availableMemoryBytes
+        );
+        if (failed(producerFits)) {
+            return doNotFuse;
+        }
+
+        // Fuse iff producer fits in the tile
+        return std::make_tuple(*producerFits, yieldProducerReplacement);
+    }
+
+    if (!isFuseGroupOutput(producerOp)) {
+        // Is part of a pattern-fuse-group, but not the output operation (bottom most).
+        // We only check the output operation of such group.
+        return std::make_tuple(true, yieldProducerReplacement);
+    }
+
+    // The dimensions the producer can be tiled over
+    auto dimOrder = getTilingDimOrder(producerTi);
+    llvm::SmallSetVector<int64_t, 4> tilingDims{dimOrder.begin(), dimOrder.end()};
+
+    auto [iterOffsets, iterSizes, iterStrides] =
+        getOffsetsSizesAndStrides(producerTi.getIterationDomain(rewriter));
+
+    assert(
+        mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
+    );
+
+    // Don't fuse if we are tiling a dimension the producer can not be tiled over
+    for (size_t index = 0; index < iterSizes.size(); ++index) {
+        if (mappedSizes[index] != iterSizes[index] && !tilingDims.contains(index)) {
+            return doNotFuse;
+        }
+    }
+
+    auto producerFuseGroupFits = checkTileFitsInMemory(
+        rewriter, producerOp, mappedOffsets, mappedSizes, {}, availableMemoryBytes
+    );
+    if (failed(producerFuseGroupFits)) {
+        return doNotFuse;
+    }
+
+    // Fuse iff producer fits in the tile
+    return std::make_tuple(*producerFuseGroupFits, yieldProducerReplacement);
+}
+
+std::tuple<bool, bool> fuseControlMaxProducers(
+    IRRewriter &rewriter, tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
+    bool isDestinationOperand
+) {
+    const auto doNotFuse = std::make_tuple(false, false);
+
+    Operation *producerOp = producerOpResult.getOwner();
+
+    auto producerTi = dyn_cast<TilingInterface>(producerOp);
+    if (!producerTi) {
+        // Producer has no TilingInterface
+        return doNotFuse;
+    }
+
+    // TODO: if producer has users outside of the tiling fuse group, maybe we should yield it?
+    bool yieldProducerReplacement = false;
+
+    // FIXME: should we not fuse destination operands?
+    // if (isDestinationOperand) {
+    //     return doNotFuse;
     // }
 
     // From here on we check if the producer can be tiled on the dimensions that
@@ -522,8 +634,6 @@ std::tuple<bool, bool> fuseControl(
         return std::make_tuple(true, yieldProducerReplacement);
     }
 
-    auto producerTi = cast<TilingInterface>(producerOp);
-
     // The dimensions the producer can be tiled over
     auto dimOrder = getTilingDimOrder(producerTi);
     llvm::SmallSetVector<int64_t, 4> tilingDims{dimOrder.begin(), dimOrder.end()};
@@ -533,8 +643,7 @@ std::tuple<bool, bool> fuseControl(
             rewriter, producerOpResult.getResultNumber(), candidateSliceOp.getMixedOffsets(),
             candidateSliceOp.getMixedSizes(), mappedOffsets, mappedSizes
         ))) {
-        // Don't fuse
-        return std::make_tuple(false, yieldProducerReplacement);
+        return doNotFuse;
     }
 
     auto [iterOffsets, iterSizes, iterStrides] =
@@ -547,8 +656,7 @@ std::tuple<bool, bool> fuseControl(
     // Don't fuse if we are tiling a dimension the producer can not be tiled over
     for (size_t index = 0; index < iterSizes.size(); ++index) {
         if (mappedSizes[index] != iterSizes[index] && !tilingDims.contains(index)) {
-            // Don't fuse
-            return std::make_tuple(false, yieldProducerReplacement);
+            return doNotFuse;
         }
     }
 
@@ -557,7 +665,7 @@ std::tuple<bool, bool> fuseControl(
 }
 
 FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
-    IRRewriter &rewriter, TilingInterface tilingInterfaceOp,
+    IRRewriter &rewriter, TilingInterface tilingInterfaceOp, int64_t availableMemoryBytes,
     llvm::ArrayRef<OpFoldResult> completeIterSizes, ArrayRef<OpFoldResult> tileIterSizes
 ) {
     // set dimensions that are not being tiled to 0 (and convert to int64_t).
@@ -580,12 +688,34 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
         llvm::dbgs() << "\n";
     });
 
+    auto maybePatternFuseGroup = isFuseGroupOutput(tilingInterfaceOp);
+
     scf::SCFTileAndFuseOptions options{};
     // Consider using setSCFTileSizes from iree/compiler/Codegen/Utils/Utils.h
     options.tilingOptions.setTileSizes(getAsIndexOpFoldResult(rewriter.getContext(), tileSizes));
     options.setFusionControlFn([&](tensor::ExtractSliceOp candidateSliceOp,
                                    OpResult producerOpResult, bool isDestinationOperand) {
-        return fuseControl(rewriter, candidateSliceOp, producerOpResult, isDestinationOperand);
+        switch (clTorqSuperTilingProducersFuseMode.getValue()) {
+        case SuperTilingProducersFuseMode::MaxSize:
+            return fuseControlMaxSize(
+                rewriter, availableMemoryBytes, candidateSliceOp, producerOpResult,
+                isDestinationOperand
+            );
+
+        case SuperTilingProducersFuseMode::MaxProducers:
+            return fuseControlMaxProducers(
+                rewriter, candidateSliceOp, producerOpResult, isDestinationOperand
+            );
+
+        case SuperTilingProducersFuseMode::OnlyPatterns: {
+            bool shouldFuse =
+                maybePatternFuseGroup && isMarkedFuseGroup(producerOpResult.getOwner());
+            return std::make_tuple(shouldFuse, false);
+        }
+
+        case SuperTilingProducersFuseMode::NoFuse:
+            return std::make_tuple(false, false);
+        }
     });
 
     return scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp, options);
@@ -639,11 +769,19 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
     }
 
     LLVM_DEBUG({
-        llvm::dbgs() << op->getName() << " (" << TORQ_FUSE_GROUP_ID << " = "
-                     << getConstantIntValue(op->getAttr(TORQ_FUSE_GROUP_ID))
-                     << ") needs to be tiled\n";
+        llvm::dbgs() << op->getName() << " needs to be tiled\n";
+        llvm::dbgs() << "  " << availableMemoryBytes << " bytes of available memory for tiling\n";
 
-        llvm::dbgs() << "iteration sizes: ";
+        if (auto groupId = op->getAttr(TORQ_FUSE_GROUP_ID)) {
+            llvm::dbgs() << "  " << TORQ_FUSE_GROUP_ID << ": " << getConstantIntValue(groupId)
+                         << "\n";
+            if (isMarkedFuseGroup(op)) {
+                llvm::dbgs() << "  principal op: " << getFuseGroupPrincipalOpBackward(op)->getName()
+                             << "\n";
+            }
+        }
+
+        llvm::dbgs() << "  iteration sizes: ";
         bool isFirst = true;
         for (auto size : iterSizes) {
             llvm::dbgs() << (isFirst ? "" : "x") << getConstantIntValue(size);
@@ -651,7 +789,7 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
         }
         llvm::dbgs() << "\n";
 
-        llvm::dbgs() << "iteration types: ";
+        llvm::dbgs() << "  iteration types: ";
         isFirst = true;
         for (auto iterType : tilingInterfaceOp.getLoopIteratorTypes()) {
             llvm::dbgs() << (isFirst ? "" : ", ") << iterType;
@@ -661,34 +799,43 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
     });
 
     FailureOr<scf::SCFTileAndFuseResult> tiledResults =
-        tileAndFuseToSize(rewriter, tilingInterfaceOp, iterSizes, tileSizes);
+        tileAndFuseToSize(rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes);
     if (failed(tiledResults)) {
         op->emitError("super tiling failed");
         return;
     }
 
-    // Now that we know which producers were fused, find a tile that fits them too.
-    tileChanged = fitTileToMemory(
-        rewriter, op, tiledResults->fusedProducers, tilingDimOrder, availableMemoryBytes,
-        *iterIntSizes, tileOffsets, tileSizes
-    );
-    if (failed(tileChanged)) {
-        op->emitError("failed to find a tile size for producers");
-        return;
-    }
-
-    if (*tileChanged) {
-        // The second fitTileToMemory returned a smaller tile.
-
-        tiledResults = tileAndFuseToSize(rewriter, tilingInterfaceOp, iterSizes, tileSizes);
-        if (failed(tiledResults)) {
-            op->emitError("super tiling failed");
+    if (clTorqSuperTilingProducersFuseMode.getValue() ==
+        SuperTilingProducersFuseMode::MaxProducers) {
+        // Now that we know which producers were fused, find a tile that fits them too.
+        tileChanged = fitTileToMemory(
+            rewriter, op, tiledResults->fusedProducers, tilingDimOrder, availableMemoryBytes,
+            *iterIntSizes, tileOffsets, tileSizes
+        );
+        if (failed(tileChanged)) {
+            // REMOEV:
+            llvm::dbgs() << "DEBUG: " << __FILE__ << ":" << __LINE__ << " fit after fuse failed\n";
+            op->dump();
+            assert(false);
+            op->emitError("failed to find a tile size for producers");
             return;
+        }
+
+        if (*tileChanged) {
+            // The second fitTileToMemory returned a smaller tile.
+
+            tiledResults = tileAndFuseToSize(
+                rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes
+            );
+            if (failed(tiledResults)) {
+                op->emitError("super tiling failed");
+                return;
+            }
         }
     }
 
     LLVM_DEBUG({
-        llvm::dbgs() << "fused " << tiledResults->fusedProducers.size() << " producers\n";
+        llvm::dbgs() << "  fused " << tiledResults->fusedProducers.size() << " producers\n";
     });
 
     applyTiledResults(rewriter, op, *tiledResults);
