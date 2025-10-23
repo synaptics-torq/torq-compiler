@@ -67,8 +67,8 @@ static llvm::cl::opt<bool> clTableAsGather(
     llvm::cl::init(false)
 );
 
-static llvm::cl::opt<bool> clConv1dAsConv2d(
-    "torq-convert-conv1d-to-conv2d", llvm::cl::desc("Convert conv1d to conv2d"),
+static llvm::cl::opt<bool> clConv1dAsMatmul(
+    "torq-convert-conv1d-to-matmul", llvm::cl::desc("Convert conv1d to imToCol + matmul"),
     llvm::cl::init(false)
 );
 
@@ -5220,11 +5220,11 @@ void populateLinalgToTorqHLPrePatterns(
 
     patterns.insert<FCMatmulOpConversion>(context, markFuseGroups);
     patterns.insert<Conv2DMatmulOpConversion>(context, markFuseGroups);
-    if (clConv1dAsConv2d) {
-        patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
+    if (clConv1dAsMatmul) {
+        patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
     }
     else {
-        patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
+        patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
     }
 
     if (!markFuseGroups) {
