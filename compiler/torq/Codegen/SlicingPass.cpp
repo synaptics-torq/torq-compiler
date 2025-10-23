@@ -433,8 +433,12 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
 
         // Compute the bias tile for each iteration
         SmallVector<OpFoldResult> biasOffset = createVector({0}, rewriter);
-        biasOffset[0] = affineEval(arg * (channels * 2), iv, rewriter);
-        auto scaleBiasTile = getSlice(op.getScaleBias(), biasOffset, {channels * 2}, rewriter);
+
+        // We need to compute the tile of the bias/scale tensor based on the original
+        // size because in some cases we have 2 values per channel and in some cases 1 value
+        auto biasScaleTileSize = op.getScaleBias().getType().getShape()[0] / kSliceCount;
+        biasOffset[0] = affineEval(arg * biasScaleTileSize, iv, rewriter);
+        auto scaleBiasTile = getSlice(op.getScaleBias(), biasOffset, {biasScaleTileSize}, rewriter);
 
         // Compute the input tile for each iteration
         SmallVector<int64_t> inTileShape(op.getInput().getType().getShape());
