@@ -312,10 +312,21 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
         int memoryRequired = outputSize + inputSize + getTensorSize(weightsType) +
                              getTensorSize(convOp.getScaleBias().getType());
 
+        // Ensure that the input can fit twice in memory in case we have to segment or transpose
+        // or convert
+        memoryRequired = std::max(memoryRequired, 2 * inputSize);
+
+        // Ensure that the output can fit twice in memory in case we have a convert
+        float outputSizeFactor = 1;
+        if (memoryRequired < 2 * outputSize) {
+            outputSizeFactor = 2.0 * outputSize / memoryRequired;
+            memoryRequired = 2 * outputSize;
+        }
+
         const int memoryAvailable = TorqHw::get().getAvailableMemoryForTiling();
 
         // Tile only if memory required is more than what we have
-        if (memoryRequired < memoryAvailable) {
+        if (memoryRequired <= memoryAvailable) {
             return failure();
         }
 
@@ -335,7 +346,8 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
         int maxChannelsPerTile =
             maxWeightAndOutputSize /
             (outFrameSize + weightsShape[1] * weightsShape[2] * weightsShape[3] *
-                                weightsType.getElementType().getIntOrFloatBitWidth() / 8);
+                                weightsType.getElementType().getIntOrFloatBitWidth() / 8) /
+            outputSizeFactor;
 
         // we process blocks of 4, 8 or 16 channels based on the alignment support
         maxChannelsPerTile = [=] {
@@ -545,8 +557,9 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
         int outputSize = getTensorSize(outType);
         int inputSize = getTensorSize(inType);
 
-        // FIXME: compute the real needs
-        int memoryRequired = outputSize + inputSize;
+        // Ensure that the input can fit twice in memory in case we have to segment or transpose
+        // or convert
+        int memoryRequired = std::max(outputSize + inputSize, 2 * inputSize);
 
         int memoryAvailable = TorqHw::get().getAvailableMemoryForTiling();
 
@@ -557,11 +570,12 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
         }
 
         // Tile only if memory required is more than what we have
-        if (memoryRequired < memoryAvailable) {
+        if (memoryRequired <= memoryAvailable) {
             return failure();
         }
 
-        int channelDataSize = getFrameSize(outType) + getFrameSize(inType);
+        int channelDataSize =
+            std::max(getFrameSize(outType) + getFrameSize(inType), 2 * getFrameSize(inType));
 
         if (channelDataSize > memoryAvailable) {
             return dwOp.emitError("Frame size is too large to fit in LRAM");
@@ -738,10 +752,13 @@ class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp>
             return failure();
         }
 
-        uint32_t maxChannelsPerTile = (mem_max_size - inputSize) /
-                                      ((outputSize + weightsSize + scaleBiasSize) / outputShape[1]);
+        int maxChannelsPerTile = (mem_max_size - inputSize) /
+                                 div_ceil(outputSize + weightsSize + scaleBiasSize, outputShape[1]);
 
         // tiles needs to be a multiple of 64, we round down to avoid exceeding the available memory
+        if (maxChannelsPerTile < 64) {
+            fcOp.emitOpError("Unable to tile FullyConnectedOp in the available memory");
+        }
         int channelsPerTile = align_floor(maxChannelsPerTile, 64);
 
         int trailingChannels = outputShape[1] % channelsPerTile;
