@@ -83,12 +83,13 @@ static SGBlockInfo sgElementCount(const Shape &dims, DType dType, int sgMax = -1
                          << " beyond scatter-gather limit: " << sgMax << "\n";
             assert(false && "Non-natural stride count beyond limit");
         }
-        blockInfo.size = count;
         blockInfo.sgGroups = dim.count;
+        blockInfo.size = count;
         blockInfo.stride = dim.stride;
     }
     else {
         // The first dimension is also contiguous
+        blockInfo.sgGroups = 1;
         blockInfo.size = count * dim.count;
     }
 
@@ -491,7 +492,10 @@ struct SlicePrivate {
 
     // Add dimensions to a mem-based NDL according to the data shape and iteration variables
     // return the NDL offset
-    int addDims(NdlType type, torq_hw::MemNdlDimsData &dims, const Data &data);
+    int addDims(
+        NdlType type, torq_hw::MemNdlDimsData &dims, const Data &data,
+        StoreMode mode = StoreMode::normal
+    );
 
     // Add dimensions to a reg-based NDL according to the data shape and iteration variables
     void addDims(
@@ -524,11 +528,11 @@ struct SlicePrivate {
         int actClipMax, torq_hw::ACTMode actMode
     );
 
-    void memNdl(NdlType ndlType, const LData &data);
+    void memNdl(NdlType ndlType, const LData &data, StoreMode mode = StoreMode::normal);
     void dedr(const LData &data);
     void dewr(const LData &data);
     void debr(const LData &data);
-    void deqw(const LData &output);
+    void deqw(const LData &output, StoreMode mode);
 
     void ref(const LData &data);
 
@@ -570,7 +574,9 @@ struct SlicePrivate {
 
 SlicePrivate::SlicePrivate() {}
 
-int SlicePrivate::addDims(NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data) {
+int SlicePrivate::addDims(
+    NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data, StoreMode mode
+) {
     Shape dataDims = data.shape();
     const Indexes &ix = data.indexes();
     const int sgGroupsMax = getBusScatterGather(type);
@@ -579,6 +585,22 @@ int SlicePrivate::addDims(NdlType type, torq_hw::MemNdlDimsData &ndlDims, const 
     auto elementSize = sizeofType(data.elementType());
     assert(ix.size() <= dataDims.size());
     int offset = data.offset();
+
+    if (mode == StoreMode::splitEvenOdd) {
+        assert(type == NdlType::DEQW && "Even-odd split mode only supported for DEQW");
+        if (block.sgGroups == 1) {
+            // If destination is a single block, split it in two even-odd halfs
+            block.sgGroups = 2;
+            assert(block.size % 2 == 0 && "Block size must be even for even-odd split");
+            block.size = div_ceil(block.size, 2);
+            if (block.stride.intVal.has_value()) {
+                block.stride.intVal = div_ceil(block.stride.intVal.value(), 2);
+            }
+            else {
+                block.stride.intVal = block.size * elementSize; // intVal.value()
+            }
+        }
+    }
 
     int busWidth = getBusWidth(type);
     int blockSizeBytes = block.size * elementSize;
@@ -601,7 +623,7 @@ int SlicePrivate::addDims(NdlType type, torq_hw::MemNdlDimsData &ndlDims, const 
     ndlDims.push_back({DimType::L, MemDimTag::B, elementSize, 1});
     ndlDims.push_back({DimType::L, MemDimTag::D, lBlockSize, elementSize});
     if (block.sgGroups > 1) {
-        if (block.size > 1) {
+        if (block.size > 1 && mode != StoreMode::splitEvenOdd) {
             if (block.stride.exprVal.has_value()) {
                 ndlDims.push_back(
                     {DimType::L, MemDimTag::G, block.sgGroups, block.stride.exprVal.value()}
@@ -620,11 +642,13 @@ int SlicePrivate::addDims(NdlType type, torq_hw::MemNdlDimsData &ndlDims, const 
             assert(block.sgGroups == 2);
             assert(elementSize <= 2);
             ndlDims.back().count = block.sgGroups;
-            if (block.stride.exprVal.has_value())
+            if (block.stride.exprVal.has_value()) {
                 ndlDims.back().setExprStride(block.stride.exprVal.value());
-            else
+            }
+            else {
                 ndlDims.back().setIntStride(block.stride.intVal.value());
-            ndlDims.push_back({DimType::L, MemDimTag::G, 1, elementSize});
+            }
+            ndlDims.push_back({DimType::L, MemDimTag::G, block.size, elementSize});
         }
     }
     // Ensure we have at least 2 DIMs for _mem_ndl_desc_gen()
@@ -1075,9 +1099,9 @@ void SlicePrivate::cepr(const PData &pdata) {
     ndlToStr(NdlType::CEPR, _ndls.getRegNdl(NdlType::CEPR));
 }
 
-void SlicePrivate::memNdl(NdlType ndlType, const LData &data) {
+void SlicePrivate::memNdl(NdlType ndlType, const LData &data, StoreMode mode) {
     MemNdlDimsData ndlDims;
-    int offset = addDims(ndlType, ndlDims, data);
+    int offset = addDims(ndlType, ndlDims, data, mode);
     _ndls.add(ndlType, ndlDims, offset);
     ndlToStr(ndlType, _ndls.getMemNdl(ndlType));
 }
@@ -1088,7 +1112,9 @@ void SlicePrivate::dewr(const LData &data) { memNdl(NdlType::DEWR, data); }
 
 void SlicePrivate::debr(const LData &data) { memNdl(NdlType::DEBR, data); }
 
-void SlicePrivate::deqw(const LData &output) { memNdl(NdlType::DEQW, output); }
+void SlicePrivate::deqw(const LData &output, StoreMode mode) {
+    memNdl(NdlType::DEQW, output, mode);
+}
 
 void SlicePrivate::ref(const LData &data) {
     MemNdlDimsData refNdlDims;
@@ -1411,10 +1437,10 @@ static void checkCompatibility(const Data &destData, const Data &sourceData) {
     }
 }
 
-void Slice::store(const LData &output, const QData &data) {
+void Slice::store(const LData &output, const QData &data, StoreMode mode) {
     assert(data.indexes().size() == 0 && "QData can't be indexed during store");
     checkCompatibility(output, data);
-    d->deqw(output);
+    d->deqw(output, mode);
 
     // Check that the DEQW H iteration count matches the specified outputShape
     if (output.shape().size() > 0 && output.shape()[0].count) {
@@ -1450,7 +1476,7 @@ void Slice::store(const LData &output, int value) {
 
     // Configure the value to be stored as pad value
     setPadding({0, 0, 0, 0}, value);
-    d->deqw(output);
+    d->deqw(output, StoreMode::normal);
 }
 int Slice::scatter() const { return getBusScatterGather(NdlType::DEQW); }
 

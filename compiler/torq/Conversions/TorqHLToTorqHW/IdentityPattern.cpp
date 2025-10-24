@@ -83,6 +83,31 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
             slice.store(output[a], res);
         }
     }
+    else if (total_px == 64 && false) {
+        // This implementation copies a 64-bytes dense input tensor by putting pixels at
+        // even and odd positions in the first, second half of the output respectively
+        // (the result is not a correct memcopy).
+        // This is done using the even-odd feature of DEQW.
+        // Can be tested with identity-64-xxx.mlir (xxx is any supported 8- or 16-bits type)
+        int blockSize = 64 / sizeofType(elementType);
+        int actBlockSize = 16;
+        int g = 2; // This example only works with g == 2
+
+        LData input({blockSize}, elementType);
+        LData output(
+            {{blockSize / actBlockSize, actBlockSize / g * sizeofType(elementType)},
+             {g, (blockSize / g) * sizeofType(elementType)},
+             actBlockSize / g},
+            elementType
+        );
+
+        IData idata = slice.iram.load(input);
+        PData pdata = slice.alu.load(idata);
+        For(auto a = slice.iterate(blockSize / actBlockSize)) {
+            QData res = slice.act.load(pdata[a]);
+            slice.store(output[a], res, StoreMode::splitEvenOdd);
+        }
+    }
     else if (false) {
         // This example works only with identity-64-i8.mlir and g == 1, 2 or 4
         // It copies input to output by skipping an element every blockSize/g elements

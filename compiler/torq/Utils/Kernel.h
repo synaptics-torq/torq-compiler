@@ -394,6 +394,29 @@ class Act : SliceComponent {
     int width(DType iType, DType wType = DType::none) const;
 };
 
+// Store modes for the store() operation
+enum class StoreMode {
+    // Data is written sequentially
+    // QData is a vector of shape [N], output must be a dense vector of the same shape [N].
+    // If QData has shape [1], the output can also be a scalar.
+    // In alternative the output can be an array of shape [{g, s}, N] where g is a power of
+    // two up to Slice::scatter() (currently 2) with dense inner dim.
+    // s specifies the stride between the two blocks which don't have to be contiguous
+    // in this case it must be s*N == alu.width() or N == 1
+    // The case N == 1 is only supported for item size <= 2 (same as even-odd split mode).
+    normal,
+
+    // Data is written using even-odd splitting
+    // This mode is only supported for item size <= 2.
+    // QData is a vector of shape [N], output must have shape [{2,s}, N/2]
+    // elements at even positions are written in the first data block
+    // elements at odd positions are written in the second data block
+    // s specifies the stride between the two blocks which don't have to be contiguous
+    // In alternative destination can have shape [N] in which case the first half is filled
+    // with elements at even positions and the second half with elements at odd positions.
+    splitEvenOdd
+};
+
 // Create a kernel for a slice
 class Slice {
     std::unique_ptr<SlicePrivate> d;
@@ -414,15 +437,10 @@ class Slice {
     Iterator iterate(const std::vector<int> &counts);
 
     // Store the computed result to LRAM
-    // output is a vector of shape {N}, data must be a dense vector of the same shape {N}
-    // If N in the output shape is 1, data can also be a scalar.
-    // In alternative both output and data can be an array of shape {s, N} where s is a power of
-    // two up to Slice::scatter() with dense inner dim.
-    // If the first dimension is not dense then must be s*N == alu.width() or N == 1
-    // The case N == 1 is only supported for item size <= 2.
     // Data types must be compatible, not necessarily the same, fp16 is compatible with float32,
     // integer types are compatible with each other.
-    void store(const LData &output, const QData &data);
+    // See the description of each StoreMode for details on how data is stored in the output memory.
+    void store(const LData &output, const QData &data, StoreMode mode = StoreMode::normal);
 
     // Store a value to LRAM
     // output must represent a scalar

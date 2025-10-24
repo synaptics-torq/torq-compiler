@@ -7,6 +7,58 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import argparse
+import sys
+
+def load_data(filename):
+    # Load numpy array from file
+    tensor = np.load(str(filename))
+    if tensor.dtype == np.dtype('V2'):
+        try:
+            import ml_dtypes
+        except ImportError:
+            print("ml_dtypes not found, bfloat16 support not available")
+            sys.exit(1)
+            
+        tensor = tensor.view(ml_dtypes.bfloat16)
+    return tensor
+
+def get_channel_count(tensor):
+    # Assume NCW or NCHW... format
+    if len(tensor.shape) >= 3:
+        return tensor.shape[1]
+    elif len(tensor.shape) == 2:
+        return tensor.shape[0]
+    return 1
+
+def get_channel(tensor, channel):
+    # Assume NCW or NCHW... format
+    if len(tensor.shape) == 1:
+        return tensor
+    elif len(tensor.shape) == 2:
+        return tensor[channel]
+    return tensor[0, channel, ...]
+
+def print_tensor(tensor):
+    items_per_row = 32 if tensor.dtype in [np.int8, np.uint8, np.bool_] else 16
+    field_width = 4 if tensor.dtype in [np.int8, np.uint8, np.bool_] else 6 if tensor.dtype in [np.int16, np.uint16] else 12
+    colorIx = "\033[90m"
+    colorEnd = "\033[0m"
+    
+    # Iterate over all dimensions except the last
+    for idx in np.ndindex(tensor.shape[:-1]):
+        data = tensor[idx]
+        print("\033[90m", end="")
+        print(colorIx + "     ", " ".join(f"{v:{field_width-1}}:" for v in range(items_per_row//2)), end="   ")
+        print(" ".join(f"{v:{field_width-1}}:" for v in range(items_per_row//2,items_per_row)), colorEnd)
+        print("\033[0m", end="")
+        print("[", end="")
+        line_count = range(0, len(data), items_per_row)
+        for line, i in enumerate(line_count):
+            if len(line_count) > 1:
+                print(colorIx + f"{line:{2 if line == 0 else 3}}: " + colorEnd, end="")
+                print(" ".join(f"{v:{field_width}}" for v in data[i:i+items_per_row//2]), end="   ")
+                print(" ".join(f"{v:{field_width}}" for v in data[i+items_per_row//2:i+items_per_row]), end="")
+            print("]" if line == len(line_count) - 1 else "")
 
 
 def main():
