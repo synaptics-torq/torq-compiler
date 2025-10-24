@@ -166,18 +166,4 @@ def UnrollLoop:
     ];
 }
 
-def DeviceMapManualOverride:
-    InterfacePass<"torq-device-map-manual-override",
-                  "mlir::FunctionOpInterface"> {
-    let summary = "Manually override device mapping based on user annotations";
-    let description = [{
-       Manually override device mapping based on user annotations
-    }];
-    let constructor =
-        "mlir::syna::torq::createDeviceMapManualOverridePass()";
-    let dependentDialects = [
-        "::mlir::linalg::LinalgDialect"
-    ];
-}
-
 #endif // IREE_CODEGEN_SYNPHL_TO_HW_PASSES

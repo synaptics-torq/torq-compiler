@@ -10,9 +10,6 @@
 
 namespace mlir::syna::torq {
 
-// CPU/NPU Dispatch Pattern - MUST be called FIRST before all other populate functions
-void populateCPUNPUDispatchPatterns(MLIRContext *context, RewritePatternSet &patterns);
-
 void populateLinalgToActPatterns(MLIRContext *context, RewritePatternSet &patterns);
 void populateLinalgToAluPatterns(MLIRContext *context, RewritePatternSet &patterns);
 

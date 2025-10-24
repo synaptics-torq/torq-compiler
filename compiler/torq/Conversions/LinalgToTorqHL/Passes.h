@@ -31,8 +31,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToTorqHLConversi
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createArithToTorqHLConversionPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createDeviceMapManualOverridePass();
-
 #ifdef ENABLE_TORQ_GENERIC
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createSpecializeLinalgGenericOpPass();
 #endif // ENABLE_TORQ_GENERIC

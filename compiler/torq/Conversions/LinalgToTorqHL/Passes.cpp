@@ -96,38 +96,15 @@ class LinalgToTorqHLPreConversionPass
     void runOnOperation() override {
         auto funcOp = getOperation();
         auto *ctx = funcOp.getContext();
-
-        RewritePatternSet cpuOverridePatterns(ctx);
-        // CPU/NPU Dispatch - MUST be called FIRST
-        populateCPUNPUDispatchPatterns(ctx, cpuOverridePatterns);
-
-        auto cpuOverrideFrozenPatterns = FrozenRewritePatternSet(
-            std::move(cpuOverridePatterns), disabledPatterns, enabledPatterns
-        );
-
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), cpuOverrideFrozenPatterns))) {
-            return signalPassFailure();
-        }
-
-        llvm::SmallVector<Operation *> torqOps;
-        auto identifyTorqOps = [&](Operation *op) {
-            if (locHas(op->getLoc(), "affinity_torq")) {
-                torqOps.push_back(op);
-            }
-        };
-
-        getOperation().walk(identifyTorqOps);
         RewritePatternSet patterns(ctx);
         populateLinalgToTorqHLPrePatterns(ctx, patterns, false);
 
         auto frozenPatterns =
             FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyOpPatternsAndFold(torqOps, frozenPatterns))) {
+        if (failed(applyPatternsAndFoldGreedily(getOperation(), frozenPatterns))) {
             return signalPassFailure();
         }
-        torqOps.clear();
-        getOperation().walk(identifyTorqOps);
 
         RewritePatternSet lowPrioPatterns(ctx);
         populateLinalgToTorqHLPrePatternsLowPrio(ctx, lowPrioPatterns, false);
@@ -135,7 +112,7 @@ class LinalgToTorqHLPreConversionPass
         auto lowPrioFrozenPatterns =
             FrozenRewritePatternSet(std::move(lowPrioPatterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyOpPatternsAndFold(torqOps, lowPrioFrozenPatterns))) {
+        if (failed(applyPatternsAndFoldGreedily(getOperation(), lowPrioFrozenPatterns))) {
             return signalPassFailure();
         }
     }
@@ -239,48 +216,8 @@ class ArithToTorqHLConversionPass
     }
 };
 
-class DeviceMapManualOverridePass
-    : public DeviceMapManualOverrideBase<DeviceMapManualOverridePass> {
-  public:
-    using DeviceMapManualOverrideBase::DeviceMapManualOverrideBase;
-
-    static void addTag(Operation *op, StringRef tag) {
-        if (locHas(op->getLoc(), tag))
-            return; // already tagged
-        MLIRContext *ctx = op->getContext();
-        auto tagLoc = NameLoc::get(StringAttr::get(ctx, tag), op->getLoc());
-        op->setLoc(FusedLoc::get(ctx, {op->getLoc(), tagLoc}));
-    }
-
-    void runOnOperation() override {
-        auto f = getOperation();
-        f.walk([&](Operation *op) {
-            auto name = op->getName().getStringRef();
-            auto nameAttr = op->getAttrOfType<StringAttr>("name");
-            if (nameAttr) {
-                StringRef qname = nameAttr.getValue(); // "onnx.Constant"
-                name = qname;
-            }
-            if (name == "onnx.MatMulInteger" || name == "onnx.Sqrt" ||
-                name == "onnx.DynamicQuantizeLinear" ||
-                name == "onnx.InstanceNormalization" /*|| name == "onnx.Add"*/) {
-                addTag(op, "affinity_cpu");
-                return;
-            }
-            else {
-                addTag(op, "affinity_torq");
-                return;
-            }
-        });
-    }
-};
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createArithToTorqHLConversionPass() {
     return std::make_unique<ArithToTorqHLConversionPass>();
-}
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createDeviceMapManualOverridePass() {
-    return std::make_unique<DeviceMapManualOverridePass>();
 }
 
 namespace {

@@ -8,7 +8,6 @@
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
-#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
@@ -2850,24 +2849,6 @@ class ClampOpPattern : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
-class CPUDispatchInterceptorPattern : public RewritePattern {
-  public:
-    CPUDispatchInterceptorPattern(MLIRContext *context)
-        : RewritePattern(MatchAnyOpTypeTag(), /*benefit=*/10, context) {}
-
-    LogicalResult matchAndRewrite(Operation *op, PatternRewriter &rewriter) const override {
-
-        if (locHas(op->getLoc(), "affinity_torq")) {
-            setTargetExecutorAttr(op, torq_hl::Executor::NSS);
-        }
-        else if (locHas(op->getLoc(), "affinity_cpu")) {
-            setTargetExecutorAttr(op, torq_hl::Executor::Host);
-        }
-
-        return failure();
-    }
-};
-
 class AbsOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -5009,14 +4990,9 @@ struct BfloatSoftmaxPattern : OpRewritePattern<linalg::SoftmaxOp> {
     }
 };
 
-void populateCPUNPUDispatchPatterns(MLIRContext *context, RewritePatternSet &patterns) {
-    patterns.insert<CPUDispatchInterceptorPattern>(context);
-}
-
 void populateLinalgToTorqHLPrePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-
     patterns.insert<BfloatSoftmaxPattern>(context);
     patterns.insert<BfloatReciprocalPattern>(context);
     patterns.insert<TensorBitcastPattern>(context);
@@ -5098,7 +5074,6 @@ void populateLinalgToTorqHLPatterns(
         patterns.insert<FillOpConversionRewrite>(context, markFuseGroups);
         return;
     }
-
     patterns.insert<ArithOnTensorToLinalgPattern<arith::ExtSIOp>>(context);
 
     patterns.insert<TransposeOpConversion>(context);

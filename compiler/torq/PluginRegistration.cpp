@@ -73,7 +73,6 @@ struct TORQSession : public PluginSession<
 
         if (typeMnemonic == "torch-torq" || typeMnemonic == "onnx-torq") {
             if (typeMnemonic == "onnx-torq") {
-                passManager.addNestedPass<func::FuncOp>(createDeviceMapManualOverridePass());
                 passManager.addNestedPass<func::FuncOp>(
                     mlir::torch::onnx_c::createTorchOnnxToTorchPass()
                 );
