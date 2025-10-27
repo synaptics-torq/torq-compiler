@@ -25,9 +25,11 @@ TARGET=${3:-soc_fpga}
 if [[ "$TARGET" == "astra_machina" ]]; then
     TORQ_ENABLE_SOC_FPGA=OFF
     TORQ_ENABLE_ASTRA_MACHINA=ON
+    TOOLCHAIN_FILE=toolchain.aarch64.cmake
 else
     TORQ_ENABLE_SOC_FPGA=ON
     TORQ_ENABLE_ASTRA_MACHINA=OFF
+    TOOLCHAIN_FILE=toolchain.armhf.cmake
 fi
 
 cd ${BASE_DIR}
@@ -43,4 +45,4 @@ cmake -B ${SOC_BUILD_DIR} \
             -DTORQ_ENABLE_SOC_FPGA=${TORQ_ENABLE_SOC_FPGA} \
             -DTORQ_ENABLE_ASTRA_MACHINA=${TORQ_ENABLE_ASTRA_MACHINA} \
             -DTORQ_ENABLE_SIMULATOR=OFF \
-            -DCMAKE_TOOLCHAIN_FILE=${BASE_DIR}/scripts/toolchain.armhf.cmake
+            -DCMAKE_TOOLCHAIN_FILE=${BASE_DIR}/scripts/${TOOLCHAIN_FILE}

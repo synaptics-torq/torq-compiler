@@ -43,7 +43,7 @@ set(CMAKE_CXX_COMPILER clang++)
 set(CMAKE_C_FLAGS "--target=aarch64-linux-gnu -static-libgcc" CACHE STRING "" FORCE)
 set(CMAKE_CXX_FLAGS "--target=aarch64-linux-gnu -static-libstdc++ -static-libgcc" CACHE STRING "" FORCE)
 
-set(CMAKE_EXE_LINKER_FLAGS "--target=aarch64-linux-gnu --sysroot=${CMAKE_SYSROOT} -static -static-libstdc++ -static-libgcc" CACHE STRING "" FORCE)
+set(CMAKE_EXE_LINKER_FLAGS "--target=aarch64-linux-gnu --sysroot=${CMAKE_SYSROOT} -static-libstdc++ -static-libgcc" CACHE STRING "" FORCE)
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}" CACHE STRING "" FORCE)
 
 set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
