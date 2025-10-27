@@ -76,14 +76,12 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
     SmallVector<int64_t> input2Strides = getEncodedStridesElements(type2);
     int m, k, n;
     int a_row_stride, b_row_stride;
+    int batches = 1;
 
     if (rank1 == 3 && rank2 == 3) { // batch matmul
         // [batch, m, k] x [batch, k, n] = [batch, m, n]
-        if (input1_shape[0] > 1) {
-            // We can support batch matmul quite easily in theory
-            op.emitError() << "Batch > 1 not supported\n";
-            return failure();
-        }
+        batches = input1_shape[0];
+        assert(batches == input2_shape[0]);
         m = input1_shape[1];
         a_row_stride = input1Strides[1];
         k = input1_shape[2];
@@ -151,7 +149,8 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
 
     // Loaded in WMEM
     LData matA(
-        {{m, a_row_stride * in_element_size}, // M
+        {batches,
+         {m, a_row_stride * in_element_size}, // M
          div_ceil(k, groupSize),              // K
          groupSize},
         inputType
@@ -159,6 +158,7 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
     // Loaded in IMEM
     LData matB(
         {
+            batches,
             div_ceil(k, groupSize),
             {groupSize, b_row_stride * in_element_size}, // K
             div_ceil(n, alu_group_width),
@@ -168,6 +168,7 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
     );
     LData matC(
         {
+            batches,
             m,                                                                                  // M
             div_ceil(n, alu_group_width), div_ceil(alu_group_width, actBlockSize), actBlockSize // N
         },
@@ -176,22 +177,24 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
     LData biasScale({2}, DType::int32);
 
     BData bdata = slice.bram.load(biasScale);
-    For(auto im = slice.iterate(matA.dim(0))) {      // rows in matA
-        For(auto ing = slice.iterate(matB.dim(2))) { // column groups in matB
-            PData pdata;
-            For(auto ikg = slice.iterate(matA.dim(1))) { // k groups in matA
-                WData a = slice.wram.load(matA[im][ikg]);
-                For(auto ik = slice.iterate(matA.dim(2))) { // each k in group
-                    IData b = slice.iram.load(matB[ikg][ik][ing]);
-                    pdata = slice.alu.scalarProductAccumulate(b, a[ik]);
+    For(auto batch = slice.iterate(batches)) {
+        For(auto im = slice.iterate(matA.dim(1))) {      // rows in matA
+            For(auto ing = slice.iterate(matB.dim(3))) { // column groups in matB
+                PData pdata;
+                For(auto ikg = slice.iterate(matA.dim(2))) { // k groups in matA
+                    WData a = slice.wram.load(matA[batch][im][ikg]);
+                    For(auto ik = slice.iterate(matA.dim(3))) { // each k in group
+                        IData b = slice.iram.load(matB[batch][ikg][ik][ing]);
+                        pdata = slice.alu.scalarProductAccumulate(b, a[ik]);
+                    }
                 }
-            }
 
-            For(auto a = slice.iterate(matC.dim(-2))) {
-                QData res = slice.act.rescaleClamp(
-                    pdata[a], bdata, op.getShift(), op.getOutputZp(), act_clip_min, act_clip_max
-                );
-                slice.store(matC[im][ing][a], res);
+                For(auto a = slice.iterate(matC.dim(-2))) {
+                    QData res = slice.act.rescaleClamp(
+                        pdata[a], bdata, op.getShift(), op.getOutputZp(), act_clip_min, act_clip_max
+                    );
+                    slice.store(matC[batch][im][ing][a], res);
+                }
             }
         }
     }
