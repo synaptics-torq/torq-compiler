@@ -22,7 +22,6 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
     // input
     auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
     auto input_shape = input_type.getShape();
-    assert(input_shape.size() > 0);
     uint32_t total_px = 1;
     for (int i = 0; i < input_shape.size(); ++i) {
         total_px *= input_shape[i];
@@ -148,7 +147,8 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
         // TODO: use peeling
     }
 #endif
-    else if (input_shape.back() <= slice.act.width(elementType) && input_strides.back() == 1) {
+    else if (!input_shape.empty() && input_shape.back() <= slice.act.width(elementType) &&
+             input_strides.back() == 1) {
         // Copy innermost dimension at a time
         // TODO: this can be extended to handle more than one innermost dimension even > act.width
         // as long as data is contiguous

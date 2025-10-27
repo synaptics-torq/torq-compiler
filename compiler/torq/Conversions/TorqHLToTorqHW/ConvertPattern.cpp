@@ -20,10 +20,6 @@ namespace mlir::syna::torq {
 template <>
 LogicalResult ConvertPattern::transform(torq_hl::ConvertOp op, PatternRewriter &rewriter) const {
     auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
-    auto input_shape = input_type.getShape();
-    if (input_shape.empty()) {
-        return op.emitError("Input tensor must have at least one dimension");
-    }
 
     // Check that the input/output tensors are compatible
     auto output_type = llvm::cast<MemRefType>(op.getInit().getType());

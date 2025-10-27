@@ -379,7 +379,6 @@ Data::Data(
     IterVar index
 )
     : Data(name, shape, ix, elType, offs) {
-    assert(!_shape.empty() && "Data is empty");
     _ix.push_back(index);
     assert(_ix.size() <= _shape.size());
 }
@@ -389,7 +388,6 @@ Data::Data(
     const Indexes &indexes
 )
     : Data(name, shape, ix, elType, offs) {
-    assert(!_shape.empty() && "Data is empty");
     _ix.insert(_ix.end(), indexes.begin(), indexes.end());
     assert(_ix.size() <= _shape.size());
 }
@@ -453,15 +451,10 @@ LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
     const int elementSize = sizeofType(elementType);
 
     Shape dataShape;
-    if (type.getRank() > 0) {
-        auto shape = type.getShape();
-        auto strides = getEncodedStridesElements(type);
-        for (int i = 0; i < shape.size(); ++i) {
-            dataShape.push_back({shape[i], strides[i] * elementSize});
-        }
-    }
-    else {
-        dataShape.push_back({1, elementSize});
+    auto shape = type.getShape();
+    auto strides = getEncodedStridesElements(type);
+    for (int i = 0; i < shape.size(); ++i) {
+        dataShape.push_back({shape[i], strides[i] * elementSize});
     }
 
     setElementType(elementType);
