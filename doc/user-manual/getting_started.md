@@ -35,6 +35,16 @@ Please refer to apt-packages.txt for the list.
 You can use **either** of the following approaches:
 
 **A. Use the prebuilt image:**
+- Log-in to the GitHub docker registry
+
+   ```{code}shell
+   docker login ghcr.io
+   ```
+
+   Use your Github username and a Github personal access token as password.
+   Please refer to [Github documentation for the creation and usage of a
+   personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic).
+
 - Create an ephemeral Docker container that uses the prebuilt image:
     ```bash
     $ docker run --rm -it -v $(pwd):$(pwd) -w $(pwd) -u $(id -u):$(id -g) ghcr.io/syna-astra-dev/iree-synaptics-synpu/compiler:latest
