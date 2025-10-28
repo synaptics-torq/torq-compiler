@@ -431,7 +431,7 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
 
         // fallback any sqrt operation to host because we don't know how to compile this yet for CSS
         auto ret = srcOp.walk([](Operation *op) {
-            if (isa<math::SqrtOp, math::RsqrtOp, math::PowFOp, math::ErfOp, arith::DivFOp>(op)) {
+            if (isa<math::SqrtOp, math::RsqrtOp, math::PowFOp, math::ErfOp>(op)) {
                 return WalkResult::interrupt();
             }
 
