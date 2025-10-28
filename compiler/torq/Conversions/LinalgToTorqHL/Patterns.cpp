@@ -1239,7 +1239,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
     LogicalResult get2Inputs(
         linalg::GenericOp srcOp, Operation *binaryOp, Value &input0, Value &input1, float &newBias,
-        bool &needReverse, PatternRewriter &rewriter
+        bool &needReverse, bool &rhs_is_scalar, PatternRewriter &rewriter
     ) const {
         const int numLinalgInputs = srcOp.getNumDpsInputs();
         const int numArithOperands = binaryOp->getNumOperands();
@@ -1284,7 +1284,16 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
             }
 
             newBias = data.getValue().convertToFloat();
-            input1 = nullptr;
+            rhs_is_scalar = true;
+            // When one operand is a scalar constant, we create a 1-element tensor for input1 to
+            // preserve add op semantics. This scalar is incorporated into the bias term instead of
+            // being used directly as a tensor input.
+            auto elemType = mlir::cast<RankedTensorType>(input0.getType()).getElementType();
+            RankedTensorType constType = RankedTensorType::get({1}, elemType);
+            DenseElementsAttr value = DenseElementsAttr::get(constType, data.getValue());
+            input1 =
+                rewriter.create<arith::ConstantOp>(srcOp.getLoc(), constType, value).getResult();
+
             return success();
         }
 
@@ -1305,7 +1314,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         PatternRewriter &rewriter
     ) const {
 
-        bool rhs_is_const = false;
+        bool rhs_is_scalar = false;
 
         const llvm::fltSemantics &bf16 = APFloat::BFloat();
         std::vector<llvm::APFloat> weights(2, llvm::APFloat(bf16, "1.0"));
@@ -1325,14 +1334,14 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         Value input1;
         float newBias;
         bool needReverse;
-        auto res = get2Inputs(srcOp, binaryOp, input0, input1, newBias, needReverse, rewriter);
+        auto res = get2Inputs(
+            srcOp, binaryOp, input0, input1, newBias, needReverse, rhs_is_scalar, rewriter
+        );
         if (failed(res)) {
             return res;
         }
-        if (!input1) {
-            rhs_is_const = true;
+        if (rhs_is_scalar) {
             biasScale[0] = newBias;
-            input1 = input0;
         }
         if (needReverse && opName == "sub") {
             biasScale[1] = -1;
@@ -1355,7 +1364,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
             output_min_f, output_max_f,
             0, // shift_factor
             torqWeights, createConst(biasScale, rewriter, srcOp.getLoc()), input0, input1, false,
-            rhs_is_const
+            rhs_is_scalar
         );
         return success();
     }
@@ -1411,7 +1420,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         std::vector<int32_t> bias = {0};
         std::vector<int32_t> scale = {1};
-        bool rhs_is_const = false;
+        bool rhs_is_scalar = false;
 
         Value input0 = srcOp.getOperand(0);
         Value input1 = srcOp.getInputs()[srcOp.getInputs().size() > 1 ? 1 : 0];
@@ -1465,7 +1474,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
                              .getResult();
 
                 bias = {data * sign};
-                rhs_is_const = true;
+                rhs_is_scalar = true;
 
                 if (inputNeedReverse) {
                     scale = {sign};
@@ -1497,7 +1506,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
             0, // shift_factor
             outType.getElementType().isInteger(32) ? weightsI8 : weightsI16,
             createI32Const(rewriter, srcOp, interleave(bias, scale)), input0, input1, false,
-            rhs_is_const
+            rhs_is_scalar
         );
 
         return success();
@@ -2992,6 +3001,102 @@ class ClampOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         Value input = srcOp.getInputs()[0];
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+
+        rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
+            srcOp, srcResultType, createInitTensor(srcOp, rewriter, srcResultType), "clamp", 0, 0,
+            minIntValue, maxIntValue,
+            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(minFloatValue)),
+            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(maxFloatValue)), input
+        );
+
+        return success();
+    }
+};
+
+// The current version of the IREE math dialect does not provide a Math::clamp op.
+// BfloatTanhPattern will introduce this generic op.
+// linalg.generic {indexing_maps = ... } ins(%inserted_slice_16 : tensor<1x1024x64xbf16>) outs(%50 :
+// tensor<1x1024x64xbf16>) {
+// ^bb0(%in: bf16, %out: bf16):
+//     %52 = arith.cmpf olt, %cst_3, %in : bf16
+//     %53 = arith.select %52, %cst_3, %in : bf16
+//     %54 = arith.cmpf ogt, %cst_2, %53 : bf16
+//     %55 = arith.select %54, %cst_2, %53 : bf16
+//     linalg.yield %55 : bf16
+// } -> tensor<1x1024x64xbf16>
+class NaiveClampOpPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+
+        if (srcOp.getInputs().size() != 1 || srcOp.getOutputs().size() != 1) {
+            return rewriter.notifyMatchFailure(srcOp, "Expects 1 input and 1 output");
+        }
+        Value input = srcOp.getInputs()[0];
+        auto inputType = dyn_cast<RankedTensorType>(input.getType());
+        auto inputElementType = inputType.getElementType();
+        auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+
+        auto &block = srcOp.getRegion().front();
+        // Expect 5 ops: cmpf, select, cmpf, select, yield
+        if (block.getOperations().size() != 5)
+            return rewriter.notifyMatchFailure(srcOp, "Expected exactly 5 ops in block");
+
+        // 1. cmpf olt, %cst_3, %in
+        auto *cmpfOltOp = &block.front();
+        auto cmpfOlt = dyn_cast<arith::CmpFOp>(cmpfOltOp);
+        if (!cmpfOlt || cmpfOlt.getPredicate() != arith::CmpFPredicate::OLT)
+            return rewriter.notifyMatchFailure(srcOp, "Expected cmpf olt as first op");
+        auto cst3 = cmpfOlt.getLhs().getDefiningOp<arith::ConstantOp>();
+        auto inArg = dyn_cast<BlockArgument>(cmpfOlt.getRhs());
+        if (!cst3 || !inArg || inArg.getArgNumber() != 0)
+            return rewriter.notifyMatchFailure(srcOp, "cmpf olt operands must be (const, %in)");
+
+        // 2. select %cmpfOlt, %cst_3, %in
+        auto select1 = dyn_cast<arith::SelectOp>(cmpfOltOp->getNextNode());
+        if (!select1 || select1.getCondition() != cmpfOlt.getResult())
+            return rewriter.notifyMatchFailure(srcOp, "Expected select after cmpf olt");
+        auto cst3_1 = select1.getTrueValue().getDefiningOp<arith::ConstantOp>();
+        auto inArg2 = dyn_cast<BlockArgument>(select1.getFalseValue());
+        if (!cst3_1 || !inArg2 || inArg2.getArgNumber() != 0)
+            return rewriter.notifyMatchFailure(srcOp, "select operands must be (const, %in)");
+
+        // 3. cmpf ogt, %cst_2, %select1
+        auto cmpfOgt = dyn_cast<arith::CmpFOp>(select1->getNextNode());
+        if (!cmpfOgt || cmpfOgt.getPredicate() != arith::CmpFPredicate::OGT)
+            return rewriter.notifyMatchFailure(srcOp, "Expected cmpf ogt as third op");
+        auto cst2 = cmpfOgt.getLhs().getDefiningOp<arith::ConstantOp>();
+        if (!cst2 || cmpfOgt.getRhs() != select1.getResult())
+            return rewriter.notifyMatchFailure(srcOp, "cmpf ogt operands must be (const, select)");
+
+        // 4. select %cmpfOgt, %cst_2, %select1
+        auto select2 = dyn_cast<arith::SelectOp>(cmpfOgt->getNextNode());
+        if (!select2 || select2.getCondition() != cmpfOgt.getResult())
+            return rewriter.notifyMatchFailure(srcOp, "Expected select after cmpf ogt");
+        auto cst2_2 = select2.getTrueValue().getDefiningOp<arith::ConstantOp>();
+        if (!cst2_2 || select2.getFalseValue() != select1.getResult())
+            return rewriter.notifyMatchFailure(srcOp, "select operands must be (const, select)");
+
+        // 5. yield select2
+        auto yieldOp = dyn_cast<linalg::YieldOp>(select2->getNextNode());
+        if (!yieldOp || yieldOp.getValues().size() != 1 ||
+            yieldOp.getValues()[0] != select2.getResult())
+            return rewriter.notifyMatchFailure(srcOp, "Yield must use last select result");
+
+        int32_t minIntValue = 0, maxIntValue = 0;
+        float minFloatValue = 0.0f, maxFloatValue = 0.0f;
+
+        if (inputElementType.isF32() || inputElementType.isBF16()) {
+            maxFloatValue = dyn_cast<FloatAttr>(cst3.getValue()).getValue().convertToFloat();
+            minFloatValue = dyn_cast<FloatAttr>(cst2.getValue()).getValue().convertToFloat();
+        }
+        else {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Unsupported element type for NaiveClamp operation"
+            );
+        }
 
         rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
             srcOp, srcResultType, createInitTensor(srcOp, rewriter, srcResultType), "clamp", 0, 0,
@@ -4928,6 +5033,135 @@ struct BfloatErfPattern : public OpRewritePattern<math::ErfOp> {
         return success();
     }
 };
+class BfloatGenericTanhPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    // using OpRewritePattern::OpRewritePattern;
+    BfloatGenericTanhPattern(MLIRContext *context)
+        : OpRewritePattern<linalg::GenericOp>(context, /*benefit=*/0) {
+        setDebugName("BfloatGenericTanhPattern");
+    }
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (!cast<RankedTensorType>(srcOp.getType(0)).getElementType().isBF16() ||
+            !isa_and_nonnull<math::TanhOp>(getElementwiseUnaryOp(srcOp))) {
+            return rewriter.notifyMatchFailure(srcOp, "Expected bf16 tanh");
+        }
+        rewriter.replaceOp(
+            srcOp,
+            rewriter.create<linalg::TanhOp>(srcOp.getLoc(), srcOp.getInputs(), srcOp.getOutputs())
+        );
+        return success();
+    }
+};
+
+struct BfloatTanhPattern : OpRewritePattern<linalg::TanhOp> {
+    BfloatTanhPattern(MLIRContext *context)
+        : OpRewritePattern<linalg::TanhOp>(context, /*benefit=*/0) {
+        setDebugName("BfloatTanhPattern");
+    }
+    LogicalResult matchAndRewrite(linalg::TanhOp op, PatternRewriter &rewriter) const override {
+        // checks
+        if (!cast<RankedTensorType>(op.getType(0)).getElementType().isBF16()) {
+            return rewriter.notifyMatchFailure(op, "Expected bf16 output");
+        }
+
+        auto ctx = rewriter.getContext();
+        auto loc = op.getLoc();
+        auto bf16TensType = cast<RankedTensorType>(op.getType(0));
+        auto bf16 = bf16TensType.getElementType();
+        auto rank = bf16TensType.getRank();
+
+        auto emptyLike = [&](Value val) {
+            return rewriter.create<tensor::EmptyOp>(loc, val.getType(), ValueRange{});
+        };
+        auto typeOf = [&](Value v) { return v.getType(); };
+        auto fpConst = [&](float fp) {
+            return rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(bf16, fp));
+        };
+        // broadcast over one tensor
+        auto broadcastOne = [&](Value v, auto func) {
+            return rewriter
+                .create<linalg::GenericOp>(
+                    loc, TypeRange{typeOf(v)}, ValueRange{v}, ValueRange{emptyLike(v)},
+                    SmallVector<AffineMap>(2, AffineMap::getMultiDimIdentityMap(rank, ctx)),
+                    SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel), func
+                )
+                .getResult(0);
+        };
+        // only works if x and y are tensor and z is a scalar constants.
+        auto fmaTensor = [&](Value x, Value y, Value z) {
+            auto xy = rewriter.create<arith::MulFOp>(loc, x, y);
+            return broadcastOne(xy, [&](OpBuilder &b, Location l, ValueRange args) {
+                b.create<linalg::YieldOp>(l, ValueRange{b.create<arith::AddFOp>(l, args[0], z)});
+            });
+        };
+        auto fmaConstant = [&](Value x, Value y, Value z) {
+            auto xy = broadcastOne(y, [&](OpBuilder &b, Location l, ValueRange args) {
+                b.create<linalg::YieldOp>(l, ValueRange{b.create<arith::MulFOp>(l, x, args[0])});
+            });
+            return broadcastOne(xy, [&](OpBuilder &b, Location l, ValueRange args) {
+                b.create<linalg::YieldOp>(l, ValueRange{b.create<arith::AddFOp>(l, args[0], z)});
+            });
+        };
+        // expects tenor x and contant scalar y
+        auto add = [&](Value x, Value y) {
+            return broadcastOne(x, [&](OpBuilder &b, Location l, ValueRange args) {
+                b.create<linalg::YieldOp>(l, ValueRange{b.create<arith::AddFOp>(l, args[0], y)});
+            });
+        };
+        // Compute the rational (sinh/cosh) polynomal approximation.
+        // Coefficients computed through Remez Algorithm for sinh and
+        // cosh then combined to calculate tanh.  (n)umerator (sinh)
+        // coefficients:
+        auto n0 = fpConst(-9.49066162e-1f);
+        auto n1 = fpConst(-2.68447266e+1f);
+        auto n2 = fpConst(-2.01115608e-2f);
+        // (d)enominator (cosh) coefficients.
+        auto d0 = fpConst(3.49853516e+1f);
+        auto d1 = fpConst(8.07031250e+1f);
+        // clamp range
+        auto one = fpConst(1.0);
+        auto mone = fpConst(-1.0);
+
+        auto x = op.getInputs()[0];
+        auto x2 = rewriter.create<arith::MulFOp>(loc, x, x);
+        auto sinh = fmaTensor(fmaConstant(n0, x2, n1), x2, n2);
+        auto cosh = fmaTensor(add(x2, d0), x2, d1);
+        auto recip =
+            rewriter
+                .create<linalg::ReciprocalOp>(loc, ValueRange{cosh}, ValueRange{emptyLike(cosh)})
+                .getResult(0);
+        auto quot = rewriter.create<arith::MulFOp>(loc, sinh, recip);
+        auto unclamped =
+            rewriter.create<arith::AddFOp>(loc, rewriter.create<arith::MulFOp>(loc, quot, x), x);
+        auto result =
+            rewriter
+                .create<linalg::GenericOp>(
+                    loc, TypeRange{typeOf(x)}, ValueRange{unclamped},
+                    ValueRange{emptyLike(unclamped)},
+                    SmallVector<AffineMap>(2, AffineMap::getMultiDimIdentityMap(rank, ctx)),
+                    SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel),
+                    [&](OpBuilder &b, Location l, ValueRange args) {
+                        // // error: no member named 'ClampFOp' in namespace
+                        // 'mlir::math' auto clamped = b.create<math::ClampFOp>(l,
+                        // res, mone, one);
+                        auto tooLarge =
+                            b.create<arith::CmpFOp>(l, arith::CmpFPredicate::OLT, one, args[0]);
+                        auto clampedAbove = b.create<arith::SelectOp>(l, tooLarge, one, args[0]);
+                        auto tooSmall = b.create<arith::CmpFOp>(
+                            l, arith::CmpFPredicate::OGT, mone, clampedAbove
+                        );
+                        auto clamped = b.create<arith::SelectOp>(l, tooSmall, mone, clampedAbove);
+                        b.create<linalg::YieldOp>(l, ValueRange{clamped});
+                    }
+                )
+                .getResult(0);
+
+        rewriter.replaceOp(op, result);
+        return success();
+    }
+};
 
 // This doesn't get its own rewriter because it only works with
 // negative inputs, which can't in general be inferred at compile
@@ -5327,6 +5561,8 @@ void populateLinalgToTorqHLPrePatterns(
 ) {
     patterns.insert<BfloatGenericErfPattern>(context);
     patterns.insert<BfloatErfPattern>(context);
+    patterns.insert<BfloatGenericTanhPattern>(context);
+    patterns.insert<BfloatTanhPattern>(context);
     patterns.insert<BfloatSoftmaxPattern>(context);
     patterns.insert<BfloatReciprocalPattern>(context);
     patterns.insert<TensorBitcastPattern>(context);
@@ -5426,6 +5662,8 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<ReduceOpConversion>(context);
     patterns.insert<MulOpPattern>(context);
     patterns.insert<ClampOpPattern>(context);
+    patterns.insert<NaiveClampOpPattern>(context);
+
     patterns.insert<CastOpPattern>(context);
     patterns.insert<BroadcastOpConversion>(context);
 

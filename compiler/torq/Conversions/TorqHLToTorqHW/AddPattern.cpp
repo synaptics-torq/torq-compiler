@@ -85,7 +85,7 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
     }
     FailureOr<SliceTaskOp> sliceTaskOp = failure();
 
-    if (addOp.getRhsIsConst() && params.input2Shape.size() == 1) {
+    if (addOp.getRhsIsScalar() && params.input2Shape.size() == 1) {
         bool is_dense = isDenseInMemory(params.type1);
         if (!is_dense) {
             // Case 1: Input2 is scalar and Input1 is non-contiguous.

@@ -64,7 +64,7 @@ def TorqHL_AddOp: TorqHL_LayerOp<"add"> {
     TensorOrMemref:$input1,
     TensorOrMemref:$input2,
     DefaultValuedOptionalAttr<BoolAttr, "false">:$segment_output,
-    DefaultValuedOptionalAttr<BoolAttr, "false">:$rhs_is_const
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$rhs_is_scalar
   ));
 }
 
