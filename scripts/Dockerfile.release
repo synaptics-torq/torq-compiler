@@ -17,6 +17,9 @@ RUN /opt/release/setup.sh /opt/venv
 # After copying, set executable permissions for all files in /opt/release/scripts
 RUN chmod a+x /opt/release/scripts/*
 
+# Make /opt/release writable for all users
+RUN chmod -R a+w /opt/release
+
 # Setup PATH and LD_LIBRARY_PATH as if the user enabled the venv
 # so that it is not required to activate the venv when using the docker
 ENV PATH="/opt/venv/bin:/opt/release/tools:/opt/release/scripts:$PATH"
