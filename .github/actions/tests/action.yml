@@ -1,0 +1,105 @@
+description: Run Torq compiler tests
+
+inputs:
+
+  hf_token:
+    description: 'HuggingFace Token'
+    required: true
+
+  pytest_args:
+    description: 'Arguments to pass to pytest'
+    required: true
+
+  app_id:
+    description: 'GitHub App ID'
+    required: false
+  
+  app_private_key:
+    description: 'GitHub App Private Key'
+    required: false
+
+  extra_repo:
+    description: 'Extras repository to checkout'
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: Generate GitHub token
+      id: generate_token
+      uses: actions/create-github-app-token@v1
+      if: ${{ inputs.app_id != '' }}
+      with:
+        app-id: ${{ inputs.app_id }}
+        private-key: ${{ inputs.app_private_key }}
+        owner: ${{ github.repository_owner }}
+
+    - name: Check if there is a branch for extras
+      id: check_branch      
+      if: ${{ inputs.extra_repo != '' }}
+      shell: bash
+      run: |
+        token="${{ steps.generate_token.outputs.token }}"
+        branch_name="${{ github.head_ref || github.ref_name }}"
+        repo="${{ inputs.extra_repo }}"
+
+        status=$(curl -s -o /dev/null -w "%{http_code}" \
+          -H "Authorization: Bearer $token" \
+          "https://api.github.com/repos/$repo/branches/$branch_name")
+
+        if [ "$status" = "200" ]; then
+          echo "branch=$branch_name" >> $GITHUB_OUTPUT
+        else
+          echo "branch=main" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Checkout extras repository
+      uses: actions/checkout@v4
+      if: ${{ inputs.extra_repo != '' }}
+      with:
+        repository: ${{ inputs.extra_repo }}
+        path: extras
+        token: ${{ steps.generate_token.outputs.token }}
+        ref: ${{ steps.check_branch.outputs.branch }}
+
+    - name: Download the compiler and runtime
+      uses: actions/download-artifact@v4
+      with:
+        name: release
+        path: .
+
+    - name: Extract the compiler and runtime
+      shell: bash
+      run: |
+        tar -zxf release.tar.gz
+
+    - name: Setup python virtualenv with on release files
+      shell: bash
+      run: |
+        pip install -r ${{github.workspace}}/release/python/requirements.txt
+
+        pip install ${{github.workspace}}/release/python/iree_tf
+        pip install ${{github.workspace}}/release/python/iree_tflite
+
+        cat > $(python -c "import site; print(site.getsitepackages()[0])")/iree.pth << EOF
+        ${{github.workspace}}/release/python/compiler
+        ${{github.workspace}}/release/python/runtime
+        EOF
+
+        # add development libraries which are not included in the release
+        cat > $(python -c "import site; print(site.getsitepackages()[0])")/torq.pth << EOF
+        ${{github.workspace}}/python
+        EOF
+
+    - name: Run pytest
+      shell: bash
+      env:
+        LD_LIBRARY_PATH: ${{github.workspace}}/release/lib/
+        SOC_IREE_RUN_MODULE: ${{github.workspace}}/release/tools/armhf-iree-run-module
+        IREE_RUN_MODULE: ${{github.workspace}}/release/tools/iree-run-module
+        IREE_COMPILE: ${{github.workspace}}/release/tools/iree-compile
+        IREE_OPT: ${{github.workspace}}/release/tools/iree-opt
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |            
+        pytest -v ${{ inputs.pytest_args }}

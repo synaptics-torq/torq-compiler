@@ -79,8 +79,6 @@ fi
 #     Enable building cmodel test vector runtime (for testing purposes)
 #
 
-python3 ./tests/helpers/py_version_checker.py
-
 cmake -B $BUILD_DIR \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \

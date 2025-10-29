@@ -21,7 +21,6 @@ jobs:
   build:
     if: ${{ vars.CODEBUILD_PROJECT_CODE != '' }}
 
-    name: Build code
     runs-on:
       - codebuild-${{ vars.CODEBUILD_PROJECT_CODE }}-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -103,6 +102,39 @@ jobs:
           path: release.tar.gz
           retention-days: 30
 
+  test_cmodel:
+    name: Test with C model
+
+    needs: build
+
+    runs-on:
+          - codebuild-${{ vars.CODEBUILD_PROJECT_CODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+          submodules: false
+    
+      - name: Run C model tests
+        uses: ./.github/actions/tests
+        with:
+          app_id: ${{ vars.CI_APP_ID }}
+          app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          extra_repo: ${{ vars.EXTRAS_REPO }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          pytest_args: -m ci -v -n 8 --performance-report=${{ github.workspace }}/host_test_performance.csv
+          
+
+      - name: Upload host test performance
+        uses: actions/upload-artifact@v4
+        with:
+          name: host_test_performance
+          path: ${{ github.workspace }}/host_test_performance.csv
+          retention-days: 60
+
   user_doc_build:
       name : Build user guide
       runs-on: ubuntu-latest
@@ -128,7 +160,7 @@ jobs:
   docker_release:
     name: Release Docker image
     if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'release' && github.event.action == 'published') }}
-    needs: [build, user_doc_build]
+    needs: [user_doc_build, test_cmodel]
     runs-on: ubuntu-latest
     permissions:
       contents: read
