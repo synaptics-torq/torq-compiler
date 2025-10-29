@@ -21,19 +21,16 @@ else
     git clone --depth=1 --branch wip_branch/vssdk/sl2619_bringup/202509161205 ssh://${SYNA_GERRIT_USER}@gerrit-ind.synaptics.com:29420/astra/linux/main
     cd main/
     # checkout specific commit to ensure repeatability
-    git fetch --depth=1 origin 8674817448091cacab6dabb73fb367f2ab04b4f5
-    git checkout 8674817448091cacab6dabb73fb367f2ab04b4f5
-    # cherrypick NPU + IOMMU defconfig changes, remove and update above commit to that once merged
-    git fetch --depth=1 origin d41b8de18eb8f25447217ca15871b4107addce45
-    git cherry-pick d41b8de18eb8f25447217ca15871b4107addce45 --strategy-option theirs --no-commit
+    git fetch --depth=1 origin d4c0cc8d7867fc703c3aac691b115069f70e70d6
+    git checkout d4c0cc8d7867fc703c3aac691b115069f70e70d6
 
     cd drivers/
     git clone --depth=1 --branch wip_branch/vssdk/sl2619_bringup/202509161205 ssh://${SYNA_GERRIT_USER}@gerrit-ind.synaptics.com:29420/debu/common/linux-driver/synaptics
     cd synaptics/
-    git fetch --depth=1 origin e00c0864e73e42c18d7fdb8af6df2bf627bdcb03
-    git checkout e00c0864e73e42c18d7fdb8af6df2bf627bdcb03
-    git fetch --depth=1 origin 052a607687a0a2a8b577f38288cdf717d32749b2
-    git cherry-pick 052a607687a0a2a8b577f38288cdf717d32749b2 --strategy-option theirs --no-commit
+    git fetch --depth=1 origin ca85f3379007a72a13565c130e0e8808dea615e9
+    git checkout ca85f3379007a72a13565c130e0e8808dea615e9
+    git fetch --depth=1 origin 13c82525eea9eebeb87c48e2455f030f795c9df1
+    git cherry-pick 13c82525eea9eebeb87c48e2455f030f795c9df1 --strategy-option theirs --no-commit
 
     # configure kernel to build the kernel module against it and pack the required headers/Makefiles/scripts
     cd ${SYNA_KERNEL_CHECKOUT}

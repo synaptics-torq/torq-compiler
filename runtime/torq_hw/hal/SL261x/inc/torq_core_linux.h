@@ -22,6 +22,7 @@
 #include <linux/compat.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/interrupt.h>
 
 #include "torq_kernel_uapi.h"
 
@@ -77,6 +78,10 @@ struct torq_module {
     bool misc_registered;
 
     struct torq_network *active_network; /* Currently attached network */
+
+    int job_irq;
+    struct completion job_completion;
+    unsigned int interrupt_status;
 };
 
 struct torq_network {

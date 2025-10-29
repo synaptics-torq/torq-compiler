@@ -14,6 +14,7 @@
 #define SYNA_NPU_DEV_NAME "torq"
 #define IOVA_ALIGN 4096
 #define NPU_RESET_INTERVAL 10
+#define TORQ_IRQ_TIMEOUT_MS 5000
 
 static int torq_power_on(struct torq_module *torq_dev)
 {
@@ -33,6 +34,23 @@ static int torq_power_off(struct torq_module *torq_dev)
     LOG_ENTER();
     clk_disable_unprepare(torq_dev->core_clk);
     return 0;
+}
+
+static irqreturn_t torq_synpu_irq_handler(int irq, void *ptr)
+{
+    struct torq_module *torq_dev = (struct torq_module *)ptr;
+    uint32_t status;
+
+    status = readl(torq_dev->reg_map + RA_(NSS,STATUS));
+    torq_dev->interrupt_status = status;
+
+    KLOGD("SYNPU IRQ: status=0x%x", status);
+
+    writel(1, torq_dev->reg_map + RA_(NSS,STATUS));
+
+    complete(&torq_dev->job_completion);
+
+    return IRQ_HANDLED;
 }
 
 static int torq_detach_network_domain(struct torq_module *torq_dev, struct torq_network *net)
@@ -392,6 +410,8 @@ static int torq_run_network(struct torq_file_inst *inst, struct torq_run_network
 
     KLOGD("Running job on network %d with code entry 0x%x", req->network_id, req->code_entry);
 
+    reinit_completion(&torq_dev->job_completion);
+
     writel(RF_LSH(NSS, CFG_LINK_EN, 1) | RF_BMSK_LSH(NSS, CFG_DESC, req->code_entry),
            torq_dev->reg_map + RA_(NSS,CFG));
 
@@ -412,11 +432,9 @@ static int torq_wait_network(struct torq_file_inst *inst, struct torq_wait_netwo
 {
     struct torq_module *torq_dev = inst->torq_device;
     struct torq_network *net;
-    int poll_count = 0;
-    int timeout_ms = 1000;
-    int poll_interval_us = 100;
-    int max_polls = (timeout_ms * 1000) / poll_interval_us;
     uint32_t reg_val;
+    int ret;
+    bool job_complete;
 
     if (!inst || !req) {
         KLOGE("Invalid parameters: inst=%p, req=%p", inst, req);
@@ -434,43 +452,43 @@ static int torq_wait_network(struct torq_file_inst *inst, struct torq_wait_netwo
         return -ENODEV;
     }
 
-    while (poll_count < max_polls) {
-        reg_val = readl(torq_dev->reg_map + RA_(NSS,STATUS));
+    KLOGD("Waiting for job completion on network %d with wait_bits=0x%x", req->network_id, req->wait_bits);
 
-        bool job_complete = true;
+    ret = wait_for_completion_timeout(&torq_dev->job_completion,
+                                      msecs_to_jiffies(TORQ_IRQ_TIMEOUT_MS));
 
-        if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_NSS)) {
-            job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_NSS));
-        }
-        if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_DMA_IN)) {
-            job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_XR));
-        }
-        if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_DMA_OUT)) {
-            job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_XW));
-        }
-        if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_SLC_0)) {
-            job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_SLC0));
-        }
-        if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_SLC_1)) {
-            job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_SLC1));
-        }
-
-        if (job_complete) {
-            KLOGD("Job completed on network %d, NSS_STATUS: 0x%x", req->network_id, reg_val);
-            break;
-        }
-
-        udelay(poll_interval_us);
-        poll_count++;
-    }
-
-    if (poll_count >= max_polls) {
-        KLOGE("Job timeout on network %d after %d ms, NSS_STATUS: 0x%x", req->network_id, timeout_ms, reg_val);
+    if (ret == 0) {
+        KLOGE("Job timeout on network %d after %d ms", req->network_id, TORQ_IRQ_TIMEOUT_MS);
         return -ETIMEDOUT;
     }
 
-    /* Clear status */
-    writel(1, torq_dev->reg_map + RA_(NSS,STATUS));
+    /* Read the final status from interrupt handler */
+    reg_val = torq_dev->interrupt_status;
+    /* Check if the specific wait bits are satisfied */
+    job_complete = true;
+
+    if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_NSS)) {
+        job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_NSS));
+    }
+    if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_DMA_IN)) {
+        job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_XR));
+    }
+    if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_DMA_OUT)) {
+        job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_XW));
+    }
+    if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_SLC_0)) {
+        job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_SLC0));
+    }
+    if (req->wait_bits & (1 << TORQ_IOCTL_WAIT_BITMASK_SLC_1)) {
+        job_complete = job_complete && (reg_val & (1 << REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_SLC1));
+    }
+
+    if (!job_complete) {
+        KLOGE("Interrupt triggered, but all expected bits not set..network: %d, status: 0x%x, wait_bits: 0x%x", 
+              req->network_id, reg_val, req->wait_bits);
+        return -EIO;
+    }
+
     return 0;
 }
 
@@ -847,8 +865,7 @@ static int torq_probe(struct platform_device *pdev)
 {
     struct torq_module *torq_dev;
     struct resource *res;
-    /* temp: override axi prot for accessing non-secure MMU space */
-    void __iomem *npu_axi_prot_map;
+    int ret;
 
     LOG_ENTER();
     torq_dev = devm_kzalloc(&pdev->dev, sizeof(*torq_dev), GFP_KERNEL);
@@ -868,19 +885,6 @@ static int torq_probe(struct platform_device *pdev)
 
     torq_dev->reg_size = resource_size(res);
     torq_dev->reg_base = res->start;
-
-    /* temp: map npu axi prot control to override to use non-secure space in iommu */
-    res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "axi_prot_override");
-    if (!res) {
-        KLOGE("axi prot override not present");
-        return -ENODEV;
-    }
-    npu_axi_prot_map = devm_ioremap_resource(&pdev->dev, res);
-    if (IS_ERR(npu_axi_prot_map)) {
-        KLOGE("error in mapping axiprot space");
-        return PTR_ERR(npu_axi_prot_map);
-    }
-    writel(0xf, npu_axi_prot_map); //override npu axi txn to non-secure
 
     torq_dev->core_clk = devm_clk_get(&pdev->dev, "core");
     if (IS_ERR(torq_dev->core_clk)) {
@@ -908,8 +912,23 @@ static int torq_probe(struct platform_device *pdev)
         return -ENODEV;
     }
 
-    dma_set_max_seg_size(&torq_dev->pdev->dev, UINT_MAX);
     platform_set_drvdata(pdev, torq_dev);
+
+    init_completion(&torq_dev->job_completion);
+    torq_dev->interrupt_status = 0;
+    torq_dev->job_irq = platform_get_irq_byname(pdev, "job");
+    if (torq_dev->job_irq < 0) {
+        KLOGE("Failed to get SYNPU IRQ: %d", torq_dev->job_irq);
+	return torq_dev->job_irq;
+    }
+
+    ret = devm_request_irq(&pdev->dev, torq_dev->job_irq, torq_synpu_irq_handler,
+                           IRQF_SHARED, "torq-npu-irq", torq_dev);
+    if (ret) {
+        KLOGE("Failed to request TORQ IRQ %d: %d", torq_dev->job_irq, ret);
+        return ret;
+    }
+    KLOGI("Registered IRQs: NPU:%d", torq_dev->job_irq);
 
     torq_dev->misc_dev.name = SYNA_NPU_DEV_NAME;
     torq_dev->misc_dev.groups = NULL;
