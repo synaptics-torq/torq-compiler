@@ -117,6 +117,12 @@ bool isTorqCastOp(Operation *op, std::string &opName, std::string &failReason) {
     auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
     auto outputElementType = resultType.getElementType();
 
+    if (inputElementType.isF64() || outputElementType.isF64() || inputElementType.isInteger(64) ||
+        outputElementType.isInteger(64)) {
+        failReason = "Torq CastOp doesn't support 64bit operand";
+        return false;
+    }
+
     auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
     if (!yieldOp) {
         failReason = "Expected a linalg.yield terminator";
@@ -228,6 +234,11 @@ bool isTorqAbsOp(Operation *op, std::string &failReason) {
     auto inputType = dyn_cast<RankedTensorType>(input.getType());
     auto inputElementType = inputType.getElementType();
 
+    if (inputElementType.isF64() || inputElementType.isInteger(64)) {
+        failReason = "Torq AbsOp doesn't support 64bit operand";
+        return false;
+    }
+
     auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
     if (!yieldOp) {
         failReason = "Expected a linalg.yield terminator";
@@ -337,6 +348,11 @@ bool isTorqClampOp(
     Value input = srcOp.getInputs()[0];
     auto inputType = dyn_cast<RankedTensorType>(input.getType());
     auto inputElementType = inputType.getElementType();
+
+    if (inputElementType.isF64() || inputElementType.isInteger(64)) {
+        failReason = "Torq ClampOp doesn't support 64bit operand";
+        return false;
+    }
 
     auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
     if (!yieldOp) {
@@ -485,6 +501,11 @@ bool isTorqNegateOp(Operation *op, std::string &failReason) {
     Value input = srcOp.getInputs()[0];
     auto inputType = dyn_cast<RankedTensorType>(input.getType());
     auto inputElementType = inputType.getElementType();
+
+    if (inputElementType.isF64() || inputElementType.isInteger(64)) {
+        failReason = "Torq NegateOp doesn't support 64bit operand";
+        return false;
+    }
 
     auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
     if (!yieldOp) {
