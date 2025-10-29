@@ -6,6 +6,8 @@ on:
   push:
     branches:
        - main
+  release:
+    types: [published]
 
 concurrency:
   # from iree CI:
@@ -19,6 +21,9 @@ concurrency:
 jobs:
 
   build:
+
+    name: Build compiler and runtime
+
     if: ${{ vars.CODEBUILD_PROJECT_CODE != '' }}
 
     runs-on:
@@ -105,7 +110,7 @@ jobs:
   test_cmodel:
     name: Test with C model
 
-    needs: build
+    needs: [ build, user_doc_build ]
 
     runs-on:
           - codebuild-${{ vars.CODEBUILD_PROJECT_CODE }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -127,7 +132,6 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           pytest_args: -m ci -v -n 8 --performance-report=${{ github.workspace }}/host_test_performance.csv
           
-
       - name: Upload host test performance
         uses: actions/upload-artifact@v4
         with:
@@ -135,6 +139,7 @@ jobs:
           path: ${{ github.workspace }}/host_test_performance.csv
           retention-days: 60
 
+  # build the user part of the docs only
   user_doc_build:
       name : Build user guide
       runs-on: ubuntu-latest
@@ -160,7 +165,7 @@ jobs:
   docker_release:
     name: Release Docker image
     if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'release' && github.event.action == 'published') }}
-    needs: [user_doc_build, test_cmodel]
+    needs: test_cmodel
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -208,3 +213,58 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           
+  publish_release:
+    name: Publish Release
+    needs: [build, user_doc_build]
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: dist
+
+      - name: Download user documentation
+        uses: actions/download-artifact@v4
+        with:
+          name: user-manual
+          path: dist/doc
+
+      - name: Compress the user manual as a zip
+        run: |
+          cd dist
+          zip -r doc.zip doc
+          rm -rf doc
+
+      - name: Ensure snapshot release exists
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.github_token }}
+        run: |
+          if gh release view snapshot >/dev/null 2>&1; then
+            echo "snapshot release exists"
+          else
+            gh release create snapshot \
+              -t "Development Snapshot" \
+              -n "Latest build from main. Unstable. Replaced on each commit." \
+              --prerelease
+          fi
+
+      - name: Upload to GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.github_token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "release" && "$EVENT_ACTION" == "published" ]]; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release upload snapshot dist/* --clobber
+          fi

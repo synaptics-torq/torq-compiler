@@ -1,4 +1,4 @@
-name: Build and deploy documentation
+name: Build and deploy documentation website
 
 on: 
   workflow_dispatch:
@@ -33,5 +33,5 @@ jobs:
       uses: syna-astra-dev/action-doc-publish/.github/workflows/process.yml@v3
       with:
         checkout_submodules: false
-        doc_directory: doc/user-manual
+        doc_directory: doc
         update_site: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
