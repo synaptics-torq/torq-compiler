@@ -1763,4 +1763,28 @@ bool isCollapseOrExpandShapeGeneric(Operation *op) {
     return block.getOperations().size() == 1 && mlir::isa<mlir::linalg::YieldOp>(block.front());
 }
 
+StringRef getCastOpName(Value input, Value output) {
+    auto inputType = dyn_cast<RankedTensorType>(input.getType());
+    auto outputType = dyn_cast<RankedTensorType>(output.getType());
+    auto inputElementType = inputType.getElementType();
+    auto outputElementType = outputType.getElementType();
+
+    if ((inputElementType.isF32() || inputElementType.isBF16()) && outputElementType.isInteger()) {
+        return "f2i";
+    }
+    else if ((inputElementType.isF32() || inputElementType.isBF16()) &&
+             (outputElementType.isF32() || outputElementType.isBF16())) {
+        return "f2f";
+    }
+    else if (inputElementType.isInteger() && outputElementType.isInteger()) {
+        return "i2i";
+    }
+    else if (inputElementType.isInteger() &&
+             (outputElementType.isF32() || outputElementType.isBF16())) {
+        return "i2f";
+    }
+
+    return "";
+}
+
 } // namespace mlir::syna::torq

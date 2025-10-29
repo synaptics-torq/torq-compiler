@@ -5,6 +5,10 @@ set(sources
   PatternUtils.cpp
   LinalgTilePass.cpp
   UnrollLoopPass.cpp
+  ArithToTorqHLPattern.cpp
+  LinalgToTorqHLPrePatternLowPrio.cpp
+  LinalgToTorqHLPrePattern.cpp
+  TensorToTorqOrLinalgPattern.cpp
 )
 
 set(deps
@@ -58,6 +62,7 @@ iree_cc_library(
     Passes.h
     Passes.h.inc
     Patterns.h
+    OpPatternOptions.h
   SRCS
     ${sources}
   DEPS
