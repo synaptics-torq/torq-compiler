@@ -13,7 +13,7 @@ jobs:
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ vars.PUBLISHING_APP_ID }}
-          private-key: ${{ vars.PUBLISHING_APP_PRIVATE_KEY }}
+          private-key: ${{ secrets.PUBLISHING_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
       
       - name: Checkout sources
