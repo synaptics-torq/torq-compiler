@@ -1,9 +1,9 @@
 name: Push to public repository
 on:
-  workflow_dispatch:        
+  workflow_dispatch:
 
 jobs:
-  push-to-public:
+  push-to-public:    
     name: Push main to public
     runs-on: ubuntu-latest
     environment: torq-compiler
@@ -25,9 +25,10 @@ jobs:
       - name: Push to public repository
         run: |
 
-          # push without forcing so that we fail if things were merged in the public repo in meantime
+          # remove original authentication header that uses  GITHUB_TOKEN (this doesn't have push rights to the public repo)
+          git config --local --unset-all http.https://github.com/.extraheader
 
-          git -c http.extraHeader="Authorization: Bearer ${{ steps.generate_token.outputs.token }}" \
-            push https://github.com/${{github.repository_owner}}/${{vars.PUBLISHING_REPO_NAME}}.git \
-            main:main
+          REPO_URL="https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{github.repository_owner}}/${{vars.PUBLISHING_REPO_NAME}}.git"
 
+          # push without forcing so that we fail if things were merged in the public repo in meantime          
+          git push "$REPO_URL" main:main
