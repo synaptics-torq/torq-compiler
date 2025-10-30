@@ -24,8 +24,10 @@ jobs:
 
       - name: Push to public repository
         run: |
-          git remote add public https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{github.repository_owner}}/${{vars.PUBLISHING_REPO_NAME}}.git
 
           # push without forcing so that we fail if things were merged in the public repo in meantime
-          git push public main
+
+          git -c http.extraHeader="Authorization: Bearer ${{ steps.generate_token.outputs.token }}" \
+            push https://github.com/${{github.repository_owner}}/${{vars.PUBLISHING_REPO_NAME}}.git \
+            main:main
 
