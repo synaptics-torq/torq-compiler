@@ -4,10 +4,7 @@ author = 'Synaptics'
 
 release = 'main'
 
-extensions = [ 'synaptics_sphinx_theme', 'sphinx_copybutton' ]
-
-copybutton_prompt_text = r"\$ "
-copybutton_prompt_is_regexp = True
+extensions = [ 'synaptics_sphinx_theme']
 
 html_theme_options = { 
     'logo_only': False
