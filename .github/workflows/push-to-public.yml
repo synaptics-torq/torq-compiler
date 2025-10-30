@@ -1,0 +1,31 @@
+name: Push to public repository
+on:
+  workflow_dispatch:        
+
+jobs:
+  push-to-public:
+    name: Push main to public
+    runs-on: ubuntu-latest
+    environment: torq-compiler
+    steps:
+      - name: Generate GitHub token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.PUBLISHING_APP_ID }}
+          private-key: ${{ vars.PUBLISHING_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+      
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to public repository
+        run: |
+          git remote add public https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{github.repository_owner}}/${{vars.PUBLISHING_REPO_NAME}}.git
+
+          # push without forcing so that we fail if things were merged in the public repo in meantime
+          git push public main
+
