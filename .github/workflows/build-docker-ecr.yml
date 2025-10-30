@@ -13,6 +13,15 @@ on:
             - 'requirements.txt'
             - 'third_party/iree'
             - '.github/workflows/build-docker-ecr.yml'
+
+    pull_request:
+        paths:
+            - 'scripts/Dockerfile.ci'
+            - 'scripts/install_dependencies.sh'
+            - 'scripts/configure_python.sh'
+            - 'requirements.txt'
+            - 'third_party/iree'
+            - '.github/workflows/build-docker-ecr.yml'
      
 jobs:
 

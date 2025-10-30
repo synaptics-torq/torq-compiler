@@ -2,7 +2,10 @@ FROM public.ecr.aws/ubuntu/ubuntu:24.04
 
 COPY . /workspace/code
 
-RUN /workspace/code/scripts/install_dependencies.sh && rm -rf /var/lib/apt/lists/*
+# unzip is installed to unzip AWS CLI installer
+RUN /workspace/code/scripts/install_dependencies.sh && \
+    apt-get install unzip && rm -rf /var/lib/apt/lists/*
+
 RUN /workspace/code/scripts/configure_python.sh /workspace/venv /workspace/build
 
 ENV PATH="/workspace/venv/bin:$PATH"
@@ -12,3 +15,5 @@ RUN wget https://github.com/mozilla/sccache/releases/download/v0.8.2/sccache-v0.
     mv sccache-v0.8.2-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache && \
     rm -rf sccache-v0.8.2-x86_64-unknown-linux-musl.tar.gz sccache-v0.8.2-x86_64-unknown-linux-musl
 
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+    unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip
