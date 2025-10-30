@@ -20,6 +20,12 @@ using namespace mlir::syna::torq_hw;
 namespace mlir::syna::torq {
 
 LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewriter) {
+    struct DDim {
+        enum { N, C, H, W };
+    };
+    struct KDim {
+        enum { O, I, H, W };
+    };
     auto inputMemrefType = llvm::cast<MemRefType>(op.getInput().getType());
     auto weightMemrefType = llvm::cast<MemRefType>(op.getWeights().getType());
     auto biasMemrefType = llvm::cast<MemRefType>(op.getScaleBias().getType());
@@ -29,24 +35,25 @@ LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewrite
     auto weightShape = weightMemrefType.getShape();
     auto outputShape = outputMemrefType.getShape();
     auto biasShape = biasMemrefType.getShape();
+    auto inputStrides = getEncodedStridesElements(inputMemrefType);
+    auto outputStrides = getEncodedStridesElements(outputMemrefType);
     const auto dataType = getDType(inputMemrefType.getElementType());
     const auto outputType = getDType(outputMemrefType.getElementType());
     const auto weightType = getDType(weightMemrefType.getElementType());
     const auto biasType = getDType(biasMemrefType.getElementType());
 
-    const int32_t batchCount = inputShape[0];
-    const int32_t inputChannels = inputShape[1];
-    const int32_t outputChannels = outputShape[1];
-    const int32_t inputWidth = inputShape[3];
-    const int32_t outputWidth = outputShape[3];
-    const int32_t kernelWidth = weightShape[3];
+    const int32_t batchCount = inputShape[DDim::N];
+    const int32_t inputChannels = inputShape[DDim::C];
+    const int32_t outputChannels = outputShape[DDim::C];
+    const int32_t outputWidth = outputShape[DDim::W];
+    const int32_t kernelWidth = weightShape[KDim::W];
     const int32_t stride = op.getStride()[0];
 
     assert(
         inputShape.size() == 4 && weightShape.size() == 4 && outputShape.size() == 5 &&
         biasShape.size() == 1
     );
-    assert(inputShape[2] == 1 && outputShape[2] == 1);
+    assert(inputShape[DDim::H] == 1 && outputShape[DDim::H] == 1);
     assert(biasShape[0] == outputChannels);
     assert(dataType == DType::bf16 && weightType == DType::bf16 && biasType == DType::fp32);
 
@@ -58,18 +65,17 @@ LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewrite
     const int32_t actBlockSize = std::min(slice.act.width(dataType, weightType), blockSize);
     const int32_t actBlockCount = div_ceil(blockSize, actBlockSize);
 
-    // TODO: here use actual strides from memrefs
     LData input(
-        {batchCount,
-         {inputChannels, inputWidth * sizeofType(dataType)},
+        {{batchCount, inputStrides[DDim::N] * sizeofType(dataType)},
+         {inputChannels, inputStrides[DDim::C] * sizeofType(dataType)},
          {outputWidth, stride * sizeofType(dataType)},
          blockCount,
          blockSize},
         dataType
     );
     LData output(
-        {batchCount,
-         outputChannels,
+        {{batchCount, outputStrides[DDim::N] * sizeofType(outputType)},
+         {outputChannels, outputStrides[DDim::C] * sizeofType(outputType)},
          {outputWidth, kernelWidth * sizeofType(outputType)},
          blockCount,
          actBlockCount,
