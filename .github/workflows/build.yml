@@ -32,8 +32,6 @@ jobs:
     env:
       SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
       SCCACHE_REGION: ${{ vars.AWS_REGION }}
-      AWS_ACCESS_KEY_ID: ${{ vars.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       SCCACHE_S3_KEY_PREFIX: clang-build
 
     steps:
@@ -59,6 +57,10 @@ jobs:
         run: |
           ./scripts/configure_python.sh /workspace/venv /workspace/build
 
+      - name: Get AWS container credentials
+        id: get_aws_creds
+        uses: ./code/.github/actions/awscreds
+
       - name: Configure build for host
         working-directory: /workspace/code
         run: |
@@ -68,6 +70,9 @@ jobs:
         working-directory: /workspace/build
         env:
           SCCACHE_SERVER_UDS: ${{github.workspace}}/sccache.sock
+          AWS_ACCESS_KEY_ID: ${{ steps.get_aws_creds.outputs.access_key }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.get_aws_creds.outputs.secret_key }}
+          AWS_SESSION_TOKEN: ${{ steps.get_aws_creds.outputs.session_token }}
         run: |
           sccache --start-server
           cmake --build .
