@@ -38,6 +38,22 @@ jobs:
         runs-on: codebuild-${{vars.CODEBUILD_PROJECT_DOCKER}}-${{ github.run_id }}-${{ github.run_attempt }}
 
         steps:
+
+          - name: Configure AWS Credentials
+            uses: aws-actions/configure-aws-credentials@v5.1.0
+            if: ${{ github.ref == 'refs/heads/main' }}
+            with:
+              aws-region: ${{ vars.AWS_REGION }}
+              role-to-assume: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          
+          - name: Show AWS identity
+            run: |
+              aws sts get-caller-identity
+
+          - name: Log in to ECR
+            if: ${{ github.ref == 'refs/heads/main' }}
+            run:
+              aws ecr get-login-password --region ${{ vars.AWS_REGION }} | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
             
           - name: Checkout repository
             uses: actions/checkout@v4
@@ -58,10 +74,6 @@ jobs:
 
               # remove the token from the submodules that have it
               git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
-
-          - name: Log in to ECR
-            run:
-              aws ecr get-login-password --region ${{ vars.AWS_REGION }} | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
 
           - name: Build and push Docker image
             uses: docker/build-push-action@v6
