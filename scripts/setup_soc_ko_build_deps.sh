@@ -34,7 +34,7 @@ else
 
     # configure kernel to build the kernel module against it and pack the required headers/Makefiles/scripts
     cd ${SYNA_KERNEL_CHECKOUT}
-    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- sl261x_defconfig
+    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- sl2610_defconfig
     export LOCALVERSION=""
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
     tar -cvzf ${THIRDPARTY_PREBUILTS_SOC_KERNEL}/${SYNA_KERNEL_MODULE_BUILD_PKG} .config include/ arch/arm64/include/ scripts/ Makefile arch/arm64/Makefile

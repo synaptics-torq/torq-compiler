@@ -72,7 +72,7 @@ endif()
 if(TORQ_ENABLE_ASTRA_MACHINA)
     list(APPEND torq_srcs src/TorqAstraMachina.cpp src/TorqAstraMachina.h)
     list(APPEND torq_defs "ENABLE_ASTRA_MACHINA=1")
-    add_subdirectory(hal/SL261x)
+    add_subdirectory(hal/SL2610)
 endif()
 
 if(TORQ_ENABLE_AWS_FPGA)
