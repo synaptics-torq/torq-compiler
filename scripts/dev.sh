@@ -2,7 +2,7 @@
 
 set -e
 
-IMAGE_NAME="ghcr.io/syna-astra-dev/iree-synaptics-synpu/builder:latest"
+IMAGE_NAME="ghcr.io/synaptics-torq/torq-compiler/builder:latest"
 
 # create a temporary file with the passwd file of the container
 
