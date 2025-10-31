@@ -190,12 +190,12 @@ def AssignAddresses :
 
 }
 
-def SuperTilingConfig :
-    InterfacePass<"torq-super-tiling-config",
+def TileAndFuse :
+    InterfacePass<"torq-tile-and-fuse",
          "mlir::FunctionOpInterface"> {
   let summary = "Tile operations and fuse producers into the tiling loop";
   let constructor =
-      "mlir::syna::torq::createSuperTilingConfigPass()";
+      "mlir::syna::torq::createTileAndFusePass()";
 
   let dependentDialects = [
         "linalg::LinalgDialect",

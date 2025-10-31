@@ -40,9 +40,9 @@
 #include <tuple>
 #include <utility>
 
-// TODO: all the TypeSwitchs should be extracted to SuperTilingInterface
+// TODO: all the TypeSwitchs should be extracted to TileAndFuseInterface
 
-#define DEBUG_TYPE "torq-super-tiling-config"
+#define DEBUG_TYPE "torq-tile-and-fuse"
 
 using namespace mlir::iree_compiler;
 
@@ -50,35 +50,35 @@ namespace mlir::syna::torq {
 
 namespace {
 
-enum class SuperTilingProducersFuseMode { MaxSize, MaxProducers, OnlyPatterns, NoFuse };
+enum class TileAndFuseProducersFuseMode { MaxSize, MaxProducers, OnlyPatterns, NoFuse };
 
-static llvm::cl::opt<SuperTilingProducersFuseMode> clTorqSuperTilingProducersFuseMode(
-    "torq-super-tiling-producers-fuse-mode",
+static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFuseMode(
+    "torq-tile-and-fuse-producers-fuse-mode",
     llvm::cl::desc("Selects one of three predefined values"),
     llvm::cl::values(
         clEnumValN(
-            SuperTilingProducersFuseMode::MaxSize, "max-size",
+            TileAndFuseProducersFuseMode::MaxSize, "max-size",
             "Prefer bigger tile over fusing more producers: tile size is set to make the consumer "
             "fit in memory; producers are fused only if they fit in the same tile size)"
         ),
         clEnumValN(
-            SuperTilingProducersFuseMode::MaxProducers, "max-producers",
+            TileAndFuseProducersFuseMode::MaxProducers, "max-producers",
             "Prefer more producers over tile size: tile size is the biggest size that can still "
             "fit all the producers"
         ),
         clEnumValN(
-            SuperTilingProducersFuseMode::OnlyPatterns, "only-patterns",
+            TileAndFuseProducersFuseMode::OnlyPatterns, "only-patterns",
             "Fuse producers only whene required to preserve patterns"
         ),
-        clEnumValN(SuperTilingProducersFuseMode::NoFuse, "no-fuse", "Do not fuse producers")
+        clEnumValN(TileAndFuseProducersFuseMode::NoFuse, "no-fuse", "Do not fuse producers")
     ),
-    llvm::cl::init(SuperTilingProducersFuseMode::MaxSize) // Default value
+    llvm::cl::init(TileAndFuseProducersFuseMode::MaxSize) // Default value
 );
 
-class SuperTilingConfigPass : public SuperTilingConfigBase<SuperTilingConfigPass> {
+class TileAndFusePass : public TileAndFuseBase<TileAndFusePass> {
   public:
-    SuperTilingConfigPass() = default;
-    SuperTilingConfigPass(const SuperTilingConfigPass &pass) {}
+    TileAndFusePass() = default;
+    TileAndFusePass(const TileAndFusePass &pass) {}
 
     void runOnOperation() override;
 };
@@ -695,25 +695,25 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
     options.tilingOptions.setTileSizes(getAsIndexOpFoldResult(rewriter.getContext(), tileSizes));
     options.setFusionControlFn([&](tensor::ExtractSliceOp candidateSliceOp,
                                    OpResult producerOpResult, bool isDestinationOperand) {
-        switch (clTorqSuperTilingProducersFuseMode.getValue()) {
-        case SuperTilingProducersFuseMode::MaxSize:
+        switch (clTorqTileAndFuseProducersFuseMode.getValue()) {
+        case TileAndFuseProducersFuseMode::MaxSize:
             return fuseControlMaxSize(
                 rewriter, availableMemoryBytes, candidateSliceOp, producerOpResult,
                 isDestinationOperand
             );
 
-        case SuperTilingProducersFuseMode::MaxProducers:
+        case TileAndFuseProducersFuseMode::MaxProducers:
             return fuseControlMaxProducers(
                 rewriter, candidateSliceOp, producerOpResult, isDestinationOperand
             );
 
-        case SuperTilingProducersFuseMode::OnlyPatterns: {
+        case TileAndFuseProducersFuseMode::OnlyPatterns: {
             bool shouldFuse =
                 maybePatternFuseGroup && isMarkedFuseGroup(producerOpResult.getOwner());
             return std::make_tuple(shouldFuse, false);
         }
 
-        case SuperTilingProducersFuseMode::NoFuse:
+        case TileAndFuseProducersFuseMode::NoFuse:
             return std::make_tuple(false, false);
         }
     });
@@ -801,12 +801,12 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
     FailureOr<scf::SCFTileAndFuseResult> tiledResults =
         tileAndFuseToSize(rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes);
     if (failed(tiledResults)) {
-        op->emitError("super tiling failed");
+        op->emitError("tile and fuse failed");
         return;
     }
 
-    if (clTorqSuperTilingProducersFuseMode.getValue() ==
-        SuperTilingProducersFuseMode::MaxProducers) {
+    if (clTorqTileAndFuseProducersFuseMode.getValue() ==
+        TileAndFuseProducersFuseMode::MaxProducers) {
         // Now that we know which producers were fused, find a tile that fits them too.
         tileChanged = fitTileToMemory(
             rewriter, op, tiledResults->fusedProducers, tilingDimOrder, availableMemoryBytes,
@@ -828,7 +828,7 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
                 rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes
             );
             if (failed(tiledResults)) {
-                op->emitError("super tiling failed");
+                op->emitError("tile and fuse failed");
                 return;
             }
         }
@@ -841,7 +841,7 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
     applyTiledResults(rewriter, op, *tiledResults);
 }
 
-void SuperTilingConfigPass::runOnOperation() {
+void TileAndFusePass::runOnOperation() {
     auto funcOp = getOperation();
     MLIRContext *context = &getContext();
 
@@ -852,13 +852,13 @@ void SuperTilingConfigPass::runOnOperation() {
         tileAndFuse(context, op);
     }
 
-    LLVM_DEBUG({ llvm::dbgs() << "Super Tiling - DONE\n"; });
+    LLVM_DEBUG({ llvm::dbgs() << "Tile and Fuse - DONE\n"; });
 }
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createSuperTilingConfigPass() {
-    return std::make_unique<SuperTilingConfigPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass() {
+    return std::make_unique<TileAndFusePass>();
 }
 
 } // namespace mlir::syna::torq

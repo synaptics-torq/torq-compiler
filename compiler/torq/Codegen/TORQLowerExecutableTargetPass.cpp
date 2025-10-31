@@ -120,7 +120,7 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     if (clEnableTorqSuperTiling) {
         funcPm.addPass(createTensorToLinalgPass());
-        funcPm.addPass(createSuperTilingConfigPass());
+        funcPm.addPass(createTileAndFusePass());
         funcPm.addPass(createCanonicalizerPass());
         funcPm.addPass(createUnrollLoopPass());
         funcPm.addPass(createCanonicalizerPass());

@@ -55,7 +55,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldPValueInitsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveAddressesPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createSuperTilingConfigPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveInvocationArgumentsPass();
 
