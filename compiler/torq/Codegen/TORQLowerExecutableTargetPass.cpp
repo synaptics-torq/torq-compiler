@@ -172,11 +172,6 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     funcPm.addPass(createLinalgToTorqHLConversionPass());
     funcPm.addPass(createCanonicalizerPass());
 
-    // op segment output feature enabled by default, diabled it for cross-check
-    if (!clDisableSeg) {
-        funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
-    }
-
 #ifdef ENABLE_TORQ_GENERIC
     // we fold all linalg.fill used to initialize pvalues to 0 to constants
     // so that they don't get converted to torq_hl.generic operations in the
@@ -195,6 +190,10 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
         funcPm.addPass(createTorqHlTilePass());
     }
     funcPm.addPass(createKernelSelectionPass());
+    // op segment output feature enabled by default, diabled it for cross-check
+    if (!clDisableSeg) {
+        funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
+    }
     funcPm.addPass(createEncodeTensorsPass());
 
     // Note: slicing should be done *before* kernel selection, but kernel selection is doing weight

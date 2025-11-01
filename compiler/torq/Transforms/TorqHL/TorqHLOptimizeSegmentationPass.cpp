@@ -50,11 +50,24 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
 
         bool segment_output =
             TypeSwitch<Operation *, bool>(op)
-                .Case<torq_hl::Conv2DOp, torq_hl::DepthwiseConv2DOp, torq_hl::AddOp>([&](auto op) {
+                .Case<torq_hl::Conv2DOp>([&](auto op) {
                     if (isa<torq_hl::Conv2DOp>(op) && isConv2DTiled(cast<torq_hl::Conv2DOp>(op))) {
                         return false;
                     }
+                    // Disable optimization of conv2d since this will generate wrong result in mbv2
+                    return false;
 
+                    auto input_type = cast<torq_hl::Conv2DOp>(op).getInput().getType();
+                    auto input_shape = input_type.getShape();
+                    LLVM_DEBUG({
+                        llvm::dbgs() << "Optimize segmentation for Conv2DOp input shape: ["
+                                     << input_shape[0] << ", " << input_shape[1] << ", "
+                                     << input_shape[2] << ", " << input_shape[3] << "]\n";
+                    });
+                    setSegmentAttr(op);
+                    return true;
+                })
+                .Case<torq_hl::DepthwiseConv2DOp, torq_hl::AddOp>([&](auto op) {
                     setSegmentAttr(op);
                     return true;
                 })
