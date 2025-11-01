@@ -364,6 +364,12 @@ KernelEncoding TableOp::getKernelEncoding() {
     return {{}, {{}, torq::HwInfo::max_input}};
 }
 
+KernelEncoding ReduceOp::getKernelEncoding() {
+    // The reduce kernel writes 64 elements of data. The output tensor size should be align to 64
+    // elements.
+    return {{}, {{}, torq::HwInfo::max_input}};
+}
+
 KernelEncoding ElementWiseShiftOp::getKernelEncoding() {
     return {
         {},
@@ -580,8 +586,6 @@ KernelEncoding ScatterOp::getKernelEncoding() { return getDenseEncoding(); }
 KernelEncoding GatherOp::getKernelEncoding() { return getDenseEncoding(); }
 
 KernelEncoding AvgPool2DOp::getKernelEncoding() { return getDenseEncoding(); }
-
-KernelEncoding ReduceOp::getKernelEncoding() { return getDenseEncoding(); }
 
 KernelEncoding ConvertOp::getKernelEncoding() { return getDenseEncoding(); }
 
