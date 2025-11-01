@@ -132,12 +132,14 @@ jobs:
     steps:
 
       - name: Checkout repository
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: actions/checkout@v4
         with:
           lfs: false
           submodules: false
     
       - name: Run C model tests
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: ./.github/actions/tests
         with:
           app_id: ${{ vars.CI_APP_ID }}
@@ -147,6 +149,7 @@ jobs:
           pytest_args: -m ci -v -n 8 --performance-report=${{ github.workspace }}/host_test_performance.csv
           
       - name: Upload host test performance
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: host_test_performance
