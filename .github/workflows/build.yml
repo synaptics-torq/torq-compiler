@@ -24,17 +24,33 @@ jobs:
 
     name: Build compiler and runtime
 
-    if: ${{ vars.CODEBUILD_PROJECT_CODE != '' }}
+    if: ${{ vars.CODEBUILD_PROJECT_CODEBASE != '' }}
 
     runs-on:
-      - codebuild-${{ vars.CODEBUILD_PROJECT_CODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
 
     env:
       SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
       SCCACHE_REGION: ${{ vars.AWS_REGION }}
       SCCACHE_S3_KEY_PREFIX: clang-build
 
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
+
+      - name: Assume AWS role to access cache
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        id: assume_role
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          # only the main branch role has permissions to write to the cache
+          role-to-assume: ${{ github.ref == 'refs/heads/main' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
+
+      - name: Show active AWS identity
+        run: |
+          aws sts get-caller-identity
 
       - name: Make cached checkout visible to workflow
         run: |
@@ -57,10 +73,6 @@ jobs:
         run: |
           ./scripts/configure_python.sh /workspace/venv /workspace/build
 
-      - name: Get AWS container credentials
-        id: get_aws_creds
-        uses: ./code/.github/actions/awscreds
-
       - name: Configure build for host
         working-directory: /workspace/code
         run: |
@@ -70,9 +82,6 @@ jobs:
         working-directory: /workspace/build
         env:
           SCCACHE_SERVER_UDS: ${{github.workspace}}/sccache.sock
-          AWS_ACCESS_KEY_ID: ${{ steps.get_aws_creds.outputs.access_key }}
-          AWS_SECRET_ACCESS_KEY: ${{ steps.get_aws_creds.outputs.secret_key }}
-          AWS_SESSION_TOKEN: ${{ steps.get_aws_creds.outputs.session_token }}
         run: |
           sccache --start-server
           cmake --build .
@@ -118,7 +127,7 @@ jobs:
     needs: [ build, user_doc_build ]
 
     runs-on:
-          - codebuild-${{ vars.CODEBUILD_PROJECT_CODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
 
