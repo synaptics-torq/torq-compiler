@@ -23,7 +23,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLPreConve
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToLinalgPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkPatternsForSuperTilingPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkPatternsForTileAndFusePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLConversionPass();
 

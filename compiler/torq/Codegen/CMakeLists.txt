@@ -25,7 +25,7 @@ set(sources
     TorqHlTilePass.cpp
     ValidPadToSamePadPass.cpp
     ResolveAddressesPass.cpp
-    SuperTilingConfigPass.cpp
+    TileAndFusePass.cpp
     ResolveInvocationArgumentsPass.cpp
     AssignObjectsIdentifiersPass.cpp
     BufferizationUtils.cpp

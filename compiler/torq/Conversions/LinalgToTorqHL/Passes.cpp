@@ -146,16 +146,15 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToLinalgPass() {
     return std::make_unique<TensorToLinalgPass>();
 }
 
-class MarkPatternsForSuperTilingPass
-    : public MarkPatternsForSuperTilingBase<MarkPatternsForSuperTilingPass> {
+class MarkPatternsForTileAndFusePass
+    : public MarkPatternsForTileAndFuseBase<MarkPatternsForTileAndFusePass> {
   public:
-    using MarkPatternsForSuperTilingBase::MarkPatternsForSuperTilingBase;
+    using MarkPatternsForTileAndFuseBase::MarkPatternsForTileAndFuseBase;
 
     void runOnOperation() override {
         auto funcOp = getOperation();
         auto *ctx = funcOp.getContext();
 
-        // TODO(sflur): move to a separate pass?
         // Assign UIDs to TilingInterface operations
         OpBuilder builder(funcOp);
         int64_t nextId = 0;
@@ -196,8 +195,8 @@ class MarkPatternsForSuperTilingPass
     }
 };
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkPatternsForSuperTilingPass() {
-    return std::make_unique<MarkPatternsForSuperTilingPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkPatternsForTileAndFusePass() {
+    return std::make_unique<MarkPatternsForTileAndFusePass>();
 }
 
 class ArithToTorqHLConversionPass

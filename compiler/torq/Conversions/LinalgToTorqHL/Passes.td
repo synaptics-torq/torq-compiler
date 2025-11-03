@@ -71,18 +71,18 @@ def TensorToLinalg :
     let options = RewritePassUtils.options;
 }
 
-def MarkPatternsForSuperTiling :
-    InterfacePass<"torq-mark-patterns-for-super-tiling",
+def MarkPatternsForTileAndFuse :
+    InterfacePass<"torq-mark-patterns-for-tile-and-fuse",
       "mlir::FunctionOpInterface"> {
 
-    let summary = "Identify patterns that super tiling should not break";
+    let summary = "Identify patterns that tile-and-fuse should not break";
 
     let description = [{
-        This pass runs rewrite patterns from other passes, but without doing the rewrites. Instead, it marks the operations involved in the match of each pattern. This marking allows super tiling to make sure operations that belong to a single pattern will be fused in the same tile.
+        This pass runs rewrite patterns from other passes, but without doing the rewrites. Instead, it marks the operations involved in the match of each pattern. This marking allows tile-and-fuse to make sure operations that belong to a single pattern will be fused in the same tile.
     }];
 
     let constructor =
-        "mlir::syna::torq::createMarkPatternsForSuperTilingPass()";
+        "mlir::syna::torq::createMarkPatternsForTileAndFusePass()";
 
     let dependentDialects = [
         "::mlir::linalg::LinalgDialect"

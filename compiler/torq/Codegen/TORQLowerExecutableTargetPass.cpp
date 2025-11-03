@@ -68,8 +68,8 @@ static llvm::cl::opt<bool> clDisableSeg(
     llvm::cl::desc("Disable fusion of segmentation operations with producer"), llvm::cl::init(false)
 );
 
-static llvm::cl::opt<bool> clEnableTorqSuperTiling(
-    "torq-enable-super-tiling", llvm::cl::desc("enable torq super tiling"), llvm::cl::init(false)
+static llvm::cl::opt<bool> clEnableTorqTileAndFuse(
+    "torq-enable-tile-and-fuse", llvm::cl::desc("enable torq tiling"), llvm::cl::init(false)
 );
 
 static llvm::cl::opt<bool> clForceTorqHLTiling(
@@ -111,14 +111,14 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     funcPm.addPass(createDecomposeSoftmaxPass());
 
-    // mark tags for supertiling pass and optimize linalg pass
-    funcPm.addPass(createMarkPatternsForSuperTilingPass());
+    // mark tags for tile-and-fuse pass and optimize linalg pass
+    funcPm.addPass(createMarkPatternsForTileAndFusePass());
 
     // optimize linalg ops for torq
-    // this pass use some tags from supertiling mark pass
+    // this pass use some tags from tile-and-fuse mark pass
     funcPm.addPass(createOptimizeLinalgForTorqPass());
 
-    if (clEnableTorqSuperTiling) {
+    if (clEnableTorqTileAndFuse) {
         funcPm.addPass(createTensorToLinalgPass());
         funcPm.addPass(createTileAndFusePass());
         funcPm.addPass(createCanonicalizerPass());
@@ -150,7 +150,7 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     funcPm.addPass(createSpecializeLinalgGenericOpPass());
 #endif // ENABLE_TORQ_GENERIC
 
-    if (!clEnableTorqSuperTiling) {
+    if (!clEnableTorqTileAndFuse) {
         // unroll loops
         // better call this pass later as possible
         // just after it all are torqhl related passes that need static rank or shape, etc.
@@ -186,7 +186,7 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     // generic (we don't know how to run those anyways)
     // funcPm.addPass(createLinalgToTorqHLGenericPass(true));
 
-    if (!clEnableTorqSuperTiling || clForceTorqHLTiling) {
+    if (!clEnableTorqTileAndFuse || clForceTorqHLTiling) {
         funcPm.addPass(createTorqHlTilePass());
     }
     funcPm.addPass(createKernelSelectionPass());
