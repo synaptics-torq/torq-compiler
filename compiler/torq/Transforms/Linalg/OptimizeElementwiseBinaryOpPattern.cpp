@@ -380,7 +380,8 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
         if (auto groupAttr = srcOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
             bool needBroadcast = false;
 
-            if (isa<arith::AddIOp>(eleOp) || isa<arith::SubIOp>(eleOp)) {
+            // FIXME: for now we only check addOp and will remove all these group id check soon
+            if (isa<arith::AddIOp>(eleOp)) {
 
                 Value operand1 = srcOp.getInputs()[0];
                 Value operand2 = srcOp.getInputs()[1];

@@ -44,6 +44,50 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
     using TorqEltOp = torq_hl::AddOp;
     using OpRewritePattern<LinalgEltOpT>::OpRewritePattern;
 
+    bool foldBackwardScalar(
+        Value &input, ScaleInfo &scaleInfo, int32_t *scalarValue, PatternRewriter &rewriter
+    ) const {
+
+        // if from expandOp, we fuse this expandop
+        auto expandOp = dyn_cast<tensor::ExpandShapeOp>(input.getDefiningOp());
+        if (expandOp) {
+            auto expandOpInput = expandOp.getSrc();
+            auto expandOpInputShape =
+                dyn_cast<RankedTensorType>(expandOpInput.getType()).getShape();
+
+            auto isAllOnes = [](ArrayRef<int64_t> list) {
+                return llvm::all_of(list, [](int64_t i) { return i == 1; });
+            };
+            // Need to check the output shape all 1?
+            if (isAllOnes(expandOpInputShape)) {
+                input = expandOp.getSrc();
+
+                expandOp.getResult().replaceAllUsesWith(expandOp.getSrc());
+                rewriter.eraseOp(expandOp);
+            }
+        }
+
+        auto inputType = dyn_cast<RankedTensorType>(input.getType());
+        auto inputShape = inputType.getShape();
+        auto inputElementType = inputType.getElementType();
+
+        Value scalarInput = input;
+        if (inputShape.size() <= 1) {
+            while (foldBackwardRescale(scalarInput, scaleInfo)) {
+            }
+
+            while (foldScalarRescale(scalarInput, scaleInfo, inputElementType, rewriter)) {
+            }
+        }
+
+        auto constOp = dyn_cast<arith::ConstantOp>(scalarInput.getDefiningOp());
+
+        if (constOp && getIntegerConstantValue(constOp, scalarValue)) {
+            return true;
+        }
+        return false;
+    }
+
     EltwiseBinaryConvert(
         MLIRContext *context, int shift8b, int shift16b, OpType opType, bool markFuseGroups
     )
@@ -173,19 +217,56 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             input1 = op.getResults()[0];
         }
 
-        // Generate torq_hl op with input in the expected format
-        input0 = transposeValue(input0, dataPerm, loc, rewriter);
-        input1 = transposeValue(input1, dataPerm, loc, rewriter);
-
         // Compute scale and bias vectors
         const double outputScale = scInfo.scaleDouble[0];
         double multiplier0 = outputScale * scaleInput0.scale;
         double multiplier1 = outputScale * scaleInput1.scale;
         int scaleFactor = 1 << scInfo.scaleShift;
+
         auto weight0 = doubleToInt<int16_t>(multiplier0 * scaleFactor);
         auto bias0 = -doubleToInt<int32_t>(multiplier0 * scaleFactor * scaleInput0.zp);
         int16_t weight1 = doubleToInt<int16_t>(multiplier1 * scaleFactor) * sign;
         int32_t bias1 = -doubleToInt<int32_t>(multiplier1 * scaleFactor * scaleInput1.zp) * sign;
+
+        int32_t scalarValue0 = 0;
+        bool input0IsScalar = foldBackwardScalar(input0, scaleInput0, &scalarValue0, rewriter);
+
+        int32_t scalarValue1 = 0;
+        bool input1IsScalar = foldBackwardScalar(input1, scaleInput1, &scalarValue1, rewriter);
+
+        if (input0IsScalar && input1IsScalar) {
+            return rewriter.notifyMatchFailure(eltOp, "don't support both input is scalar for now");
+        }
+
+        if (input0IsScalar) {
+            double scaleFactor = (1 << scInfo.scaleShift) + 0.5;
+            weight0 = 0;
+            bias0 = scalarValue0 * scaleFactor * sign * outputScale;
+
+            input0 = input1;
+        }
+        else if (input1IsScalar) {
+
+            scaleInput1.scale = 0;
+            scaleInput1.zp = 0;
+
+            // Compute scale and bias vectors
+            double scaleFactor = (1 << scInfo.scaleShift) + 0.5;
+
+            multiplier1 = outputScale * scaleInput1.scale;
+            weight1 = doubleToInt<int16_t>(multiplier1 * scaleFactor) * sign;
+
+            // should not use negative bias here as it compute from scale
+            // if later issue happens, please check if need to add minus sign here
+            bias1 = scalarValue1 * scaleFactor * sign * outputScale;
+
+            // force weigth1 is 0, input0 * weight0 + input1 * 0
+            input1 = input0;
+        }
+
+        // Generate torq_hl op with input in the expected format
+        input0 = transposeValue(input0, dataPerm, loc, rewriter);
+        input1 = transposeValue(input1, dataPerm, loc, rewriter);
 
         // concatenate weight0 and weight1
         std::vector<int16_t> weights = {weight0, weight1};

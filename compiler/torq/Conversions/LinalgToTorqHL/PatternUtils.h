@@ -281,4 +281,15 @@ template <typename OpTy> struct ArithOnTensorToLinalgPattern : public OpRewriteP
     }
 };
 
+bool getIntegerConstantValue(arith::ConstantOp constOp, int32_t *value);
+
+Value create1DimTensorFromRescaleScalar(
+    linalg::GenericOp srcOp, tosa::ApplyScaleOp applyScaleOp, ScaleInfo &scaleInfo,
+    const Type &elementType, PatternRewriter &rewriter
+);
+
+bool foldScalarRescale(
+    Value &input, ScaleInfo &scaleInfo, const Type &elementType, PatternRewriter &rewriter
+);
+
 } // namespace mlir::syna::torq

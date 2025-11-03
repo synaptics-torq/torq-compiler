@@ -1787,4 +1787,136 @@ StringRef getCastOpName(Value input, Value output) {
     return "";
 }
 
+bool getIntegerConstantValue(arith::ConstantOp constOp, int32_t *value) {
+    if (!constOp || !value) {
+        return false;
+    }
+
+    auto attr = constOp.getValue();
+    if (!attr) {
+        LLVM_DEBUG({ llvm::errs() << "constantOp has no attribute \n"; });
+        return false;
+    }
+
+    int32_t data = 0;
+
+    if (auto intAttr = dyn_cast_if_present<IntegerAttr>(attr)) {
+        data = intAttr.getInt();
+    }
+    else if (auto denseAttr = dyn_cast<DenseIntElementsAttr>(attr)) {
+        if (denseAttr.isSplat() || denseAttr.getNumElements() == 1) {
+            data = (*denseAttr.begin()).getSExtValue();
+        }
+        else {
+            LLVM_DEBUG({ llvm::errs() << "constant is not scalar \n"; });
+            return false;
+        }
+    }
+    else {
+        LLVM_DEBUG({ llvm::errs() << "unsupported constant type \n"; });
+        return false;
+    }
+
+    *value = data;
+
+    return true;
+}
+
+// rescale op cannot work for floating point data type
+// if create something from rescale scalar which means only works for integer type
+Value create1DimTensorFromRescaleScalar(
+    linalg::GenericOp srcOp, tosa::ApplyScaleOp applyScaleOp, ScaleInfo &scaleInfo,
+    const Type &elementType, PatternRewriter &rewriter
+) {
+    Value input = applyScaleOp.getValue();
+    if (!input) {
+        LLVM_DEBUG({ llvm::errs() << "applyScaleOp cannot get value\n"; });
+        return nullptr;
+    }
+
+    auto ms = getMultiplierAndShift(srcOp, applyScaleOp, 1);
+    if (!ms) {
+        return nullptr;
+    }
+
+    double scaleFactor = static_cast<double>(ms.multiplier[0]) / (1l << ms.shift[0]);
+
+    if (scaleInfo.scale > 0) {
+        scaleFactor = scaleFactor * scaleInfo.scale;
+    }
+
+    auto constOp = dyn_cast<arith::ConstantOp>(input.getDefiningOp());
+    if (!constOp) {
+        return input;
+    }
+
+    int32_t data = 0;
+    if (!getIntegerConstantValue(constOp, &data)) {
+        LLVM_DEBUG({ llvm::errs() << "cannot get integer constant value\n"; });
+        return input;
+    }
+
+    data = static_cast<int32_t>(std::round(data * scaleFactor));
+
+    RankedTensorType constType = RankedTensorType::get({}, elementType);
+    DenseElementsAttr value;
+
+    if (elementType.isInteger(16)) {
+        value = DenseIntElementsAttr::get(constType, static_cast<int16_t>(data));
+    }
+    else if (elementType.isInteger(32)) {
+        value = DenseIntElementsAttr::get(constType, data);
+    }
+    else if (elementType.isInteger(8)) {
+        value = DenseIntElementsAttr::get(constType, static_cast<int8_t>(data));
+    }
+    else {
+        LLVM_DEBUG({ llvm::errs() << "only support 8/16/32 bit integer\n"; });
+        return input;
+    }
+    auto output = rewriter.create<arith::ConstantOp>(constOp.getLoc(), constType, value);
+
+    return output.getResult();
+}
+
+bool foldScalarRescale(
+    Value &input, ScaleInfo &scaleInfo, const Type &elementType, PatternRewriter &rewriter
+) {
+
+    linalg::GenericOp rescaleOp = input.getDefiningOp<linalg::GenericOp>();
+
+    if (!rescaleOp) {
+        LLVM_DEBUG({ llvm::errs() << "Value input definingOp is not linalg.generic op\n"; });
+        return false;
+    }
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(rescaleOp.getBody()->getTerminator());
+    if (!yieldOp) {
+        LLVM_DEBUG({ llvm::errs() << "There is no yield in linalg.generic body\n"; });
+        return false;
+    }
+
+    auto yieldValues = yieldOp.getValues();
+    if (yieldValues.size() != 1) {
+        LLVM_DEBUG({ llvm::errs() << "Linalg.yield operand is not 1 \n"; });
+        return false;
+    }
+
+    tosa::ApplyScaleOp applyScaleOp;
+    applyScaleOp = yieldValues[0].getDefiningOp<tosa::ApplyScaleOp>();
+    if (!applyScaleOp) {
+        LLVM_DEBUG({ llvm::errs() << "apply scale op does not exist\n"; });
+        return false;
+    }
+    auto output = create1DimTensorFromRescaleScalar(
+        rescaleOp, applyScaleOp, scaleInfo, elementType, rewriter
+    );
+
+    if (output) {
+        input = output;
+        return true;
+    }
+    return false;
+}
+
 } // namespace mlir::syna::torq
