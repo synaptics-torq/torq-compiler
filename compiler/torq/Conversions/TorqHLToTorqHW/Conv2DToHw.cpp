@@ -43,14 +43,7 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
     }
 
     auto input_strides = getEncodedStridesElements(input_type);
-    if (align_ceil(input_shape[2] * input_shape[3], HwInfo::max_input) != input_strides[1]) {
-        return failure();
-    }
-
     auto output_strides = getEncodedStridesElements(output_type);
-    if (align_ceil(output_shape[2] * output_shape[3], HwInfo::max_input) != output_strides[1]) {
-        return failure();
-    }
 
     // input/output data layout is NCHW
     const uint32_t out_h = output_shape[2];
@@ -95,10 +88,6 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
     int32_t pad_top = op.getPad()[2];
     int32_t pad_bottom = op.getPad()[3];
 
-    if (pad_left != 1 || pad_right != 1 || pad_top != 1 || pad_bottom != 1) {
-        return failure();
-    }
-
     if (stride == 2 && (ksize_x == 1 && ksize_y == 1)) {
         stride = 1;
     }
@@ -109,7 +98,10 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
         pad_bottom = 1;
     }
 
-    if (stride != 1 || op.getSegmentOutput()) {
+    if (stride != 1) {
+        return failure();
+    }
+    if (pad_left != 1 || pad_right != 1 || pad_top != 1 || pad_bottom != 1) {
         return failure();
     }
 
@@ -123,12 +115,7 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
     auto min = op.getOutputMin();
     auto max = op.getOutputMax();
     auto zp = op.getOutputZp();
-    std::vector<int> outputSegmentationDims;
-    if (op.getSegmentOutput()) {
-        for (auto i : output_shape) {
-            outputSegmentationDims.push_back(i);
-        }
-    }
+    bool segmentOutput = op.getSegmentOutput();
 
     int blockSize = max_input;
     int inputBlockSize = blockSize + pad_left + pad_right;
@@ -163,6 +150,17 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
         DType::int8
     );
 
+    if (segmentOutput) {
+        output = LData(
+            {{outputChGroups, (outputChStride * outputChInGroup)},
+             {outputChInGroup, outputChStride},
+             output_shape[2],
+             output_shape[3]},
+            DType::int8
+        );
+        partitionByIndexParity2D(output);
+    }
+
     Slice slice;
     slice.setInputChannelShape(input_shape[2], input_shape[3]);
     slice.setKernel({kernel_left, kernel_right, kernel_top, kernel_bottom});
@@ -185,16 +183,20 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
             For(auto o = slice.iterate(outputChInGroup)) {
                 For(auto a = slice.iterate(blockSize / actBlockSize, MemDimTag::A)) {
                     QData res = slice.act.rescaleClamp(pdata[o][a], bdata[o], shift, zp, min, max);
-                    slice.store(output[og][b][o][a], res);
+                    if (segmentOutput) {
+                        slice.append(output[og][o], res);
+                    }
+                    else {
+                        slice.store(output[og][b][o][a], res);
+                    }
                 }
             }
         }
     }
-    slice.segment(outputSegmentationDims, outputChStride);
 
     rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
         op,                    // Operation to replace
-        "conv2d",              // Task name
+        "conv2d-ek",           // Task name
         op.getInput(),         // Input tensor
         op.getWeights(),       // Weights
         op.getScaleBias(),     // BiasScale tensor,

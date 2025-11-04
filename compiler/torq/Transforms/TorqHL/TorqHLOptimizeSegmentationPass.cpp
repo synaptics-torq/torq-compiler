@@ -22,21 +22,6 @@ template <typename T> void setSegmentAttr(T op) {
     op->setAttr(op.getSegmentOutputAttrName(), BoolAttr::get(op.getContext(), true));
 }
 
-// simple check if conv2d is tiled, we have to skip segmenting it if it need to tile
-// as current conv2d xy-tiling segmented to wrong data
-bool isConv2DTiled(torq_hl::Conv2DOp op) {
-    auto datasize = getShapeTypeDataSize(op.getInit().getType()) +
-                    getShapeTypeDataSize(op.getInput().getType()) +
-                    getShapeTypeDataSize(op.getWeights().getType()) +
-                    getShapeTypeDataSize(op.getScaleBias().getType());
-
-    // TODO: get lram size from somewhere
-    if (datasize > 1024 * 400) {
-        return true;
-    }
-    return false;
-}
-
 class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -44,19 +29,12 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
     LogicalResult
     matchAndRewrite(torq_hl::SegmentationOp segOp, PatternRewriter &rewriter) const override {
         auto op = segOp.getInput().getDefiningOp();
-
         if (!op)
             return failure();
 
         bool segment_output =
             TypeSwitch<Operation *, bool>(op)
-                .Case<torq_hl::Conv2DOp>([&](auto op) {
-                    if (isa<torq_hl::Conv2DOp>(op) && isConv2DTiled(cast<torq_hl::Conv2DOp>(op))) {
-                        return false;
-                    }
-                    // Disable optimization of conv2d since this will generate wrong result in mbv2
-                    return false;
-
+                .Case<torq_hl::Conv2DOp, torq_hl::DepthwiseConv2DOp, torq_hl::AddOp>([&](auto op) {
                     auto input_type = cast<torq_hl::Conv2DOp>(op).getInput().getType();
                     auto input_shape = input_type.getShape();
                     LLVM_DEBUG({
@@ -64,10 +42,6 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
                                      << input_shape[0] << ", " << input_shape[1] << ", "
                                      << input_shape[2] << ", " << input_shape[3] << "]\n";
                     });
-                    setSegmentAttr(op);
-                    return true;
-                })
-                .Case<torq_hl::DepthwiseConv2DOp, torq_hl::AddOp>([&](auto op) {
                     setSegmentAttr(op);
                     return true;
                 })

@@ -12,6 +12,9 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
+// Allow to enable the desired test code
+#define IDENTITY_TEST_MODE 0
+
 using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
@@ -39,11 +42,12 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
     auto input_strides = getEncodedStridesElements(input_type);
     Slice slice;
     bool is_size_aligned = (total_px % slice.alu.iWidth(elementType)) == 0;
-    if (total_px == 64 && elementType == DType::int8) {
+    if (IDENTITY_TEST_MODE == 1 && total_px == 64 && elementType == DType::int8) {
         // This implementation copies a 64-bytes dense input tensor
         // The input tensor in partitioned in g sections reading from last one to exercise
         // the gather feature of DEDR
         // Can be tested with identity-64-i8.mlir
+        llvm::errs() << "*** Identity using test mode " << IDENTITY_TEST_MODE << "\n";
         int blockSize = 64;
         int actBlockSize = 16;
         int g = 4; // This example only works with g == 4
@@ -59,12 +63,35 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
             slice.store(output[a.reverse()], res);
         }
     }
-    else if (total_px == 64 && elementType == DType::int8 && false) {
+    else if (IDENTITY_TEST_MODE == 2) {
+        // This implementation copies a dense input tensor except the last 3 bytes of each block
+        // Can be tested with identity-64-i8.mlir
+        llvm::errs() << "*** Identity using test mode " << IDENTITY_TEST_MODE << "\n";
+        int blockSize = slice.alu.iWidth(elementType);
+        int actBlockSize = slice.act.width(elementType);
+        const int blockCount = div_ceil(total_px, blockSize);
+        int maxOutSize = blockSize - 3;
+
+        LData input({blockCount, blockSize}, elementType);
+        LData output({blockCount, maxOutSize}, elementType);
+
+        // slice.setOutputSizeLimit(maxOutSize);
+        For(auto b = slice.iterate(blockCount)) {
+            IData idata = slice.iram.load(input[b]);
+            PData pdata = slice.alu.load(idata);
+            For(auto a = slice.iterate(blockSize / actBlockSize)) {
+                QData res = slice.act.load(pdata[a]);
+                slice.append(output[b], res);
+            }
+        }
+    }
+    else if (IDENTITY_TEST_MODE == 3 && total_px == 64 && elementType == DType::int8) {
         // This implementation copies a 64-bytes dense input tensor by writing each 8-bytes
         // chunk from the end (the result is not a correct memcopy).
         // The act output is partitioned in 2 non-contiguous sections to exercise
         // the scatter feature of DEQW.
         // Can be tested with identity-64-i8.mlir
+        llvm::errs() << "*** Identity using test mode " << IDENTITY_TEST_MODE << "\n";
         int blockSize = 64;
         int actBlockSize = 16;
         int g = 2; // This example only works with g == 2
@@ -82,34 +109,49 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
             slice.store(output[a], res);
         }
     }
-    else if (total_px == 64 && false) {
+    else if (IDENTITY_TEST_MODE == 4 && total_px == 64) {
         // This implementation copies a 64-bytes dense input tensor by putting pixels at
         // even and odd positions in the first, second half of the output respectively
         // (the result is not a correct memcopy).
         // This is done using the even-odd feature of DEQW.
         // Can be tested with identity-64-xxx.mlir (xxx is any supported 8- or 16-bits type)
+        // /!\ this is processing only one input data block
+        llvm::errs() << "*** Identity using test mode " << IDENTITY_TEST_MODE << "\n";
         int blockSize = 64 / sizeofType(elementType);
         int actBlockSize = 16;
-        int g = 2; // This example only works with g == 2
 
+#define IDENTITY_EVEN_ODD_WITH_APPEND 1
         LData input({blockSize}, elementType);
         LData output(
-            {{blockSize / actBlockSize, actBlockSize / g * sizeofType(elementType)},
-             {g, (blockSize / g) * sizeofType(elementType)},
-             actBlockSize / g},
+#if IDENTITY_EVEN_ODD_WITH_APPEND
+            {blockSize},
+#else
+            {{blockSize / actBlockSize, actBlockSize / 2 * sizeofType(elementType)},
+             {actBlockSize / 2, sizeofType(elementType)},
+             {2, blockSize / 2 * sizeofType(elementType)}},
+#endif
             elementType
         );
+#if IDENTITY_EVEN_ODD_WITH_APPEND
+        partitionByIndexParity1D(output);
+#endif
+        llvm::errs() << "\nOutput after partitioning by index parity output: " << output << "\n";
 
         IData idata = slice.iram.load(input);
         PData pdata = slice.alu.load(idata);
         For(auto a = slice.iterate(blockSize / actBlockSize)) {
             QData res = slice.act.load(pdata[a]);
-            slice.store(output[a], res, StoreMode::splitEvenOdd);
+#if IDENTIY_EVEN_ODD_WITH_APPEND
+            slice.append(output, res);
+#else
+            slice.store(output[a], res);
+#endif
         }
     }
-    else if (false) {
+    else if (IDENTITY_TEST_MODE == 5) {
         // This example works only with identity-64-i8.mlir and g == 1, 2 or 4
         // It copies input to output by skipping an element every blockSize/g elements
+        llvm::errs() << "*** Identity using test mode " << IDENTITY_TEST_MODE << "\n";
         int blockSize = 64;
         int actBlockSize = 16;
         int g = 4;

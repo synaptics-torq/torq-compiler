@@ -38,16 +38,22 @@ static Stride computeStride(const Shape &dims, int i) {
 }
 
 // Compute number of elements in the shape by multiplying the dimensions
-// The shape must be dense
-static int denseElementCount(const Shape &dims, DType dType) {
+// if numDims >= 0 only the final numDims dimensions are considered
+// return -1 if the shape is not dense
+static int denseElementCount(const Shape &dims, DType dType, int numDims = -1) {
     int count = 1;
     int itemSize = sizeofType(dType);
-    for (int j = dims.size() - 1; j >= 0; j--) {
+    int startDim = numDims < 0 ? 0 : dims.size() - numDims;
+    for (int j = dims.size() - 1; j >= startDim; j--) {
         const auto &dim = dims[j];
-        assert(!dim.stride.exprVal.has_value() && "Stride in inner block not supported");
+        if (dim.stride.exprVal.has_value()) {
+            return -1;
+        }
         if (dim.stride.intVal.has_value()) {
             int stride = dim.stride.intVal.value();
-            assert(stride == count * itemSize && "Stride in inner block not supported");
+            if (stride != count * itemSize) {
+                return -1;
+            }
         }
         count *= dim.count;
     }
@@ -56,10 +62,35 @@ static int denseElementCount(const Shape &dims, DType dType) {
 
 // LRAM scatter-gather block info
 struct SGBlockInfo {
-    int size{1};     // Number of elements in each group
-    int sgGroups{1}; // Number of scatter-gather groups
-    Stride stride{}; // Stride in bytes between the groups
+    int size{1};           // Number of elements in each group
+    int sgGroups{1};       // Number of scatter-gather groups
+    Stride stride{};       // Stride in bytes between the groups
+    bool isEvenOddSplit{}; // True if the sgGroups represent an even-odd split
 };
+
+static bool isEvenOddSplit(const Shape &dims, DType dType, SGBlockInfo &block) {
+    if (dims.size() < 2) {
+        return false;
+    }
+    int elementSize = sizeofType(dType);
+    const auto &dim1 = dims[dims.size() - 1];
+    const auto &dim0 = dims[dims.size() - 2];
+    bool dim1NaturalStride =
+        !dim1.stride.exprVal.has_value() &&
+        (!dim1.stride.intVal.has_value() ||
+         (dim1.stride.intVal.has_value() && dim1.stride.intVal.value() == elementSize));
+    if (dim1.count != 2 || dim1NaturalStride) {
+        return false;
+    }
+    if (!(dim0.stride.intVal.has_value() && dim0.stride.intVal.value() == elementSize)) {
+        return false;
+    }
+    block.sgGroups = 2;
+    block.size = dim0.count;
+    block.stride = dim1.stride;
+    block.isEvenOddSplit = true;
+    return true;
+}
 
 // Compute number of elements in the shape by multiplying the dimensions
 // The shape must be dense, or have up to sgGroups non-contiguous groups.
@@ -70,7 +101,11 @@ static SGBlockInfo sgElementCount(const Shape &dims, DType dType, int sgMax = -1
     }
     // Compute the total number of elements in the shape excluding the first dimension
     SGBlockInfo blockInfo;
+    if (isEvenOddSplit(dims, dType, blockInfo)) {
+        return blockInfo;
+    }
     int count = denseElementCount(Shape{dims.begin() + 1, dims.end()}, dType);
+    assert(count >= 0 && "Shape is  not dense");
 
     //  If the first dimension has a non-natural stride get the stride and the number of groups
     int itemSize = sizeofType(dType);
@@ -445,6 +480,8 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Data &shape) {
     return os;
 }
 
+LData::LData(Value value) : LData(cast<MemRefType>(value.getType())) {}
+
 LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
     const DType elementType = getDType(type.getElementType());
     assert(elementType != DType::none && "Invalid element type");
@@ -486,8 +523,7 @@ struct SlicePrivate {
     // Add dimensions to a mem-based NDL according to the data shape and iteration variables
     // return the NDL offset
     int addDims(
-        NdlType type, torq_hw::MemNdlDimsData &dims, const Data &data,
-        StoreMode mode = StoreMode::normal
+        NdlType type, torq_hw::MemNdlDimsData &dims, const Data &data, int appendBlockSize = -1
     );
 
     // Add dimensions to a reg-based NDL according to the data shape and iteration variables
@@ -521,11 +557,11 @@ struct SlicePrivate {
         int actClipMax, torq_hw::ACTMode actMode
     );
 
-    void memNdl(NdlType ndlType, const LData &data, StoreMode mode = StoreMode::normal);
+    void memNdl(NdlType ndlType, const LData &data, int appendBlockSize = -1);
     void dedr(const LData &data);
     void dewr(const LData &data);
     void debr(const LData &data);
-    void deqw(const LData &output, StoreMode mode);
+    void deqw(const LData &output, int appendBlockSize = -1);
 
     void ref(const LData &data);
 
@@ -568,31 +604,22 @@ struct SlicePrivate {
 SlicePrivate::SlicePrivate() {}
 
 int SlicePrivate::addDims(
-    NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data, StoreMode mode
+    NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data, int appendBlockSize
 ) {
+    bool useSDims = appendBlockSize >= 0;
     Shape dataDims = data.shape();
     const Indexes &ix = data.indexes();
     const int sgGroupsMax = getBusScatterGather(type);
-    auto block = sgElementCount(data.subShape(), data.elementType(), sgGroupsMax);
+    auto block = useSDims ? SGBlockInfo{appendBlockSize}
+                          : sgElementCount(data.subShape(), data.elementType(), sgGroupsMax);
     assert(block.size && "Block empty or not dense");
     auto elementSize = sizeofType(data.elementType());
     assert(ix.size() <= dataDims.size());
     int offset = data.offset();
 
-    if (mode == StoreMode::splitEvenOdd) {
-        assert(type == NdlType::DEQW && "Even-odd split mode only supported for DEQW");
-        if (block.sgGroups == 1) {
-            // If destination is a single block, split it in two even-odd halfs
-            block.sgGroups = 2;
-            assert(block.size % 2 == 0 && "Block size must be even for even-odd split");
-            block.size = div_ceil(block.size, 2);
-            if (block.stride.intVal.has_value()) {
-                block.stride.intVal = div_ceil(block.stride.intVal.value(), 2);
-            }
-            else {
-                block.stride.intVal = block.size * elementSize; // intVal.value()
-            }
-        }
+    if (type != NdlType::DEQW) {
+        assert(!block.isEvenOddSplit && "Even-odd split only supported for DEQW");
+        assert(!useSDims && "SDIMs only supported for DEQW");
     }
 
     int busWidth = getBusWidth(type);
@@ -616,7 +643,7 @@ int SlicePrivate::addDims(
     ndlDims.push_back({DimType::L, MemDimTag::B, elementSize, 1});
     ndlDims.push_back({DimType::L, MemDimTag::D, lBlockSize, elementSize});
     if (block.sgGroups > 1) {
-        if (block.size > 1 && mode != StoreMode::splitEvenOdd) {
+        if (block.size > 1 && !block.isEvenOddSplit) {
             if (block.stride.exprVal.has_value()) {
                 ndlDims.push_back(
                     {DimType::L, MemDimTag::G, block.sgGroups, block.stride.exprVal.value()}
@@ -690,7 +717,50 @@ int SlicePrivate::addDims(
                 offset += (itemsCount - 1) * strideValue;
                 strideValue = -strideValue;
             }
-            ndlDims.push_back({DimType::H, _forStack[i].tag, _forStack[i].count, strideValue});
+            // If useSDims and this iter variable is not used to explicitly index the output data,
+            // this means that it will be covered by SDims, so use an A tag (with stride 0)
+            // as required by the hardware
+            auto tag = useSDims && !iv ? MemDimTag::A : _forStack[i].tag;
+            ndlDims.push_back({DimType::H, tag, _forStack[i].count, strideValue});
+        }
+    }
+
+    if (useSDims) {
+        assert(hBlockCount == 1 && "SDIMs only supported for single block transfers");
+        // Add special SDIMs to cover the remaining size
+        Shape sdimsShape = data.subShape();
+        ndlDims.push_back({DimType::S, MemDimTag::B, elementSize, 1});
+        int denseCnt = denseElementCount(sdimsShape, data.elementType());
+        assert(denseCnt != 0 && "SDIM can't handle empty tensors");
+        if (denseCnt > 0) {
+            if (elementSize == 4) {
+                // HW doesn't support elementSize == 4 but if the output is dense we can adjust
+                // the data type and the count accordingly
+                denseCnt *= 4;
+                elementSize = 1;
+                ndlDims.back().count = elementSize;
+            }
+
+            // Sequential write to a dense subtensor
+            ndlDims.push_back({DimType::S, MemDimTag::X, denseCnt, elementSize});
+        }
+        else if (sdimsShape.size() == 2 || sdimsShape.size() == 4) {
+            // Should be even-odd split or 4-quadrants even-odd segmentation
+            assert(elementSize <= 2 && "Non-dense SDIMs not supported for element size > 2");
+            assert(sdimsShape[1].count == 2 && "Not even-odd split");
+            assert((sdimsShape.size() < 2 || sdimsShape[3].count == 2) && "Not even-odd split");
+            int i = 0;
+            for (const auto &s : llvm::reverse(sdimsShape)) {
+                assert(s.stride.intVal.has_value());
+                ndlDims.push_back(
+                    {DimType::S, i++ < 2 ? MemDimTag::X : MemDimTag::Y, s.count,
+                     s.stride.intVal.value()}
+                );
+            }
+        }
+        else {
+            llvm::errs() << "Error: unsupported subshape for SDIM: " << sdimsShape << "\n";
+            assert(false && "unsupported subshape for SDIM");
         }
     }
 
@@ -972,7 +1042,7 @@ void SlicePrivate::ceww(const WData &wdata) {
     // assert(shape.size() <= 1 && "WData shape must be up to 1 for now");
     const int weightSize = sizeofType(wdata.elementType());
     const int weightBlockSize = denseElementCount(shape, wdata.elementType());
-    assert(weightBlockSize && "Block empty or not dense");
+    assert(weightBlockSize > 0 && "Block empty or not dense");
 
     // Generate CEWW to load the data from DEWR to WRAM
     // TODO: check that the data fits WRAM and that dataShape has natural strides
@@ -1092,9 +1162,9 @@ void SlicePrivate::cepr(const PData &pdata) {
     ndlToStr(NdlType::CEPR, _ndls.getRegNdl(NdlType::CEPR));
 }
 
-void SlicePrivate::memNdl(NdlType ndlType, const LData &data, StoreMode mode) {
+void SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSize) {
     MemNdlDimsData ndlDims;
-    int offset = addDims(ndlType, ndlDims, data, mode);
+    int offset = addDims(ndlType, ndlDims, data, appendBlockSize);
     _ndls.add(ndlType, ndlDims, offset);
     ndlToStr(ndlType, _ndls.getMemNdl(ndlType));
 }
@@ -1105,8 +1175,8 @@ void SlicePrivate::dewr(const LData &data) { memNdl(NdlType::DEWR, data); }
 
 void SlicePrivate::debr(const LData &data) { memNdl(NdlType::DEBR, data); }
 
-void SlicePrivate::deqw(const LData &output, StoreMode mode) {
-    memNdl(NdlType::DEQW, output, mode);
+void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
+    memNdl(NdlType::DEQW, output, appendBlockSize);
 }
 
 void SlicePrivate::ref(const LData &data) {
@@ -1378,20 +1448,30 @@ Iterator Slice::iterate(int count, torq_hw::MemDimTag tag) {
 
 Iterator Slice::iterate(const std::vector<int> &counts) { return Iterator(*this, counts); }
 
-static void checkCompatibility(const Data &destData, const Data &sourceData) {
-    const Shape destShape = destData.subShape();
-    const Shape sourceShape = sourceData.subShape();
+static void checkTypeCompatibility(const Data &destData, const Data &sourceData) {
     const DType sType = sourceData.elementType();
     const DType dType = destData.elementType();
+    bool elemTypeCompatible = (isFloat(sType) && isFloat(dType)) || (isInt(sType) && isInt(dType));
+    if (!elemTypeCompatible) {
+        llvm::errs() << "Mismatching assignment. ";
+        llvm::errs() << "Destination: " << destData << ", ";
+        llvm::errs() << "Source: " << sourceData << "\n";
+        assert(false && "Data type mismatch");
+    }
+}
+
+static void checkCompatibility(const Data &destData, const Data &sourceData) {
+    checkTypeCompatibility(destData, sourceData);
+
+    const Shape destShape = destData.subShape();
+    const Shape sourceShape = sourceData.subShape();
     const int destRank = destShape.size();
     const int sourceRank = sourceShape.size();
-
     if (destRank > 2) {
         llvm::errs() << "Invalid assignment. ";
         llvm::errs() << "Destination: " << destData << " has rank " << destRank << "\n";
         assert(false && "Destination rank error");
     }
-    bool elemTypeCompatible = (isFloat(sType) && isFloat(dType)) || (isInt(sType) && isInt(dType));
     bool shapeMatch = destRank == sourceRank;
     if (shapeMatch) {
         for (size_t i = 0; i < destRank; ++i) {
@@ -1413,27 +1493,39 @@ static void checkCompatibility(const Data &destData, const Data &sourceData) {
             shapeMatch = true;
         }
     }
-    if (!elemTypeCompatible || !shapeMatch) {
+    if (!shapeMatch) {
         llvm::errs() << "Mismatching assignment. ";
         llvm::errs() << "Destination: " << destData << ", ";
         llvm::errs() << "Source: " << sourceData << "\n";
-        assert(false && "Data shapes mismatch");
+        assert(false && "Data shape mismatch");
     }
     if (destRank > 1) {
-        // Check that the last dimension is dense
+        // Check that the last dimension is dense (except if even-odd split)
+        const DType dType = destData.elementType();
         auto innerStride = destShape.back().stride;
-        if (innerStride.exprVal.has_value() ||
-            (innerStride.intVal.has_value() && innerStride.intVal.value() != sizeofType(dType))) {
+        SGBlockInfo dummyBlockInfo;
+
+        if (!isEvenOddSplit(destShape, dType, dummyBlockInfo) &&
+            (innerStride.exprVal.has_value() ||
+             (innerStride.intVal.has_value() && innerStride.intVal.value() != sizeofType(dType)))) {
             llvm::errs() << "Destination inner dimension is not dense: " << destData << "\n";
             assert(false && "Inner dimension must be dense");
         }
     }
 }
 
-void Slice::store(const LData &output, const QData &data, StoreMode mode) {
+void Slice::append(const LData &output, const QData &data) {
+    assert(data.indexes().size() == 0 && "QData can't be indexed during append");
+    assert(data.shape().size() <= 1 && "QData shape > 1 not allowed during append");
+    checkTypeCompatibility(output, data);
+    int dataBlockSize = backDimCount(data.subShape());
+    d->deqw(output, dataBlockSize);
+}
+
+void Slice::store(const LData &output, const QData &data) {
     assert(data.indexes().size() == 0 && "QData can't be indexed during store");
     checkCompatibility(output, data);
-    d->deqw(output, mode);
+    d->deqw(output);
 
     // Check that the DEQW H iteration count matches the specified outputShape
     if (output.shape().size() > 0 && output.shape()[0].count) {
@@ -1469,7 +1561,7 @@ void Slice::store(const LData &output, int value) {
 
     // Configure the value to be stored as pad value
     setPadding({0, 0, 0, 0}, value);
-    d->deqw(output, StoreMode::normal);
+    d->deqw(output);
 }
 int Slice::scatter() const { return getBusScatterGather(NdlType::DEQW); }
 
@@ -1771,6 +1863,120 @@ Iterator Iterator::reverse() {
         iv.reverse();
     }
     return std::move(*this);
+}
+
+void partitionByIndexParity1D(LData &data) {
+    Shape shape = data.shape();
+    int rank = shape.size();
+    assert(rank >= 1 && "Data must have at least 1 dimensions");
+    assert(sizeofType(data.elementType()) <= 2 && "Element size must be 1 or 2 bytes");
+    Shape subShape(&shape[rank - 1], &shape[rank]);
+
+    // Check the last dim is dense
+    assert(denseElementCount(subShape, data.elementType()) > 0 && "Not dense inner dimension");
+    // To be verified if the below assert is really needed
+    int w = subShape[0].count;
+    assert(w % 2 == 0 && "Last dimension must be even for partitioning");
+
+    int elementSize = sizeofType(data.elementType());
+    shape.pop_back();
+    shape.push_back({div_ceil(w, 2), 1 * elementSize});
+    shape.push_back({2, div_ceil(w, 2) * elementSize});
+
+    // Update data shape
+    data.setShape(shape);
+}
+
+void partitionByIndexParity2D(LData &data) {
+    Shape shape = data.shape();
+    int rank = shape.size();
+    assert(rank >= 2 && "Data must have at least 2 dimensions");
+    assert(sizeofType(data.elementType()) <= 2 && "Element size must be 1 or 2 bytes");
+    Shape subShape(&shape[rank - 2], &shape[rank]);
+
+    // Check the last two dims are dense
+    // To be verified if subShape[0] really needs to be dense or we can somehow handle a stride
+    assert(denseElementCount(subShape, data.elementType()) > 0 && "Not dense inner dimension");
+    // To be verified if the below assert is really needed
+    int h = subShape[0].count;
+    int w = subShape[1].count;
+    assert(h % 2 == 0 && w % 2 == 0 && "Last two dimensions must be even for partitioning");
+    int subFrameSize = div_ceil(h, 2) * div_ceil(w, 2);
+
+    int elementSize = sizeofType(data.elementType());
+    shape.pop_back();
+    shape.pop_back();
+    shape.push_back({div_ceil(h, 2), div_ceil(w, 2) * elementSize});
+    shape.push_back({2, subFrameSize * 2 * elementSize});
+    shape.push_back({div_ceil(w, 2), 1 * elementSize});
+    shape.push_back({2, subFrameSize * elementSize});
+
+    // Update data shape
+    data.setShape(shape);
+}
+
+void vectorize(LData &data, int vectorSize, std::vector<int> dims) {
+    int rank = data.shape().size();
+    if (dims.empty()) {
+        dims.push_back(rank - 1);
+    }
+    std::sort(dims.begin(), dims.end());
+    assert(dims[0] >= 0 && dims.back() < rank && "Invalid dimension for vectorization");
+
+    int itemCount = 1;
+    int prevDim = dims[0] - 1;
+    for (auto dim : dims) {
+        assert(dim >= 0 && dim < rank && "Invalid dimension for vectorization");
+        assert(dim == prevDim + 1 && "Dimensions must contiguous");
+        itemCount *= data.dim(dim);
+        ++prevDim;
+    }
+
+    auto shape = data.shape();
+
+    // check that the vectorized dims are dense
+    for (int i = 0; i < dims.size() - 1; ++i) {
+        auto stride = computeStride(shape, dims[i]);
+        assert(!stride.exprVal.has_value() && "Cannot vectorize non-constant stride");
+        if (stride.intVal.has_value()) {
+            Stride nextStride = computeStride(shape, dims[i + 1]);
+            assert(!nextStride.exprVal.has_value() && "Cannot vectorize non-constant stride");
+            int naturalStride = nextStride.intVal.value() * shape[dims[i + 1]].count;
+            assert(
+                stride.intVal.value() == naturalStride && "Cannot vectorize non-dense dimensions"
+            );
+        }
+    }
+
+    // Compute stride of the innermost vectorized dimension
+    Stride baseStride = computeStride(shape, dims.back());
+    assert(!baseStride.exprVal.has_value() && "Cannot vectorize non-constant stride");
+    int baseStrideInt = baseStride.intVal.value() * sizeofType(data.elementType());
+
+    // Remove vectorized dimensions
+    shape.erase(shape.begin() + dims[0], shape.begin() + dims[0] + dims.size());
+
+    // Append new vectorized dimension
+    shape.insert(
+        shape.begin() + dims[0],
+        ShapeItem{div_ceil(itemCount, vectorSize), vectorSize * baseStrideInt}
+    );
+    shape.insert(shape.begin() + dims[0] + 1, ShapeItem{vectorSize, baseStrideInt});
+
+    // Set the stride of the previous dim (if any) if it doesn't have a stride yet
+    if (dims[0] > 0) {
+        auto &outerDim = shape[dims[0] - 1];
+        if (!outerDim.stride.hasVal()) {
+            // Compute the stride as the product of the counts of the vectorized dimensions
+            int strideValue = 1;
+            for (auto dim : dims) {
+                strideValue *= shape[dim].count;
+            }
+            outerDim.stride = Stride{strideValue * sizeofType(data.elementType())};
+        }
+    }
+
+    data.setShape(shape);
 }
 
 } // namespace mlir::syna::torq

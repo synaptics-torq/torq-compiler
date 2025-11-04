@@ -186,6 +186,7 @@ class LData : public DataT<LData> {
     LData(const Shape &shape, DType elementType) : DataT(shape, elementType) {}
     LData(const Shape &shape, DType elementType, int offs) : DataT(shape, elementType, offs) {}
     LData(const MemRefType &type);
+    LData(const Value value);
     static std::string name() { return "LData"; }
 };
 
@@ -394,29 +395,6 @@ class Act : SliceComponent {
     int width(DType iType, DType wType = DType::none) const;
 };
 
-// Store modes for the store() operation
-enum class StoreMode {
-    // Data is written sequentially
-    // QData is a vector of shape [N], output must be a dense vector of the same shape [N].
-    // If QData has shape [1], the output can also be a scalar.
-    // In alternative the output can be an array of shape [{g, s}, N] where g is a power of
-    // two up to Slice::scatter() (currently 2) with dense inner dim.
-    // s specifies the stride between the two blocks which don't have to be contiguous
-    // in this case it must be s*N == alu.width() or N == 1
-    // The case N == 1 is only supported for item size <= 2 (same as even-odd split mode).
-    normal,
-
-    // Data is written using even-odd splitting
-    // This mode is only supported for item size <= 2.
-    // QData is a vector of shape [N], output must have shape [{2,s}, N/2]
-    // elements at even positions are written in the first data block
-    // elements at odd positions are written in the second data block
-    // s specifies the stride between the two blocks which don't have to be contiguous
-    // In alternative destination can have shape [N] in which case the first half is filled
-    // with elements at even positions and the second half with elements at odd positions.
-    splitEvenOdd
-};
-
 // Create a kernel for a slice
 class Slice {
     std::unique_ptr<SlicePrivate> d;
@@ -439,13 +417,39 @@ class Slice {
     // Store the computed result to LRAM
     // Data types must be compatible, not necessarily the same, fp16 is compatible with float32,
     // integer types are compatible with each other.
-    // See the description of each StoreMode for details on how data is stored in the output memory.
-    void store(const LData &output, const QData &data, StoreMode mode = StoreMode::normal);
+    // QData is a vector of shape [n], output can be:
+    //  - a dense vector of the same shape [n]
+    //  - a scalar if QData has shape [1]
+    //  - an array of shape [{g, s}, n] where g is up to Slice::scatter() (2) with dense inner dim.
+    //    and s is the stride between the two inner blocks of size n (no need to be contiguous)
+    //    In this case it must be s*n == alu.width() or n == 1
+    //    The case n == 1 is only supported for item size <= 2
+    //  - an array of shape [{n,1},{2,s}] (even-odd split mode) only supported for item size <= 2
+    void store(const LData &output, const QData &data);
 
     // Store a value to LRAM
     // output must represent a scalar
     // Can only be used if iram, wram and bram haven't been loaded
     void store(const LData &output, int value);
+
+    // Append the computed result to the specified position in the output tensor.
+    // The result is appended after the other results already appended at that position,
+    // according to the shape and stride of the indexed subtensor.
+    // In case the result data would go beyond the end of the indexed subtensor
+    // the data in excess is discarded.
+    // QData is a vector of shape [n], output can be:
+    //  - a dense vector of any rank and size
+    //  - a scalar if QData has shape [1] (TBV)
+    //  - a 2-dim array of shape [{n,1},{2,s}] (even-odd split mode), s is the stride between blocks
+    //  - a 4-dim array of shape [{n,1},{2,s},{m,1},{2,t}] (4-quadrants even-odd segmentation mode)
+    // Example, filling a tensor of 2 channels of shape 16x3, with a result of shape 5:
+    // auto out = LData({2, 16, 3}, DType::int8); // output tensor
+    // auto res = QData({5}, DType::int8); // computed result to append
+    // For (auto n = kernel.iterate(2))
+    //   For (auto i = kernel.iterate(div_ceil(16 * 3, 5)))
+    //     kernel.append(out[n], res);
+    // The extra 2 elements in each channels are discarded.
+    void append(const LData &output, const QData &data);
 
     // Get max scattering supported by the slice in the store() operation
     // Scattering indicates the max number of different addresses that can be generated in parallel
@@ -504,6 +508,25 @@ class Iterator {
     Slice &_kernel;
     Indexes _iterVars;
 };
+
+// Reorganize the last dimension into two sub-blocks containing elements
+// with even and odd indexes respectively
+void partitionByIndexParity1D(LData &data);
+
+// Reorganize the last two dimensions into 4 quadrants containing elements
+// with even-even, even-odd, odd-even and odd-odd indexes respectively
+void partitionByIndexParity2D(LData &data);
+
+// Vectorize the specified dimensions into a single dimension made of vectors of the given size
+// dims must be contiguous. If dims is empty the last dimension is vectorized.
+// Dimensions to be vectorized must be dense.
+// If the number of elements in the specified dimensions is not multiple of vectorSize
+// the last vector will actually go beyond the end of the data shape, in any case the strides
+// are adjusted accordingly.
+// Example:
+// data shape: {1, 16, 5, 5}, vectorSize: 4, dims: {2, 3}
+// resulting shape: {1, {16,stride:25}, 7, 4}
+void vectorize(LData &data, int vectorSize, std::vector<int> dims = {});
 
 // This macro is just a syntactic helper to write Torq loops with iterators in a natural way eg:
 // For (auto block = kernel.iterate(blockCount)) {

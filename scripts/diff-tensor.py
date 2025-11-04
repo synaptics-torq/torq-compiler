@@ -66,10 +66,11 @@ def main():
     parser.add_argument('-o', '--dst', help='Destination image file')
     parser.add_argument('-c', '--channel', help='Channel to visualize', type=int, default=None)
     parser.add_argument('-a', '--all', help='Print all elements', action='store_true')
+    parser.add_argument('-t', '--transpose', help='Transpose NHWC to NCHW', action='store_true')
     parser.add_argument('-n', '--nowrap', help='Don\'t wrap lines', action='store_true')
-    parser.add_argument('-s', '--scale', help='Scale values for visualization', type=float)
-    parser.add_argument('-d', '--delta', help='Max acceptable delta', type=int, default=0)
-    parser.add_argument('-f', '--fix', help='Fix input', action='store_true')
+    parser.add_argument('-x', '--scale', help='Scale values for visualization', type=float)
+    parser.add_argument('-s', '--sort', help='Sort mistmatching channels', action='store_true')
+    parser.add_argument('-d', '--delta', help='Max acceptable delta', type=float, default=0)
     parser.add_argument('-1', help='Show first file instead of difference', dest='first', action='store_true')
     parser.add_argument('-2', help='Show second file instead of difference', dest='second', action='store_true')
     parser.add_argument('src', help='Tensor file (.npy)', nargs=1)
@@ -86,53 +87,57 @@ def main():
         args.ref = None
 
     # Load numpy array(s) from file
-    tensor = np.load(str(args.src[0]))
-    print("Type: ", tensor.dtype)
+    tensor = load_data(str(args.src[0]))
+    print("Data type: ", tensor.dtype)
     if args.ref:
         msg = "diff"
-        reference_tensor = np.load(str(args.ref))
-        print("Reference type: ", reference_tensor.dtype)
+        reference_tensor = load_data(str(args.ref))
+        if tensor.dtype != reference_tensor.dtype:
+            print("Reference data type: ", reference_tensor.dtype)
         if tensor.shape != reference_tensor.shape:
             print("Tensors have different shapes: ", tensor.shape, reference_tensor.shape)
             return
     else:
         reference_tensor = np.zeros_like(tensor)
 
-    if args.fix:
-        # Remove initial garbage (16 bytes per channel)
-        tensor = tensor.flatten()
-        shift = 16 * reference_tensor.shape[3]
-        tensor = tensor[shift:]
-        # Append the final part of the 2nd tensor to avoid mismatch
-        tensor = np.concatenate((tensor, reference_tensor.flatten()[-shift:]))
-        # Restore shape
-        tensor = tensor.reshape(reference_tensor.shape)
-        print("Input tensor fixed")
-
     # Compute difference between input and reference tensor
     tensor = tensor - reference_tensor
 
-    if len(tensor.shape) > 4:
-        print("Unsupported tensor shape")
-        return
-    elif len(tensor.shape) == 4:
-        tensor = np.transpose(tensor, (0, 3, 1, 2))
-    else:
-        new_shape = (1,) * (4 - len(tensor.shape))+ tensor.shape
-        tensor = np.reshape(tensor, new_shape)
+    # Input data is considered NCHW by default is 4D, NCW if 3D
+    # if not the case it can be transposed with -t option
+    if args.transpose:
+        if len(tensor.shape) == 4:
+            tensor = np.transpose(tensor, (0, 3, 1, 2))
+        elif len(tensor.shape) == 3:
+            tensor = np.transpose(tensor, (0, 2, 1))
+        else:
+            print("Transpose only supported for 4D tensors")
+
+    print("Tensor shape: ", tensor.shape)
 
     # Check for non-null channels
     mismatch_channels = {}
-    for i in range(tensor.shape[1]):
-        abs_diff = np.abs(tensor[0, i, :, :])
+    for i in range(get_channel_count(tensor)):
+        abs_diff = np.abs(get_channel(tensor, i))
         max_abs_diff = np.max(abs_diff)
         if max_abs_diff > args.delta:
-            l2 = np.sum(np.square(tensor[0, i, :, :])) / (tensor.shape[2] * tensor.shape[3])
-            mismatch_channels[i] = (max_abs_diff, round(float(l2), 3))
+            channel_data = get_channel(tensor, i)
+            l2 = np.sqrt(np.sum(np.square(channel_data * 1.0)) / channel_data.size)
+            mismatch_channels[i] = (float(l2), float(max_abs_diff))
 
     if args.ref:
         if mismatch_channels:
-            print("Mismatching channels:", mismatch_channels)
+            # sort by average diff
+            if args.sort:
+                mismatch_list = sorted(mismatch_channels.items(), key=lambda item: item[1], reverse=True)
+            else:
+                mismatch_list = list(mismatch_channels.items())
+            print(len(mismatch_list) , "mismatching channels:", end=' ')
+            mismatch_list_top = mismatch_list[:50]
+            for mc in mismatch_list_top:
+                print(f"{mc[0]}: ({mc[1][0]:.2g};{mc[1][1]:.2g}) ", end=' ')
+            if len(mismatch_list) > len(mismatch_list_top):
+                print("...")
         else:
             print("Match")
 
@@ -140,12 +145,15 @@ def main():
     if args.channel is not None:
         mismatch_channels = {args.channel: 0}
 
-    np.set_printoptions(threshold=np.inf if args.all else 64 * 32, linewidth=(100000 if args.nowrap else 120))
-    channel_data = tensor[0, 0, :, :]
+    np.set_printoptions(threshold=np.inf if args.all else 64 * 32, linewidth=(100000 if args.nowrap else 200))
+    channel_data = get_channel(tensor, 0)
     for channel in mismatch_channels.keys():
-        channel_data = tensor[0, channel, :, :]
+        channel_data = get_channel(tensor, channel)
         print(f"Channel {channel} {msg}:")
-        print(channel_data)
+        if channel_data.size > 64 * 32 and not args.all:
+            print(channel_data)
+        else:
+            print_tensor(channel_data)
 
     if args.scale:
         channel_data = channel_data * args.scale
@@ -158,37 +166,6 @@ def main():
         color_map = plt.cm.seismic # plt.cm.gray if diff is None else plt.cm.seismic
         plt.imshow(channel_data, cmap=color_map, vmin=-128, vmax=127)
         plt.savefig(args.dst)
-
-
-    # # Save tensors to files
-    np.save("one.npy", np.ones([1,32,32,8], dtype=np.int8))
-    np.save("two.npy", np.ones([1,32,32,8], dtype=np.int8) * 2)
-    np.save("ten.npy", np.ones([1,32,32,8], dtype=np.int8) * 10)
-    np.save("in_50.npy", np.ones([1,32,32,8], dtype=np.int8) * 50)
-    np.save("in_rand.npy", np.random.randint(-20, 20, [1,32,32,8], dtype=np.int8))
-
-    np.save("in_rand_1x4x32x3.npy", np.random.randint(-20, 20, [1,4,32,3], dtype=np.int8))
-    np.save("in_0_1x4x32x3.npy", np.ones([1,4,32,3], dtype=np.int8) * 0)
-    np.save("in_50_1x4x32x3.npy", np.ones([1,4,32,3], dtype=np.int8) * 50)
-    np.save("in_rand_1x224x224x32.npy", np.random.randint(-50, 50, [1,224,224,32], dtype=np.int8))
-
-    # Fill each channel with a different value
-    tensor = np.zeros([1,32,32,8], dtype=np.int8)
-    for i in range(8):
-        tensor[0, :, :, i] = (i - 4) * 10
-    np.save("in_pc.npy", tensor)
-    tensor[0, 10, 10, 0] = 33
-    np.save("in_pc33.npy", tensor)
-    
-    # Create a tensor 1x96x112x112 with progressive value in each channel
-    tensor = np.zeros([1,112,112,3], dtype=np.int8)
-    for i in range(3):
-        for j in range(112):
-            for k in range(112):
-                tensor[0, j, k, i] = k % 2 + 2 * (j % 2) + ( i  % 10 ) * 10 + 1
-
-    np.save("in_1x3x112x112.npy", tensor)
-
 
 if __name__ == "__main__":
     main()

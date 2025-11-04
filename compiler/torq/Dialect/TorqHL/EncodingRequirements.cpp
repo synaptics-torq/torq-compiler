@@ -182,9 +182,11 @@ FailureOr<bool> encodeKernelInputOutputs(
     return changed;
 }
 
-static KernelTensorEncoding defaultEncoding(ShapedType type, int channelAlign = 0) {
+static KernelTensorEncoding
+defaultEncoding(ShapedType type, int channelAlign = 0, bool alignData = true) {
     int defaultByteAlign = 64;
-    auto alignWithType = getAlignmentByType(defaultByteAlign, type.getElementType());
+    auto alignWithType =
+        alignData ? getAlignmentByType(defaultByteAlign, type.getElementType()) : 0;
     if (type.getRank() == 4) {
         return {{-channelAlign, alignWithType, 0, 0}, 0};
     }
@@ -215,7 +217,8 @@ template <typename ConvT> static KernelEncoding getConvLikeKernelEncoding(ConvT 
     }
 
     const int parallelOuts = static_cast<int>(mode);
-    return {{}, defaultEncoding(op.getInit().getType(), parallelOuts)};
+
+    return {{}, defaultEncoding(op.getInit().getType(), parallelOuts, !op.getSegmentOutput())};
 }
 
 KernelEncoding TransposeOp::getKernelEncoding() {
@@ -345,7 +348,7 @@ KernelEncoding AddOp::getKernelEncoding() {
 
     auto enc1 = defaultEncoding(input1Type);
     auto enc2 = defaultEncoding(input2Type);
-    auto enc = defaultEncoding(resultType);
+    auto enc = defaultEncoding(resultType, 0, !getSegmentOutput());
 
     SmallVector<KernelInputEncoding> inEncoding = {
         {getInput1Mutable().getOperandNumber(), enc1}, {getInput2Mutable().getOperandNumber(), enc2}
