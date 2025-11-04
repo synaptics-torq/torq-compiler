@@ -77,6 +77,34 @@ struct TensorBitcastPattern : public OpRewritePattern<tensor::BitcastOp> {
         return success();
     }
 };
+class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    // using OpRewritePattern::OpRewritePattern;
+    BfloatDivfPattern(MLIRContext *context)
+        : OpRewritePattern<linalg::GenericOp>(context, /*benefit=*/0) {
+        setDebugName("BfloatDivfPattern");
+    }
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (!cast<RankedTensorType>(srcOp.getType(0)).getElementType().isBF16() ||
+            !isa_and_nonnull<arith::DivFOp>(getElementwiseBinaryOp(srcOp))) {
+            return rewriter.notifyMatchFailure(srcOp, "Expected bf16 divf");
+        }
+        auto numerator = srcOp.getOperand(0);
+        auto denominator = srcOp.getOperand(1);
+        rewriter.replaceOp(
+            srcOp,
+            rewriter.create<arith::MulFOp>(
+                srcOp.getLoc(), numerator,
+                rewriter
+                    .create<linalg::ReciprocalOp>(srcOp.getLoc(), denominator, srcOp.getOutputs())
+                    .getResult(0)
+            )
+        );
+        return success();
+    }
+};
 
 struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
     BfloatReciprocalPattern(MLIRContext *context)
@@ -2063,6 +2091,7 @@ void populateLinalgToTorqHLPrePatterns(
     patterns.insert<BfloatGenericTanhPattern>(context);
     patterns.insert<BfloatTanhPattern>(context);
     patterns.insert<BfloatSoftmaxPattern>(context);
+    patterns.insert<BfloatDivfPattern>(context);
     patterns.insert<BfloatReciprocalPattern>(context);
     patterns.insert<TensorBitcastPattern>(context);
     patterns.insert<ArithOnTensorToLinalgPattern<arith::AndIOp>>(context);
