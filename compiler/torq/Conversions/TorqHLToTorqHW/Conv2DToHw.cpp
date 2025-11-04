@@ -77,7 +77,7 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
     }
 
     // We want to maximize the ALU usage and process "max_channels" output channels at a time.
-    const uint32_t max_out_channels = max_channels;
+    const uint32_t max_out_channels = output_shape[1] >= 4 ? max_channels : 1;
     const uint32_t out_ch_split = div_ceil(output_shape[1], max_out_channels);
     const uint32_t max_in_channels = std::min<uint32_t>(input_shape[1], HwInfo::iram_depth);
     assert(max_in_channels > 0);

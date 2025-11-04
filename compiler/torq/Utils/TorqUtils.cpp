@@ -56,7 +56,6 @@ std::vector<uint32_t> prepareWeightDims(
     if (alu_groups_check < alu_groups) {
         limits[0] = HwInfo::wram_width;
         limits[1] = HwInfo::wram_seg_width / HwInfo::wram_width;
-        assert(false);
     }
 
     size_t mul = 1;

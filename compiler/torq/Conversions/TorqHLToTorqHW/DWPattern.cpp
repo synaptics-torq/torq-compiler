@@ -439,14 +439,9 @@ LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewrite
     }
 
     max_input = max_input / ddat_width;
-    uint32_t max_out_channels = output_shape[1] > max_channels
-                                    ? findExactMultiple(output_shape[1], max_channels)
-                                    : max_channels;
-    if (max_out_channels < max_channels) {
-        max_out_channels = max_channels;
-    }
-    uint32_t max_channels_split_1 = div_ceil(max_out_channels, 4); // TODO: remove hardcoded 4 value
-    uint32_t max_channels_split_2 = 4;
+    uint32_t max_out_channels = output_shape[1] >= max_channels ? max_channels : 1;
+    uint32_t max_channels_split_1 = max_out_channels > 1 ? ceil(max_out_channels / 4.0) : 1;
+    uint32_t max_channels_split_2 = max_out_channels > 1 ? 4 : 1;
 
     const uint32_t out_ch_split = div_ceil(input_channel, max_out_channels);
 
