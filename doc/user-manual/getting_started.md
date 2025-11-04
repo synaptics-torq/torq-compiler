@@ -11,7 +11,7 @@ and the [IREE CPU Deployment Guide](https://iree.dev/guides/deployment-configura
 
 ### Release Package Ubuntu 24.04
 
-- Uncompress the release package (tarball or zip).
+- Download the [release.tar.gz](https://github.com/synaptics-torq/torq-compiler/releases) from the **Assets** section and uncompress it.
 - There are some prerequisite system packages that need to be installed.
 Please refer to apt-packages.txt for the list.
 - In the root directory of the uncompressed package, run:
@@ -47,7 +47,7 @@ You can use **either** of the following approaches:
 
 - Create an ephemeral Docker container that uses the prebuilt image:
     ```bash
-    $ docker run --rm -it -v $(pwd):$(pwd) -w $(pwd) -u $(id -u):$(id -g) ghcr.io/syna-astra-dev/iree-synaptics-synpu/compiler:latest
+    $ docker run --rm -it -v $(pwd):$(pwd) -w $(pwd) -u $(id -u):$(id -g) ghcr.io/synaptics-torq/torq-compiler/compiler:main
     ```
     The container will have access to the contents of your current directory.
 
