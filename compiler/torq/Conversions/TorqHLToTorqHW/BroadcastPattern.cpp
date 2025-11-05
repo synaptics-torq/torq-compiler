@@ -30,73 +30,102 @@ BroadcastPattern::transform(torq_hl::BroadcastOp op, PatternRewriter &rewriter) 
     if (broadcastDims.empty()) {
         return failure();
     }
-    // if (broadcastDims.size() != 1) {
-    //     return rewriter.notifyMatchFailure(
-    //         op, "Broadcast dimensions must be a single value for now"
-    //     );
-    // }
 
-    auto dim = broadcastDims[0];
-    if (dim < 0 || dim >= outputShape.size()) {
-        return rewriter.notifyMatchFailure(op, "Invalid broadcast dimension");
-    }
+    SmallVector<int64_t> dims(broadcastDims.begin(), broadcastDims.end());
+    llvm::sort(dims.begin(), dims.end());
+    const auto outRank = static_cast<int>(outputShape.size());
+    const auto inRank = static_cast<int>(inputShape.size());
 
-    uint32_t initSize = 1;
-    for (int i = 0; i < inputShape.size(); ++i) {
-        initSize *= inputShape[i];
-    }
-
-    uint32_t dimSize = outputShape[dim];
-
-    // 1x1x1 -> 1x21x1024
-    // if broadcast from 1x1x1, we don't care if dims.size()==1
-    if (initSize == 1) {
-        dimSize = 1;
-        for (int i = 0; i < outputShape.size(); ++i) {
-            dimSize *= outputShape[i];
+    for (int64_t d : dims) {
+        if (d < 0 || d >= outRank) {
+            return rewriter.notifyMatchFailure(op, "Invalid broadcast dimension");
         }
     }
+
+    auto allPrevOutOnes = [&](int dimIdx) -> bool {
+        for (int i = 0; i < dimIdx; ++i) {
+            if (outputShape[i] != 1)
+                return false;
+        }
+        return true;
+    };
+
+    int primaryDim = -1;
+
+    // Primary-dim selection prefers places that match our simple 2D kernel shape.
+    // Prefer append: dim == inRank.
+    for (int64_t d : dims) {
+        if (d == inRank) {
+            primaryDim = static_cast<int>(d);
+            break;
+        }
+    }
+
+    // Prefer same-rank last: dim == inRank - 1.
+    // Passes when expanding the last existing dim of a same-rank tensor,
+    // e.g. [1x21x1] -> [1x21x1024] at dim=2
+    if (primaryDim < 0 && inRank > 0) {
+        for (int64_t d : dims) {
+            if (d == inRank - 1) {
+                primaryDim = static_cast<int>(d);
+                break;
+            }
+        }
+    }
+
+    // Try first legal middle insert: 0 < dim < outRank && all previous outputs are 1.
+    // Passes when inserting in the middle but the earlier output dims are all 1,
+    // which avoids ambiguous layout. This matches our “middle insert” constraint
+    if (primaryDim < 0) {
+        for (int64_t d : dims) {
+            if (d > 0 && d < outRank && allPrevOutOnes(static_cast<int>(d))) {
+                primaryDim = static_cast<int>(d);
+                break;
+            }
+        }
+    }
+
+    auto product64 = [](ArrayRef<int64_t> shape) -> uint64_t {
+        uint64_t p = 1;
+        for (int64_t v : shape) {
+            p *= static_cast<uint64_t>(v);
+        }
+        return p;
+    };
+
+    uint64_t initSize = product64(inputShape);
+
+    uint64_t dimSize = static_cast<uint64_t>(
+        (initSize == 1) ? product64(outputShape) : // scalar fast-path: fill all
+            std::max<int64_t>(outputShape[primaryDim], 1)
+    );
 
     Shape oShape;
     bool outputIdxReverse = false;
-    // 6 -> 6x7 or 6x7 -> 6x7x3 or 6x7 -> 6x7x5x3
-    if (dim == inputShape.size() ||
-        // 1x21x1 -> 1x21x1024
-        (inputShape.size() == outputShape.size() && dim == inputShape.size() - 1) ||
-        // 1x1x1 -> 1x21x1
-        (initSize == 1)) {
 
-        outputIdxReverse = false;
-        oShape = {initSize, dimSize};
+    // Append-style (dim==inRank), same-rank last (dim==inRank-1), OR scalar fast-path.
+    if (primaryDim == inRank || (inRank == outRank && primaryDim == inRank - 1) ||
+        (initSize == 1)) {
+        outputIdxReverse = false; // expand across columns
+        oShape = {static_cast<int64_t>(initSize), static_cast<int64_t>(dimSize)};
     }
-    else if (dim == 0) {
-        // 6 -> 7x6 or 6x5 -> 7x6x5
-        outputIdxReverse = true;
-        oShape = {dimSize, initSize};
+    // Prepend-style (dim==0).
+    else if (primaryDim == 0) {
+        outputIdxReverse = true; // expand across rows
+        oShape = {static_cast<int64_t>(dimSize), static_cast<int64_t>(initSize)};
     }
-    else if (dim > 0) {
-        // 1x6 -> 1x7x6, 1x1x1x6 -> 1x1x1x7x6
-        bool allOne = true;
-        if (dim > 0) {
-            for (int i = 0; i < dim; i++) {
-                if (outputShape[i] != 1) {
-                    allOne = false;
-                    break;
-                }
-            }
-        }
-        if (allOne) {
-            outputIdxReverse = true;
-            oShape = {dimSize, initSize};
-        }
-        else {
+    // Middle insert (primaryDim>0) but only when all earlier outputs are 1.
+    else if (primaryDim > 0) {
+        if (!allPrevOutOnes(primaryDim)) {
             return rewriter.notifyMatchFailure(
-                op, "Broadcast doesn't support non-zero dim before broadcast dimension"
+                op, "Broadcast middle-insert requires all earlier output dims to be 1"
             );
         }
+        outputIdxReverse = true;
+        oShape = {static_cast<int64_t>(dimSize), static_cast<int64_t>(initSize)};
     }
     else {
-        return rewriter.notifyMatchFailure(op, "Broadcast not supported for this case");
+        return rewriter.notifyMatchFailure(op, "Unsupported broadcast case");
     }
 
     const DType elementType = getDType(inputType.getElementType());

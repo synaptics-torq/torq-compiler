@@ -136,7 +136,6 @@ static LogicalResult collapseValue(
 
 static LogicalResult
 broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRewriter &rewriter) {
-
     auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
     auto input1Shape = input1Type.getShape();
     auto input1ElementType = input1Type.getElementType();
@@ -160,7 +159,7 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
 
     // if input rank is 1, expand input shape to output rank
     // find the dim postion in output shape equal to input shape
-    // e.g. 21 -> 1x1x21
+    // e.g.
     auto expandTensor = [&](Value input, ArrayRef<int64_t> outputShape) -> Value {
         auto inputType = dyn_cast<RankedTensorType>(input.getType());
         auto inputShape = inputType.getShape();
@@ -206,7 +205,7 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
         input2 = expandTensor(input2, outputShape);
     }
 
-    // if input shape is all 1, we need to collapse it to be 1
+    // If a tensor is full of size-1 dims, collapse it to [1].
     auto collapseTensor = [&](Value input, PatternRewriter &rewriter) -> Value {
         auto inputType = dyn_cast<RankedTensorType>(input.getType());
         auto inputShape = inputType.getShape();
@@ -238,33 +237,143 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
     input1 = collapseTensor(input1, rewriter);
     input2 = collapseTensor(input2, rewriter);
 
-    // align input shape to output shape for broadcasting
-    auto dimvec = [](ArrayRef<int64_t> inputShape, ArrayRef<int64_t> outputShape) {
-        SmallVector<int64_t> dims;
-
-        if (inputShape.size() <= outputShape.size()) {
-            for (int i = 0; i < outputShape.size(); i++) {
-                if (i < inputShape.size()) {
-                    if (inputShape[i] != outputShape[i]) {
-                        dims.push_back(i);
-                    }
-                }
-                else {
-                    dims.push_back(i);
-                }
+    // This inspects affine indexing maps to find which output loop dims
+    // are missing in each input (→ broadcast candidates).
+    auto getBroadcastDimsFromMap = [](AffineMap inputMap,
+                                      AffineMap outputMap) -> SmallVector<int64_t> {
+        llvm::SmallDenseSet<unsigned> usedDims;
+        for (auto expr : inputMap.getResults()) {
+            if (auto dimExpr = llvm::dyn_cast<AffineDimExpr>(expr)) {
+                usedDims.insert(dimExpr.getPosition());
             }
         }
-        return dims;
+
+        SmallVector<int64_t> broadcastDims;
+        for (unsigned i = 0; i < outputMap.getNumDims(); i++) {
+            if (!usedDims.contains(i)) {
+                broadcastDims.push_back(i);
+            }
+        }
+        return broadcastDims;
     };
 
+    // Fetch maps for both inputs and the output
+    SmallVector<AffineMap> indexingMaps = srcOp.getIndexingMapsArray();
+    AffineMap input1Map = indexingMaps[0];
+    AffineMap input2Map = indexingMaps[1];
+    AffineMap outputMap = indexingMaps.back();
+
+    // Recompute shapes (after potential collapse)
     input1Shape = dyn_cast<RankedTensorType>(input1.getType()).getShape();
     input2Shape = dyn_cast<RankedTensorType>(input2.getType()).getShape();
-    SmallVector<int64_t> dims1, dims2;
-    dims1 = dimvec(input1Shape, outputShape);
-    dims2 = dimvec(input2Shape, outputShape);
+
+    // Compute initial broadcast dims
+    SmallVector<int64_t> dims1 = getBroadcastDimsFromMap(input1Map, outputMap);
+    SmallVector<int64_t> dims2 = getBroadcastDimsFromMap(input2Map, outputMap);
+
+    // When ranks match, drop dims where input and output already match (no broadcast).
+    auto filterBySize = [](SmallVector<int64_t> &dims, ArrayRef<int64_t> inputShape,
+                           ArrayRef<int64_t> outputShape) {
+        SmallVector<int64_t> filtered;
+        for (auto d : dims) {
+            if (d < inputShape.size() && inputShape[d] == outputShape[d]) {
+                continue;
+            }
+            filtered.push_back(d);
+        }
+        return filtered;
+    };
+
+    if (input1Shape.size() == outputShape.size()) {
+        dims1 = filterBySize(dims1, input1Shape, outputShape);
+    }
+    if (input2Shape.size() == outputShape.size()) {
+        dims2 = filterBySize(dims2, input2Shape, outputShape);
+    }
+
+    if (dims1.empty() && dims2.empty()) {
+        return success();
+    }
+
+    auto recalculateBroadcastDims = [](Value input, ArrayRef<int64_t> outputShape) {
+        auto inputShape = dyn_cast<RankedTensorType>(input.getType()).getShape();
+        SmallVector<int64_t> broadcastDims;
+
+        for (unsigned i = inputShape.size(); i < outputShape.size(); i++) {
+            broadcastDims.push_back(i);
+        }
+        return broadcastDims;
+    };
+
+    // Detect pre-broadcasted maps that contain constants (like affine_map<(d0,d1,d2)->(0,d1,0)>).
+    auto hasConstants = [](AffineMap map) {
+        for (auto expr : map.getResults()) {
+            if (llvm::isa<AffineConstantExpr>(expr)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Remember ranks before collapse
+    unsigned originalInput1Rank = input1Shape.size();
+    unsigned originalInput2Rank = input2Shape.size();
 
     (void)collapseValue(input1, dims1, outputShape.size(), rewriter);
     (void)collapseValue(input2, dims2, outputShape.size(), rewriter);
+
+    // Refresh shapes and detect whether we collapsed in this pass
+    input1Shape = dyn_cast<RankedTensorType>(input1.getType()).getShape();
+    input2Shape = dyn_cast<RankedTensorType>(input2.getType()).getShape();
+
+    bool input1WasCollapsed = (input1Shape.size() != originalInput1Rank);
+    bool input2WasCollapsed = (input2Shape.size() != originalInput2Rank);
+
+    if (!dims1.empty() && input1Shape.size() < outputShape.size() && hasConstants(input1Map) &&
+        !input1WasCollapsed) {
+        dims1 = recalculateBroadcastDims(input1, outputShape);
+        SmallVector<int64_t> filtered1;
+        for (auto d : dims1) {
+            if (d >= input1Shape.size()) {
+                filtered1.push_back(d);
+            }
+        }
+        dims1 = filtered1;
+    }
+    if (!dims2.empty() && input2Shape.size() < outputShape.size() && hasConstants(input2Map) &&
+        !input2WasCollapsed) {
+        dims2 = recalculateBroadcastDims(input2, outputShape);
+        SmallVector<int64_t> filtered2;
+        for (auto d : dims2) {
+            if (d >= input2Shape.size()) {
+                filtered2.push_back(d);
+            }
+        }
+        dims2 = filtered2;
+    }
+
+    // Don't create linalg.broadcast for same-rank inputs.
+    if (input1Shape.size() == outputShape.size()) {
+        if (!dims1.empty() && !hasConstants(input1Map)) {
+            // Same-rank + dims present but no constants in map is inconsistent.
+            // Either an upstream issue or we skipped a needed collapse step.
+            LLVM_DEBUG(
+                llvm::dbgs()
+                << "[broadcastInputs] Warning: same-rank dims for input1 without constants in map\n"
+            );
+            // Optionally: return failure() to surface the inconsistency early.
+        }
+        dims1.clear();
+    }
+    if (input2Shape.size() == outputShape.size()) {
+        if (!dims2.empty() && !hasConstants(input2Map)) {
+            LLVM_DEBUG(
+                llvm::dbgs()
+                << "[broadcastInputs] Warning: same-rank dims for input2 without constants in map\n"
+            );
+        }
+        dims2.clear();
+    }
 
     if (!dims1.empty()) {
 
@@ -411,7 +520,6 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             );
         }
 
-        // make sure all inputs/outputs have the same affine maps as elementwise binary op requires
         AffineMap m = srcOp.getMatchingIndexingMap(srcOp.getDpsInitOperand(0));
         SmallVector<AffineMap> newIndexingMaps = {m, m, m};
 
