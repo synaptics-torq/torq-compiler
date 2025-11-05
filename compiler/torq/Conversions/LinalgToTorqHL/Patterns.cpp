@@ -2235,7 +2235,6 @@ void populateLinalgToTorqHLPatterns(
         patterns.insert<FillOpConversionRewrite>(context, markFuseGroups);
         return;
     }
-    patterns.insert<ArithOnTensorToLinalgPattern<arith::ExtSIOp>>(context);
 
     patterns.insert<TransposeOpConversion>(context);
     patterns.insert<FillOpConversion>(context);

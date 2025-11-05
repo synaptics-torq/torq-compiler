@@ -53,5 +53,19 @@ def OptimizeLinalgForTorq :
     ];
 }
 
+def DecomposeLinalgOpsPass :
+    InterfacePass<"torq-decompose-linalg-ops-pass",
+                  "mlir::FunctionOpInterface"> {
 
+    let summary = "Rewrites linalg operations in a form more suitable for execution on Torq";
+
+    let constructor =
+        "mlir::syna::torq::createDecomposeLinalgOpsPass()";
+
+    let options = RewritePassUtils.options;
+
+    let dependentDialects = [
+        "linalg::LinalgDialect",
+    ];
+}
 #endif // IREE_CODEGEN_SYNPHL_TO_HW_PASSES

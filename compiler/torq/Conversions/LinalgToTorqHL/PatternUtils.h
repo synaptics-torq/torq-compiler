@@ -219,68 +219,6 @@ bool isCollapseOrExpandShapeGeneric(Operation *op);
 
 StringRef getCastOpName(Value input, Value output);
 
-template <typename OpTy> struct ArithOnTensorToLinalgPattern : public OpRewritePattern<OpTy> {
-    using OpRewritePattern<OpTy>::OpRewritePattern;
-
-    LogicalResult matchAndRewrite(OpTy origOp, PatternRewriter &rewriter) const override {
-
-        Operation *op = origOp.getOperation();
-
-        if (op->getNumResults() != 1) {
-            return rewriter.notifyMatchFailure(op, "Expected one result");
-        }
-
-        auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-
-        if (!resultType) {
-            return rewriter.notifyMatchFailure(op, "Expected ranked tensor type");
-        }
-
-        SmallVector<RankedTensorType> operandTypes;
-
-        for (auto operand : op->getOperands()) {
-            auto rankedType = dyn_cast<RankedTensorType>(operand.getType());
-
-            if (!rankedType) {
-                return rewriter.notifyMatchFailure(op, "Expected ranked tensor type");
-            }
-
-            if (rankedType.getShape() != resultType.getShape()) {
-                return rewriter.notifyMatchFailure(op, "Expected same shape for all operands");
-            }
-
-            operandTypes.push_back(rankedType);
-        }
-
-        size_t rank = resultType.getRank();
-
-        auto emptyOp = rewriter.create<tensor::EmptyOp>(
-            op->getLoc(), resultType.getShape(), resultType.getElementType()
-        );
-
-        SmallVector<AffineMap> maps{
-            op->getNumOperands() + 1, AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext())
-        };
-
-        SmallVector<utils::IteratorType> iteratorTypes{rank, utils::IteratorType::parallel};
-
-        rewriter.replaceOpWithNewOp<linalg::GenericOp>(
-            op, resultType, op->getOperands(), ValueRange{emptyOp}, maps, iteratorTypes,
-            [&](OpBuilder &nestedBuilder, Location loc, ValueRange args) {
-                SmallVector<Value> argsVec;
-                for (size_t i = 0; i < op->getNumOperands(); i++) {
-                    argsVec.push_back(args[i]);
-                }
-                auto value =
-                    nestedBuilder.create<OpTy>(loc, args.back().getType(), argsVec, op->getAttrs());
-                nestedBuilder.create<linalg::YieldOp>(loc, ValueRange{value});
-            }
-        );
-
-        return success();
-    }
-};
-
 bool getIntegerConstantValue(arith::ConstantOp constOp, int32_t *value);
 
 Value create1DimTensorFromRescaleScalar(

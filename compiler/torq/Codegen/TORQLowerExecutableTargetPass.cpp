@@ -118,6 +118,12 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     // this pass use some tags from tile-and-fuse mark pass
     funcPm.addPass(createOptimizeLinalgForTorqPass());
 
+    // Convert tensor-level elementwise arith ops (e.g. addi, subi, andi) into
+    // explicit linalg.generic form. This makes all elementwise math uniform
+    // in Linalg, so later passes like createLinalgTilePass and pattern matching can
+    // handle them consistently.
+    funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
+
     if (clEnableTorqTileAndFuse) {
         funcPm.addPass(createTensorToLinalgPass());
         funcPm.addPass(createTileAndFusePass());
@@ -134,12 +140,6 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     // Handles valid pad operations
     funcPm.addPass(createValidToSamePadPass());
-
-    // Convert tensor-level elementwise arith ops (e.g. addi, subi, andi) into
-    // explicit linalg.generic form. This makes all elementwise math uniform
-    // in Linalg, so later passes like createLinalgTilePass and pattern matching can
-    // handle them consistently.
-    funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
 
     // tile the linalg ops or tilingInterface ops
     funcPm.addPass(createLramTilePass());

@@ -19,6 +19,7 @@ iree_cc_library(
     GeneralizeLinalgNamedOpsPass.cpp
     OptimizeLinalgForTorqPass.cpp
     OptimizeElementwiseBinaryOpPattern.cpp
+    DecomposeLinalgOpsPattern.cpp
   DEPS
     ::PassesIncGen
     MLIRArithDialect

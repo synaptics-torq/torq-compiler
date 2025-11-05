@@ -12,4 +12,6 @@ namespace mlir::syna::torq {
 
 void populateOptimizeElementwiseBinaryOpPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 } // namespace mlir::syna::torq
