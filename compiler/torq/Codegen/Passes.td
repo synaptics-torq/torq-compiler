@@ -321,4 +321,14 @@ def ScalarsToTensors :
         ];
 }
 
+def CompileTimeConstCompute : 
+    InterfacePass<"torq-compile-time-const-compute", "mlir::FunctionOpInterface"> {
+        let summary = "Compute values at compile time for operations marked as compile-time-const";
+        let constructor = "mlir::syna::torq::createCompileTimeConstComputePass()";
+        let dependentDialects = [
+            "syna::torq_hl::TorqHLDialect",
+            "tensor::TensorDialect"
+        ];
+}
+
 #endif // IREE_CODEGEN_TORQ_PASSES

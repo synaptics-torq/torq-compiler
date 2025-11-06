@@ -67,6 +67,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createEncodeTensorsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createScalarsToTensorsPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileTimeConstComputePass();
+
 void addTorqComprehensiveBufferizePasses(
     OpPassManager &funcPassManager,
     std::optional<bufferization::BufferizationOptions::AllocationFn> allocationFn,

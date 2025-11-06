@@ -13,6 +13,7 @@
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/EncodingUtils.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -98,13 +99,10 @@ static mlir::Value weights_OIHW_to_OIHWO(
     // 32x5x3x3 --> 8x5x3x3x4  (for inner_on=4)
     auto packedWeights =
         rewriter.create<tensor::PackOp>(loc, weights, empty, innerDimsPos, innerTiles, zeroVal);
-    auto wtConstAttr = computeValue(packedWeights.getResult(), true, {});
-    if (failed(wtConstAttr)) {
-        weights.getDefiningOp()->emitError() << "Failed to rearrange constant weights tensor";
-        llvm::report_fatal_error("Cannot rearrange constant weights");
-    }
-    auto wtConst = rewriter.create<arith::ConstantOp>(loc, *wtConstAttr);
-    return wtConst;
+
+    setCompileTimeConstAttr(packedWeights);
+    setTargetExecutorAttr(packedWeights, torq_hl::Executor::NSS);
+    return packedWeights.getResult();
 }
 
 // FIXME: remove and use createI8Const from CoversionUtils.h
@@ -265,15 +263,12 @@ static mlir::Value weights_swap_even_odd(PatternRewriter &rewriter, Location loc
         rewriter.getIndexAttr(O), rewriter.getIndexAttr(I), rewriter.getIndexAttr(H),
         rewriter.getIndexAttr(oddColSz)
     };
-    Value res =
+    auto res =
         rewriter.create<tensor::InsertSliceOp>(loc, oddExtract, r1, ins1Off, ins1Sz, insStride);
-    auto swapConstAttr = computeValue(res, true, {});
-    if (failed(swapConstAttr)) {
-        weights.getDefiningOp()->emitError() << "Failed to rearrange constant weights tensor";
-        llvm::report_fatal_error("Cannot rearrange constant weights");
-    }
-    auto swapConst = rewriter.create<arith::ConstantOp>(loc, *swapConstAttr);
-    return swapConst;
+
+    setCompileTimeConstAttr(res);
+    setTargetExecutorAttr(res, torq_hl::Executor::NSS);
+    return res.getResult();
 }
 
 template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePattern<ConvOpT> {
