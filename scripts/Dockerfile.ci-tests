@@ -17,4 +17,5 @@ ENV PATH="/workspace/venv/bin:$PATH"
 
 RUN /workspace/venv/bin/pip install -r /code/build_requirements.txt && \
     /workspace/venv/bin/pip install -r /code/tf_test_requirements.txt && \
-    /workspace/venv/bin/pip install -r /code/requirements.txt
+    /workspace/venv/bin/pip install -r /code/requirements.txt && \
+    /workspace/venv/bin/pip cache purge
