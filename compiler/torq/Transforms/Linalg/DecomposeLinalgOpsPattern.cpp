@@ -65,6 +65,82 @@ struct TensorBitcastPattern : public OpRewritePattern<tensor::BitcastOp> {
     }
 };
 
+// Rewrites linalg.generic ops containing math.powf(x, cst) where cst is a constant 2
+// (for bf16, i8, i16, i32 element types) into a linalg.generic with a multiplication
+// (mul) of the input with itself. This is useful for lowering pow(x, 2) to mul(x, x)
+// until the target dialect does not support powf.
+class PowToMulPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    PowToMulPattern(MLIRContext *context)
+        : OpRewritePattern<linalg::GenericOp>(context, /*benefit=*/0) {
+        setDebugName("PowToMulPattern");
+    }
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        // Only match elementwise binary ops
+        auto powOp =
+            dyn_cast_or_null<math::PowFOp>(getElementwiseBinaryOp(srcOp, /*allowConstant=*/true));
+        if (!powOp) {
+            return rewriter.notifyMatchFailure(srcOp, "Not a math.powf op");
+        }
+        auto rhs = powOp.getRhs();
+        Attribute rhsAttr;
+
+        // Only support constant RHS: check for arith.constant
+        if (auto cOp = rhs.getDefiningOp<arith::ConstantOp>()) {
+            rhsAttr = cOp.getValue();
+        }
+        else {
+            return rewriter.notifyMatchFailure(srcOp, "RHS is not a constant");
+        }
+
+        Type rhsType = rhs.getType();
+        if (rhsType.isF32()) {
+            return rewriter.notifyMatchFailure(srcOp, "Type f32 not supported");
+        }
+
+        bool isTwo = false;
+        if (rhsType.isBF16()) {
+            if (auto floatAttr = mlir::dyn_cast<FloatAttr>(rhsAttr)) {
+                isTwo = (floatAttr.getValueAsDouble() == 2.0);
+            }
+        }
+        else if (rhsType.isInteger(8) || rhsType.isInteger(16) || rhsType.isInteger(32)) {
+            if (auto intAttr = mlir::dyn_cast<IntegerAttr>(rhsAttr)) {
+                isTwo = (intAttr.getInt() == 2);
+            }
+        }
+
+        if (!isTwo) {
+            return rewriter.notifyMatchFailure(srcOp, "RHS constant is not 2");
+        }
+
+        auto elemType = cast<RankedTensorType>(srcOp.getResultTypes()[0]).getElementType();
+
+        // Replace powf(x, 2) with mul(x, x)
+        rewriter.replaceOpWithNewOp<linalg::GenericOp>(
+            srcOp, srcOp.getResultTypes(), srcOp.getInputs(), srcOp.getOutputs(),
+            srcOp.getIndexingMapsArray(), srcOp.getIteratorTypesArray(),
+            [&](OpBuilder &b, Location l, ValueRange args) {
+                Value val;
+                if (mlir::isa<FloatType>(elemType)) {
+                    val = b.create<arith::MulFOp>(l, args[0], args[0]);
+                }
+                else if (mlir::isa<IntegerType>(elemType)) {
+                    val = b.create<arith::MulIOp>(l, args[0], args[0]);
+                }
+                else {
+                    // fallback: yield input as-is (should not happen)
+                    val = args[0];
+                }
+                b.create<linalg::YieldOp>(l, val);
+            }
+        );
+        return success();
+    }
+};
+
 class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     // using OpRewritePattern::OpRewritePattern;
@@ -1076,6 +1152,7 @@ void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet 
     patterns.insert<BfloatDivfPattern>(context);
     patterns.insert<BfloatReciprocalPattern>(context);
     patterns.insert<QuantizedBatchMatmulPattern>(context);
+    patterns.insert<PowToMulPattern>(context);
 }
 
 } // namespace mlir::syna::torq
