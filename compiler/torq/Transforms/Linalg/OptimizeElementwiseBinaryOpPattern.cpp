@@ -90,10 +90,16 @@ static LogicalResult collapseShapeWithDim(Value &input, int dim, PatternRewriter
         return failure();
     }
 
+    auto srcOp = input.getDefiningOp();
+    auto srcOpGroupAttr = srcOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+
     auto outType = RankedTensorType::get(squeezedShape, elementType);
     auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
         input.getLoc(), outType, input, ArrayRef<ReassociationIndices>{newShape}
     );
+    if (srcOpGroupAttr) {
+        collapseOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
+    }
 
     input = collapseOp.getResult();
 
@@ -145,6 +151,8 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
     auto outputType = dyn_cast<RankedTensorType>(srcOp->getResult(0).getType());
     auto outputShape = outputType.getShape();
 
+    auto srcOpGroupAttr = srcOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+
     // this case should never happen
     if (input1Shape.size() > outputShape.size() || input2Shape.size() > outputShape.size()) {
         llvm::errs() << "input1 shape size: " << input1Shape.size()
@@ -190,6 +198,11 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
             auto expandOp = rewriter.create<tensor::ExpandShapeOp>(
                 input.getLoc(), newType, input, ArrayRef<ReassociationIndices>{reassociationIndices}
             );
+
+            if (srcOpGroupAttr) {
+                expandOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
+            }
+
             return expandOp.getResult();
         }
 
@@ -228,6 +241,11 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
             auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
                 input.getLoc(), outType, input, ArrayRef<ReassociationIndices>{collapseShape}
             );
+
+            if (srcOpGroupAttr) {
+                collapseOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
+            }
+
             return collapseOp.getResult();
         }
 
@@ -379,24 +397,26 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
 
         auto broadcastOutputType = RankedTensorType::get(outputShape, input1ElementType);
 
-        input1 = rewriter
-                     .create<linalg::BroadcastOp>(
-                         srcOp.getLoc(), input1,
-                         createInitTensor(srcOp, rewriter, broadcastOutputType), dims1
-                     )
-                     .getResults()[0];
+        auto broadcastOp = rewriter.create<linalg::BroadcastOp>(
+            srcOp.getLoc(), input1, createInitTensor(srcOp, rewriter, broadcastOutputType), dims1
+        );
+
+        input1 = broadcastOp.getResults()[0];
+        if (srcOpGroupAttr) {
+            broadcastOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
+        }
     }
 
     if (!dims2.empty()) {
 
         auto broadcastOutputType = RankedTensorType::get(outputShape, input1ElementType);
-
-        input2 = rewriter
-                     .create<linalg::BroadcastOp>(
-                         srcOp.getLoc(), input2,
-                         createInitTensor(srcOp, rewriter, broadcastOutputType), dims2
-                     )
-                     .getResults()[0];
+        auto broadcastOp = rewriter.create<linalg::BroadcastOp>(
+            srcOp.getLoc(), input2, createInitTensor(srcOp, rewriter, broadcastOutputType), dims2
+        );
+        input2 = broadcastOp.getResults()[0];
+        if (srcOpGroupAttr) {
+            broadcastOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
+        }
     }
 
     return success();

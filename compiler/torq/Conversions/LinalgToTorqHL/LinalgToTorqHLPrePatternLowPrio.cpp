@@ -88,6 +88,94 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         return false;
     }
 
+    bool broadcastProcessing(Value &input, ScaleInfo &scaleInfo, PatternRewriter &rewriter) const {
+        auto bcastOp = input.getDefiningOp<linalg::BroadcastOp>();
+        if (bcastOp) {
+            input = bcastOp.getInput();
+        }
+
+        auto collapseOp = input.getDefiningOp<tensor::CollapseShapeOp>();
+        if (collapseOp) {
+            input = collapseOp.getSrc();
+        }
+
+        // tensor to linalg pass convert collapse to generic op
+        auto isCollapseOp = [](linalg::GenericOp op) -> bool {
+            auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
+            if (!yieldOp || yieldOp.getNumOperands() != 1) {
+                return false;
+            }
+            auto yieldInputIsBlockArg = dyn_cast<BlockArgument>(yieldOp.getOperand(0));
+            if (!yieldInputIsBlockArg) {
+                return false;
+            }
+            auto maybeCollapseOpInputType = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
+            auto maybeCollapseOpOutputType =
+                dyn_cast<RankedTensorType>(op.getResultTensors()[0].getType());
+            if (maybeCollapseOpInputType.getRank() <= maybeCollapseOpOutputType.getRank()) {
+                return false;
+            }
+            return true;
+        };
+
+        auto maybeCollapseOp = input.getDefiningOp<linalg::GenericOp>();
+        if (maybeCollapseOp) {
+            if (isCollapseOp(maybeCollapseOp)) {
+                input = maybeCollapseOp->getOperand(0);
+            }
+            else {
+                maybeCollapseOp = nullptr;
+            }
+        }
+
+        while (foldBackwardRescale(input, scaleInfo)) {
+        }
+
+        auto inputElementType = dyn_cast<RankedTensorType>(input.getType()).getElementType();
+
+        // linalg.generic as collapse_shape
+        if (maybeCollapseOp) {
+            auto maybeCollapseOpOutputShape =
+                dyn_cast<RankedTensorType>(maybeCollapseOp.getResult(0).getType()).getShape();
+
+            auto newOutputType =
+                RankedTensorType::get(maybeCollapseOpOutputShape, inputElementType);
+
+            auto newCollapseOp = rewriter.create<tensor::CollapseShapeOp>(
+                maybeCollapseOp.getLoc(), newOutputType, input, maybeCollapseOp->getAttrs()
+            );
+            maybeCollapseOp.getResult(0).replaceAllUsesWith(newCollapseOp.getResult());
+            rewriter.eraseOp(maybeCollapseOp);
+        }
+
+        // tensor.collapse_shape
+        if (collapseOp) {
+            auto collapseShape = collapseOp.getResultType().getShape();
+            auto newOutputType = RankedTensorType::get(collapseShape, inputElementType);
+
+            auto newCollapseOp = rewriter.create<tensor::CollapseShapeOp>(
+                collapseOp.getLoc(), newOutputType, input, collapseOp.getReassociationIndices()
+            );
+            collapseOp->getResult(0).replaceAllUsesWith(newCollapseOp.getResult());
+            rewriter.eraseOp(collapseOp);
+        }
+
+        if (bcastOp) {
+            auto bOutputShape = bcastOp.getInit().getType().getShape();
+            auto bOutputType = RankedTensorType::get(bOutputShape, inputElementType);
+
+            auto op = rewriter.create<linalg::BroadcastOp>(
+                bcastOp.getLoc(), bcastOp.getInput(),
+                createInitTensor(bcastOp, rewriter, bOutputType), bcastOp.getDimensionsAttr()
+            );
+            rewriter.replaceOp(bcastOp, op.getResults()[0]);
+
+            input = op.getResults()[0];
+        }
+
+        return true;
+    }
+
     EltwiseBinaryConvert(
         MLIRContext *context, int shift8b, int shift16b, OpType opType, bool markFuseGroups
     )
@@ -167,19 +255,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         while (foldBackwardRescale(input1, scaleInput1)) {
         }
 
-        auto bcastOp = input1.getDefiningOp<linalg::BroadcastOp>();
-        if (bcastOp) {
-            input1 = bcastOp.getInput();
-        }
-
-        auto collapseOp = input1.getDefiningOp<tensor::CollapseShapeOp>();
-        if (collapseOp) {
-            input1 = collapseOp.getSrc();
-        }
-
-        while (foldBackwardRescale(input1, scaleInput1)) {
-        }
-
         if (_markFuseGroups) {
             markFuseGroupBackward(
                 output, {input0, input1}, rewriter,
@@ -188,34 +263,8 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             return success();
         }
 
-        if (collapseOp) {
-            auto collapseShape = collapseOp.getResultType().getShape();
-            auto collapseInputElementType =
-                dyn_cast<RankedTensorType>(input1.getType()).getElementType();
-            auto newOutputType = RankedTensorType::get(collapseShape, collapseInputElementType);
-
-            auto newCollapseOp = rewriter.create<tensor::CollapseShapeOp>(
-                collapseOp.getLoc(), newOutputType, input1, collapseOp.getReassociationIndices()
-            );
-            collapseOp->getResult(0).replaceAllUsesWith(newCollapseOp.getResult());
-            rewriter.eraseOp(collapseOp);
-        }
-
-        if (bcastOp) {
-            auto bcastInputElementType =
-                dyn_cast<RankedTensorType>(input1.getType()).getElementType();
-
-            auto bOutputShape = bcastOp.getInit().getType().getShape();
-            auto bOutputType = RankedTensorType::get(bOutputShape, bcastInputElementType);
-
-            auto op = rewriter.create<linalg::BroadcastOp>(
-                loc, bcastOp.getInput(), createInitTensor(bcastOp, rewriter, bOutputType),
-                bcastOp.getDimensionsAttr()
-            );
-            rewriter.replaceOp(bcastOp, op.getResults()[0]);
-
-            input1 = op.getResults()[0];
-        }
+        broadcastProcessing(input0, scaleInput0, rewriter);
+        broadcastProcessing(input1, scaleInput1, rewriter);
 
         // Compute scale and bias vectors
         const double outputScale = scInfo.scaleDouble[0];
