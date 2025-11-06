@@ -75,11 +75,18 @@ jobs:
               # remove the token from the submodules that have it
               git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
 
-          - name: Build and push Docker image
+          - name: Build and push build Docker image
             uses: docker/build-push-action@v6
-            id: push
             with:
               context: .
               file: scripts/Dockerfile.ci
               push: ${{ github.ref == 'refs/heads/main' }}
               tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
+
+          - name: Build and push tests Docker image
+            uses: docker/build-push-action@v6            
+            with:
+              context: .
+              file: scripts/Dockerfile.ci-tests
+              push: ${{ github.ref == 'refs/heads/main' }}
+              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-tests
