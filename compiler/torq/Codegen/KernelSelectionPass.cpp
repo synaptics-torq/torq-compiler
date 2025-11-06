@@ -151,18 +151,9 @@ template <class T> static bool isStride2(T convLikeOp) {
 }
 
 template <typename Stride2Op> void insertSegmentationOp(Stride2Op op, PatternRewriter &rewriter) {
-
     ShapedType inputType = op.getInput().getType();
-
     assert(inputType.getRank() == 4 && "Expecting 4D input tensor");
-
-    auto inputShape = inputType.getShape();
-
-    // FIXME: do we need to do div_ceil or floor here?
-    auto outputType = RankedTensorType::get(
-        {inputShape[0], inputShape[1], 4, div_ceil(inputShape[3], 2), div_ceil(inputShape[2], 2)},
-        inputType.getElementType()
-    );
+    auto outputType = inputType;
 
     rewriter.setInsertionPoint(op);
     Value initTensor = rewriter.create<tensor::EmptyOp>(op.getLoc(), outputType, ValueRange{});

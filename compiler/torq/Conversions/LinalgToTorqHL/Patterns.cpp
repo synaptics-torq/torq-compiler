@@ -1209,7 +1209,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         if (opName == "sub") {
             weights[1] = llvm::APFloat(bf16, "-1.0");
         }
-        std::vector<float> biasScale{0.0, 1.0};
+        std::vector<float> biasScale{0.0};
         auto torqWeights = createConst(weights, rewriter, srcOp.getLoc());
 
         if (srcOp.getNumDpsInits() != 1 && srcOp.getInputs().size() != 1) {
@@ -1232,7 +1232,8 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
             biasScale[0] = newBias;
         }
         if (needReverse && opName == "sub") {
-            biasScale[1] = -1;
+            assert(false && "scale not supported for bf16 operations");
+            // biasScale[1] = -1;
             opName = "add";
         }
 

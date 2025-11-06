@@ -281,6 +281,7 @@ KernelEncoding TransposeOp::getKernelEncoding() {
 }
 
 static KernelEncoding getDenseEncoding() { return {{}, {{}, 0, true}}; }
+static KernelEncoding getNoEncoding() { return {{}, {{}, 0}}; }
 
 template <typename OpT> static KernelEncoding getDenseTwoInputEncoding(OpT op) {
     auto req = getDenseEncoding();
@@ -505,28 +506,9 @@ KernelEncoding TransposeReshapeOp::getKernelEncoding() {
     return {{}, outEncoding};
 }
 
-KernelEncoding MaxPool2dOp::getKernelEncoding() {
+KernelEncoding MaxPool2dOp::getKernelEncoding() { return getDefault1InputEncoding(*this); }
 
-    if (getOperation()->hasAttr("torq-segmented-input")) {
-        return {
-            {{getInputMutable().getOperandNumber(), defaultEncoding(getInput().getType())}},
-            defaultEncoding(getOutput().getType())
-        };
-    }
-
-    return getDefault1InputEncoding(*this);
-}
-
-KernelEncoding SegmentationOp::getKernelEncoding() {
-
-    auto resultType = cast<RankedTensorType>(getOutput().getType());
-
-    int defaultByteAlign = 64;
-
-    auto alignWithType = getAlignmentByType(defaultByteAlign, resultType.getElementType());
-
-    return {{}, {{0, 0, alignWithType, 0, 0}, 0}};
-}
+KernelEncoding SegmentationOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ReduceMeanOp::getKernelEncoding() {
     auto resultType = getInit().getType();

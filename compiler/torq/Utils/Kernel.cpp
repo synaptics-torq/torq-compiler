@@ -22,8 +22,9 @@ namespace mlir::syna::torq {
 // Compute the stride of dimension i by multiplying the dimensions up to i (excluded)
 // or the expicit stride if present
 // if i < 0 compute the stride (size) of the entire shape
-static Stride computeStride(const Shape &dims, int i) {
-    Stride stride = 1;
+static Stride computeStride(const Shape &dims, int i, DType dType = DType::int8) {
+    int itemSize = sizeofType(dType);
+    Stride stride = itemSize;
     for (int j = dims.size() - 1; j >= 0; j--) {
         if (dims[j].stride.hasVal()) {
             stride = dims[j].stride;
@@ -380,6 +381,31 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
     return os;
 }
 
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const IterVar &iv) {
+    if (iv.isReverse())
+        os << "R(" << static_cast<int>(iv) << ")";
+    else
+        os << static_cast<int>(iv);
+    return os;
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Indexes &indexes) {
+    os << "[";
+    for (size_t i = 0; i < indexes.size(); ++i) {
+        if (i > 0) {
+            os << ", ";
+        }
+        os << indexes[i];
+    }
+    os << "]";
+    return os;
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Iterator &iterator) {
+    os << static_cast<Indexes>(iterator);
+    return os;
+}
+
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape) {
     os << "[";
     for (size_t i = 0; i < shape.size(); ++i) {
@@ -429,6 +455,7 @@ Data::Data(
 
 const Indexes &Data::indexes() const { return _ix; }
 const Shape &Data::shape() const { return _shape; }
+Shape &Data::getShape() { return _shape; }
 int Data::dim(int i) const {
     if (i < 0) {
         i = _shape.size() + i;
@@ -444,6 +471,9 @@ std::vector<int> Data::dims() const {
     return dims;
 }
 std::vector<int> Data::dims(int begin, int end) const {
+    if (begin < 0) {
+        begin = _shape.size() + begin;
+    }
     if (end < 0) {
         end = _shape.size() + end;
     }
@@ -603,6 +633,21 @@ struct SlicePrivate {
 
 SlicePrivate::SlicePrivate() {}
 
+// Decompose number into two factors, both <= 65535 possible
+// If not possible returns a pair of -1s
+static std::pair<int, int> decomposeIntoTwoFactors(int number) {
+    const int kMaxFactor = 65535;
+    for (int i = 1; i <= kMaxFactor && i <= number; ++i) {
+        if (number % i == 0) {
+            int j = number / i;
+            if (j <= kMaxFactor) {
+                return {i, j};
+            }
+        }
+    }
+    return {-1, -1};
+}
+
 int SlicePrivate::addDims(
     NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data, int appendBlockSize
 ) {
@@ -628,10 +673,11 @@ int SlicePrivate::addDims(
     int lBlockSizeBytes = hBlockCount > 1 ? busWidth : blockSizeBytes;
     int lBlockSize = lBlockSizeBytes / elementSize;
 
-    assert(
-        hBlockCount == 1 ||
-        blockSizeBytes % busWidth == 0 && "Block size must be a multiple of bus width"
-    );
+    if (hBlockCount != 1 && blockSizeBytes % busWidth != 0) {
+        llvm::errs() << "Error: in " << type << " block size " << blockSizeBytes
+                     << " must be a multiple of bus width " << busWidth << "\n";
+        assert(false && "Block size must be a multiple of bus width");
+    }
 
     // At this level we don't care about the actual element type, just about element size,
     // so we can consider it as an additional dimension (important for stride computation)
@@ -736,13 +782,23 @@ int SlicePrivate::addDims(
             if (elementSize == 4) {
                 // HW doesn't support elementSize == 4 but if the output is dense we can adjust
                 // the data type and the count accordingly
-                denseCnt *= 4;
-                elementSize = 1;
+                denseCnt *= 2;
+                elementSize = 2;
                 ndlDims.back().count = elementSize;
             }
 
             // Sequential write to a dense subtensor
-            ndlDims.push_back({DimType::S, MemDimTag::X, denseCnt, elementSize});
+            if (denseCnt > 65535) {
+                auto cntPair = decomposeIntoTwoFactors(denseCnt);
+                assert(cntPair.first != -1 && "SDIM dense count is a prime number too large");
+                ndlDims.push_back({DimType::S, MemDimTag::X, cntPair.first, elementSize});
+                ndlDims.push_back(
+                    {DimType::S, MemDimTag::Y, cntPair.second, elementSize * cntPair.first}
+                );
+            }
+            else {
+                ndlDims.push_back({DimType::S, MemDimTag::X, denseCnt, elementSize});
+            }
         }
         else if (sdimsShape.size() == 2 || sdimsShape.size() == 4) {
             // Should be even-odd split or 4-quadrants even-odd segmentation
@@ -1900,19 +1956,44 @@ void partitionByIndexParity2D(LData &data) {
     // To be verified if the below assert is really needed
     int h = subShape[0].count;
     int w = subShape[1].count;
-    assert(h % 2 == 0 && w % 2 == 0 && "Last two dimensions must be even for partitioning");
-    int subFrameSize = div_ceil(h, 2) * div_ceil(w, 2);
+    // Note: this works also if h or w are odd
+    int subFrameSize = (h * w) / 4;
 
     int elementSize = sizeofType(data.elementType());
     shape.pop_back();
     shape.pop_back();
-    shape.push_back({div_ceil(h, 2), div_ceil(w, 2) * elementSize});
+    // Note: use normal div here instead of div_ceil, as in the original ndl-based implementation
+    shape.push_back({(h / 2), (w / 2) * elementSize});
     shape.push_back({2, subFrameSize * 2 * elementSize});
-    shape.push_back({div_ceil(w, 2), 1 * elementSize});
+    shape.push_back({(w / 2), 1 * elementSize});
     shape.push_back({2, subFrameSize * elementSize});
 
     // Update data shape
     data.setShape(shape);
+}
+
+int denseCount(LData &data) {
+    int denseCount = 0;
+    // TODO: we can do better
+    while (denseCount < data.shape().size() &&
+           denseElementCount(data.shape(), data.elementType(), denseCount + 1) > 0) {
+        denseCount++;
+    }
+    return denseCount;
+}
+
+void fuseDense(LData &data, int count) {
+    int fused = 1;
+    for (; (count < 0 || fused < count) && data.shape().size() > 1 &&
+           denseElementCount(data.shape(), data.elementType(), 2) > 0;
+         fused++) {
+        // Merge last two dimensions
+        int rank = data.shape().size();
+        data.getShape()[rank - 2].count *= data.getShape().back().count;
+        data.getShape()[rank - 2].stride = data.getShape().back().stride;
+        data.getShape().pop_back();
+    }
+    assert(fused >= count && "Could not fuse the requested number of dimensions");
 }
 
 void vectorize(LData &data, int vectorSize, std::vector<int> dims) {
@@ -1949,9 +2030,9 @@ void vectorize(LData &data, int vectorSize, std::vector<int> dims) {
     }
 
     // Compute stride of the innermost vectorized dimension
-    Stride baseStride = computeStride(shape, dims.back());
+    Stride baseStride = computeStride(shape, dims.back(), data.elementType());
     assert(!baseStride.exprVal.has_value() && "Cannot vectorize non-constant stride");
-    int baseStrideInt = baseStride.intVal.value() * sizeofType(data.elementType());
+    int baseStrideInt = baseStride.intVal.value();
 
     // Remove vectorized dimensions
     shape.erase(shape.begin() + dims[0], shape.begin() + dims[0] + dims.size());

@@ -75,6 +75,8 @@ class IterVar {
 
 // Indexes of a tensor
 using Indexes = std::vector<IterVar>;
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const IterVar &iv);
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Indexes &indexes);
 
 // Data types for tensor elements
 enum class DType { none, uint8, uint16, uint32, int8, int16, int32, bf16, fp32 };
@@ -119,9 +121,12 @@ class Data {
     std::vector<int> dims() const;
 
     // Get dimensions of the shape in the range [begin, end)
-    // If end is negative it is intended relative to the end of the shape as numpy
+    // If begin or end is negative it is intended relative to the end of the shape as numpy
     // eg if shape is {1,3,16,8} and begin=1, end=-1 will return {3,16}
     std::vector<int> dims(int begin, int end) const;
+
+    // Get R/W data shape
+    Shape &getShape();
 
     // Set data shape
     void setShape(const Shape &shape);
@@ -508,6 +513,7 @@ class Iterator {
     Slice &_kernel;
     Indexes _iterVars;
 };
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Iterator &iterator);
 
 // Reorganize the last dimension into two sub-blocks containing elements
 // with even and odd indexes respectively
@@ -516,6 +522,13 @@ void partitionByIndexParity1D(LData &data);
 // Reorganize the last two dimensions into 4 quadrants containing elements
 // with even-even, even-odd, odd-even and odd-odd indexes respectively
 void partitionByIndexParity2D(LData &data);
+
+// Count the number of dense dimensions in the data shape
+int denseCount(LData &data);
+
+// Fuse all dense dimensions into a single dimension starting from the last dimension up to count
+// If count is -1 all dense dimensions are fused
+void fuseDense(LData &data, int count = -1);
 
 // Vectorize the specified dimensions into a single dimension made of vectors of the given size
 // dims must be contiguous. If dims is empty the last dimension is vectorized.
