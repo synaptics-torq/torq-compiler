@@ -128,6 +128,10 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             }
         }
 
+        if (_markFuseGroups) {
+            return true;
+        }
+
         while (foldBackwardRescale(input, scaleInfo)) {
         }
 
@@ -255,6 +259,9 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         while (foldBackwardRescale(input1, scaleInput1)) {
         }
 
+        broadcastProcessing(input0, scaleInput0, rewriter);
+        broadcastProcessing(input1, scaleInput1, rewriter);
+
         if (_markFuseGroups) {
             markFuseGroupBackward(
                 output, {input0, input1}, rewriter,
@@ -262,9 +269,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             );
             return success();
         }
-
-        broadcastProcessing(input0, scaleInput0, rewriter);
-        broadcastProcessing(input1, scaleInput1, rewriter);
 
         // Compute scale and bias vectors
         const double outputScale = scInfo.scaleDouble[0];

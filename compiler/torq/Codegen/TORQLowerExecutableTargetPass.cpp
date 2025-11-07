@@ -111,9 +111,6 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     funcPm.addPass(createDecomposeSoftmaxPass());
 
-    // mark tags for tile-and-fuse pass and optimize linalg pass
-    funcPm.addPass(createMarkPatternsForTileAndFusePass());
-
     // optimize linalg ops for torq
     // this pass use some tags from tile-and-fuse mark pass
     funcPm.addPass(createOptimizeLinalgForTorqPass());
@@ -125,6 +122,7 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
 
     if (clEnableTorqTileAndFuse) {
+        funcPm.addPass(createMarkPatternsForTileAndFusePass());
         funcPm.addPass(createTensorToLinalgPass());
         funcPm.addPass(createTileAndFusePass());
         funcPm.addPass(createCanonicalizerPass());

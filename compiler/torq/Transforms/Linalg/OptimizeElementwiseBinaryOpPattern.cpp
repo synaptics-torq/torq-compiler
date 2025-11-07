@@ -18,7 +18,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Support/Debug.h"
 
-#define DEBUG_TYPE "torq-optimize-linalg-for-torq"
+#define DEBUG_TYPE "torq-optimize-elementwise-binary-op-pattern"
 
 namespace mlir::syna::torq {
 
@@ -90,16 +90,10 @@ static LogicalResult collapseShapeWithDim(Value &input, int dim, PatternRewriter
         return failure();
     }
 
-    auto srcOp = input.getDefiningOp();
-    auto srcOpGroupAttr = srcOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-
     auto outType = RankedTensorType::get(squeezedShape, elementType);
     auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
         input.getLoc(), outType, input, ArrayRef<ReassociationIndices>{newShape}
     );
-    if (srcOpGroupAttr) {
-        collapseOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
-    }
 
     input = collapseOp.getResult();
 
@@ -151,8 +145,6 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
     auto outputType = dyn_cast<RankedTensorType>(srcOp->getResult(0).getType());
     auto outputShape = outputType.getShape();
 
-    auto srcOpGroupAttr = srcOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-
     // this case should never happen
     if (input1Shape.size() > outputShape.size() || input2Shape.size() > outputShape.size()) {
         llvm::errs() << "input1 shape size: " << input1Shape.size()
@@ -199,10 +191,6 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
                 input.getLoc(), newType, input, ArrayRef<ReassociationIndices>{reassociationIndices}
             );
 
-            if (srcOpGroupAttr) {
-                expandOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
-            }
-
             return expandOp.getResult();
         }
 
@@ -241,10 +229,6 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
             auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
                 input.getLoc(), outType, input, ArrayRef<ReassociationIndices>{collapseShape}
             );
-
-            if (srcOpGroupAttr) {
-                collapseOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
-            }
 
             return collapseOp.getResult();
         }
@@ -397,26 +381,23 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
 
         auto broadcastOutputType = RankedTensorType::get(outputShape, input1ElementType);
 
-        auto broadcastOp = rewriter.create<linalg::BroadcastOp>(
-            srcOp.getLoc(), input1, createInitTensor(srcOp, rewriter, broadcastOutputType), dims1
-        );
-
-        input1 = broadcastOp.getResults()[0];
-        if (srcOpGroupAttr) {
-            broadcastOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
-        }
+        input1 = rewriter
+                     .create<linalg::BroadcastOp>(
+                         srcOp.getLoc(), input1,
+                         createInitTensor(srcOp, rewriter, broadcastOutputType), dims1
+                     )
+                     .getResults()[0];
     }
 
     if (!dims2.empty()) {
 
         auto broadcastOutputType = RankedTensorType::get(outputShape, input1ElementType);
-        auto broadcastOp = rewriter.create<linalg::BroadcastOp>(
-            srcOp.getLoc(), input2, createInitTensor(srcOp, rewriter, broadcastOutputType), dims2
-        );
-        input2 = broadcastOp.getResults()[0];
-        if (srcOpGroupAttr) {
-            broadcastOp->setAttr(TORQ_FUSE_GROUP, srcOpGroupAttr);
-        }
+        input2 = rewriter
+                     .create<linalg::BroadcastOp>(
+                         srcOp.getLoc(), input2,
+                         createInitTensor(srcOp, rewriter, broadcastOutputType), dims2
+                     )
+                     .getResults()[0];
     }
 
     return success();
@@ -426,6 +407,64 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
 class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
+
+    bool isScalarFromRecursiveRescale(const Value &v) const {
+        Value input = v;
+        ScaleInfo scaleInfo;
+
+        // if input is from tensor.expandshape, assign input to expandop's input
+        if (auto expandOp = dyn_cast<tensor::ExpandShapeOp>(input.getDefiningOp())) {
+            input = expandOp.getSrc();
+        }
+
+        while (foldBackwardRescale(input, scaleInfo)) {
+        }
+
+        linalg::GenericOp rescaleOp = input.getDefiningOp<linalg::GenericOp>();
+
+        if (!rescaleOp) {
+            LLVM_DEBUG({ llvm::errs() << "Value input definingOp is not linalg.generic op\n"; });
+            return false;
+        }
+
+        auto yieldOp = dyn_cast<linalg::YieldOp>(rescaleOp.getBody()->getTerminator());
+        if (!yieldOp) {
+            LLVM_DEBUG({ llvm::errs() << "There is no yield in linalg.generic body\n"; });
+            return false;
+        }
+
+        auto yieldValues = yieldOp.getValues();
+        if (yieldValues.size() != 1) {
+            LLVM_DEBUG({ llvm::errs() << "Linalg.yield operand is not 1 \n"; });
+            return false;
+        }
+
+        tosa::ApplyScaleOp applyScaleOp = yieldValues[0].getDefiningOp<tosa::ApplyScaleOp>();
+        if (!applyScaleOp) {
+            LLVM_DEBUG({ llvm::errs() << "apply scale op does not exist\n"; });
+            return false;
+        }
+
+        Value value = applyScaleOp.getValue();
+        if (!value) {
+            LLVM_DEBUG({ llvm::errs() << "applyScaleOp cannot get value\n"; });
+            return false;
+        }
+
+        auto constOp = dyn_cast<arith::ConstantOp>(value.getDefiningOp());
+        if (!constOp) {
+            LLVM_DEBUG({ llvm::errs() << "defining op is not constant op\n"; });
+            return false;
+        }
+
+        int32_t data = 0;
+        if (!getIntegerConstantValue(constOp, &data)) {
+            LLVM_DEBUG({ llvm::errs() << "cannot get integer constant value\n"; });
+            return false;
+        }
+
+        return true;
+    }
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
@@ -504,34 +543,37 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             );
         }
 
-        // if op is tagged with torq.fuse.group, unnecessary to do broadcast
-        // as it will be fused later probably
-        if (auto groupAttr = srcOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
-            bool needBroadcast = false;
-
-            // FIXME: for now we only check addOp and will remove all these group id check soon
-            if (isa<arith::AddIOp>(eleOp)) {
-
-                Value operand1 = srcOp.getInputs()[0];
-                Value operand2 = srcOp.getInputs()[1];
-
-                ScaleInfo scaleInput1, scaleInput2;
-                if (foldBackwardRescale(operand1, scaleInput1) ||
-                    foldBackwardRescale(operand2, scaleInput2)) {
-                    needBroadcast = true;
-                }
+        auto isConstantValue = [](Value val) {
+            if (auto definingOp = val.getDefiningOp()) {
+                return isa<arith::ConstantOp>(definingOp);
             }
-
-            if (!needBroadcast) {
-                return failure();
-            }
-        }
+            return false;
+        };
 
         auto rank1 = input1Type.getRank();
         auto rank2 = input2Type.getRank();
 
         if (rank1 == 0 || rank2 == 0) {
-            return failure();
+            return rewriter.notifyMatchFailure(
+                srcOp, "one of input or both input rank is 0, no need broadcast\n"
+            );
+        }
+
+        // if one input is rank=1 constant, no need to broadcast
+        if ((isConstantValue(input1) && rank1 < 2) || (isConstantValue(input2) && rank2 < 2)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "one of input or both input is rank=1 constant, no need broadcast\n"
+            );
+        }
+
+        // TODO: add more recursive scalar input processing for elementwise binary ops
+        // right now we only handle add/sub with recurive scalar input processing
+        if (isa<arith::AddIOp>(eleOp) || isa<arith::SubIOp>(eleOp)) {
+            if (isScalarFromRecursiveRescale(input1) || isScalarFromRecursiveRescale(input2)) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "one of input or both input is recurive scalar, no need broadcast\n"
+                );
+            }
         }
 
         if (failed(broadcastInputs(srcOp, input1, input2, rewriter))) {
