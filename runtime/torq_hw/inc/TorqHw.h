@@ -15,6 +15,12 @@
 #include <string>
 #include <atomic>
 
+#ifdef ENABLE_ASTRA_MACHINA
+#define DEF_HW_TYPE "astra_machina"
+#else
+#define DEF_HW_TYPE "sim"
+#endif
+
 namespace synaptics {
 
 /// Virtual interface to lowest-level Torq driver

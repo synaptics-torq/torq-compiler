@@ -49,7 +49,7 @@ IREE_FLAG(bool, torq_debug, false, "Enable debug logs")
 IREE_FLAG(bool, torq_verbose, false, "Enable verbose logs (more than debug logs)")
 IREE_FLAG(bool, torq_step_by_step, false, "Enable step_by_step debug mode")
 IREE_FLAG(string, torq_dump_buffers_dir, "", "Enable dumping intermediate buffers during execution to the specified directory")
-IREE_FLAG(string, torq_hw_type, "sim", "Hardware type [sim, aws_fpga, soc_fpga, astra_machina]")
+IREE_FLAG(string, torq_hw_type, DEF_HW_TYPE, "Hardware type [sim, aws_fpga, soc_fpga, astra_machina]")
 IREE_FLAG(bool, torq_clear_memory, false, "Force clearing XRAM and LRAM before starting execution")
 
 namespace iree {
