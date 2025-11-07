@@ -10,6 +10,7 @@
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
@@ -194,13 +195,32 @@ SmallVector<int64_t> getTilingDimOrder(TilingInterface tilingInterfaceOp) {
     }
 }
 
-int64_t bytesOfSlice(Type type, ArrayRef<OpFoldResult> resultSizes) {
+int64_t bytesOfSlice(Type type, ArrayRef<OpFoldResult> resultSizes, Attribute zero) {
     if (auto rankedType = dyn_cast<RankedTensorType>(type)) {
         int64_t bytes = div_ceil(rankedType.getElementTypeBitWidth(), 8);
-        for (auto sizeValue : resultSizes) {
-            auto size = getConstantIntValue(sizeValue);
-            assert(size && "slice size is not constant");
-            bytes *= size.value();
+        for (auto sizeFoldResult : resultSizes) {
+            auto constSize = getConstantIntValue(sizeFoldResult);
+            if (!constSize) {
+                assert(sizeFoldResult.is<Value>() && "expected Value");
+                auto sizeValue = sizeFoldResult.get<Value>();
+
+                constSize =
+                    llvm::TypeSwitch<Operation *, std::optional<int64_t>>(sizeValue.getDefiningOp())
+                        .Case<affine::AffineMinOp>([&](auto minOp) {
+                            // Evaluate the size at 0,0,...
+                            // This is a bit of a hack, what we really want is a tight upper bound
+                            // of size.
+                            SmallVector<Attribute> dims(minOp.getDimOperands().size(), zero);
+                            return getConstantIntValue(minOp.fold({dims}));
+                        })
+                        // TODO: implement for other operations as needed.
+                        .Default([](auto) {
+                            assert(false && "unexpected operation");
+                            return std::nullopt;
+                        });
+                assert(constSize && "failed to fold slice size to a constant");
+            }
+            bytes *= *constSize;
         }
         return bytes;
     }
@@ -296,6 +316,8 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
     // This does not take into account that while computing an operand, other operands already take
     // space.
 
+    Attribute zero = getAsIndexOpFoldResult(rewriter.getContext(), 1).get<Attribute>();
+
     // Accumulate for each fuse-group the size of operands external to the group.
     llvm::DenseMap<IntegerAttr, int64_t> fusedGroupsBytes;
 
@@ -341,7 +363,7 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
             Operation *resultOp = opResult.getOwner();
 
             // Compute memory usage
-            int64_t operandBytes = bytesOfSlice(opResult.getType(), resultSizes);
+            int64_t operandBytes = bytesOfSlice(opResult.getType(), resultSizes, zero);
             if ((totalOpBytes += operandBytes) > availableMemoryBytes && !isMarkedFuseGroup(op)) {
                 return false;
             }
