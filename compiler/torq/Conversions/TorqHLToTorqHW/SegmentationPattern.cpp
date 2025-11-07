@@ -23,21 +23,20 @@ SegmentationPattern::transform(torq_hl::SegmentationOp op, PatternRewriter &rewr
     LData input(op.getInput());
     LData output(op.getInit());
     assert(input.shape().size() == 4 && output.shape().size() == 4);
-    struct DDim {
+    struct In : Vectorized {
         enum { N, C, H, W };
-        enum { DataVectors = H };
     };
 
     // Vectorize the input data vectors based on the activation width
-    int dataVectorSize = slice.act.width(input.elementType()); // TODO: don't mention act explicitly
-    vectorize(input, dataVectorSize, {DDim::H, DDim::W});
+    int vectorSize = slice.act.width(input.elementType());
+    input.vectorize({In::H, In::W}, vectorSize);
 
     // Reorganize the output to be partitioned in 4 quadrants by index parity in height and width
-    partitionByIndexParity2D(output);
+    output.partitionByIndexParity2D();
 
-    For(auto batch = slice.iterate(input.dim(DDim::N))) {
-        For(auto ch = slice.iterate(input.dim(DDim::C))) {
-            For(auto dv = slice.iterate(input.dim(DDim::DataVectors))) {
+    For(auto batch = slice.iterate(input.dim(In::N))) {
+        For(auto ch = slice.iterate(input.dim(In::C))) {
+            For(auto dv = slice.iterate(input.dim(In::Vectors))) {
                 IData idata = slice.iram.load(input[batch][ch][dv]);
                 PData pdata = slice.alu.load(idata);
                 QData res = slice.act.load(pdata);

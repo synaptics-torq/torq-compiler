@@ -133,7 +133,7 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
             elementType
         );
 #if IDENTITY_EVEN_ODD_WITH_APPEND
-        partitionByIndexParity1D(output);
+        output.partitionByIndexParity1D();
 #endif
         llvm::errs() << "\nOutput after partitioning by index parity output: " << output << "\n";
 

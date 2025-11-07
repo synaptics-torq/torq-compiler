@@ -48,7 +48,17 @@ struct ShapeItem {
 };
 
 // Dimensions and strides of a tensor
-using Shape = std::vector<ShapeItem>;
+class Shape : public std::vector<ShapeItem> {
+  public:
+    using std::vector<ShapeItem>::vector;
+    using std::vector<ShapeItem>::insert;
+    using std::vector<ShapeItem>::erase;
+    auto insert(int pos, const ShapeItem &item) {
+        return std::vector<ShapeItem>::insert(begin() + pos, item);
+    }
+    auto erase(int pos) { return std::vector<ShapeItem>::erase(begin() + pos); }
+};
+
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape);
 
 // Total number of elements in the shape
@@ -82,21 +92,13 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Indexes &indexes);
 enum class DType { none, uint8, uint16, uint32, int8, int16, int32, bf16, fp32 };
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype);
 
-// return size in bytes of the given type
-int sizeofType(DType type);
-
-// return true if the given type is a floating point type
-bool isFloat(DType type);
-
-// return true if the given type is an integer type
-bool isInt(DType type);
-
-// return true if the given type is an unsigned type
-bool isUnsigned(DType type);
-
-// return the DType corresponding to the given MLIR type
-// none if no corresponding type exists
-DType getDType(mlir::Type mlirType);
+// Dimension indicators for vectorized data
+struct Vectorized {
+    enum {
+        Vectors = -2, // The data vectors
+        Elements = -1 // The data elements
+    };
+};
 
 // Represent a data tensor in memory
 // Data is defined by a shape, and it is possible to access a subset of it using indexes.
@@ -193,6 +195,39 @@ class LData : public DataT<LData> {
     LData(const MemRefType &type);
     LData(const Value value);
     static std::string name() { return "LData"; }
+
+    // Dimension manipulation methods
+
+    // Return the number of contiguous dense dimensions at the end of the data shape
+    int denseDims() const;
+
+    // Fuse count dimensions at the end of the data shape into a single dimension.
+    // Asserts if rank < count or some of the dimensions are not dense.
+    // If count is -1 all dense dimensions at the end are fused.
+    LData &fuseDense(int count = -1);
+
+    // Vectorize the specified dimensions into a single dimension made of vectors of the given size
+    // dims must be contiguous.
+    // Dimensions to be vectorized must be dense.
+    // If the number of elements in the specified dimensions is not multiple of vectorSize
+    // the last vector will actually go beyond the end of the data shape, in any case the strides
+    // are adjusted accordingly.
+    // Example:
+    // data shape: {1, 16, 5, 5}, vectorSize: 4, dims: {2, 3}
+    // resulting shape: {1, {16,stride:25}, 7, 4}
+    LData &vectorize(const std::vector<int> &dims, int vectorSize);
+
+    // Vectorize the last dimension.
+    // Shortcut for vectorize({shape.size() -1}, vectorSize)
+    LData &vectorize(int vectorSize);
+
+    // Reorganize the last dimension into two sub-blocks containing elements
+    // with even and odd indexes respectively
+    LData &partitionByIndexParity1D();
+
+    // Reorganize the last two dimensions into 4 quadrants containing elements
+    // with even-even, even-odd, odd-even and odd-odd indexes respectively
+    LData &partitionByIndexParity2D();
 };
 
 // Data in IRAM
@@ -515,38 +550,39 @@ class Iterator {
 };
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Iterator &iterator);
 
-// Reorganize the last dimension into two sub-blocks containing elements
-// with even and odd indexes respectively
-void partitionByIndexParity1D(LData &data);
-
-// Reorganize the last two dimensions into 4 quadrants containing elements
-// with even-even, even-odd, odd-even and odd-odd indexes respectively
-void partitionByIndexParity2D(LData &data);
-
-// Count the number of dense dimensions in the data shape
-int denseCount(LData &data);
-
-// Fuse all dense dimensions into a single dimension starting from the last dimension up to count
-// If count is -1 all dense dimensions are fused
-void fuseDense(LData &data, int count = -1);
-
-// Vectorize the specified dimensions into a single dimension made of vectors of the given size
-// dims must be contiguous. If dims is empty the last dimension is vectorized.
-// Dimensions to be vectorized must be dense.
-// If the number of elements in the specified dimensions is not multiple of vectorSize
-// the last vector will actually go beyond the end of the data shape, in any case the strides
-// are adjusted accordingly.
-// Example:
-// data shape: {1, 16, 5, 5}, vectorSize: 4, dims: {2, 3}
-// resulting shape: {1, {16,stride:25}, 7, 4}
-void vectorize(LData &data, int vectorSize, std::vector<int> dims = {});
-
 // This macro is just a syntactic helper to write Torq loops with iterators in a natural way eg:
 // For (auto block = kernel.iterate(blockCount)) {
 //
 // }
 // Above "block" represents an iterator that calls endfor at the end of the block
 #define For if
+
+//
+// Utility functions
+//
+
+// return size in bytes of the given type
+int sizeofType(DType type);
+
+// return true if the given type is a floating point type
+bool isFloat(DType type);
+
+// return true if the given type is an integer type
+bool isInt(DType type);
+
+// return true if the given type is an unsigned type
+bool isUnsigned(DType type);
+
+// return the DType corresponding to the given MLIR type
+// none if no corresponding type exists
+DType getDType(mlir::Type mlirType);
+
+// Return true if the given type supports scale in the activation unit
+bool hasScale(DType type);
+
+// Return the number of values in each entry of the scale/bias vector for the given type
+// (some types don't have scale but just bias)
+int scaleBiasEntries(DType type);
 
 } // namespace torq
 

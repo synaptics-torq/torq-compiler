@@ -33,18 +33,7 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
 // The 2 inputs are loaded from 2 different addresses.
 // Each input value is copied in two nearby ALU entries and multiplied by the same 16-bits weight.
 // We have 4 weights bytes in total that are precomputed and stored in lram.
-//
-// 1. Read the input data in blocks of 32 pixels, duplicating each of them in 2 ALU entries.
-// 2. Read the weights in blocks of 4 bytes (2 weights).
-// 3. Feed the first input data to ALU with first 16bits weight and process
-// 4. Feed the second input data to ALU with next 16bits weight and process
-// 5. The ALU will output 64 bytes of data.
-// 6. Read the bias & scale
-// 7. The output is rescaled to int8 in blocks of 8
-// 8. The output is written back to LRAM
-// 9. Take the next block of 32 pixels and repeat the process.
-// 10. Repeat the process for the next channel
-FailureOr<SliceTaskOp> buildDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
+FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 LogicalResult convertToHw(torq_hl::AddOp op, PatternRewriter &rewriter);
 
@@ -54,20 +43,6 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
     BinaryOpParams<torq_hl::AddOp> params(addOp, rewriter);
     if (failed(prepareParams(params))) {
         return failure();
-    }
-    // Skip stride mismatch check for batch dimension (dim 0) if batch size is 1,
-    // since differing strides won't affect computation in that case.
-    for (size_t i = 0; i < params.input1Strides.size(); ++i) {
-        if (i == 0 && params.input1Shape[0] == 1)
-            continue;
-
-        // FIXME: we should change input strides somewhere if it is from subview
-        // otherwise we cannot get correct strides to get things work as we have 2 inputs whose
-        // strides might be different but it is needed for hardware computation
-
-        // if (params.input1Strides[i] != params.input2Strides[i]) {
-        //     return addOp.emitError("Input strides must matchh");
-        // }
     }
 
     // check if input and output shapes match
@@ -103,8 +78,21 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
         }
     }
     else {
-        // Case 3: Both inputs are non-scalar, dense layout tensors.
-        sliceTaskOp = buildDenseTaskOp(params);
+        // Case 3: Both inputs are non-scalar tensors.
+        // The two tensors must have the same shape and strides.
+        // Skip stride mismatch check for batch dimension (dim 0) if batch size is 1,
+        // since differing strides won't affect computation in that case.
+        for (size_t i = 0; i < params.input1Strides.size(); ++i) {
+            if (params.input1Shape[i] != params.input2Shape[i])
+                return addOp.emitError("Add input shapes must match");
+            if (i == 0 && params.input1Shape[0] == 1)
+                continue;
+            if (params.input1Strides[i] != params.input2Strides[i]) {
+                return addOp.emitError("Add input strides must matchh");
+            }
+        }
+
+        sliceTaskOp = buildNonScalarTaskOp(params);
     }
 
     if (failed(sliceTaskOp)) {
@@ -241,97 +229,73 @@ FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
     return sliceTaskOp;
 }
 
-FailureOr<SliceTaskOp> buildDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
+FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
+    auto op = params.op;
+    const auto shift = op.getShiftFactor();
+    const auto min = op.getOutputMin();
+    const auto max = op.getOutputMax();
+    const auto zp = op.getOutputZp();
 
-    Slice slice;
-    auto shift = params.op.getShiftFactor();
-    auto min = params.op.getOutputMin();
-    auto max = params.op.getOutputMax();
-    auto zp = params.op.getOutputZp();
+    // Define data tensors
+    LData input(params.input1);
+    LData output(params.input2);
+    LData weights(op.getWeights());
+    LData biasScale(op.getScaleBias());
+    assert(weights.dim(0) == 2);
+    assert(biasScale.dim(0) == scaleBiasEntries(input.elementType()));
 
-    // By default consider the entire input as a single channel
-    const uint32_t channelCount = 1;
-    uint32_t channelSize = getEncodedTotalSizeBytes(params.type1);
+    // Dimensions of the input data for processing
+    struct In : Vectorized {
+        enum {
+            InputTensors, // Selects between the two input tensors
+            DataDim,      // First (non-dense) data dimension if any
+        };
+    };
 
-    // Number of inputs to be added
-    const uint32_t inputCount = 2;
-
-    // We have a single 16-bits weight for each input
-    DType weightType = params.inputElementType.isInteger(32) ? DType::int8 : DType::int16;
-    DType inputType = getDType(params.inputElementType);
-
-    // Input data that are processed at once by ALU
-    uint32_t blockSize = slice.alu.iWidth(inputType, weightType);
-
-    auto segment_output = params.op.getSegmentOutput();
-    if (segment_output) {
-        // If output is segmented, we have to process channel by channel
-        if (params.outputShape.size() != 4) {
-            return params.op.emitError("Output segmentation only available for rank 4 tensors");
-        }
-        channelSize = params.input1Strides[1];
-        assert(false && "AddOp segment output is not supported yet");
-    }
-
-    // Input buffer size must be a multiple of the block size
-    if (channelSize % blockSize != 0) {
-        return params.op.emitError("Channel size must be multiple of " + std::to_string(blockSize));
-    }
-
-    channelSize /= params.inputElementSize; // Convert to elements count
-
-    const uint32_t blocksPerChannel = div_ceil(channelSize, blockSize);
-    const int32_t blockCount = blocksPerChannel * channelCount;
-
-    // The difference between the two input addresses is used as offset in DEDR to fetch the
-    // data
-    auto input1Address =
-        params.rewriter.create<GetAddressOp>(params.loc, params.input1).getAddress();
-    auto input2Address =
-        params.rewriter.create<GetAddressOp>(params.loc, params.input2).getAddress();
+    // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
+    // The difference between the two input addresses is used as offset to fetch the data
     auto inputDiff = getAffineDimExpr(1, params.ctx) - getAffineDimExpr(0, params.ctx);
+    input.getShape().insert(In::InputTensors, {2, inputDiff});
 
-    // Data processed by ACT at once
-    uint32_t actBlockSize = slice.act.width(inputType, weightType);
-
-    LData input(
-        {{inputCount, inputDiff}, blockCount, blockSize}, getDType(params.inputElementType)
-    );
-
-    LData weights({inputCount}, getDType(params.op.getWeights().getType().getElementType()));
-    int biasNum = 2;
-    if (getDType(params.inputElementType) == DType::bf16) {
-        biasNum = 1;
+    // Take care of output segmentation if requested
+    int denseDims = std::min(input.denseDims(), output.denseDims());
+    if (op.getSegmentOutput()) {
+        // In this case vectorize on H & W dimensions only, so the output can be segmented
+        denseDims = 2;
+        output.partitionByIndexParity2D();
     }
-    LData biasScale({biasNum}, getDType(params.op.getScaleBias().getType().getElementType()));
 
-    LData output(
-        {blockCount, blockSize / actBlockSize, actBlockSize},
-        getDType(params.op.getInit().getType().getElementType())
-    );
+    // Vectorize the input tensor
+    Slice slice;
+    int vectorSize = slice.alu.iWidth(input.elementType(), weights.elementType());
+    input.fuseDense(denseDims).vectorize(vectorSize);
 
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
-    For(auto b = slice.iterate(blockCount)) {
-        PData pdata;
-        For(auto i = slice.iterate(inputCount)) {
-            IData idata = slice.iram.load(input[i][b]);
-            pdata = slice.alu.scalarProductAccumulate(idata, wdata[i]);
-        }
-        For(auto a = slice.iterate(blockSize / actBlockSize)) {
-            QData res = slice.act.rescaleClamp(pdata[a], bdata, shift, zp, min, max);
-            slice.store(output[b][a], res);
+    For(auto ii = slice.iterate(input.dims(In::DataDim, In::Vectors))) {
+        For(auto dv = slice.iterate(input.dim(In::Vectors))) {
+            PData pdata;
+            For(auto i = slice.iterate(input.dim(In::InputTensors))) {
+                IData idata = slice.iram.load(input[i][ii][dv]);
+                pdata = slice.alu.scalarProductAccumulate(idata, wdata[i]);
+            }
+            For(auto a = slice.iterate(pdata.dim(0))) {
+                QData res = slice.act.rescaleClamp(pdata[a], bdata, shift, zp, min, max);
+                slice.append(output[ii], res);
+            }
         }
     }
 
+    auto input1Addr = params.rewriter.create<GetAddressOp>(params.loc, params.input1).getAddress();
+    auto input2Addr = params.rewriter.create<GetAddressOp>(params.loc, params.input2).getAddress();
     auto sliceTaskOp = params.rewriter.create<SliceTaskOp>(
         params.loc,                               // Operation to replace
-        params.op.getName(),                      // Task name
+        op.getName(),                             // Task name
         ValueRange{params.input1, params.input2}, // Input tensor
-        ValueRange{params.op.getWeights()},       // Weights
-        ValueRange{params.op.getScaleBias()},     // BiasScale tensor
-        ValueRange{params.op.getInit()},          // Output tensor initializer
-        ValueRange{input1Address, input2Address}, // Symbols used to compute the NDLs
+        ValueRange{op.getWeights()},              // Weights
+        ValueRange{op.getScaleBias()},            // BiasScale tensor
+        ValueRange{op.getInit()},                 // Output tensor initializer
+        ValueRange{input1Addr, input2Addr},       // Symbols used to compute the NDLs
         slice.getCfgAttr(params.ctx),             // Slice configuration
         slice.getNdls()
     );

@@ -19,6 +19,12 @@ using namespace std;
 
 namespace mlir::syna::torq {
 
+static int denseDims(const LData &data);
+static void fuseDense(LData &data, int count = -1);
+static void vectorize(LData &data, const std::vector<int> &dims, int vectorSize);
+static void partitionByIndexParity1D(LData &data);
+static void partitionByIndexParity2D(LData &data);
+
 // Compute the stride of dimension i by multiplying the dimensions up to i (excluded)
 // or the expicit stride if present
 // if i < 0 compute the stride (size) of the entire shape
@@ -348,6 +354,10 @@ bool isUnsigned(DType type) {
     return type == DType::uint8 || type == DType::uint16 || type == DType::uint32;
 }
 
+bool hasScale(DType type) { return isInt(type); }
+
+int scaleBiasEntries(DType type) { return hasScale(type) ? 2 : 1; }
+
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
     switch (dtype) {
     case DType::uint8:
@@ -526,6 +536,33 @@ LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
 
     setElementType(elementType);
     setShape(dataShape);
+}
+
+int LData::denseDims() const { return torq::denseDims(*this); }
+
+LData &LData::fuseDense(int count) {
+    torq::fuseDense(*this, count);
+    return *this;
+}
+
+LData &LData::vectorize(const std::vector<int> &dims, int vectorSize) {
+    torq::vectorize(*this, dims, vectorSize);
+    return *this;
+}
+
+LData &LData::vectorize(int vectorSize) {
+    torq::vectorize(*this, std::vector<int>(1, shape().size() - 1), vectorSize);
+    return *this;
+}
+
+LData &LData::partitionByIndexParity1D() {
+    torq::partitionByIndexParity1D(*this);
+    return *this;
+}
+
+LData &LData::partitionByIndexParity2D() {
+    torq::partitionByIndexParity2D(*this);
+    return *this;
 }
 
 //
@@ -1921,7 +1958,11 @@ Iterator Iterator::reverse() {
     return std::move(*this);
 }
 
-void partitionByIndexParity1D(LData &data) {
+//
+// Dimension manipulation utilities
+//
+
+static void partitionByIndexParity1D(LData &data) {
     Shape shape = data.shape();
     int rank = shape.size();
     assert(rank >= 1 && "Data must have at least 1 dimensions");
@@ -1930,20 +1971,20 @@ void partitionByIndexParity1D(LData &data) {
 
     // Check the last dim is dense
     assert(denseElementCount(subShape, data.elementType()) > 0 && "Not dense inner dimension");
-    // To be verified if the below assert is really needed
     int w = subShape[0].count;
+    // To be verified if the below assert is really needed
     assert(w % 2 == 0 && "Last dimension must be even for partitioning");
 
     int elementSize = sizeofType(data.elementType());
     shape.pop_back();
-    shape.push_back({div_ceil(w, 2), 1 * elementSize});
-    shape.push_back({2, div_ceil(w, 2) * elementSize});
+    shape.push_back({(w / 2), 1 * elementSize});
+    shape.push_back({2, (w / 2) * elementSize});
 
     // Update data shape
     data.setShape(shape);
 }
 
-void partitionByIndexParity2D(LData &data) {
+static void partitionByIndexParity2D(LData &data) {
     Shape shape = data.shape();
     int rank = shape.size();
     assert(rank >= 2 && "Data must have at least 2 dimensions");
@@ -1972,7 +2013,7 @@ void partitionByIndexParity2D(LData &data) {
     data.setShape(shape);
 }
 
-int denseCount(LData &data) {
+static int denseDims(const LData &data) {
     int denseCount = 0;
     // TODO: we can do better
     while (denseCount < data.shape().size() &&
@@ -1982,7 +2023,7 @@ int denseCount(LData &data) {
     return denseCount;
 }
 
-void fuseDense(LData &data, int count) {
+static void fuseDense(LData &data, int count) {
     int fused = 1;
     for (; (count < 0 || fused < count) && data.shape().size() > 1 &&
            denseElementCount(data.shape(), data.elementType(), 2) > 0;
@@ -1996,11 +2037,12 @@ void fuseDense(LData &data, int count) {
     assert(fused >= count && "Could not fuse the requested number of dimensions");
 }
 
-void vectorize(LData &data, int vectorSize, std::vector<int> dims) {
+static void vectorize(LData &data, const std::vector<int> &dimsIn, int vectorSize) {
     int rank = data.shape().size();
-    if (dims.empty()) {
-        dims.push_back(rank - 1);
+    if (dimsIn.empty()) {
+        return;
     }
+    auto dims = dimsIn;
     std::sort(dims.begin(), dims.end());
     assert(dims[0] >= 0 && dims.back() < rank && "Invalid dimension for vectorization");
 

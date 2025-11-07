@@ -158,7 +158,7 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
              output_shape[3]},
             DType::int8
         );
-        partitionByIndexParity2D(output);
+        output.partitionByIndexParity2D();
     }
 
     Slice slice;

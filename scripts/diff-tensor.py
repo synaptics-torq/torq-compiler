@@ -45,19 +45,24 @@ def print_tensor(tensor):
     colorEnd = "\033[0m"
     
     # Iterate over all dimensions except the last
+    first_row = True
     for idx in np.ndindex(tensor.shape[:-1]):
         data = tensor[idx]
-        print("\033[90m", end="")
-        print(colorIx + "     ", " ".join(f"{v:{field_width-1}}:" for v in range(items_per_row//2)), end="   ")
-        print(" ".join(f"{v:{field_width-1}}:" for v in range(items_per_row//2,items_per_row)), colorEnd)
-        print("\033[0m", end="")
+        if first_row:
+            first_row = False
+            print("\033[90m", end="")
+            print(colorIx + "     ", " ".join(f"{v:{field_width-1}}:" for v in range(min(len(data), items_per_row//2))), end="   ")
+            print(" ".join(f"{v:{field_width-1}}:" for v in range(items_per_row//2,min(len(data), items_per_row))), colorEnd)
+            print("\033[0m", end="")
         print("[", end="")
         line_count = range(0, len(data), items_per_row)
         for line, i in enumerate(line_count):
             if len(line_count) > 1:
                 print(colorIx + f"{line:{2 if line == 0 else 3}}: " + colorEnd, end="")
-                print(" ".join(f"{v:{field_width}}" for v in data[i:i+items_per_row//2]), end="   ")
-                print(" ".join(f"{v:{field_width}}" for v in data[i+items_per_row//2:i+items_per_row]), end="")
+            else:
+                print("    ", end="")
+            print(" ".join(f"{v:{field_width}}" for v in data[i:i+items_per_row//2]), end="   ")
+            print(" ".join(f"{v:{field_width}}" for v in data[i+items_per_row//2:i+items_per_row]), end="")
             print("]" if line == len(line_count) - 1 else "")
 
 
