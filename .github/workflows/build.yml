@@ -128,7 +128,7 @@ jobs:
 
     runs-on:
           - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-            image:${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-tests
+            image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-tests
 
     steps:
 

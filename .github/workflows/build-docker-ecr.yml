@@ -8,6 +8,7 @@ on:
              - main
         paths:
             - 'scripts/Dockerfile.ci'
+            - 'scripts/Dockerfile.ci-tests'
             - 'scripts/install_dependencies.sh'
             - 'scripts/configure_python.sh'
             - 'requirements.txt'
@@ -17,6 +18,7 @@ on:
     pull_request:
         paths:
             - 'scripts/Dockerfile.ci'
+            - 'scripts/Dockerfile.ci-tests'
             - 'scripts/install_dependencies.sh'
             - 'scripts/configure_python.sh'
             - 'requirements.txt'
