@@ -37,14 +37,23 @@ struct Stride {
 
 // ShapeItem represents a dimension of a tensor in terms of its size and optional stride
 struct ShapeItem {
+    enum class Tag {
+        None,
+        Main,      // Main (vectorized) data dimension
+        KernelRows // Dimension associated to kernel row index
+    };
     ShapeItem(int64_t count) : count(int(count)) {}
     ShapeItem(int64_t count, int64_t intStride) : count(int(count)), stride(int(intStride)) {}
+    ShapeItem(int64_t count, int64_t intStride, Tag tag)
+        : count(int(count)), stride(int(intStride)), tag(tag) {}
     ShapeItem(int64_t count, AffineExpr exprStride) : count(int(count)), stride(exprStride) {}
     ShapeItem(const ShapeItem &) = default;
     ShapeItem &operator=(const ShapeItem &) = default;
 
     int count;
     Stride stride;
+    // Tag is only used in input LData to support automatic data padding in convolutions
+    Tag tag{Tag::None};
 };
 
 // Dimensions and strides of a tensor
@@ -60,9 +69,6 @@ class Shape : public std::vector<ShapeItem> {
 };
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape);
-
-// Total number of elements in the shape
-int elementCount(const Shape &shape);
 
 // Loop iteration variable
 class IterVar {
@@ -360,7 +366,7 @@ class Alu : SliceComponent {
     // return: pram data of shape {ceil(N/act::width), act::width}:pType
     // where pType is int32 for integer input, fp32 for float input
     // if N < act::width the result will be {1, N}:pType
-    PData accumulate(const IData &idata, torq_hw::ALUOp1Mode acc);
+    PData accumulate(const IData &idata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC);
 
     // Multiply an input of shape {N} with a scalar weight (or vector of shape {1}) and accumulate
     // N can be any value up to iWidth(iType, wType)
@@ -445,13 +451,13 @@ class Slice {
 
     // Start a for loop iterating over all the values in the range [0, count - 1]
     // returns the loop iteration variable
-    IterVar forall(int count, torq_hw::MemDimTag tag = torq_hw::MemDimTag::O);
+    IterVar forall(int count);
 
     // Terminate a for loop
     void endfor();
 
     // Create an iterator (equivalent to forall/endfor)
-    Iterator iterate(int count, torq_hw::MemDimTag tag = torq_hw::MemDimTag::O);
+    Iterator iterate(int count);
     Iterator iterate(const std::vector<int> &counts);
 
     // Store the computed result to LRAM
@@ -534,7 +540,7 @@ class Iterator {
     Iterator(const Iterator &) = delete;
     Iterator(Iterator &&);
     Iterator &operator=(const Iterator &) = delete;
-    Iterator(Slice &kernel, int count, torq_hw::MemDimTag tag);
+    Iterator(Slice &kernel, int count);
     Iterator(Slice &kernel, const std::vector<int> &counts);
     ~Iterator();
 
@@ -583,6 +589,9 @@ bool hasScale(DType type);
 // Return the number of values in each entry of the scale/bias vector for the given type
 // (some types don't have scale but just bias)
 int scaleBiasEntries(DType type);
+
+// Total number of elements in the shape TODO: make this a method
+int elementCount(const Shape &shape);
 
 } // namespace torq
 

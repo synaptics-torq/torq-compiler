@@ -131,8 +131,8 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
     LData input(
         {
             {inputChannels, inputChStride},
-            {blocksInChannel, blockSize},
-            {ksize_y, rowSize},
+            {blocksInChannel, blockSize, ShapeItem::Tag::Main},
+            {ksize_y, rowSize, ShapeItem::Tag::KernelRows},
             inputBlockSize,
         },
         DType::int8
@@ -166,11 +166,11 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
     slice.setKernel({kernel_left, kernel_right, kernel_top, kernel_bottom});
     slice.setPadding({pad_left, pad_right, pad_top, pad_bottom}, op.getInputZp());
     For(auto og = slice.iterate(outputChGroups)) {
-        For(auto b = slice.iterate(blocksInChannel, MemDimTag::A)) {
+        For(auto b = slice.iterate(blocksInChannel)) {
             PData pdata;
             BData bdata = slice.bram.load(biasScale[og]);
             For(auto u = slice.iterate(inputChannels)) {
-                For(auto j = slice.iterate(ksize_y, MemDimTag::J)) {
+                For(auto j = slice.iterate(ksize_y)) {
                     IData idata = slice.iram.load(input[u][b][j]);
                     WData wdata = slice.wram.load(weight[og][u][j]);
                     idata.setShape({{ksize_x, 1}, blockSize});
@@ -181,7 +181,7 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
                 }
             }
             For(auto o = slice.iterate(outputChInGroup)) {
-                For(auto a = slice.iterate(blockSize / actBlockSize, MemDimTag::A)) {
+                For(auto a = slice.iterate(blockSize / actBlockSize)) {
                     QData res = slice.act.rescaleClamp(pdata[o][a], bdata[o], shift, zp, min, max);
                     if (segmentOutput) {
                         slice.append(output[og][o], res);

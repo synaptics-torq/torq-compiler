@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "Kernel.h"
+#include "torq/Dialect/TorqHW/TorqHWAttrs.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -685,6 +686,18 @@ static std::pair<int, int> decomposeIntoTwoFactors(int number) {
     return {-1, -1};
 }
 
+static torq_hw::MemDimTag tagToMemDimTag(ShapeItem::Tag tag, torq_hw::MemDimTag defaultTag) {
+    switch (tag) {
+    case ShapeItem::Tag::None:
+        return defaultTag;
+    case ShapeItem::Tag::Main:
+        return torq_hw::MemDimTag::A;
+    case ShapeItem::Tag::KernelRows:
+        return torq_hw::MemDimTag::J;
+    }
+    assert(false && "Unknown ShapeItem::Tag");
+}
+
 int SlicePrivate::addDims(
     NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data, int appendBlockSize
 ) {
@@ -769,6 +782,7 @@ int SlicePrivate::addDims(
         // in this case compute the stride from dataDims.
         // If not, this loop doesn't affect this data load, so this is a repeat with stride 0
         Stride stride(0);
+        ShapeItem::Tag tag{};
         int itemsCount = 0;
         const IterVar *iv{};
         for (int dataDimensionIx = 0; dataDimensionIx < ix.size(); dataDimensionIx++) {
@@ -783,6 +797,7 @@ int SlicePrivate::addDims(
                 }
                 stride = computeStride(dataDims, dataDimensionIx);
                 itemsCount = dataDims[dataDimensionIx].count;
+                tag = dataDims[dataDimensionIx].tag;
                 iv = &iterVar;
                 break;
             }
@@ -803,8 +818,8 @@ int SlicePrivate::addDims(
             // If useSDims and this iter variable is not used to explicitly index the output data,
             // this means that it will be covered by SDims, so use an A tag (with stride 0)
             // as required by the hardware
-            auto tag = useSDims && !iv ? MemDimTag::A : _forStack[i].tag;
-            ndlDims.push_back({DimType::H, tag, _forStack[i].count, strideValue});
+            auto memDimTag = useSDims && !iv ? MemDimTag::A : tagToMemDimTag(tag, _forStack[i].tag);
+            ndlDims.push_back({DimType::H, memDimTag, _forStack[i].count, strideValue});
         }
     }
 
@@ -1522,9 +1537,9 @@ Slice::Slice()
 
 Slice::~Slice() {}
 
-IterVar Slice::forall(int count, torq_hw::MemDimTag tag) {
+IterVar Slice::forall(int count) {
     int nesting = d->_forStack.size();
-    d->_forStack.push_back({count, tag});
+    d->_forStack.push_back({count, torq_hw::MemDimTag::O});
     return IterVar{nesting};
 }
 
@@ -1534,9 +1549,9 @@ void Slice::endfor() {
     d->_pram.loadNesting = d->_forStack.size();
 }
 
-Iterator Slice::iterate(int count, torq_hw::MemDimTag tag) {
+Iterator Slice::iterate(int count) {
     // Just create an iterator object that will take care of calling forall/endfor
-    return Iterator(*this, count, tag);
+    return Iterator(*this, count);
 }
 
 Iterator Slice::iterate(const std::vector<int> &counts) { return Iterator(*this, counts); }
@@ -1933,8 +1948,7 @@ int Act::width(DType iType, DType wType) const {
 // Iterator class
 //
 
-Iterator::Iterator(Slice &kernel, int count, torq_hw::MemDimTag tag)
-    : _kernel{kernel}, _iterVars{kernel.forall(count, tag)} {}
+Iterator::Iterator(Slice &kernel, int count) : _kernel{kernel}, _iterVars{kernel.forall(count)} {}
 
 Iterator::Iterator(Slice &kernel, const std::vector<int> &counts) : _kernel{kernel} {
     for (auto count : counts) {
@@ -2082,7 +2096,7 @@ static void vectorize(LData &data, const std::vector<int> &dimsIn, int vectorSiz
     // Append new vectorized dimension
     shape.insert(
         shape.begin() + dims[0],
-        ShapeItem{div_ceil(itemCount, vectorSize), vectorSize * baseStrideInt}
+        ShapeItem{div_ceil(itemCount, vectorSize), vectorSize * baseStrideInt, ShapeItem::Tag::Main}
     );
     shape.insert(shape.begin() + dims[0] + 1, ShapeItem{vectorSize, baseStrideInt});
 
