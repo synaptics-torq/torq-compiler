@@ -38,6 +38,7 @@ iree_cc_library(
     iree::target::torq::Dialect::TorqHL::Dialect
     iree::target::torq::Dialect::TorqHW::Dialect
     iree::target::torq::Transforms::TorqHL::Transforms
+    iree::target::torq::Transforms::Linalg::Transforms
     iree::target::torq::Codegen
     iree::target::torq::Pipelines
   PUBLIC

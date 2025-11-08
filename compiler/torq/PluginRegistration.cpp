@@ -15,6 +15,7 @@
 #include "torq/Dialect/TorqHW/TorqHWDialect.h"
 #include "torq/Pipelines/InputConversionPassPipelines.h"
 #include "torq/Target/TorqTarget.h"
+#include "torq/Transforms/Linalg/Passes.h"
 #include "torq/Transforms/TorqHL/Passes.h"
 
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
@@ -38,6 +39,7 @@ struct TORQSession : public PluginSession<
     static void registerPasses() {
         registerCodegenTORQPasses();
         torq_hl::registerTorqHLPasses();
+        registerOptimizeLinalgForTorqPasses();
 
         registerLinalgToTorqHLPasses();
         registerTosaToTorqHLPasses();

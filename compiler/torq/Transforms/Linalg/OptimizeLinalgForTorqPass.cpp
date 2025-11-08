@@ -41,6 +41,4 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeLinalgForTorqP
     return std::make_unique<OptimizeLinalgForTorqPass>();
 }
 
-static PassRegistration<OptimizeLinalgForTorqPass> pass;
-
 } // namespace mlir::syna::torq

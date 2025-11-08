@@ -15,6 +15,7 @@ iree_cc_library(
     Passes.h
     Passes.h.inc
   SRCS
+    Passes.cpp
     FoldConstantsPass.cpp
     GeneralizeLinalgNamedOpsPass.cpp
     OptimizeLinalgForTorqPass.cpp
