@@ -22,6 +22,10 @@ inputs:
     description: 'Extras repository to checkout'
     required: false
 
+  test_data_cache_artifact:
+    description: 'Name of the test data cache artifact to generate'
+    required: false
+
 runs:
   using: "composite"
   steps:
@@ -103,3 +107,9 @@ runs:
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |            
         pytest -v ${{ inputs.pytest_args }}
+
+    - name: Create compressed test data cache artifact
+      if: ${{ inputs.test_data_cache_artifact != '' }}
+      shell: bash
+      run: |
+        tar -zcf ${{ inputs.test_data_cache_artifact }} -C .pytest_cache/d/ compilation_test_data
