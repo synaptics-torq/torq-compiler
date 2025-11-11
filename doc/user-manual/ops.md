@@ -4,163 +4,183 @@ This document provides a comprehensive list of operators supported by the Synapt
 
 ## Activation related Operators
 
-| Op                | Input  |        TorqHL        | in_t | weight_t | out_t | Tiling  | Implemented | Verified | Notes                                        |
-|:------------------|:------:|:---------------------:|:----:|:--------:|:-----:|:-------:|:-----------:|:--------:|:---------------------------------------------|
-| Abs               |  Tosa  |       Act(ABS)        | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | f32  |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-| Cast              |  Tosa  |       Act(ACT)        | bf16 |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(F2I)        | bf16 |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(F2I)        | bf16 |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(F2I)        | bf16 |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(ACT)        | f32  |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(F2I)        | f32  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(F2I)        | f32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(F2I)        | f32  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2F)        | i16  |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2F)        | i16  |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(ACT)        | i16  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(ACT)        | i16  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2F)        | i32  |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2F)        | i32  |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2F)        | i32  |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2I)        | i32  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2I)        | i32  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2F)        |  i8  |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2F)        |  i8  |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2I)        |  i8  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2I)        |  i8  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |       Act(I2I)        |  i1  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-| Ceil              |  Tosa  |       Act(CEL)        | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | f32  |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-| Clamp             | Linalg |       Act(CLP)        | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | f32  |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-| Clz               |  Clz   |       Act(CLZ)        | i32  |   n/a    | int32 | generic |     Yes     |   Yes    |                                              |
-| Floor             |  Tosa  |       Act(FLR)        | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | f32  |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-| Negate            |  Tosa  |       Act(NEG)        | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | f32  |   n/a    |  f32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
+| Op     | Input  |  TorqHL  | in_t | weight_t | out_t | Tiling  | Notes |
+|:-------|:------:|:--------:|:----:|:--------:|:-----:|:-------:|:------|
+| Abs    |  Tosa  | Act(ABS) | bf16 |   n/a    | bf16  | generic |       |
+|        |        |          | f32  |   n/a    |  f32  | generic |       |
+|        |        |          | i16  |   n/a    |  i16  | generic |       |
+|        |        |          | i32  |   n/a    |  i32  | generic |       |
+|        |        |          |  i8  |   n/a    |  i8   | generic |       |
+| Cast   |  Tosa  | Act(ACT) | bf16 |   n/a    |  f32  | generic |       |
+|        |        | Act(F2I) | bf16 |   n/a    |  i16  | generic |       |
+|        |        | Act(F2I) | bf16 |   n/a    |  i32  | generic |       |
+|        |        | Act(F2I) | bf16 |   n/a    |  i8   | generic |       |
+|        |        | Act(ACT) | f32  |   n/a    | bf16  | generic |       |
+|        |        | Act(F2I) | f32  |   n/a    |  i16  | generic |       |
+|        |        | Act(F2I) | f32  |   n/a    |  i32  | generic |       |
+|        |        | Act(F2I) | f32  |   n/a    |  i8   | generic |       |
+|        |        | Act(I2F) | i16  |   n/a    | bf16  | generic |       |
+|        |        | Act(I2F) | i16  |   n/a    |  f32  | generic |       |
+|        |        | Act(ACT) | i16  |   n/a    |  i32  | generic |       |
+|        |        | Act(ACT) | i16  |   n/a    |  i8   | generic |       |
+|        |        | Act(I2F) | i32  |   n/a    | bf16  | generic |       |
+|        |        | Act(I2F) | i32  |   n/a    |  f32  | generic |       |
+|        |        | Act(I2F) | i32  |   n/a    |  f32  | generic |       |
+|        |        | Act(I2I) | i32  |   n/a    |  i16  | generic |       |
+|        |        | Act(I2I) | i32  |   n/a    |  i8   | generic |       |
+|        |        | Act(I2F) |  i8  |   n/a    | bf16  | generic |       |
+|        |        | Act(I2F) |  i8  |   n/a    |  f32  | generic |       |
+|        |        | Act(I2I) |  i8  |   n/a    |  i16  | generic |       |
+|        |        | Act(I2I) |  i8  |   n/a    |  i32  | generic |       |
+|        |        | Act(I2I) |  i1  |   n/a    |  i16  | generic |       |
+| Ceil   |  Tosa  | Act(CEL) | bf16 |   n/a    | bf16  | generic |       |
+|        |        |          | f32  |   n/a    |  f32  | generic |       |
+| Clamp  | Linalg | Act(CLP) | bf16 |   n/a    | bf16  | generic |       |
+|        |        |          | f32  |   n/a    |  f32  | generic |       |
+|        |        |          | i16  |   n/a    |  i16  | generic |       |
+|        |        |          | i32  |   n/a    |  i32  | generic |       |
+|        |        |          |  i8  |   n/a    |  i8   | generic |       |
+| Clz    |  Clz   | Act(CLZ) | i32  |   n/a    | int32 | generic |       |
+| Floor  |  Tosa  | Act(FLR) | bf16 |   n/a    | bf16  | generic |       |
+|        |        |          | f32  |   n/a    |  f32  | generic |       |
+| Negate |  Tosa  | Act(NEG) | bf16 |   n/a    | bf16  | generic |       |
+|        |        |          | f32  |   n/a    |  f32  | generic |       |
+|        |        |          | i16  |   n/a    |  i16  | generic |       |
+|        |        |          | i32  |   n/a    |  i32  | generic |       |
+|        |        |          |  i8  |   n/a    |  i8   | generic |       |
 
 
 ## Element-Wise Operators
 
-| Op                |   Input    |       TorqHL       | in_t | weight_t | out_t | Tiling  | Implemented | Verified | Notes |
-|:------------------|:----------:|:------------------:|:----:|:--------:|:-----:|:-------:|:-----------:|:--------:|:------|
-| ElementWiseBinary |   Linalg   |  EltwiseBin(BAND)  |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |       |
-|                   |            |  EltwiseBin(BOR)   |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |       |
-|                   |            |  EltwiseBin(BXOR)  |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |       |
-|                   |            |  EltwiseBin(AND)   | bool |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |   EltwiseBin(OR)   | bool |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |  EltwiseBin(XOR)   | bool |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |   EltwiseBin(EQ)   |  i8  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i16  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i32  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | bf16 |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |   EltwiseBin(GT)   |  i8  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i16  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i32  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | bf16 |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   | Linalg ult |   EltwiseBin(GT)   | i16  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   | Linalg ule |   EltwiseBin(GT)   | i16  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |  EltwiseBin(GTEQ)  |  i8  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i16  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i32  |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | bf16 |   n/a    | bool  | generic |     Yes     |   Yes    |       |
-|                   |            |  EltwiseBin(MAX)   |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |       |
-|                   |            |   EltwisBin(MIN)   |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |       |
-| ElementWiseUnary  |   Linalg   | EltwiseUnary(BNOT) |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |       |
-|                   |            |                    | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |       |
-|                   |            | EltwiseUnary(NOT)  | bool |   n/a    | bool  | generic |     Yes     |   Yes    |       |
+| Op                | Input |       TorqHL       | in_t | weight_t | out_t | Tiling  | Notes |
+|:------------------|:-----:|:------------------:|:----:|:--------:|:-----:|:-------:|:-----:|
+| ElementWiseBinary | Arith |  EltwiseBin(BAND)  |  i8  |   n/a    |  i8   | generic |       |
+|                   |       |                    | i16  |   n/a    |  i16  | generic |       |
+|                   |       |                    | i32  |   n/a    |  i32  | generic |       |
+|                   |       |  EltwiseBin(BOR)   |  i8  |   n/a    |  i8   | generic |       |
+|                   |       |                    | i16  |   n/a    |  i16  | generic |       |
+|                   |       |                    | i32  |   n/a    |  i32  | generic |       |
+|                   |       |  EltwiseBin(BXOR)  |  i8  |   n/a    |  i8   | generic |       |
+|                   |       |                    | i16  |   n/a    |  i16  | generic |       |
+|                   |       |                    | i32  |   n/a    |  i32  | generic |       |
+|                   |       |  EltwiseBin(AND)   | bool |   n/a    | bool  | generic |       |
+|                   |       |   EltwiseBin(OR)   | bool |   n/a    | bool  | generic |       |
+|                   |       |  EltwiseBin(XOR)   | bool |   n/a    | bool  | generic |       |
+|                   |       |   EltwiseBin(EQ)   |  i8  |   n/a    | bool  | generic |       |
+|                   |       |                    | i16  |   n/a    | bool  | generic |       |
+|                   |       |                    | i32  |   n/a    | bool  | generic |       |
+|                   |       |                    | bf16 |   n/a    | bool  | generic |       |
+|                   |       |   EltwiseBin(GT)   |  i8  |   n/a    | bool  | generic |       |
+|                   |       |                    | i16  |   n/a    | bool  | generic |       |
+|                   |       |                    | i32  |   n/a    | bool  | generic |       |
+|                   |       |                    | bf16 |   n/a    | bool  | generic |       |
+|                   |       |   EltwiseBin(GT)   | i16  |   n/a    | bool  | generic |       |
+|                   |       |   EltwiseBin(GT)   | i16  |   n/a    | bool  | generic |       |
+|                   |       |  EltwiseBin(GTEQ)  |  i8  |   n/a    | bool  | generic |       |
+|                   |       |                    | i16  |   n/a    | bool  | generic |       |
+|                   |       |                    | i32  |   n/a    | bool  | generic |       |
+|                   |       |                    | bf16 |   n/a    | bool  | generic |       |
+|                   |       |  EltwiseBin(MAX)   |  i8  |   n/a    |  i8   | generic |       |
+|                   |       |                    | i16  |   n/a    |  i16  | generic |       |
+|                   |       |                    | i32  |   n/a    |  i32  | generic |       |
+|                   |       |                    | bf16 |   n/a    | bf16  | generic |       |
+|                   |       |   EltwisBin(MIN)   |  i8  |   n/a    |  i8   | generic |       |
+|                   |       |                    | i16  |   n/a    |  i16  | generic |       |
+|                   |       |                    | i32  |   n/a    |  i32  | generic |       |
+|                   |       |                    | bf16 |   n/a    | bf16  | generic |       |
+| ElementWiseUnary  | Arith | EltwiseUnary(BNOT) |  i8  |   n/a    |  i8   | generic |       |
+|                   |       |                    | i16  |   n/a    |  i16  | generic |       |
+|                   |       |                    | i32  |   n/a    |  i32  | generic |       |
+|                   |       | EltwiseUnary(NOT)  | bool |   n/a    | bool  | generic |       |
 
+## Composite Operators
+
+| Op                   | Input  | TorqHL | in_t | weight_t | out_t | Tiling  | Notes |
+|:---------------------|:------:|:------:|:----:|:--------:|:-----:|:-------:|:-----:|
+| Reciprocal           | Linalg |        | bf16 |   n/a    | bf16  | generic |       |
+| Div                  | Arith  |        | bf16 |   n/a    | bf16  | generic |       |
+| Erf                  |  Math  |        | bf16 |   n/a    | bf16  | generic |       |
+| QuantizedBatchMatMul | Linalg |        |  i8  |   n/a    |  i32  | generic |       |
 
 ## Other Operators
 
-| Op                | Input  |        TorqHL        | in_t | weight_t | out_t | Tiling  | Implemented | Verified | Notes                                        |
-|:------------------|:------:|:---------------------:|:----:|:--------:|:-----:|:-------:|:-----------:|:--------:|:---------------------------------------------|
-| Add               | Linalg |          Add          |  i8  |   n/a    |  i8   | generic |   Yes       |   Yes    |                                              |
-|                   |        |                       |  i16 |   n/a    |  i16  | generic |   Yes       |   Yes    |                                              |
-|                   |        |                       |  i32 |   n/a    |  i32  | generic |   Yes       |   Yes    |                                              |
-|                   |        |                       | bf16 |   n/a    |  bf16 | generic |   Yes       |   Yes    |                                              |
-| Bitcast           | Linalg |       Identity        | i16  |   n/a    |  bf16 |   No    |     Yes     |   Yes    |                                              |
-|                   |        |                       | bf16 |   n/a    |  i16  |   No    |     Yes     |   Yes    |                                              |
-| Sub               | Linalg |          Add          |  i8  |   n/a    |  i8   | generic |   Yes       |   Yes    |                                              |
-|                   |        |                       |  i16 |   n/a    |  i16  | generic |   Yes       |   Yes    |                                              |
-|                   |        |                       |  i32 |   n/a    |  i32  | generic |   Yes       |   Yes    |                                              |
-|                   |        |                       | bf16 |   n/a    |  bf16 | generic |   Yes       |   Yes    |                                              |
-| ArgMax            |  TOSA  |        ArgMax         |  i8  |    i8    |  i8   |   No    |     Yes     |   Yes    |                                              |
-| AvgPool           |  TOSA  |        AvgPool        |  i8  |    i8    |  i8   |   No    |     Yes     |   Yes    |                                              |
-| Conv2D            |  TOSA  |        Conv2D         |  i8  |    i8    |  i8   | custom  |     Yes     |  Partly  | 7x7 stride-2 not supported                   |
-|                   |  TOSA  |        Conv2D         | i16  |    i8    |  i32  | custom  |     Yes     |  Partly  | TOSA specifies i48 output                    |
-|                   |  TOSA  |        Conv2D         | bf16 |   bf16   | bf16  | custom  |   ongoing   |  Partly  |                                              |
-| DepthwiseConv2D   |  TOSA  |          DW           |  i8  |    i8    |  i8   | custom  |     Yes     |  Partly  |                                              |
-| Fill              | Linalg |         Fill          | any  |   n/a    |  any  | generic |     Yes     |   Yes    |                                              |
-| FullyConnected    | Linalg |          FC           |  i8  |    i8    |  i8   | custom  |     Yes     |   Yes    |                                              |
-| Gather            |  TOSA  |        Gather         |  i8  |    i8    |  i8   |   No    |     Yes     |   Yes    |                                              |
-| Identity          |  TOSA  |       Identity        | any  |   n/a    |  any  |   No    |     Yes     |   Yes    |                                              |
-| MatMul            | Linalg |        MatMul         |  i8  |    i8    |  i32  | generic |     Yes     |   Yes    | BatchMatmul, DotOp and Matvec also supported |
-|                   | Linalg |        MatMul         | i16  |   i16    |  i32  | generic |     Yes     |   Yes    | TOSA specifies i48 output                    |
-|                   | Linalg |        MatMul         | bf16 |   bf16   |  f32  | generic |     Yes     |   Yes    |                                              |
-| MaxPool2D         | Linalg |       MaxPool2D       |  i8  |    i8    |  i8   | custom  |     Yes     |   Yes    |                                              |
-|                   | Linalg |       MaxPool2D       |  i16 |    i8    |  i16  | custom  |     Yes     |   Yes    |                                              |
-| Mul               | Linalg |          Mul          |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   | Linalg |          Mul          | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   | Linalg |          Mul          | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-| Reciprocal        | Linalg |      Composite        | bf16 |   n/a    |  bf16 | generic |     Yes     |   Yes    |                                              |
-| Reduce            | Linalg |      Reduce(all)      |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |      Reduce(any)      |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |      Reduce(Max)      |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |      Reduce(Min)      |  i8  |   n/a    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | bf16 |   n/a    | bf16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |      Reduce(Sum)      | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   |        |      Reduce(Mul)      | bf16 |   n/a    |  bf16 | generic |     Yes     |   Yes    |                                              |
-|                   |        |      Reduce(XOR)      | i16  |   n/a    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   |        |                       | i32  |   n/a    |  i32  | generic |     Yes     |   Yes    |                                              |
-| Reshape-collapse  | Linalg |       Identity        |  i8  |   n/a    |  i8   |   No    |     Yes     |   Yes    |                                              |
-| Reshape-expand    | Linalg |       Identity        |  i8  |   n/a    |  i8   |   No    |     Yes     |   Yes    |                                              |
-| Rescale           | Linalg |          FMA          |  i8  |   i16    |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   | Linalg |          FMA          |  i8  |   i16    |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   | Linalg |          FMA          | i16  |   i16    |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   | Linalg |          FMA          | i32  |   i8     |  i8   | generic |     Yes     |   Yes    |                                              |
-|                   | Linalg |          FMA          | i32  |   i8     |  i16  | generic |     Yes     |   Yes    |                                              |
-|                   | Linalg |          FMA          | i32  |   i8     |  i32  | generic |     Yes     |   Yes    |                                              |
-|                   | Linalg |          FMA          | i16  |   i16    |  i32  | generic |     Yes     |   Yes    |                                              |
-| Resize            |  TOSA  | ResizeNearestNeighbor |  i8  |   i16    |  i8   |   No    |     Yes     |  Partly  | block size of 2                              |
-| Scale-and-Add     | Linalg |          Add          |  i8  |   i16    |  i8   | custom  |     Yes     |   Yes    |                                              |
-|                   |        |          Add          |  i16 |   i16    |  i16  | custom  |     Yes     |   Yes    |                                              |
-| Scale-and-Sub     | Linalg |          Add          |  i8  |   i16    |  i8   | custom  |     Yes     |   Yes    |                                              |
-|                   |        |          Add          |  i16 |   i16    |  i16  | custom  |     Yes     |   Yes    |                                              |
-| Scatter           |  TOSA  |        SynpHL         |  i8  |    i8    |  i8   |   No    |     Yes     |   Yes    |                                              |
-| Table             |  TOSA  |         Table         |  i8  |   n/a    |  i8   |   No    |     Yes     |   Yes    | Default is Gather based                      |
-| Table             |  TOSA  |         Table         | i16  |   n/a    |  i32  |   No    |     Yes     |   Yes    |                                              |
-| Transpose         | Linalg |       Transpose       |  i8  |    i8    |  i8   |   No    |     Yes     |   Yes    |                                              |
-| Broadcast         | Linalg |       Broadcast       |  *   |   n/a    |  *    | generic |     Yes     |   Yes    | *: i8/i16/i32 supported, bf16 not yet        |
+| Op               | Input  |        TorqHL         | in_t | weight_t | out_t | Tiling  | Notes                            |
+|:-----------------|:------:|:---------------------:|:----:|:--------:|:-----:|:-------:|:---------------------------------|
+| Add              | Linalg |          Add          |  i8  |   n/a    |  i8   | generic |                                  |
+|                  |        |                       | i16  |   n/a    |  i16  | generic |                                  |
+|                  |        |                       | i32  |   n/a    |  i32  | generic |                                  |
+|                  |        |                       | bf16 |   n/a    | bf16  | generic |                                  |
+| Bitcast          | Arith  |       Identity        | i16  |   n/a    | bf16  |   No    |                                  |
+|                  |        |                       | bf16 |   n/a    |  i16  |   No    |                                  |
+| Sub              | Linalg |          Add          |  i8  |   n/a    |  i8   | generic |                                  |
+|                  |        |                       | i16  |   n/a    |  i16  | generic |                                  |
+|                  |        |                       | i32  |   n/a    |  i32  | generic |                                  |
+|                  |        |                       | bf16 |   n/a    | bf16  | generic |                                  |
+| ArgMax           |  TOSA  |        ArgMax         |  i8  |    i8    |  i8   |   No    |                                  |
+| AvgPool          |  TOSA  |        AvgPool        |  i8  |    i8    |  i8   |   No    |                                  |
+| Conv1D           | Linalg |        Conv1D         | bf16 |   bf16   | bf16  | custom  |                                  |
+| Conv2D           | Linalg |        Conv2D         |  i8  |    i8    |  i8   | custom  |                                  |
+|                  | Linalg |        Conv2D         | i16  |    i8    |  i32  | custom  | TOSA specifies i48 output        |
+|                  | Linalg |        Conv2D         | bf16 |   bf16   | bf16  | custom  |                                  |
+| DepthwiseConv2D  |  TOSA  |          DW           |  i8  |    i8    |  i8   | custom  |                                  |
+| Fill             | Linalg |         Fill          | any  |   n/a    |  any  | generic |                                  |
+| FullyConnected   | Linalg |          FC           |  i8  |    i8    |  i8   | custom  |                                  |
+| Gather           |  TOSA  |        Gather         |  i8  |    i8    |  i8   |   No    |                                  |
+|                  |        |        Gather         | i16  |   i16    |  i16  |   No    |                                  |
+|                  |        |        Gather         | i32  |   i32    |  i32  |   No    |                                  |
+|                  | Linalg |        Gather         | i16  |   i16    |  i16  |   No    |                                  |
+| Identity         |  TOSA  |       Identity        | any  |   n/a    |  any  |   No    |                                  |
+| MatMul           | Linalg |        MatMul         |  i8  |    i8    |  i32  | generic |                                  |
+|                  | Linalg |        MatMul         | i16  |   i16    |  i32  | generic | TOSA specifies i48 output        |
+|                  | Linalg |        MatMul         | bf16 |   bf16   |  f32  | generic |                                  |
+| Dot              | Linalg |        MatMul         |  i8  |    i8    |  i16  | generic |                                  |
+|                  | Linalg |        MatMul         | i16  |   i16    |  i16  | generic |                                  |
+|                  | Linalg |        MatMul         | bf16 |   bf16   |  f32  | generic |                                  |
+| MatVec           | Linalg |        MatMul         |  i8  |    i8    |  i16  | generic |                                  |
+|                  | Linalg |        MatMul         | i16  |   i16    |  i16  | generic |                                  |
+|                  | Linalg |        MatMul         | bf16 |   bf16   |  f32  | generic |                                  |
+| BatchMatMul      | Linalg |        MatMul         |  i8  |    i8    |  i32  | generic |                                  |
+| MaxPool2D        | Linalg |       MaxPool2D       |  i8  |    i8    |  i8   | custom  |                                  |
+|                  | Linalg |       MaxPool2D       | i16  |    i8    |  i16  | custom  |                                  |
+| Mul              | Linalg |          Mul          |  i8  |   n/a    |  i8   | generic |                                  |
+|                  | Linalg |          Mul          | i16  |   n/a    |  i16  | generic |                                  |
+|                  | Linalg |          Mul          | bf16 |   n/a    | bf16  | generic |                                  |
+| Reduce           | Linalg |      Reduce(all)      |  i8  |   n/a    |  i8   | generic |                                  |
+|                  |        |                       | i16  |   n/a    |  i16  | generic |                                  |
+|                  |        |                       | i32  |   n/a    |  i32  | generic |                                  |
+|                  |        |      Reduce(any)      |  i8  |   n/a    |  i8   | generic |                                  |
+|                  |        |                       | i16  |   n/a    |  i16  | generic |                                  |
+|                  |        |                       | i32  |   n/a    |  i32  | generic |                                  |
+|                  |        |      Reduce(Max)      |  i8  |   n/a    |  i8   | generic |                                  |
+|                  |        |                       | i16  |   n/a    |  i16  | generic |                                  |
+|                  |        |                       | i32  |   n/a    |  i32  | generic |                                  |
+|                  |        |                       | bf16 |   n/a    | bf16  | generic |                                  |
+|                  |        |      Reduce(Min)      |  i8  |   n/a    |  i8   | generic |                                  |
+|                  |        |                       | i16  |   n/a    |  i16  | generic |                                  |
+|                  |        |                       | i32  |   n/a    |  i32  | generic |                                  |
+|                  |        |                       | bf16 |   n/a    | bf16  | generic |                                  |
+|                  |        |      Reduce(Sum)      | i32  |   n/a    |  i32  | generic |                                  |
+|                  |        |      Reduce(Mul)      | bf16 |   n/a    | bf16  | generic |                                  |
+|                  |        |      Reduce(XOR)      | i16  |   n/a    |  i16  | generic |                                  |
+|                  |        |                       | i32  |   n/a    |  i32  | generic |                                  |
+| Reshape-collapse | Linalg |       Identity        |  i8  |   n/a    |  i8   |   No    |                                  |
+| Reshape-expand   | Linalg |       Identity        |  i8  |   n/a    |  i8   |   No    |                                  |
+| Rescale          | Linalg |          FMA          | ui8  |   ui8    |  i8   | generic |                                  |
+|                  | Linalg |          FMA          |  i8  |    i8    |  ui8  | generic |                                  |
+|                  | Linalg |          FMA          |  i8  |   i16    |  i16  | generic |                                  |
+|                  | Linalg |          FMA          |  i8  |   i16    |  i32  | generic |                                  |
+|                  | Linalg |          FMA          | i16  |   i16    |  i8   | generic |                                  |
+|                  | Linalg |          FMA          | i32  |    i8    |  i8   | generic |                                  |
+|                  | Linalg |          FMA          | i32  |    i8    |  i16  | generic |                                  |
+|                  | Linalg |          FMA          | i32  |    i8    |  i32  | generic |                                  |
+|                  | Linalg |          FMA          | i16  |   i16    |  i32  | generic |                                  |
+| Resize           |  TOSA  | ResizeNearestNeighbor |  i8  |   i16    |  i8   |   No    | block size of 2                  |
+| Scale-and-Add    | Linalg |          Add          |  i8  |   i16    |  i8   | custom  |                                  |
+|                  |        |          Add          | i16  |   i16    |  i16  | custom  |                                  |
+| Scale-and-Sub    | Linalg |          Add          |  i8  |   i16    |  i8   | custom  |                                  |
+|                  |        |          Add          | i16  |   i16    |  i16  | custom  |                                  |
+| Scatter          |  TOSA  |        SynpHL         |  i8  |    i8    |  i8   |   No    |                                  |
+| Table            |  TOSA  |         Table         |  i8  |   n/a    |  i8   |   No    | Default is Table based           |
+| Table            |  TOSA  |         Table         | i16  |   n/a    |  i32  |   No    |                                  |
+| Transpose        | Linalg |       Transpose       |  i8  |    i8    |  i8   |   No    |                                  |
+| Broadcast        | Linalg |       Broadcast       |  *   |   n/a    |   *   | generic | *: i8/i16/i32/bf16/f32 supported |
