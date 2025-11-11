@@ -1,0 +1,4 @@
+# for Torq python wrappers
+
+packaging>=24.2
+numpy>=2.0.0b1

@@ -63,12 +63,14 @@ cp ${BASE_DIR}/scripts/annotate_profiling.py ${INSTALL_DIR}/scripts
 
 mkdir ${INSTALL_DIR}/python
 
-mkdir -p ${INSTALL_DIR}/python/compiler ${INSTALL_DIR}/python/runtime
+mkdir -p ${INSTALL_DIR}/python ${INSTALL_DIR}/python/compiler ${INSTALL_DIR}/python/runtime
 cp -rL ${BUILD_DIR}/third_party/iree/compiler/bindings/python/iree ${INSTALL_DIR}/python/compiler
 cp -rL ${BUILD_DIR}/third_party/iree/runtime/bindings/python/iree ${INSTALL_DIR}/python/runtime
+cp -rL ${BASE_DIR}/python/torq ${INSTALL_DIR}/python
 
 cat ${BASE_DIR}/third_party/iree/runtime/bindings/python/iree/runtime/build_requirements.txt \
     ${BASE_DIR}/third_party/iree/integrations/tensorflow/test/requirements.txt \
+    ${BASE_DIR}/python/torq/requirements.txt \
     ${BASE_DIR}/requirements.txt > ${INSTALL_DIR}/python/requirements.txt
 
 cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tf ${INSTALL_DIR}/python

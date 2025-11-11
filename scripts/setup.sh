@@ -59,3 +59,8 @@ fi
 if ! grep -q "export PATH=$BASE_DIR/tools:$BASE_DIR/scripts" "$ACTIVATE_FILE"; then
   echo "export PATH=$BASE_DIR/tools:$BASE_DIR/scripts:\$PATH" >> "$ACTIVATE_FILE"
 fi
+
+# register library code in virtual env
+cat > $(python3 -c "import site; print(site.getsitepackages()[0])")/torq.pth << EOF
+${BASE_DIR}/python
+EOF
