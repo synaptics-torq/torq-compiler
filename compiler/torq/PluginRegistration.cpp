@@ -25,6 +25,8 @@
 #include "iree/compiler/PluginAPI/Client.h"
 
 #include "torch-mlir/Conversion/TorchOnnxToTorch/Passes.h"
+#include "torch-mlir/Conversion/TorchToLinalg/TorchToLinalg.h"
+#include "torch-mlir/Dialect/TorchConversion/Transforms/Passes.h"
 
 #include <stdio.h>
 
@@ -79,6 +81,12 @@ struct TORQSession : public PluginSession<
                     mlir::torch::onnx_c::createTorchOnnxToTorchPass()
                 );
             }
+            passManager.addPass(
+                mlir::torch::Torch::createLowerToBackendContractPass(10, true, true, {}, "")
+            );
+            mlir::torch::TorchConversion::createTorchBackendToLinalgOnTensorsBackendPipeline(
+                passManager
+            );
             buildTorchToTorqHLOpsInputConversionPassPipeline(passManager);
             return true;
         }

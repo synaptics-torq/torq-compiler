@@ -60,11 +60,6 @@ void registerTosaTransformPassPipeline() {
 }
 
 void buildTorchTransformPassPipeline(OpPassManager &passManager) {
-
-    iree_compiler::TorchInput::TorchToIREELoweringPipelineOptions torchOptions;
-    torchOptions.strictSymbolicShapes = true;
-    iree_compiler::TorchInput::createTorchToIREEPipeline(passManager, torchOptions);
-
     passManager.addNestedPass<func::FuncOp>(createFormDispatchRegionsPass(clDisableDispatchFusion));
 }
 
