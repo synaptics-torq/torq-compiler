@@ -52,8 +52,16 @@ If you are using a different environment you can use a Docker image:
 
 2. Start a development container with access to the current directory and your ssh configuration:
 
+   **Note:** To build and mount volumes correctly, Docker needs access to the entire `torq-compiler` project directory. Running this command from the parent directory allows Docker to mount the full project directory inside the container.
+
    ```{code} shell
-   $ scripts/dev.sh
+   $ cd .. && torq-compiler/scripts/dev.sh
+   ```
+
+3. Inside the container, go to the `torq-compiler` directory and continue with the build steps:
+
+   ```{code} shell
+   $ cd torq-compiler
    ```
 
 ## Build compiler and runtime for host
