@@ -255,7 +255,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
     // The difference between the two input addresses is used as offset to fetch the data
     auto inputDiff = getAffineDimExpr(1, params.ctx) - getAffineDimExpr(0, params.ctx);
-    input.getShape().insert(In::InputTensors, {2, inputDiff});
+    input.insertDim(In::InputTensors, {2, inputDiff});
 
     // Take care of output segmentation if requested
     int denseDims = std::min(input.denseDims(), output.denseDims());

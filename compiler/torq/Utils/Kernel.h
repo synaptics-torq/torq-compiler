@@ -60,12 +60,6 @@ struct ShapeItem {
 class Shape : public std::vector<ShapeItem> {
   public:
     using std::vector<ShapeItem>::vector;
-    using std::vector<ShapeItem>::insert;
-    using std::vector<ShapeItem>::erase;
-    auto insert(int pos, const ShapeItem &item) {
-        return std::vector<ShapeItem>::insert(begin() + pos, item);
-    }
-    auto erase(int pos) { return std::vector<ShapeItem>::erase(begin() + pos); }
 };
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape);
@@ -106,6 +100,32 @@ struct Vectorized {
     };
 };
 
+// Dimension structure for Left, Right, Top, Bottom
+// Can be used for 2D kernel size and padding specification
+struct LRTBDim {
+    enum { Left = 0, Right = 1, Top = 2, Bottom = 3 };
+    LRTBDim() = default;
+    LRTBDim(::llvm::ArrayRef<int64_t> lrtb) {
+        assert(lrtb.size() == 4 && "Expected 4 values for LRTB dimension");
+        left = lrtb[0];
+        right = lrtb[1];
+        top = lrtb[2];
+        bottom = lrtb[3];
+    }
+    int left{};
+    int right{};
+    int top{};
+    int bottom{};
+};
+
+// Dimension structure for Height and Width
+struct HWDim {
+    HWDim() = default;
+    HWDim(int h, int w) : h(h), w(w) {}
+    int h{};
+    int w{};
+};
+
 // Represent a data tensor in memory
 // Data is defined by a shape, and it is possible to access a subset of it using indexes.
 // For example the following represents a 4D tensor with 16 channels:
@@ -116,6 +136,7 @@ class Data {
   public:
     // Create a data tensor representation with the given shape and element type
     Data(Data &&) = default;
+    Data(const Data &) = default;
     Data &operator=(const Data &) = default;
 
     // Get data shape
@@ -204,6 +225,12 @@ class LData : public DataT<LData> {
 
     // Dimension manipulation methods
 
+    // Insert a new dimension at the specified index
+    void insertDim(int dimIndex, const ShapeItem &item);
+
+    // Erase the dimension at the specified index
+    void eraseDim(int dimIndex);
+
     // Return the number of contiguous dense dimensions at the end of the data shape
     int denseDims() const;
 
@@ -215,17 +242,26 @@ class LData : public DataT<LData> {
     // Vectorize the specified dimensions into a single dimension made of vectors of the given size
     // dims must be contiguous.
     // Dimensions to be vectorized must be dense.
-    // If the number of elements in the specified dimensions is not multiple of vectorSize
+    // If the number of elements in the specified dimensions is not multiple of vectorStride
     // the last vector will actually go beyond the end of the data shape, in any case the strides
     // are adjusted accordingly.
+    // If vectorStride is not specified it is assumed to be the same as vectorSize
     // Example:
     // data shape: {1, 16, 5, 5}, vectorSize: 4, dims: {2, 3}
     // resulting shape: {1, {16,stride:25}, 7, 4}
-    LData &vectorize(const std::vector<int> &dims, int vectorSize);
+    LData &vectorize(const std::vector<int> &dims, int vectorSize, int vectorStride = 0);
 
     // Vectorize the last dimension.
-    // Shortcut for vectorize({shape.size() -1}, vectorSize)
-    LData &vectorize(int vectorSize);
+    // Shortcut for vectorize({shape.size() -1}, vectorSize, vectorStride)
+    LData &vectorize(int vectorSize, int vectorStride = 0);
+
+    // Reshape the specified dimension
+    // dimIndex: index of the dimension to reshape
+    // newDims: new dimensions that will replace the specified one, if one of them is -1
+    // it is inferred from the size of the original dimension and the other new dimensions
+    // asserts if the product of the new dimensions is not equal to the size of the original one
+    // unless allowNonMultiple is true
+    LData &reshapeDim(int dimIndex, const std::vector<int> &newDims, bool allowNonMultiple = false);
 
     // Reorganize the last dimension into two sub-blocks containing elements
     // with even and odd indexes respectively
@@ -404,9 +440,11 @@ class Alu : SliceComponent {
     );
 
     // Max number of input items that can be processed in parallel for the given in and weight type
-    int iWidth(DType iType, DType wType = DType::none) const;
+    // weightWidth if specified indicates the number of weights that will be used in outerProduct
+    int iWidth(DType iType, DType wType = DType::none, int weightWidth = 0) const;
 
     // Max number of weight items that can be processed in parallel for the given input width
+    // Note: inputWidth paramer is currently deprecated, will be removed in future
     int wWidth(DType wType, int inputWidth = 0) const;
 };
 
@@ -446,8 +484,12 @@ class Slice {
     std::unique_ptr<SlicePrivate> d;
 
   public:
-    Slice();
+    // Create a slice kernel. Name is for debugging purposes only
+    Slice(const std::string &name = {});
     ~Slice();
+
+    // Return the name associated to the slice
+    const std::string &name() const;
 
     // Start a for loop iterating over all the values in the range [0, count - 1]
     // returns the loop iteration variable
@@ -507,12 +549,12 @@ class Slice {
 
     // Configure the kernel size on each side, for example a 5x5 kernel will have {2, 2, 2, 2}
     // Mandatory for convolutions
-    void setKernel(const std::vector<int> &lrtb);
+    void setKernel(const LRTBDim &lrtb);
 
     // Configure the input padding margin and value
     // For example a 1-pixel padding on left, right, top, bottom will have {1, 1, 1, 1}
     // Mandatory for convolutions
-    void setPadding(const std::vector<int> &lrtb, int padValue);
+    void setPadding(const LRTBDim &lrtb, int padValue);
 
     // Segment the output in 4 quadrants of shape {N, C, 4, H/2, W/2}
     // outShape: NCHW shape of the output tensor. if empty the output is not segmented.

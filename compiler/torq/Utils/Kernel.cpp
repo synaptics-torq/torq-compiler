@@ -22,7 +22,9 @@ namespace mlir::syna::torq {
 
 static int denseDims(const LData &data);
 static void fuseDense(LData &data, int count = -1);
-static void vectorize(LData &data, const std::vector<int> &dims, int vectorSize);
+static void vectorize(LData &data, const std::vector<int> &dims, int vectorSize, int vectorStride);
+static void
+reshapeDim(LData &data, int dimIndex, const std::vector<int> &sizes, bool allowNonMultiple);
 static void partitionByIndexParity1D(LData &data);
 static void partitionByIndexParity2D(LData &data);
 
@@ -178,14 +180,15 @@ static Shape getSubShape(const Shape &shape, const Indexes &ix) {
 }
 
 // return bus width in bytes
-static int getBusWidth(NdlType type) {
+static int getBusWidth(NdlType type, DType dataType) {
     switch (type) {
     case NdlType::DEDR:
         return HwInfo::iram_seg_width;
     case NdlType::DEWR:
         return HwInfo::wram_seg_width;
     case NdlType::DEBR:
-        return HwInfo::breg_width;
+        // In floating point mode act doesn't have the scale value
+        return isFloat(dataType) ? HwInfo::breg_width / 2 : HwInfo::breg_width;
     case NdlType::DEQW:
         return HwInfo::act_width * sizeof(int32_t);
     default:
@@ -221,14 +224,8 @@ struct SliceCfg {
     int32_t act_zero_point;
     uint8_t no_p_clear;
     uint8_t no_p_output;
-    uint32_t kernel_left;
-    uint32_t kernel_right;
-    uint32_t kernel_top;
-    uint32_t kernel_bottom;
-    int32_t pad_left;
-    int32_t pad_right;
-    int32_t pad_top;
-    int32_t pad_bottom;
+    LRTBDim kernel;
+    LRTBDim pad;
     int32_t pad_value{-1};
     int32_t stride{1};
     int32_t stride_offset;
@@ -256,8 +253,8 @@ struct SliceCfg {
             act_rsh, act_clip_min, act_clip_max, act_zero_point, //
             no_p_clear,
             no_p_output,                                                       //
-            kernel_left, kernel_right, kernel_top, kernel_bottom,              //
-            pad_left, pad_right, pad_top, pad_bottom, pad_value,               //
+            kernel.left, kernel.right, kernel.top, kernel.bottom,              //
+            pad.left, pad.right, pad.top, pad.bottom, pad_value,               //
             stride, stride_offset, act_round_mode, weight_format,              //
             alu_disable, act_disable, alu_format, act_format, act_sum_bits, {} /*table*/
         );
@@ -539,6 +536,15 @@ LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
     setShape(dataShape);
 }
 
+void LData::insertDim(int pos, const ShapeItem &item) {
+    auto &shape = getShape();
+    shape.insert(shape.begin() + pos, item);
+}
+void LData::eraseDim(int pos) {
+    auto &shape = getShape();
+    shape.erase(shape.begin() + pos);
+}
+
 int LData::denseDims() const { return torq::denseDims(*this); }
 
 LData &LData::fuseDense(int count) {
@@ -546,13 +552,18 @@ LData &LData::fuseDense(int count) {
     return *this;
 }
 
-LData &LData::vectorize(const std::vector<int> &dims, int vectorSize) {
-    torq::vectorize(*this, dims, vectorSize);
+LData &LData::vectorize(const std::vector<int> &dims, int vectorSize, int vectorStride) {
+    torq::vectorize(*this, dims, vectorSize, vectorStride);
     return *this;
 }
 
-LData &LData::vectorize(int vectorSize) {
-    torq::vectorize(*this, std::vector<int>(1, shape().size() - 1), vectorSize);
+LData &LData::vectorize(int vectorSize, int vectorStride) {
+    torq::vectorize(*this, std::vector<int>(1, shape().size() - 1), vectorSize, vectorStride);
+    return *this;
+}
+
+LData &LData::reshapeDim(int dimIndex, const std::vector<int> &newDims, bool allowNonMultiple) {
+    torq::reshapeDim(*this, dimIndex, newDims, allowNonMultiple);
     return *this;
 }
 
@@ -586,7 +597,7 @@ struct SlicePrivate {
     };
 
     // Constructor
-    SlicePrivate();
+    SlicePrivate(const std::string &name);
 
     // Add dimensions to a mem-based NDL according to the data shape and iteration variables
     // return the NDL offset
@@ -667,9 +678,14 @@ struct SlicePrivate {
     // Height and width of an input channel (used for convolutions)
     int _inputChannelHeight{};
     int _inputChannelWidth{};
+
+    // Name of the kernel
+    std::string _name;
 };
 
-SlicePrivate::SlicePrivate() {}
+SlicePrivate::SlicePrivate(const string &name) : _name(name) {
+    LLVM_DEBUG(llvm::dbgs() << "- Kernel " << _name << " ----------------------------\n");
+}
 
 // Decompose number into two factors, both <= 65535 possible
 // If not possible returns a pair of -1s
@@ -717,7 +733,7 @@ int SlicePrivate::addDims(
         assert(!useSDims && "SDIMs only supported for DEQW");
     }
 
-    int busWidth = getBusWidth(type);
+    int busWidth = getBusWidth(type, data.elementType());
     int blockSizeBytes = block.size * elementSize;
     int hBlockCount = div_ceil(blockSizeBytes, busWidth);
     int lBlockSizeBytes = hBlockCount > 1 ? busWidth : blockSizeBytes;
@@ -1303,7 +1319,7 @@ void SlicePrivate::ref(const LData &data) {
 
 void SlicePrivate::acpw(DType dataType, const uint32_t weightSize) {
     const uint32_t dataSize = sizeofType(_iram.elementType);
-    if (isInt(dataType) && ((weightSize == 2) || (dataSize == 4 && weightSize == 1))) {
+    if (isInt(dataType) && ((weightSize == 2) || (dataSize > 1 && weightSize == 1))) {
         auto actIterationCount = outerIterCount(_forStack, _forStack.size());
         RegNdlDimsData acpwDims;
         acpwDims.push_back({DimType::L, RegDimTag::B, HwInfo::pdat_width, 1});
@@ -1470,6 +1486,15 @@ QData SlicePrivate::actClamp(
             resultType = DType::int16;
             resultCount /= 2;
         }
+        else if (weightSize == 1 && dataSize == 2) {
+            // We have 2 partials for each data
+            // Each partial is processed with different left shifts
+            _cfg.alu_d_unsigned = 5;
+            _cfg.alu_w_unsigned = 0;
+            _cfg.act_lsh = {0, 8, 0, 8};
+            resultType = DType::int16;
+            resultCount /= 2;
+        }
         else if (dataSize == 2 && weightSize == 2) {
             // We have 4 partials for each data
             // Each partial is processed with different left shifts
@@ -1494,6 +1519,8 @@ QData SlicePrivate::actClamp(
             // No weight applied, keep original data type
         }
         else {
+            llvm::errs() << "Unsupported data and weight size combination: dataSize=" << dataSize
+                         << ", weightSize=" << weightSize << "\n";
             assert(false && "Invalid data and weight size");
         }
     }
@@ -1531,11 +1558,13 @@ QData SlicePrivate::actRescaleClamp(
 // Slice class
 //
 
-Slice::Slice()
-    : d{new SlicePrivate()}, // Internal state common to the slice and its subcomponents
+Slice::Slice(const std::string &name)
+    : d{new SlicePrivate(name)}, // Internal state common to the slice and its subcomponents
       iram{d.get()}, wram{d.get()}, bram{d.get()}, alu{d.get()}, act{d.get()} {}
 
 Slice::~Slice() {}
+
+const std::string &Slice::name() const { return d->_name; }
 
 IterVar Slice::forall(int count) {
     int nesting = d->_forStack.size();
@@ -1668,25 +1697,15 @@ void Slice::store(const LData &output, int value) {
     d->aluSetMode(torq_hw::ALUOp0Mode::DBYP, torq_hw::ALUOp1Mode::BXOR);
 
     // Configure the value to be stored as pad value
-    setPadding({0, 0, 0, 0}, value);
+    setPadding({}, value);
     d->deqw(output);
 }
 int Slice::scatter() const { return getBusScatterGather(NdlType::DEQW); }
 
-void Slice::setKernel(const std::vector<int> &lrtb) {
-    assert(lrtb.size() == 4 && "Invalid kernel shape");
-    d->_cfg.kernel_left = lrtb[0];
-    d->_cfg.kernel_right = lrtb[1];
-    d->_cfg.kernel_top = lrtb[2];
-    d->_cfg.kernel_bottom = lrtb[3];
-}
+void Slice::setKernel(const LRTBDim &lrtb) { d->_cfg.kernel = lrtb; }
 
-void Slice::setPadding(const std::vector<int> &lrtb, int padValue) {
-    assert(lrtb.size() == 4 && "Invalid padding shape");
-    d->_cfg.pad_left = lrtb[0];
-    d->_cfg.pad_right = lrtb[1];
-    d->_cfg.pad_top = lrtb[2];
-    d->_cfg.pad_bottom = lrtb[3];
+void Slice::setPadding(const LRTBDim &lrtb, int padValue) {
+    d->_cfg.pad = lrtb;
     d->_cfg.pad_value = padValue;
 }
 
@@ -1868,16 +1887,36 @@ PData Alu::elementwiseProductAccumulate(const IData &idata, const WData &wdata, 
     return d->aluProductAccumulate(idata, wdata, acc, false, false);
 }
 
-int Alu::iWidth(DType iType, DType wType) const {
+int Alu::iWidth(DType iType, DType wType, int weightWidth) const {
     if (isFloat(iType)) {
-        return HwInfo::max_input / sizeofType(iType);
+        assert(!isInt(wType) && "Weight type can't be int for float input");
+        if (weightWidth <= 0) {
+            return HwInfo::max_input / sizeofType(iType);
+        }
+        else if (weightWidth <= 4) {
+            assert(iType == DType::bf16 && wType == DType::bf16);
+            return 32;
+        }
+        else if (weightWidth <= 8) {
+            assert(iType == DType::bf16 && wType == DType::bf16);
+            return 16;
+        }
     }
     else if (isInt(iType)) {
         assert(!isFloat(wType) && "Weight type can't be float for int input");
         int inputElementSize = sizeofType(iType);
         int weightElementSize = wType == DType::none ? 1 : sizeofType(wType);
         assert(inputElementSize * weightElementSize <= sizeof(int32_t));
-        return HwInfo::max_input / inputElementSize / weightElementSize;
+        int n = HwInfo::max_input / inputElementSize / weightElementSize;
+        if (weightWidth <= 4) {
+            return n;
+        }
+        else if (weightWidth <= 8) {
+            return n / 2;
+        }
+        else if (weightWidth <= 16) {
+            return n / 4;
+        }
     }
     return 0;
 }
@@ -2051,10 +2090,14 @@ static void fuseDense(LData &data, int count) {
     assert(fused >= count && "Could not fuse the requested number of dimensions");
 }
 
-static void vectorize(LData &data, const std::vector<int> &dimsIn, int vectorSize) {
+static void
+vectorize(LData &data, const std::vector<int> &dimsIn, int vectorSize, int vectorStride) {
     int rank = data.shape().size();
     if (dimsIn.empty()) {
         return;
+    }
+    if (vectorStride <= 0) {
+        vectorStride = vectorSize;
     }
     auto dims = dimsIn;
     std::sort(dims.begin(), dims.end());
@@ -2096,7 +2139,9 @@ static void vectorize(LData &data, const std::vector<int> &dimsIn, int vectorSiz
     // Append new vectorized dimension
     shape.insert(
         shape.begin() + dims[0],
-        ShapeItem{div_ceil(itemCount, vectorSize), vectorSize * baseStrideInt, ShapeItem::Tag::Main}
+        ShapeItem{
+            div_ceil(itemCount, vectorStride), vectorStride * baseStrideInt, ShapeItem::Tag::Main
+        }
     );
     shape.insert(shape.begin() + dims[0] + 1, ShapeItem{vectorSize, baseStrideInt});
 
@@ -2111,6 +2156,54 @@ static void vectorize(LData &data, const std::vector<int> &dimsIn, int vectorSiz
             }
             outerDim.stride = Stride{strideValue * sizeofType(data.elementType())};
         }
+    }
+
+    data.setShape(shape);
+}
+
+static void reshapeDim(
+    LData &data, int dimensionToReshape, const std::vector<int> &sizes, bool allowNonMultiple
+) {
+    int rank = data.shape().size();
+    assert(dimensionToReshape < rank && "Invalid dimension to reshape");
+
+    // Check the total number of elements in sizes[] corresponds to that in the dimension to reshape
+    int itemCount = 1;
+    for (auto size : sizes) {
+        assert((size > 0 || (size == -1 && itemCount > 0)) && "Sizes must be positive or -1");
+        itemCount *= size;
+    }
+    int implicitDimSize = 0;
+    if (itemCount < 0) {
+        // Deduce implicit dimension
+        itemCount = -itemCount;
+        if (data.dim(dimensionToReshape) % itemCount != 0 && !allowNonMultiple) {
+            llvm::errs() << "Reshape size mismatch: dimension " << dimensionToReshape << " size "
+                         << data.dim(dimensionToReshape) << " not multiple of " << itemCount
+                         << "\n";
+            assert(false && "Reshape size mismatch");
+        }
+        implicitDimSize = div_ceil(data.dim(dimensionToReshape), itemCount);
+    }
+    else if ((allowNonMultiple && itemCount > data.dim(dimensionToReshape)) ||
+             (!allowNonMultiple && itemCount != data.dim(dimensionToReshape))) {
+        llvm::errs() << "Reshape size mismatch: dimension " << dimensionToReshape << " has size "
+                     << data.dim(dimensionToReshape) << " but reshape sizes have total size "
+                     << itemCount << "\n";
+        assert(false && "Reshape size mismatch");
+    }
+
+    // Remove dimension to reshape
+    auto shape = data.shape();
+    ShapeItem reshapedItem = shape[dimensionToReshape];
+    shape.erase(shape.begin() + dimensionToReshape, shape.begin() + dimensionToReshape + 1);
+
+    // Append new reshaped dimensions
+    for (auto it = sizes.rbegin(); it != sizes.rend(); ++it) {
+        reshapedItem.count = *it > 0 ? *it : implicitDimSize;
+        shape.insert(shape.begin() + dimensionToReshape, reshapedItem);
+        // Use natural stride for next dimensions
+        reshapedItem.stride = {};
     }
 
     data.setShape(shape);
