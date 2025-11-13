@@ -237,7 +237,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
 
     // Define data tensors
     LData input(params.input1);
-    LData output(params.input2);
+    LData output(params.init);
     LData weights(op.getWeights());
     LData biasScale(op.getScaleBias());
     assert(weights.dim(0) == 2);
@@ -267,7 +267,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     // Vectorize the input tensor
     Slice slice;
     int vectorSize = slice.alu.iWidth(input.elementType(), weights.elementType());
-    input.fuseDense(denseDims).vectorize(vectorSize);
+    input.fuse(denseDims).vectorize(vectorSize);
 
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);

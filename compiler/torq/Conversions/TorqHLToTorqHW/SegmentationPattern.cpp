@@ -29,7 +29,7 @@ SegmentationPattern::transform(torq_hl::SegmentationOp op, PatternRewriter &rewr
 
     // Vectorize the input data vectors based on the activation width
     int vectorSize = slice.act.width(input.elementType());
-    input.vectorize({In::H, In::W}, vectorSize);
+    input.fuse({In::H, In::W}).vectorize(vectorSize);
 
     // Reorganize the output to be partitioned in 4 quadrants by index parity in height and width
     output.partitionByIndexParity2D();

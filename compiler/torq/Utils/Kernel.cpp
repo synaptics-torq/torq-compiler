@@ -21,8 +21,8 @@ using namespace std;
 namespace mlir::syna::torq {
 
 static int denseDims(const LData &data);
-static void fuseDense(LData &data, int count = -1);
-static void vectorize(LData &data, const std::vector<int> &dims, int vectorSize, int vectorStride);
+static void fuse(LData &data, int count = -1);
+static void vectorize(LData &data, int vectorSize, int vectorStride);
 static void
 reshapeDim(LData &data, int dimIndex, const std::vector<int> &sizes, bool allowNonMultiple);
 static void partitionByIndexParity1D(LData &data);
@@ -531,29 +531,34 @@ LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
     setShape(dataShape);
 }
 
-void LData::insertDim(int pos, const ShapeItem &item) {
+LData &LData::insertDim(int pos, const ShapeItem &item) {
     auto &shape = getShape();
     shape.insert(shape.begin() + pos, item);
+    return *this;
 }
-void LData::eraseDim(int pos) {
+LData &LData::eraseDim(int pos) {
     auto &shape = getShape();
     shape.erase(shape.begin() + pos);
+    return *this;
 }
 
 int LData::denseDims() const { return torq::denseDims(*this); }
 
-LData &LData::fuseDense(int count) {
-    torq::fuseDense(*this, count);
+LData &LData::fuse(int count) {
+    torq::fuse(*this, count);
     return *this;
 }
 
-LData &LData::vectorize(const std::vector<int> &dims, int vectorSize, int vectorStride) {
-    torq::vectorize(*this, dims, vectorSize, vectorStride);
-    return *this;
+LData &LData::fuse(const std::vector<int> &dims) {
+    int fuseCount = 0;
+    for (auto dim : llvm::reverse(dims)) {
+        assert(dim == shape().size() - ++fuseCount && "Only trailing dimensions can be fused");
+    }
+    return fuse(dims.size());
 }
 
 LData &LData::vectorize(int vectorSize, int vectorStride) {
-    torq::vectorize(*this, std::vector<int>(1, shape().size() - 1), vectorSize, vectorStride);
+    torq::vectorize(*this, vectorSize, vectorStride);
     return *this;
 }
 
@@ -596,7 +601,7 @@ struct SlicePrivate {
 
     // Add dimensions to a mem-based NDL according to the data shape and iteration variables
     // return the NDL offset
-    int addDims(
+    int addMemNdlDims(
         NdlType type, torq_hw::MemNdlDimsData &dims, const Data &data, int appendBlockSize = -1
     );
 
@@ -709,7 +714,7 @@ static torq_hw::MemDimTag tagToMemDimTag(ShapeItem::Tag tag, torq_hw::MemDimTag 
     assert(false && "Unknown ShapeItem::Tag");
 }
 
-int SlicePrivate::addDims(
+int SlicePrivate::addMemNdlDims(
     NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data, int appendBlockSize
 ) {
     bool useSDims = appendBlockSize >= 0;
@@ -1278,7 +1283,7 @@ void SlicePrivate::cepr(const PData &pdata) {
 
 void SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSize) {
     MemNdlDimsData ndlDims;
-    int offset = addDims(ndlType, ndlDims, data, appendBlockSize);
+    int offset = addMemNdlDims(ndlType, ndlDims, data, appendBlockSize);
     _ndls.add(ndlType, ndlDims, offset);
     ndlToStr(ndlType, _ndls.getMemNdl(ndlType));
 }
@@ -1643,30 +1648,16 @@ static void checkCompatibility(const Data &destData, const Data &sourceData) {
 
 void Slice::append(const LData &output, const QData &data) {
     assert(data.indexes().size() == 0 && "QData can't be indexed during append");
-    assert(data.shape().size() <= 1 && "QData shape > 1 not allowed during append");
+    assert(data.shape().size() == 1 && "Unexpected QData rank during append");
     checkTypeCompatibility(output, data);
-    int dataBlockSize = backDimCount(data.subShape());
-    d->deqw(output, dataBlockSize);
+    d->deqw(output, backDimCount(data.subShape()));
 }
 
 void Slice::store(const LData &output, const QData &data) {
     assert(data.indexes().size() == 0 && "QData can't be indexed during store");
+    assert(data.shape().size() == 1 && "Unexpected QData rank during store");
     checkCompatibility(output, data);
     d->deqw(output);
-
-    // Check that the DEQW H iteration count matches the specified outputShape
-    if (output.shape().size() > 0 && output.shape()[0].count) {
-        // auto blockCount = 1;
-        // for (int i = 0; i < output.shape().size() - 1; i++) {
-        //     blockCount *= output.shape()[i].count;
-        // }
-        // if (blockCount != iterationCount(ndlDims)) {
-        //     llvm::errs() << "Block count mismatch: " << blockCount << " vs "
-        //                  << iterationCount(ndlDims) << "\n";
-        //     assert(false);
-        // }
-        // llvm::outs() << "Block count: " << blockCount << "\n";
-    }
 }
 
 void Slice::store(const LData &output, int value) {
@@ -1911,30 +1902,9 @@ int Alu::iWidth(DType iType, DType wType, int weightWidth) const {
     return 0;
 }
 
-int Alu::wWidth(DType wType, int inputWidth) const {
+int Alu::wWidth(DType wType) const {
     int weightSize = wType == DType::none ? 1 : sizeofType(wType);
-    if (inputWidth == 0) {
-        return HwInfo::wram_seg_width / weightSize;
-    }
-    else if (isInt(wType)) {
-        switch (inputWidth) {
-        case 64:
-            return 4;
-        case 32:
-            return 8;
-        case 16:
-            return 16;
-        }
-    }
-    else if (isFloat(wType)) {
-        switch (inputWidth) {
-        case 32:
-            return 4;
-        case 16:
-            return 8;
-        }
-    }
-    return 0;
+    return HwInfo::wram_seg_width / weightSize;
 }
 
 //
@@ -2054,17 +2024,17 @@ static void partitionByIndexParity2D(LData &data) {
     data.setShape(shape);
 }
 
+// Return the number of dense dimensions at the innermost side of the data
 static int denseDims(const LData &data) {
-    int denseCount = 0;
+    int denseCnt = 0;
     // TODO: we can do better
-    while (denseCount < data.shape().size() && denseElementCount(data.shape(), denseCount + 1) > 0
-    ) {
-        denseCount++;
+    while (denseCnt < data.shape().size() && denseElementCount(data.shape(), denseCnt + 1) > 0) {
+        denseCnt++;
     }
-    return denseCount;
+    return denseCnt;
 }
 
-static void fuseDense(LData &data, int count) {
+static void fuse(LData &data, int count) {
     int fused = 1;
     for (; (count < 0 || fused < count) && data.shape().size() > 1 &&
            denseElementCount(data.shape(), 2) > 0;
@@ -2078,82 +2048,37 @@ static void fuseDense(LData &data, int count) {
     assert(fused >= count && "Could not fuse the requested number of dimensions");
 }
 
-static void
-vectorize(LData &data, const std::vector<int> &dimsIn, int vectorSize, int vectorStride) {
+static void vectorize(LData &data, int vectorSize, int vectorStride) {
     int rank = data.shape().size();
-    if (dimsIn.empty()) {
-        return;
-    }
+    assert(rank > 0 && "Cannot vectorize scalar data?");
+    assert(data.denseDims() >= 1 && "last dimension must be dense to vectorize");
     if (vectorStride <= 0) {
         vectorStride = vectorSize;
     }
-    auto dims = dimsIn;
-    std::sort(dims.begin(), dims.end());
-    assert(dims[0] >= 0 && dims.back() < rank && "Invalid dimension for vectorization");
 
-    int itemCount = 1;
-    int prevDim = dims[0] - 1;
-    for (auto dim : dims) {
-        assert(dim >= 0 && dim < rank && "Invalid dimension for vectorization");
-        assert(dim == prevDim + 1 && "Dimensions must contiguous");
-        itemCount *= data.dim(dim);
-        ++prevDim;
-    }
-
+    // Remove dimension to vectorize
     auto shape = data.shape();
+    int itemCount = shape.back().count;
+    shape.pop_back();
 
-    // check that the vectorized dims are dense
-    for (int i = 0; i < dims.size() - 1; ++i) {
-        auto stride = computeStride(shape, dims[i]);
-        assert(!stride.exprVal.has_value() && "Cannot vectorize non-constant stride");
-        if (stride.intVal.has_value()) {
-            Stride nextStride = computeStride(shape, dims[i + 1]);
-            assert(!nextStride.exprVal.has_value() && "Cannot vectorize non-constant stride");
-            int naturalStride = nextStride.intVal.value() * shape[dims[i + 1]].count;
-            assert(
-                stride.intVal.value() == naturalStride && "Cannot vectorize non-dense dimensions"
-            );
-        }
-    }
-
-    // Compute stride of the innermost vectorized dimension
-    Stride baseStride = computeStride(shape, dims.back());
-    assert(!baseStride.exprVal.has_value() && "Cannot vectorize non-constant stride");
-    int baseStrideInt = baseStride.intVal.value();
-
-    // Remove vectorized dimensions
-    shape.erase(shape.begin() + dims[0], shape.begin() + dims[0] + dims.size());
-
-    // Append new vectorized dimension
-    shape.insert(
-        shape.begin() + dims[0],
-        ShapeItem{
-            div_ceil(itemCount, vectorStride), (vectorStride * baseStrideInt), ShapeItem::Tag::Main
-        }
+    // Append new vectorized dimensions.
+    // Use the 'Main' tag for the count dimension to indicate it's the main vectorized dimension.
+    shape.push_back(ShapeItem{div_ceil(itemCount, vectorStride), vectorStride, ShapeItem::Tag::Main}
     );
-    shape.insert(shape.begin() + dims[0] + 1, ShapeItem{vectorSize, baseStrideInt});
+    shape.push_back(ShapeItem{vectorSize});
 
     // Set the stride of the previous dim (if any) if it doesn't have a stride yet
-    if (dims[0] > 0) {
-        auto &outerDim = shape[dims[0] - 1];
-        if (!outerDim.stride.hasVal()) {
-            // Compute the stride as the product of the counts of the vectorized dimensions
-            int strideValue = 1;
-            for (auto dim : dims) {
-                strideValue *= shape[dim].count;
-            }
-            outerDim.stride = Stride{strideValue * sizeofType(data.elementType())};
-        }
+    if (rank > 1 && !shape[rank - 1].stride.hasVal()) {
+        shape[rank - 1].stride = Stride{itemCount};
     }
 
     data.setShape(shape);
 }
 
-static void reshapeDim(
-    LData &data, int dimensionToReshape, const std::vector<int> &sizes, bool allowNonMultiple
-) {
+static void
+reshapeDim(LData &data, int dimIndex, const std::vector<int> &sizes, bool allowNonMultiple) {
     int rank = data.shape().size();
-    assert(dimensionToReshape < rank && "Invalid dimension to reshape");
+    assert(dimIndex < rank && "Invalid dimension to reshape");
 
     // Check the total number of elements in sizes[] corresponds to that in the dimension to reshape
     int itemCount = 1;
@@ -2165,31 +2090,30 @@ static void reshapeDim(
     if (itemCount < 0) {
         // Deduce implicit dimension
         itemCount = -itemCount;
-        if (data.dim(dimensionToReshape) % itemCount != 0 && !allowNonMultiple) {
-            llvm::errs() << "Reshape size mismatch: dimension " << dimensionToReshape << " size "
-                         << data.dim(dimensionToReshape) << " not multiple of " << itemCount
-                         << "\n";
+        if (data.dim(dimIndex) % itemCount != 0 && !allowNonMultiple) {
+            llvm::errs() << "Reshape size mismatch: dimension " << dimIndex << " size "
+                         << data.dim(dimIndex) << " not multiple of " << itemCount << "\n";
             assert(false && "Reshape size mismatch");
         }
-        implicitDimSize = div_ceil(data.dim(dimensionToReshape), itemCount);
+        implicitDimSize = div_ceil(data.dim(dimIndex), itemCount);
     }
-    else if ((allowNonMultiple && itemCount > data.dim(dimensionToReshape)) ||
-             (!allowNonMultiple && itemCount != data.dim(dimensionToReshape))) {
-        llvm::errs() << "Reshape size mismatch: dimension " << dimensionToReshape << " has size "
-                     << data.dim(dimensionToReshape) << " but reshape sizes have total size "
-                     << itemCount << "\n";
+    else if ((allowNonMultiple && itemCount > data.dim(dimIndex)) ||
+             (!allowNonMultiple && itemCount != data.dim(dimIndex))) {
+        llvm::errs() << "Reshape size mismatch: dimension " << dimIndex << " has size "
+                     << data.dim(dimIndex) << " but reshape sizes have total size " << itemCount
+                     << "\n";
         assert(false && "Reshape size mismatch");
     }
 
     // Remove dimension to reshape
     auto shape = data.shape();
-    ShapeItem reshapedItem = shape[dimensionToReshape];
-    shape.erase(shape.begin() + dimensionToReshape, shape.begin() + dimensionToReshape + 1);
+    ShapeItem reshapedItem = shape[dimIndex];
+    shape.erase(shape.begin() + dimIndex, shape.begin() + dimIndex + 1);
 
     // Append new reshaped dimensions
     for (auto it = sizes.rbegin(); it != sizes.rend(); ++it) {
         reshapedItem.count = *it > 0 ? *it : implicitDimSize;
-        shape.insert(shape.begin() + dimensionToReshape, reshapedItem);
+        shape.insert(shape.begin() + dimIndex, reshapedItem);
         // Use natural stride for next dimensions
         reshapedItem.stride = {};
     }

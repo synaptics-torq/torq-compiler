@@ -100,7 +100,7 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
     int vectSize = vectStride + kernelBorder.left + kernelBorder.right;
     int rowSize = output.dim(Out::H);
     ShapeItem rowsDim(kernelDim.h, rowSize, ShapeItem::Tag::KernelRows);
-    input.vectorize({Dim::H, Dim::W}, vectSize, vectStride).insertDim(In::KernelRows, rowsDim);
+    input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride).insertDim(In::KernelRows, rowsDim);
 
     // Reshape biasScale to match the processing layout
     biasScale.reshapeDim(0, {-1, outChInGroup, scaleBiasEntries(input.elementType())}, true);

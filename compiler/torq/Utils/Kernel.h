@@ -227,43 +227,42 @@ class LData : public DataT<LData> {
 
     // Dimension manipulation methods
 
-    // Insert a new dimension at the specified index
-    void insertDim(int dimIndex, const ShapeItem &item);
-
-    // Erase the dimension at the specified index
-    void eraseDim(int dimIndex);
-
     // Return the number of contiguous dense dimensions at the end of the data shape
     int denseDims() const;
 
     // Fuse count dimensions at the end of the data shape into a single dimension.
     // Asserts if rank < count or some of the dimensions are not dense.
     // If count is -1 all dense dimensions at the end are fused.
-    LData &fuseDense(int count = -1);
+    LData &fuse(int count);
 
-    // Vectorize the specified dimensions into a single dimension made of vectors of the given size
-    // dims must be contiguous.
-    // Dimensions to be vectorized must be dense.
-    // If the number of elements in the specified dimensions is not multiple of vectorStride
-    // the last vector will actually go beyond the end of the data shape, in any case the strides
-    // are adjusted accordingly.
+    // Same as fuse(n) but with explicitly specified dimensions
+    // The dimensions must be the last ones in the shape and dense.
+    LData &fuse(const std::vector<int> &dims);
+
+    // Vectorize the last dimension into vectors of the specified size and stride.
+    // The last dimension must be dense.
+    // If the number of elements is not multiple of vectorStride the last vector
+    // will actually go beyond the end of the data shape, in any case the stride
+    // of the dimension above is kept to the actual element count.
     // If vectorStride is not specified it is assumed to be the same as vectorSize
     // Example:
     // data shape: {1, 16, 5, 5}, vectorSize: 4, dims: {2, 3}
     // resulting shape: {1, {16,stride:25}, 7, 4}
-    LData &vectorize(const std::vector<int> &dims, int vectorSize, int vectorStride = 0);
-
-    // Vectorize the last dimension.
-    // Shortcut for vectorize({shape.size() -1}, vectorSize, vectorStride)
     LData &vectorize(int vectorSize, int vectorStride = 0);
 
-    // Reshape the specified dimension
+    // Reshape the specified dimension.
     // dimIndex: index of the dimension to reshape
     // newDims: new dimensions that will replace the specified one, if one of them is -1
-    // it is inferred from the size of the original dimension and the other new dimensions
+    // its size is inferred from the size of the original dimension and the other new dimensions
     // asserts if the product of the new dimensions is not equal to the size of the original one
     // unless allowNonMultiple is true
     LData &reshapeDim(int dimIndex, const std::vector<int> &newDims, bool allowNonMultiple = false);
+
+    // Insert a new dimension at the specified index
+    LData &insertDim(int dimIndex, const ShapeItem &item);
+
+    // Erase the dimension at the specified index
+    LData &eraseDim(int dimIndex);
 
     // Reorganize the last dimension into two sub-blocks containing elements
     // with even and odd indexes respectively
@@ -445,9 +444,8 @@ class Alu : SliceComponent {
     // weightWidth if specified indicates the number of weights that will be used in outerProduct
     int iWidth(DType iType, DType wType = DType::none, int weightWidth = 0) const;
 
-    // Max number of weight items that can be processed in parallel for the given input width
-    // Note: inputWidth paramer is currently deprecated, will be removed in future
-    int wWidth(DType wType, int inputWidth = 0) const;
+    // Max number of weight items that can be processed in parallel
+    int wWidth(DType wType) const;
 };
 
 // Activation Unit
