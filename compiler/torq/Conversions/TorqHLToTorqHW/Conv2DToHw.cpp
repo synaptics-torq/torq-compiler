@@ -99,8 +99,7 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
     int vectStride = slice.alu.iWidth(input.elementType(), weight.elementType(), outChInGroup);
     int vectSize = vectStride + kernelBorder.left + kernelBorder.right;
     int rowSize = output.dim(Out::H);
-    int dTypeSize = sizeofType(input.elementType());
-    ShapeItem rowsDim(kernelDim.h, rowSize * dTypeSize, ShapeItem::Tag::KernelRows);
+    ShapeItem rowsDim(kernelDim.h, rowSize, ShapeItem::Tag::KernelRows);
     input.vectorize({Dim::H, Dim::W}, vectSize, vectStride).insertDim(In::KernelRows, rowsDim);
 
     // Reshape biasScale to match the processing layout
@@ -121,7 +120,7 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
                     For(auto j = slice.iterate(kernelDim.h)) {
                         IData idata = slice.iram.load(input[batch][u][j][b]);
                         WData wdata = slice.wram.load(weight[og][u][j]);
-                        idata.setShape({{kernelDim.w, 1 * dTypeSize}, vectStride});
+                        idata.setShape({{kernelDim.w, 1}, vectStride});
                         wdata.setShape({kernelDim.w, outChInGroup});
                         For(auto i = slice.iterate(kernelDim.w)) {
                             pdata = slice.alu.outerProductAccumulate(idata[i], wdata[i]);

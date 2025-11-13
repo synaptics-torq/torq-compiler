@@ -31,8 +31,8 @@ static void partitionByIndexParity2D(LData &data);
 // Compute the stride of dimension i by multiplying the dimensions up to i (excluded)
 // or the expicit stride if present
 // if i < 0 compute the stride (size) of the entire shape
-static Stride computeStride(const Shape &dims, int i, DType dType = DType::int8) {
-    int itemSize = sizeofType(dType);
+static Stride computeStride(const Shape &dims, int i) {
+    int itemSize = 1;
     Stride stride = itemSize;
     for (int j = dims.size() - 1; j >= 0; j--) {
         if (dims[j].stride.hasVal()) {
@@ -50,9 +50,8 @@ static Stride computeStride(const Shape &dims, int i, DType dType = DType::int8)
 // Compute number of elements in the shape by multiplying the dimensions
 // if numDims >= 0 only the final numDims dimensions are considered
 // return -1 if the shape is not dense
-static int denseElementCount(const Shape &dims, DType dType, int numDims = -1) {
+static int denseElementCount(const Shape &dims, int numDims = -1) {
     int count = 1;
-    int itemSize = sizeofType(dType);
     int startDim = numDims < 0 ? 0 : dims.size() - numDims;
     for (int j = dims.size() - 1; j >= startDim; j--) {
         const auto &dim = dims[j];
@@ -61,7 +60,7 @@ static int denseElementCount(const Shape &dims, DType dType, int numDims = -1) {
         }
         if (dim.stride.intVal.has_value()) {
             int stride = dim.stride.intVal.value();
-            if (stride != count * itemSize) {
+            if (stride != count) {
                 return -1;
             }
         }
@@ -78,21 +77,19 @@ struct SGBlockInfo {
     bool isEvenOddSplit{}; // True if the sgGroups represent an even-odd split
 };
 
-static bool isEvenOddSplit(const Shape &dims, DType dType, SGBlockInfo &block) {
+static bool isEvenOddSplit(const Shape &dims, SGBlockInfo &block) {
     if (dims.size() < 2) {
         return false;
     }
-    int elementSize = sizeofType(dType);
     const auto &dim1 = dims[dims.size() - 1];
     const auto &dim0 = dims[dims.size() - 2];
-    bool dim1NaturalStride =
-        !dim1.stride.exprVal.has_value() &&
-        (!dim1.stride.intVal.has_value() ||
-         (dim1.stride.intVal.has_value() && dim1.stride.intVal.value() == elementSize));
+    bool dim1NaturalStride = !dim1.stride.exprVal.has_value() &&
+                             (!dim1.stride.intVal.has_value() ||
+                              (dim1.stride.intVal.has_value() && dim1.stride.intVal.value() == 1));
     if (dim1.count != 2 || dim1NaturalStride) {
         return false;
     }
-    if (!(dim0.stride.intVal.has_value() && dim0.stride.intVal.value() == elementSize)) {
+    if (!(dim0.stride.intVal.has_value() && dim0.stride.intVal.value() == 1)) {
         return false;
     }
     block.sgGroups = 2;
@@ -111,17 +108,16 @@ static SGBlockInfo sgElementCount(const Shape &dims, DType dType, int sgMax = -1
     }
     // Compute the total number of elements in the shape excluding the first dimension
     SGBlockInfo blockInfo;
-    if (isEvenOddSplit(dims, dType, blockInfo)) {
+    if (isEvenOddSplit(dims, blockInfo)) {
         return blockInfo;
     }
-    int count = denseElementCount(Shape{dims.begin() + 1, dims.end()}, dType);
+    int count = denseElementCount(Shape{dims.begin() + 1, dims.end()});
     assert(count >= 0 && "Shape is  not dense");
 
     //  If the first dimension has a non-natural stride get the stride and the number of groups
-    int itemSize = sizeofType(dType);
     const auto &dim = dims[0];
     if (dim.stride.exprVal.has_value() ||
-        (dim.stride.intVal.has_value() && dim.stride.intVal.value() != count * itemSize)) {
+        (dim.stride.intVal.has_value() && dim.stride.intVal.value() != count)) {
         // Non-natural stride specified
         if (sgMax >= 0 && dim.count > sgMax) {
             llvm::errs() << "Error: Non-natural stride count: " << dim.count << " in " << dims
@@ -523,13 +519,12 @@ LData::LData(Value value) : LData(cast<MemRefType>(value.getType())) {}
 LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
     const DType elementType = getDType(type.getElementType());
     assert(elementType != DType::none && "Invalid element type");
-    const int elementSize = sizeofType(elementType);
 
     Shape dataShape;
     auto shape = type.getShape();
     auto strides = getEncodedStridesElements(type);
     for (int i = 0; i < shape.size(); ++i) {
-        dataShape.push_back({shape[i], strides[i] * elementSize});
+        dataShape.push_back({shape[i], strides[i]});
     }
 
     setElementType(elementType);
@@ -745,10 +740,6 @@ int SlicePrivate::addDims(
         assert(false && "Block size must be a multiple of bus width");
     }
 
-    // At this level we don't care about the actual element type, just about element size,
-    // so we can consider it as an additional dimension (important for stride computation)
-    dataDims.push_back(elementSize);
-
     // Let's start with LDIMs.
     // We currently handle with LDIMs only the element size and the top shape dimension if present.
     // Any other dimension will be handled with HDIMs.
@@ -764,7 +755,8 @@ int SlicePrivate::addDims(
             else {
                 assert(block.stride.intVal.has_value());
                 ndlDims.push_back(
-                    {DimType::L, MemDimTag::G, block.sgGroups, block.stride.intVal.value()}
+                    {DimType::L, MemDimTag::G, block.sgGroups,
+                     block.stride.intVal.value() * elementSize}
                 );
             }
         }
@@ -778,7 +770,7 @@ int SlicePrivate::addDims(
                 ndlDims.back().setExprStride(block.stride.exprVal.value());
             }
             else {
-                ndlDims.back().setIntStride(block.stride.intVal.value());
+                ndlDims.back().setIntStride(block.stride.intVal.value() * elementSize);
             }
             ndlDims.push_back({DimType::L, MemDimTag::G, block.size, elementSize});
         }
@@ -826,16 +818,16 @@ int SlicePrivate::addDims(
             );
         }
         else {
-            int strideValue = stride.intVal.value();
+            int strideVal = stride.intVal.value();
             if (iv && iv->isReverse()) {
-                offset += (itemsCount - 1) * strideValue;
-                strideValue = -strideValue;
+                offset += (itemsCount - 1) * strideVal;
+                strideVal = -strideVal;
             }
             // If useSDims and this iter variable is not used to explicitly index the output data,
             // this means that it will be covered by SDims, so use an A tag (with stride 0)
             // as required by the hardware
             auto memDimTag = useSDims && !iv ? MemDimTag::A : tagToMemDimTag(tag, _forStack[i].tag);
-            ndlDims.push_back({DimType::H, memDimTag, _forStack[i].count, strideValue});
+            ndlDims.push_back({DimType::H, memDimTag, _forStack[i].count, strideVal * elementSize});
         }
     }
 
@@ -844,7 +836,7 @@ int SlicePrivate::addDims(
         // Add special SDIMs to cover the remaining size
         Shape sdimsShape = data.subShape();
         ndlDims.push_back({DimType::S, MemDimTag::B, elementSize, 1});
-        int denseCnt = denseElementCount(sdimsShape, data.elementType());
+        int denseCnt = denseElementCount(sdimsShape);
         assert(denseCnt != 0 && "SDIM can't handle empty tensors");
         if (denseCnt > 0) {
             if (elementSize == 4) {
@@ -878,7 +870,7 @@ int SlicePrivate::addDims(
                 assert(s.stride.intVal.has_value());
                 ndlDims.push_back(
                     {DimType::S, i++ < 2 ? MemDimTag::X : MemDimTag::Y, s.count,
-                     s.stride.intVal.value()}
+                     s.stride.intVal.value() * elementSize}
                 );
             }
         }
@@ -888,7 +880,7 @@ int SlicePrivate::addDims(
         }
     }
 
-    return offset;
+    return offset * elementSize;
 }
 
 void SlicePrivate::addDims(
@@ -911,10 +903,6 @@ void SlicePrivate::addDims(
             assert(false && "Invalid index in data");
         }
     }
-
-    // At this level we don't care about the actual element type, just about element size,
-    // so we can consider it as an additional dimension (important for stride computation)
-    dataDims.push_back(elementSize);
 
     // We only add HDIMs here, LDIMs must have been added by the caller.
     // Generate HDIMs from loops
@@ -948,7 +936,7 @@ void SlicePrivate::addDims(
             }
         }
 
-        auto strideVal = stride.intVal.value();
+        auto strideVal = stride.intVal.value() * elementSize;
         if (strideVal == 0) {
             if (repeatTagIx >= sizeof(repeatTags) / sizeof(repeatTags[0])) {
                 llvm::errs() << "Error, NDL " << type << " has too many repeats\n";
@@ -1070,7 +1058,9 @@ void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
     cedrDims.push_back({DimType::L, RegDimTag::D, dSize, elementSize});
     if (bi.sgGroups > 1) {
         assert(bi.stride.intVal.has_value());
-        cedrDims.push_back({DimType::L, RegDimTag::G, bi.sgGroups, bi.stride.intVal.value()});
+        cedrDims.push_back(
+            {DimType::L, RegDimTag::G, bi.sgGroups, bi.stride.intVal.value() * elementSize}
+        );
     }
 
     // Now add hdims for each loop deeper the iram load
@@ -1165,7 +1155,7 @@ void SlicePrivate::ceww(const WData &wdata) {
     Shape shape = wdata.subShape();
     // assert(shape.size() <= 1 && "WData shape must be up to 1 for now");
     const int weightSize = sizeofType(wdata.elementType());
-    const int weightBlockSize = denseElementCount(shape, wdata.elementType());
+    const int weightBlockSize = denseElementCount(shape);
     assert(weightBlockSize > 0 && "Block empty or not dense");
 
     // Generate CEWW to load the data from DEWR to WRAM
@@ -1377,8 +1367,9 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     int actWidth = isFloat(dataType) ? HwInfo::act_width / 2 : HwInfo::act_width;
     int actBlockCount = div_ceil(blockSize, actWidth);
     int actBlockSize = actBlockCount > 1 ? actWidth : blockSize;
-    Shape pramShape = {actBlockCount, {actBlockSize, HwInfo::pdat_width}};
-    PData pdata(pramShape, isInt(dataType) ? DType::int32 : dataType);
+    DType pDataType = isInt(dataType) ? DType::int32 : dataType;
+    Shape pramShape = {actBlockCount, {actBlockSize, (HwInfo::pdat_width / sizeofType(pDataType))}};
+    PData pdata(pramShape, pDataType);
     debugData(pdata);
     return pdata;
 }
@@ -1437,14 +1428,14 @@ PData SlicePrivate::aluProductAccumulate(
     int actWidth = HwInfo::act_width;
     int actBlockCount = div_ceil(blockSize, actWidth);
     int actBlockSize = actBlockCount > 1 ? actWidth : blockSize;
-    Shape pramShape = {actBlockCount, {actBlockSize, HwInfo::pdat_width}};
+    bool resUnsigned = isUnsigned(dataType) && isUnsigned(weightType);
+    DType resType = isInt(dataType) ? (resUnsigned ? DType::uint32 : DType::int32) : DType::fp32;
+    Shape pramShape = {actBlockCount, {actBlockSize, (HwInfo::pdat_width / sizeofType(resType))}};
     if (outer) {
         // In this case pram.shape becomes 4D
         pramShape.insert(pramShape.begin(), weightBlockSize);
     }
 
-    bool resUnsigned = isUnsigned(dataType) && isUnsigned(weightType);
-    DType resType = isInt(dataType) ? (resUnsigned ? DType::uint32 : DType::int32) : DType::fp32;
     PData pdata(pramShape, resType);
     debugData(pdata);
     return pdata;
@@ -1638,13 +1629,12 @@ static void checkCompatibility(const Data &destData, const Data &sourceData) {
     }
     if (destRank > 1) {
         // Check that the last dimension is dense (except if even-odd split)
-        const DType dType = destData.elementType();
         auto innerStride = destShape.back().stride;
         SGBlockInfo dummyBlockInfo;
 
-        if (!isEvenOddSplit(destShape, dType, dummyBlockInfo) &&
+        if (!isEvenOddSplit(destShape, dummyBlockInfo) &&
             (innerStride.exprVal.has_value() ||
-             (innerStride.intVal.has_value() && innerStride.intVal.value() != sizeofType(dType)))) {
+             (innerStride.intVal.has_value() && innerStride.intVal.value() != 1))) {
             llvm::errs() << "Destination inner dimension is not dense: " << destData << "\n";
             assert(false && "Inner dimension must be dense");
         }
@@ -2023,15 +2013,14 @@ static void partitionByIndexParity1D(LData &data) {
     Shape subShape(&shape[rank - 1], &shape[rank]);
 
     // Check the last dim is dense
-    assert(denseElementCount(subShape, data.elementType()) > 0 && "Not dense inner dimension");
+    assert(denseElementCount(subShape) > 0 && "Not dense inner dimension");
     int w = subShape[0].count;
     // To be verified if the below assert is really needed
     assert(w % 2 == 0 && "Last dimension must be even for partitioning");
 
-    int elementSize = sizeofType(data.elementType());
     shape.pop_back();
-    shape.push_back({(w / 2), 1 * elementSize});
-    shape.push_back({2, (w / 2) * elementSize});
+    shape.push_back({(w / 2), 1});
+    shape.push_back({2, (w / 2)});
 
     // Update data shape
     data.setShape(shape);
@@ -2046,21 +2035,20 @@ static void partitionByIndexParity2D(LData &data) {
 
     // Check the last two dims are dense
     // To be verified if subShape[0] really needs to be dense or we can somehow handle a stride
-    assert(denseElementCount(subShape, data.elementType()) > 0 && "Not dense inner dimension");
+    assert(denseElementCount(subShape) > 0 && "Not dense inner dimension");
     // To be verified if the below assert is really needed
     int h = subShape[0].count;
     int w = subShape[1].count;
     // Note: this works also if h or w are odd
     int subFrameSize = (h * w) / 4;
 
-    int elementSize = sizeofType(data.elementType());
     shape.pop_back();
     shape.pop_back();
     // Note: use normal div here instead of div_ceil, as in the original ndl-based implementation
-    shape.push_back({(h / 2), (w / 2) * elementSize});
-    shape.push_back({2, subFrameSize * 2 * elementSize});
-    shape.push_back({(w / 2), 1 * elementSize});
-    shape.push_back({2, subFrameSize * elementSize});
+    shape.push_back({(h / 2), (w / 2)});
+    shape.push_back({2, (subFrameSize * 2)});
+    shape.push_back({(w / 2), 1});
+    shape.push_back({2, subFrameSize});
 
     // Update data shape
     data.setShape(shape);
@@ -2069,8 +2057,8 @@ static void partitionByIndexParity2D(LData &data) {
 static int denseDims(const LData &data) {
     int denseCount = 0;
     // TODO: we can do better
-    while (denseCount < data.shape().size() &&
-           denseElementCount(data.shape(), data.elementType(), denseCount + 1) > 0) {
+    while (denseCount < data.shape().size() && denseElementCount(data.shape(), denseCount + 1) > 0
+    ) {
         denseCount++;
     }
     return denseCount;
@@ -2079,7 +2067,7 @@ static int denseDims(const LData &data) {
 static void fuseDense(LData &data, int count) {
     int fused = 1;
     for (; (count < 0 || fused < count) && data.shape().size() > 1 &&
-           denseElementCount(data.shape(), data.elementType(), 2) > 0;
+           denseElementCount(data.shape(), 2) > 0;
          fused++) {
         // Merge last two dimensions
         int rank = data.shape().size();
@@ -2129,7 +2117,7 @@ vectorize(LData &data, const std::vector<int> &dimsIn, int vectorSize, int vecto
     }
 
     // Compute stride of the innermost vectorized dimension
-    Stride baseStride = computeStride(shape, dims.back(), data.elementType());
+    Stride baseStride = computeStride(shape, dims.back());
     assert(!baseStride.exprVal.has_value() && "Cannot vectorize non-constant stride");
     int baseStrideInt = baseStride.intVal.value();
 
@@ -2140,7 +2128,7 @@ vectorize(LData &data, const std::vector<int> &dimsIn, int vectorSize, int vecto
     shape.insert(
         shape.begin() + dims[0],
         ShapeItem{
-            div_ceil(itemCount, vectorStride), vectorStride * baseStrideInt, ShapeItem::Tag::Main
+            div_ceil(itemCount, vectorStride), (vectorStride * baseStrideInt), ShapeItem::Tag::Main
         }
     );
     shape.insert(shape.begin() + dims[0] + 1, ShapeItem{vectorSize, baseStrideInt});

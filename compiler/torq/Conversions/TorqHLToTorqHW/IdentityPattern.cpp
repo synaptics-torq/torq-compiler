@@ -38,7 +38,6 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
     if (elementType == DType::bf16) {
         elementType = DType::int16;
     }
-    const int elementSize = sizeofType(elementType);
     auto input_strides = getEncodedStridesElements(input_type);
     Slice slice;
     bool is_size_aligned = (total_px % slice.alu.iWidth(elementType)) == 0;
@@ -126,9 +125,8 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
 #if IDENTITY_EVEN_ODD_WITH_APPEND
             {blockSize},
 #else
-            {{blockSize / actBlockSize, actBlockSize / 2 * sizeofType(elementType)},
-             {actBlockSize / 2, sizeofType(elementType)},
-             {2, blockSize / 2 * sizeofType(elementType)}},
+            {{blockSize / actBlockSize, actBlockSize / 2}, {actBlockSize / 2, 1}, {2, blockSize / 2}
+            },
 #endif
             elementType
         );
@@ -155,7 +153,7 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
         int blockSize = 64;
         int actBlockSize = 16;
         int g = 4;
-        LData input({{g, (blockSize / g) + 1}, blockSize / g}, elementType);
+        LData input({{g, ((blockSize / g) + 1)}, blockSize / g}, elementType);
         LData output({blockSize / actBlockSize, actBlockSize}, elementType);
 
         IData idata = slice.iram.load(input);
@@ -197,7 +195,7 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
         // The input can have any number of dimensions with any stride (innermost must be dense)
         Shape inputShape;
         for (int i = 0; i < input_shape.size(); ++i) {
-            inputShape.push_back({input_shape[i], input_strides[i] * elementSize});
+            inputShape.push_back({input_shape[i], input_strides[i]});
         }
         // The output is a dense version of the input
         Shape outputShape;

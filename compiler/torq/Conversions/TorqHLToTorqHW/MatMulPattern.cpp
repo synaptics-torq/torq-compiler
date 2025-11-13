@@ -150,8 +150,8 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
     // Loaded in WMEM
     LData matA(
         {batches,
-         {m, a_row_stride * in_element_size}, // M
-         div_ceil(k, groupSize),              // K
+         {m, a_row_stride},      // M
+         div_ceil(k, groupSize), // K
          groupSize},
         inputType
     );
@@ -160,7 +160,7 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
         {
             batches,
             div_ceil(k, groupSize),
-            {groupSize, b_row_stride * in_element_size}, // K
+            {groupSize, b_row_stride}, // K
             div_ceil(n, alu_group_width),
             alu_group_width // N
         },

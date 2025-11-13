@@ -66,29 +66,23 @@ LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewrite
     const int32_t actBlockCount = div_ceil(blockSize, actBlockSize);
 
     LData input(
-        {{batchCount, inputStrides[DDim::N] * sizeofType(dataType)},
-         {inputChannels, inputStrides[DDim::C] * sizeofType(dataType)},
-         {outputWidth, stride * sizeofType(dataType)},
+        {{batchCount, inputStrides[DDim::N]},
+         {inputChannels, inputStrides[DDim::C]},
+         {outputWidth, stride},
          blockCount,
          blockSize},
         dataType
     );
     LData output(
-        {{batchCount, outputStrides[DDim::N] * sizeofType(outputType)},
-         {outputChannels, outputStrides[DDim::C] * sizeofType(outputType)},
-         {outputWidth, kernelWidth * sizeofType(outputType)},
+        {{batchCount, outputStrides[DDim::N]},
+         {outputChannels, outputStrides[DDim::C]},
+         {outputWidth, kernelWidth},
          blockCount,
          actBlockCount,
          actBlockSize},
         outputType
     );
-    LData weight(
-        {outputChannels,
-         {inputChannels, kernelWidth * sizeofType(weightType)},
-         blockCount,
-         blockSize},
-        weightType
-    );
+    LData weight({outputChannels, {inputChannels, kernelWidth}, blockCount, blockSize}, weightType);
     LData biasScale({outputChannels}, biasType);
 
     // Note: outputs are generated in order, so no need to pad each channel

@@ -38,7 +38,7 @@ ReduceMeanPattern::transform(torq_hl::ReduceMeanOp op, PatternRewriter &rewriter
     const uint32_t blockCount = div_ceil(width, blockSize);
 
     auto input_strides = getEncodedStridesElements(input_type);
-    uint32_t row_stride = input_strides[2] * sizeofType(DType::bf16);
+    uint32_t row_stride = input_strides[2];
 
     LData input({input_channel, {height, row_stride}, blockCount, blockSize}, DType::bf16);
     LData weight({1}, weightType);

@@ -172,7 +172,6 @@ FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
     Slice slice;
     DType elementType = getDType(params.inputElementType);
     Shape inputShape;
-    const int elementSize = sizeofType(elementType);
 
     auto shift = params.op.getShiftFactor();
     auto min = params.op.getOutputMin();
@@ -180,18 +179,18 @@ FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
     auto zp = params.op.getOutputZp();
 
     for (int i = 0; i < params.input1Shape.size() - 1; ++i) {
-        inputShape.push_back({params.input1Shape[i], params.input1Strides[i] * elementSize});
+        inputShape.push_back({params.input1Shape[i], params.input1Strides[i]});
     }
     int lastDimSize = params.input1Shape.back();
 
     if (lastDimSize <= slice.act.width(elementType)) {
-        inputShape.push_back({lastDimSize, 1 * elementSize});
+        inputShape.push_back({lastDimSize, 1});
     }
     else {
         // If the last dimension is larger than act width, we need to split it into blocks
         int blocks = div_ceil(lastDimSize, slice.act.width(elementType));
-        inputShape.push_back({blocks, slice.act.width(elementType) * elementSize});
-        inputShape.push_back({slice.act.width(elementType), 1 * elementSize});
+        inputShape.push_back({blocks, slice.act.width(elementType)});
+        inputShape.push_back({slice.act.width(elementType), 1});
     }
 
     // The output is a dense version of the input

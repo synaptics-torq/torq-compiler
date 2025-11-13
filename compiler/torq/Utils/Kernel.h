@@ -22,7 +22,9 @@ class Slice;
 class SlicePrivate;
 class Iterator;
 
-// A stride can be specified as either a constant value or an affine expression
+// A stride can be specified as either a constant value or an affine expression.
+// Constant strides and offsets always represent items (as in memrefs).
+// Affine expression represent bytes.
 struct Stride {
     Stride() {}
     Stride(const Stride &) = default;
@@ -178,7 +180,7 @@ class Data {
     // Return data name
     const std::string &name() const;
 
-    // Return data offset
+    // Return data offset (in items)
     int offset() const;
     void setOffset(int offset);
 

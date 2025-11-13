@@ -74,22 +74,20 @@ LogicalResult convertToHw(torq_hl::TransposeOp op, PatternRewriter &rewriter) {
     // The output can have any number of dimensions with any stride
     Shape outputShape;
     for (int i = 0; i < input_shape.size(); ++i) {
-        outputShape.push_back({output_shape[i], output_strides[i] * sizeofType(elementType)});
+        outputShape.push_back({output_shape[i], output_strides[i]});
     }
 #else
     // Read sequential
     Shape inputShape;
     for (int i = 0; i < input_shape.size(); ++i) {
-        inputShape.push_back({input_shape[i], input_strides[i] * sizeofType(elementType)});
+        inputShape.push_back({input_shape[i], input_strides[i]});
     }
 
     // The output can have any number of dimensions with any stride
     auto revPerm = getReversePerm(perm);
     Shape outputShape;
     for (int i = 0; i < input_shape.size(); ++i) {
-        outputShape.push_back(
-            {output_shape[revPerm[i]], output_strides[revPerm[i]] * sizeofType(elementType)}
-        );
+        outputShape.push_back({output_shape[revPerm[i]], output_strides[revPerm[i]]});
     }
 #endif
 
@@ -100,9 +98,9 @@ LogicalResult convertToHw(torq_hl::TransposeOp op, PatternRewriter &rewriter) {
     ShapeItem &topDim = inputShape.back();
     ShapeItem &outTopDim = outputShape.back();
 #if TORQ_TRANSPOSE_WRITE_SEQUENTIAL
-    bool topDimIsDense = topDim.stride.intVal.value() == sizeofType(elementType);
+    bool topDimIsDense = topDim.stride.intVal.value() == 1;
 #else
-    bool topDimIsDense = outTopDim.stride.intVal.value() == sizeofType(elementType);
+    bool topDimIsDense = outTopDim.stride.intVal.value() == 1;
 #endif
 
     //  TODO: handle the case when dim is a power of 2
