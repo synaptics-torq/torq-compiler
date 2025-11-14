@@ -261,6 +261,8 @@ static uint32_t toChars(torq_hw::ALUOp1Mode hwOp) {
         return 'BYP';
     case torq_hw::ALUOp1Mode::MUL:
         return 'MUL';
+    case torq_hw::ALUOp1Mode::SEL:
+        return 'SEL';
     default:
         return 'ACC';
     }

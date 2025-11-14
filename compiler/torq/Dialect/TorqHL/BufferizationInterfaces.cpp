@@ -259,6 +259,9 @@ void registerBufferizationInterfaceExternalModels(DialectRegistry &registry) {
 
         syna::torq_hl::BroadcastOp::attachInterface<
             TorqHLBufferizableOpInterface<syna::torq_hl::BroadcastOp>>(*context);
+
+        syna::torq_hl::SelectOp::attachInterface<
+            TorqHLBufferizableOpInterface<syna::torq_hl::SelectOp>>(*context);
     });
 }
 

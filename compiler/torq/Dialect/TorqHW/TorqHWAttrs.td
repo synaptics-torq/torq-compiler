@@ -63,7 +63,9 @@ def TorqHW_ALUOp1ModeAttr: I32EnumAttr<"ALUOp1Mode",
       I32EnumAttrCaseWithDoc<"BXOR", 16, "reserved">,
       I32EnumAttrCaseWithDoc<"BNOT", 17, "reserved">,
       I32EnumAttrCaseWithDoc<"BYP", 18, "">,
-      I32EnumAttrCaseWithDoc<"MUL", 19, "">
+      I32EnumAttrCaseWithDoc<"MUL", 19, "">,
+      I32EnumAttrCaseWithDoc<"SEL", 20, "">
+
     ]> {
   let cppNamespace = "::mlir::syna::torq_hw";
 }

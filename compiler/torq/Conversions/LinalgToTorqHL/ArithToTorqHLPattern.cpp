@@ -439,6 +439,52 @@ class ElementWiseShiftOpPattern : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
+class SelectOpPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        Operation *ternaryOp = getElementwiseTernaryOp(srcOp, /*allowConstants*/ true);
+        if (!ternaryOp) {
+            return rewriter.notifyMatchFailure(srcOp, "Not an elementwise ternary op");
+        }
+        // Match arith.select
+        auto selectOp = dyn_cast<arith::SelectOp>(ternaryOp);
+        if (!selectOp) {
+            return rewriter.notifyMatchFailure(srcOp, "Not an arith.select operation");
+        }
+        auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+
+        SmallVector<Value, 3> selectInputs;
+        for (int i = 0; i < 3; ++i) {
+            Value operand = ternaryOp->getOperand(i);
+            if (auto blockArg = dyn_cast<BlockArgument>(operand)) {
+                int argIdx = blockArg.getArgNumber();
+                selectInputs.push_back(srcOp.getInputs()[argIdx]);
+            }
+            else if (auto constOp = dyn_cast_or_null<arith::ConstantOp>(operand.getDefiningOp())) {
+                auto constAttr = constOp.getValue();
+                auto constTensor = rewriter.create<arith::ConstantOp>(
+                    srcOp.getLoc(), resultType, DenseElementsAttr::get(resultType, constAttr)
+                );
+                selectInputs.push_back(constTensor.getResult());
+            }
+            else {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Select operand is not block arg or constant"
+                );
+            }
+        }
+
+        rewriter.replaceOpWithNewOp<torq_hl::SelectOp>(
+            srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), selectInputs[0],
+            selectInputs[1], selectInputs[2]
+        );
+        return success();
+    }
+};
+
 void populateArithToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patterns) {
     patterns.insert<ArithCastOpPattern<arith::ExtUIOp>>(context);
     patterns.insert<ArithCastOpPattern<arith::TruncIOp>>(context);
@@ -448,6 +494,8 @@ void populateArithToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patt
     patterns.insert<ElementWiseShiftOpPattern>(context);
 
     patterns.insert<RoundingRightShiftPattern>(context);
+
+    patterns.insert<SelectOpPattern>(context);
 }
 
 } // namespace mlir::syna::torq

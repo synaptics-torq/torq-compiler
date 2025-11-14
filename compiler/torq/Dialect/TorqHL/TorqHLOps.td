@@ -68,6 +68,20 @@ def TorqHL_AddOp: TorqHL_LayerOp<"add"> {
   ));
 }
 
+def TorqHL_SelectOp: TorqHL_LayerOp<"select"> {
+
+  let summary = "Select operation";
+  let description = [{
+    A ternary select operation; Select elements from input tensors based on a condition tensor.
+  }];
+
+  let arguments = !con(commonArgs, (ins
+    TensorOrMemref:$input1, // condition tensor
+    TensorOrMemref:$input2, // true tensor
+    TensorOrMemref:$input3 // false tensor
+  ));
+}
+
 def TorqHL_MatMulOp: TorqHL_LayerOp<"matmul"> {
   let summary = "MatMul operation";
   let description = [{

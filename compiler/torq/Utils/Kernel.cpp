@@ -1124,10 +1124,12 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
     // 256/(weightBlockSize*weightSize) times in alu computation
     cewrDims.push_back({DimType::L, RegDimTag::D, repeatWeight ? 1 : weightBlockSize, 0});
 
-    // mainly used for int16 elementwise Mul operation, meaning repeat elementSize=2 times weight in
-    // order to compute with ddata 16bit = 2 int18 to combine 48bit result
-    if (_iram.elementType == DType::int16 && _cfg.alu_op0_mode[0] == torq_hw::ALUOp0Mode::MUL &&
-        !repeatWeight) {
+    // Mainly used for int16/int32 elementwise multiplication operations.
+    // For example, for int16, this means repeating the elementSize (2 bytes) times the weight
+    // in order to compute with 16-bit data, resulting in a 48-bit output from combining two 24-bit
+    // intermediate results.
+    if ((_iram.elementType == DType::int16 || _iram.elementType == DType::int32) &&
+        _cfg.alu_op0_mode[0] == torq_hw::ALUOp0Mode::MUL && !repeatWeight) {
         cewrDims.push_back({DimType::L, RegDimTag::J, sizeofType(_iram.elementType), 0});
     }
 

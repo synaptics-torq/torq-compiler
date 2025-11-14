@@ -72,6 +72,8 @@ typedef OpPattern<torq_hl::ElementWiseShiftOp> ElementWiseShiftPattern;
 typedef OpPattern<torq_hl::DepthToSpaceOp> DepthToSpacePattern;
 typedef OpPattern<torq_hl::ReduceMeanOp> ReduceMeanPattern;
 
+typedef OpPattern<torq_hl::SelectOp> SelectPattern;
+
 void populateNssTaskPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
 } // namespace mlir::syna::torq

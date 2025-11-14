@@ -60,7 +60,7 @@ void TorqHLDialect::initialize() {
         syna::torq_hl::MatMulOp, syna::torq_hl::FMAOp, syna::torq_hl::ReduceOp,
         syna::torq_hl::MulOp, syna::torq_hl::IdentityOp, syna::torq_hl::ArgMaxOp,
         syna::torq_hl::TableOp, syna::torq_hl::ActOp, syna::torq_hl::BroadcastOp,
-        syna::torq_hl::ReduceMeanOp>();
+        syna::torq_hl::ReduceMeanOp, syna::torq_hl::SelectOp>();
 }
 
 } // namespace mlir::syna::torq_hl

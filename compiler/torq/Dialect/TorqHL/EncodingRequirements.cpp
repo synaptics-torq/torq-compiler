@@ -574,4 +574,6 @@ KernelEncoding AvgPool2DOp::getKernelEncoding() { return getDenseEncoding(); }
 
 KernelEncoding ConvertOp::getKernelEncoding() { return getDenseEncoding(); }
 
+KernelEncoding SelectOp::getKernelEncoding() { return getNoEncoding(); }
+
 } // namespace mlir::syna::torq_hl

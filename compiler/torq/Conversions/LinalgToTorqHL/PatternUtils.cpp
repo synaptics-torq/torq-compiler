@@ -1495,6 +1495,74 @@ ScaleClampInfo getDefaultScaleClampInfo(Type outElemType, Operation *srcOp) {
     return scInfo;
 }
 
+Operation *getElementwiseTernaryOp(linalg::GenericOp op, bool allowConstants) {
+
+    Value output = op.getResultTensors()[0];
+    auto rank = cast<RankedTensorType>(output.getType()).getRank();
+
+    // if rank == 0 (scalar) there is no loop
+    if (rank > 0 && op.getNumLoops() < 1) {
+        LLVM_DEBUG({ llvm::dbgs() << "elementwise ternary op loop number < 1\n"; });
+        return {};
+    }
+
+    if (op.getNumParallelLoops() != op.getNumLoops()) {
+        LLVM_DEBUG({ llvm::dbgs() << "elementwiseTernaryOp expect all loops are parallel\n"; });
+        return {};
+    }
+
+    // We expect 3 inputs but must also accept 1 or 2 if the same is used for multiple operands
+    if (op.getNumDpsInputs() != 3 && op.getNumDpsInputs() != 2 && op.getNumDpsInputs() != 1) {
+        LLVM_DEBUG({ llvm::dbgs() << "elementwiseTernaryOp expect 3 inputs (or 2/1)\n"; });
+        return {};
+    }
+
+    if (op.getNumDpsInits() != 1) {
+        LLVM_DEBUG({ llvm::dbgs() << "elementwiseTernaryOp expect 1 init\n"; });
+        return {};
+    }
+
+    // All inputs are used
+    for (int i = 0; i < op.getNumDpsInputs(); i++) {
+        if (!op.payloadUsesValueFromOperand(op.getDpsInputOperand(i))) {
+            LLVM_DEBUG({ llvm::dbgs() << "elementwiseTernaryOp input " << i << " is not used\n"; });
+            return {};
+        }
+    }
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1) {
+        LLVM_DEBUG({ llvm::dbgs() << "elementwiseTernaryOp expect 1 yield\n"; });
+        return {};
+    }
+
+    // Check the yielded result comes from an op with three operands
+    Operation *ternaryOp = yieldOp.getOperand(0).getDefiningOp();
+    if (!ternaryOp || ternaryOp->getNumOperands() != 3) {
+        LLVM_DEBUG({ llvm::dbgs() << "elementwiseTernaryOp expect 3 operands\n"; });
+        return {};
+    }
+
+    // Check the three operands are coming directly from the block args or constants
+    for (int i = 0; i < 3; ++i) {
+        auto operand = ternaryOp->getOperand(i);
+        if (auto extsi = operand.getDefiningOp<arith::ExtSIOp>()) {
+            operand = extsi.getIn();
+        }
+        bool ok = isa<BlockArgument>(operand) ||
+                  (allowConstants && isa<arith::ConstantOp>(operand.getDefiningOp()));
+        if (!ok) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "elementwiseTernaryOp operand " << i
+                             << " is not block arg (or constant if allowed)\n";
+            });
+            return {};
+        }
+    }
+
+    return ternaryOp;
+}
+
 Operation *getElementwiseBinaryOp(linalg::GenericOp op, bool allowConstants) {
 
     Value output = op.getResultTensors()[0];

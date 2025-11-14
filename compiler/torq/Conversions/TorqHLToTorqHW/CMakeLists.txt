@@ -41,6 +41,7 @@ set(sources
     Conv1DPattern.cpp
     DepthToSpacePattern.cpp
     ReduceMeanPattern.cpp
+    SelectPattern.cpp
 )
 
 if(TORQ_ENABLE_TORQ_GENERIC)

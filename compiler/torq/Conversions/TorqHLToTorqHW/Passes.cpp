@@ -86,6 +86,7 @@ void ConvertSliceProgramToTorqHwPass::runOnOperation() {
     patterns.add<ElementWiseShiftPattern>(ctx);
     patterns.add<DepthToSpacePattern>(ctx);
     patterns.add<ReduceMeanPattern>(ctx);
+    patterns.add<SelectPattern>(ctx);
 
     if (failed(applyFullConversion(getOperation(), conversionTarget, std::move(patterns)))) {
         getOperation().emitError() << "conversion failed";

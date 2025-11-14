@@ -197,6 +197,8 @@ MultiplierShiftInfo getMultiplierAndShift(
 
 ScaleClampInfo getDefaultScaleClampInfo(Type outElemType, Operation *srcOp);
 
+Operation *getElementwiseTernaryOp(linalg::GenericOp op, bool allowConstants = false);
+
 Operation *getElementwiseBinaryOp(linalg::GenericOp op, bool allowConstants = false);
 
 Operation *getElementwiseUnaryOp(linalg::GenericOp op);
