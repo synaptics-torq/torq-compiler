@@ -537,7 +537,8 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
         // TODO: add more elementwise binary ops
         if (eleOp && !isa<arith::AddIOp>(eleOp) && !isa<arith::AddFOp>(eleOp) &&
             !isa<arith::SubIOp>(eleOp) && !isa<arith::SubFOp>(eleOp) &&
-            !isa<arith::MulIOp>(eleOp) && !isa<arith::MulFOp>(eleOp)) {
+            !isa<arith::MulIOp>(eleOp) && !isa<arith::MulFOp>(eleOp) &&
+            !isa<arith::DivFOp>(eleOp)) {
             return rewriter.notifyMatchFailure(
                 srcOp, "elementwise binary op pattern only supports add/sub/mul ..\n"
             );

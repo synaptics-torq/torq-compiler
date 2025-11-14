@@ -157,13 +157,21 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
         }
         auto numerator = srcOp.getOperand(0);
         auto denominator = srcOp.getOperand(1);
+        auto output = srcOp.getOutputs()[0];
+        auto recip =
+            rewriter.create<linalg::ReciprocalOp>(srcOp.getLoc(), denominator, srcOp.getOutputs())
+                .getResult(0);
+
         rewriter.replaceOp(
             srcOp,
-            rewriter.create<arith::MulFOp>(
-                srcOp.getLoc(), numerator,
-                rewriter
-                    .create<linalg::ReciprocalOp>(srcOp.getLoc(), denominator, srcOp.getOutputs())
-                    .getResult(0)
+            rewriter.create<linalg::GenericOp>(
+                srcOp.getLoc(), TypeRange{output.getType()}, ValueRange{numerator, recip},
+                ValueRange{output}, srcOp.getIndexingMapsArray(), srcOp.getIteratorTypesArray(),
+                [&](OpBuilder &b, Location l, ValueRange args) {
+                    rewriter.create<linalg::YieldOp>(
+                        l, ValueRange{rewriter.create<arith::MulFOp>(l, args[0], args[1])}
+                    );
+                }
             )
         );
         return success();
