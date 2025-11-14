@@ -1987,4 +1987,40 @@ bool foldScalarRescale(
     return false;
 }
 
+// Conv2DMatmulOpConversion weight conversion function
+Value convertWeights(
+    mlir::linalg::MatmulOp srcOp, mlir::DenseIntOrFPElementsAttr weightAttr,
+    PatternRewriter &rewriter
+) {
+    // Reorder weights to OIHW
+    auto weightElemType = weightAttr.getElementType();
+    auto weightShape = dyn_cast<ShapedType>(weightAttr.getType()).getShape();
+
+    // Validate expected shape: [OC, IC] for matmul-style
+    assert(weightShape.size() == 2);
+
+    // Assume shape was originally [OC, IC] from matmul-style
+    int on = weightShape[0]; // OC
+    int in = weightShape[1]; // IC
+    int hn = 1;
+    int wn = 1;
+    std::vector<int64_t> weight_shape{on, in, hn, wn};
+
+    if (weightElemType.isBF16()) {
+        auto bfVals = weightAttr.getValues<APFloat>();
+        const std::vector<APFloat> bfVec(bfVals.begin(), bfVals.end());
+        std::vector<APFloat> reordered = get_weights_OIHW<APFloat>(bfVec, on, hn, wn, in);
+        return createFConst(rewriter, srcOp, reordered, weight_shape);
+    }
+    else if (weightElemType.isInteger(8)) {
+        auto rawVals = weightAttr.getValues<int8_t>();
+        std::vector<int8_t> reordered(rawVals.begin(), rawVals.end());
+        reordered = get_weights_OIHW<int8_t>(reordered, on, hn, wn, in);
+        return createI8Const(rewriter, srcOp, reordered, weight_shape);
+    }
+    else {
+        assert(false && "Unsupported weight type");
+    }
+}
+
 } // namespace mlir::syna::torq
