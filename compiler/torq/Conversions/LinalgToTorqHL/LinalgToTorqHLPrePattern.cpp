@@ -511,14 +511,7 @@ struct FCMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         // check if output user is expand_shape
         if (output.hasOneUse() && (isa<tensor::ExpandShapeOp>(*output.getUsers().begin()) ||
                                    isCollapseOrExpandShapeGeneric(*output.getUsers().begin()))) {
-            auto op = *output.getUsers().begin();
-            if (_markFuseGroups) {
-                output = op->getResult(0);
-            }
-            else {
-                op->getResult(0).replaceAllUsesWith(output);
-                rewriter.eraseOp(op);
-            }
+            output = output.getUsers().begin()->getResult(0);
         }
 
         ScaleClampInfo scInfo = foldForwardScaleClamp(output, outputChannelCount, 20, 12);
