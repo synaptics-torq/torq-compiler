@@ -1,17 +1,19 @@
-from torq.testing.iree import MlirTestCase, WithLLVMCPUReference, list_mlir_files, WithTweakedRandomDataInput
-from torq.testing.compilation_tests import parametrize, WithParameters
 import pytest
 
+from torq.testing.comparison import compare_test_results
+from torq.testing.iree import list_mlir_files
+from torq.testing.cases import get_test_cases_from_files
 
-@parametrize(list_mlir_files("tosa_ops"))
-class TestLinalgMlir(WithParameters, WithTweakedRandomDataInput, WithLLVMCPUReference, MlirTestCase):
 
-    pytestmark = pytest.mark.ci
+@pytest.fixture(params=get_test_cases_from_files(list_mlir_files("tosa_ops")))
+def case_config(request):
+    return {
+        "mlir_model_file": "static_mlir_model_file",
+        "static_mlir_model_file": request.param.data,
+        "input_data": "tweaked_random_input_data",
+        "torq_compiler_options": ["--iree-input-type=tosa-torq", "--torq-css-qemu"]
+    }
 
-    @property
-    def compiler_options(self):
-        return ["--iree-input-type=tosa-torq", "--torq-css-qemu"]
-
-    @property
-    def mlir_model_file(self):
-        return self.params
+@pytest.mark.ci
+def test_mlir_files(request, torq_results, llvmcpu_reference_results, case_config):
+    compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)

@@ -1,16 +1,21 @@
+from dataclasses import dataclass
+import pytest
 import tensorflow as tf
 import numpy as np
 import subprocess
 import json
-import abc
 
 import iree.compiler.tflite as iree_tflite_compile
 
-from .compilation_tests import CompilationTestCase, CachedTestDataFile
-from .iree import IREE_OPT, WithSimpleComparisonToReference, WithTorqCompiler, WithTorqRuntime, WithRandomUniformIntegerInputData, WithCachedMlirModel
+from .versioned_fixtures import versioned_generated_file_fixture, versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture
+
+"""
+This module provides fixtures and utilities for testing TensorFlow/Keras models.
+"""
 
 
-def generate_tests_from_model(full_model: tf.keras.Model, module_globals, marks):    
+
+def generate_layers_from_model(model: tf.keras.Model):    
     """
     Generates test cases for each unique layer configuration in the given Keras model and for the whole model
 
@@ -18,20 +23,12 @@ def generate_tests_from_model(full_model: tf.keras.Model, module_globals, marks)
     :param module_globals: The globals() dictionary of the module where the test cases will be added
     """
 
-    class TestFullModel(WithRandomUniformIntegerInputData, TfliteTestCase):
-
-        pytestmark = marks
-
-        def model(self):
-            return full_model
-
-    module_globals["TestFullModel"] = TestFullModel
-
     existing_cases = set()
+    layer_configs = {}
 
-    print("Total layers in model: ", len(full_model.layers))
+    print("Total layers in model: ", len(model.layers))
 
-    for layer in full_model.layers:
+    for layer in model.layers:
 
         if isinstance(layer, tf.keras.layers.InputLayer):
             continue
@@ -51,7 +48,9 @@ def generate_tests_from_model(full_model: tf.keras.Model, module_globals, marks)
 
         model = tf.keras.Model(inputs=inputs, outputs=output, name=f"Model")
 
-        json_str = json.dumps(model.get_config(), sort_keys=True)
+        model_config = model.get_config()
+
+        json_str = json.dumps(model_config, sort_keys=True)
 
         # create one test case for each unique layer configuration
         if json_str not in existing_cases:
@@ -60,16 +59,11 @@ def generate_tests_from_model(full_model: tf.keras.Model, module_globals, marks)
             print(f"Skipping duplicate model for layer {layer.name}")
             continue
 
-        class TestLayer(WithRandomUniformIntegerInputData, TfliteTestCase):
-            
-            pytestmark = marks
-
-            def model(self):
-                return model            
-
-        module_globals[f"Test{layer.name}"] = TestLayer
+        layer_configs[layer.name] = model_config
 
     print("Generated unique tests: ", len(existing_cases))
+
+    return layer_configs
 
 
 def quantize_model(model, quantize=True, quantize_to_int16=False):
@@ -126,72 +120,73 @@ def quantize_model(model, quantize=True, quantize_to_int16=False):
     return converter.convert()
 
 
-class WithTfliteToMlir(WithCachedMlirModel):
-    """
-    Converts a TFLite model to an MLIR model using IREE's TFLite importer
-    """
+@pytest.fixture
+def keras_model(request, case_config):
+    return request.getfixturevalue(case_config['keras_model'])
 
-    @abc.abstractmethod
-    def generate_tflite_model(self):
-        pass
+
+@pytest.fixture
+def tflite_model_file(request, case_config):
+    return request.getfixturevalue(case_config.get('tflite_model_file', 'quantized_tflite_model_file'))    
+
+
+@versioned_generated_file_fixture("mlir")
+def tflite_mlir_model_file(request, iree_opt, versioned_file, tflite_model_file):    
+
+    mlirb_model_path = str(versioned_file) + "b"
+    iree_tflite_compile.compile_file(str(tflite_model_file), save_temp_iree_input=str(mlirb_model_path), import_only=True)
+
+    subprocess.check_call([iree_opt, str(mlirb_model_path), "-o", str(versioned_file)])
+
+
+@versioned_hashable_object_fixture
+def tflite_quantization_params(case_config):
+    return {"quantize_to_int16": case_config.get("quantize_to_int16", False)}
+
+
+@versioned_generated_file_fixture("tflite")
+def quantized_tflite_model_file(request, versioned_file, keras_model, tflite_quantization_params):
+
+    quantize_to_int16 = tflite_quantization_params.get("quantize_to_int16", False)
     
-    def generate_mlir_model(self, mlir_file_path):
+    tflite_model = quantize_model(keras_model, quantize_to_int16=quantize_to_int16)
 
-        print("Generating MLIR model from TFLite model...")
-
-        mlirb_model_path = self.cache_dir / "model.mlirb"
-
-        iree_tflite_compile.compile_file(str(self.tflite_model_file), save_temp_iree_input=str(mlirb_model_path), import_only=True)
-
-        subprocess.check_call([IREE_OPT, str(mlirb_model_path), "-o", str(mlir_file_path)])
+    with open(versioned_file, "wb") as f:
+        f.write(tflite_model)
 
 
-class WithQuantizedTfliteExport(WithTfliteToMlir):
-    """
-    Exports the model as a quantized TFLite model (the model must be of type tf.keras.Model)
-    """
+@versioned_generated_file_fixture("tflite")
+def float32_tflite_model_file(request, versioned_file, keras_model):
 
-    def quantize_to_int16(self):
-        return False
+    converter = tf.lite.TFLiteConverter.from_keras_model(keras_model.data)    
+    tflite_model = converter.convert()
 
-    tflite_model_file = CachedTestDataFile("quantized_model.tflite", "generate_tflite_model")
-
-    def generate_tflite_model(self, tflite_file_path):
-        print("Generating quantized TFLite model...")        
-
-        tflite_model = quantize_model(self.model(), quantize_to_int16=self.quantize_to_int16())
-
-        with open(tflite_file_path, "wb") as f:
-            f.write(tflite_model)
+    with open(versioned_file, "wb") as f:
+        f.write(tflite_model)
 
 
-class WithTfliteReference:
-    """
-    Computes reference results for a test case using TFLite
-    """ 
+@versioned_cached_data_fixture
+def tflite_reference_results(request, tflite_model_file, input_data):
 
-    def generate_reference_results(self):
-        print("Generating TFLite reference results...")
+    interpreter = tf.lite.Interpreter(model_path=str(tflite_model_file))
+    interpreter.allocate_tensors()
 
-        interpreter = tf.lite.Interpreter(model_path=str(self.tflite_model_file))
-        interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
 
-        input_details = interpreter.get_input_details()
-        output_details = interpreter.get_output_details()
+    for i, input_data_array in enumerate(input_data):
+        interpreter.set_tensor(input_details[i]['index'], input_data_array)
 
-        for i, input_data_array in enumerate(self.input_data):
-            interpreter.set_tensor(input_details[i]['index'], input_data_array)
+    interpreter.invoke()
 
-        interpreter.invoke()
-
-        return [interpreter.get_tensor(output_details[i]['index']) for i in range(len(output_details))] 
+    return [interpreter.get_tensor(output_details[i]['index']) for i in range(len(output_details))] 
 
 
-class TfliteTestCase(WithTorqCompiler, WithTorqRuntime, WithQuantizedTfliteExport, 
-                     WithTfliteReference, WithSimpleComparisonToReference,
-                     CompilationTestCase):
-    """
-    Test case that compares the torq output against TFLite reference output
-    """
+@versioned_hashable_object_fixture
+def keras_layer_data(case_config):
+    return case_config['keras_layer_data']
 
-    pass
+
+@versioned_unhashable_object_fixture
+def layer_model(request, keras_layer_data):
+    return tf.keras.Model.from_config(keras_layer_data)

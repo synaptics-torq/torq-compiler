@@ -1,47 +1,41 @@
-import tensorflow as tf
-
-# make sure tests use reproducible weights and inputs
-tf.keras.utils.set_random_seed(21321)
-
-from torq.testing.compilation_tests import WithParameters, parametrize
-from torq.testing.iree import WithRandomUniformIntegerInputData
-from torq.testing.tensorflow import *
-
-from .models.keras_models import ConvModelParams, conv_model, transpose_conv_model
-
 import pytest
 
-
-from dataclasses import dataclass
-
-
-@dataclass
-class TransposeConvTestParams:
-    quantize_to_int16: bool
-
-    @staticmethod
-    def idfn(val):
-        return val.quantize_to_int16 and "i16" or "i8"
+from .models.keras_models import *
+from torq.testing.comparison import compare_test_results
+from torq.testing.cases import Case
 
 
-@parametrize([TransposeConvTestParams(True), TransposeConvTestParams(False)])
-class TestTransposeConv(WithParameters, WithRandomUniformIntegerInputData, TfliteTestCase):
+def get_test_cases():
+    test_cases = []
 
-    pytestmark = pytest.mark.ci
+    for params in conv_model_params:
+        test_cases.append(Case("conv_model_" + params.idfn(), {
+            "keras_model_name": "conv_model",
+            "keras_model_params": params
+        }))
 
-    # overrides default quantization to int8
-    def quantize_to_int16_value(self):
-        return self.params.quantize_to_int16
-    
-    def model(self):
-        return transpose_conv_model()
+    for quantize_mode in [False, True]:
+        test_cases.append(Case("transpose_conv_model_quantized_" + ("i16" if quantize_mode else "i8"), {
+            "keras_model_name": "transpose_conv_model",
+            "quantize_to_int16": quantize_mode
+        }))
+
+    return test_cases
 
 
-@parametrize([ConvModelParams(12, 12, 5, 1, 64), ConvModelParams(100, 100, 5, 6, 4)])
-class TestConv(WithRandomUniformIntegerInputData, WithParameters, TfliteTestCase):
+@pytest.fixture(params=get_test_cases())
+def case_config(request):
 
-    pytestmark = pytest.mark.ci
+    return {
+        "keras_model": request.param.data['keras_model_name'],
+        "keras_model_params": request.param.data.get('keras_model_params', {}),
+        "mlir_model_file": "tflite_mlir_model_file",
+        "tflite_model_file": "quantized_tflite_model_file",
+        "input_data": "tweaked_random_input_data",
+        "quantize_to_int16": request.param.data.get("quantize_to_int16", False)
+    }
 
-    def model(self):
-        return conv_model(self.params)
 
+@pytest.mark.ci
+def test_keras_model(request, torq_results, tflite_reference_results, case_config):
+    compare_test_results(request, torq_results, tflite_reference_results, case_config)

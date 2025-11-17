@@ -1,20 +1,24 @@
-from torq.testing.iree import MlirTestCase, WithLLVMCPUReference, list_mlir_files, WithTweakedRandomDataInput
-from torq.testing.compilation_tests import parametrize, WithParameters
 import pytest
 
+from torq.testing.comparison import compare_test_results
+from torq.testing.iree import list_mlir_file_group
+from torq.testing.cases import get_test_cases_from_files
 
-@parametrize(list_mlir_files("torch_ops"))
-class TestTorchMlir(WithParameters, WithTweakedRandomDataInput, WithLLVMCPUReference, MlirTestCase):
 
-    pytestmark = pytest.mark.ci
+@pytest.fixture(params=get_test_cases_from_files(list_mlir_file_group("torch_ops")))
+def case_config(request):
 
-    @property
-    def compiler_options(self):
-        return ["--iree-input-type=linalg-torq", "--torq-css-qemu"]
+    if request.param.data.name in ["equal.mlir", "instancenorm.mlir", 
+                                    "0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean.mlir"]:
+        pytest.xfail("not implemented yet")
 
-    @property
-    def mlir_model_file(self):
-        if self.params.split("/")[-1] in ["equal.mlir", "instancenorm.mlir"]:
-            pytest.xfail("not implemented yet")
+    return {
+        "mlir_model_file": "static_mlir_model_file",
+        "static_mlir_model_file": request.param.data,
+        "input_data": "tweaked_random_input_data",
+        "torq_compiler_options": ["--torq-css-qemu"]
+    }
 
-        return self.params
+@pytest.mark.ci
+def test_mlir_files(request, torq_results, llvmcpu_reference_results, case_config):    
+    compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)

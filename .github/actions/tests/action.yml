@@ -112,4 +112,4 @@ runs:
       if: ${{ inputs.test_data_cache_artifact != '' }}
       shell: bash
       run: |
-        tar -zcf ${{ inputs.test_data_cache_artifact }} -C .pytest_cache/d/ compilation_test_data
+        tar -zcf ${{ inputs.test_data_cache_artifact }} -C .pytest_cache/d/ versioned_fixtures
