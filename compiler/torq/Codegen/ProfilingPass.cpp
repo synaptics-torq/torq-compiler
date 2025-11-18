@@ -116,11 +116,9 @@ struct ProfStruct {
 };
 
 static std::string toString(Location loc) {
-
     std::string locStr;
     llvm::raw_string_ostream os(locStr);
     loc.print(os);
-
     return locStr;
 }
 
@@ -264,7 +262,7 @@ LogicalResult ProfilingPass::cycleProfiling(mlir::FunctionOpInterface funcOp) {
         }
 
         rewriter.create<torq_hw::SliceProfilingOp>(
-            rewriter.getUnknownLoc(), sliceMemSize, shapeSstr.str(), curMaxCycle, ndlCycles
+            sliceTaskOp.getLoc(), sliceMemSize, shapeSstr.str(), curMaxCycle, ndlCycles
         );
 
         // NDL Cycle Match Checks
@@ -338,14 +336,14 @@ static LogicalResult processOperationTime(Operation *op, const IRMapping &map, P
         // TODO: check if there is a concurrent dma out and compute the bandwidth if shared
         prof.addToDmaTimeline(
             DmaType::In, prof.timestamp, prof.timestamp + prof.currentDmaInCycles,
-            prof.currentDmaInLoc
+            toString(dmaInStartOp.getLoc())
         );
     }
     else if (auto dmaOutStartOp = dyn_cast<torq_hw::DmaOutStartOp>(op)) {
         // TODO: check if there is a concurrent dma in and compute the bandwidth if shared
         prof.addToDmaTimeline(
             DmaType::Out, prof.timestamp, prof.timestamp + prof.currentDmaOutCycles,
-            prof.currentDmaOutLoc
+            toString(dmaOutStartOp.getLoc())
         );
     }
     // Update the timestamp based on the end of dma operation.
@@ -521,9 +519,7 @@ void ProfilingPass::runOnOperation() {
     Block &funcBlock = funcOp->getRegion(0).front();
     rewriter.setInsertionPointToStart(&funcBlock);
 
-    rewriter.create<torq_hw::DispatchProfilingOp>(
-        rewriter.getUnknownLoc(), totalMemSize, totalCycle
-    );
+    rewriter.create<torq_hw::DispatchProfilingOp>(funcOp.getLoc(), totalMemSize, totalCycle);
 }
 
 } // namespace
