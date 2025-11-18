@@ -13,9 +13,12 @@
 
 #include "compiler/plugins/input/TOSA/InputConversion/Passes.h"
 #include "compiler/plugins/input/Torch/InputConversion/Passes.h"
+#include "iree/compiler/Preprocessing/Common/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
+#include "torch-mlir/Conversion/TorchToLinalg/TorchToLinalg.h"
+#include "torch-mlir/Dialect/TorchConversion/Transforms/Passes.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "iree-torq-pass-pipeline"
@@ -49,7 +52,11 @@ void buildTosaTransformPassPipeline(OpPassManager &passManager) {
     iree_compiler::buildTOSAInputConversionPassPipeline(passManager);
 
     // divide operations into  dispatch into Flow::RegionOps
-    passManager.addNestedPass<func::FuncOp>(createFormDispatchRegionsPass(clDisableDispatchFusion));
+    if (!clDisableDispatchFusion) {
+        passManager.addNestedPass<func::FuncOp>(
+            iree_compiler::Preprocessing::createMakeSingleDispatchForFunctionPass()
+        );
+    }
 }
 
 void registerTosaTransformPassPipeline() {
@@ -60,11 +67,23 @@ void registerTosaTransformPassPipeline() {
 }
 
 void buildTorchTransformPassPipeline(OpPassManager &passManager) {
-    passManager.addNestedPass<func::FuncOp>(createFormDispatchRegionsPass(clDisableDispatchFusion));
+
+    passManager.addPass(mlir::torch::Torch::createLowerToBackendContractPass(10, true, true, {}, "")
+    );
+    mlir::torch::TorchConversion::createTorchBackendToLinalgOnTensorsBackendPipeline(passManager);
+    if (!clDisableDispatchFusion) {
+        passManager.addNestedPass<func::FuncOp>(
+            iree_compiler::Preprocessing::createMakeSingleDispatchForFunctionPass()
+        );
+    }
 }
 
 void buildLinalgTransformPassPipeline(OpPassManager &passManager) {
-    passManager.addNestedPass<func::FuncOp>(createFormDispatchRegionsPass(clDisableDispatchFusion));
+    if (!clDisableDispatchFusion) {
+        passManager.addNestedPass<func::FuncOp>(
+            createFormDispatchRegionsPass(clDisableDispatchFusion)
+        );
+    }
 }
 
 void registerTorchTransformPassPipeline() {
