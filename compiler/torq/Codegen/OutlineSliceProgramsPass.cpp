@@ -104,7 +104,8 @@ static void outlineOp(int idx, Operation *op, OpBuilder builder) {
 
     // FIXME: here we should defer computing the size until we compile the Program
     // The size should be enough to store a CFG/SYN task and the required NDLs
-    int size = 0xA00;
+    // Note: this has to be kept in sync with the size in getProgramSize()
+    int size = 0xA00 * 2;
 
     // allocate some lram that will contain the code
 

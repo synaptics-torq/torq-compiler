@@ -164,7 +164,8 @@ static int64_t getProgramSize(torq_hl::ProgramOp programOp) {
 
     // FIXME: we compute this based on the real content of the program
     if (programOp.getProgram().getType().getExecutor() == torq_hl::Executor::Slice) {
-        return 0xA00;
+        // /!\ Note: this has to be kept in sync with the size in outlineOp()
+        return 0xA00 * 2;
     }
     else if (programOp.getProgram().getType().getExecutor() == torq_hl::Executor::NSS) {
         return 0x280;

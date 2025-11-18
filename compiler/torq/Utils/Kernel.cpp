@@ -20,13 +20,13 @@ using namespace std;
 
 namespace mlir::syna::torq {
 
-static int denseDims(const LData &data);
-static void fuse(LData &data, int count = -1);
-static void vectorize(LData &data, int vectorSize, int vectorStride);
-static void
-reshapeDim(LData &data, int dimIndex, const std::vector<int> &sizes, bool allowNonMultiple);
-static void partitionByIndexParity1D(LData &data);
-static void partitionByIndexParity2D(LData &data);
+static int denseDims(const LData &);
+static void fuse(LData &, int count = -1);
+static void vectorize(LData &, int vectorSize, int vectorStride);
+static void subviewDim(LData &, int dimIndex, int offset, int count);
+static void reshapeDim(LData &, int dimIndex, const std::vector<int> &sizes, bool allowNonMultiple);
+static void partitionByIndexParity1D(LData &);
+static void partitionByIndexParity2D(LData &);
 
 // Compute the stride of dimension i by multiplying the dimensions up to i (excluded)
 // or the expicit stride if present
@@ -350,7 +350,7 @@ bool isUnsigned(DType type) {
 
 bool hasScale(DType type) { return isInt(type); }
 
-int scaleBiasEntries(DType type) { return hasScale(type) ? 2 : 1; }
+int scaleBiasWidth(DType type) { return hasScale(type) ? 2 : 1; }
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
     switch (dtype) {
@@ -425,6 +425,27 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape) {
     }
     os << "]";
     return os;
+}
+
+//
+// LRTBDim class
+//
+
+LRTBDim::LRTBDim(::llvm::ArrayRef<int64_t> lrtb) {
+    assert(lrtb.size() == 4 && "Expected 4 values for LRTB dimension");
+    left = lrtb[0];
+    right = lrtb[1];
+    top = lrtb[2];
+    bottom = lrtb[3];
+}
+
+LRTBDim LRTBDim::symmetric(const HWDim &dim) {
+    LRTBDim b;
+    b.left = dim.w / 2;
+    b.right = dim.w - b.left - 1;
+    b.top = dim.h / 2;
+    b.bottom = dim.h - b.top - 1;
+    return b;
 }
 
 //
@@ -510,7 +531,11 @@ int Data::offset() const { return _offset; }
 void Data::setOffset(int offset) { _offset = offset; }
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Data &shape) {
-    os << shape.name() << shape.subShape() << ":" << shape.elementType();
+    os << shape.name() << shape.subShape();
+    if (shape.offset()) {
+        os << "@" << shape.offset();
+    }
+    os << ":" << shape.elementType();
     return os;
 }
 
@@ -559,6 +584,11 @@ LData &LData::fuse(const std::vector<int> &dims) {
 
 LData &LData::vectorize(int vectorSize, int vectorStride) {
     torq::vectorize(*this, vectorSize, vectorStride);
+    return *this;
+}
+
+LData &LData::subviewDim(int dimIndex, int offset, int count) {
+    torq::subviewDim(*this, dimIndex, offset, count);
     return *this;
 }
 
@@ -1747,6 +1777,23 @@ torq_hw::SliceCFGAttr Slice::getCfgAttr(MLIRContext *ctx) const {
 }
 
 const torq_hw::Ndls &Slice::getNdls() const {
+#if 0
+    // This doesn't work yet. Check conv-stride1.mlir vs conv-stride1-notile-5ch.mlir with:
+    // biasScale.getShape()[1].count = 4;
+
+    // Check consistency
+    auto acbr = d->_ndls.getRegNdl(NdlType::ACBR);
+    auto acpr = d->_ndls.getRegNdl(NdlType::ACPR);
+    int acbrRepeat = (acbr && acbr->dims.size() > 2) ? acbr->dims[acbr->dims.size() - 2].count : 1;
+    if (acbr && acpr && iterationCount(acbr->dims) != iterationCount(acpr->dims) * acbrRepeat) {
+        llvm::errs() << "The biasScale read don't match the number of executions of ACT\n";
+        llvm::errs() << "Mismatching iteration counts:\n";
+        llvm::errs() << "  BiasScale: " << iterationCount(acbr->dims) << "/" << acbrRepeat << "\n";
+        llvm::errs() << "  ACT: " << iterationCount(acpr->dims) << "\n";
+        llvm::errs() << "  DEQW: " << iterationCount(d->_ndls.getMemNdl(NdlType::DEQW)) << "\n";
+        assert(false && "Iteration count mismatch");
+    }
+#endif
     // Just return the NDLs
     return d->_ndls;
 }
@@ -2065,13 +2112,44 @@ static void vectorize(LData &data, int vectorSize, int vectorStride) {
 
     // Append new vectorized dimensions.
     // Use the 'Main' tag for the count dimension to indicate it's the main vectorized dimension.
-    shape.push_back(ShapeItem{div_ceil(itemCount, vectorStride), vectorStride, ShapeItem::Tag::Main}
+    // If itemCount <= vectorSize create one single vector of that size (this optimization is not
+    // done if the vectorSize != vectorStride, this is needed for convolution with frame size
+    // exactly equal to vectorSize because in that case we have to respect the vectorStride to
+    // take into account padding).
+    int vectCount = div_ceil(itemCount, vectorStride);
+    shape.push_back(ShapeItem{vectCount, vectorStride, ShapeItem::Tag::Main});
+    shape.push_back(ShapeItem{vectCount > 1 || vectorSize != vectorStride ? vectorSize : itemCount}
     );
-    shape.push_back(ShapeItem{vectorSize});
 
     // Set the stride of the previous dim (if any) if it doesn't have a stride yet
     if (rank > 1 && !shape[rank - 1].stride.hasVal()) {
         shape[rank - 1].stride = Stride{itemCount};
+    }
+
+    data.setShape(shape);
+}
+
+static void subviewDim(LData &data, int dimIndex, int offset, int count) {
+    auto shape = data.getShape();
+    int rank = shape.size();
+    assert(dimIndex >= 0 && dimIndex < rank && "Dimension index out of range");
+    if (!(count > 0 && offset >= 0 && offset + count <= shape[dimIndex].count)) {
+        llvm::errs() << "Subview out of range: dimIndex=" << dimIndex << ", offset=" << offset
+                     << ", count=" << count << ", dimSize=" << shape[dimIndex].count << "\n";
+        assert(false && "Subview out of range");
+    }
+    auto stride = computeStride(shape, dimIndex);
+    assert(!stride.exprVal.has_value() && "Cannot subview dimension with expr stride");
+    int intStride = stride.intVal.value();
+
+    // Adjust dimension & offset
+    int itemCountInDim = shape[dimIndex].count;
+    data.setOffset(data.offset() + offset * intStride);
+    shape[dimIndex].count = count;
+
+    // Set the stride of the previous dim (if any) if it doesn't have a stride yet
+    if (dimIndex > 1 && !shape[dimIndex - 1].stride.hasVal()) {
+        shape[dimIndex - 1].stride = Stride{itemCountInDim};
     }
 
     data.setShape(shape);

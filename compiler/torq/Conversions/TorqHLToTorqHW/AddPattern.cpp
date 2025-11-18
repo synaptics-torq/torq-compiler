@@ -241,7 +241,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     LData weights(op.getWeights());
     LData biasScale(op.getScaleBias());
     assert(weights.dim(0) == 2);
-    assert(biasScale.dim(0) == scaleBiasEntries(input.elementType()));
+    assert(biasScale.dim(0) == scaleBiasWidth(input.elementType()));
 
     // Dimensions of the input data for processing
     struct In : Vectorized {

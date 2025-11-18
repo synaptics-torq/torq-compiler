@@ -102,30 +102,28 @@ struct Vectorized {
     };
 };
 
-// Dimension structure for Left, Right, Top, Bottom
-// Can be used for 2D kernel size and padding specification
-struct LRTBDim {
-    enum { Left = 0, Right = 1, Top = 2, Bottom = 3 };
-    LRTBDim() = default;
-    LRTBDim(::llvm::ArrayRef<int64_t> lrtb) {
-        assert(lrtb.size() == 4 && "Expected 4 values for LRTB dimension");
-        left = lrtb[0];
-        right = lrtb[1];
-        top = lrtb[2];
-        bottom = lrtb[3];
-    }
-    int left{};
-    int right{};
-    int top{};
-    int bottom{};
-};
-
 // Dimension structure for Height and Width
 struct HWDim {
     HWDim() = default;
     HWDim(int h, int w) : h(h), w(w) {}
     int h{};
     int w{};
+};
+
+// Dimension structure for Left, Right, Top, Bottom
+// Can be used for 2D kernel size and padding specification
+struct LRTBDim {
+    enum { Left = 0, Right = 1, Top = 2, Bottom = 3 };
+    LRTBDim() = default;
+    LRTBDim(::llvm::ArrayRef<int64_t> lrtb);
+
+    // Create symmetric border from kernel h,w size
+    static LRTBDim symmetric(const HWDim &dim);
+
+    int left{};
+    int right{};
+    int top{};
+    int bottom{};
 };
 
 // Represent a data tensor in memory
@@ -250,6 +248,9 @@ class LData : public DataT<LData> {
     // resulting shape: {1, {16,stride:25}, 7, 4}
     LData &vectorize(int vectorSize, int vectorStride = 0);
 
+    // Create a sub-view of the specified dimension.
+    LData &subviewDim(int dimIndex, int offset, int count);
+
     // Reshape the specified dimension.
     // dimIndex: index of the dimension to reshape
     // newDims: new dimensions that will replace the specified one, if one of them is -1
@@ -310,6 +311,10 @@ class [[nodiscard]] PData : public DataT<PData> {
   public:
     PData() : DataT(Shape{}, DType::none) {}
     static std::string name() { return "PData"; }
+
+    // PData can be a 2D or 3D tensor. It is already vectorized correctly for the ACT processing.
+    // If 3D the Outer dimension represents multiple groups (eg from outer products).
+    enum { Outer = -3, Vectors = -2, Elements = -1 };
 };
 
 // Output data
@@ -630,7 +635,7 @@ bool hasScale(DType type);
 
 // Return the number of values in each entry of the scale/bias vector for the given type
 // (some types don't have scale but just bias)
-int scaleBiasEntries(DType type);
+int scaleBiasWidth(DType type);
 
 // Total number of elements in the shape TODO: make this a method
 int elementCount(const Shape &shape);
