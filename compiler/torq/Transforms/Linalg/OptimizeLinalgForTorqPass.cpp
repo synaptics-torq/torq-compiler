@@ -27,7 +27,9 @@ class OptimizeLinalgForTorqPass : public OptimizeLinalgForTorqBase<OptimizeLinal
 
         populateOptimizeElementwiseBinaryOpPatterns(ctx, patterns);
         populateDecomposeLinalgOpsPatterns(ctx, patterns);
-
+        populateSpecializeTransposeOpPatterns(ctx, patterns);
+        linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
+        // Configure disabled/enabled patterns based on pass options.
         auto frozenPatterns =
             FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
 
