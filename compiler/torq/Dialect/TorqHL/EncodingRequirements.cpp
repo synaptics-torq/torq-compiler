@@ -398,6 +398,16 @@ template <typename ActOp> static KernelEncoding getActLikeEncoding(ActOp op) {
 
 KernelEncoding MulOp::getKernelEncoding() {
 
+    const int inIndex = getInput1Mutable().getOperandNumber();
+    const int inIndex2 = getInput2Mutable().getOperandNumber();
+
+    int inRank = cast<RankedTensorType>(getOperand(inIndex).getType()).getRank();
+    int inRank2 = cast<RankedTensorType>(getOperand(inIndex2).getType()).getRank();
+    // if any input is scalar, no encoding required
+    if (inRank == 1 || inRank2 == 1) {
+        return getNoEncoding();
+    }
+
     // FIXME: correct encoding
     // right now this configs seems work for all the cases
     // but have to check later

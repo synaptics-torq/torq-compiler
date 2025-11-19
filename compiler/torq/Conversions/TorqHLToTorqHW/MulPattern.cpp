@@ -111,37 +111,50 @@ LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter
     const uint32_t actWidth = HwInfo::act_width / data_width;
     const uint32_t actBlockCount = div_ceil(blockSize, actWidth);
 
-    LData input({blockCount, blockSize}, getDType(dataType.getElementType()));
-
     LData weights({1}, getDType(weightType.getElementType()));
     if (!hasScalar) {
         weights = LData({blockCount, blockSize}, getDType(weightType.getElementType()));
     }
 
     LData biasScale({2}, elType1.isBF16() ? DType::bf16 : DType::int32);
-    LData output({blockCount, actBlockCount, actWidth}, getDType(outElType));
 
     Slice slice;
-
     BData bdata = slice.bram.load(biasScale);
 
     if (hasScalar) {
 
         WData wdata = slice.wram.load(weights);
 
-        For(auto b = slice.iterate(blockCount)) {
-            IData idata = slice.iram.load(input[b]);
-            PData pdata = slice.alu.scalarProductAccumulate(idata, wdata);
+        LData input(op.getInput1());
+        LData output(op.getInit());
 
-            For(auto a = slice.iterate(actBlockCount)) {
-                QData res = slice.act.rescaleClamp(
-                    pdata[a], bdata, op.getShift(), 0, act_clip_min, act_clip_max
-                );
-                slice.store(output[b][a], res);
+        // Dimensions of the input data for processing
+        struct In : Vectorized {
+            enum {
+                DataDim, // First (non-dense) data dimension if any
+            };
+        };
+        int denseDims = std::min(input.denseDims(), output.denseDims());
+        int vectorSize = slice.alu.iWidth(input.elementType(), weights.elementType());
+        input.fuse(denseDims).vectorize(vectorSize);
+
+        For(auto ndd = slice.iterate(input.dims(In::DataDim, In::Vectors))) {
+            For(auto dv = slice.iterate(input.dim(In::Vectors))) {
+                IData idata = slice.iram.load(input[ndd][dv]);
+                PData pdata = slice.alu.scalarProductAccumulate(idata, wdata);
+                For(auto a = slice.iterate(pdata.dim(0))) {
+                    QData res = slice.act.rescaleClamp(
+                        pdata[a], bdata, op.getShift(), 0, act_clip_min, act_clip_max
+                    );
+                    slice.append(output[ndd], res);
+                }
             }
         }
     }
     else {
+        LData input({blockCount, blockSize}, getDType(dataType.getElementType()));
+        LData output({blockCount, actBlockCount, actWidth}, getDType(outElType));
+
         For(auto b = slice.iterate(blockCount)) {
             IData idata = slice.iram.load(input[b]);
             WData wdata = slice.wram.load(weights[b]);
