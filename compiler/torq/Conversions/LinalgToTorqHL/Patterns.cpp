@@ -1154,15 +1154,16 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto lhs = binaryOp->getOperand(0);
         auto rhs = binaryOp->getOperand(1);
 
-        auto constOp = lhs.getDefiningOp<arith::ConstantOp>();
-        needReverse = (numLinalgInputs == 2 && constOp != nullptr);
+        auto constOp = rhs.getDefiningOp<arith::ConstantOp>();
         if (!constOp) {
-            constOp = rhs.getDefiningOp<arith::ConstantOp>();
+            constOp = lhs.getDefiningOp<arith::ConstantOp>();
+            if (constOp) {
+                needReverse = true;
+            }
         }
-
         FloatAttr data = fromConstScalar(constOp);
         if (data) {
-            if (needReverse) {
+            if (needReverse && numLinalgInputs == 2) {
                 // input0 is the tensor input, input1 is the const scalar
                 input0 = srcOp.getInputs()[1];
             }
@@ -1192,8 +1193,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         else {
             input1 = srcOp.getInputs()[1];
         }
-        // We take the const tensor as is, no need to invert the inputs
-        needReverse = false;
+
         return success();
     }
 
@@ -1206,11 +1206,12 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         const llvm::fltSemantics &bf16 = APFloat::BFloat();
         std::vector<llvm::APFloat> weights(2, llvm::APFloat(bf16, "1.0"));
+        // for sub, set weight of 2nd input to -1.0
+        // so it becomes => %input0 + (-1.0) * %input1
         if (opName == "sub") {
             weights[1] = llvm::APFloat(bf16, "-1.0");
         }
         std::vector<float> biasScale{0.0};
-        auto torqWeights = createConst(weights, rewriter, srcOp.getLoc());
 
         if (srcOp.getNumDpsInits() != 1 && srcOp.getInputs().size() != 1) {
             return rewriter.notifyMatchFailure(
@@ -1221,7 +1222,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         Value input0;
         Value input1;
         float newBias;
-        bool needReverse;
+        bool needReverse = false;
         auto res = get2Inputs(
             srcOp, binaryOp, input0, input1, newBias, needReverse, rhs_is_scalar, rewriter
         );
@@ -1229,11 +1230,21 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return res;
         }
         if (rhs_is_scalar) {
+            // Pattern: %input - cst
+            if (opName == "sub" && !needReverse) {
+                newBias = -newBias;
+            }
+            // Pattern: %input + cst
             biasScale[0] = newBias;
         }
+        // Pattern: cst - %input
+        // Rewrite: (-1 * %input) + cst
+        // Action: flip weights to [-1, +1] and treat as "add"; the constant stays in the bias
+        // (needReverse is set when the constant was the lhs of a subtraction)
+        // Note: scale not supported for bf16 operations so we have to take this approach
         if (needReverse && opName == "sub") {
-            assert(false && "scale not supported for bf16 operations");
-            // biasScale[1] = -1;
+            weights[0] = llvm::APFloat(bf16, "-1.0");
+            weights[1] = llvm::APFloat(bf16, "1.0");
             opName = "add";
         }
 
@@ -1244,6 +1255,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         int32_t output_min_f = *reinterpret_cast<int32_t *>(&min_f);
         float max_f = std::numeric_limits<float>::max();
         int32_t output_max_f = *reinterpret_cast<int32_t *>(&max_f);
+        auto torqWeights = createConst(weights, rewriter, srcOp.getLoc());
 
         rewriter.replaceOpWithNewOp<torq_hl::AddOp>(
             srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),

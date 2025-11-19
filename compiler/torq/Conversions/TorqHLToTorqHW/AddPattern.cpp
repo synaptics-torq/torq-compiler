@@ -107,8 +107,6 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
 
     Slice slice;
     // By default consider the entire input as a single channel
-    const uint32_t channelCount = 1;
-    uint32_t channelSize = getEncodedTotalSizeBytes(params.type1);
     DType elementType = getDType(params.inputElementType);
 
     auto shift = params.op.getShiftFactor();
@@ -116,40 +114,36 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
     auto max = params.op.getOutputMax();
     auto zp = params.op.getOutputZp();
 
-    // Input data that are processed at once by ALU
-    const uint32_t blockSize = slice.alu.iWidth(elementType);
-
-    // Input buffer size must be a multiple of the block size
-    if (channelSize % blockSize != 0) {
-        return params.op.emitError("Channel size must be multiple of " + std::to_string(blockSize));
-    }
-
-    channelSize /= params.inputElementSize; // Convert to elements count
-
-    const uint32_t blocksPerChannel = div_ceil(channelSize, blockSize);
-    const int32_t blockCount = blocksPerChannel * channelCount;
-
-    // Data processed by ACT at once
-    int actBlockSize = slice.act.width(elementType);
-
-    LData input({blockCount, blockSize}, getDType(params.inputElementType));
     int biasNum = 2;
     if (getDType(params.inputElementType) == DType::bf16) {
         biasNum = 1;
     }
     LData biasScale({biasNum}, getDType(params.op.getScaleBias().getType().getElementType()));
 
-    LData output(
-        {blockCount, blockSize / actBlockSize, actBlockSize}, getDType(params.inputElementType)
-    );
-
+    LData input(params.op.getInput1());
+    LData output(params.op.getInit());
+    LData weights({1}, params.inputElementType.isInteger(32) ? DType::int8 : elementType);
+    WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
-    For(auto b = slice.iterate(blockCount)) {
-        IData idata = slice.iram.load(input[b]);
-        PData pdata = slice.alu.load(idata);
-        For(auto a = slice.iterate(blockSize / actBlockSize)) {
-            QData res = slice.act.rescaleClamp(pdata[a], bdata, shift, zp, min, max);
-            slice.store(output[b][a], res);
+
+    // Dimensions of the input data for processing
+    struct In : Vectorized {
+        enum {
+            DataDim, // First (non-dense) data dimension if any
+        };
+    };
+    int denseDims = std::min(input.denseDims(), output.denseDims());
+    int vectorSize = slice.alu.iWidth(input.elementType(), weights.elementType());
+    input.fuse(denseDims).vectorize(vectorSize);
+
+    For(auto ndd = slice.iterate(input.dims(In::DataDim, In::Vectors))) {
+        For(auto dv = slice.iterate(input.dim(In::Vectors))) {
+            IData idata = slice.iram.load(input[ndd][dv]);
+            PData pdata = slice.alu.scalarProductAccumulate(idata, wdata);
+            For(auto a = slice.iterate(pdata.dim(0))) {
+                QData res = slice.act.rescaleClamp(pdata[a], bdata, shift, zp, min, max);
+                slice.append(output[ndd], res);
+            }
         }
     }
 
@@ -157,7 +151,7 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
         params.loc,                                     // Location
         params.op.getName(),                            // Operation to replace
         ValueRange{params.op.getInput1()},              // Input tensor
-        ValueRange{},                                   // Weights
+        ValueRange{params.op.getWeights()},             // Weights
         ValueRange{params.op.getScaleBias()},           // BiasScale tensor,
         ValueRange{params.op.getInit()},                // Output tensor initializer
         ValueRange{},                                   // Symbols
