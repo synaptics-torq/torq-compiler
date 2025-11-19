@@ -45,10 +45,8 @@ struct ShapeItem {
         KernelRows // Dimension associated to kernel row index
     };
     ShapeItem(int64_t count) : count(int(count)) {}
-    ShapeItem(int64_t count, int64_t intStride) : count(int(count)), stride(int(intStride)) {}
-    ShapeItem(int64_t count, int64_t intStride, Tag tag)
-        : count(int(count)), stride(int(intStride)), tag(tag) {}
-    ShapeItem(int64_t count, AffineExpr exprStride) : count(int(count)), stride(exprStride) {}
+    ShapeItem(int64_t count, Stride stride, Tag tag = Tag::None)
+        : count(int(count)), stride(stride), tag(tag) {}
     ShapeItem(const ShapeItem &) = default;
     ShapeItem &operator=(const ShapeItem &) = default;
 

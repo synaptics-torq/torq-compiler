@@ -36,8 +36,8 @@ SegmentationPattern::transform(torq_hl::SegmentationOp op, PatternRewriter &rewr
 
     For(auto batch = slice.iterate(input.dim(In::N))) {
         For(auto ch = slice.iterate(input.dim(In::C))) {
-            For(auto dv = slice.iterate(input.dim(In::Vectors))) {
-                IData idata = slice.iram.load(input[batch][ch][dv]);
+            For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+                IData idata = slice.iram.load(input[batch][ch][iv]);
                 PData pdata = slice.alu.load(idata);
                 QData res = slice.act.load(pdata);
                 slice.append(output[batch][ch], res);

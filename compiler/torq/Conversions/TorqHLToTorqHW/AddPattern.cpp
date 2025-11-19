@@ -129,19 +129,19 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
     // Dimensions of the input data for processing
     struct In : Vectorized {
         enum {
-            DataDim, // First (non-dense) data dimension if any
+            NonDenseDims, // First (non-dense) data dimension if any
         };
     };
     int denseDims = std::min(input.denseDims(), output.denseDims());
     int vectorSize = slice.alu.iWidth(input.elementType(), weights.elementType());
     input.fuse(denseDims).vectorize(vectorSize);
 
-    For(auto ndd = slice.iterate(input.dims(In::DataDim, In::Vectors))) {
-        For(auto dv = slice.iterate(input.dim(In::Vectors))) {
-            IData idata = slice.iram.load(input[ndd][dv]);
+    For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
+        For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+            IData idata = slice.iram.load(input[ndd][iv]);
             PData pdata = slice.alu.scalarProductAccumulate(idata, wdata);
-            For(auto a = slice.iterate(pdata.dim(0))) {
-                QData res = slice.act.rescaleClamp(pdata[a], bdata, shift, zp, min, max);
+            For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                QData res = slice.act.rescaleClamp(pdata[av], bdata, shift, zp, min, max);
                 slice.append(output[ndd], res);
             }
         }
@@ -241,14 +241,14 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     struct In : Vectorized {
         enum {
             InputTensors, // Selects between the two input tensors
-            DataDim,      // First (non-dense) data dimension if any
+            NonDenseDims, // First (non-dense) data dimension if any
         };
     };
 
     // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
     // The difference between the two input addresses is used as offset to fetch the data
     auto inputDiff = getAffineDimExpr(1, params.ctx) - getAffineDimExpr(0, params.ctx);
-    input.insertDim(In::InputTensors, {2, inputDiff});
+    input.insertDim(In::InputTensors, {2, Stride(inputDiff)});
 
     // Take care of output segmentation if requested
     int denseDims = std::min(input.denseDims(), output.denseDims());
@@ -265,16 +265,16 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
 
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
-    For(auto ii = slice.iterate(input.dims(In::DataDim, In::Vectors))) {
-        For(auto dv = slice.iterate(input.dim(In::Vectors))) {
+    For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
+        For(auto iv = slice.iterate(input.dim(In::Vectors))) {
             PData pdata;
-            For(auto i = slice.iterate(input.dim(In::InputTensors))) {
-                IData idata = slice.iram.load(input[i][ii][dv]);
-                pdata = slice.alu.scalarProductAccumulate(idata, wdata[i]);
+            For(auto it = slice.iterate(input.dim(In::InputTensors))) {
+                IData idata = slice.iram.load(input[it][ndd][iv]);
+                pdata = slice.alu.scalarProductAccumulate(idata, wdata[it]);
             }
-            For(auto a = slice.iterate(pdata.dim(0))) {
-                QData res = slice.act.rescaleClamp(pdata[a], bdata, shift, zp, min, max);
-                slice.append(output[ii], res);
+            For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                QData res = slice.act.rescaleClamp(pdata[av], bdata, shift, zp, min, max);
+                slice.append(output[ndd], res);
             }
         }
     }

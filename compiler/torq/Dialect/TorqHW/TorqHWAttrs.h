@@ -44,6 +44,7 @@ struct MemNdlDimData {
     }
 
     std::optional<int64_t> getIntStride() const { return strideInt_; }
+    std::optional<AffineExpr> getExprStride() const { return expr_; }
     void setIntStride(int64_t stride) { strideInt_ = stride; }
     void setExprStride(AffineExpr stride) { expr_ = stride; }
 

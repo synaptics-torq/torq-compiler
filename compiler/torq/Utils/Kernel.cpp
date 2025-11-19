@@ -266,8 +266,13 @@ static void ndlToStr(NdlType type, const torq_hw::MemNdlData *ndl) {
     LLVM_DEBUG(
         llvm::dbgs() << type << ": "; for (auto &dim
                                            : ndl->dims) {
-            llvm::dbgs() << dim.tag << "(" << dim.type << ")" << dim.count << "["
-                         << dim.getIntStride() << "] ";
+            llvm::dbgs() << dim.tag << "(" << dim.type << ")" << dim.count << "[";
+            if (dim.getExprStride().has_value()) {
+                llvm::dbgs() << "expr] ";
+            }
+            else {
+                llvm::dbgs() << dim.getIntStride() << "] ";
+            }
         } if (ndl->offset) {
             llvm::dbgs() << "offset=" << ndl->offset;
         } llvm::dbgs() << "\n";
@@ -2098,15 +2103,18 @@ static void fuse(LData &data, int count) {
 }
 
 static void vectorize(LData &data, int vectorSize, int vectorStride) {
-    int rank = data.shape().size();
-    assert(rank > 0 && "Cannot vectorize scalar data?");
-    assert(data.denseDims() >= 1 && "last dimension must be dense to vectorize");
+    if (data.denseDims() == 0) {
+        // This is a scalar tensor or a tensor where even the innermost dimension is not dense
+        // Add a placeholder dense dimension of size 1 to be able to vectorize
+        data.getShape().push_back(ShapeItem{1});
+    }
     if (vectorStride <= 0) {
         vectorStride = vectorSize;
     }
 
     // Remove dimension to vectorize
     auto shape = data.shape();
+    int rank = shape.size();
     int itemCount = shape.back().count;
     shape.pop_back();
 

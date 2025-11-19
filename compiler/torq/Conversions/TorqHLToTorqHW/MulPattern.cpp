@@ -131,20 +131,20 @@ LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter
         // Dimensions of the input data for processing
         struct In : Vectorized {
             enum {
-                DataDim, // First (non-dense) data dimension if any
+                NonDenseDims, // First (non-dense) data dimension if any
             };
         };
         int denseDims = std::min(input.denseDims(), output.denseDims());
         int vectorSize = slice.alu.iWidth(input.elementType(), weights.elementType());
         input.fuse(denseDims).vectorize(vectorSize);
 
-        For(auto ndd = slice.iterate(input.dims(In::DataDim, In::Vectors))) {
-            For(auto dv = slice.iterate(input.dim(In::Vectors))) {
-                IData idata = slice.iram.load(input[ndd][dv]);
+        For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
+            For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+                IData idata = slice.iram.load(input[ndd][iv]);
                 PData pdata = slice.alu.scalarProductAccumulate(idata, wdata);
-                For(auto a = slice.iterate(pdata.dim(0))) {
+                For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                     QData res = slice.act.rescaleClamp(
-                        pdata[a], bdata, op.getShift(), 0, act_clip_min, act_clip_max
+                        pdata[av], bdata, op.getShift(), 0, act_clip_min, act_clip_max
                     );
                     slice.append(output[ndd], res);
                 }

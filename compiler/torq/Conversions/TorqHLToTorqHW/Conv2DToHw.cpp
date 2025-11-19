@@ -103,7 +103,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     int vectStride = slice.alu.iWidth(input.elementType(), weight.elementType(), outChVectSize);
     int vectSize = vectStride + kernelBorder.left + kernelBorder.right;
     int rowSize = output.dim(Out::H);
-    ShapeItem rowsDim(kernelDim.h, rowSize, ShapeItem::Tag::KernelRows);
+    ShapeItem rowsDim(kernelDim.h, Stride(rowSize), ShapeItem::Tag::KernelRows);
     input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride).insertDim(In::KernelRows, rowsDim);
 
     // Reshape output to match the processing layout
@@ -123,7 +123,7 @@ static torq_hw::SliceTaskOp lowerToHw(
                     For(auto kh = slice.iterate(kernelDim.h)) {
                         IData idata = slice.iram.load(input[batch][ic][kh][iv]);
                         WData wdata = slice.wram.load(weight[ocv][ic][kh]);
-                        idata.setShape({{kernelDim.w, 1}, vectStride});
+                        idata.setShape({{kernelDim.w, Stride(1)}, vectStride});
                         For(auto kw = slice.iterate(kernelDim.w)) {
                             pdata = slice.alu.outerProductAccumulate(idata[kw], wdata[kw]);
                         }
@@ -131,9 +131,9 @@ static torq_hw::SliceTaskOp lowerToHw(
                 }
                 BData bdata = slice.bram.load(biasScale[ocv]);
                 For(auto o = slice.iterate(outChVectSize)) { // Not necessarily all the pdata
-                    For(auto a = slice.iterate(pdata.dim(PData::Vectors))) {
+                    For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                         QData res = slice.act.rescaleClamp(
-                            pdata[o][a], bdata[o], op.getShiftFactor(), op.getOutputZp(),
+                            pdata[o][av], bdata[o], op.getShiftFactor(), op.getOutputZp(),
                             op.getOutputMin(), op.getOutputMax()
                         );
                         slice.append(output[batch][ocv][o], res);

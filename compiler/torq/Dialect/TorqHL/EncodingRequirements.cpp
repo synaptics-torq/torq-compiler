@@ -549,8 +549,7 @@ KernelEncoding ReduceMeanOp::getKernelEncoding() {
 }
 
 KernelEncoding Conv2DOp::getKernelEncoding() {
-    return mlir::syna::torq::hasEkLowering(*this) ? getNoEncoding()
-                                                  : getConvLikeKernelEncoding(*this);
+    return torq::hasEkLowering(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
 }
 
 KernelEncoding DepthwiseConv2DOp::getKernelEncoding() { return getConvLikeKernelEncoding(*this); }

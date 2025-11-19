@@ -42,14 +42,14 @@ LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &re
     struct In : Vectorized {
         enum {
             InputTensors, // Selects between the two input tensors
-            DataDim,      // First (non-dense) data dimension if any
+            NonDenseDims, // First (non-dense) data dimension if any
         };
     };
 
     // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
     // The difference between the two input addresses is used as offset to fetch the data
     auto inputDiff = getAffineDimExpr(1, ctx) - getAffineDimExpr(0, ctx);
-    input.insertDim(In::InputTensors, {2, inputDiff});
+    input.insertDim(In::InputTensors, {2, Stride(inputDiff)});
 
     int denseDims = std::min(input.denseDims(), output.denseDims());
     Slice slice;
@@ -62,18 +62,17 @@ LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &re
     input.fuse(denseDims).vectorize(vectorSize);
     weights.fuse(denseDims).vectorize(vectorSize);
 
-    For(auto ii = slice.iterate(input.dims(In::DataDim, In::Vectors))) {
-        For(auto dv = slice.iterate(input.dim(In::Vectors))) {
+    For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
+        For(auto iv = slice.iterate(input.dim(In::Vectors))) {
             PData pdata;
-            WData wdata = slice.wram.load(weights[ii][dv]);
-            For(auto i = slice.iterate(input.dim(In::InputTensors))) {
-                IData idata = slice.iram.load(input[i][ii][dv]);
-                pdata =
-                    slice.alu.elementwiseProductAccumulate(idata, wdata, torq_hw::ALUOp1Mode::SEL);
+            WData wdata = slice.wram.load(weights[ndd][iv]);
+            For(auto it = slice.iterate(input.dim(In::InputTensors))) {
+                IData idata = slice.iram.load(input[it][ndd][iv]);
+                pdata = slice.alu.elementwiseProductAccumulate(idata, wdata, ALUOp1Mode::SEL);
             }
-            For(auto a = slice.iterate(pdata.dim(0))) {
-                QData res = slice.act.load(pdata[a]);
-                slice.append(output[ii], res);
+            For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                QData res = slice.act.load(pdata[av]);
+                slice.append(output[ndd], res);
             }
         }
     }
