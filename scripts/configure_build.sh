@@ -74,6 +74,10 @@ fi
 #
 #     Use the currently active python interpreted (uses the interpreter of a virtualenv if that is enabled)
 #
+#  -DTORQ_ENABLE_AWS_FPGA=ON
+#
+#     Enable support for running on AWS FPGA instances
+#
 #  -DTORQ_ENABLE_SIMULATOR=ON
 #
 #     Enable building cmodel test vector runtime (for testing purposes)
@@ -92,4 +96,5 @@ cmake -B $BUILD_DIR \
             ${LAUNCHER_OPTS} \
             -DIREE_BUILD_PYTHON_BINDINGS=ON \
             -DTORQ_ENABLE_SIMULATOR=ON \
+            -DTORQ_ENABLE_AWS_FPGA=ON \
             -DPython3_EXECUTABLE="$(which python3)"

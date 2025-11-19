@@ -14,3 +14,7 @@ if("torq" IN_LIST IREE_EXTERNAL_HAL_DRIVERS)
 endif()
 
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/runtime TORQ)
+
+if(TORQ_ENABLE_AWS_FPGA)
+  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/third_party/aws_fpga_mgmt aws_fpga_mgmt)
+endif()

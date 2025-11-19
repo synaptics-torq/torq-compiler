@@ -58,10 +58,11 @@ if(TORQ_HW_DEBUG)
 endif()
 
 if(TORQ_ENABLE_AWS_FPGA)
+
+    list(APPEND torq_deps aws_fpga_mgmt)
+
     list(APPEND torq_srcs src/TorqAwsFpga.cpp src/TorqAwsFpga.h)
-    list(APPEND torq_deps ${IREE_TORQ_SOURCE_DIR}/third_party/fpga_mgmt/${CMAKE_HOST_SYSTEM_PROCESSOR}-${CMAKE_HOST_SYSTEM_NAME}/libfpga_mgmt.so.1.0.0)
     list(APPEND torq_defs "ENABLE_AWS_FPGA=1")
-    set(AWS_FPGA_INC_DIR ${IREE_TORQ_SOURCE_DIR}/third_party/fpga_mgmt/include)
 endif()
 
 if(TORQ_ENABLE_SOC_FPGA)
