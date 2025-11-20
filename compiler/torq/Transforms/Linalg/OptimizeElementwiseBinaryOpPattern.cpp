@@ -13,9 +13,13 @@
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
+#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
+#include "numeric"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-optimize-elementwise-binary-op-pattern"
@@ -136,108 +140,7 @@ static LogicalResult collapseValue(
 
 static LogicalResult
 broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRewriter &rewriter) {
-    auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
-    auto input1Shape = input1Type.getShape();
-    auto input1ElementType = input1Type.getElementType();
-    auto input2Type = dyn_cast<RankedTensorType>(input2.getType());
-    auto input2Shape = input2Type.getShape();
-
-    auto outputType = dyn_cast<RankedTensorType>(srcOp->getResult(0).getType());
-    auto outputShape = outputType.getShape();
-
-    // this case should never happen
-    if (input1Shape.size() > outputShape.size() || input2Shape.size() > outputShape.size()) {
-        llvm::errs() << "input1 shape size: " << input1Shape.size()
-                     << ", input2 shape size: " << input2Shape.size()
-                     << ", output shape size: " << outputShape.size() << "\n";
-        assert(false && "Input shape size is larger than output shape size");
-    }
-
-    if (input1Shape.size() == 0 && input2Shape.size() == 0) {
-        assert(false && "Input shape size is 0");
-    }
-
-    // if input rank is 1, expand input shape to output rank
-    // find the dim postion in output shape equal to input shape
-    // e.g.
-    auto expandTensor = [&](Value input, ArrayRef<int64_t> outputShape) -> Value {
-        auto inputType = dyn_cast<RankedTensorType>(input.getType());
-        auto inputShape = inputType.getShape();
-        auto inputElementType = inputType.getElementType();
-
-        if (inputShape.size() == 1 && outputShape.size() > 1) {
-            int dim = -1;
-            for (int i = 0; i < outputShape.size(); i++) {
-                if (outputShape[i] == inputShape[0]) {
-                    dim = i;
-                    break;
-                }
-            }
-
-            if (dim == -1) {
-                return input;
-            }
-
-            SmallVector<int64_t> newShape(outputShape.size(), 1);
-            newShape[dim] = inputShape[0];
-
-            SmallVector<int64_t, 2> reassociationIndices;
-            for (int i = 0; i < newShape.size(); i++) {
-                reassociationIndices.push_back(i);
-            }
-
-            auto newType = RankedTensorType::get(newShape, inputElementType);
-            auto expandOp = rewriter.create<tensor::ExpandShapeOp>(
-                input.getLoc(), newType, input, ArrayRef<ReassociationIndices>{reassociationIndices}
-            );
-
-            return expandOp.getResult();
-        }
-
-        return input;
-    };
-
-    auto input1Rank = dyn_cast<RankedTensorType>(input1.getType()).getRank();
-    auto input2Rank = dyn_cast<RankedTensorType>(input2.getType()).getRank();
-    if (input1Rank == 1 && outputShape.size() > 1) {
-        input1 = expandTensor(input1, outputShape);
-    }
-    if (input2Rank == 1 && outputShape.size() > 1) {
-        input2 = expandTensor(input2, outputShape);
-    }
-
-    // If a tensor is full of size-1 dims, collapse it to [1].
-    auto collapseTensor = [&](Value input, PatternRewriter &rewriter) -> Value {
-        auto inputType = dyn_cast<RankedTensorType>(input.getType());
-        auto inputShape = inputType.getShape();
-        auto inputElementType = inputType.getElementType();
-
-        SmallVector<int64_t, 2> collapseShape;
-        for (int i = 0; i < inputShape.size(); i++) {
-            collapseShape.push_back(i);
-        }
-
-        bool allOne = true;
-        for (int i = 0; i < inputShape.size(); i++) {
-            if (inputShape[i] != 1) {
-                allOne = false;
-                break;
-            }
-        }
-        if (allOne) {
-            auto outType = RankedTensorType::get({1}, inputElementType);
-            auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
-                input.getLoc(), outType, input, ArrayRef<ReassociationIndices>{collapseShape}
-            );
-
-            return collapseOp.getResult();
-        }
-
-        return input;
-    };
-
-    input1 = collapseTensor(input1, rewriter);
-    input2 = collapseTensor(input2, rewriter);
+    /////////Support Functions///////////
 
     // This inspects affine indexing maps to find which output loop dims
     // are missing in each input (→ broadcast candidates).
@@ -259,6 +162,81 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
         return broadcastDims;
     };
 
+    auto calcBcastShapeAndDims = [&](ArrayRef<int64_t> outputShape, SmallVector<int64_t> &shape,
+                                     SmallVector<int64_t> &dims) {
+        // Reshape the input to match with linalg.broadcast requirements
+        // 128x1 to be broadcasted to 1x128x32 need to be reshaped to 1x128
+        SmallVector<int64_t> newShape;
+        SmallVector<int64_t> newDims;
+        for (int i = 0; i < outputShape.size(); ++i) {
+            if (outputShape[i] == 1) {
+                newShape.push_back(outputShape[i]);
+                continue;
+            }
+            if (!llvm::is_contained(dims, i)) {
+                newShape.push_back(outputShape[i]);
+            }
+            else {
+                newDims.push_back(i);
+            }
+        }
+        dims = newDims;
+        shape = newShape;
+    };
+
+    auto addReshapeOp = [&](Value &input, SmallVector<int64_t> &newShape,
+                            PatternRewriter &rewriter) {
+        auto type = dyn_cast<RankedTensorType>(input.getType());
+        auto elementType = type.getElementType();
+
+        auto outType = RankedTensorType::get(newShape, elementType);
+        std::vector<int64_t> shVec(newShape.begin(), newShape.end());
+        Value shValue = createConst(shVec, rewriter, input.getLoc());
+        auto reshapeOp =
+            rewriter.create<tensor::ReshapeOp>(input.getLoc(), outType, input, shValue);
+
+        return reshapeOp.getResult();
+    };
+
+    auto addBcastOp = [&](Value &input, llvm::ArrayRef<int64_t> bcastShape,
+                          SmallVector<int64_t> &dims, PatternRewriter &rewriter) {
+        auto type = dyn_cast<RankedTensorType>(input.getType());
+        auto elementType = type.getElementType();
+
+        auto outType = RankedTensorType::get(bcastShape, elementType);
+        auto bcastOp = rewriter.create<linalg::BroadcastOp>(
+            srcOp.getLoc(), input, createInitTensor(srcOp, rewriter, outType), dims
+        );
+        auto gOp = linalg::generalizeNamedOp(rewriter, bcastOp);
+        if (failed(gOp)) {
+            return bcastOp.getResults()[0];
+        }
+
+        return gOp->getResults()[0];
+    };
+
+    //////////////End of Support Functions//////////////
+
+    auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
+    auto input1Shape = input1Type.getShape();
+    auto input2Type = dyn_cast<RankedTensorType>(input2.getType());
+    auto input2Shape = input2Type.getShape();
+
+    auto outputType = dyn_cast<RankedTensorType>(srcOp->getResult(0).getType());
+    auto outputShape = outputType.getShape();
+
+    // this case should never happen
+    if (input1Shape.size() > outputShape.size() || input2Shape.size() > outputShape.size()) {
+        llvm::errs() << "input1 shape size: " << input1Shape.size()
+                     << ", input2 shape size: " << input2Shape.size()
+                     << ", output shape size: " << outputShape.size() << "\n";
+        assert(false && "Input shape size is larger than output shape size");
+    }
+
+    if (input1Shape.size() == 0 && input2Shape.size() == 0) {
+        assert(false && "Input shape size is 0");
+    }
+
     // Fetch maps for both inputs and the output
     SmallVector<AffineMap> indexingMaps = srcOp.getIndexingMapsArray();
     AffineMap input1Map = indexingMaps[0];
@@ -272,132 +250,36 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
     // Compute initial broadcast dims
     SmallVector<int64_t> dims1 = getBroadcastDimsFromMap(input1Map, outputMap);
     SmallVector<int64_t> dims2 = getBroadcastDimsFromMap(input2Map, outputMap);
-
-    // When ranks match, drop dims where input and output already match (no broadcast).
-    auto filterBySize = [](SmallVector<int64_t> &dims, ArrayRef<int64_t> inputShape,
-                           ArrayRef<int64_t> outputShape) {
-        SmallVector<int64_t> filtered;
-        for (auto d : dims) {
-            if (d < inputShape.size() && inputShape[d] == outputShape[d]) {
-                continue;
-            }
-            filtered.push_back(d);
-        }
-        return filtered;
-    };
-
-    if (input1Shape.size() == outputShape.size()) {
-        dims1 = filterBySize(dims1, input1Shape, outputShape);
-    }
-    if (input2Shape.size() == outputShape.size()) {
-        dims2 = filterBySize(dims2, input2Shape, outputShape);
-    }
-
     if (dims1.empty() && dims2.empty()) {
         return success();
     }
 
-    auto recalculateBroadcastDims = [](Value input, ArrayRef<int64_t> outputShape) {
-        auto inputShape = dyn_cast<RankedTensorType>(input.getType()).getShape();
-        SmallVector<int64_t> broadcastDims;
+    SmallVector<int64_t> input1NewShape;
+    calcBcastShapeAndDims(outputShape, input1NewShape, dims1);
+    SmallVector<int64_t> input2NewShape;
+    calcBcastShapeAndDims(outputShape, input2NewShape, dims2);
 
-        for (unsigned i = inputShape.size(); i < outputShape.size(); i++) {
-            broadcastDims.push_back(i);
-        }
-        return broadcastDims;
-    };
-
-    // Detect pre-broadcasted maps that contain constants (like affine_map<(d0,d1,d2)->(0,d1,0)>).
-    auto hasConstants = [](AffineMap map) {
-        for (auto expr : map.getResults()) {
-            if (llvm::isa<AffineConstantExpr>(expr)) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    // Remember ranks before collapse
-    unsigned originalInput1Rank = input1Shape.size();
-    unsigned originalInput2Rank = input2Shape.size();
-
-    (void)collapseValue(input1, dims1, outputShape.size(), rewriter);
-    (void)collapseValue(input2, dims2, outputShape.size(), rewriter);
-
-    // Refresh shapes and detect whether we collapsed in this pass
-    input1Shape = dyn_cast<RankedTensorType>(input1.getType()).getShape();
-    input2Shape = dyn_cast<RankedTensorType>(input2.getType()).getShape();
-
-    bool input1WasCollapsed = (input1Shape.size() != originalInput1Rank);
-    bool input2WasCollapsed = (input2Shape.size() != originalInput2Rank);
-
-    if (!dims1.empty() && input1Shape.size() < outputShape.size() && hasConstants(input1Map) &&
-        !input1WasCollapsed) {
-        dims1 = recalculateBroadcastDims(input1, outputShape);
-        SmallVector<int64_t> filtered1;
-        for (auto d : dims1) {
-            if (d >= input1Shape.size()) {
-                filtered1.push_back(d);
-            }
-        }
-        dims1 = filtered1;
+    if (dims1.size() > 1 && input1NewShape.size() != 1) {
+        return failure();
     }
-    if (!dims2.empty() && input2Shape.size() < outputShape.size() && hasConstants(input2Map) &&
-        !input2WasCollapsed) {
-        dims2 = recalculateBroadcastDims(input2, outputShape);
-        SmallVector<int64_t> filtered2;
-        for (auto d : dims2) {
-            if (d >= input2Shape.size()) {
-                filtered2.push_back(d);
-            }
-        }
-        dims2 = filtered2;
+    if (dims2.size() > 1 && input2NewShape.size() != 1) {
+        return failure();
     }
 
-    // Don't create linalg.broadcast for same-rank inputs.
-    if (input1Shape.size() == outputShape.size()) {
-        if (!dims1.empty() && !hasConstants(input1Map)) {
-            // Same-rank + dims present but no constants in map is inconsistent.
-            // Either an upstream issue or we skipped a needed collapse step.
-            LLVM_DEBUG(
-                llvm::dbgs()
-                << "[broadcastInputs] Warning: same-rank dims for input1 without constants in map\n"
-            );
-            // Optionally: return failure() to surface the inconsistency early.
-        }
+    if (input1NewShape.size() == outputShape.size()) {
         dims1.clear();
     }
-    if (input2Shape.size() == outputShape.size()) {
-        if (!dims2.empty() && !hasConstants(input2Map)) {
-            LLVM_DEBUG(
-                llvm::dbgs()
-                << "[broadcastInputs] Warning: same-rank dims for input2 without constants in map\n"
-            );
-        }
+    if (input2NewShape.size() == outputShape.size()) {
         dims2.clear();
     }
 
     if (!dims1.empty()) {
-
-        auto broadcastOutputType = RankedTensorType::get(outputShape, input1ElementType);
-
-        input1 = rewriter
-                     .create<linalg::BroadcastOp>(
-                         srcOp.getLoc(), input1,
-                         createInitTensor(srcOp, rewriter, broadcastOutputType), dims1
-                     )
-                     .getResults()[0];
+        input1 = addReshapeOp(input1, input1NewShape, rewriter);
+        input1 = addBcastOp(input1, outputShape, dims1, rewriter);
     }
-
     if (!dims2.empty()) {
-
-        auto broadcastOutputType = RankedTensorType::get(outputShape, input1ElementType);
-        input2 = rewriter
-                     .create<linalg::BroadcastOp>(
-                         srcOp.getLoc(), input2,
-                         createInitTensor(srcOp, rewriter, broadcastOutputType), dims2
-                     )
-                     .getResults()[0];
+        input2 = addReshapeOp(input2, input2NewShape, rewriter);
+        input2 = addBcastOp(input2, outputShape, dims2, rewriter);
     }
 
     return success();
@@ -599,10 +481,105 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
     }
 };
 
+struct ReshapeToCollapseExpand : public OpRewritePattern<tensor::ReshapeOp> {
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(tensor::ReshapeOp op, PatternRewriter &rewriter) const override {
+        //////////Support Functions///////////
+        auto calcRank = [&](ArrayRef<int64_t> srcShape) {
+            int rank = 0;
+            for (auto dim : srcShape) {
+                if (dim != 1)
+                    rank++;
+            }
+            if (rank == 0)
+                rank = 1;
+            return rank;
+        };
+
+        auto findCollapseShape = [](ArrayRef<int64_t> shape) {
+            SmallVector<int64_t> collapseShape;
+            for (auto d : shape) {
+                if (d == 1) {
+                    continue;
+                }
+                collapseShape.push_back(d);
+            }
+            if (collapseShape.empty()) {
+                collapseShape.push_back(1);
+            }
+            return collapseShape;
+        };
+        //////////////End of Support Functions//////////////
+
+        auto srcType = mlir::dyn_cast<RankedTensorType>(op.getSource().getType());
+        auto dstType = mlir::dyn_cast<RankedTensorType>(op.getResult().getType());
+        if (!srcType || !dstType || !srcType.hasStaticShape() || !dstType.hasStaticShape())
+            return failure();
+
+        ArrayRef<int64_t> srcShape = srcType.getShape();
+        ArrayRef<int64_t> dstShape = dstType.getShape();
+        if (calcRank(srcShape) != calcRank(dstShape)) {
+            return failure();
+        }
+
+        SmallVector<int64_t> collapseShape = findCollapseShape(srcShape);
+        SmallVector<int64_t> dstCollapseShape = findCollapseShape(dstShape);
+        if (collapseShape != dstCollapseShape) {
+            op.emitError("ReshapeToCollapseExpand: cannot optimize reshape op due to different "
+                         "collapse shape");
+            return failure();
+        }
+
+        // Collapse (1xNx1) -> (N)
+        auto maybeReassoc = getReassociationIndicesForReshape(srcType, dstType);
+        auto collapsedType = dstType;
+        bool onlyCollapse = true;
+        if (!maybeReassoc) {
+            collapsedType = RankedTensorType::get({collapseShape}, srcType.getElementType());
+            maybeReassoc = getReassociationIndicesForCollapse(srcShape, collapseShape);
+            onlyCollapse = false;
+        }
+
+        if (!maybeReassoc) {
+            op.emitError("ReshapeToCollapseExpand: cannot get reassociation for collapse");
+            return failure();
+        }
+
+        SmallVector<ReassociationIndices, 1> collapseReassoc = maybeReassoc.value();
+        Value collapsed = rewriter.create<tensor::CollapseShapeOp>(
+            op.getLoc(), collapsedType, op.getSource(), collapseReassoc
+        );
+        auto finalOp = collapsed;
+
+        // Expand (N) -> (1xN)
+        if (!onlyCollapse && dstShape.size() != collapseShape.size()) {
+            maybeReassoc = getReassociationIndicesForCollapse(dstShape, collapseShape);
+            if (!maybeReassoc) {
+                op.emitError("ReshapeToCollapseExpand: cannot get reassociation for expand");
+                return failure();
+            }
+            SmallVector<ReassociationIndices, 1> expandReassoc = maybeReassoc.value();
+
+            Value expanded = rewriter.create<tensor::ExpandShapeOp>(
+                op.getLoc(), dstType, collapsed, expandReassoc
+            );
+            finalOp = expanded;
+        }
+
+        rewriter.replaceOp(op, finalOp);
+        return success();
+    }
+};
+
 void populateOptimizeElementwiseBinaryOpPatterns(
     MLIRContext *context, RewritePatternSet &patterns
 ) {
     patterns.add<BroadcastElementwiseBinaryOpPattern>(context);
+    patterns.add<ReshapeToCollapseExpand>(context);
+    tensor::populateReassociativeReshapeFoldingPatterns(patterns);
+    patterns.add<ComposeExpandOfCollapseOp<tensor::ExpandShapeOp, tensor::CollapseShapeOp>>(context
+    );
 }
 
 } // namespace mlir::syna::torq

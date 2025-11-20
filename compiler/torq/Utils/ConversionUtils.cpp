@@ -8,6 +8,7 @@
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-conversion-utils"
@@ -646,6 +647,71 @@ bool hasEkLowering(mlir::syna::torq_hl::Conv2DOp op) {
         return false;
     }
     return true;
+}
+
+// FIXME: Copied from
+// https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/Linalg/IR/LinalgInterfaces.cpp#L141.
+// Remove after upgrading to latest MLIR.
+std::optional<SmallVector<int64_t>> isaBroadcastOpInterface(linalg::GenericOp genericOp) {
+    // Is single Input and Output
+    if (genericOp.getInputs().size() != 1 || genericOp.getOutputs().size() != 1)
+        return std::nullopt;
+
+    // Is all parallel loops
+    for (auto it : genericOp.getIteratorTypesArray()) {
+        if (mlir::linalg::isParallelIterator(it) == false)
+            return std::nullopt;
+    }
+
+    // Is single region, block and yield
+    if (!genericOp.getRegion().hasOneBlock())
+        return std::nullopt;
+
+    auto &block = genericOp.getRegion().front();
+    if (block.getNumArguments() != 2)
+        return std::nullopt;
+
+    auto yield = mlir::dyn_cast<mlir::linalg::YieldOp>(block.getTerminator());
+    if (!yield || yield.getValues().size() != 1 || yield.getValues()[0] != block.getArgument(0))
+        return std::nullopt;
+
+    auto srcTy = genericOp.getDpsInputOperand(0)->get().getType();
+    auto dstTy = genericOp.getDpsInitOperand(0)->get().getType();
+    if (!isa<MemRefType, RankedTensorType>(srcTy) || !isa<MemRefType, RankedTensorType>(dstTy))
+        return std::nullopt;
+
+    // Check output is identity map. Broadcast could additionally be
+    // employing permutation of indices and that would be expressible
+    // in linalg.generic but is not expressible for named broadcast genericOp.
+    auto dstMap = genericOp.getIndexingMapsArray()[1];
+    if (!dstMap.isIdentity())
+        return std::nullopt;
+
+    SmallVector<int64_t> position;
+    auto srcMap = genericOp.getIndexingMapsArray()[0];
+
+    if (srcMap.getResults().size() >= dstMap.getResults().size())
+        return std::nullopt;
+
+    // Check input map is monotonically increasing DimIds.
+    for (unsigned i = 0; i < srcMap.getNumResults(); ++i) {
+        auto expr = llvm::dyn_cast<AffineDimExpr>(srcMap.getResults()[i]);
+        if (!expr)
+            return std::nullopt;
+        int64_t pos = expr.getPosition();
+        if (i > 0 && pos <= position[i - 1])
+            return std::nullopt;
+        position.push_back(expr.getPosition());
+    }
+
+    SmallVector<int64_t> broadcastedDims;
+    auto numDims = srcMap.getNumDims();
+    // This is quadratic but number of items is generally small.
+    for (auto dim : llvm::seq<int64_t>(0, numDims)) {
+        if (!llvm::is_contained(position, dim))
+            broadcastedDims.push_back(dim);
+    }
+    return broadcastedDims;
 }
 
 } // namespace mlir::syna::torq

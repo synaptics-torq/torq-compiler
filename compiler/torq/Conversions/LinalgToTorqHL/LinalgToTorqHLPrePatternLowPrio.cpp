@@ -48,22 +48,29 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         Value &input, ScaleInfo &scaleInfo, int32_t *scalarValue, PatternRewriter &rewriter
     ) const {
 
-        // if from expandOp, we fuse this expandop
-        auto expandOp = dyn_cast<tensor::ExpandShapeOp>(input.getDefiningOp());
-        if (expandOp) {
-            auto expandOpInput = expandOp.getSrc();
-            auto expandOpInputShape =
-                dyn_cast<RankedTensorType>(expandOpInput.getType()).getShape();
+        auto elOp = input.getDefiningOp<Operation *>();
+        bool maybeReplace = false;
+        if (isa<tensor::ExpandShapeOp>(elOp) || isa<tensor::CollapseShapeOp>(elOp)) {
+            maybeReplace = true;
+        }
+        if (isa<linalg::GenericOp>(elOp)) {
+            auto maybeElemOp = dyn_cast<linalg::GenericOp>(elOp);
+            auto &r = maybeElemOp.getRegion();
+            if (r.hasOneBlock() && isa<linalg::YieldOp>(r.front().front())) {
+                maybeReplace = true;
+            }
+        }
 
-            auto isAllOnes = [](ArrayRef<int64_t> list) {
-                return llvm::all_of(list, [](int64_t i) { return i == 1; });
-            };
-            // Need to check the output shape all 1?
-            if (isAllOnes(expandOpInputShape)) {
-                input = expandOp.getSrc();
+        // FIXME Replacing expand, collapse or its corresponding linalg.generic op
+        // with its input only works when the input is a scalar tensor with dims 1x1x..x1.
+        if (maybeReplace) {
+            auto elOpInput = elOp->getOperand(0);
+            auto elOpInputShape = dyn_cast<RankedTensorType>(elOpInput.getType()).getShape();
+            if (mlir::computeProduct(elOpInputShape) == 1) {
+                input = elOpInput;
 
-                expandOp.getResult().replaceAllUsesWith(expandOp.getSrc());
-                rewriter.eraseOp(expandOp);
+                elOp->getResult(0).replaceAllUsesWith(elOpInput);
+                rewriter.eraseOp(elOp);
             }
         }
 
@@ -89,42 +96,61 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
     }
 
     bool broadcastProcessing(Value &input, ScaleInfo &scaleInfo, PatternRewriter &rewriter) const {
-        auto bcastOp = input.getDefiningOp<linalg::BroadcastOp>();
+        auto bkpInput = input;
+        if (!input.hasOneUse()) {
+            return false;
+        }
+        auto selectInput = [](Value &in, Value subst) {
+            if (!in.hasOneUse()) {
+                return false;
+            }
+            in = subst;
+            return true;
+        };
+
+        linalg::GenericOp bcastOp = input.getDefiningOp<linalg::GenericOp>();
+        std::optional<SmallVector<int64_t>> bcastDims;
         if (bcastOp) {
-            input = bcastOp.getInput();
+            bcastDims = isaBroadcastOpInterface(bcastOp);
+            if (bcastDims) {
+                auto success = selectInput(input, bcastOp.getDpsInputOperand(0)->get());
+                if (!success) {
+                    input = bkpInput;
+                    return false;
+                }
+            }
+        }
+
+        auto expandOp = input.getDefiningOp<tensor::ExpandShapeOp>();
+        if (expandOp) {
+            auto success = selectInput(input, expandOp.getSrc());
+            if (!success) {
+                input = bkpInput;
+                return false;
+            }
         }
 
         auto collapseOp = input.getDefiningOp<tensor::CollapseShapeOp>();
         if (collapseOp) {
-            input = collapseOp.getSrc();
+            auto success = selectInput(input, collapseOp.getSrc());
+            if (!success) {
+                input = bkpInput;
+                return false;
+            }
         }
 
-        // tensor to linalg pass convert collapse to generic op
-        auto isCollapseOp = [](linalg::GenericOp op) -> bool {
-            auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
-            if (!yieldOp || yieldOp.getNumOperands() != 1) {
-                return false;
-            }
-            auto yieldInputIsBlockArg = dyn_cast<BlockArgument>(yieldOp.getOperand(0));
-            if (!yieldInputIsBlockArg) {
-                return false;
-            }
-            auto maybeCollapseOpInputType = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
-            auto maybeCollapseOpOutputType =
-                dyn_cast<RankedTensorType>(op.getResultTensors()[0].getType());
-            if (maybeCollapseOpInputType.getRank() <= maybeCollapseOpOutputType.getRank()) {
-                return false;
-            }
-            return true;
-        };
-
-        auto maybeCollapseOp = input.getDefiningOp<linalg::GenericOp>();
-        if (maybeCollapseOp) {
-            if (isCollapseOp(maybeCollapseOp)) {
-                input = maybeCollapseOp->getOperand(0);
+        auto maybeElemOp = input.getDefiningOp<linalg::GenericOp>();
+        if (maybeElemOp) {
+            auto &r = maybeElemOp.getRegion();
+            if (r.hasOneBlock() && isa<linalg::YieldOp>(r.front().front())) {
+                auto success = selectInput(input, maybeElemOp.getOperand(0));
+                if (!success) {
+                    input = bkpInput;
+                    return false;
+                }
             }
             else {
-                maybeCollapseOp = nullptr;
+                maybeElemOp = nullptr;
             }
         }
 
@@ -138,18 +164,39 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         auto inputElementType = dyn_cast<RankedTensorType>(input.getType()).getElementType();
 
         // linalg.generic as collapse_shape
-        if (maybeCollapseOp) {
-            auto maybeCollapseOpOutputShape =
-                dyn_cast<RankedTensorType>(maybeCollapseOp.getResult(0).getType()).getShape();
+        if (maybeElemOp) {
+            auto maybeElemOpOutputShape =
+                dyn_cast<RankedTensorType>(maybeElemOp.getResult(0).getType()).getShape();
 
-            auto newOutputType =
-                RankedTensorType::get(maybeCollapseOpOutputShape, inputElementType);
+            auto createElOp = [&](PatternRewriter &rewriter, Location loc, Type elementType) {
+                auto newOutputType =
+                    RankedTensorType::get(maybeElemOpOutputShape, inputElementType);
 
-            auto newCollapseOp = rewriter.create<tensor::CollapseShapeOp>(
-                maybeCollapseOp.getLoc(), newOutputType, input, maybeCollapseOp->getAttrs()
-            );
-            maybeCollapseOp.getResult(0).replaceAllUsesWith(newCollapseOp.getResult());
-            rewriter.eraseOp(maybeCollapseOp);
+                auto emptyOp = rewriter.create<tensor::EmptyOp>(
+                    maybeElemOp.getLoc(), newOutputType.getShape(), newOutputType.getElementType()
+                );
+
+                auto newOp = rewriter.create<linalg::GenericOp>(
+                    loc, ArrayRef<Type>{newOutputType}, ValueRange{input}, ValueRange{emptyOp},
+                    /*indexingMaps=*/
+                    ArrayRef<AffineMap>{
+                        maybeElemOp.getIndexingMapsArray().front(),
+                        maybeElemOp.getIndexingMapsArray().back()
+                    },
+                    /*iteratorTypes=*/maybeElemOp.getIteratorTypesArray(),
+                    [&](OpBuilder &bBuilder, Location bLoc, ValueRange bArgs) {
+                        bBuilder.create<linalg::YieldOp>(bLoc, bArgs[0]);
+                    }
+                );
+
+                return newOp;
+            };
+
+            auto newOp = createElOp(rewriter, maybeElemOp.getLoc(), inputElementType);
+
+            maybeElemOp.getResult(0).replaceAllUsesWith(newOp->getResult(0));
+            rewriter.eraseOp(maybeElemOp);
+            input = newOp->getResult(0);
         }
 
         // tensor.collapse_shape
@@ -162,19 +209,36 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             );
             collapseOp->getResult(0).replaceAllUsesWith(newCollapseOp.getResult());
             rewriter.eraseOp(collapseOp);
+            input = newCollapseOp.getResult();
         }
 
-        if (bcastOp) {
-            auto bOutputShape = bcastOp.getInit().getType().getShape();
+        // tensor.expand_shape
+        if (expandOp) {
+            auto expandShape = expandOp.getResultType().getShape();
+            auto newOutputType = RankedTensorType::get(expandShape, inputElementType);
+
+            auto newExpandOp = rewriter.create<tensor::ExpandShapeOp>(
+                expandOp.getLoc(), newOutputType, input, expandOp.getReassociationIndices()
+            );
+            expandOp->getResult(0).replaceAllUsesWith(newExpandOp.getResult());
+            rewriter.eraseOp(expandOp);
+            input = newExpandOp.getResult();
+        }
+
+        if (bcastDims) {
+
+            auto dstTy = bcastOp.getDpsInitOperand(0)->get().getType();
+            auto src = bcastOp.getDpsInputOperand(0)->get();
+            auto bOutputShape = mlir::cast<RankedTensorType>(dstTy).getShape();
             auto bOutputType = RankedTensorType::get(bOutputShape, inputElementType);
 
             auto op = rewriter.create<linalg::BroadcastOp>(
-                bcastOp.getLoc(), bcastOp.getInput(),
-                createInitTensor(bcastOp, rewriter, bOutputType), bcastOp.getDimensionsAttr()
+                bcastOp.getLoc(), src, createInitTensor(bcastOp, rewriter, bOutputType), *bcastDims
             );
-            rewriter.replaceOp(bcastOp, op.getResults()[0]);
+            auto gOp = linalg::generalizeNamedOp(rewriter, op);
+            rewriter.replaceOp(bcastOp, gOp->getResults()[0]);
 
-            input = op.getResults()[0];
+            input = gOp->getResults()[0];
         }
 
         return true;

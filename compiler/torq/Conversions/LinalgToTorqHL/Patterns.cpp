@@ -2238,6 +2238,34 @@ struct TensorPadOpConversion : public OpRewritePattern<tensor::PadOp> {
 
 } // namespace
 
+struct GenericToBroadcastOpConversion : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
+
+        // FIXME: Copied from
+        // https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/Linalg/IR/LinalgInterfaces.cpp#L141.
+        // Remove after upgrading to latest MLIR.
+        std::optional<SmallVector<int64_t>> equivalentToBroadcast =
+            isaBroadcastOpInterface(genericOp);
+        if (!equivalentToBroadcast) {
+            return failure();
+        }
+        auto input = genericOp.getDpsInputOperand(0)->get();
+        auto dstTy = genericOp.getDpsInitOperand(0)->get().getType();
+        auto dims = *equivalentToBroadcast;
+
+        auto op = rewriter.create<torq_hl::BroadcastOp>(
+            genericOp.getLoc(), dstTy,
+            createInitTensor(genericOp, rewriter, mlir::cast<RankedTensorType>(dstTy)), dims, input
+        );
+        rewriter.replaceOp(genericOp, op.getResults());
+        return success();
+    }
+};
+
 void populateLinalgToTorqHLPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
@@ -2292,6 +2320,8 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<ExtractOpPattern>(context);
 
     patterns.insert<ReinterpretCastOpPattern>(context);
+
+    patterns.insert<GenericToBroadcastOpConversion>(context);
 }
 
 } // namespace mlir::syna::torq

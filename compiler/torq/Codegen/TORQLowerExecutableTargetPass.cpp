@@ -114,6 +114,7 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     // optimize linalg ops for torq
     // this pass use some tags from tile-and-fuse mark pass
     funcPm.addPass(createOptimizeLinalgForTorqPass());
+    funcPm.addPass(createCanonicalizerPass());
 
     // Convert tensor-level elementwise arith ops (e.g. addi, subi, andi) into
     // explicit linalg.generic form. This makes all elementwise math uniform
