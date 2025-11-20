@@ -150,8 +150,9 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         auto shape = inputType.getShape();
         auto weightType = llvm::cast<RankedTensorType>(weights.getType());
         auto weightShape = weightType.getShape();
-
-        bool isConv1D = (inputType.getRank() == 4 && shape[1] == 1);
+        // Layout: NHWC → height is dim 1,  NCHW → height is dim 2
+        const int heightDim = (_channelDim == 3) ? 1 : 2;
+        bool isConv1D = (inputType.getRank() == 4 && shape[heightDim] == 1);
         if (isConv1D) {
             return rewriteAsConv1D(convOp, rewriter);
         }
@@ -228,6 +229,19 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
 
         // Generate torq_hl op with input/output in the expected format
         input = transposeValue(input, _dataPerm, loc, rewriter);
+        // If the only user of output is a linalg.generic whose body contains
+        // an arith.truncf, treat it as part of a BF16 truncation pattern and
+        // forward `output` to that genericOp's result.
+        if (output.hasOneUse()) {
+            auto *userOp = *output.getUsers().begin();
+            if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
+                Block *body = genericOp.getBody();
+                // Strict check: body has a truncf
+                if (isa<arith::TruncFOp>(body->front())) {
+                    output = genericOp.getResult(0);
+                }
+            }
+        }
         auto torqOutType = transposeType(output.getType(), _dataPerm);
         bool nhwcInput = _channelDim == 3 && _dataPerm.empty();
         auto torqConvOp = rewriter.create<TorqConvOp>(
@@ -1226,6 +1240,10 @@ void populateLinalgToTorqHLPrePatterns(
     );
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
         context, 3, Permutation::none(), Permutation::none(), 20, 12, Check::isKerEqInput,
+        markFuseGroups
+    );
+    patterns.insert<Conv2dConvert<linalg::Conv2DNchwFchwOp, syna::torq_hl::Conv2DOp>>(
+        context, 1, Permutation::none(), Permutation::none(), 28, 12, Check::isKerSmall,
         markFuseGroups
     );
 
