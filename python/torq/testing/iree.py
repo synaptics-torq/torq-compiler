@@ -140,7 +140,8 @@ def compile_torq(request, iree_compile, input_path, output_path, ext_options=[])
     print("Compiling for TORQ with: " + " ".join(cmds))
 
     with request.getfixturevalue("scenario_log").event("torq_compile"):
-        subprocess.check_call(cmds, cwd=str(Path(output_path).parent))
+        subprocess.check_call(cmds, cwd=str(Path(output_path).parent),
+            timeout=int(request.getfixturevalue("torq_compiler_timeout")))
 
 
 def create_output_args(request, output_specs, tag):
@@ -207,7 +208,7 @@ def run_torq(request, iree_run_module, model_path, input_args, output_specs, ext
 
     with request.getfixturevalue("scenario_log").event("torq_run"):
         # FIXME: Depending on the platform and the model this will not be enough (tests with desc dumping are particularly slow).
-        subprocess.check_call(cmds, timeout=60 * 15)
+        subprocess.check_call(cmds, timeout=int(request.getfixturevalue("torq_runtime_timeout")))
 
     if request.config.getoption("--generate-hw-test-vectors"):
         print(f"Generated test vectors in {tv_dir}")
@@ -481,6 +482,13 @@ def runtime_hw_type(request):
 def torq_compiler_options(request, case_config):
     return case_config.get("torq_compiler_options", [])
 
+@pytest.fixture
+def torq_compiler_timeout(request, case_config):
+    return case_config.get("torq_compiler_timeout", 60 * 15)
+
+@pytest.fixture
+def torq_runtime_timeout(request, case_config):
+    return case_config.get("torq_runtime_timeout", 60 * 15)
 
 @versioned_generated_file_fixture("vmfb")
 def torq_compiled_model(versioned_file, torq_compiler_options, request, mlir_model_file, torq_compiler):

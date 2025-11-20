@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import List, Dict, Any
 from pathlib import Path
 
+from torq.testing.tensorflow import generate_layers_from_model
+
 """
 
 This module provides an helper fixture and class that allows to setup
@@ -98,5 +100,26 @@ def get_test_cases_from_files(files: Path) -> List[Case]:
 
     for file_path in files:
         cases.append(Case(file_path.name, file_path))
+
+    return cases
+
+
+def get_test_cases_from_tf_model(model, model_name, full_model=False) -> List[Case]:
+    """
+    Generates layer test cases from a tensorflow model, each layer becomes a test case.
+
+    These test cases expect that the case_config fixture is overriden in the test module
+    to provide the actual test configuration (by using the layer name in the model).
+    """
+    cases = []
+
+    if full_model:
+        full_model_config = model.get_config()
+        cases.append(Case(f"full_model_{model_name}", full_model_config))
+    else:
+        layers = generate_layers_from_model(model)
+
+        for layer_name, layer_config in layers.items():
+            cases.append(Case(f"layer_{model_name}_" + layer_name, layer_config))
 
     return cases

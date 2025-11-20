@@ -38,7 +38,8 @@ def case_config(request):
             "keras_layer_data": keras_model,
             "mlir_model_file": "tflite_mlir_model_file",
             "tflite_model_file": "quantized_tflite_model_file",
-            "input_data": "tweaked_random_input_data"
+            "input_data": "tweaked_random_input_data",
+            "quantize_to_int16": False
         }
 
 
@@ -46,9 +47,9 @@ def test_model_tflite_torq(request, tflite_reference_results, torq_results, case
     compare_test_results(request, torq_results, tflite_reference_results, case_config)
 
 
-def test_model_llvmcpu_torq(request, llvm_reference_results, torq_results, case_config):
-    compare_test_results(request, torq_results, llvm_reference_results, case_config)
+def test_model_llvmcpu_torq(request, llvmcpu_reference_results, torq_results, case_config):
+    compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
 
 
-def test_model_llvmcpu_tflite(request, tflite_reference_results, llvm_reference_results, case_config):
-    compare_test_results(request, tflite_reference_results, llvm_reference_results, case_config)
+def test_model_llvmcpu_tflite(request, tflite_reference_results, llvmcpu_reference_results, case_config):
+    compare_test_results(request, tflite_reference_results, llvmcpu_reference_results, case_config)

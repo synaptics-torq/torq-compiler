@@ -56,7 +56,7 @@ def generate_layers_from_model(model: tf.keras.Model):
         if json_str not in existing_cases:
             existing_cases.add(json_str)
         else:
-            print(f"Skipping duplicate model for layer {layer.name}")
+            # print(f"Skipping duplicate model for layer {layer.name}")
             continue
 
         layer_configs[layer.name] = model_config
