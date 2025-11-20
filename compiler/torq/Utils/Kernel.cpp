@@ -1157,7 +1157,8 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
     // 256/weightSize times in alu computation,
     // repeatWeight is false means use weightBlockSize different weight for
     // 256/(weightBlockSize*weightSize) times in alu computation
-    cewrDims.push_back({DimType::L, RegDimTag::D, repeatWeight ? 1 : weightBlockSize, 0});
+    // if not repeatWeight avoid using a count of 1 since that would put the ALU in repeat mode
+    cewrDims.push_back({DimType::L, RegDimTag::D, repeatWeight ? 1 : max(weightBlockSize, 2), 0});
 
     // Mainly used for int16/int32 elementwise multiplication operations.
     // For example, for int16, this means repeating the elementSize (2 bytes) times the weight
@@ -1435,9 +1436,8 @@ PData SlicePrivate::aluProductAccumulate(
     // Each data bytes is duplicated and processed with each weight byte
     // There will be a total of "weightSize" partials for each data
     auto iShape = idata.subShape();
-    assert(iShape.size() >= 1 && "Invalid shape rank");
     const DType dataType = idata.elementType();
-    int blockSize = iShape.back().count;
+    int blockSize = elementCount(iShape);
 
     _iram.elementType = dataType;
 

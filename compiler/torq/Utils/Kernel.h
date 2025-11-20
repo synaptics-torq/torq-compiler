@@ -410,7 +410,7 @@ class Alu : SliceComponent {
 
     // Multiply an input of shape {N} with a scalar weight (or vector of shape {1}) and accumulate
     // N can be any value up to iWidth(iType, wType)
-    // idata: input tensor data in iram
+    // idata: input tensor data in iram (A scalar is also accepted)
     // wdata: weight tensor data in wram
     // acc: accumulate operation
     // return: pram data of shape {ceil(N/act::width), act::width}:pType
@@ -421,7 +421,7 @@ class Alu : SliceComponent {
     );
 
     // Outer product of an input of shape {N} with a weight vector of shape {M} and accumulate
-    // N can be up to iWidth(iType, wType) (NOT any value, only some power of 2 for now TODO FIXME)
+    // N can be up to iWidth(iType, wType) (A scalar is also accepted for both input and weight)
     // idata: input tensor data in iram
     // wdata: weight tensor data in wram
     // acc: accumulate operation
@@ -432,7 +432,7 @@ class Alu : SliceComponent {
     );
 
     // Multiply an input of shape {N} with a weight vector of shape {N} and accumulate
-    // N can be any value up to wWidth(wType)
+    // N can be any value up to wWidth(wType) (A scalar is also accepted for both input and weight)
     // idata: input tensor data in iram
     // wdata: weight tensor data in wram
     // acc: accumulate operation
@@ -464,6 +464,7 @@ class Act : SliceComponent {
     // N can be up to width(iType)
     // clamped return: result data of shape {M}
     // M can be less than M if multiple partials are combined to compute each result value
+    // In case of floating point partials clipMax and clipMin are interpreted as float values.
     QData clamp(
         const PData &pdata, int clipMin, int clipMax,
         torq_hw::ACTMode actMode = torq_hw::ACTMode::ACT
@@ -473,6 +474,23 @@ class Act : SliceComponent {
     // N can be up to width(iType)
     // return: result data of shape {M}
     // M can be less than M if multiple partials are combined to compute each result value
+    //
+    // In case of actMode = torq_hw::ACTMode::ACT each value in the generated QData
+    // is computed according to the following pseudocode:
+    // int32_t t0 = pdata + bdata[og][0];
+    // int64_t t1 = t0 * bdata[og][1];
+    // int64_t t2 = t1 + (1 << (shift * 4 - 1));
+    // int64_t t3 = t2 >> (shift * 4);
+    // int64_t t4 = t3 + zeroPoint;
+    // int16_t t5 = (t4 < clipMin) ? clipMin : (t4 > clipMax) ? clipMax : t4;
+    // qdata = t5;
+    // Where og is the outer group index if pdata is 3D, otherwise og=0.
+    //
+    // In case of floating point partials the rescaling is not available and shift must be 0.
+    // Furthermore clipMax and clipMin are interpreted as float values:
+    // float t0 = pdata + bdata[og][0];
+    // float t1 = (t0<clipMin) ? clipMin : (t0>clipMax) ? clipMax : t0;
+    // qdata = t1;
     QData rescaleClamp(
         const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax,
         torq_hw::ACTMode actMode = torq_hw::ACTMode::ACT
