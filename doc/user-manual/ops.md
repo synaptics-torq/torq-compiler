@@ -74,12 +74,17 @@ This document provides a comprehensive list of operators supported by the Synapt
 |                   |       |                    | i16  |   n/a    | bool  | generic |       |
 |                   |       |                    | i32  |   n/a    | bool  | generic |       |
 |                   |       |                    | bf16 |   n/a    | bool  | generic |       |
-|                   |       |   EltwiseBin(GT)   | i16  |   n/a    | bool  | generic |       |
-|                   |       |   EltwiseBin(GT)   | i16  |   n/a    | bool  | generic |       |
 |                   |       |  EltwiseBin(GTEQ)  |  i8  |   n/a    | bool  | generic |       |
 |                   |       |                    | i16  |   n/a    | bool  | generic |       |
 |                   |       |                    | i32  |   n/a    | bool  | generic |       |
 |                   |       |                    | bf16 |   n/a    | bool  | generic |       |
+|                   |       |   EltwiseBin(LT)   |  i8  |   n/a    | bool  | generic |       |
+|                   |       |                    | i16  |   n/a    | bool  | generic |       |
+|                   |       |                    | i32  |   n/a    | bool  | generic |       |
+|                   |       |                    | bf16 |   n/a    | bool  | generic |       |
+|                   |       |  EltwiseBin(LTEQ)  |  i8  |   n/a    | bool  | generic |       |
+|                   |       |                    | i16  |   n/a    | bool  | generic |       |
+|                   |       |                    | i32  |   n/a    | bool  | generic |       |
 |                   |       |  EltwiseBin(MAX)   |  i8  |   n/a    |  i8   | generic |       |
 |                   |       |                    | i16  |   n/a    |  i16  | generic |       |
 |                   |       |                    | i32  |   n/a    |  i32  | generic |       |

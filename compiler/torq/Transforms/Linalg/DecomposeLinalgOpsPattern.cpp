@@ -65,6 +65,112 @@ struct TensorBitcastPattern : public OpRewritePattern<tensor::BitcastOp> {
     }
 };
 
+// %91 = linalg.generic {...} ins(%87 : tensor<1x2x128x1xbf16>) outs(%90 : tensor<1x2x128x1xi1>) {
+// ^bb0(%in: bf16, %out: i1):
+// %1484 = arith.extf %in : bf16 to f32
+// %1485 = arith.cmpf olt, %1484, %cst_78 : f32
+// linalg.yield %1485 : i1
+// } -> tensor<1x2x128x1xi1>
+// Detect a linalg.generic that:
+//   1) extending each bf16 element to f32 (arith.extf)
+//   2) comparing that f32 to a constant f32 (arith.cmpf)
+//   3) yielding the i1 result.
+// If the structure is exactly same, we rewrite it to remove the f32
+// extension. We instead compare the original bf16 directly against a bf16
+// constant (converted from the original f32 constant). This avoids f32 compare
+// which the hardware does not support.
+class CanonicalizeBF16CastComparePattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    CanonicalizeBF16CastComparePattern(MLIRContext *context)
+        : OpRewritePattern<linalg::GenericOp>(context, /*benefit=*/0) {
+        setDebugName("CanonicalizeBF16CastComparePattern");
+    }
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        // Expect exactly 1 input tensor (bf16), 1 output tensor (i1).
+        if (srcOp.getInputs().size() != 1 || srcOp.getOutputs().size() != 1)
+            return rewriter.notifyMatchFailure(srcOp, "expected 1 input and 1 output");
+        auto inType = dyn_cast<RankedTensorType>(srcOp.getInputs()[0].getType());
+        auto outType = dyn_cast<RankedTensorType>(srcOp.getOutputs()[0].getType());
+        if (!inType || !outType)
+            return rewriter.notifyMatchFailure(srcOp, "expected ranked tensor types");
+        if (!inType.getElementType().isBF16())
+            return rewriter.notifyMatchFailure(srcOp, "expected bf16 input element type");
+        if (!outType.getElementType().isInteger(1))
+            return rewriter.notifyMatchFailure(srcOp, "expected i1 output element type");
+
+        // Region must have: extf(bf16->f32), cmpf(f32,f32 with constant), yield(i1).
+        auto &block = srcOp.getRegion().front();
+        if (block.getNumArguments() < 1)
+            return rewriter.notifyMatchFailure(srcOp, "expected block arg");
+        // Must be exactly 3 ops.
+        if (std::distance(block.begin(), block.end()) != 3)
+            return rewriter.notifyMatchFailure(srcOp, "unexpected region ops count");
+
+        auto *extOpRaw = &block.front();
+        auto extOp = dyn_cast<arith::ExtFOp>(extOpRaw);
+        if (!extOp)
+            return rewriter.notifyMatchFailure(srcOp, "first op not arith.extf");
+        if (!extOp.getIn().getType().isBF16() || !extOp.getResult().getType().isF32())
+            return rewriter.notifyMatchFailure(srcOp, "extf types not bf16->f32");
+        if (extOp.getIn() != block.getArgument(0))
+            return rewriter.notifyMatchFailure(srcOp, "extf input not block argument");
+
+        auto *cmpOpRaw = extOpRaw->getNextNode();
+        auto cmpOp = dyn_cast<arith::CmpFOp>(cmpOpRaw);
+        if (!cmpOp)
+            return rewriter.notifyMatchFailure(srcOp, "second op not arith.cmpf");
+
+        // One operand must be the extf result, the other a constant f32.
+        arith::ConstantOp constOp = nullptr;
+        Value bfExtendedVal;
+        if (cmpOp.getLhs() == extOp.getResult()) {
+            bfExtendedVal = cmpOp.getLhs();
+            constOp = cmpOp.getRhs().getDefiningOp<arith::ConstantOp>();
+        }
+        else if (cmpOp.getRhs() == extOp.getResult()) {
+            bfExtendedVal = cmpOp.getRhs();
+            constOp = cmpOp.getLhs().getDefiningOp<arith::ConstantOp>();
+        }
+        else {
+            return rewriter.notifyMatchFailure(srcOp, "cmpf does not use extf result");
+        }
+        if (!constOp)
+            return rewriter.notifyMatchFailure(srcOp, "non-constant compare operand");
+        auto floatAttr = dyn_cast<FloatAttr>(constOp.getValue());
+        if (!floatAttr || !floatAttr.getType().isF32())
+            return rewriter.notifyMatchFailure(srcOp, "expected f32 constant rhs/lhs");
+
+        auto *yieldOpRaw = cmpOpRaw->getNextNode();
+        auto yieldOp = dyn_cast<linalg::YieldOp>(yieldOpRaw);
+        if (!yieldOp)
+            return rewriter.notifyMatchFailure(srcOp, "third op not linalg.yield");
+        if (yieldOp.getValues().size() != 1 || yieldOp.getOperand(0) != cmpOp.getResult())
+            return rewriter.notifyMatchFailure(srcOp, "yield not from cmpf result");
+
+        // All checks passed. Replace with bf16 compare (no extf).
+        auto bf16Ty = inType.getElementType(); // bf16
+        double cstVal = floatAttr.getValueAsDouble();
+        auto pred = cmpOp.getPredicate();
+
+        rewriter.replaceOpWithNewOp<linalg::GenericOp>(
+            srcOp, srcOp.getResultTypes(), srcOp.getInputs(), srcOp.getOutputs(),
+            srcOp.getIndexingMapsArray(), srcOp.getIteratorTypesArray(),
+            [&](OpBuilder &b, Location loc, ValueRange args) {
+                // Create bf16 constant.
+                auto bfConst =
+                    b.create<arith::ConstantOp>(loc, b.getFloatAttr(bf16Ty, cstVal)).getResult();
+                // Compare directly in bf16.
+                auto newCmp = b.create<arith::CmpFOp>(loc, pred, args[0], bfConst).getResult();
+                b.create<linalg::YieldOp>(loc, ValueRange{newCmp});
+            }
+        );
+
+        return success();
+    }
+};
+
 // Rewrites linalg.generic ops containing math.powf(x, cst) where cst is a constant 2
 // (for bf16, i8, i16, i32 element types) into a linalg.generic with a multiplication
 // (mul) of the input with itself. This is useful for lowering pow(x, 2) to mul(x, x)
@@ -1256,6 +1362,7 @@ void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet 
     patterns.insert<QuantizedBatchMatmulPattern>(context);
     patterns.insert<PowToMulPattern>(context);
     patterns.insert<BfloatRsqrtPattern>(context);
+    patterns.insert<CanonicalizeBF16CastComparePattern>(context);
 }
 
 } // namespace mlir::syna::torq

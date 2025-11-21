@@ -115,7 +115,7 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         else if (isa<arith::CmpFOp>(op)) {
             auto cmpFOp = dyn_cast<arith::CmpFOp>(op);
 
-            // TODO: add UNE, OLE, OLT
+            // TODO: add UNE, OLE
 
             auto predicate = cmpFOp.getPredicate();
 
@@ -124,6 +124,11 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
             }
             else if (predicate == arith::CmpFPredicate::OGT) {
                 opType = torq_hl::ElementwiseOpEnum::GREATER;
+            }
+            else if (predicate == arith::CmpFPredicate::OLT) {
+                // Orderd less than => Reverse inputs and use GREATER
+                opType = torq_hl::ElementwiseOpEnum::GREATER;
+                swapInputs = true;
             }
             else if (predicate == arith::CmpFPredicate::OEQ) {
                 opType = torq_hl::ElementwiseOpEnum::EQUAL;
