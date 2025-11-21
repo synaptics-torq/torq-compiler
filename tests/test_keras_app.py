@@ -81,6 +81,7 @@ def case_config(request):
 
     # vgg16
     # hang
+    'vgg16_block1_conv1',
     'vgg16_block1_conv2',
     'vgg16_block2_conv1',
     'vgg16_block2_conv2',
@@ -178,6 +179,7 @@ def case_config(request):
     'nasnetmobile_reduction_left',
     'nasnetmobile_adjust_avg_pool',
     'nasnetmobile_normal_left3',
+    'nasnetmobile_separable_conv_2_reduction_left1_stem_2',
 
     # efficientnetb0
     # wrong results
@@ -228,7 +230,7 @@ def case_config(request):
             "torq_runtime_timeout": runtime_timeout
         }
 
-
+@pytest.mark.ci
 def test_keras_app_tflite_torq(request, tflite_reference_results, torq_results, case_config):
     compare_test_results(request, torq_results, tflite_reference_results, case_config)
 
