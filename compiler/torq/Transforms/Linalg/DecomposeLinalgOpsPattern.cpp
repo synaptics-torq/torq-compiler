@@ -1150,6 +1150,100 @@ struct QuantizedBatchMatmulPattern : public OpRewritePattern<linalg::QuantizedBa
     }
 };
 
+class BfloatRsqrtPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    // using OpRewritePattern::OpRewritePattern;
+    BfloatRsqrtPattern(MLIRContext *context)
+        : OpRewritePattern<linalg::GenericOp>(context, /*benefit=*/0) {
+        setDebugName("BfloatRsqrtPattern");
+    }
+
+    LogicalResult matchAndRewrite(linalg::GenericOp op, PatternRewriter &rewriter) const override {
+        if (!cast<RankedTensorType>(op.getType(0)).getElementType().isBF16() ||
+            !isa_and_nonnull<math::RsqrtOp>(getElementwiseUnaryOp(op))) {
+            return rewriter.notifyMatchFailure(op, "Expected bf16 rsqrt");
+        }
+        auto loc = op.getLoc();
+        auto bfTensorType = cast<RankedTensorType>(op.getType(0));
+        auto bf16 = bfTensorType.getElementType();
+        auto i16 = rewriter.getIntegerType(16);
+        auto i16TensorType = RankedTensorType::get(bfTensorType.getShape(), i16);
+        // auto i1 = rewriter.getIntegerType(1);
+        // auto i1TensorType = RankedTensorType::get(bfTensorType.getShape(), i1);
+        auto rank = bfTensorType.getRank();
+        auto ctx = rewriter.getContext();
+
+        auto broadcast = [&](Value v, RankedTensorType t, auto func) {
+            return rewriter
+                .create<linalg::GenericOp>(
+                    loc, TypeRange{t}, ValueRange{v},
+                    ValueRange{rewriter.create<tensor::EmptyOp>(loc, t, ValueRange{})},
+                    SmallVector<AffineMap>(2, AffineMap::getMultiDimIdentityMap(rank, ctx)),
+                    SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel),
+                    [&](OpBuilder &b, Location l, ValueRange args) {
+                        b.create<linalg::YieldOp>(l, ValueRange{func(b, l, args)});
+                    }
+                )
+                .getResult(0);
+        };
+
+        // following https://en.wikipedia.org/wiki/Fast_inverse_square_root
+        auto number = op.getInputs()[0];
+        const int16_t rsqrtMagic = 0x5f37;
+        auto magic =
+            rewriter.create<arith::ConstantOp>(loc, rewriter.getIntegerAttr(i16, rsqrtMagic));
+        auto threeHalfs = rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(bf16, 1.5));
+        auto oneHalf = rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(bf16, 0.5));
+        auto x2 = broadcast(number, bfTensorType, [&](OpBuilder &b, Location l, ValueRange args) {
+            return b.create<arith::MulFOp>(loc, oneHalf, args[0]);
+        });
+        auto i = rewriter.create<tensor::BitcastOp>(loc, i16TensorType, number);
+        // // Any value (unsigned) greater than +inf is either a negative
+        // // number, or nan. In either case, rsqrt of this is NaN.
+        // const int16_t bf16Inf = 0x7f80;
+        // auto inf = rewriter.create<arith::ConstantOp>(loc, rewriter.getIntegerAttr(i16,
+        // bf16Inf));
+        // // rsqrt(neg) -> nan
+        // auto nanBoolMask =
+        //     broadcast(i, i1TensorType, [&](OpBuilder &b, Location l, ValueRange args) {
+        //         return b.create<arith::CmpIOp>(l, arith::CmpIPredicate::ugt, args[0], inf);
+        //     });
+        auto one = rewriter.create<arith::ConstantOp>(loc, rewriter.getIntegerAttr(i16, 1));
+        auto i2 = broadcast(
+            broadcast(
+                i, i16TensorType,
+                [&](OpBuilder &b, Location l, ValueRange args) {
+                    return b.create<arith::ShRSIOp>(loc, args[0], one);
+                }
+            ),
+            i16TensorType,
+            [&](OpBuilder &b, Location l, ValueRange args) {
+                return b.create<arith::SubIOp>(loc, magic, args[0]);
+            }
+        );
+        // auto nanMask =
+        //     broadcast(nanBoolMask, i16TensorType, [&](OpBuilder &b, Location l, ValueRange args)
+        //     {
+        //         // Sign extending comming in clutch: (true) 0b1 -> 0b1111111111111111 (nan)
+        //         return b.create<arith::ExtSIOp>(l, i16, args[0]);
+        //     });
+        // auto i3 = rewriter.create<arith::OrIOp>(loc, nanMask, i2);
+        auto y = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, i2);
+        auto y2 = rewriter.create<arith::MulFOp>(
+            loc, y,
+            broadcast(
+                rewriter.create<arith::MulFOp>(loc, rewriter.create<arith::MulFOp>(loc, x2, y), y),
+                bfTensorType,
+                [&](OpBuilder &b, Location l, ValueRange args) {
+                    return b.create<arith::SubFOp>(loc, threeHalfs, args[0]);
+                }
+            )
+        );
+        rewriter.replaceOp(op, y2);
+        return success();
+    }
+};
+
 void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet &patterns) {
     patterns.insert<TensorBitcastPattern>(context);
     patterns.insert<BfloatGenericErfPattern>(context);
@@ -1161,6 +1255,7 @@ void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet 
     patterns.insert<BfloatReciprocalPattern>(context);
     patterns.insert<QuantizedBatchMatmulPattern>(context);
     patterns.insert<PowToMulPattern>(context);
+    patterns.insert<BfloatRsqrtPattern>(context);
 }
 
 } // namespace mlir::syna::torq
