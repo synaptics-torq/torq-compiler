@@ -1,6 +1,7 @@
 
 import numpy as np
 from .iree import TOPDIR
+from torq.testing.versioned_fixtures import VersionedData
 
 """
 
@@ -28,15 +29,25 @@ def check_nans(arr1, arr2):
 
 def compare_test_results(request, observed_result, reference_results, case_config):
 
-    try:
-        accept_zero_output = request.getfixturevalue("accept_zero_output")
-    except pytest.FixtureLookupError:
-        accept_zero_output = False
+    comparison_config = {"int_tol": 1,
+                        "int_thld": 1,
+                        "fp_avg_tol": 1e-2,
+                        "fp_max_tol": 1e-2,
+                        "allow_all_zero": False,
+                        "epsilon": 1e-6 }
 
-    compare_results(request, observed_result.data, reference_results.data, accept_zero_output=accept_zero_output)
+    if 'comparison_config' in case_config:
+        configuration_overrides = request.getfixturevalue(case_config['comparison_config'])
+
+        if isinstance(configuration_overrides, VersionedData):
+            configuration_overrides = configuration_overrides.data
+
+        comparison_config.update(configuration_overrides)
+
+    compare_results(request, observed_result.data, reference_results.data, comparison_config=comparison_config)
 
 
-def compare_results(request, observed_outputs, expected_outputs, accept_zero_output):
+def compare_results(request, observed_outputs, expected_outputs, comparison_config):
     """
     Compare two tensors container in two numpy.array
     """
@@ -53,7 +64,8 @@ def compare_results(request, observed_outputs, expected_outputs, accept_zero_out
 
         assert observed_output.size == expected_output.size
 
-        assert accept_zero_output or not np.all(observed_output == 0), "Output is 0 always. Sometimes changing parameters will fix it"
+        if not comparison_config['allow_all_zero']:
+            assert not np.all(observed_output == 0), "Output is 0 always"
 
         actual_observed_output = observed_output
         actual_expected_output = expected_output
@@ -65,18 +77,15 @@ def compare_results(request, observed_outputs, expected_outputs, accept_zero_out
         else:
             abs_diff = np.abs(expected_output-observed_output).astype(np.float32)
             if (np.issubdtype(expected_output.dtype, np.integer)):
-                differences = abs_diff>1
+                differences = abs_diff > comparison_config['int_tol']
             else:
-                # Compute relative difference for each element
-                t_expected = expected_output
-                t_observed = observed_output
-                epsilon = 1e-6  # Small constant to avoid division by zero
-                t_diff = np.abs((t_expected - t_observed) / (np.abs(t_expected) + np.abs(t_observed) + epsilon))
-                print("Max relative difference: ", np.max(t_diff))
-
-                # Consider error if relative error > 1%
-                differences = t_diff > 1e-2
-
+                scale = np.abs(expected_output) + np.abs(observed_output) + comparison_config['epsilon']
+                rel_diff = abs_diff / scale
+                # force 0/0 -> 0
+                # DM: avoid TypeError: 'numpy.float32' object does not support item assignment
+                # rel_diff[abs_diff == 0] = 0
+                differences = rel_diff > comparison_config['fp_avg_tol']
+                print(f'Max relative difference: {np.max(rel_diff)}')
             abs_diff = differences*abs_diff
 
         num_diffs = np.sum(differences)
@@ -92,7 +101,7 @@ def compare_results(request, observed_outputs, expected_outputs, accept_zero_out
         np.save(str(observed_output_path), actual_observed_output)
         np.save(str(expected_output_path), actual_expected_output)
 
-        if (np.issubdtype(expected_output.dtype, np.integer)):
-            assert (np.max(abs_diff) <= 1), difference_summary
+        if (np.issubdtype(expected_output.dtype, np.integer) or np.issubdtype(expected_output.dtype, bool)):
+            assert (np.max(abs_diff) <= comparison_config['int_thld']) and not (abs_diff != 0).sum(), difference_summary
         else:
-            assert (np.max(differences) <= 1e-2), difference_summary
+            assert np.max(rel_diff) <= comparison_config['fp_max_tol'], difference_summary

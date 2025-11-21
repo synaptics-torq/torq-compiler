@@ -633,16 +633,24 @@ def list_mlir_file_group(group_name):
     return sorted(files)
 
 
-
 @versioned_static_file_fixture
 def static_mlir_model_file(case_config):
     return case_config["static_mlir_model_file"]    
 
 
 @versioned_cached_data_fixture
-def accept_zero_output(request, mlir_model_file):
+def comparison_config_from_mlir(request, mlir_model_file):
+    """
+    Extract comparison configuration directives from MLIR file comments
 
-    with open(mlir_model_file, 'r') as mlir_file:
-        mlir_header = mlir_file.readline()
+    These values will update the default comparison configuration used in tests.
+    """
 
-    return "// TORQ_ALLOW_ALL_ZERO: 1" == mlir_header.strip()
+    tols = {}
+
+    for line in open(mlir_model_file).readlines():
+        if "TORQ_" in line:
+            _, directive, value = line.split()
+            tols[directive[5:-1].lower()] = float(value)
+
+    return tols

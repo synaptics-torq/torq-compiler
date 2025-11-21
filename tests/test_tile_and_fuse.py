@@ -8,16 +8,18 @@ from torq.testing.comparison import compare_test_results
 def get_test_cases():
     test_cases = []
 
+    base_options = ["--torq-css-qemu", "--torq-enable-tile-and-fuse"]
+
     for mlir_file in list_mlir_files("linalg_ops"):
         test_cases.append(Case("linalg_" + mlir_file.stem, {
             "static_mlir_model_file": mlir_file,
-            "torq_compiler_options": ["--iree-input-type=linalg-torq"]
+            "torq_compiler_options": base_options + ["--iree-input-type=linalg-torq"]
         }))
 
     for mlir_file in list_mlir_files("tosa_ops"):
         test_cases.append(Case("tosa_" + mlir_file.stem, {
             "static_mlir_model_file": mlir_file,
-            "torq_compiler_options": ["--iree-input-type=tosa-torq"]
+            "torq_compiler_options": base_options + ["--iree-input-type=tosa-torq"]
         }))
 
     for mlir_file in list_mlir_file_group("torch_ops"):
@@ -26,7 +28,8 @@ def get_test_cases():
             continue  # not implemented yet
 
         test_cases.append(Case("torch_" + mlir_file.stem, {
-            "static_mlir_model_file": mlir_file
+            "static_mlir_model_file": mlir_file,
+            "torq_compiler_options": base_options
         }))
 
     return test_cases
@@ -91,13 +94,13 @@ def case_config(request):
     ]
 
     if request.param.name in failed_tc:
-        pytest.xfail("known failure")
+        pytest.xfail("known failure")    
 
     return {
         "mlir_model_file": "static_mlir_model_file",
-        "static_mlir_model_file": request.param.data.get("static_mlir_model_file"),
         "input_data": "tweaked_random_input_data",
-        "torq_compiler_options": ["--torq-css-qemu", "--torq-enable-tile-and-fuse"] + request.param.data.get("torq_compiler_options", [])
+        "comparison_config": "comparison_config_from_mlir",
+        **request.param.data
     }
 
 @pytest.mark.ci
