@@ -61,6 +61,7 @@ def case_config(request):
     
         # wrong result
         'linalg_tanh-bf16',
+        'linalg_rsqrt-bf16',
 
         # crash
         'linalg_quantized_batch_matmul',

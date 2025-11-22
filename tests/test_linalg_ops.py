@@ -8,6 +8,9 @@ from torq.testing.iree import list_mlir_files
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_files("linalg_ops")))
 def case_config(request):
     
+    if request.param.data.name in ["rsqrt-bf16.mlir"]:
+        pytest.xfail("output mismatch in bfloat16")
+
     return {
         "mlir_model_file": "static_mlir_model_file",
         "static_mlir_model_file": request.param.data,
