@@ -92,3 +92,11 @@ jobs:
               file: scripts/Dockerfile.ci-tests
               push: ${{ github.ref == 'refs/heads/main' }}
               tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-tests
+
+          - name: Build and push FPGA tests Docker image
+            uses: docker/build-push-action@v6            
+            with:
+              context: .
+              file: scripts/Dockerfile.ci-fpga-tests
+              push: ${{ github.ref == 'refs/heads/main' }}
+              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-fpga-tests
