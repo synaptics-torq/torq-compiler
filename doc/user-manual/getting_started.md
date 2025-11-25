@@ -74,13 +74,14 @@ You can use **either** of the following approaches:
         ```
         $ cd /opt/release
         ```
+    > **Note:** The `samples/` directory is only included in the [Release Package](./getting_started.md#release-package-ubuntu-24-04) and is not available in the github compiler repository.
 
-- Compile an input MLIR file ``samples/tosa/conv2d-stride4.mlir`` to a compiled model ``model.vmfb``:
+- Compile an input MLIR file ``samples/tosa/add.mlir`` to a compiled model ``model.vmfb``:
     ```bash
-    $ torq-compile samples/tosa/conv2d-stride4.mlir -o model.vmfb
+    $ torq-compile samples/tosa/add.mlir -o model.vmfb
     ```
 
 - Run the generated model with the Torq simulator:
     ```bash
-    $ iree-run-module --device=torq --module=model.vmfb --input="1x256x256x1xi8=0"
+    $ iree-run-module --device=torq --module=model.vmfb --input="1x56x56x24xi8=1"
     ```

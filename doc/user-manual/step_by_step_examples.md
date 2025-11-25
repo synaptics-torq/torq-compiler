@@ -17,10 +17,13 @@ Follow the steps below to convert, and run a MobileNetV2 model on Torq.
   ```
 - Convert the `.tflite` model into TOSA format using the IREE import tool:
 
+  **Model Source:** This model - MobileNetV2 is generated from tf.keras.applications using [tf_model_generator.py](https://github.com/synaptics-torq/iree-synaptics-synpu/blob/main/tests/model_generator/tf_model_generator.py). The dataset for int8 quantization is done using random data.
+
   ```shell
   # Convert TFLite to TOSA (binary MLIR)
   iree-import-tflite samples/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite -o mobilenetv2.tosa
   ```
+> **Note:** The `samples/` directory is only included in the [Release Package](./getting_started.md#release-package-ubuntu-24-04) and is not available in the github compiler repository.
 
   The TOSA format is a binary format that can be fed to our compiler. For more details on the IREE TFLite tools, see the [official IREE website](https://iree.dev/guides/ml-frameworks/tflite/).
 

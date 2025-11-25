@@ -78,6 +78,9 @@ cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_
 
 mkdir ${INSTALL_DIR}/samples
 
+# Download release models from HF
+python3 ${BASE_DIR}/scripts/model_release.py ${INSTALL_DIR}/samples
+
 # remove redundant libIREECompiler.so library
 rm ${INSTALL_DIR}/python/compiler/iree/compiler/_mlir_libs/libIREECompiler.so
 

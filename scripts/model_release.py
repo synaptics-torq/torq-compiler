@@ -24,8 +24,8 @@ HF_MODEL_LIST = [
 ]
 TOSA_MODEL_LIST = [
     "add.mlir",
-    "conv2d-stride4.mlir",
-    "fc.mlir"
+    "mul-bf16.mlir",
+    "clamp-bf16.mlir"
 ]
 LINALG_MODEL_LIST = [
     "batch-matmul-in-int8-out-int16.mlir",
