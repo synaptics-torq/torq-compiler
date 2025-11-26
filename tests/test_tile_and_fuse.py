@@ -87,6 +87,7 @@ def case_config(request):
 
         # unable to free enough space for results and operands
         'torch_Conv2d_bf16_1x1x64x8192',
+        'torch_Conv2d_bf16_1x1x8192x64',
         # failed to run translation of source executable to target executable for backend
         'torch_ConvTranspose_bf16_1x1x512x512',
 

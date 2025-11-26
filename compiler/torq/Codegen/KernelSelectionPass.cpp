@@ -134,14 +134,23 @@ template <typename T> static torq_hl::VectorizationModeEnum getVectorizationMode
     if (outShape.size() <= 2) {
         return vectorizationMode;
     }
-    auto outFrameSize = outShape[2] * outShape[3];
-
-    if (outFrameSize < outShape[1]) {
-        if (outFrameSize < 64)
-            vectorizationMode = torq_hl::VectorizationModeEnum::_32x8;
-        if (outFrameSize < 32)
-            vectorizationMode = torq_hl::VectorizationModeEnum::_16x16;
+    // Find the best Mode for Hardware based on the macc count
+    auto outFrameSize = outShape[2] * outShape[3]; // Height * Widith
+    auto out_channel = outShape[1];
+    // Compute MACC counts
+    int64_t maccCount_64x4 = div_ceil(outFrameSize, 64) * div_ceil(out_channel, 4);
+    int64_t maccCount_32x8 = div_ceil(outFrameSize, 32) * div_ceil(out_channel, 8);
+    int64_t maccCount_16x16 = div_ceil(outFrameSize, 16) * div_ceil(out_channel, 16);
+    // Default selection is 64x4
+    int64_t bestValue = maccCount_64x4;
+    // Check 32x8
+    if (maccCount_32x8 < bestValue && out_channel >= 8) {
+        bestValue = maccCount_32x8;
+        vectorizationMode = torq_hl::VectorizationModeEnum::_32x8;
     }
+    // Check 16x16
+    if (maccCount_16x16 < bestValue && out_channel >= 16)
+        vectorizationMode = torq_hl::VectorizationModeEnum::_16x16;
     return vectorizationMode;
 }
 

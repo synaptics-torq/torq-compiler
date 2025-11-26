@@ -646,6 +646,9 @@ bool hasEkLowering(mlir::syna::torq_hl::Conv2DOp op) {
         // Not supported by this EK kernel
         return false;
     }
+    if (op.getVectorizationMode() != torq_hl::VectorizationModeEnum::_64x4) {
+        return false;
+    }
     return true;
 }
 
