@@ -1,0 +1,63 @@
+================================================================================
+Processing: matmul_synai.mlir
+Model Directory: model002
+Timestamp: 2025-11-20 09:05:23
+================================================================================
+
+[INFO] Starting MLIR compilation process...
+[INFO] Input file: /buildsrc/torq-compiler-dev/models/model002/matmul_synai.mlir
+[INFO] Target: torq-compiler vmfb backend
+
+--- MLIR Source ---
+module {
+  func.func @matmul(%arg0: tensor<128x256xf32>, %arg1: tensor<256x512xf32>) -> tensor<128x512xf32> {
+    %0 = "tosa.matmul"(%arg0, %arg1) : (tensor<128x256xf32>, tensor<256x512xf32>) -> tensor<128x512xf32>
+    return %0 : tensor<128x512xf32>
+  }
+}
+
+[INFO] Running: torq-compiler-compile --mlir-input matmul_synai.mlir --output matmul_synai.vmfb
+
+--- Compilation Error ---
+ERROR: Failed to lower TOSA dialect to LinAlg
+Location: @matmul:3:10
+  %0 = "tosa.matmul"(%arg0, %arg1) : (tensor<128x256xf32>, tensor<256x512xf32>) -> tensor<128x512xf32>
+       ^
+
+Error Details:
+  - Failed pattern match for operation 'tosa.matmul'
+  - Expected tensor dimensions do not match the matmul operation requirements
+  - Input tensor shapes: [128x256] and [256x512]
+  - The TOSA to LinAlg conversion pattern failed to match this specific configuration
+
+Diagnostic:
+  The matmul operation requires specific memory layout constraints that are not
+  satisfied by the current tensor configuration. This typically happens when:
+  1. Input tensors have incompatible strides
+  2. Memory layout is not contiguous
+  3. Tensor dimensions exceed hardware limits
+
+Stack Trace:
+  at TosaToLinalgConverter::matchAndRewrite() [TosaToLinalg.cpp:234]
+  at PatternMatcher::apply() [PatternMatch.cpp:156]
+  at GreedyPatternRewriter::processWorklist() [GreedyPatternRewriter.cpp:89]
+  at applyPatternsAndFoldGreedily() [Transforms.cpp:445]
+  
+[ERROR] Compilation failed with exit code: 1
+[ERROR] MLIR to VMFB conversion unsuccessful
+
+--- Compilation Statistics ---
+Duration: 1.234s
+Peak Memory: 245 MB
+Optimization Passes Applied: 12
+Failed Pass: TosaToLinalg
+
+[INFO] Attempting fallback compilation strategy...
+[WARN] Fallback strategy not available for this error type
+[FAIL] Model compilation terminated with errors
+
+================================================================================
+Test Result: FAILED
+Failure Stage: mlir_to_vmfb
+Exit Code: 1
+================================================================================

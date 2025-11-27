@@ -1,0 +1,60 @@
+{
+  "test_suite": {
+    "name": "Sample SynAI Models Test",
+    "timestamp": "2025-11-20 09:00:00",
+    "base_dir": "/buildsrc/torq-compiler-dev/torq-compiler-extras/tests/helpers",
+    "timeout": 180,
+    "dry_run": false,
+    "args": {
+      "base_dir": "/buildsrc/torq-compiler-dev/torq-compiler-extras/tests/helpers",
+      "timeout": 180
+    }
+  },
+  "results": [
+    {
+      "model_path": "/buildsrc/torq-compiler-dev/models/model001/conv_3x3_synai.mlir",
+      "model_dir": "model001",
+      "model_name": "conv_3x3_synai.mlir",
+      "success": true,
+      "failure_stage": null,
+      "max_diff": null,
+      "log_file": ""
+    },
+    {
+      "model_path": "/buildsrc/torq-compiler-dev/models/model001/add_synai.mlir",
+      "model_dir": "model001",
+      "model_name": "add_synai.mlir",
+      "success": true,
+      "failure_stage": null,
+      "max_diff": null,
+      "log_file": ""
+    },
+    {
+      "model_path": "/buildsrc/torq-compiler-dev/models/model002/matmul_synai.mlir",
+      "model_dir": "model002",
+      "model_name": "matmul_synai.mlir",
+      "success": false,
+      "failure_stage": "mlir_to_vmfb",
+      "max_diff": null,
+      "log_file": "/buildsrc/torq-compiler-dev/torq-compiler-extras/tests/helpers/sample_error.log"
+    },
+    {
+      "model_path": "/buildsrc/torq-compiler-dev/models/model003/pooling_synai.mlir",
+      "model_dir": "model003",
+      "model_name": "pooling_synai.mlir",
+      "success": false,
+      "failure_stage": "large_difference",
+      "max_diff": "3.456789",
+      "log_file": ""
+    },
+    {
+      "model_path": "/buildsrc/torq-compiler-dev/models/model003/relu_synai.mlir",
+      "model_dir": "model003",
+      "model_name": "relu_synai.mlir",
+      "success": true,
+      "failure_stage": null,
+      "max_diff": null,
+      "log_file": ""
+    }
+  ]
+}
