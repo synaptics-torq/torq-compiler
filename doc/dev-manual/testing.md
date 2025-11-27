@@ -303,6 +303,9 @@ re-use the content of the file if the version of the file has not changed.
 Notice that ``versioned_file`` is a special argument that provides the path where the file should 
 be generated.
 
+Anologuously it is possible to cache a fixture that creates a set of files in a directory using the
+``versioned_generated_directory_fixture``.
+
 Sometimes cached fixtures depend on other fixtures, if the value of the other fixture changes this will
 potentially impact the value of the cached fixture. To detect this, the versioned fixture code keeps track
 of the version of any input of a given fixture and automatically changes the version of the output object

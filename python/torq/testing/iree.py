@@ -10,10 +10,12 @@ import re
 import subprocess
 import shutil
 import pytest
+import json
 
 from iree.compiler.ir import Context, Module
 
-from .versioned_fixtures import versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, versioned_cached_data_fixture, versioned_hashable_object_fixture
+from .versioned_fixtures import versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
+                                versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
 
 
 TOPDIR = Path(__file__).parent.parent.parent.parent
@@ -32,13 +34,53 @@ def pytest_addoption(parser):
     parser.addoption("--no-phases-dump", action="store_true", default=False, help="Disable phase dumps in torq compiler")
     parser.addoption("--debug-torq-compiler", type=int, default=0, help="Run torq compiler under gdb")
     parser.addoption("--trace-buffers", action="store_true", default=False, help="Enable tracing of buffers in the torq runtime")
-    parser.addoption("--runtime-hw-type", action="store", default="cmodel", help="Command separate list of target hw to use for torq tests (cmodel, aws-fpga)")
+    parser.addoption("--torq-runtime-hw-type", action="store", default="cmodel", help="Command separate list of target hw to use for torq tests (cmodel, aws-fpga)")
+    parser.addoption("--torq-chips", action="store", default="default", help="Command separate list of chips to compile models for")
 
 
 def pytest_generate_tests(metafunc):
     if 'runtime_hw_type' in metafunc.fixturenames:
-        runtime_hw_type = metafunc.config.getoption("runtime_hw_type").split(",")
+
+        runtime_hw_type = metafunc.config.getoption("torq_runtime_hw_type").split(",")
+
         metafunc.parametrize('runtime_hw_type', runtime_hw_type, indirect=True)
+
+        if metafunc.config.getoption("torq_chips") == 'all':
+            chips = get_latest_chips()
+        else:
+            chips = metafunc.config.getoption("torq_chips").split(",")
+
+        if len(chips) == 0:
+            raise ValueError("No chips found for torq tests")
+
+        metafunc.parametrize('chip_config', chips, indirect=True)
+
+
+def get_latest_chips():
+    configs_dir = TOPDIR / 'extras' / 'chips'
+
+    return [ f.resolve().stem for f in configs_dir.iterdir() if f.stem.endswith('latest') ]
+
+
+@versioned_hashable_object_fixture
+def chip_config(request):
+
+    if request.param == 'default':
+
+        return {
+            "target": "SL2610"
+        }    
+
+
+    config_file = TOPDIR / 'extras' / 'chips' / f'{request.param}.json'
+
+    if not config_file.exists():
+        return {
+            "target": request.param
+        }
+
+    with open(TOPDIR / 'extras' / 'chips' / f'{request.param}.json', 'r') as f:
+        return json.load(f)
 
 
 def _find_iree_tool(env_var, tool_name):
@@ -67,36 +109,6 @@ def iree_opt():
     return _find_iree_tool('IREE_OPT', 'iree-opt')
 
 
-def get_debug_ir_params(request):
-    """
-    Creates the debug parameters for invoking iree-compile based on pytest options
-    """
-
-    if request.config.getoption("--debug-ir") is not False:
-        if request.config.getoption("--debug-ir") is True:
-            tmpdir = request.getfixturevalue("tmpdir")
-            dump_path = str(tmpdir / 'ir')
-        else:
-            dump_path = (Path(request.config.rootdir) / request.config.getoption("--debug-ir"))
-
-        return ['--mlir-print-ir-after-all', f'--mlir-print-ir-tree-dir={dump_path}']
-
-    return []
-
-
-def get_extra_torq_compiler_options(request):
-    """
-    Finds extra torq compiler options from pytest options
-    """
-
-    cmds = []
-
-    if request.config.getoption("--extra-torq-compiler-options"):
-        cmds.extend(request.config.getoption("--extra-torq-compiler-options").split(" "))
-
-    cmds += get_debug_ir_params(request)
-
-    return cmds
 
 def get_input_type_options(input_path):
     """
@@ -111,54 +123,32 @@ def get_input_type_options(input_path):
         return ['--iree-input-type=torch-torq']
     return []
 
-def compile_torq(request, iree_compile, input_path, output_path, ext_options=[]):
-    """
-    Compiles an mlir file with torq backend
-    """
 
-    ext_options = ext_options + get_input_type_options(input_path)
-
-    cmds = [str(TOPDIR) + '/scripts/torq-compile',
-            str(iree_compile),
-            str(input_path), '-o', str(output_path),            
-            *ext_options,
-            *get_extra_torq_compiler_options(request)]
-    
-    if not request.config.getoption("--no-phases-dump"):
-        cmds.append('--dump-compilation-phases-to=' + str(output_path) + '-phases')
-
-    if request.config.getoption("--generate-hw-test-vectors"):
-        cmds.append(f'--torq-dump-descriptors-dir={output_path}-cfgdesc')
-
-    if request.config.getoption("--trace-buffers"):
-        cmds.append('--torq-enable-buffer-debug-info')
-
-    gdb_port = request.config.getoption('--debug-torq-compiler')
-    if gdb_port > 0:
-        cmds = ['gdbserver', 'localhost:' + str(gdb_port)] + cmds
-
-    print("Compiling for TORQ with: " + " ".join(cmds))
-
-    with request.getfixturevalue("scenario_log").event("torq_compile"):
-        subprocess.check_call(cmds, cwd=str(Path(output_path).parent),
-            timeout=int(request.getfixturevalue("torq_compiler_timeout")))
-
-
-def create_output_args(request, output_specs, tag):
+def create_output_args(output_path_root, output_specs):
     """
     Creates the output command line args to invoke iree-run-module
-    """
-    output_path_root = str(request.getfixturevalue("tmpdir") / f'output_{tag}')
+    """    
 
     output_args = []
+
+    for output_path in create_output_paths(output_path_root, output_specs):
+        output_args.append(f'--output=@{output_path}')
+
+    return output_args
+
+
+def create_output_paths(output_path_root, output_specs):
+    """
+    Creates the paths for the outputs of iree-run-module
+    """    
+    
     output_paths = []
 
     for idx, tensor_type in enumerate(output_specs):
-        output_path = f'{output_path_root}_{idx}.bin'
+        output_path = f'{output_path_root}/output_{idx}.bin'
         output_paths.append(output_path)
-        output_args.append(f'--output=@{output_path}')
 
-    return output_args, output_paths
+    return output_paths
 
 
 def load_outputs(output_specs, output_paths):
@@ -174,103 +164,6 @@ def load_outputs(output_specs, output_paths):
             output_data.append(data)
             
     return output_data
-
-
-def run_torq(request, iree_run_module, model_path, input_args, output_specs, ext_options=[], tag=''):
-    """
-    Runs the specified vmfb model using iree-run-module with torq backend / hal driver
-    """
-
-    output_args, output_paths = create_output_args(request, output_specs, "torq" + tag)
-
-    cmds = [str(iree_run_module),
-            '--device=torq',
-            '--module=' + str(model_path),
-            '--function=main',
-            *output_args,
-            *ext_options,
-            *input_args]
-
-    tv_dir = str(request.getfixturevalue("tmpdir") / f'output_torq{tag}') + "-tv"
-    buffers_dir = str(request.getfixturevalue("tmpdir") / f'output_torq{tag}') + "-buffers"
-
-    if request.config.getoption("--generate-hw-test-vectors"):
-        cmds.append('--torq_desc_data_dir=' + str(model_path) + "-cfgdesc")
-        cmds.append('--torq_dump_mem_data_dir=' + tv_dir)
-
-    if request.config.getoption("--trace-buffers"):
-        cmds.append('--torq_dump_buffers_dir=' + buffers_dir)
-
-    if request.config.getoption("--extra-torq-runtime-options"):
-        cmds.extend(request.config.getoption("--extra-torq-runtime-options").split(" "))
-
-    print("Running for TORQ with: " + " ".join(cmds))
-
-    with request.getfixturevalue("scenario_log").event("torq_run"):
-        # FIXME: Depending on the platform and the model this will not be enough (tests with desc dumping are particularly slow).
-        subprocess.check_call(cmds, timeout=int(request.getfixturevalue("torq_runtime_timeout")))
-
-    if request.config.getoption("--generate-hw-test-vectors"):
-        print(f"Generated test vectors in {tv_dir}")
-
-    if request.config.getoption("--trace-buffers"):
-        print("\nBuffer tracing enabled\n")
-        print("Buffer trace will be available in: " + buffers_dir + "\n")
-        print("To view the buffer trace run:")
-
-        ir_path = ""
-        ir_dir = str(model_path) + '-phases'
-        if os.path.exists(ir_dir):            
-            for irs in os.listdir(ir_dir):
-                if irs.endswith('9.executable-targets.mlir'):
-                    ir_path = str(Path(ir_dir) / irs)
-                    break
-
-        print(f"cd {TOPDIR} && streamlit run apps/buffer_viewer/buffer_viewer.py {buffers_dir} {ir_path}")
-        print()
-        
-    return load_outputs(output_specs, output_paths)
-
-
-def compile_llvmcpu(request, iree_compile, input_path, output_path, compiler_options=[]):
-    """
-    Compile a mlir file with llvm-cpu backend
-    """
-
-    compiler_options = compiler_options
-
-    cmd = [str(iree_compile),
-           '--iree-hal-target-backends=llvm-cpu',
-           str(input_path),
-           '-o', str(output_path),
-           *compiler_options]
-
-    print("Compiling for LLVMCPU with: " + " ".join(cmd))
-
-    subprocess.check_call(cmd)
-
-
-def run_llvmcpu(request, iree_run_module, model_path, input_args, output_specs,
-                runtime_options=[], tag=''):
-    """
-    Run a mlir file with local-task (CPU) HAL driver
-    """
-
-    output_args, output_paths = create_output_args(request, output_specs, "llvm" + tag)
-
-    cmd = [str(iree_run_module),
-           '--device=local-task',
-           '--module=' + str(model_path),
-           '--function=main',
-           *output_args,
-           *input_args,
-           *runtime_options]
-
-    print("Running for LLVMCPU with: " + " ".join(cmd))
-
-    subprocess.check_call(cmd)
-
-    return load_outputs(output_specs, output_paths)
 
 
 def get_dtype(name):
@@ -446,21 +339,19 @@ def iree_input_data_args(iree_input_data, mlir_io_spec):
     return input_args
 
 
-@versioned_generated_file_fixture("dir")
-def iree_input_data(request, versioned_file, input_data):
+@versioned_generated_directory_fixture
+def iree_input_data(request, versioned_dir, input_data):
     """
     Save the received test data for inference
     """
 
-    versioned_file.mkdir(parents=True, exist_ok=True)
-
     for i, data in enumerate(input_data):
-        file_name = versioned_file / f'in_rnd_{i}.bin'
+        file_name = versioned_dir / f'in_rnd_{i}.bin'
 
         with open(file_name, 'wb') as f:
             f.write(data.tobytes())
 
-        np.save(str(file_name) + '.npy', data)    
+        np.save(str(file_name) + '.npy', data)
 
 
 @pytest.fixture
@@ -480,42 +371,210 @@ def runtime_hw_type(request):
 
 @versioned_hashable_object_fixture
 def torq_compiler_options(request, case_config):
-    return case_config.get("torq_compiler_options", [])
 
-@pytest.fixture
-def torq_compiler_timeout(request, case_config):
-    return case_config.get("torq_compiler_timeout", 60 * 15)
+    cmds = case_config.get("torq_compiler_options", [])
 
-@pytest.fixture
-def torq_runtime_timeout(request, case_config):
-    return case_config.get("torq_runtime_timeout", 60 * 15)
+    if request.config.getoption("--extra-torq-compiler-options"):
+        cmds.extend(request.config.getoption("--extra-torq-compiler-options").split(" "))
+    
+    if request.config.getoption("--trace-buffers"):
+        cmds.append('--torq-enable-buffer-debug-info')
 
-@versioned_generated_file_fixture("vmfb")
-def torq_compiled_model(versioned_file, torq_compiler_options, request, mlir_model_file, torq_compiler):
-    compile_torq(request, torq_compiler, mlir_model_file, versioned_file, torq_compiler_options)
-        
+    gdb_port = request.config.getoption('--debug-torq-compiler')
+    if gdb_port > 0:
+        cmds = ['gdbserver', 'localhost:' + str(gdb_port)] + cmds
+
+    return cmds
+
 
 @versioned_hashable_object_fixture
-def torq_runtime_options(case_config):
-    return case_config.get("torq_runtime_options", [])
+def torq_compiler_timeout(request, case_config):
+    return int(case_config.get("torq_compiler_timeout", 60 * 15))
 
 
-@versioned_cached_data_fixture
-def torq_results(request, torq_compiled_model, iree_input_data_args, mlir_io_spec, torq_runtime, runtime_hw_type, torq_runtime_options):
+@versioned_hashable_object_fixture
+def enable_debug_ir(request):
+    return request.config.getoption("--debug-ir")
 
-    options = [ "--torq_hw_type=" + runtime_hw_type ] + torq_runtime_options
 
-    return run_torq(request, torq_runtime, torq_compiled_model, iree_input_data_args, mlir_io_spec.outputs, options)
+@versioned_hashable_object_fixture
+def enable_phases_dump(request):
+    return not request.config.getoption("--no-phases-dump", False)
+
+
+@versioned_generated_directory_fixture
+def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_model_file, torq_compiler, chip_config, 
+                            torq_compiler_timeout, enable_debug_ir, enable_hw_test_vectors, enable_phases_dump):
+    
+    model_file = versioned_dir / 'model.vmfb'
+
+    target = chip_config.get("target", "SL2610")
+
+    cmds = [str(TOPDIR) + '/scripts/torq-compile',
+            str(torq_compiler),
+            str(mlir_model_file), '-o', str(model_file)]
+
+    cmds.append(f'--torq-hw={target}')
+
+    if enable_debug_ir is not False:
+        if enable_debug_ir is True:            
+            dump_path = versioned_dir / 'ir'
+        else:
+            dump_path = Path(request.config.rootdir) / enable_debug_ir
+
+        cmds.extend(['--mlir-print-ir-after-all', f'--mlir-print-ir-tree-dir={dump_path}'])
+
+    if enable_phases_dump:
+        cmds.append(f'--dump-compilation-phases-to={versioned_dir}/phases')
+
+    if enable_hw_test_vectors:
+        cmds.append(f'--torq-dump-descriptors-dir={versioned_dir}/cfgdesc')
+
+    if target == "custom":
+        cmds.append(f'--torq-hw-custom={chip_config["lram_size"]},{chip_config["slice_count"]},{chip_config["tiling_memory"]}')
+
+    cmds += get_input_type_options(mlir_model_file)
+
+    cmds += torq_compiler_options
+    
+    print("Compiling for TORQ with: " + " ".join(cmds))
+
+    with request.getfixturevalue("scenario_log").event("torq_compile"):
+        subprocess.check_call(cmds, cwd=str(versioned_dir), timeout=torq_compiler_timeout)
+
+
+@versioned_unhashable_object_fixture
+def torq_compiled_model(torq_compiled_model_dir):
+    return torq_compiled_model_dir / 'model.vmfb'
+
+
+@versioned_unhashable_object_fixture
+def torq_compiled_hw_descriptors(torq_compiled_model_dir):
+    return torq_compiled_model_dir / 'cfgdesc'
+
+
+@versioned_unhashable_object_fixture
+def torq_compiled_model_phases(torq_compiled_model_dir):
+    return torq_compiled_model_dir / 'phases'
+
+
+@versioned_hashable_object_fixture
+def torq_runtime_options(request, case_config):
+    cmds = case_config.get("torq_runtime_options", [])
+
+    if request.config.getoption("--extra-torq-runtime-options"):
+        cmds.extend(request.config.getoption("--extra-torq-runtime-options").split(" "))
+
+    return cmds
+
+
+@versioned_hashable_object_fixture
+def enable_torq_buffer_tracing(request):
+    return request.config.getoption("--trace-buffers")
+
+
+@versioned_hashable_object_fixture
+def enable_hw_test_vectors(request):
+    return request.config.getoption("--generate-hw-test-vectors")
+
+
+@versioned_hashable_object_fixture
+def torq_runtime_timeout(request, case_config):
+    return int(case_config.get("torq_runtime_timeout", 60 * 15))
+
+
+@versioned_generated_directory_fixture
+def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_data_args, mlir_io_spec, 
+                        torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
+                        enable_hw_test_vectors, torq_runtime_timeout):
+
+    output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
+
+    cmds = [str(torq_runtime),
+            '--device=torq',
+            '--module=' + str(torq_compiled_model),
+            '--function=main',
+            *output_args,
+            '--torq_hw_type=' + runtime_hw_type,
+            *torq_runtime_options,
+            *iree_input_data_args]
+
+    tv_dir = versioned_dir / 'tv'
+    buffers_dir = versioned_dir / 'buffers'
+
+    if enable_hw_test_vectors:
+        cmds.append('--torq_desc_data_dir=' + str(request.getfixturevalue("torq_compiled_hw_descriptors")))
+        cmds.append('--torq_dump_mem_data_dir=' + tv_dir)
+
+    if enable_torq_buffer_tracing:
+        cmds.append('--torq_dump_buffers_dir=' + buffers_dir)
+
+    print("Running for TORQ with: " + " ".join(cmds))
+
+    with request.getfixturevalue("scenario_log").event("torq_run"):
+        # FIXME: Depending on the platform and the model this will not be enough (tests with desc dumping are particularly slow).
+        subprocess.check_call(cmds, timeout=torq_runtime_timeout)
+
+    if enable_hw_test_vectors:
+        print(f"Generated test vectors in {tv_dir}")
+
+    if enable_torq_buffer_tracing:
+        print("\nBuffer tracing enabled\n")
+        print("Buffer trace will be available in: " + buffers_dir + "\n")
+        print("To view the buffer trace run:")
+
+        ir_path = ""
+        ir_dir = request.getfixturevalue("torq_compiled_model_phases")
+        if os.path.exists(ir_dir):            
+            for irs in os.listdir(ir_dir):
+                if irs.endswith('9.executable-targets.mlir'):
+                    ir_path = str(Path(ir_dir) / irs)
+                    break
+
+        print(f"cd {TOPDIR} && streamlit run apps/buffer_viewer/buffer_viewer.py {buffers_dir} {ir_path}")
+        print()
+
+
+@versioned_unhashable_object_fixture
+def torq_results(request, torq_results_dir, mlir_io_spec):
+    output_paths = create_output_paths(torq_results_dir, mlir_io_spec.outputs)
+    return load_outputs(mlir_io_spec.outputs, output_paths)
 
 
 @versioned_generated_file_fixture("vmfb")
 def llvmcpu_compiled_model(versioned_file, llvmcpu_compiler, request, mlir_model_file):
-    compile_llvmcpu(request, llvmcpu_compiler, mlir_model_file, versioned_file)
+
+    cmd = [str(llvmcpu_compiler),
+           '--iree-hal-target-backends=llvm-cpu',
+           str(mlir_model_file),
+           '-o', str(versioned_file)]
+
+    print("Compiling for LLVMCPU with: " + " ".join(cmd))
+
+    subprocess.check_call(cmd)
 
 
-@versioned_cached_data_fixture
-def llvmcpu_reference_results(request, llvmcpu_runtime, llvmcpu_compiled_model, iree_input_data_args, mlir_io_spec):
-    return run_llvmcpu(request, llvmcpu_runtime, llvmcpu_compiled_model, iree_input_data_args, mlir_io_spec.outputs)
+@versioned_generated_directory_fixture
+def llvmcpu_reference_results_dir(versioned_dir, request, llvmcpu_runtime, llvmcpu_compiled_model, iree_input_data_args, mlir_io_spec):
+
+    output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
+
+    cmd = [str(llvmcpu_runtime),
+           '--device=local-task',
+           '--module=' + str(llvmcpu_compiled_model),
+           '--function=main',
+           *output_args,
+           *iree_input_data_args]
+
+    print("Running for LLVMCPU with: " + " ".join(cmd))
+
+    subprocess.check_call(cmd)
+    
+
+@versioned_unhashable_object_fixture
+def llvmcpu_reference_results(llvmcpu_reference_results_dir, mlir_io_spec):
+    output_paths = create_output_paths(llvmcpu_reference_results_dir, mlir_io_spec.outputs)
+    return load_outputs(mlir_io_spec.outputs, output_paths)
 
 
 @pytest.fixture
