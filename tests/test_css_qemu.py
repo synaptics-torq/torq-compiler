@@ -39,7 +39,7 @@ def get_test_cases():
 def case_config(request):
     return {        
         "input_data": "tweaked_random_input_data",
-        "torq_compiler_options": ["--torq-disable-slices", "--iree-input-type=tosa", "--torq-css-qemu"],
+        "torq_compiler_options": ["--torq-disable-slices", "--iree-input-type=tosa"],
         **request.param.data
     }
 

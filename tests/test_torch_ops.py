@@ -15,8 +15,7 @@ def case_config(request):
     return {
         "mlir_model_file": "static_mlir_model_file",
         "static_mlir_model_file": request.param.data,
-        "input_data": "tweaked_random_input_data",
-        "torq_compiler_options": ["--torq-css-qemu"]
+        "input_data": "tweaked_random_input_data"
     }
 
 @pytest.mark.ci

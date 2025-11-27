@@ -14,6 +14,7 @@ import json
 
 from iree.compiler.ir import Context, Module
 
+from .aws_fpga import FpgaSession
 from .versioned_fixtures import versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
 
@@ -34,7 +35,7 @@ def pytest_addoption(parser):
     parser.addoption("--no-phases-dump", action="store_true", default=False, help="Disable phase dumps in torq compiler")
     parser.addoption("--debug-torq-compiler", type=int, default=0, help="Run torq compiler under gdb")
     parser.addoption("--trace-buffers", action="store_true", default=False, help="Enable tracing of buffers in the torq runtime")
-    parser.addoption("--torq-runtime-hw-type", action="store", default="cmodel", help="Command separate list of target hw to use for torq tests (cmodel, aws-fpga)")
+    parser.addoption("--torq-runtime-hw-type", action="store", default="sim", help="Command separate list of target hw to use for torq tests (sim, aws_fpga)")
     parser.addoption("--torq-chips", action="store", default="default", help="Command separate list of chips to compile models for")
 
 
@@ -47,6 +48,9 @@ def pytest_generate_tests(metafunc):
 
         if metafunc.config.getoption("torq_chips") == 'all':
             chips = get_latest_chips()
+        elif metafunc.config.getoption("torq_chips").endswith('.group'):
+            with open(Path(TOPDIR / 'extras' / 'chips' / metafunc.config.getoption("torq_chips")), 'r') as f:
+                chips = f.read().splitlines()
         else:
             chips = metafunc.config.getoption("torq_chips").split(",")
 
@@ -404,7 +408,7 @@ def enable_phases_dump(request):
 
 @versioned_generated_directory_fixture
 def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_model_file, torq_compiler, chip_config, 
-                            torq_compiler_timeout, enable_debug_ir, enable_hw_test_vectors, enable_phases_dump):
+                            torq_compiler_timeout, enable_debug_ir, enable_hw_test_vectors, enable_phases_dump, runtime_hw_type):
     
     model_file = versioned_dir / 'model.vmfb'
 
@@ -432,6 +436,10 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     if target == "custom":
         cmds.append(f'--torq-hw-custom={chip_config["lram_size"]},{chip_config["slice_count"]},{chip_config["tiling_memory"]}')
+
+    # when the runtime is cmodel, we need to compile with qemu address map
+    if runtime_hw_type == 'sim':
+        cmds.append('--torq-css-qemu')
 
     cmds += get_input_type_options(mlir_model_file)
 
@@ -486,7 +494,7 @@ def torq_runtime_timeout(request, case_config):
 @versioned_generated_directory_fixture
 def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_data_args, mlir_io_spec, 
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
-                        enable_hw_test_vectors, torq_runtime_timeout):
+                        enable_hw_test_vectors, torq_runtime_timeout, chip_config):
 
     output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
 
@@ -510,10 +518,15 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         cmds.append('--torq_dump_buffers_dir=' + buffers_dir)
 
     print("Running for TORQ with: " + " ".join(cmds))
-
-    with request.getfixturevalue("scenario_log").event("torq_run"):
-        # FIXME: Depending on the platform and the model this will not be enough (tests with desc dumping are particularly slow).
-        subprocess.check_call(cmds, timeout=torq_runtime_timeout)
+    
+    if runtime_hw_type == 'aws_fpga':            
+        with FpgaSession(chip_config['aws_fpga']) as fpga_session:
+            with request.getfixturevalue("scenario_log").event("torq_run"):
+                subprocess.check_call(cmds, timeout=torq_runtime_timeout)
+    else:
+        with request.getfixturevalue("scenario_log").event("torq_run"):
+            # FIXME: Depending on the platform and the model this will not be enough (tests with desc dumping are particularly slow).
+            subprocess.check_call(cmds, timeout=torq_runtime_timeout)
 
     if enable_hw_test_vectors:
         print(f"Generated test vectors in {tv_dir}")

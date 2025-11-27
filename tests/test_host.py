@@ -58,7 +58,7 @@ def case_config(request):
 
     return {
         "input_data": "tweaked_random_input_data",
-        "torq_compiler_options": ["--torq-disable-slices", "--torq-disable-css", "--torq-css-qemu"],
+        "torq_compiler_options": ["--torq-disable-slices", "--torq-disable-css"],
         **request.param.data
     }
 

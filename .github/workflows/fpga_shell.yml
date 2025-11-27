@@ -1,0 +1,110 @@
+name: Create an AWS FPGA shell
+
+on:   
+
+  workflow_dispatch:
+
+jobs:
+  create_shell:    
+    name: Create a AWS FPGA shell
+    if: ${{ vars.ENABLE_FPGA_SHELL_CREATION == 'true' }}
+    runs-on: torq-fpga-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      
+      - name: Checkout repository        
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+          submodules: false
+    
+      - name: Clear FPGA slot
+        run: |
+          fpga-describe-local-image-slots
+
+          # the instance on which this is running may have already served another shell
+          # so we need to clear the slot before running our tests to ensure a clean state
+          fpga-clear-local-image -S 0
+
+      - name: Setup testing environment
+        uses: ./.github/actions/tests
+        with:
+          app_id: ${{ vars.CI_APP_ID }}
+          app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          extra_repo: ${{ vars.EXTRAS_REPO }}
+          hf_token: ${{ secrets.HF_TOKEN }}          
+          pytest_args: --version
+
+      - name: Start ssh server
+        run: |
+
+          # this is the privilege separation directory
+          mkdir -p /run/sshd
+
+          # allow root login
+          echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+
+          # set the port number to an high number to avoid conflicts with the host
+          echo 'Port 2222' >> /etc/ssh/sshd_config
+
+          # install the public ssh keys
+          mkdir -p /root/.ssh
+
+          # install public key for the actor running this job     
+          curl https://github.com/${{ github.actor }}.keys >> /root/.ssh/authorized_keys
+
+          chmod 600 /root/.ssh/authorized_keys
+          chmod 700 /root/.ssh
+
+          # create a custom shutdown script
+          echo '#!/bin/bash' > /usr/local/bin/ssh-server-shutdown
+          echo 'echo "Shutting down ssh server."' >> /usr/local/bin/ssh-server-shutdown
+          echo 'pkill -f sleep' >> /usr/local/bin/ssh-server-shutdown
+          chmod +x /usr/local/bin/ssh-server-shutdown
+
+          # create environment setup script        
+          cat >> /usr/local/bin/setup-test-environment << 'EOF'       
+
+          cd ${{github.workspace}}
+          source /workspace/venv/bin/activate          
+          export LD_LIBRARY_PATH=${{github.workspace}}/release/lib/
+          export SOC_IREE_RUN_MODULE=${{github.workspace}}/release/tools/armhf-iree-run-module
+          export IREE_RUN_MODULE=${{github.workspace}}/release/tools/iree-run-module
+          export IREE_COMPILE=${{github.workspace}}/release/tools/iree-compile
+          export IREE_OPT=${{github.workspace}}/release/tools/iree-opt
+          export HF_TOKEN=${{ inputs.hf_token }}
+          EOF
+
+          /usr/sbin/sshd
+
+          # redirect the rest of the output to the GITHUB_STEP_SUMMARY file
+
+          echo ""
+          echo "SSH server started and available at the following addresses:"
+
+          for addr in $(hostname -I); do
+            echo "  ssh -p 2222 -o StrictHostKeyChecking=no root@${addr}"
+          done
+
+          echo "Use the private key for the account ${{ github.actor }} to connect."
+
+          echo ""
+          echo "Host key fingerprints:"
+          echo ""
+
+          for key in /etc/ssh/ssh_host_*_key; do
+            ssh-keygen -lf $key
+          done
+          
+          echo "Use the following command to shutdown the ssh server manually:"
+          echo "  /usr/local/bin/ssh-server-shutdown"
+          echo ""
+
+          echo "To setup an environment suitable for testing, run:"
+          echo "  source /usr/local/bin/setup-test-environment"
+          echo ""
+
+          echo "Server will shut down automatically in 50 minutes."
+          sleep 3000 || exit 0 # keep ssh server alive for 50 minutes
+          echo "Shutting down ssh server."
+          exit 1

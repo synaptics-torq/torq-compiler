@@ -36,7 +36,7 @@ bool TorqAwsFpga::open() {
         return false;
     }
 
-    if (fpga_pci_attach(slot_id, 0, 1, 0, &npu_pci_hdl) != 0) {
+    if (fpga_pci_attach(slot_id, 0, 0, 0, &npu_pci_hdl) != 0) {
         cerr << "Failed to attach npu_pci_hdl" << endl;
         return false;
     }

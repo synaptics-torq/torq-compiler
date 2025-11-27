@@ -8,7 +8,7 @@ from torq.testing.comparison import compare_test_results
 def get_test_cases():
     test_cases = []
 
-    base_options = ["--torq-css-qemu", "--torq-enable-tile-and-fuse"]
+    base_options = ["--torq-enable-tile-and-fuse"]
 
     for mlir_file in list_mlir_files("linalg_ops"):
         test_cases.append(Case("linalg_" + mlir_file.stem, {

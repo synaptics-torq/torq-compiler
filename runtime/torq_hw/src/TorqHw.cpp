@@ -92,6 +92,10 @@ std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr,
         type = TorqHw::SOC_FPGA;
     } else if (hw_type == "astra_machina") {
         type = TorqHw::ASTRA_MACHINA;
+    } else if (hw_type == "sim") {
+        type = TorqHw::SIMULATOR;
+    } else {
+        assert(false && "Unsupported TorqHw type");
     }
 
     switch (type) {

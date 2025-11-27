@@ -2,6 +2,11 @@ description: Run Torq compiler tests
 
 inputs:
 
+  release_run_id:
+    description: 'Run ID of the build to test against'
+    default: ${{ github.run_id }}
+    required: false
+
   hf_token:
     description: 'HuggingFace Token'
     required: true
@@ -72,6 +77,8 @@ runs:
       with:
         name: release
         path: .
+        run-id: ${{ inputs.release_run_id }}
+        github-token: ${{ steps.generate_token.outputs.token }}
 
     - name: Extract the compiler and runtime
       shell: bash

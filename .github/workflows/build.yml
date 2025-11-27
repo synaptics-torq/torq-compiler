@@ -24,7 +24,7 @@ jobs:
 
     name: Build compiler and runtime
 
-    if: ${{ vars.CODEBUILD_PROJECT_CODEBASE != '' }}
+    if: ${{ vars.CODEBUILD_PROJECT_CODEBASE != ''}}
 
     runs-on:
       - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -154,7 +154,7 @@ jobs:
         if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: host_test_performance
+          name: cmodel_test_performance
           path: ${{ github.workspace }}/host_test_performance.csv
           retention-days: 60
 
@@ -165,6 +165,47 @@ jobs:
           name: test_data_cache
           path: test_data_cache.tar.gz
           retention-days: 10
+
+  test_aws_fpga:    
+    name: Test with AWS FPGA
+
+    runs-on: torq-fpga-${{ github.run_id }}-${{ github.run_attempt }}
+
+    needs: [ test_cmodel ]
+
+    steps:
+      
+      - name: Clear FPGA slot
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
+        run: |
+          # the instance on which this is running may have already served another shell
+          # so we need to clear the slot before running our tests to ensure a clean state
+          fpga-clear-local-image -S 0
+    
+      - name: Checkout repository
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+          submodules: false
+    
+      - name: Run AWS FPGA model tests
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
+        uses: ./.github/actions/tests
+        with:
+          app_id: ${{ vars.CI_APP_ID }}
+          app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          extra_repo: ${{ vars.EXTRAS_REPO }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          pytest_args: tests/test_tosa_ops.py::test_mlir_files[conv-stride1-notile.mlir-aws_fpga-sl2610-v1] -m ci -v -n auto --performance-report=${{ github.workspace }}/aws_fpga_test_performance.csv --torq-runtime-hw-type aws_fpga --torq-chips default.group --ignore-glob=extras/tests/test_*
+          
+      - name: Upload AWS FPGA test performance
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws_fpga_test_performance
+          path: ${{ github.workspace }}/fpga_test_performance.csv
+          retention-days: 60
 
   # build the user part of the docs only
   user_doc_build:
@@ -192,7 +233,7 @@ jobs:
   docker_release:
     name: Release Docker image
     if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'release' && github.event.action == 'published') }}
-    needs: test_cmodel
+    needs: test_aws_fpga
     runs-on: ubuntu-latest
     permissions:
       contents: read
