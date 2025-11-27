@@ -181,6 +181,7 @@ def case_config(request):
     'nasnetmobile_normal_left3',
     'nasnetmobile_separable_conv_2_reduction_left1_stem_2',
     'nasnetmobile_separable_conv_2_reduction_right1_stem_2',
+    'nasnetmobile_separable_conv_2_reduction_right1_reduce_8',
 
     # efficientnetb0
     # wrong results
