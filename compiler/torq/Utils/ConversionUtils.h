@@ -504,7 +504,8 @@ template <typename OpTy> LogicalResult prepareParams(BinaryOpParams<OpTy> &P) {
 
 Value convertScalarToRankedTensor(Value &input, Location loc, PatternRewriter &rewriter);
 
-bool hasEkLowering(mlir::syna::torq_hl::Conv2DOp op);
+bool hasEkLoweringConv2d(mlir::syna::torq_hl::Conv2DOp op);
+bool hasEkLoweringDwConv(mlir::syna::torq_hl::DepthwiseConv2DOp op);
 std::optional<SmallVector<int64_t>> isaBroadcastOpInterface(linalg::GenericOp genericOp);
 
 } // namespace mlir::syna::torq

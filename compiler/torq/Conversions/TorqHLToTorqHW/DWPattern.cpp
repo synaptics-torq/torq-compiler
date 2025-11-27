@@ -17,6 +17,8 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
 
+LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter);
+
 // This is to handle special case of depthwise doing valid padding and filter size is equal to frame
 // size To program the hardware for depthwise we need to generate the following descriptors: ref,
 // dedr, dewr, debr, deqw, cedw, cedr, ceww, cewr, cepr, acpr, acbw, acbr For depthwise the ALU will
@@ -373,8 +375,19 @@ LogicalResult dwNHWCInput(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewrit
 template <>
 LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter) const {
     if (op.getNhwcInput()) {
+        if (clUseNewKernels) {
+            return op.emitError("New kernel failed");
+        }
         return dwNHWCInput(op, rewriter);
     }
+
+    if (convertToHw(op, rewriter).succeeded()) {
+        return success();
+    }
+    if (clUseNewKernels) {
+        return op.emitError("New kernel failed");
+    }
+
     // input
     auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
     auto input_shape = input_type.getShape();

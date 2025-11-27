@@ -11,6 +11,7 @@ def case_config(request):
         "mlir_model_file": "static_mlir_model_file",
         "static_mlir_model_file": request.param.data,
         "input_data": "tweaked_random_input_data",
+        "comparison_config": "comparison_config_from_mlir",
         "torq_compiler_options": ["--iree-input-type=tosa-torq", "--torq-css-qemu"]
     }
 

@@ -23,9 +23,7 @@ SegmentationPattern::transform(torq_hl::SegmentationOp op, PatternRewriter &rewr
     LData input(op.getInput());
     LData output(op.getInit());
     assert(input.shape().size() == 4 && output.shape().size() == 4);
-    struct In : Vectorized {
-        enum { N, C, H, W };
-    };
+    struct In : NCHW, Vectorized {};
 
     // Vectorize the input data vectors based on the activation width
     int vectorSize = slice.act.width(input.elementType());

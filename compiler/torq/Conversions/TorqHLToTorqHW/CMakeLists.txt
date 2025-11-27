@@ -34,6 +34,7 @@ set(sources
     ElementWiseShiftPattern.cpp
     ScatterPattern.cpp
     Conv2DToHw.cpp
+    DWToHw.cpp
     TransposeToHw.cpp
     ResizeNearestNeighborPattern.cpp
     BroadcastPattern.cpp

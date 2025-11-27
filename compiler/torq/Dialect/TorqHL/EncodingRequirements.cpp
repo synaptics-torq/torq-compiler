@@ -549,10 +549,12 @@ KernelEncoding ReduceMeanOp::getKernelEncoding() {
 }
 
 KernelEncoding Conv2DOp::getKernelEncoding() {
-    return torq::hasEkLowering(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
+    return torq::hasEkLoweringConv2d(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
 }
 
-KernelEncoding DepthwiseConv2DOp::getKernelEncoding() { return getConvLikeKernelEncoding(*this); }
+KernelEncoding DepthwiseConv2DOp::getKernelEncoding() {
+    return torq::hasEkLoweringDwConv(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
+}
 
 KernelEncoding FullyConnectedOp::getKernelEncoding() { return getDefault1InputEncoding(*this); }
 

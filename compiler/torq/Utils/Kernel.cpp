@@ -71,11 +71,22 @@ static int denseElementCount(const Shape &dims, int numDims = -1) {
 
 // LRAM scatter-gather block info
 struct SGBlockInfo {
-    int size{1};           // Number of elements in each group
+    int size{1};           // Number of elements in each sgGroups
     int sgGroups{1};       // Number of scatter-gather groups
-    Stride stride{};       // Stride in bytes between the groups
+    Stride stride{};       // Stride between the groups
     bool isEvenOddSplit{}; // True if the sgGroups represent an even-odd split
+    int outerGroups{1};    // Number of elements in outer dimensions
+    Stride outerStride{};  // Stride between the outer elements
 };
+
+static llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const SGBlockInfo &SGBlockInfo) {
+    os << "{ " << "size: " << SGBlockInfo.size << ", sgGroups: " << SGBlockInfo.sgGroups
+       << ", stride: " << SGBlockInfo.stride << ", outerGroups: " << SGBlockInfo.outerGroups
+       << ", outerStride: " << SGBlockInfo.outerStride
+       << ", isEvenOddSplit: " << SGBlockInfo.isEvenOddSplit << " }";
+    return os;
+    ;
+}
 
 static bool isEvenOddSplit(const Shape &dims, SGBlockInfo &block) {
     if (dims.size() < 2) {
@@ -100,38 +111,72 @@ static bool isEvenOddSplit(const Shape &dims, SGBlockInfo &block) {
 }
 
 // Compute number of elements in the shape by multiplying the dimensions
+// dims can be:
+// - 1D dense or not dense (if up to sgGroups fitting use scatter-gather)
+// - 2D dense or with non-natural stride in dims[0] (if up to sgGroups fitting use scatter-gather)
+// - 3D dense or with non-natural stride in dim[1] and/or dims[2]
+//      (if up to sgGroups fitting use scatter-gather)
+// If dense or 2D with inner size > busWidthItems then use outerGroups to handle the entire tranfer
+//
 // The shape must be dense, or have up to sgGroups non-contiguous groups.
 // In this latter case, the non-contiguous groups can only happen in dims[0]
-static SGBlockInfo sgElementCount(const Shape &dims, DType dType, int sgMax = -1) {
+static SGBlockInfo sgElementCount(const Shape &dims, int busWidthItems, int sgMax = -1) {
     if (dims.empty()) {
         return {};
     }
+    assert(dims.size() <= 3 && "Shape with more than 3 dimensions not supported");
     // Compute the total number of elements in the shape excluding the first dimension
     SGBlockInfo blockInfo;
     if (isEvenOddSplit(dims, blockInfo)) {
         return blockInfo;
     }
-    int count = denseElementCount(Shape{dims.begin() + 1, dims.end()});
+    bool isRank3 = dims.size() == 3;
+    int count = denseElementCount(Shape{dims.begin() + isRank3 + 1, dims.end()});
     assert(count >= 0 && "Shape is  not dense");
 
     //  If the first dimension has a non-natural stride get the stride and the number of groups
-    const auto &dim = dims[0];
+    const auto &dim = dims[isRank3 ? 1 : 0];
     if (dim.stride.exprVal.has_value() ||
         (dim.stride.intVal.has_value() && dim.stride.intVal.value() != count)) {
         // Non-natural stride specified
-        if (sgMax >= 0 && dim.count > sgMax) {
-            llvm::errs() << "Error: Non-natural stride count: " << dim.count << " in " << dims
-                         << " beyond scatter-gather limit: " << sgMax << "\n";
-            assert(false && "Non-natural stride count beyond limit");
+        if (sgMax >= 0 && dim.count <= sgMax && count <= busWidthItems / dim.count) {
+            // Use scatter-gather
+            blockInfo.sgGroups = dim.count;
+            blockInfo.size = count;
+            blockInfo.stride = dim.stride;
         }
-        blockInfo.sgGroups = dim.count;
-        blockInfo.size = count;
-        blockInfo.stride = dim.stride;
+        else {
+            // Cannot use scatter-gather, use outer dim
+            assert(count <= busWidthItems && "Inner dimension larger than bus width");
+            blockInfo.size = count;
+            blockInfo.outerGroups = dim.count;
+            blockInfo.outerStride = dim.stride;
+        }
     }
     else {
         // The first dimension is also contiguous
         blockInfo.sgGroups = 1;
         blockInfo.size = count * dim.count;
+    }
+
+    if (isRank3) {
+        assert(false && "Scatter-gather for 3D shapes not supported yet");
+        // Handle the outer dimension
+        assert(blockInfo.outerGroups == 1 && "Scatter-gather was not applied");
+        blockInfo.outerGroups = dims[0].count;
+        blockInfo.outerStride = dims[0].stride;
+    }
+    else if (blockInfo.size > busWidthItems) {
+        if (blockInfo.size % busWidthItems != 0) {
+            // To be verified if there are cases where we can accept this
+            llvm::errs() << "Error block size " << blockInfo.size
+                         << " must be a multiple of bus width " << busWidthItems << "\n";
+            assert(false && "Block size must be a multiple of bus width");
+        }
+        // Divide by bus width to get number of bus transfers
+        blockInfo.outerGroups = div_ceil(blockInfo.size, busWidthItems);
+        blockInfo.outerStride = Stride(busWidthItems);
+        blockInfo.size = busWidthItems;
     }
 
     return blockInfo;
@@ -415,6 +460,14 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Iterator &iterator) {
     return os;
 }
 
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Stride &stride) {
+    os
+        << (stride.hasVal()
+                ? (stride.intVal.has_value() ? std::to_string(stride.intVal.value()) : "expr")
+                : "-");
+    return os;
+}
+
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape) {
     os << "[";
     for (size_t i = 0; i < shape.size(); ++i) {
@@ -423,9 +476,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape) {
         }
         os << shape[i].count;
         if (shape[i].stride.hasVal()) {
-            os << "@"
-               << (shape[i].stride.intVal.has_value() ? std::to_string(*shape[i].stride.intVal)
-                                                      : "expr");
+            os << "@" << shape[i].stride;
         }
     }
     os << "]";
@@ -566,9 +617,31 @@ LData &LData::insertDim(int pos, const ShapeItem &item) {
     shape.insert(shape.begin() + pos, item);
     return *this;
 }
+
+IData &IData::insertDim(int pos, const ShapeItem &item) {
+    auto &shape = getShape();
+    shape.insert(shape.begin() + pos, item);
+    return *this;
+}
+
 LData &LData::eraseDim(int pos) {
     auto &shape = getShape();
     shape.erase(shape.begin() + pos);
+    return *this;
+}
+
+LData &LData::moveDim(int fromDimIndex, int toDimIndex) {
+    auto &shape = getShape();
+    assert(fromDimIndex >= 0 && fromDimIndex < shape.size());
+    assert(toDimIndex >= 0 && toDimIndex < shape.size());
+    ShapeItem dim = shape[fromDimIndex];
+    assert(dim.stride.intVal.has_value() && "Only dims with explicit int stride can be moved");
+    if (fromDimIndex > 0 && !shape[fromDimIndex - 1].stride.hasVal()) {
+        // Update the stride of the previous dim
+        shape[fromDimIndex - 1].stride = dim.stride.intVal.value() * dim.count;
+    }
+    shape.erase(shape.begin() + fromDimIndex);
+    shape.insert(shape.begin() + toDimIndex, dim);
     return *this;
 }
 
@@ -755,11 +828,12 @@ int SlicePrivate::addMemNdlDims(
     bool useSDims = appendBlockSize >= 0;
     Shape dataDims = data.shape();
     const Indexes &ix = data.indexes();
+    auto elementSize = sizeofType(data.elementType());
+    int busWidth = getBusWidth(type, data.elementType());
     const int sgGroupsMax = getBusScatterGather(type);
     auto block = useSDims ? SGBlockInfo{appendBlockSize}
-                          : sgElementCount(data.subShape(), data.elementType(), sgGroupsMax);
+                          : sgElementCount(data.subShape(), busWidth / elementSize, sgGroupsMax);
     assert(block.size && "Block empty or not dense");
-    auto elementSize = sizeofType(data.elementType());
     assert(ix.size() <= dataDims.size());
     int offset = data.offset();
 
@@ -768,23 +842,11 @@ int SlicePrivate::addMemNdlDims(
         assert(!useSDims && "SDIMs only supported for DEQW");
     }
 
-    int busWidth = getBusWidth(type, data.elementType());
-    int blockSizeBytes = block.size * elementSize;
-    int hBlockCount = div_ceil(blockSizeBytes, busWidth);
-    int lBlockSizeBytes = hBlockCount > 1 ? busWidth : blockSizeBytes;
-    int lBlockSize = lBlockSizeBytes / elementSize;
-
-    if (hBlockCount != 1 && blockSizeBytes % busWidth != 0) {
-        llvm::errs() << "Error: in " << type << " block size " << blockSizeBytes
-                     << " must be a multiple of bus width " << busWidth << "\n";
-        assert(false && "Block size must be a multiple of bus width");
-    }
-
     // Let's start with LDIMs.
     // We currently handle with LDIMs only the element size and the top shape dimension if present.
     // Any other dimension will be handled with HDIMs.
     ndlDims.push_back({DimType::L, MemDimTag::B, elementSize, 1});
-    ndlDims.push_back({DimType::L, MemDimTag::D, lBlockSize, elementSize});
+    ndlDims.push_back({DimType::L, MemDimTag::D, block.size, elementSize});
     if (block.sgGroups > 1) {
         if (block.size > 1 && !block.isEvenOddSplit) {
             if (block.stride.exprVal.has_value()) {
@@ -819,8 +881,19 @@ int SlicePrivate::addMemNdlDims(
     ndlDims.push_back({DimType::H, MemDimTag::G, 1});
 
     // Generate an extra HDIM to load the entire size of the indexed data block
-    if (hBlockCount > 1) {
-        ndlDims.push_back({DimType::H, MemDimTag::V, hBlockCount, lBlockSizeBytes});
+    if (block.outerGroups > 1) {
+        if (block.outerStride.exprVal.has_value()) {
+            ndlDims.push_back(
+                {DimType::H, MemDimTag::V, block.outerGroups, block.outerStride.exprVal.value()}
+            );
+        }
+        else {
+            assert(block.outerStride.intVal.has_value());
+            ndlDims.push_back(
+                {DimType::H, MemDimTag::V, block.outerGroups,
+                 block.outerStride.intVal.value() * elementSize}
+            );
+        }
     }
 
     // Generate additional HDIMs from loops
@@ -872,7 +945,7 @@ int SlicePrivate::addMemNdlDims(
     }
 
     if (useSDims) {
-        assert(hBlockCount == 1 && "SDIMs only supported for single block transfers");
+        assert(block.outerGroups == 1 && "SDIMs only supported for single block transfers");
         // Add special SDIMs to cover the remaining size
         Shape sdimsShape = data.subShape();
         ndlDims.push_back({DimType::S, MemDimTag::B, elementSize, 1});
@@ -1001,6 +1074,8 @@ void SlicePrivate::addDims(
         else {
             if (fuseW && strideTagIx) {
                 auto &wDim = ndlDims.back();
+                llvm::errs() << "wDim.count: " << wDim.count << " wDim.stride : " << wDim.stride
+                             << " strideVal: " << strideVal << "\n";
                 assert(wDim.count * wDim.stride == strideVal && "Cannot fuse");
                 wDim.count *= _forStack[i].count;
             }
@@ -1067,7 +1142,7 @@ void SlicePrivate::actSetNumberFormat(DType dtype) {
 void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
     Shape shape = idata.subShape();
     const int elementSize = sizeofType(idata.elementType());
-    SGBlockInfo bi = sgElementCount(shape, idata.elementType());
+    SGBlockInfo bi = sgElementCount(shape, backDimCount(shape));
     int biCount = elementSize;
 
     // Generate CEDR to load the data from IRAM to ALU
@@ -1096,10 +1171,11 @@ void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
         assert(false && "Invalid CEDR block size");
     }
     cedrDims.push_back({DimType::L, RegDimTag::D, dSize, elementSize});
-    if (bi.sgGroups > 1) {
-        assert(bi.stride.intVal.has_value());
+    if (bi.sgGroups > 1 || bi.outerGroups > 1) {
+        // Not sure if stride is actually used by HW here
+        int stride = bi.stride.intVal.has_value() ? bi.stride.intVal.value() : 1;
         cedrDims.push_back(
-            {DimType::L, RegDimTag::G, bi.sgGroups, bi.stride.intVal.value() * elementSize}
+            {DimType::L, RegDimTag::G, bi.sgGroups * bi.outerGroups, stride * elementSize}
         );
     }
 
@@ -1111,7 +1187,7 @@ void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
     auto dedr = _ndls.getMemNdl(NdlType::DEDR);
     assert(dedr && "DEDR NDL not defined");
     auto ramWrCount = iterationCount(dedr);
-    cedrDims.push_back({DimType::H, RegDimTag::T, ramWrCount});
+    cedrDims.push_back({DimType::H, RegDimTag::T, ramWrCount / iterationCount(cedrDims)});
 
     _ndls.add(NdlType::CEDR, cedrDims);
     ndlToStr(NdlType::CEDR, _ndls.getRegNdl(NdlType::CEDR));
@@ -1121,23 +1197,26 @@ void SlicePrivate::cedw(const IData &idata) {
     Shape shape = idata.subShape();
     // assert(shape.size() <= 1);
     const int elementSize = sizeofType(idata.elementType());
-    SGBlockInfo bi = sgElementCount(shape, idata.elementType());
+    SGBlockInfo bi = sgElementCount(shape, backDimCount(shape));
 
     // Generate CEDW to load the data from DEDR to IRAM
     // TODO: check that the data fits IRAM and that dataShape has natural strides
     RegNdlDimsData regDims;
     regDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
     // Note we could as well always transfer the entire IRAM segment without penalty here
-    int dSize = bi.sgGroups > 1 ? HwInfo::iram_seg_width / elementSize : bi.size;
-    regDims.push_back({DimType::L, RegDimTag::D, dSize, elementSize});
-
-    // /!\ TODO: how to fill the entire IRAM with the data from DEDR?
+    int cnt =
+        bi.sgGroups > 1 || bi.outerGroups > 1 ? HwInfo::iram_seg_width / elementSize : bi.size;
+    regDims.push_back({DimType::L, RegDimTag::D, cnt, elementSize});
+    if (bi.outerGroups > 1) {
+        // Fill the IRAM with the data from DEDR
+        regDims.push_back({DimType::H, RegDimTag::S, bi.outerGroups, HwInfo::iram_seg_width});
+    }
 
     // Repeat for as many times as DEDR
     auto dedr = _ndls.getMemNdl(NdlType::DEDR);
     assert(dedr && "DEDR NDL not defined");
     auto ramWrCount = iterationCount(dedr);
-    regDims.push_back({DimType::H, RegDimTag::T, ramWrCount});
+    regDims.push_back({DimType::H, RegDimTag::T, ramWrCount / iterationCount(regDims)});
     _ndls.add(NdlType::CEDW, regDims);
 
     ndlToStr(NdlType::CEDW, _ndls.getRegNdl(NdlType::CEDW));
@@ -1153,7 +1232,7 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
     // Generate CEWR to load the weights from WRAM to ALU
     cewrDims.push_back({DimType::L, RegDimTag::B, weightSize, 1});
 
-    // repeatWeight is true means repeate same weightSize byte weight for
+    // repeatWeight is true means repeat same weightSize byte weight for
     // 256/weightSize times in alu computation,
     // repeatWeight is false means use weightBlockSize different weight for
     // 256/(weightBlockSize*weightSize) times in alu computation
@@ -1437,7 +1516,8 @@ PData SlicePrivate::aluProductAccumulate(
     // There will be a total of "weightSize" partials for each data
     auto iShape = idata.subShape();
     const DType dataType = idata.elementType();
-    int blockSize = elementCount(iShape);
+
+    LLVM_DEBUG(llvm::dbgs() << "aluProductAccumulate iShape: " << iShape.size() << "\n";);
 
     _iram.elementType = dataType;
 
@@ -1460,6 +1540,8 @@ PData SlicePrivate::aluProductAccumulate(
 
     // In some cases multiple partials are required to store the ALU result
     int partialElementWidth = isFloat(dataType) ? 2 : weightSize * sizeofType(dataType);
+    assert(iShape.size() > 0 && "Input shape cannot be empty");
+    int blockSize = iShape[iShape.size() - 1].count;
     blockSize *= partialElementWidth;
     if (blockSize > HwInfo::max_input) {
         llvm::errs() << "Actual block size: " << blockSize << " > " << HwInfo::max_input << "\n";
@@ -1723,7 +1805,10 @@ int Slice::scatter() const { return getBusScatterGather(NdlType::DEQW); }
 void Slice::setKernel(const LRTBDim &lrtb) { d->_cfg.kernel = lrtb; }
 
 void Slice::setPadding(const LRTBDim &lrtb, int padValue) {
-    d->_cfg.pad = lrtb;
+    d->_cfg.pad.left = lrtb.left > 0;
+    d->_cfg.pad.right = lrtb.right > 0;
+    d->_cfg.pad.top = lrtb.top;
+    d->_cfg.pad.bottom = lrtb.bottom;
     d->_cfg.pad_value = padValue;
 }
 
@@ -1820,12 +1905,11 @@ void SliceRam::checkLoadSize(const Data &data) {
 
 const char *IRam::name() const { return "IRam"; }
 
-int IRam::size() const { return HwInfo::iram_seg_width; }
+int IRam::size() const { return HwInfo::iram_seg_width * HwInfo::iram_seg; }
 
 IData IRam::load(const LData &data) {
     // Create here mandatory REF NDL
     d->ref(data);
-
     d->dedr(data);
 
     d->_iram.loadNesting = d->_forStack.size();
@@ -1833,19 +1917,26 @@ IData IRam::load(const LData &data) {
 
     Shape iramShape = data.subShape();
     auto idata = IData(iramShape, data.elementType());
-    // llvm::errs() << "IRam load: " << idata << "\n";
+    llvm::errs() << "IRam load: " << idata << "\n";
     d->cedw(idata);
+
+    // Adjust IRAM shape strides to natural strides, in IRAM data is contiguous
+    for (auto &iramShapeItem : iramShape) {
+        iramShapeItem.stride = {};
+    }
 
     if (iramShape.size() > 0) {
         SGBlockInfo bi =
-            sgElementCount(iramShape, data.elementType(), getBusScatterGather(NdlType::DEDR));
+            sgElementCount(iramShape, backDimCount(iramShape), getBusScatterGather(NdlType::DEDR));
         if (bi.stride.intVal.has_value()) {
             // Set the actual stride in the IRAM
             // The blocks read with gather are not contiguous in IRAM but have a fixed stride.
-            iramShape[0].stride = HwInfo::iram_seg_width / bi.sgGroups;
-            idata.setShape(iramShape);
+            iramShape[iramShape.size() - 1].stride = HwInfo::iram_seg_width / bi.sgGroups;
         }
     }
+
+    idata.setShape(iramShape);
+
     checkLoadSize(idata);
     return idata;
 }
@@ -1909,9 +2000,35 @@ PData Alu::load(const IData &idata) { return d->aluAccumulate(idata, ALUOp1Mode:
 
 PData Alu::scalarProductAccumulate(const IData &idata, const WData &wdata, ALUOp1Mode acc) {
     // Check wdata is a scalar or tensor with shape {1}
+    auto iShape = idata.subShape();
     auto wShape = wdata.subShape();
-    assert(wShape.size() == 0 || wShape[0].count == 1 && "Invalid weight shape");
+    if (iShape.size() > 1) {
+        llvm::errs() << "Invalid input shape for scalarProductAccumulate: " << iShape << "\n";
+        assert(false && "Invalid input shape");
+    }
+    if (wShape.size() > 1 || (wShape.size() == 1 && wShape[0].count != 1)) {
+        llvm::errs() << "Invalid weight shape for scalarProductAccumulate: " << wShape << "\n";
+        assert(false && "Invalid weight shape");
+    }
+
     return d->aluProductAccumulate(idata, wdata, acc, false, true);
+}
+
+PData Alu::multiScalarProductAccumulate(const IData &idata, const WData &wdata, ALUOp1Mode acc) {
+    // Check wdata is a scalar or tensor with shape {1}
+    auto iShape = idata.subShape();
+    auto wShape = wdata.subShape();
+    if (iShape.size() != 2) {
+        llvm::errs() << "Invalid input shape for scalarProductAccumulate: " << iShape << "\n";
+        assert(false && "Invalid input shape");
+    }
+    if (wShape.size() != 1) {
+        llvm::errs() << "Invalid weight shape for scalarProductAccumulate: " << wShape << "\n";
+        assert(false && "Invalid weight shape");
+    }
+
+    // Enable "outer" mode since we have multiple weights to apply them to different input vectors
+    return d->aluProductAccumulate(idata, wdata, acc, true, true);
 }
 
 PData Alu::outerProductAccumulate(const IData &idata, const WData &wdata, ALUOp1Mode acc) {
@@ -2203,7 +2320,9 @@ reshapeDim(LData &data, int dimIndex, const std::vector<int> &sizes, bool allowN
         reshapedItem.count = *it > 0 ? *it : implicitDimSize;
         shape.insert(shape.begin() + dimIndex, reshapedItem);
         // Use natural stride for next dimensions
-        reshapedItem.stride = {};
+        reshapedItem.stride = reshapedItem.stride.intVal.has_value()
+                                  ? Stride(reshapedItem.stride.intVal.value() * reshapedItem.count)
+                                  : Stride{};
     }
 
     data.setShape(shape);

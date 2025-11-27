@@ -36,6 +36,7 @@ struct Stride {
     std::optional<int> intVal{};
     std::optional<AffineExpr> exprVal{};
 };
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Stride &shape);
 
 // ShapeItem represents a dimension of a tensor in terms of its size and optional stride
 struct ShapeItem {
@@ -98,6 +99,11 @@ struct Vectorized {
         Vectors = -2, // The data vectors
         Elements = -1 // The data elements
     };
+};
+
+// Dimension indicators for NCHW data, quite common
+struct NCHW {
+    enum { N, C, H, W };
 };
 
 // Dimension structure for Height and Width
@@ -263,6 +269,10 @@ class LData : public DataT<LData> {
     // Erase the dimension at the specified index
     LData &eraseDim(int dimIndex);
 
+    // Move a dimension from fromDimIndex to toDimIndex
+    // the 'toDimIndex' is the index after removing the dimension at 'fromDimIndex'
+    LData &moveDim(int fromDimIndex, int toDimIndex);
+
     // Reorganize the last dimension into two sub-blocks containing elements
     // with even and odd indexes respectively
     LData &partitionByIndexParity1D();
@@ -279,6 +289,9 @@ class IData : public DataT<IData> {
 
   public:
     static std::string name() { return "IData"; }
+
+    // Insert a new dimension at the specified index
+    IData &insertDim(int dimIndex, const ShapeItem &item);
 };
 
 // Data in WRAM
@@ -417,6 +430,13 @@ class Alu : SliceComponent {
     // where pType is int32 for integer input, fp32 for float input
     // if N < act::width the result will be {1, N}:pType
     PData scalarProductAccumulate(
+        const IData &idata, const WData &wdata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC
+    );
+
+    // Like scalarProductAccumulate but the input must be [M,N] and the weight a vector of shape [M]
+    // the scalarProductAccumulate is performed for each of the M input rows producing an output
+    // of shape [M, ceil(N/act::width), act::width]
+    PData multiScalarProductAccumulate(
         const IData &idata, const WData &wdata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC
     );
 

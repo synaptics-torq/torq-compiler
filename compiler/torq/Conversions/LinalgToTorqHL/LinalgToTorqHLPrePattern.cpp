@@ -1206,9 +1206,10 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
     }
 };
 
-// Checker methods for convolutions with input: NHWC, weights: HWC(F)
-struct Check {
-    static constexpr int ih = 1, kh = 0;
+// Checker methods for convolutions with input: NHWC, weights: HWC(F) or NCHW, weights: CHW(F)
+template <int channelIndex> struct Check {
+    static constexpr int kh = channelIndex == 3 ? 0 : 1;
+    static constexpr int ih = kh + 1;
     static constexpr int iw = ih + 1, kw = kh + 1;
     static constexpr int maxKerHW = 9;
     using Shape = ArrayRef<int64_t>;
@@ -1231,19 +1232,23 @@ void populateLinalgToTorqHLPrePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
     patterns.insert<Conv2dConvert<linalg::Conv2DNhwcHwcfOp, syna::torq_hl::Conv2DOp>>(
-        context, 3, Permutation::nhwc2nchw(), Permutation::hwcf2fchw(), 28, 12, Check::isKerSmall,
+        context, 3, Permutation::nhwc2nchw(), Permutation::hwcf2fchw(), 28, 12,
+        Check<3>::isKerSmall, markFuseGroups
+    );
+    patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
+        context, 3, Permutation::nhwc2nchw(), Permutation::hwc2chw(), 20, 12, Check<3>::isKerSmall,
+        markFuseGroups
+    );
+    patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNchwChwOp, torq_hl::DepthwiseConv2DOp>>(
+        context, 1, Permutation::none(), Permutation::none(), 20, 12, Check<1>::isKerSmall,
         markFuseGroups
     );
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
-        context, 3, Permutation::nhwc2nchw(), Permutation::hwc2chw(), 20, 12, Check::isKerSmall,
-        markFuseGroups
-    );
-    patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
-        context, 3, Permutation::none(), Permutation::none(), 20, 12, Check::isKerEqInput,
+        context, 3, Permutation::none(), Permutation::none(), 20, 12, Check<3>::isKerEqInput,
         markFuseGroups
     );
     patterns.insert<Conv2dConvert<linalg::Conv2DNchwFchwOp, syna::torq_hl::Conv2DOp>>(
-        context, 1, Permutation::none(), Permutation::none(), 28, 12, Check::isKerSmall,
+        context, 1, Permutation::none(), Permutation::none(), 28, 12, Check<1>::isKerSmall,
         markFuseGroups
     );
 

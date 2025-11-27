@@ -187,12 +187,15 @@ LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &re
     }
 
     if (stride == 2 && (ksize_x == 1 && ksize_y == 1)) {
+        // apply conv only on top-left segment (EE)
+        // since we take out dim it's ok
         stride = 1;
         stride_offset = 0;
     }
     if (stride == 2) {
         // Not clear why we have to overwrite the padding values here.
         // TODO: support cases where pad_top and/or pad_bottom is 0
+        // not sure how we can handle XY tiling which requires different pad_top/pad_bottom config?
         pad_left = 1;
         pad_right = 1;
         pad_top = 1;

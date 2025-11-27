@@ -25,8 +25,8 @@ namespace mlir::syna::torq {
 using Dim = NCHW;
 
 // Layout of the in/out/weight tensors for processing
-struct In : Vectorized {
-    enum { N, C, KernelRows };
+struct In {
+    enum { N, CVectors, IVectors, KernelRows, CVectorItems };
 };
 
 struct Out {
@@ -34,42 +34,20 @@ struct Out {
 };
 
 struct Weight {
+    // Here IC dimension is always 1 for depthwise convolution
     enum { OCVectors, IC, H, W, OCVectorItems };
 };
 
-// Adjust input shape according to the padding to be applied
-void convAdjustPadding(LData &input, const LRTBDim &pad, const LRTBDim &kernelBorder) {
-    assert(pad.left == kernelBorder.left && pad.right == kernelBorder.right && "No HW support");
-    assert(pad.top <= kernelBorder.top && pad.bottom <= kernelBorder.bottom);
-    if (int validPadLines = kernelBorder.top - pad.top) {
-        // NPU always starts fetching data kernel.top rows before the beginning of the data.
-        // If (some) valid padding, add an offset to start fetching from the beginning of the frame
-        // and reduce the height accordingly
-        input.setOffset(validPadLines * input.shape()[Dim::H].stride.intVal.value());
-        input.getShape()[Dim::H].count -= validPadLines;
-    }
-    if (int validPadLines = kernelBorder.bottom - pad.bottom) {
-        // If valid padding reduce the height accordingly
-        input.getShape()[Dim::H].count -= validPadLines;
-    }
-}
-
-// Get subview of output, weight and biasScale tensors for the given output channel offset and count
-void convGetSubview(LData &output, LData &weight, LData &biasScale, int chOffs, int chCount) {
-    int sbWidth = scaleBiasWidth(output.elementType());
-    auto wDims = weight.dims();
-    int outChVectSize = wDims.size() > Weight::OCVectorItems ? wDims[Weight::OCVectorItems] : 1;
-    assert(chOffs % outChVectSize == 0);
-    output.subviewDim(Dim::C, chOffs, chCount);
-    weight.subviewDim(Weight::OCVectors, chOffs / outChVectSize, div_ceil(chCount, outChVectSize));
-    biasScale.subviewDim(0, chOffs * sbWidth, chCount * sbWidth);
-}
+// TODO: find a .h where to put these utility functions
+void convAdjustPadding(LData &input, const LRTBDim &pad, const LRTBDim &kernelBorder);
+void convGetSubview(LData &output, LData &weight, LData &biasScale, int chOffs, int chCount);
 
 // Lower torq_hl op to SliceTaskOp
 static torq_hw::SliceTaskOp lowerToHw(
-    torq_hl::Conv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset, int chCount
+    torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
+    int chCount
 ) {
-    if (!hasEkLoweringConv2d(op)) {
+    if (!hasEkLoweringDwConv(op)) {
         return {};
     }
 
@@ -78,6 +56,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     LData output(op.getInit());
     LData biasScale(op.getScaleBias());
     LData weight(op.getWeights());
+
     if (weight.dims().size() <= Weight::OCVectorItems) {
         weight.insertDim(Weight::OCVectorItems, {1});
     }
@@ -88,7 +67,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     LRTBDim pad(op.getPad());
 
     // Configure convolution parameters
-    Slice slice("conv2d");
+    Slice slice("DepthwiseConv2d");
     LRTBDim kernelBorder = LRTBDim::symmetric(kernelDim);
     convAdjustPadding(input, pad, kernelBorder);
     slice.setKernel(kernelBorder);
@@ -98,12 +77,22 @@ static torq_hw::SliceTaskOp lowerToHw(
     // Get out ch vector size from weight tensor (or less to handle peeled channels without padding)
     int outChVectSize = std::min(weight.dim(Weight::OCVectorItems), chCount);
 
-    // Vectorize input and add additional dimension to scan over the kernelDim.h input rows
+    // Vectorize input
     int vectStride = slice.alu.iWidth(input.elementType(), weight.elementType(), outChVectSize);
     int vectSize = vectStride + kernelBorder.left + kernelBorder.right;
+    input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride);
+
+    // Split the C dimension into CVectors and CVectorItems
+    input.reshapeDim(Dim::C, {-1, outChVectSize}, true);
+
+    // Move CVectorItems dimension after IVectors so that we can load 4 IVectors in parallel
+    // from neighboring channels (use CVectorItems -1 because Rows dim not yet inserted)
+    input.moveDim(In::CVectors + 1, In::CVectorItems - 1);
+
+    // Add additional dimension to scan over the kernelDim.h input rows
     int rowSize = output.dim(Dim::W);
     ShapeItem rowsDim(kernelDim.h, Stride(rowSize), ShapeItem::Tag::KernelRows);
-    input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride).insertDim(In::KernelRows, rowsDim);
+    input.insertDim(In::KernelRows, rowsDim);
 
     // Reshape output to match the processing layout
     output.reshapeDim(Dim::C, {-1, outChVectSize}, true);
@@ -114,25 +103,31 @@ static torq_hw::SliceTaskOp lowerToHw(
     // Reshape biasScale to match the processing layout
     biasScale.reshapeDim(0, {-1, outChVectSize, scaleBiasWidth(input.elementType())}, true);
 
+    // Main processing loops. Instead of processing one input vector at a time, we load multiple
+    // vectors in iram from neighboring channels. The number of vectors loaded is equal to the
+    // weight vectorization (dimension 4 of the weight vector if present).
+    // Loading multiple vectors allows to paralleliza the iram load (4 cycles) with the
+    // processing of the idata by the alu (kernelDim.w cycles).
     For(auto batch = slice.iterate(input.dim(In::N))) {
         For(auto ocv = slice.iterate(output.dim(Out::CVectors))) {
-            For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+            For(auto iv = slice.iterate(input.dim(In::IVectors))) {
                 PData pdata;
-                For(auto ic = slice.iterate(input.dim(In::C))) {
+                For(auto ic = slice.iterate(1)) {
                     For(auto kh = slice.iterate(kernelDim.h)) {
-                        IData idata = slice.iram.load(input[batch][ic][kh][iv]);
+                        // Load vectors from neighboring channels
                         WData wdata = slice.wram.load(weight[ocv][ic][kh]);
-                        idata.setShape({{kernelDim.w, Stride(1)}, vectStride});
+                        IData idata = slice.iram.load(input[batch][ocv][iv][kh]);
+                        idata.setShape({{kernelDim.w, Stride(1)}, idata.dim(0), vectStride});
                         For(auto kw = slice.iterate(kernelDim.w)) {
-                            pdata = slice.alu.outerProductAccumulate(idata[kw], wdata[kw]);
+                            pdata = slice.alu.multiScalarProductAccumulate(idata[kw], wdata[kw]);
                         }
                     }
                 }
-                BData bdata = slice.bram.load(biasScale[ocv]);
                 For(auto o = slice.iterate(outChVectSize)) { // Not necessarily all the pdata
+                    BData bdata = slice.bram.load(biasScale[ocv][o]);
                     For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                         QData res = slice.act.rescaleClamp(
-                            pdata[o][av], bdata[o], op.getShiftFactor(), op.getOutputZp(),
+                            pdata[o][av], bdata, op.getShiftFactor(), op.getOutputZp(),
                             op.getOutputMin(), op.getOutputMax()
                         );
                         slice.append(output[batch][ocv][o], res);
@@ -148,7 +143,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     );
 }
 
-LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
+LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter) {
     Value initValue = op.getInit();
     auto wDims = LData(op.getWeights()).dims();
     int outChVectSize = wDims.size() > Weight::OCVectorItems ? wDims[Weight::OCVectorItems] : 1;

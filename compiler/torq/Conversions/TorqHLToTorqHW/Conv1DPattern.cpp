@@ -20,9 +20,7 @@ using namespace mlir::syna::torq_hw;
 namespace mlir::syna::torq {
 
 LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewriter) {
-    struct DDim {
-        enum { N, C, H, W };
-    };
+    using In = NCHW;
     struct KDim {
         enum { O, I, H, W };
     };
@@ -42,10 +40,10 @@ LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewrite
     const auto weightType = getDType(weightMemrefType.getElementType());
     const auto biasType = getDType(biasMemrefType.getElementType());
 
-    const int32_t batchCount = inputShape[DDim::N];
-    const int32_t inputChannels = inputShape[DDim::C];
-    const int32_t outputChannels = outputShape[DDim::C];
-    const int32_t outputWidth = outputShape[DDim::W];
+    const int32_t batchCount = inputShape[In::N];
+    const int32_t inputChannels = inputShape[In::C];
+    const int32_t outputChannels = outputShape[In::C];
+    const int32_t outputWidth = outputShape[In::W];
     const int32_t kernelWidth = weightShape[KDim::W];
     const int32_t stride = op.getStride()[0];
 
@@ -53,7 +51,7 @@ LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewrite
         inputShape.size() == 4 && weightShape.size() == 4 && outputShape.size() == 5 &&
         biasShape.size() == 1
     );
-    assert(inputShape[DDim::H] == 1 && outputShape[DDim::H] == 1);
+    assert(inputShape[In::H] == 1 && outputShape[In::H] == 1);
     assert(biasShape[0] == outputChannels);
     assert(dataType == DType::bf16 && weightType == DType::bf16 && biasType == DType::fp32);
 
@@ -66,16 +64,16 @@ LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewrite
     const int32_t actBlockCount = div_ceil(blockSize, actBlockSize);
 
     LData input(
-        {{batchCount, inputStrides[DDim::N]},
-         {inputChannels, inputStrides[DDim::C]},
+        {{batchCount, inputStrides[In::N]},
+         {inputChannels, inputStrides[In::C]},
          {outputWidth, stride},
          blockCount,
          blockSize},
         dataType
     );
     LData output(
-        {{batchCount, outputStrides[DDim::N]},
-         {outputChannels, outputStrides[DDim::C]},
+        {{batchCount, outputStrides[In::N]},
+         {outputChannels, outputStrides[In::C]},
          {outputWidth, kernelWidth},
          blockCount,
          actBlockCount,

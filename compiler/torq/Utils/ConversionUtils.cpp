@@ -632,7 +632,7 @@ Value convertScalarToRankedTensor(Value &input, Location loc, PatternRewriter &r
 }
 
 // Check if the Conv2DOp can be lowered using EK kernel
-bool hasEkLowering(mlir::syna::torq_hl::Conv2DOp op) {
+bool hasEkLoweringConv2d(mlir::syna::torq_hl::Conv2DOp op) {
     int32_t pad_left = op.getPad()[0];
     int32_t pad_right = op.getPad()[1];
     if (pad_left != 1 || pad_right != 1) {
@@ -649,6 +649,30 @@ bool hasEkLowering(mlir::syna::torq_hl::Conv2DOp op) {
     if (op.getVectorizationMode() != torq_hl::VectorizationModeEnum::_64x4) {
         return false;
     }
+    return true;
+}
+
+// Check if the DepthwiseConv2DOp can be lowered using EK kernel
+bool hasEkLoweringDwConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
+    int32_t pad_left = op.getPad()[0];
+    int32_t pad_right = op.getPad()[1];
+    if (pad_left != 1 || pad_right != 1) {
+        // Not supported by HW
+        return false;
+    }
+
+    int stride = op.getStride()[0]; // FIXME: consider all stride values
+    auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
+    if (stride != 1 || weightShape[2] != 3 || weightShape[3] != 3) {
+        // Not supported by this EK kernel
+        return false;
+    }
+    if (weightShape.size() == 5 && weightShape[4] != 4) {
+        // Not supported by this EK kernel
+        llvm::errs() << "DepthwiseConv2DOp with mode != 4 not supported by EK lowering\n";
+        return false;
+    }
+
     return true;
 }
 
