@@ -7,34 +7,49 @@ namespace mlir::syna::torq {
 
 class TorqHw {
   public:
-    enum Type {
-        SL2610,        // Synaptics SL2610 family hardware
-        SL2610_1SLICE, // Synaptics SL2610 family hardware with 1 slice
-        CUSTOM         // Custom hardware configuration
-    };
-
-    virtual ~TorqHw();
-    TorqHw(const TorqHw &) = delete;
-
-    Type getType() const { return _type; }
-
     static const TorqHw &get();
 
+    // Get the hardware name
+    std::string getName() const { return _name; }
+
     // Get the hardware information as a string
-    virtual std::string getString() const = 0;
+    std::string getDescription() const { return _description; }
 
     // Get LRAM size in bytes
-    virtual size_t getLramSize() const = 0;
+    size_t getLramSize() const { return _lramSize; }
 
     // Get Number of Slices
-    virtual size_t getSliceCount() const = 0;
+    size_t getSliceCount() const { return _sliceCount; }
 
     // Get Available Memory for Tiling in bytes
-    virtual size_t getAvailableMemoryForTiling() const = 0;
+    size_t getAvailableMemoryForTiling() const { return _availableMemoryForTiling; }
 
-  protected:
-    TorqHw(Type type) : _type(type) {}
-    Type _type;
+    // Get the available cpu features of CSS
+    std::string getCSSFeatures() const { return _cssFeatures; }
+
+    // Get the NSS features
+    std::string getNSSFeatures() const { return _nssFeatures; }
+
+    TorqHw(
+        std::string name, std::string description, size_t lramSize, size_t sliceCount,
+        size_t availableMemoryForTiling, std::string cssFeatures, std::string nssFeatures
+    )
+        : _name(name), _description(description), _lramSize(lramSize), _sliceCount(sliceCount),
+          _availableMemoryForTiling(availableMemoryForTiling), _cssFeatures(cssFeatures),
+          _nssFeatures(nssFeatures) {}
+
+    TorqHw() = default;
+
+  private:
+    std::string _name{};
+    std::string _description{};
+    std::string _version{};
+    size_t _lramSize = 0;
+    size_t _sliceCount = 0;
+    size_t _availableMemoryForTiling = 0;
+    std::string _cssFeatures{};
+    std::string _nssFeatures{};
+
     static const TorqHw *_instance;
 };
 

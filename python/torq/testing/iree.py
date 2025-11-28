@@ -418,7 +418,11 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
             str(torq_compiler),
             str(mlir_model_file), '-o', str(model_file)]
 
-    cmds.append(f'--torq-hw={target}')
+    if target == "custom":
+        cmds.append(f'--torq-hw={chip_config["lram_size"]}:{chip_config["slice_count"]}:{chip_config["tiling_memory"]}:'
+                     f'{chip_config.get("css_features","")}:{chip_config.get("nss_features","")}')
+    else:
+        cmds.append(f'--torq-hw={target}')
 
     if enable_debug_ir is not False:
         if enable_debug_ir is True:            
@@ -433,9 +437,6 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     if enable_hw_test_vectors:
         cmds.append(f'--torq-dump-descriptors-dir={versioned_dir}/cfgdesc')
-
-    if target == "custom":
-        cmds.append(f'--torq-hw-custom={chip_config["lram_size"]},{chip_config["slice_count"]},{chip_config["tiling_memory"]}')
 
     # when the runtime is cmodel, we need to compile with qemu address map
     if runtime_hw_type == 'sim':

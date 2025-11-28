@@ -17,31 +17,49 @@ You can configure the LRAM size and the number of slices at model compilation ti
 To compile a model for a custom hardware configuration, use the following options:
 
 ```{code} shell
-$ torq-compile ... --torq-hw=custom --torq-hw-custom=<LRAM>,<slices>,<tiling_memory>
+$ torq-compile ... --torq-hw=<LRAM>:<Slices>:<tiling_memory>:<CSS features>:<NSS features>
 ```
 - `<LRAM>`: Size of LRAM (integer)
 - `<slices>`: Number of SLICE blocks (integer)
 - `<tiling_memory>`: Tiling memory size in kilobytes (kb)
     > **Tiling memory:** specifies the available memory for tiling operations. When an operation's memory requirement exceeds the LRAM value, the compiler will automatically tile the operation to fit within the specified tiling memory.
+- `<CSS features>`: indicates the css features to enable (at the moment "+m")
+- `<NSS features >`: indicates the css features to enable (at the moment "nss_v1")
 
 #### Example Configurations
 
-**Configuration 1**
+**SL2610 Configuration**
+
+This is the default configuration:
+
 - LRAM: 512
 - Slices: 2
-- Tiling memory: specify as needed  
-  Compile with:
-  ```shell
-  $ torq-compile ... --torq-hw=custom --torq-hw-custom=512,2,400
-  ```
+- Tiling memory: 450
 
-**Configuration 2**
-- LRAM: 256
+**Custom configuration 1**
+- Version: 1
+- LRAM: 512
 - Slices: 1
-- Tiling memory: specify as needed  
+- Tiling memory: 450
+- CSS features: +m
+- NSS features: nss_v1
+
   Compile with:
   ```shell
-  $ torq-compile ... --torq-hw=custom --torq-hw-custom=256,1,200
+  $ torq-compile ... --torq-hw=512:1:450:+m:nss_v1
   ```
 
-> **Note:** When compiling models with a 256 LRAM configuration, stability may vary due to the need for very small tile sizes. Support for this configuration is still under development. Full compatibility is not guaranteed in this release. For a more representative configuration, you can compile with 512 size of LRAM and keep the rest of the configuration the same.
+**Custom configuration 2**
+
+- LRAM: 512
+- Slices: 1
+- Tiling memory: specify as needed
+- CSS features: +m
+- NSS features: nss_v2
+
+  Compile with:
+  ```shell
+  $ torq-compile ... --torq-hw=512,1,400,+m,nss_v2
+  ```
+
+> **Note:** When compiling models with a smaller LRAM configuration, stability may vary due to the need for very small tile sizes. Support for this configuration is still under development. Full compatibility is not guaranteed in this release. For a more representative configuration, you can compile with 512kB size of LRAM and keep the rest of the configuration the same.

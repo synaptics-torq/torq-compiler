@@ -33,6 +33,7 @@
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Utils/ToolUtils.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "torq/Utils/TorqHw.h"
 
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/IRObjectFile.h"
@@ -520,8 +521,9 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
         maybeTarget = IREE::HAL::LLVMTarget::create(hostTriple, hostCpu, hostFeatures, false);
     }
     else {
-        maybeTarget =
-            IREE::HAL::LLVMTarget::create("riscv32-pc-linux-elf", "generic-rv32", "+m", true);
+        maybeTarget = IREE::HAL::LLVMTarget::create(
+            "riscv32-pc-linux-elf", "generic-rv32", TorqHw::get().getCSSFeatures(), true
+        );
     }
 
     if (!maybeTarget) {

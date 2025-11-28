@@ -9,80 +9,108 @@ using namespace std;
 
 namespace mlir::syna::torq {
 
-static llvm::cl::opt<TorqHw::Type> clTorqHw(
-    "torq-hw", llvm::cl::desc("Specify the hardware family"),
-    llvm::cl::values(
-        clEnumValN(TorqHw::SL2610, "SL2610", "Synaptics SL2610 (default)"),
-        clEnumValN(TorqHw::CUSTOM, "custom", "Custom hardware (see torq-hw-custom option)")
-    )
-);
-
-static llvm::cl::list<size_t> clTorqHwCustom(
-    llvm::cl::CommaSeparated, "torq-hw-custom",
-    llvm::cl::desc("additional parameters for custom HW selection (see torq-hw option)"),
-    llvm::cl::value_desc("<lram_size>,<slice_count>,<available_memory_for_tiling>")
-);
-
-class TorqHwCustom : public TorqHw {
-  public:
-    TorqHwCustom(size_t lramSize, size_t sliceCount, size_t availableMemoryForTiling)
-        : TorqHw(CUSTOM), _lramSize(lramSize * 1024), _sliceCount(sliceCount),
-          _availableMemoryForTiling(availableMemoryForTiling * 1024) {}
-
-    std::string getString() const override { return "Custom Synaptics hardware configuration"; }
-
-    size_t getLramSize() const override { return _lramSize; }
-    size_t getSliceCount() const override { return _sliceCount; }
-    size_t getAvailableMemoryForTiling() const override { return _availableMemoryForTiling; }
-
-  private:
-    size_t _lramSize;
-    size_t _sliceCount;
-    size_t _availableMemoryForTiling;
+llvm::SmallVector<TorqHw> hwTypes = {
+    TorqHw("SL2610", "Synaptics SL2610 SoC family", 512 * 1024, 2, 400 * 1024, "+m", "nss_v1")
 };
 
-class TorqHwSL2610 : public TorqHw {
-  public:
-    TorqHwSL2610() : TorqHw(SL2610) {}
-    std::string getString() const { return "Synaptics SL2610 SoC family"; }
-    size_t getLramSize() const { return 512 * 1024; } // 512 KB
-    size_t getSliceCount() const { return 2; }
-    size_t getAvailableMemoryForTiling() const { return 400 * 1024; }
-};
+#define TORQ_CUSTOM_FORMAT                                                                         \
+    "<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_features>"
 
-TorqHw::~TorqHw() { delete _instance; }
+struct TorqHwParser : public llvm::cl::parser<TorqHw> {
 
-const TorqHw *TorqHw::_instance = nullptr;
+    using llvm::cl::parser<TorqHw>::parser;
 
-const TorqHw &TorqHw::get() {
-    if (_instance)
-        return *_instance;
-    switch (clTorqHw) {
-    case TorqHw::CUSTOM: {
-        if (clTorqHwCustom.size() != 3) {
-            llvm::errs() << "Invalid custom hardware configuration. Expected 3 values:\n"
-                         << "    <lram_size,slice_count,available_memory_for_tiling>\n";
-            llvm::report_fatal_error("Invalid custom hardware configuration");
+    bool parse(
+        llvm::cl::Option &O, llvm::StringRef ArgName, const llvm::StringRef &ArgValue, TorqHw &Val
+    ) {
+
+        llvm::SmallVector<llvm::StringRef, 4> parts;
+        ArgValue.split(parts, ':');
+
+        if (parts.size() == 1) {
+
+            if (ArgValue == "list") {
+                llvm::outs() << "Available Torq Hardware Types:\n";
+                for (const auto &hw : hwTypes) {
+                    llvm::outs() << "  " << hw.getName() << ": " << hw.getDescription() << "\n";
+                }
+
+                exit(0);
+            }
+
+            for (const auto &hw : hwTypes) {
+                if (hw.getName() == ArgValue) {
+                    Val = hw;
+                    return false;
+                }
+            }
+
+            return O.error(
+                ArgName, " expects a valid hardware name (pass 'list' to see available types) or a "
+                         "custom hardware specification\n"
+            );
         }
-        size_t lramSize = clTorqHwCustom[0];
-        size_t sliceCount = clTorqHwCustom[1];
-        size_t availableMemoryForTiling = clTorqHwCustom[2];
-        llvm::dbgs() << "Using custom hardware configuration: lram_size=" << lramSize << " KB, "
-                     << "slice_count=" << sliceCount << ", "
-                     << "available_memory_for_tiling=" << availableMemoryForTiling << " KB\n";
-        _instance = new TorqHwCustom(lramSize, sliceCount, availableMemoryForTiling);
-        break;
+
+        if (parts.size() != 5) {
+            return O.error(
+                ArgName, " custom hardware specification requires 4 colon-separated "
+                         "values: " TORQ_CUSTOM_FORMAT
+            );
+        }
+
+        std::string name = "custom";
+        std::string description = "Custom Torq Hardware";
+
+        size_t lram_size_kb = 0;
+
+        // check that lram_size is a valid number
+        if (parts[0].getAsInteger(10, lram_size_kb)) {
+            return O.error(ArgName, " LRAM size must be a valid number\n");
+        }
+
+        size_t lram_size = lram_size_kb * 1024;
+
+        size_t slice_count;
+
+        if (parts[1].getAsInteger(10, slice_count)) {
+            return O.error(ArgName, " Slice count must be a valid number\n");
+        }
+
+        size_t available_memory_for_tiling_kb;
+
+        if (parts[2].getAsInteger(10, available_memory_for_tiling_kb)) {
+            return O.error(ArgName, " Available memory for tiling must be a valid number\n");
+        }
+
+        size_t available_memory_for_tiling = available_memory_for_tiling_kb * 1024;
+
+        std::string cpu_features = parts[3].str();
+        std::string nss_features = parts[4].str();
+
+        llvm::outs() << "Custom Torq Hardware Configuration:\n";
+        llvm::outs() << "  LRAM Size: " << lram_size << " bytes\n";
+        llvm::outs() << "  Slice Count: " << slice_count << "\n";
+        llvm::outs() << "  Available Memory for Tiling: " << available_memory_for_tiling
+                     << " bytes\n";
+        llvm::outs() << "  CSS Features: " << cpu_features << "\n";
+        llvm::outs() << "  NSS Features: " << nss_features << "\n";
+
+        Val = TorqHw(
+            name, description, lram_size, slice_count, available_memory_for_tiling, cpu_features,
+            nss_features
+        );
+
+        // no error
+        return false;
     }
-    case TorqHw::SL2610:
-        _instance = new TorqHwSL2610;
-        break;
-    default:
-        // This should never happen if the command line option is correctly defined
-        // and the enum values are exhaustive.
-        llvm::errs() << "Unknown Torq hardware type: " << clTorqHw << "\n";
-        llvm::report_fatal_error("Invalid Torq hardware type specified");
-    }
-    return *_instance;
-}
+};
+
+static llvm::cl::opt<TorqHw, false, TorqHwParser> clTorqHw(
+    "torq-hw", llvm::cl::init(hwTypes[0]),
+    llvm::cl::desc("Specify the target hardware (pass 'list' to list all available targets) or a "
+                   "custom target specification as " TORQ_CUSTOM_FORMAT)
+);
+
+const TorqHw &TorqHw::get() { return clTorqHw; }
 
 } // namespace mlir::syna::torq
