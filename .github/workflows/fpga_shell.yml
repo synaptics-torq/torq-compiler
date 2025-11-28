@@ -7,6 +7,7 @@ on:
 jobs:
   create_shell:    
     name: Create a AWS FPGA shell
+
     if: ${{ vars.ENABLE_FPGA_SHELL_CREATION == 'true' }}
     runs-on: torq-fpga-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -17,7 +18,27 @@ jobs:
         with:
           lfs: false
           submodules: false
-    
+      
+      - name: Generate GitHub token
+        id: generate_app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id:  ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Get latest successful build run
+        id: get_latest_build_id
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_app_token.outputs.token }}
+        run: |
+          BUILD_RUN_ID=$(python3 ./scripts/get-latest-workflow-run.py \
+            --repo ${{ github.repository }} \
+            --branch ${{ github.ref }} \
+            --workflow build.yml)
+
+          echo "BUILD_RUN_ID=${BUILD_RUN_ID}" >> $GITHUB_OUTPUT
+
       - name: Clear FPGA slot
         run: |
           fpga-describe-local-image-slots
@@ -30,6 +51,7 @@ jobs:
         uses: ./.github/actions/tests
         with:
           app_id: ${{ vars.CI_APP_ID }}
+          release_run_id: ${{ steps.get_latest_build_id.outputs.BUILD_RUN_ID }}
           app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           extra_repo: ${{ vars.EXTRAS_REPO }}
           hf_token: ${{ secrets.HF_TOKEN }}          

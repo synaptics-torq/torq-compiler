@@ -171,6 +171,8 @@ jobs:
 
     runs-on: torq-fpga-${{ github.run_id }}-${{ github.run_attempt }}
 
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name || '', 'test-aws') }}
+
     needs: [ test_cmodel ]
 
     steps:
