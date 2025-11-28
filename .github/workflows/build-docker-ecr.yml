@@ -77,6 +77,13 @@ jobs:
               # remove the token from the submodules that have it
               git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
 
+          - name: Remove git-lfs hooks
+            run: |
+              set -x
+
+              # remove the hooks to make sure we can re-install them when we use the checkout in other workflows
+              rm -f .git/hooks/*
+
           - name: Build and push build Docker image
             uses: docker/build-push-action@v6
             with:
