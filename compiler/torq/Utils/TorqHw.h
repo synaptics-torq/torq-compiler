@@ -24,19 +24,19 @@ class TorqHw {
     // Get Available Memory for Tiling in bytes
     size_t getAvailableMemoryForTiling() const { return _availableMemoryForTiling; }
 
-    // Get the available cpu features of CSS
-    std::string getCSSFeatures() const { return _cssFeatures; }
+    // Get the CSS configuration name
+    std::string getCSSConfigName() const { return _cssConfigName; }
 
-    // Get the NSS features
-    std::string getNSSFeatures() const { return _nssFeatures; }
+    // Get the NSS configuration name
+    std::string getNSSConfigName() const { return _nssConfigName; }
 
     TorqHw(
         std::string name, std::string description, size_t lramSize, size_t sliceCount,
-        size_t availableMemoryForTiling, std::string cssFeatures, std::string nssFeatures
+        size_t availableMemoryForTiling, std::string cssConfigName, std::string nssConfigName
     )
         : _name(name), _description(description), _lramSize(lramSize), _sliceCount(sliceCount),
-          _availableMemoryForTiling(availableMemoryForTiling), _cssFeatures(cssFeatures),
-          _nssFeatures(nssFeatures) {}
+          _availableMemoryForTiling(availableMemoryForTiling), _cssConfigName(cssConfigName),
+          _nssConfigName(nssConfigName) {}
 
     TorqHw() = default;
 
@@ -47,8 +47,8 @@ class TorqHw {
     size_t _lramSize = 0;
     size_t _sliceCount = 0;
     size_t _availableMemoryForTiling = 0;
-    std::string _cssFeatures{};
-    std::string _nssFeatures{};
+    std::string _cssConfigName{};
+    std::string _nssConfigName{};
 
     static const TorqHw *_instance;
 };

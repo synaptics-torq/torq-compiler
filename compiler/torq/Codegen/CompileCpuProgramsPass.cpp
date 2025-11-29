@@ -11,7 +11,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Export.h"
 
-#include "css_bootstrap/css_kernel_riscv.h"
+#include "torq/Codegen/css_bootstrap/css_kernel_riscv.h"
 
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 
@@ -52,11 +52,6 @@ static llvm::cl::opt<bool> clEnableCSSForHost(
     llvm::cl::init(false)
 );
 
-static llvm::cl::opt<bool> clEnableCSSForQemu(
-    "torq-css-qemu", llvm::cl::desc("Create CSS binaries suitable for QEMU emulation"),
-    llvm::cl::init(false)
-);
-
 static llvm::cl::opt<bool> clKeepCssLinkingArtifacts(
     "torq-keep-css-linking-artifacts",
     llvm::cl::desc("Keep the artifacts generated during linking of CSS kernels"),
@@ -88,40 +83,45 @@ static llvm::cl::opt<std::string> clTargetHostCpuFeatures(
 
 namespace {
 
+static std::optional<CssConfig> getActiveCssConfig() {
+
+    auto cssConfig = getCssConfigByName(TorqHw::get().getCSSConfigName());
+
+    if (!cssConfig) {
+        llvm::errs() << "Unable to find css config " << TorqHw::get().getCSSConfigName() << "\n";
+        exit(1);
+    }
+
+    return cssConfig;
+}
+
 class CssLinker {
 
   public:
-    CssLinker(std::string libraryName, bool forQemu) : libraryName(libraryName), forQemu(forQemu) {
+    CssLinker(std::string libraryName) : libraryName(libraryName) {
 
         // create a temporary file with the linker script
         loadLinkerScript();
 
         // create temporary files with the boostrap code for the kernel (asm and c code)
-        if (forQemu) {
+        auto cssConfig = getActiveCssConfig();
+
+        addObjectFile(cssConfig->kernel.as_string(), "c.o");
+        addObjectFile(cssConfig->bootstrap.as_string(), "s.o");
+
+        // link libc/libm/compiler_rt for soft float support
+        if (cssConfig->mabi == "ilp32") {
             addObjectFile(
-                std::string(&_binary_css_kernel_qemu_c_o_start, &_binary_css_kernel_qemu_c_o_end),
-                "c.o"
+                std::string(&_binary_css_libc_a_start, &_binary_css_libc_a_end), "libc.a"
+            );
+            addObjectFile(
+                std::string(&_binary_css_libm_a_start, &_binary_css_libm_a_end), "libm.a"
+            );
+            addObjectFile(
+                std::string(&_binary_css_compiler_rt_a_start, &_binary_css_compiler_rt_a_end),
+                "compiler_rt.a"
             );
         }
-        else {
-            addObjectFile(
-                std::string(
-                    &_binary_css_kernel_kelvin_c_o_start, &_binary_css_kernel_kelvin_c_o_end
-                ),
-                "c.o"
-            );
-        }
-
-        addObjectFile(
-            std::string(&_binary_css_kernel_s_o_start, &_binary_css_kernel_s_o_end), "s.o"
-        );
-
-        addObjectFile(std::string(&_binary_css_libc_a_start, &_binary_css_libc_a_end), "libc.a");
-        addObjectFile(std::string(&_binary_css_libm_a_start, &_binary_css_libm_a_end), "libm.a");
-        addObjectFile(
-            std::string(&_binary_css_compiler_rt_a_start, &_binary_css_compiler_rt_a_end),
-            "compiler_rt.a"
-        );
     }
 
     void addObjectFile(std::string objectData, std::string objectName) {
@@ -194,26 +194,12 @@ class CssLinker {
         command.push_back("--defsym __stack_size=" + std::to_string(HwInfo::css_stack_size));
 
         /* setup the right memory addresses depending on the target */
-        if (forQemu) {
 
-            /* we map the ITCM at the start of the DRAM (where the ROM code expects the BIOS to be)
-               and we map DTCM just after, CSS registers are mapped in memory after the DTCM so that
-               we can set them by editing the memory backing store.
+        auto config = getActiveCssConfig();
 
-               These values must be synchronized with the values used by TorqHW.
-            */
-            command.push_back("--defsym __itcm_start=0x80000000");
-            command.push_back("--defsym __dtcm_start=0x80010000");
-            command.push_back("--defsym __css_regs_start=0x80020000");
-        }
-        else {
-
-            /* see ${TORQ_HW_DIR}/reg/torq_regs_css_view.h */
-
-            command.push_back("--defsym __itcm_start=0x00000000");
-            command.push_back("--defsym __dtcm_start=0x00010000");
-            command.push_back("--defsym __css_regs_start=0x401fc000");
-        }
+        command.push_back("--defsym __itcm_start=0x" + llvm::utohexstr(config->itcmStart));
+        command.push_back("--defsym __dtcm_start=0x" + llvm::utohexstr(config->dtcmStart));
+        command.push_back("--defsym __css_regs_start=0x" + llvm::utohexstr(config->regsStart));
 
         if (largeItcm) {
             command.push_back("--defsym __itcm_size=" + std::to_string(HwInfo::itcm_size * 100));
@@ -228,6 +214,8 @@ class CssLinker {
         }
 
         std::string fullCommand = llvm::join(command, " ");
+
+        llvm::dbgs() << "Linking command: " << fullCommand << "\n";
 
         int ret = system(fullCommand.c_str());
 
@@ -298,7 +286,6 @@ class CssLinker {
     std::string libraryName;
     SmallVector<IREE::HAL::Artifact> objectFiles;
     IREE::HAL::Artifact linkerScript;
-    bool forQemu;
 };
 
 static FailureOr<std::vector<uint8_t>> linkSharedHostLibrary(
@@ -521,8 +508,9 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
         maybeTarget = IREE::HAL::LLVMTarget::create(hostTriple, hostCpu, hostFeatures, false);
     }
     else {
+
         maybeTarget = IREE::HAL::LLVMTarget::create(
-            "riscv32-pc-linux-elf", "generic-rv32", TorqHw::get().getCSSFeatures(), true
+            "riscv32-pc-linux-elf", "generic-rv32", getActiveCssConfig()->mattrs, true
         );
     }
 
@@ -566,7 +554,7 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
     }
     else {
 
-        CssLinker linker(libraryName, clEnableCSSForQemu);
+        CssLinker linker(libraryName);
 
         linker.addObjectFile(*maybeObject, "o");
 

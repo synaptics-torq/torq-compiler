@@ -1,0 +1,64 @@
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include <optional>
+#include <string>
+#include <vector>
+
+#define BINARY_OBJ(name)                                                                           \
+    extern char _binary_##name##_end;                                                              \
+    extern size_t _binary_##name##_size;                                                           \
+    extern char _binary_##name##_start;
+
+#define BINARY_DESC(name)                                                                          \
+    CssObject { &_binary_##name##_start, &_binary_##name##_end }
+
+extern "C" {
+
+BINARY_OBJ(css_kernel_ld)
+
+BINARY_OBJ(css_libc_a)
+BINARY_OBJ(css_libm_a)
+BINARY_OBJ(css_compiler_rt_a)
+
+@CSS_BINARY_OBJ_DEF@
+
+}
+
+namespace mlir::syna::torq {
+
+struct CssObject {
+    char *start;
+    char *end;
+
+    std::string as_string() const { return std::string(start, end); }
+};
+
+struct CssConfig {
+    std::string name;
+    std::string mabi;
+    std::string march;
+    std::string mattrs;
+    uint32_t itcmStart;
+    uint32_t dtcmStart;
+    uint32_t regsStart;
+    CssObject kernel;
+    CssObject bootstrap;
+};
+
+std::vector<CssConfig> cssConfigs = {
+  @CSS_CONFIGS_DESCS_STR@
+};
+
+std::optional<CssConfig> getCssConfigByName(const std::string &name) {
+    for (auto &config : cssConfigs) {
+        if (config.name == name) {
+            return config;
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace mlir::syna::torq

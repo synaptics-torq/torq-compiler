@@ -10,7 +10,7 @@ using namespace std;
 namespace mlir::syna::torq {
 
 llvm::SmallVector<TorqHw> hwTypes = {
-    TorqHw("SL2610", "Synaptics SL2610 SoC family", 512 * 1024, 2, 400 * 1024, "+m", "nss_v1")
+    TorqHw("SL2610", "Synaptics SL2610 SoC family", 512 * 1024, 2, 400 * 1024, "coral_v1", "nss_v1")
 };
 
 #define TORQ_CUSTOM_FORMAT                                                                         \
@@ -111,6 +111,30 @@ static llvm::cl::opt<TorqHw, false, TorqHwParser> clTorqHw(
                    "custom target specification as " TORQ_CUSTOM_FORMAT)
 );
 
-const TorqHw &TorqHw::get() { return clTorqHw; }
+static llvm::cl::opt<bool> clEnableCSSForQemu(
+    "torq-css-qemu", llvm::cl::desc("Create CSS binaries suitable for QEMU emulation"),
+    llvm::cl::init(false)
+);
+
+static std::optional<TorqHw> instance{std::nullopt};
+
+const TorqHw &TorqHw::get() {
+
+    if (!instance.has_value()) {
+
+        if (clEnableCSSForQemu) {
+            instance = TorqHw(
+                clTorqHw.getName(), clTorqHw.getDescription(), clTorqHw.getLramSize(),
+                clTorqHw.getSliceCount(), clTorqHw.getAvailableMemoryForTiling(),
+                clTorqHw.getCSSConfigName() + "_qemu", clTorqHw.getNSSConfigName()
+            );
+        }
+        else {
+            instance = clTorqHw;
+        }
+    }
+
+    return *instance;
+}
 
 } // namespace mlir::syna::torq

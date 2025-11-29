@@ -2,6 +2,68 @@
 #include "iree/hal/local/executable_library.h"
 #include <stdint.h>
 
+#ifdef CSS_HW_KELVIN
+
+#define print(x)
+#define printInt(x)
+
+static inline void halt() {
+    // this is a special kelvin instruction that halts the cpu
+    asm volatile(".word 0x08000073");
+}
+#endif
+#ifdef CSS_HW_QEMU
+
+static inline void print(char *data) {
+    int uart = 0x10000000;
+
+    for (int i = 0; data[i] != '\0'; i++) {
+        *(volatile char *)(uart) = data[i];
+    }
+}
+
+static inline void printInt(unsigned int val) {
+    int uart = 0x10000000;
+    char hexChars[] = "0123456789ABCDEF";
+
+    *(volatile char *)(uart) = '0';
+    *(volatile char *)(uart) = 'x';
+
+    for (int pos = 7; pos >= 0; pos--) {
+        *(volatile char *)(uart) = hexChars[(val >> (pos * 4)) & 0xF];
+    }
+}
+
+static inline void halt() {
+
+    // ensure the whole memory is written before halting
+    __asm__ volatile("" ::: "memory");
+
+    // shutdown emulation using the sifive_test device
+    asm volatile("li a0, 0x5555\n"   // Exit code (0x3333 fail 0x5555 success)"
+                 "li a1, 0x100000\n" // Address of the exit device"
+                 "sw a0, 0(a1)\n"    // Write the exit code to the device"
+    );
+
+    // Wait for the emulation to exit
+    while (1) {
+    };
+}
+
+#endif
+
+#ifdef ENABLE_FP
+static inline void riscv_enable_fp(void) {
+    unsigned long mstatus;
+    asm volatile("csrr %0, mstatus" : "=r"(mstatus));
+    // Set FS=Initial (bit13=1, bit14=0).
+    mstatus |= (1UL << 13); // FS=01
+    asm volatile("csrw mstatus, %0" ::"r"(mstatus));
+    // Clear FCSR: fflags=0, frm=round-to-nearest-even (0), fcsr=0
+    asm volatile("csrw fcsr, zero");
+}
+#endif
+
 extern volatile uint32_t css_regs[REG_SIZE__TORQ_CSS_REGS];
 
 static inline uint32_t readCssReg(uint32_t addr) { return css_regs[addr / 4]; }
@@ -109,6 +171,12 @@ void css_sw_main(void *cpu) {
     print("\n");
 
     __stack_start = 0xDEADBEEF; // canary value to detect stack overflows
+
+#ifdef ENABLE_FP
+    print("Enabling FP support...\n");
+    riscv_enable_fp();
+    print("FP support enabled.\n");
+#endif
 
     print("Executing main...\n");
     main(&environment, &dispatch_state, &workgroup_state);
