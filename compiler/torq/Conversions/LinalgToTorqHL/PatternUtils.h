@@ -138,6 +138,12 @@ bool isFuseGroupPrincipalOp(Operation *op, IntegerAttr fuseGroupAttr);
 // exactly one source that is in the same fuse group);
 Operation *getFuseGroupPrincipalOpBackward(Operation *op);
 
+// Walks forward from result, over operations that belong to fuseGroupAttr, and
+// return all the OpOperands that are owned by the principal operation of
+// fuseGroupAttr, and reachable by the walk.
+SmallVector<OpOperand *>
+getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, OpResult result);
+
 // Return true iff op is already marked as part of a fuse group.
 bool isMarkedFuseGroup(Operation *op);
 

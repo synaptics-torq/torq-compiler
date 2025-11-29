@@ -245,6 +245,38 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *op) {
     llvm_unreachable("the while loop should terminate by return");
 }
 
+SmallVector<OpOperand *>
+getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, OpResult result) {
+    SmallVector<OpOperand *> principalOperands;
+
+    std::deque<OpOperand *> queue;
+    for (auto &next : result.getUses())
+        queue.push_back(&next);
+
+    while (!queue.empty()) {
+        OpOperand *operand = queue.front();
+        queue.pop_front();
+
+        Operation *op = operand->getOwner();
+
+        if (auto arrayAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+            arrayAttr && llvm::is_contained(arrayAttr, fuseGroupAttr)) {
+
+            if (auto idAttr = op->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
+                idAttr && idAttr == fuseGroupAttr) {
+
+                principalOperands.push_back(operand);
+                continue;
+            }
+
+            for (auto &next : op->getUses())
+                queue.push_back(&next);
+        }
+    }
+
+    return principalOperands;
+}
+
 bool isMarkedFuseGroup(Operation *op) {
     // We don't check if the array attribute is not empty, because we always add
     // something to it when we created it.

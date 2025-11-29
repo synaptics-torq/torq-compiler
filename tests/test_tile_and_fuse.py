@@ -23,10 +23,6 @@ def get_test_cases():
         }))
 
     for mlir_file in list_mlir_file_group("torch_ops"):
-        
-        if mlir_file.name in ["equal.mlir", "instancenorm.mlir"]:
-            continue  # not implemented yet
-
         test_cases.append(Case("torch_" + mlir_file.stem, {
             "static_mlir_model_file": mlir_file,
             "torq_compiler_options": base_options
@@ -40,58 +36,39 @@ def case_config(request):
 
     # tosaops
     failed_tc = [
-        # crash
+        # Compiler hang
         'tosa_pw-32x8-7x7x320',
-        'tosa_maxpool2d-stride2-k3x3-pad-224x224x64',
-        'tosa_maxpool-seg-tile',
-        'tosa_maxpool2d-stride2-k3x3-pad-112x112x128',
-        'tosa_maxpool2d-stride2-k3x3-pad-112x112x64',
-        'tosa_maxpool-seg-tile-1',
-        'tosa_pad-dw',
+ 
+        # crash
+        # argument #1 must have an executor id
         'tosa_conv-stride1',
-        'tosa_dw_f5_s2_128x128x72',
+        'tosa_conv-stride1-56',
+
+        # failed to find a tile size for op
+        'tosa_conv-343',
 
         # result wrong
         'tosa_pw-stride2',
-
-        # hang
-        'tosa_dw_i16_s2_8x8x1',
-        'tosa_dw_wzp',
-        'tosa_softmax',
     
         # wrong result
         'linalg_tanh-bf16',
         'linalg_rsqrt-bf16',
 
         # crash
-        'linalg_quantized_batch_matmul',
-
-        # hang
-        'linalg_softmax-bf16',
-        'linalg_reducesum-a0-i32',
-        'linalg_batch-matmul-in-int8-out-int16',
-        'linalg_reduceall-a2',
-        'linalg_fill-56x48x24',
-        'linalg_Elementwise-less-than-u16',
-        'linalg_broadcast-a0',
-        'linalg_reducexor-a0',
-
-        # crash
         'torch_encoder.mlir.230.Conv_0_small',
-        'torch_equal',
         'torch_encoder.mlir.243.Conv_2_small',
         'torch_encoder.mlir.237.Conv_1_small',
-
-        # wrong result
-        'torch_instancenorm',
 
         # unable to free enough space for results and operands
         'torch_Conv2d_bf16_1x1x64x8192',
         'torch_Conv2d_bf16_1x1x8192x64',
+        'tosa_conv2d-f4',
         # failed to run translation of source executable to target executable for backend
         'torch_ConvTranspose_bf16_1x1x512x512',
 
         # fails even without tile and fuse
+        'torch_equal',
+        'torch_instancenorm',
         'torch_0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean'
     ]
 

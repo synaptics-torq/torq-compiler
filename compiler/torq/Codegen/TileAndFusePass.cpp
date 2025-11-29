@@ -142,31 +142,38 @@ SmallVector<int64_t> getTilingDimOrder(TilingInterface tilingInterfaceOp) {
     auto allParallelDims = [&]() {
         SmallVector<int64_t> tilingDimOrder;
         for (size_t dim = 0; dim < loopIteratorTypes.size(); ++dim) {
-            if (loopIteratorTypes[dim] != utils::IteratorType::parallel)
-                continue;
-
-            tilingDimOrder.push_back(dim);
+            if (loopIteratorTypes[dim] == utils::IteratorType::parallel)
+                tilingDimOrder.push_back(dim);
         }
         return tilingDimOrder;
     };
 
-    // Handler for nhwc operations we tile h and c (as needed), in that order.
-    // The HW currently does not support tiling w (can't do the padding right), so we skip it.
-    // The HW currently does not support tiling h when stride is > 1.
-    auto nhwcOpWithStires = [](mlir::DenseIntElementsAttr stridesAttr) {
+    // Handler for nhwc operations: we tile C, followed by H as needed.
+    // The H/W currently does not support tiling W (can't do the padding right).
+    // The H/W currently does not support tiling H when stride > 1.
+    auto nhwcOpWithStrides = [&](mlir::DenseIntElementsAttr stridesAttr) {
         SmallVector<int64_t> tilingDimOrder;
-        SmallVector<int64_t, 2> strides;
-        for (int64_t stride : stridesAttr.getValues<int64_t>()) {
-            strides.push_back(stride);
-        }
+        SmallVector<int64_t, 2> strides(stridesAttr.getValues<int64_t>());
         if (strides[0] > 1) {
             // tile only the channels
+            assert(
+                loopIteratorTypes[3] == utils::IteratorType::parallel &&
+                "expected dimension 3 to be parallel"
+            );
             tilingDimOrder.push_back(3); // C
         }
         else {
             // tile horizontally and then channels
-            tilingDimOrder.push_back(1); // H
+            assert(
+                loopIteratorTypes[3] == utils::IteratorType::parallel &&
+                "expected dimension 3 to be parallel"
+            );
             tilingDimOrder.push_back(3); // C
+            assert(
+                loopIteratorTypes[1] == utils::IteratorType::parallel &&
+                "expected dimension 1 to be parallel"
+            );
+            tilingDimOrder.push_back(1); // H
         }
         return tilingDimOrder;
     };
@@ -178,12 +185,18 @@ SmallVector<int64_t> getTilingDimOrder(TilingInterface tilingInterfaceOp) {
         assert(principalOp != nullptr && "could not find the principal op of the fuse group");
 
         return TypeSwitch<Operation *, SmallVector<int64_t>>(principalOp)
+            .Case<linalg::Conv2DNhwcHwcfOp>([&](auto convOp) {
+                // NB: 4th iteration domain is actually F (filters/output-channels) here
+                return nhwcOpWithStrides(convOp.getStrides());
+            })
+            .Case<linalg::DepthwiseConv2DNhwcHwcOp>([&](auto convOp) {
+                return nhwcOpWithStrides(convOp.getStrides());
+            })
             .Case<
-                linalg::Conv2DNhwcHwcfOp, linalg::DepthwiseConv2DNhwcHwcOp,
                 linalg::PoolingNhwcMaxOp, linalg::PoolingNhwcMaxUnsignedOp,
                 linalg::PoolingNhwcMinOp, linalg::PoolingNhwcMinUnsignedOp,
                 linalg::PoolingNhwcSumOp>([&](auto convOp) {
-                return nhwcOpWithStires(convOp.getStrides());
+                return nhwcOpWithStrides(convOp.getStrides());
             })
             .Default([&](auto) { return allParallelDims(); });
     }
@@ -391,13 +404,65 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
                         }
                     }
 
+                    // If opResult feeds the first input of the principal op,
+                    // and that op has stride > 1, we need to double the memory,
+                    // except if opResult comes from conv2d/dw/add.
+                    auto principalOperands =
+                        getFuseGroupPrincipalOpOperandsForward(intAttr, opResult);
+                    if (llvm::any_of(principalOperands, [](OpOperand *principalOperand) {
+                            if (principalOperand->getOperandNumber() == 0) {
+                                auto strides =
+                                    TypeSwitch<Operation *, SmallVector<int64_t>>(
+                                        principalOperand->getOwner()
+                                    )
+                                        .Case<linalg::Conv2DNhwcHwcfOp>([](auto convOp) {
+                                            return convOp.getStrides().template getValues<int64_t>(
+                                            );
+                                        })
+                                        .Case<linalg::DepthwiseConv2DNhwcHwcOp>([](auto convOp) {
+                                            return convOp.getStrides().template getValues<int64_t>(
+                                            );
+                                        })
+                                        .Case<
+                                            linalg::PoolingNhwcMaxOp,
+                                            linalg::PoolingNhwcMaxUnsignedOp,
+                                            linalg::PoolingNhwcMinOp,
+                                            linalg::PoolingNhwcMinUnsignedOp,
+                                            linalg::PoolingNhwcSumOp>([](auto convOp) {
+                                            return convOp.getStrides().template getValues<int64_t>(
+                                            );
+                                        })
+                                        .Default([&](auto) -> SmallVector<int64_t> { return {}; });
+                                return llvm::any_of(strides, [](auto s) { return s > 1; });
+                            }
+                            return false;
+                        })) {
+
+                        if (operandFuseGroupAttr) {
+                            Operation *sourcePrincipal = getFuseGroupPrincipalOpBackward(resultOp);
+                            assert(
+                                sourcePrincipal != nullptr &&
+                                "could not find the principal op of the fuse group"
+                            );
+                            if (!isa<
+                                    linalg::Conv2DNhwcHwcfOp, linalg::DepthwiseConv2DNhwcHwcOp,
+                                    linalg::AddOp>(sourcePrincipal)) {
+                                operandBytes *= 2;
+                            }
+                        }
+                        else {
+                            operandBytes *= 2;
+                        }
+                    }
+
                     if ((fusedGroupsBytes[intAttr] += operandBytes) > availableMemoryBytes) {
                         return false;
                     }
                 }
             }
 
-            // Add operand to the queue as needed
+            // Add operand to the queue if it's in the producers set, or in one
+            // of the pattern-fuse-groups of op.
             if (producerOps.contains(resultOp) || shareFuseGroup) {
                 auto tiOp = cast<TilingInterface>(resultOp);
 
