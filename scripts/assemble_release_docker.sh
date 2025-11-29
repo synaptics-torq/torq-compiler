@@ -47,6 +47,7 @@ mkdir ${INSTALL_DIR}/scripts
 
 cp ${BUILD_DIR}/third_party/iree/tools/iree-run-module ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-compile ${INSTALL_DIR}/tools
+cp ${BUILD_DIR}/third_party/iree/tools/torq-compile ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-opt ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/lib/libIREECompiler.so ${INSTALL_DIR}/lib
 
@@ -56,7 +57,6 @@ cp ${BASE_DIR}/scripts/Dockerfile.release ${INSTALL_DIR}/Dockerfile
 cp ${BASE_DIR}/scripts/setup.sh ${INSTALL_DIR}
 cp ${BASE_DIR}/scripts/apt-packages.txt ${INSTALL_DIR}
 
-cp ${BASE_DIR}/scripts/torq-compile ${INSTALL_DIR}/scripts
 cp ${BASE_DIR}/scripts/diff-tensor.py ${INSTALL_DIR}/scripts
 cp ${BASE_DIR}/scripts/image_to_tensor.py ${INSTALL_DIR}/scripts
 cp ${BASE_DIR}/scripts/annotate_profiling.py ${INSTALL_DIR}/scripts

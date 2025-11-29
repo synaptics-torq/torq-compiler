@@ -520,7 +520,7 @@ def process_tflite_file(tflite_file, dry_run=False, timeout=180):
     commands = [
         f"iree-import-tflite {tflite_file} -o {tosa_file}",
         f"iree-opt {tosa_file} -o {mlir_file}",
-        f"torq-compile iree-compile {mlir_file} -o {vmfb_file}",
+        f"torq-compile {mlir_file} -o {vmfb_file}",
         f"iree-run-module --device=torq --module={vmfb_file} --function=main {' '.join(input_args)} {' '.join(output_args)}"
     ]
     

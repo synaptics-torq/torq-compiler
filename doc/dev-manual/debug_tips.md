@@ -26,7 +26,7 @@
 - To debug using gdb the compiler plugin you can use the following command line:
 
   ```{code} shell
-  $ gdb --args /bin/bash scripts/torq-compile ../iree-build/third_party/iree/tools/iree-compile ${OTHER_TORQ_COMPILE_PARAMS}
+  $ gdb --args ../iree-build/third_party/iree/tools/torq-compile ${OTHER_TORQ_COMPILE_PARAMS}
   ```
 
 - To debug using gdb the hal runtime plugin you can use the following command line:
@@ -68,7 +68,7 @@
 
   ```{code} shell
 
-  $ export PATH=${PATH}:${PWD}/../iree-build/llvm-project/bin:${PWD}/../iree-build/tools
+  $ export PATH=${PATH}:${PWD}/../iree-build/llvm-project/bin:${PWD}/../iree-build/third_party/iree/tools
       
   $ llvm-lit path_to_test_case.mlir
 
@@ -139,5 +139,5 @@
   - To see all supported Torq flags, run:
 
     ```{code} shell
-    $ ../iree-build/third_party/iree/tools/iree-compile --help | grep "torq"
+    $ ../iree-build/third_party/iree/tools/torq-compile --help | grep "torq"
     ```

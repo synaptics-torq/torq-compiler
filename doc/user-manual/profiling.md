@@ -11,7 +11,7 @@ Profiling helps you understand the performance characteristics of your models on
 
 - Torq profiling adds memory footprints and approximate clock cycles information in the MLIR output.
     By default it is disabled, to enable it add option ``--torq-enable-profiling``
-    to the ``scripts/torq-compile`` command. By default profiling is written to `timeline.csv`. The profiling details can be written to a different file using ``--torq-dump-profiling=path/to/trace.csv``
+    to the ``torq-compile`` command. By default profiling is written to `timeline.csv`. The profiling details can be written to a different file using ``--torq-dump-profiling=path/to/trace.csv``
 
 - Compile the model using torq-compile with the profiling flag:
     ```shell

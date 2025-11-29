@@ -15,3 +15,19 @@ iree_cc_binary(
         MLIRTosaDialect
     SETUP_INSTALL_RPATH
 )
+
+iree_cc_binary(
+    NAME
+      torq-compile
+    SRCS
+      "torq-compile-main.cc"
+    DEPS
+      iree::compiler::bindings::c::headers
+      iree::compiler::API::Impl
+    DATA
+      ${IREE_LLD_TARGET}
+    HOSTONLY
+    SETUP_INSTALL_RPATH
+    INSTALL_COMPONENT IREETools-Compiler
+  )
+  

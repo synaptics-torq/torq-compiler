@@ -6,7 +6,7 @@ Example MLIR models are provided in the `tests/` directory.
 - Compile a mlir for the Torq target:
 
     ```{code} shell
-    $ scripts/torq-compile ../iree-build/third_party/iree/tools/iree-compile \
+    $ ../iree-build/third_party/iree/tools/torq-compile \
         tests/testdata/tosa_ops/conv2d-stride4.mlir \
         -o conv2d-stride4.vmfb
     ```

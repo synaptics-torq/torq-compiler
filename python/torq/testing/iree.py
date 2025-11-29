@@ -296,7 +296,7 @@ def torq_compiler():
     It is automatically invalidated when the compiler binary mtime changes.
     """
 
-    return _find_iree_tool('IREE_COMPILE', 'iree-compile')
+    return _find_iree_tool('TORQ_COMPILE', 'torq-compile')
 
 
 @versioned_hashable_object_fixture
@@ -414,9 +414,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     target = chip_config.get("target", "SL2610")
 
-    cmds = [str(TOPDIR) + '/scripts/torq-compile',
-            str(torq_compiler),
-            str(mlir_model_file), '-o', str(model_file)]
+    cmds = [str(torq_compiler), str(mlir_model_file), '-o', str(model_file)]
 
     if target == "custom":
         cmds.append(f'--torq-hw={chip_config["lram_size"]}:{chip_config["slice_count"]}:{chip_config["tiling_memory"]}:'

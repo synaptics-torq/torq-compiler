@@ -11,7 +11,7 @@ To implement such an optimization it is recommended to follow two steps:
    some input model as follows:
 
    ```
-   $ {BUILD_DIR}/third_party/iree/tools/iree-compile --compile-to=input mymodel.mlir -o mymodel_linalg.mlir
+   $ {BUILD_DIR}/third_party/iree/tools/torq-compile --compile-to=input mymodel.mlir -o mymodel_linalg.mlir
    ```
 
    Make sure to edit the file so that ``func.func`` and ``func.return`` operations are used instead of the ``util`` dialect variants.

@@ -29,7 +29,7 @@ def test_and_save(model, reference, bittol=0):
     for target, args in (('vmfb', ('--iree-hal-target-backends=llvm-cpu',
                                    '--iree-llvmcpu-target-cpu=generic')),
                          ('linalg.mlir', ('--compile-to=input',))):
-        full_args = [f'{build_dir}/tools/iree-compile', f'{name}.mlir',
+        full_args = [f'{build_dir}/tools/torq-compile', f'{name}.mlir',
                      '-o', f'{name}.{target}',
                      #'--mlir-print-ir-after-all',
                      *args]

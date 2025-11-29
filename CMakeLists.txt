@@ -28,6 +28,6 @@ set(IREE_INPUT_STABLEHLO OFF)
 add_subdirectory(third_party/iree)
 
 add_custom_target(torq
-  DEPENDS iree-compile iree-run-module iree-opt third_party/iree/compiler/bindings/python/all third_party/iree/runtime/bindings/python/all
+  DEPENDS iree-compile torq-compile iree-run-module iree-opt third_party/iree/compiler/bindings/python/all third_party/iree/runtime/bindings/python/all
   COMMENT "Building Torq project with IREE"
 )

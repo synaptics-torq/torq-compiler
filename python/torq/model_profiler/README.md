@@ -25,7 +25,7 @@ Dependency:
 
 1. Generate compile time profiling using flag `--torq-enable-profiling` and `--torq-dump-profiling=./compile_profile.csv`
 ```
-/buildsrc/iree-synaptics-synpu/scripts/torq-compile /buildsrc/iree-build/third_party/iree/tools/iree-compile /buildsrc/iree-synaptics-synpu/tests/testdata/tosa_ops/conv-stride1-notile.mlir -o ./output_torq.vmfb --dump-compilation-phases-to=output_torq_phases --mlir-print-ir-after-all --mlir-print-ir-tree-dir=output_torq_passes  --torq-enable-profiling --torq-dump-profiling=./compile_profile.csv
+/buildsrc/iree-build/third_party/iree/tools/torq-compile /buildsrc/iree-synaptics-synpu/tests/testdata/tosa_ops/conv-stride1-notile.mlir -o ./output_torq.vmfb --dump-compilation-phases-to=output_torq_phases --mlir-print-ir-after-all --mlir-print-ir-tree-dir=output_torq_passes  --torq-enable-profiling --torq-dump-profiling=./compile_profile.csv
 ```
 
 2. Generate runtime profiling using flag `--torq_profile=./runtime_profile.csv`. Create sample input `in_rnd_0.npy`.

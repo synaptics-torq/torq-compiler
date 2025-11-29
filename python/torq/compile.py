@@ -19,9 +19,9 @@ def get_iree_version() -> str | None:
     import re
 
     try:
-        out = subprocess.check_output(["iree-compile", "--version"], text=True)
+        out = subprocess.check_output(["torq-compile", "--version"], text=True)
     except FileNotFoundError:
-        logger.warning("Failed to check iree-compile version; Ensure 'iree-compile' is installed and accessible from PATH")
+        logger.warning("Failed to check torq-compile version; Ensure 'torq-compile' is installed and accessible from PATH")
         return None
     m = re.search(r"IREE compiler version ([\w.\-+]+)", out)
     if not m:
@@ -174,10 +174,10 @@ def compile_mlir_for_vm(
             f.write(compiled_bytes)
     else:
         if not IREE_C_PYAPI:
-            logger.warning("IREE compile python API not found, will attempt fallback to `iree-compile` CLI")
+            logger.warning("IREE compile python API not found, will attempt fallback to `torq-compile` CLI")
         try:
             compile_cmd = [
-                "iree-compile",
+                "torq-compile",
                 str(mlir_model),
                 "-o", str(output_model)
             ] + [str(arg) for arg in compiler_args]
@@ -189,7 +189,7 @@ def compile_mlir_for_vm(
             )
         except FileNotFoundError:
             raise RuntimeError(
-                "iree-compile binary not found in PATH"
+                "torq-compile binary not found in PATH"
             ) from None
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
@@ -260,7 +260,7 @@ def add_iree_args(parser: argparse.ArgumentParser):
         "--use-iree-cli",
         action="store_true",
         default=False,
-        help="Enforce using the `iree-compile` binary instead of Python API"
+        help="Enforce using the `torq-compile` binary instead of Python API"
     )
 
 
@@ -372,7 +372,7 @@ def main():
             f"--iree-hal-dump-executable-intermediates-to={debug_dir}/exec",
             f"--dump-compilation-phases-to={debug_dir}/compile"
         ]
-        logger.debug("Added iree-compile debug args, current args: %s", str(iree_compile_args))
+        logger.debug("Added torq-compile debug args, current args: %s", str(iree_compile_args))
 
         output_model: Path = Path(output_dir / (model_file.stem + ".vmfb"))
         model_type: str = model_file.suffix.lower()

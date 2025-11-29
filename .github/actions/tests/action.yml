@@ -109,6 +109,7 @@ runs:
         LD_LIBRARY_PATH: ${{github.workspace}}/release/lib/
         SOC_IREE_RUN_MODULE: ${{github.workspace}}/release/tools/armhf-iree-run-module
         IREE_RUN_MODULE: ${{github.workspace}}/release/tools/iree-run-module
+        TORQ_COMPILE: ${{github.workspace}}/release/tools/torq-compile
         IREE_COMPILE: ${{github.workspace}}/release/tools/iree-compile
         IREE_OPT: ${{github.workspace}}/release/tools/iree-opt
         HF_TOKEN: ${{ inputs.hf_token }}

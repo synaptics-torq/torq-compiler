@@ -84,7 +84,7 @@ Each TFLite model goes through 4 stages:
 
 1. **Import**: `iree-import-tflite` → TOSA
 2. **Optimize**: `iree-opt` → MLIR
-3. **Compile**: `torq-compile iree-compile` → VMFB
+3. **Compile**: `torq-compile` → VMFB
 4. **Execute**: `iree-run-module` → Compare outputs
 
 Input and output `.npy` files are automatically downloaded from Hugging Face.
@@ -110,7 +110,7 @@ MODEL: model001 - conv_3X3_synai.tflite
 Processing: conv_3X3_synai.tflite
   Executing: iree-import-tflite ...
   Executing: iree-opt ...
-  Executing: torq-compile iree-compile ...
+  Executing: torq-compile ...
   Executing: iree-run-module ...
 ✅ SUCCESS - All outputs match!
 
