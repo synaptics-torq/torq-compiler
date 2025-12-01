@@ -510,7 +510,7 @@ bool foldBackwardRescale(Value &value, ScaleInfo &scaleInfo) {
     return true;
 }
 
-// ScaleClamp is normally expressed as a linalg generic with the following body:
+// ScaleClamp is normally expressed as a linalg generic with the following body for integer:
 // ^bb0(%in: i32, %in_3: i32, %in_4: i8, %out: i8):
 //  [%16 = arith.subi %in, %c196_i32 : i32] optional
 //   %17 = tosa.apply_scale %16, %in_3, %in_4 {double_round = true} : (i32, i32, i8) -> i32
@@ -521,6 +521,114 @@ bool foldBackwardRescale(Value &value, ScaleInfo &scaleInfo) {
 //   linalg.yield %21 : i8
 // The 2nd and 3rd args to apply_scale can be vectors or scalars
 // The addi is used to add the zero point and is optional
+
+static ScaleClampInfo foldForwardFloatTruncClamp(Value &value) {
+    ScaleClampInfo sci;
+    auto valueType = dyn_cast<ShapedType>(value.getType());
+    if (!valueType) {
+        LLVM_DEBUG({ llvm::errs() << "matching error value is not a ShapedType!\n"; });
+        return {};
+    }
+
+    if (!llvm::isa<FloatType>(valueType.getElementType())) {
+        return {};
+    }
+
+    // For floating point tensors the scale operation is not mandatory so we initialize
+    // it with meaningful default values
+    float max = std::numeric_limits<float>::max();
+    sci.max = reinterpret_cast<int32_t &>(max);
+    float min = std::numeric_limits<float>::lowest();
+    sci.min = reinterpret_cast<int32_t &>(min);
+
+    // If user of output is a linalg.generic whose body contains
+    // an arith.truncf, if its output is BF16 truncation pattern and
+    // forward `output` to that genericOp's result.
+    if (value.hasOneUse()) {
+        auto *userOp = *value.getUsers().begin();
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
+            Block *body = genericOp.getBody();
+
+            // Strict check: body has a truncf
+            if (isa<arith::TruncFOp>(body->front())) {
+                if (dyn_cast<arith::TruncFOp>(body->front()).getOut().getType().isBF16()) {
+                    value = genericOp.getResult(0);
+                }
+                else {
+                    LLVM_DEBUG({ llvm::dbgs() << "truncFOp output type request bf16\n"; });
+                    return {};
+                }
+            }
+        }
+    }
+
+    // check output clamp
+    valueType = dyn_cast<ShapedType>(value.getType());
+    if (!valueType) {
+        LLVM_DEBUG({ llvm::errs() << "matching error value is not a ShapedType!\n"; });
+        return {};
+    }
+
+    if (valueType.getElementType().isBF16()) {
+
+        linalg::GenericOp maybeClampOp = getSingleUser<linalg::GenericOp>(value);
+        if (!maybeClampOp) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "must have a single GenericOp of cmp and select for clamp\n";
+            });
+            return sci;
+        }
+
+        if (maybeClampOp.getNumDpsInits() != 1 || maybeClampOp.getNumDpsInputs() != 1) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "must have a single GenericOp of cmp and select for clamp\n";
+            });
+            return sci;
+        }
+
+        auto yieldOp = dyn_cast<linalg::YieldOp>(maybeClampOp.getBody()->getTerminator());
+        if (!yieldOp) {
+            LLVM_DEBUG({ llvm::dbgs() << "matching error yieldOp is not a yield!\n"; });
+            return sci;
+        }
+
+        // relax clamp check: iterate genericOp to find two selectOp otherwise it is not clampOp
+        Region &bodyRegion = maybeClampOp->getRegion(0);
+        Block &entryBlock = bodyRegion.front();
+        SmallVector<float, 2> vals;
+
+        // TODO: if there are more than 2 selectOp for some algo, need to add more check
+        int cnt = 2;
+
+        for (Operation &op : entryBlock) {
+
+            if (op.hasTrait<OpTrait::IsTerminator>())
+                continue;
+
+            if (auto selectOp = dyn_cast<arith::SelectOp>(op)) {
+                if (cnt <= 0) {
+                    llvm::errs() << "NOTE: there are more than 2 selectOp for clamp op\n";
+                }
+                cnt--;
+
+                auto trueValue = selectOp.getTrueValue();
+                float val = getFloatValue(trueValue).value();
+                vals.push_back(val);
+            }
+        }
+
+        if (!vals.empty() && vals.size() == 2 && vals[0] != vals[1]) {
+            sci.max = vals[0] > vals[1] ? vals[0] : vals[1];
+            sci.min = vals[0] < vals[1] ? vals[0] : vals[1];
+
+            value = maybeClampOp.getResult(0);
+        }
+        LLVM_DEBUG({ llvm::dbgs() << "sci.max: " << sci.max << " sci.min: " << sci.min << "\n"; });
+    }
+
+    return sci;
+}
+
 ScaleClampInfo foldForwardScaleClamp(
     Value &value, int scaleValuesCount, int shift8b, int shift16b, bool isElementWiseOp
 ) {
@@ -530,16 +638,9 @@ ScaleClampInfo foldForwardScaleClamp(
         LLVM_DEBUG({ llvm::errs() << "matching error value is not a ShapedType!\n"; });
         return {};
     }
+
     if (llvm::isa<FloatType>(valueType.getElementType())) {
-        // For floating point tensors the scale operation is not mandatory so we initialize
-        // it with meaningful default values
-        float max = std::numeric_limits<float>::max();
-        sci.max = reinterpret_cast<int32_t &>(max);
-        float min = std::numeric_limits<float>::lowest();
-        sci.min = reinterpret_cast<int32_t &>(min);
-        // We don't know yet how to match a float rescale & clamp, just return this default for now.
-        // TODO: match a float rescale & clamp when we have an actual example.
-        return sci;
+        return foldForwardFloatTruncClamp(value);
     }
 
     linalg::GenericOp genericOp = getSingleUser<linalg::GenericOp>(value);
@@ -907,7 +1008,7 @@ static LogicalResult foldTensorPad(
     return success();
 }
 
-PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter) {
+PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw) {
 
     // Process any extract_slice op and check there is no dynamic slice extraction
     Value val = value;
@@ -944,8 +1045,11 @@ PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter) {
     }
 
     // Check there is no padding except on the H and W dimensions
-    // Assume NHWC format
-    constexpr int hDim = 1, wDim = 2;
+    int hDim = 1, wDim = 2;
+    if (nchw) {
+        hDim = 2;
+        wDim = 3;
+    }
 
     for (size_t i = 0; i < padOffsetsBelow.size(); ++i) {
         if (i == hDim || i == wDim) {

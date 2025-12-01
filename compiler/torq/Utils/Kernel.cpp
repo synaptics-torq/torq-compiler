@@ -1917,7 +1917,6 @@ IData IRam::load(const LData &data) {
 
     Shape iramShape = data.subShape();
     auto idata = IData(iramShape, data.elementType());
-    llvm::errs() << "IRam load: " << idata << "\n";
     d->cedw(idata);
 
     // Adjust IRAM shape strides to natural strides, in IRAM data is contiguous

@@ -156,7 +156,7 @@ std::optional<int64_t> isFuseGroupOutput(Operation *op);
 // - return padding info if found and update value to the source tensor
 // - return null padding if not found
 // Update value to the input of the folded operations
-PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter);
+PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw = false);
 
 // Deduce scaling and zp by looking for a rescale backward
 // If a rescale is found, ScaleInfo information is adjusted accordingly

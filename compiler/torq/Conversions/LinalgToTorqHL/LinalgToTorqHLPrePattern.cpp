@@ -29,83 +29,11 @@
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/raw_ostream.h"
 #include <optional>
 
 #define DEBUG_TYPE "linalg-torq-pre-pattern"
 
 namespace mlir::syna::torq {
-
-Value applyPaddingIfNeeded(
-    Value input, RankedTensorType inputType, PatternRewriter &rewriter, Location loc,
-    const PaddingInfo &padInfo
-) {
-    int64_t padLeft = padInfo.lrtbPad[0];
-    int64_t padRight = padInfo.lrtbPad[1];
-
-    bool needsPad = (padLeft > 1 || padRight > 1);
-    if (!needsPad)
-        return input;
-
-    auto inputShape = inputType.getShape();
-    SmallVector<int64_t> paddedShape(inputShape.begin(), inputShape.end());
-    // paddedShape.back() += padLeft + padRight;
-
-    auto elemType = inputType.getElementType();
-
-    if (!elemType.isInteger(32)) {
-        llvm::errs() << "Unsupported element type for FillOp (only i32 supported)\n";
-        return input;
-    }
-
-    auto paddedType = RankedTensorType::get(paddedShape, elemType);
-    auto initTensor = rewriter.create<tensor::EmptyOp>(loc, paddedShape, elemType);
-
-    auto fillOp = rewriter.create<torq_hl::FillOp>(
-        loc,
-        paddedType,             // Output type
-        initTensor.getResult(), // Init tensor value
-        rewriter.getI32IntegerAttr(padInfo.padValue)
-    );
-    // Create InsertSliceOp: insert input tensor into padded tensor at correct offset
-    SmallVector<OpFoldResult> offsets(inputShape.size(), rewriter.getIndexAttr(0));
-    SmallVector<OpFoldResult> sizes;
-    SmallVector<OpFoldResult> strides(inputShape.size(), rewriter.getIndexAttr(1));
-
-    for (int64_t dim : inputShape)
-        sizes.push_back(rewriter.getIndexAttr(dim));
-
-    offsets.back() = rewriter.getIndexAttr(padLeft); // Insert input starting at padLeft
-
-    Value inserted = rewriter.create<tensor::InsertSliceOp>(
-        loc, input, fillOp.getOutput(), offsets, sizes, strides
-    );
-
-    return inserted;
-}
-
-void dumpModuleToFile(Operation *op, StringRef filename) {
-    // Traverse upward to find the parent module
-    mlir::Operation *parent = op;
-    while (parent && !llvm::isa<mlir::ModuleOp>(parent))
-        parent = parent->getParentOp();
-
-    if (!parent) {
-        llvm::errs() << "Failed to find parent ModuleOp for dumping IR.\n";
-        return;
-    }
-
-    std::error_code ec;
-    llvm::raw_fd_ostream file(filename, ec, llvm::sys::fs::OF_None);
-    if (ec) {
-        llvm::errs() << "Failed to open file " << filename << ": " << ec.message() << "\n";
-        return;
-    }
-
-    // Dump the whole module IR
-    parent->print(file, mlir::OpPrintingFlags().useLocalScope());
-}
 
 template <class LinalgConvOp, class TorqConvOp>
 struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
@@ -121,17 +49,19 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
     const int _shift16b;            // Scale shift for 16-bit integer operations
     MatchFn *_matchFn;              // Function to match the convolution operation
     const bool _markFuseGroups;     // When true, mark the TI operations, don't convert.
+    const bool
+        _2DNchwChw; // set nchw/nhwc info from linalg conv op which give accurate input layout
 
   public:
     using OpRewritePattern<LinalgConvOp>::OpRewritePattern;
     Conv2dConvert(
         MLIRContext *context, int channelDim, const Permutation &dataPerm,
         const Permutation &weightsPerm, int shift8b, int shift16b, MatchFn *matchFn,
-        bool markFuseGroups
+        bool markFuseGroups, bool isNchw = false
     )
         : OpRewritePattern<LinalgConvOp>(context), _channelDim(channelDim), _dataPerm(dataPerm),
           _weightsPerm(weightsPerm), _shift8b(shift8b), _shift16b(shift16b), _matchFn(matchFn),
-          _markFuseGroups(markFuseGroups) {}
+          _markFuseGroups(markFuseGroups), _2DNchwChw(isNchw) {}
 
     LogicalResult matchAndRewrite(LinalgConvOp convOp, PatternRewriter &rewriter) const override {
         if (_markFuseGroups && isMarkedFuseGroup(convOp)) {
@@ -158,7 +88,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         }
 
         // Fold padding if present
-        PaddingInfo padInfo = foldBackwardPadding(input, rewriter);
+        PaddingInfo padInfo = foldBackwardPadding(input, rewriter, _2DNchwChw);
 
         // Check if we can support this layer
         if (_matchFn && !_matchFn(shape, weightShape, padInfo.lrtbPad)) {
@@ -215,6 +145,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             // (We could multiply the scaling factor by 2 instead, but that could cause overflow)
             scInfo.scaleShift -= 1;
         }
+
         weightAttr = computeConstant(transposedWeights);
         auto torqWeights = createConst(weightAttr, rewriter, loc);
         if (!torqWeights) {
@@ -229,21 +160,8 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
 
         // Generate torq_hl op with input/output in the expected format
         input = transposeValue(input, _dataPerm, loc, rewriter);
-        // If the only user of output is a linalg.generic whose body contains
-        // an arith.truncf, treat it as part of a BF16 truncation pattern and
-        // forward `output` to that genericOp's result.
-        if (output.hasOneUse()) {
-            auto *userOp = *output.getUsers().begin();
-            if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
-                Block *body = genericOp.getBody();
-                // Strict check: body has a truncf
-                if (isa<arith::TruncFOp>(body->front())) {
-                    output = genericOp.getResult(0);
-                }
-            }
-        }
-        auto torqOutType = transposeType(output.getType(), _dataPerm);
         bool nhwcInput = _channelDim == 3 && _dataPerm.empty();
+        auto torqOutType = transposeType(output.getType(), _dataPerm);
         auto torqConvOp = rewriter.create<TorqConvOp>(
             loc, torqOutType, createInitTensor(convOp, rewriter, torqOutType), padInfo.padValue, 0,
             scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
@@ -1239,17 +1157,18 @@ void populateLinalgToTorqHLPrePatterns(
         context, 3, Permutation::nhwc2nchw(), Permutation::hwc2chw(), 20, 12, Check<3>::isKerSmall,
         markFuseGroups
     );
-    patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNchwChwOp, torq_hl::DepthwiseConv2DOp>>(
-        context, 1, Permutation::none(), Permutation::none(), 20, 12, Check<1>::isKerSmall,
-        markFuseGroups
-    );
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
         context, 3, Permutation::none(), Permutation::none(), 20, 12, Check<3>::isKerEqInput,
         markFuseGroups
     );
+
+    patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNchwChwOp, torq_hl::DepthwiseConv2DOp>>(
+        context, 1, Permutation::none(), Permutation::none(), 20, 12, Check<1>::isKerSmall,
+        markFuseGroups, true
+    );
     patterns.insert<Conv2dConvert<linalg::Conv2DNchwFchwOp, syna::torq_hl::Conv2DOp>>(
         context, 1, Permutation::none(), Permutation::none(), 28, 12, Check<1>::isKerSmall,
-        markFuseGroups
+        markFuseGroups, true
     );
 
     patterns.insert<PoolingNhwcMaxOpConversion>(context, markFuseGroups);
