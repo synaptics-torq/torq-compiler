@@ -84,20 +84,20 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
 
         size_t available_memory_for_tiling = available_memory_for_tiling_kb * 1024;
 
-        std::string cpu_features = parts[3].str();
-        std::string nss_features = parts[4].str();
+        std::string cpu_config = parts[3].str();
+        std::string nss_config = parts[4].str();
 
         llvm::outs() << "Custom Torq Hardware Configuration:\n";
         llvm::outs() << "  LRAM Size: " << lram_size << " bytes\n";
         llvm::outs() << "  Slice Count: " << slice_count << "\n";
         llvm::outs() << "  Available Memory for Tiling: " << available_memory_for_tiling
                      << " bytes\n";
-        llvm::outs() << "  CSS Features: " << cpu_features << "\n";
-        llvm::outs() << "  NSS Features: " << nss_features << "\n";
+        llvm::outs() << "  CSS Config: " << cpu_config << "\n";
+        llvm::outs() << "  NSS Config: " << nss_config << "\n";
 
         Val = TorqHw(
-            name, description, lram_size, slice_count, available_memory_for_tiling, cpu_features,
-            nss_features
+            name, description, lram_size, slice_count, available_memory_for_tiling, cpu_config,
+            nss_config
         );
 
         // no error

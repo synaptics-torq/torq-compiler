@@ -215,8 +215,6 @@ class CssLinker {
 
         std::string fullCommand = llvm::join(command, " ");
 
-        llvm::dbgs() << "Linking command: " << fullCommand << "\n";
-
         int ret = system(fullCommand.c_str());
 
         auto bareMetalFileData = libraryFile.read();

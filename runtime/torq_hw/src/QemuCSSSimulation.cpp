@@ -322,7 +322,7 @@ static void run_cpu_qemu_binary_ex(void *cpu, int debugger_port, bool trace_inst
 
     std::string qemu_cmd;
 
-    qemu_cmd += "qemu-system-riscv32 -nographic -M virt,memory-backend=" + memory_id + " -m 10M";
+    qemu_cmd += "qemu-system-riscv32 -cpu rv32,v=true,vlen=128,elen=32 -nographic -M virt,memory-backend=" + memory_id + " -m 10M";
     qemu_cmd += " -bios " + std::string(code_file);
     qemu_cmd += " -object memory-backend-file,size=10M,id=" + memory_id + ",mem-path=" + std::string(memory_file) + ",share=on,prealloc=on";
     

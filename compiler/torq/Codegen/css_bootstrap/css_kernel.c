@@ -52,6 +52,18 @@ static inline void halt() {
 
 #endif
 
+#ifdef ENABLE_VEC
+static inline void riscv_enable_vec(void) {
+    unsigned long mstatus;
+    asm volatile("csrr %0, mstatus" : "=r"(mstatus));
+
+    // Set VS=Initial (01)
+    mstatus |= (1UL << 9); // Set VS=01 (Initial)
+
+    asm volatile("csrw mstatus, %0" ::"r"(mstatus));
+}
+#endif
+
 #ifdef ENABLE_FP
 static inline void riscv_enable_fp(void) {
     unsigned long mstatus;
@@ -127,6 +139,18 @@ void css_sw_main(void *cpu) {
 
     setup_trap_handler();
 
+#ifdef ENABLE_FP
+    print("Enabling FP support...\n");
+    riscv_enable_fp();
+    print("FP support enabled.\n");
+#endif
+
+#ifdef ENABLE_VEC
+    print("Enabling Vector support...\n");
+    riscv_enable_vec();
+    print("Vector support enabled.\n");
+#endif
+
     print("Clearing interrupt...\n");
 
     clearIrq0(); // clear NSS2CSS IRQ
@@ -171,12 +195,6 @@ void css_sw_main(void *cpu) {
     print("\n");
 
     __stack_start = 0xDEADBEEF; // canary value to detect stack overflows
-
-#ifdef ENABLE_FP
-    print("Enabling FP support...\n");
-    riscv_enable_fp();
-    print("FP support enabled.\n");
-#endif
 
     print("Executing main...\n");
     main(&environment, &dispatch_state, &workgroup_state);
