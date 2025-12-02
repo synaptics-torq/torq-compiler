@@ -105,7 +105,9 @@ std::optional<int64_t> getConstIntValue(Value val);
 // return nullptr if no user or more than one user
 Operation *getSingleUser(Value value);
 
-template <class OpT> OpT getSingleUser(Value value) { return dyn_cast<OpT>(getSingleUser(value)); }
+template <class OpT> OpT getSingleUser(Value value) {
+    return dyn_cast_or_null<OpT>(getSingleUser(value));
+}
 
 // If maybeFuseGroupAttr is not std::nullopt and op implements TilingInterface,
 // add maybeFuseGroupAttr to the TORQ_FUSE_GROUP array attribute of op. If op
