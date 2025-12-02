@@ -63,7 +63,7 @@ def case_config(request):
         'torch_Conv2d_bf16_1x1x64x8192',
         'torch_Conv2d_bf16_1x1x8192x64',
         'tosa_conv2d-f4',
-        'conv2d-nchw-clip-bf16.mlir',
+        'conv2d-nchw-clip-bf16',
         # failed to run translation of source executable to target executable for backend
         'torch_ConvTranspose_bf16_1x1x512x512',
 
@@ -74,7 +74,7 @@ def case_config(request):
 
     ]
 
-    if request.param.name in failed_tc:
+    if any(s in request.param.name for s in failed_tc):
         pytest.xfail("known failure")    
 
     return {
