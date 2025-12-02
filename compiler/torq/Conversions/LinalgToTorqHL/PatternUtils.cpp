@@ -618,8 +618,8 @@ static ScaleClampInfo foldForwardFloatTruncClamp(Value &value) {
         }
 
         if (!vals.empty() && vals.size() == 2 && vals[0] != vals[1]) {
-            sci.max = vals[0] > vals[1] ? vals[0] : vals[1];
-            sci.min = vals[0] < vals[1] ? vals[0] : vals[1];
+            sci.max = llvm::bit_cast<uint32_t>(vals[0] > vals[1] ? vals[0] : vals[1]);
+            sci.min = llvm::bit_cast<uint32_t>(vals[0] < vals[1] ? vals[0] : vals[1]);
 
             value = maybeClampOp.getResult(0);
         }
