@@ -497,11 +497,22 @@ LRTBDim::LRTBDim(::llvm::ArrayRef<int64_t> lrtb) {
 
 LRTBDim LRTBDim::symmetric(const HWDim &dim) {
     LRTBDim b;
-    b.left = dim.w / 2;
+    b.left = (dim.w - 1) / 2;
     b.right = dim.w - b.left - 1;
-    b.top = dim.h / 2;
+    b.top = (dim.h - 1) / 2;
     b.bottom = dim.h - b.top - 1;
     return b;
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const HWDim &shape) {
+    os << "{h:" << shape.h << ", w:" << shape.w << "}";
+    return os;
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const LRTBDim &shape) {
+    os << "{l:" << shape.left << ", r:" << shape.right << ", t:" << shape.top
+       << ", b:" << shape.bottom << "}";
+    return os;
 }
 
 //
@@ -818,6 +829,8 @@ static torq_hw::MemDimTag tagToMemDimTag(ShapeItem::Tag tag, torq_hw::MemDimTag 
         return torq_hw::MemDimTag::A;
     case ShapeItem::Tag::KernelRows:
         return torq_hw::MemDimTag::J;
+    case ShapeItem::Tag::KernelCols:
+        return torq_hw::MemDimTag::I;
     }
     assert(false && "Unknown ShapeItem::Tag");
 }
@@ -906,13 +919,18 @@ int SlicePrivate::addMemNdlDims(
         ShapeItem::Tag tag{};
         int itemsCount = 0;
         const IterVar *iv{};
+        int loopIterCount = _forStack[i].count;
         for (int dataDimensionIx = 0; dataDimensionIx < ix.size(); dataDimensionIx++) {
             const IterVar &iterVar{ix[dataDimensionIx]};
             if (iterVar == i) {
-                if (_forStack[i].count > dataDims[dataDimensionIx].count) {
+                if (iterVar.divisor()) {
+                    // Special case to split the same loop between mem and reg based NDLs
+                    loopIterCount = div_ceil(loopIterCount, iterVar.divisor());
+                }
+                if (loopIterCount > dataDims[dataDimensionIx].count) {
                     llvm::errs() << "Out of bounds access to dimension " << dataDimensionIx
                                  << " of " << data.name() << data.shape()
-                                 << " with iteration count " << _forStack[i].count
+                                 << " with iteration count " << loopIterCount
                                  << " while generating " << type << "\n";
                     assert(false && "Out of bounds access");
                 }
@@ -924,10 +942,10 @@ int SlicePrivate::addMemNdlDims(
             }
         }
 
+        assert(!iv || !iv->modulo() && "Iteration with modulo not allowed here");
         if (stride.exprVal.has_value()) {
             assert((!iv || !iv->isReverse()) && "Reverse iteration not allowed with expr");
-            ndlDims.push_back(
-                {DimType::H, _forStack[i].tag, _forStack[i].count, stride.exprVal.value()}
+            ndlDims.push_back({DimType::H, _forStack[i].tag, loopIterCount, stride.exprVal.value()}
             );
         }
         else {
@@ -940,7 +958,7 @@ int SlicePrivate::addMemNdlDims(
             // this means that it will be covered by SDims, so use an A tag (with stride 0)
             // as required by the hardware
             auto memDimTag = useSDims && !iv ? MemDimTag::A : tagToMemDimTag(tag, _forStack[i].tag);
-            ndlDims.push_back({DimType::H, memDimTag, _forStack[i].count, strideVal * elementSize});
+            ndlDims.push_back({DimType::H, memDimTag, loopIterCount, strideVal * elementSize});
         }
     }
 
@@ -992,7 +1010,6 @@ int SlicePrivate::addMemNdlDims(
             assert(false && "unsupported subshape for SDIM");
         }
     }
-
     return offset * elementSize;
 }
 
@@ -1009,8 +1026,9 @@ void SlicePrivate::addDims(
     }
 
     // Check that the indexes are not referring to some loop before the load point
+    // This is allowed only for modulo indexes which generate their own local loop
     for (const auto &iterVar : ix) {
-        if (iterVar < loadNesting) {
+        if (iterVar < loadNesting && !iterVar.modulo()) {
             llvm::errs() << "Error, " << data << " uses index from loop " << iterVar
                          << " which is before load at level " << loadNesting << "\n";
             assert(false && "Invalid index in data");
@@ -1033,14 +1051,23 @@ void SlicePrivate::addDims(
         // in this case compute the stride from dataDims.
         // If not, this loop doesn't affect this data load, so this is a repeat with stride 0
         Stride stride(0);
+        int loopIterCount = _forStack[i].count;
         for (int dataDimensionIx = 0; dataDimensionIx < ix.size(); dataDimensionIx++) {
             const IterVar &iterVar{ix[dataDimensionIx]};
             if (iterVar == i) {
                 assert(!iterVar.isReverse() && "Reverse iteration not allowed here");
-                if (_forStack[i].count > dataDims[dataDimensionIx].count) {
+                assert(
+                    /*iterVar.modulo() ||*/ !iterVar.divisor() &&
+                    "Iteration with divisor not allowed here"
+                );
+                if (iterVar.modulo()) {
+                    // Special case to split the same loop between mem and reg based NDLs
+                    loopIterCount = iterVar.modulo();
+                }
+                if (loopIterCount > dataDims[dataDimensionIx].count) {
                     llvm::errs() << "Out of bounds access to dimension " << dataDimensionIx
                                  << " of " << data.name() << data.shape()
-                                 << " with iteration count " << _forStack[i].count
+                                 << " with iteration count " << loopIterCount
                                  << " while generating " << type << "\n";
                     assert(false && "Out of bounds access");
                 }
@@ -1055,7 +1082,7 @@ void SlicePrivate::addDims(
                 llvm::errs() << "Error, NDL " << type << " has too many repeats\n";
                 assert(false && "Too many repeats");
             }
-            auto repeatCount = _forStack[i].count;
+            auto repeatCount = loopIterCount;
             auto tag = repeatTags[repeatTagIx++];
             if (tag == RegDimTag::M && repeatCount > 256 && !bigM) {
                 // M only support small repeats, use next tag
@@ -1077,13 +1104,13 @@ void SlicePrivate::addDims(
                 llvm::errs() << "wDim.count: " << wDim.count << " wDim.stride : " << wDim.stride
                              << " strideVal: " << strideVal << "\n";
                 assert(wDim.count * wDim.stride == strideVal && "Cannot fuse");
-                wDim.count *= _forStack[i].count;
+                wDim.count *= loopIterCount;
             }
             else {
                 constexpr int strideTagsCount = sizeof(strideTags) / sizeof(strideTags[0]);
                 assert(strideTagIx < strideTagsCount && "Too many strides");
                 auto tag = strideTags[strideTagIx++];
-                ndlDims.push_back({DimType::H, tag, _forStack[i].count, strideVal});
+                ndlDims.push_back({DimType::H, tag, loopIterCount, strideVal});
             }
             prevDimIsRepeat = false;
         }
@@ -1268,7 +1295,6 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
     assert(dewr && "DEWR NDL not defined");
     auto ramWrCount = iterationCount(dewr);
     cewrDims.push_back({DimType::H, RegDimTag::T, ramWrCount});
-
     _ndls.add(NdlType::CEWR, cewrDims);
     ndlToStr(NdlType::CEWR, _ndls.getRegNdl(NdlType::CEWR));
 }
@@ -1389,7 +1415,7 @@ void SlicePrivate::cepr(const PData &pdata) {
 
     RegNdlDimsData ceprDims;
     ceprDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
-    ceprDims.push_back({DimType::L, RegDimTag::D, blockSize, HwInfo::pdat_width});
+    ceprDims.push_back({DimType::L, RegDimTag::D, elementCount(pdata.shape()), HwInfo::pdat_width});
 
     ceprDims.push_back({DimType::H, RegDimTag::N, innerIterCount(_stackCopy, _pram.loadNesting)});
     ceprDims.push_back({DimType::H, RegDimTag::T, outerIterCount(_stackCopy, _pram.loadNesting)});
@@ -1417,12 +1443,9 @@ void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
 
 void SlicePrivate::ref(const LData &data) {
     MemNdlDimsData refNdlDims;
-    for (auto shapeItem : data.shape()) {
-        refNdlDims.push_back({DimType::H, MemDimTag::O, shapeItem.count});
-    }
     if (_inputChannelHeight || _inputChannelWidth) {
-        refNdlDims.push_back({DimType::H, MemDimTag::Y, _inputChannelHeight, 0});
         refNdlDims.push_back({DimType::H, MemDimTag::X, _inputChannelWidth, 0});
+        refNdlDims.push_back({DimType::H, MemDimTag::Y, _inputChannelHeight, 0});
     }
 
     _ndls.add(NdlType::REF, refNdlDims);
@@ -1652,7 +1675,7 @@ QData SlicePrivate::actClamp(
     }
 
     acpr(pdata);
-    cepr(pdata); // TODO: why cepr is based on pdata?
+    cepr(pdata);
     acpw(dataType, weightSize);
 
     QData qdata({resultCount}, resultType);
@@ -2077,6 +2100,8 @@ int Alu::wWidth(DType wType) const {
     return HwInfo::wram_seg_width / weightSize;
 }
 
+int Alu::kerWidth() const { return 3; }
+
 //
 // Activation Unit
 //
@@ -2125,20 +2150,55 @@ Iterator::Iterator(Slice &kernel, const std::vector<int> &counts) : _kernel{kern
     }
 }
 
+Iterator::Iterator(const Iterator &other)
+    : _kernel{other._kernel}, _iterVars{other._iterVars}, _isCopy{true} {}
+
 Iterator::Iterator(Iterator &&other)
-    : _kernel{other._kernel}, _iterVars{std::move(other._iterVars)} {}
+    : _kernel{other._kernel}, _iterVars{std::move(other._iterVars)}, _isCopy{other._isCopy} {}
 
 Iterator::~Iterator() {
-    for (int i = 0; i < _iterVars.size(); ++i) {
-        _kernel.endfor();
+    if (!_isCopy) {
+        for (int i = 0; i < _iterVars.size(); ++i) {
+            _kernel.endfor();
+        }
     }
 }
 
-Iterator Iterator::reverse() {
+Iterator Iterator::reverse() & {
+    // We have been called from a named object, we don't want to change the original so
+    // we make a clone and return that one
+    Iterator clone(*this);
+    for (auto &iv : clone._iterVars) {
+        iv.reverse();
+    }
+    return clone;
+}
+
+Iterator Iterator::reverse() && {
+    // We have been called from a temporary, this could be the one when the loop is created
+    // so if we clone it the for loop will be destroyed immediately when the temporary goes away.
+    // In this case we move it so that the temporary destructor will do nothing.
     for (auto &iv : _iterVars) {
         iv.reverse();
     }
     return std::move(*this);
+}
+
+Iterator Iterator::operator/(int divisor) {
+    llvm::errs() << "Iterator::div called with itervars=" << _iterVars.size() << "\n";
+    assert(_iterVars.size() == 1 && "div can be applied only to single iterators");
+    Iterator clone(*this);
+    clone._iterVars.back().setDivisor(divisor);
+    return clone;
+}
+
+Iterator Iterator::operator%(int modulo) {
+    llvm::errs() << "Iterator::mod called with itervars=" << _iterVars.size() << "\n";
+    assert(_iterVars.size() == 1 && "mod can be applied only to single iterators");
+    // assert(_iterVars.back().divisor() && "mod can be applied only after div");
+    Iterator clone(*this);
+    clone._iterVars.back().setModulo(modulo);
+    return clone;
 }
 
 //

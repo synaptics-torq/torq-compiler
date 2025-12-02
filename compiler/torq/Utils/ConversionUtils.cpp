@@ -633,16 +633,18 @@ Value convertScalarToRankedTensor(Value &input, Location loc, PatternRewriter &r
 
 // Check if the Conv2DOp can be lowered using EK kernel
 bool hasEkLoweringConv2d(mlir::syna::torq_hl::Conv2DOp op) {
+    auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
+    int kh = weightShape[2];
+    int kw = weightShape[3];
     int32_t pad_left = op.getPad()[0];
     int32_t pad_right = op.getPad()[1];
-    if (pad_left != 1 || pad_right != 1) {
+    if (pad_left != kw / 2 || pad_right != kw / 2) {
         // Not supported by HW
         return false;
     }
 
     int stride = op.getStride()[0]; // FIXME: consider all stride values
-    auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
-    if (stride != 1 || weightShape[2] != 3 || weightShape[3] != 3) {
+    if (stride != 1 || kh > 7 || kw > 7) {
         // Not supported by this EK kernel
         return false;
     }
@@ -654,16 +656,18 @@ bool hasEkLoweringConv2d(mlir::syna::torq_hl::Conv2DOp op) {
 
 // Check if the DepthwiseConv2DOp can be lowered using EK kernel
 bool hasEkLoweringDwConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
+    auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
+    int kh = weightShape[2];
+    int kw = weightShape[3];
     int32_t pad_left = op.getPad()[0];
     int32_t pad_right = op.getPad()[1];
-    if (pad_left != 1 || pad_right != 1) {
+    if (pad_left != kw / 2 || pad_right != kw / 2) {
         // Not supported by HW
         return false;
     }
 
     int stride = op.getStride()[0]; // FIXME: consider all stride values
-    auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
-    if (stride != 1 || weightShape[2] != 3 || weightShape[3] != 3) {
+    if (stride != 1 || kh != 3 || kw != 3) {
         // Not supported by this EK kernel
         return false;
     }

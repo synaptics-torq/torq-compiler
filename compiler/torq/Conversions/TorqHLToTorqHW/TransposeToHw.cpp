@@ -58,7 +58,7 @@ LogicalResult convertToHw(torq_hl::TransposeOp op, PatternRewriter &rewriter) {
         }
     }
 
-    Slice slice;
+    Slice slice("transpose");
 
 #define TORQ_TRANSPOSE_WRITE_SEQUENTIAL false
 #if TORQ_TRANSPOSE_WRITE_SEQUENTIAL
@@ -140,7 +140,7 @@ LogicalResult convertToHw(torq_hl::TransposeOp op, PatternRewriter &rewriter) {
 
     rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
         op,                        // Operation to replace
-        "transpose",               // Task name
+        slice.name(),              // Task name
         ValueRange{op.getInput()}, // Input tensor
         ValueRange{},              // Weights
         ValueRange{},              // BiasScale tensor,

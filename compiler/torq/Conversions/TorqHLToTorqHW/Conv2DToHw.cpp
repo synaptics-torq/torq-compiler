@@ -26,7 +26,7 @@ using Dim = NCHW;
 
 // Layout of the in/out/weight tensors for processing
 struct In : Vectorized {
-    enum { N, C, KernelRows };
+    enum { N, C, KernelRows, KernelColGroups };
 };
 
 struct Out {
@@ -98,12 +98,20 @@ static torq_hw::SliceTaskOp lowerToHw(
     // Get out ch vector size from weight tensor (or less to handle peeled channels without padding)
     int outChVectSize = std::min(weight.dim(Weight::OCVectorItems), chCount);
 
-    // Vectorize input and add additional dimension to scan over the kernelDim.h input rows
+    // Vectorize input
     int vectStride = slice.alu.iWidth(input.elementType(), weight.elementType(), outChVectSize);
-    int vectSize = vectStride + kernelBorder.left + kernelBorder.right;
+    int vectSize = vectStride + std::min(kernelBorder.left + kernelBorder.right, 2);
+    input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride);
+
+    // Add additional dimension to scan over the kernelDim.h input rows
     int rowSize = output.dim(Dim::W);
     ShapeItem rowsDim(kernelDim.h, Stride(rowSize), ShapeItem::Tag::KernelRows);
-    input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride).insertDim(In::KernelRows, rowsDim);
+    input.insertDim(In::KernelRows, rowsDim);
+
+    // Add additional dimension to scan over the kernelDim.w/ColGroupSize input column groups
+    const int alukw = slice.alu.kerWidth();
+    ShapeItem colGroupsDim(div_ceil(kernelDim.w, alukw), Stride(alukw), ShapeItem::Tag::KernelCols);
+    input.insertDim(In::KernelColGroups, colGroupsDim);
 
     // Reshape output to match the processing layout
     output.reshapeDim(Dim::C, {-1, outChVectSize}, true);
@@ -120,11 +128,11 @@ static torq_hw::SliceTaskOp lowerToHw(
                 PData pdata;
                 For(auto ic = slice.iterate(input.dim(In::C))) {
                     For(auto kh = slice.iterate(kernelDim.h)) {
-                        IData idata = slice.iram.load(input[batch][ic][kh][iv]);
                         WData wdata = slice.wram.load(weight[ocv][ic][kh]);
-                        idata.setShape({{kernelDim.w, Stride(1)}, vectStride});
                         For(auto kw = slice.iterate(kernelDim.w)) {
-                            pdata = slice.alu.outerProductAccumulate(idata[kw], wdata[kw]);
+                            IData idata = slice.iram.load(input[batch][ic][kh][kw / alukw][iv]);
+                            idata.setShape({{std::min(kernelDim.w, alukw), Stride(1)}, vectStride});
+                            pdata = slice.alu.outerProductAccumulate(idata[kw % alukw], wdata[kw]);
                         }
                     }
                 }

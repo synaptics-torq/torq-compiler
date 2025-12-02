@@ -42,8 +42,9 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Stride &shape);
 struct ShapeItem {
     enum class Tag {
         None,
-        Main,      // Main (vectorized) data dimension
-        KernelRows // Dimension associated to kernel row index
+        Main,       // Main (vectorized) data dimension
+        KernelRows, // Dimension associated to kernel row index
+        KernelCols  // Dimension associated to kernel column index
     };
     ShapeItem(int64_t count) : count(int(count)) {}
     ShapeItem(int64_t count, Stride stride, Tag tag = Tag::None)
@@ -71,9 +72,13 @@ class IterVar {
     IterVar(int iterId) : _iterId(iterId) {}
 
     void reverse() { _reverse = !_reverse; }
+    void setDivisor(int divisor) { _divisor = divisor; }
+    void setModulo(int modulo) { _modulo = modulo; }
 
     // Check if iteration variable is reversed
     bool isReverse() const { return _reverse; }
+    int divisor() const { return _divisor; }
+    int modulo() const { return _modulo; }
 
     operator int() const { return _iterId; }
 
@@ -82,6 +87,13 @@ class IterVar {
 
     // If reverse go backward from last element to the first
     bool _reverse{};
+
+    // Division mode. The actual count for the NDL dim is computed by dividing the
+    // corresponding loop count by _divisor.
+    int _divisor{0};
+
+    // Modulo mode. An additional dim with count of _modulo is added to the corresponding NDL dim.
+    int _modulo{0};
 };
 
 // Indexes of a tensor
@@ -113,6 +125,7 @@ struct HWDim {
     int h{};
     int w{};
 };
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const HWDim &shape);
 
 // Dimension structure for Left, Right, Top, Bottom
 // Can be used for 2D kernel size and padding specification
@@ -129,6 +142,7 @@ struct LRTBDim {
     int top{};
     int bottom{};
 };
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const LRTBDim &shape);
 
 // Represent a data tensor in memory
 // Data is defined by a shape, and it is possible to access a subset of it using indexes.
@@ -469,6 +483,10 @@ class Alu : SliceComponent {
 
     // Max number of weight items that can be processed in parallel
     int wWidth(DType wType) const;
+
+    // Max kernel with that can be handled directly by the ALU.
+    // Above this threshold it is necessary to load each row multple times.
+    int kerWidth() const;
 };
 
 // Activation Unit
@@ -620,7 +638,7 @@ class Slice {
 // Helper class that calls forall in the constructor and endfor when going out of scope
 class Iterator {
   public:
-    Iterator(const Iterator &) = delete;
+    Iterator(const Iterator &);
     Iterator(Iterator &&);
     Iterator &operator=(const Iterator &) = delete;
     Iterator(Slice &kernel, int count);
@@ -628,7 +646,20 @@ class Iterator {
     ~Iterator();
 
     // Revert the iterator direction, from last to first
-    Iterator reverse();
+    Iterator reverse() &;
+    Iterator reverse() &&;
+
+    // Divide the corresponding loop count by divisor
+    // Only supported for LRAM-based iterations
+    Iterator operator/(int divisor);
+
+    // Add an additional dimension with count of divisor
+    // Only supported for internal-memory-based iterations
+    // To be used in combination with division mode on the same iter variable with the same value.
+    // The two modes together allow to split a loop in two parts, an outer part used to load data
+    // from LRam to internal memory, and an inner part to load data from internal memory to ALU.
+    // The original loop count doesn't have to be multiple of the modulo.
+    Iterator operator%(int divisor);
 
     operator bool() const { return true; }
     operator Indexes() const { return _iterVars; }
@@ -636,6 +667,7 @@ class Iterator {
   private:
     Slice &_kernel;
     Indexes _iterVars;
+    bool _isCopy{};
 };
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Iterator &iterator);
 
