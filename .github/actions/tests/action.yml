@@ -116,36 +116,6 @@ runs:
         ${{github.workspace}}/python
         EOF
 
-    - name: Install boto3
-      shell: bash
-      run: |
-        pip3 install boto3
-
-    - name: Download precomputed test cache
-      if: ${{ inputs.precomputed_cache != '' }}
-      shell: bash
-      env:
-        PRECOMPUTED_CACHE: ${{ inputs.precomputed_cache }}
-      run: |        
-        set -x
-
-        mkdir -p .pytest_cache/d/
-        cd .pytest_cache/d/
-
-        python3 - <<EOF
-        import boto3        
-        import os
-
-        s3_path = os.environ['PRECOMPUTED_CACHE']
-        bucket, key = s3_path.replace("s3://", "").split("/", 1)
-
-        s3 = boto3.client("s3")
-        s3.download_file(bucket, key, "cache.tar.gz")
-        EOF
-        
-        tar -zxf cache.tar.gz
-        rm cache.tar.gz
-
     - name: Run pytest
       shell: bash
       env:
@@ -175,39 +145,3 @@ runs:
         path: cache.tar.gz
         retention-days: 7 # delete quickly because these are very large
 
-    - name: Upload cache to S3
-      if: ${{ inputs.s3_bucket != '' }}
-      shell: bash
-      env:        
-        S3_BUCKET: ${{ inputs.s3_bucket }}
-        CACHE_FILE: 
-      run: |
-
-        set -x
-
-        python3 - <<EOF
-        import os
-        import uuid
-        import boto3
-
-        artifact_name = f"artifact-{uuid.uuid4()}.tar.gz"
-
-        s3_bucket = os.environ['S3_BUCKET']
-
-        s3 = boto3.client("s3")
-
-        # the options needs to be whitelisted to be used (See https://github.com/boto/boto3/issues/4366)
-        boto3.s3.transfer.S3Transfer.ALLOWED_UPLOAD_ARGS.append("IfNoneMatch")
-        
-        # Add If-None-Match header to avoid overwriting if the object exists (required by policy)
-        s3.upload_file("cache.tar.gz", s3_bucket, artifact_name, ExtraArgs={"IfNoneMatch": "*"})
-
-        # Output the S3 path for GitHub Actions
-        print(f"s3_cache_path=s3://{s3_bucket}/{artifact_name}")
-        with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-          out.write(f"s3_cache_path=s3://{s3_bucket}/{artifact_name}\n")
-        EOF
-
-
-
-        
