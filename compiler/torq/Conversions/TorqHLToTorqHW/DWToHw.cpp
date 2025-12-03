@@ -26,7 +26,7 @@ using Dim = NCHW;
 
 // Layout of the in/out/weight tensors for processing
 struct In {
-    enum { N, CVectors, IVectors, KernelRows, CVectorItems };
+    enum { N, CVectors, IVectors, KernelRows, KernelColGroups, CVectorItems };
 };
 
 struct Out {
@@ -38,9 +38,21 @@ struct Weight {
     enum { OCVectors, IC, H, W, OCVectorItems };
 };
 
-// TODO: find a .h where to put these utility functions
+// TODO: find a .h where to put this utility function
 void convAdjustPadding(LData &input, const LRTBDim &pad, const LRTBDim &kernelBorder);
-void convGetSubview(LData &output, LData &weight, LData &biasScale, int chOffs, int chCount);
+
+// Get subview of input, output, weight and biasScale tensors for the given channel offset and count
+static void
+getSubview(LData &input, LData &output, LData &weight, LData &biasScale, int chOffs, int chCount) {
+    int sbWidth = scaleBiasWidth(output.elementType());
+    auto wDims = weight.dims();
+    int outChVectSize = wDims.size() > Weight::OCVectorItems ? wDims[Weight::OCVectorItems] : 1;
+    assert(chOffs % outChVectSize == 0);
+    input.subviewDim(Dim::C, chOffs, chCount);
+    output.subviewDim(Dim::C, chOffs, chCount);
+    weight.subviewDim(Weight::OCVectors, chOffs / outChVectSize, div_ceil(chCount, outChVectSize));
+    biasScale.subviewDim(0, chOffs * sbWidth, chCount * sbWidth);
+}
 
 // Lower torq_hl op to SliceTaskOp
 static torq_hw::SliceTaskOp lowerToHw(
@@ -60,7 +72,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     if (weight.dims().size() <= Weight::OCVectorItems) {
         weight.insertDim(Weight::OCVectorItems, {1});
     }
-    convGetSubview(output, weight, biasScale, chOffset, chCount);
+    getSubview(input, output, weight, biasScale, chOffset, chCount);
 
     // FIXME Adjust stride & padding for stride 2 case (also consider all stride values)
     HWDim kernelDim(weight.dim(Weight::H), weight.dim(Weight::W));
@@ -78,21 +90,26 @@ static torq_hw::SliceTaskOp lowerToHw(
     int outChVectSize = std::min(weight.dim(Weight::OCVectorItems), chCount);
 
     // Vectorize input
+    const int alukw = slice.alu.kerWidth();
     int vectStride = slice.alu.iWidth(input.elementType(), weight.elementType(), outChVectSize);
-    int vectSize = vectStride + kernelBorder.left + kernelBorder.right;
+    int vectSize = vectStride + std::min(kernelBorder.left + kernelBorder.right, alukw - 1);
     input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride);
 
     // Split the C dimension into CVectors and CVectorItems
     input.reshapeDim(Dim::C, {-1, outChVectSize}, true);
 
     // Move CVectorItems dimension after IVectors so that we can load 4 IVectors in parallel
-    // from neighboring channels (use CVectorItems -1 because Rows dim not yet inserted)
-    input.moveDim(In::CVectors + 1, In::CVectorItems - 1);
+    // from neighboring channels (use CVectorItems -2 because Rows & Cols dim not yet inserted)
+    input.moveDim(In::CVectors + 1, In::CVectorItems - 2);
 
     // Add additional dimension to scan over the kernelDim.h input rows
     int rowSize = output.dim(Dim::W);
     ShapeItem rowsDim(kernelDim.h, Stride(rowSize), ShapeItem::Tag::KernelRows);
     input.insertDim(In::KernelRows, rowsDim);
+
+    // Add additional dimension to scan over the kernelDim.w/ColGroupSize input column groups
+    ShapeItem colGroupsDim(div_ceil(kernelDim.w, alukw), Stride(alukw), ShapeItem::Tag::KernelCols);
+    input.insertDim(In::KernelColGroups, colGroupsDim);
 
     // Reshape output to match the processing layout
     output.reshapeDim(Dim::C, {-1, outChVectSize}, true);
@@ -116,10 +133,12 @@ static torq_hw::SliceTaskOp lowerToHw(
                     For(auto kh = slice.iterate(kernelDim.h)) {
                         // Load vectors from neighboring channels
                         WData wdata = slice.wram.load(weight[ocv][ic][kh]);
-                        IData idata = slice.iram.load(input[batch][ocv][iv][kh]);
-                        idata.setShape({{kernelDim.w, Stride(1)}, idata.dim(0), vectStride});
                         For(auto kw = slice.iterate(kernelDim.w)) {
-                            pdata = slice.alu.multiScalarProductAccumulate(idata[kw], wdata[kw]);
+                            IData idata = slice.iram.load(input[batch][ocv][iv][kh][kw / alukw]);
+                            idata.setShape({{alukw, Stride(1)}, idata.dim(0), vectStride});
+                            pdata = slice.alu.multiScalarProductAccumulate(
+                                idata[kw % alukw], wdata[kw]
+                            );
                         }
                     }
                 }

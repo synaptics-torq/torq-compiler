@@ -55,7 +55,7 @@ void convAdjustPadding(LData &input, const LRTBDim &pad, const LRTBDim &kernelBo
 }
 
 // Get subview of output, weight and biasScale tensors for the given output channel offset and count
-void convGetSubview(LData &output, LData &weight, LData &biasScale, int chOffs, int chCount) {
+static void getSubview(LData &output, LData &weight, LData &biasScale, int chOffs, int chCount) {
     int sbWidth = scaleBiasWidth(output.elementType());
     auto wDims = weight.dims();
     int outChVectSize = wDims.size() > Weight::OCVectorItems ? wDims[Weight::OCVectorItems] : 1;
@@ -64,6 +64,28 @@ void convGetSubview(LData &output, LData &weight, LData &biasScale, int chOffs, 
     weight.subviewDim(Weight::OCVectors, chOffs / outChVectSize, div_ceil(chCount, outChVectSize));
     biasScale.subviewDim(0, chOffs * sbWidth, chCount * sbWidth);
 }
+
+/*
+The classical algorithm to compute a 2D convolution on a 4D NCHW tensor consists of 7 nested loops.
+The 4 outermost loops are used to iterate over each position in the NCHW output tensor.
+The 3 innermost loops are needed to multiply and accumulate the input region associated with each
+output pixel by the corresponding weights (each input region has shape [InputChannels, KH, KW]).
+The structure of the kernel below closely resembles this algorithm, with a few changes to take
+advantage of the hardware capabilities:
+1) Instead of computing one output value at a time, we compute P output values on Q channels in
+   parallel. P and Q depend on the ALU mode and data-type, typical is 64x4.
+2) We have just 6 loops, not 7. Instead of explicitly iterating over the H,W dimensions we flatten
+   both to a single dimension of data vectors. The NPU takes care of inserting padding values
+   where needed.
+3) To handle input vectors and channel vectors we add the required dimensions to the tensors
+4) Moving horizontally on a line to fetch the input vectors (inner loop on KW) would generate a lot
+   of LRam traffic to get data that is overlapping except for one pixel. To avoid this we load to
+   IRam two additional pixels each time, so that for 3 iterations the ALU input data can be fecthed
+   directly from IRam. For kernels KW > 3 this is parallelized with the loading of the next vector.
+   The data loaded to IRam is resized from a vector of size [P+2] to an array of size
+   [{3:stride(1)}, P] so that at each iteration shifting by one pixel the data loaded to the ALU
+   can be done simply by indexing the first dimension.
+*/
 
 // Lower torq_hl op to SliceTaskOp
 static torq_hw::SliceTaskOp lowerToHw(
@@ -81,7 +103,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     if (weight.dims().size() <= Weight::OCVectorItems) {
         weight.insertDim(Weight::OCVectorItems, {1});
     }
-    convGetSubview(output, weight, biasScale, chOffset, chCount);
+    getSubview(output, weight, biasScale, chOffset, chCount);
 
     // FIXME Adjust stride & padding for stride 2 case (also consider all stride values)
     HWDim kernelDim(weight.dim(Weight::H), weight.dim(Weight::W));
@@ -99,8 +121,9 @@ static torq_hw::SliceTaskOp lowerToHw(
     int outChVectSize = std::min(weight.dim(Weight::OCVectorItems), chCount);
 
     // Vectorize input
+    const int alukw = slice.alu.kerWidth();
     int vectStride = slice.alu.iWidth(input.elementType(), weight.elementType(), outChVectSize);
-    int vectSize = vectStride + std::min(kernelBorder.left + kernelBorder.right, 2);
+    int vectSize = vectStride + std::min(kernelBorder.left + kernelBorder.right, alukw - 1);
     input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride);
 
     // Add additional dimension to scan over the kernelDim.h input rows
@@ -109,7 +132,6 @@ static torq_hw::SliceTaskOp lowerToHw(
     input.insertDim(In::KernelRows, rowsDim);
 
     // Add additional dimension to scan over the kernelDim.w/ColGroupSize input column groups
-    const int alukw = slice.alu.kerWidth();
     ShapeItem colGroupsDim(div_ceil(kernelDim.w, alukw), Stride(alukw), ShapeItem::Tag::KernelCols);
     input.insertDim(In::KernelColGroups, colGroupsDim);
 
@@ -131,7 +153,7 @@ static torq_hw::SliceTaskOp lowerToHw(
                         WData wdata = slice.wram.load(weight[ocv][ic][kh]);
                         For(auto kw = slice.iterate(kernelDim.w)) {
                             IData idata = slice.iram.load(input[batch][ic][kh][kw / alukw][iv]);
-                            idata.setShape({{std::min(kernelDim.w, alukw), Stride(1)}, vectStride});
+                            idata.setShape({{alukw, Stride(1)}, vectStride});
                             pdata = slice.alu.outerProductAccumulate(idata[kw % alukw], wdata[kw]);
                         }
                     }

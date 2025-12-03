@@ -437,9 +437,9 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const IterVar &iv) {
     if (iv.isReverse())
-        os << "R(" << static_cast<int>(iv) << ")";
+        os << "R(" << static_cast<int>(iv.iterId()) << ")";
     else
-        os << static_cast<int>(iv);
+        os << static_cast<int>(iv.iterId());
     return os;
 }
 
@@ -922,7 +922,7 @@ int SlicePrivate::addMemNdlDims(
         int loopIterCount = _forStack[i].count;
         for (int dataDimensionIx = 0; dataDimensionIx < ix.size(); dataDimensionIx++) {
             const IterVar &iterVar{ix[dataDimensionIx]};
-            if (iterVar == i) {
+            if (iterVar.iterId() == i) {
                 if (iterVar.divisor()) {
                     // Special case to split the same loop between mem and reg based NDLs
                     loopIterCount = div_ceil(loopIterCount, iterVar.divisor());
@@ -1028,7 +1028,7 @@ void SlicePrivate::addDims(
     // Check that the indexes are not referring to some loop before the load point
     // This is allowed only for modulo indexes which generate their own local loop
     for (const auto &iterVar : ix) {
-        if (iterVar < loadNesting && !iterVar.modulo()) {
+        if (iterVar.iterId() < loadNesting && !iterVar.modulo()) {
             llvm::errs() << "Error, " << data << " uses index from loop " << iterVar
                          << " which is before load at level " << loadNesting << "\n";
             assert(false && "Invalid index in data");
@@ -1054,7 +1054,7 @@ void SlicePrivate::addDims(
         int loopIterCount = _forStack[i].count;
         for (int dataDimensionIx = 0; dataDimensionIx < ix.size(); dataDimensionIx++) {
             const IterVar &iterVar{ix[dataDimensionIx]};
-            if (iterVar == i) {
+            if (iterVar.iterId() == i) {
                 assert(!iterVar.isReverse() && "Reverse iteration not allowed here");
                 assert(
                     /*iterVar.modulo() ||*/ !iterVar.divisor() &&
@@ -1166,6 +1166,16 @@ void SlicePrivate::actSetNumberFormat(DType dtype) {
     }
 }
 
+// return value rounded up to the next valid value, 0 if too big
+static int roundUp(int value, const int *validValues) {
+    while (int validValue = *validValues++) {
+        if (value <= validValue) {
+            return validValue;
+        }
+    }
+    return 0;
+}
+
 void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
     Shape shape = idata.subShape();
     const int elementSize = sizeofType(idata.elementType());
@@ -1182,28 +1192,25 @@ void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
         biCount *= weightSize;
     }
     cedrDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
-    int dSize = bi.size;
-    int dCount = biCount * dSize;
-    // Note: HW API requires a dCount of 8/16/32/64
-    if (dCount <= 8)
-        dSize = 8 / biCount;
-    else if (dCount <= 16)
-        dSize = 16 / biCount;
-    else if (dCount <= 32)
-        dSize = 32 / biCount;
-    else if (dCount <= 64)
-        dSize = 64 / biCount;
-    else {
+    static const int sValidDataCount[] = {8, 16, 32, 64, 0};
+    int dCount = biCount * bi.size;
+    int dSize = roundUp(dCount, sValidDataCount) / biCount;
+    if (!dSize) {
         llvm::errs() << "Invalid CEDR block size: " << dSize << "\n";
         assert(false && "Invalid CEDR block size");
     }
+
     cedrDims.push_back({DimType::L, RegDimTag::D, dSize, elementSize});
     if (bi.sgGroups > 1 || bi.outerGroups > 1) {
         // Not sure if stride is actually used by HW here
         int stride = bi.stride.intVal.has_value() ? bi.stride.intVal.value() : 1;
-        cedrDims.push_back(
-            {DimType::L, RegDimTag::G, bi.sgGroups * bi.outerGroups, stride * elementSize}
-        );
+        static const int sValidGroupCount[] = {1, 4, 8, 16, 32, 0};
+        int groupCount = roundUp(bi.sgGroups * bi.outerGroups, sValidGroupCount);
+        if (!groupCount) {
+            llvm::errs() << "Invalid CEDR group size: " << groupCount << "\n";
+            assert(false && "Invalid CEDR group size");
+        }
+        cedrDims.push_back({DimType::L, RegDimTag::G, groupCount, stride * elementSize});
     }
 
     // Now add hdims for each loop deeper the iram load
@@ -1380,16 +1387,9 @@ void SlicePrivate::acpr(const PData &pdata) {
     // Generate ACPR to load the partials from PRAM to ACT
     RegNdlDimsData acprDims;
     acprDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
-    int dSize = blockSize;
-    if (dSize <= 2)
-        dSize = 2;
-    else if (dSize <= 4)
-        dSize = 4;
-    else if (dSize <= 8)
-        dSize = 8;
-    else if (dSize <= 16)
-        dSize = 16;
-    else {
+    static const int sValidDataSizes[] = {2, 4, 8, 16, 0};
+    int dSize = roundUp(blockSize, sValidDataSizes);
+    if (!dSize) {
         llvm::errs() << "Invalid ACPR block size: " << dSize << "\n";
         assert(false && "Invalid ACPR block size");
     }
@@ -2185,7 +2185,6 @@ Iterator Iterator::reverse() && {
 }
 
 Iterator Iterator::operator/(int divisor) {
-    llvm::errs() << "Iterator::div called with itervars=" << _iterVars.size() << "\n";
     assert(_iterVars.size() == 1 && "div can be applied only to single iterators");
     Iterator clone(*this);
     clone._iterVars.back().setDivisor(divisor);
@@ -2193,9 +2192,7 @@ Iterator Iterator::operator/(int divisor) {
 }
 
 Iterator Iterator::operator%(int modulo) {
-    llvm::errs() << "Iterator::mod called with itervars=" << _iterVars.size() << "\n";
     assert(_iterVars.size() == 1 && "mod can be applied only to single iterators");
-    // assert(_iterVars.back().divisor() && "mod can be applied only after div");
     Iterator clone(*this);
     clone._iterVars.back().setModulo(modulo);
     return clone;

@@ -70,6 +70,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape);
 class IterVar {
   public:
     IterVar(int iterId) : _iterId(iterId) {}
+    int iterId() const { return _iterId; }
 
     void reverse() { _reverse = !_reverse; }
     void setDivisor(int divisor) { _divisor = divisor; }
@@ -79,8 +80,6 @@ class IterVar {
     bool isReverse() const { return _reverse; }
     int divisor() const { return _divisor; }
     int modulo() const { return _modulo; }
-
-    operator int() const { return _iterId; }
 
   private:
     int _iterId;

@@ -642,15 +642,16 @@ bool hasEkLoweringConv2d(mlir::syna::torq_hl::Conv2DOp op) {
         // Not supported by HW
         return false;
     }
-
     int stride = op.getStride()[0]; // FIXME: consider all stride values
     if (stride != 1 || kh > 7 || kw > 7) {
+        // Not supported by this HW
+        return false;
+    }
+    if (weightShape.size() == 5 && weightShape[4] > 4) {
         // Not supported by this EK kernel
         return false;
     }
-    if (op.getVectorizationMode() != torq_hl::VectorizationModeEnum::_64x4) {
-        return false;
-    }
+
     return true;
 }
 
@@ -667,13 +668,12 @@ bool hasEkLoweringDwConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
     }
 
     int stride = op.getStride()[0]; // FIXME: consider all stride values
-    if (stride != 1 || kh != 3 || kw != 3) {
-        // Not supported by this EK kernel
+    if (stride != 1 || kh > 7 || kw > 7) {
+        // Not supported by HW
         return false;
     }
     if (weightShape.size() == 5 && weightShape[4] != 4) {
         // Not supported by this EK kernel
-        llvm::errs() << "DepthwiseConv2DOp with mode != 4 not supported by EK lowering\n";
         return false;
     }
 
