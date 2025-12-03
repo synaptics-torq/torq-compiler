@@ -434,7 +434,7 @@ class FullyConnectedKernelSelection : public OpRewritePattern<torq_hl::FullyConn
         }
 
         auto convWeights = constOp.getValue();
-        auto weightValues = mlir::cast<DenseIntElementsAttr>(convWeights);
+        auto weightValues = mlir::cast<DenseIntOrFPElementsAttr>(convWeights);
         auto weightData = weightValues.getRawData().vec();
         auto weightShape = weightValues.getType().getShape().vec();
 

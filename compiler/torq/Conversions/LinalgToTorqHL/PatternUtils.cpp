@@ -510,6 +510,28 @@ bool foldBackwardRescale(Value &value, ScaleInfo &scaleInfo) {
     return true;
 }
 
+// If user of output is a linalg.generic whose body contains
+// an arith.truncf, if its output is BF16 truncation pattern and
+// forward `output` to that genericOp's result.
+static void foldForwardTruncFOp(Value &value) {
+    if (value.hasOneUse()) {
+        auto *userOp = *value.getUsers().begin();
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
+            Block *body = genericOp.getBody();
+
+            // Strict check: body has a truncf
+            if (isa<arith::TruncFOp>(body->front())) {
+                if (dyn_cast<arith::TruncFOp>(body->front()).getOut().getType().isBF16()) {
+                    value = genericOp.getResult(0);
+                }
+                else {
+                    LLVM_DEBUG({ llvm::dbgs() << "truncFOp output type request bf16\n"; });
+                }
+            }
+        }
+    }
+}
+
 // ScaleClamp is normally expressed as a linalg generic with the following body for integer:
 // ^bb0(%in: i32, %in_3: i32, %in_4: i8, %out: i8):
 //  [%16 = arith.subi %in, %c196_i32 : i32] optional
@@ -541,26 +563,7 @@ static ScaleClampInfo foldForwardFloatTruncClamp(Value &value) {
     float min = std::numeric_limits<float>::lowest();
     sci.min = reinterpret_cast<int32_t &>(min);
 
-    // If user of output is a linalg.generic whose body contains
-    // an arith.truncf, if its output is BF16 truncation pattern and
-    // forward `output` to that genericOp's result.
-    if (value.hasOneUse()) {
-        auto *userOp = *value.getUsers().begin();
-        if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
-            Block *body = genericOp.getBody();
-
-            // Strict check: body has a truncf
-            if (isa<arith::TruncFOp>(body->front())) {
-                if (dyn_cast<arith::TruncFOp>(body->front()).getOut().getType().isBF16()) {
-                    value = genericOp.getResult(0);
-                }
-                else {
-                    LLVM_DEBUG({ llvm::dbgs() << "truncFOp output type request bf16\n"; });
-                    return {};
-                }
-            }
-        }
-    }
+    foldForwardTruncFOp(value);
 
     // check output clamp
     valueType = dyn_cast<ShapedType>(value.getType());
@@ -1211,6 +1214,17 @@ bool foldForwardPerChannelAdd(
     Value &value, int channelDim, VectorIntOrFloat &bias, int32_t *input_zp, Value inValue,
     int32_t *w_zp
 ) {
+    auto valueType = dyn_cast<ShapedType>(value.getType());
+    if (!valueType) {
+        LLVM_DEBUG({ llvm::errs() << "matching error value is not a ShapedType!\n"; });
+        return {};
+    }
+
+    // bf16 there is truncfOp for fp32 to bf16, fold truncfOp
+    if (llvm::isa<FloatType>(valueType.getElementType())) {
+        foldForwardTruncFOp(value);
+    }
+
     linalg::GenericOp addOp = getSingleUser<linalg::GenericOp>(value);
     if (!addOp || addOp.getNumDpsInputs() > (inValue ? 3 : 2)) {
         // Normal case is two inputs, one for the value to add to and one for the bias

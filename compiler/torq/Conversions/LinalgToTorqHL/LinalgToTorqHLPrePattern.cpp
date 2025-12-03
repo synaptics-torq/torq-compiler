@@ -394,17 +394,17 @@ struct PoolingNhwcMaxOpConversion : public OpRewritePattern<linalg::PoolingNhwcM
     }
 };
 
-struct FCMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
+template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy> {
   private:
     const bool _markFuseGroups;
 
   public:
-    using OpRewritePattern::OpRewritePattern;
-    FCMatmulOpConversion(MLIRContext *context, bool markFuseGroups)
-        : OpRewritePattern(context), _markFuseGroups(markFuseGroups) {}
+    using OpRewritePattern<OpTy>::OpRewritePattern;
 
-    LogicalResult
-    matchAndRewrite(linalg::MatmulOp srcOp, PatternRewriter &rewriter) const override {
+    FCMatmulOpConversion(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern<OpTy>(context), _markFuseGroups(markFuseGroups) {}
+
+    LogicalResult matchAndRewrite(OpTy srcOp, PatternRewriter &rewriter) const override {
         if (_markFuseGroups && isMarkedFuseGroup(srcOp)) {
             return rewriter.notifyMatchFailure(srcOp, "Already marked");
         }
@@ -1173,7 +1173,9 @@ void populateLinalgToTorqHLPrePatterns(
 
     patterns.insert<PoolingNhwcMaxOpConversion>(context, markFuseGroups);
 
-    patterns.insert<FCMatmulOpConversion>(context, markFuseGroups);
+    patterns.insert<FCMatmulOpConversion<linalg::MatmulOp>>(context, markFuseGroups);
+    patterns.insert<FCMatmulOpConversion<linalg::MatmulTransposeBOp>>(context, markFuseGroups);
+
     patterns.insert<Conv2DMatmulOpConversion>(context, markFuseGroups);
     patterns.insert<Conv2DNchwMatmulOpConversion>(context, markFuseGroups);
     if (clConv1dAsMatmul) {
