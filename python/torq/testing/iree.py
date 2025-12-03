@@ -15,7 +15,7 @@ import json
 from iree.compiler.ir import Context, Module
 
 from .aws_fpga import FpgaSession
-from .versioned_fixtures import versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
+from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
 
 
@@ -37,6 +37,7 @@ def pytest_addoption(parser):
     parser.addoption("--trace-buffers", action="store_true", default=False, help="Enable tracing of buffers in the torq runtime")
     parser.addoption("--torq-runtime-hw-type", action="store", default="sim", help="Command separate list of target hw to use for torq tests (sim, aws_fpga)")
     parser.addoption("--torq-chips", action="store", default="default", help="Command separate list of chips to compile models for")
+    parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
 
 
 def pytest_generate_tests(metafunc):
@@ -288,18 +289,31 @@ def mlir_io_spec(request, mlir_model_file):
     return MlirIoSpec(inputs=input_specs, outputs=output_specs)
 
 
-@versioned_static_file_fixture
-def torq_compiler():
+@pytest.fixture
+def torq_compiler(request):
     """
     This fixture returns the path to the torq compiler binary.
 
-    It is automatically invalidated when the compiler binary mtime changes.
+    It is automatically invalidated when the compiler binary or the library changes.
     """
 
-    return _find_iree_tool('TORQ_COMPILE', 'torq-compile')
+    file_path = _find_iree_tool('TORQ_COMPILE', 'torq-compile')
+            
+    if request.config.getoption("--ignore-binary-mtime"):
+        compiler_mtime = 0
+    else:
+        compiler_mtime = os.path.getmtime(file_path)
+
+    version = "torq_compiler_" + str(compiler_mtime)
+
+    print("[compiler] " + "torq_compiler" + f" -> {file_path}")
+
+    return VersionedFile(file_path, version)
 
 
-@versioned_hashable_object_fixture
+# this fixture is assumed to always have the same version so we don't need
+# to rebuild dependent fixtures when the compiler mtime or its path changes
+@versioned_unhashable_object_fixture
 def llvmcpu_compiler():
     """
     This fixture returns the path to the compiler binary.
@@ -310,18 +324,31 @@ def llvmcpu_compiler():
     return _find_iree_tool('IREE_COMPILE', 'iree-compile')
 
 
-@versioned_static_file_fixture
-def torq_runtime():
+@pytest.fixture
+def torq_runtime(request):
     """
     This fixture returns the path to the torq runtime binary.
 
     It is automatically invalidated when the runtime binary mtime changes.
     """
 
-    return _find_iree_tool('IREE_RUN_MODULE', 'iree-run-module')
+    file_path = _find_iree_tool('IREE_RUN_MODULE', 'iree-run-module')
+
+    if request.config.getoption("--ignore-binary-mtime"):
+        runtime_mtime = 0
+    else:
+        runtime_mtime = os.path.getmtime(file_path)
+
+    version = "torq_runtime_" + str(runtime_mtime)
+
+    print("[runtime] " + "torq_runtime" + f" -> {file_path}")
+
+    return VersionedFile(file_path, version)
 
 
-@versioned_hashable_object_fixture
+# this fixture is assumed to always have the same version so we don't need
+# to rebuild dependent fixtures when the compiler mtime or its path changes
+@versioned_unhashable_object_fixture
 def llvmcpu_runtime():
     """
     This fixture returns the path to the runtime binary.
@@ -705,7 +732,7 @@ def list_mlir_file_group(group_name):
 
 
 @versioned_static_file_fixture
-def static_mlir_model_file(case_config):
+def static_mlir_model_file(request, case_config):
     return case_config["static_mlir_model_file"]    
 
 

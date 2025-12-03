@@ -27,7 +27,7 @@ fixture and create a version for it based on its hash or the inputs used to gene
 """
 
 
-def pytest_addoption(parser):    
+def pytest_addoption(parser):
     parser.addoption("--recompute-cache", action="store_true", default=False, help="Re-creates all cached artifacts instead of using existing cached values")
 
 
@@ -43,18 +43,65 @@ def _dataclass_dict_deep(obj):
 
 
 def _hash_data(data) -> str:
+    """
+    Returns the hash of an object by serializing it to JSON using sorted keys.
+    """
     hash_data = json.dumps(_dataclass_dict_deep(data), sort_keys=True).encode('utf-8')
     hash_obj = hashlib.sha256()
     hash_obj.update(hash_data)
     return hash_obj.hexdigest()
 
 
+def _hash_file(request, file_path):
+    """
+    Returns the hash of a file, caching the result based on the file's mtime.
+    """
+
+    cache = request.config.cache
+    cached_hashes = cache.get("torq_file_hashes", {})
+
+    file_stat = file_path.stat()
+
+    # check if we have a cached hash for this file and if the mtime matches
+    if str(file_path) in cached_hashes:
+        cached_entry = cached_hashes[str(file_path)]
+        if cached_entry['mtime'] == file_stat.st_mtime:
+            print(f"[file content hash cache hit] {file_path} -> {cached_entry['hash']}")
+            return cached_entry['hash']
+        
+    # compute the hash
+    hash_obj = hashlib.sha256()
+    with open(file_path, 'rb') as f:
+        while True:
+            data = f.read(65536)
+            if not data:
+                break
+            hash_obj.update(data)
+
+    file_hash = hash_obj.hexdigest()
+
+    # cache the hash
+    cached_hashes[str(file_path)] = {
+        'mtime': file_stat.st_mtime,
+        'hash': file_hash
+    }
+    cache.set("torq_file_hashes", cached_hashes)
+
+    print(f"[file content hash computed] {file_path} -> {file_hash}")
+
+    return file_hash
+
+
 def _get_fixture_params(kwargs):    
     input_params_versions = []
 
     kwargs_data = {}
-    
-    for name, value in kwargs.items():
+
+    sorted_keys = sorted(kwargs.keys())
+
+    for name in sorted_keys:
+
+        value = kwargs[name]
 
         if name == 'request':
             kwargs_data['request'] = value
@@ -75,6 +122,7 @@ def _get_fixture_params(kwargs):
         else:
             raise ValueError(f"Unsupported argument type {type(value)} for fixture parameter '{name}'")
         
+        print("[param version] " + name + " -> " + value.version)
         input_params_versions.append(value.version)
 
     return input_params_versions, kwargs_data
@@ -305,6 +353,8 @@ def versioned_generated_file_fixture(suffix):
         @wraps(fun)
         def wrapper(**kwargs):
 
+            print("[generating versioned file] " + fun.__name__)
+
             input_params_versions, kwargs_data = _get_fixture_params(kwargs)
 
             request = kwargs['request']
@@ -320,6 +370,8 @@ def versioned_generated_file_fixture(suffix):
                     fun(**kwargs_data)
                 else:
                     print("[cache hit] " + fun.__name__ + f" -> {versioned_file.file_path}")
+
+            print("[generated file version] " + fun.__name__ + f" -> {versioned_file.file_path}")
 
             return versioned_file
 
@@ -369,6 +421,7 @@ def versioned_generated_directory_fixture(fun):
     @wraps(fun)
     def wrapper(**kwargs):
 
+        print("[generating versioned directory] " + fun.__name__)
         input_params_versions, kwargs_data = _get_fixture_params(kwargs)
 
         request = kwargs['request']
@@ -390,6 +443,8 @@ def versioned_generated_directory_fixture(fun):
             else:
                 print("[cache hit] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
 
+        print("[generated dir version] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
+
         return versioned_dir
 
     return wrapper
@@ -402,8 +457,12 @@ def versioned_static_file_fixture(fun):
     The decorated fixture must return the path to a static file on disk (either
     a string or a Path object).
 
-    The version of the file is computed based on the path and the last modification
-    time of the file.
+    The version of the file is computed based on the hash of the file content.
+
+    The version is cached based on the file's mtime to avoid recomputing the hash
+    on every invocation.
+
+    The fixture must accept a 'request' parameter.
 
     Example:
     @versioned_static_file_fixture
@@ -418,9 +477,10 @@ def versioned_static_file_fixture(fun):
 
         file_path = Path(fun(**kwargs))
 
-        version = fun.__name__ + _hash_data([str(file_path), file_path.stat().st_mtime])
+        version = fun.__name__ + _hash_file(kwargs['request'], file_path)
 
         print("[static file] " + fun.__name__ + f" -> {file_path}")
+        print("[static file version] " + fun.__name__ + f" -> {version}")
 
         return VersionedFile(file_path, version)
 
@@ -444,9 +504,14 @@ def versioned_unhashable_object_fixture(fun):
 
     @pytest.fixture
     @wraps(fun)
-    def wrapper(**kwargs):
-        print ("[uncached unhashable] " + fun.__name__)
+    def wrapper(**kwargs):        
+
+        print("[uncached unhashable] " + fun.__name__)
+
         input_params_versions, kwargs_data = _get_fixture_params(kwargs)
+
+        print ("[unhashable object version] " + fun.__name__ + " -> " + str(input_params_versions))
+
         return VersionedUncachedData.build(fun(**kwargs_data), fun, input_params_versions)
 
     return wrapper
@@ -468,9 +533,11 @@ def versioned_hashable_object_fixture(fun):
     @pytest.fixture
     @wraps(fun)
     def wrapper(**kwargs):
-        print("[uncached hashable] " + fun.__name__)
+        print("[uncached hashable] " + fun.__name__)        
         data = fun(**kwargs)
-        return VersionedUncachedData(data, fun.__name__ + _hash_data(data))    
+        version = fun.__name__ + _hash_data(data)
+        print("[hashable version] " + fun.__name__ + " -> " + version)
+        return VersionedUncachedData(data, version)
 
     return wrapper
 
@@ -504,6 +571,8 @@ def versioned_cached_data_fixture(fun):
     @wraps(fun)
     def wrapper(**kwargs):
 
+        print("[generating versioned data] " + fun.__name__)
+        
         input_params_versions, kwargs_data = _get_fixture_params(kwargs)
 
         request = kwargs['request']
@@ -517,6 +586,8 @@ def versioned_cached_data_fixture(fun):
                 versioned_data.save(fun(**kwargs_data))
             else:
                 print("[cache hit] " + fun.__name__ + f" -> {versioned_data.file_path}")
+
+        print("[data version] " + fun.__name__ + " -> " + versioned_data.version)
 
         return versioned_data
 
