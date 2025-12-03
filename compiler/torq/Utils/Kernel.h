@@ -69,17 +69,21 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape);
 // Loop iteration variable
 class IterVar {
   public:
-    IterVar(int iterId) : _iterId(iterId) {}
+    // Create from a constant index. We can make this explicit if needed.
+    IterVar(int constIndex) : _iterId(-1), _constIndex{constIndex} {}
+
+    // Create from a loop id. Internal usage only.
+    IterVar(int iterId, const SlicePrivate &) : _iterId(iterId) {}
     int iterId() const { return _iterId; }
 
     void reverse() { _reverse = !_reverse; }
     void setDivisor(int divisor) { _divisor = divisor; }
     void setModulo(int modulo) { _modulo = modulo; }
 
-    // Check if iteration variable is reversed
     bool isReverse() const { return _reverse; }
     int divisor() const { return _divisor; }
     int modulo() const { return _modulo; }
+    int constIndex() const { return _constIndex; }
 
   private:
     int _iterId;
@@ -93,6 +97,9 @@ class IterVar {
 
     // Modulo mode. An additional dim with count of _modulo is added to the corresponding NDL dim.
     int _modulo{0};
+
+    // Support indexing a dimension with a constant index
+    int _constIndex{0};
 };
 
 // Indexes of a tensor

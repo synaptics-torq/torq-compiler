@@ -436,7 +436,10 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
 }
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const IterVar &iv) {
-    if (iv.isReverse())
+    if (iv.iterId() < 0) {
+        os << "Const(" << iv.constIndex() << ")";
+    }
+    else if (iv.isReverse())
         os << "R(" << static_cast<int>(iv.iterId()) << ")";
     else
         os << static_cast<int>(iv.iterId());
@@ -962,6 +965,17 @@ int SlicePrivate::addMemNdlDims(
         }
     }
 
+    // Handle constant indexes
+    for (int dataDimensionIx = 0; dataDimensionIx < ix.size(); dataDimensionIx++) {
+        const IterVar &iterVar{ix[dataDimensionIx]};
+        if (iterVar.iterId() < 0 && iterVar.constIndex() != 0) {
+            Stride stride = computeStride(dataDims, dataDimensionIx);
+            assert(!stride.exprVal.has_value() && "Constant index not allowed for expr stride");
+            int strideVal = stride.intVal.has_value() ? stride.intVal.value() : 0;
+            offset += iterVar.constIndex() * strideVal;
+        }
+    }
+
     if (useSDims) {
         assert(block.outerGroups == 1 && "SDIMs only supported for single block transfers");
         // Add special SDIMs to cover the remaining size
@@ -1028,7 +1042,10 @@ void SlicePrivate::addDims(
     // Check that the indexes are not referring to some loop before the load point
     // This is allowed only for modulo indexes which generate their own local loop
     for (const auto &iterVar : ix) {
-        if (iterVar.iterId() < loadNesting && !iterVar.modulo()) {
+        if (iterVar.iterId() < 0) {
+            assert(iterVar.constIndex() == 0 && "Indexing with non-0 constant not allowed here");
+        }
+        else if (iterVar.iterId() < loadNesting && !iterVar.modulo()) {
             llvm::errs() << "Error, " << data << " uses index from loop " << iterVar
                          << " which is before load at level " << loadNesting << "\n";
             assert(false && "Invalid index in data");
@@ -1707,7 +1724,7 @@ const std::string &Slice::name() const { return d->_name; }
 IterVar Slice::forall(int count) {
     int nesting = d->_forStack.size();
     d->_forStack.push_back({count, torq_hw::MemDimTag::O});
-    return IterVar{nesting};
+    return IterVar{nesting, *d};
 }
 
 void Slice::endfor() {
