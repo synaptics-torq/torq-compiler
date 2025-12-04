@@ -21,31 +21,46 @@ Avgpool2DPattern::transform(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) 
     // input
     auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
     auto input_shape = input_type.getShape();
+    auto input_element_type = input_type.getElementType();
+
+    const DType inputDType = getDType(input_element_type);
+    const DType outputDType =
+        getDType(llvm::cast<MemRefType>(op.getInit().getType()).getElementType());
+    assert(inputDType == outputDType && "input and output dataType must be the same");
+
+    const DType weightDType =
+        getDType(llvm::cast<MemRefType>(op.getWeights().getType()).getElementType());
+    auto biasElementType = llvm::cast<MemRefType>(op.getScaleBias().getType()).getElementType();
+    const DType biasDType = getDType(biasElementType);
 
     // avgpool input is NHWC
-    const uint32_t h = input_shape[1];
-    const uint32_t w = input_shape[2];
-    const uint32_t input_channel = input_shape[3];
+    const uint32_t input_channel = input_shape[input_shape.size() - 1];
 
-    const uint32_t frame_size = h * w;
+    uint32_t frame_size = 1;
+    for (int i = 1; i < input_shape.size() - 1; i++) {
+        frame_size *= input_shape[i];
+    }
     assert(frame_size > 0 && "frame size must be greater than 0");
 
-    uint32_t blockSize = 64;
-    uint32_t blockCount = input_channel / blockSize;
-    uint32_t frameSizeStride = input_shape[3];
+    Slice slice;
+
+    const uint32_t blockSize = slice.alu.iWidth(inputDType, weightDType);
+
+    uint32_t blockCount = div_ceil(input_channel, blockSize);
+    uint32_t frameSizeStride = input_channel;
 
     // input memory read address when we do loop
-    LData input({{frame_size, frameSizeStride}, blockCount, blockSize}, DType::int8);
+    LData input({{frame_size, frameSizeStride}, blockCount, blockSize}, inputDType);
 
     // Same weight used for the entire computation
-    LData weights({1}, DType::int8);
+    LData weights({1}, weightDType);
 
     // all blocks use the same bias and scale
-    LData biasScale({2}, DType::int32);
+    LData biasScale({biasElementType.isInteger() ? 2 : 1}, biasDType);
 
-    LData output({blockCount, blockSize / HwInfo::act_width, HwInfo::act_width}, DType::int8);
+    const uint32_t actOutputWidth = slice.act.width(inputDType, weightDType);
+    LData output({blockCount, blockSize / actOutputWidth, actOutputWidth}, inputDType);
 
-    Slice slice;
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
 
@@ -57,7 +72,7 @@ Avgpool2DPattern::transform(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) 
             pdata = slice.alu.scalarProductAccumulate(idata, wdata);
         }
 
-        For(auto a = slice.iterate(blockSize / HwInfo::act_width)) {
+        For(auto a = slice.iterate(blockSize / actOutputWidth)) {
             QData res = slice.act.rescaleClamp(
                 pdata[a], bdata, op.getShiftFactor(), op.getOutputZp(), op.getOutputMin(),
                 op.getOutputMax()

@@ -58,6 +58,7 @@ def case_config(request):
         'torch_encoder.mlir.230.Conv_0_small',
         'torch_encoder.mlir.243.Conv_2_small',
         'torch_encoder.mlir.237.Conv_1_small',
+        'torch_reducemean',
 
         # unable to free enough space for results and operands
         'torch_Conv2d_bf16_1x1x64x8192',

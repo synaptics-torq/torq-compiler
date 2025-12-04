@@ -15,7 +15,8 @@ def case_config(request):
     return {
         "mlir_model_file": "static_mlir_model_file",
         "static_mlir_model_file": request.param.data,
-        "input_data": "tweaked_random_input_data"
+        "input_data": "tweaked_random_input_data",
+        "comparison_config": "comparison_config_from_mlir"
     }
 
 @pytest.mark.ci

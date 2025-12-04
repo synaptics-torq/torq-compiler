@@ -513,6 +513,119 @@ struct PoolingConvert : public OpRewritePattern<linalg::PoolingNhwcSumOp> {
     const bool _markFuseGroups; // When true, mark the TI operations, don't convert.
 };
 
+struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (srcOp.getNumDpsInputs() != 1 || srcOp.getNumDpsInits() != 1) {
+            return rewriter.notifyMatchFailure(srcOp, "ReducemeanPattern Expected 1 input/init");
+        }
+
+        auto inType = dyn_cast_or_null<RankedTensorType>(srcOp.getInputs()[0].getType());
+        auto output = srcOp.getResult(0);
+        auto outType = dyn_cast_or_null<RankedTensorType>(output.getType());
+
+        if (!inType || !outType || !inType.getElementType().isBF16() ||
+            !outType.getElementType().isBF16()) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "ReducemeanPattern only bf16 supported for now"
+            );
+        }
+
+        auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
+        if (!yieldOp) {
+            return rewriter.notifyMatchFailure(srcOp, "Expected yield");
+        }
+
+        auto divFOp = dyn_cast_or_null<arith::DivFOp>(yieldOp.getValues()[0].getDefiningOp());
+        if (!divFOp) {
+            return rewriter.notifyMatchFailure(srcOp, "Expected div op");
+        }
+
+        if (!isa<BlockArgument>(divFOp.getLhs())) {
+            return rewriter.notifyMatchFailure(srcOp, "Div lhs must be block arg");
+        }
+
+        auto divRhs = divFOp.getRhs().getDefiningOp<arith::ConstantOp>();
+        if (!divRhs) {
+            return rewriter.notifyMatchFailure(srcOp, "Div rhs must be constant");
+        }
+
+        auto divConstAttr = dyn_cast_or_null<FloatAttr>(divRhs.getValue());
+        if (!divConstAttr) {
+            return rewriter.notifyMatchFailure(srcOp, "Div constant must be float");
+        }
+
+        double divConst = divConstAttr.getValueAsDouble();
+        if (divConst <= 0.0) {
+            return rewriter.notifyMatchFailure(srcOp, "Div constant must be positive");
+        }
+
+        // if output is used by CollapseShape, fold collapseShape op
+        if (output.hasOneUse() && (isa<tensor::CollapseShapeOp>(*output.getUsers().begin()) ||
+                                   isCollapseOrExpandShapeGeneric(*output.getUsers().begin()))) {
+            output = output.getUsers().begin()->getResult(0);
+        }
+
+        auto reducesumOp = srcOp.getInputs()[0].getDefiningOp<linalg::GenericOp>();
+        if (!reducesumOp) {
+            return rewriter.notifyMatchFailure(srcOp, "Expected sum reduction");
+        }
+
+        auto reducesumYield = dyn_cast<linalg::YieldOp>(reducesumOp.getBody()->getTerminator());
+        if (!reducesumYield || !isa<arith::AddFOp>(reducesumYield.getValues()[0].getDefiningOp())) {
+            return rewriter.notifyMatchFailure(
+                reducesumOp, "ReducesumPattern Expected AddFOp reduction"
+            );
+        }
+
+        SmallVector<unsigned> reductionDims;
+        reducesumOp.getReductionDims(reductionDims);
+        if (reductionDims.size() < 1) {
+            return rewriter.notifyMatchFailure(
+                reducesumOp, "ReducesumPattern expected reduction loop > 0"
+            );
+        }
+
+        SmallVector<unsigned> parallelDims;
+        reducesumOp.getParallelDims(parallelDims);
+
+        Value input = reducesumOp.getInputs()[0];
+
+        // reduceMean has batch and its iteratetype is parallel
+        SmallVector<uint64_t, 4> permVec;
+        permVec.push_back(0);
+        permVec.append(reductionDims.begin(), reductionDims.end());
+        for (int i = 1; i < parallelDims.size(); i++) {
+            permVec.push_back(parallelDims[i]);
+        }
+
+        // avgpool kernel request nhwc
+        auto loc = srcOp.getLoc();
+        Permutation dataPerm(permVec.begin(), permVec.end());
+        input = transposeValue(input, dataPerm, loc, rewriter);
+
+        // Scale = 1 / meanConst for mean calculation
+        float meanValue = 1.0f / divConst;
+        const llvm::fltSemantics &bf16 = APFloat::BFloat();
+        std::vector<llvm::APFloat> weightsData(1, llvm::APFloat(bf16, std::to_string(meanValue)));
+        auto weights = createConst(weightsData, rewriter, srcOp.getLoc());
+
+        std::vector<float> biasScaleData{0.0};
+        auto biasScale = createConst(biasScaleData, rewriter, srcOp.getLoc());
+
+        auto avgpoolOutType = dyn_cast_or_null<RankedTensorType>(output.getType());
+
+        rewriter.replaceOpWithNewOp<torq_hl::AvgPool2DOp>(
+            srcOp, avgpoolOutType, createInitTensor(reducesumOp, rewriter, avgpoolOutType), 0, 0,
+            0xff800000, 0x7f800000, 0, weights, biasScale, input
+        );
+
+        return success();
+    }
+};
+
 // ReduceMeanConvert: detects a pattern of sum-reduction along the last axis followed by
 // division by the reduced axis size, and lowers it to torq_hl::ReduceMeanOp.
 // Example matched IR (bf16 shown but pattern supports bf16/f32):
@@ -785,6 +898,9 @@ void populateLinalgToTorqHLPrePatternsLowPrio(
     patterns.insert<PoolingConvert>(context, 20, 20 /* FIXME */, markFuseGroups);
 
     patterns.insert<ReduceMeanConvert>(context);
+
+    // TODO: refactor with ReduceMeanConvert later soon
+    patterns.insert<ReduceMeanPattern>(context);
 
     patterns.insert<Conv2DOpBigStride>(context, markFuseGroups);
 }
