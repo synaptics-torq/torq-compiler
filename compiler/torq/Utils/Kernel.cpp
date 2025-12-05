@@ -859,7 +859,7 @@ int SlicePrivate::addMemNdlDims(
     }
 
     // Let's start with LDIMs.
-    // We currently handle with LDIMs only the element size and the top shape dimension if present.
+    // We currently handle with LDIMs only the element size and the block.size.
     // Any other dimension will be handled with HDIMs.
     ndlDims.push_back({DimType::L, MemDimTag::B, elementSize, 1});
     ndlDims.push_back({DimType::L, MemDimTag::D, block.size, elementSize});
@@ -1246,15 +1246,10 @@ void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
     // Now add hdims for each loop deeper the iram load
     addDims(NdlType::CEDR, cedrDims, idata, _iram.loadNesting);
 
-    // Number of read from iram must match the number of writes (overall H iterations in DEDR)
-    // TODO: handle the case with multiple DEDR NDLs
-    auto dedr = _ndls.getMemNdl(NdlType::DEDR);
-    assert(dedr && "DEDR NDL not defined");
-    auto ramWrCount = iterationCount(dedr);
-    cedrDims.push_back({DimType::H, RegDimTag::T, ramWrCount / iterationCount(cedrDims)});
+    // Actual T count will be adjusted later
+    cedrDims.push_back({DimType::H, RegDimTag::T, 1});
 
     _ndls.add(NdlType::CEDR, cedrDims);
-    ndlToStr(NdlType::CEDR, _ndls.getRegNdl(NdlType::CEDR));
 }
 
 void SlicePrivate::cedw(const IData &idata) {
@@ -1326,14 +1321,9 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
     // Now add hdims for each loop deeper the wram load
     addDims(NdlType::CEWR, cewrDims, wdata, _wram.loadNesting, true, true);
 
-    // Number of read from wram must match the number of writes (overall H iterations in DEWR)
-    // TODO: handle the case with multiple DEWR NDLs
-    auto dewr = _ndls.getMemNdl(NdlType::DEWR);
-    assert(dewr && "DEWR NDL not defined");
-    auto ramWrCount = iterationCount(dewr);
-    cewrDims.push_back({DimType::H, RegDimTag::T, ramWrCount});
+    // Actual T count will be adjusted later
+    cewrDims.push_back({DimType::H, RegDimTag::T, 1});
     _ndls.add(NdlType::CEWR, cewrDims);
-    ndlToStr(NdlType::CEWR, _ndls.getRegNdl(NdlType::CEWR));
 }
 
 void SlicePrivate::ceww(const WData &wdata) {
@@ -1354,7 +1344,7 @@ void SlicePrivate::ceww(const WData &wdata) {
     auto dewr = _ndls.getMemNdl(NdlType::DEWR);
     assert(dewr && "DEWR NDL not defined");
     auto ramWrCount = iterationCount(dewr);
-    regDims.push_back({DimType::H, RegDimTag::T, ramWrCount});
+    regDims.push_back({DimType::H, RegDimTag::T, ramWrCount / iterationCount(regDims)});
 
     _ndls.add(NdlType::CEWW, regDims);
     ndlToStr(NdlType::CEWW, _ndls.getRegNdl(NdlType::CEWW));
@@ -1449,6 +1439,18 @@ void SlicePrivate::cepr(const PData &pdata) {
 
     ceprDims.push_back({DimType::H, RegDimTag::N, innerIterCount(_stackCopy, _pram.loadNesting)});
     ceprDims.push_back({DimType::H, RegDimTag::T, outerIterCount(_stackCopy, _pram.loadNesting)});
+
+    // Update iteration count for CEDR and CEWR to match CEPR
+    // These counters are not really used, but we set them to consistent values to avoid confusion
+    int ceprCount = iterationCount(ceprDims);
+    if (auto cedr = _ndls.getRegNdl(NdlType::CEDR)) {
+        cedr->dims.back().count = div_ceil(ceprCount, iterationCount(cedr->dims));
+        ndlToStr(NdlType::CEDR, _ndls.getRegNdl(NdlType::CEDR));
+    }
+    if (auto cewr = _ndls.getRegNdl(NdlType::CEWR)) {
+        cewr->dims.back().count = div_ceil(ceprCount, iterationCount(cewr->dims));
+        ndlToStr(NdlType::CEWR, _ndls.getRegNdl(NdlType::CEWR));
+    }
 
     _ndls.add(NdlType::CEPR, ceprDims);
     ndlToStr(NdlType::CEPR, _ndls.getRegNdl(NdlType::CEPR));
