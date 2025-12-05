@@ -90,6 +90,32 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         // Fold padding if present
         PaddingInfo padInfo = foldBackwardPadding(input, rewriter, _2DNchwChw);
 
+        // Todo: Capability check for depthwise conv should be moved to a helper function
+        // Check for depthwise conv specific constraints
+        if (llvm::isa<linalg::DepthwiseConv2DNhwcHwcOp, linalg::DepthwiseConv2DNchwChwOp>(&convOp
+            )) {
+
+            auto strides = convOp.getStrides().template getValues<int64_t>();
+            // hk kernel
+            if (strides[0] > 2 || strides[0] != strides[1]) {
+                return rewriter.notifyMatchFailure(
+                    convOp, "asymmetric strides or stride > 2 not supported by DW"
+                );
+            }
+            // EK kernel
+            bool isBF16 =
+                inputType.getElementType().isBF16() && weightType.getElementType().isBF16();
+            // nchw_chw -> in_cxkhxkw, nhwc_hwc -> khxkwxin_c
+            const int kw =
+                isa<linalg::DepthwiseConv2DNhwcHwcOp>(convOp) ? weightShape[1] : weightShape[2];
+            if (isBF16 && padInfo.lrtbPad[0] != kw / 2 && padInfo.lrtbPad[1] != kw / 2) {
+                return rewriter.notifyMatchFailure(convOp, "Valid padding not supported by DW");
+            }
+            if (isBF16 && strides[0] != 1) {
+                return rewriter.notifyMatchFailure(convOp, "DW-bf16 only support stride 1");
+            }
+        }
+
         // Check if we can support this layer
         if (_matchFn && !_matchFn(shape, weightShape, padInfo.lrtbPad)) {
             return rewriter.notifyMatchFailure(
