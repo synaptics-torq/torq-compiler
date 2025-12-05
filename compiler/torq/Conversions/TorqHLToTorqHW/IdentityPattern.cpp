@@ -39,7 +39,7 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
         elementType = DType::int16;
     }
     auto input_strides = getEncodedStridesElements(input_type);
-    Slice slice;
+    Slice slice("identity");
     bool is_size_aligned = (total_px % slice.alu.iWidth(elementType)) == 0;
     if (IDENTITY_TEST_MODE == 1 && total_px == 64 && elementType == DType::int8) {
         // This implementation copies a 64-bytes dense input tensor
@@ -237,7 +237,7 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
 
     rewriter.replaceOpWithNewOp<SliceTaskOp>(
         op,
-        "identity",                              // Operation to replace
+        slice.name(),                            // Operation to replace
         ValueRange{op.getInput()},               // Input tensor
         ValueRange{},                            // Weights
         ValueRange{},                            // BiasScale tensor,

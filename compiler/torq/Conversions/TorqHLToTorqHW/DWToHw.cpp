@@ -129,17 +129,14 @@ static torq_hw::SliceTaskOp lowerToHw(
         For(auto ocv = slice.iterate(output.dim(Out::CVectors))) {
             For(auto iv = slice.iterate(input.dim(In::IVectors))) {
                 PData pdata;
-                For(auto ic = slice.iterate(1)) {
-                    For(auto kh = slice.iterate(kernelDim.h)) {
-                        // Load vectors from neighboring channels
-                        WData wdata = slice.wram.load(weight[ocv][ic][kh]);
-                        For(auto kw = slice.iterate(kernelDim.w)) {
-                            IData idata = slice.iram.load(input[batch][ocv][iv][kh][kw / alukw]);
-                            idata.setShape({{alukw, Stride(1)}, idata.dim(0), vectStride});
-                            pdata = slice.alu.multiScalarProductAccumulate(
-                                idata[kw % alukw], wdata[kw]
-                            );
-                        }
+                For(auto kh = slice.iterate(kernelDim.h)) {
+                    // Load vectors from neighboring channels
+                    WData wdata = slice.wram.load(weight[ocv][0][kh]);
+                    For(auto kw = slice.iterate(kernelDim.w)) {
+                        IData idata = slice.iram.load(input[batch][ocv][iv][kh][kw / alukw]);
+                        idata.setShape({{alukw, Stride(1)}, idata.dim(0), vectStride});
+                        pdata =
+                            slice.alu.multiScalarProductAccumulate(idata[kw % alukw], wdata[kw]);
                     }
                 }
                 For(auto o = slice.iterate(outChVectSize)) { // Not necessarily all the pdata

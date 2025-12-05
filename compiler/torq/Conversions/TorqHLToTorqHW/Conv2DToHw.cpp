@@ -80,7 +80,7 @@ advantage of the hardware capabilities:
 3) To handle input vectors and channel vectors we add the required dimensions to the tensors
 4) Moving horizontally on a line to fetch the input vectors (inner loop on KW) would generate a lot
    of LRam traffic to get data that is overlapping except for one pixel. To avoid this we load to
-   IRam two additional pixels each time, so that for 3 iterations the ALU input data can be fecthed
+   IRam two additional pixels each time, so that for 3 iterations the ALU input data can be fetched
    directly from IRam. For kernels KW > 3 this is parallelized with the loading of the next vector.
    The data loaded to IRam is resized from a vector of size [P+2] to an array of size
    [{3:stride(1)}, P] so that at each iteration shifting by one pixel the data loaded to the ALU

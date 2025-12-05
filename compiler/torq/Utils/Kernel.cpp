@@ -959,7 +959,8 @@ int SlicePrivate::addMemNdlDims(
             }
             // If useSDims and this iter variable is not used to explicitly index the output data,
             // this means that it will be covered by SDims, so use an A tag (with stride 0)
-            // as required by the hardware
+            // as required by the hardware.
+            // Note: probably we don't really need to use tha A tag if strideVal == 0
             auto memDimTag = useSDims && !iv ? MemDimTag::A : tagToMemDimTag(tag, _forStack[i].tag);
             ndlDims.push_back({DimType::H, memDimTag, loopIterCount, strideVal * elementSize});
         }
@@ -978,6 +979,18 @@ int SlicePrivate::addMemNdlDims(
 
     if (useSDims) {
         assert(block.outerGroups == 1 && "SDIMs only supported for single block transfers");
+
+        // Check that we don't have more than 3 A dims (HW limitation)
+        // A-dims come from loops whose iteration variable is not used in the indexing
+        int aDimCnt = 0;
+        for (auto &dim : ndlDims) {
+            aDimCnt += dim.tag == MemDimTag::A;
+        }
+        if (aDimCnt > 3) {
+            llvm::errs() << "Up to 3 unused loop var in append() indexing, got:" << aDimCnt << "\n";
+            assert(false && "Too many A-dims");
+        }
+
         // Add special SDIMs to cover the remaining size
         Shape sdimsShape = data.subShape();
         ndlDims.push_back({DimType::S, MemDimTag::B, elementSize, 1});
