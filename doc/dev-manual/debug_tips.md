@@ -141,3 +141,11 @@
     ```{code} shell
     $ ../iree-build/third_party/iree/tools/torq-compile --help | grep "torq"
     ```
+
+- To see debug at which pass a given error is emitted or find which pass is getting stuck use the following options:
+
+    ```
+    --debug-only pass-manager --mlir-disable-threading
+    ```
+
+  
