@@ -517,17 +517,32 @@ def torq_runtime_timeout(request, case_config):
     return int(case_config.get("torq_runtime_timeout", 60 * 15))
 
 
+@versioned_cached_data_fixture
+def torq_mlir_func_name(request, mlir_model_file):
+    with open(mlir_model_file, 'r') as mlir_file:
+        mlir_content = mlir_file.read()
+
+    all_lines = mlir_content.split('\n')
+    for line in all_lines:
+        print(line)
+        if re.match(r'^\s*(func.func).*', line):
+            m = re.search(r'@(\w+)\s*\(', line)
+            return m.group(1) if m else "main"
+
+    return "main"
+
+
 @versioned_generated_directory_fixture
 def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_data_args, mlir_io_spec, 
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
-                        enable_hw_test_vectors, torq_runtime_timeout, chip_config):
+                        enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name):
 
     output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
 
     cmds = [str(torq_runtime),
             '--device=torq',
             '--module=' + str(torq_compiled_model),
-            '--function=main',
+            '--function=' + torq_mlir_func_name,
             *output_args,
             '--torq_hw_type=' + runtime_hw_type,
             *torq_runtime_options,
@@ -594,14 +609,16 @@ def llvmcpu_compiled_model(versioned_file, llvmcpu_compiler, request, mlir_model
 
 
 @versioned_generated_directory_fixture
-def llvmcpu_reference_results_dir(versioned_dir, request, llvmcpu_runtime, llvmcpu_compiled_model, iree_input_data_args, mlir_io_spec):
+def llvmcpu_reference_results_dir(versioned_dir, request,
+    llvmcpu_runtime, llvmcpu_compiled_model, iree_input_data_args, mlir_io_spec,
+    torq_mlir_func_name):
 
     output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
 
     cmd = [str(llvmcpu_runtime),
            '--device=local-task',
            '--module=' + str(llvmcpu_compiled_model),
-           '--function=main',
+           '--function=' + torq_mlir_func_name,
            *output_args,
            *iree_input_data_args]
 
