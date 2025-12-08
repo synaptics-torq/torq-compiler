@@ -524,7 +524,6 @@ def torq_mlir_func_name(request, mlir_model_file):
 
     all_lines = mlir_content.split('\n')
     for line in all_lines:
-        print(line)
         if re.match(r'^\s*(func.func).*', line):
             m = re.search(r'@(\w+)\s*\(', line)
             return m.group(1) if m else "main"

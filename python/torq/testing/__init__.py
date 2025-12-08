@@ -11,5 +11,6 @@ pytest_plugins = [
     "torq.testing.cases",
     "torq.testing.iree",
     "torq.testing.tensorflow",        
+    "torq.testing.onnx",
     "torq.testing.comparison"
 ]

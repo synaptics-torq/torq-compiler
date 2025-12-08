@@ -14,6 +14,11 @@ streamlit==1.45.1
 # (iree has a >= dependency which is picking up 2.19.0 which is not compatible)
 tensorflow==2.18.1
 
+# onnx
+onnx==1.19.1
+onnxruntime==1.23.2
+onnxscript==0.5.6
+
 # Used for image_to_tensor.py utility tools
 opencv-python-headless==4.12.0.88
 

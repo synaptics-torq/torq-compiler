@@ -166,3 +166,16 @@ def hf_audio_with_transcription(request, hf_audio_name):
 
     return audio_np, transcription
 
+
+@versioned_hashable_object_fixture
+def model_large_512_stream_bf16_onnx_name():
+    return {"repo_id": "Synaptics/Customer_A", "filename": "model_large_512_stream_bf16.onnx"}
+
+
+@versioned_unhashable_object_fixture
+def model_large_512_stream_bf16_onnx(request, model_large_512_stream_bf16_onnx_name):
+
+    cache = request.getfixturevalue("cache")
+
+    return get_hf_model_file(cache,
+        model_large_512_stream_bf16_onnx_name["repo_id"], model_large_512_stream_bf16_onnx_name["filename"])
