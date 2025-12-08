@@ -126,6 +126,8 @@ template <typename T> static torq_hl::VectorizationModeEnum getVectorizationMode
     if constexpr (std::is_same_v<T, torq_hl::DepthwiseConv2DOp>) {
         if (convOp.getNhwcInput())
             return torq_hl::VectorizationModeEnum::_32x32;
+        else
+            return torq_hl::VectorizationModeEnum::_64x4;
     }
 
     auto vectorizationMode = torq_hl::VectorizationModeEnum::_64x4;

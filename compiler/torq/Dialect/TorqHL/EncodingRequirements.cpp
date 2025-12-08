@@ -572,6 +572,8 @@ KernelEncoding ResizeNearestNeighborOp::getKernelEncoding() { return getResizeLi
 
 KernelEncoding DepthToSpaceOp::getKernelEncoding() { return getResizeLikeEncoding(*this); }
 
+KernelEncoding InterleavedInsertOp::getKernelEncoding() { return getNoEncoding(); }
+
 KernelEncoding IdentityOp::getKernelEncoding() { return getDenseEncoding(); }
 
 KernelEncoding ElementWiseBinaryOp::getKernelEncoding() { return getDenseTwoInputEncoding(*this); }

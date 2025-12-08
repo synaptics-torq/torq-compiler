@@ -305,6 +305,40 @@ llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorPadOperandSlicesFrom
     )};
 }
 
+llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorInsertSliceOperandSlicesFromIterDomain(
+    IRRewriter &rewriter, tensor::InsertSliceOp insertSliceOp, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes
+) {
+    SmallVector<OpResultIterationDomain> operandIterDomains;
+
+    // Handle source operand (the tensor being inserted)
+    auto source = insertSliceOp.getSource();
+    if (auto sourceOpResult = dyn_cast<OpResult>(source)) {
+        auto sourceType = cast<RankedTensorType>(sourceOpResult.getType());
+        SmallVector<OpFoldResult> sourceOffsets, sourceSizes;
+        for (auto size : sourceType.getShape()) {
+            sourceOffsets.push_back(rewriter.getIndexAttr(0));
+            sourceSizes.push_back(rewriter.getIndexAttr(size));
+        }
+        operandIterDomains.push_back(std::make_tuple(sourceOpResult, sourceOffsets, sourceSizes));
+    }
+
+    // Handle destination operand (the tensor being inserted into)
+    auto dest = insertSliceOp.getDest();
+    if (auto destOpResult = dyn_cast<OpResult>(dest)) {
+        // Use the full destination tensor size as a safe over-approximation
+        auto destType = cast<RankedTensorType>(destOpResult.getType());
+        SmallVector<OpFoldResult> destOffsets, destSizes;
+        for (auto size : destType.getShape()) {
+            destOffsets.push_back(rewriter.getIndexAttr(0));
+            destSizes.push_back(rewriter.getIndexAttr(size));
+        }
+        operandIterDomains.push_back(std::make_tuple(destOpResult, destOffsets, destSizes));
+    }
+
+    return operandIterDomains;
+}
+
 // Return true iff the tile (including consumerOp and producerOps) can fit in availableMemoryBytes.
 // When consumerOp is a member of a fuse group, it must be the output operation of that group. In
 // that case, the entire group will be checked, even if the other members are not in producerOps.
@@ -356,6 +390,11 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
                 })
                 .Case<tensor::PadOp>([&](auto padOp) {
                     return tensorPadOperandSlicesFromIterDomain(rewriter, padOp, offsets, sizes);
+                })
+                .Case<tensor::InsertSliceOp>([&](auto insertSliceOp) {
+                    return tensorInsertSliceOperandSlicesFromIterDomain(
+                        rewriter, insertSliceOp, offsets, sizes
+                    );
                 })
                 .Default([&](auto) {
                     LLVM_DEBUG({ llvm::dbgs() << "unknown op type: " << op->getName() << "\n"; });
@@ -461,9 +500,10 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
                 }
             }
 
-            // Add operand to the queue if it's in the producers set, or in one
-            // of the pattern-fuse-groups of op.
-            if (producerOps.contains(resultOp) || shareFuseGroup) {
+            // Add operand to the queue as needed
+            // Skip tensor::InsertSliceOp as it's a data movement operation that doesn't need tiling
+            if ((producerOps.contains(resultOp) || shareFuseGroup) &&
+                !isa<tensor::InsertSliceOp>(resultOp)) {
                 auto tiOp = cast<TilingInterface>(resultOp);
 
                 // Get the iteration domain for all the loops of the operand owner

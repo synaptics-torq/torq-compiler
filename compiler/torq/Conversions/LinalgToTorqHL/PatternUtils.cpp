@@ -132,7 +132,10 @@ bool markOpFuseGroup(
     }
 
     assert(op && "Trying to mark null op!");
-    if (!isa<TilingInterface, tensor::CollapseShapeOp, tensor::ExpandShapeOp>(op)) {
+    if (!isa<
+            TilingInterface, tensor::CollapseShapeOp, tensor::ExpandShapeOp, tensor::InsertSliceOp>(
+            op
+        )) {
         op->emitError("Trying to mark an op that does not implement TilingInterface");
         op->dump();
         assert(false && "Trying to mark an op that does not implement TilingInterface");
@@ -1012,7 +1015,6 @@ static LogicalResult foldTensorPad(
 }
 
 PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw) {
-
     // Process any extract_slice op and check there is no dynamic slice extraction
     Value val = value;
     SmallVector<tensor::ExtractSliceOp> extractSliceOps;
@@ -1037,9 +1039,10 @@ PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nc
     SmallVector<int64_t> padOffsetsBelow;
     Value fillValue;
 
-    if (failed(foldTensorPad(val, padOffsetsAbove, padOffsetsBelow, fillValue)) &&
-        failed(foldLinalgFillTensorInsert(val, padOffsetsAbove, padOffsetsBelow, fillValue))) {
-        return {};
+    if (failed(foldTensorPad(val, padOffsetsAbove, padOffsetsBelow, fillValue))) {
+        if (failed(foldLinalgFillTensorInsert(val, padOffsetsAbove, padOffsetsBelow, fillValue))) {
+            return {};
+        }
     }
 
     if (padOffsetsBelow.size() != 4) {

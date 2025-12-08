@@ -247,6 +247,8 @@ void registerBufferizationInterfaceExternalModels(DialectRegistry &registry) {
             TorqHLBufferizableOpInterface<syna::torq_hl::ElementWiseShiftOp>>(*context);
         syna::torq_hl::ResizeNearestNeighborOp::attachInterface<
             TorqHLBufferizableOpInterface<syna::torq_hl::ResizeNearestNeighborOp>>(*context);
+        syna::torq_hl::InterleavedInsertOp::attachInterface<
+            TorqHLBufferizableOpInterface<syna::torq_hl::InterleavedInsertOp>>(*context);
         syna::torq_hl::DepthToSpaceOp::attachInterface<
             TorqHLBufferizableOpInterface<syna::torq_hl::DepthToSpaceOp>>(*context);
         syna::torq_hl::ReduceMeanOp::attachInterface<

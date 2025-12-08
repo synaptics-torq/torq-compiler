@@ -795,6 +795,28 @@ def TorqHL_ResizeNearestNeighborOp: TorqHL_LayerOp<"ResizeNearestNeighbor"> {
   ));
 }
 
+def TorqHL_InterleavedInsertOp: TorqHL_LayerOp<"interleaved_insert"> {
+  let summary = "Interleaved Insert Operation";
+  let description = [{
+    Inserts a source tensor into a destination tensor with strided/interleaved pattern.
+    This operation is used for upsampling in transposed convolutions where elements
+    are inserted with a stride > 1, creating zeros between the source elements.
+    
+    Example: inserting [a, b, c] with stride=2 into a zero-filled tensor creates:
+    [0, a, 0, b, 0, c, 0]
+    
+    The weights tensor contains interleaving pattern values (e.g., [0, 1, 1, 0] for stride-2).
+  }];
+  
+  let arguments = !con(commonArgs, (ins
+    I32Attr:$stride_value,
+    I32Attr:$output_min,
+    I32Attr:$output_max,
+    TensorOrMemref:$weights,
+    TensorOrMemref:$input
+  ));
+}
+
 def TorqHL_BroadcastOp: TorqHL_LayerOp<"broadcast"> {
   let summary = "broadcast operator";
   let description = [{

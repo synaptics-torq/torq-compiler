@@ -43,6 +43,7 @@ set(sources
     DepthToSpacePattern.cpp
     ReduceMeanPattern.cpp
     SelectPattern.cpp
+    InterleavedInsertPattern.cpp
 )
 
 if(TORQ_ENABLE_TORQ_GENERIC)

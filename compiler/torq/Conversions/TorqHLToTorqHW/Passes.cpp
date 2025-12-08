@@ -81,6 +81,7 @@ void ConvertSliceProgramToTorqHwPass::runOnOperation() {
     patterns.add<ActPattern>(ctx);
     patterns.add<BroadcastPattern>(ctx);
     patterns.add<ResizeNearestNeighborPattern>(ctx);
+    patterns.add<InterleavedInsertPattern>(ctx);
     patterns.add<ElementWiseBinaryPattern>(ctx);
     patterns.add<ElementWiseUnaryPattern>(ctx);
     patterns.add<ElementWiseShiftPattern>(ctx);

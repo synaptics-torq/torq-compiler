@@ -662,11 +662,10 @@ bool hasEkLoweringDwConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
     int kw = weightShape[3];
     int32_t pad_left = op.getPad()[0];
     int32_t pad_right = op.getPad()[1];
-    if (pad_left != kw / 2 || pad_right != kw / 2) {
+    if ((pad_left != (kw - 1) / 2 && pad_left != kw / 2) || pad_right != kw / 2) {
         // Not supported by HW
         return false;
     }
-
     int stride = op.getStride()[0]; // FIXME: consider all stride values
     if (stride != 1 || kh > 7 || kw > 7) {
         // Not supported by HW
