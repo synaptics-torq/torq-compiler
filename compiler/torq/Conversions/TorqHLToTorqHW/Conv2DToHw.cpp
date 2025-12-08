@@ -91,7 +91,7 @@ advantage of the hardware capabilities:
 static torq_hw::SliceTaskOp lowerToHw(
     torq_hl::Conv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset, int chCount
 ) {
-    if (!hasEkLoweringConv2d(op)) {
+    if (!hasEkLoweringConv(op)) {
         return {};
     }
 

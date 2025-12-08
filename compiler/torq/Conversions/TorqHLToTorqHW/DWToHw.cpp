@@ -59,7 +59,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
     int chCount
 ) {
-    if (!hasEkLoweringDwConv(op)) {
+    if (!hasEkLoweringConv(op)) {
         return {};
     }
 

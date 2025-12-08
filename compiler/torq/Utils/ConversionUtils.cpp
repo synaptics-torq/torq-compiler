@@ -632,7 +632,7 @@ Value convertScalarToRankedTensor(Value &input, Location loc, PatternRewriter &r
 }
 
 // Check if the Conv2DOp can be lowered using EK kernel
-bool hasEkLoweringConv2d(mlir::syna::torq_hl::Conv2DOp op) {
+bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
     auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
     int kh = weightShape[2];
     int kw = weightShape[3];
@@ -656,7 +656,7 @@ bool hasEkLoweringConv2d(mlir::syna::torq_hl::Conv2DOp op) {
 }
 
 // Check if the DepthwiseConv2DOp can be lowered using EK kernel
-bool hasEkLoweringDwConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
+bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
     auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
     int kh = weightShape[2];
     int kw = weightShape[3];

@@ -54,33 +54,6 @@ static void biasScale_inflate(
     }
 }
 
-template <typename T>
-static void weights_inflate_last_channel(
-    std::vector<T> &weight, std::vector<int64_t> &shape, int inner_on, T value
-) {
-
-    auto channel_dim_index = shape.size() - 1;
-    auto original_channels = shape[channel_dim_index];
-    auto padded_channels = smallest_multiple(original_channels, inner_on);
-
-    shape[channel_dim_index] = padded_channels;
-
-    int64_t outer_size = 1;
-    for (size_t i = 0; i < channel_dim_index; ++i)
-        outer_size *= shape[i];
-
-    std::vector<T> inflated_weight;
-    inflated_weight.reserve(outer_size * padded_channels);
-
-    for (int64_t i = 0; i < outer_size; ++i) {
-        for (int64_t c = 0; c < original_channels; ++c)
-            inflated_weight.push_back(weight[i * original_channels + c]);
-        for (int64_t c = 0; c < (padded_channels - original_channels); ++c)
-            inflated_weight.push_back(value);
-    }
-    weight = std::move(inflated_weight);
-}
-
 // Convert weights from OI[HW] to OI[HW]O layout
 // The number of output channels must be a multiple of inner_on
 // inner_on: number of channels to be moved in the inner dimension
@@ -183,23 +156,24 @@ template <typename Stride2Op> void insertSegmentationOp(Stride2Op op, PatternRew
     });
 }
 
-// This function reorders the weights to match the access pattern used in stride-2 convolution cases
-// for filters with size greater than 1. It rearranges weights by placing even-indexed values first,
-// followed by odd-indexed values, for each output channel slice.
-static mlir::Value weights_swap_even_odd(PatternRewriter &rewriter, Location loc, Value weights) {
-
+// This function rearranges weights by placing even-indexed values first,
+// followed by odd-indexed values, on the specified dimension.
+static mlir::Value
+weights_swap_even_odd(PatternRewriter &rewriter, Location loc, Value weights, int swapDim) {
     auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
-    std::vector<int64_t> shape = wtRankedTy.getShape();
-    assert(shape.size() == 4 && "weight swap even odd: shape size is not 4\n");
-    int O = shape[0];
-    int I = shape[1];
-    int H = shape[2];
-    int W = shape[3];
-    const int64_t evenColSz = (W + 1) / 2;
-    const int64_t oddColSz = W / 2;
+    SmallVector<int64_t> shape(wtRankedTy.getShape());
+    const int rank = shape.size();
+    assert(swapDim < rank && "weight swap even odd: swapDim exceeds rank\n");
+    SmallVector<OpFoldResult> sizes = getAsIndexOpFoldResult(rewriter.getContext(), shape);
+    const int64_t evenColSz = (shape[swapDim] + 1) / 2;
+    const int64_t oddColSz = shape[swapDim] / 2;
 
-    auto evenTy = RankedTensorType::get({O, I, H, evenColSz}, wtRankedTy.getElementType());
-    auto oddTy = RankedTensorType::get({O, I, H, oddColSz}, wtRankedTy.getElementType());
+    SmallVector<int64_t> evenShape(shape);
+    evenShape[swapDim] = evenColSz;
+    SmallVector<int64_t> oddShape(shape);
+    oddShape[swapDim] = oddColSz;
+    auto evenTy = RankedTensorType::get(evenShape, wtRankedTy.getElementType());
+    auto oddTy = RankedTensorType::get(oddShape, wtRankedTy.getElementType());
     // Constants
     Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
@@ -207,67 +181,96 @@ static mlir::Value weights_swap_even_odd(PatternRewriter &rewriter, Location loc
     Value cevenColSz = rewriter.create<arith::ConstantIndexOp>(loc, evenColSz);
 
     // Extract even channels: offsets [0,0,0,0], sizes [O,I,H,evenColSz], strides [1,1,1,2]
-    SmallVector<OpFoldResult> evenOffsets{
-        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), c0
-    };
-    SmallVector<OpFoldResult> evenSizes{
-        rewriter.getIndexAttr(O), rewriter.getIndexAttr(I), rewriter.getIndexAttr(H),
-        rewriter.getIndexAttr(evenColSz)
-    };
-    SmallVector<OpFoldResult> evenStrides{
-        rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), c2
-    };
+    SmallVector<OpFoldResult> evenOffsets(rank, rewriter.getIndexAttr(0));
+    evenOffsets[swapDim] = c0;
+    SmallVector<OpFoldResult> evenSizes(sizes);
+    evenSizes[swapDim] = rewriter.getIndexAttr(evenColSz);
+    SmallVector<OpFoldResult> evenStrides(rank, rewriter.getIndexAttr(1));
+    evenStrides[swapDim] = c2;
     Value evenExtract = rewriter.create<tensor::ExtractSliceOp>(
         loc, evenTy, weights, evenOffsets, evenSizes, evenStrides
     );
 
     // Extract odd channels: offsets [0,0,0,1], sizes [O,I,H,oddColSz], strides [1,1,1,2]
-    SmallVector<OpFoldResult> oddOffsets{
-        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), c1
-    };
-    SmallVector<OpFoldResult> oddSizes{
-        rewriter.getIndexAttr(O), rewriter.getIndexAttr(I), rewriter.getIndexAttr(H),
-        rewriter.getIndexAttr(oddColSz)
-    };
-    SmallVector<OpFoldResult> oddStrides{
-        rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), c2
-    };
+    SmallVector<OpFoldResult> oddOffsets(rank, rewriter.getIndexAttr(0));
+    oddOffsets[swapDim] = c1;
+    SmallVector<OpFoldResult> oddSizes(sizes);
+    oddSizes[swapDim] = rewriter.getIndexAttr(oddColSz);
+    SmallVector<OpFoldResult> oddStrides(rank, rewriter.getIndexAttr(1));
+    oddStrides[swapDim] = c2;
     Value oddExtract = rewriter.create<tensor::ExtractSliceOp>(
         loc, oddTy, weights, oddOffsets, oddSizes, oddStrides
     );
 
     // Stitch evens then odds into a new tensor
-    Value empty = rewriter.create<tensor::EmptyOp>(
-        loc, ArrayRef<int64_t>{O, I, H, W}, wtRankedTy.getElementType()
-    );
+    Value empty = rewriter.create<tensor::EmptyOp>(loc, shape, wtRankedTy.getElementType());
 
     // Insert evens at offset last-dim = 0
-    SmallVector<OpFoldResult> ins0Off{
-        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(0),
-        rewriter.getIndexAttr(0)
-    };
-    SmallVector<OpFoldResult> ins0Sz{
-        rewriter.getIndexAttr(O), rewriter.getIndexAttr(I), rewriter.getIndexAttr(H),
-        rewriter.getIndexAttr(evenColSz)
-    };
-    SmallVector<OpFoldResult> insStride{
-        rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), rewriter.getIndexAttr(1),
-        rewriter.getIndexAttr(1)
-    };
+    SmallVector<OpFoldResult> ins0Off(rank, rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> ins0Sz(sizes);
+    ins0Sz[swapDim] = rewriter.getIndexAttr(evenColSz);
+    SmallVector<OpFoldResult> insStride(rank, rewriter.getIndexAttr(1));
     Value r1 =
         rewriter.create<tensor::InsertSliceOp>(loc, evenExtract, empty, ins0Off, ins0Sz, insStride);
 
     // Insert odds at offset last-dim = evenColSz
-    SmallVector<OpFoldResult> ins1Off{
-        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), cevenColSz
-    };
-    SmallVector<OpFoldResult> ins1Sz{
-        rewriter.getIndexAttr(O), rewriter.getIndexAttr(I), rewriter.getIndexAttr(H),
-        rewriter.getIndexAttr(oddColSz)
-    };
+    SmallVector<OpFoldResult> ins1Off(rank, rewriter.getIndexAttr(0));
+    ins1Off[swapDim] = cevenColSz;
+    SmallVector<OpFoldResult> ins1Sz(sizes);
+    ins1Sz[swapDim] = rewriter.getIndexAttr(oddColSz);
     auto res =
         rewriter.create<tensor::InsertSliceOp>(loc, oddExtract, r1, ins1Off, ins1Sz, insStride);
 
+    setCompileTimeConstAttr(res);
+    setTargetExecutorAttr(res, torq_hl::Executor::NSS);
+    return res.getResult();
+}
+
+// Insert a dimension of size 1 at the specified position
+static mlir::Value
+weights_insert_dimension(PatternRewriter &rewriter, Location loc, Value weights, int insertDim) {
+    auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
+    SmallVector<int64_t> shape(wtRankedTy.getShape());
+    const int rank = shape.size();
+    assert(insertDim <= rank && "weight insert dimension: insertDim exceeds rank\n");
+    SmallVector<ReassociationIndices> reassoc;
+    for (int i = 0; i < rank + 1; ++i) {
+        reassoc.push_back({i <= insertDim ? i : i - 1});
+    }
+    SmallVector<int64_t> newShape = shape;
+    newShape.insert(newShape.begin() + insertDim, 1);
+    auto newTy = RankedTensorType::get(newShape, wtRankedTy.getElementType());
+    auto res = rewriter.create<tensor::ExpandShapeOp>(loc, newTy, weights, reassoc);
+    setCompileTimeConstAttr(res);
+    setTargetExecutorAttr(res, torq_hl::Executor::NSS);
+    return res.getResult();
+}
+
+// Pad the specified dimension to padDimAlignment with 0s at the end
+static mlir::Value weights_pad_with_zero(
+    PatternRewriter &rewriter, Location loc, Value weights, int padDim, int padDimAlignment
+) {
+    auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
+    SmallVector<int64_t> shape(wtRankedTy.getShape());
+    const int rank = shape.size();
+    assert(padDim < rank && "weight pad with zero: padDim exceeds rank\n");
+    int paddedDimSize = align_ceil(shape[padDim], padDimAlignment);
+    if (paddedDimSize == shape[padDim]) {
+        return weights;
+    }
+
+    SmallVector<OpFoldResult> sizes = getAsIndexOpFoldResult(rewriter.getContext(), shape);
+    auto paddedShape = shape;
+    paddedShape[padDim] = paddedDimSize;
+    SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
+    // Create empty padded tensor
+    Value paddedEmpty =
+        rewriter.create<tensor::EmptyOp>(loc, paddedShape, wtRankedTy.getElementType());
+    // Insert original weights into padded tensor
+    SmallVector<OpFoldResult> insOff(rank, rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> insSz = sizes;
+    auto res =
+        rewriter.create<tensor::InsertSliceOp>(loc, weights, paddedEmpty, insOff, insSz, strides);
     setCompileTimeConstAttr(res);
     setTargetExecutorAttr(res, torq_hl::Executor::NSS);
     return res.getResult();
@@ -304,9 +307,7 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
             llvm::report_fatal_error("cannot select kernel");
         }
 
-        auto convWeights = constOp.getValue();
-        auto weightValues = mlir::cast<DenseIntOrFPElementsAttr>(convWeights);
-        auto weightType = weightValues.getType();
+        auto weightType = cast<RankedTensorType>(weights.getType());
         auto weightElementType = weightType.getElementType();
         auto weightShape = weightType.getShape().vec();
 
@@ -318,14 +319,9 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
         if (vectorizationMode == torq_hl::VectorizationModeEnum::_32x32) {
             if (weightShape.size() == 3) {
                 // Linalg depthwise conv2d has 3D weights: HW0, make it IHW0
-                weightShape.insert(weightShape.begin(), 1);
+                weights = weights_insert_dimension(rewriter, op.getLoc(), weights, 0);
             }
-            auto weightData = weightValues.getRawData().vec();
-            weights_inflate_last_channel(
-                weightData, weightShape, parallel_outs, static_cast<char>(0)
-            );
-
-            auto weight_tensor = createI8Const2(rewriter, op.getLoc(), weightData, weightShape);
+            weights = weights_pad_with_zero(rewriter, op.getLoc(), weights, 3, parallel_outs);
 
             std::vector<llvm::APInt> biasData(
                 biasValues.value_begin<llvm::APInt>(), biasValues.value_end<llvm::APInt>()
@@ -335,7 +331,7 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
 
             rewriter.modifyOpInPlace(op, [&]() {
                 op.setVectorizationMode(vectorizationMode);
-                op.setOperand(1, weight_tensor);
+                op.setOperand(1, weights);
                 op.setOperand(2, bias_tensor);
             });
 
@@ -345,14 +341,7 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
         if (weightShape.size() == 3) {
             // Linalg depthwise conv2d has 3D weights: OHW, make it OIHW
             // Ex: 576x3x3 --> 576x1x3x3
-            weightShape.insert(weightShape.begin() + 1, 1);
-            auto reassoc = SmallVector<ReassociationIndices>{{0, 1}, {2}, {3}};
-            weights = rewriter
-                          .create<tensor::ExpandShapeOp>(
-                              op.getLoc(), RankedTensorType::get(weightShape, weightElementType),
-                              weights, reassoc
-                          )
-                          .getResult();
+            weights = weights_insert_dimension(rewriter, op.getLoc(), weights, 1);
             rewriter.modifyOpInPlace(op, [&]() { op.setOperand(1, weights); });
         }
 
@@ -365,15 +354,12 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
         rewriter.modifyOpInPlace(op, [&]() { op.setVectorizationMode(vectorizationMode); });
         if (weightElementType.isInteger()) {
             auto bitWidth = weightElementType.getIntOrFloatBitWidth();
-            std::vector<llvm::APInt> weightData(
-                weightValues.value_begin<llvm::APInt>(), weightValues.value_end<llvm::APInt>()
-            );
             switch (bitWidth) {
             case 8: {
                 // Inflate and reorder weights
                 if (isStride2(op) && weight_shape[3] > 1) {
                     // Kernel requires column 1 and column 2 in weights to be swapped
-                    weights = weights_swap_even_odd(rewriter, op.getLoc(), weights);
+                    weights = weights_swap_even_odd(rewriter, op.getLoc(), weights, 3);
                 }
                 if (on >= parallel_outs) {
                     weights = weights_OIHW_to_OIHWO(
@@ -389,13 +375,10 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
             }
         }
         else if (weightElementType.isBF16()) {
-            std::vector<llvm::APFloat> weightData(
-                weightValues.value_begin<llvm::APFloat>(), weightValues.value_end<llvm::APFloat>()
-            );
             // Inflate and reorder weights
             if (isStride2(op) && weight_shape[3] > 1) {
                 // Kernel requires column 1 and column 2 in weights to be swapped
-                weights = weights_swap_even_odd(rewriter, op.getLoc(), weights);
+                weights = weights_swap_even_odd(rewriter, op.getLoc(), weights, 3);
             }
             if (on >= parallel_outs) {
                 weights = weights_OIHW_to_OIHWO(
