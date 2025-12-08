@@ -11,6 +11,7 @@ import pickle
 from functools import wraps
 import inspect
 import hashlib
+import logging
 
 """
 This module provides decorators that allow to create fixtures that cache their results.
@@ -29,6 +30,14 @@ fixture and create a version for it based on its hash or the inputs used to gene
 
 def pytest_addoption(parser):
     parser.addoption("--recompute-cache", action="store_true", default=False, help="Re-creates all cached artifacts instead of using existing cached values")
+    parser.addoption("--debug-cache", action="store_true", default=False, help="Enables debug output for cache operations")
+
+logger = logging.getLogger("versioned_fixtures")
+
+def pytest_configure(config):
+    if config.getoption("--debug-cache"):
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(logging.StreamHandler())
 
 
 def _dataclass_dict_deep(obj):
@@ -66,7 +75,7 @@ def _hash_file(request, file_path):
     if str(file_path) in cached_hashes:
         cached_entry = cached_hashes[str(file_path)]
         if cached_entry['mtime'] == file_stat.st_mtime:
-            print(f"[file content hash cache hit] {file_path} -> {cached_entry['hash']}")
+            logger.debug(f"[file content hash cache hit] {file_path} -> {cached_entry['hash']}")
             return cached_entry['hash']
         
     # compute the hash
@@ -87,7 +96,7 @@ def _hash_file(request, file_path):
     }
     cache.set("torq_file_hashes", cached_hashes)
 
-    print(f"[file content hash computed] {file_path} -> {file_hash}")
+    logger.debug(f"[file content hash computed] {file_path} -> {file_hash}")
 
     return file_hash
 
@@ -122,7 +131,7 @@ def _get_fixture_params(kwargs):
         else:
             raise ValueError(f"Unsupported argument type {type(value)} for fixture parameter '{name}'")
         
-        print("[param version] " + name + " -> " + value.version)
+        logger.debug("[param version] " + name + " -> " + value.version)
         input_params_versions.append(value.version)
 
     return input_params_versions, kwargs_data
@@ -353,7 +362,7 @@ def versioned_generated_file_fixture(suffix):
         @wraps(fun)
         def wrapper(**kwargs):
 
-            print("[generating versioned file] " + fun.__name__)
+            logger.debug("[generating versioned file] " + fun.__name__)
 
             input_params_versions, kwargs_data = _get_fixture_params(kwargs)
 
@@ -366,12 +375,12 @@ def versioned_generated_file_fixture(suffix):
             with FileLock(str(versioned_file.file_path) + ".lock"):
 
                 if not versioned_file.valid(request):
-                    print("[cache miss] " + fun.__name__ + f" -> {versioned_file.file_path}")
+                    logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_file.file_path}")
                     fun(**kwargs_data)
                 else:
-                    print("[cache hit] " + fun.__name__ + f" -> {versioned_file.file_path}")
+                    logger.debug("[cache hit] " + fun.__name__ + f" -> {versioned_file.file_path}")
 
-            print("[generated file version] " + fun.__name__ + f" -> {versioned_file.file_path}")
+            logger.debug("[generated file version] " + fun.__name__ + f" -> {versioned_file.file_path}")
 
             return versioned_file
 
@@ -421,7 +430,7 @@ def versioned_generated_directory_fixture(fun):
     @wraps(fun)
     def wrapper(**kwargs):
 
-        print("[generating versioned directory] " + fun.__name__)
+        logger.debug("[generating versioned directory] " + fun.__name__)
         input_params_versions, kwargs_data = _get_fixture_params(kwargs)
 
         request = kwargs['request']
@@ -433,7 +442,7 @@ def versioned_generated_directory_fixture(fun):
         with FileLock(str(versioned_dir.dir_path) + ".lock"):
 
             if not versioned_dir.valid(request):
-                print("[cache miss] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
+                logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
 
                 fun(**kwargs_data)
 
@@ -441,9 +450,9 @@ def versioned_generated_directory_fixture(fun):
                 with open(versioned_dir.dir_path / "valid", "w") as f:
                     pass
             else:
-                print("[cache hit] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
+                logger.debug("[cache hit] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
 
-        print("[generated dir version] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
+        logger.debug("[generated dir version] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
 
         return versioned_dir
 
@@ -479,8 +488,8 @@ def versioned_static_file_fixture(fun):
 
         version = fun.__name__ + _hash_file(kwargs['request'], file_path)
 
-        print("[static file] " + fun.__name__ + f" -> {file_path}")
-        print("[static file version] " + fun.__name__ + f" -> {version}")
+        logger.debug("[static file] " + fun.__name__ + f" -> {file_path}")
+        logger.debug("[static file version] " + fun.__name__ + f" -> {version}")
 
         return VersionedFile(file_path, version)
 
@@ -506,11 +515,11 @@ def versioned_unhashable_object_fixture(fun):
     @wraps(fun)
     def wrapper(**kwargs):        
 
-        print("[uncached unhashable] " + fun.__name__)
+        logger.debug("[uncached unhashable] " + fun.__name__)
 
         input_params_versions, kwargs_data = _get_fixture_params(kwargs)
 
-        print ("[unhashable object version] " + fun.__name__ + " -> " + str(input_params_versions))
+        logger.debug("[unhashable object version] " + fun.__name__ + " -> " + str(input_params_versions))
 
         return VersionedUncachedData.build(fun(**kwargs_data), fun, input_params_versions)
 
@@ -533,10 +542,10 @@ def versioned_hashable_object_fixture(fun):
     @pytest.fixture
     @wraps(fun)
     def wrapper(**kwargs):
-        print("[uncached hashable] " + fun.__name__)        
+        logger.debug("[uncached hashable] " + fun.__name__)        
         data = fun(**kwargs)
         version = fun.__name__ + _hash_data(data)
-        print("[hashable version] " + fun.__name__ + " -> " + version)
+        logger.debug("[hashable version] " + fun.__name__ + " -> " + version)
         return VersionedUncachedData(data, version)
 
     return wrapper
@@ -571,7 +580,7 @@ def versioned_cached_data_fixture(fun):
     @wraps(fun)
     def wrapper(**kwargs):
 
-        print("[generating versioned data] " + fun.__name__)
+        logger.debug("[generating versioned data] " + fun.__name__)
         
         input_params_versions, kwargs_data = _get_fixture_params(kwargs)
 
@@ -582,12 +591,12 @@ def versioned_cached_data_fixture(fun):
         with FileLock(str(versioned_data.file_path) + ".lock"):
 
             if not versioned_data.load(request):
-                print("[cache miss] " + fun.__name__ + f" -> {versioned_data.file_path}")
+                logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_data.file_path}")
                 versioned_data.save(fun(**kwargs_data))
             else:
-                print("[cache hit] " + fun.__name__ + f" -> {versioned_data.file_path}")
+                logger.debug("[cache hit] " + fun.__name__ + f" -> {versioned_data.file_path}")
 
-        print("[data version] " + fun.__name__ + " -> " + versioned_data.version)
+        logger.debug("[data version] " + fun.__name__ + " -> " + versioned_data.version)
 
         return versioned_data
 

@@ -38,6 +38,8 @@ def pytest_addoption(parser):
     parser.addoption("--torq-runtime-hw-type", action="store", default="sim", help="Command separate list of target hw to use for torq tests (sim, aws_fpga)")
     parser.addoption("--torq-chips", action="store", default="default", help="Command separate list of chips to compile models for")
     parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
+    parser.addoption("--torq-compiler-timeout", type=int, default=60*5, help="Timeout in seconds for torq compiler invocations")
+    parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
 
 
 def pytest_generate_tests(metafunc):
@@ -341,8 +343,6 @@ def torq_runtime(request):
 
     version = "torq_runtime_" + str(runtime_mtime)
 
-    print("[runtime] " + "torq_runtime" + f" -> {file_path}")
-
     return VersionedFile(file_path, version)
 
 
@@ -420,7 +420,7 @@ def torq_compiler_options(request, case_config):
 
 @versioned_hashable_object_fixture
 def torq_compiler_timeout(request, case_config):
-    return int(case_config.get("torq_compiler_timeout", 60 * 15))
+    return int(case_config.get("torq_compiler_timeout", request.config.getoption("--torq-compiler-timeout")))
 
 
 @versioned_hashable_object_fixture
@@ -514,7 +514,7 @@ def enable_hw_test_vectors(request):
 
 @versioned_hashable_object_fixture
 def torq_runtime_timeout(request, case_config):
-    return int(case_config.get("torq_runtime_timeout", 60 * 15))
+    return int(case_config.get("torq_runtime_timeout", request.config.getoption("--torq-runtime-timeout")))
 
 
 @versioned_cached_data_fixture

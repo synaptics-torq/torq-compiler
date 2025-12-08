@@ -1,0 +1,10 @@
+set(CSS_CONFIG_MABI "ilp32f")
+set(CSS_CONFIG_MARCH "rv32imf_zve32x")
+set(CSS_CONFIG_MATTRS "+m,+f,+zve32x")
+set(CSS_CONFIG_CFLAGS -DCSS_HW_KELVIN -DENABLE_FP -DENABLE_VEC)
+
+# see ${TORQ_HW_DIR}/reg/torq_regs_css_view.h
+
+set(CSS_ITCM_START "0x00000000")
+set(CSS_DTCM_START "0x00010000")
+set(CSS_REGS_START "0x401fc000")

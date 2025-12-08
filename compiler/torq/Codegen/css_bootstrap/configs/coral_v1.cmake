@@ -3,7 +3,6 @@ set(CSS_CONFIG_MARCH "rv32im")
 set(CSS_CONFIG_MATTRS "+m")
 set(CSS_CONFIG_CFLAGS "-DCSS_HW_KELVIN")
 
-
 # see ${TORQ_HW_DIR}/reg/torq_regs_css_view.h
 
 set(CSS_ITCM_START "0x00000000")

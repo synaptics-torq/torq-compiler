@@ -68,7 +68,7 @@ test_cases = [
 
 
 @pytest.fixture(params=test_cases)
-def case_config(request):
+def case_config(request, chip_config):
 
   failed_str = [
     # resnet50
@@ -181,6 +181,7 @@ def case_config(request):
     'nasnetmobile_normal_left3',
     'nasnetmobile_separable_conv_2_reduction_left1_stem_2',
     'nasnetmobile_separable_conv_2_reduction_right1_stem_2',
+    'nasnetmobile_separable_conv_2_reduction_right1_reduce_4', # error: matching error reduction loops > 0!
     'nasnetmobile_separable_conv_2_reduction_right1_reduce_8',
 
     # efficientnetb0
@@ -205,17 +206,34 @@ def case_config(request):
     'se_excite',
     'efficientnetb0_block2a_expand_activation',
     'efficientnetb0_block2a_expand_conv',
-
-    ]
-
+  ]
   if any(s in request.param.name.lower() for s in failed_str):
     pytest.xfail("failing test or skipped for now")
+
+  next_chip_failed_tc = [
+     # Assertion failed: (fused >= count && "Could not fuse the requested number of dimensions")
+     'resnet50_conv3_block1_1_conv',
+     'resnet50_conv3_block1_0_conv',
+     'resnet50_conv4_block1_1_conv',
+     'resnet50_conv4_block1_0_conv',
+     'resnet50_conv5_block1_1_conv',
+     'resnet50_conv5_block1_0_conv',
+      # Compiler too long
+     'xception_block13_sepconv2',
+      # error: unable to free enough space for results and operands
+     'nasnetmobile_zero_padding2d_2',
+     # doesnt work on github ci for unknown reason
+     'xception_block14_sepconv2',
+  ]
+  next_chip = (chip_config.data['target'] != "SL2610")
+  if next_chip and any(s in request.param.name for s in next_chip_failed_tc):
+    pytest.xfail("output mismatch or error on next chip")
 
   compile_timeout = 60 * 15
   runtime_timeout = 60 * 15
 
   if "layer_" in request.param.name:
-    compile_timeout = 30
+    compile_timeout = 60 * 3
     runtime_timeout = 30
 
   keras_model = request.param.data

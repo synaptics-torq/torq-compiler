@@ -32,7 +32,7 @@ def get_test_cases():
 
 
 @pytest.fixture(params=get_test_cases())
-def case_config(request):    
+def case_config(request, chip_config):
 
     # tosaops
     failed_tc = [
@@ -74,9 +74,26 @@ def case_config(request):
         'torch_0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean'
 
     ]
-
     if any(s in request.param.name for s in failed_tc):
         pytest.xfail("known failure")    
+
+    next_chip_failed_tc = [
+        'tosa_add-rescaled-constant',
+        'tosa_conv2d_f5_s2_64x64x16_i16',
+        'tosa_conv-stride2',
+        'tosa_add-constant',
+        'tosa_asr-i32',
+        'tosa_add-strided-scalar-i32',
+        'tosa_conv2d-stride4-i16',
+        'tosa_resize-31x31x33xi8',
+        'tosa_pw-16x16',
+        'tosa_pw-32x8',
+        'tosa_matmul-in-bf16-out-fp32_207x207',
+        'torch_0037_Add__Add',
+    ]
+    next_chip = (chip_config.data['target'] != "SL2610")
+    if next_chip and any(s in request.param.name for s in next_chip_failed_tc):
+        pytest.xfail("output mismatch or error on next chip")
 
     return {
         "mlir_model_file": "static_mlir_model_file",

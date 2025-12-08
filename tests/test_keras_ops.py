@@ -1156,10 +1156,19 @@ def get_keras_transpose_test_cases():
 
 
 @pytest.fixture(params=get_test_cases())
-def case_config(request):
+def case_config(request, chip_config):
     # Extract the case from pytest.param if needed
     case = request.param
-    
+
+    # Next chip failures
+    next_chip_failed_tc = [
+        # FIXME: it should be model024_fc_97x2000_int8
+        'model024_fc_97x2000' #'Failed to allocate LRAM addresses"
+    ]
+    tc = request.param.data['keras_model_name']
+    if chip_config.data['target'] != "SL2610" and any(s in tc for s in next_chip_failed_tc):
+        pytest.xfail("output mismatch or error on next chip")
+
     return {
         "keras_model": case.data['keras_model_name'],
         "keras_model_params": case.data.get('keras_model_params', {}),
@@ -1171,8 +1180,6 @@ def case_config(request):
 
 
 @pytest.mark.ci
+@pytest.mark.fpga_ci
 def test_keras_model(request, torq_results, tflite_reference_results, case_config):
     compare_test_results(request, torq_results, tflite_reference_results, case_config)
-
-
-

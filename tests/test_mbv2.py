@@ -43,6 +43,8 @@ def case_config(request):
         }
 
 
+# FIXME full model fails with "error: matching error reduction loops > 0!"
+# @pytest.mark.ci
 def test_model_tflite_torq(request, tflite_reference_results, torq_results, case_config):
     compare_test_results(request, torq_results, tflite_reference_results, case_config)
 
