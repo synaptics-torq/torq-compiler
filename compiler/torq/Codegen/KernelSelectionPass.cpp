@@ -343,6 +343,7 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
             // Ex: 576x3x3 --> 576x1x3x3
             weights = weights_insert_dimension(rewriter, op.getLoc(), weights, 1);
             rewriter.modifyOpInPlace(op, [&]() { op.setOperand(1, weights); });
+            weightShape = {weightShape[0], 1, weightShape[1], weightShape[2]};
         }
 
         const int on = weightShape[0];
