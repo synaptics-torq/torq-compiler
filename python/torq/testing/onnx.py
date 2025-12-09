@@ -7,11 +7,15 @@ import onnxruntime
 import subprocess
 import sys
 
+import json
+from google.protobuf.json_format import MessageToJson
+
 from .versioned_fixtures import (versioned_generated_file_fixture,
   versioned_cached_data_fixture,
   versioned_hashable_object_fixture,
   versioned_unhashable_object_fixture,
-  versioned_static_file_fixture
+  versioned_static_file_fixture,
+  VersionedUncachedData
  )
 
 
@@ -20,6 +24,8 @@ This module provides fixtures and utilities for testing onnx models.
 """
 
 def generate_onnx_layers_from_model(model):
+
+    existing_cases = set()
     layer_configs = {}
 
     graph = model.graph
@@ -44,6 +50,11 @@ def generate_onnx_layers_from_model(model):
     index = 0
     part_num = 0
     while index < node_count:
+
+        if (nodes[index].op_type.lower() == 'constant'):
+            index += 1
+            continue
+
         group_size = match_group(index)
         if group_size > 0:
             part_nodes = nodes[index:index + group_size]
@@ -209,19 +220,28 @@ def generate_onnx_layers_from_model(model):
         part_model.ir_version = model.ir_version
         part_model.opset_import.extend(model.opset_import)
 
-        layer_name = f"layer_{part_num}"
+        layer_name = f"layer_{part_nodes[0].op_type}_{part_num}"
+
+        final_model = part_model
 
         # Try to run shape inference and checker on the part. If inference
         # succeeds, save the inferred model; otherwise try checker on raw model.
         try:
             inferred_part = shape_inference.infer_shapes(part_model)
             onnx.checker.check_model(inferred_part)
-            layer_configs[layer_name] = inferred_part
+            final_model = inferred_part
         except Exception as e:
-            print(f'Part {part_num}: inference/check failed: {e}; saving raw part for debugging')
-            onnx.checker.check_model(part_model)
-            layer_configs[layer_name] = part_model
+            print(f'layer {layer_name}: inference/check failed: {e}; saving raw part for debugging')
 
+        onnx_json = json.loads(MessageToJson(final_model))
+        onnx_json_str = json.dumps(onnx_json, sort_keys=True)
+        if onnx_json_str not in existing_cases:
+            existing_cases.add(onnx_json_str)
+        else:
+            print(f"Skipping duplicate model for layer {layer_name}")
+            continue
+
+        layer_configs[layer_name] = final_model
         part_num += 1
 
     return layer_configs
@@ -258,3 +278,25 @@ def onnx_reference_results(request, onnx_model_file):
     ort_inputs = {ort_session.get_inputs()[0].name: sample_input.numpy()}
     ort_outs = ort_session.run(None, ort_inputs)
     return ort_outs
+
+
+def get_full_model(model_file):
+
+    model = onnx.load(model_file)
+    # Run shape inference on the original model to get value_info with shapes
+    inferred_model = None
+    try:
+        inferred_model = shape_inference.infer_shapes(model)
+    except Exception as e:
+        inferred_model = model
+
+    return inferred_model
+
+
+@pytest.fixture
+def onnx_layer_model(request):
+    case_name = request.param.name
+    model_data = request.param.data
+    version = "onnx_layer_model_" + case_name
+
+    return VersionedUncachedData(data=model_data, version=version)
