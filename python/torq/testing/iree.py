@@ -185,6 +185,7 @@ def get_dtype(name):
                   'ui8': np.uint8,
                   'f16': np.float16,
                   'f32': np.float32,
+                  'si8': np.int8,
                   'si16': np.int16,
                   'si64': np.int64,
                   'si32': np.int32,
@@ -715,6 +716,25 @@ def list_mlir_files(dir_name):
 
     if extra_dir.exists():
         test_files.extend(_list_mlir_files(extra_dir))
+
+    return sorted(test_files)
+
+
+def list_files_without_extras(dir_name):
+    """
+    Creates pytest parameters for all files in the specified testdata subdirectory
+    """
+
+    test_files = []
+
+    testdata_dir = TOPDIR / 'tests' / 'testdata' / dir_name
+
+    if not testdata_dir.exists():
+        return []
+
+    for file in testdata_dir.iterdir():
+        if not file.name.startswith('disable'):
+            test_files.append(testdata_dir / file)
 
     return sorted(test_files)
 

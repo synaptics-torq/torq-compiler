@@ -4,3 +4,4 @@ __pycache__
 CMakeLists.txt.user
 /extras
 tmp
+tests/testdata/dev_ops
