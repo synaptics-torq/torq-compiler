@@ -23,7 +23,7 @@ from .versioned_fixtures import (versioned_generated_file_fixture,
 This module provides fixtures and utilities for testing onnx models.
 """
 
-def generate_onnx_layers_from_model(model):
+def generate_onnx_layers_from_model(model, node_groups=None):
 
     existing_cases = set()
     layer_configs = {}
@@ -32,15 +32,9 @@ def generate_onnx_layers_from_model(model):
     nodes = graph.node
     node_count = len(nodes)
 
-    # Define groups of nodes (by op_type) that should be split together
-    node_groups = [
-        ['Conv', 'Relu'],
-        ['Conv', 'Clip'],
-        ['MatMul', 'Add', 'Relu'],
-        # Add more groups as needed
-    ]
-
     def match_group(start_index):
+        if node_groups is None:
+            return 0
         for group in node_groups:
             if start_index + len(group) <= node_count:
                 if all(nodes[start_index + i].op_type == group[i] for i in range(len(group))):

@@ -11,7 +11,7 @@ from torq.testing.cases import Case
 from torq.testing.versioned_fixtures import versioned_cached_data_fixture
 
 @versioned_cached_data_fixture
-def comparison_config_from_dict(request):
+def comparison_config_for_mbv2(request):
     return {"fp_avg_tol": 0.03, "fp_max_tol": 0.31}
 
 
@@ -65,7 +65,7 @@ def case_config(request, chip_config):
     }
 
     if "layer_ReduceMean" in request.node.name:
-        case_config_dict["comparison_config"] = "comparison_config_from_dict"
+        case_config_dict["comparison_config"] = "comparison_config_for_mbv2"
 
     return case_config_dict
 
@@ -74,7 +74,12 @@ def pytest_generate_tests(metafunc):
 
     model_file = get_hf_model_file(metafunc.config.cache,  "Synaptics/torch_models", "mbv2-bf16.onnx")
     model = get_full_model(model_file)
-    layers = generate_onnx_layers_from_model(model)
+
+    # Define groups of nodes (by op_type) that should be split together
+    node_groups = [
+        ['Conv', 'Clip'],
+    ]
+    layers = generate_onnx_layers_from_model(model, node_groups)
 
     cases = [Case(key, layer) for key, layer in layers.items()] + [ Case("full_model", model) ]
     metafunc.parametrize("onnx_layer_model", cases, indirect=True)
