@@ -35,6 +35,77 @@
 
 namespace mlir::syna::torq {
 
+static DenseElementsAttr expandWeightsForDilation(
+    DenseElementsAttr weights, ArrayRef<int64_t> dilations, PatternRewriter &rewriter,
+    int64_t maxKernelSize = 7
+) {
+    auto weightType = mlir::cast<ShapedType>(weights.getType());
+    auto shape = weightType.getShape();
+    auto elemType = weightType.getElementType();
+
+    int64_t kh = shape[shape.size() - 2];
+    int64_t kw = shape[shape.size() - 1];
+    int64_t dh = dilations[0], dw = dilations[1];
+
+    int64_t khNew = kh + (kh - 1) * (dh - 1);
+    int64_t kwNew = kw + (kw - 1) * (dw - 1);
+
+    if (khNew > maxKernelSize || kwNew > maxKernelSize)
+        return nullptr;
+
+    SmallVector<int64_t> newShape(shape.begin(), shape.end());
+    newShape[newShape.size() - 2] = khNew;
+    newShape[newShape.size() - 1] = kwNew;
+
+    Location loc = rewriter.getUnknownLoc();
+    auto weightsConst = rewriter.create<arith::ConstantOp>(loc, weights);
+    auto emptyTensor = rewriter.create<tensor::EmptyOp>(loc, newShape, elemType);
+
+    TypedAttr zeroAttr;
+    if (elemType.isBF16() || elemType.isF16() || elemType.isF32()) {
+        zeroAttr = rewriter.getFloatAttr(elemType, 0.0);
+    }
+    else if (elemType.isInteger()) {
+        zeroAttr = rewriter.getIntegerAttr(elemType, 0);
+    }
+    else {
+        return nullptr;
+    }
+
+    auto zeroConst = rewriter.create<arith::ConstantOp>(loc, zeroAttr);
+    auto filledTensor =
+        rewriter.create<linalg::FillOp>(loc, ValueRange{zeroConst}, ValueRange{emptyTensor});
+
+    SmallVector<AffineMap> indexingMaps;
+    SmallVector<utils::IteratorType> iteratorTypes;
+    indexingMaps.push_back(rewriter.getMultiDimIdentityMap(shape.size()));
+
+    SmallVector<AffineExpr> outputExprs;
+    for (size_t i = 0; i < shape.size() - 2; ++i) {
+        outputExprs.push_back(rewriter.getAffineDimExpr(i));
+    }
+    outputExprs.push_back(rewriter.getAffineDimExpr(shape.size() - 2) * dh);
+    outputExprs.push_back(rewriter.getAffineDimExpr(shape.size() - 1) * dw);
+    indexingMaps.push_back(AffineMap::get(shape.size(), 0, outputExprs, rewriter.getContext()));
+
+    for (size_t i = 0; i < shape.size(); ++i) {
+        iteratorTypes.push_back(utils::IteratorType::parallel);
+    }
+
+    auto genericOp = rewriter.create<linalg::GenericOp>(
+        loc, RankedTensorType::get(newShape, elemType), ValueRange{weightsConst},
+        ValueRange{filledTensor.getResult(0)}, indexingMaps, iteratorTypes,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+            b.create<linalg::YieldOp>(loc, args[0]);
+        }
+    );
+
+    genericOp->setAttr("torq-compile-time-const", rewriter.getBoolAttr(true));
+    auto result = computeConstant(genericOp.getResult(0));
+
+    return result;
+}
+
 // Helper function to convert tensor.insert_slice with stride > 1 to InterleavedInsertOp
 // and calculate padding for transposed convolution
 static std::optional<std::pair<Value, PaddingInfo>> convertStridedInsertSliceToInterleaved(
@@ -313,10 +384,8 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                 return rewriter.notifyMatchFailure(convOp, "DW-bf16 only support stride 1");
             }
 
-            auto dilations = convOp.getDilations().template getValues<int64_t>();
-            if (dilations[0] > 1 || dilations[1] > 1) {
-                return rewriter.notifyMatchFailure(convOp, "DW only supports dilation = 1");
-            }
+            // Dilation check removed - now handled by weight expansion below
+            // (dilations > 1 will be converted to dilation = 1 via weight expansion)
         }
 
         // Check if we can support this layer
@@ -375,7 +444,31 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             scInfo.scaleShift -= 1;
         }
 
-        weightAttr = computeConstant(transposedWeights);
+        auto dilations = convOp.getDilations().template getValues<int64_t>();
+        SmallVector<int64_t> dilationVec(dilations.begin(), dilations.end());
+        std::vector<int64_t> finalDilationVec;
+
+        if (llvm::any_of(dilations, [](int64_t d) { return d > 1; })) {
+            weightAttr = computeConstant(transposedWeights);
+            if (!weightAttr)
+                return rewriter.notifyMatchFailure(
+                    convOp, "failed to compute weights for dilation expansion"
+                );
+
+            auto expanded = expandWeightsForDilation(weightAttr, dilationVec, rewriter);
+            if (!expanded)
+                return rewriter.notifyMatchFailure(
+                    convOp, "expanded kernel size exceeds 7x7 limit"
+                );
+
+            weightAttr = mlir::cast<DenseIntOrFPElementsAttr>(expanded);
+            finalDilationVec = {1, 1};
+        }
+        else {
+            weightAttr = computeConstant(transposedWeights);
+            finalDilationVec = attrValues(convOp.getDilations());
+        }
+
         auto torqWeights = createConst(weightAttr, rewriter, loc);
         if (!torqWeights) {
             return rewriter.notifyMatchFailure(
@@ -417,11 +510,12 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         input = transposeValue(input, _dataPerm, loc, rewriter);
         bool nhwcInput = _channelDim == 3 && _dataPerm.empty();
         auto torqOutType = transposeType(output.getType(), _dataPerm);
+
         auto torqConvOp = rewriter.create<TorqConvOp>(
             loc, torqOutType, createInitTensor(convOp, rewriter, torqOutType), padInfo.padValue, 0,
             scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
-            attrValues(convOp.getStrides()), attrValues(convOp.getDilations()),
-            torq_hl::VectorizationModeEnum::None, torqWeights, biasScale, input, nhwcInput
+            attrValues(convOp.getStrides()), finalDilationVec, torq_hl::VectorizationModeEnum::None,
+            torqWeights, biasScale, input, nhwcInput
         );
         auto torqOut = transposeValue(torqConvOp.getOutput(), _dataPerm.reverse(), loc, rewriter);
         rewriter.replaceOp(output.getDefiningOp(), torqOut);
