@@ -44,6 +44,11 @@ class ArithConstPattern : public OpRewritePattern<arith::ConstantOp> {
             return failure();
         }
 
+        if (origType.getElementType().isIndex()) {
+            // This is an index constant, probably coming from a reshape op, don't convert it
+            return failure();
+        }
+
 #ifdef ENABLE_TORQ_GENERIC
         // don't convert Pvalues
         if (torq_hl::usedOnlyAsPValue(constOp)) {

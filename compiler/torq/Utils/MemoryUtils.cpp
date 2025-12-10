@@ -411,7 +411,7 @@ getDataStartAddress(Value value, int64_t offset, TypedValue<torq_hl::InvocationT
 bool isDerivedMemRefOperation(Operation *op) {
     return isa<
         memref::SubViewOp, memref::ExpandShapeOp, memref::ReinterpretCastOp,
-        memref::MemorySpaceCastOp, memref::CollapseShapeOp>(op);
+        memref::MemorySpaceCastOp, memref::CollapseShapeOp, memref::ReshapeOp>(op);
 }
 
 OpOperand &getDerivedMemRefBase(Operation *op) {
@@ -431,6 +431,9 @@ OpOperand &getDerivedMemRefBase(Operation *op) {
     }
     else if (auto memorySpaceCast = dyn_cast<memref::MemorySpaceCastOp>(op)) {
         return memorySpaceCast.getSourceMutable();
+    }
+    else if (auto reshapeOp = dyn_cast<memref::ReshapeOp>(op)) {
+        return reshapeOp.getSourceMutable();
     }
     else {
         llvm::report_fatal_error("not a derived memref operation");

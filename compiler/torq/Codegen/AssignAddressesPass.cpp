@@ -200,6 +200,15 @@ static LogicalResult setDerivedMemrefAddress(Operation *op) {
 
         baseAddress = *maybeBaseAddress;
     }
+    else if (auto reshapeOp = dyn_cast<memref::ReshapeOp>(op)) {
+        auto maybeBaseAddress = getAddress(reshapeOp.getSource());
+
+        if (!maybeBaseAddress) {
+            return reshapeOp.emitError("source does not have an address assigned");
+        }
+
+        baseAddress = *maybeBaseAddress;
+    }
     else {
         return op->emitError() << "not a derived memref operation";
     }
