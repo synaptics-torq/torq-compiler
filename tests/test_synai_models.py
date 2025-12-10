@@ -45,6 +45,7 @@ import datetime
 import multiprocessing
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from threading import Lock
 
 # Add parent directory to path to import from python/torq
@@ -95,8 +96,14 @@ def signal_handler(sig, frame):
     print("Exiting.")
     sys.exit(1)
 
-# Register the signal handler for SIGINT (Ctrl+C)
-signal.signal(signal.SIGINT, signal_handler)
+# Register the signal handler for SIGINT (Ctrl+C) only when running in the main thread.
+try:
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, signal_handler)
+    else:
+        print("Skipping SIGINT handler registration: not running in main thread.")
+except Exception as e:
+    print(f"Warning: unable to register SIGINT handler: {e}")
 
 def get_cache_directory(custom_cache_dir=None):
     """Get the cache directory for downloaded models."""
