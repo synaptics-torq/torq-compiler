@@ -36,9 +36,19 @@ def case_config(request, chip_config):
 
     # tosaops
     failed_tc = [
+        # fails even without tile and fuse
+        'linalg_rsqrt-bf16', # AssertionError: Nans differ.
+        'torch_equal',
+        'torch_instancenorm',
+        'torch_reducemean',
+        'torch_reducemean-reshape',
+        'torch_conv2d-nchw-clip-bf16',
+
+        ### tests from extras ###
+
         # Compiler hang
         'tosa_pw-32x8-7x7x320',
- 
+
         # crash
         # argument #1 must have an executor id
         'tosa_conv-stride1',
@@ -49,30 +59,24 @@ def case_config(request, chip_config):
 
         # result wrong
         'tosa_pw-stride2',
-    
+
         # wrong result
         'linalg_tanh-bf16',
-        'linalg_rsqrt-bf16',
 
         # crash
         'torch_encoder.mlir.230.Conv_0_small',
         'torch_encoder.mlir.243.Conv_2_small',
         'torch_encoder.mlir.237.Conv_1_small',
-        'torch_reducemean',
 
         # unable to free enough space for results and operands
         'torch_Conv2d_bf16_1x1x64x8192',
         'torch_Conv2d_bf16_1x1x8192x64',
         'tosa_conv2d-f4',
-        'conv2d-nchw-clip-bf16',
         # failed to run translation of source executable to target executable for backend
         'torch_ConvTranspose_bf16_1x1x512x512',
 
         # fails even without tile and fuse
-        'torch_equal',
-        'torch_instancenorm',
         'torch_0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean'
-
     ]
     if any(s in request.param.name for s in failed_tc):
         pytest.xfail("known failure")    
