@@ -62,18 +62,29 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
             return failure();
         }
 
-        int32_t stride = conv2dOp.getStride()[0];
+        int32_t stride_h = conv2dOp.getStride()[0];
+        int32_t stride_w = conv2dOp.getStride()[1];
 
         int32_t pad_left = conv2dOp.getPad()[0];
         int32_t pad_right = conv2dOp.getPad()[1];
         int32_t pad_top = conv2dOp.getPad()[2];
         int32_t pad_bottom = conv2dOp.getPad()[3];
 
-        // Only transform VALID padding (all zeros) where filter size > 1 in at least one dimension
-        if (!(pad_top == 0 && pad_left == 0 && pad_right == 0 && pad_bottom == 0))
+        // Check which dimensions have VALID padding (pad == 0)
+        bool has_valid_pad_h = (pad_top == 0 && pad_bottom == 0);
+        bool has_valid_pad_w = (pad_left == 0 && pad_right == 0);
+
+        // Only transform if at least one dimension has VALID padding and filter size > 1
+        if (!has_valid_pad_h && !has_valid_pad_w)
             return failure();
 
-        if (ksize_h <= 1 && ksize_w <= 1)
+        // Check if the dimensions with VALID padding have kernel size > 1
+        if (has_valid_pad_h && ksize_h <= 1)
+            has_valid_pad_h = false;
+        if (has_valid_pad_w && ksize_w <= 1)
+            has_valid_pad_w = false;
+
+        if (!has_valid_pad_h && !has_valid_pad_w)
             return failure();
 
         // Reject large kernels (>7x7) as they cannot be handled by hardware or software efficiently
@@ -98,41 +109,77 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
             }
         }
 
+        auto output_type = llvm::dyn_cast<RankedTensorType>(conv2dOp.getInit().getType());
+        auto output_shape = output_type.getShape();
+
+        // Calculate SAME padding for dimensions with VALID padding
         int64_t total_pad_h = 0, total_pad_w = 0;
-        if (stride == 1) {
-            // For stride = 1, SAME padding requires total padding = kernel_size - 1
-            // This ensures output size remains the same as input size
-            total_pad_h = ksize_h - 1;
-            total_pad_w = ksize_w - 1;
+
+        if (has_valid_pad_h) {
+            if (stride_h == 1) {
+                total_pad_h = ksize_h - 1;
+            }
+            else {
+                // For stride > 1: Calculate expected SAME output size first
+                // SAME output = ceil(input / stride)
+                int64_t same_output_h = (input_shape[2] + stride_h - 1) / stride_h;
+                // Then calculate required padding: total_pad = (output - 1) * stride + kernel -
+                // input
+                total_pad_h =
+                    std::max((same_output_h - 1) * stride_h + ksize_h - input_shape[2], int64_t(0));
+            }
         }
-        else if (stride == 2) {
-            // Total padding = (output_size - 1) * stride + kernel_size - input_size
-            // This is the formula for SAME padding with stride > 1
-            int64_t output_h = (input_shape[2] + 1) / 2;
-            int64_t output_w = (input_shape[3] + 1) / 2;
-            total_pad_h = std::max((output_h - 1) * 2 + ksize_h - input_shape[2], int64_t(0));
-            total_pad_w = std::max((output_w - 1) * 2 + ksize_w - input_shape[3], int64_t(0));
-        }
-        else {
-            return failure();
+
+        if (has_valid_pad_w) {
+            if (stride_w == 1) {
+                total_pad_w = ksize_w - 1;
+            }
+            else {
+                // For stride > 1: Calculate expected SAME output size first
+                int64_t same_output_w = (input_shape[3] + stride_w - 1) / stride_w;
+                total_pad_w =
+                    std::max((same_output_w - 1) * stride_w + ksize_w - input_shape[3], int64_t(0));
+            }
         }
 
         if (total_pad_h == 0 && total_pad_w == 0)
             return failure();
 
-        int64_t new_pad_top = total_pad_h / 2;
-        int64_t new_pad_bottom = total_pad_h - new_pad_top;
-        int64_t new_pad_left = total_pad_w / 2;
-        int64_t new_pad_right = total_pad_w - new_pad_left;
+        // Calculate new padding values, preserving existing padding for dimensions that already
+        // have it
+        int64_t new_pad_top, new_pad_bottom, new_pad_left, new_pad_right;
 
-        auto output_type = llvm::dyn_cast<RankedTensorType>(conv2dOp.getInit().getType());
-        auto output_shape = output_type.getShape();
+        if (has_valid_pad_h) {
+            new_pad_top = total_pad_h / 2;
+            new_pad_bottom = total_pad_h - new_pad_top;
+        }
+        else {
+            // Keep existing padding
+            new_pad_top = pad_top;
+            new_pad_bottom = pad_bottom;
+        }
+
+        if (has_valid_pad_w) {
+            new_pad_left = total_pad_w / 2;
+            new_pad_right = total_pad_w - new_pad_left;
+        }
+        else {
+            // Keep existing padding
+            new_pad_left = pad_left;
+            new_pad_right = pad_right;
+        }
+
         SmallVector<int64_t, 4> same_pad_conv_output_shape = {
             output_shape[0], output_shape[1], output_shape[2], output_shape[3]
         };
 
-        same_pad_conv_output_shape[2] += (new_pad_top + new_pad_bottom);
-        same_pad_conv_output_shape[3] += (new_pad_left + new_pad_right);
+        // Add padding only for dimensions that were converted from VALID to SAME
+        if (has_valid_pad_h) {
+            same_pad_conv_output_shape[2] += (new_pad_top + new_pad_bottom);
+        }
+        if (has_valid_pad_w) {
+            same_pad_conv_output_shape[3] += (new_pad_left + new_pad_right);
+        }
 
         auto new_output_type =
             RankedTensorType::get(same_pad_conv_output_shape, output_type.getElementType());
@@ -156,7 +203,11 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
             conv2dOp.getWeights(), conv2dOp.getScaleBias(), conv2dOp.getInput()
         );
 
-        auto offsets = createVector({0, 0, new_pad_top, new_pad_left}, rewriter);
+        // Extract slice offsets: only offset dimensions that were converted from VALID to SAME
+        int64_t offset_h = has_valid_pad_h ? new_pad_top : 0;
+        int64_t offset_w = has_valid_pad_w ? new_pad_left : 0;
+
+        auto offsets = createVector({0, 0, offset_h, offset_w}, rewriter);
         auto sizes = createVector(
             {output_shape[0], output_shape[1], output_shape[2], output_shape[3]}, rewriter
         );
