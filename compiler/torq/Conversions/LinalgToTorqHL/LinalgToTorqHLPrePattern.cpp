@@ -1100,8 +1100,8 @@ struct Conv2DNchwMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> 
             rhs = extractSlice.getSource();
         }
         if (!rhs.getDefiningOp<tensor::CollapseShapeOp>() &&
-            !isCollapseOrExpandShapeGeneric(lhs.getDefiningOp())) {
-            return rewriter.notifyMatchFailure(srcOp, "LHS is not collapsed from 4D");
+            !isCollapseOrExpandShapeGeneric(rhs.getDefiningOp())) {
+            return rewriter.notifyMatchFailure(srcOp, "RHS is not collapsed from 4D");
         }
         Value input = rhs.getDefiningOp()->getOperand(0);
         auto inputType = dyn_cast<RankedTensorType>(input.getType());
@@ -1177,7 +1177,7 @@ struct Conv2DNchwMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> 
 
         if (_markFuseGroups) {
             markFuseGroupBackward(
-                output, {input, rhs}, rewriter,
+                output, {lhs, input}, rewriter,
                 srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();
