@@ -560,7 +560,7 @@ KernelEncoding FullyConnectedOp::getKernelEncoding() { return getDefault1InputEn
 
 KernelEncoding Conv1DOp::getKernelEncoding() { return getPaddedOutEncoding(*this); }
 
-KernelEncoding ActOp::getKernelEncoding() { return getActLikeEncoding(*this); }
+KernelEncoding ActOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ElementWiseUnaryOp::getKernelEncoding() { return getActLikeEncoding(*this); }
 

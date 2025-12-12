@@ -1638,6 +1638,15 @@ QData SlicePrivate::actClamp(
         isFloat(dataType) && isFloat(partialType) && !isInt(weightType)
     );
 
+    if (actMode == torq_hw::ACTMode::I2F) {
+        assert(isInt(partialType) && "I2F requires int data");
+        resultType = DType::fp32;
+    }
+    else if (actMode == torq_hw::ACTMode::F2I) {
+        assert(isFloat(partialType) && "F2I requires float data");
+        resultType = DType::int32;
+    }
+
     // Configure the ACT unit
     _cfg.act_rsh = actShift;
     _cfg.act_lsh = {0, 0, 0, 0};
