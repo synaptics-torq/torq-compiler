@@ -1,0 +1,19 @@
+iree_cc_library(
+  NAME
+    IR
+  HDRS
+    "TensorTilingInterfaceImpl.h"
+    "Utils.h"
+  SRCS
+    "TensorTilingInterfaceImpl.cpp"
+    "Utils.cpp"
+  DEPS
+    LLVMSupport
+    MLIRIR
+    MLIRSupport
+    MLIRTensorDialect
+    MLIRTensorUtils
+    MLIRTilingInterface
+    iree::compiler::Dialect::Util::IR
+    iree::compiler::Utils
+)

@@ -30,6 +30,7 @@
 
 namespace mlir::syna::torq {
 
+// DEADCODE:
 // Converts a `tensor.collapse_shape` operation into a `linalg.generic`
 // operation that explicitly materializes the collapsed tensor via a copy.
 // Note that linalg implementation of TilingInterface requires that the indexing_map of the output
@@ -132,6 +133,7 @@ struct CollapseShapeOpToLinalgRewrite : public OpRewritePattern<tensor::Collapse
     }
 };
 
+// DEADCODE:
 // Converts a `tensor.expand_shape` operation into a `linalg.generic`
 // operation that explicitly materializes the expand tensor via a copy.
 // Example:

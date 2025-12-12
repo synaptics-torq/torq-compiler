@@ -1954,6 +1954,7 @@ bool isRoundingRightShiftOp(linalg::GenericOp op, arith::ShRSIOp &shrsiOp1) {
     return true;
 }
 
+// DEADCODE:
 bool isCollapseOrExpandShapeGeneric(Operation *op) {
     if (!isa<linalg::GenericOp>(op))
         return false;

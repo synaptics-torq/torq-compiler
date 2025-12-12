@@ -8,6 +8,7 @@
 #include "torq/Conversions/LinalgToTorqHL/Passes.h"
 #include "torq/Conversions/TorqHLToTorqHW/Passes.h"
 #include "torq/Conversions/TosaToTorqHL/Passes.h"
+#include "torq/Dialect/Tensor/IR/TensorTilingInterfaceImpl.h"
 #include "torq/Dialect/TorqHL/BufferizationInterfaces.h"
 #include "torq/Dialect/TorqHL/GenericOpBufferizableInterface.h"
 #include "torq/Dialect/TorqHL/TilingInterfaces.h"
@@ -62,6 +63,8 @@ struct TORQSession : public PluginSession<
         // These are used for JIT compilation of constant manipulation functions
         mlir::registerBuiltinDialectTranslation(registry);
         mlir::registerLLVMDialectTranslation(registry);
+
+        torq::tensor::registerTilingInterfaceExternalModels(registry);
     }
 
     bool extendCustomInputConversionPassPipeline(

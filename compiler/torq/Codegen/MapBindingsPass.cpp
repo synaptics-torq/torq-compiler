@@ -6,6 +6,10 @@
 
 #include "PassesDetail.h"
 
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Value.h"
+#include "mlir/Support/LLVM.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -16,7 +20,10 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
+#include <deque>
 
 #define DEBUG_TYPE "torq-map-bindings"
 
@@ -27,28 +34,52 @@ namespace mlir::syna::torq {
 namespace {
 
 static void updateSubViewUserTypes(PatternRewriter &rewriter, Operation *op) {
-    SmallVector<memref::SubViewOp> subViewUsers;
-    for (auto &use : op->getUses()) {
-        memref::SubViewOp subViewOp = dyn_cast_if_present<memref::SubViewOp>(use.getOwner());
-        if (subViewOp) {
-            subViewUsers.push_back(subViewOp);
+    std::deque<OpOperand> stack;
+    llvm::append_range(stack, op->getUsers());
+
+    while (!stack.empty()) {
+        Operation *currentOp = stack.back().getOwner();
+        stack.pop_back();
+
+        if (!currentOp) {
+            continue;
         }
-    }
 
-    for (auto &subViewOp : subViewUsers) {
+        bool changedOutput =
+            TypeSwitch<Operation *, bool>(currentOp)
+                .Case<memref::SubViewOp>([&](auto subViewOp) {
+                    // Update the subview the correct out type
+                    auto newType = memref::SubViewOp::inferRankReducedResultType(
+                        subViewOp.getType().getShape(), subViewOp.getSource().getType(),
+                        subViewOp.getStaticOffsets(), subViewOp.getStaticSizes(),
+                        subViewOp.getStaticStrides()
+                    );
 
-        // Update the subview the correct out type
-        auto newType = memref::SubViewOp::inferRankReducedResultType(
-            subViewOp.getType().getShape(), subViewOp.getSource().getType(),
-            subViewOp.getStaticOffsets(), subViewOp.getStaticSizes(), subViewOp.getStaticStrides()
-        );
+                    rewriter.modifyOpInPlace(subViewOp, [&]() {
+                        subViewOp.getResult().setType(cast<MemRefType>(newType));
+                    });
 
-        rewriter.modifyOpInPlace(subViewOp, [&]() {
-            subViewOp.getResult().setType(cast<MemRefType>(newType));
-        });
+                    return true;
+                })
+                .Case<memref::ExpandShapeOp>([&](memref::ExpandShapeOp expandOp) {
+                    FailureOr<MemRefType> newType = memref::ExpandShapeOp::computeExpandedType(
+                        expandOp.getSrcType(), expandOp.getStaticOutputShape(),
+                        expandOp.getReassociationIndices()
+                    );
+                    assert(!failed(newType));
 
-        // Recurse to also update subviews of subviews
-        updateSubViewUserTypes(rewriter, subViewOp);
+                    rewriter.modifyOpInPlace(expandOp, [&]() {
+                        expandOp.getResult().setType(*newType);
+                    });
+
+                    return true;
+                })
+                .Default([](auto) { return false; });
+
+        if (changedOutput) {
+            // Recurse to also update users of currentOp
+            llvm::append_range(stack, currentOp->getUsers());
+        }
     }
 }
 

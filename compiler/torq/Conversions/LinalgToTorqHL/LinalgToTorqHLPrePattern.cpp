@@ -790,8 +790,7 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
         }
 
         // check if output user is expand_shape
-        if (output.hasOneUse() && (isa<tensor::ExpandShapeOp>(*output.getUsers().begin()) ||
-                                   isCollapseOrExpandShapeGeneric(*output.getUsers().begin()))) {
+        if (output.hasOneUse() && isa<tensor::ExpandShapeOp>(*output.getUsers().begin())) {
             output = output.getUsers().begin()->getResult(0);
         }
 
@@ -803,8 +802,7 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
         }
 
         // check if output is a tensor::CollapseShapeOp
-        if (output.hasOneUse() && (isa<tensor::CollapseShapeOp>(*output.getUsers().begin()) ||
-                                   isCollapseOrExpandShapeGeneric(*output.getUsers().begin()))) {
+        if (output.hasOneUse() && isa<tensor::CollapseShapeOp>(*output.getUsers().begin())) {
             output = output.getUsers().begin()->getResult(0);
         }
 
@@ -890,8 +888,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         while (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(lhs.getDefiningOp())) {
             lhs = extractSlice.getSource();
         }
-        if (!lhs.getDefiningOp<tensor::CollapseShapeOp>() &&
-            !isCollapseOrExpandShapeGeneric(lhs.getDefiningOp())) {
+        if (!lhs.getDefiningOp<tensor::CollapseShapeOp>()) {
             return rewriter.notifyMatchFailure(srcOp, "LHS is not collapsed from 4D");
         }
         Value input = lhs.getDefiningOp()->getOperand(0);
@@ -931,8 +928,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
 
         // check if output user is expand_shape
         RankedTensorType finalType = nullptr;
-        if (output.hasOneUse() && (isa<tensor::ExpandShapeOp>(*output.getUsers().begin()) ||
-                                   isCollapseOrExpandShapeGeneric(*output.getUsers().begin()))) {
+        if (output.hasOneUse() && isa<tensor::ExpandShapeOp>(*output.getUsers().begin())) {
             output = (*output.getUsers().begin())->getResult(0);
             finalType = cast<RankedTensorType>(output.getType());
         }

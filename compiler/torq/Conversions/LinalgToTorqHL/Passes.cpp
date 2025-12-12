@@ -122,6 +122,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLPreConve
     return std::make_unique<LinalgToTorqHLPreConversionPass>();
 }
 
+// DEADCODE:
 class TensorToLinalgPass : public TensorToLinalgBase<TensorToLinalgPass> {
   public:
     using TensorToLinalgBase::TensorToLinalgBase;
@@ -142,6 +143,7 @@ class TensorToLinalgPass : public TensorToLinalgBase<TensorToLinalgPass> {
     }
 };
 
+// DEADCODE:
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToLinalgPass() {
     return std::make_unique<TensorToLinalgPass>();
 }

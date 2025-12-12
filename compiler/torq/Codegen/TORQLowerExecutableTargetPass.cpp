@@ -124,7 +124,6 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     if (clEnableTorqTileAndFuse) {
         funcPm.addPass(createMarkPatternsForTileAndFusePass());
-        funcPm.addPass(createTensorToLinalgPass());
         funcPm.addPass(createTileAndFusePass());
         funcPm.addPass(createCanonicalizerPass());
         funcPm.addPass(createUnrollLoopPass());

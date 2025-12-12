@@ -21,6 +21,7 @@ add_subdirectory(Pipelines)
 add_subdirectory(Codegen)
 add_subdirectory(Serialization)
 add_subdirectory(Target)
+add_subdirectory(Dialect/Tensor)
 
 iree_cc_library(
   NAME
@@ -41,6 +42,7 @@ iree_cc_library(
     iree::target::torq::Transforms::Linalg::Transforms
     iree::target::torq::Codegen
     iree::target::torq::Pipelines
+    iree::target::torq::Dialect::Tensor::IR
   PUBLIC
 )
 

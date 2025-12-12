@@ -6,7 +6,9 @@
 
 #include "PassesDetail.h"
 
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
+#include "torq/Dialect/Tensor/IR/Utils.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -258,6 +260,7 @@ llvm::FailureOr<SmallVector<OpResultIterationDomain>> linalgOperandSlicesFromIte
         if (RankedTensorType rankedType = dyn_cast<RankedTensorType>(operandOpResult.getType())) {
             SmallVector<OpFoldResult> sizes, offsets;
             sizes.reserve(rankedType.getShape().size());
+            offsets.reserve(rankedType.getShape().size());
             for (auto size : rankedType.getShape()) {
                 sizes.push_back(rewriter.getIndexAttr(size));
                 offsets.push_back(rewriter.getIndexAttr(0));
@@ -275,8 +278,49 @@ llvm::FailureOr<SmallVector<OpResultIterationDomain>> linalgOperandSlicesFromIte
     return oprandIterDomains;
 }
 
+llvm::FailureOr<SmallVector<OpResultIterationDomain>>
+tensorCollapseShapeOperandSlicesFromIterDomain(
+    IRRewriter &rewriter, mlir::tensor::CollapseShapeOp collapseOp, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes
+) {
+    std::optional<linalg::SliceParameters> sliceParams =
+        tensor::computeCollapseSliceParameters(rewriter, collapseOp, offsets, sizes, {}, true);
+
+    assert(sliceParams.has_value());
+
+    SmallVector<OpResultIterationDomain> oprandIterDomains;
+    auto operand = collapseOp.getOperand();
+    OpResult operandOpResult = dyn_cast<OpResult>(operand);
+
+    oprandIterDomains.push_back(
+        std::make_tuple(operandOpResult, sliceParams->offsets, sliceParams->sizes)
+    );
+
+    return oprandIterDomains;
+}
+
+llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorExpandShapeOperandSlicesFromIterDomain(
+    IRRewriter &rewriter, mlir::tensor::ExpandShapeOp expandOp, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes
+) {
+    std::optional<linalg::SliceParameters> sliceParams =
+        tensor::computeExpandSliceParameters(rewriter, expandOp, offsets, sizes, {}, true);
+
+    assert(sliceParams.has_value());
+
+    SmallVector<OpResultIterationDomain> oprandIterDomains;
+    auto operand = expandOp.getOperand(0);
+    OpResult operandOpResult = dyn_cast<OpResult>(operand);
+
+    oprandIterDomains.push_back(
+        std::make_tuple(operandOpResult, sliceParams->offsets, sliceParams->sizes)
+    );
+
+    return oprandIterDomains;
+}
+
 llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorPadOperandSlicesFromIterDomain(
-    IRRewriter &rewriter, tensor::PadOp padOp, ArrayRef<OpFoldResult> offsets,
+    IRRewriter &rewriter, mlir::tensor::PadOp padOp, ArrayRef<OpFoldResult> offsets,
     ArrayRef<OpFoldResult> sizes
 ) {
     auto operand = padOp.getSource();
@@ -290,7 +334,7 @@ llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorPadOperandSlicesFrom
 }
 
 llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorInsertSliceOperandSlicesFromIterDomain(
-    IRRewriter &rewriter, tensor::InsertSliceOp insertSliceOp, ArrayRef<OpFoldResult> offsets,
+    IRRewriter &rewriter, mlir::tensor::InsertSliceOp insertSliceOp, ArrayRef<OpFoldResult> offsets,
     ArrayRef<OpFoldResult> sizes
 ) {
     SmallVector<OpResultIterationDomain> operandIterDomains;
@@ -372,12 +416,22 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
                 .Case<linalg::LinalgOp>([&](auto linalgOp) {
                     return linalgOperandSlicesFromIterDomain(rewriter, linalgOp, offsets, sizes);
                 })
-                .Case<tensor::PadOp>([&](auto padOp) {
+                .Case<mlir::tensor::PadOp>([&](auto padOp) {
                     return tensorPadOperandSlicesFromIterDomain(rewriter, padOp, offsets, sizes);
                 })
-                .Case<tensor::InsertSliceOp>([&](auto insertSliceOp) {
+                .Case<mlir::tensor::InsertSliceOp>([&](auto insertSliceOp) {
                     return tensorInsertSliceOperandSlicesFromIterDomain(
                         rewriter, insertSliceOp, offsets, sizes
+                    );
+                })
+                .Case<mlir::tensor::CollapseShapeOp>([&](auto collapseOp) {
+                    return tensorCollapseShapeOperandSlicesFromIterDomain(
+                        rewriter, collapseOp, offsets, sizes
+                    );
+                })
+                .Case<mlir::tensor::ExpandShapeOp>([&](auto expandOp) {
+                    return tensorExpandShapeOperandSlicesFromIterDomain(
+                        rewriter, expandOp, offsets, sizes
                     );
                 })
                 .Default([&](auto) {
@@ -420,7 +474,7 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
                     // Don't count tensor::EmptyOp feeding the output operand, except for the output
                     // op of the group.
                     auto opDsoi = dyn_cast<DestinationStyleOpInterface>(op);
-                    if (isa<tensor::EmptyOp>(resultOp) && !isFuseGroupOutput(op) && opDsoi) {
+                    if (isa<mlir::tensor::EmptyOp>(resultOp) && !isFuseGroupOutput(op) && opDsoi) {
                         auto inits = opDsoi.getDpsInits();
                         if (llvm::is_contained(inits, opResult)) {
                             continue;
@@ -487,7 +541,7 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
             // Add operand to the queue as needed
             // Skip tensor::InsertSliceOp as it's a data movement operation that doesn't need tiling
             if ((producerOps.contains(resultOp) || shareFuseGroup) &&
-                !isa<tensor::InsertSliceOp>(resultOp)) {
+                !isa<mlir::tensor::InsertSliceOp>(resultOp)) {
                 auto tiOp = cast<TilingInterface>(resultOp);
 
                 // Get the iteration domain for all the loops of the operand owner
@@ -630,8 +684,9 @@ void applyTiledResults(
 }
 
 std::tuple<bool, bool> fuseControlMaxSize(
-    IRRewriter &rewriter, int64_t availableMemoryBytes, tensor::ExtractSliceOp candidateSliceOp,
-    OpResult producerOpResult, bool isDestinationOperand
+    IRRewriter &rewriter, int64_t availableMemoryBytes,
+    mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
+    bool isDestinationOperand
 ) {
     const auto doNotFuse = std::make_tuple(false, false);
 
@@ -709,7 +764,7 @@ std::tuple<bool, bool> fuseControlMaxSize(
 }
 
 std::tuple<bool, bool> fuseControlMaxProducers(
-    IRRewriter &rewriter, tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
+    IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
     bool isDestinationOperand
 ) {
     const auto doNotFuse = std::make_tuple(false, false);
@@ -804,7 +859,7 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
     scf::SCFTileAndFuseOptions options{};
     // Consider using setSCFTileSizes from iree/compiler/Codegen/Utils/Utils.h
     options.tilingOptions.setTileSizes(getAsIndexOpFoldResult(rewriter.getContext(), tileSizes));
-    options.setFusionControlFn([&](tensor::ExtractSliceOp candidateSliceOp,
+    options.setFusionControlFn([&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                                    OpResult producerOpResult, bool isDestinationOperand) {
         switch (clTorqTileAndFuseProducersFuseMode.getValue()) {
         case TileAndFuseProducersFuseMode::MaxSize:
