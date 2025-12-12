@@ -8,7 +8,8 @@ import subprocess
 import sys
 
 import json
-from google.protobuf.json_format import MessageToJson
+# from google.protobuf.json_format import MessageToJson
+# from google.protobuf.json_format import Parse
 
 from .versioned_fixtures import (versioned_generated_file_fixture,
   versioned_cached_data_fixture,
@@ -22,6 +23,59 @@ from .versioned_fixtures import (versioned_generated_file_fixture,
 """
 This module provides fixtures and utilities for testing onnx models.
 """
+
+def _vi_dtype_shape(vi):
+    try:
+        tt = vi.type.tensor_type
+    except Exception:
+        return None, None
+
+    elem = getattr(tt, 'elem_type', None)
+
+    shape = None
+    try:
+        dims = []
+        for d in getattr(tt, 'shape').dim:
+            val = getattr(d, 'dim_value', None)
+            if val is None:
+                val = getattr(d, 'dim_param', None)
+            dims.append(val)
+        shape = tuple(dims)
+    except Exception:
+        shape = None
+
+    return int(elem) if elem is not None else None, shape
+
+
+def _inputs_outputs_signature(graph):
+    inputs = []
+    for vi in graph.input:
+        inputs.append(_vi_dtype_shape(vi))
+
+    outputs = []
+    for vi in graph.output:
+        outputs.append(_vi_dtype_shape(vi))
+
+    return inputs, outputs
+
+
+def _init_signature(init):
+    try:
+        arr = numpy_helper.to_array(init)
+        dtype = str(arr.dtype)
+        shape = tuple(int(d) for d in arr.shape)
+        return [dtype, shape]
+    except Exception:
+        return [init.data_type, tuple(getattr(init, 'dims', ()))]
+
+def model_signature(model):
+    graph = getattr(model, 'graph', model)
+    inputs, outputs = _inputs_outputs_signature(graph)
+    inits = [_init_signature(init) for init in graph.initializer]
+
+    # signature_list = [inputs, outputs, len(node), node_op_type_list, initializer]
+    return [inputs, outputs, len(list(graph.node)), [n.op_type for n in graph.node], inits]
+
 
 def generate_onnx_layers_from_model(model, node_groups=None):
 
@@ -218,6 +272,9 @@ def generate_onnx_layers_from_model(model, node_groups=None):
 
         final_model = part_model
 
+        # to trace exact layer_number in model
+        part_num += 1
+
         # Try to run shape inference and checker on the part. If inference
         # succeeds, save the inferred model; otherwise try checker on raw model.
         try:
@@ -227,16 +284,21 @@ def generate_onnx_layers_from_model(model, node_groups=None):
         except Exception as e:
             print(f'layer {layer_name}: inference/check failed: {e}; saving raw part for debugging')
 
-        onnx_json = json.loads(MessageToJson(final_model))
-        onnx_json_str = json.dumps(onnx_json, sort_keys=True)
-        if onnx_json_str not in existing_cases:
-            existing_cases.add(onnx_json_str)
+        # check duplication: too heavy to compare model, just compare signature
+        m_signature_json = json.dumps(model_signature(final_model))
+        found_existing = False
+        for c in existing_cases:
+            if c == m_signature_json:
+                found_existing = True
+                break
+
+        if not found_existing:
+            existing_cases.add(m_signature_json)
         else:
-            print(f"Skipping duplicate model for layer {layer_name}")
+            # print(f"Skipping duplicate model for layer {layer_name}")
             continue
 
         layer_configs[layer_name] = final_model
-        part_num += 1
 
     return layer_configs
 
