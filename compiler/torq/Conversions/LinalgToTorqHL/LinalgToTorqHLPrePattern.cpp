@@ -866,7 +866,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         Location loc = srcOp.getLoc();
 
         if (srcOp.getInputs().size() != 2 || srcOp.getResults().size() != 1) {
-            return rewriter.notifyMatchFailure(srcOp, "Expects 1 input and 1 output");
+            return rewriter.notifyMatchFailure(srcOp, "Expects 2 inputs and 1 output");
         }
 
         Value lhs = srcOp.getInputs()[0];

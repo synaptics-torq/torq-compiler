@@ -148,33 +148,22 @@ SmallVector<int64_t> getTilingDimOrder(TilingInterface tilingInterfaceOp) {
         return tilingDimOrder;
     };
 
-    // Handler for nhwc operations: we tile C, followed by H as needed.
-    // The H/W currently does not support tiling W (can't do the padding right).
-    // The H/W currently does not support tiling H when stride > 1.
-    auto nhwcOpWithStrides = [&](mlir::DenseIntElementsAttr stridesAttr) {
+    // Handler for nhwc operations: we tile C, followed by H.
+    auto nhwcOpHandler = [&]() {
         SmallVector<int64_t> tilingDimOrder;
-        SmallVector<int64_t, 2> strides(stridesAttr.getValues<int64_t>());
-        if (strides[0] > 1) {
-            // tile only the channels
-            assert(
-                loopIteratorTypes[3] == utils::IteratorType::parallel &&
-                "expected dimension 3 to be parallel"
-            );
-            tilingDimOrder.push_back(3); // C
-        }
-        else {
-            // tile horizontally and then channels
-            assert(
-                loopIteratorTypes[3] == utils::IteratorType::parallel &&
-                "expected dimension 3 to be parallel"
-            );
-            tilingDimOrder.push_back(3); // C
-            assert(
-                loopIteratorTypes[1] == utils::IteratorType::parallel &&
-                "expected dimension 1 to be parallel"
-            );
-            tilingDimOrder.push_back(1); // H
-        }
+
+        assert(
+            loopIteratorTypes[3] == utils::IteratorType::parallel &&
+            "expected dimension 3 to be parallel"
+        );
+        tilingDimOrder.push_back(3); // C
+
+        assert(
+            loopIteratorTypes[1] == utils::IteratorType::parallel &&
+            "expected dimension 1 to be parallel"
+        );
+        tilingDimOrder.push_back(1); // H
+
         return tilingDimOrder;
     };
 
@@ -185,18 +174,13 @@ SmallVector<int64_t> getTilingDimOrder(TilingInterface tilingInterfaceOp) {
         assert(principalOp != nullptr && "could not find the principal op of the fuse group");
 
         return TypeSwitch<Operation *, SmallVector<int64_t>>(principalOp)
-            .Case<linalg::Conv2DNhwcHwcfOp>([&](auto convOp) {
-                // NB: 4th iteration domain is actually F (filters/output-channels) here
-                return nhwcOpWithStrides(convOp.getStrides());
-            })
-            .Case<linalg::DepthwiseConv2DNhwcHwcOp>([&](auto convOp) {
-                return nhwcOpWithStrides(convOp.getStrides());
-            })
             .Case<
-                linalg::PoolingNhwcMaxOp, linalg::PoolingNhwcMaxUnsignedOp,
-                linalg::PoolingNhwcMinOp, linalg::PoolingNhwcMinUnsignedOp,
-                linalg::PoolingNhwcSumOp>([&](auto convOp) {
-                return nhwcOpWithStrides(convOp.getStrides());
+                linalg::Conv2DNhwcHwcfOp, // NB: 4th iteration domain is actually F
+                                          // (filters/output-channels) in this case
+                linalg::DepthwiseConv2DNhwcHwcOp, linalg::PoolingNhwcMaxOp,
+                linalg::PoolingNhwcMaxUnsignedOp, linalg::PoolingNhwcMinOp,
+                linalg::PoolingNhwcMinUnsignedOp, linalg::PoolingNhwcSumOp>([&](auto) {
+                return nhwcOpHandler();
             })
             .Default([&](auto) { return allParallelDims(); });
     }
@@ -609,7 +593,7 @@ llvm::FailureOr<bool> fitTileToMemory(
         return true;
     }
 
-    LLVM_DEBUG({ llvm::dbgs() << __func__ << ": failed, no more dimensions\n"; });
+    consumerOp->emitWarning("operation can't be tiled: no more dimensions to tile");
 
     return LogicalResult::failure();
 }
