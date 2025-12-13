@@ -290,6 +290,17 @@ template <typename OpT> static KernelEncoding getDenseTwoInputEncoding(OpT op) {
         {op.getInput1Mutable().getOperandNumber(), op.getInput2Mutable().getOperandNumber()}
     };
 
+    /// add padding for small outputs
+    constexpr size_t KERNEL_W_SZ = 64;
+    const RankedTensorType resultType = cast<RankedTensorType>(op->getResult(0).getType());
+    const auto numElements = resultType.getNumElements();
+    assert(resultType.hasStaticShape() && "Output 0 has non-static shape");
+    assert(numElements != ShapedType::kDynamic && "Output 0 has a dynamic number of elements");
+    const auto outSizeBytes = numElements * getScalarSizeBytes(resultType.getElementType());
+    if (outSizeBytes < static_cast<int64_t>(KERNEL_W_SZ)) {
+        req.outputEncoding.paddingAlign = KERNEL_W_SZ;
+    }
+
     return req;
 }
 

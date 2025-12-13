@@ -20,6 +20,10 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 #include "numeric"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-optimize-elementwise-binary-op-pattern"
@@ -285,6 +289,122 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
     return success();
 }
 
+static LogicalResult
+promoteScalar(linalg::LinalgOp srcOp, Value &input, PatternRewriter &rewriter) {
+
+    auto addReshape1D = [&](Value &input) {
+        auto type = dyn_cast<RankedTensorType>(input.getType());
+        auto elementType = type.getElementType();
+        SmallVector<int64_t> newShape = {1};
+        auto outType = RankedTensorType::get(newShape, elementType);
+        std::vector<int64_t> shVec(newShape.begin(), newShape.end());
+        Value shValue = createConst(shVec, rewriter, input.getLoc());
+        auto reshapeOp =
+            rewriter.create<tensor::ReshapeOp>(input.getLoc(), outType, input, shValue);
+        return reshapeOp.getResult();
+    };
+
+    auto rank = dyn_cast<RankedTensorType>(input.getType()).getRank();
+    assert(rank >= 0 && "Tensor rank must be >= 0");
+    if (rank > 0) {
+        return failure();
+    }
+    input = addReshape1D(input);
+    return success();
+}
+
+/// @brief Promote scalar operands to 1D tensors via a symbolic reshape
+/// @note Only matches elementwise binary ops for now
+///
+/// The purpose of this promotion is to ensure that ops with scalar operands
+/// are picked up by `BroadcastElementwiseBinaryOpPattern`
+///
+/// Simlpe example: `tensor<i16>` -> `tensor<1xi16>`
+class PromoteScalarsTo1D : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+
+        // Avoid broadcasted inputs
+        if (srcOp->getAttrOfType<BoolAttr>("broadcasted")) {
+            return failure();
+        }
+
+        auto resultType = dyn_cast<RankedTensorType>(srcOp.getResultTypes().front());
+        if (!resultType) {
+            return rewriter.notifyMatchFailure(srcOp, "expected ranked tensor result type\n");
+        }
+
+        if (resultType.getRank() == 0) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "result is scalar, no need to promote scalars\n"
+            );
+        }
+
+        if (srcOp.getNumDpsInputs() != 2 || srcOp.getNumDpsInits() != 1) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "expected binary linalg.generic with a single output\n"
+            );
+        }
+
+        if (srcOp.getNumReductionLoops() != 0) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "only handle elementwise generics without reductions\n"
+            );
+        }
+
+        SmallVector<AffineMap> indexingMaps = srcOp.getIndexingMapsArray();
+        SmallVector<Value> newOperands(srcOp->getOperands().begin(), srcOp->getOperands().end());
+        SmallVector<unsigned> scalarInputIdxs;
+        for (auto it : llvm::enumerate(srcOp.getDpsInputs())) {
+            auto rtt = dyn_cast<RankedTensorType>(it.value().getType());
+            if (!rtt)
+                return rewriter.notifyMatchFailure(srcOp, "non-ranked input\n");
+            if (rtt.getRank() == 0)
+                scalarInputIdxs.push_back(it.index());
+        }
+        if (scalarInputIdxs.empty()) {
+            return rewriter.notifyMatchFailure(srcOp, "no rank-0 input to promote\n");
+        }
+
+        for (unsigned dpsIdx : scalarInputIdxs) {
+            Value input = srcOp.getDpsInputs()[dpsIdx];
+            auto inputType = dyn_cast<RankedTensorType>(input.getType());
+            if (!inputType) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "expected ranked tensor type for input " + Twine(dpsIdx) + "\n"
+                );
+            }
+            if (failed(promoteScalar(srcOp, input, rewriter))) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "failed to promote input " + Twine(dpsIdx) + "\n"
+                );
+            }
+            const int64_t numLoops = srcOp.getNumLoops();
+            auto c0 = rewriter.getAffineConstantExpr(0);
+            unsigned operandNumber = srcOp.getDpsInputOperand(dpsIdx)->getOperandNumber();
+            newOperands[operandNumber] = input;
+            indexingMaps[operandNumber] = AffineMap::get(
+                /*dimCount=*/numLoops,
+                /*symbolCount=*/0,
+                /*results=*/ArrayRef<AffineExpr>{c0}, rewriter.getContext()
+            );
+        }
+
+        rewriter.modifyOpInPlace(srcOp, [&]() {
+            for (unsigned dpsIdx : scalarInputIdxs) {
+                unsigned operandNumber = srcOp.getDpsInputOperand(dpsIdx)->getOperandNumber();
+                srcOp->setOperand(operandNumber, newOperands[operandNumber]);
+            }
+            srcOp.setIndexingMapsAttr(rewriter.getAffineMapArrayAttr(indexingMaps));
+        });
+
+        return success();
+    }
+};
+
 // elementwise binary ops with 2 inputs
 class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
@@ -420,9 +540,9 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
         if (eleOp && !isa<arith::AddIOp>(eleOp) && !isa<arith::AddFOp>(eleOp) &&
             !isa<arith::SubIOp>(eleOp) && !isa<arith::SubFOp>(eleOp) &&
             !isa<arith::MulIOp>(eleOp) && !isa<arith::MulFOp>(eleOp) &&
-            !isa<arith::DivFOp>(eleOp)) {
+            !isa<arith::DivFOp>(eleOp) && !isa<arith::CmpIOp>(eleOp)) {
             return rewriter.notifyMatchFailure(
-                srcOp, "elementwise binary op pattern only supports add/sub/mul ..\n"
+                srcOp, "elementwise binary op pattern only supports add/sub/mul/cmp ..\n"
             );
         }
 
@@ -523,6 +643,28 @@ struct ReshapeToCollapseExpand : public OpRewritePattern<tensor::ReshapeOp> {
             return failure();
         }
 
+        const int srcRank = srcType.getRank();
+        const int dstRank = dstType.getRank();
+        if (auto direct = getReassociationIndicesForReshape(srcType, dstType)) {
+            Value out;
+            if (dstRank < srcRank) {
+                out = rewriter.create<tensor::CollapseShapeOp>(
+                    op.getLoc(), dstType, op.getSource(), *direct
+                );
+            }
+            else if (dstRank > srcRank) {
+                out = rewriter.create<tensor::ExpandShapeOp>(
+                    op.getLoc(), dstType, op.getSource(), *direct
+                );
+            }
+            /// same rank: fall through to mid-shape decomposition
+
+            if (out) {
+                rewriter.replaceOp(op, out);
+                return success();
+            }
+        }
+
         SmallVector<int64_t> collapseShape = findCollapseShape(srcShape);
         SmallVector<int64_t> dstCollapseShape = findCollapseShape(dstShape);
         if (collapseShape != dstCollapseShape) {
@@ -531,43 +673,20 @@ struct ReshapeToCollapseExpand : public OpRewritePattern<tensor::ReshapeOp> {
             return failure();
         }
 
-        // Collapse (1xNx1) -> (N)
-        auto maybeReassoc = getReassociationIndicesForReshape(srcType, dstType);
-        auto collapsedType = dstType;
-        bool onlyCollapse = true;
-        if (!maybeReassoc) {
-            collapsedType = RankedTensorType::get({collapseShape}, srcType.getElementType());
-            maybeReassoc = getReassociationIndicesForCollapse(srcShape, collapseShape);
-            onlyCollapse = false;
-        }
-
-        if (!maybeReassoc) {
-            op.emitError("ReshapeToCollapseExpand: cannot get reassociation for collapse");
+        auto collapseSrc = getReassociationIndicesForCollapse(srcShape, collapseShape);
+        auto collapseDst = getReassociationIndicesForCollapse(dstShape, dstCollapseShape);
+        if (!collapseSrc || !collapseDst) {
             return failure();
         }
 
-        SmallVector<ReassociationIndices, 1> collapseReassoc = maybeReassoc.value();
+        auto midType = RankedTensorType::get(collapseShape, srcType.getElementType());
         Value collapsed = rewriter.create<tensor::CollapseShapeOp>(
-            op.getLoc(), collapsedType, op.getSource(), collapseReassoc
+            op.getLoc(), midType, op.getSource(), *collapseSrc
         );
-        auto finalOp = collapsed;
+        Value expanded =
+            rewriter.create<tensor::ExpandShapeOp>(op.getLoc(), dstType, collapsed, *collapseDst);
 
-        // Expand (N) -> (1xN)
-        if (!onlyCollapse && dstShape.size() != collapseShape.size()) {
-            maybeReassoc = getReassociationIndicesForCollapse(dstShape, collapseShape);
-            if (!maybeReassoc) {
-                op.emitError("ReshapeToCollapseExpand: cannot get reassociation for expand");
-                return failure();
-            }
-            SmallVector<ReassociationIndices, 1> expandReassoc = maybeReassoc.value();
-
-            Value expanded = rewriter.create<tensor::ExpandShapeOp>(
-                op.getLoc(), dstType, collapsed, expandReassoc
-            );
-            finalOp = expanded;
-        }
-
-        rewriter.replaceOp(op, finalOp);
+        rewriter.replaceOp(op, expanded);
         return success();
     }
 };
@@ -575,6 +694,7 @@ struct ReshapeToCollapseExpand : public OpRewritePattern<tensor::ReshapeOp> {
 void populateOptimizeElementwiseBinaryOpPatterns(
     MLIRContext *context, RewritePatternSet &patterns
 ) {
+    patterns.add<PromoteScalarsTo1D>(context);
     patterns.add<BroadcastElementwiseBinaryOpPattern>(context);
     patterns.add<ReshapeToCollapseExpand>(context);
     tensor::populateReassociativeReshapeFoldingPatterns(patterns);

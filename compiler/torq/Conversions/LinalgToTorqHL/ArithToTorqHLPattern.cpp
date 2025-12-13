@@ -142,7 +142,7 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         else if (isa<arith::CmpIOp>(op)) {
             auto cmpIOp = dyn_cast<arith::CmpIOp>(op);
 
-            // TODO: add ne, sle, slt
+            // TODO: add ne
 
             auto predicate = cmpIOp.getPredicate();
             if (predicate == arith::CmpIPredicate::sge || predicate == arith::CmpIPredicate::uge) {
@@ -155,11 +155,21 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
             else if (predicate == arith::CmpIPredicate::eq) {
                 opType = torq_hl::ElementwiseOpEnum::EQUAL;
             }
+            else if (predicate == arith::CmpIPredicate::slt) {
+                // Signed less than => Reverse inputs and use GREATER
+                opType = torq_hl::ElementwiseOpEnum::GREATER;
+                swapInputs = true;
+            }
             else if (predicate == arith::CmpIPredicate::ult) {
                 // Unsigned less than => Reverse inputs and use GREATER
                 opType = torq_hl::ElementwiseOpEnum::GREATER;
                 swapInputs = true;
                 isUnsigned = true;
+            }
+            else if (predicate == arith::CmpIPredicate::sle) {
+                // Signed less than equal => Reverse inputs and use GREATER_EQUAL
+                opType = torq_hl::ElementwiseOpEnum::GREATER_EQUAL;
+                swapInputs = true;
             }
             else if (predicate == arith::CmpIPredicate::ule) {
                 // Unsigned less than equal => Reverse inputs and use GREATER_EQUAL
