@@ -370,7 +370,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
 
             auto strides = convOp.getStrides().template getValues<int64_t>();
             // hk kernel
-            if (strides[0] > 2 || strides[0] != strides[1]) {
+            if (strides[1] != 1 && (strides[0] > 2 || strides[0] != strides[1])) {
                 return rewriter.notifyMatchFailure(
                     convOp, "asymmetric strides or stride > 2 not supported by DW"
                 );
@@ -380,7 +380,8 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                 inputType.getElementType().isBF16() && weightType.getElementType().isBF16();
             // nchw_chw -> in_cxkhxkw, nhwc_hwc -> khxkwxin_c
 
-            if (isBF16 && strides[0] != 1) {
+            if (isBF16 && strides[1] != 1) {
+                // Note: EK supports all strides [SH,1]
                 return rewriter.notifyMatchFailure(convOp, "DW-bf16 only support stride 1");
             }
 

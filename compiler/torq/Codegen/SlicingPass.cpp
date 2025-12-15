@@ -426,9 +426,9 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
 
         // Compute the weights tile for each iteration
         SmallVector<int64_t> weightTileShape(weightsShape);
-        weightTileShape[0] = channels / weightsGrouping;
+        weightTileShape[0] /= kSliceCount;
         SmallVector<OpFoldResult> weightOffset = createVector(0, weightsShape.size(), rewriter);
-        weightOffset[0] = affineEval(arg * (channels / weightsGrouping), iv, rewriter);
+        weightOffset[0] = affineEval(arg * weightTileShape[0], iv, rewriter);
         auto weightsTile = getSlice(op.getWeights(), weightOffset, weightTileShape, rewriter);
 
         // Compute the bias tile for each iteration
@@ -442,9 +442,9 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
 
         // Compute the input tile for each iteration
         SmallVector<int64_t> inTileShape(op.getInput().getType().getShape());
-        inTileShape[1] = channels;
+        inTileShape[1] /= kSliceCount;
         SmallVector<OpFoldResult> inTileOffsets = createVector({0, 0, 0, 0}, rewriter);
-        inTileOffsets[1] = affineEval(arg * channels, iv, rewriter);
+        inTileOffsets[1] = affineEval(arg * inTileShape[1], iv, rewriter);
         inputTile = getSlice(inputTile, inTileOffsets, inTileShape, rewriter);
 
         // Perform the sliced operation using the sliced input, weights and scale/bias

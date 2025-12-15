@@ -26,7 +26,7 @@ using Dim = NCHW;
 
 // Layout of the in/out/weight tensors for processing
 struct In {
-    enum { N, CVectors, IVectors, KernelRows, KernelColGroups, CVectorItems };
+    enum { N, CVectors, CInGroup, IVectors, KernelRows, KernelColGroups, CVectorItems, IElements };
 };
 
 struct Out {
@@ -34,7 +34,13 @@ struct Out {
 };
 
 struct Weight {
-    // Here IC dimension is always 1 for depthwise convolution
+    // IC dimension is always 1 for normal depthwise convolutions, but here we use it to represent
+    // the input channel groups used to accumulate multiple input channels together when depthwise
+    // has been converted from another one with stride [SH, 1] with SH > 1.
+    // In this case the DW will have the original output shape [N, C, H, W], but input shape
+    // [N, C * SH, H / SH, W] and weight shape [O, SH, KH / SH, KW, o].
+    // In both the input and the kernel, the rows have been reorganized in even/odd.
+    // More info in: https://github.com/synaptics-torq/torq-compiler-dev/issues/506
     enum { OCVectors, IC, H, W, OCVectorItems };
 };
 
@@ -46,9 +52,10 @@ static void
 getSubview(LData &input, LData &output, LData &weight, LData &biasScale, int chOffs, int chCount) {
     int sbWidth = scaleBiasWidth(output.elementType());
     auto wDims = weight.dims();
+    int inChGroupSize = weight.dim(Weight::IC);
     int outChVectSize = wDims.size() > Weight::OCVectorItems ? wDims[Weight::OCVectorItems] : 1;
     assert(chOffs % outChVectSize == 0);
-    input.subviewDim(Dim::C, chOffs, chCount);
+    input.subviewDim(Dim::C, chOffs * inChGroupSize, chCount * inChGroupSize);
     output.subviewDim(Dim::C, chOffs, chCount);
     weight.subviewDim(Weight::OCVectors, chOffs / outChVectSize, div_ceil(chCount, outChVectSize));
     biasScale.subviewDim(0, chOffs * sbWidth, chCount * sbWidth);
@@ -95,12 +102,17 @@ static torq_hw::SliceTaskOp lowerToHw(
     int vectSize = vectStride + std::min(kernelBorder.left + kernelBorder.right, alukw - 1);
     input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride);
 
+    // Split the input channels in groups to accumulate over the input channels in the same group
+    // After the split input.dim(Dim::C) will be equal to output.dim(Dim::C) as for normal dw convs.
+    int inChGroupSize = weight.dim(Weight::IC);
+    assert(input.dim(Dim::C) % inChGroupSize == 0 && "Input channels not multiple of group");
+    input.reshapeDim(Dim::C, {-1, inChGroupSize}, false);
+
     // Split the C dimension into CVectors and CVectorItems
-    input.reshapeDim(Dim::C, {-1, outChVectSize}, true);
+    input.reshapeDim(In::CVectors, {-1, outChVectSize}, true);
 
     // Move CVectorItems dimension after IVectors so that we can load 4 IVectors in parallel
-    // from neighboring channels (use CVectorItems -2 because Rows & Cols dim not yet inserted)
-    input.moveDim(In::CVectors + 1, In::CVectorItems - 2);
+    input.moveDim(In::CVectors + 1, In::IVectors + 1);
 
     // Add additional dimension to scan over the kernelDim.h input rows
     int rowSize = output.dim(Dim::W);
@@ -125,17 +137,20 @@ static torq_hw::SliceTaskOp lowerToHw(
     // weight vectorization (dimension 4 of the weight vector if present).
     // Loading multiple vectors allows to paralleliza the iram load (4 cycles) with the
     // processing of the idata by the alu (kernelDim.w cycles).
-    For(auto batch = slice.iterate(input.dim(In::N))) {
+    For(auto n = slice.iterate(input.dim(In::N))) {
         For(auto ocv = slice.iterate(output.dim(Out::CVectors))) {
             For(auto iv = slice.iterate(input.dim(In::IVectors))) {
                 PData pdata;
-                For(auto kh = slice.iterate(kernelDim.h)) {
-                    For(auto kw = slice.iterate(kernelDim.w)) {
-                        WData wdata = slice.wram.load(weight[ocv][0][kh][kw]);
-                        // Load vectors from neighboring channels
-                        IData idata = slice.iram.load(input[batch][ocv][iv][kh][kw / alukw]);
-                        idata.setShape({{alukw, Stride(1)}, idata.dim(0), vectStride});
-                        pdata = slice.alu.multiScalarProductAccumulate(idata[kw % alukw], wdata);
+                For(auto ic = slice.iterate(weight.dim(Weight::IC))) {
+                    For(auto kh = slice.iterate(kernelDim.h)) {
+                        For(auto kw = slice.iterate(kernelDim.w)) {
+                            WData wdata = slice.wram.load(weight[ocv][ic][kh][kw]);
+                            // Load vectors from neighboring channels
+                            IData idata = slice.iram.load(input[n][ocv][ic][iv][kh][kw / alukw]);
+                            idata.setShape({{alukw, Stride(1)}, idata.dim(0), vectStride});
+                            pdata =
+                                slice.alu.multiScalarProductAccumulate(idata[kw % alukw], wdata);
+                        }
                     }
                 }
                 For(auto o = slice.iterate(outChVectSize)) { // Not necessarily all the pdata
@@ -145,7 +160,7 @@ static torq_hw::SliceTaskOp lowerToHw(
                             pdata[o][av], bdata, op.getShiftFactor(), op.getOutputZp(),
                             op.getOutputMin(), op.getOutputMax()
                         );
-                        slice.append(output[batch][ocv][o], res);
+                        slice.append(output[n][ocv][o], res);
                     }
                 }
             }

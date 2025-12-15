@@ -99,8 +99,8 @@ AssignOperationsToCpuProgramsPass::createOutliningGroups(Region *region, int nex
         // the DMA engine or will be folded away when we unroll loops)
         else if (isa<arith::ConstantOp, tensor::EmptyOp, tensor::InsertSliceOp,
                      tensor::ExtractSliceOp, func::ReturnOp, tensor::ParallelInsertSliceOp,
-                     tensor::CollapseShapeOp, tensor::ExpandShapeOp, affine::AffineApplyOp,
-                     affine::AffineMaxOp, affine::AffineMinOp>(op)) {
+                     tensor::CollapseShapeOp, tensor::ExpandShapeOp, tensor::ReshapeOp,
+                     affine::AffineApplyOp, affine::AffineMaxOp, affine::AffineMinOp>(op)) {
             noOutlineOps.insert(&op);
         }
         else if (op.getDialect()->getNamespace() == torq_hl::TorqHLDialect::getDialectNamespace()) {

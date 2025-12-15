@@ -458,7 +458,12 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<FoldConvertChainWithKernel>(ctx);
     patterns.add<FoldRoundTripConversion>(ctx);
     patterns.add<FoldLramToLramConversionChain>(ctx);
+#if 0
+    // This pattern creates a situation where elementwise ops have inputs with different
+    // encodings (strides), which is not supported yet. So we disable it for now.
+    // It can be re-enabled once we support elementwise ops with different input encodings.
     patterns.add<SwapExtractAndConvert>(ctx);
+#endif
 
     if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();

@@ -20,6 +20,7 @@
 #include "iree/compiler/Utils/FlatbufferUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -1352,6 +1353,11 @@ flatbuffers_vec_ref_t Serializer::createBuffersDebugInfoVector(mlir::FunctionOpI
                 }
             }
 
+            if (memref.getType().getElementType().isIndex()) {
+                // Indexes used for Reshape operations are not real buffers
+                continue;
+            }
+
             debugInfoVec.push_back(createBufferDebugInfo(
                 bufferIds[idx], definingActionId, lastUseId, deallocationId, memref
             ));
@@ -1600,6 +1606,16 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
             auto deallocParams = iree_hal_torq_DeallocParams_create(_builder, maybeId->second);
 
             params = iree_hal_torq_HostActionParams_as_DeallocParams(deallocParams);
+        }
+        else if (auto constOp = dyn_cast<arith::ConstantOp>(op);
+                 constOp && isa<IndexType>(cast<ShapedType>(constOp.getType()).getElementType())) {
+            // Ignore constants with element type of IndexType
+            continue;
+        }
+        else if (auto toMemrefOp = dyn_cast<bufferization::ToMemrefOp>(op);
+                 toMemrefOp && isa<arith::ConstantOp>(toMemrefOp.getTensor().getDefiningOp())) {
+            // Ignore ToMemrefOp whose source is an arith.constant
+            continue;
         }
         else {
             // unsupported operation

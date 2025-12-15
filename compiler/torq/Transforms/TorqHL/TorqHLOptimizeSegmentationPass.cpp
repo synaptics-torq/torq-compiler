@@ -28,9 +28,14 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
 
     LogicalResult
     matchAndRewrite(torq_hl::SegmentationOp segOp, PatternRewriter &rewriter) const override {
-        auto op = segOp.getInput().getDefiningOp();
-        if (!op)
+        if (segOp.getHSegments() != 2 || segOp.getWSegments() != 2) {
+            // Only 4-quandrants segmentation can be fused at the moment
             return failure();
+        }
+        auto op = segOp.getInput().getDefiningOp();
+        if (!op) {
+            return failure();
+        }
 
         bool segment_output =
             TypeSwitch<Operation *, bool>(op)

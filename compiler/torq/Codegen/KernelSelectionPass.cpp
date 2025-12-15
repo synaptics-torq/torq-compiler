@@ -129,12 +129,12 @@ template <typename T> static torq_hl::VectorizationModeEnum getVectorizationMode
     return vectorizationMode;
 }
 
-template <class T> static bool isStride2(T convLikeOp) {
-    auto strides = convLikeOp.getStride();
+static bool isStride2(llvm::ArrayRef<int64_t> strides) {
     return strides.size() == 2 && strides[0] == 2 && strides[1] == 2;
 }
 
-template <typename Stride2Op> void insertSegmentationOp(Stride2Op op, PatternRewriter &rewriter) {
+template <typename Stride2Op>
+void insertSegmentationOp(Stride2Op op, PatternRewriter &rewriter, int h, int w) {
     ShapedType inputType = op.getInput().getType();
     assert(inputType.getRank() == 4 && "Expecting 4D input tensor");
     auto outputType = inputType;
@@ -147,7 +147,7 @@ template <typename Stride2Op> void insertSegmentationOp(Stride2Op op, PatternRew
         createIConst(rewriter, op, std::vector<APInt>{APInt(32, 0), APInt(32, 1)});
 
     auto segmentationOp = rewriter.create<syna::torq_hl::SegmentationOp>(
-        op.getLoc(), outputType, initTensor, 0, 0, 0, 0, dummy_weights.getResult(),
+        op.getLoc(), outputType, initTensor, h, w, dummy_weights.getResult(),
         dummy_scale_bias.getResult(), op.getInput()
     );
 
@@ -156,17 +156,34 @@ template <typename Stride2Op> void insertSegmentationOp(Stride2Op op, PatternRew
     });
 }
 
+// Reshapes a tensor to the specified compile-time shape
+static Value staticTensorReshape(
+    Value tensor, mlir::ArrayRef<int64_t> shape, PatternRewriter &rewriter, const Location &loc
+) {
+    auto tensorType = dyn_cast<RankedTensorType>(tensor.getType());
+    auto newType = RankedTensorType::get(shape, tensorType.getElementType());
+    auto shapeType = RankedTensorType::get({(int)shape.size()}, rewriter.getIndexType());
+    auto shapeAttr = DenseIntElementsAttr::get(shapeType, shape);
+    Value shapeConst = rewriter.create<arith::ConstantOp>(loc, shapeAttr);
+    return rewriter.create<tensor::ReshapeOp>(loc, newType, tensor, shapeConst).getResult();
+}
+
 // This function rearranges weights by placing even-indexed values first,
 // followed by odd-indexed values, on the specified dimension.
-static mlir::Value
-weights_swap_even_odd(PatternRewriter &rewriter, Location loc, Value weights, int swapDim) {
+static mlir::Value weights_swap_even_odd(
+    PatternRewriter &rewriter, Location loc, Value weights, int swapDim, int stride
+) {
     auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
     SmallVector<int64_t> shape(wtRankedTy.getShape());
     const int rank = shape.size();
     assert(swapDim < rank && "weight swap even odd: swapDim exceeds rank\n");
     SmallVector<OpFoldResult> sizes = getAsIndexOpFoldResult(rewriter.getContext(), shape);
-    const int64_t evenColSz = (shape[swapDim] + 1) / 2;
-    const int64_t oddColSz = shape[swapDim] / 2;
+    const int64_t evenColSz = (shape[swapDim] + 1) / stride;
+    const int64_t oddColSz = shape[swapDim] / stride;
+    // Normally a kernel must be padded with 0s before calling this function.
+    // However, in the specific case of stride==2 and swapping the last dimension,
+    // we allow oddColSz != evenColSz since the HW can handle it.
+    assert(stride == 2 && swapDim == 3 || evenColSz == oddColSz);
 
     SmallVector<int64_t> evenShape(shape);
     evenShape[swapDim] = evenColSz;
@@ -177,7 +194,7 @@ weights_swap_even_odd(PatternRewriter &rewriter, Location loc, Value weights, in
     // Constants
     Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value c2 = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+    Value cStride = rewriter.create<arith::ConstantIndexOp>(loc, stride);
     Value cevenColSz = rewriter.create<arith::ConstantIndexOp>(loc, evenColSz);
 
     // Extract even channels: offsets [0,0,0,0], sizes [O,I,H,evenColSz], strides [1,1,1,2]
@@ -186,7 +203,7 @@ weights_swap_even_odd(PatternRewriter &rewriter, Location loc, Value weights, in
     SmallVector<OpFoldResult> evenSizes(sizes);
     evenSizes[swapDim] = rewriter.getIndexAttr(evenColSz);
     SmallVector<OpFoldResult> evenStrides(rank, rewriter.getIndexAttr(1));
-    evenStrides[swapDim] = c2;
+    evenStrides[swapDim] = cStride;
     Value evenExtract = rewriter.create<tensor::ExtractSliceOp>(
         loc, evenTy, weights, evenOffsets, evenSizes, evenStrides
     );
@@ -197,7 +214,7 @@ weights_swap_even_odd(PatternRewriter &rewriter, Location loc, Value weights, in
     SmallVector<OpFoldResult> oddSizes(sizes);
     oddSizes[swapDim] = rewriter.getIndexAttr(oddColSz);
     SmallVector<OpFoldResult> oddStrides(rank, rewriter.getIndexAttr(1));
-    oddStrides[swapDim] = c2;
+    oddStrides[swapDim] = cStride;
     Value oddExtract = rewriter.create<tensor::ExtractSliceOp>(
         loc, oddTy, weights, oddOffsets, oddSizes, oddStrides
     );
@@ -266,6 +283,11 @@ static mlir::Value weights_pad_with_zero(
     // Create empty padded tensor
     Value paddedEmpty =
         rewriter.create<tensor::EmptyOp>(loc, paddedShape, wtRankedTy.getElementType());
+    // Fill with zeros
+    auto zeroAttr = rewriter.getZeroAttr(wtRankedTy.getElementType());
+    Value zeroVal = rewriter.create<arith::ConstantOp>(loc, wtRankedTy.getElementType(), zeroAttr);
+    paddedEmpty = rewriter.create<linalg::FillOp>(loc, zeroVal, paddedEmpty).getResult(0);
+
     // Insert original weights into padded tensor
     SmallVector<OpFoldResult> insOff(rank, rewriter.getIndexAttr(0));
     SmallVector<OpFoldResult> insSz = sizes;
@@ -291,9 +313,7 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
 
         // The enum has already the value for the number of parallel outputs (4, 8 or 16)
         const int parallel_outs = static_cast<int>(vectorizationMode);
-
         Value outputs = op.getOutput();
-
         Value weights = op.getWeights();
         arith::ConstantOp constOp = weights.getDefiningOp<arith::ConstantOp>();
 
@@ -353,48 +373,97 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
         std::vector<int64_t> weight_shape{on, in, hn, wn};
 
         rewriter.modifyOpInPlace(op, [&]() { op.setVectorizationMode(vectorizationMode); });
-        if (weightElementType.isInteger()) {
-            auto bitWidth = weightElementType.getIntOrFloatBitWidth();
-            switch (bitWidth) {
-            case 8: {
-                // Inflate and reorder weights
-                if (isStride2(op) && weight_shape[3] > 1) {
-                    // Kernel requires column 1 and column 2 in weights to be swapped
-                    weights = weights_swap_even_odd(rewriter, op.getLoc(), weights, 3);
-                }
-                if (on >= parallel_outs) {
-                    weights = weights_OIHW_to_OIHWO(
-                        rewriter, op.getLoc(), weights, parallel_outs, weightElementType
-                    );
-                }
-                rewriter.modifyOpInPlace(op, [&]() { op.setOperand(1, weights); });
-                break;
-            }
-            default:
-                op->emitError() << "Unsupported weight bitwidth: " << bitWidth;
-                llvm::report_fatal_error("cannot select kernel");
-            }
-        }
-        else if (weightElementType.isBF16()) {
-            // Inflate and reorder weights
-            if (isStride2(op) && weight_shape[3] > 1) {
-                // Kernel requires column 1 and column 2 in weights to be swapped
-                weights = weights_swap_even_odd(rewriter, op.getLoc(), weights, 3);
-            }
-            if (on >= parallel_outs) {
-                weights = weights_OIHW_to_OIHWO(
-                    rewriter, op.getLoc(), weights, parallel_outs, weightElementType
-                );
-            }
-            rewriter.modifyOpInPlace(op, [&]() { op.setOperand(1, weights); });
-        }
-        else {
+
+        if (!(weightElementType.isBF16() ||
+              (weightElementType.isInteger() && weightElementType.getIntOrFloatBitWidth() == 8))) {
             op->emitError() << "Unsupported weight element type: " << weightElementType;
             llvm::report_fatal_error("cannot select kernel");
         }
 
-        if (isStride2(op)) {
-            insertSegmentationOp(op, rewriter);
+        // Inflate and reorder weights
+        const auto &strides = op.getStride();
+        if (isStride2(strides) && weight_shape[3] > 1) {
+            // Kernel requires column 1 and column 2 in weights to be swapped
+            weights = weights_swap_even_odd(rewriter, op.getLoc(), weights, 3, 2);
+        }
+        else if (strides[0] > 1 && strides[1] == 1) {
+            // Conv with stride [SH, 1], input [N, C, H, W] and kernel [KH, KW] is equivalent to
+            // one with stride [1, 1], input [N, SH*C, H/SH, W], kernel [O,SH*I,div_ceil(KH,SH), KW]
+            // where both the kernel and the input have been segmented (transposed) in SH groups
+            // (in case of SH==2 this means even/odd rows).
+
+            // Pad weights on H dimension to be multiple of sh
+            const int sh = strides[0];
+            weights = weights_pad_with_zero(rewriter, op.getLoc(), weights, 2, sh);
+
+            // Partition kernel rows in sh groups (even/odd rows for sh == 2)
+            weights = weights_swap_even_odd(rewriter, op.getLoc(), weights, 2, sh);
+
+            // Reshape weights by multiplying channels by sh and dividing rows by sh
+            // Note: in the case of DW it is not normally allowed to change the number of input
+            // channels, but our HW kernel supports accumulation over multiple input channels
+            // to generate one output.
+            auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
+            // Collapse dimensions 1 and 2 of weights using a memref::CollapseShapeOp
+            weightShape = wtRankedTy.getShape().vec();
+            SmallVector<ReassociationIndices, 4> reassoc{{0}, {1, 2}, {3}};
+            SmallVector<int64_t, 4> collapsedShape{
+                weightShape[0], weightShape[1] * weightShape[2], weightShape[3]
+            };
+            weights = rewriter
+                          .create<tensor::CollapseShapeOp>(
+                              op.getLoc(),
+                              RankedTensorType::get(collapsedShape, wtRankedTy.getElementType()),
+                              weights, reassoc
+                          )
+                          .getResult();
+            setCompileTimeConstAttr(weights.getDefiningOp());
+            setTargetExecutorAttr(weights.getDefiningOp(), torq_hl::Executor::NSS);
+
+            // Expand dimensions 1 weights using a memref::ExpandShapeOp
+            weightShape[1] = weightShape[1] * sh;
+            weightShape[2] /= sh;
+            weights = rewriter
+                          .create<tensor::ExpandShapeOp>(
+                              op.getLoc(),
+                              RankedTensorType::get(weightShape, wtRankedTy.getElementType()),
+                              weights, reassoc
+                          )
+                          .getResult();
+            setCompileTimeConstAttr(weights.getDefiningOp());
+            setTargetExecutorAttr(weights.getDefiningOp(), torq_hl::Executor::NSS);
+
+            // Segment input rown in sh groups (even/odd rows for sh == 2) and reshape accordingly
+            insertSegmentationOp(op, rewriter, sh, 0);
+            Value input = op.getInput();
+            auto inRankedTy = dyn_cast<RankedTensorType>(input.getType());
+            auto inShape = inRankedTy.getShape().vec();
+            inShape[1] = inShape[1] * sh;
+            inShape[2] /= sh;
+            input = staticTensorReshape(input, inShape, rewriter, op.getLoc());
+
+            // Set strides to [1, 1]
+            SmallVector<int64_t> newStrides{1, 1};
+            rewriter.modifyOpInPlace(op, [&]() {
+                op.setOperand(3, input);
+                op.setStride(newStrides);
+            });
+
+            // Update top and bottom padding. Note: padding is represented as LRTB
+            SmallVector<int64_t> padding(op.getPad());
+            padding[2] /= sh;
+            padding[3] /= sh;
+            rewriter.modifyOpInPlace(op, [&]() { op.setPad(padding); });
+        }
+        if (on >= parallel_outs) {
+            weights = weights_OIHW_to_OIHWO(
+                rewriter, op.getLoc(), weights, parallel_outs, weightElementType
+            );
+        }
+        rewriter.modifyOpInPlace(op, [&]() { op.setOperand(1, weights); });
+
+        if (isStride2(strides)) {
+            insertSegmentationOp(op, rewriter, 2, 2);
         }
 
         return success();
@@ -448,7 +517,8 @@ class MaxPool2dKernelSelectionOp : public OpRewritePattern<torq_hl::MaxPool2dOp>
     LogicalResult matchAndRewrite(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) const {
 
         // only stride-2 maxpool needs segmentation
-        if (!isStride2(op)) {
+        const auto &strides = op.getStride();
+        if (!isStride2(strides)) {
             return failure();
         }
 
@@ -458,7 +528,7 @@ class MaxPool2dKernelSelectionOp : public OpRewritePattern<torq_hl::MaxPool2dOp>
             return failure();
         }
 
-        insertSegmentationOp(op, rewriter);
+        insertSegmentationOp(op, rewriter, 2, 2);
 
         rewriter.modifyOpInPlace(op, [&]() {
             op->setAttr("torq-segmented-input", rewriter.getUnitAttr());

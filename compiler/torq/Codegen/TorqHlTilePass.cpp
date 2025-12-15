@@ -219,9 +219,8 @@ class Conv1DPattern : public OpRewritePattern<torq_hl::Conv1DOp> {
 
                     auto inputTileOp = rewriter.create<torq_hl::SegmentationOp>(
                         segmentationOp.getLoc(), segmentationInputTile.getType(),
-                        segmentationInitTile.getResult(), segmentationOp.getInputZp(),
-                        segmentationOp.getOutputZp(), segmentationOp.getOutputMin(),
-                        segmentationOp.getOutputMax(), segmentationOp.getWeights(),
+                        segmentationInitTile.getResult(), segmentationOp.getHSegments(),
+                        segmentationOp.getWSegments(), segmentationOp.getWeights(),
                         segmentationOp.getScaleBias(), segmentationInputTile
                     );
                     inputTile = inputTileOp.getOutput();
@@ -470,9 +469,8 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
 
                     auto inputTileOp = rewriter.create<torq_hl::SegmentationOp>(
                         segmentationOp.getLoc(), segmentationInputTile.getType(),
-                        segmentationInitTile.getResult(), segmentationOp.getInputZp(),
-                        segmentationOp.getOutputZp(), segmentationOp.getOutputMin(),
-                        segmentationOp.getOutputMax(), segmentationOp.getWeights(),
+                        segmentationInitTile.getResult(), segmentationOp.getHSegments(),
+                        segmentationOp.getWSegments(), segmentationOp.getWeights(),
                         segmentationOp.getScaleBias(), segmentationInputTile
                     );
                     inputTile = inputTileOp.getOutput();
@@ -644,9 +642,8 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
                 inputTile = rewriter
                                 .create<torq_hl::SegmentationOp>(
                                     segmentationOp.getLoc(), segmentationInputTile.getType(),
-                                    segmentationInitTile.getResult(), segmentationOp.getInputZp(),
-                                    segmentationOp.getOutputZp(), segmentationOp.getOutputMin(),
-                                    segmentationOp.getOutputMax(), segmentationOp.getWeights(),
+                                    segmentationInitTile.getResult(), segmentationOp.getHSegments(),
+                                    segmentationOp.getWSegments(), segmentationOp.getWeights(),
                                     segmentationOp.getScaleBias(), segmentationInputTile
                                 )
                                 .getOutput();
@@ -1125,9 +1122,8 @@ class MaxPoolPattern : public OpRewritePattern<torq_hl::MaxPool2dOp> {
                 inputTile = rewriter
                                 .create<torq_hl::SegmentationOp>(
                                     segmentationOp.getLoc(), segmentationInputTile.getType(),
-                                    segmentationInitTile.getResult(), segmentationOp.getInputZp(),
-                                    segmentationOp.getOutputZp(), segmentationOp.getOutputMin(),
-                                    segmentationOp.getOutputMax(), segmentationOp.getWeights(),
+                                    segmentationInitTile.getResult(), segmentationOp.getHSegments(),
+                                    segmentationOp.getWSegments(), segmentationOp.getWeights(),
                                     segmentationOp.getScaleBias(), segmentationInputTile
                                 )
                                 .getOutput();

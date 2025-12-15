@@ -398,10 +398,8 @@ def TorqHL_SegmentationOp: TorqHL_LayerOp<"segmentation"> {
   }];
 
   let arguments = !con(commonArgs, (ins
-    I32Attr:$input_zp,
-    I32Attr:$output_zp,
-    I32Attr:$output_min,
-    I32Attr:$output_max,
+    I32Attr:$h_segments,
+    I32Attr:$w_segments,
     TensorOrMemref:$weights,
     TensorOrMemref:$scale_bias,
     TensorOrMemref:$input

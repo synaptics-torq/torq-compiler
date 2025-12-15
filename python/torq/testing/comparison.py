@@ -69,6 +69,12 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
 
         actual_observed_output = observed_output
         actual_expected_output = expected_output
+        print("To display the difference between expected and observed tensor run:")
+        print(f"{TOPDIR}/scripts/diff-tensor.py {observed_output_path} {expected_output_path}")
+        print("or")
+        print(f"cd {TOPDIR} && streamlit run apps/buffer_diff/buffer_diff.py {observed_output_path} {expected_output_path}")
+        np.save(str(observed_output_path), actual_observed_output)
+        np.save(str(expected_output_path), actual_expected_output)
         observed_output, expected_output = check_nans(observed_output, expected_output)
 
         if (np.issubdtype(expected_output.dtype, bool)):
@@ -93,13 +99,6 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
 
         print(f"Max absolute difference: {np.max(abs_diff)}")
         print(difference_summary)
-        print("To display the difference between expected and observed tensor run:")
-        print(f"{TOPDIR}/scripts/diff-tensor.py {observed_output_path} {expected_output_path}")
-        print("or")
-        print(f"cd {TOPDIR} && streamlit run apps/buffer_diff/buffer_diff.py {observed_output_path} {expected_output_path}")
-
-        np.save(str(observed_output_path), actual_observed_output)
-        np.save(str(expected_output_path), actual_expected_output)
 
         if (np.issubdtype(expected_output.dtype, np.integer) or np.issubdtype(expected_output.dtype, bool)):
             assert (np.max(abs_diff) <= comparison_config['int_thld']) and not (abs_diff != 0).sum(), difference_summary

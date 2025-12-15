@@ -125,7 +125,7 @@ def main():
     for i in range(get_channel_count(tensor)):
         abs_diff = np.abs(get_channel(tensor, i))
         max_abs_diff = np.max(abs_diff)
-        if max_abs_diff > args.delta:
+        if np.isnan(max_abs_diff) or max_abs_diff > args.delta:
             channel_data = get_channel(tensor, i)
             l2 = np.sqrt(np.sum(np.square(channel_data * 1.0)) / channel_data.size)
             mismatch_channels[i] = (float(l2), float(max_abs_diff))
