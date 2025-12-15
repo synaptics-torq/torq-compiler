@@ -42,6 +42,71 @@ BroadcastPattern::transform(torq_hl::BroadcastOp op, PatternRewriter &rewriter) 
         }
     }
 
+    auto product64 = [](ArrayRef<int64_t> shape) -> uint64_t {
+        uint64_t p = 1;
+        for (int64_t v : shape) {
+            p *= static_cast<uint64_t>(v);
+        }
+        return p;
+    };
+
+    // Special-case: insert a single broadcast dim right before the last input dim.
+    // Example: input [1,207,32] -> output [1,207,8,32] with dims=[2].
+    if (dims.size() == 1 && outRank == inRank + 1 && dims.front() == inRank - 1) {
+        const int64_t insertDim = dims.front();
+
+        // Validate that inputShape matches outputShape with the inserted dim removed.
+        for (int i = 0; i < inRank; ++i) {
+            const int outIdx = (i < insertDim) ? i : (i + 1);
+            if (inputShape[i] != outputShape[outIdx]) {
+                return rewriter.notifyMatchFailure(op, "Broadcast insert-dim shape mismatch");
+            }
+        }
+
+        if (outputShape[insertDim] <= 0) {
+            return rewriter.notifyMatchFailure(op, "Broadcast insert-dim shape mismatch");
+        }
+
+        const uint64_t prefix = product64(outputShape.take_front(insertDim));
+        const uint64_t dimSize = static_cast<uint64_t>(outputShape[insertDim]);
+        const uint64_t trailing = product64(outputShape.drop_front(insertDim + 1));
+
+        const DType elementType = getDType(inputType.getElementType());
+
+        // Represent input as [prefix, trailing] and output as [prefix, dimSize, trailing].
+        LData input({static_cast<int64_t>(prefix), static_cast<int64_t>(trailing)}, elementType);
+        LData output(
+            {static_cast<int64_t>(prefix), static_cast<int64_t>(dimSize),
+             static_cast<int64_t>(trailing)},
+            elementType
+        );
+
+        Slice slice;
+        For(auto p = slice.iterate(static_cast<int>(prefix))) {
+            For(auto t = slice.iterate(static_cast<int>(trailing))) {
+                IData idata = slice.iram.load(input[p][t]);
+                For(auto r = slice.iterate(static_cast<int>(dimSize))) {
+                    PData pdata = slice.alu.load(idata);
+                    QData res = slice.act.load(pdata);
+                    slice.store(output[p][r][t], res);
+                }
+            }
+        }
+
+        rewriter.replaceOpWithNewOp<SliceTaskOp>(
+            op,
+            "broadcast",               // Operation to replace
+            ValueRange{op.getInput()}, // Input tensor
+            ValueRange{},              // Weights
+            ValueRange{},              // BiasScale tensor,
+            ValueRange{op.getInit()},  // Output tensor initializer
+            ValueRange{},              // Symbols
+            slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+        );
+
+        return success();
+    }
+
     auto allPrevOutOnes = [&](int dimIdx) -> bool {
         for (int i = 0; i < dimIdx; ++i) {
             if (outputShape[i] != 1)
@@ -84,14 +149,6 @@ BroadcastPattern::transform(torq_hl::BroadcastOp op, PatternRewriter &rewriter) 
             }
         }
     }
-
-    auto product64 = [](ArrayRef<int64_t> shape) -> uint64_t {
-        uint64_t p = 1;
-        for (int64_t v : shape) {
-            p *= static_cast<uint64_t>(v);
-        }
-        return p;
-    };
 
     uint64_t initSize = product64(inputShape);
 

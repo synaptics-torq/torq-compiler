@@ -64,9 +64,6 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
 
         assert observed_output.size == expected_output.size
 
-        if not comparison_config['allow_all_zero']:
-            assert not np.all(observed_output == 0), "Output is 0 always"
-
         actual_observed_output = observed_output
         actual_expected_output = expected_output
         print("To display the difference between expected and observed tensor run:")
@@ -76,6 +73,13 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
         np.save(str(observed_output_path), actual_observed_output)
         np.save(str(expected_output_path), actual_expected_output)
         observed_output, expected_output = check_nans(observed_output, expected_output)
+
+        # Guard against accidentally returning an all-zero tensor when we expect meaningful data.
+        # If the reference is also all-zero (by value), allow an all-zero observed output.
+        if not comparison_config["allow_all_zero"]:
+            expected_is_all_zero = np.all(expected_output == 0)
+            if not expected_is_all_zero:
+                assert np.any(observed_output != 0), "Output is 0 always"
 
         if (np.issubdtype(expected_output.dtype, bool)):
             # abs_diff means the number of differences when dypte is boolean
