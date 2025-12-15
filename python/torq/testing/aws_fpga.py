@@ -2,17 +2,16 @@ from filelock import FileLock
 import subprocess
 from contextlib import contextmanager
 
-
-def load_bitstream(agfi, bandwidth):
+def load_bitstream(agfi, bandwidth, force=False):
 
     print(f"Loading FPGA bitstream {agfi} with bandwidth {bandwidth}...")
 
-    # find the currently loaded AGFI
-    result = subprocess.run(["fpga-describe-local-image", "-S", "0"], capture_output=True, text=True)
-    
-    if agfi in result.stdout:
-        print("Bitstream already loaded.")
-        return  # already loaded
+    if not force:
+        # find the currently loaded AGFI
+        result = subprocess.run(["fpga-describe-local-image", "-S", "0"], capture_output=True, text=True)
+        if agfi in result.stdout:
+            print("Bitstream already loaded.")
+            return
 
     # load the bitstream
     subprocess.run(["fpga-load-local-image", "-S", "0", "-I", agfi], check=True)
@@ -41,16 +40,15 @@ def load_bitstream(agfi, bandwidth):
     print(f"Configured clock at {rate} MHz")
 
 
-
 @contextmanager
 def FpgaSession(fpga_configuration):
 
-    try:
-
-        with FileLock("/tmp/fpga.lock"):
+    with FileLock("/tmp/fpga.lock"):
+        try:
             load_bitstream(fpga_configuration["agfi"], fpga_configuration["bandwidth"])
-
             yield None
-
-    finally:
-        pass
+        except:
+            load_bitstream(fpga_configuration["agfi"], fpga_configuration["bandwidth"], force=True)
+            raise
+        finally:
+            pass

@@ -210,24 +210,25 @@ def case_config(request, chip_config):
   if any(s in request.param.name.lower() for s in failed_str):
     pytest.xfail("failing test or skipped for now")
 
-  next_chip_failed_tc = [
-     # Assertion failed: (fused >= count && "Could not fuse the requested number of dimensions")
-     'resnet50_conv3_block1_1_conv',
-     'resnet50_conv3_block1_0_conv',
-     'resnet50_conv4_block1_1_conv',
-     'resnet50_conv4_block1_0_conv',
-     'resnet50_conv5_block1_1_conv',
-     'resnet50_conv5_block1_0_conv',
-      # Compiler too long
-     'xception_block13_sepconv2',
-      # error: unable to free enough space for results and operands
-     'nasnetmobile_zero_padding2d_2',
-     # doesnt work on github ci for unknown reason
-     'xception_block14_sepconv2',
-  ]
-  next_chip = (chip_config.data['target'] != "SL2610")
-  if next_chip and any(s in request.param.name for s in next_chip_failed_tc):
-    pytest.xfail("output mismatch or error on next chip")
+  if chip_config.data['target'] != "SL2610":
+    failed_str += [
+      # Assertion failed: (fused >= count && "Could not fuse the requested number of dimensions")
+      'resnet50_conv3_block1_1_conv',
+      'resnet50_conv3_block1_0_conv',
+      'resnet50_conv4_block1_1_conv',
+      'resnet50_conv4_block1_0_conv',
+      'resnet50_conv5_block1_1_conv',
+      'resnet50_conv5_block1_0_conv',
+        # Compiler too long
+      'xception_block13_sepconv2',
+        # error: unable to free enough space for results and operands
+      'nasnetmobile_zero_padding2d_2',
+      # doesnt work on github ci for unknown reason
+      'xception_block14_sepconv2',
+    ]
+
+  if any(s in request.param.name.lower() for s in failed_str):
+    pytest.xfail("failing test or skipped for now")
 
   compile_timeout = 60 * 15
   runtime_timeout = 60 * 15

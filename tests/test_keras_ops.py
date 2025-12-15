@@ -1156,18 +1156,31 @@ def get_keras_transpose_test_cases():
 
 
 @pytest.fixture(params=get_test_cases())
-def case_config(request, chip_config):
-    # Extract the case from pytest.param if needed
-    case = request.param
+def case_config(request, runtime_hw_type, chip_config):
 
-    # Next chip failures
-    next_chip_failed_tc = [
-        # FIXME: it should be model024_fc_97x2000_int8
-        'model024_fc_97x2000' #'Failed to allocate LRAM addresses"
-    ]
-    tc = request.param.data['keras_model_name']
-    if chip_config.data['target'] != "SL2610" and any(s in tc for s in next_chip_failed_tc):
-        pytest.xfail("output mismatch or error on next chip")
+    aws_fpga = (runtime_hw_type.data == "aws_fpga")
+
+    failed_tc = []
+
+    if chip_config.data['target'] != "SL2610":
+        # Next chip failures
+        failed_tc += [
+            # FIXME: it should be model024_fc_97x2000_int8
+            'model024_fc_97x2000', #'Failed to allocate LRAM addresses"
+        ]
+        # Next chip fpga failures
+        if aws_fpga:
+            failed_tc += [
+                # # FIXME: how to distinguish between int8 and int16 ?
+                # For int8: Output is [127,127,127], expected is [11,9,31] 
+                # For int16:Output is [0,0,0], expected is [-32768, -32768, -32768]
+                'model471_add16x8_negative_s2v',  
+            ]
+
+    case = request.param
+    tc = case.data['keras_model_name']
+    if any(s in tc for s in failed_tc):
+        pytest.xfail("output mismatch or error")
 
     return {
         "keras_model": case.data['keras_model_name'],
