@@ -26,15 +26,18 @@ namespace synaptics {
 /// Virtual interface to lowest-level Torq driver
 class TorqHw {
   public:
-    enum Type {
+    enum class Type {
+        UNDEFINED,
         SIMULATOR,
         AWS_FPGA,
         SOC_FPGA,
-        ASTRA_MACHINA,
+        ASTRA_MACHINA
     };
 
     virtual ~TorqHw() {}
-    TorqHw(TorqEventLog* eventLog = nullptr);
+    TorqHw(Type type, TorqEventLog* eventLog = nullptr);
+
+    Type getType() const { return _type; }
 
     /// open the device
     virtual bool open() = 0;
@@ -61,6 +64,16 @@ class TorqHw {
     bool readDtcm(uint32_t addr, size_t size, void *dataOut) const;
     /// read data from ITCM, only for debugging purpose
     bool readItcm(uint32_t addr, size_t size, void *dataOut) const;
+
+    /// start XRAM read access
+    virtual const void * startXramReadAccess(uint32_t xramAddr) const = 0;
+    /// end XRAM read access
+    virtual bool endXramReadAccess() = 0;
+    /// start XRAM write access
+    virtual void * startXramWriteAccess(uint32_t xramAddr) = 0;
+    /// end XRAM write access
+    virtual bool endXramWriteAccess() = 0;
+
     /// write data to XRAM
     virtual bool writeXram(uint32_t addr, size_t size, const void *dataIn) = 0;
     /// read data from XRAM
@@ -95,6 +108,9 @@ class TorqHw {
     virtual bool readLram32(uint32_t addr, uint32_t &data) const = 0;
 
   protected:
+    /// Torq hardware type
+    const Type _type{Type::UNDEFINED};
+  
     /// Job Timer reset at each start() call.
     Timer _start_timer;
     /// Job Timer reset at each open() call.

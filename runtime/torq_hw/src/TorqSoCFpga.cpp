@@ -116,6 +116,22 @@ bool TorqSoCFpga::readLram32(uint32_t addr, uint32_t & data) const {
     return true;
 }
 
+const void * TorqSoCFpga::startXramReadAccess(uint32_t addr) const {
+    return reinterpret_cast<const void*>(_xramVBase + addr);
+}
+
+bool TorqSoCFpga::endXramReadAccess() {
+    return true;
+}
+
+void * TorqSoCFpga::startXramWriteAccess(uint32_t addr) {
+    return reinterpret_cast<void*>(_xramVBase + addr);
+}
+
+bool TorqSoCFpga::endXramWriteAccess() {
+    return true;
+}
+
 bool TorqSoCFpga::writeXram(uint32_t addr, size_t size, const void *dataIn) {
     const uint8_t *p = _xramVBase + addr;
     memcpy((void*)p, dataIn, size);

@@ -16,13 +16,17 @@ namespace synaptics {
 
 class TorqSoCFpga: public TorqHw {
   public:
-    TorqSoCFpga(uint32_t xramStartAddr, size_t xramSize): _xramStartAddr(xramStartAddr), _xramSize(xramSize) {}
+    TorqSoCFpga(uint32_t xramStartAddr, size_t xramSize): TorqHw(Type::SOC_FPGA), _xramStartAddr(xramStartAddr), _xramSize(xramSize) {}
 
     bool open() override;
     bool close() override;
     Timer::Duration waitTimeout() override { return Timer::Duration(10000000); }
     bool writeXram(uint32_t addr, size_t size, const void *dataIn) override;
     bool readXram(uint32_t addr, size_t size, void *dataOut) const override;
+    const void * startXramReadAccess(uint32_t xramAddr) const override;
+    bool endXramReadAccess() override;
+    void * startXramWriteAccess(uint32_t xramAddr) override;
+    bool endXramWriteAccess() override;
     bool load() override { return true; };
     bool release() override { return true; };
 

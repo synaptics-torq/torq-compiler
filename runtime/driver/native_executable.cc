@@ -1113,8 +1113,125 @@ private:
         ns(HostAction_location_is_present(action)) ? ns(HostAction_location_get(action)) : ""
     });
     return iree_ok_status();
-
   }
+
+  iree_status_t dumpMemData(const vector<uint8_t> & data, uint32_t outputAddress, uint32_t outputOffset, ns(BufferType_enum_t) outputType) {
+      const string file_name = "host_copy_" + std::to_string(actionIndex) + "_" + std::to_string(outputAddress + outputOffset) + ".txt";
+
+      string type;
+
+      if (outputType == ns(BufferType_LRAM)) {
+        type = ""; 
+      } else if (outputType == ns(BufferType_XRAM)) {
+        type = "x";
+      } else {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "unsupported output memory type when dumping descriptors");
+      }
+
+      auto executableName = ns(ExecutableDef_executable_name(executableDef()));
+
+      // load the data in the next job
+      auto status = create_job_directory(executableName, jobId);
+      if (status != iree_ok_status()) {
+        return status;
+      }
+
+      if (!hex_file_write(executableName, file_name, type + "load", outputAddress + outputOffset, data.data(), data.size(), jobId)) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to dump host copy data");
+      }
+
+      // save the data in the current job
+      if (jobId > 0) {
+        auto status = create_job_directory(executableName, jobId - 1);
+        if (status != iree_ok_status()) {
+          return status;
+        }
+
+        if (!hex_file_write(executableName, file_name, type + "save", outputAddress + outputOffset, data.data(), data.size(), jobId - 1)) {
+          return iree_make_status(IREE_STATUS_INTERNAL, "failed to dump host copy data");
+        }
+      }
+      return iree_ok_status();
+  }
+
+  iree_status_t copyElement(int inputOffset, int outputOffset, int size, ns(HostCopyParams_table_t) params) {
+    vector<uint8_t> data(size);
+
+    uint32_t inputAddress = ns(HostCopyParams_input_address(params));
+    uint32_t outputAddress = ns(HostCopyParams_output_address(params));
+
+    ns(BufferType_enum_t) inputType = ns(HostCopyParams_input_buffer_type(params));
+    ns(BufferType_enum_t) outputType = ns(HostCopyParams_output_buffer_type(params));  
+
+    if (inputType == ns(BufferType_XRAM) && outputType == ns(BufferType_LRAM)) {
+      if (!torq->readXram(inputAddress + inputOffset, size, data.data())) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to read from xram");
+      }
+      if (!torq->writeLram(outputAddress + outputOffset, size, data.data())) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to write to lram");
+      }
+    }
+    else if (inputType == ns(BufferType_LRAM) && outputType == ns(BufferType_XRAM)) {
+      if (!torq->readLram(inputAddress + inputOffset, size, data.data())) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to read from lram");
+      }
+      if (!torq->writeXram(outputAddress + outputOffset, size, data.data())) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to write to xram");
+      }  
+    }
+    else if (inputType == ns(BufferType_XRAM) && outputType == ns(BufferType_XRAM)) {
+      if (!torq->readXram(inputAddress + inputOffset, size, data.data())) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to read from xram");
+      }
+      if (!torq->writeXram(outputAddress + outputOffset, size, data.data())) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to write to xram");
+      }  
+    }
+    else {
+      // XRAM to XRAM is handled by optimized path in processHostCopyAction
+      // LRAM to LRAM should not happen (we must use NSS based copy for that) 
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "unsupported output memory type");
+    }
+    
+    if (FLAG_torq_dump_mem_data_dir[0]) {
+      auto status = dumpMemData(data, outputAddress, outputOffset, outputType);
+      if (!iree_status_is_ok(status)) {
+        return status;
+      }
+    }
+
+    pendingHostCopies = true;
+    
+    return iree_ok_status();
+  };
+
+  iree_status_t copyDimension(int dim, int inputOffset, int outputOffset, ns(HostCopyParams_table_t) params) {
+    auto inputStridesBytes = ns(HostCopyParams_input_strides_bytes(params));
+    auto outputStridesBytes = ns(HostCopyParams_output_strides_bytes(params));
+    auto shape = ns(HostCopyParams_shape(params));
+    auto rank = flatbuffers_uint32_vec_len(shape);
+
+    //cout << "dim " << dim << " rank " << rank << " Copying element: inputOffset=" << inputOffset << " outputOffset=" << outputOffset << endl;
+
+    if (dim == rank) {
+      //cout << "****** last dim == rank, copying element, dim=" << dim << " rank=" << rank << endl;
+      auto elementSize = ns(HostCopyParams_element_size_bytes(params));
+      auto ret = copyElement(inputOffset, outputOffset, elementSize, params);
+
+      if (!iree_status_is_ok(ret)) {
+        return ret;
+      }
+    } else {
+      for (int i = 0; i < flatbuffers_uint32_vec_at(shape, dim); i++) {
+        auto ret = copyDimension(dim + 1, inputOffset + i * flatbuffers_uint32_vec_at(inputStridesBytes, dim),
+                                outputOffset + i * flatbuffers_uint32_vec_at(outputStridesBytes, dim), params);
+        if (!iree_status_is_ok(ret)) {
+          return ret;
+        }
+      }
+    }
+    return iree_ok_status();
+  };
 
   iree_status_t processHostCopyAction(ns(HostAction_table_t) action, ns(HostCopyParams_table_t) params) {
     if (eventLog_) eventLog_->addEvent(Event{
@@ -1148,110 +1265,79 @@ private:
     LOGD << "action: Copying " << ns(BufferType_name(inputType)) << "[" << inputAddress << 
               "] to " << ns(BufferType_name(outputType)) << "[" << outputAddress << "]";
 
-    auto copyElement = [&] (int inputOffset, int outputOffset, int size) {
-      vector<uint8_t> data(size);
-    
-      switch(inputType) {
-        case ns(BufferType_XRAM):
-          if (!torq->readXram(inputAddress + inputOffset, size, data.data())) {
-            return iree_make_status(IREE_STATUS_INTERNAL, "failed to read from xram");
-          }
-          break;
+    iree_status_t ret = iree_ok_status();
 
-        case ns(BufferType_LRAM):
-          if (!torq->readLram(inputAddress + inputOffset, size, data.data())) {
-            return iree_make_status(IREE_STATUS_INTERNAL, "failed to read from lram");
-          }
-          break;
-
-        default:
-          return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "unsupported memory type");
+    // Optimized copy for XRAM to XRAM using direct memory access and linear iteration without.
+    // recursion
+    bool memcpySupported = torq->getType() == TorqHw::Type::SIMULATOR || torq->getType() == TorqHw::Type::ASTRA_MACHINA;
+    if (memcpySupported && inputType == ns(BufferType_XRAM) && outputType == ns(BufferType_XRAM)) {
+      auto inputAddress = static_cast<const uint8_t*>(
+        torq->startXramReadAccess(ns(HostCopyParams_input_address(params))));
+      auto outputAddress = static_cast<uint8_t*>(
+        torq->startXramWriteAccess(ns(HostCopyParams_output_address(params))));
+      if (!inputAddress || !outputAddress) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "XRAM access issue");
       }
+      auto inputStridesBytes = ns(HostCopyParams_input_strides_bytes(params));
+      auto outputStridesBytes = ns(HostCopyParams_output_strides_bytes(params));
+      auto shape = ns(HostCopyParams_shape(params));
+      auto rank = flatbuffers_uint32_vec_len(shape);
+      auto elementSize = ns(HostCopyParams_element_size_bytes(params));
 
-      switch(outputType) {
-        case ns(BufferType_XRAM):
-          if (!torq->writeXram(outputAddress + outputOffset, size, data.data())) {
-            return iree_make_status(IREE_STATUS_INTERNAL, "failed to write to xram");
-          }
-          break;
-
-        case ns(BufferType_LRAM):
-          if (!torq->writeLram(outputAddress + outputOffset, size, data.data())) {
-            return iree_make_status(IREE_STATUS_INTERNAL, "failed to write to lram");
-          }
-          break;
-
-        default:
-          return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "unsupported memory type");
+      LOGD << "Doing optimized host copy for xram to xram, rank=" << rank;
+      LOGD << "Input strides bytes: " <<  inputStridesBytes;
+      LOGD << "Output strides bytes: " << outputStridesBytes;
+      LOGD << "Input Address: " << static_cast<const void*>(inputAddress);
+      LOGD << "Output Address: " << static_cast<void*>(outputAddress);
+      LOGD << "Element size bytes: " << elementSize;
+      
+      // Calculate total number of elements
+      uint32_t totalElements = 1;
+      for (int dim = 0; dim < rank; dim++) {
+        totalElements *= flatbuffers_uint32_vec_at(shape, dim);
       }
-
-      if (FLAG_torq_dump_mem_data_dir[0]) {
-        const string file_name = "host_copy_" + std::to_string(actionIndex) + "_" + std::to_string(outputAddress + outputOffset) + ".txt";
-
-        string type;
-
-        if (outputType == ns(BufferType_LRAM)) {
-          type = ""; 
-        } else if (outputType == ns(BufferType_XRAM)) {
-          type = "x";
-        } else {
-          return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "unsupported output memory type when dumping descriptors");
-        }
-
-        auto executableName = ns(ExecutableDef_executable_name(executableDef()));
-
-        // load the data in the next job
-        auto status = create_job_directory(executableName, jobId);
-        if (status != iree_ok_status()) {
-          return status;
-        }
-
-        if (!hex_file_write(executableName, file_name, type + "load", outputAddress + outputOffset, data.data(), data.size(), jobId)) {
-          return iree_make_status(IREE_STATUS_INTERNAL, "failed to dump host copy data");
-        }
-
-        // save the data in the current job
-        if (jobId > 0) {
-          auto status = create_job_directory(executableName, jobId - 1);
-          if (status != iree_ok_status()) {
-            return status;
-          }
-
-          if (!hex_file_write(executableName, file_name, type + "save", outputAddress + outputOffset, data.data(), data.size(), jobId - 1)) {
-            return iree_make_status(IREE_STATUS_INTERNAL, "failed to dump host copy data");
-          }
+      
+      // Iterate through all elements sequentially
+      for (uint32_t elemIdx = 0; elemIdx < totalElements; elemIdx++) {
+        uint32_t inputOffset = 0;
+        uint32_t outputOffset = 0;
+        uint32_t remaining = elemIdx;
+        
+        // Convert linear index to multi-dimensional offsets
+        for (int dim = rank - 1; dim >= 0; dim--) {
+          uint32_t dimSize = flatbuffers_uint32_vec_at(shape, dim);
+          uint32_t idx = remaining % dimSize;
+          remaining /= dimSize;
+          
+          inputOffset += idx * flatbuffers_uint32_vec_at(inputStridesBytes, dim);
+          outputOffset += idx * flatbuffers_uint32_vec_at(outputStridesBytes, dim);
         }
         
-      }
-
-      pendingHostCopies = true;
-
-      return iree_ok_status();
-    };
-
-    std::function<iree_status_t(int, int, int)> copyDimension = [&] (int dim, int inputOffset, int outputOffset) {
-      if (dim == rank) {
-        auto elementSize = ns(HostCopyParams_element_size_bytes(params));
-        auto ret = copyElement(inputOffset, outputOffset, elementSize);
-
-        if (!iree_status_is_ok(ret)) {
-          return ret;
-        }
-      } else {
-        for (int i = 0; i < flatbuffers_uint32_vec_at(shape, dim); i++) {
-          auto ret = copyDimension(dim + 1, inputOffset + i * flatbuffers_uint32_vec_at(inputStridesBytes, dim),
-                                  outputOffset + i * flatbuffers_uint32_vec_at(outputStridesBytes, dim));
-          if (!iree_status_is_ok(ret)) {
-            return ret;
-          }
+        auto src = inputAddress + inputOffset;
+        auto dst = outputAddress + outputOffset;
+        switch (elementSize)
+        {
+        case 1:
+          *dst = *src;
+          break;
+        case 2:
+          *(uint16_t*)dst = *(uint16_t*)src;
+          break;
+        case 4:
+          *(uint32_t*)dst = *(uint32_t*)src;
+          break;
+        default:
+          memcpy(dst, src, elementSize);
+          break;
         }
       }
-
-      return iree_ok_status();
-
-    };
-
-    auto ret = copyDimension(0, 0, 0);  
+      if (!torq->endXramReadAccess() || !torq->endXramWriteAccess()) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "XRAM access issue");
+      }
+    }
+    else {
+      ret = copyDimension(0, 0, 0, params);
+    }
 
     if (eventLog_) eventLog_->addEvent(Event{
         std::chrono::steady_clock::now(),
@@ -1261,7 +1347,6 @@ private:
     });
 
     return ret;
-    
   }
 
   iree_status_t processAllocAction(ns(HostAction_table_t) action, ns(AllocParams_table_t) params) {

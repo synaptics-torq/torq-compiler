@@ -202,4 +202,21 @@ bool TorqAwsFpga::readXram(uint32_t addr, size_t size, void *dataOut) const {
     return true;
 }
 
+const void * TorqAwsFpga::startXramReadAccess(uint32_t addr) const {
+    return nullptr;
+}
+
+bool TorqAwsFpga::endXramReadAccess() {
+    return false;
+}
+
+void * TorqAwsFpga::startXramWriteAccess(uint32_t addr) {
+    return nullptr;
+}
+
+bool TorqAwsFpga::endXramWriteAccess() {
+    return false;
+}
+
+
 }  // synaptics namespace

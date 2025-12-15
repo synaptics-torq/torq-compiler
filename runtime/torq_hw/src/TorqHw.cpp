@@ -35,8 +35,8 @@ using namespace std;
 
 namespace synaptics {
 
-TorqHw::TorqHw(TorqEventLog* eventLog)
-    : _eventLog(eventLog) {}
+TorqHw::TorqHw(Type type, TorqEventLog* eventLog)
+    : _type(type), _eventLog(eventLog) {}
 
 void TorqHw::printNssRegs() {
 
@@ -85,49 +85,28 @@ void TorqHw::printNssRegs() {
 }
 
 std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir, TorqEventLog* eventLog) {
-    TorqHw::Type type = TorqHw::SIMULATOR;
-    if (hw_type == "aws_fpga") {
-        type = TorqHw::AWS_FPGA;
-    } else if (hw_type == "soc_fpga") {
-        type = TorqHw::SOC_FPGA;
-    } else if (hw_type == "astra_machina") {
-        type = TorqHw::ASTRA_MACHINA;
-    } else if (hw_type == "sim") {
-        type = TorqHw::SIMULATOR;
-    } else {
-        assert(false && "Unsupported TorqHw type");
-    }
-
-    switch (type) {
-    case TorqHw::SIMULATOR:
 #ifdef ENABLE_SIMULATOR
+    if (hw_type == "sim") {
         return std::unique_ptr<TorqHw>(new TorqSimulator(xram_start_addr, xram_size, dump_dir, eventLog));
-#else
-        LOGE << "Simulator is not available";
-        return nullptr;
-#endif
-    case TorqHw::AWS_FPGA:
-#ifdef ENABLE_AWS_FPGA
-        return std::unique_ptr<TorqHw>(new TorqAwsFpga(xram_start_addr, xram_size, eventLog));
-#else
-        LOGE << "AWS FPGA is not available";
-        return nullptr;
-#endif
-    case TorqHw::SOC_FPGA:
-#ifdef ENABLE_SOC_FPGA
-        return std::unique_ptr<TorqHw>(new TorqSoCFpga(xram_start_addr, xram_size));
-#else
-        LOGE << "SOC FPGA is not available";
-        return nullptr;
-#endif
-    case TorqHw::ASTRA_MACHINA:
-#ifdef ENABLE_ASTRA_MACHINA
-        return std::unique_ptr<TorqHw>(new TorqAstraMachina(xram_start_addr, xram_size));
-#else
-        LOGE << "Astra Machina option is not available";
-        return nullptr;
-#endif
     }
+#endif
+#ifdef ENABLE_AWS_FPGA
+    if (hw_type == "aws_fpga") {
+        return std::unique_ptr<TorqHw>(new TorqAwsFpga(xram_start_addr, xram_size, eventLog));
+    }
+#endif
+#ifdef ENABLE_SOC_FPGA
+    if (hw_type == "soc_fpga") {
+        return std::unique_ptr<TorqHw>(new TorqSoCFpga(xram_start_addr, xram_size));
+    }
+#endif
+#ifdef ENABLE_ASTRA_MACHINA
+    if (hw_type == "astra_machina") {
+        return std::unique_ptr<TorqHw>(new TorqAstraMachina(xram_start_addr, xram_size));
+    }
+#endif
+    assert(false && "Unsupported TorqHw type");
+    cerr << hw_type << ": Torq Hardware not supported" << endl;
     return nullptr;
 }
 

@@ -26,6 +26,11 @@ extern "C" {
 
 using namespace std;
 
+
+#define TORQ_NODE "/dev/torq"
+
+#define DMABUF_NODE "/dev/dma_heap/system"
+
 namespace synaptics {
 
 static mutex _session_lock;
@@ -39,7 +44,7 @@ TorqAstraMachina::~TorqAstraMachina() {
     close();
 }
 
-TorqAstraMachina::TorqAstraMachina(uint32_t xramStartAddr, size_t xramSize): _xramStartAddr(xramStartAddr), _xramSize(xramSize) {
+TorqAstraMachina::TorqAstraMachina(uint32_t xramStartAddr, size_t xramSize): TorqHw(Type::ASTRA_MACHINA), _xramStartAddr(xramStartAddr), _xramSize(xramSize) {
     _xramVBase = NULL;
     _dmabufHandle = 0;
     _networkId = 0;
@@ -156,32 +161,60 @@ bool TorqAstraMachina::readLram32(uint32_t addr, uint32_t & data) const {
 }
 
 bool TorqAstraMachina::startXramAccess() const {
-#if defined (DMABUF_USE_UNCACHED)
-    return true;
-#else
+    if (_xramAccessActive) {
+        return true;
+    }
+
     struct dma_buf_sync sync = {0};
     sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW;
     if (ioctl(_dmabufHandle, DMA_BUF_IOCTL_SYNC, &sync)) {
         cerr << "error in dmabuf start sync ioctl\n";
         return false;
     }
+    _xramAccessActive = true;
     return true;
-#endif
 }
 
 bool TorqAstraMachina::endXramAccess() const {
-#if defined (DMABUF_USE_UNCACHED)
-    return true;
-#else
+    if (!_xramAccessActive) {
+        return true;
+    }
     struct dma_buf_sync sync = {0};
     sync.flags = DMA_BUF_SYNC_END  | DMA_BUF_SYNC_RW;
     if (ioctl(_dmabufHandle, DMA_BUF_IOCTL_SYNC, &sync)) {
         cerr << "error in dmabuf end sync ioctl\n";
         return false;
     }
+    _xramAccessActive = false;
     return true;
-#endif
 }
+
+const void * TorqAstraMachina::startXramReadAccess(uint32_t addr) const {
+    // TODO check bounds with size and use DMA_BUF_SYNC_READ for read only access
+    if (!startXramAccess()) {
+        return nullptr;
+    }
+    return reinterpret_cast<const void*>(_xramVBase + _alignOffset + (addr - _xramStartAddr));
+}
+
+bool TorqAstraMachina::endXramReadAccess() {
+    // TODO use DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ for read only access
+    return endXramAccess();
+}
+
+void * TorqAstraMachina::startXramWriteAccess(uint32_t addr) {
+    // TODO check bounds and use DMA_BUF_SYNC_WRITE for write access
+    if (!startXramAccess()) {
+        return nullptr;
+    }
+    return reinterpret_cast<void*>(_xramVBase + _alignOffset + (addr - _xramStartAddr));
+}
+
+bool TorqAstraMachina::endXramWriteAccess() {
+    // TODO use DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE for write access
+    return endXramAccess();
+}
+
 
 bool TorqAstraMachina::writeXram(uint32_t addr, size_t size, const void *dataIn) {
     const uint8_t *p = _xramVBase + _alignOffset + (addr - _xramStartAddr);

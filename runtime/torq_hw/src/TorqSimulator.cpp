@@ -27,7 +27,7 @@ using namespace std;
 namespace synaptics {
 
 bool TorqSimulator::open() {
-    cm = torq_cm_open(_xram.data(), _xram_start_addr, _xram.size());
+    cm = torq_cm_open(_xram.data(), _xramStartAddr, _xram.size());
 
     if (!_dump_dir.empty()) {
         _job_dump_dir = _dump_dir + "/job0";
@@ -84,24 +84,41 @@ bool TorqSimulator::readLram32(uint32_t addr, uint32_t &data) const {
 }
 
 bool TorqSimulator::writeXram(uint32_t addr, size_t size, const void *dataIn) {
-    if (addr + size > _xram.size() + _xram_start_addr) {
+    if (addr + size > _xram.size() + _xramStartAddr) {
         cerr << "Out of range write" << " addr " << addr << " size " << size << " _xram.size() "
-             << _xram.size() << " _xramStartAddr " << _xram_start_addr << endl;
+             << _xram.size() << " _xramStartAddr " << _xramStartAddr << endl;
         return false;
     }
-    uint8_t *p = _xram.data() + (size_t)addr - _xram_start_addr;
+    uint8_t *p = _xram.data() + (size_t)addr - _xramStartAddr;
     memcpy(p, dataIn, size);
     return true;
 }
 
 bool TorqSimulator::readXram(uint32_t addr, size_t size, void *dataOut) const {
-    if (addr + size > _xram.size() + _xram_start_addr) {
+    if (addr + size > _xram.size() + _xramStartAddr) {
         cerr << "Out of range read " << " addr " << addr << " size " << size << " _xram.size() "
-             << _xram.size() << " _xramStartAddr " << _xram_start_addr << endl;
+             << _xram.size() << " _xramStartAddr " << _xramStartAddr << endl;
         return false;
     }
-    const uint8_t *p = _xram.data() + addr - _xram_start_addr;
+    const uint8_t *p = _xram.data() + addr - _xramStartAddr;
     memcpy(dataOut, p, size);
+    return true;
+}
+
+
+const void * TorqSimulator::startXramReadAccess(uint32_t addr) const {
+    return _xram.data() + addr - _xramStartAddr;
+}
+
+bool TorqSimulator::endXramReadAccess() {
+    return true;
+}
+
+void * TorqSimulator::startXramWriteAccess(uint32_t addr) {
+    return _xram.data() + addr - _xramStartAddr;
+}
+
+bool TorqSimulator::endXramWriteAccess() {
     return true;
 }
 

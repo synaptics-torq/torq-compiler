@@ -9,15 +9,6 @@
 #include "TorqHw.h"
 #include "torq_kernel_uapi.h"
 
-#define TORQ_NODE "/dev/torq"
-
-#define DMABUF_USE_UNCACHED
-#if defined (DMABUF_USE_UNCACHED)
-#define DMABUF_NODE "/dev/dma_heap/system-cust-uncached"
-#else
-#define DMABUF_NODE "/dev/dma_heap/system"
-#endif
-
 namespace synaptics {
 
 #define ALIGN_4K 4096
@@ -40,6 +31,10 @@ class TorqAstraMachina: public TorqHw {
     bool readXram(uint32_t addr, size_t size, void *dataOut) const override;
     bool writeLram(uint32_t addr, size_t size, const void *dataIn) override;
     bool readLram(uint32_t addr, size_t size, void *dataOut) const override;
+    const void * startXramReadAccess(uint32_t xramAddr) const override;
+    bool endXramReadAccess() override;
+    void * startXramWriteAccess(uint32_t xramAddr) override;
+    bool endXramWriteAccess() override;
 
     bool load() override;
     bool release() override;
@@ -50,6 +45,7 @@ class TorqAstraMachina: public TorqHw {
   private:
     int _torqDevNode;
     int _dmabufDevNode;
+    mutable bool _xramAccessActive{false};
     const uint32_t _xramStartAddr;
     const size_t _xramSize;
 
