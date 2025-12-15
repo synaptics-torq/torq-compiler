@@ -323,6 +323,32 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         bool isConv1D = (inputType.getRank() == 4 && shape[heightDim] == 1);
         bool isDepthwise =
             llvm::isa<linalg::DepthwiseConv2DNhwcHwcOp, linalg::DepthwiseConv2DNchwChwOp>(&convOp);
+
+        // Check if this is a depthwise 1D case
+        if (isConv1D && isDepthwise) {
+            // Additional checks for depthwise 1D: filter height=1, stride height=1
+            int weightHeightDim = (_channelDim == 3) ? 2 : 1;
+            bool filterHeightIs1 = (weightShape[weightHeightDim] == 1);
+            auto strides = convOp.getStrides().template getValues<int64_t>();
+            bool strideHeightIs1 = (strides[0] == 1);
+
+            if (filterHeightIs1 && strideHeightIs1) {
+                // Check if expanded kernel size exceeds 7x7 limit of regular 2D depthwise conv
+                // Only use 1D stride-1 path if expansion would exceed this limit
+                auto dilations = convOp.getDilations().template getValues<int64_t>();
+                int64_t kh = weightShape[weightShape.size() - 2];
+                int64_t kw = weightShape[weightShape.size() - 1];
+                int64_t dh = dilations[0], dw = dilations[1];
+                int64_t khExpanded = kh + (kh - 1) * (dh - 1);
+                int64_t kwExpanded = kw + (kw - 1) * (dw - 1);
+
+                // Use 1D stride-1 path only if expanded kernel exceeds 7x7 (2D limit)
+                if (khExpanded > 7 || kwExpanded > 7) {
+                    return rewriteAsDepthwiseConv1DStride1(convOp, rewriter);
+                }
+            }
+        }
+
         if (isConv1D && !isDepthwise) {
             return rewriteAsConv1D(convOp, rewriter);
         }
@@ -663,6 +689,134 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         // ).getOutput();
 
         torqOut = transposeValue(torqOut, _dataPerm.reverse(), loc, rewriter);
+
+        rewriter.replaceOp(output.getDefiningOp(), torqOut);
+        return success();
+    }
+
+    template <typename LinalgConv>
+    LogicalResult
+    rewriteAsDepthwiseConv1DStride1(LinalgConv convOp, PatternRewriter &rewriter) const {
+        // Only accept depthwise conv ops with height=1 and stride=1
+        if (!llvm::isa<linalg::DepthwiseConv2DNhwcHwcOp, linalg::DepthwiseConv2DNchwChwOp>(&convOp
+            )) {
+            return rewriter.notifyMatchFailure(
+                convOp, "Only DepthwiseConv2D ops can be rewritten as DepthwiseConv1D"
+            );
+        }
+        if (_markFuseGroups && isMarkedFuseGroup(convOp)) {
+            return rewriter.notifyMatchFailure(convOp, "Already marked");
+        }
+
+        auto loc = convOp.getLoc();
+        constexpr int weightZp = 0;
+        Value input = convOp.image();
+        Value weights = convOp.filter();
+        Value output = convOp.getResultTensors()[0];
+
+        auto inputType = cast<RankedTensorType>(input.getType());
+        auto outputType = cast<RankedTensorType>(output.getType());
+        auto weightType = cast<RankedTensorType>(weights.getType());
+        auto outElemType = outputType.getElementType();
+        bool isInt = outElemType.isInteger();
+
+        // For depthwise: groups = input channels
+        int groups = inputType.getShape()[_channelDim];
+        int outChannels = outputType.getShape()[_channelDim];
+
+        // Extract strides - for 1D, use both but height stride should be 1
+        auto stridesAttr = convOp.getStrides();
+        auto strides2D = attrValues(stridesAttr);
+
+        VectorIntOrFloat bias(outChannels, isInt);
+        while (foldForwardPerChannelAdd(output, _channelDim, bias)) {
+        }
+
+        ScaleClampInfo scInfo = foldForwardScaleClamp(output, outChannels, _shift8b, _shift16b);
+        if (!scInfo && isInt)
+            return failure();
+
+        if (_markFuseGroups) {
+            markFuseGroupBackward(
+                output, {input}, rewriter,
+                convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            );
+            return success();
+        }
+
+        // Transpose weights if needed
+        auto transposedWeights = transposeValue(weights, _weightsPerm, loc, rewriter);
+
+        // Handle dilation expansion if needed
+        auto dilations = convOp.getDilations().template getValues<int64_t>();
+        SmallVector<int64_t> dilationVec(dilations.begin(), dilations.end());
+        std::vector<int64_t> finalDilationVec;
+        DenseIntOrFPElementsAttr weightAttr;
+
+        if (llvm::any_of(dilations, [](int64_t d) { return d > 1; })) {
+            weightAttr = computeConstant(transposedWeights);
+            if (!weightAttr)
+                return rewriter.notifyMatchFailure(
+                    convOp, "failed to compute weights for dilation expansion"
+                );
+
+            // For depthwise 1D with stride 1, allow larger kernel sizes (no 7x7 limit)
+            // since expansion only happens in width dimension
+            auto expanded = expandWeightsForDilation(
+                weightAttr, dilationVec, rewriter,
+                /*maxKernelSize=*/1024
+            );
+            if (!expanded)
+                return rewriter.notifyMatchFailure(convOp, "failed to expand weights for dilation");
+
+            weightAttr = mlir::cast<DenseIntOrFPElementsAttr>(expanded);
+            finalDilationVec = {1, 1};
+
+            // Update weight type to reflect expanded dimensions
+            weightType = mlir::cast<RankedTensorType>(weightAttr.getType());
+        }
+        else {
+            weightAttr = computeConstant(transposedWeights);
+            finalDilationVec = attrValues(convOp.getDilations());
+        }
+
+        auto torqWeights = createConst(weightAttr, rewriter, loc);
+        if (!torqWeights)
+            return failure();
+
+        auto biasScale = isInt ? createConst(interleave(bias.ints, scInfo.scaleNpu), rewriter, loc)
+                               : createConst(bias.floats, rewriter, loc);
+
+        // Fold backward padding
+        bool isNchw = (_channelDim == 1);
+        PaddingInfo padInfo = foldBackwardPadding(input, rewriter, isNchw);
+
+        // For depthwise 1D, always transpose to NHWC format
+        // NCHW [N,C,1,W] -> NHWC [N,1,W,C]
+        if (isNchw) {
+            input = transposeValue(input, Permutation::nhwc2nchw().reverse(), loc, rewriter);
+        }
+        bool nhwcInput = true; // Always use NHWC for depthwise 1D
+        auto torqOutType = isNchw
+                               ? transposeType(output.getType(), Permutation::nhwc2nchw().reverse())
+                               : transposeType(output.getType(), _dataPerm);
+
+        // Create DepthwiseConv2DOp (treating 1D as 2D with height=1)
+        auto torqDwConvOp = rewriter.create<torq_hl::DepthwiseConv2DOp>(
+            loc, torqOutType, createInitTensor(convOp, rewriter, torqOutType), padInfo.padValue,
+            weightZp, scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
+            strides2D, finalDilationVec, torq_hl::VectorizationModeEnum::None, torqWeights,
+            biasScale, input, nhwcInput, /*segment_output=*/false, /*is_dw1d_stride1=*/true
+        );
+        Value torqOut = torqDwConvOp.getOutput();
+
+        // Transpose output back to original format if needed
+        if (isNchw) {
+            torqOut = transposeValue(torqOut, Permutation::nhwc2nchw(), loc, rewriter);
+        }
+        else {
+            torqOut = transposeValue(torqOut, _dataPerm.reverse(), loc, rewriter);
+        }
 
         rewriter.replaceOp(output.getDefiningOp(), torqOut);
         return success();

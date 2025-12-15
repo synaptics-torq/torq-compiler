@@ -163,7 +163,8 @@ def TorqHL_DepthwiseConv2DOp: TorqHL_LayerOp<"depthwise_conv2d"> {
     TensorOrMemref:$scale_bias,
     TensorOrMemref:$input,
     DefaultValuedOptionalAttr<BoolAttr, "false">:$nhwc_input,
-    DefaultValuedOptionalAttr<BoolAttr, "false">:$segment_output
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$segment_output,
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$is_dw1d_stride1
   ));
 }
 

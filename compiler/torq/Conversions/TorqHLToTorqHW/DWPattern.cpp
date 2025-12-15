@@ -374,7 +374,10 @@ LogicalResult dwNHWCInput(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewrit
 //
 template <>
 LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter) const {
-    if (op.getNhwcInput()) {
+    // Check for depthwise 1D stride=1 special case first
+    bool isDw1dStride1 = op.getIsDw1dStride1();
+
+    if (op.getNhwcInput() && !isDw1dStride1) {
         if (clUseNewKernels) {
             return op.emitError("New kernel failed");
         }

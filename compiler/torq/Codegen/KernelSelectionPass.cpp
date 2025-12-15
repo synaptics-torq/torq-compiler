@@ -263,6 +263,43 @@ weights_insert_dimension(PatternRewriter &rewriter, Location loc, Value weights,
     return res.getResult();
 }
 
+// Pack depthwise 1D weights from [Ch, Kh, Kw] to [(Ch/32), Kh, Kw, 32]
+// Used for depthwise 1D stride=1 special case
+static mlir::Value weights_ChHW_to_ChHW32(
+    PatternRewriter &rewriter, Location loc, Value weights, int inner_ch, Type elementType
+) {
+    auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
+    SmallVector<int64_t> shape(wtRankedTy.getShape());
+    assert(shape.size() == 3 && "Expected 3D weight tensor [Ch, Kh, Kw]");
+
+    const int ch = shape[0];
+    const int kh = shape[1];
+    const int kw = shape[2];
+
+    assert(ch % inner_ch == 0 && "Channel dimension must be divisible by inner_ch");
+
+    const int ch_outer = ch / inner_ch;
+
+    // Create destination tensor shape: [(Ch/32), Kh, Kw, 32]
+    SmallVector<int64_t> destShape = {ch_outer, kh, kw, inner_ch};
+
+    // Use PackOp to transform [Ch, Kh, Kw] -> [(Ch/32), Kh, Kw, 32]
+    // innerDimsPos=[0] means we're packing the first dimension (Ch)
+    // innerTiles=[inner_ch] means we're splitting Ch into tiles of size inner_ch
+    llvm::SmallVector<int64_t> innerDimsPos(1, 0);
+    llvm::SmallVector<OpFoldResult> innerTiles(1, OpFoldResult(rewriter.getIndexAttr(inner_ch)));
+
+    auto empty = tensor::PackOp::createDestinationTensor(
+        rewriter, loc, weights, innerTiles, innerDimsPos, {}
+    );
+
+    auto res = rewriter.create<tensor::PackOp>(loc, weights, empty, innerDimsPos, innerTiles);
+
+    setCompileTimeConstAttr(res);
+    setTargetExecutorAttr(res, torq_hl::Executor::NSS);
+    return res.getResult();
+}
+
 // Pad the specified dimension to padDimAlignment with 0s at the end
 static mlir::Value weights_pad_with_zero(
     PatternRewriter &rewriter, Location loc, Value weights, int padDim, int padDimAlignment
@@ -336,18 +373,45 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
         auto biasType = biasValues.getType();
         auto biasShape = biasType.getShape().vec();
 
-        if (vectorizationMode == torq_hl::VectorizationModeEnum::_32x32) {
-            if (weightShape.size() == 3) {
-                // Linalg depthwise conv2d has 3D weights: HW0, make it IHW0
-                weights = weights_insert_dimension(rewriter, op.getLoc(), weights, 0);
-            }
-            weights = weights_pad_with_zero(rewriter, op.getLoc(), weights, 3, parallel_outs);
+        // Check if this is a depthwise 1D stride=1 special case
+        bool isDw1dStride1 = false;
+        if (auto dwOp = dyn_cast<torq_hl::DepthwiseConv2DOp>(op.getOperation())) {
+            isDw1dStride1 = dwOp.getIsDw1dStride1();
+        }
 
-            std::vector<llvm::APInt> biasData(
-                biasValues.value_begin<llvm::APInt>(), biasValues.value_end<llvm::APInt>()
-            );
-            biasScale_inflate(biasData, biasShape, parallel_outs, APInt(32, 0), APInt(32, 0));
-            auto bias_tensor = createIConst(rewriter, op, biasData, biasShape);
+        if (vectorizationMode == torq_hl::VectorizationModeEnum::_32x32) {
+            if (isDw1dStride1 && weightShape.size() == 3) {
+                // Special case: depthwise 1D stride=1
+                // Pack weights from [Ch, Kh, Kw] to [(Ch/inner), Kh, Kw, inner]
+                // For BF16: inner=16 (WRAM holds 16*2=32 bytes)
+                // For INT8: inner=32 (WRAM holds 32*1=32 bytes)
+                int inner_tile = weightElementType.isBF16() ? 16 : 32;
+                weights = weights_ChHW_to_ChHW32(
+                    rewriter, op.getLoc(), weights, inner_tile, weightElementType
+                );
+            }
+            else {
+                if (weightShape.size() == 3) {
+                    // Linalg depthwise conv2d has 3D weights: HW0, make it IHW0
+                    weights = weights_insert_dimension(rewriter, op.getLoc(), weights, 0);
+                }
+                weights = weights_pad_with_zero(rewriter, op.getLoc(), weights, 3, parallel_outs);
+            }
+
+            Value bias_tensor;
+            auto biasElemType = biasType.getElementType();
+            if (biasElemType.isInteger()) {
+                std::vector<llvm::APInt> biasData(
+                    biasValues.value_begin<llvm::APInt>(), biasValues.value_end<llvm::APInt>()
+                );
+                biasScale_inflate(biasData, biasShape, parallel_outs, APInt(32, 0), APInt(32, 0));
+                bias_tensor = createIConst(rewriter, op, biasData, biasShape);
+            }
+            else {
+                // For floating point bias (e.g., BF16/F32), keep the bias as-is
+                // The _32x32 vectorization mode for BF16 doesn't require bias inflation
+                bias_tensor = biases;
+            }
 
             rewriter.modifyOpInPlace(op, [&]() {
                 op.setVectorizationMode(vectorizationMode);

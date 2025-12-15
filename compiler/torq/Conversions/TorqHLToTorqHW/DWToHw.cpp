@@ -61,6 +61,89 @@ getSubview(LData &input, LData &output, LData &weight, LData &biasScale, int chO
     biasScale.subviewDim(0, chOffs * sbWidth, chCount * sbWidth);
 }
 
+// Lower depthwise 1D stride=1 special case to SliceTaskOp
+// Input: NHWC format [N, 1, Width, Channels]
+// Weight: Packed format [Ch_outer, Kh, Kw, 32] where Ch_outer = Channels/32
+// Lower depthwise 1D stride=1 convolution to hardware
+// Processing strategy: For each channel block (16 for BF16, 32 for INT8),
+// accumulate across kernel width using element-wise multiply-accumulate
+static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
+    torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
+    int chCount
+) {
+    if (!hasEkLoweringConv(op)) {
+        return {};
+    }
+
+    // Define operands in LRAM
+    LData input(op.getInput());         // NHWC format: [N, H, W, C]
+    LData output(op.getInit());         // NHWC format: [N, H, W, C]
+    LData biasScale(op.getScaleBias()); // Bias and scale data
+    LData weight(op.getWeights());      // Packed format: [Ch_outer, Kh, Kw, inner]
+
+    // Extract parameters
+    int sbWidth = scaleBiasWidth(output.elementType());
+    // Get the inner tile size from packed weights: 16 for BF16, 32 for INT8
+    int outChVectSize = weight.dim(weight.shape().size() - 1);
+    const int channelDim = 3; // NHWC: channels at last dimension
+
+    assert(chOffset % outChVectSize == 0);
+
+    // Apply channel subviews
+    input.subviewDim(channelDim, chOffset, chCount);
+    output.subviewDim(channelDim, chOffset, chCount);
+    weight.subviewDim(0, chOffset / outChVectSize, div_ceil(chCount, outChVectSize));
+    biasScale.subviewDim(0, chOffset * sbWidth, chCount * sbWidth);
+
+    // Reshape weights from [Ch_outer, Kh, Kw, inner] to [Ch_outer, Kw, inner]
+    // Since Kh=1 for depthwise 1D, fuse last 3 dims then reshape
+    int kw = weight.dim(2); // Kernel width
+    weight.fuse(3);
+    weight.reshapeDim(1, {kw, outChVectSize}, false);
+
+    Slice slice("DepthwiseConv1dStride1");
+
+    // Calculate activation block parameters
+    const int32_t actBlockSize = slice.act.width(input.elementType(), weight.elementType());
+    const int32_t actBlockCount = div_ceil(outChVectSize, actBlockSize);
+
+    // Reshape tensors to split channels into [Ch_outer, outChVectSize]
+    input.reshapeDim(channelDim, {-1, outChVectSize}, true);
+    output.reshapeDim(channelDim, {-1, outChVectSize}, true);
+    biasScale.reshapeDim(0, {-1, outChVectSize, sbWidth}, true);
+
+    int chOuterCount = weight.dim(0);
+
+    // Main processing loop
+    For(auto batch = slice.iterate(input.dim(0))) {
+        For(auto ch_block = slice.iterate(chOuterCount)) {
+            PData pdata;
+            BData bdata = slice.bram.load(biasScale[ch_block][0]);
+
+            // Accumulate across kernel width
+            For(auto kw_pos = slice.iterate(kw)) {
+                WData wdata = slice.wram.load(weight[ch_block][kw_pos]);
+                IData idata = slice.iram.load(input[batch][0][kw_pos][ch_block]);
+                pdata = slice.alu.elementwiseProductAccumulate(idata, wdata);
+            }
+
+            // Process through activation in blocks
+            For(auto a = slice.iterate(actBlockCount)) {
+                QData res = slice.act.rescaleClamp(
+                    pdata[a], bdata, op.getShiftFactor(), op.getOutputZp(), op.getOutputMin(),
+                    op.getOutputMax()
+                );
+                slice.append(output[batch][0][0][ch_block], res);
+            }
+        }
+    }
+
+    return rewriter.create<torq_hw::SliceTaskOp>(
+        op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
+        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+    );
+}
+
 // Lower torq_hl op to SliceTaskOp
 static torq_hw::SliceTaskOp lowerToHw(
     torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
@@ -174,11 +257,48 @@ static torq_hw::SliceTaskOp lowerToHw(
 }
 
 LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter) {
+    // Check for depthwise 1D stride=1 special case
+    bool isDw1dStride1 = op.getIsDw1dStride1();
+
     Value initValue = op.getInit();
+
     auto wDims = LData(op.getWeights()).dims();
-    int outChVectSize = wDims.size() > Weight::OCVectorItems ? wDims[Weight::OCVectorItems] : 1;
-    int outChCount = LData(op.getInit()).dim(Dim::C);
+    // Get the vector size from the last dimension of the weight tensor
+    // For depthwise 1D stride=1: weight is [Ch_outer, Kh, Kw, inner] so inner is at index 3
+    // For standard depthwise: weight is [Ch_outer, IC, Kh, Kw, inner] so inner is at index 4
+    int outChVectSize = wDims.size() > 0 ? wDims[wDims.size() - 1] : 1;
+
+    // For depthwise 1D stride=1, the layout is NHWC, so channel is at dimension 3
+    // For regular depthwise 2D, the layout is NCHW, so channel is at dimension 1 (Dim::C)
+    LData outputData(op.getInit());
+    int outChCount = isDw1dStride1 ? outputData.dim(outputData.shape().size() - 1) // NHWC: last dim
+                                   : outputData.dim(Dim::C);                       // NCHW: dim 1
     torq_hw::SliceTaskOp hwOp;
+
+    if (isDw1dStride1) {
+        // Use specialized lowering for depthwise 1D stride=1
+        LLVM_DEBUG(llvm::dbgs() << "Lowering depthwise 1D stride=1 case\n");
+
+        // Peel-off channels not multiple of output channel grouping
+        if (int peeledOutCh = outChCount % outChVectSize) {
+            if (!(hwOp = lowerDw1dStride1ToHw(
+                      op, rewriter, initValue, outChCount - peeledOutCh, peeledOutCh
+                  ))) {
+                return failure();
+            }
+            initValue = hwOp.getQ()[0];
+            outChCount -= peeledOutCh;
+        }
+        if (outChCount > 0) {
+            if (!(hwOp = lowerDw1dStride1ToHw(op, rewriter, initValue, 0, outChCount))) {
+                return failure();
+            }
+        }
+        rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+        return success();
+    }
+
+    // Standard depthwise conv2d lowering
 
     // Peel-off channels not multiple of output channel grouping. This removes any
     // requirement for output channels padding.
