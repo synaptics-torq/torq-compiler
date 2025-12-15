@@ -687,10 +687,31 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             }) != 1)
             return rewriter.notifyMatchFailure(sumOp, "Expected one reduction");
 
-        int reductionAxis = 0;
+        // Find the index of the reduction loop in the loop nest
+        int reductionLoopIdx = -1;
         for (size_t i = 0; i < sumIters.size(); ++i)
             if (sumIters[i] == mlir::utils::IteratorType::reduction)
-                reductionAxis = i;
+                reductionLoopIdx = i;
+
+        if (reductionLoopIdx == -1)
+            return rewriter.notifyMatchFailure(sumOp, "No reduction loop found");
+
+        // Map the reduction loop index to the actual input dimension index
+        auto inMap = sumOp.getIndexingMapsArray()[0];
+        int reductionAxis = -1;
+        for (unsigned i = 0; i < inMap.getNumResults(); ++i) {
+            if (auto dimExpr = dyn_cast<AffineDimExpr>(inMap.getResult(i))) {
+                if (dimExpr.getPosition() == static_cast<unsigned>(reductionLoopIdx)) {
+                    reductionAxis = i;
+                    break;
+                }
+            }
+        }
+
+        if (reductionAxis == -1)
+            return rewriter.notifyMatchFailure(
+                sumOp, "Could not map reduction loop to input dimension"
+            );
 
         auto sumYield = dyn_cast<linalg::YieldOp>(sumOp.getBody()->getTerminator());
         if (!sumYield || !isa<arith::AddFOp>(sumYield.getValues()[0].getDefiningOp()))
@@ -707,13 +728,15 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         int rank = inputType.getRank();
         if (rank == 2) {
             auto s = inputType.getShape();
-            auto nchwType = RankedTensorType::get({1, 1, s[0], s[1]}, inputType.getElementType());
+            // [B, F] -> [B, 1, 1, F] where B is batch (dim 0) and F is features (dim 1)
+            auto nchwType = RankedTensorType::get({s[0], 1, 1, s[1]}, inputType.getElementType());
             inputNCHW = rewriter.create<tensor::ExpandShapeOp>(
-                loc, nchwType, input, SmallVector<ReassociationIndices>{{0, 1, 2}, {3}}
+                loc, nchwType, input, SmallVector<ReassociationIndices>{{0}, {1, 2, 3}}
             );
         }
         else if (rank == 3) {
             auto s = inputType.getShape();
+            // [B, H, W] -> [B, 1, H, W] where B is batch (dim 0)
             auto nchwType =
                 RankedTensorType::get({s[0], 1, s[1], s[2]}, inputType.getElementType());
             inputNCHW = rewriter.create<tensor::ExpandShapeOp>(
@@ -723,15 +746,47 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         else if (rank != 4)
             return rewriter.notifyMatchFailure(meanOp, "Only rank 2-4 supported");
 
-        // Map reduction axis to NCHW and apply H↔W transpose if reducing W (axis=3)
-        int nchwAxis = (rank == 2)   ? (reductionAxis == 1 ? 3 : 2)
-                       : (rank == 3) ? (reductionAxis == 2 ? 3 : 2)
-                                     : reductionAxis;
+        // Map reduction axis to NCHW and apply transpose to bring reduction axis to H position
+        // ReduceMeanOp always reduces along dimension 2 (H), so we need to permute the input
+        // to bring the target axis to position 2, then permute back after the reduction
+        int nchwAxis = reductionAxis;
+        if (rank == 2) {
+            // [B, F] -> [B, 1, 1, F].
+            // reductionAxis 0 (batch) -> nchwAxis 0 (N)
+            // reductionAxis 1 (features) -> nchwAxis 3 (W)
+            if (reductionAxis == 0) {
+                nchwAxis = 0; // Reducing batch dimension -> N dimension
+            }
+            else if (reductionAxis == 1) {
+                nchwAxis = 3; // Reducing features dimension -> W dimension
+            }
+        }
+        else if (rank == 3) {
+            // [B, H, W] -> [B, 1, H, W]. 0->0, 1->2, 2->3
+            if (reductionAxis > 0)
+                nchwAxis = reductionAxis + 1;
+        }
 
+        // Determine the transpose permutation to bring nchwAxis to position 2
+        // - nchwAxis == 0 (N): [0,1,2,3] -> [2,1,0,3] (swap N and H)
+        // - nchwAxis == 1 (C): [0,1,2,3] -> [0,2,1,3] (swap C and H)
+        // - nchwAxis == 2 (H): identity (no transpose needed)
+        // - nchwAxis == 3 (W): [0,1,2,3] -> [0,1,3,2] (swap H and W)
         Value reduceMeanInput = inputNCHW;
-        bool needsPreTranspose = (nchwAxis == 3);
-        if (needsPreTranspose)
-            reduceMeanInput = transposeValue(inputNCHW, Permutation({0, 1, 3, 2}), loc, rewriter);
+        Permutation preTransposePerm;
+        bool needsPreTranspose = (nchwAxis != 2);
+        if (nchwAxis == 0) {
+            preTransposePerm = Permutation({2, 1, 0, 3});
+            reduceMeanInput = transposeValue(inputNCHW, preTransposePerm, loc, rewriter);
+        }
+        else if (nchwAxis == 1) {
+            preTransposePerm = Permutation({0, 2, 1, 3});
+            reduceMeanInput = transposeValue(inputNCHW, preTransposePerm, loc, rewriter);
+        }
+        else if (nchwAxis == 3) {
+            preTransposePerm = Permutation({0, 1, 3, 2});
+            reduceMeanInput = transposeValue(inputNCHW, preTransposePerm, loc, rewriter);
+        }
 
         // Scale = 1/reducedDimSize for mean calculation (e.g., 1/288 = 0.003472)
         float scaleValue = 1.0f / static_cast<float>(reducedDimSize);
@@ -760,18 +815,64 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             0, weights, biasScale, reduceMeanInput // shift_factor=0 for bf16
         );
 
-        // Undo H↔W transpose if it was applied (restore original axis positions)
+        // Undo transpose if it was applied (restore original axis positions)
+        // The swap permutations are self-inverse, so we use the same permutation
         Value out = reduceMeanOp.getOutput();
         if (needsPreTranspose)
-            out = transposeValue(out, Permutation({0, 1, 3, 2}), loc, rewriter);
-        if (rank == 2)
-            out = rewriter.create<tensor::CollapseShapeOp>(
-                loc, resultType, out, SmallVector<ReassociationIndices>{{0, 1, 2, 3}}
-            );
-        else if (rank == 3)
-            out = rewriter.create<tensor::CollapseShapeOp>(
-                loc, resultType, out, SmallVector<ReassociationIndices>{{0}, {1, 2, 3}}
-            );
+            out = transposeValue(out, preTransposePerm, loc, rewriter);
+
+        // Collapse back to the result rank
+        // After transpose-back, out has shape [N, C, H, 1] or [N, C, 1, W] depending on reduction
+        // axis
+        int outRank = resultType.getRank();
+        SmallVector<ReassociationIndices> collapseIndices;
+
+        if (rank == 2) {
+            // Input was rank 2, output is rank 1 or 2
+            if (outRank == 1)
+                collapseIndices = {{0, 1, 2, 3}};
+            else // outRank == 2
+                collapseIndices = {{0, 1, 2}, {3}};
+        }
+        else if (rank == 3) {
+            // Input was rank 3, output is rank 2 or 3
+            // Input [N, H, W] -> Expanded [N, 1, H, W]
+            if (outRank == 2) {      // keepdims=false
+                if (nchwAxis == 0) { // Reduced N. [1, 1, H, W] -> [H, W]
+                    collapseIndices = {{0, 1, 2}, {3}};
+                }
+                else { // Reduced H or W. [N, 1, 1, W] or [N, 1, H, 1] -> [N, W] or [N, H]
+                    collapseIndices = {{0, 1}, {2, 3}};
+                }
+            }
+            else { // outRank == 3, keepdims=true
+                // [N, 1, 1, W] -> [N, 1, W]
+                // [N, 1, H, 1] -> [N, H, 1]
+                // [1, 1, H, W] -> [1, H, W]
+                if (nchwAxis == 0) { // Reduced N. [1, 1, H, W] -> [1, H, W]
+                    collapseIndices = {{0, 1}, {2}, {3}};
+                }
+                else {
+                    collapseIndices = {{0}, {1, 2}, {3}};
+                }
+            }
+        }
+        else if (rank == 4) {
+            // Input [N, C, H, W] -> [N, C, H, W] (Identity or Transpose)
+            if (outRank == 3) {      // keepdims=false
+                if (nchwAxis <= 1) { // Reduced N or C
+                    collapseIndices = {{0, 1}, {2}, {3}};
+                }
+                else { // Reduced H or W
+                    collapseIndices = {{0}, {1}, {2, 3}};
+                }
+            }
+            else { // outRank == 4, keepdims=true
+                collapseIndices = {{0}, {1}, {2}, {3}};
+            }
+        }
+
+        out = rewriter.create<tensor::CollapseShapeOp>(loc, resultType, out, collapseIndices);
 
         rewriter.replaceOp(meanOp, out);
         return success();
