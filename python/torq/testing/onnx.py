@@ -8,8 +8,10 @@ import subprocess
 import sys
 
 import json
-# from google.protobuf.json_format import MessageToJson
-# from google.protobuf.json_format import Parse
+from pathlib import Path
+
+from torq.testing.hf import get_hf_model_file
+from torq.testing.cases import Case
 
 from .versioned_fixtures import (versioned_generated_file_fixture,
   versioned_cached_data_fixture,
@@ -301,6 +303,19 @@ def generate_onnx_layers_from_model(model, node_groups=None):
         layer_configs[layer_name] = final_model
 
     return layer_configs
+
+
+def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None):
+    model = get_full_model(get_hf_model_file(cache, repo_id, filename))
+    layers = generate_onnx_layers_from_model(model, node_groups)
+    model_prefix = Path(filename).stem
+    return [Case(f"{model_prefix}_{key}", layer) for key, layer in layers.items()] + [ Case(f"{model_prefix}_full_model", model) ]
+
+
+def generate_onnx_layer_from_file(filepath:Path, node_groups=None):
+    model = get_full_model(str(filepath))
+    layers = generate_onnx_layers_from_model(model, node_groups)
+    return [Case(f"{filepath.stem}_{key}", layer) for key, layer in layers.items()] + [ Case(f"{filepath.stem}_full_model", model) ]
 
 
 @pytest.fixture

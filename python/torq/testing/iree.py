@@ -691,36 +691,25 @@ def tweaked_random_input_data(request, mlir_io_spec):
     return input_tensors
 
 
-def _list_mlir_files(path_name: Path):
+def _list_files(path_name: Path, suffix=None):
     test_files = []
 
+    if not path_name.exists():
+        return []
+
     for file in path_name.iterdir():
-        if file.suffix == '.mlir' and not file.name.startswith('disable'):
+        if file.name.startswith('disable'):
+            continue
+
+        if suffix is None:
             test_files.append(path_name / file)
+        else:
+            if file.suffix == suffix:
+                test_files.append(path_name / file)
 
     return test_files
 
-
-def list_mlir_files(dir_name):
-    """
-    Creates pytest parameters for all mlir files in the specified testdata subdirectory    
-    """
-
-    test_files = []
-
-    testdata_dir = TOPDIR / 'tests' / 'testdata' / dir_name
-
-    test_files = _list_mlir_files(testdata_dir)
-
-    extra_dir = TOPDIR / 'extras/tests/testdata' / dir_name
-
-    if extra_dir.exists():
-        test_files.extend(_list_mlir_files(extra_dir))
-
-    return sorted(test_files)
-
-
-def list_files_without_extras(dir_name):
+def list_files(dir_name, suffix=None, extras=True):
     """
     Creates pytest parameters for all files in the specified testdata subdirectory
     """
@@ -732,11 +721,22 @@ def list_files_without_extras(dir_name):
     if not testdata_dir.exists():
         return []
 
-    for file in testdata_dir.iterdir():
-        if not file.name.startswith('disable'):
-            test_files.append(testdata_dir / file)
+    test_files = _list_files(testdata_dir, suffix)
+
+    if extras:
+        extra_dir = TOPDIR / 'extras/tests/testdata' / dir_name
+
+        if extra_dir.exists():
+            test_files.extend(_list_files(extra_dir, suffix))
 
     return sorted(test_files)
+
+
+def list_mlir_files(dir_name):
+    """
+    Creates pytest parameters for all mlir files in the specified testdata subdirectory
+    """
+    return list_files(dir_name, ".mlir")
 
 
 def list_mlir_file_group(group_name):
@@ -762,7 +762,7 @@ def list_mlir_file_group(group_name):
             if not dir_name.exists():
                 continue
 
-            files.extend(_list_mlir_files(dir_name))
+            files.extend(_list_files(dir_name, ".mlir"))
 
     return sorted(files)
 

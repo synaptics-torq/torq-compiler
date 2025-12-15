@@ -1,12 +1,8 @@
 import pytest
-import onnx
-from onnx import shape_inference
 
 from torq.testing.comparison import compare_test_results
-from torq.testing.onnx import generate_onnx_layers_from_model, get_full_model
+from torq.testing.onnx import generate_onnx_layers_from_hf
 from torq.testing.iree import llvmcpu_reference_results
-from torq.testing.hf import get_hf_model_file
-from torq.testing.cases import Case
 
 from torq.testing.versioned_fixtures import versioned_cached_data_fixture
 
@@ -57,7 +53,7 @@ def case_config(request, chip_config):
 
     if any(s in request.node.name for s in failed_str):
         pytest.xfail("failing test or skipped for now")
-    
+
     case_config_dict = {
          "onnx_model": "onnx_layer_model",
          "mlir_model_file": "onnx_mlir_model_file",
@@ -72,16 +68,14 @@ def case_config(request, chip_config):
 
 def pytest_generate_tests(metafunc):
 
-    model_file = get_hf_model_file(metafunc.config.cache,  "Synaptics/torch_models", "mbv2-bf16.onnx")
-    model = get_full_model(model_file)
-
     # Define groups of nodes (by op_type) that should be split together
     node_groups = [
         ['Conv', 'Clip'],
     ]
-    layers = generate_onnx_layers_from_model(model, node_groups)
 
-    cases = [Case(key, layer) for key, layer in layers.items()] + [ Case("full_model", model) ]
+    cases = generate_onnx_layers_from_hf(metafunc.config.cache,
+            "Synaptics/torch_models", "mbv2-bf16.onnx", node_groups)
+
     metafunc.parametrize("onnx_layer_model", cases, indirect=True)
 
 
