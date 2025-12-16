@@ -49,6 +49,18 @@ $ pytest -k somepattern
 
 To learn more about how to configure the execution of tests see the official [pytest documentation](https://docs.pytest.org/)
 
+## Profiling of tests
+
+The test framework allows to automatically generate profiling information for each test that is executed.
+
+To collect profiling information add the corresponding command line option as follows:
+
+```
+$ pytest --torq-profiling-output-dir SOME/DIR
+```
+
+A profile log is going to be generated for each test run in the corresponding directory.
+
 ## How test code works
 
 A Pytest test invocation works in two phases: in the first phase called collection pytest finds all

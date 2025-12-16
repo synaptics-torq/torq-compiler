@@ -40,6 +40,7 @@ def pytest_addoption(parser):
     parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
     parser.addoption("--torq-compiler-timeout", type=int, default=60*5, help="Timeout in seconds for torq compiler invocations")
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
+    parser.addoption("--torq-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
 
 
 def pytest_generate_tests(metafunc):
@@ -532,10 +533,17 @@ def torq_mlir_func_name(request, mlir_model_file):
     return "main"
 
 
+@versioned_hashable_object_fixture
+def enable_profiling(request):
+    profiling_output_dir = request.config.getoption("--torq-profiling-output-dir")
+    return profiling_output_dir is not None
+
+
 @versioned_generated_directory_fixture
 def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_data_args, mlir_io_spec, 
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
-                        enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name):
+                        enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name,
+                        enable_profiling):
 
     output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
 
@@ -549,7 +557,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             *iree_input_data_args]
 
     tv_dir = versioned_dir / 'tv'
-    buffers_dir = versioned_dir / 'buffers'
+    buffers_dir = versioned_dir / 'buffers'    
 
     if enable_hw_test_vectors:
         cmds.append('--torq_desc_data_dir=' + str(request.getfixturevalue("torq_compiled_hw_descriptors")))
@@ -557,6 +565,9 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
 
     if enable_torq_buffer_tracing:
         cmds.append('--torq_dump_buffers_dir=' + buffers_dir)
+
+    if enable_profiling:
+        cmds.append(f'--torq_profile_host=' + str(versioned_dir / 'host_profile.csv'))
 
     print("Running for TORQ with: " + " ".join(cmds))
     
@@ -591,6 +602,14 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
 
 @versioned_unhashable_object_fixture
 def torq_results(request, torq_results_dir, mlir_io_spec):
+
+    profiling_output_dir = request.config.getoption("--torq-profiling-output-dir")
+    
+    if profiling_output_dir is not None:
+        profiling_output_dir = Path(profiling_output_dir)
+        profiling_output_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(torq_results_dir / 'host_profile.csv', profiling_output_dir / f'{request.node.name}.csv')
+
     output_paths = create_output_paths(torq_results_dir, mlir_io_spec.outputs)
     return load_outputs(mlir_io_spec.outputs, output_paths)
 
