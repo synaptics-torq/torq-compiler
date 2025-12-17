@@ -68,7 +68,9 @@ foreach(TORQ_CSS_CONFIG ${TORQ_RISCV_CONFIGS})
 
     list(APPEND CSS_CONFIGS_DESCS "CssConfig{\"${CSS_CONFIG_NAME}\", \"${CSS_CONFIG_MABI}\", \"${CSS_CONFIG_MARCH}\", \"${CSS_CONFIG_MATTRS}\", \
                                   ${CSS_ITCM_START}, ${CSS_DTCM_START}, ${CSS_REGS_START}, \
-                                  BINARY_DESC(${CSS_CONFIG_NAME}_css_kernel_c_o), BINARY_DESC(${CSS_CONFIG_NAME}_css_kernel_s_o)}")
+                                  BINARY_DESC(${CSS_CONFIG_NAME}_css_kernel_c_o), BINARY_DESC(${CSS_CONFIG_NAME}_css_kernel_s_o), \
+                                  BINARY_DESC(css_kernel_ld), BINARY_DESC(css_compiler_rt_a), BINARY_DESC(css_libc_a), BINARY_DESC(css_libm_a) \
+                                  }")
 
 endforeach()
 
@@ -78,7 +80,7 @@ message(STATUS "CSS configurations: ${TORQ_RISCV_CONFS_NAMES}")
 
 configure_file("css_kernel_riscv.S.in" "${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.S" @ONLY)
 
-configure_file("css_kernel_riscv.h.in" "${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.h" @ONLY)
+configure_file("css_kernel_riscv.cpp.in" "${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.cpp" @ONLY)
 
 # create dependencies for the pre-built runtime libraries
 set(TORQ_RISCV_PREBUILT_RUNTIME_LIBS libc.a libclang_rt.builtins-riscv32.a libm.a)
@@ -88,15 +90,32 @@ foreach(TORQ_RISCV_PREBUILT_RUNTIME_LIB ${TORQ_RISCV_PREBUILT_RUNTIME_LIBS})
     list(APPEND TORQ_RISCV_OBJS ${TORQ_RISCV_PREBUILT_RUNTIME_LIB_PATH})
 endforeach()
 
-set_source_files_properties(css_kernel_riscv.S PROPERTIES OBJECT_DEPENDS "${TORQ_RISCV_OBJS}")
+set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.S PROPERTIES OBJECT_DEPENDS "${TORQ_RISCV_OBJS}")
 
-add_library(torq_kernel_riscv STATIC "${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.S")
-target_compile_definitions(torq_kernel_riscv PRIVATE CSS_PREBUILT_DIR="${CMAKE_SOURCE_DIR}/third_party/runtimes-prebuilt")
+# add_library(torq_kernel_riscv STATIC "${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.S")
+# target_compile_definitions(torq_kernel_riscv PRIVATE CSS_PREBUILT_DIR="${CMAKE_SOURCE_DIR}/third_party/runtimes-prebuilt")
 
-# we can't use the macro iree_bitcode_library here because it uses the wrong machine config for riscv_32
-target_include_directories(torq_kernel_riscv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# # we can't use the macro iree_bitcode_library here because it uses the wrong machine config for riscv_32
+# target_include_directories(torq_kernel_riscv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-# this is used to find the generated .o included as binary blobs in the .s file
-target_include_directories(torq_kernel_riscv PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+# # this is used to find the generated .o included as binary blobs in the .s file
+# target_include_directories(torq_kernel_riscv PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
-target_sources(torq_kernel_riscv PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.h")
+# target_sources(torq_kernel_riscv PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.cpp")
+
+iree_cc_library(
+  NAME
+    torq_kernel_riscv
+  SRCS
+    ${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.S
+    ${CMAKE_CURRENT_BINARY_DIR}/css_kernel_riscv.cpp
+  HDRS
+    css_kernel_riscv.h
+  INCLUDES
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+  DEFINES
+    CSS_PREBUILT_DIR="${CMAKE_SOURCE_DIR}/third_party/runtimes-prebuilt"
+  PUBLIC
+)
+

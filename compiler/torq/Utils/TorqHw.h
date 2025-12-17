@@ -1,5 +1,7 @@
 #pragma once
 
+#include "torq/Codegen/css_bootstrap/css_kernel_riscv.h"
+
 #include <cstdint>
 #include <string>
 
@@ -26,6 +28,8 @@ class TorqHw {
 
     // Get the CSS configuration name
     std::string getCSSConfigName() const { return _cssConfigName; }
+
+    CssConfig getCssConfig() const;
 
     // Get the NSS configuration name
     std::string getNSSConfigName() const { return _nssConfigName; }

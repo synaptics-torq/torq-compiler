@@ -83,18 +83,6 @@ static llvm::cl::opt<std::string> clTargetHostCpuFeatures(
 
 namespace {
 
-static std::optional<CssConfig> getActiveCssConfig() {
-
-    auto cssConfig = getCssConfigByName(TorqHw::get().getCSSConfigName());
-
-    if (!cssConfig) {
-        llvm::errs() << "Unable to find css config " << TorqHw::get().getCSSConfigName() << "\n";
-        exit(1);
-    }
-
-    return cssConfig;
-}
-
 class CssLinker {
 
   public:
@@ -104,23 +92,16 @@ class CssLinker {
         loadLinkerScript();
 
         // create temporary files with the boostrap code for the kernel (asm and c code)
-        auto cssConfig = getActiveCssConfig();
+        auto cssConfig = TorqHw::get().getCssConfig();
 
-        addObjectFile(cssConfig->kernel.as_string(), "c.o");
-        addObjectFile(cssConfig->bootstrap.as_string(), "s.o");
+        addObjectFile(cssConfig.kernel.as_string(), "c.o");
+        addObjectFile(cssConfig.bootstrap.as_string(), "s.o");
 
         // link libc/libm/compiler_rt for soft float support
-        if (cssConfig->mabi == "ilp32") {
-            addObjectFile(
-                std::string(&_binary_css_libc_a_start, &_binary_css_libc_a_end), "libc.a"
-            );
-            addObjectFile(
-                std::string(&_binary_css_libm_a_start, &_binary_css_libm_a_end), "libm.a"
-            );
-            addObjectFile(
-                std::string(&_binary_css_compiler_rt_a_start, &_binary_css_compiler_rt_a_end),
-                "compiler_rt.a"
-            );
+        if (cssConfig.mabi == "ilp32") {
+            addObjectFile(cssConfig.libc.as_string(), "libc.a");
+            addObjectFile(cssConfig.libm.as_string(), "libm.a");
+            addObjectFile(cssConfig.compiler_rt.as_string(), "compiler_rt.a");
         }
     }
 
@@ -195,11 +176,11 @@ class CssLinker {
 
         /* setup the right memory addresses depending on the target */
 
-        auto config = getActiveCssConfig();
+        auto config = TorqHw::get().getCssConfig();
 
-        command.push_back("--defsym __itcm_start=0x" + llvm::utohexstr(config->itcmStart));
-        command.push_back("--defsym __dtcm_start=0x" + llvm::utohexstr(config->dtcmStart));
-        command.push_back("--defsym __css_regs_start=0x" + llvm::utohexstr(config->regsStart));
+        command.push_back("--defsym __itcm_start=0x" + llvm::utohexstr(config.itcmStart));
+        command.push_back("--defsym __dtcm_start=0x" + llvm::utohexstr(config.dtcmStart));
+        command.push_back("--defsym __css_regs_start=0x" + llvm::utohexstr(config.regsStart));
 
         if (largeItcm) {
             command.push_back("--defsym __itcm_size=" + std::to_string(HwInfo::itcm_size * 100));
@@ -273,9 +254,8 @@ class CssLinker {
 
         auto &os = linkerScript.outputFile->os();
 
-        os.write(
-            &_binary_css_kernel_ld_start, &_binary_css_kernel_ld_end - &_binary_css_kernel_ld_start
-        );
+        auto linkerScript = TorqHw::get().getCssConfig().linkerScript.as_string();
+        os.write(linkerScript.c_str(), linkerScript.size());
         os.flush();
         os.close();
     }
@@ -508,7 +488,7 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
     else {
 
         maybeTarget = IREE::HAL::LLVMTarget::create(
-            "riscv32-pc-linux-elf", "generic-rv32", getActiveCssConfig()->mattrs, true
+            "riscv32-pc-linux-elf", "generic-rv32", TorqHw::get().getCssConfig().mattrs, true
         );
     }
 

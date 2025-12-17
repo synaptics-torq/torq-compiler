@@ -1,11 +1,12 @@
-#pragma once
+#include "css_kernel_riscv.h"
 
-#include <stddef.h>
-#include <stdint.h>
+#include <cstddef>
+#include <cstdint>
 
 #include <optional>
 #include <string>
 #include <vector>
+
 
 #define BINARY_OBJ(name)                                                                           \
     extern char _binary_##name##_end;                                                              \
@@ -28,25 +29,6 @@ BINARY_OBJ(css_compiler_rt_a)
 }
 
 namespace mlir::syna::torq {
-
-struct CssObject {
-    char *start;
-    char *end;
-
-    std::string as_string() const { return std::string(start, end); }
-};
-
-struct CssConfig {
-    std::string name;
-    std::string mabi;
-    std::string march;
-    std::string mattrs;
-    uint32_t itcmStart;
-    uint32_t dtcmStart;
-    uint32_t regsStart;
-    CssObject kernel;
-    CssObject bootstrap;
-};
 
 std::vector<CssConfig> cssConfigs = {
   @CSS_CONFIGS_DESCS_STR@

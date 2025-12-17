@@ -98,7 +98,7 @@ iree_cc_library(
     iree::target::torq::Conversions::LinalgToTorqHL
     iree::target::torq::Conversions::TorqHLToTorqHW
     iree::target::torq::Transforms::Linalg::Transforms    
-    torq_kernel_riscv
+    iree::target::torq::Codegen::css_bootstrap::torq_kernel_riscv
 )
 
 add_subdirectory("css_bootstrap")

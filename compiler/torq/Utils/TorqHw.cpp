@@ -1,5 +1,7 @@
 #include "TorqHw.h"
 
+#include "torq/Codegen/css_bootstrap/css_kernel_riscv.h"
+
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -135,6 +137,15 @@ const TorqHw &TorqHw::get() {
     }
 
     return *instance;
+}
+
+CssConfig TorqHw::getCssConfig() const {
+    auto cssConfig = getCssConfigByName(getCSSConfigName());
+    if (!cssConfig) {
+        llvm::errs() << "Unable to find css config " << TorqHw::get().getCSSConfigName();
+        exit(1);
+    }
+    return cssConfig.value();
 }
 
 } // namespace mlir::syna::torq
