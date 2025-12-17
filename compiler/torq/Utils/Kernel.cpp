@@ -1131,8 +1131,6 @@ void SlicePrivate::addDims(
         else {
             if (fuseW && strideTagIx) {
                 auto &wDim = ndlDims.back();
-                llvm::errs() << "wDim.count: " << wDim.count << " wDim.stride : " << wDim.stride
-                             << " strideVal: " << strideVal << "\n";
                 assert(wDim.count * wDim.stride == strideVal && "Cannot fuse");
                 wDim.count *= loopIterCount;
             }

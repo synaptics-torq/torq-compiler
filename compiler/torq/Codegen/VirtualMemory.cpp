@@ -4,6 +4,7 @@
 #include "torq/Codegen/BufferizationUtils.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
@@ -299,9 +300,9 @@ class VirtualAlias : public VirtualObject {
 class PhysicalMemory {
 
     VirtualMemory &vm_;
-    DenseMap<VirtualBuffer *, std::unique_ptr<PhysicalBuffer>> physicalBuffers_;
+    llvm::MapVector<VirtualBuffer *, std::unique_ptr<PhysicalBuffer>> physicalBuffers_;
     SetVector<PhysicalBuffer *> lastUsedPhysicalBuffer_;
-    DenseMap<PhysicalBuffer *, int> pinnedBuffers_;
+    llvm::MapVector<PhysicalBuffer *, int> pinnedBuffers_;
     int totalPinnedSize_ = 0;
     Pool &pool_;
     int defragCount_ = 0;
@@ -528,8 +529,8 @@ class PhysicalMemory {
 
 // This class is used to track the currently active virtual objects
 class VirtualObjects {
-    DenseMap<Value, std::unique_ptr<VirtualBuffer>> virtualBuffers_;
-    DenseMap<Value, VirtualObject *> virtualObjects_;
+    llvm::MapVector<Value, std::unique_ptr<VirtualBuffer>> virtualBuffers_;
+    llvm::MapVector<Value, VirtualObject *> virtualObjects_;
     VirtualMemory &vm_;
 
   public:
@@ -931,7 +932,7 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         ops.push_back(&op);
     }
 
-    DenseMap<Value, SmallVector<Value>> invocationToVirtual;
+    llvm::MapVector<Value, SmallVector<Value>> invocationToVirtual;
 
     // process every operation that we found to map any memref operand or result from virtual
     // to physical value. Use pinning and swap-in to make sure all operands are present before
@@ -999,7 +1000,7 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         }
 
         // find operands that need to be swapped in and compute how much space we need to do so
-        DenseSet<Value>
+        SetVector<Value>
             toSwapIn; // use a set because multiple opOperands may point to the same value
         SmallVector<Value> pinnedValues;
         for (auto &opOperand : memrefOperands) {
@@ -1083,6 +1084,23 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         // pin all the memref operands and replace virtual with physical values
         pinnedValues.clear();
         for (auto memRefOperand : memrefOperands) {
+
+            // ensure the value is not swapped out (this may happen if it is an alias
+            // of a buffer that was swapped out during defragmentation that may happend
+            // when allocating / swapping in buffers above)
+            if (vm.isSwappedOut(memRefOperand->get())) {
+
+                assert(
+                    isDerivedMemRefOperation(memRefOperand->get().getDefiningOp()) &&
+                    "only derived memref operations should lead to swapped out operands here"
+                );
+
+                if (failed(vm.swapIn(memRefOperand->get(), rewriter, op->getLoc()))) {
+                    return memRefOperand->get().getDefiningOp()->emitError("unable to swap in alias"
+                    );
+                }
+            }
+
             vm.pin(memRefOperand->get());
             pinnedValues.push_back(memRefOperand->get());
             memRefOperand->set(vm.getPhysicalValue(memRefOperand->get()));
@@ -1104,7 +1122,7 @@ LogicalResult convertVirtualToPhysicalMemRefs(
             // special case for wait op: unpin all the arguments that were pinned for the start
             // operation
             if (auto waitOp = dyn_cast<torq_hl::WaitProgramOp>(op)) {
-                for (auto arg : invocationToVirtual.at(waitOp.getInvocation())) {
+                for (auto arg : invocationToVirtual[waitOp.getInvocation()]) {
                     vm.unpin(arg);
                 }
 

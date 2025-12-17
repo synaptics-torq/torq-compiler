@@ -10,7 +10,9 @@
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/EncodingUtils.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "torq/Utils/TorqHw.h"
 
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -445,6 +447,124 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
     }
 };
 
+//
+// Finds a concat operation in XRAM that has been expanded to two tensor.insert_slice
+// operations and ensures it is done in LRAM if it is sufficiently small
+//
+// The IR matches looks like this:
+//
+//  %empty = tensor.empty(...) in XRAM
+//  %insert1 = tensor.insert_slice(%input1, %empty, ...)
+//  %insert2 = tensor.insert_slice(%input2, %insert1, ...)
+//  %insert3 = tensor.insert_slice(%input3, %insert2, ...)
+//  ...
+//  %insertN = tensor.insert_slice(%inputN, %insertN-1, ...)
+//
+//  And substitutes it with:
+//
+//  %empty_lram = tensor.empty(...) in LRAM
+//  %input1_lram = convert(%input1) to LRAM
+//  %insert1_lram = tensor.insert_slice(%input1_lram, %empty_lram, ...)
+//  %input2_lram = convert(%input2) to LRAM
+//  %insert2_lram = tensor.insert_slice(%input2_lram, %insert1_lram, ...)
+//  %insert2 = convert(%insert2_lram) back to XRAM
+//  ...
+//  %insertN = convert(%insertN_lram) to XRAM
+//
+class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(tensor::InsertSliceOp rootOp, PatternRewriter &rewriter) const override {
+
+        // we only work on tensor.insert_slice ops that insert into XRAM tensors
+        auto destType = rootOp.getDest().getType();
+
+        if (getEncodingMemorySpace(destType) != torq_hl::MemorySpace::Xram) {
+            return failure();
+        }
+
+        // do not match if the rootOp source is a compile time constant
+        if (isCompileTimeConst(rootOp)) {
+            return failure();
+        }
+
+        // do not match if the result is used by another insert slice, we will
+        // only the last insert_slice in a chain of insert_slices
+        for (auto &use : rootOp.getResult().getUses()) {
+            if (isa<tensor::InsertSliceOp>(use.getOwner())) {
+                return failure();
+            }
+        }
+
+        // keep track of the types the chain of insert slice ops
+        SmallVector<tensor::InsertSliceOp> insertOps;
+
+        // keep track of the total size of the inputs
+        int totalSize = getEncodedTotalSizeBytes(destType);
+
+        auto currentInsert = rootOp;
+
+        // find the whole chain of insert slice ops
+        do {
+            insertOps.push_back(currentInsert);
+
+            // check we can fit the concat in LRAM
+            totalSize += getEncodedTotalSizeBytes(currentInsert.getSource().getType());
+
+            // we cannot fit the whole contact in LRAM so we won't apply this pattern
+            if (totalSize > TorqHw::get().getAvailableMemoryForTiling()) {
+                return failure();
+            }
+
+            currentInsert = currentInsert.getDest().getDefiningOp<tensor::InsertSliceOp>();
+
+        } while (currentInsert);
+
+        // check that we start from an empty op
+        auto emptyOp = insertOps.back().getDest().getDefiningOp<tensor::EmptyOp>();
+
+        if (!emptyOp) {
+            return failure();
+        }
+
+        auto newDestEncoding = createDenseEncoding(destType, torq_hl::MemorySpace::Lram);
+
+        auto newDestValue =
+            rewriter
+                .create<tensor::EmptyOp>(
+                    rootOp.getLoc(), destType.getShape(), destType.getElementType(), newDestEncoding
+                )
+                .getResult();
+
+        for (auto insertOp : llvm::reverse(insertOps)) {
+
+            // convert the source to LRAM
+            auto sourceType = insertOp.getSource().getType();
+            auto lramEncoding = createDenseEncoding(sourceType, torq_hl::MemorySpace::Lram);
+            auto newSource = convertTensorToEncoding(rewriter, insertOp.getSource(), lramEncoding);
+
+            // create a new insert slice op that works in LRAM
+            auto newInsertOp = rewriter.create<tensor::InsertSliceOp>(
+                insertOp.getLoc(), newSource, newDestValue, insertOp.getMixedOffsets(),
+                insertOp.getMixedSizes(), insertOp.getMixedStrides()
+            );
+
+            newDestValue = newInsertOp.getResult();
+        }
+
+        // convert back the result to XRAM
+        auto finalResult =
+            convertTensorToType(rewriter, newDestValue, rootOp.getResult().getType());
+
+        // replace the original insert_slice op result with the final result
+        rewriter.replaceOp(rootOp, finalResult);
+
+        return success();
+    }
+};
+
 class FoldConvertPass : public FoldConvertBase<FoldConvertPass> {
   public:
     using FoldConvertBase<FoldConvertPass>::FoldConvertBase;
@@ -458,6 +578,8 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<FoldConvertChainWithKernel>(ctx);
     patterns.add<FoldRoundTripConversion>(ctx);
     patterns.add<FoldLramToLramConversionChain>(ctx);
+    patterns.add<KeepConcatInLram>(ctx);
+
 #if 0
     // This pattern creates a situation where elementwise ops have inputs with different
     // encodings (strides), which is not supported yet. So we disable it for now.
