@@ -1044,10 +1044,13 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
             lhs = extractSlice.getSource();
         }
         if (!lhs.getDefiningOp<tensor::CollapseShapeOp>()) {
+            // FIXME Maybe there are cases where there is no CollapseShapeOp and the rank is already
+            // 2D !
             return rewriter.notifyMatchFailure(srcOp, "LHS is not collapsed from 4D");
         }
         Value input = lhs.getDefiningOp()->getOperand(0);
         auto inputType = dyn_cast<RankedTensorType>(input.getType());
+
         if (!inputType || inputType.getRank() != 4) {
             return rewriter.notifyMatchFailure(srcOp, "Expected input to be 4D pre-collapse");
         }
@@ -1256,7 +1259,7 @@ struct Conv2DNchwMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> 
         }
         Value input = rhs.getDefiningOp()->getOperand(0);
         auto inputType = dyn_cast<RankedTensorType>(input.getType());
-        if (!inputType || inputType.getRank() != 4) {
+        if (!inputType) {
             return rewriter.notifyMatchFailure(srcOp, "Expected input to be 4D pre-collapse");
         }
 
@@ -1324,6 +1327,30 @@ struct Conv2DNchwMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> 
 
         if (!finalType || finalType.getRank() != 4) {
             return rewriter.notifyMatchFailure(srcOp, "Expected 4D output from expand");
+        }
+
+        // padding input rank to be output rank
+        if (inputType.getRank() < finalType.getRank()) {
+            SmallVector<ReassociationIndices> reassoc;
+            int rank = finalType.getRank();
+            if (rank <= 1) {
+                for (int i = 0; i < rank; ++i)
+                    reassoc.push_back({i});
+            }
+            else {
+                for (int i = 0; i < rank - 2; ++i) {
+                    reassoc.push_back({i});
+                }
+                reassoc.push_back({rank - 2, rank - 1});
+            }
+            auto inputShape = inputType.getShape();
+            SmallVector<int64_t, 8> newInShape(inputShape.begin(), inputShape.end());
+            newInShape.resize(finalType.getRank(), 1);
+            auto newTy = RankedTensorType::get(newInShape, inputType.getElementType());
+            input = rewriter.create<tensor::ExpandShapeOp>(loc, newTy, input, reassoc).getResult();
+        }
+        else if (inputType.getRank() > finalType.getRank()) {
+            return rewriter.notifyMatchFailure(srcOp, "Expected input rank <= output rank");
         }
 
         if (_markFuseGroups) {
