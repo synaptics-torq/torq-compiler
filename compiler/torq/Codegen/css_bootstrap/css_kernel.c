@@ -2,13 +2,13 @@
 #include "iree/hal/local/executable_library.h"
 #include <stdint.h>
 
-#ifdef CSS_HW_KELVIN
+#ifdef CSS_HW_CORALNPU
 
 #define print(x)
 #define printInt(x)
 
 static inline void halt() {
-    // this is a special kelvin instruction that halts the cpu
+    // this is a special CoralNPU instruction that halts the cpu
     asm volatile(".word 0x08000073");
 }
 #endif

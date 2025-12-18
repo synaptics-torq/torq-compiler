@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "TorqSimulator.h"
-#include "KelvinCSSSimulation.h"
+#include "CoralNpuCSSSimulation.h"
 #include "QemuCSSSimulation.h"
 
 #include "torq_cm.h"
@@ -20,7 +20,7 @@
 #include <cstring>
 #include <iostream>
 
-IREE_FLAG(bool, torq_enable_kelvin, false, "Enable Kelvin CSS simulation")
+IREE_FLAG(bool, torq_enable_coralnpu, false, "Enable CoralNPU CSS simulation")
 
 using namespace std;
 
@@ -34,8 +34,8 @@ bool TorqSimulator::open() {
         torq_cm_set_dump(cm, _job_dump_dir.c_str());
     }
 
-#ifdef TORQ_KELVIN_SIMULATOR
-    auto simulator = FLAG_torq_enable_kelvin ? &run_cpu_kelvin_binary : &run_cpu_qemu_binary;
+#ifdef TORQ_CORALNPU_SIMULATOR
+    auto simulator = FLAG_torq_enable_coralnpu ? &run_cpu_kelvin_binary : &run_cpu_qemu_binary;
 #else
     auto simulator = &run_cpu_qemu_binary;
 #endif

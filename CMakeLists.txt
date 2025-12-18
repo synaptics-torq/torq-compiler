@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.21)
 
 project(TORQ ASM C CXX)
 
+option(TORQ_HW_DEBUG "Enable verbose debugging logs of HW" OFF)
+
+option(TORQ_ENABLE_SOC_FPGA "Enable SoC FPGA support" OFF)
+option(TORQ_ENABLE_ASTRA_MACHINA "Enable Astra Machina platform support" OFF)
+option(TORQ_ENABLE_AWS_FPGA "Enable AWS FPGA support" OFF)
+option(TORQ_ENABLE_SIMULATOR "Enable Simulator support" ON)
+option(TORQ_ENABLE_CORALNPU_SIMULATOR "Enable CoralNPU CSS Simulator support" OFF)
+
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(TORQ_HW_DIR ${CMAKE_CURRENT_LIST_DIR}/third_party/torq-hw)

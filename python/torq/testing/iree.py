@@ -561,7 +561,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
 
     if enable_hw_test_vectors:
         cmds.append('--torq_desc_data_dir=' + str(request.getfixturevalue("torq_compiled_hw_descriptors")))
-        cmds.append('--torq_dump_mem_data_dir=' + tv_dir)
+        cmds.append('--torq_dump_mem_data_dir=' + str(tv_dir))
 
     if enable_torq_buffer_tracing:
         cmds.append('--torq_dump_buffers_dir=' + buffers_dir)

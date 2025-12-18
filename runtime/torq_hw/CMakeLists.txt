@@ -9,14 +9,6 @@
 # Enable with: -DIREE_EXTERNAL_HAL_DRIVERS=torq
 #-------------------------------------------------------------------------------
 
-option(TORQ_HW_DEBUG "Enable verbose debugging logs of HW" OFF)
-
-option(TORQ_ENABLE_SOC_FPGA "Enable SoC FPGA support" OFF)
-option(TORQ_ENABLE_ASTRA_MACHINA "Enable Astra Machina platform support" OFF)
-option(TORQ_ENABLE_AWS_FPGA "Enable AWS FPGA support" OFF)
-option(TORQ_ENABLE_SIMULATOR "Enable Simulator support" ON)
-option(TORQ_ENABLE_KELVIN_SIMULATOR "Enable Kelvin CSS Simulator support" OFF)
-
 set(torq_deps)
 set(torq_srcs src/TorqUtils.cpp src/TorqHw.cpp src/TorqEventLog.cpp)
 set(torq_defs)
@@ -44,12 +36,12 @@ if (TORQ_ENABLE_SIMULATOR)
   list(APPEND include_dirs ${TORQ_SIMULATOR_INC_DIR})
   list(APPEND torq_deps ${TORQ_SIMULATOR_LIB})
 
-  set(TORQ_KELVIN_SIMULATOR_LIB
-    ${IREE_TORQ_SOURCE_DIR}/third_party/kelvin-simulator/${CMAKE_HOST_SYSTEM_PROCESSOR}-${CMAKE_HOST_SYSTEM_NAME}/libkelvin_simulator_mpact.so)
-  if(TORQ_ENABLE_KELVIN_SIMULATOR AND EXISTS ${TORQ_KELVIN_SIMULATOR_LIB})
-    list(APPEND torq_srcs src/KelvinCSSSimulation.cpp)
-    list(APPEND torq_deps ${TORQ_KELVIN_SIMULATOR_LIB})
-    list(APPEND torq_defs "TORQ_KELVIN_SIMULATOR=1")
+  set(TORQ_CORALNPU_SIMULATOR_LIB
+    ${IREE_TORQ_SOURCE_DIR}/third_party/coralnpu-mpact/${CMAKE_HOST_SYSTEM_PROCESSOR}-${CMAKE_HOST_SYSTEM_NAME}/libcoralnpu_simulator_mpact.so)
+  if(TORQ_ENABLE_CORALNPU_SIMULATOR AND EXISTS ${TORQ_CORALNPU_SIMULATOR_LIB})
+    list(APPEND torq_srcs src/CoralNpuCSSSimulation.cpp)
+    list(APPEND torq_deps ${TORQ_CORALNPU_SIMULATOR_LIB})
+    list(APPEND torq_defs "TORQ_CORALNPU_SIMULATOR=1")
   endif()
 endif()
 
