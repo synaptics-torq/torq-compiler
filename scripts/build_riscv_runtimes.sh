@@ -51,32 +51,13 @@ echo "Configuring target build to build libc and compiler-rt"
 
 cd ${IREE_SOURCE_DIR}/third_party/llvm-project/runtimes
 
-# this patch is needed because riscv soft float is not compiling correctly
-( 
-    cd ${IREE_SOURCE_DIR}/third_party/llvm-project
-    git checkout HEAD -- libc/src/__support/FPUtil/FEnvImpl.h
-    patch -p1 << EOF
-diff --git a/libc/src/__support/FPUtil/FEnvImpl.h b/libc/src/__support/FPUtil/FEnvImpl.h
-index 13e668becc65..e992a2c8db84 100644
---- a/libc/src/__support/FPUtil/FEnvImpl.h
-+++ b/libc/src/__support/FPUtil/FEnvImpl.h
-@@ -30,7 +30,7 @@
- #include "x86_64/FEnvImpl.h"
- #elif defined(LIBC_TARGET_ARCH_IS_ARM) && defined(__ARM_FP)
- #include "arm/FEnvImpl.h"
--#elif defined(LIBC_TARGET_ARCH_IS_ANY_RISCV)
-+#elif defined(LIBC_TARGET_ARCH_IS_ANY_RISCV) && !defined(__riscv_float_abi_soft)
- #include "riscv/FEnvImpl.h"
- #else
-EOF
-)
-
 cmake -B ${RUNTIMES_BUILD_DIR}/target \
       -G Ninja \
       -DIREE_BUILD_DIR=${IREE_BUILD_DIR} \
       -DCMAKE_TOOLCHAIN_FILE=${BASE_DIR}/scripts/toolchain.riscv.cmake \
       -DLLVM_ENABLE_RUNTIMES="libc;compiler-rt" \
       -DLLVM_LIBC_FULL_BUILD=ON \
+      -DTORQ_CSS=ON \
       -DLLVM_INCLUDE_DOCS=OFF \
       -DCOMPILER_RT_BAREMETAL_BUILD=ON \
       -DTEST_COMPILE_ONLY=ON \

@@ -32,6 +32,8 @@ SECTIONS {
         * (.sdata*)
         * (.rodata*)
         * (.data*)
+        * (.got)
+        * (.sbss)
         . = ALIGN(16);
         . = . + 0x20; /* append extra zero bytes at the end of .text */
         . = ALIGN(16);

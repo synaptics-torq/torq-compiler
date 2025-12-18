@@ -429,27 +429,6 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
             return failure();
         }
 
-        // If CSS doesn't support hard floating point
-        if (TorqHw::get().getCssConfig().mabi == "ilp32") {
-            // fallback those operations to host because they link to errno which we
-            // cannot link yet
-            auto ret = srcOp.walk([](Operation *op) {
-                if (isa<math::SqrtOp, math::RsqrtOp, math::PowFOp, math::ErfOp>(op)) {
-                    return WalkResult::interrupt();
-                }
-
-                return WalkResult::advance();
-            });
-
-            if (ret.wasInterrupted()) {
-                rewriter.modifyOpInPlace(srcOp, [&]() {
-                    setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
-                });
-
-                return success();
-            }
-        }
-
         if (clFallbackF32ToHost && !isa<linalg::TransposeOp>(srcOp) &&
             !isa<linalg::FillOp>(srcOp)) {
 
