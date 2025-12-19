@@ -14,6 +14,9 @@ streamlit==1.45.1
 # (iree has a >= dependency which is picking up 2.19.0 which is not compatible)
 tensorflow==2.18.1
 
+# we depend on this specific version of keras at the moment
+keras==3.12.0
+
 # onnx
 onnx==1.19.1
 onnxruntime==1.23.2
@@ -44,3 +47,22 @@ https://github.com/syna-astra-dev/synaptics-sphinx-theme/archive/refs/heads/main
 
 # this is to automatically rebuild upon edit the documentation
 sphinx-autobuild==2025.8.25
+
+# these are from third_party/iree/runtime/bindings/python/iree/runtime/build_requirements.txt
+pip>=21.3
+setuptools>=62.4.0
+nanobind==2.0
+numpy>=2.0.0b1
+requests>=2.28.0
+wheel>=0.36.2
+sympy==1.12.1
+pybind11>=2.10.1
+PyYAML>=5.4.1
+
+# these are from third_party/iree/integrations/tensorflow/test/requirements.txt
+tensorflow==2.18.1
+keras>=2.7.0
+Pillow>=9.2.0
+
+# these are from python/torq/requirements.txt
+packaging>=24.2

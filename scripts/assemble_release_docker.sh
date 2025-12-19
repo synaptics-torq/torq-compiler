@@ -53,7 +53,7 @@ cp ${BUILD_DIR}/third_party/iree/lib/libIREECompiler.so ${INSTALL_DIR}/lib
 
 cp ${TARGET_BUILD_DIR}/third_party/iree/tools/iree-run-module ${INSTALL_DIR}/tools/armhf-iree-run-module
 
-cp ${BASE_DIR}/scripts/Dockerfile.release ${INSTALL_DIR}/Dockerfile     
+cp ${BASE_DIR}/scripts/Dockerfile.release ${INSTALL_DIR}/Dockerfile
 cp ${BASE_DIR}/scripts/setup.sh ${INSTALL_DIR}
 cp ${BASE_DIR}/scripts/apt-packages.txt ${INSTALL_DIR}
 
@@ -68,10 +68,7 @@ cp -rL ${BUILD_DIR}/third_party/iree/compiler/bindings/python/iree ${INSTALL_DIR
 cp -rL ${BUILD_DIR}/third_party/iree/runtime/bindings/python/iree ${INSTALL_DIR}/python/runtime
 cp -rL ${BASE_DIR}/python/torq ${INSTALL_DIR}/python
 
-cat ${BASE_DIR}/third_party/iree/runtime/bindings/python/iree/runtime/build_requirements.txt \
-    ${BASE_DIR}/third_party/iree/integrations/tensorflow/test/requirements.txt \
-    ${BASE_DIR}/python/torq/requirements.txt \
-    ${BASE_DIR}/requirements.txt > ${INSTALL_DIR}/python/requirements.txt
+cp ${BASE_DIR}/requirements.txt ${INSTALL_DIR}/python/requirements.txt
 
 cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tf ${INSTALL_DIR}/python
 cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tflite ${INSTALL_DIR}/python

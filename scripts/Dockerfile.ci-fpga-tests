@@ -16,17 +16,13 @@ RUN mkdir /actions-runner && cd /actions-runner && \
     tar xvzf ./actions-runner-linux-x64-2.329.0.tar.gz && \
     rm actions-runner-linux-x64-2.329.0.tar.gz
 
-COPY third_party/iree/runtime/bindings/python/iree/runtime/build_requirements.txt /code/build_requirements.txt
-COPY third_party/iree/integrations/tensorflow/test/requirements.txt /code/tf_test_requirements.txt
 COPY requirements.txt /code/requirements.txt
 
 RUN python3 -m venv /workspace/venv
 
 ENV PATH="/workspace/venv/bin:$PATH"
 
-RUN /workspace/venv/bin/pip install -r /code/build_requirements.txt && \
-    /workspace/venv/bin/pip install -r /code/tf_test_requirements.txt && \
-    /workspace/venv/bin/pip install -r /code/requirements.txt && \
+RUN /workspace/venv/bin/pip install -r /code/requirements.txt && \
     rm -rf /root/.cache
 
 ENTRYPOINT ["bash", "-c", "/actions-runner/run.sh --jitconfig ${GH_JIT_CONFIG}" ]
