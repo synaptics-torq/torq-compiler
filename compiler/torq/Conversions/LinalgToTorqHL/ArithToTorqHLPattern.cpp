@@ -445,10 +445,30 @@ class ElementWiseShiftOpPattern : public OpRewritePattern<linalg::GenericOp> {
                        "arith.shrui or arith.shrsi"
             );
         }
+        auto input1 = srcOp.getOperand(0);
+        auto input2 = srcOp.getOperand(1);
+
+        // for case #1, we need to get shift constant and create a constant tensor
+        if (srcOp.getNumDpsInputs() == 1) {
+            auto c1 = binaryOp->getOperand(1).getDefiningOp<arith::ConstantOp>();
+            if (!c1) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Expected defining operation for yield operand to be arith.constant for "
+                           "RoundingRightShiftPattern"
+                );
+            }
+
+            auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
+            auto shiftConstValue = c1.getValue();
+            auto constTensor = rewriter.create<arith::ConstantOp>(
+                srcOp.getLoc(), input1Type, DenseElementsAttr::get(input1Type, shiftConstValue)
+            );
+            input2 = constTensor.getResult();
+        }
 
         rewriter.replaceOpWithNewOp<torq_hl::ElementWiseShiftOp>(
             srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
-            opName, round, srcOp.getOperand(0), srcOp.getOperand(1)
+            opName, round, input1, input2
         );
         return success();
     }
