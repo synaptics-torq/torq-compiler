@@ -79,7 +79,7 @@ def model_signature(model):
     return [inputs, outputs, len(list(graph.node)), [n.op_type for n in graph.node], inits]
 
 
-def generate_onnx_layers_from_model(model, node_groups=None):
+def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
 
     existing_cases = set()
     layer_configs = {}
@@ -287,34 +287,35 @@ def generate_onnx_layers_from_model(model, node_groups=None):
             print(f'layer {layer_name}: inference/check failed: {e}; saving raw part for debugging')
 
         # check duplication: too heavy to compare model, just compare signature
-        m_signature_json = json.dumps(model_signature(final_model))
-        found_existing = False
-        for c in existing_cases:
-            if c == m_signature_json:
-                found_existing = True
-                break
+        if dedup:
+            m_signature_json = json.dumps(model_signature(final_model))
+            found_existing = False
+            for c in existing_cases:
+                if c == m_signature_json:
+                    found_existing = True
+                    break
 
-        if not found_existing:
-            existing_cases.add(m_signature_json)
-        else:
-            # print(f"Skipping duplicate model for layer {layer_name}")
-            continue
+            if not found_existing:
+                existing_cases.add(m_signature_json)
+            else:
+                # print(f"Skipping duplicate model for layer {layer_name}")
+                continue
 
         layer_configs[layer_name] = final_model
 
     return layer_configs
 
 
-def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None):
+def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, dedup=True):
     model = get_full_model(get_hf_model_file(cache, repo_id, filename))
-    layers = generate_onnx_layers_from_model(model, node_groups)
+    layers = generate_onnx_layers_from_model(model, node_groups, dedup)
     model_prefix = Path(filename).stem
     return [Case(f"{model_prefix}_{key}", layer) for key, layer in layers.items()] + [ Case(f"{model_prefix}_full_model", model) ]
 
 
-def generate_onnx_layer_from_file(filepath:Path, node_groups=None):
+def generate_onnx_layer_from_file(filepath:Path, node_groups=None, dedup=True):
     model = get_full_model(str(filepath))
-    layers = generate_onnx_layers_from_model(model, node_groups)
+    layers = generate_onnx_layers_from_model(model, node_groups, dedup)
     return [Case(f"{filepath.stem}_{key}", layer) for key, layer in layers.items()] + [ Case(f"{filepath.stem}_full_model", model) ]
 
 
