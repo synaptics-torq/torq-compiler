@@ -1591,6 +1591,11 @@ iree_status_t iree_hal_torq_native_executable_run(
       }
     }
 
+    auto dirname = get_mem_dump_data_root_dir(executable_name);
+    if (!dirname.empty()) {
+      std::error_code ec;
+      filesystem::remove_all(dirname, ec);
+    }
     auto status = create_job_directory(executable_name, 0);
 
     if (status != iree_ok_status()) {

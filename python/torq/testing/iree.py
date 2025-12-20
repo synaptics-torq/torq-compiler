@@ -560,11 +560,11 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
     buffers_dir = versioned_dir / 'buffers'    
 
     if enable_hw_test_vectors:
-        cmds.append('--torq_desc_data_dir=' + str(request.getfixturevalue("torq_compiled_hw_descriptors")))
+        cmds.append('--torq_desc_data_dir=' + str(request.getfixturevalue("torq_compiled_hw_descriptors").data))
         cmds.append('--torq_dump_mem_data_dir=' + str(tv_dir))
 
     if enable_torq_buffer_tracing:
-        cmds.append('--torq_dump_buffers_dir=' + buffers_dir)
+        cmds.append('--torq_dump_buffers_dir=' + str(buffers_dir))
 
     if enable_profiling:
         cmds.append(f'--torq_profile_host=' + str(versioned_dir / 'host_profile.csv'))
@@ -585,16 +585,10 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
 
     if enable_torq_buffer_tracing:
         print("\nBuffer tracing enabled\n")
-        print("Buffer trace will be available in: " + buffers_dir + "\n")
+        print("Buffer trace will be available in: " + str(buffers_dir) + "\n")
         print("To view the buffer trace run:")
 
         ir_path = ""
-        ir_dir = request.getfixturevalue("torq_compiled_model_phases")
-        if os.path.exists(ir_dir):            
-            for irs in os.listdir(ir_dir):
-                if irs.endswith('9.executable-targets.mlir'):
-                    ir_path = str(Path(ir_dir) / irs)
-                    break
 
         print(f"cd {TOPDIR} && streamlit run apps/buffer_viewer/buffer_viewer.py {buffers_dir} {ir_path}")
         print()
