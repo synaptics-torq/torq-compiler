@@ -371,3 +371,110 @@ def onnx_layer_model(request):
     version = "onnx_layer_model_" + case_name
 
     return VersionedUncachedData(data=model_data, version=version)
+
+
+def _has_bf16_matmul(model):
+    """Check if model contains MatMul with bf16."""
+    graph = model.graph
+    value_info = {vi.name: vi.type.tensor_type.elem_type 
+                  for vi in list(graph.value_info) + list(graph.input) + list(graph.output)
+                  if hasattr(vi.type, 'tensor_type')}
+    for node in graph.node:
+        if node.op_type == 'MatMul':
+            node_inputs = list(node.input)
+            node_outputs = list(node.output)
+            if any(value_info.get(name) == TensorProto.BFLOAT16 for name in node_inputs + node_outputs):
+                return True
+            if any(init.data_type == TensorProto.BFLOAT16 for init in graph.initializer 
+                   if init.name in node_inputs):
+                return True
+    return False
+
+
+def _execute_onnx_model_numpy(model, input_data):
+    """
+    Execute ONNX model using numpy, with special handling for bf16 MatMul operations.
+    NumPy's matmul accepts bf16 arrays directly and handles promotion to float32 internally,
+    then we convert the result back to bf16 if needed. Uses manual execution with numpy
+    for MatMul and onnxruntime for other operations.
+    """
+    graph = model.graph
+    
+    # Build value info map
+    value_info_map = {vi.name: vi for vi in list(graph.value_info) + list(graph.input) + list(graph.output)}
+    
+    # Initialize tensor values
+    tensor_values = {}
+    
+    # Load initializers
+    for init in graph.initializer:
+        arr = numpy_helper.to_array(init)
+        tensor_values[init.name] = arr
+    
+    # Set input values
+    input_names = [inp.name for inp in graph.input]
+    for i, inp_name in enumerate(input_names):
+        if i < len(input_data):
+            tensor_values[inp_name] = input_data[i]
+    
+    # Execute nodes in order
+    for node in graph.node:
+        inputs = [tensor_values.get(inp) for inp in node.input if inp and inp in tensor_values]
+        
+        if node.op_type == 'MatMul' and len(inputs) >= 2:
+            result = np.matmul(inputs[0], inputs[1])
+            # Convert to bf16 if output type requires it
+            if node.output and node.output[0] in value_info_map:
+                vi = value_info_map[node.output[0]]
+                if hasattr(vi.type, 'tensor_type') and vi.type.tensor_type.elem_type == TensorProto.BFLOAT16:
+                    result = result.astype('bfloat16')
+            tensor_values[node.output[0]] = result
+        else:
+            # For other operations, try to use onnxruntime
+            try:
+                # Create a temporary model with just this node and required inputs/outputs
+                node_inputs = [helper.make_tensor_value_info(inp, TensorProto.FLOAT, []) 
+                               for inp in node.input if inp in tensor_values]
+                node_outputs = [helper.make_tensor_value_info(out, TensorProto.FLOAT, []) 
+                                for out in node.output]
+                node_inits = [init for init in graph.initializer if init.name in node.input]
+                
+                temp_graph = helper.make_graph([node], 'temp_graph', node_inputs, node_outputs, node_inits)
+                temp_model = helper.make_model(temp_graph)
+                ort_session = onnxruntime.InferenceSession(temp_model.SerializeToString())
+                ort_inputs = {inp: tensor_values[inp] for inp in node.input if inp in tensor_values}
+                outputs = ort_session.run(None, ort_inputs)
+                for i, output_name in enumerate(node.output):
+                    tensor_values[output_name] = outputs[i]
+            except Exception as e:
+                # If onnxruntime fails, raise to fall back to llvmcpu
+                print(f"Warning: Could not execute {node.op_type} with onnxruntime: {e}")
+                raise
+    
+    # Collect output values
+    outputs = []
+    for output in graph.output:
+        if output.name in tensor_values:
+            outputs.append(tensor_values[output.name])
+    
+    return outputs
+
+
+@versioned_unhashable_object_fixture
+def numpy_reference_results(request, onnx_model_file, input_data, llvmcpu_reference_results):
+    """Generate reference using numpy for bf16 MatMul (onnxruntime doesn't support it).
+    Falls back to llvmcpu if numpy cannot handle an operation."""
+    onnx_model = onnx.load(str(onnx_model_file))
+    if not _has_bf16_matmul(onnx_model):
+        try:
+            ort_session = onnxruntime.InferenceSession(str(onnx_model_file))
+            ort_inputs = {inp.name: input_data[i] for i, inp in enumerate(ort_session.get_inputs())}
+            return ort_session.run(None, ort_inputs)
+        except Exception:
+            pass
+    try:
+        return _execute_onnx_model_numpy(onnx_model, input_data)
+    except Exception as e:
+        # Fall back to llvmcpu if numpy cannot handle the operation
+        print(f"Warning: Numpy reference failed, falling back to llvmcpu: {e}")
+        return llvmcpu_reference_results

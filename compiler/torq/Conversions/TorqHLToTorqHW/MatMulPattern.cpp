@@ -39,8 +39,8 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
         return failure();
     }
 
-    if (rank1 > 3) {
-        op.emitError() << "Input rank must be 1, 2 or 3, got " << rank1 << "\n";
+    if (rank1 > 4) {
+        op.emitError() << "Input rank must be 1, 2, 3, or 4, got " << rank1 << "\n";
         return failure();
     }
 
@@ -78,7 +78,20 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
     int a_row_stride, b_row_stride;
     int batches = 1;
 
-    if (rank1 == 3 && rank2 == 3) { // batch matmul
+    if (rank1 == 4 && rank2 == 4) { // 4D batch matmul
+        // [batch1, batch2, m, k] x [batch1, batch2, k, n] = [batch1, batch2, m, n]
+        // Combine batch1 and batch2 into a single batch dimension
+        int64_t batch1 = input1_shape[0];
+        int64_t batch2 = input1_shape[1];
+        assert(batch1 == input2_shape[0] && batch2 == input2_shape[1]);
+        batches = batch1 * batch2;
+        m = input1_shape[2];
+        a_row_stride = input1Strides[2];
+        k = input1_shape[3];
+        b_row_stride = input2Strides[2];
+        n = output_shape[3];
+    }
+    else if (rank1 == 3 && rank2 == 3) { // batch matmul
         // [batch, m, k] x [batch, k, n] = [batch, m, n]
         batches = input1_shape[0];
         assert(batches == input2_shape[0]);
@@ -86,6 +99,16 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
         a_row_stride = input1Strides[1];
         k = input1_shape[2];
         b_row_stride = input2Strides[1];
+        n = output_shape[2];
+    }
+    else if (rank1 == 3 && rank2 == 2) { // batch matmul with 2D weight broadcasting
+        // [batch, m, k] x [k, n] = [batch, m, n]
+        // The 2D matrix is broadcast across all batch elements
+        batches = input1_shape[0];
+        m = input1_shape[1];
+        a_row_stride = input1Strides[1];
+        k = input1_shape[2];
+        b_row_stride = input2Strides[0];
         n = output_shape[2];
     }
     else if (rank1 == 2 && rank2 == 2) { // matmul
@@ -147,6 +170,9 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
 
     // Implementing matC = matA * matB
 
+    // Determine if input2 (B matrix) has fewer dimensions than input1 (broadcasting case)
+    bool isBroadcastedB = (rank1 == 3 && rank2 == 2);
+
     // Loaded in WMEM
     LData matA(
         {batches,
@@ -156,8 +182,16 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
         inputType
     );
     // Loaded in IMEM
+    // For 3D x 2D case, matB doesn't have batch dimension (it's broadcast across batches)
     LData matB(
-        {
+        isBroadcastedB ?
+        Shape{
+            div_ceil(k, groupSize),
+            {groupSize, b_row_stride}, // K
+            div_ceil(n, alu_group_width),
+            alu_group_width // N
+        } :
+        Shape{
             batches,
             div_ceil(k, groupSize),
             {groupSize, b_row_stride}, // K
@@ -178,13 +212,17 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
 
     BData bdata = slice.bram.load(biasScale);
     For(auto batch = slice.iterate(batches)) {
-        For(auto im = slice.iterate(matA.dim(1))) {      // rows in matA
-            For(auto ing = slice.iterate(matB.dim(3))) { // column groups in matB
+        For(auto im = slice.iterate(matA.dim(1))) { // rows in matA
+            // For broadcast case, matB has one less dimension
+            int matB_ng_dim = isBroadcastedB ? 2 : 3;
+            For(auto ing = slice.iterate(matB.dim(matB_ng_dim))) { // column groups in matB
                 PData pdata;
                 For(auto ikg = slice.iterate(matA.dim(2))) { // k groups in matA
                     WData a = slice.wram.load(matA[batch][im][ikg]);
                     For(auto ik = slice.iterate(matA.dim(3))) { // each k in group
-                        IData b = slice.iram.load(matB[batch][ikg][ik][ing]);
+                        // For broadcast case, don't index matB with batch
+                        IData b = isBroadcastedB ? slice.iram.load(matB[ikg][ik][ing])
+                                                 : slice.iram.load(matB[batch][ikg][ik][ing]);
                         pdata = slice.alu.scalarProductAccumulate(b, a[ik]);
                     }
                 }
