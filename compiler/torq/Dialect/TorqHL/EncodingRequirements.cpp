@@ -280,7 +280,7 @@ KernelEncoding TransposeOp::getKernelEncoding() {
     return {{{getInputMutable().getOperandNumber(), inEncodingAttr}}, outEncodingAttr};
 }
 
-static KernelEncoding getDenseEncoding() { return {{}, {{}, 0, true}}; }
+static KernelEncoding getDenseEncoding() { return {{}, {{}, 64, true}}; }
 static KernelEncoding getNoEncoding() { return {{}, {{}, 0}}; }
 
 template <typename OpT> static KernelEncoding getDenseTwoInputEncoding(OpT op) {
