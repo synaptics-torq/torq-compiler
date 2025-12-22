@@ -1319,7 +1319,9 @@ struct Conv2DNchwMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> 
                     srcOp, "Expected scale info for integer operations"
                 );
             }
-            scInfo = getDefaultScaleClampInfo(finalType, srcOp);
+            // For float ops, only clamp (min/max) is set; scales are not required
+            else if (!scInfo.hasClamp())
+                scInfo = getDefaultScaleClampInfo(finalType, srcOp);
         }
         else {
             finalType = cast<RankedTensorType>(output.getType());

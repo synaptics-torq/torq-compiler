@@ -19,32 +19,13 @@ def case_config(request, chip_config):
         pytest.xfail("AssertionError: Nans differ")
 
     failed_str = [
-        # crash as dw not supported, fallback to conv2d with tiling issue
+        # crash as dw not supported(stride [2,2] cases), fallback to conv2d with tiling issue
         # basically wrong in lowering logic
         "layer_Conv_4-",
         "layer_Conv_11-",
 
         # wrong result as torq fc kernel hasn't support bf16
         "layer_Gemm", 
-
-        # wrong result
-        "layer_Conv_3-",
-        "layer_Conv_6-",
-        "layer_Conv_10-",
-        "layer_Conv_13",
-        "layer_Conv_17",
-        "layer_Conv_21",
-        "layer_Conv_24",
-        "layer_Conv_28",
-        "layer_Conv_32",
-        "layer_Conv_36",
-        "layer_Conv_39",
-        "layer_Conv_43",
-        "layer_Conv_47",
-        "layer_Conv_50",
-        "layer_Conv_54",
-        "layer_Conv_58",
-        "layer_Conv_61",
 
         # full model fail because of above op issue
         # full model has total 62 layers as we group some ops together (conv2d + clip)
