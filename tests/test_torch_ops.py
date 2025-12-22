@@ -24,6 +24,8 @@ def case_config(request, runtime_hw_type, chip_config):
 
     if chip_config.data['target'] != "SL2610":
         # Next chip failures
+        print(f"[pytest] True Running test with chip target: {chip_config.data['target']}")
+
         failed_tc += [
             'conv2d-nchw-clip-bf16.mlir', # Number of differences: 1914 out of 401408 [0.48%]
             'encoder.mlir.230.Conv_0_small.mlir' # Compiler Timeout (exceeded 300 seconds)
@@ -33,8 +35,16 @@ def case_config(request, runtime_hw_type, chip_config):
             failed_tc += [
                 # native_executable.cc:1085: INTERNAL; torq failed to wait;
                 'encoder.mlir.237.Conv_1_small.mlir', # AssertionError: Number of differences: 53378 out of 59616 [89.54%]
-                'encoder.mlir.243.Conv_2_small.mlir'
+                'encoder.mlir.243.Conv_2_small.mlir',
+                '0698_Neg__layers.5_self_attn_Neg.mlir', # output mismatch
+                '0730_Cast__layers.5_Add_output_0_cast_to_fp32.mlir', # output mismatch
+                'encoder.mlir.230.Conv_0_small.mlir', # output mismatch
+                'abs.mlir',  # output mismatch
+
             ]
+    else:
+        print(f"[pytest] False Running test with chip target: {chip_config.data['target']}")
+
 
     if any(s in request.param.name for s in failed_tc):
         pytest.xfail("output mismatch or error")

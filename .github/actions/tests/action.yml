@@ -162,7 +162,7 @@ runs:
       run: |            
         # run pytest with ignoring binary mtime changes to generate a cache that can be used in other environments,
         # also disable phases dump to reduce size of the cache
-        pytest --ignore-binary-mtime --no-phases-dump  -v ${{ inputs.pytest_args }}
+        pytest --ignore-binary-mtime -v ${{ inputs.pytest_args }}
 
     - name: Create compressed test data cache artifact
       if: ${{ inputs.test_data_cache_artifact != '' || inputs.s3_bucket != '' }}

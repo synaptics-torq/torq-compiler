@@ -437,7 +437,7 @@ def TorqHW_MemNdlAttr :
   let mnemonic = "mem_ndl";
   let parameters = (ins
     AttrParameter<"NdlType", "">:$type,
-    ArrayRefParameter<"MemDimAttr", "">:$dims,
+    OptionalArrayRefParameter<"MemDimAttr", "">:$dims,
     DefaultValuedParameter<"int64_t", "0">:$index,
     DefaultValuedParameter<"int64_t", "0">:$offset,
     DefaultValuedParameter<"int64_t", "0">:$set_id,
@@ -451,7 +451,7 @@ def TorqHW_MemNdlAttr :
   ];
 
   let assemblyFormat = [{
-    `{` $type `dims` `=` `[` $dims`]`
+    `{` $type `dims` `=` `[` (`]`) : ($dims^ `]`)?
      (`index` `=` $index^)?
      (`offset` `=` $offset^)?
      (`set_id` `=` $set_id^)?

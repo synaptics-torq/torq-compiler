@@ -17,9 +17,10 @@ from iree.compiler.ir import Context, Module
 from .aws_fpga import FpgaSession
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
-
+from torq.performance import annotate_host_profile_from_files
 
 TOPDIR = Path(__file__).parent.parent.parent.parent
+
 
 MODELS_DIR = TOPDIR / 'tests/testdata/'
 BUILD_DIR = Path(os.environ.get('IREE_BUILD_DIR', str(TOPDIR.parent / 'iree-build')))
@@ -40,7 +41,7 @@ def pytest_addoption(parser):
     parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
     parser.addoption("--torq-compiler-timeout", type=int, default=60*5, help="Timeout in seconds for torq compiler invocations")
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
-    parser.addoption("--torq-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
+    parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
 
 
 def pytest_generate_tests(metafunc):
@@ -535,7 +536,7 @@ def torq_mlir_func_name(request, mlir_model_file):
 
 @versioned_hashable_object_fixture
 def enable_profiling(request):
-    profiling_output_dir = request.config.getoption("--torq-profiling-output-dir")
+    profiling_output_dir = request.config.getoption("--torq-runtime-profiling-output-dir")
     return profiling_output_dir is not None
 
 
@@ -570,7 +571,6 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         cmds.append(f'--torq_profile_host=' + str(versioned_dir / 'host_profile.csv'))
 
     print("Running for TORQ with: " + " ".join(cmds))
-    
     if runtime_hw_type == 'aws_fpga':            
         with FpgaSession(chip_config['aws_fpga']) as fpga_session:
             with request.getfixturevalue("scenario_log").event("torq_run"):
@@ -592,17 +592,30 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
 
         print(f"cd {TOPDIR} && streamlit run apps/buffer_viewer/buffer_viewer.py {buffers_dir} {ir_path}")
         print()
-
+    
+    if enable_profiling:
+        ir_path = ""
+        ir_dir = request.getfixturevalue("torq_compiled_model_phases").data
+        if os.path.exists(ir_dir):            
+            for irs in os.listdir(ir_dir):
+                if irs.endswith('9.executable-targets.mlir'):
+                    ir_path = str(Path(ir_dir) / irs)
+                    annotate_host_profile_from_files(
+                        ir_path,
+                        str(versioned_dir / 'host_profile.csv'),
+                        str(versioned_dir / 'annotated_profile.xlsx')
+                    )
 
 @versioned_unhashable_object_fixture
 def torq_results(request, torq_results_dir, mlir_io_spec):
 
-    profiling_output_dir = request.config.getoption("--torq-profiling-output-dir")
+    profiling_output_dir = request.config.getoption("--torq-runtime-profiling-output-dir")
     
     if profiling_output_dir is not None:
         profiling_output_dir = Path(profiling_output_dir)
         profiling_output_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy(torq_results_dir / 'host_profile.csv', profiling_output_dir / f'{request.node.name}.csv')
+        shutil.copy(torq_results_dir / 'annotated_profile.xlsx', profiling_output_dir / f'{request.node.name}.xlsx')
 
     output_paths = create_output_paths(torq_results_dir, mlir_io_spec.outputs)
     return load_outputs(mlir_io_spec.outputs, output_paths)

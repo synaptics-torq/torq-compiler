@@ -49,8 +49,15 @@ bool TorqEventLog::dumpEvents(const std::string& filename){
         }
         std::string sanitized_location = e.location;
         sanitized_location.erase(std::remove(sanitized_location.begin(), sanitized_location.end(), '\n'), sanitized_location.end());
+        // Escape double quotes in location
+        size_t pos = 0;
+        while ((pos = sanitized_location.find('"', pos)) != std::string::npos) {
+            sanitized_location.insert(pos, 1, '"');
+            pos += 2;
+        }
 
-        profilingFile_ << e.actionIndex << "," << elapsed_us << "," << timestamp_us << "," << type_str << "," << sanitized_location << "\n";
+        // Always quote the location field
+        profilingFile_ << e.actionIndex << "," << elapsed_us << "," << timestamp_us << "," << type_str << ",\"" << sanitized_location << "\"\n";
     }
     profilingFile_.close();
     return true;
