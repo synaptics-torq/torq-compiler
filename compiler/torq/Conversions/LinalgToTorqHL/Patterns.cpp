@@ -2149,6 +2149,7 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         SmallVector<int32_t> convertedValues;
         auto cstData = computeConstant(cst);
+
         if (!clTableAsGather && isTableOp) {
             auto values = cstData.getValues<int8_t>();
             for (size_t i = 0; i < 256; i++) {
@@ -2195,12 +2196,26 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             else if (cstData) { // If not a table converted Gather and the const values are
                                 // input(table)
                                 // and extract tensor is indices
-                auto values = cstData.getValues<APInt>();
-                tableValues.insert(tableValues.end(), values.begin(), values.end());
+
+                arith::ConstantOp tableConst;
+
                 auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+
+                if (llvm::isa<FloatType>(outType.getElementType())) {
+                    auto values = cstData.getValues<APFloat>();
+                    std::vector<APFloat> tableValues;
+                    tableValues.insert(tableValues.end(), values.begin(), values.end());
+                    tableConst = createFConst(rewriter, srcOp, tableValues);
+                }
+                else {
+                    auto values = cstData.getValues<APInt>();
+                    std::vector<APInt> tableValues;
+                    tableValues.insert(tableValues.end(), values.begin(), values.end());
+                    tableConst = createIConst(rewriter, srcOp, tableValues);
+                }
+
                 rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
-                    srcOp, outType, createInitTensor(srcOp, rewriter, outType),
-                    createIConst(rewriter, srcOp, tableValues), input
+                    srcOp, outType, createInitTensor(srcOp, rewriter, outType), tableConst, input
                 );
             }
             else { // If not a table converted Gather and the const values are indices and extract
