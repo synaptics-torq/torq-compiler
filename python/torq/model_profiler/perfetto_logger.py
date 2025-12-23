@@ -23,6 +23,13 @@ from pathlib import Path
 # Toggle to show shortened MLIR locations (filename only) vs full paths
 SHOW_SHORT_LOCATIONS = True
 
+# Clock frequency in MHz for cycle-to-time conversion
+CLOCK_FREQ_MHZ = 800
+
+def cycles_to_ns(cycles):
+    """Convert cycles to nanoseconds assuming 800MHz clock."""
+    return int(cycles * 1000 / CLOCK_FREQ_MHZ)
+
 
 # =============================================================================
 # DATA STRUCTURES
@@ -349,7 +356,10 @@ def parse_compile_profile_csv(csv_path):
         Tuple of (dma_intervals, slice_intervals, overall_start, overall_end, all_rows)
     """
     dma_intervals = []
+    cdma_dtcm_intervals = []
+    cdma_itcm_intervals = []
     slice_intervals = []
+    css_intervals = []
     all_rows = []
     overall_start = None
     overall_end = None
@@ -357,14 +367,15 @@ def parse_compile_profile_csv(csv_path):
     with open(csv_path, newline='') as fp:
         reader = csv.reader(fp)
         for row in reader:
-            if len(row) != 5:
+            if len(row) < 5:
                 continue
             
-            event, start, end, src_line_id, etype = row
+            event, start, end, src_line_id, etype = row[:5]
+            bytes_transferred = row[5] if len(row) > 5 else None
             
             try:
-                start_time = int(start)
-                end_time = int(end)
+                start_time = cycles_to_ns(int(start))
+                end_time = cycles_to_ns(int(end))
             except ValueError:
                 continue
             
@@ -377,12 +388,18 @@ def parse_compile_profile_csv(csv_path):
             # Categorize by event type
             if event.startswith('DI') or event.startswith('DO'):
                 dma_intervals.append((start_time, end_time))
+            elif event.startswith('CDMA_L2D') or event.startswith('CDMA_D2L'):
+                cdma_dtcm_intervals.append((start_time, end_time))
+            elif event.startswith('CDMA_L2I'):
+                cdma_itcm_intervals.append((start_time, end_time))
+            elif event.startswith('CSS'):
+                css_intervals.append((start_time, end_time))
             elif event.startswith('S'):
                 slice_intervals.append((start_time, end_time))
             
-            all_rows.append((event, start_time, end_time, src_line_id, etype))
+            all_rows.append((event, start_time, end_time, src_line_id, etype, bytes_transferred))
     
-    return dma_intervals, slice_intervals, overall_start, overall_end, all_rows
+    return dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end, all_rows
 
 
 def parse_runtime_profile_csv(csv_path):
@@ -410,8 +427,8 @@ def parse_runtime_profile_csv(csv_path):
             dispatch_id, time_since_open, time_since_start, mlir_loc = row
             
             try:
-                start_time = int(time_since_open)
-                duration = int(time_since_start)
+                start_time = cycles_to_ns(int(time_since_open))
+                duration = cycles_to_ns(int(time_since_start))
                 end_time = start_time + duration
             except ValueError:
                 continue
@@ -441,27 +458,53 @@ def calculate_compile_profile_metrics(csv_path):
         - overall_start: Start timestamp
         - overall_end: End timestamp
     """
-    dma_intervals, slice_intervals, overall_start, overall_end, _ = parse_compile_profile_csv(csv_path)
+    dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end, _ = parse_compile_profile_csv(csv_path)
     
     # Merge overlapping intervals
     merged_dma = merge_intervals(dma_intervals)
     merged_slice = merge_intervals(slice_intervals)
+    merged_cdma_dtcm = merge_intervals(cdma_dtcm_intervals)
+    merged_cdma_itcm = merge_intervals(cdma_itcm_intervals)
+    merged_cdma_all = merge_intervals(cdma_dtcm_intervals + cdma_itcm_intervals)
+    merged_css = merge_intervals(css_intervals)
     
-    # Calculate DMA-only time (DMA active, SLICE inactive)
-    dma_only_intervals = subtract_intervals(merged_dma, merged_slice)
+    # Combine DMA and CDMA for "DMA" statistics
+    # Use merge_intervals to calculate the Union (handling any overlaps between DMA and CDMA)
+    merged_dma_combined = merge_intervals(dma_intervals + cdma_dtcm_intervals + cdma_itcm_intervals)
+    
+    # Combine SLICE and CSS for "COMPUTE" statistics
+    # Use merge_intervals to calculate the Union (handling any overlaps between Slice and CSS)
+    merged_compute_combined = merge_intervals(slice_intervals + css_intervals)
+    
+    # Calculate DMA-only time (DMA/CDMA active, SLICE/CSS inactive)
+    # This subtracts any time where Compute is active from the DMA Combined time
+    dma_only_intervals = subtract_intervals(merged_dma_combined, merged_compute_combined)
     total_dma_only = sum(end - start for start, end in dma_only_intervals)
     
-    # Calculate DMA+SLICE overlap time
-    overlap_intervals = intersect_intervals(merged_dma, merged_slice)
+    # Calculate COMPUTE-only time (SLICE/CSS active, DMA/CDMA inactive)
+    compute_only_intervals = subtract_intervals(merged_compute_combined, merged_dma_combined)
+    total_compute_only = sum(end - start for start, end in compute_only_intervals)
+    
+    # Calculate DMA+COMPUTE overlap time
+    # This finds the time where BOTH DMA/CDMA and Compute are active
+    overlap_intervals = intersect_intervals(merged_dma_combined, merged_compute_combined)
     total_overlap = sum(end - start for start, end in overlap_intervals)
     
     # Calculate totals
     total_dma = sum(end - start for start, end in merged_dma)
     total_slice = sum(end - start for start, end in merged_slice)
+    total_cdma_dtcm = sum(end - start for start, end in merged_cdma_dtcm)
+    total_cdma_itcm = sum(end - start for start, end in merged_cdma_itcm)
+    total_cdma_all = sum(end - start for start, end in merged_cdma_all)
+    total_css = sum(end - start for start, end in merged_css)
+    
+    total_dma_combined = sum(end - start for start, end in merged_dma_combined)
+    total_compute_combined = sum(end - start for start, end in merged_compute_combined)
+    
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
     
-    # Calculate BUSY time (union of DMA and SLICE)
-    busy_intervals = merge_intervals(merged_dma + merged_slice)
+    # Calculate BUSY time (union of DMA/CDMA and SLICE/CSS)
+    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined)
     busy_time = sum(end - start for start, end in busy_intervals)
     
     # Calculate IDLE time
@@ -474,9 +517,16 @@ def calculate_compile_profile_metrics(csv_path):
     metrics = {
         'DMA': {'time': total_dma, 'percent': calc_percent(total_dma)},
         'SLICE': {'time': total_slice, 'percent': calc_percent(total_slice)},
+        'CDMA_DTCM': {'time': total_cdma_dtcm, 'percent': calc_percent(total_cdma_dtcm)},
+        'CDMA_ITCM': {'time': total_cdma_itcm, 'percent': calc_percent(total_cdma_itcm)},
+        'CDMA': {'time': total_cdma_all, 'percent': calc_percent(total_cdma_all)},
+        'CSS': {'time': total_css, 'percent': calc_percent(total_css)},
+        'DMA_COMBINED': {'time': total_dma_combined, 'percent': calc_percent(total_dma_combined)},
+        'COMPUTE_COMBINED': {'time': total_compute_combined, 'percent': calc_percent(total_compute_combined)},
         'IDLE': {'time': idle_time, 'percent': calc_percent(idle_time)},
         'DMA_ONLY': {'time': total_dma_only, 'percent': calc_percent(total_dma_only)},
-        'DMA_SLICE_OVERLAP': {'time': total_overlap, 'percent': calc_percent(total_overlap)},
+        'COMPUTE_ONLY': {'time': total_compute_only, 'percent': calc_percent(total_compute_only)},
+        'DMA_COMPUTE_OVERLAP': {'time': total_overlap, 'percent': calc_percent(total_overlap)},
         'OVERALL': {'time': overall_time}
     }
     
@@ -513,7 +563,10 @@ def calculate_runtime_profile_metrics(csv_path):
         'SLICE': {'time': 0, 'percent': 0},
         'IDLE': {'time': idle_time, 'percent': calc_percent(idle_time)},
         'DMA_ONLY': {'time': 0, 'percent': 0},
-        'DMA_SLICE_OVERLAP': {'time': 0, 'percent': 0},
+        'COMPUTE_ONLY': {'time': 0, 'percent': 0},
+        'DMA_COMBINED': {'time': 0, 'percent': 0},
+        'COMPUTE_COMBINED': {'time': 0, 'percent': 0},
+        'DMA_COMPUTE_OVERLAP': {'time': 0, 'percent': 0},
         'OVERALL': {'time': overall_time}
     }
     
@@ -527,12 +580,13 @@ def calculate_runtime_profile_metrics(csv_path):
 def print_metrics_summary(profile_name, metrics):
     """Print formatted metrics summary to console."""
     print(f"\n=== Overview ({profile_name}) ===")
-    for key in ['DMA', 'SLICE', 'DMA_ONLY', 'DMA_SLICE_OVERLAP', 'IDLE', 'OVERALL']:
-        metric = metrics[key]
-        if 'percent' in metric:
-            print(f"{key} time: {metric['time']} ({metric['percent']:.2f}%)")
-        else:
-            print(f"{key} time: {metric['time']}")
+    for key in ['DMA_COMBINED', 'COMPUTE_COMBINED', 'DMA_ONLY', 'COMPUTE_ONLY', 'IDLE', 'OVERALL', 'DMA', 'SLICE', 'CDMA', 'CSS', 'DMA_COMPUTE_OVERLAP']:
+        if key in metrics:
+            metric = metrics[key]
+            if 'percent' in metric:
+                print(f"{key} time: {metric['time']} ({metric['percent']:.2f}%)")
+            else:
+                print(f"{key} time: {metric['time']}")
 
 
 # =============================================================================
@@ -540,7 +594,7 @@ def print_metrics_summary(profile_name, metrics):
 # =============================================================================
 
 def create_compile_profile_event(view_name, event, start_time, end_time, 
-                                 src_line_id, etype, overall_time):
+                                 src_line_id, etype, overall_time, bytes_transferred=None):
     """
     Create a Perfetto event for a compile profile entry.
     
@@ -550,23 +604,36 @@ def create_compile_profile_event(view_name, event, start_time, end_time,
     # Categorize event
     event_category = "UNKNOWN"
     if event.startswith("DI"):
-        event_category = "DMA IN"
+        event_category = "0_DMA_IN"
     elif event.startswith("DO"):
-        event_category = "DMA OUT"
+        event_category = "1_DMA_OUT"
     elif event.startswith("S"):
-        event_category = "SLICE"
         try:
-            slice_num = int(event.replace("S", ""))
-            slice_num = slice_num % 2  # Hardware has 2 slices
-            event_category = f"{event_category} {slice_num}"
+            if '_' in event:
+                # Format: S<IDX>_<CORE_ID>
+                parts = event.split('_')
+                slice_num = int(parts[1])
+            else:
+                # Legacy Format: S<IDX>
+                slice_num = int(event.replace("S", ""))
+                slice_num = slice_num % 2  # Hardware has 2 slices
+            
+            event_category = f"{2 + slice_num}_SLICE_{slice_num}"
         except Exception:
-            event_category = f"{event_category} UNKNOWN"
+            event_category = "SLICE UNKNOWN"
+    elif event.startswith("CDMA"):
+        event_category = "4_CDMA"
+    elif event.startswith("CSS"):
+        event_category = "5_CSS"
     
     # Build event details with duration and percentage
     duration = end_time - start_time
     percent = (duration / overall_time * 100) if overall_time else 0
     short_loc = shorten_mlir_location(src_line_id)
+    
     details = f"{etype}, {event}, MLIR - {short_loc}, dur={duration} ({percent:.2f}%)"
+    if bytes_transferred:
+        details += f", bytes={bytes_transferred}"
     
     return PerfettoEvent(view_name, event_category, details, start_time, end_time)
 
@@ -611,13 +678,25 @@ def create_overview_event(process_name, thread_name, label, metric, base_start):
 
 def render_compile_profile_events(view_name, trace_writer, csv_path):
     """Render compile profile events to Perfetto trace with duration/percent info."""
-    _, _, overall_start, overall_end, all_rows = parse_compile_profile_csv(csv_path)
+    _, _, _, _, _, overall_start, overall_end, all_rows = parse_compile_profile_csv(csv_path)
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
     
-    for event, start_time, end_time, src_line_id, etype in all_rows:
+    # Pre-register tracks to ensure specific order in Perfetto UI
+    ordered_tracks = [
+        "0_DMA_IN",
+        "1_DMA_OUT",
+        "2_SLICE_0",
+        "3_SLICE_1",
+        "4_CDMA",
+        "5_CSS"
+    ]
+    for track in ordered_tracks:
+        trace_writer.add_thread_descriptor(view_name, track)
+    
+    for event, start_time, end_time, src_line_id, etype, bytes_transferred in all_rows:
 
         perfetto_event = create_compile_profile_event(
-            view_name, event, start_time, end_time, src_line_id, etype, overall_time
+            view_name, event, start_time, end_time, src_line_id, etype, overall_time, bytes_transferred
         )
         trace_writer.add_event(perfetto_event)
 
@@ -645,12 +724,16 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
     
     # Define track order (using numeric prefix for lexicographic sorting)
     overview_tracks = [
-        ("00 OVERVIEW DMA", "DMA total", metrics['DMA']),
-        ("01 OVERVIEW SLICE", "SLICE total", metrics['SLICE']),
-        ("02 OVERVIEW DMA ONLY", "DMA ONLY (exclusive)", metrics['DMA_ONLY']),
-        ("03 OVERVIEW DMA+SLICE OVERLAP", "DMA & SLICE overlap", metrics['DMA_SLICE_OVERLAP']),
-        ("04 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
-        ("05 OVERALL", "OVERALL", metrics['OVERALL']),
+        ("00 OVERVIEW DMA COMBINED", "DMA+CDMA total", metrics.get('DMA_COMBINED', metrics.get('DMA', {'time': 0}))),
+        ("01 OVERVIEW COMPUTE COMBINED", "SLICE+CSS total", metrics.get('COMPUTE_COMBINED', metrics.get('SLICE', {'time': 0}))),
+        ("02 OVERVIEW DMA", "DMA total", metrics.get('DMA', {'time': 0})),
+        ("03 OVERVIEW CDMA", "CDMA total", metrics.get('CDMA', {'time': 0})),
+        ("04 OVERVIEW SLICE", "SLICE total", metrics.get('SLICE', {'time': 0})),
+        ("05 OVERVIEW CSS", "CSS total", metrics.get('CSS', {'time': 0})),
+        ("06 OVERVIEW DMA ONLY", "DMA ONLY (exclusive)", metrics.get('DMA_ONLY', {'time': 0})),
+        ("07 OVERVIEW COMPUTE ONLY", "COMPUTE ONLY (exclusive)", metrics.get('COMPUTE_ONLY', {'time': 0})),
+        ("08 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
+        ("09 OVERALL", "OVERALL", metrics['OVERALL']),
     ]
     
     for thread_name, label, metric in overview_tracks:

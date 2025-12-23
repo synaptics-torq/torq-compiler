@@ -26,10 +26,12 @@
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "torq/Utils/TorqHw.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <tuple>
@@ -49,7 +51,7 @@ namespace mlir::syna::torq {
 
 namespace {
 
-enum class DmaType { In, Out };
+enum class DmaType { In, Out, CdmaLramToDtcm, CdmaLramToItcm, CdmaDtcmToLram };
 
 typedef uint64_t StartTime;
 typedef uint64_t EndTime;
@@ -59,6 +61,7 @@ struct DmaEvent {
     StartTime startTime;
     EndTime endTime;
     std::string loc;
+    uint64_t bytes;
 };
 
 struct SliceEvent {
@@ -69,8 +72,15 @@ struct SliceEvent {
     std::string loc;
 };
 
+struct CSSEvent {
+    StartTime startTime;
+    EndTime endTime;
+    std::string loc;
+};
+
 typedef std::vector<DmaEvent> DmaTimeline;
 typedef std::vector<SliceEvent> SliceTimeline;
+typedef std::vector<CSSEvent> CSSTimeline;
 
 struct ProfStruct {
 
@@ -78,12 +88,16 @@ struct ProfStruct {
 
     DmaTimeline dmaTimeline;
     SliceTimeline sliceTimeline;
+    CSSTimeline cssTimeline;
 
     std::string currentDmaInLoc;
     std::string currentDmaOutLoc;
 
     uint64_t currentDmaInCycles;
     uint64_t currentDmaOutCycles;
+
+    uint64_t currentDmaInBytes;
+    uint64_t currentDmaOutBytes;
 
     void
     addToSliceTimeline(int id, uint64_t start, uint64_t end, std::string opName, std::string loc) {
@@ -100,8 +114,21 @@ struct ProfStruct {
         return 0;
     }
 
-    void addToDmaTimeline(DmaType dmaType, uint64_t start, uint64_t end, std::string loc) {
-        dmaTimeline.push_back({dmaType, start, end, loc}
+    void addToCSSTimeline(uint64_t start, uint64_t end, std::string loc) {
+        cssTimeline.push_back({start, end, loc});
+    }
+
+    int getLastCSSTime() {
+        if (cssTimeline.empty()) {
+            return 0;
+        }
+        return cssTimeline.back().endTime;
+    }
+
+    void addToDmaTimeline(
+        DmaType dmaType, uint64_t start, uint64_t end, std::string loc, uint64_t bytes = 0
+    ) {
+        dmaTimeline.push_back({dmaType, start, end, loc, bytes}
         ); // loc+1 to match with the original line number in dump
     }
 
@@ -321,14 +348,14 @@ static LogicalResult processOperationTime(Operation *op, const IRMapping &map, P
     // DMA in config contains reference to slice_program op
     if (auto dmaInCfgOp = dyn_cast<torq_hw::DmaInCfgOp>(op)) {
         // TODO: check if this is correct for strided types
-        prof.currentDmaInCycles =
-            getEncodedTotalSizeBytes(dmaInCfgOp.getRead().getType()) / perCycleDmaTransferBytes;
+        prof.currentDmaInBytes = getEncodedTotalSizeBytes(dmaInCfgOp.getRead().getType());
+        prof.currentDmaInCycles = prof.currentDmaInBytes / perCycleDmaTransferBytes;
         prof.currentDmaInLoc = toString(dmaInCfgOp.getLoc());
     }
     else if (auto dmaOutCfgOp = dyn_cast<torq_hw::DmaOutCfgOp>(op)) {
         // TODO: check if this is correct for strided types
-        prof.currentDmaOutCycles =
-            getEncodedTotalSizeBytes(dmaOutCfgOp.getRead().getType()) / perCycleDmaTransferBytes;
+        prof.currentDmaOutBytes = getEncodedTotalSizeBytes(dmaOutCfgOp.getRead().getType());
+        prof.currentDmaOutCycles = prof.currentDmaOutBytes / perCycleDmaTransferBytes;
         prof.currentDmaOutLoc = toString(dmaOutCfgOp.getLoc());
     }
     // Add the dma time to the timeline
@@ -336,14 +363,14 @@ static LogicalResult processOperationTime(Operation *op, const IRMapping &map, P
         // TODO: check if there is a concurrent dma out and compute the bandwidth if shared
         prof.addToDmaTimeline(
             DmaType::In, prof.timestamp, prof.timestamp + prof.currentDmaInCycles,
-            toString(dmaInStartOp.getLoc())
+            toString(dmaInStartOp.getLoc()), prof.currentDmaInBytes
         );
     }
     else if (auto dmaOutStartOp = dyn_cast<torq_hw::DmaOutStartOp>(op)) {
         // TODO: check if there is a concurrent dma in and compute the bandwidth if shared
         prof.addToDmaTimeline(
             DmaType::Out, prof.timestamp, prof.timestamp + prof.currentDmaOutCycles,
-            toString(dmaOutStartOp.getLoc())
+            toString(dmaOutStartOp.getLoc()), prof.currentDmaOutBytes
         );
     }
     // Update the timestamp based on the end of dma operation.
@@ -356,6 +383,59 @@ static LogicalResult processOperationTime(Operation *op, const IRMapping &map, P
     }
     else if (isa<torq_hw::DmaOutWaitOp>(op)) {
         auto lastTimeStamp = prof.getLastDmaTime(DmaType::Out);
+        if (prof.timestamp < lastTimeStamp) {
+            prof.timestamp = lastTimeStamp;
+        }
+    }
+    else if (auto cdmaStartOp = dyn_cast<torq_hw::CDMAStartOp>(op)) {
+        auto srcType = cdmaStartOp.getSrc().getType();
+        auto dstType = cdmaStartOp.getDest().getType();
+        uint64_t bytes = getEncodedTotalSizeBytes(srcType);
+
+        double factor = 1.0;
+        auto hw = TorqHw::get();
+        std::string css = hw.getCSSConfigName();
+        std::string nss = hw.getNSSConfigName();
+
+        if (css == "coral_v1" && nss == "nss_v1") {
+            factor = 0.36;
+        }
+        else {
+            factor = 0.8;
+        }
+
+        uint64_t cycles = std::max((uint64_t)1, (uint64_t)std::ceil(bytes / (16.0 * factor)));
+
+        DmaType type = DmaType::CdmaLramToDtcm;
+        auto srcSpace = getEncodingMemorySpace(srcType);
+        auto dstSpace = getEncodingMemorySpace(dstType);
+
+        if (srcSpace == syna::torq_hl::MemorySpace::Lram &&
+            dstSpace == syna::torq_hl::MemorySpace::Dtcm) {
+            type = DmaType::CdmaLramToDtcm;
+        }
+        else if (srcSpace == syna::torq_hl::MemorySpace::Lram &&
+                 dstSpace == syna::torq_hl::MemorySpace::Itcm) {
+            type = DmaType::CdmaLramToItcm;
+        }
+        else if (srcSpace == syna::torq_hl::MemorySpace::Dtcm &&
+                 dstSpace == syna::torq_hl::MemorySpace::Lram) {
+            type = DmaType::CdmaDtcmToLram;
+        }
+
+        prof.addToDmaTimeline(
+            type, prof.timestamp, prof.timestamp + cycles, toString(cdmaStartOp.getLoc()), bytes
+        );
+    }
+    else if (isa<torq_hw::CDMAWaitOp>(op)) {
+        uint64_t lastTimeStamp = 0;
+        lastTimeStamp =
+            std::max(lastTimeStamp, (uint64_t)prof.getLastDmaTime(DmaType::CdmaLramToDtcm));
+        lastTimeStamp =
+            std::max(lastTimeStamp, (uint64_t)prof.getLastDmaTime(DmaType::CdmaLramToItcm));
+        lastTimeStamp =
+            std::max(lastTimeStamp, (uint64_t)prof.getLastDmaTime(DmaType::CdmaDtcmToLram));
+
         if (prof.timestamp < lastTimeStamp) {
             prof.timestamp = lastTimeStamp;
         }
@@ -419,6 +499,23 @@ static LogicalResult processOperationTime(Operation *op, const IRMapping &map, P
             prof.timestamp = lastTimeStamp;
         }
     }
+    // Handle CSS (Computation Slice System) operations - similar to Slice operations
+    else if (auto cssStartOp = dyn_cast<torq_hw::CSSStartOp>(op)) {
+        // CSS operations cycle count is not available so lets keep a fixed duration
+        // Duration: 10000 cycles as requested
+        const uint64_t cssFixedDuration = 8000; // 10us at 800MHz (10us * 800 cycles/us)
+        prof.addToCSSTimeline(
+            prof.timestamp, prof.timestamp + cssFixedDuration, toString(cssStartOp.getLoc())
+        );
+        prof.timestamp += 1; // Add 1 cycle for CSS start overhead
+    }
+    else if (isa<torq_hw::CSSWaitOp>(op)) {
+        // CSS wait - update timestamp to end of CSS operation
+        auto lastTimeStamp = prof.getLastCSSTime();
+        if (prof.timestamp < lastTimeStamp) {
+            prof.timestamp = lastTimeStamp;
+        }
+    }
     else if (isa<memref::AllocOp, memref::DeallocOp, memref::CastOp, memref::MemorySpaceCastOp,
                  memref::ReinterpretCastOp, memref::ReshapeOp>(op)) {
         // These operations do not affect the profiling timestamp
@@ -441,17 +538,34 @@ void writeToCsv(const std::string &filename, const ProfStruct &prof) {
         const auto dmaT = prof.dmaTimeline[i];
         if (dmaT.dmaType == DmaType::In) {
             file << "DI" << i << "," << dmaT.startTime << "," << dmaT.endTime << "," << dmaT.loc
-                 << ",DMA_IN\n";
+                 << ",DMA_IN," << dmaT.bytes << "\n";
         }
-        else {
+        else if (dmaT.dmaType == DmaType::Out) {
             file << "DO" << i << "," << dmaT.startTime << "," << dmaT.endTime << "," << dmaT.loc
-                 << ",DMA_OUT\n";
+                 << ",DMA_OUT," << dmaT.bytes << "\n";
+        }
+        else if (dmaT.dmaType == DmaType::CdmaLramToDtcm) {
+            file << "CDMA_L2D" << i << "," << dmaT.startTime << "," << dmaT.endTime << ","
+                 << dmaT.loc << ",CDMA_LRAM_TO_DTCM," << dmaT.bytes << "\n";
+        }
+        else if (dmaT.dmaType == DmaType::CdmaLramToItcm) {
+            file << "CDMA_L2I" << i << "," << dmaT.startTime << "," << dmaT.endTime << ","
+                 << dmaT.loc << ",CDMA_LRAM_TO_ITCM," << dmaT.bytes << "\n";
+        }
+        else if (dmaT.dmaType == DmaType::CdmaDtcmToLram) {
+            file << "CDMA_D2L" << i << "," << dmaT.startTime << "," << dmaT.endTime << ","
+                 << dmaT.loc << ",CDMA_DTCM_TO_LRAM," << dmaT.bytes << "\n";
         }
     }
     for (int i = 0; i < prof.sliceTimeline.size(); i++) {
         const auto sliceT = prof.sliceTimeline[i];
-        file << "S" << i << "," << sliceT.startTime << "," << sliceT.endTime << "," << sliceT.loc
-             << "," << sliceT.opName << "\n";
+        file << "S" << i << "_" << sliceT.id << "," << sliceT.startTime << "," << sliceT.endTime
+             << "," << sliceT.loc << "," << sliceT.opName << "\n";
+    }
+    for (int i = 0; i < prof.cssTimeline.size(); i++) {
+        const auto cssT = prof.cssTimeline[i];
+        file << "CSS" << i << "," << cssT.startTime << "," << cssT.endTime << "," << cssT.loc
+             << ",CSS\n";
     }
 };
 
