@@ -39,27 +39,24 @@ LogicalResult ElementWiseUnaryPattern::transform(
         return failure();
     }
 
-    Slice slice;
+    Slice slice(std::string("Eltwise-") + std::string(stringifyElementwiseOpEnum(opType)));
     DType elementType = getDType(input_type.getElementType());
-    int blockSize = slice.alu.iWidth(elementType);
+    int blockSize = slice.act.width(elementType);
     const int blockCount = div_ceil(input_type.getNumElements(), blockSize);
-    int actBlockSize = slice.act.width(elementType);
 
     LData input({blockCount, blockSize}, elementType);
-    LData output({blockCount, blockSize / actBlockSize, actBlockSize}, elementType);
+    LData output({blockCount, blockSize}, elementType);
 
     For(auto b = slice.iterate(blockCount)) {
         IData idata = slice.iram.load(input[b]);
         PData pdata = slice.alu.accumulate(idata, hwOp1Mode);
-        For(auto a = slice.iterate(blockSize / actBlockSize)) {
-            QData res = slice.act.load(pdata[a]);
-            slice.store(output[b][a], res);
-        }
+        QData res = slice.act.load(pdata);
+        slice.store(output[b], res);
     }
 
     rewriter.replaceOpWithNewOp<SliceTaskOp>(
         op,
-        stringifyElementwiseOpEnum(opType),      // Operation to replace
+        slice.name(),                            // Operation to replace
         ValueRange{op.getInput()},               // Input tensor
         ValueRange{},                            // Weights
         ValueRange{},                            // BiasScale tensor,

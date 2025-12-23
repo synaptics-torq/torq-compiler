@@ -50,8 +50,7 @@ struct ActConfig {
 };
 
 FailureOr<ActConfig> configureActivation(
-    torq_hl::ActOp op, DType inputDType, DType outputDType, Type inputElementType,
-    Type outputElementType
+    torq_hl::ActOp op, DType inputDType, DType outputDType, Type outputElementType
 ) {
     ActConfig config;
     auto opName = op.getName().str();
@@ -143,29 +142,23 @@ LogicalResult ActPattern::transform(torq_hl::ActOp op, PatternRewriter &rewriter
     auto ctx = op.getContext();
     LData input(op.getInput());
     LData output(op.getInit());
+    DType inputDType = input.elementType();
+    DType outputDType = output.elementType();
 
     // Setup input dimensions and vectorization
     struct In : Vectorized {
         enum { NonDenseDims };
     };
 
-    Slice slice;
     auto opName = op.getName().str();
-    int vectorSize = slice.alu.iWidth(input.elementType());
-    bool isFloatTypeConversion = (opName == "i2f" || opName == "f2i" || opName == "f2f");
-    if (isFloatTypeConversion) {
-        vectorSize = slice.act.width(DType::fp32);
-    }
+    Slice slice(std::string("Act-" + opName));
+    int vectorSize = std::min(slice.act.width(inputDType), slice.act.width(outputDType));
     input.fuse(input.denseDims()).vectorize(vectorSize);
-    // Extract type information
-    auto inputElementType = llvm::cast<MemRefType>(op.getInput().getType()).getElementType();
-    auto outputElementType = llvm::cast<MemRefType>(op.getInit().getType()).getElementType();
-    DType inputDType = getDType(inputElementType);
-    DType outputDType = getDType(outputElementType);
 
     // Configure activation mode and clip ranges
+    auto outputElementType = llvm::cast<MemRefType>(op.getInit().getType()).getElementType();
     FailureOr<ActConfig> configResult =
-        configureActivation(op, inputDType, outputDType, inputElementType, outputElementType);
+        configureActivation(op, inputDType, outputDType, outputElementType);
     if (failed(configResult))
         return failure();
     ActConfig config = *configResult;
@@ -180,10 +173,8 @@ LogicalResult ActPattern::transform(torq_hl::ActOp op, PatternRewriter &rewriter
         For(auto iv = slice.iterate(input.dim(In::Vectors))) {
             IData idata = slice.iram.load(input[ndd][iv]);
             PData pdata = slice.alu.load(idata);
-            For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
-                QData res = slice.act.clamp(pdata[av], config.clipMin, config.clipMax, config.mode);
-                slice.append(output[ndd], res);
-            }
+            QData res = slice.act.clamp(pdata, config.clipMin, config.clipMax, config.mode);
+            slice.append(output[ndd], res);
         }
     }
 

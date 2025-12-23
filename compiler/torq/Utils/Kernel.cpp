@@ -1411,11 +1411,20 @@ void SlicePrivate::acpr(const PData &pdata) {
         llvm::errs() << "Invalid ACPR block size: " << dSize << "\n";
         assert(false && "Invalid ACPR block size");
     }
+    const bool aluInBypass = _wram.elementType == DType::none;
+    if (aluInBypass) {
+        // Only PRAM transfer width of 64 is supported in this case.
+        dSize = 64 / HwInfo::pdat_width;
+    }
     acprDims.push_back({DimType::L, RegDimTag::D, dSize, HwInfo::pdat_width});
     acprDims.push_back({DimType::L, RegDimTag::G});
 
     // Now add hdims for each loop deeper the last endfor (end of the ALU accumulate)
     addDims(NdlType::ACPR, acprDims, pdata, _pram.loadNesting, false, true);
+
+    // In bypass mode no HDIMs are supported
+    assert(!aluInBypass || acprDims.size() == 3 && "No ACT loop supported in bypass mode");
+
     // And repeat for the number of executions of ALU
     acprDims.push_back({DimType::H, RegDimTag::T, outerIterCount(_forStack, _pram.loadNesting)});
 
@@ -1432,6 +1441,7 @@ void SlicePrivate::cepr(const PData &pdata) {
     assert(blockSize <= HwInfo::mac_count && "Block size must fit ALU width");
 
     RegNdlDimsData ceprDims;
+    // FIXME: should we use always use 4 instead of elementSize here? (not clear if actually used)
     ceprDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
     ceprDims.push_back({DimType::L, RegDimTag::D, elementCount(pdata.shape()), HwInfo::pdat_width});
 

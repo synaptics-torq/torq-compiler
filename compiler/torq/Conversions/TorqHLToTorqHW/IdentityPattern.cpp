@@ -165,21 +165,18 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
     }
     else if (is_dense && is_size_aligned) {
         // Most efficient implementation, data is transferred in blocks
-        int blockSize = slice.alu.iWidth(elementType);
+        int blockSize = slice.act.width(elementType);
         const int blockCount = div_ceil(total_px, blockSize);
-        int actBlockSize = slice.act.width(elementType);
 
         LData input({blockCount, blockSize}, elementType);
-        LData output({blockCount, blockSize / actBlockSize, actBlockSize}, elementType);
+        LData output({blockCount, blockSize}, elementType);
 
         // Use reverse iterator. We don't really need it here, it's just to test its usage
         For(auto b = slice.iterate(blockCount).reverse()) {
             IData idata = slice.iram.load(input[b]);
             PData pdata = slice.alu.load(idata);
-            For(auto a = slice.iterate(blockSize / actBlockSize)) {
-                QData res = slice.act.load(pdata[a]);
-                slice.store(output[b][a], res);
-            }
+            QData res = slice.act.load(pdata);
+            slice.store(output[b], res);
         }
     }
 #if NOT_YET_IMPLEMENTED
