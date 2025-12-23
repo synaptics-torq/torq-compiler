@@ -198,7 +198,10 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         }
         else if (auto rhsConstOp = dyn_cast<arith::ConstantOp>(rhs.getDefiningOp())) {
             auto inputType = mlir::cast<RankedTensorType>(input0.getType());
-            DenseElementsAttr constAttr = computeConstant(srcOp, false);
+            Attribute constAttr = computeConstant(srcOp, false);
+            if (!constAttr) {
+                constAttr = rhsConstOp.getValue();
+            }
             if (!constAttr) {
                 return failure();
             }
