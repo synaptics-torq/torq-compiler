@@ -25,6 +25,7 @@ class OptimizeLinalgForTorqPass : public OptimizeLinalgForTorqBase<OptimizeLinal
         auto *ctx = funcOp.getContext();
         RewritePatternSet patterns(ctx);
 
+        populateOptimizeMatmuOpPatterns(ctx, patterns);
         populateOptimizeElementwiseBinaryOpPatterns(ctx, patterns);
         populateDecomposeLinalgOpsPatterns(ctx, patterns);
         populateSpecializeTransposeOpPatterns(ctx, patterns);

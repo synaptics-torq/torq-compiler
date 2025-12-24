@@ -16,4 +16,6 @@ void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet 
 
 void populateSpecializeTransposeOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+void populateOptimizeMatmuOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 } // namespace mlir::syna::torq

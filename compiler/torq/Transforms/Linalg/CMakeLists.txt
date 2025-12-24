@@ -22,6 +22,7 @@ iree_cc_library(
     OptimizeElementwiseBinaryOpPattern.cpp
     DecomposeLinalgOpsPattern.cpp
     SpecializeTransposeOpPattern.cpp
+    OptimizeMatmulOpPattern.cpp
   DEPS
     ::PassesIncGen
     MLIRArithDialect
