@@ -401,16 +401,6 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                     convOp, "asymmetric strides or stride > 2 not supported by DW"
                 );
             }
-            // EK kernel
-            bool isBF16 =
-                inputType.getElementType().isBF16() && weightType.getElementType().isBF16();
-            // nchw_chw -> in_cxkhxkw, nhwc_hwc -> khxkwxin_c
-
-            if (isBF16 && strides[1] != 1) {
-                // Note: EK supports all strides [SH,1]
-                return rewriter.notifyMatchFailure(convOp, "DW-bf16 only support stride 1");
-            }
-
             // Dilation check removed - now handled by weight expansion below
             // (dilations > 1 will be converted to dilation = 1 via weight expansion)
         }

@@ -19,11 +19,6 @@ def case_config(request, chip_config):
         pytest.xfail("AssertionError: Nans differ")
 
     failed_str = [
-        # crash as dw not supported(stride [2,2] cases), fallback to conv2d with tiling issue
-        # basically wrong in lowering logic
-        "layer_Conv_4-",
-        "layer_Conv_11-",
-
         # wrong result as torq fc kernel hasn't support bf16
         "layer_Gemm", 
 

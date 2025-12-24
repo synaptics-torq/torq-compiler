@@ -415,8 +415,21 @@ LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewrite
     int32_t qdat_width = 1;
     NumberFormat alu_format = NumberFormat::I;
     NumberFormat act_format = NumberFormat::I;
-
-    if (input_type.getElementType().isInteger(16) && weight_type.getElementType().isInteger(8)) {
+    bool isBF16 = false;
+    auto rounding_mode = RoundingMode::NTP;
+    if (input_type.getElementType().isBF16() && weight_type.getElementType().isBF16()) {
+        isBF16 = true;
+        ddat_width = 2;
+        wdat_width = 2;
+        bdat_width = 4; // No scale for bf16 so 4 byte bias is enough
+        qdat_width = 2;
+        act_width = HwInfo::act_width / qdat_width; // Activation reduces to half for bf16
+        alu_format = NumberFormat::BF;
+        act_format = NumberFormat::BF;
+        rounding_mode = RoundingMode::OFF; // No rounding needed for bf16
+    }
+    else if (input_type.getElementType().isInteger(16) &&
+             weight_type.getElementType().isInteger(8)) {
         ddat_width = 2;
         qdat_width = 2;
         act_width = HwInfo::act_width / qdat_width; // Activation reduces to half for int16
@@ -527,9 +540,8 @@ LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewrite
     int32_t alu_d_unsigned = 0;
     int32_t alu_w_unsigned = 0;
     uint32_t act_sum_bits = 32;
-    auto rounding_mode = RoundingMode::NTP;
 
-    if (ddat_width == 2 && wdat_width == 1) {
+    if (!isBF16 && ddat_width == 2 && wdat_width == 1) {
         act_lsh[0] = 0;
         act_lsh[1] = 8;
         act_lsh[2] = 0;
@@ -694,14 +706,14 @@ LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewrite
         if (weight_dims[i] == 1) {
             continue;
         }
-        dewr.push_back({DimType::H, MemDimTag::O, weight_dims[i], weight_idx});
+        dewr.push_back({DimType::H, MemDimTag::O, weight_dims[i], weight_idx * wdat_width});
         weight_idx *= weight_dims[i];
     }
     dewr.push_back({DimType::H, MemDimTag::A, total_px_block, 0});
     if (out_ch_split > 1) {
         auto per_oc_weights =
             std::accumulate(weight_dims.begin(), weight_dims.end(), 1, std::multiplies<size_t>());
-        dewr.push_back({DimType::H, MemDimTag::G, out_ch_split, per_oc_weights});
+        dewr.push_back({DimType::H, MemDimTag::G, out_ch_split, per_oc_weights * wdat_width});
     }
     ndls.add(NdlType::DEWR, dewr);
 
@@ -952,13 +964,15 @@ LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewrite
     };
     ndls.add(NdlType::ACBR, acbr);
 
-    RegNdlDimsData acpw = {
-        {DimType::L, RegDimTag::B, HwInfo::pram_dsize, 1},
-        {DimType::L, RegDimTag::D, ddat_width, HwInfo::pram_dsize},
-        {DimType::L, RegDimTag::G, act_width, HwInfo::pram_dsize * ddat_width},
-        {DimType::H, RegDimTag::T, act_width * out_ch_split * total_px_block, 1}
-    };
-    ndls.add(NdlType::ACPW, acpw);
+    if (!isBF16) {
+        RegNdlDimsData acpw = {
+            {DimType::L, RegDimTag::B, HwInfo::pram_dsize, 1},
+            {DimType::L, RegDimTag::D, ddat_width, HwInfo::pram_dsize},
+            {DimType::L, RegDimTag::G, act_width, HwInfo::pram_dsize * ddat_width},
+            {DimType::H, RegDimTag::T, act_width * out_ch_split * total_px_block, 1}
+        };
+        ndls.add(NdlType::ACPW, acpw);
+    }
 
     // ACPR agent fetches the data in PRAM and sends to ACT.
     // The data is 4-byte long.
