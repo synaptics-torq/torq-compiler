@@ -39,7 +39,7 @@
 #pragma GCC diagnostic ignored "-Wmultichar"
 #endif
 
-#define MAX_PATH_LEN 256
+#define MAX_PATH_LEN 1024
 #define DUMP_PREFIX "tv."
 
 typedef struct torq_desc_dump_t {
