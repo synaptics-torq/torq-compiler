@@ -2272,6 +2272,37 @@ struct GenericToBroadcastOpConversion : public OpRewritePattern<linalg::GenericO
         auto dstTy = genericOp.getDpsInitOperand(0)->get().getType();
         auto dims = *equivalentToBroadcast;
 
+        // HW lowering currently prefers a single broadcast dimension per op; decompose same-rank
+        // multi-dim (incl. non-contiguous) broadcasts into chained single-dim broadcasts.
+        if (dims.size() > 1) {
+            auto inType = dyn_cast<RankedTensorType>(input.getType());
+            auto outType = dyn_cast<RankedTensorType>(dstTy);
+            if (inType && outType && inType.getRank() == outType.getRank()) {
+                Value current = input;
+                SmallVector<int64_t> currentShape(
+                    inType.getShape().begin(), inType.getShape().end()
+                );
+                for (int64_t dim : dims) {
+                    if (dim < 0 || dim >= outType.getRank()) {
+                        return rewriter.notifyMatchFailure(
+                            genericOp, "Invalid broadcast dimension for decomposition"
+                        );
+                    }
+                    currentShape[dim] = outType.getShape()[dim];
+                    auto midType = RankedTensorType::get(currentShape, outType.getElementType());
+                    auto init = createInitTensor(genericOp, rewriter, midType);
+                    current = rewriter
+                                  .create<torq_hl::BroadcastOp>(
+                                      genericOp.getLoc(), midType, init, SmallVector<int64_t>{dim},
+                                      current
+                                  )
+                                  .getResult(0);
+                }
+                rewriter.replaceOp(genericOp, current);
+                return success();
+            }
+        }
+
         auto op = rewriter.create<torq_hl::BroadcastOp>(
             genericOp.getLoc(), dstTy,
             createInitTensor(genericOp, rewriter, mlir::cast<RankedTensorType>(dstTy)), dims, input

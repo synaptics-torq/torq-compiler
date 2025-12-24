@@ -724,18 +724,26 @@ std::optional<SmallVector<int64_t>> isaBroadcastOpInterface(linalg::GenericOp ge
     SmallVector<int64_t> position;
     auto srcMap = genericOp.getIndexingMapsArray()[0];
 
-    if (srcMap.getResults().size() >= dstMap.getResults().size())
+    if (srcMap.getResults().size() > dstMap.getResults().size())
         return std::nullopt;
 
     // Check input map is monotonically increasing DimIds.
-    for (unsigned i = 0; i < srcMap.getNumResults(); ++i) {
-        auto expr = llvm::dyn_cast<AffineDimExpr>(srcMap.getResults()[i]);
-        if (!expr)
+    int64_t lastPos = -1;
+    for (auto expr : srcMap.getResults()) {
+        if (auto dim = dyn_cast<AffineDimExpr>(expr)) {
+            int64_t pos = dim.getPosition();
+            if (pos <= lastPos)
+                return std::nullopt;
+            lastPos = pos;
+            position.push_back(pos);
+        }
+        else if (auto cst = dyn_cast<AffineConstantExpr>(expr)) {
+            if (cst.getValue() != 0)
+                return std::nullopt; // reject non-broadcast constant
+        }
+        else {
             return std::nullopt;
-        int64_t pos = expr.getPosition();
-        if (i > 0 && pos <= position[i - 1])
-            return std::nullopt;
-        position.push_back(expr.getPosition());
+        }
     }
 
     SmallVector<int64_t> broadcastedDims;

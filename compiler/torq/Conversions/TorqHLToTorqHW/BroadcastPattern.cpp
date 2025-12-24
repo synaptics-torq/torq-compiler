@@ -321,6 +321,56 @@ BroadcastPattern::transform(torq_hl::BroadcastOp op, PatternRewriter &rewriter) 
         return handleSqueezeBroadcast();
     }
 
+    // Case 4: Same-rank broadcast of a size-1 dimension (expand an existing dim in place).
+    if (dims.size() == 1 && inRank == outRank) {
+        const int bd = static_cast<int>(dims.front());
+
+        // Input/output must match on all non-broadcast dimensions.
+        for (int i = 0; i < outRank; ++i) {
+            if (i == bd)
+                continue;
+            if (inputShape[i] != outputShape[i]) {
+                return rewriter.notifyMatchFailure(
+                    op, "Broadcast dimension differs between input and output shapes"
+                );
+            }
+        }
+        if (inputShape[bd] != 1) {
+            return rewriter.notifyMatchFailure(
+                op, "Broadcast dimension must be size-1 in the input tensor"
+            );
+        }
+
+        const uint64_t prefix = product64(outputShape.take_front(bd));
+        const uint64_t dimSize = static_cast<uint64_t>(outputShape[bd]);
+        const uint64_t suffix = product64(outputShape.drop_front(bd + 1));
+
+        const DType elementType = getDType(inputType.getElementType());
+
+        // Flatten as [prefix, suffix] -> [prefix, dimSize, suffix] and replicate along dimSize.
+        LData input({static_cast<int64_t>(prefix), static_cast<int64_t>(suffix)}, elementType);
+        LData output(
+            {static_cast<int64_t>(prefix), static_cast<int64_t>(dimSize),
+             static_cast<int64_t>(suffix)},
+            elementType
+        );
+
+        Slice slice;
+        For(auto p = slice.iterate(static_cast<int>(prefix))) {
+            For(auto t = slice.iterate(static_cast<int>(suffix))) {
+                IData idata = slice.iram.load(input[p][t]);
+                For(auto r = slice.iterate(static_cast<int>(dimSize))) {
+                    PData pdata = slice.alu.load(idata);
+                    QData res = slice.act.load(pdata);
+                    slice.store(output[p][r][t], res);
+                }
+            }
+        }
+
+        replaceBroadcastWithSliceTask(op, rewriter, slice);
+        return success();
+    }
+
     // Case 4: General broadcast (append/prepend/middle insert).
     return handleGeneralBroadcast();
 }
