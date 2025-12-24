@@ -306,6 +306,16 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             return rewriter.notifyMatchFailure(convOp, "Already marked");
         }
 
+        // Guard: Skip conversion if this Conv2D was created from Conv1D and marked
+        // to prevent infinite loop. This prevents Conv2dConvert from converting
+        // Conv2D (height=1) back to Conv1D, which would cause an infinite loop
+        // with Conv1DNcwFcwToLinalgConv2DPattern.
+        if (convOp->hasAttr("torq.skip_conv2d_to_conv1d")) {
+            return rewriter.notifyMatchFailure(
+                convOp, "Skipping Conv2D to Conv1D conversion to prevent infinite loop"
+            );
+        }
+
         constexpr int groups = 1; // We don't use it
         const auto loc = convOp.getLoc();
 
@@ -648,19 +658,25 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         Value torqOut = torqConv1Op.getOutput();
 
         if (useConv1dWithReduce) {
-            // Add linalg.reduce to remove the extra dimension
-            // Create reducedType from torqOutType by removing the last dimension
             auto reducedShape = torqOutType.getShape().drop_back();
+            auto elemType = torqOutType.getElementType();
+            Type reduceElemType = elemType;
+            Value reduceInput = torqOut;
+            bool needsF32Conversion = elemType.isF32();
 
-            // Create a tensor filled with zeros of type torqOutType.getElementType()
-            Value zeroValue = createZeroConstant(rewriter, loc, torqOutType.getElementType());
-            auto cEmpty =
-                rewriter.create<tensor::EmptyOp>(loc, reducedShape, torqOutType.getElementType());
+            if (needsF32Conversion) {
+                reduceElemType = rewriter.getBF16Type();
+                auto bf16Type = RankedTensorType::get(torqOutType.getShape(), reduceElemType);
+                reduceInput = rewriter.create<arith::TruncFOp>(loc, bf16Type, torqOut);
+            }
+
+            Value zeroValue = createZeroConstant(rewriter, loc, reduceElemType);
+            auto cEmpty = rewriter.create<tensor::EmptyOp>(loc, reducedShape, reduceElemType);
             Value zeroTensor =
                 rewriter.create<linalg::FillOp>(loc, ValueRange{zeroValue}, ValueRange{cEmpty})
                     .result();
             linalg::ReduceOp reduceOp = rewriter.create<linalg::ReduceOp>(
-                loc, ValueRange{torqOut}, ValueRange{zeroTensor}, 4,
+                loc, ValueRange{reduceInput}, ValueRange{zeroTensor}, 4,
                 [&](OpBuilder &b, Location l, ValueRange args) {
                     b.create<linalg::YieldOp>(
                         l, ValueRange{b.create<arith::AddFOp>(l, args[0], args[1])}
@@ -669,6 +685,10 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             );
 
             torqOut = reduceOp->getResult(0);
+            if (needsF32Conversion) {
+                auto f32Type = RankedTensorType::get(reducedShape, elemType);
+                torqOut = rewriter.create<arith::ExtFOp>(loc, f32Type, torqOut);
+            }
         }
         // // Overwrite torqOut with init tensor for debugging
         // torqOut = createInitTensor(convOp, rewriter, cast<RankedTensorType>(torqOut.getType()));
@@ -1554,7 +1574,20 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
 
     LogicalResult
     matchAndRewrite(linalg::Conv1DNcwFcwOp convOp, PatternRewriter &rewriter) const override {
-        llvm::errs() << "Applying Conv1DNcwFcwToLinalgConv2D\n";
+        // Guard: Prevent infinite loop with Conv2dConvert pattern.
+        // This pattern converts Conv1D -> Conv2D with height=1 (NHWC format, dim 1 = 1).
+        // Conv2dConvert detects Conv2D with height=1 and converts it back to Conv1D,
+        // causing an infinite loop. To prevent this, we check if the operation has
+        // already been processed or if we're in a context where the loop would occur.
+        //
+        // Check if this operation was created by a previous conversion attempt
+        // (indicated by a marker attribute or by checking the defining operation)
+        if (convOp->hasAttr("torq.conv1d_to_conv2d_processed")) {
+            return rewriter.notifyMatchFailure(
+                convOp, "Conv1D already processed, skipping to prevent infinite loop"
+            );
+        }
+
         auto loc = convOp.getLoc();
 
         // Get operands
@@ -1629,6 +1662,11 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
             loc, nhwcOutput.getType(), ValueRange{nhwcInput, hwcfFilter}, ValueRange{nhwcOutput},
             stridesAttr2d, dilationsAttr2d
         );
+
+        // Mark the Conv2D to prevent Conv2dConvert from converting it back to Conv1D,
+        // which would cause an infinite loop. Conv2dConvert should check for this
+        // attribute and skip conversion if present.
+        conv2d->setAttr("torq.skip_conv2d_to_conv1d", rewriter.getBoolAttr(true));
 
         // Transpose result back: [N,1,W,F] -> [N,F,1,W]
         Value transposedResult = transposeValue(conv2d.getResult(0), {0, 3, 1, 2}, loc, rewriter);
@@ -1886,6 +1924,10 @@ void populateLinalgToTorqHLPrePatterns(
     if (clConv1dAsMatmul) {
         patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
     }
+    // Conv1DNcwFcwToLinalgConv2DPattern now has a guard to prevent infinite loop:
+    // It converts Conv1D to Conv2D with height=1, and marks the Conv2D with
+    // "torq.skip_conv2d_to_conv1d" attribute. Conv2dConvert checks for this
+    // attribute and skips conversion to prevent the infinite loop.
     else {
         patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
     }
