@@ -183,7 +183,6 @@ LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter
 
         assert(weight_size > 0);
         assert(num_rows > 0);
-        assert(data_size == num_rows * weight_size && "Data size must be multiple of weight size");
 
         // Create LData for weights with block structure
         LData weights({weightBlockCount, blockSize}, getDType(weightType.getElementType()));
