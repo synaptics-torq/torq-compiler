@@ -4,6 +4,8 @@ from typing import Dict, List
 from dataclasses import dataclass
 from iree.compiler.ir import Context, Module, BlockArgument
 import pandas as pd
+import re
+from torq.model_profiler import perfetto_logger
 
 class Duration(contextlib.AbstractContextManager):
     def __init__(self, scenario: 'Scenario', test_name: str):
@@ -209,8 +211,79 @@ def extract_ops_based_on_action_ids(dispatch_op):
 
     return action_ops
 
-def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, output_file):
+def extract_line_numbers(location_str):
+    # Extracts line numbers from location string, excluding call site locations after " at "
+    # Handles both simple callsites and fused locations
+    # Example: loc(callsite("...":4:10 at "...":2:3)) -> [4]
+    # Example: loc(fused[callsite("...":147:12 at "...":2:3), callsite("...":145:12 at "...":2:3)]) -> [147, 145]
+    
+    # Split by callsite boundaries to process each separately
+    line_numbers = []
+    # Find all callsite(...) patterns
+    for callsite_match in re.finditer(r'callsite\([^)]+\)', location_str):
+        callsite_str = callsite_match.group(0)
+        # Extract the first line:col before " at " (this is the actual location, not the call site)
+        match = re.search(r'":?(\d+):(\d+)(?:\s+at\s+|")', callsite_str)
+        if match:
+            line_num = int(match.group(1))
+            line_numbers.append(line_num)
+    
+    return line_numbers if line_numbers else [None]
+
+def get_operator_from_line(line):
+    line = line.strip()
+    if not line:
+        return ""
+    
+    # Remove result assignment (e.g., "%0 = ...")
+    if "=" in line:
+        lhs = line.split("=", 1)[0].strip()
+        # Only split if the LHS looks like a result definition (starts with % or ()
+        if lhs.startswith("%") or lhs.startswith("("):
+            line = line.split("=", 1)[1].strip()
+    
+    # Handle torch.operator "..." pattern (covers ONNX and other operators)
+    if line.startswith('torch.operator '):
+        match = re.search(r'"([^"]+)"', line)
+        if match:
+            return match.group(1)
+
+    # Handle TOSA operators (both quoted and unquoted forms)
+    if line.startswith('"tosa.'):
+        match = re.search(r'"([^"]+)"', line)
+        if match:
+            return match.group(1)
+    elif line.startswith('tosa.'):
+        # Return the first token (e.g., "tosa.conv2d")
+        return line.split()[0]
+
+    return ""
+
+def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, output_file, original_mlir_lines=None, perfetto_file=None):
+    """
+    Generates an annotated performance profile report for host execution, mapping low-level operations
+    to original MLIR source lines and tracking hardware resource usage.
+    This function processes a sequence of executed actions, correlates them with profiling data,
+    and produces two types of outputs: a tabular report (CSV or Excel) and an optional Perfetto trace.
+    Args:
+        profiling_dict (dict): A dictionary mapping action IDs to profiling data (timestamps, locations, total_time).
+        actions_ops (list): A list of tuples (action_id, op, job_id) representing the sequence of executed operations.
+        nss_program_ops (dict): A mapping of job IDs to their constituent NSS program operations and arguments.
+                                This is used to expand `wait_program` calls into specific hardware instructions
+                                (e.g., slice start/wait, DMA start/wait).
+        output_file (str): The file path where the tabular report (CSV or .xlsx) will be written.
+        original_mlir_lines (list[str], optional): A list of original source code lines used to resolve
+                                                   operator names from line numbers found in location data.
+        perfetto_file (str, optional): The file path where the Perfetto trace will be written. If None,
+                                       no trace is generated.
+    Internal Data Structures:
+        rows (list[dict]): Accumulates data for the tabular output (CSV or Excel). Each dictionary represents
+                           a single operation's metrics, including resolved names and resource usage flags.
+        perfetto_rows (list[tuple]): Accumulates data specifically formatted for the Perfetto trace writer.
+                                     Each tuple contains timestamped event data required for visual rendering.
+    """
     rows = []
+    perfetto_rows = []
     slice_active = [False, False]
     dma_in_active = False
     dma_out_active = False
@@ -219,10 +292,26 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
 
     for (action_id, op, job_id) in actions_ops:
 
-        if action_id >= len(profiling_dict.keys()):
+        if action_id not in profiling_dict:
             #TODO: investigate why this happens for dw_bf16_f5x2_s2x1_2x256x2
             # This should not be happened ideally, but we skip it for now to avoid crashes
-            break
+            continue
+        
+        original_operator = ""
+        if original_mlir_lines:
+            loc_str = ','.join(profiling_dict[action_id].get("location", []))
+            line_nums = extract_line_numbers(loc_str)
+            # Sort line numbers in ascending order
+            line_nums = sorted([ln for ln in line_nums if ln is not None])
+            operators = []
+            for line_num in line_nums:
+                if 1 <= line_num <= len(original_mlir_lines):
+                    operator_name = get_operator_from_line(original_mlir_lines[line_num - 1])
+                    if operator_name:  # Only add non-empty operators
+                        # Append line number to operator name
+                        operators.append(f"{operator_name}@L{line_num}")
+            original_operator = " + ".join(operators) if operators else ""
+
         operation = op.operation.name
         invocation_name = None
         if operation == "torq_hl.wait_program" and job_id is not None:
@@ -288,10 +377,33 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                     "dma_out_used_in_program": dma_out_used,
                     "timestamp_start": str(profiling_dict[action_id].get("timestamp_start")),
                     "timestamp_end": str(profiling_dict[action_id].get("timestamp_end")),
-                    "location": ','.join(profiling_dict[action_id].get("location", []))
+                    "location": ','.join(profiling_dict[action_id].get("location", [])),
+                    "original_operator": original_operator
                 }
 
                 rows.append(row)
+
+                # Collect data for Perfetto
+                if perfetto_file:
+                    ts_start = profiling_dict[action_id].get("timestamp_start")
+                    ts_end = profiling_dict[action_id].get("timestamp_end")
+                    if ts_start is not None and ts_end is not None:
+                        perfetto_rows.append((
+                            action_id,
+                            job_id if job_id is not None else "",
+                            ts_start,
+                            ts_end,
+                            ','.join(profiling_dict[action_id].get("location", [])),
+                            original_operator,
+                            invocation_name,
+                            operation,
+                            slice_id,
+                            slice_used[0],
+                            slice_used[1],
+                            dma_in_used,
+                            dma_out_used
+                        ))
+
         elif operation == "torq_hl.wait_program" and str(op.operation.operands[0].type) == "!torq_hl.invocation<host>": 
             # host execution is synchronous for the moment so we don't need to do anything to wait for it
             continue
@@ -315,10 +427,44 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                     "dma_out_used_in_program": None, # Not an slice job
                     "timestamp_start": str(profiling_dict[action_id].get("timestamp_start")),
                     "timestamp_end": str(profiling_dict[action_id].get("timestamp_end")),
-                    "location": ','.join(profiling_dict[action_id].get("location", []))
+                    "location": ','.join(profiling_dict[action_id].get("location", [])),
+                    "original_operator": original_operator
                 }
             rows.append(row)
+
+            # Collect data for Perfetto
+            if perfetto_file:
+                ts_start = profiling_dict[action_id].get("timestamp_start")
+                ts_end = profiling_dict[action_id].get("timestamp_end")
+                if ts_start is not None and ts_end is not None:
+                    perfetto_rows.append((
+                        action_id,
+                        job_id if job_id is not None else "",
+                        ts_start,
+                        ts_end,
+                        ','.join(profiling_dict[action_id].get("location", [])),
+                        original_operator,
+                        None, # invocation_name
+                        operation,
+                        None, # slice_id
+                        None, # slice_used_0
+                        None, # slice_used_1
+                        None, # dma_in_used
+                        None  # dma_out_used
+                    ))
+
     df = pd.DataFrame(rows)
+
+    # Ensure consistent column order
+    desired_columns = [
+        "action_id", "job_id", "operation", "invocation_name", "original_operator", "total_time",
+        "slice_id", "slice_used_0_in_program", "slice_used_1_in_program",
+        "dma_in_used_in_program", "dma_out_used_in_program",
+        "timestamp_start", "timestamp_end", "location"
+    ]
+    # Only keep columns that are actually in the DataFrame
+    existing_columns = [col for col in desired_columns if col in df.columns]
+    df = df[existing_columns]
     
     if output_file.endswith('.csv'):
         df.to_csv(output_file, index=False, sep=';')
@@ -339,7 +485,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                 "dma_out_used_in_program": "DMA Out Used in NSS Program",
                 "timestamp_start": "Timestamp Start",
                 "timestamp_end": "Timestamp End",
-                "location": "Location"
+                "location": "Location",
+                "original_operator": "Original Operator"
             }
 
             df.rename(columns=human_friendly_columns, inplace=True)
@@ -351,8 +498,24 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                     max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
                     worksheet.set_column(idx, idx, max_len)
 
-def write_annotated_profile(profiling_data, program_ops, output_file):
+    # Generate Perfetto trace directly
+    if perfetto_file and perfetto_rows:
+        # Calculate overall start and end from the collected rows
+        overall_start = min(r[2] for r in perfetto_rows)
+        overall_end = max(r[3] for r in perfetto_rows)
+        
+        trace_writer = perfetto_logger.PerfettoTraceWriter(perfetto_file)
+        perfetto_logger.log_runtime_profile_data("Host Profile", trace_writer, perfetto_rows, overall_start, overall_end)
+        
+        # Compute Metrics and Render Overview
+        metrics_result = perfetto_logger.compute_runtime_metrics(perfetto_rows, overall_start, overall_end)
+        perfetto_logger.render_overview_tracks("Host Profile", overall_start, metrics_result['metrics'], trace_writer)
+        
+        trace_writer.close()
+
+def write_annotated_profile(profiling_data, program_ops, output_file, perfetto_file=None):
     rows = []
+    perfetto_rows = []
     slice_active = [False, False]
     dma_in_active = False
     dma_out_active = False
@@ -362,6 +525,10 @@ def write_annotated_profile(profiling_data, program_ops, output_file):
     last_slice_program_name = [None, None]
 
     for idx, (ops, args) in enumerate(program_ops):
+
+        if idx >= len(profiling_data):
+            print(f"Warning: Profiling data has fewer entries ({len(profiling_data)}) than program ops ({len(program_ops)}). Stopping annotation.")
+            break
 
         data_after = profiling_data.iloc[idx]
 
@@ -433,6 +600,26 @@ def write_annotated_profile(profiling_data, program_ops, output_file):
 
             rows.append(row)
 
+            # Collect data for Perfetto
+            if perfetto_file:
+                ts_start = data_before['time_since_open'] - start_time
+                ts_end = data_after['time_since_open'] - start_time
+                perfetto_rows.append((
+                    str(idx), # action_id (using index as proxy)
+                    "", # job_id
+                    ts_start,
+                    ts_end,
+                    "", # location
+                    "", # original_operator
+                    invocation_name,
+                    operation,
+                    slice_id,
+                    slice_used[0],
+                    slice_used[1],
+                    dma_in_used,
+                    dma_out_used
+                ))
+
     df = pd.DataFrame(rows)
     
     if output_file.endswith('.csv'):
@@ -463,6 +650,21 @@ def write_annotated_profile(profiling_data, program_ops, output_file):
                 for idx, col in enumerate(df.columns):
                     max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
                     worksheet.set_column(idx, idx, max_len)
+
+    # Generate Perfetto trace directly
+    if perfetto_file and perfetto_rows:
+        # Calculate overall start and end from the collected rows
+        overall_start = min(r[2] for r in perfetto_rows)
+        overall_end = max(r[3] for r in perfetto_rows)
+        
+        trace_writer = perfetto_logger.PerfettoTraceWriter(perfetto_file)
+        perfetto_logger.log_runtime_profile_data("NSS Profile", trace_writer, perfetto_rows, overall_start, overall_end)
+        
+        # Compute Metrics and Render Overview
+        metrics_result = perfetto_logger.compute_runtime_metrics(perfetto_rows, overall_start, overall_end)
+        perfetto_logger.render_overview_tracks("NSS Profile", overall_start, metrics_result['metrics'], trace_writer)
+        
+        trace_writer.close()
 
 def parse_profiling_to_dict(profiling_data):
     profiling_data.columns = profiling_data.columns.str.strip().str.lower()
@@ -500,10 +702,19 @@ def parse_profiling_to_dict(profiling_data):
             
     return result
 
-def annotate_host_profile_from_files(mlir_file, profile_file, output_file):
+def annotate_host_profile_from_files(mlir_file, profile_file, output_file, original_mlir_file=None, perfetto_file=None):
     """Wrapper function for easy external use."""
     profiling_data = pd.read_csv(profile_file, sep=',')
     profiling_dict = parse_profiling_to_dict(profiling_data)
+    
+    original_mlir_lines = None
+    if original_mlir_file:
+        try:
+            with open(original_mlir_file, 'r') as f:
+                original_mlir_lines = f.readlines()
+        except Exception as e:
+            print(f"Warning: Could not read original MLIR file: {e}")
+
     with Context() as ctx:
         parsed_module = parse_mlir_file(mlir_file)
         dispatches = find_dispatches(parsed_module)
@@ -514,12 +725,13 @@ def annotate_host_profile_from_files(mlir_file, profile_file, output_file):
         actions_ops = extract_ops_based_on_action_ids(dispatches[0])
         nss_program_ops = extract_program_ops(dispatches[0])
 
-        write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, output_file)
+        write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, output_file, original_mlir_lines, perfetto_file)
 
 
-def annotate_nss_profile_from_files(mlir_file, profile_file, output_file):
+def annotate_nss_profile_from_files(mlir_file, profile_file, output_file, perfetto_file=None):
     """Wrapper function for easy external use."""
     profiling_data = pd.read_csv(profile_file, sep=';')
+    profiling_data.columns = profiling_data.columns.str.strip().str.lower()
 
     with Context() as ctx:
         parsed_module = parse_mlir_file(mlir_file)
@@ -533,6 +745,6 @@ def annotate_nss_profile_from_files(mlir_file, profile_file, output_file):
 
         print(f"Found {len(nss_program_ops)} NSS programs in the dispatch")
 
-        write_annotated_profile(profiling_data, nss_program_ops, output_file)
+        write_annotated_profile(profiling_data, nss_program_ops, output_file, perfetto_file)
 
     print(f"Annotated profile written to {output_file}")

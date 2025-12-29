@@ -6,12 +6,12 @@ Model Profiler
 The script converts timeline.csv from profiling pass to Perfetto log. The Perfetto log is saved as proto buffer.
 
 ### **Purpose**
-This script converts timeline profiling logs (from model compile and runtime stages) stored in CSV format into a **Perfetto protobuf trace file (`.pb`)**. The resulting trace can be visualized using Perfetto's trace viewer for performance analysis.
+This script converts timeline profiling logs (from model compile stage) stored in CSV format into a **Perfetto protobuf trace file (`.pb`)**. The resulting trace can be visualized using Perfetto's trace viewer for performance analysis.
 
 ---
 
 ### **Key Features**
-- Supports both **compile-time** and **runtime** profile formats.
+- Supports **compile-time** profile formats.
 - Organizes logs into Perfetto’s process/thread view hierarchy.
 - Automatically serializes the logs into a `.pb` binary trace file.
 
@@ -28,35 +28,14 @@ Dependency:
 /buildsrc/iree-build/third_party/iree/tools/torq-compile /buildsrc/iree-synaptics-synpu/tests/testdata/tosa_ops/conv-stride1-notile.mlir -o ./output_torq.vmfb --dump-compilation-phases-to=output_torq_phases --mlir-print-ir-after-all --mlir-print-ir-tree-dir=output_torq_passes  --torq-enable-profiling --torq-dump-profiling=./compile_profile.csv
 ```
 
-2. Generate runtime profiling using flag `--torq_profile=./runtime_profile.csv`. Create sample input `in_rnd_0.npy`.
+2. Run `perfetto_logger.py` with input profile `compile_profile.csv` to get output. The output will be at `perfetto_log.pb` for the below command
 ```
-/buildsrc/iree-build/third_party/iree/tools/iree-run-module --device=torq --module=./output_torq.vmfb  --function=main --output=@./output_torq-cmodel.npy --input=@./in_rnd_0.npy  --torq_profile=./runtime_profile.csv
-```
-
-Sample code to generate `in_rnd_0.npy`:
-```
-import numpy as np
-np.random.seed(0)
-dtype_info = np.iinfo(np.int8)
-shape = [1, 224, 224, 3]
-random_array = np.random.randint(dtype_info.min, dtype_info.max + 1, size=shape, dtype=np.int8)
-np.save('in_rnd_0.npy', random_array)
+python3 perfetto_logger.py ./compile_profile.csv --pb ./perfetto_log.pb
 ```
 
-3. Run `perfetto_logger.py` with inputs profile `compile_timeline.csv` and, runtime profile to get output. The output will be at `perfetto_log.pb` for the below command
+3. You can also specify multiple compile profiles.
 ```
-python3 perfetto_logger.py --compile_profile ./compile_profile.csv --runtime_profile ./runtime_profile.csv --pb ./perfetto_log.pb
-```
-
-4. You can also specify multiple compile profiles or multiple runtime profiles or both.
-```
-python3 perfetto_logger.py --compile_profile ./compile_profile.csv ./compile_profile.csv --pb ./perfetto_log.pb
-```
-```
-python3 perfetto_logger.py --runtime_profile ./runtime_profile.csv ./runtime_profile.csv --pb ./perfetto_log.pb
-```
-```
-python3 perfetto_logger.py --compile_profile ./compile_profile.csv ./compile_profile.csv --runtime_profile ./runtime_profile.csv ./runtime_profile.csv --pb ./perfetto_log.pb
+python3 perfetto_logger.py ./compile_profile.csv ./compile_profile_2.csv --pb ./perfetto_log.pb
 ```
 
 #### Generation of perfetto_api.py

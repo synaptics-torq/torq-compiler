@@ -600,10 +600,28 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             for irs in os.listdir(ir_dir):
                 if irs.endswith('9.executable-targets.mlir'):
                     ir_path = str(Path(ir_dir) / irs)
+                    
+                    original_mlir_file = None
+                    try:
+                        # Attempt to get the original MLIR file path
+                        mlir_model_file_obj = request.getfixturevalue("mlir_model_file")
+                        # Handle VersionedFile or similar wrapper objects
+                        if hasattr(mlir_model_file_obj, 'file_path'):
+                            original_mlir_file = str(mlir_model_file_obj.file_path)
+                        elif hasattr(mlir_model_file_obj, 'data'):
+                            original_mlir_file = str(mlir_model_file_obj.data)
+                        else:
+                            original_mlir_file = str(mlir_model_file_obj)
+                    except Exception:
+                        # This is optional, so we ignore errors if the fixture is not available
+                        pass
+
                     annotate_host_profile_from_files(
                         ir_path,
                         str(versioned_dir / 'host_profile.csv'),
-                        str(versioned_dir / 'annotated_profile.xlsx')
+                        str(versioned_dir / 'annotated_profile.xlsx'),
+                        original_mlir_file=original_mlir_file,
+                        perfetto_file=str(versioned_dir / 'trace.pb')
                     )
 
 @versioned_unhashable_object_fixture
@@ -616,6 +634,8 @@ def torq_results(request, torq_results_dir, mlir_io_spec):
         profiling_output_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy(torq_results_dir / 'host_profile.csv', profiling_output_dir / f'{request.node.name}.csv')
         shutil.copy(torq_results_dir / 'annotated_profile.xlsx', profiling_output_dir / f'{request.node.name}.xlsx')
+        if (torq_results_dir / 'trace.pb').exists():
+            shutil.copy(torq_results_dir / 'trace.pb', profiling_output_dir / f'{request.node.name}.pb')
 
     output_paths = create_output_paths(torq_results_dir, mlir_io_spec.outputs)
     return load_outputs(mlir_io_spec.outputs, output_paths)

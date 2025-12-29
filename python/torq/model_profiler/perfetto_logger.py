@@ -1,14 +1,18 @@
 """
 Perfetto Trace Generator for Profile Analysis
 
-Converts compile-time and runtime profiling CSV data into Perfetto trace format.
+Converts compile-time profiling CSV data into Perfetto trace format.
 Includes hardware utilization analysis (DMA, SLICE, IDLE time) with visual overview tracks.
 
 Usage:
-    python perfetto_logger.py --compile_profile profile1.csv --runtime_profile runtime.csv --pb output.pb
+    python perfetto_logger.py profile1.csv --pb output.pb
 """
 
-import perfetto_api as perfetto
+try:
+    from . import perfetto_api as perfetto
+except ImportError:
+    import perfetto_api as perfetto
+
 import csv
 import argparse
 import os
@@ -56,13 +60,19 @@ class PerfettoTraceWriter:
         self.process_to_thread = {}
         self.global_uuid = 0
 
+    def close(self):
+        if not self.file.closed:
+            self.flush()
+            self.file.close()
+
     def __del__(self):
-        self.flush()
+        self.close()
     
     def flush(self):
         """Write accumulated trace packets to file and clear buffer."""
-        self.file.write(self.trace.SerializeToString())
-        self.trace.Clear()
+        if not self.file.closed:
+            self.file.write(self.trace.SerializeToString())
+            self.trace.Clear()
 
     def get_next_uuid(self):
         """Generate unique ID for processes and threads."""
@@ -346,7 +356,7 @@ def add_numeric_prefix(log_dict, start_index=1, width=2):
 # CSV PARSING
 # =============================================================================
 
-def parse_compile_profile_csv(csv_path):
+def parse_compile_profile(csv_path):
     """
     Parse compile profile CSV and extract event intervals.
     
@@ -402,64 +412,26 @@ def parse_compile_profile_csv(csv_path):
     return dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end, all_rows
 
 
-def parse_runtime_profile_csv(csv_path):
-    """
-    Parse runtime profile CSV and extract dispatch intervals.
-    
-    CSV Format: dispatch_id;time_since_open;time_since_start;mlir_loc
-    
-    Returns:
-        Tuple of (dispatch_intervals, overall_start, overall_end, all_rows)
-    """
-    dispatch_intervals = []
-    all_rows = []
-    overall_start = None
-    overall_end = None
-    
-    with open(csv_path, newline='') as fp:
-        reader = csv.reader(fp, delimiter=';')
-        for row in reader:
-            if len(row) == 0 or 'id' in row:
-                continue
-            if len(row) != 4:
-                continue
-            
-            dispatch_id, time_since_open, time_since_start, mlir_loc = row
-            
-            try:
-                start_time = cycles_to_ns(int(time_since_open))
-                duration = cycles_to_ns(int(time_since_start))
-                end_time = start_time + duration
-            except ValueError:
-                continue
-            
-            if overall_start is None or start_time < overall_start:
-                overall_start = start_time
-            if overall_end is None or end_time > overall_end:
-                overall_end = end_time
-            
-            dispatch_intervals.append((start_time, end_time))
-            all_rows.append((dispatch_id, start_time, end_time, mlir_loc))
-    
-    return dispatch_intervals, overall_start, overall_end, all_rows
-
-
 # =============================================================================
 # METRICS CALCULATION
 # =============================================================================
 
-def calculate_compile_profile_metrics(csv_path):
+def compute_compile_metrics(dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end):
     """
-    Calculate hardware utilization metrics for compile profile.
+    Compute hardware utilization metrics from parsed compile profile intervals.
     
+    Args:
+        dma_intervals: List of (start, end) tuples for DMA
+        cdma_dtcm_intervals: List of (start, end) tuples for CDMA DTCM
+        cdma_itcm_intervals: List of (start, end) tuples for CDMA ITCM
+        slice_intervals: List of (start, end) tuples for Slice
+        css_intervals: List of (start, end) tuples for CSS
+        overall_start: Start timestamp
+        overall_end: End timestamp
+        
     Returns:
-        Dictionary containing:
-        - metrics: Dict with DMA, SLICE, IDLE, DMA_ONLY, DMA_SLICE_OVERLAP, OVERALL
-        - overall_start: Start timestamp
-        - overall_end: End timestamp
+        Dictionary containing metrics, overall_start, overall_end
     """
-    dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end, _ = parse_compile_profile_csv(csv_path)
-    
     # Merge overlapping intervals
     merged_dma = merge_intervals(dma_intervals)
     merged_slice = merge_intervals(slice_intervals)
@@ -537,36 +509,104 @@ def calculate_compile_profile_metrics(csv_path):
     }
 
 
-def calculate_runtime_profile_metrics(csv_path):
+def calculate_compile_profile_metrics(csv_path):
     """
-    Calculate utilization metrics for runtime profile.
+    Calculate hardware utilization metrics for compile profile.
     
-    Runtime profiles only track dispatch execution (BUSY vs IDLE).
+    Returns:
+        Dictionary containing:
+        - metrics: Dict with DMA, SLICE, IDLE, DMA_ONLY, DMA_SLICE_OVERLAP, OVERALL
+        - overall_start: Start timestamp
+        - overall_end: End timestamp
+    """
+    dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end, _ = parse_compile_profile(csv_path)
     
+    return compute_compile_metrics(dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end)
+
+
+def compute_runtime_metrics(all_rows, overall_start, overall_end):
+    """
+    Compute utilization metrics from parsed runtime profile rows.
+    
+    Args:
+        all_rows: List of event tuples
+        overall_start: Start timestamp
+        overall_end: End timestamp
+        
     Returns:
         Dictionary containing metrics, overall_start, overall_end
     """
-    dispatch_intervals, overall_start, overall_end, _ = parse_runtime_profile_csv(csv_path)
+    dma_intervals = []
+    slice_intervals = []
+    slice_0_intervals = []
+    slice_1_intervals = []
     
-    # Merge overlapping dispatches
-    merged = merge_intervals(dispatch_intervals)
-    busy_time = sum(end - start for start, end in merged)
+    for row in all_rows:
+        # Unpack row (13 elements)
+        (action_id, job_id, start_time, end_time, mlir_loc, original_operator, 
+            invocation_name, operation, slice_id, slice_0_used, slice_1_used, 
+            dma_in_used, dma_out_used) = row
+        
+        if dma_in_used or dma_out_used:
+            dma_intervals.append((start_time, end_time))
+        
+        if slice_0_used or slice_1_used:
+            slice_intervals.append((start_time, end_time))
+            
+        if slice_0_used:
+            slice_0_intervals.append((start_time, end_time))
+            
+        if slice_1_used:
+            slice_1_intervals.append((start_time, end_time))
+            
+    # Merge overlapping intervals
+    merged_dma = merge_intervals(dma_intervals)
+    merged_slice = merge_intervals(slice_intervals)
+    merged_slice_0 = merge_intervals(slice_0_intervals)
+    merged_slice_1 = merge_intervals(slice_1_intervals)
+    
+    merged_compute_combined = merge_intervals(slice_0_intervals + slice_1_intervals)
+    
+    # Calculate exclusive and overlap times
+    dma_only_intervals = subtract_intervals(merged_dma, merged_compute_combined)
+    compute_only_intervals = subtract_intervals(merged_compute_combined, merged_dma)
+    overlap_intervals = intersect_intervals(merged_dma, merged_compute_combined)
+    
+    # Calculate totals
+    total_dma = sum(end - start for start, end in merged_dma)
+    total_slice = sum(end - start for start, end in merged_slice)
+    total_slice_0 = sum(end - start for start, end in merged_slice_0)
+    total_slice_1 = sum(end - start for start, end in merged_slice_1)
+    total_compute_combined = sum(end - start for start, end in merged_compute_combined)
+    total_dma_only = sum(end - start for start, end in dma_only_intervals)
+    total_compute_only = sum(end - start for start, end in compute_only_intervals)
+    total_overlap = sum(end - start for start, end in overlap_intervals)
     
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
+    
+    # Calculate BUSY time (union of DMA and SLICE)
+    busy_intervals = merge_intervals(merged_dma + merged_compute_combined)
+    busy_time = sum(end - start for start, end in busy_intervals)
+    
+    # Calculate IDLE time
     idle_time = overall_time - busy_time if overall_time >= busy_time else 0
     
     def calc_percent(time):
         return (time / overall_time * 100) if overall_time else 0
     
     metrics = {
-        'DMA': {'time': 0, 'percent': 0},
-        'SLICE': {'time': 0, 'percent': 0},
+        'DMA': {'time': total_dma, 'percent': calc_percent(total_dma)},
+        'SLICE': {'time': total_slice, 'percent': calc_percent(total_slice)},
+        'SLICE_0': {'time': total_slice_0, 'percent': calc_percent(total_slice_0)},
+        'SLICE_1': {'time': total_slice_1, 'percent': calc_percent(total_slice_1)},
+        'CDMA': {'time': 0, 'percent': 0}, # Not tracked in runtime profile yet
+        'CSS': {'time': 0, 'percent': 0},  # Not tracked in runtime profile yet
+        'DMA_COMBINED': {'time': total_dma, 'percent': calc_percent(total_dma)}, # Same as DMA for now
+        'COMPUTE_COMBINED': {'time': total_compute_combined, 'percent': calc_percent(total_compute_combined)},
         'IDLE': {'time': idle_time, 'percent': calc_percent(idle_time)},
-        'DMA_ONLY': {'time': 0, 'percent': 0},
-        'COMPUTE_ONLY': {'time': 0, 'percent': 0},
-        'DMA_COMBINED': {'time': 0, 'percent': 0},
-        'COMPUTE_COMBINED': {'time': 0, 'percent': 0},
-        'DMA_COMPUTE_OVERLAP': {'time': 0, 'percent': 0},
+        'DMA_ONLY': {'time': total_dma_only, 'percent': calc_percent(total_dma_only)},
+        'COMPUTE_ONLY': {'time': total_compute_only, 'percent': calc_percent(total_compute_only)},
+        'DMA_COMPUTE_OVERLAP': {'time': total_overlap, 'percent': calc_percent(total_overlap)},
         'OVERALL': {'time': overall_time}
     }
     
@@ -638,22 +678,6 @@ def create_compile_profile_event(view_name, event, start_time, end_time,
     return PerfettoEvent(view_name, event_category, details, start_time, end_time)
 
 
-def create_runtime_profile_event(view_name, dispatch_id, start_time, end_time, 
-                                 mlir_loc, overall_time):
-    """
-    Create a Perfetto event for a runtime profile entry.
-    
-    Returns:
-        PerfettoEvent instance
-    """
-    duration = end_time - start_time
-    percent = (duration / overall_time * 100) if overall_time else 0
-    short_loc = shorten_mlir_location(mlir_loc)
-    details = f"{short_loc}, dur={duration} ({percent:.2f}%)"
-    
-    return PerfettoEvent(view_name, dispatch_id, details, start_time, end_time)
-
-
 def create_overview_event(process_name, thread_name, label, metric, base_start):
     """
     Create a Perfetto event for an overview track.
@@ -676,9 +700,17 @@ def create_overview_event(process_name, thread_name, label, metric, base_start):
     return PerfettoEvent(process_name, thread_name, name, start, end)
 
 
-def render_compile_profile_events(view_name, trace_writer, csv_path):
-    """Render compile profile events to Perfetto trace with duration/percent info."""
-    _, _, _, _, _, overall_start, overall_end, all_rows = parse_compile_profile_csv(csv_path)
+def log_compile_profile_data(view_name, trace_writer, all_rows, overall_start, overall_end):
+    """
+    Log pre-parsed compile profile data to Perfetto trace.
+    
+    Args:
+        view_name: Name of the process/view
+        trace_writer: PerfettoTraceWriter instance
+        all_rows: List of event tuples (event, start_time, end_time, src_line_id, etype, bytes_transferred)
+        overall_start: Start timestamp of the entire profile
+        overall_end: End timestamp of the entire profile
+    """
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
     
     # Pre-register tracks to ensure specific order in Perfetto UI
@@ -701,16 +733,180 @@ def render_compile_profile_events(view_name, trace_writer, csv_path):
         trace_writer.add_event(perfetto_event)
 
 
-def render_runtime_profile_events(view_name, trace_writer, csv_path):
-    """Render runtime profile events to Perfetto trace with duration/percent info."""
-    _, overall_start, overall_end, all_rows = parse_runtime_profile_csv(csv_path)
+def render_compile_profile_events(view_name, trace_writer, csv_path):
+    """Render compile profile events to Perfetto trace with duration/percent info."""
+    _, _, _, _, _, overall_start, overall_end, all_rows = parse_compile_profile(csv_path)
+    log_compile_profile_data(view_name, trace_writer, all_rows, overall_start, overall_end)
+
+
+def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, overall_end):
+    """
+    Log pre-parsed runtime profile data to Perfetto trace.
+    
+    Args:
+        view_name: Name of the process/view
+        trace_writer: PerfettoTraceWriter instance
+        all_rows: List of event tuples
+        overall_start: Start timestamp of the entire profile
+        overall_end: End timestamp of the entire profile
+    """
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
     
-    for dispatch_id, start_time, end_time, mlir_loc in all_rows:
-        perfetto_event = create_runtime_profile_event(
-            view_name, dispatch_id, start_time, end_time, mlir_loc, overall_time
-        )
-        trace_writer.add_event(perfetto_event)
+    # Deduplicate events with same action_id and timestamps
+    # Key: (action_id, start_time, end_time)
+    # Value: (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used)
+    unique_events = {}
+    
+    for row_data in all_rows:
+        # Handle new Excel (13-tuple) format
+        dispatch_id, job_id, start_time, end_time, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used = row_data
+        
+        # Create unique key based on action_id and timestamps
+        event_key = (dispatch_id, start_time, end_time)
+        
+        # Keep the first occurrence or prefer entries with original_operator
+        if event_key not in unique_events:
+            unique_events[event_key] = (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used)
+        else:
+            # Merge information to capture all details (invocation name, original operator, etc.)
+            existing = unique_events[event_key]
+            (e_job_id, e_mlir_loc, e_original_operator, e_invocation_name, e_operation, e_slice_id, e_slice_0_used, e_slice_1_used, e_dma_in_used, e_dma_out_used) = existing
+            
+            def pick_best(new_val, old_val):
+                if new_val and str(new_val) != 'nan' and str(new_val) != 'None' and str(new_val).strip():
+                    return new_val
+                return old_val
+
+            new_job_id = pick_best(job_id, e_job_id)
+            new_original_operator = pick_best(original_operator, e_original_operator)
+            new_invocation_name = pick_best(invocation_name, e_invocation_name)
+            new_operation = pick_best(operation, e_operation)
+            new_mlir_loc = pick_best(mlir_loc, e_mlir_loc)
+            
+            # Merge booleans (OR logic)
+            new_slice_0_used = slice_0_used or e_slice_0_used
+            new_slice_1_used = slice_1_used or e_slice_1_used
+            new_dma_in_used = dma_in_used or e_dma_in_used
+            new_dma_out_used = dma_out_used or e_dma_out_used
+            
+            new_slice_id = slice_id if slice_id is not None else e_slice_id
+            
+            unique_events[event_key] = (new_job_id, new_mlir_loc, new_original_operator, new_invocation_name, new_operation, new_slice_id, new_slice_0_used, new_slice_1_used, new_dma_in_used, new_dma_out_used)
+    
+    # Create tracks in desired order
+    input_layer_track = "00_Input_Layer"
+    torq_ops_track = "01_Torq_Operations"
+    dma_in_track = "02_DMA_In"
+    dma_out_track = "03_DMA_Out"
+    slice_0_track = "04_Slice_0"
+    slice_1_track = "05_Slice_1"
+    
+    trace_writer.add_thread_descriptor(view_name, input_layer_track)
+    trace_writer.add_thread_descriptor(view_name, torq_ops_track)
+    trace_writer.add_thread_descriptor(view_name, dma_in_track)
+    trace_writer.add_thread_descriptor(view_name, dma_out_track)
+    trace_writer.add_thread_descriptor(view_name, slice_0_track)
+    trace_writer.add_thread_descriptor(view_name, slice_1_track)
+    
+    # Sort events by start time for proper merging
+    sorted_events = sorted(unique_events.items(), key=lambda x: x[0][1])  # Sort by start_time
+    
+    # Merge consecutive events with same operator for Input Layer track
+    merged_operator_events = []
+    current_operator_event = None
+    
+    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used) in sorted_events:
+        # Only process events that have a valid original_operator
+        if original_operator and original_operator != 'nan' and str(original_operator).strip() and original_operator != 'None':
+            if current_operator_event is None:
+                # Start a new operator event
+                current_operator_event = {
+                    'operator': original_operator,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'mlir_locs': [mlir_loc]
+                }
+            elif current_operator_event['operator'] == original_operator:
+                # Same operator - extend the end time
+                current_operator_event['end_time'] = max(current_operator_event['end_time'], end_time)
+                if mlir_loc not in current_operator_event['mlir_locs']:
+                    current_operator_event['mlir_locs'].append(mlir_loc)
+            else:
+                # Different operator - save current and start new
+                merged_operator_events.append(current_operator_event)
+                current_operator_event = {
+                    'operator': original_operator,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'mlir_locs': [mlir_loc]
+                }
+    
+    # Don't forget the last event
+    if current_operator_event is not None:
+        merged_operator_events.append(current_operator_event)
+    
+    # Create Perfetto events for merged operator events in Input Layer track
+    for op_event in merged_operator_events:
+        duration = op_event['end_time'] - op_event['start_time']
+        percent = (duration / overall_time * 100) if overall_time else 0
+        short_locs = [shorten_mlir_location(loc) for loc in op_event['mlir_locs'][:3]]  # Show first 3 locations
+        loc_str = ', '.join(short_locs)
+        if len(op_event['mlir_locs']) > 3:
+            loc_str += f" (+{len(op_event['mlir_locs']) - 3} more)"
+        
+        operator_details = f"{op_event['operator']} | {loc_str} | dur={duration} ({percent:.2f}%)"
+        operator_event = PerfettoEvent(view_name, input_layer_track, operator_details, op_event['start_time'], op_event['end_time'])
+        trace_writer.add_event(operator_event)
+    
+    # Create events for Torq Operations, DMA, and Slice tracks
+    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used) in unique_events.items():
+        duration = end_time - start_time
+        percent = (duration / overall_time * 100) if overall_time else 0
+        short_loc = shorten_mlir_location(mlir_loc)
+        
+        # Create event for Torq Operations track (based on Invocation Name)
+        if invocation_name and invocation_name != 'nan' and invocation_name != 'None' and str(invocation_name).strip():
+            torq_ops_details = f"{invocation_name} | {short_loc} | dur={duration} ({percent:.2f}%)"
+            torq_ops_event = PerfettoEvent(view_name, torq_ops_track, torq_ops_details, start_time, end_time)
+            trace_writer.add_event(torq_ops_event)
+        
+        # Prepare common details for DMA and Slice tracks
+        input_layer_str = original_operator if (original_operator and original_operator != 'nan' and str(original_operator).strip() and original_operator != 'None') else ""
+        torq_op_str = invocation_name if (invocation_name and invocation_name != 'nan' and invocation_name != 'None' and str(invocation_name).strip()) else ""
+        job_id_str = f"Job {job_id}" if (job_id and job_id != 'nan' and str(job_id).strip()) else ""
+        action_id_str = f"Action {dispatch_id}"
+        
+        # Build compact detail string
+        detail_parts = []
+        if input_layer_str:
+            detail_parts.append(f"Input: {input_layer_str}")
+        if torq_op_str:
+            detail_parts.append(f"Torq: {torq_op_str}")
+        detail_parts.append(action_id_str)
+        if job_id_str:
+            detail_parts.append(job_id_str)
+        detail_parts.append(f"dur={duration} ({percent:.2f}%)")
+        detail_str = " | ".join(detail_parts)
+        
+        # Create event for DMA In track if DMA In is used
+        if dma_in_used:
+            dma_in_event = PerfettoEvent(view_name, dma_in_track, f"DMA In | {detail_str}", start_time, end_time)
+            trace_writer.add_event(dma_in_event)
+        
+        # Create event for DMA Out track if DMA Out is used
+        if dma_out_used:
+            dma_out_event = PerfettoEvent(view_name, dma_out_track, f"DMA Out | {detail_str}", start_time, end_time)
+            trace_writer.add_event(dma_out_event)
+        
+        # Create event for Slice 0 track if Slice 0 is used
+        if slice_0_used:
+            slice_event = PerfettoEvent(view_name, slice_0_track, f"Slice 0 | {detail_str}", start_time, end_time)
+            trace_writer.add_event(slice_event)
+
+        # Create event for Slice 1 track if Slice 1 is used
+        if slice_1_used:
+            slice_event = PerfettoEvent(view_name, slice_1_track, f"Slice 1 | {detail_str}", start_time, end_time)
+            trace_writer.add_event(slice_event)
 
 
 def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
@@ -729,11 +925,13 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
         ("02 OVERVIEW DMA", "DMA total", metrics.get('DMA', {'time': 0})),
         ("03 OVERVIEW CDMA", "CDMA total", metrics.get('CDMA', {'time': 0})),
         ("04 OVERVIEW SLICE", "SLICE total", metrics.get('SLICE', {'time': 0})),
-        ("05 OVERVIEW CSS", "CSS total", metrics.get('CSS', {'time': 0})),
-        ("06 OVERVIEW DMA ONLY", "DMA ONLY (exclusive)", metrics.get('DMA_ONLY', {'time': 0})),
-        ("07 OVERVIEW COMPUTE ONLY", "COMPUTE ONLY (exclusive)", metrics.get('COMPUTE_ONLY', {'time': 0})),
-        ("08 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
-        ("09 OVERALL", "OVERALL", metrics['OVERALL']),
+        ("05 OVERVIEW SLICE 0", "SLICE 0 total", metrics.get('SLICE_0', {'time': 0})),
+        ("06 OVERVIEW SLICE 1", "SLICE 1 total", metrics.get('SLICE_1', {'time': 0})),
+        ("07 OVERVIEW CSS", "CSS total", metrics.get('CSS', {'time': 0})),
+        ("08 OVERVIEW DMA ONLY", "DMA ONLY (exclusive)", metrics.get('DMA_ONLY', {'time': 0})),
+        ("09 OVERVIEW COMPUTE ONLY", "COMPUTE ONLY (exclusive)", metrics.get('COMPUTE_ONLY', {'time': 0})),
+        ("10 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
+        ("11 OVERALL", "OVERALL", metrics['OVERALL']),
     ]
     
     for thread_name, label, metric in overview_tracks:
@@ -746,13 +944,12 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
 # MAIN CONVERSION LOGIC
 # =============================================================================
 
-def convert_to_perfetto(compile_profile_logs, runtime_profile_logs, pb_path, overview_map=None):
+def convert_to_perfetto(compile_profile_logs, pb_path, overview_map=None):
     """
     Convert CSV profiles to Perfetto trace format.
     
     Args:
         compile_profile_logs: Dict of {name: csv_path} for compile profiles
-        runtime_profile_logs: Dict of {name: csv_path} for runtime profiles
         pb_path: Output path for Perfetto .pb file
         overview_map: Optional dict with pre-calculated metrics per profile
     
@@ -774,16 +971,6 @@ def convert_to_perfetto(compile_profile_logs, runtime_profile_logs, pb_path, ove
             render_overview_tracks(name, overview['overall_start'], 
                                   overview['metrics'], trace_writer)
     
-    # Render runtime profiles
-    for name, csv_path in runtime_profile_logs.items():
-        render_runtime_profile_events(name, trace_writer, csv_path)
-        
-        # Add overview tracks if metrics available
-        if overview_map and name in overview_map:
-            overview = overview_map[name]
-            render_overview_tracks(name, overview['overall_start'], 
-                                  overview['metrics'], trace_writer)
-    
     return pb_path
 
 
@@ -796,24 +983,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="Convert timeline CSV logs to Perfetto trace with overview analysis"
     )
-    parser.add_argument("--compile_profile", nargs='+', default=[], 
+    parser.add_argument("input_files", nargs='+', 
                        help="Path(s) to compile profile CSV file(s)")
-    parser.add_argument("--runtime_profile", nargs='+', default=[], 
-                       help="Path(s) to runtime profile CSV file(s)")
     parser.add_argument("--pb", type=str, required=True,
                        help="Output path for Perfetto .pb file")
     args = parser.parse_args()
     
     # Build profile dictionaries with filenames as keys
     compile_profile_logs = {}
-    for path in args.compile_profile:
+    for path in args.input_files:
         filename = os.path.basename(path)
         compile_profile_logs[filename] = path
-    
-    runtime_profile_logs = {}
-    for path in args.runtime_profile:
-        filename = os.path.basename(path)
-        runtime_profile_logs[filename] = path
     
     # Calculate metrics for all profiles
     overview_map = {}
@@ -823,31 +1003,24 @@ def main():
         overview_map[name] = overview_data
         print_metrics_summary(name, overview_data['metrics'])
     
-    for name, path in runtime_profile_logs.items():
-        overview_data = calculate_runtime_profile_metrics(path)
-        overview_map[name] = overview_data
-        print_metrics_summary(name, overview_data['metrics'])
+    # Add numeric prefixes for process ordering in Perfetto UI only if multiple files
+    total_files = len(compile_profile_logs)
     
-    # Add numeric prefixes for process ordering in Perfetto UI
-    compile_prefixed = add_numeric_prefix(compile_profile_logs, start_index=1)
-    runtime_prefixed = add_numeric_prefix(runtime_profile_logs, 
-                                          start_index=1 + len(compile_profile_logs))
-    
-    # Update overview_map keys to match prefixed names
-    new_overview_map = {}
-    for i, (name, _) in enumerate(compile_profile_logs.items(), start=1):
-        prefixed_name = f"{i:02d} {name}"
-        new_overview_map[prefixed_name] = overview_map[name]
-    
-    for i, (name, _) in enumerate(runtime_profile_logs.items(), 
-                                  start=1 + len(compile_profile_logs)):
-        prefixed_name = f"{i:02d} {name}"
-        new_overview_map[prefixed_name] = overview_map[name]
+    if total_files > 1:
+        compile_prefixed = add_numeric_prefix(compile_profile_logs, start_index=1)
+        
+        # Update overview_map keys to match prefixed names
+        new_overview_map = {}
+        for i, (name, _) in enumerate(compile_profile_logs.items(), start=1):
+            prefixed_name = f"{i:02d} {name}"
+            new_overview_map[prefixed_name] = overview_map[name]
+    else:
+        compile_prefixed = compile_profile_logs
+        new_overview_map = overview_map
     
     # Generate Perfetto trace
     output_path = convert_to_perfetto(
         compile_profile_logs=compile_prefixed,
-        runtime_profile_logs=runtime_prefixed,
         pb_path=args.pb,
         overview_map=new_overview_map
     )
