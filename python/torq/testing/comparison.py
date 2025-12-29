@@ -87,7 +87,7 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
             # abs_diff means the number of differences when dypte is boolean
             abs_diff = differences = np.sum(expected_output != observed_output)
         else:
-            abs_diff = np.abs(expected_output-observed_output).astype(np.float32)
+            abs_diff = np.abs(expected_output.astype(np.float32)-observed_output.astype(np.float32))
             if (np.issubdtype(expected_output.dtype, np.integer)):
                 differences = abs_diff > comparison_config['int_tol']
             else:

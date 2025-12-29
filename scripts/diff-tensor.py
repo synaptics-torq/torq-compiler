@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import argparse
 import sys
 
+tensor_dtype = None
+
 def load_data(filename):
     # Load numpy array from file
     tensor = np.load(str(filename))
@@ -39,8 +41,8 @@ def get_channel(tensor, channel):
     return tensor[0, channel, ...]
 
 def print_tensor(tensor):
-    items_per_row = 32 if tensor.dtype in [np.int8, np.uint8, np.bool_] else 16
-    field_width = 4 if tensor.dtype in [np.int8, np.uint8, np.bool_] else 6 if tensor.dtype in [np.int16, np.uint16] else 12
+    items_per_row = 32 if tensor_dtype in [np.int8, np.uint8, np.bool_] else 16
+    field_width = 4 if tensor_dtype in [np.int8, np.uint8, np.bool_] else 6 if tensor_dtype in [np.int16, np.uint16] else 12
     colorIx = "\033[90m"
     colorEnd = "\033[0m"
     
@@ -104,6 +106,16 @@ def main():
             return
     else:
         reference_tensor = np.zeros_like(tensor)
+
+    # if dtype is integer convert to int64
+    # this is important to ensure a meaningful difference, otherwise for example with int8 we have
+    # that diff(-128, 127) == 1
+    global tensor_dtype
+    tensor_dtype = tensor.dtype
+    if np.issubdtype(tensor.dtype, np.integer):
+        tensor = tensor.astype(np.int64)
+    if np.issubdtype(reference_tensor.dtype, np.integer):
+        reference_tensor = reference_tensor.astype(np.int64)
 
     # Compute difference between input and reference tensor
     tensor = tensor - reference_tensor
