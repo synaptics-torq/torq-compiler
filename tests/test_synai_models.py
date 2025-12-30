@@ -50,7 +50,7 @@ from threading import Lock
 
 # Add parent directory to path to import from python/torq
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
-from torq.utils.report_generator import TestReportGenerator, ensure_log_in_common_location, get_display_stage
+from torq.utils.report_generator import ReportGenerator, ensure_log_in_common_location, get_display_stage
 
 # Global variables to track processes and thread safety
 current_process = None
@@ -1158,7 +1158,7 @@ def main():
         print(f"\nTest data saved to: {json_data_path}")
         
         # Generate reports using the new report generator
-        report_generator = TestReportGenerator(json_report_data)
+        report_generator = ReportGenerator(json_report_data)
         
         # Generate text report
         text_report_path = os.path.join(reports_dir, "synai_models_summary_report.txt")

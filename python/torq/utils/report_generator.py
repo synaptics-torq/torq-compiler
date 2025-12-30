@@ -7,8 +7,8 @@ making it reusable across different test suites.
 
 Usage:
     # As a module
-    from helpers.report_generator import TestReportGenerator
-    generator = TestReportGenerator(json_data)
+    from helpers.report_generator import ReportGenerator
+    generator = ReportGenerator(json_data)
     generator.generate_html_report()
     generator.generate_text_report()
     
@@ -24,7 +24,7 @@ import datetime
 from pathlib import Path
 
 
-class TestReportGenerator:
+class ReportGenerator:
     """
     Generic test report generator that accepts structured JSON data.
     
@@ -540,7 +540,7 @@ def generate_html_report(results, model_groups, failures_by_stage, args):
             "log_file": ""
         })
     
-    generator = TestReportGenerator(json_data)
+    generator = ReportGenerator(json_data)
     return generator.generate_html_report()
 
 
@@ -568,14 +568,14 @@ def generate_text_report(results, model_groups, failures_by_stage, report_path, 
             "log_file": ""
         })
     
-    generator = TestReportGenerator(json_data)
+    generator = ReportGenerator(json_data)
     return generator.generate_text_report(report_path)
 
 
 # Keep legacy helper functions
 def get_display_stage(stage, max_diff=None):
     """Legacy helper function."""
-    generator = TestReportGenerator({"test_suite": {}, "results": []})
+    generator = ReportGenerator({"test_suite": {}, "results": []})
     return generator.get_display_stage(stage, max_diff)
 
 
@@ -683,7 +683,7 @@ Examples:
         sys.exit(1)
     
     # Create report generator
-    generator = TestReportGenerator(json_data)
+    generator = ReportGenerator(json_data)
     
     # Generate reports
     try:
