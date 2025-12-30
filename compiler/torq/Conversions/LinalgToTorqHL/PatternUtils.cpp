@@ -651,11 +651,19 @@ ScaleClampInfo foldForwardScaleClamp(
 
     linalg::GenericOp genericOp = getSingleUser<linalg::GenericOp>(value);
     if (!genericOp) {
-        LLVM_DEBUG({
-            llvm::dbgs() << "must have a single GenericOp scaleClampOp, we return empty object for "
-                            "caller to further check\n";
-        });
-        return {};
+        // close to scaleclamp generic op to check expandshapeop for integer dtype
+        if (value.hasOneUse() && isa<tensor::ExpandShapeOp>(*value.getUsers().begin())) {
+            value = value.getUsers().begin()->getResult(0);
+            genericOp = getSingleUser<linalg::GenericOp>(value);
+        }
+        if (!genericOp) {
+            LLVM_DEBUG({
+                llvm::dbgs(
+                ) << "must have a single GenericOp scaleClampOp, we return empty object for "
+                     "caller to further check\n";
+            });
+            return {};
+        }
     }
 
     // expects one init, the value of p

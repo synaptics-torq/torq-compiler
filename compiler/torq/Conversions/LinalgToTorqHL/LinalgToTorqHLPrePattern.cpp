@@ -954,11 +954,6 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
         while (foldForwardPerChannelAdd(output, 1, bias, &input_zp)) {
         }
 
-        // check if output user is expand_shape
-        if (output.hasOneUse() && isa<tensor::ExpandShapeOp>(*output.getUsers().begin())) {
-            output = output.getUsers().begin()->getResult(0);
-        }
-
         ScaleClampInfo scInfo = foldForwardScaleClamp(output, outputChannelCount, 20, 12);
         if (!scInfo && isInt) {
             return rewriter.notifyMatchFailure(
@@ -998,6 +993,10 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
 
         // get new output type as above various changes for output
         outputType = llvm::cast<RankedTensorType>(output.getType());
+        inputAType = llvm::cast<RankedTensorType>(inputA.getType());
+
+        assert(outputType.getRank() == 2 && "TORQ FC op expected output tensor rank == 2");
+        assert(inputAType.getRank() == 2 && "TORQ FC op expected input tensor rank == 2");
 
         auto fcOp = rewriter.create<torq_hl::FullyConnectedOp>(
             loc, outputType, createInitTensor(srcOp, rewriter, outputType), input_zp,

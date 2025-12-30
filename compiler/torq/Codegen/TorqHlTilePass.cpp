@@ -753,10 +753,10 @@ class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp>
                                  div_ceil(outputSize + weightsSize + scaleBiasSize, outputShape[1]);
 
         // tiles needs to be a multiple of 64, we round down to avoid exceeding the available memory
+        int channelsPerTile = align_floor(maxChannelsPerTile, 64);
         if (maxChannelsPerTile < 64) {
             fcOp.emitOpError("Unable to tile FullyConnectedOp in the available memory");
         }
-        int channelsPerTile = align_floor(maxChannelsPerTile, 64);
 
         int trailingChannels = outputShape[1] % channelsPerTile;
 
