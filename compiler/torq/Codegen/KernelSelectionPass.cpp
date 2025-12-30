@@ -559,7 +559,9 @@ class FullyConnectedKernelSelection : public OpRewritePattern<torq_hl::FullyConn
 
         auto vectorizationMode = getVectorizationMode(op);
 
-        int parallel_outs = 64;
+        auto outputElementType = op.getInit().getType().getElementType();
+        // FIXME: the test below should be improved to avoid hardcoding these values
+        int parallel_outs = outputElementType.getIntOrFloatBitWidth() <= 8 ? 64 : 32;
 
         weights = weights_OIHW_to_OIHWO(
             rewriter, op.getLoc(), weights, parallel_outs, weightValues.getType().getElementType()

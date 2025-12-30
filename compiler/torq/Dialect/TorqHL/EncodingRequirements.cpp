@@ -579,7 +579,7 @@ KernelEncoding DepthwiseConv2DOp::getKernelEncoding() {
     return torq::hasEkLoweringConv(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
 }
 
-KernelEncoding FullyConnectedOp::getKernelEncoding() { return getDefault1InputEncoding(*this); }
+KernelEncoding FullyConnectedOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding Conv1DOp::getKernelEncoding() { return getPaddedOutEncoding(*this); }
 

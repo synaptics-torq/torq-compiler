@@ -228,8 +228,7 @@ static int getBusWidth(NdlType type, DType dataType) {
     case NdlType::DEWR:
         return HwInfo::wram_seg_width;
     case NdlType::DEBR:
-        // In floating point mode act doesn't have the scale value
-        return isFloat(dataType) ? HwInfo::breg_width / 2 : HwInfo::breg_width;
+        return HwInfo::breg_width * 4;
     case NdlType::DEQW:
         return HwInfo::act_width * sizeof(int32_t);
     default:
@@ -1350,12 +1349,14 @@ void SlicePrivate::ceww(const WData &wdata) {
 
 void SlicePrivate::acbr(const BData &bdata) {
     Shape shape = bdata.subShape();
-    const int elementSize = sizeofType(bdata.elementType());
-    const int blockSize = backDimCount(shape);
+    int elementSize = sizeofType(bdata.elementType()) * backDimCount(shape);
+    int blockSize = denseElementCount(shape) / backDimCount(shape);
+    assert(blockSize > 0 && "Block empty or not dense");
 
     // Generate ACBR to load the data from BRAM to ACT
     RegNdlDimsData acbrDims;
-    acbrDims.push_back({DimType::L, RegDimTag::B, blockSize * elementSize, 1});
+    acbrDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
+    acbrDims.push_back({DimType::L, RegDimTag::D, blockSize, elementSize}); // Block
 
     // Now add hdims for each loop deeper the bram load
     addDims(NdlType::ACBR, acbrDims, bdata, _bram.loadNesting, true);
@@ -1373,16 +1374,17 @@ void SlicePrivate::acbr(const BData &bdata) {
 
 void SlicePrivate::acbw(const BData &bdata) {
     Shape shape = bdata.subShape();
-    const int elementSize = sizeofType(bdata.elementType());
-    const int blockSize = backDimCount(shape);
+    const int elementSize = sizeofType(bdata.elementType()) * backDimCount(shape);
+    int blockSize = denseElementCount(shape) / backDimCount(shape);
+    assert(blockSize > 0 && "Block empty or not dense");
 
     // Generate ACBW to load the data from DEBR to BRAM
-    // TODO: check that the data fits BRAM and that dataShape has natural strides
+    // TODO: check that the data fits BRAM
     RegNdlDimsData regDims;
     // /!\ todo: this sould start from where the previous H loop left!
-    regDims.push_back({DimType::L, RegDimTag::B, blockSize * elementSize, 1});
-    regDims.push_back({DimType::L, RegDimTag::D, 1, 0}); // No block
-    regDims.push_back({DimType::L, RegDimTag::G});       // No group
+    regDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
+    regDims.push_back({DimType::L, RegDimTag::D, blockSize, elementSize});
+    regDims.push_back({DimType::L, RegDimTag::G}); // No group
 
     // Repeat for as many times as DEBR
     auto debr = _ndls.getMemNdl(NdlType::DEBR);
@@ -2175,7 +2177,10 @@ QData Act::rescaleClamp(
     return d->actRescaleClamp(pdata, bdata, shift, zeroPoint, clipMin, clipMax, actMode);
 }
 
-int Act::width(DType iType, DType wType) const {
+int Act::width(DType iType, DType wType, bool biasScalePerItem) const {
+    if (biasScalePerItem) {
+        return HwInfo::act_limit;
+    }
     if (isFloat(iType)) {
         return HwInfo::act_width / 2;
     }

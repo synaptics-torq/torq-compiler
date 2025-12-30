@@ -158,11 +158,11 @@ static torq_hw::SliceTaskOp lowerToHw(
                         }
                     }
                 }
-                BData bdata = slice.bram.load(biasScale[ocv]);
                 For(auto o = slice.iterate(outChVectSize)) { // Not necessarily all the pdata
+                    BData bdata = slice.bram.load(biasScale[ocv][o]);
                     For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                         QData res = slice.act.rescaleClamp(
-                            pdata[o][av], bdata[o], op.getShiftFactor(), op.getOutputZp(),
+                            pdata[o][av], bdata, op.getShiftFactor(), op.getOutputZp(),
                             op.getOutputMin(), op.getOutputMax()
                         );
                         slice.append(output[batch][ocv][o], res);

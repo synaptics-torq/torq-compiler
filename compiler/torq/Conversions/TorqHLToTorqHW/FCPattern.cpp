@@ -38,8 +38,16 @@ namespace mlir::syna::torq {
 // 10. Take the next block of 64 output weights and repeat the process.
 //
 //
+
+LogicalResult convertToHw(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter);
+
 template <>
 LogicalResult FCPattern::transform(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) const {
+
+    if (convertToHw(op, rewriter).succeeded()) {
+        return success();
+    }
+
     // input
     auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
     auto input_shape = input_type.getShape();

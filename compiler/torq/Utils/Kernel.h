@@ -541,7 +541,9 @@ class Act : SliceComponent {
     );
 
     // Max number of output items that can be computed in parallel for the given in and weight type
-    int width(DType iType, DType wType = DType::none) const;
+    // The flag biasScalePerItem indicates if a different bias/scale is required for each item
+    // (in which case the width may be reduced)
+    int width(DType iType, DType wType = DType::none, bool biasScalePerItem = false) const;
 };
 
 // Create a kernel for a slice

@@ -188,8 +188,12 @@ class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp>
 
         // Compute the bias tile for each iteration
         SmallVector<OpFoldResult> biasOffset = createVector({0}, rewriter);
-        biasOffset[0] = affineEval(arg * (channels * 2), iv, rewriter);
-        auto scaleBiasTile = getSlice(op.getScaleBias(), biasOffset, {channels * 2}, rewriter);
+
+        // We need to compute the tile of the bias/scale tensor based on the original
+        // size because in some cases we have 2 values per channel and in some cases 1 value
+        auto biasScaleTileSize = op.getScaleBias().getType().getShape()[0] / kSliceCount;
+        biasOffset[0] = affineEval(arg * biasScaleTileSize, iv, rewriter);
+        auto scaleBiasTile = getSlice(op.getScaleBias(), biasOffset, {biasScaleTileSize}, rewriter);
 
         // Perform the sliced operation using the sliced weights and scale/bias
         // /!\ FIXME: if the original channel count is not a multiple of the weights grouping,

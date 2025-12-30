@@ -19,9 +19,6 @@ def case_config(request, chip_config):
         pytest.xfail("AssertionError: Nans differ")
 
     failed_str = [
-        # wrong result as torq fc kernel hasn't support bf16
-        "layer_Gemm", 
-
         # full model fail because of above op issue
         # full model has total 62 layers as we group some ops together (conv2d + clip)
         "full_model"
