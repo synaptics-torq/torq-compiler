@@ -972,6 +972,13 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
             // NOTE: inputB changed, re-get its type if need to process related
         }
 
+        inputBType = llvm::cast<RankedTensorType>(inputB.getType());
+        auto inputBShape = inputBType.getShape();
+        if (inputBShape[0] != outputChannelCount) {
+            // above logic already checked inputB(weight) rank=2
+            inputB = transposeValue(inputB, {1, 0}, loc, rewriter);
+        }
+
         if (_markFuseGroups) {
             markFuseGroupBackward(
                 output, {inputA, inputB}, rewriter,
@@ -995,8 +1002,10 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
         outputType = llvm::cast<RankedTensorType>(output.getType());
         inputAType = llvm::cast<RankedTensorType>(inputA.getType());
 
-        assert(outputType.getRank() == 2 && "TORQ FC op expected output tensor rank == 2");
-        assert(inputAType.getRank() == 2 && "TORQ FC op expected input tensor rank == 2");
+        assert(outputType.getRank() == 2 && "TORQ FC op expects output tensor rank == 2");
+        assert(inputAType.getRank() == 2 && "TORQ FC op expects input tensor rank == 2");
+        auto weightType = llvm::cast<RankedTensorType>(torqWeights.getType());
+        assert(weightType.getRank() == 2 && "TORQ FC op expects weight rank == 2");
 
         auto fcOp = rewriter.create<torq_hl::FullyConnectedOp>(
             loc, outputType, createInitTensor(srcOp, rewriter, outputType), input_zp,
