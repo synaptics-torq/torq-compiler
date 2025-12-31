@@ -15,7 +15,16 @@ tweaked to account for inaccuracies due to floating point and quantization.
 def check_nans(arr1, arr2):
     nan1 = np.isnan(arr1)
     nan2 = np.isnan(arr2)
-    assert (nan1 == nan2).all(), "Nans differ."
+    if not (nan1 == nan2).all():
+        if nan2.any() and not nan2.all():
+            print(f"Nan positions (expected): {nan2}")
+        if nan1.any() and not nan1.all():
+            print(f"Nan positions (observed): {nan1}")
+        if not nan2.any():
+            print(f"No Nan expected")
+
+        assert False, "Nans differ."
+
     arr1 = arr1.copy()
     arr2 = arr2.copy()
     # Replace NaNs with 0 so that we don't break comparison

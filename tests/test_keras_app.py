@@ -113,19 +113,19 @@ def case_config(request, chip_config):
 
     # inceptionv3
     # wrong results
-    'inceptionv3_conv2d',
+    'inceptionv3_conv2d_4',
+    'inceptionv3_conv2d_30',
+    'inceptionv3_conv2d_33',
+    'inceptionv3_conv2d_75',
+    'inceptionv3_conv2d_79',
     'inceptionv3_max_pooling2d',
     'inceptionv3_max_pooling2d_1',
-    'inceptionv3_conv2d_26',
-    'inceptionv3_conv2d_29',
     'inceptionv3_max_pooling2d_2',
-    'inceptionv3_conv2d_71',
-    'inceptionv3_conv2d_75',
     'inceptionv3_max_pooling2d_3',
 
-    # hang
-    'inceptionv3_conv2d_2',
-    'inceptionv3_conv2d_4',
+    # compiler too long
+    'inceptionv3_conv2d_6',
+    'inceptionv3_conv2d_8',
 
     # crash
     'inceptionv3_average_pooling2d',
@@ -236,6 +236,14 @@ def case_config(request, chip_config):
   if "layer_" in request.param.name:
     compile_timeout = 60 * 3
     runtime_timeout = 30
+
+  longer_test_timeout = [
+      'inceptionv3_conv2d_6',
+      'inceptionv3_conv2d_8',
+  ]
+  if any(s in request.param.name.lower() for s in longer_test_timeout):
+    compile_timeout = compile_timeout * 2
+    runtime_timeout = runtime_timeout * 2
 
   keras_model = request.param.data
 

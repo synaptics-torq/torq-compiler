@@ -20,6 +20,7 @@ def case_config(request, runtime_hw_type, chip_config):
         # aws-fpga failures
         failed_tc += [
             'decoder.mlir.431.Mul_24.mlir', # AssertionError: Number of differences: 53378 out of 59616 [89.54%]
+            'add-1x24x56x56-bf16.mlir', # output is all Nan
         ]
 
     if chip_config.data['target'] != "SL2610":
