@@ -8,7 +8,7 @@ def main():
     parser.add_argument("mlir_file", type=str, help="Path to the executable-targets phase dump file")
     parser.add_argument("profile_file", type=str, help="Path to the runtime profile file.")
     parser.add_argument("annotated_profile_file", type=str, help="Path to the output")
-    parser.add_argument("--host_profiling", action="store_true", default=False, help="Enable tracing of buffers in the torq runtime")
+    parser.add_argument("--host_profiling", action="store_true", default=False, help="Enable annotating the host profiling log")
     parser.add_argument("--original_mlir_file", type=str, default=None, help="Path to the original input MLIR file for mapping line numbers to operators")
     parser.add_argument("--perfetto_file", type=str, default=None, help="Path to the output Perfetto trace file")
 
