@@ -259,7 +259,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     }
 
     // Vectorize the input tensor
-    Slice slice;
+    Slice slice("add");
     int vectorSize = slice.alu.iWidth(input.elementType(), weights.elementType());
     input.fuse(denseDims).vectorize(vectorSize);
 
@@ -283,7 +283,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     auto input2Addr = params.rewriter.create<GetAddressOp>(params.loc, params.input2).getAddress();
     auto sliceTaskOp = params.rewriter.create<SliceTaskOp>(
         params.loc,                               // Operation to replace
-        op.getName(),                             // Task name
+        slice.name(),                             // Task name
         ValueRange{params.input1, params.input2}, // Input tensor
         ValueRange{op.getWeights()},              // Weights
         ValueRange{op.getScaleBias()},            // BiasScale tensor

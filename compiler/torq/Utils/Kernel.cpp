@@ -688,6 +688,31 @@ LData &LData::reshapeDim(int dimIndex, const std::vector<int> &newDims, bool all
     return *this;
 }
 
+LData &LData::broadcastAs(const LData &other) {
+    assert(shape().size() == other.shape().size() && "Rank mismatch for broadcasting");
+    for (int i = 0; i < other.shape().size(); ++i) {
+        auto &shapeItem = getShape()[i];
+        const auto &otherItem = other.shape()[i];
+        if (shapeItem.count == otherItem.count) {
+            continue;
+        }
+        else if (shapeItem.count != 1) {
+            llvm::errs() << "Error: cannot broadcast dimension " << i << " of size "
+                         << shapeItem.count << " to size " << otherItem.count << "\n";
+            assert(false && "Cannot broadcast mismatching dimension");
+        }
+
+        if (i > 0 && !shape()[i - 1].stride.hasVal()) {
+            // Update the stride of the previous dim (broadcast will destroy the natural stride)
+            getShape()[i - 1].stride = computeStride(shape(), i - 1);
+        }
+        // Broadcast this dimension
+        shapeItem.count = otherItem.count;
+        shapeItem.stride = 0;
+    }
+    return *this;
+}
+
 LData &LData::partitionByIndexParity1D() {
     torq::partitionByIndexParity1D(*this);
     return *this;

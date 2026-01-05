@@ -293,6 +293,13 @@ class LData : public DataT<LData> {
     // the 'toDimIndex' is the index after removing the dimension at 'fromDimIndex'
     LData &moveDim(int fromDimIndex, int toDimIndex);
 
+    // Broadcast dimensions to match the shape of 'other' data
+    // The current shape must have the same rank as 'other'
+    // All dimensions with size 1 are expanded to match the corresponding dimension in 'other'
+    // but with stride 0, so that no data duplication occours.
+    // Asserts if the shapes are not compatible for broadcasting
+    LData &broadcastAs(const LData &other);
+
     // Reorganize the last dimension into two sub-blocks containing elements
     // with even and odd indexes respectively
     LData &partitionByIndexParity1D();
