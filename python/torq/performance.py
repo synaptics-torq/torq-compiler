@@ -365,18 +365,18 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                     slice_id = None
 
                 row = {
-                    "action_id": str(action_id),
-                    "job_id": str(job_id) if job_id is not None else "",
+                    "action_id": action_id,
+                    "job_id": job_id if job_id is not None else "",
                     "operation": operation,
                     "invocation_name": invocation_name,
-                    "total_time": str(profiling_dict[action_id].get("total_time")),
+                    "total_time": profiling_dict[action_id].get("total_time"),
                     "slice_id": slice_id,
                     "slice_used_0_in_program": slice_used[0],
                     "slice_used_1_in_program": slice_used[1],
                     "dma_in_used_in_program": dma_in_used,
                     "dma_out_used_in_program": dma_out_used,
-                    "timestamp_start": str(profiling_dict[action_id].get("timestamp_start")),
-                    "timestamp_end": str(profiling_dict[action_id].get("timestamp_end")),
+                    "timestamp_start": profiling_dict[action_id].get("timestamp_start"),
+                    "timestamp_end": profiling_dict[action_id].get("timestamp_end"),
                     "location": ','.join(profiling_dict[action_id].get("location", [])),
                     "original_operator": original_operator
                 }
@@ -415,18 +415,18 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                 operation += " (host)"
 
             row = {
-                    "action_id": str(action_id),
-                    "job_id": str(job_id) if job_id is not None else "",
+                    "action_id": action_id,
+                    "job_id": job_id if job_id is not None else "",
                     "operation": operation,
                     "invocation_name": None, # Not an invocation
-                    "total_time": str(profiling_dict[action_id].get("total_time")),
+                    "total_time": profiling_dict[action_id].get("total_time"),
                     "slice_id": None, # Not an slice job
                     "slice_used_0_in_program": None, # Not an slice job
                     "slice_used_1_in_program": None, # Not an slice job
                     "dma_in_used_in_program": None, # Not an slice job
                     "dma_out_used_in_program": None, # Not an slice job
-                    "timestamp_start": str(profiling_dict[action_id].get("timestamp_start")),
-                    "timestamp_end": str(profiling_dict[action_id].get("timestamp_end")),
+                    "timestamp_start": profiling_dict[action_id].get("timestamp_start"),
+                    "timestamp_end": profiling_dict[action_id].get("timestamp_end"),
                     "location": ','.join(profiling_dict[action_id].get("location", [])),
                     "original_operator": original_operator
                 }
