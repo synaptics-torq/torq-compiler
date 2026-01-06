@@ -633,7 +633,8 @@ def torq_results(request, torq_results_dir, mlir_io_spec):
         profiling_output_dir = Path(profiling_output_dir)
         profiling_output_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy(torq_results_dir / 'host_profile.csv', profiling_output_dir / f'{request.node.name}.csv')
-        shutil.copy(torq_results_dir / 'annotated_profile.xlsx', profiling_output_dir / f'{request.node.name}.xlsx')
+        if (torq_results_dir / 'annotated_profile.xlsx').exists():
+            shutil.copy(torq_results_dir / 'annotated_profile.xlsx', profiling_output_dir / f'{request.node.name}.xlsx')
         if (torq_results_dir / 'trace.pb').exists():
             shutil.copy(torq_results_dir / 'trace.pb', profiling_output_dir / f'{request.node.name}.pb')
 

@@ -211,10 +211,17 @@ FailureOr<OutliningResults> outlineProgram(
 ) {
     auto loc = builder.getUnknownLoc();
 
-    if (!targets.empty()) {
-        loc = targets.front()->getLoc();
+    // Try to find a non-unknown location from targets
+    // TODO: improve location handling for edge cases
+    // e.g., consider scenarios when we only have ops in targets that load the constant to lram.
+    // As const data does not have location info, we end up with an unknown loc here.
+    for (auto *op : targets) {
+        auto opLoc = op->getLoc();
+        if (!isa<UnknownLoc>(opLoc)) {
+            loc = opLoc;
+            break;
+        }
     }
-
     LLVM_DEBUG({
         llvm::dbgs() << "-- outlining operations:\n";
         for (auto op : targets) {

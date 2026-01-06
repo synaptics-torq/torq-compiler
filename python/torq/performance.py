@@ -291,14 +291,16 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
     last_slice_program_name = [None, None]
 
     for (action_id, op, job_id) in actions_ops:
-
-        if action_id not in profiling_dict:
-            #TODO: investigate why this happens for dw_bf16_f5x2_s2x1_2x256x2
-            # This should not be happened ideally, but we skip it for now to avoid crashes
-            continue
         
+        is_host_wait_task = (
+            op.operation.name == "torq_hl.wait_program"
+            and len(op.operation.operands) > 0
+            and str(op.operation.operands[0].type) == "!torq_hl.invocation<host>"
+        )
+
         original_operator = ""
-        if original_mlir_lines:
+        # we dont log the host_wait_program seperately as host_start_program is synchronous.
+        if original_mlir_lines and not is_host_wait_task:
             loc_str = ','.join(profiling_dict[action_id].get("location", []))
             line_nums = extract_line_numbers(loc_str)
             # Sort line numbers in ascending order
@@ -404,8 +406,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                             dma_out_used
                         ))
 
-        elif operation == "torq_hl.wait_program" and str(op.operation.operands[0].type) == "!torq_hl.invocation<host>": 
-            # host execution is synchronous for the moment so we don't need to do anything to wait for it
+        elif is_host_wait_task: 
+            # Host execution is currently synchronous, so we skip this since it is already logged with host_start_task.
             continue
         else:
             # Since host execution is synchronous, we skip the wait_program log as it does not make sense; 
