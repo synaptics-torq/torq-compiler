@@ -30,17 +30,9 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
         total_px *= input_shape[i];
     }
 
-    bool is_dense = isDenseInMemory(input_type);
     DType elementType = getDType(input_type.getElementType());
 
-    // FIXME: The reinterpret cast from bf16 to i16 was failing.
-    // For now, we can treat the input as i16 since it's just a bypass.
-    if (elementType == DType::bf16) {
-        elementType = DType::int16;
-    }
-    auto input_strides = getEncodedStridesElements(input_type);
     Slice slice("identity");
-    bool is_size_aligned = (total_px % slice.alu.iWidth(elementType)) == 0;
     if (IDENTITY_TEST_MODE == 1 && total_px == 64 && elementType == DType::int8) {
         // This implementation copies a 64-bytes dense input tensor
         // The input tensor in partitioned in g sections reading from last one to exercise
@@ -163,72 +155,28 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
             slice.store(output[a], res);
         }
     }
-    else if (is_dense && is_size_aligned) {
-        // Most efficient implementation, data is transferred in blocks
-        int blockSize = slice.act.width(elementType);
-        const int blockCount = div_ceil(total_px, blockSize);
-
-        LData input({blockCount, blockSize}, elementType);
-        LData output({blockCount, blockSize}, elementType);
-
-        // Use reverse iterator. We don't really need it here, it's just to test its usage
-        For(auto b = slice.iterate(blockCount).reverse()) {
-            IData idata = slice.iram.load(input[b]);
-            PData pdata = slice.alu.load(idata);
-            QData res = slice.act.load(pdata);
-            slice.store(output[b], res);
-        }
-    }
-#if NOT_YET_IMPLEMENTED
-    else if (is_dense) {
-        // TODO: use peeling
-    }
-#endif
-    else if (!input_shape.empty() && input_shape.back() <= slice.act.width(elementType) &&
-             input_strides.back() == 1) {
-        // Copy innermost dimension at a time
-        // TODO: this can be extended to handle more than one innermost dimension even > act.width
-        // as long as data is contiguous
-        // The input can have any number of dimensions with any stride (innermost must be dense)
-        Shape inputShape;
-        for (int i = 0; i < input_shape.size(); ++i) {
-            inputShape.push_back({input_shape[i], input_strides[i]});
-        }
-        // The output is a dense version of the input
-        Shape outputShape;
-        for (int i = 0; i < input_shape.size(); ++i) {
-            outputShape.push_back(input_shape[i]);
-        }
-
-        LData input(inputShape, elementType);
-        LData output(outputShape, elementType);
-
-        For(auto ii = slice.iterate(input.dims(0, -1))) {
-            IData idata = slice.iram.load(input[ii]);
-            PData pdata = slice.alu.load(idata);
-            QData res = slice.act.load(pdata);
-            slice.store(output[ii], res);
-        }
-    }
     else {
-        // Flexible copy: least efficient but most flexible implementation
-        // copy one item at a time
-        // The input can have any number of dimensions with any stride
-
-        // The output is a dense version of the input
-        Shape outputShape;
-        for (auto s : input_shape) {
-            outputShape.push_back(s);
+        struct In : Vectorized {
+            enum { NonDenseDims };
+        };
+        LData input(op.getInput());
+        LData output(op.getInit());
+        // FIXME: In some cases this op is also used as a bit-cast bf16 -> i16 or i16 -> bf16.
+        // For now, we can handle this case as i16 since it's just a bypass.
+        if (input.elementType() == DType::bf16 || output.elementType() == DType::bf16) {
+            input.setElementType(DType::int16);
+            output.setElementType(DType::int16);
         }
+        int vectorSize = slice.act.width(input.elementType());
+        input.fuse(std::min(input.denseDims(), output.denseDims())).vectorize(vectorSize);
 
-        LData input(input_type);
-        LData output(outputShape, elementType);
-
-        For(auto ii = slice.iterate(input.dims())) {
-            IData idata = slice.iram.load(input[ii]);
-            PData pdata = slice.alu.load(idata);
-            QData res = slice.act.load(pdata);
-            slice.store(output[ii], res);
+        For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
+            For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+                IData idata = slice.iram.load(input[ndd][iv]);
+                PData pdata = slice.alu.load(idata);
+                QData res = slice.act.load(pdata);
+                slice.append(output[ndd], res);
+            }
         }
     }
 

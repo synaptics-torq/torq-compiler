@@ -153,7 +153,7 @@ LogicalResult ActPattern::transform(torq_hl::ActOp op, PatternRewriter &rewriter
     auto opName = op.getName().str();
     Slice slice(std::string("Act-" + opName));
     int vectorSize = std::min(slice.act.width(inputDType), slice.act.width(outputDType));
-    input.fuse(input.denseDims()).vectorize(vectorSize);
+    input.fuse(std::min(input.denseDims(), output.denseDims())).vectorize(vectorSize);
 
     // Configure activation mode and clip ranges
     auto outputElementType = llvm::cast<MemRefType>(op.getInit().getType()).getElementType();
