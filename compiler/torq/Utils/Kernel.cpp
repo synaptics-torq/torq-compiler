@@ -397,6 +397,16 @@ bool isUnsigned(DType type) {
     return type == DType::uint8 || type == DType::uint16 || type == DType::uint32;
 }
 
+int32_t maxVal(DType type) {
+    constexpr int32_t plusInf = 0x7f800000;
+    return isFloat(type) ? plusInf : int32_t((1 << (sizeofType(type) * 8 - 1)) - 1);
+}
+
+int32_t minVal(DType type) {
+    constexpr int32_t minusInf = 0xff800000;
+    return isFloat(type) ? minusInf : int32_t(-1 << (sizeofType(type) * 8 - 1));
+}
+
 bool hasScale(DType type) { return isInt(type); }
 
 int scaleBiasWidth(DType type) { return hasScale(type) ? 2 : 1; }
@@ -1449,9 +1459,6 @@ void SlicePrivate::acpr(const PData &pdata) {
     // Now add hdims for each loop deeper the last endfor (end of the ALU accumulate)
     addDims(NdlType::ACPR, acprDims, pdata, _pram.loadNesting, false, true);
 
-    // In bypass mode no HDIMs are supported
-    assert(!aluInBypass || acprDims.size() == 3 && "No ACT loop supported in bypass mode");
-
     // And repeat for the number of executions of ALU
     acprDims.push_back({DimType::H, RegDimTag::T, outerIterCount(_forStack, _pram.loadNesting)});
 
@@ -1665,7 +1672,14 @@ QData SlicePrivate::actClamp(
     const int weightSize = sizeofType(weightType);
     const DType partialType = pdata.elementType();
     DType resultType = dataType;
-    int resultCount = elementCount(pdata.subShape());
+    const Shape subShape = pdata.subShape();
+    int resultCount = elementCount(subShape);
+    if (!(subShape.size() == 1 || (subShape.size() == 2 && subShape[0].count == 1))) {
+        // Note: we have no issues with more generic shapes, this is just to catch usage errors
+        llvm::errs() << "Act PData must be 1D or 2D with 1 row, got: " << subShape << "\n";
+        assert(false && "PData shape must be 1D");
+    }
+    assert(resultCount <= HwInfo::act_width && "pdata size must fit Act width");
 
     // Check that data, weight and partial types are compatible
     assert(
@@ -2094,7 +2108,12 @@ PData Alu::accumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     return d->aluAccumulate(idata, acc);
 }
 
-PData Alu::load(const IData &idata) { return d->aluAccumulate(idata, ALUOp1Mode::BOR); }
+PData Alu::load(const IData &idata) {
+    PData pData = d->aluAccumulate(idata, ALUOp1Mode::BOR);
+    assert(pData.dim(0) == 1 && "ALU load can't exceed ACT width");
+    // Make PData 1D
+    return PData({pData.shape()[1]}, pData.elementType());
+}
 
 PData Alu::scalarProductAccumulate(const IData &idata, const WData &wdata, ALUOp1Mode acc) {
     // Check wdata is a scalar or tensor with shape {1}
@@ -2183,23 +2202,18 @@ int Alu::kerWidth() const { return 3; }
 //
 
 QData Act::load(const PData &pdata) {
-    bool isFlt = isFloat(pdata.elementType());
-    constexpr int32_t minusInf = 0xff800000;
-    constexpr int32_t plusInf = 0x7f800000;
-    const int32_t clipMin = isFlt ? minusInf : std::numeric_limits<int32_t>::min();
-    const int32_t clipMax = isFlt ? plusInf : std::numeric_limits<int32_t>::max();
-    return d->actClamp(pdata, 0, 0, clipMin, clipMax, torq_hw::ACTMode::ACT);
+    DType dataType = pdata.elementType();
+    return d->actClamp(pdata, 0, 0, minVal(dataType), maxVal(dataType), ACTMode::ACT);
 }
 
-QData Act::clamp(const PData &pdata, int clipMin, int clipMax, torq_hw::ACTMode actMode) {
+QData Act::clamp(const PData &pdata, int clipMin, int clipMax, ACTMode actMode) {
     return d->actClamp(pdata, 0, 0, clipMin, clipMax, actMode);
 }
 
 QData Act::rescaleClamp(
-    const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax,
-    torq_hw::ACTMode actMode
+    const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax
 ) {
-    return d->actRescaleClamp(pdata, bdata, shift, zeroPoint, clipMin, clipMax, actMode);
+    return d->actRescaleClamp(pdata, bdata, shift, zeroPoint, clipMin, clipMax, ACTMode::ACT);
 }
 
 int Act::width(DType iType, DType wType, bool biasScalePerItem) const {

@@ -337,6 +337,10 @@ class BData : public DataT<BData> {
 
   public:
     static std::string name() { return "BData"; }
+
+    // It's not possible to index BData (not supported by HW)
+    BData operator[](IterVar index) const = delete;
+    BData operator[](const Indexes &ixs) const = delete;
 };
 
 // Data in PRAM
@@ -436,15 +440,18 @@ class Alu : SliceComponent {
 
   public:
     // Load input data of shape {N} to PRam
-    // N can be any value up to iWidth(iType)
+    // N can be any value up to act.width(iType)
+    // idata: input tensor data in iram
+    // return: pram data of shape {N}:pType
+    // where pType is int32 for integer input, iType for float input
     PData load(const IData &idata);
 
     // Accumulate an input of shape {N}
-    // N can be any value up to iWidth(iType)
+    // N can be any value up to act.width(iType)
     // idata: input tensor data in iram
     // acc: accumulate operation (accumulate with ALUOp1Mode::BOR is equivalent to load()
     // return: pram data of shape {ceil(N/act::width), act::width}:pType
-    // where pType is int32 for integer input, fp32 for float input
+    // where pType is int32 for integer input, iType for float input
     // if N < act::width the result will be {1, N}:pType
     PData accumulate(const IData &idata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC);
 
@@ -511,7 +518,7 @@ class Act : SliceComponent {
     // N can be up to width(iType)
     QData load(const PData &pdata);
 
-    // Perform clamp on partials of shape {N}
+    // Perform clamp on partials of shape {N} or {1, N}
     // N can be up to width(iType)
     // clamped return: result data of shape {M}
     // M can be less than M if multiple partials are combined to compute each result value
@@ -521,30 +528,31 @@ class Act : SliceComponent {
         torq_hw::ACTMode actMode = torq_hw::ACTMode::ACT
     );
 
-    // Perform rescaling and clamp on partials of shape {N}
+    // Perform rescaling and clamp on partials of shape {N} or {1, N}
     // N can be up to width(iType)
     // return: result data of shape {M}
-    // M can be less than M if multiple partials are combined to compute each result value
+    // M can be less than N if multiple partials are combined to compute each result value
     //
-    // In case of actMode = torq_hw::ACTMode::ACT each value in the generated QData
-    // is computed according to the following pseudocode:
-    // int32_t t0 = pdata + bdata[og][0];
-    // int64_t t1 = t0 * bdata[og][1];
+    // In case of integer partials:
+    // bdata must have shape {2}:int32 or {BS,2}:int32 where BS can be 1, 2 or 4
+    // Each value i in the generated QData is computed according to the following pseudocode:
+    // int32_t t0 = pdata + bdata[i % BS][0];
+    // int64_t t1 = t0 * bdata[i % BS][1];
     // int64_t t2 = t1 + (1 << (shift * 4 - 1));
     // int64_t t3 = t2 >> (shift * 4);
     // int64_t t4 = t3 + zeroPoint;
     // int16_t t5 = (t4 < clipMin) ? clipMin : (t4 > clipMax) ? clipMax : t4;
     // qdata = t5;
-    // Where og is the outer group index if pdata is 3D, otherwise og=0.
     //
-    // In case of floating point partials the rescaling is not available and shift must be 0.
-    // Furthermore clipMax and clipMin are interpreted as float values:
-    // float t0 = pdata + bdata[og][0];
+    // In case of floating point partials the rescaling is not available so
+    // bdata must have shape {1}:float32 or {BS,1}:float32 where BS can be 1, 2 or 4
+    // Furthermore shift must be 0 and clipMax and clipMin are interpreted as float values.
+    // Each value i in the generated QData is computed according to the following pseudocode:
+    // float t0 = pdata + bdata[i % BS][0];
     // float t1 = (t0<clipMin) ? clipMin : (t0>clipMax) ? clipMax : t0;
     // qdata = t1;
     QData rescaleClamp(
-        const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax,
-        torq_hw::ACTMode actMode = torq_hw::ACTMode::ACT
+        const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax
     );
 
     // Max number of output items that can be computed in parallel for the given in and weight type
@@ -697,6 +705,10 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Iterator &iterator);
 // Utility functions
 //
 
+// return the DType corresponding to the given MLIR type
+// none if no corresponding type exists
+DType getDType(mlir::Type mlirType);
+
 // return size in bytes of the given type
 int sizeofType(DType type);
 
@@ -709,9 +721,11 @@ bool isInt(DType type);
 // return true if the given type is an unsigned type
 bool isUnsigned(DType type);
 
-// return the DType corresponding to the given MLIR type
-// none if no corresponding type exists
-DType getDType(mlir::Type mlirType);
+// Return the max value for the given DType as an integer constant
+int32_t maxVal(DType type);
+
+// Return the min value for the given DType as an integer constant
+int32_t minVal(DType type);
 
 // Return true if the given type supports scale in the activation unit
 bool hasScale(DType type);
