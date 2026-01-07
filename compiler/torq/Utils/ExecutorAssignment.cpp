@@ -6,6 +6,16 @@ namespace mlir::syna::torq {
 static std::string EXECUTOR_ATTR_NAME = "torq-executor";
 static std::string COMPILE_TIME_CONST_ATTR_NAME = "torq-compile-time-const";
 
+torq_hl::Executor getTargetExecutor(Operation *op) {
+    auto executor = op->getAttr(EXECUTOR_ATTR_NAME);
+
+    if (!executor) {
+        return torq_hl::Executor::Slice;
+    }
+
+    return cast<torq_hl::ExecutorAttr>(executor).getValue();
+}
+
 torq_hl::Executor getTargetExecutor(Operation *op, torq_hl::Executor defaultExecutor) {
     auto executor = op->getAttr(EXECUTOR_ATTR_NAME);
 

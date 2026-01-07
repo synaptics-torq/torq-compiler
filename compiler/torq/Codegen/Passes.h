@@ -76,6 +76,8 @@ void addTorqComprehensiveBufferizePasses(
     std::optional<bufferization::BufferizationOptions::DefaultMemorySpaceFn> memSpaceFn
 );
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkHostExecutorPass();
+
 //----------------------------------------------------------------------------//
 // Registration
 //----------------------------------------------------------------------------//

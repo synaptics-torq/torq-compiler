@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "PassesDetail.h"
-#include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
+// #include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -38,12 +38,7 @@
 namespace mlir::syna::torq {
 
 extern llvm::cl::opt<bool> clDisableHost;
-
-llvm::cl::opt<bool> clFallbackF32ToHost(
-    "torq-fallback-f32-to-host",
-    llvm::cl::desc("Fallback to host execution of any operation that uses f32"),
-    llvm::cl::init(true)
-);
+extern llvm::cl::opt<bool> clFallbackF32ToHost;
 
 namespace {
 
@@ -277,9 +272,13 @@ static LogicalResult tileMatMulForSlices(
         scf::SCFTileAndFuseOptions().setTilingOptions(scf::SCFTilingOptions().setTileSizes(tileSizes
         ));
 
-    // Avoid fusing img2col operations as we want to run them on the host in one go
+    // Avoid fusing operations that do not run on the slice
     auto fusionControlFn = [](tensor::ExtractSliceOp, OpResult op, bool) {
-        bool fuse = !isIm2ColOp(op.getDefiningOp<linalg::LinalgOp>());
+        auto srcOp = op.getDefiningOp<linalg::LinalgOp>();
+        if (!srcOp) {
+            return std::make_tuple(false, false);
+        }
+        bool fuse = getTargetExecutor(srcOp, torq_hl::Executor::Slice) == torq_hl::Executor::Slice;
         return std::make_tuple(fuse, false);
     };
     options.setFusionControlFn(fusionControlFn);
@@ -432,73 +431,14 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
         if (clFallbackF32ToHost && !isa<linalg::TransposeOp>(srcOp) &&
             !isa<linalg::FillOp>(srcOp)) {
 
-            // FIXME: this is a quick workaround to avoid tiling operations that we want on the host
-            auto isFp32Op = false;
-
+            // TODO: move to MarkHostExecutorPass
             if (isIm2ColOp(srcOp)) {
                 setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
                 return success();
             }
 
-            for (auto operand : srcOp->getOperands()) {
-                if (auto rankedType = dyn_cast<RankedTensorType>(operand.getType())) {
-                    if (rankedType.getElementType().isF32()) {
-                        isFp32Op = true;
-                        break;
-                    }
-                }
-                else if (operand.getType().isF32()) {
-                    isFp32Op = true;
-                    break;
-                }
-            }
-
-            // force fp32 ops to run on host and do not tile them
-            if (isFp32Op && !clDisableHost) {
-
-                std::string failReason;
-                std::string opName;
-                int32_t minIntValue = 0;
-                int32_t maxIntValue = 0;
-                float minFloatValue = 0.0f;
-                float maxFloatValue = 0.0f;
-
-                bool canExecuteOnTorq = false;
-
-                // check if the operation can be lowered to a torq kernel
-                if (isTorqCastOp(srcOp, opName, failReason)) {
-                    canExecuteOnTorq = true;
-                }
-                else if (isTorqNegateOp(srcOp, failReason)) {
-                    canExecuteOnTorq = true;
-                }
-                else if (isTorqAbsOp(srcOp, failReason)) {
-                    canExecuteOnTorq = true;
-                }
-                else if (isTorqCeilOp(srcOp, failReason)) {
-                    canExecuteOnTorq = true;
-                }
-                else if (isTorqClampOp(
-                             srcOp, minIntValue, maxIntValue, minFloatValue, maxFloatValue,
-                             failReason
-                         )) {
-                    canExecuteOnTorq = true;
-                }
-                else if (isTorqFloorOp(srcOp, failReason)) {
-                    canExecuteOnTorq = true;
-                }
-                else if (isTorqMatMul(srcOp, failReason)) {
-                    canExecuteOnTorq = true;
-                }
-
-                // if not possible we want to run it on the host
-                if (!canExecuteOnTorq) {
-                    rewriter.modifyOpInPlace(srcOp, [&]() {
-                        setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
-                    });
-
-                    return success();
-                }
+            if (getTargetExecutor(srcOp) == torq_hl::Executor::Host) {
+                return success();
             }
         }
 

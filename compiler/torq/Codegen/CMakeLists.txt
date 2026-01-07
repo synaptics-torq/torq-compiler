@@ -36,6 +36,7 @@ set(sources
     ScalarsToTensorsPass.cpp
     FoldConvertPass.cpp
     CompileTimeConstComputePass.cpp
+    MarkHostExecutorPass.cpp
 )
 
 if(TORQ_ENABLE_TORQ_GENERIC)

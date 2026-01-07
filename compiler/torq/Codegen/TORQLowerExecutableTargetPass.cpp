@@ -139,6 +139,8 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     // Handles valid pad operations
     funcPm.addPass(createValidToSamePadPass());
 
+    funcPm.addPass(createMarkHostExecutorPass());
+
     // tile the linalg ops or tilingInterface ops
     funcPm.addPass(createLramTilePass());
     funcPm.addPass(createCanonicalizerPass());
@@ -216,6 +218,9 @@ void TORQLowerExecutableTargetPass::addCpuPasses(OpPassManager &pm) {
     if (!clDisableCSS) {
 
         auto &funcPm = pm.nest<func::FuncOp>();
+
+        // mark any new operations that were created after the last time this pass was run
+        funcPm.addPass(createMarkHostExecutorPass());
 
         // tile the linalg ops or tilingInterface op before lowering to css tasks
         funcPm.addPass(createDtcmTilePass());

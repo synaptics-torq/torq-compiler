@@ -331,4 +331,18 @@ def CompileTimeConstCompute :
         ];
 }
 
+def MarkHostExecutor :
+    InterfacePass<"torq-mark-host-executor",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Mark host executor";
+
+    let constructor =
+        "mlir::syna::torq::createMarkHostExecutorPass()";
+
+    let dependentDialects = [
+        "linalg::LinalgDialect"
+    ];
+}
+
 #endif // IREE_CODEGEN_TORQ_PASSES
