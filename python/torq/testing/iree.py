@@ -18,6 +18,7 @@ from .aws_fpga import FpgaSession
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
 from torq.performance import annotate_host_profile_from_files
+from torq.model_profiler.generate_perfetto_combined_report import generate_html, extract_model_name, extract_perfetto_summary
 
 TOPDIR = Path(__file__).parent.parent.parent.parent
 
@@ -639,6 +640,15 @@ def torq_results(request, torq_results_dir, mlir_io_spec):
             shutil.copy(torq_results_dir / 'annotated_profile.xlsx', profiling_output_dir / f'{request.node.name}.xlsx')
         if (torq_results_dir / 'trace.pb').exists():
             shutil.copy(torq_results_dir / 'trace.pb', profiling_output_dir / f'{request.node.name}.pb')
+        
+        # Generate combined HTML report with all profiling artifacts
+        pb_files = sorted(profiling_output_dir.glob('*.pb'))
+        if pb_files:
+            html_content = generate_html(pb_files)
+            html_output_path = profiling_output_dir / 'perfetto_viewer.html'
+            with open(html_output_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            print(f"✓ Generated profiling report: {html_output_path}")
 
     output_paths = create_output_paths(torq_results_dir, mlir_io_spec.outputs)
     return load_outputs(mlir_io_spec.outputs, output_paths)
