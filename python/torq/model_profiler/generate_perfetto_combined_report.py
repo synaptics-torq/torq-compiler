@@ -18,6 +18,18 @@ def extract_model_name(filename):
     return filename.replace('.pb', '')
 
 
+def extract_model_type(model_name, filename=''):
+    """Extract the model type from the test function name pattern: test_<type>_"""
+    filename_lower = filename.lower()
+    
+    # Extract type from test_<type>_ pattern
+    match = re.search(r'test_([^_]+)_', filename_lower)
+    if match:
+        return match.group(1)
+    
+    return 'other'
+
+
 def extract_perfetto_summary(pb_file_path):
     """Extract summary information from Perfetto .pb file by reading readable text sections"""
     try:
@@ -123,9 +135,14 @@ def get_pb_files():
 def generate_html(pb_files):
     """Generate HTML content with all trace files"""
     
+    # Collect all model types for filter buttons
+    model_types = set()
+    
     trace_items = []
     for i, pb_file in enumerate(pb_files):
         model_name = extract_model_name(pb_file.name)
+        model_type = extract_model_type(model_name, pb_file.name)
+        model_types.add(model_type)
         file_path = pb_file.name
         
         # Read and base64 encode the file
@@ -242,6 +259,20 @@ def generate_html(pb_files):
                         </div>
                     </div>'''
             
+            # Add overlap information
+            if summary['dma_time'] is not None and summary['dma_only_time'] is not None and summary['compute_time'] is not None:
+                overlap_time = summary['dma_time'] - summary['dma_only_time']
+                overlap_percent = (overlap_time / summary['total_duration'] * 100) if summary['total_duration'] else 0
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">Overlap (DMA vs Compute)</div>
+                        <div class="metric-value">{format_duration(overlap_time)}</div>
+                        <div class="metric-percent">{overlap_percent:.2f}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: {min(overlap_percent, 100):.1f}%"></div>
+                        </div>
+                    </div>'''
+            
             if summary['idle_time'] is not None:
                 metrics_html += f'''
                     <div class="metric-card">
@@ -293,11 +324,16 @@ def generate_html(pb_files):
                 summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Idle</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{format_duration(summary['idle_time'])}</span><span class='tile-percent'>{summary['idle_percent']:.1f}%</span></div></div>")
             collapsed_summary = ''.join(summary_tiles)
         
-        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" data-encoded="{encoded_data}">
+        # Create type badge
+        type_display = model_type.upper() if model_type != 'other' else 'Other'
+        type_badge = f'<span class="type-badge type-badge-{model_type}">{type_display}</span>'
+        
+        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" data-encoded="{encoded_data}" data-type="{model_type}" data-original-index="{i}">
             <div class="trace-header">
                 <div class="trace-info">
                     <span class="expand-icon">▶</span>
                     <div class="trace-name">{model_name}</div>
+                    {type_badge}
                 </div>
                 <div class="trace-summary">
                     {collapsed_summary}
@@ -308,6 +344,14 @@ def generate_html(pb_files):
         trace_items.append(trace_item)
     
     traces_html = '\n\n'.join(trace_items)
+    
+    # Generate filter buttons
+    filter_buttons = []
+    filter_buttons.append('<button class="filter-btn active" onclick="filterByType(\'all\')" data-type="all">All</button>')
+    for model_type in sorted(model_types):
+        display_type = model_type.upper() if model_type != 'other' else 'Other'
+        filter_buttons.append(f'<button class="filter-btn" onclick="filterByType(\'{model_type}\')" data-type="{model_type}">{display_type}</button>')
+    filters_html = '\n                '.join(filter_buttons)
     
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
@@ -387,7 +431,54 @@ def generate_html(pb_files):
             box-shadow: 0 4px 20px rgba(0,0,0,0.08);
         }}
         
-        .search-box {{
+        .filter-section {{
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #e2e8f0;
+        }}
+        
+        .filter-label {{
+            font-size: 13px;
+            font-weight: 600;
+            color: #4a5568;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        
+        .filter-buttons {{
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }}
+        
+        .filter-btn {{
+            padding: 8px 16px;
+            border: 2px solid #e2e8f0;
+            background: white;
+            color: #4a5568;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.2s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }}
+        
+        .filter-btn:hover {{
+            border-color: #667eea;
+            color: #667eea;
+            transform: translateY(-1px);
+        }}
+        
+        .filter-btn.active {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-color: #667eea;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+        }}
+                .search-box {{
             position: relative;
             width: 100%;
         }}
@@ -480,6 +571,66 @@ def generate_html(pb_files):
             color: #2d3748;
             font-size: 16px;
             word-wrap: break-word;
+        }}
+        
+        .type-badge {{
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 12px;
+            flex-shrink: 0;
+        }}
+        
+        .type-badge-mlir {{
+            background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(72, 187, 120, 0.3);
+        }}
+        
+        .type-badge-tosa {{
+            background: linear-gradient(135deg, #ed8936 0%, #dd6b20 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(237, 137, 54, 0.3);
+        }}
+        
+        .type-badge-onnx {{
+            background: linear-gradient(135deg, #4299e1 0%, #3182ce 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(66, 153, 225, 0.3);
+        }}
+        
+        .type-badge-keras {{
+            background: linear-gradient(135deg, #d53f8c 0%, #b83280 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(213, 63, 140, 0.3);
+        }}
+        
+        .type-badge-tflite {{
+            background: linear-gradient(135deg, #f6ad55 0%, #ed8936 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(246, 173, 85, 0.3);
+        }}
+        
+        .type-badge-torch {{
+            background: linear-gradient(135deg, #fc8181 0%, #f56565 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(252, 129, 129, 0.3);
+        }}
+        
+        .type-badge-vmfb {{
+            background: linear-gradient(135deg, #9f7aea 0%, #805ad5 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(159, 122, 234, 0.3);
+        }}
+        
+        .type-badge-other {{
+            background: linear-gradient(135deg, #a0aec0 0%, #718096 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(160, 174, 192, 0.3);
         }}
         
         .trace-summary {{
@@ -765,6 +916,12 @@ def generate_html(pb_files):
         </div>
         
         <div class="controls">
+            <div class="filter-section">
+                <div class="filter-label">Filter by Type</div>
+                <div class="filter-buttons">
+                    {filters_html}
+                </div>
+            </div>
             <div class="search-box">
                 <input 
                     type="text" 
@@ -863,23 +1020,85 @@ def generate_html(pb_files):
             }}
         }}
         
+        let currentTypeFilter = 'all';
+        
+        function filterByType(type) {{
+            currentTypeFilter = type;
+            
+            // Update active button
+            const buttons = document.querySelectorAll('.filter-btn');
+            buttons.forEach(btn => {{
+                if (btn.getAttribute('data-type') === type) {{
+                    btn.classList.add('active');
+                }} else {{
+                    btn.classList.remove('active');
+                }}
+            }});
+            
+            // Apply filters
+            filterTraces();
+        }}
+        
         function filterTraces() {{
             const searchInput = document.getElementById('searchInput').value.toLowerCase();
             const traceItems = document.querySelectorAll('.trace-item');
             const noResults = document.getElementById('noResults');
+            const traceGrid = document.querySelector('.trace-grid');
             let visibleCount = 0;
             
-            traceItems.forEach(item => {{
+            // Split search input into words for flexible matching
+            const searchWords = searchInput.trim().split(/\s+/).filter(word => word.length > 0);
+            
+            // Create array of items with their match scores
+            const itemsWithScores = Array.from(traceItems).map(item => {{
                 const name = item.querySelector('.trace-name').textContent.toLowerCase();
+                const itemType = item.getAttribute('data-type');
+                const originalIndex = parseInt(item.getAttribute('data-original-index'));
                 
-                if (name.includes(searchInput)) {{
-                    item.classList.remove('hidden');
+                // Calculate match score (number of search words that match)
+                let matchScore = 0;
+                if (searchWords.length > 0) {{
+                    matchScore = searchWords.filter(word => name.includes(word)).length;
+                }}
+                
+                const matchesSearch = searchWords.length === 0 || matchScore > 0;
+                const matchesType = currentTypeFilter === 'all' || itemType === currentTypeFilter;
+                const isVisible = matchesSearch && matchesType;
+                
+                return {{
+                    element: item,
+                    score: matchScore,
+                    visible: isVisible,
+                    originalIndex: originalIndex
+                }};
+            }});
+            
+            // Sort: if search is empty, use original order; otherwise sort by score
+            if (searchWords.length === 0) {{
+                itemsWithScores.sort((a, b) => a.originalIndex - b.originalIndex);
+            }} else {{
+                itemsWithScores.sort((a, b) => {{
+                    if (a.visible && b.visible) {{
+                        return b.score - a.score;  // Higher score first
+                    }}
+                    if (a.visible) return -1;
+                    if (b.visible) return 1;
+                    return 0;
+                }});
+            }}
+            
+            // Reorder DOM elements and update visibility
+            const noResultsElement = document.getElementById('noResults');
+            itemsWithScores.forEach(item => {{
+                if (item.visible) {{
+                    item.element.classList.remove('hidden');
                     visibleCount++;
                 }} else {{
-                    item.classList.add('hidden');
-                    // Collapse hidden items
-                    item.classList.remove('expanded');
+                    item.element.classList.add('hidden');
+                    item.element.classList.remove('expanded');
                 }}
+                // Move element to maintain sorted order
+                traceGrid.insertBefore(item.element, noResultsElement);
             }});
             
             if (visibleCount === 0) {{
