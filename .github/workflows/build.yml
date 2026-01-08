@@ -183,7 +183,7 @@ jobs:
   test_aws_fpga:    
     name: Test with AWS FPGA on ${{ matrix.chip_group }}
 
-    runs-on: torq-fpga-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ${{ vars.DISABLE_TESTS != 'true' && format('torq-fpga-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
 
     if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name || '', 'test-aws') }}
 
