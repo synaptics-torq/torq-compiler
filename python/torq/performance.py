@@ -511,7 +511,7 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
         
         # Compute Metrics and Render Overview
         metrics_result = perfetto_logger.compute_runtime_metrics(perfetto_rows, overall_start, overall_end)
-        perfetto_logger.render_overview_tracks("Host Profile", overall_start, metrics_result['metrics'], trace_writer)
+        perfetto_logger.render_overview_tracks("Host Profile", metrics_result['overall_start'], metrics_result['metrics'], trace_writer)
         
         trace_writer.close()
 
@@ -664,7 +664,7 @@ def write_annotated_profile(profiling_data, program_ops, output_file, perfetto_f
         
         # Compute Metrics and Render Overview
         metrics_result = perfetto_logger.compute_runtime_metrics(perfetto_rows, overall_start, overall_end)
-        perfetto_logger.render_overview_tracks("NSS Profile", overall_start, metrics_result['metrics'], trace_writer)
+        perfetto_logger.render_overview_tracks("NSS Profile", metrics_result['overall_start'], metrics_result['metrics'], trace_writer)
         
         trace_writer.close()
 

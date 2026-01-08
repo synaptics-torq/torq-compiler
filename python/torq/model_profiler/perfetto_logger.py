@@ -35,6 +35,26 @@ def cycles_to_ns(cycles):
     return int(cycles * 1000 / CLOCK_FREQ_MHZ)
 
 
+def format_time_duration(ns):
+    """
+    Format nanosecond duration into human-readable string with appropriate unit.
+    
+    Args:
+        ns: Duration in nanoseconds (integer)
+        
+    Returns:
+        Formatted string like "1.234s", "456.789ms", "123.456µs", or "123ns"
+    """
+    if ns >= 1_000_000_000:  # >= 1 second
+        return f"{ns / 1_000_000_000:.3f}s"
+    elif ns >= 1_000_000:  # >= 1 millisecond
+        return f"{ns / 1_000_000:.3f}ms"
+    elif ns >= 1_000:  # >= 1 microsecond
+        return f"{ns / 1_000:.3f}µs"
+    else:
+        return f"{ns}ns"
+
+
 # =============================================================================
 # DATA STRUCTURES
 # =============================================================================
@@ -536,6 +556,12 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
     Returns:
         Dictionary containing metrics, overall_start, overall_end
     """
+    # Convert from microseconds to nanoseconds (ensure integer conversion)
+    if overall_start is not None:
+        overall_start = int(overall_start * 1000)
+    if overall_end is not None:
+        overall_end = int(overall_end * 1000)
+
     dma_intervals = []
     slice_intervals = []
     slice_0_intervals = []
@@ -547,6 +573,10 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
             invocation_name, operation, slice_id, slice_0_used, slice_1_used, 
             dma_in_used, dma_out_used) = row
         
+        # Convert microseconds to nanoseconds (ensure integer conversion)
+        start_time = int(start_time * 1000)
+        end_time = int(end_time * 1000)
+
         if dma_in_used or dma_out_used:
             dma_intervals.append((start_time, end_time))
         
@@ -692,8 +722,8 @@ def create_overview_event(process_name, thread_name, label, metric, base_start):
     start = base_start
     end = base_start + duration
     
-    # Build name with duration and percent (if available)
-    name = f"{label}: {duration}"
+    # Build name with formatted duration and percent (if available)
+    name = f"{label}: {format_time_duration(duration)}"
     if 'percent' in metric:
         name += f" ({metric['percent']:.2f}%)"
     
@@ -750,6 +780,12 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
         overall_start: Start timestamp of the entire profile
         overall_end: End timestamp of the entire profile
     """
+    # Convert from microseconds to nanoseconds (ensure integer conversion)
+    if overall_start is not None:
+        overall_start = int(overall_start * 1000)
+    if overall_end is not None:
+        overall_end = int(overall_end * 1000)
+
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
     
     # Deduplicate events with same action_id and timestamps
@@ -761,6 +797,10 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
         # Handle new Excel (13-tuple) format
         dispatch_id, job_id, start_time, end_time, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used = row_data
         
+        # Convert microseconds to nanoseconds (ensure integer conversion)
+        start_time = int(start_time * 1000)
+        end_time = int(end_time * 1000)
+
         # Create unique key based on action_id and timestamps
         event_key = (dispatch_id, start_time, end_time)
         
@@ -930,8 +970,9 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
         ("07 OVERVIEW CSS", "CSS total", metrics.get('CSS', {'time': 0})),
         ("08 OVERVIEW DMA ONLY", "DMA ONLY (exclusive)", metrics.get('DMA_ONLY', {'time': 0})),
         ("09 OVERVIEW COMPUTE ONLY", "COMPUTE ONLY (exclusive)", metrics.get('COMPUTE_ONLY', {'time': 0})),
-        ("10 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
-        ("11 OVERALL", "OVERALL", metrics['OVERALL']),
+        ("10 OVERVIEW DMA COMPUTE OVERLAP", "DMA+COMPUTE overlap", metrics.get('DMA_COMPUTE_OVERLAP', {'time': 0})),
+        ("11 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
+        ("12 OVERALL", "OVERALL", metrics['OVERALL']),
     ]
     
     for thread_name, label, metric in overview_tracks:

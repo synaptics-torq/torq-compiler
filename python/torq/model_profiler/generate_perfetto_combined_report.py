@@ -54,70 +54,99 @@ def extract_perfetto_summary(pb_file_path):
             'slice_percent': None,
             'css_time': None,
             'css_percent': None,
+            'overlap_time': None,
+            'overlap_percent': None,
             'idle_time': None,
             'idle_percent': None,
             'available': False
         }
+        # Note: time values stored as formatted strings (e.g., "47.545ms"), percent as strings (e.g., "99.94")
         
-        # Extract overall duration
-        overall_match = re.search(r'OVERALL:\s*(\d+)', content)
+        # Extract formatted strings directly from .pb file (no parsing/reformatting needed)
+        
+        # Extract OVERALL duration - maps to "12 OVERALL"
+        # Match OVERALL: followed by time value (protobuf has binary data, so don't require newline before)
+        overall_match = re.search(r'OVERALL:\s*([0-9.]+[a-zµμ]+)', content, re.IGNORECASE)
         if overall_match:
-            summary['total_duration'] = int(overall_match.group(1))
+            summary['total_duration'] = overall_match.group(1)  # Store formatted string directly (e.g., "47.347ms")
             summary['available'] = True
         
-        # Extract DMA+CDMA combined total
-        dma_combined_match = re.search(r'DMA\+CDMA\s+total:\s*(\d+)\s*\(([0-9.]+)%\)', content)
+        # Extract DMA+CDMA combined total - maps to "00 OVERVIEW DMA COMBINED"
+        # Exact match: "DMA+CDMA total:"
+        dma_combined_match = re.search(r'DMA\+CDMA\s+total:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if dma_combined_match:
-            summary['dma_time'] = int(dma_combined_match.group(1))
-            summary['dma_percent'] = float(dma_combined_match.group(2))
+            summary['dma_time'] = dma_combined_match.group(1)  # e.g., "47.545ms"
+            summary['dma_percent'] = dma_combined_match.group(2)  # e.g., "99.94"
         
-        # Extract DMA ONLY (exclusive) statistics
-        dma_only_match = re.search(r'DMA\s+ONLY\s*\([^)]*\):\s*(\d+)\s*\(([0-9.]+)%\)', content)
+        # Extract DMA ONLY (exclusive) - maps to "08 OVERVIEW DMA ONLY"
+        # Exact match: "DMA ONLY (exclusive):"
+        dma_only_match = re.search(r'DMA\s+ONLY\s*\(exclusive\):\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if dma_only_match:
-            summary['dma_only_time'] = int(dma_only_match.group(1))
-            summary['dma_only_percent'] = float(dma_only_match.group(2))
+            summary['dma_only_time'] = dma_only_match.group(1)
+            summary['dma_only_percent'] = dma_only_match.group(2)
         
-        # Extract plain DMA total (without CDMA)
-        plain_dma_match = re.search(r'(?<!DMA\+)(?<!C)DMA\s+total:\s*(\d+)\s*\(([0-9.]+)%\)', content)
+        # Extract plain DMA total - maps to "02 OVERVIEW DMA"
+        # Must NOT match "DMA+CDMA total" or "DMA ONLY"
+        # Negative lookbehind ensures we don't match "DMA+CDMA" or within "DMA ONLY"
+        plain_dma_match = re.search(r'(?<![\+A-Z])DMA\s+total:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if plain_dma_match:
-            summary['cdma_time'] = int(plain_dma_match.group(1))
-            summary['cdma_percent'] = float(plain_dma_match.group(2))
+            summary['cdma_time'] = plain_dma_match.group(1)
+            summary['cdma_percent'] = plain_dma_match.group(2)
         
-        # Extract DMA In statistics (from track-level data)
-        dma_in_match = re.search(r'DMA[\s_-]*In[^|]*\|\s*dur=(\d+)\s*\(([0-9.]+)%\)', content)
+        # Extract CDMA total - maps to "03 OVERVIEW CDMA"  
+        # Must NOT match "DMA+CDMA total"
+        cdma_only_match = re.search(r'(?<!\+)CDMA\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        if cdma_only_match:
+            # Store actual CDMA value (currently not used in HTML but extracted for completeness)
+            pass
+        
+        # Extract DMA In statistics (from individual track data, not overview)
+        dma_in_match = re.search(r'DMA[\s_-]*In[^|]*\|\s*dur=([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if dma_in_match:
-            summary['dma_in_time'] = int(dma_in_match.group(1))
-            summary['dma_in_percent'] = float(dma_in_match.group(2))
+            summary['dma_in_time'] = dma_in_match.group(1)
+            summary['dma_in_percent'] = dma_in_match.group(2)
         
-        # Extract DMA Out statistics (from track-level data)
-        dma_out_match = re.search(r'DMA[\s_-]*Out[^|]*\|\s*dur=(\d+)\s*\(([0-9.]+)%\)', content)
+        # Extract DMA Out statistics (from individual track data, not overview)
+        dma_out_match = re.search(r'DMA[\s_-]*Out[^|]*\|\s*dur=([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if dma_out_match:
-            summary['dma_out_time'] = int(dma_out_match.group(1))
-            summary['dma_out_percent'] = float(dma_out_match.group(2))
+            summary['dma_out_time'] = dma_out_match.group(1)
+            summary['dma_out_percent'] = dma_out_match.group(2)
         
-        # Extract SLICE+CSS combined total
-        compute_combined_match = re.search(r'SLICE\+CSS\s+total:\s*(\d+)\s*\(([0-9.]+)%\)', content)
+        # Extract SLICE+CSS combined total - maps to "01 OVERVIEW COMPUTE COMBINED"
+        # Exact match: "SLICE+CSS total:"
+        compute_combined_match = re.search(r'SLICE\+CSS\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if compute_combined_match:
-            summary['compute_time'] = int(compute_combined_match.group(1))
-            summary['compute_percent'] = float(compute_combined_match.group(2))
+            summary['compute_time'] = compute_combined_match.group(1)
+            summary['compute_percent'] = compute_combined_match.group(2)
         
-        # Extract SLICE total (without CSS)
-        slice_match = re.search(r'(?<!SLICE\+)SLICE\s+total:\s*(\d+)\s*\(([0-9.]+)%\)', content)
+        # Extract SLICE total - maps to "04 OVERVIEW SLICE" (NOT SLICE 0 or SLICE 1)
+        # Must NOT match "SLICE+CSS total" or "SLICE 0 total" or "SLICE 1 total"
+        # Use negative lookbehind for "+" and word boundary to avoid "SLICE 0" or "SLICE 1"
+        slice_match = re.search(r'(?<!\+)SLICE\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if slice_match:
-            summary['slice_time'] = int(slice_match.group(1))
-            summary['slice_percent'] = float(slice_match.group(2))
+            summary['slice_time'] = slice_match.group(1)
+            summary['slice_percent'] = slice_match.group(2)
         
-        # Extract CSS statistics
-        css_match = re.search(r'CSS\s+total:\s*(\d+)\s*\(([0-9.]+)%\)', content)
+        # Extract CSS total - maps to "07 OVERVIEW CSS"
+        # Must NOT match "SLICE+CSS total"
+        css_match = re.search(r'(?<!\+)CSS\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if css_match:
-            summary['css_time'] = int(css_match.group(1))
-            summary['css_percent'] = float(css_match.group(2))
+            summary['css_time'] = css_match.group(1)
+            summary['css_percent'] = css_match.group(2)
         
-        # Extract idle time
-        idle_match = re.search(r'IDLE:\s*(\d+)\s*\(([0-9.]+)%\)', content)
+        # Extract DMA+COMPUTE overlap - maps to "10 OVERVIEW DMA COMPUTE OVERLAP"
+        # Exact match: "DMA+COMPUTE overlap:"
+        overlap_match = re.search(r'DMA\+COMPUTE\s+overlap:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        if overlap_match:
+            summary['overlap_time'] = overlap_match.group(1)
+            summary['overlap_percent'] = overlap_match.group(2)
+        
+        # Extract IDLE time - maps to "11 OVERVIEW IDLE"
+        # Match "IDLE:" followed by time value and percentage (protobuf has binary data)
+        idle_match = re.search(r'IDLE:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if idle_match:
-            summary['idle_time'] = int(idle_match.group(1))
-            summary['idle_percent'] = float(idle_match.group(2))
+            summary['idle_time'] = idle_match.group(1)
+            summary['idle_percent'] = idle_match.group(2)
         
         return summary
     except Exception as e:
@@ -153,12 +182,6 @@ def generate_html(pb_files):
         # Extract overview summary from pb file
         summary = extract_perfetto_summary(pb_file)
         
-        # Format duration with appropriate unit
-        def format_duration(microseconds):
-            if microseconds is None:
-                return 'N/A'
-            return f'{microseconds} µs'
-        
         # Build overview HTML
         overview_html = ''
         if summary['available']:
@@ -168,17 +191,17 @@ def generate_html(pb_files):
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">Total Duration</div>
-                        <div class="metric-value">{format_duration(summary['total_duration'])}</div>
+                        <div class="metric-value">{summary['total_duration']}</div>
                     </div>'''
             
             if summary['dma_time'] is not None:
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">DMA+CDMA Total</div>
-                        <div class="metric-value">{format_duration(summary['dma_time'])}</div>
-                        <div class="metric-percent">{summary['dma_percent']:.2f}%</div>
+                        <div class="metric-value">{summary['dma_time']}</div>
+                        <div class="metric-percent">{summary['dma_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['dma_percent']:.1f}%"></div>
+                            <div class="metric-bar-fill" style="width: {summary['dma_percent']}%"></div>
                         </div>
                     </div>'''
             
@@ -186,10 +209,10 @@ def generate_html(pb_files):
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">DMA Only (Exclusive)</div>
-                        <div class="metric-value">{format_duration(summary['dma_only_time'])}</div>
-                        <div class="metric-percent">{summary['dma_only_percent']:.2f}%</div>
+                        <div class="metric-value">{summary['dma_only_time']}</div>
+                        <div class="metric-percent">{summary['dma_only_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['dma_only_percent']:.1f}%"></div>
+                            <div class="metric-bar-fill" style="width: {summary['dma_only_percent']}%"></div>
                         </div>
                     </div>'''
             
@@ -197,10 +220,10 @@ def generate_html(pb_files):
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">DMA Total</div>
-                        <div class="metric-value">{format_duration(summary['cdma_time'])}</div>
-                        <div class="metric-percent">{summary['cdma_percent']:.2f}%</div>
+                        <div class="metric-value">{summary['cdma_time']}</div>
+                        <div class="metric-percent">{summary['cdma_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['cdma_percent']:.1f}%"></div>
+                            <div class="metric-bar-fill" style="width: {summary['cdma_percent']}%"></div>
                         </div>
                     </div>'''
             
@@ -208,10 +231,10 @@ def generate_html(pb_files):
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">DMA In Time</div>
-                        <div class="metric-value">{format_duration(summary['dma_in_time'])}</div>
-                        <div class="metric-percent">{summary['dma_in_percent']:.2f}%</div>
+                        <div class="metric-value">{summary['dma_in_time']}</div>
+                        <div class="metric-percent">{summary['dma_in_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['dma_in_percent']:.1f}%"></div>
+                            <div class="metric-bar-fill" style="width: {summary['dma_in_percent']}%"></div>
                         </div>
                     </div>'''
             
@@ -219,10 +242,10 @@ def generate_html(pb_files):
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">DMA Out Time</div>
-                        <div class="metric-value">{format_duration(summary['dma_out_time'])}</div>
-                        <div class="metric-percent">{summary['dma_out_percent']:.2f}%</div>
+                        <div class="metric-value">{summary['dma_out_time']}</div>
+                        <div class="metric-percent">{summary['dma_out_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['dma_out_percent']:.1f}%"></div>
+                            <div class="metric-bar-fill" style="width: {summary['dma_out_percent']}%"></div>
                         </div>
                     </div>'''
             
@@ -230,10 +253,10 @@ def generate_html(pb_files):
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">SLICE+CSS Total</div>
-                        <div class="metric-value">{format_duration(summary['compute_time'])}</div>
-                        <div class="metric-percent">{summary['compute_percent']:.2f}%</div>
+                        <div class="metric-value">{summary['compute_time']}</div>
+                        <div class="metric-percent">{summary['compute_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['compute_percent']:.1f}%"></div>
+                            <div class="metric-bar-fill" style="width: {summary['compute_percent']}%"></div>
                         </div>
                     </div>'''
             
@@ -241,10 +264,10 @@ def generate_html(pb_files):
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">SLICE Total</div>
-                        <div class="metric-value">{format_duration(summary['slice_time'])}</div>
-                        <div class="metric-percent">{summary['slice_percent']:.2f}%</div>
+                        <div class="metric-value">{summary['slice_time']}</div>
+                        <div class="metric-percent">{summary['slice_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['slice_percent']:.1f}%"></div>
+                            <div class="metric-bar-fill" style="width: {summary['slice_percent']}%"></div>
                         </div>
                     </div>'''
             
@@ -252,24 +275,24 @@ def generate_html(pb_files):
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">CSS Time</div>
-                        <div class="metric-value">{format_duration(summary['css_time'])}</div>
-                        <div class="metric-percent">{summary['css_percent']:.2f}%</div>
+                        <div class="metric-value">{summary['css_time']}</div>
+                        <div class="metric-percent">{summary['css_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['css_percent']:.1f}%"></div>
+                            <div class="metric-bar-fill" style="width: {summary['css_percent']}%"></div>
                         </div>
                     </div>'''
             
-            # Add overlap information
-            if summary['dma_time'] is not None and summary['dma_only_time'] is not None and summary['compute_time'] is not None:
-                overlap_time = summary['dma_time'] - summary['dma_only_time']
-                overlap_percent = (overlap_time / summary['total_duration'] * 100) if summary['total_duration'] else 0
+            # Extract overlap from .pb file - maps to "10 OVERVIEW DMA COMPUTE OVERLAP"
+            # Overlap = time when BOTH DMA/CDMA and COMPUTE (SLICE/CSS) are active simultaneously
+            # This is calculated in perfetto_logger.py using intersect_intervals(DMA, COMPUTE)
+            if summary['overlap_time'] is not None:
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">Overlap (DMA vs Compute)</div>
-                        <div class="metric-value">{format_duration(overlap_time)}</div>
-                        <div class="metric-percent">{overlap_percent:.2f}%</div>
+                        <div class="metric-value">{summary['overlap_time']}</div>
+                        <div class="metric-percent">{summary['overlap_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {min(overlap_percent, 100):.1f}%"></div>
+                            <div class="metric-bar-fill" style="width: {min(float(summary['overlap_percent']), 100)}%"></div>
                         </div>
                     </div>'''
             
@@ -277,10 +300,10 @@ def generate_html(pb_files):
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">Idle Time</div>
-                        <div class="metric-value">{format_duration(summary['idle_time'])}</div>
-                        <div class="metric-percent">{summary['idle_percent']:.2f}%</div>
+                        <div class="metric-value">{summary['idle_time']}</div>
+                        <div class="metric-percent">{summary['idle_percent']}%</div>
                         <div class="metric-bar">
-                            <div class="metric-bar-fill idle" style="width: {summary['idle_percent']:.1f}%"></div>
+                            <div class="metric-bar-fill idle" style="width: {summary['idle_percent']}%"></div>
                         </div>
                     </div>'''
             
@@ -307,21 +330,19 @@ def generate_html(pb_files):
         if summary['available']:
             summary_tiles = []
             if summary['total_duration']:
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Duration</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{format_duration(summary['total_duration'])}</span></div></div>")
+                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Duration</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['total_duration']}</span></div></div>")
             
             if summary['dma_time'] is not None:
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>DMA+CDMA</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{format_duration(summary['dma_time'])}</span><span class='tile-percent'>{summary['dma_percent']:.1f}%</span></div></div>")
+                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>DMA+CDMA</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['dma_time']}</span><span class='tile-percent'>{summary['dma_percent']}%</span></div></div>")
             if summary['compute_time'] is not None:
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>SLICE+CSS</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{format_duration(summary['compute_time'])}</span><span class='tile-percent'>{summary['compute_percent']:.1f}%</span></div></div>")
+                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>SLICE+CSS</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['compute_time']}</span><span class='tile-percent'>{summary['compute_percent']}%</span></div></div>")
             
-            # Add overlap information
-            if summary['dma_time'] is not None and summary['dma_only_time'] is not None and summary['compute_time'] is not None:
-                overlap_time = summary['dma_time'] - summary['dma_only_time']
-                overlap_percent = (overlap_time / summary['total_duration'] * 100) if summary['total_duration'] else 0
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Overlap</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{format_duration(overlap_time)}</span><span class='tile-percent'>{overlap_percent:.1f}%</span></div></div>")
+            # Add overlap from .pb file
+            if summary['overlap_time'] is not None:
+                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Overlap</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['overlap_time']}</span><span class='tile-percent'>{summary['overlap_percent']}%</span></div></div>")
             
             if summary['idle_time'] is not None:
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Idle</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{format_duration(summary['idle_time'])}</span><span class='tile-percent'>{summary['idle_percent']:.1f}%</span></div></div>")
+                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Idle</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['idle_time']}</span><span class='tile-percent'>{summary['idle_percent']}%</span></div></div>")
             collapsed_summary = ''.join(summary_tiles)
         
         # Create type badge
