@@ -589,7 +589,7 @@ KernelEncoding ElementWiseUnaryOp::getKernelEncoding() { return getActLikeEncodi
 
 KernelEncoding FMAOp::getKernelEncoding() { return getActLikeEncoding(*this); }
 
-KernelEncoding BroadcastOp::getKernelEncoding() { return getActLikeEncoding(*this); }
+KernelEncoding BroadcastOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ResizeNearestNeighborOp::getKernelEncoding() { return getResizeLikeEncoding(*this); }
 
