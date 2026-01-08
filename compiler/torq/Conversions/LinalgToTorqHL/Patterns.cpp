@@ -2351,16 +2351,6 @@ void populateLinalgToTorqHLPatterns(
 
     patterns.insert<RescaleOpConversion>(context);
 
-    // for add/sub op, currently we have two ways/steps to process:
-    // it will be converted firstly in
-    // populateLinalgToTorqHLPrePatternsLowPrio::EltwiseBinaryConvert, if converted
-    // successfully, its tiling will be done by TilePass, if converted failed, it will go
-    // through the general linalg path, which is linalg tiling then will be converted by
-    // populateLinalgToTorqHLPatterns::AddOpPattern to torq_hl::AddOp
-    // now rescaled add/sub uses populateLinalgToTorqHLPrePatternsLowPrio
-    // non-rescaled add/sub uses populateLinalgToTorqHLPatterns::AddOpPattern
-    // this way we can make sure some add/sub op can make use of linalg tiling
-    // in the end, we will switch all addOp with/without rescale to linalg tiling
     patterns.insert<AddOpPattern>(context);
 
     patterns.insert<ExtractOpPattern>(context);

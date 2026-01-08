@@ -6,8 +6,14 @@ set(sources
   LinalgTilePass.cpp
   UnrollLoopPass.cpp
   ArithToTorqHLPattern.cpp
-  LinalgToTorqHLPrePatternLowPrio.cpp
-  LinalgToTorqHLPrePattern.cpp
+  Conv1DPattern.cpp
+  Conv2DPattern.cpp
+  Conv2DMatmulPattern.cpp
+  FCPattern.cpp
+  PoolingPattern.cpp
+  ElementWiseBinaryPattern.cpp
+  ReduceMeanPattern.cpp
+  Conv2DOpBigStridePattern.cpp
   TensorToTorqOrLinalgPattern.cpp
 )
 

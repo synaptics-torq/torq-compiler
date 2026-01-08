@@ -33,6 +33,24 @@
 
 namespace mlir::syna::torq {
 
+void populateLinalgToTorqHLPrePatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+) {
+    populateLinalgToTorqHLConv1DPatterns(context, patterns, markFuseGroups);
+    populateLinalgToTorqHLConv2DPatterns(context, patterns, markFuseGroups);
+    populateLinalgToTorqHLConv2DMatmulPatterns(context, patterns, markFuseGroups);
+    populateLinalgToTorqHLFCPatterns(context, patterns, markFuseGroups);
+    populateLinalgToTorqHLPoolingPatterns(context, patterns, markFuseGroups);
+}
+
+void populateLinalgToTorqHLPrePatternsLowPrio(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+) {
+    populateLinalgToTorqHLEWBinaryPatterns(context, patterns, markFuseGroups);
+    populateTorqHLConv2DBigStridePatterns(context, patterns, markFuseGroups);
+    populateLinalgToTorqHLReduceMeanPatterns(context, patterns, markFuseGroups);
+}
+
 class LinalgToTorqHLConversionPass
     : public LinalgToTorqHLConversionBase<LinalgToTorqHLConversionPass> {
   public:

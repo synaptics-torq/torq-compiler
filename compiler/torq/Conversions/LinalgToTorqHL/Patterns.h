@@ -16,9 +16,36 @@ void populateLinalgToAluPatterns(MLIRContext *context, RewritePatternSet &patter
 void populateLinalgToTorqHLPrePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
+
+void populateLinalgToTorqHLConv1DPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+void populateLinalgToTorqHLConv2DPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+void populateLinalgToTorqHLConv2DMatmulPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+void populateLinalgToTorqHLFCPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+void populateLinalgToTorqHLPoolingPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+
 void populateLinalgToTorqHLPrePatternsLowPrio(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
+void populateLinalgToTorqHLEWBinaryPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+void populateLinalgToTorqHLReduceMeanPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+void populateTorqHLConv2DBigStridePatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+
 void populateLinalgToTorqHLPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
