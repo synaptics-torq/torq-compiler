@@ -8,9 +8,15 @@ from torq.testing.iree import list_mlir_files
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_files("linalg_ops")))
 def case_config(request, runtime_hw_type, chip_config):
     
-    failed_tc = [
-        'rsqrt-bf16.mlir',
+    no_negative_input = [
+        'sqrt',
     ]
+
+    extra_args = {}
+    if any(s in request.param.name for s in no_negative_input):
+        extra_args["tweaked_input_data_range"]  = (0, 100)
+
+    failed_tc = []
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
@@ -45,9 +51,6 @@ def case_config(request, runtime_hw_type, chip_config):
                 'matmul-in-int8-out-int16.mlir', # output mismatch
             ]
 
-
-
-
     if any(s in request.param.name for s in failed_tc):
         pytest.xfail("output mismatch or error")
 
@@ -56,7 +59,8 @@ def case_config(request, runtime_hw_type, chip_config):
         "static_mlir_model_file": request.param.data,
         "input_data": "tweaked_random_input_data",
         "comparison_config": "comparison_config_from_mlir",
-        "torq_compiler_options": ["--iree-input-type=linalg-torq"]
+        "torq_compiler_options": ["--iree-input-type=linalg-torq"],
+        **extra_args
     }
 
 @pytest.mark.ci

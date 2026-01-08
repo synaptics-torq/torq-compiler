@@ -8,6 +8,14 @@ from torq.testing.cases import get_test_cases_from_files
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_file_group("torch_ops")))
 def case_config(request, runtime_hw_type, chip_config):
 
+    no_negative_input = [
+        'sqrt-scalar',
+    ]
+
+    extra_args = {}
+    if any(s in request.param.name for s in no_negative_input):
+        extra_args["tweaked_input_data_range"]  = (0, 100)
+
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
     failed_tc = [
@@ -54,7 +62,8 @@ def case_config(request, runtime_hw_type, chip_config):
         "mlir_model_file": "static_mlir_model_file",
         "static_mlir_model_file": request.param.data,
         "input_data": "tweaked_random_input_data",
-        "comparison_config": "comparison_config_from_mlir"
+        "comparison_config": "comparison_config_from_mlir",
+        **extra_args
     }
 
 @pytest.mark.ci

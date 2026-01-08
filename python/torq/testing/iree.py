@@ -737,23 +737,38 @@ def random_uniform_input_data(request, mlir_io_spec):
     return result
 
 
+@versioned_hashable_object_fixture
+def tweaked_random_input_data_ranges(mlir_io_spec, case_config):
+
+    random_ranges = []
+    for tensor_type in mlir_io_spec.data.inputs:
+
+        dtype = get_dtype(tensor_type.fmt)
+
+        if "tweaked_input_data_range" in case_config:
+            random_range = case_config["tweaked_input_data_range"]
+        else:
+            # TODO: there are many issues when we enable the full range
+            # for now we limit the range to avoid issues
+            if dtype == np.uint8:
+                random_range = (0, 80)
+            else:
+                random_range = (-40, 40)
+
+        random_ranges.append(random_range)
+
+    return random_ranges
+
 @versioned_cached_data_fixture
-def tweaked_random_input_data(request, mlir_io_spec):
+def tweaked_random_input_data(request, mlir_io_spec, tweaked_random_input_data_ranges):
     rng = np.random.default_rng(1234)
 
     input_tensors = []
 
-    for tensor_type in mlir_io_spec.inputs:
+    for idx, tensor_type in enumerate(mlir_io_spec.inputs):
 
+        random_range = tweaked_random_input_data_ranges[idx]
         dtype = get_dtype(tensor_type.fmt)
-
-        # TODO: there are many issues when we enable the full range
-        # for now we limit the range to avoid issues
-        if dtype == np.uint8:
-            random_range = (0, 80)
-        else:
-            random_range = (-40, 40)
-
         if is_float_type(dtype):
             tensor = rng.uniform(random_range[0],
                                     random_range[1], tensor_type.shape).astype(dtype)
