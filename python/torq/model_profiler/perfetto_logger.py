@@ -566,12 +566,14 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
     slice_intervals = []
     slice_0_intervals = []
     slice_1_intervals = []
+    cdma_intervals = []
+    css_intervals = []
     
     for row in all_rows:
-        # Unpack row (13 elements)
+        # Unpack row (15 elements)
         (action_id, job_id, start_time, end_time, mlir_loc, original_operator, 
             invocation_name, operation, slice_id, slice_0_used, slice_1_used, 
-            dma_in_used, dma_out_used) = row
+            dma_in_used, dma_out_used, cdma_used, css_used) = row
         
         # Convert microseconds to nanoseconds (ensure integer conversion)
         start_time = int(start_time * 1000)
@@ -579,6 +581,9 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
 
         if dma_in_used or dma_out_used:
             dma_intervals.append((start_time, end_time))
+
+        if cdma_used:
+            cdma_intervals.append((start_time, end_time))
         
         if slice_0_used or slice_1_used:
             slice_intervals.append((start_time, end_time))
@@ -588,34 +593,45 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
             
         if slice_1_used:
             slice_1_intervals.append((start_time, end_time))
+
+        if css_used:
+            css_intervals.append((start_time, end_time))
             
     # Merge overlapping intervals
     merged_dma = merge_intervals(dma_intervals)
+    merged_cdma = merge_intervals(cdma_intervals)
     merged_slice = merge_intervals(slice_intervals)
     merged_slice_0 = merge_intervals(slice_0_intervals)
     merged_slice_1 = merge_intervals(slice_1_intervals)
+    merged_css = merge_intervals(css_intervals)
     
-    merged_compute_combined = merge_intervals(slice_0_intervals + slice_1_intervals)
+    merged_compute_combined = merge_intervals(slice_0_intervals + slice_1_intervals + css_intervals)
     
+    # Combined DMA = DMA + CDMA
+    merged_dma_combined = merge_intervals(dma_intervals + cdma_intervals)
+
     # Calculate exclusive and overlap times
-    dma_only_intervals = subtract_intervals(merged_dma, merged_compute_combined)
-    compute_only_intervals = subtract_intervals(merged_compute_combined, merged_dma)
-    overlap_intervals = intersect_intervals(merged_dma, merged_compute_combined)
+    dma_only_intervals = subtract_intervals(merged_dma_combined, merged_compute_combined)
+    compute_only_intervals = subtract_intervals(merged_compute_combined, merged_dma_combined)
+    overlap_intervals = intersect_intervals(merged_dma_combined, merged_compute_combined)
     
     # Calculate totals
     total_dma = sum(end - start for start, end in merged_dma)
+    total_cdma = sum(end - start for start, end in merged_cdma)
     total_slice = sum(end - start for start, end in merged_slice)
     total_slice_0 = sum(end - start for start, end in merged_slice_0)
     total_slice_1 = sum(end - start for start, end in merged_slice_1)
+    total_css = sum(end - start for start, end in merged_css)
     total_compute_combined = sum(end - start for start, end in merged_compute_combined)
     total_dma_only = sum(end - start for start, end in dma_only_intervals)
     total_compute_only = sum(end - start for start, end in compute_only_intervals)
     total_overlap = sum(end - start for start, end in overlap_intervals)
+    total_dma_combined = sum(end - start for start, end in merged_dma_combined)
     
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
     
-    # Calculate BUSY time (union of DMA and SLICE)
-    busy_intervals = merge_intervals(merged_dma + merged_compute_combined)
+    # Calculate BUSY time (union of DMA+CDMA and SLICE+CSS)
+    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined)
     busy_time = sum(end - start for start, end in busy_intervals)
     
     # Calculate IDLE time
@@ -629,9 +645,9 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
         'SLICE': {'time': total_slice, 'percent': calc_percent(total_slice)},
         'SLICE_0': {'time': total_slice_0, 'percent': calc_percent(total_slice_0)},
         'SLICE_1': {'time': total_slice_1, 'percent': calc_percent(total_slice_1)},
-        'CDMA': {'time': 0, 'percent': 0}, # Not tracked in runtime profile yet
-        'CSS': {'time': 0, 'percent': 0},  # Not tracked in runtime profile yet
-        'DMA_COMBINED': {'time': total_dma, 'percent': calc_percent(total_dma)}, # Same as DMA for now
+        'CDMA': {'time': total_cdma, 'percent': calc_percent(total_cdma)}, 
+        'CSS': {'time': total_css, 'percent': calc_percent(total_css)},
+        'DMA_COMBINED': {'time': total_dma_combined, 'percent': calc_percent(total_dma_combined)},
         'COMPUTE_COMBINED': {'time': total_compute_combined, 'percent': calc_percent(total_compute_combined)},
         'IDLE': {'time': idle_time, 'percent': calc_percent(idle_time)},
         'DMA_ONLY': {'time': total_dma_only, 'percent': calc_percent(total_dma_only)},
@@ -650,7 +666,12 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
 def print_metrics_summary(profile_name, metrics):
     """Print formatted metrics summary to console."""
     print(f"\n=== Overview ({profile_name}) ===")
-    for key in ['DMA_COMBINED', 'COMPUTE_COMBINED', 'DMA_ONLY', 'COMPUTE_ONLY', 'IDLE', 'OVERALL', 'DMA', 'SLICE', 'CDMA', 'CSS', 'DMA_COMPUTE_OVERLAP']:
+    order = [
+        'OVERALL', 'DMA_COMPUTE_OVERLAP', 'SLICE', 'SLICE_0', 'SLICE_1', 
+        'COMPUTE_COMBINED', 'CSS', 'COMPUTE_ONLY', 'DMA_COMBINED', 
+        'DMA_ONLY', 'DMA', 'CDMA', 'IDLE'
+    ]
+    for key in order:
         if key in metrics:
             metric = metrics[key]
             if 'percent' in metric:
@@ -790,12 +811,14 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
     
     # Deduplicate events with same action_id and timestamps
     # Key: (action_id, start_time, end_time)
-    # Value: (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used)
+    # Value: (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used)
     unique_events = {}
     
     for row_data in all_rows:
-        # Handle new Excel (13-tuple) format
-        dispatch_id, job_id, start_time, end_time, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used = row_data
+        # Handle new tuple format (15-tuple)
+        (dispatch_id, job_id, start_time, end_time, mlir_loc, original_operator, 
+         invocation_name, operation, slice_id, slice_0_used, slice_1_used, 
+         dma_in_used, dma_out_used, cdma_used, css_used) = row_data
         
         # Convert microseconds to nanoseconds (ensure integer conversion)
         start_time = int(start_time * 1000)
@@ -806,11 +829,11 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
         
         # Keep the first occurrence or prefer entries with original_operator
         if event_key not in unique_events:
-            unique_events[event_key] = (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used)
+            unique_events[event_key] = (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used)
         else:
             # Merge information to capture all details (invocation name, original operator, etc.)
             existing = unique_events[event_key]
-            (e_job_id, e_mlir_loc, e_original_operator, e_invocation_name, e_operation, e_slice_id, e_slice_0_used, e_slice_1_used, e_dma_in_used, e_dma_out_used) = existing
+            (e_job_id, e_mlir_loc, e_original_operator, e_invocation_name, e_operation, e_slice_id, e_slice_0_used, e_slice_1_used, e_dma_in_used, e_dma_out_used, e_cdma_used, e_css_used) = existing
             
             def pick_best(new_val, old_val):
                 if new_val and str(new_val) != 'nan' and str(new_val) != 'None' and str(new_val).strip():
@@ -828,25 +851,31 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
             new_slice_1_used = slice_1_used or e_slice_1_used
             new_dma_in_used = dma_in_used or e_dma_in_used
             new_dma_out_used = dma_out_used or e_dma_out_used
+            new_cdma_used = cdma_used or e_cdma_used
+            new_css_used = css_used or e_css_used
             
             new_slice_id = slice_id if slice_id is not None else e_slice_id
             
-            unique_events[event_key] = (new_job_id, new_mlir_loc, new_original_operator, new_invocation_name, new_operation, new_slice_id, new_slice_0_used, new_slice_1_used, new_dma_in_used, new_dma_out_used)
+            unique_events[event_key] = (new_job_id, new_mlir_loc, new_original_operator, new_invocation_name, new_operation, new_slice_id, new_slice_0_used, new_slice_1_used, new_dma_in_used, new_dma_out_used, new_cdma_used, new_css_used)
     
     # Create tracks in desired order
     input_layer_track = "00_Input_Layer"
     torq_ops_track = "01_Torq_Operations"
     dma_in_track = "02_DMA_In"
     dma_out_track = "03_DMA_Out"
-    slice_0_track = "04_Slice_0"
-    slice_1_track = "05_Slice_1"
+    cdma_track = "04_CDMA"
+    slice_0_track = "05_Slice_0"
+    slice_1_track = "06_Slice_1"
+    css_track = "07_CSS"
     
     trace_writer.add_thread_descriptor(view_name, input_layer_track)
     trace_writer.add_thread_descriptor(view_name, torq_ops_track)
     trace_writer.add_thread_descriptor(view_name, dma_in_track)
     trace_writer.add_thread_descriptor(view_name, dma_out_track)
+    trace_writer.add_thread_descriptor(view_name, cdma_track)
     trace_writer.add_thread_descriptor(view_name, slice_0_track)
     trace_writer.add_thread_descriptor(view_name, slice_1_track)
+    trace_writer.add_thread_descriptor(view_name, css_track)
     
     # Sort events by start time for proper merging
     sorted_events = sorted(unique_events.items(), key=lambda x: x[0][1])  # Sort by start_time
@@ -855,7 +884,7 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
     merged_operator_events = []
     current_operator_event = None
     
-    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used) in sorted_events:
+    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used) in sorted_events:
         # Only process events that have a valid original_operator
         if original_operator and original_operator != 'nan' and str(original_operator).strip() and original_operator != 'None':
             if current_operator_event is None:
@@ -889,7 +918,7 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
     for op_event in merged_operator_events:
         duration = op_event['end_time'] - op_event['start_time']
         percent = (duration / overall_time * 100) if overall_time else 0
-        short_locs = [shorten_mlir_location(loc) for loc in op_event['mlir_locs'][:3]]  # Show first 3 locations
+        short_locs = [shorten_mlir_location(loc) for loc in op_event['mlir_locs'][:3]]
         loc_str = ', '.join(short_locs)
         if len(op_event['mlir_locs']) > 3:
             loc_str += f" (+{len(op_event['mlir_locs']) - 3} more)"
@@ -898,8 +927,8 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
         operator_event = PerfettoEvent(view_name, input_layer_track, operator_details, op_event['start_time'], op_event['end_time'])
         trace_writer.add_event(operator_event)
     
-    # Create events for Torq Operations, DMA, and Slice tracks
-    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used) in unique_events.items():
+    # Create events for Torq Operations, DMA, CDMA and Slice tracks
+    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used) in unique_events.items():
         duration = end_time - start_time
         percent = (duration / overall_time * 100) if overall_time else 0
         short_loc = shorten_mlir_location(mlir_loc)
@@ -910,7 +939,7 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
             torq_ops_event = PerfettoEvent(view_name, torq_ops_track, torq_ops_details, start_time, end_time)
             trace_writer.add_event(torq_ops_event)
         
-        # Prepare common details for DMA and Slice tracks
+        # Prepare common details
         input_layer_str = original_operator if (original_operator and original_operator != 'nan' and str(original_operator).strip() and original_operator != 'None') else ""
         torq_op_str = invocation_name if (invocation_name and invocation_name != 'nan' and invocation_name != 'None' and str(invocation_name).strip()) else ""
         job_id_str = f"Job {job_id}" if (job_id and job_id != 'nan' and str(job_id).strip()) else ""
@@ -937,6 +966,10 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
         if dma_out_used:
             dma_out_event = PerfettoEvent(view_name, dma_out_track, f"DMA Out | {detail_str}", start_time, end_time)
             trace_writer.add_event(dma_out_event)
+
+        if cdma_used:
+            cdma_event = PerfettoEvent(view_name, cdma_track, f"CDMA | {detail_str}", start_time, end_time)
+            trace_writer.add_event(cdma_event)
         
         # Create event for Slice 0 track if Slice 0 is used
         if slice_0_used:
@@ -947,6 +980,10 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
         if slice_1_used:
             slice_event = PerfettoEvent(view_name, slice_1_track, f"Slice 1 | {detail_str}", start_time, end_time)
             trace_writer.add_event(slice_event)
+
+        if css_used:
+            css_event = PerfettoEvent(view_name, css_track, f"CSS | {detail_str}", start_time, end_time)
+            trace_writer.add_event(css_event)
 
 
 def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
@@ -960,17 +997,17 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
     
     # Define track order (using numeric prefix for lexicographic sorting)
     overview_tracks = [
-        ("00 OVERVIEW DMA COMBINED", "DMA+CDMA total", metrics.get('DMA_COMBINED', metrics.get('DMA', {'time': 0}))),
-        ("01 OVERVIEW COMPUTE COMBINED", "SLICE+CSS total", metrics.get('COMPUTE_COMBINED', metrics.get('SLICE', {'time': 0}))),
+        ("00 OVERVIEW DMA COMBINED", "DMA+CDMA union", metrics.get('DMA_COMBINED', metrics.get('DMA', {'time': 0}))),
+        ("01 OVERVIEW COMPUTE COMBINED", "SLICE+CSS union", metrics.get('COMPUTE_COMBINED', metrics.get('SLICE', {'time': 0}))),
         ("02 OVERVIEW DMA", "DMA total", metrics.get('DMA', {'time': 0})),
         ("03 OVERVIEW CDMA", "CDMA total", metrics.get('CDMA', {'time': 0})),
-        ("04 OVERVIEW SLICE", "SLICE total", metrics.get('SLICE', {'time': 0})),
+        ("04 OVERVIEW SLICE", "SLICE 0 + 1 union", metrics.get('SLICE', {'time': 0})),
         ("05 OVERVIEW SLICE 0", "SLICE 0 total", metrics.get('SLICE_0', {'time': 0})),
         ("06 OVERVIEW SLICE 1", "SLICE 1 total", metrics.get('SLICE_1', {'time': 0})),
         ("07 OVERVIEW CSS", "CSS total", metrics.get('CSS', {'time': 0})),
-        ("08 OVERVIEW DMA ONLY", "DMA ONLY (exclusive)", metrics.get('DMA_ONLY', {'time': 0})),
-        ("09 OVERVIEW COMPUTE ONLY", "COMPUTE ONLY (exclusive)", metrics.get('COMPUTE_ONLY', {'time': 0})),
-        ("10 OVERVIEW DMA COMPUTE OVERLAP", "DMA+COMPUTE overlap", metrics.get('DMA_COMPUTE_OVERLAP', {'time': 0})),
+        ("08 OVERVIEW DMA ONLY", "DMA/CDMA ONLY (no compute)", metrics.get('DMA_ONLY', {'time': 0})),
+        ("09 OVERVIEW COMPUTE ONLY", "COMPUTE ONLY (no DMA/CDMA)", metrics.get('COMPUTE_ONLY', {'time': 0})),
+        ("10 OVERVIEW DMA COMPUTE OVERLAP", "DMA/CDMA<->COMPUTE overlap", metrics.get('DMA_COMPUTE_OVERLAP', {'time': 0})),
         ("11 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
         ("12 OVERALL", "OVERALL", metrics['OVERALL']),
     ]

@@ -287,6 +287,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
     slice_active = [False, False]
     dma_in_active = False
     dma_out_active = False
+    cdma_active = False
+    css_active = False
 
     last_slice_program_name = [None, None]
 
@@ -321,6 +323,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
             slice_used = [slice_active[0], slice_active[1]]
             dma_out_used = dma_out_active
             dma_in_used = dma_in_active
+            cdma_used = cdma_active
+            css_used = css_active
 
             for op in ops:
                 operation = op.operation.name
@@ -343,6 +347,16 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                     dma_out_used = True
                 elif operation == "torq_hw.dma_out_wait":
                     dma_out_active = False
+                if operation == "torq_hw.cdma_start":
+                    cdma_active = True
+                    cdma_used = True
+                elif operation == "torq_hw.cdma_wait":
+                    cdma_active = False
+                if operation == "torq_hw.css_start":
+                    css_active = True
+                    css_used = True
+                elif operation == "torq_hw.css_wait":
+                    css_active = False
 
             for op in ops:
                 operation = op.operation.name
@@ -377,6 +391,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                     "slice_used_1_in_program": slice_used[1],
                     "dma_in_used_in_program": dma_in_used,
                     "dma_out_used_in_program": dma_out_used,
+                    "cdma_used_in_program": cdma_used,
+                    "css_used_in_program": css_used,
                     "timestamp_start": profiling_dict[action_id].get("timestamp_start"),
                     "timestamp_end": profiling_dict[action_id].get("timestamp_end"),
                     "location": ','.join(profiling_dict[action_id].get("location", [])),
@@ -403,7 +419,9 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                             slice_used[0],
                             slice_used[1],
                             dma_in_used,
-                            dma_out_used
+                            dma_out_used,
+                            cdma_used,
+                            css_used,
                         ))
 
         elif is_host_wait_task: 
@@ -427,6 +445,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                     "slice_used_1_in_program": None, # Not an slice job
                     "dma_in_used_in_program": None, # Not an slice job
                     "dma_out_used_in_program": None, # Not an slice job
+                    "cdma_used_in_program": None, # Not an slice job
+                    "css_used_in_program": None, # Not an slice job
                     "timestamp_start": profiling_dict[action_id].get("timestamp_start"),
                     "timestamp_end": profiling_dict[action_id].get("timestamp_end"),
                     "location": ','.join(profiling_dict[action_id].get("location", [])),
@@ -452,7 +472,9 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                         None, # slice_used_0
                         None, # slice_used_1
                         None, # dma_in_used
-                        None  # dma_out_used
+                        None, # dma_out_used
+                        None, # cdma_used
+                        None, # css_used
                     ))
 
     df = pd.DataFrame(rows)
@@ -461,7 +483,7 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
     desired_columns = [
         "action_id", "job_id", "operation", "invocation_name", "original_operator", "total_time",
         "slice_id", "slice_used_0_in_program", "slice_used_1_in_program",
-        "dma_in_used_in_program", "dma_out_used_in_program",
+        "dma_in_used_in_program", "dma_out_used_in_program", "cdma_used_in_program", "css_used_in_program",
         "timestamp_start", "timestamp_end", "location"
     ]
     # Only keep columns that are actually in the DataFrame
@@ -485,6 +507,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                 "slice_used_1_in_program": "Slice 1 Used in NSS Program",
                 "dma_in_used_in_program": "DMA In Used in NSS Program",
                 "dma_out_used_in_program": "DMA Out Used in NSS Program",
+                "cdma_used_in_program": "CDMA Used in CSS Program",
+                "css_used_in_program": "CSS Used in CSS Program",
                 "timestamp_start": "Timestamp Start",
                 "timestamp_end": "Timestamp End",
                 "location": "Location",

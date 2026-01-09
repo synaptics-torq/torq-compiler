@@ -42,6 +42,8 @@ def extract_perfetto_summary(pb_file_path):
             'dma_percent': None,
             'dma_only_time': None,
             'dma_only_percent': None,
+            'dma_total_time': None,
+            'dma_total_percent': None,
             'cdma_time': None,
             'cdma_percent': None,
             'dma_in_time': None,
@@ -50,8 +52,14 @@ def extract_perfetto_summary(pb_file_path):
             'dma_out_percent': None,
             'compute_time': None,
             'compute_percent': None,
+            'compute_only_time': None,
+            'compute_only_percent': None,
             'slice_time': None,
             'slice_percent': None,
+            'slice_0_time': None,
+            'slice_0_percent': None,
+            'slice_1_time': None,
+            'slice_1_percent': None,
             'css_time': None,
             'css_percent': None,
             'overlap_time': None,
@@ -72,33 +80,33 @@ def extract_perfetto_summary(pb_file_path):
             summary['available'] = True
         
         # Extract DMA+CDMA combined total - maps to "00 OVERVIEW DMA COMBINED"
-        # Exact match: "DMA+CDMA total:"
-        dma_combined_match = re.search(r'DMA\+CDMA\s+total:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        # Exact match: "DMA+CDMA union:"
+        dma_combined_match = re.search(r'DMA\+CDMA\s+union:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if dma_combined_match:
             summary['dma_time'] = dma_combined_match.group(1)  # e.g., "47.545ms"
             summary['dma_percent'] = dma_combined_match.group(2)  # e.g., "99.94"
         
         # Extract DMA ONLY (exclusive) - maps to "08 OVERVIEW DMA ONLY"
-        # Exact match: "DMA ONLY (exclusive):"
-        dma_only_match = re.search(r'DMA\s+ONLY\s*\(exclusive\):\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        # Exact match: "DMA/CDMA ONLY (no compute):"
+        dma_only_match = re.search(r'DMA/CDMA\s+ONLY\s*\(no\s+compute\):\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if dma_only_match:
             summary['dma_only_time'] = dma_only_match.group(1)
             summary['dma_only_percent'] = dma_only_match.group(2)
         
         # Extract plain DMA total - maps to "02 OVERVIEW DMA"
-        # Must NOT match "DMA+CDMA total" or "DMA ONLY"
-        # Negative lookbehind ensures we don't match "DMA+CDMA" or within "DMA ONLY"
-        plain_dma_match = re.search(r'(?<![\+A-Z])DMA\s+total:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        # Must NOT match "DMA+CDMA union" or "DMA/CDMA ONLY"
+        # Negative lookbehind ensures we don't match "DMA+CDMA" or within "DMA/CDMA ONLY"
+        plain_dma_match = re.search(r'(?<![\+A-Z/])DMA\s+total:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if plain_dma_match:
-            summary['cdma_time'] = plain_dma_match.group(1)
-            summary['cdma_percent'] = plain_dma_match.group(2)
+            summary['dma_total_time'] = plain_dma_match.group(1)
+            summary['dma_total_percent'] = plain_dma_match.group(2)
         
         # Extract CDMA total - maps to "03 OVERVIEW CDMA"  
-        # Must NOT match "DMA+CDMA total"
+        # Must NOT match "DMA+CDMA union"
         cdma_only_match = re.search(r'(?<!\+)CDMA\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if cdma_only_match:
-            # Store actual CDMA value (currently not used in HTML but extracted for completeness)
-            pass
+            summary['cdma_time'] = cdma_only_match.group(1)
+            summary['cdma_percent'] = cdma_only_match.group(2)
         
         # Extract DMA In statistics (from individual track data, not overview)
         dma_in_match = re.search(r'DMA[\s_-]*In[^|]*\|\s*dur=([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
@@ -113,30 +121,48 @@ def extract_perfetto_summary(pb_file_path):
             summary['dma_out_percent'] = dma_out_match.group(2)
         
         # Extract SLICE+CSS combined total - maps to "01 OVERVIEW COMPUTE COMBINED"
-        # Exact match: "SLICE+CSS total:"
-        compute_combined_match = re.search(r'SLICE\+CSS\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        # Exact match: "SLICE+CSS union:"
+        compute_combined_match = re.search(r'SLICE\+CSS\s+union:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if compute_combined_match:
             summary['compute_time'] = compute_combined_match.group(1)
             summary['compute_percent'] = compute_combined_match.group(2)
+
+        # Extract COMPUTE ONLY (exclusive) - maps to "09 OVERVIEW COMPUTE ONLY"
+        # Exact match: "COMPUTE ONLY (no DMA/CDMA):"
+        compute_only_match = re.search(r'COMPUTE\s+ONLY\s*\(no\s+DMA/CDMA\):\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        if compute_only_match:
+            summary['compute_only_time'] = compute_only_match.group(1)
+            summary['compute_only_percent'] = compute_only_match.group(2)
         
         # Extract SLICE total - maps to "04 OVERVIEW SLICE" (NOT SLICE 0 or SLICE 1)
-        # Must NOT match "SLICE+CSS total" or "SLICE 0 total" or "SLICE 1 total"
-        # Use negative lookbehind for "+" and word boundary to avoid "SLICE 0" or "SLICE 1"
-        slice_match = re.search(r'(?<!\+)SLICE\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        # Match "SLICE 0 + 1 union:"
+        slice_match = re.search(r'SLICE\s+0\s+\+\s+1\s+union:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if slice_match:
             summary['slice_time'] = slice_match.group(1)
             summary['slice_percent'] = slice_match.group(2)
+            
+        # Extract SLICE 0 total - maps to "05 OVERVIEW SLICE 0"
+        slice_0_match = re.search(r'SLICE\s+0\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        if slice_0_match:
+            summary['slice_0_time'] = slice_0_match.group(1)
+            summary['slice_0_percent'] = slice_0_match.group(2)
+
+        # Extract SLICE 1 total - maps to "06 OVERVIEW SLICE 1"
+        slice_1_match = re.search(r'SLICE\s+1\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        if slice_1_match:
+            summary['slice_1_time'] = slice_1_match.group(1)
+            summary['slice_1_percent'] = slice_1_match.group(2)
         
         # Extract CSS total - maps to "07 OVERVIEW CSS"
-        # Must NOT match "SLICE+CSS total"
+        # Must NOT match "SLICE+CSS union"
         css_match = re.search(r'(?<!\+)CSS\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if css_match:
             summary['css_time'] = css_match.group(1)
             summary['css_percent'] = css_match.group(2)
         
         # Extract DMA+COMPUTE overlap - maps to "10 OVERVIEW DMA COMPUTE OVERLAP"
-        # Exact match: "DMA+COMPUTE overlap:"
-        overlap_match = re.search(r'DMA\+COMPUTE\s+overlap:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        # Exact match: "DMA/CDMA<->COMPUTE overlap:"
+        overlap_match = re.search(r'DMA/CDMA<->COMPUTE\s+overlap:\s*([0-9.]+[a-zµμ]+)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
         if overlap_match:
             summary['overlap_time'] = overlap_match.group(1)
             summary['overlap_percent'] = overlap_match.group(2)
@@ -187,6 +213,7 @@ def generate_html(pb_files):
         if summary['available']:
             metrics_html = ''
             
+            # 1. TOTAL DURATION
             if summary['total_duration']:
                 metrics_html += f'''
                     <div class="metric-card">
@@ -194,10 +221,95 @@ def generate_html(pb_files):
                         <div class="metric-value">{summary['total_duration']}</div>
                     </div>'''
             
+            # 2. OVERLAP (DMA/CDMA VS COMPUTE)
+            if summary['overlap_time'] is not None:
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">Overlap (DMA/CDMA vs Compute)</div>
+                        <div class="metric-value">{summary['overlap_time']}</div>
+                        <div class="metric-percent">{summary['overlap_percent']}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: {min(float(summary['overlap_percent']), 100)}%"></div>
+                        </div>
+                    </div>'''
+            
+            # 3. SLICE (0+1) UNION
+            if summary['slice_time'] is not None:
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">SLICE (0+1) Union</div>
+                        <div class="metric-value">{summary['slice_time']}</div>
+                        <div class="metric-percent">{summary['slice_percent']}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: {summary['slice_percent']}%"></div>
+                        </div>
+                    </div>'''
+            
+            # 4. SLICE 0
+            if summary['slice_0_time'] is not None:
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">SLICE 0 Time</div>
+                        <div class="metric-value">{summary['slice_0_time']}</div>
+                        <div class="metric-percent">{summary['slice_0_percent']}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: {summary['slice_0_percent']}%"></div>
+                        </div>
+                    </div>'''
+            
+            # 5. SLICE 1
+            if summary['slice_1_time'] is not None:
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">SLICE 1 Time</div>
+                        <div class="metric-value">{summary['slice_1_time']}</div>
+                        <div class="metric-percent">{summary['slice_1_percent']}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: {summary['slice_1_percent']}%"></div>
+                        </div>
+                    </div>'''
+            
+            # 6. SLICE+CSS UNION
+            if summary['compute_time'] is not None:
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">SLICE+CSS Union</div>
+                        <div class="metric-value">{summary['compute_time']}</div>
+                        <div class="metric-percent">{summary['compute_percent']}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: {summary['compute_percent']}%"></div>
+                        </div>
+                    </div>'''
+            
+            # 7. CSS TIME
+            if summary['css_time'] is not None:
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">CSS Time</div>
+                        <div class="metric-value">{summary['css_time']}</div>
+                        <div class="metric-percent">{summary['css_percent']}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: {summary['css_percent']}%"></div>
+                        </div>
+                    </div>'''
+            
+            # 8. COMPUTE ONLY (NO DMA/CDMA)
+            if summary['compute_only_time'] is not None:
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">Compute Only (No DMA/CDMA)</div>
+                        <div class="metric-value">{summary['compute_only_time']}</div>
+                        <div class="metric-percent">{summary['compute_only_percent']}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: {summary['compute_only_percent']}%"></div>
+                        </div>
+                    </div>'''
+            
+            # 9. DMA+CDMA UNION
             if summary['dma_time'] is not None:
                 metrics_html += f'''
                     <div class="metric-card">
-                        <div class="metric-label">DMA+CDMA Total</div>
+                        <div class="metric-label">DMA+CDMA Union</div>
                         <div class="metric-value">{summary['dma_time']}</div>
                         <div class="metric-percent">{summary['dma_percent']}%</div>
                         <div class="metric-bar">
@@ -205,10 +317,11 @@ def generate_html(pb_files):
                         </div>
                     </div>'''
             
+            # 10. DMA ONLY (NO COMPUTE)
             if summary['dma_only_time'] is not None:
                 metrics_html += f'''
                     <div class="metric-card">
-                        <div class="metric-label">DMA Only (Exclusive)</div>
+                        <div class="metric-label">DMA Only (No Compute)</div>
                         <div class="metric-value">{summary['dma_only_time']}</div>
                         <div class="metric-percent">{summary['dma_only_percent']}%</div>
                         <div class="metric-bar">
@@ -216,14 +329,39 @@ def generate_html(pb_files):
                         </div>
                     </div>'''
             
-            if summary['cdma_time'] is not None:
+            # 11. DMA TOTAL
+            if summary['dma_total_time'] is not None:
                 metrics_html += f'''
                     <div class="metric-card">
                         <div class="metric-label">DMA Total</div>
+                        <div class="metric-value">{summary['dma_total_time']}</div>
+                        <div class="metric-percent">{summary['dma_total_percent']}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: {summary['dma_total_percent']}%"></div>
+                        </div>
+                    </div>'''
+
+            # 12. CDMA TOTAL
+            if summary['cdma_time'] is not None:
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">CDMA Total</div>
                         <div class="metric-value">{summary['cdma_time']}</div>
                         <div class="metric-percent">{summary['cdma_percent']}%</div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['cdma_percent']}%"></div>
+                        </div>
+                    </div>'''
+            
+            # 13. IDLE TIME
+            if summary['idle_time'] is not None:
+                metrics_html += f'''
+                    <div class="metric-card">
+                        <div class="metric-label">Idle Time</div>
+                        <div class="metric-value">{summary['idle_time']}</div>
+                        <div class="metric-percent">{summary['idle_percent']}%</div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill idle" style="width: {summary['idle_percent']}%"></div>
                         </div>
                     </div>'''
             
@@ -246,64 +384,6 @@ def generate_html(pb_files):
                         <div class="metric-percent">{summary['dma_out_percent']}%</div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['dma_out_percent']}%"></div>
-                        </div>
-                    </div>'''
-            
-            if summary['compute_time'] is not None:
-                metrics_html += f'''
-                    <div class="metric-card">
-                        <div class="metric-label">SLICE+CSS Total</div>
-                        <div class="metric-value">{summary['compute_time']}</div>
-                        <div class="metric-percent">{summary['compute_percent']}%</div>
-                        <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['compute_percent']}%"></div>
-                        </div>
-                    </div>'''
-            
-            if summary['slice_time'] is not None:
-                metrics_html += f'''
-                    <div class="metric-card">
-                        <div class="metric-label">SLICE Total</div>
-                        <div class="metric-value">{summary['slice_time']}</div>
-                        <div class="metric-percent">{summary['slice_percent']}%</div>
-                        <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['slice_percent']}%"></div>
-                        </div>
-                    </div>'''
-            
-            if summary['css_time'] is not None:
-                metrics_html += f'''
-                    <div class="metric-card">
-                        <div class="metric-label">CSS Time</div>
-                        <div class="metric-value">{summary['css_time']}</div>
-                        <div class="metric-percent">{summary['css_percent']}%</div>
-                        <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {summary['css_percent']}%"></div>
-                        </div>
-                    </div>'''
-            
-            # Extract overlap from .pb file - maps to "10 OVERVIEW DMA COMPUTE OVERLAP"
-            # Overlap = time when BOTH DMA/CDMA and COMPUTE (SLICE/CSS) are active simultaneously
-            # This is calculated in perfetto_logger.py using intersect_intervals(DMA, COMPUTE)
-            if summary['overlap_time'] is not None:
-                metrics_html += f'''
-                    <div class="metric-card">
-                        <div class="metric-label">Overlap (DMA vs Compute)</div>
-                        <div class="metric-value">{summary['overlap_time']}</div>
-                        <div class="metric-percent">{summary['overlap_percent']}%</div>
-                        <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: {min(float(summary['overlap_percent']), 100)}%"></div>
-                        </div>
-                    </div>'''
-            
-            if summary['idle_time'] is not None:
-                metrics_html += f'''
-                    <div class="metric-card">
-                        <div class="metric-label">Idle Time</div>
-                        <div class="metric-value">{summary['idle_time']}</div>
-                        <div class="metric-percent">{summary['idle_percent']}%</div>
-                        <div class="metric-bar">
-                            <div class="metric-bar-fill idle" style="width: {summary['idle_percent']}%"></div>
                         </div>
                     </div>'''
             
