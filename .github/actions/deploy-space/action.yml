@@ -1,0 +1,34 @@
+description: Deploy space code to HuggingFace
+
+inputs:
+
+  hf_token:
+    description: 'HuggingFace Token'
+    required: true
+  
+  hf_user:
+    description: 'HuggingFace user name for token'
+    required: true
+
+  app_name:
+    description: 'Name of the app to deploy'
+    required: true
+
+  source_path:
+    description: 'Location of the space sources'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: Push app to space
+      shell: bash
+      run: |          
+        cd ${{ inputs.source_path }}
+        git init .
+        git config user.email "torq-ci@synaptics.com"
+        git config user.name "Torq CI"
+        git add .
+        git commit -m "Snapshot"
+        git push -f https://${{ inputs.hf_user }}:${{ inputs.hf_token }}@huggingface.co/spaces/${{ inputs.app_name }} HEAD:main

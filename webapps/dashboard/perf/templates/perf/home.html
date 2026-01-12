@@ -1,0 +1,355 @@
+{% extends "perf/base.html" %}
+
+{% block title %}Performance Dashboard - Torq{% endblock %}
+
+{% block content %}
+<div class="container">
+    <header class="dashboard-header">
+        <h1>Performance Dashboard</h1>
+        <p class="subtitle">Real-time performance tracking and test results</p>
+    </header>
+
+    <div class="latest-session-section">
+        {% if latest_session %}
+            <div class="session-header">
+                <h2>Latest Test Session</h2>
+                <p class="session-id">Session #{{ latest_session.id }}</p>
+            </div>
+
+            <div class="session-info-grid">
+                <div class="info-card">
+                    <h4>Timestamp</h4>
+                    <p class="info-value">{{ latest_session.timestamp|date:"M d, Y H:i:s" }}</p>
+                </div>
+                {% if latest_session.git_commit %}
+                <div class="info-card">
+                    <h4>Git Commit</h4>
+                    <p class="info-value monospace">{{ latest_session.git_commit|truncatechars:10 }}</p>
+                </div>
+                {% endif %}
+                {% if latest_session.git_branch %}
+                <div class="info-card">
+                    <h4>Git Branch</h4>
+                    <p class="info-value">{{ latest_session.git_branch }}</p>
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="stats-container">
+                <h3>Test Statistics</h3>
+                <div class="stats-grid">
+                    <div class="stat-card total">
+                        <div class="stat-value">{{ latest_session.num_total }}</div>
+                        <div class="stat-label">Total Tests</div>
+                    </div>
+                    <div class="stat-card passed">
+                        <div class="stat-value">{{ latest_session.num_passed }}</div>
+                        <div class="stat-label">Passed</div>
+                        {% if latest_session.num_total %}
+                        <div class="stat-percentage">{% widthratio latest_session.num_passed latest_session.num_total 100 %}%</div>
+                        {% endif %}
+                    </div>
+                    <div class="stat-card failed">
+                        <div class="stat-value">{{ latest_session.num_failed }}</div>
+                        <div class="stat-label">Failed</div>
+                        {% if latest_session.num_total %}
+                        <div class="stat-percentage">{% widthratio latest_session.num_failed latest_session.num_total 100 %}%</div>
+                        {% endif %}
+                    </div>
+                    <div class="stat-card skipped">
+                        <div class="stat-value">{{ latest_session.num_skipped }}</div>
+                        <div class="stat-label">Skipped</div>
+                        {% if latest_session.num_total %}
+                        <div class="stat-percentage">{% widthratio latest_session.num_skipped latest_session.num_total 100 %}%</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <a href="{% url 'test_session' latest_session.id %}" class="btn btn-primary">View Full Details</a>
+                <a href="/admin/perf/testsession/{{ latest_session.id }}/change/" class="btn btn-secondary" target="_blank">Edit in Admin</a>
+            </div>
+        {% else %}
+            <div class="no-data">
+                <p>No test sessions available yet.</p>
+                <p class="text-muted">Test sessions will appear here once they are created.</p>
+            </div>
+        {% endif %}
+    </div>
+
+    <div class="footer-links">
+        <a href="/admin" class="link" target="_blank">Admin Dashboard</a>
+        <a href="/api/test-sessions/" class="link">API Endpoint</a>
+    </div>
+</div>
+
+<style>
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background-color: #f5f7fa;
+    color: #2c3e50;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+.dashboard-header {
+    text-align: center;
+    margin-bottom: 3rem;
+}
+
+.dashboard-header h1 {
+    font-size: 2.5rem;
+    margin: 0 0 0.5rem 0;
+    color: #1a252f;
+}
+
+.subtitle {
+    font-size: 1.1rem;
+    color: #7f8c8d;
+    margin: 0;
+}
+
+.latest-session-section {
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.session-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #ecf0f1;
+}
+
+.session-header h2 {
+    margin: 0;
+    font-size: 1.8rem;
+}
+
+.session-id {
+    color: #7f8c8d;
+    margin: 0;
+    font-size: 0.95rem;
+}
+
+.session-info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+
+.info-card {
+    padding: 1rem;
+    background-color: #f8f9fa;
+    border-radius: 6px;
+    border-left: 4px solid #3498db;
+}
+
+.info-card h4 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    color: #7f8c8d;
+    letter-spacing: 0.5px;
+}
+
+.info-value {
+    margin: 0;
+    font-size: 1.1rem;
+    color: #2c3e50;
+    font-weight: 500;
+}
+
+.info-value.monospace {
+    font-family: 'Courier New', monospace;
+    font-size: 0.95rem;
+}
+
+.stats-container h3 {
+    margin-top: 0;
+    margin-bottom: 1.5rem;
+    font-size: 1.3rem;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+}
+
+.stat-card {
+    padding: 1.5rem;
+    border-radius: 6px;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.stat-card.total {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.stat-card.passed {
+    background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+    color: white;
+}
+
+.stat-card.failed {
+    background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+    color: white;
+}
+
+.stat-card.skipped {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    color: white;
+}
+
+.stat-value {
+    font-size: 2.5rem;
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+}
+
+.stat-label {
+    font-size: 0.95rem;
+    opacity: 0.95;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.stat-percentage {
+    font-size: 1rem;
+    margin-top: 0.5rem;
+    opacity: 0.85;
+}
+
+.action-buttons {
+    display: flex;
+    gap: 1rem;
+    margin-top: 2rem;
+    flex-wrap: wrap;
+}
+
+.btn {
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    text-decoration: none;
+    font-weight: 600;
+    transition: all 0.2s;
+    border: none;
+    cursor: pointer;
+    display: inline-block;
+    font-size: 1rem;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+}
+
+.btn-secondary {
+    background-color: #ecf0f1;
+    color: #2c3e50;
+    border: 2px solid #bdc3c7;
+}
+
+.btn-secondary:hover {
+    background-color: #bdc3c7;
+    transform: translateY(-2px);
+}
+
+.no-data {
+    text-align: center;
+    padding: 3rem 1rem;
+}
+
+.no-data p {
+    margin: 0.5rem 0;
+    font-size: 1.1rem;
+}
+
+.text-muted {
+    color: #95a5a6;
+}
+
+.footer-links {
+    display: flex;
+    gap: 2rem;
+    justify-content: center;
+    margin-top: 3rem;
+}
+
+.link {
+    color: #3498db;
+    text-decoration: none;
+    font-weight: 500;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.link:hover {
+    background-color: rgba(52, 152, 219, 0.1);
+    color: #2980b9;
+}
+
+@media (max-width: 768px) {
+    .container {
+        padding: 1rem;
+    }
+
+    .dashboard-header h1 {
+        font-size: 1.8rem;
+    }
+
+    .latest-session-section {
+        padding: 1.5rem;
+    }
+
+    .session-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .action-buttons {
+        flex-direction: column;
+    }
+
+    .btn {
+        width: 100%;
+        text-align: center;
+    }
+
+    .footer-links {
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+}
+</style>
+{% endblock %}

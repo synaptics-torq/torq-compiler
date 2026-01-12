@@ -1,0 +1,30 @@
+name: Deploy Dashboard to Hugging Face
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'webapps/dashboard/**'
+
+jobs:
+
+  deploy:
+    name: Deploy to Hugging Face Spaces
+    runs-on: ubuntu-latest
+
+    environment: hf-spaces
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        if: ${{ vars.HF_SPACES_DEPLOY_USER != '' }}
+      
+      - name: Deploy to Hugging Face Space
+        uses: ./.github/actions/deploy-space
+        if: ${{ vars.HF_SPACES_DEPLOY_USER != '' }}
+        with:
+          hf_token: ${{ secrets.HF_SPACES_DEPLOY_TOKEN }}
+          hf_user: ${{ vars.HF_SPACES_DEPLOY_USER }}
+          app_name: Synaptics/torq-performance
+          source_path: webapps/dashboard

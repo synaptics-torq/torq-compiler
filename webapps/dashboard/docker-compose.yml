@@ -1,0 +1,18 @@
+services:
+  torq-performance:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: torq-performance
+
+    ports:      
+      - "8080:8080"
+
+    volumes:
+      - ./data:/data
+      - ./perf:/app/perf:ro
+      - ./webapp:/app/webapp:ro
+      - ./templates:/app/templates:ro
+
+    command: uwsgi --ini uwsgi.ini --py-autoreload 1

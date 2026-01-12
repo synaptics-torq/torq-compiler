@@ -571,7 +571,10 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         cmds.append('--torq_dump_buffers_dir=' + str(buffers_dir))
 
     if enable_profiling:
-        cmds.append(f'--torq_profile_host=' + str(versioned_dir / 'host_profile.csv'))
+        host_profile_path = versioned_dir / 'host_profile.csv'
+        cmds.append(f'--torq_profile_host=' + str(host_profile_path))
+        record_property = request.getfixturevalue("record_property")
+        record_property("profiling_output", str(host_profile_path))
 
     print("Running for TORQ with: " + " ".join(cmds))
     if runtime_hw_type == 'aws_fpga':            

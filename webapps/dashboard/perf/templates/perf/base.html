@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Torq Performance{% endblock %}</title>
+    {% load static %}
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <header>
+        <nav>
+            {% block navigation %}
+            <!-- Navigation content -->
+            {% endblock %}
+        </nav>
+    </header>
+
+    <main>
+        {% block content %}
+        <!-- Main content goes here -->
+        {% endblock %}
+    </main>
+
+    <footer>
+        {% block footer %}
+        <!-- Footer content -->
+        {% endblock %}
+    </footer>
+
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

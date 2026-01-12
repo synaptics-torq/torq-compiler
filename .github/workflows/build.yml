@@ -171,6 +171,8 @@ jobs:
           test_data_cache_artifact: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('test-cache-{0}', matrix.chip_group)) || '' }} # upload to github only on main branch 
           pytest_args: -m ci -n auto -v --performance-report=${{ github.workspace }}/host_test_performance_${{ matrix.chip_group }}.csv --torq-chips ${{ matrix.chip_group }}
           s3_bucket: ${{ vars.ARTIFACT_BUCKET }}
+          torq_perf_server: ${{ vars.TORQ_PERF_SERVER }}
+          torq_perf_server_token: ${{ secrets.TORQ_PERF_SERVER_TOKEN }}
           
       - name: Upload host test performance
         if: ${{ vars.DISABLE_TESTS != 'true' }}

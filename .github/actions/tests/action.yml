@@ -40,6 +40,16 @@ inputs:
     required: false
     default: ''
 
+  torq_perf_server:
+    description: 'Torq Performance Server URL'
+    required: false
+    default: ''
+    
+  torq_perf_server_token:
+    description: 'Torq Performance Server Token'
+    required: false
+    default: ''
+
 outputs:
   s3_cache_path:
     description: 'S3 path of the uploaded test data cache artifact'
@@ -159,6 +169,8 @@ runs:
         IREE_COMPILE: ${{github.workspace}}/release/tools/iree-compile
         IREE_OPT: ${{github.workspace}}/release/tools/iree-opt
         HF_TOKEN: ${{ inputs.hf_token }}
+        TORQ_PERF_SERVER: ${{ inputs.torq_perf_server }}
+        TORQ_PERF_SERVER_TOKEN: ${{ inputs.torq_perf_server_token }}
       run: |            
         # run pytest with ignoring binary mtime changes to generate a cache that can be used in other environments,
         # also disable phases dump to reduce size of the cache
