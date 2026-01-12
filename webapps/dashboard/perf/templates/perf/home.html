@@ -94,13 +94,12 @@
                         <th class="text-center">Failed</th>
                         <th class="text-center">Skipped</th>
                         <th class="text-center">Pass Rate</th>
-                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for session in other_branch_sessions %}
                     <tr>
-                        <td class="branch-name">{{ session.git_branch }}</td>
+                        <td class="branch-name"><a href="{% url 'test_session' session.id %}">{{ session.git_branch }}</a></td>
                         <td class="text-center">#{{ session.id }}</td>
                         <td>{{ session.timestamp|date:"M d, H:i" }}</td>
                         <td class="commit-hash">{{ session.git_commit|truncatechars:10|default:"—" }}</td>
@@ -114,9 +113,6 @@
                             {% else %}
                                 —
                             {% endif %}
-                        </td>
-                        <td>
-                            <a href="{% url 'test_session' session.id %}" class="btn-small">View</a>
                         </td>
                     </tr>
                     {% endfor %}

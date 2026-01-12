@@ -13,7 +13,7 @@ from typing import Dict, Any
 import random
 
 
-reports = []
+reports = {}
 
 def _upload_zip_bundle(zip_path: str) -> Dict[str, Any]:
     """Uploads a ZIP bundle to the bulk endpoint.
@@ -85,11 +85,8 @@ def _parse_from_nodeid(nodeid: str) -> tuple[str, str, str]:
 def pytest_runtest_logreport(report: pytest.TestReport):
     """Called after each test phase (setup, call, teardown)"""    
 
-    # only process the 'call' phase
-    if report.when != 'call':
-        return
+    reports.setdefault(report.nodeid, {})[report.when] = report
 
-    reports.append(report)
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session):
@@ -111,30 +108,41 @@ def pytest_sessionfinish(session):
         profiles_root = os.path.join(temp_dir, 'profiles')
         os.makedirs(profiles_root, exist_ok=True)
 
-        for report in reports:
+        for node_id, report_phases in reports.items():
 
-            # parse the node id of the report
-            
-            module, name, parameters = _parse_from_nodeid(report.nodeid)
+            # parse the node id of the report            
+            module, name, parameters = _parse_from_nodeid(node_id)
+
+            # find the complete outcome of the test across all phases
+            outcome = 'failed'            
+            for phase in ['setup', 'call', 'teardown']:              
+                if phase in report_phases:                    
+                    outcome = report_phases[phase].outcome
+                    if outcome != 'passed':
+                        break
 
             test_run = {
                 'module': module,
                 'name': name,
                 'parameters': parameters,
-                'outcome': report.outcome,
+                'outcome': outcome,
             }
 
-            profiling_output_file = dict(report.user_properties).get('profiling_output')
+            if 'call' in report_phases:
 
-            if profiling_output_file:
+                report = report_phases['call']
 
-                # Copy profiling file into profiles/ and reference it relative to manifest
-                dst_name = os.path.basename(profiling_output_file)
-                dst_path = os.path.join(profiles_root, dst_name)
+                profiling_output_file = dict(report.user_properties).get('profiling_output')
+
+                if profiling_output_file:
+
+                    # Copy profiling file into profiles/ and reference it relative to manifest
+                    dst_name = os.path.basename(profiling_output_file)
+                    dst_path = os.path.join(profiles_root, dst_name)
+                    
+                    shutil.copy2(profiling_output_file, dst_path)
+                    test_run['profiling_file'] = os.path.join('profiles', dst_name)
                 
-                shutil.copy2(profiling_output_file, dst_path)
-                test_run['profiling_file'] = os.path.join('profiles', dst_name)
-            
             manifest['test_runs'].append(test_run)
 
         manifest_path = os.path.join(temp_dir, 'test_session.json')
