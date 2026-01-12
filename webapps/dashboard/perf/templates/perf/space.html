@@ -1,0 +1,20 @@
+{% extends "perf/base.html" %}
+
+{% block title %}Welcome - Torq Performance{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: center; align-items: center; min-height: 60vh; flex-direction: column; text-align: center;">
+    <div style="max-width: 600px; padding: 40px;">
+        <h1 style="margin-bottom: 20px; color: #333;">Welcome to Torq Performance Dashboard</h1>
+        <p style="font-size: 18px; color: #666; margin-bottom: 30px;">
+            View performance metrics and test results
+        </p>
+        
+        {% if redirect_url %}
+            <a href="{{ redirect_url }}" target="_blank" style="display: inline-block; padding: 14px 32px; font-size: 16px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 4px; text-decoration: none; transition: background-color 0.3s ease;">
+                Enter Dashboard
+            </a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

@@ -38,6 +38,9 @@ COPY templates /app/templates
 # collect all the static files for serving over http
 RUN python3 manage.py collectstatic --noinput
 
+# ensure /data exists even if nobody mounts it
+RUN mkdir /data && chown ubuntu:ubuntu /data
+
 EXPOSE 8080
 
 USER ubuntu

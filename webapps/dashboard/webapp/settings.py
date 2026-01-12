@@ -28,10 +28,10 @@ SECRET_KEY = 'django-insecure-z3-vwm@3-wtk4kp_odcx*4hiagl3x^kz15ru1clnv-&o=zme4f
 DEBUG = True
 
 
-if os.environ.get("DJANGO_ALLOWED_HOSTS"):
-    ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS").split(",")
-else:
-    ALLOWED_HOSTS = []
+ALLOWED_HOSTS = []
+
+if os.environ.get("SPACE_HOST"):
+    ALLOWED_HOSTS.append(os.environ.get("SPACE_HOST"))    
 
 # Application definition
 
@@ -53,7 +53,7 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware'
+    'django.middleware.csp.ContentSecurityPolicyMiddleware'
 ]
 
 ROOT_URLCONF = 'webapp.urls'
@@ -83,6 +83,11 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': '/data/db.sqlite3',
+        # Use WAL journal mode for better concurrency and to avoid issues on NFS (persistent space data)
+        'OPTIONS': {
+            'timeout': 20,
+            'init_command': "PRAGMA journal_mode=WAL;"
+        }
     }
 }
 
@@ -130,4 +135,5 @@ MEDIA_URL = 'media/'
 MEDIA_ROOT = '/data/media'
 
 # Allow embedding the app from huggingface spaces
-X_FRAME_OPTIONS = 'ALLOW-FROM https://huggingface.co/'
+if os.environ.get("SPACE_HOST"):
+    SECURE_CONTENT_SECURITY_POLICY = "frame-ancestors 'self' https://huggingface.co"

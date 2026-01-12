@@ -6,6 +6,8 @@ colorTo: green
 sdk: docker
 app_port: 8080
 pinned: false
+suggested_storage: small
+base_path: /space
 short_description: Torq Performance Dashboard
 license: apache-2.0
 ---
@@ -69,3 +71,13 @@ set two environment variables:
 export TORQ_PERF_SERVER=https://organization_name-space_name.hf.space
 export TORQ_PERF_SERVER_TOKEN=hf_XXXXXXXXXXXXXXXXXXXXXX
 ```
+
+Once the space is created to manually deploy the application you can use the following command line:
+
+```
+../../scripts/deploy-to-space.sh organization_name/space_name
+```
+
+The script creates a local repo in the current directory and force pushes it to the corresponding repo.
+
+The script expects ssh access to HF is already configured for the current user.

@@ -9,90 +9,133 @@
         <p class="subtitle">Real-time performance tracking and test results</p>
     </header>
 
-    <div class="latest-session-section">
-        {% if latest_session %}
+    <!-- Main Branch Session - Prominent Display -->
+    <div class="main-branch-section">
+        {% if main_branch_session %}
             <div class="session-header">
-                <h2>Latest Test Session</h2>
-                <p class="session-id">Session #{{ latest_session.id }}</p>
+                <h2>Main Branch - Latest Session</h2>
+                <p class="session-id">Session #{{ main_branch_session.id }}</p>
             </div>
 
             <div class="session-info-grid">
                 <div class="info-card">
                     <h4>Timestamp</h4>
-                    <p class="info-value">{{ latest_session.timestamp|date:"M d, Y H:i:s" }}</p>
+                    <p class="info-value">{{ main_branch_session.timestamp|date:"M d, Y H:i:s" }}</p>
                 </div>
-                {% if latest_session.git_commit %}
+                {% if main_branch_session.git_commit %}
                 <div class="info-card">
                     <h4>Git Commit</h4>
-                    <p class="info-value monospace">{{ latest_session.git_commit|truncatechars:10 }}</p>
+                    <p class="info-value monospace">{{ main_branch_session.git_commit|truncatechars:10 }}</p>
                 </div>
                 {% endif %}
-                {% if latest_session.git_branch %}
                 <div class="info-card">
                     <h4>Git Branch</h4>
-                    <p class="info-value">{{ latest_session.git_branch }}</p>
+                    <p class="info-value">{{ main_branch_session.git_branch }}</p>
                 </div>
-                {% endif %}
             </div>
 
             <div class="stats-container">
                 <h3>Test Statistics</h3>
                 <div class="stats-grid">
                     <div class="stat-card total">
-                        <div class="stat-value">{{ latest_session.num_total }}</div>
+                        <div class="stat-value">{{ main_branch_session.num_total }}</div>
                         <div class="stat-label">Total Tests</div>
                     </div>
                     <div class="stat-card passed">
-                        <div class="stat-value">{{ latest_session.num_passed }}</div>
+                        <div class="stat-value">{{ main_branch_session.num_passed }}</div>
                         <div class="stat-label">Passed</div>
-                        {% if latest_session.num_total %}
-                        <div class="stat-percentage">{% widthratio latest_session.num_passed latest_session.num_total 100 %}%</div>
+                        {% if main_branch_session.num_total %}
+                        <div class="stat-percentage">{% widthratio main_branch_session.num_passed main_branch_session.num_total 100 %}%</div>
                         {% endif %}
                     </div>
                     <div class="stat-card failed">
-                        <div class="stat-value">{{ latest_session.num_failed }}</div>
+                        <div class="stat-value">{{ main_branch_session.num_failed }}</div>
                         <div class="stat-label">Failed</div>
-                        {% if latest_session.num_total %}
-                        <div class="stat-percentage">{% widthratio latest_session.num_failed latest_session.num_total 100 %}%</div>
+                        {% if main_branch_session.num_total %}
+                        <div class="stat-percentage">{% widthratio main_branch_session.num_failed main_branch_session.num_total 100 %}%</div>
                         {% endif %}
                     </div>
                     <div class="stat-card skipped">
-                        <div class="stat-value">{{ latest_session.num_skipped }}</div>
+                        <div class="stat-value">{{ main_branch_session.num_skipped }}</div>
                         <div class="stat-label">Skipped</div>
-                        {% if latest_session.num_total %}
-                        <div class="stat-percentage">{% widthratio latest_session.num_skipped latest_session.num_total 100 %}%</div>
+                        {% if main_branch_session.num_total %}
+                        <div class="stat-percentage">{% widthratio main_branch_session.num_skipped main_branch_session.num_total 100 %}%</div>
                         {% endif %}
                     </div>
                 </div>
             </div>
 
             <div class="action-buttons">
-                <a href="{% url 'test_session' latest_session.id %}" class="btn btn-primary">View Full Details</a>
-                <a href="/admin/perf/testsession/{{ latest_session.id }}/change/" class="btn btn-secondary" target="_blank">Edit in Admin</a>
+                <a href="{% url 'test_session' main_branch_session.id %}" class="btn btn-primary">View Full Details</a>
+                <a href="/admin/perf/testsession/{{ main_branch_session.id }}/change/" class="btn btn-secondary">Edit in Admin</a>
             </div>
         {% else %}
             <div class="no-data">
-                <p>No test sessions available yet.</p>
+                <p>No main branch test sessions available yet.</p>
                 <p class="text-muted">Test sessions will appear here once they are created.</p>
             </div>
         {% endif %}
     </div>
 
+    <!-- Other Branches - Compact Table View -->
+    {% if other_branch_sessions %}
+    <div class="other-branches-section">
+        <h2 class="section-title">Recent Branches (Latest 10)</h2>
+        <div class="table-container">
+            <table class="branches-table">
+                <thead>
+                    <tr>
+                        <th>Branch</th>
+                        <th>Session</th>
+                        <th>Timestamp</th>
+                        <th>Commit</th>
+                        <th class="text-center">Total</th>
+                        <th class="text-center">Passed</th>
+                        <th class="text-center">Failed</th>
+                        <th class="text-center">Skipped</th>
+                        <th class="text-center">Pass Rate</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for session in other_branch_sessions %}
+                    <tr>
+                        <td class="branch-name">{{ session.git_branch }}</td>
+                        <td class="text-center">#{{ session.id }}</td>
+                        <td>{{ session.timestamp|date:"M d, H:i" }}</td>
+                        <td class="commit-hash">{{ session.git_commit|truncatechars:10|default:"—" }}</td>
+                        <td class="text-center">{{ session.num_total }}</td>
+                        <td class="text-center stat-passed">{{ session.num_passed }}</td>
+                        <td class="text-center stat-failed">{{ session.num_failed }}</td>
+                        <td class="text-center stat-skipped">{{ session.num_skipped }}</td>
+                        <td class="text-center">
+                            {% if session.num_total %}
+                                {% widthratio session.num_passed session.num_total 100 %}%
+                            {% else %}
+                                —
+                            {% endif %}
+                        </td>
+                        <td>
+                            <a href="{% url 'test_session' session.id %}" class="btn-small">View</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
     <div class="footer-links">
-        <a href="/admin" class="link" target="_blank">Admin Dashboard</a>
+        <a href="/admin" class="link">Admin Dashboard</a>
         <a href="/api/test-sessions/" class="link">API Endpoint</a>
     </div>
 </div>
 
 <style>
-body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    background-color: #f5f7fa;
-    color: #2c3e50;
-}
 
 .container {
-    max-width: 1200px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 2rem;
 }
@@ -114,11 +157,13 @@ body {
     margin: 0;
 }
 
-.latest-session-section {
+/* Main Branch Section - Prominent Display */
+.main-branch-section {
     background: white;
     border-radius: 8px;
     padding: 2rem;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    margin-bottom: 3rem;
 }
 
 .session-header {
@@ -280,6 +325,115 @@ body {
     transform: translateY(-2px);
 }
 
+/* Other Branches Section - Compact Table */
+.other-branches-section {
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    margin-bottom: 2rem;
+}
+
+.section-title {
+    margin: 0 0 1.5rem 0;
+    font-size: 1.6rem;
+    color: #1a252f;
+    border-bottom: 2px solid #ecf0f1;
+    padding-bottom: 1rem;
+}
+
+.table-container {
+    overflow-x: auto;
+}
+
+.branches-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+
+.branches-table thead {
+    background-color: #f8f9fa;
+}
+
+.branches-table th {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    font-weight: 600;
+    color: #2c3e50;
+    border-bottom: 2px solid #dee2e6;
+    white-space: nowrap;
+}
+
+.branches-table th.text-center {
+    text-align: center;
+}
+
+.branches-table tbody tr {
+    border-bottom: 1px solid #ecf0f1;
+    transition: background-color 0.2s;
+}
+
+.branches-table tbody tr:hover {
+    background-color: #f8f9fa;
+}
+
+.branches-table td {
+    padding: 0.75rem 1rem;
+    vertical-align: middle;
+}
+
+.branches-table td.text-center {
+    text-align: center;
+}
+
+.branch-name {
+    font-weight: 500;
+    color: #3498db;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.commit-hash {
+    font-family: 'Courier New', monospace;
+    font-size: 0.85rem;
+    color: #7f8c8d;
+}
+
+.stat-passed {
+    color: #27ae60;
+    font-weight: 600;
+}
+
+.stat-failed {
+    color: #e74c3c;
+    font-weight: 600;
+}
+
+.stat-skipped {
+    color: #f39c12;
+    font-weight: 600;
+}
+
+.btn-small {
+    padding: 0.4rem 0.8rem;
+    border-radius: 4px;
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 0.85rem;
+    background-color: #3498db;
+    color: white;
+    transition: all 0.2s;
+    display: inline-block;
+}
+
+.btn-small:hover {
+    background-color: #2980b9;
+    transform: translateY(-1px);
+}
+
 .no-data {
     text-align: center;
     padding: 3rem 1rem;
@@ -324,7 +478,7 @@ body {
         font-size: 1.8rem;
     }
 
-    .latest-session-section {
+    .main-branch-section {
         padding: 1.5rem;
     }
 
@@ -344,6 +498,19 @@ body {
     .btn {
         width: 100%;
         text-align: center;
+    }
+
+    .other-branches-section {
+        padding: 1rem;
+    }
+
+    .branches-table {
+        font-size: 0.8rem;
+    }
+
+    .branches-table th,
+    .branches-table td {
+        padding: 0.5rem;
     }
 
     .footer-links {
