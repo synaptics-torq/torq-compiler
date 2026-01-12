@@ -129,7 +129,13 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
         outputType = llvm::cast<RankedTensorType>(output.getType());
         inputAType = llvm::cast<RankedTensorType>(inputA.getType());
 
-        assert(outputType.getRank() == 2 && "TORQ FC op expects output tensor rank == 2");
+        assert(outputType.getRank() >= 2 && "TORQ FC op expects output tensor rank >= 2");
+        if (outputType.getRank() > 2) {
+            auto outputShape = outputType.getShape();
+            for (int i = 0; i < outputShape.size() - 2; ++i) {
+                assert(outputShape[i] == 1 && "TORQ FC op expects extra dimensions to be 1");
+            }
+        }
         assert(inputAType.getRank() == 2 && "TORQ FC op expects input tensor rank == 2");
         auto weightType = llvm::cast<RankedTensorType>(torqWeights.getType());
         assert(weightType.getRank() == 2 && "TORQ FC op expects weight rank == 2");
