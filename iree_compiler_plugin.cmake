@@ -6,4 +6,4 @@
 
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/compiler target/TORQ)
 
-add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/tools torq-tools)
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/compiler/tools ${CMAKE_BINARY_DIR}/compiler/tools)

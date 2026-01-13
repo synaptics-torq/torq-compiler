@@ -46,12 +46,13 @@ mkdir ${INSTALL_DIR}/lib
 mkdir ${INSTALL_DIR}/scripts
 
 cp ${BUILD_DIR}/third_party/iree/tools/iree-run-module ${INSTALL_DIR}/tools
+cp ${BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-compile ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/torq-compile ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-opt ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/lib/libIREECompiler.so ${INSTALL_DIR}/lib
 
-cp ${TARGET_BUILD_DIR}/third_party/iree/tools/iree-run-module ${INSTALL_DIR}/tools/armhf-iree-run-module
+cp ${TARGET_BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools/armhf-torq-run-module
 
 cp ${BASE_DIR}/scripts/Dockerfile.release ${INSTALL_DIR}/Dockerfile
 cp ${BASE_DIR}/scripts/setup.sh ${INSTALL_DIR}

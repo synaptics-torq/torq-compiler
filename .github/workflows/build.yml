@@ -95,7 +95,7 @@ jobs:
       - name: Build for soc
         working-directory: /workspace/build-soc
         run: |
-          cmake --build . --target iree-run-module
+          cmake --build . --target torq-run-module
 
       - name: Set tag variable
         id: vars

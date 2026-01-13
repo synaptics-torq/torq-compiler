@@ -139,7 +139,7 @@ def get_input_type_options(input_path):
 
 def create_output_args(output_path_root, output_specs):
     """
-    Creates the output command line args to invoke iree-run-module
+    Creates the output command line args to invoke torq-run-module
     """    
 
     output_args = []
@@ -152,7 +152,7 @@ def create_output_args(output_path_root, output_specs):
 
 def create_output_paths(output_path_root, output_specs):
     """
-    Creates the paths for the outputs of iree-run-module
+    Creates the paths for the outputs of torq-run-module
     """    
     
     output_paths = []
@@ -166,7 +166,7 @@ def create_output_paths(output_path_root, output_specs):
 
 def load_outputs(output_specs, output_paths):
     """
-    Reads the data saved as outputs from iree-run-module
+    Reads the data saved as outputs from torq-run-module
     """
     output_data = []
 
@@ -341,7 +341,7 @@ def torq_runtime(request):
     It is automatically invalidated when the runtime binary mtime changes.
     """
 
-    file_path = _find_iree_tool('IREE_RUN_MODULE', 'iree-run-module')
+    file_path = _find_iree_tool('TORQ_RUN_MODULE', 'torq-run-module')
 
     if request.config.getoption("--ignore-binary-mtime"):
         runtime_mtime = 0

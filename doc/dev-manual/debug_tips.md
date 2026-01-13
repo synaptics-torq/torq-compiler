@@ -32,7 +32,7 @@
 - To debug using gdb the hal runtime plugin you can use the following command line:
 
   ```{code} shell
-  $ gdb --args ../iree-build/third_party/iree/tools/iree-run-module ${OTHER_RUN_MODULE_PARAMS}
+  $ gdb --args ../iree-build/runtime/tools/torq-run-module ${OTHER_RUN_MODULE_PARAMS}
   ```
 
 - To get a full dump of each pass IR with a test run::

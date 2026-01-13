@@ -90,7 +90,8 @@ jobs:
           cd ${{github.workspace}}
           source /workspace/venv/bin/activate          
           export LD_LIBRARY_PATH=${{github.workspace}}/release/lib/
-          export SOC_IREE_RUN_MODULE=${{github.workspace}}/release/tools/armhf-iree-run-module
+          export SOC_TORQ_RUN_MODULE=${{github.workspace}}/release/tools/armhf-torq-run-module
+          export TORQ_RUN_MODULE=${{github.workspace}}/release/tools/torq-run-module
           export IREE_RUN_MODULE=${{github.workspace}}/release/tools/iree-run-module
           export TORQ_COMPILE=${{github.workspace}}/release/tools/torq-compile
           export IREE_COMPILE=${{github.workspace}}/release/tools/iree-compile

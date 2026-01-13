@@ -42,9 +42,9 @@ Profiling helps you understand the performance characteristics of your models on
 
 - Runtime profiling records the actual execution time for each code block when the model is run on simulation. This will print the time each individual block of code takes to execute.
 
-- Run the model using iree-run-module with the profiling flag:
+- Run the model using torq-run-module with the profiling flag:
     ```shell
-    $ iree-run-module --device=torq --module=model.vmfb --input="1x56x56x24xi8=1" --torq_profile=./runtime.csv 
+    $ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1" --torq_profile=./runtime.csv 
     ```
 - Understanding `runtime.csv` Output
 

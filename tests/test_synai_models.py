@@ -513,12 +513,12 @@ def process_tflite_file(tflite_file, dry_run=False, timeout=180):
     for i, _ in enumerate(output_files):
         test_output_files.append(os.path.join(model_dir, f"output_{i}_test.npy"))
     
-    # Prepare input arguments for iree-run-module
+    # Prepare input arguments for torq-run-module
     input_args = []
     for input_file in input_files:
         input_args.append(f'--input="@{input_file}"')
     
-    # Prepare output arguments for iree-run-module
+    # Prepare output arguments for torq-run-module
     output_args = []
     for test_output_file in test_output_files:
         output_args.append(f'--output="@{test_output_file}"')
@@ -528,7 +528,7 @@ def process_tflite_file(tflite_file, dry_run=False, timeout=180):
         f"iree-import-tflite {tflite_file} -o {tosa_file}",
         f"iree-opt {tosa_file} -o {mlir_file}",
         f"torq-compile {mlir_file} -o {vmfb_file}",
-        f"iree-run-module --device=torq --module={vmfb_file} --function=main {' '.join(input_args)} {' '.join(output_args)}"
+        f"torq-run-module --module={vmfb_file} --function=main {' '.join(input_args)} {' '.join(output_args)}"
     ]
     
     # Command names for log files and stages
