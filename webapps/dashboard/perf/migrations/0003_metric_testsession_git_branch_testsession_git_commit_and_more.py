@@ -44,7 +44,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='testrun',
             name='profiling_data',
-            field=models.FileField(blank=True, null=True, upload_to=perf.models.profiling_data_upload_path),
+            field=models.FileField(blank=True, null=True, upload_to=perf.models._profiling_data_upload_path),
         ),
         migrations.CreateModel(
             name='Measurement',

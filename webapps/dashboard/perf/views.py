@@ -63,6 +63,6 @@ def home(request):
 
 
 def test_session(request, session_id):
-    session = TestSession.objects.prefetch_related('testrun_set__test_case').get(id=session_id)
+    session = TestSession.objects.prefetch_related('testrunbatch_set__testrun_set__test_case').get(id=session_id)
 
     return render(request, 'perf/test_session.html', {'session': session})

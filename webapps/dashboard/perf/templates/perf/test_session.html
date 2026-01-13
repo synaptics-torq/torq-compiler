@@ -72,45 +72,55 @@
 
     <div class="test-runs" style="margin-bottom: 2rem;">
         <h2>Test Runs</h2>
-        {% if session.testrun_set.all %}
-            <table style="width: 100%; border-collapse: collapse;">
-                <thead>
-                    <tr style="border-bottom: 2px solid #ddd;">
-                        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Module</th>
-                        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Test Case</th>
-                        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Parameters</th>
-                        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Outcome</th>
-                        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Perf Trace</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for test_run in session.testrun_set.all %}
-                    <tr style="border-bottom: 1px solid #eee;">
-                        <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">{{ test_run.test_case.module }}</td>
-                        <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">{{ test_run.test_case.name }}</td>
-                        <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">{{ test_run.test_case.parameters }}</td>
-                        <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">
-                            {% if test_run.outcome == 1 %}
-                                <span style="color: #2e7d32; font-weight: bold;">✓ Pass</span>
-                            {% elif test_run.outcome == 2 %}
-                                <span style="color: #c62828; font-weight: bold;">✗ Fail</span>
-                            {% elif test_run.outcome == 3 %}
-                                <span style="color: #e65100; font-weight: bold;">⊘ Skip</span>
-                            {% endif %}
-                        </td>
-                        <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">
-                            {% if test_run.profiling_data %}
-                                <a href="{{ test_run.profiling_data.url }}" style="color: #007bff; text-decoration: none;">📊 View Trace</a>
-                            {% else %}
-                                <span style="color: #999;">—</span>
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+        {% if session.testrunbatch_set.all %}
+            {% for batch in session.testrunbatch_set.all %}
+            <div style="margin-bottom: 2rem; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; background-color: #f9f9f9;">
+                <h3>Batch #{{ batch.id }} - {{ batch.name|default:"Unnamed" }}</h3>
+                <p style="margin: 0.5rem 0; font-size: 0.9rem; color: #666;">Created: {{ batch.created_at }} | Status: {% if batch.processed %}<span style="color: #2e7d32;">✓ Processed</span>{% else %}<span style="color: #e65100;">⏳ Processing</span>{% endif %}</p>
+                {% if batch.testrun_set.all %}
+                <table style="width: 100%; border-collapse: collapse;">
+                    <thead>
+                        <tr style="border-bottom: 2px solid #ddd;">
+                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Module</th>
+                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Test Case</th>
+                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Parameters</th>
+                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Outcome</th>
+                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Perf Trace</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for test_run in batch.testrun_set.all %}
+                        <tr style="border-bottom: 1px solid #eee;">
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">{{ test_run.test_case.module }}</td>
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">{{ test_run.test_case.name }}</td>
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">{{ test_run.test_case.parameters }}</td>
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">
+                                {% if test_run.outcome == 1 %}
+                                    <span style="color: #2e7d32; font-weight: bold;">✓ Pass</span>
+                                {% elif test_run.outcome == 2 %}
+                                    <span style="color: #c62828; font-weight: bold;">✗ Fail</span>
+                                {% elif test_run.outcome == 3 %}
+                                    <span style="color: #e65100; font-weight: bold;">⊘ Skip</span>
+                                {% endif %}
+                            </td>
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">
+                                {% if test_run.profiling_data %}
+                                    <a href="{{ test_run.profiling_data.url }}" style="color: #007bff; text-decoration: none;">📊 View Trace</a>
+                                {% else %}
+                                    <span style="color: #999;">—</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p style="margin: 0.5rem 0;">No test runs in this batch.</p>
+                {% endif %}
+            </div>
+            {% endfor %}
         {% else %}
-            <p>No test runs in this session.</p>
+            <p>No test batches in this session.</p>
         {% endif %}
     </div>
 

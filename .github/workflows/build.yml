@@ -173,6 +173,7 @@ jobs:
           s3_bucket: ${{ vars.ARTIFACT_BUCKET }}
           torq_perf_server: ${{ vars.TORQ_PERF_SERVER }}
           torq_perf_server_token: ${{ secrets.TORQ_PERF_SERVER_TOKEN }}
+          batch_name: cmodel-${{ matrix.chip_group }}
           
       - name: Upload host test performance
         if: ${{ vars.DISABLE_TESTS != 'true' }}
@@ -240,6 +241,7 @@ jobs:
           pytest_args: -m fpga_ci -n auto --performance-report=${{ github.workspace }}/aws_fpga_test_performance_${{ matrix.chip_group }}.csv --torq-runtime-hw-type aws_fpga --torq-runtime-timeout=20 --torq-chips ${{ matrix.chip_group }} --torq-runtime-profiling-output-dir=${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
           torq_perf_server: ${{ vars.TORQ_PERF_SERVER }}
           torq_perf_server_token: ${{ secrets.TORQ_PERF_SERVER_TOKEN }}
+          batch_name: cmodel-${{ matrix.chip_group }}
 
 
       - name: Upload AWS FPGA test performance

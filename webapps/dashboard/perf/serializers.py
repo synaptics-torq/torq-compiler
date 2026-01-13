@@ -38,5 +38,5 @@ class TestSessionSerializer(serializers.ModelSerializer):
 class TestRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = TestRun
-        fields = ['id', 'test_session', 'test_case', 'profiling_data', 'outcome']
+        fields = ['id', 'test_run_batch', 'test_case', 'profiling_data', 'outcome']
 

@@ -3,6 +3,30 @@ from django.db import models
 from django.utils.text import slugify
 
 
+## Helper functions
+
+def _profiling_data_upload_path(instance, filename):
+    """Generate a custom path for profiling data files."""
+    # Extract file extension
+    ext = os.path.splitext(filename)[1]
+    
+    # Create a naming convention: session_id/testcase_module_name_params.ext
+    test_case = instance.test_case
+    session_id = instance.test_run_batch.test_session.id
+    batch_id = instance.test_run_batch.id
+    
+    # Sanitize the components
+    module = slugify(test_case.module)
+    name = slugify(test_case.name)
+    params = slugify(test_case.parameters)
+    
+    # Build the filename
+    new_filename = f"{module}_{name}_{params}{ext}"
+    
+    return f"profiling_data/session_{session_id}/batch_{batch_id}/{new_filename}"
+
+## Models
+
 class TestCase(models.Model):
     module = models.TextField()
     name = models.TextField()
@@ -30,42 +54,36 @@ class TestSession(models.Model):
 
     @property
     def num_passed(self):
-        return self.testrun_set.filter(outcome=TestRun.Outcome.PASS).count()
+        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.PASS).count()
 
     @property
     def num_skipped(self):
-        return self.testrun_set.filter(outcome=TestRun.Outcome.SKIP).count()
+        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.SKIP).count()
 
     @property
     def num_failed(self):
-        return self.testrun_set.filter(outcome=TestRun.Outcome.FAIL).count()
+        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.FAIL).count()
 
     @property
     def num_total(self):
-        return self.testrun_set.count()
+        return TestRun.objects.filter(test_run_batch__test_session=self).count()
 
     def __str__(self):
         return f"Session #{self.id} (commit: {self.git_commit}, branch: {self.git_branch})"
 
 
-def profiling_data_upload_path(instance, filename):
-    """Generate a custom path for profiling data files."""
-    # Extract file extension
-    ext = os.path.splitext(filename)[1]
-    
-    # Create a naming convention: session_id/testcase_module_name_params.ext
-    test_case = instance.test_case
-    session_id = instance.test_session.id
-    
-    # Sanitize the components
-    module = slugify(test_case.module)
-    name = slugify(test_case.name)
-    params = slugify(test_case.parameters)
-    
-    # Build the filename
-    new_filename = f"{module}_{name}_{params}{ext}"
-    
-    return f"profiling_data/session_{session_id}/{new_filename}"
+class TestRunBatch(models.Model):
+    test_session = models.ForeignKey(TestSession, on_delete=models.CASCADE, db_index=True)
+    name = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    processed = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = "Test run batch"
+        verbose_name_plural = "Test run batches"
+
+    def __str__(self):
+        return f"TestRunBatch #{self.id}: {self.name} for Session #{self.test_session.id}"
 
 
 class Metric(models.Model):
@@ -84,13 +102,13 @@ class TestRun(models.Model):
         FAIL = 2, 'Fail'
         SKIP = 3, 'Skip'
 
-    test_session = models.ForeignKey(TestSession, on_delete=models.CASCADE)
+    test_run_batch = models.ForeignKey(TestRunBatch, on_delete=models.CASCADE)
     test_case = models.ForeignKey(TestCase, on_delete=models.CASCADE)
-    profiling_data = models.FileField(blank=True, null=True, upload_to=profiling_data_upload_path)
+    profiling_data = models.FileField(blank=True, null=True, upload_to=_profiling_data_upload_path)
     outcome = models.IntegerField(choices=Outcome.choices)
 
     def __str__(self):
-        return f"TestRun: {self.test_case} in Session #{self.test_session.id} - {self.get_outcome_display()}"
+        return f"TestRun: {self.test_case} in Session #{self.test_run_batch.test_session.id} - {self.get_outcome_display()}"
 
 
 class Measurement(models.Model):
@@ -100,3 +118,4 @@ class Measurement(models.Model):
 
     def __str__(self):
         return f"Measurement: {self.metric.name} = {self.value} for {self.test_run}"
+

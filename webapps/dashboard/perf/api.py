@@ -9,7 +9,7 @@ from rest_framework import viewsets, filters, status
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
-from .models import TestCase, TestSession, TestRun
+from .models import TestCase, TestSession, TestRun, TestRunBatch
 from .serializers import TestCaseSerializer, TestSessionSerializer, TestRunSerializer
 from .processing import process_uploaded_zip
 
@@ -84,6 +84,13 @@ class TestSessionViewSet(viewsets.ModelViewSet):
                 workflow_url=None,
             )
 
+        # Create a TestRunBatch for this upload
+        test_run_batch = TestRunBatch.objects.create(
+            test_session=test_session,
+            name=manifest.get('batch_name'),
+            processed=False,
+        )
+
         # Save the uploaded file to a temporary location
         # The spooler will process the test runs
         with NamedTemporaryFile(delete=False, suffix='.zip', dir='/tmp') as temp_file:
@@ -95,7 +102,7 @@ class TestSessionViewSet(viewsets.ModelViewSet):
         # Spool the test run processing job
         process_uploaded_zip.spool(
             zip_path=temp_path.encode('utf-8'),
-            test_session_id=str(test_session.id).encode('utf-8'),
+            test_run_batch_id=str(test_run_batch.id).encode('utf-8'),
         )
 
         # Return the serialized test session
@@ -109,6 +116,6 @@ class TestRunViewSet(viewsets.ModelViewSet):
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['test_case__name', 'test_case__module']
-    ordering_fields = ['test_session', 'test_case', 'outcome']
-    ordering = ['-test_session__timestamp']
+    ordering_fields = ['test_run_batch__test_session', 'test_case', 'outcome']
+    ordering = ['-test_run_batch__test_session__timestamp']
 

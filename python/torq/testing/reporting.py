@@ -21,7 +21,7 @@ def _upload_zip_bundle(zip_path: str) -> Dict[str, Any]:
     Returns the JSON response (should include the created test session).
     """
     
-    server = os.environ.get("TORQ_PERF_SERVER")
+    server = os.environ.get("TORQ_PERF_SERVER", "")
 
     if server == "":
         return None
@@ -92,7 +92,10 @@ def pytest_runtest_logreport(report: pytest.TestReport):
 def pytest_sessionfinish(session):
     
     if xdist.is_xdist_worker(session):
-        return    
+        return
+
+    if os.environ.get("TORQ_PERF_SERVER", "") == "":
+        return
 
     with TemporaryDirectory() as temp_dir:
     
@@ -102,7 +105,8 @@ def pytest_sessionfinish(session):
             'git_commit': os.environ.get("GITHUB_SHA"),
             'git_branch': os.environ.get("GITHUB_REF"),
             'workflow_url': _build_workflow_url(),
-            'test_runs': []
+            'test_runs': [],
+            'batch_name': os.environ.get("TORQ_PERF_BATCH_NAME", "default"),
         }
 
         profiles_root = os.path.join(temp_dir, 'profiles')

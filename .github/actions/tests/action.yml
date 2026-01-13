@@ -50,6 +50,11 @@ inputs:
     required: false
     default: ''
 
+  batch_name:
+    description: 'Name of the test run batch for Torq reporting.'
+    required: false
+    default: 'default'
+
 outputs:
   s3_cache_path:
     description: 'S3 path of the uploaded test data cache artifact'
@@ -172,6 +177,7 @@ runs:
         HF_TOKEN: ${{ inputs.hf_token }}
         TORQ_PERF_SERVER: ${{ inputs.torq_perf_server }}
         TORQ_PERF_SERVER_TOKEN: ${{ inputs.torq_perf_server_token }}
+        TORQ_PERF_BATCH_NAME: ${{ inputs.batch_name }}
       run: |            
         # run pytest with ignoring binary mtime changes to generate a cache that can be used in other environments,
         # also disable phases dump to reduce size of the cache

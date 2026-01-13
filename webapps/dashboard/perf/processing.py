@@ -12,7 +12,7 @@ except ImportError:
     def spool(pass_arguments):
         return lambda x: x
     
-from perf.models import TestCase, TestSession, TestRun
+from perf.models import TestCase, TestSession, TestRun, TestRunBatch
 
 
 @spool
@@ -25,15 +25,15 @@ def process_uploaded_zip(args):
     Args:
         args: Dictionary containing:
             - zip_path: Path to the uploaded zip file
-            - test_session_id: ID of the pre-created test session
+            - test_run_batch_id: ID of the pre-created test run batch
     """
 
     zip_path = args['zip_path']
-    test_session_id = int(args['test_session_id'])
+    test_run_batch_id = int(args['test_run_batch_id'])
     
     try:
-        # Get the test session
-        test_session = TestSession.objects.get(id=test_session_id)
+        # Get the test run batch
+        test_run_batch = TestRunBatch.objects.get(id=test_run_batch_id)
         
         with TemporaryDirectory() as temp_dir:
             # Extract the zip file
@@ -74,7 +74,7 @@ def process_uploaded_zip(args):
                 )
 
                 test_run = TestRun.objects.create(
-                    test_session=test_session,
+                    test_run_batch=test_run_batch,
                     test_case=test_case,
                     outcome=outcome_map[outcome],
                 )
@@ -88,8 +88,12 @@ def process_uploaded_zip(args):
                     else:
                         print(f'Warning: Profiling file {profiling_rel} not found in archive.')
 
-    except TestSession.DoesNotExist:
-        print(f'Error: Test session {test_session_id} not found')
+            # Mark the batch as processed after all test runs have been created
+            test_run_batch.processed = True
+            test_run_batch.save()
+
+    except TestRunBatch.DoesNotExist:
+        print(f'Error: Test run batch {test_run_batch_id} not found')
     except Exception as e:
         print(f'Error processing uploaded zip: {e}')
     finally:
