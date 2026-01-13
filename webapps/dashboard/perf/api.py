@@ -1,7 +1,7 @@
 import os
 import zipfile
 import json
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, NamedTemporaryFile
 from django.core.files.base import File
 from rest_framework.parsers import MultiPartParser
 import requests
@@ -11,6 +11,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
 from .models import TestCase, TestSession, TestRun
 from .serializers import TestCaseSerializer, TestSessionSerializer, TestRunSerializer
+from .processing import process_uploaded_zip
 
 
 class StandardResultsSetPagination(PageNumberPagination):
@@ -47,83 +48,59 @@ class TestSessionViewSet(viewsets.ModelViewSet):
         if not upload.name.endswith('.zip'):
             return Response({'detail': 'File is not a zip archive.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        with TemporaryDirectory() as temp_dir:
-
+        try:
             with zipfile.ZipFile(upload, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
-
-            # Find JSON manifest named test_session.json
-            manifest_path = os.path.join(temp_dir, 'test_session.json')
-            
-            if not os.path.exists(manifest_path):
-                return Response({'detail': 'Required manifest test_session.json not found in archive.'}, status=status.HTTP_400_BAD_REQUEST)
-
-            with open(manifest_path, 'r', encoding='utf-8') as f:
-                manifest = json.load(f)
-
-            git_commit = manifest.get('git_commit')
-            git_branch = manifest.get('git_branch')
-            workflow_url = manifest.get('workflow_url')
-            owner = manifest.get('owner')
-
-            # Reuse get_or_create logic for consistency with unique workflow_url
-            if workflow_url:
-                test_session, _ = TestSession.objects.get_or_create(
-                    workflow_url=workflow_url,
-                    defaults={
-                        'owner': owner,
-                        'git_commit': git_commit,
-                        'git_branch': git_branch,
-                    },
-                )
-            else:
-                test_session = TestSession.objects.create(
-                    owner=owner,
-                    git_commit=git_commit,
-                    git_branch=git_branch,
-                    workflow_url=None,
-                )
-
-            outcome_map = {
-                'passed': TestRun.Outcome.PASS,
-                'failed': TestRun.Outcome.FAIL,
-                'skipped': TestRun.Outcome.SKIP,
-            }
-
-            test_runs = manifest.get('test_runs', [])
-            
-            for item in test_runs:                
-                module = item.get('module', '')
-                name = item.get('name', '')
-                parameters = item.get('parameters', '')
-                outcome = item.get('outcome', '')
-                profiling_rel = item.get('profiling_file')  # relative path inside zip (optional)
-
-                if not module or not name or outcome not in outcome_map:
-                    raise Response({'detail': 'Invalid run entry in manifest.'}, status=status.HTTP_400_BAD_REQUEST)
+                if 'test_session.json' not in zip_ref.namelist():
+                    return Response({'detail': 'Required manifest test_session.json not found in archive.'}, status=status.HTTP_400_BAD_REQUEST)
                 
-                test_case, _ = TestCase.objects.get_or_create(
-                    module=str(module), name=str(name), parameters=str(parameters)
-                )
+                with zip_ref.open('test_session.json') as f:
+                    manifest = json.load(f)
+        except zipfile.BadZipFile:
+            return Response({'detail': 'Invalid zip file.'}, status=status.HTTP_400_BAD_REQUEST)
+        except json.JSONDecodeError:
+            return Response({'detail': 'Invalid JSON in manifest.'}, status=status.HTTP_400_BAD_REQUEST)
 
-                test_run = TestRun.objects.create(
-                    test_session=test_session,
-                    test_case=test_case,
-                    outcome=outcome_map[outcome],
-                )
+        # Extract metadata from manifest or request
+        git_commit = manifest.get('git_commit')
+        git_branch = manifest.get('git_branch')
+        workflow_url = manifest.get('workflow_url')
+        owner = manifest.get('owner')
 
-                if profiling_rel:
-                    profiling_path = os.path.join(os.path.dirname(manifest_path), profiling_rel)
+        # Reuse get_or_create logic for consistency with unique workflow_url
+        if workflow_url:
+            test_session, _ = TestSession.objects.get_or_create(
+                workflow_url=workflow_url,
+                defaults={
+                    'owner': owner,
+                    'git_commit': git_commit,
+                    'git_branch': git_branch,
+                },
+            )
+        else:
+            test_session = TestSession.objects.create(
+                owner=owner,
+                git_commit=git_commit,
+                git_branch=git_branch,
+                workflow_url=None,
+            )
 
-                    if not os.path.exists(profiling_path):
-                        raise Response({'detail': f'Profiling file {profiling_rel} not found in archive.'}, status=status.HTTP_400_BAD_REQUEST)
-                
-                    with open(profiling_path, 'rb') as pf:
-                        test_run.profiling_data.save(os.path.basename(profiling_path), File(pf), save=True)
+        # Save the uploaded file to a temporary location
+        # The spooler will process the test runs
+        with NamedTemporaryFile(delete=False, suffix='.zip', dir='/tmp') as temp_file:
+            upload.seek(0)  # Reset file pointer
+            for chunk in upload.chunks():
+                temp_file.write(chunk)
+            temp_path = temp_file.name
 
-            payload = self.get_serializer(test_session).data
+        # Spool the test run processing job
+        process_uploaded_zip.spool(
+            zip_path=temp_path.encode('utf-8'),
+            test_session_id=str(test_session.id).encode('utf-8'),
+        )
 
-            return Response(payload, status=status.HTTP_201_CREATED)
+        # Return the serialized test session
+        payload = self.get_serializer(test_session).data
+        return Response(payload, status=status.HTTP_201_CREATED)
         
 
 class TestRunViewSet(viewsets.ModelViewSet):

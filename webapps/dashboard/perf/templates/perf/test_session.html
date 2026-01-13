@@ -80,6 +80,7 @@
                         <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Test Case</th>
                         <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Parameters</th>
                         <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Outcome</th>
+                        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Perf Trace</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -95,6 +96,13 @@
                                 <span style="color: #c62828; font-weight: bold;">✗ Fail</span>
                             {% elif test_run.outcome == 3 %}
                                 <span style="color: #e65100; font-weight: bold;">⊘ Skip</span>
+                            {% endif %}
+                        </td>
+                        <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">
+                            {% if test_run.profiling_data %}
+                                <a href="{{ test_run.profiling_data.url }}" style="color: #007bff; text-decoration: none;">📊 View Trace</a>
+                            {% else %}
+                                <span style="color: #999;">—</span>
                             {% endif %}
                         </td>
                     </tr>
