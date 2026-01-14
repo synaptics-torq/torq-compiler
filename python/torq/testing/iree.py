@@ -105,9 +105,12 @@ def _find_iree_tool(env_var, tool_name):
         return env_path
     
     # Fall back to BUILD_DIR based path
-    fallback_path = BUILD_DIR / 'third_party/iree/tools' / tool_name
-    if fallback_path.exists():
-        return str(fallback_path)
+    fallback_paths = [BUILD_DIR / 'third_party/iree/tools' / tool_name,
+                      BUILD_DIR / 'runtime/tools' / tool_name,
+                      BUILD_DIR / 'compiler/tools' / tool_name]
+    for path in fallback_paths:
+        if path.exists():
+            return str(path)
 
     # Check if tool is in the path
     tool_path = shutil.which(tool_name)
