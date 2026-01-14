@@ -3,6 +3,37 @@
 {% block title %}Test Session {{ session.id }} - Torq Performance{% endblock %}
 
 {% block content %}
+
+<style>
+table {
+    font-family: Arial, sans-serif;
+    border-collapse: collapse;
+    margin-top: 1rem;
+}
+
+table th, table td {
+    padding: 0.75rem;
+    text-align: left;
+}
+
+table th {
+    background-color: #f5f5f5;
+    font-weight: bold;
+    border-bottom: 2px solid #ddd;
+}
+
+table tr:hover {
+    background-color: #f9f9f9;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+    font-family: Arial, sans-serif;
+}
+</style>
+
 <div class="container">
     <h1>Test Session #{{ session.id }}</h1>
     
@@ -74,6 +105,7 @@
         <h2>Test Runs</h2>
         {% if session.testrunbatch_set.all %}
             {% for batch in session.testrunbatch_set.all %}
+            <a name="batch-{{ batch.name }}"></a>
             <div style="margin-bottom: 2rem; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; background-color: #f9f9f9;">
                 <h3>Batch #{{ batch.id }} - {{ batch.name|default:"Unnamed" }}</h3>
                 <p style="margin: 0.5rem 0; font-size: 0.9rem; color: #666;">Created: {{ batch.created_at }} | Status: {% if batch.processed %}<span style="color: #2e7d32;">✓ Processed</span>{% else %}<span style="color: #e65100;">⏳ Processing</span>{% endif %}</p>
@@ -130,33 +162,4 @@
     </div>
 </div>
 
-<style>
-table {
-    font-family: Arial, sans-serif;
-    border-collapse: collapse;
-    margin-top: 1rem;
-}
-
-table th, table td {
-    padding: 0.75rem;
-    text-align: left;
-}
-
-table th {
-    background-color: #f5f5f5;
-    font-weight: bold;
-    border-bottom: 2px solid #ddd;
-}
-
-table tr:hover {
-    background-color: #f9f9f9;
-}
-
-.container {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 2rem;
-    font-family: Arial, sans-serif;
-}
-</style>
 {% endblock %}

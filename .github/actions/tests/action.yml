@@ -55,6 +55,11 @@ inputs:
     required: false
     default: 'default'
 
+  torq_perf_space_url:
+    description: 'Base URL of the Torq Performance Space'
+    required: false
+    default: ''
+
 outputs:
   s3_cache_path:
     description: 'S3 path of the uploaded test data cache artifact'
@@ -178,6 +183,7 @@ runs:
         TORQ_PERF_SERVER: ${{ inputs.torq_perf_server }}
         TORQ_PERF_SERVER_TOKEN: ${{ inputs.torq_perf_server_token }}
         TORQ_PERF_BATCH_NAME: ${{ inputs.batch_name }}
+        TORQ_PERF_SPACE_URL: ${{ inputs.torq_perf_space_url }}
       run: |            
         # run pytest with ignoring binary mtime changes to generate a cache that can be used in other environments,
         # also disable phases dump to reduce size of the cache

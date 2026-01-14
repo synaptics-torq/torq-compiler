@@ -1,3 +1,4 @@
+from urllib.parse import urlencode
 import requests
 import os
 import pytest
@@ -44,7 +45,7 @@ def _upload_zip_bundle(zip_path: str) -> Dict[str, Any]:
             response = requests.post(f"{server}/api/test-sessions/upload_zip/", files=files, headers=headers)
 
         if response.status_code in [200, 201]:
-            return f"{server}/test-sessions/{response.json()['id']}/"
+            return f"/test-sessions/{response.json()['id']}/"
 
     raise RuntimeError(f"Failed to upload zip bundle: {response.status_code} - {response.text}")
 
@@ -94,7 +95,9 @@ def pytest_sessionfinish(session):
     if xdist.is_xdist_worker(session):
         return
 
-    if os.environ.get("TORQ_PERF_SERVER", "") == "":
+    server_url = os.environ.get("TORQ_PERF_SERVER", "")
+
+    if server_url == "":
         return
 
     with TemporaryDirectory() as temp_dir:
@@ -165,16 +168,23 @@ def pytest_sessionfinish(session):
 
         # Upload bundle        
         print("Uploading results bundle...")
-        session_url = _upload_zip_bundle(zip_path)
+        session_path = _upload_zip_bundle(zip_path) + "#batch-" + manifest['batch_name']
         print("Upload complete.")
-                    
-        print(f"\nTest results available at {session_url}\n")
+
+        space_url = os.environ.get("TORQ_PERF_SPACE_URL", "")
+
+        if space_url == "":
+            space_url = server_url + session_path
+        else:
+            space_url = space_url + "?" + urlencode({"next": session_path})
+
+        print(f"\nTest results available at {space_url}\n")
 
         if os.getenv("GITHUB_ACTIONS"):
             try:
                 github_step_summary = os.getenv("GITHUB_STEP_SUMMARY")
                 if github_step_summary:
                     with open(github_step_summary, "a") as f:
-                        f.write(f"[View test results]({session_url})\n\n")
+                        f.write(f"[View test results]({space_url})\n\n")
             except Exception as e:
                 print(f"Failed to write report url to GitHub Actions summary: {e}")

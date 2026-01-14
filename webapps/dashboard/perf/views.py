@@ -18,11 +18,16 @@ def space(request):
         
     token = request.GET.get('__sign', None)
 
-    if token is None:                
+    if token is None:
         return JsonResponse({'error': 'Missing authentication parameter'}, status=400) 
     
-    redirected_url = f"/?__sign={token}"
-    
+    next = request.GET.get('next', '/')
+
+    if not next.startswith('/'):
+        return JsonResponse({'error': 'Invalid next parameter'}, status=400)
+
+    redirected_url = f"{next}?__sign={token}"
+
     return render(request, 'perf/space.html', {'redirect_url': redirected_url})
 
 

@@ -173,6 +173,7 @@ jobs:
           s3_bucket: ${{ vars.ARTIFACT_BUCKET }}
           torq_perf_server: ${{ vars.TORQ_PERF_SERVER }}
           torq_perf_server_token: ${{ secrets.TORQ_PERF_SERVER_TOKEN }}
+          torq_perf_space_url: ${{ vars.TORQ_PERF_SPACE_URL }}
           batch_name: cmodel-${{ matrix.chip_group }}
           
       - name: Upload host test performance
@@ -242,6 +243,7 @@ jobs:
           torq_perf_server: ${{ vars.TORQ_PERF_SERVER }}
           torq_perf_server_token: ${{ secrets.TORQ_PERF_SERVER_TOKEN }}
           batch_name: cmodel-${{ matrix.chip_group }}
+          torq_perf_space_url: ${{ vars.TORQ_PERF_SPACE_URL }}
 
 
       - name: Upload AWS FPGA test performance
