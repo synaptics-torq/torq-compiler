@@ -112,9 +112,15 @@ FailureOr<ActConfig> configureActivation(
         config.clipMin = 0xff800000;
         config.clipMax = 0x7f800000;
     }
-    else if (opName == "i2i" || opName == "f2f") {
+    else if (opName == "i2i") {
+        config.mode = torq_hw::ACTMode::ACT;
+        // We should not use int8 range here as we want to truncate without clipping
+        setClipRange(int32_t{});
+    }
+    else if (opName == "f2f") {
         config.mode = torq_hw::ACTMode::ACT;
     }
+
     else if (opName == "clamp") {
         config.mode = torq_hw::ACTMode::ACT;
         if (isInt(inputDType)) {
