@@ -10,6 +10,7 @@
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -21,6 +22,10 @@
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-decompose-linalg-ops-pattern"
+
+static llvm::cl::opt<bool> clForceDivOnHost(
+    "torq-force-div-on-host", llvm::cl::desc("Force arith.div on host"), llvm::cl::init(false)
+);
 
 namespace mlir::syna::torq {
 
@@ -257,6 +262,10 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (clForceDivOnHost) {
+            setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
+            return failure();
+        }
         if (!cast<RankedTensorType>(srcOp.getType(0)).getElementType().isBF16() ||
             !isa_and_nonnull<arith::DivFOp>(getElementwiseBinaryOp(srcOp))) {
             return rewriter.notifyMatchFailure(srcOp, "Expected bf16 divf");
