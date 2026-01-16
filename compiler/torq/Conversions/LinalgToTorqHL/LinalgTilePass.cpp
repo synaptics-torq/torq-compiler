@@ -70,27 +70,33 @@ static bool isMonotonicPositive(AffineExpr expr) {
     return false;
 }
 
+static FailureOr<int> getMemoryRequirements(Value value) {
+
+    if (auto rankedType = dyn_cast<RankedTensorType>(value.getType())) {
+        if (!rankedType.hasStaticShape()) {
+            return failure();
+        }
+        return rankedType.getNumElements() * div_ceil(rankedType.getElementTypeBitWidth(), 8);
+    }
+    else if (isa<FloatType, IntegerType>(value.getType())) {
+        return div_ceil(value.getType().getIntOrFloatBitWidth(), 8);
+    }
+    else {
+        return failure();
+    }
+}
+
 static FailureOr<int> getMemoryRequirements(linalg::LinalgOp op) {
 
     int totalSize = 0;
 
     for (auto operand : op.getOperation()->getOperands()) {
-
-        if (auto rankedType = dyn_cast<RankedTensorType>(operand.getType())) {
-            if (!rankedType.hasStaticShape()) {
-                return failure();
-            }
-            totalSize +=
-                rankedType.getNumElements() * div_ceil(rankedType.getElementTypeBitWidth(), 8);
-        }
-        else if (isa<FloatType, IntegerType>(operand.getType())) {
-            totalSize += div_ceil(operand.getType().getIntOrFloatBitWidth(), 8);
-        }
-        else {
+        auto memoryRequirement = getMemoryRequirements(operand);
+        if (failed(memoryRequirement)) {
             return failure();
         }
+        totalSize += *memoryRequirement;
     }
-
     return totalSize;
 }
 
@@ -273,12 +279,20 @@ static LogicalResult tileMatMulForSlices(
         ));
 
     // Avoid fusing operations that do not run on the slice
-    auto fusionControlFn = [](tensor::ExtractSliceOp, OpResult op, bool) {
-        auto srcOp = op.getDefiningOp<linalg::LinalgOp>();
+    auto fusionControlFn = [](tensor::ExtractSliceOp, OpResult opResult, bool) {
+        // If producer memory requirement is less than maxAllowedMemory, do not fuse
+        // use 10kB as threshold for now but we should probably calculate it based on MatMul
+        const uint32_t maxAllowedMemory = 10000;
+        auto maybeMemoryRequirement = getMemoryRequirements(opResult);
+        if (succeeded(maybeMemoryRequirement) && (*maybeMemoryRequirement < maxAllowedMemory)) {
+            return std::make_tuple(false, false);
+        }
+        auto srcOp = opResult.getDefiningOp<linalg::LinalgOp>();
         if (!srcOp) {
             return std::make_tuple(false, false);
         }
         bool fuse = getTargetExecutor(srcOp, torq_hl::Executor::Slice) == torq_hl::Executor::Slice;
+
         return std::make_tuple(fuse, false);
     };
     options.setFusionControlFn(fusionControlFn);
