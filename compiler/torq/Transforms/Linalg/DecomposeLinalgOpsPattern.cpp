@@ -262,14 +262,18 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
-        if (clForceDivOnHost) {
-            setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
-            return failure();
-        }
         if (!cast<RankedTensorType>(srcOp.getType(0)).getElementType().isBF16() ||
             !isa_and_nonnull<arith::DivFOp>(getElementwiseBinaryOp(srcOp))) {
             return rewriter.notifyMatchFailure(srcOp, "Expected bf16 divf");
         }
+        if (clForceDivOnHost) {
+            if (getTargetExecutor(srcOp) != torq_hl::Executor::Host) {
+                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
+                return success();
+            }
+            return rewriter.notifyMatchFailure(srcOp, "target executor is Host");
+        }
+
         auto numerator = srcOp.getOperand(0);
         auto denominator = srcOp.getOperand(1);
         auto output = srcOp.getOutputs()[0];
