@@ -35,7 +35,7 @@ inputs:
     description: 'S3 path to precomputed test data cache artifact to download'
     required: false
 
-  s3_bucket:
+  s3_artifact_bucket:
     description: 'S3 bucket to upload the test cache artifact'
     required: false
     default: ''
@@ -57,6 +57,16 @@ inputs:
 
   torq_perf_space_url:
     description: 'Base URL of the Torq Performance Space'
+    required: false
+    default: ''
+
+  s3_hf_cache_bucket:
+    description: 'S3 bucket for HuggingFace data cache'
+    required: false
+    default: ''
+
+  s3_hf_cache_dir:
+    description: 'Directory in S3 bucket for HuggingFace data cache'
     required: false
     default: ''
 
@@ -184,13 +194,15 @@ runs:
         TORQ_PERF_SERVER_TOKEN: ${{ inputs.torq_perf_server_token }}
         TORQ_PERF_BATCH_NAME: ${{ inputs.batch_name }}
         TORQ_PERF_SPACE_URL: ${{ inputs.torq_perf_space_url }}
+        S3_HF_CACHE_BUCKET_NAME: ${{ inputs.s3_hf_cache_bucket }}
+        S3_HF_CACHE_DIR: ${{ inputs.s3_hf_cache_dir }}
       run: |            
         # run pytest with ignoring binary mtime changes to generate a cache that can be used in other environments,
         # also disable phases dump to reduce size of the cache
         pytest --ignore-binary-mtime -v ${{ inputs.pytest_args }}
 
     - name: Create compressed test data cache artifact
-      if: ${{ inputs.test_data_cache_artifact != '' || inputs.s3_bucket != '' }}
+      if: ${{ inputs.test_data_cache_artifact != '' || inputs.s3_artifact_bucket != '' }}
       shell: bash
       run: |
         tar -zcf cache.tar.gz -C .pytest_cache/d/ versioned_fixtures
@@ -204,11 +216,11 @@ runs:
         retention-days: 7 # delete quickly because these are very large
 
     - name: Upload cache to S3
-      if: ${{ inputs.s3_bucket != '' }}
+      if: ${{ inputs.s3_artifact_bucket != '' }}
       id: upload_s3
       shell: bash
       env:        
-        S3_BUCKET: ${{ inputs.s3_bucket }}
+        S3_BUCKET: ${{ inputs.s3_artifact_bucket }}
         CACHE_FILE: 
       run: |
 
