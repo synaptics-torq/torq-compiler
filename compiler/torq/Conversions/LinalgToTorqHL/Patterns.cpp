@@ -1066,8 +1066,8 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
         }
 
         // TODO: check if the operations surrounding this Mul allows to use an i16 operation
-        bool castToi16 = input1ElementType.isInteger(32) && input2ElementType.isInteger(32);
-        if (clMulCasti32Toi16 && castToi16) {
+        bool isInputsi32 = input1ElementType.isInteger(32) && input2ElementType.isInteger(32);
+        if (clMulCasti32Toi16 && isInputsi32) {
             ArrayRef<int64_t> in1Shape = input1Type.getShape();
             auto inType = RankedTensorType::get(in1Shape, IntegerType::get(srcOp.getContext(), 16));
 
@@ -1086,6 +1086,11 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
                              APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input2
                          )
                          .getResult(0);
+        }
+        else if (!clMulCasti32Toi16 && isInputsi32) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "mul expects i8, i16, bf16 inputs, but given i32 inputs\n"
+            );
         }
 
         const std::vector<int32_t> bias = {0};

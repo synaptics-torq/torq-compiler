@@ -858,7 +858,7 @@ class AddPattern : public OpRewritePattern<torq_hl::AddOp> {
         }
 
         int maxChannelsPerTile = memoryAvailable / channelDataSize;
-        maxChannelsPerTile = align_floor(maxChannelsPerTile, 4);
+        maxChannelsPerTile = std::max(1u, align_floor(maxChannelsPerTile, 4));
 
         int channels = getChannelCount(outType);
 
