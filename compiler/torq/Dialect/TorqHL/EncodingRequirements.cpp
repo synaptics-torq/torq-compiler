@@ -361,6 +361,17 @@ template <typename OpT> static KernelEncoding getResizeLikeEncoding(OpT op) {
 }
 
 KernelEncoding AddOp::getKernelEncoding() {
+
+    const uint32_t inIndex1 = getInput1Mutable().getOperandNumber();
+    const uint32_t inIndex2 = getInput2Mutable().getOperandNumber();
+
+    int inRank1 = cast<RankedTensorType>(getOperand(inIndex1).getType()).getRank();
+    int inRank2 = cast<RankedTensorType>(getOperand(inIndex2).getType()).getRank();
+    // if any input is scalar, no encoding required
+    if (inRank1 == 1 || inRank2 == 1) {
+        return getNoEncoding();
+    }
+
     RankedTensorType resultType = dyn_cast<RankedTensorType>(getResult(0).getType());
 
     auto input1Type = cast<RankedTensorType>(getInput1().getType());
@@ -374,13 +385,9 @@ KernelEncoding AddOp::getKernelEncoding() {
     auto enc2 = defaultEncoding(input2Type);
     auto enc = defaultEncoding(resultType, 0, !getSegmentOutput());
 
-    SmallVector<KernelInputEncoding> inEncoding = {
-        {getInput1Mutable().getOperandNumber(), enc1}, {getInput2Mutable().getOperandNumber(), enc2}
-    };
+    SmallVector<KernelInputEncoding> inEncoding = {{inIndex1, enc1}, {inIndex2, enc2}};
 
-    SmallVector<std::pair<unsigned, unsigned>> equalEncodingOperands = {
-        {getInput1Mutable().getOperandNumber(), getInput2Mutable().getOperandNumber()}
-    };
+    SmallVector<std::pair<unsigned, unsigned>> equalEncodingOperands = {{inIndex1, inIndex2}};
 
     return {inEncoding, enc, equalEncodingOperands};
 }
