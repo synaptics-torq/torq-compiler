@@ -565,6 +565,82 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
     }
 };
 
+// Fold duplicate conversions where two convert ops convert the same input tensor
+// %extracted_slice_38 = tensor.extract_slice
+// %123 = torq_hl.convert out(%122 : tensor<1x1x89928xbf16, #torq_hl<enc mem_space = lram>>)
+// in(%extracted_slice_38 : tensor<1x1x89928xbf16>) %125 = torq_hl.convert out(%124 :
+// tensor<1x1x89928xbf16, #torq_hl<enc mem_space = lram>>) in(%extracted_slice_38 :
+// tensor<1x1x89928xbf16>) %126 = "torq_hl.mul"(%119, %121, %123, %125)
+// --> fold to %126 = "torq_hl.mul"(%119, %121, %123, %123)
+// to reduce lram usage
+
+class FoldDuplicateConversion : public OpRewritePattern<torq_hl::ConvertOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(torq_hl::ConvertOp op, PatternRewriter &rewriter) const override {
+
+        Value currentOutput = op.getOutput();
+
+        auto inEncoding = getEncoding(op.getInput().getType());
+        auto outEncoding = getEncoding(op.getOutput().getType());
+
+        if (inEncoding.getMemSpace() != torq_hl::MemorySpace::Xram &&
+            outEncoding.getMemSpace() != torq_hl::MemorySpace::Lram) {
+            return failure();
+        }
+
+        for (auto use : currentOutput.getUsers()) {
+
+            Value lhs, rhs;
+
+            if (isa<torq_hl::MulOp>(use)) {
+                lhs = dyn_cast<torq_hl::MulOp>(use).getInput1();
+                rhs = dyn_cast<torq_hl::MulOp>(use).getInput2();
+            }
+            else if (isa<torq_hl::AddOp>(use)) {
+                lhs = dyn_cast<torq_hl::AddOp>(use).getInput1();
+                rhs = dyn_cast<torq_hl::AddOp>(use).getInput2();
+            }
+            else if (isa<torq_hl::ElementWiseBinaryOp>(use)) {
+                lhs = dyn_cast<torq_hl::ElementWiseBinaryOp>(use).getInput1();
+                rhs = dyn_cast<torq_hl::ElementWiseBinaryOp>(use).getInput2();
+            }
+            else {
+                continue;
+            }
+
+            // if both lhs and rhs defining Op are convertOp
+            // check if two convertOp input is the same tensor
+            // if so, we can replace one of the convertOp output with the other
+            auto lhsConvertOp = dyn_cast<torq_hl::ConvertOp>(lhs.getDefiningOp());
+            auto rhsConvertOp = dyn_cast<torq_hl::ConvertOp>(rhs.getDefiningOp());
+
+            if (lhsConvertOp && rhsConvertOp) {
+                if (lhsConvertOp == rhsConvertOp) {
+                    return failure();
+                }
+
+                Value lhsInput = lhsConvertOp.getInput();
+                Value rhsInput = rhsConvertOp.getInput();
+
+                if (lhsInput == rhsInput) {
+
+                    if (lhsConvertOp == op) {
+                        rhsConvertOp.getOutput().replaceAllUsesWith(lhsConvertOp.getOutput());
+                    }
+                    else {
+                        lhsConvertOp.getOutput().replaceAllUsesWith(rhsConvertOp.getOutput());
+                    }
+
+                    return success();
+                }
+            }
+        }
+        return failure();
+    }
+};
+
 class FoldConvertPass : public FoldConvertBase<FoldConvertPass> {
   public:
     using FoldConvertBase<FoldConvertPass>::FoldConvertBase;
@@ -579,6 +655,7 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<FoldRoundTripConversion>(ctx);
     patterns.add<FoldLramToLramConversionChain>(ctx);
     patterns.add<KeepConcatInLram>(ctx);
+    patterns.add<FoldDuplicateConversion>(ctx);
 
 #if 0
     // This pattern creates a situation where elementwise ops have inputs with different
