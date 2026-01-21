@@ -776,6 +776,7 @@ struct SlicePrivate {
     // ALU instructions
     void aluSetMode(torq_hw::ALUOp0Mode op0, torq_hw::ALUOp1Mode op1);
     void aluSetNumberFormat(DType dtype);
+    DType aluGetWeightType() const;
     PData aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc);
     PData aluProductAccumulate(
         const IData &idata, const WData &wdata, ALUOp1Mode acc, bool outer, bool repeatWeight
@@ -1544,6 +1545,17 @@ void SlicePrivate::acpw(DType dataType, const uint32_t weightSize) {
     }
 }
 
+DType SlicePrivate::aluGetWeightType() const {
+    DType weightType = _wram.elementType;
+    if (weightType == DType::none &&
+        (_cfg.alu_op1_mode[0] == ALUOp1Mode::ACC || _cfg.alu_op1_mode[0] == ALUOp1Mode::SACC)) {
+        // Accumulate with ACC and SACC are internally implemented as a multiply-accumulate
+        // with an implicit internal weight of 1 (for ACC) or (1, -1, 1, -1, ...) for SACC
+        weightType = isFloat(_iram.elementType) ? DType::bf16 : DType::int8;
+    }
+    return weightType;
+}
+
 PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     // Configure the alu in bypass mode with the specified accumulate operation
     aluSetMode(ALUOp0Mode::DBYP, acc);
@@ -1552,6 +1564,7 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
 
     // Weights are not used in bypass mode (no need to generate cewr)
     _wram.elementType = DType::none;
+    _iram.elementType = dataType;
     _cfg.alu_d_unsigned = 0;
     if (isUnsigned(dataType) || isFloat(dataType)) {
         _cfg.alu_d_unsigned = 0b1111;
@@ -1563,15 +1576,23 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
         _cfg.alu_d_unsigned = 0b0111;
     }
     _cfg.alu_w_unsigned = 0;
-    _cfg.alu_format =
-        isFloat(idata.elementType()) ? torq_hw::NumberFormat::BF : torq_hw::NumberFormat::I;
+    _cfg.alu_format = isFloat(dataType) ? torq_hw::NumberFormat::BF : torq_hw::NumberFormat::I;
+
+    // Some accumulate ops are actually implemented as multiply-accumulate with implicit weights
+    // These must be handled as we do in aluProductAccumulate
+    int weightSize = sizeofType(aluGetWeightType());
+    bool isMulAcc = weightSize > 0;
+    // In some cases multiple partials are required to store the ALU result
+    int partialElWidth = isMulAcc ? (isFloat(dataType) ? 2 : weightSize * sizeofType(dataType)) : 1;
 
     // Check the input data
     auto iShape = idata.subShape();
     // TODO: check that iShape[rank - 1] is dense
-    const int blockSize = elementCount(iShape);
-    assert(blockSize <= HwInfo::max_input && "Block size too big");
-    _iram.elementType = idata.elementType();
+    const int blockSize = elementCount(iShape) * partialElWidth;
+    if (blockSize > HwInfo::max_input) {
+        llvm::errs() << "Actual block size: " << blockSize << " > " << HwInfo::max_input << "\n";
+        assert(false && "Block size too big");
+    }
 
     cedr(idata, 0);
 
@@ -1583,10 +1604,10 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     _pram.loadNesting = _forStack.size();
 
     // Automatically infer the shape of the pram data
-    int actWidth = isFloat(dataType) ? HwInfo::act_width / 2 : HwInfo::act_width;
+    int actWidth = isFloat(dataType) && !isMulAcc ? HwInfo::act_width / 2 : HwInfo::act_width;
     int actBlockCount = div_ceil(blockSize, actWidth);
     int actBlockSize = actBlockCount > 1 ? actWidth : blockSize;
-    DType pDataType = isInt(dataType) ? DType::int32 : dataType;
+    DType pDataType = isInt(dataType) ? DType::int32 : isMulAcc ? DType::fp32 : dataType;
     Shape pramShape = {actBlockCount, {actBlockSize, (HwInfo::pdat_width / sizeofType(pDataType))}};
     PData pdata(pramShape, pDataType);
     debugData(pdata);
@@ -1596,9 +1617,12 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
 PData SlicePrivate::aluProductAccumulate(
     const IData &idata, const WData &wdata, ALUOp1Mode acc, bool outer, bool repeatWeight
 ) {
+    const DType dataType = idata.elementType();
+    _iram.elementType = dataType;
+
     // Configure the required multiply and accumulate operations
     aluSetMode(ALUOp0Mode::MUL, acc);
-    aluSetNumberFormat(idata.elementType());
+    aluSetNumberFormat(dataType);
 
     // Get weight shape
     auto wShape = wdata.subShape();
@@ -1612,11 +1636,7 @@ PData SlicePrivate::aluProductAccumulate(
     // Each data bytes is duplicated and processed with each weight byte
     // There will be a total of "weightSize" partials for each data
     auto iShape = idata.subShape();
-    const DType dataType = idata.elementType();
-
     LLVM_DEBUG(llvm::dbgs() << "aluProductAccumulate iShape: " << iShape.size() << "\n";);
-
-    _iram.elementType = dataType;
 
     _cfg.alu_d_unsigned = dataType == DType::uint8 ? 0b1111 : 0;
     _cfg.alu_w_unsigned = weightType == DType::int16 ? 0b101 : 0;
@@ -1638,8 +1658,7 @@ PData SlicePrivate::aluProductAccumulate(
     // In some cases multiple partials are required to store the ALU result
     int partialElementWidth = isFloat(dataType) ? 2 : weightSize * sizeofType(dataType);
     assert(iShape.size() > 0 && "Input shape cannot be empty");
-    int blockSize = iShape[iShape.size() - 1].count;
-    blockSize *= partialElementWidth;
+    const int blockSize = iShape[iShape.size() - 1].count * partialElementWidth;
     if (blockSize > HwInfo::max_input) {
         llvm::errs() << "Actual block size: " << blockSize << " > " << HwInfo::max_input << "\n";
         assert(false && "Block size too big");
@@ -1668,7 +1687,7 @@ QData SlicePrivate::actClamp(
 ) {
     const DType dataType = _iram.elementType;
     const int dataSize = sizeofType(dataType);
-    const DType weightType = _wram.elementType;
+    const DType weightType = aluGetWeightType();
     const int weightSize = sizeofType(weightType);
     const DType partialType = pdata.elementType();
     DType resultType = dataType;
@@ -1714,7 +1733,7 @@ QData SlicePrivate::actClamp(
             resultType = DType::int16;
             resultCount /= 2;
         }
-        else if (weightSize == 1 && dataSize == 2) {
+        else if (dataSize == 2 && weightSize == 1) {
             // We have 2 partials for each data
             // Each partial is processed with different left shifts
             _cfg.alu_d_unsigned = 5;
