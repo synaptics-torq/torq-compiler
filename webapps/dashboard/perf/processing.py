@@ -1,6 +1,7 @@
 import os
 import zipfile
 import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from django.core.files.base import File
 
@@ -12,8 +13,9 @@ except ImportError:
     def spool(pass_arguments):
         return lambda x: x
     
-from perf.models import TestCase, TestSession, TestRun, TestRunBatch
-
+from perf.models import TestCase, TestSession, TestRun, TestRunBatch, Metric, Measurement
+from perf.perfetto_report_generator import generate_html as generate_perfetto_html
+from perf.perfetto_report_generator import extract_perfetto_summary
 
 @spool
 def process_uploaded_zip(args):
@@ -30,6 +32,42 @@ def process_uploaded_zip(args):
 
     zip_path = args['zip_path']
     test_run_batch_id = int(args['test_run_batch_id'])
+    
+    # Metric descriptions dictionary (moved outside loop for reuse)
+    metric_descriptions = {
+        'total_duration': 'Total execution duration of the workload',
+        'dma_time': 'Combined time for DMA and CDMA operations (union)',
+        'dma_percent': 'Percentage of dma_time over total duration',
+        'dma_only_time': 'Time spent exclusively on DMA/CDMA without compute overlap',
+        'dma_only_percent': 'Percentage of dma_only_time over total duration',
+        'dma_total_time': 'Total DMA operation time (doesnt include CDMA)',
+        'dma_total_percent': 'Percentage of dma_total_time over total duration',
+        'cdma_time': 'Total CDMA (Constant DMA) operation time',
+        'cdma_percent': 'Percentage of cdma_time over total duration',
+        'dma_in_time': 'Time spent on DMA input transfers',
+        'dma_in_percent': 'Percentage of dma_in_time over total duration',
+        'dma_out_time': 'Time spent on DMA output transfers',
+        'dma_out_percent': 'Percentage of dma_out_time over total duration',
+        'compute_time': 'Combined compute time for SLICE and CSS operations (union)',
+        'compute_percent': 'Percentage of compute_time over total duration',
+        'compute_only_time': 'Time spent exclusively on compute without DMA overlap',
+        'compute_only_percent': 'Percentage of compute_only_time over total duration',
+        'slice_time': 'Total time spent on SLICE 0 and 1 compute operations (union)',
+        'slice_percent': 'Percentage of slice_time over total duration',
+        'slice_0_time': 'Time spent on SLICE 0 compute operations (exclusive)',
+        'slice_0_percent': 'Percentage of slice_0_time over total duration',
+        'slice_1_time': 'Time spent on SLICE 1 compute operations (exclusive)',
+        'slice_1_percent': 'Percentage of slice_1_time over total duration',
+        'css_time': 'Total time spent on CSS (Compute Subsystem) operations',
+        'css_percent': 'Percentage of css_time over total duration',
+        'overlap_time': 'Time where DMA/CDMA and compute operations overlap',
+        'overlap_percent': 'Percentage of overlap_time over total duration',
+        'idle_time': 'Time when hardware is idle (no DMA or compute, it could be host operation as well)',
+        'idle_percent': 'Percentage of idle_time over total duration',
+    }
+    
+    # Cache for metric objects to avoid repeated database queries
+    metrics_cache = {}
     
     try:
         # Get the test run batch
@@ -83,8 +121,95 @@ def process_uploaded_zip(args):
                     profiling_path = os.path.join(os.path.dirname(manifest_path), profiling_rel)
 
                     if os.path.exists(profiling_path):
+                        # Save the profiling file
                         with open(profiling_path, 'rb') as pf:
-                            test_run.profiling_data.save(os.path.basename(profiling_path), File(pf), save=True)
+                            test_run.profiling_data.save(os.path.basename(profiling_path), File(pf), save=False)
+                        
+                        # Extract and save metrics from the .pb file
+                        try:
+                            summary = extract_perfetto_summary(profiling_path)
+                            if summary and summary.get('available'):
+                                for key, value in summary.items():
+                                    print(f'DEBUG: Processing metric: {key} = {value} (type: {type(value).__name__})', flush=True)
+                                    if key == 'available' or not value:
+                                        print(f'DEBUG: Skipping {key} (available or empty)', flush=True)
+                                        continue
+                                    
+                                    # Parse and normalize value
+                                    parsed_value = None
+                                    unit = ""
+                                    
+                                    if isinstance(value, str):
+                                        # Check if this is a percentage metric by name
+                                        if key.endswith('_percent'):
+                                            try:
+                                                parsed_value = float(value.replace('%', '').strip())
+                                                unit = '%'
+                                            except ValueError as e:
+                                                continue
+                                        # Parse time values to nanoseconds - check specific patterns first
+                                        elif 'ms' in value:
+                                            try:
+                                                num = float(value.replace('ms', '').strip())
+                                                parsed_value = num * 1_000_000  # ms to ns
+                                                unit = 'ns'
+                                            except ValueError as e:
+                                                continue
+                                        elif 'µs' in value or 'μs' in value:
+                                            try:
+                                                num = float(value.replace('µs', '').replace('μs', '').strip())
+                                                parsed_value = num * 1_000  # µs to ns
+                                                unit = 'ns'
+                                            except ValueError as e:
+                                                continue
+                                        elif 'ns' in value:
+                                            # Handle "0ns", "123ns", etc.
+                                            try:
+                                                num = float(value.replace('ns', '').strip())
+                                                parsed_value = num  # already in ns
+                                                unit = 'ns'
+                                            except ValueError as e:
+                                                continue
+                                        elif value.endswith('s'):
+                                            # Must be seconds (after ruling out ms, µs, ns)
+                                            try:
+                                                num = float(value.replace('s', '').strip())
+                                                parsed_value = num * 1_000_000_000  # s to ns
+                                                unit = 'ns'
+                                            except ValueError as e:
+                                                continue
+                                        else:
+                                            continue
+                                    else:
+                                        continue
+                                    
+                                    if parsed_value is None:
+                                        continue
+                                    
+                                    # Get or create metric (will be cached after first access)
+                                    metric = metrics_cache.get(key)
+                                    if not metric:
+                                        # Get description for this metric
+                                        description = metric_descriptions.get(key, '')
+                                        
+                                        metric, created = Metric.objects.get_or_create(
+                                            name=key, 
+                                            defaults={'unit': unit, 'description': description}
+                                        )
+                                        # Update description if metric already exists but has no description
+                                        if not created and not metric.description:
+                                            metric.description = description
+                                            metric.save()
+                                        
+                                        # Cache it for reuse
+                                        metrics_cache[key] = metric
+                                    
+                                    # Store normalized numeric value
+                                    Measurement.objects.create(test_run=test_run, metric=metric, value=parsed_value)
+                        except Exception as e:
+                                print(f'Warning: Could not extract metrics from {profiling_path}: {e}')
+                        
+                        test_run.save()
                     else:
                         print(f'Warning: Profiling file {profiling_rel} not found in archive.')
 

@@ -3,7 +3,6 @@
 {% block title %}Test Session {{ session.id }} - Torq Performance{% endblock %}
 
 {% block content %}
-
 <style>
 table {
     font-family: Arial, sans-serif;
@@ -27,17 +26,18 @@ table tr:hover {
 }
 
 .container {
-    max-width: 1200px;
+    max-width: 95%;
     margin: 0 auto;
-    padding: 2rem;
+    padding: 1rem 2rem 2rem 2rem;
     font-family: Arial, sans-serif;
+    font-size: 16px;
 }
 </style>
 
 <div class="container">
     <h1>Test Session #{{ session.id }}</h1>
     
-    <div class="session-info" style="margin-bottom: 2rem;">
+    <div class="session-info" style="margin-bottom: 2rem; padding: 1.5rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);">
         <h2>Session Details</h2>
         <table>
             <tr>
@@ -69,90 +69,15 @@ table tr:hover {
         </table>
     </div>
 
-    <div class="session-stats" style="margin-bottom: 2rem;">
-        <h2>Statistics</h2>
-        <div class="stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem;">
-            <div class="stat-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 4px;">
-                <h3 style="margin: 0 0 0.5rem 0; color: #333;">Total Tests</h3>
-                <p style="margin: 0; font-size: 1.5rem; font-weight: bold;">{{ session.num_total }}</p>
-            </div>
-            <div class="stat-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 4px; background-color: #e8f5e9;">
-                <h3 style="margin: 0 0 0.5rem 0; color: #2e7d32;">Passed</h3>
-                <p style="margin: 0; font-size: 1.5rem; font-weight: bold;">{{ session.num_passed }}</p>
-            </div>
-            <div class="stat-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 4px; background-color: #ffebee;">
-                <h3 style="margin: 0 0 0.5rem 0; color: #c62828;">Failed</h3>
-                <p style="margin: 0; font-size: 1.5rem; font-weight: bold;">{{ session.num_failed }}</p>
-            </div>
-            <div class="stat-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 4px; background-color: #fff3e0;">
-                <h3 style="margin: 0 0 0.5rem 0; color: #e65100;">Skipped</h3>
-                <p style="margin: 0; font-size: 1.5rem; font-weight: bold;">{{ session.num_skipped }}</p>
-            </div>
-        </div>
-        {% if session.num_total %}
-        <div style="margin-top: 1.5rem;">
-            <h3>Pass Rates</h3>
-            <ul>
-                <li>Pass Rate: {% widthratio session.num_passed session.num_total 100 %}%</li>
-                <li>Fail Rate: {% widthratio session.num_failed session.num_total 100 %}%</li>
-                <li>Skip Rate: {% widthratio session.num_skipped session.num_total 100 %}%</li>
-            </ul>
-        </div>
-        {% endif %}
-    </div>
-
     <div class="test-runs" style="margin-bottom: 2rem;">
-        <h2>Test Runs</h2>
-        {% if session.testrunbatch_set.all %}
-            {% for batch in session.testrunbatch_set.all %}
-            <a name="batch-{{ batch.name }}"></a>
-            <div style="margin-bottom: 2rem; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; background-color: #f9f9f9;">
-                <h3>Batch #{{ batch.id }} - {{ batch.name|default:"Unnamed" }}</h3>
-                <p style="margin: 0.5rem 0; font-size: 0.9rem; color: #666;">Created: {{ batch.created_at }} | Status: {% if batch.processed %}<span style="color: #2e7d32;">✓ Processed</span>{% else %}<span style="color: #e65100;">⏳ Processing</span>{% endif %}</p>
-                {% if batch.testrun_set.all %}
-                <table style="width: 100%; border-collapse: collapse;">
-                    <thead>
-                        <tr style="border-bottom: 2px solid #ddd;">
-                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Module</th>
-                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Test Case</th>
-                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Parameters</th>
-                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Outcome</th>
-                            <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #ddd;">Perf Trace</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for test_run in batch.testrun_set.all %}
-                        <tr style="border-bottom: 1px solid #eee;">
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">{{ test_run.test_case.module }}</td>
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">{{ test_run.test_case.name }}</td>
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">{{ test_run.test_case.parameters }}</td>
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">
-                                {% if test_run.outcome == 1 %}
-                                    <span style="color: #2e7d32; font-weight: bold;">✓ Pass</span>
-                                {% elif test_run.outcome == 2 %}
-                                    <span style="color: #c62828; font-weight: bold;">✗ Fail</span>
-                                {% elif test_run.outcome == 3 %}
-                                    <span style="color: #e65100; font-weight: bold;">⊘ Skip</span>
-                                {% endif %}
-                            </td>
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #eee;">
-                                {% if test_run.profiling_data %}
-                                    <a href="{{ test_run.profiling_data.url }}" style="color: #007bff; text-decoration: none;">📊 View Trace</a>
-                                {% else %}
-                                    <span style="color: #999;">—</span>
-                                {% endif %}
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-                {% else %}
-                <p style="margin: 0.5rem 0;">No test runs in this batch.</p>
-                {% endif %}
+        <h2 style="color: white;">Test Runs</h2>
+        {% if perfetto_viewer_html %}
+            <!-- Perfetto Viewer with Session Details -->
+            <div style="margin-bottom: 2rem; padding: 1.5rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);">
+                {{ perfetto_viewer_html|safe }}
             </div>
-            {% endfor %}
         {% else %}
-            <p>No test batches in this session.</p>
+            <p>No profiling data available for this session.</p>
         {% endif %}
     </div>
 

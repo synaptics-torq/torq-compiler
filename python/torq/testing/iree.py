@@ -45,6 +45,7 @@ def pytest_addoption(parser):
     parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
     parser.addoption("--torq-compiler-timeout", type=int, default=60*5, help="Timeout in seconds for torq compiler invocations")
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
+    parser.addoption("--torq-compile-time-profiling-output-dir", default=None, help="Directory to save per-test compile time profiling outputs")
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
 
 
@@ -481,10 +482,49 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     cmds += torq_compiler_options
     
+    # Enable compiler profiling if compile-time profiling output is requested
+    compile_time_profiling_output_dir = request.config.getoption("--torq-compile-time-profiling-output-dir")
+    compiler_profile_csv = None
+    if compile_time_profiling_output_dir is not None:
+        compiler_profile_csv = versioned_dir / 'compiler_profile.csv'
+        cmds.extend(['--torq-enable-profiling', f'--torq-dump-profiling={compiler_profile_csv}'])
+    
     print("Compiling for TORQ with: " + " ".join(cmds))
 
     with request.getfixturevalue("scenario_log").event("torq_compile"):
         subprocess.check_call(cmds, cwd=str(versioned_dir), timeout=torq_compiler_timeout)
+
+    # Save compile time profiling data if requested
+    if compile_time_profiling_output_dir is not None and compiler_profile_csv is not None:
+        compile_time_profiling_output_dir = Path(compile_time_profiling_output_dir)
+        compile_time_profiling_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy the compiler-generated profile to the output directory with test name
+        output_compile_profile = compile_time_profiling_output_dir / f'{request.node.name}_compile.csv'
+        if compiler_profile_csv.exists():
+            shutil.copy(compiler_profile_csv, output_compile_profile)
+            print(f"✓ Saved compile time profile: {output_compile_profile}")
+            
+            # Generate Perfetto .pb file from compile time profile
+            try:
+                from torq.model_profiler.perfetto_logger import convert_to_perfetto, calculate_compile_profile_metrics
+                
+                # Calculate metrics for the compile profile
+                overview_data = calculate_compile_profile_metrics(str(output_compile_profile))
+                overview_map = {request.node.name: overview_data}
+                
+                # Generate .pb file
+                pb_output_path = compile_time_profiling_output_dir / f'{request.node.name}_compile.pb'
+                convert_to_perfetto(
+                    {request.node.name: str(output_compile_profile)},
+                    str(pb_output_path),
+                    overview_map=overview_map
+                )
+                print(f"✓ Generated Perfetto trace: {pb_output_path}")
+            except Exception as e:
+                print(f"⚠ Warning: Could not generate Perfetto trace: {e}")
+        else:
+            print(f"⚠ Warning: Compiler profile CSV not found at {compiler_profile_csv}")
 
 
 @versioned_unhashable_object_fixture
@@ -576,8 +616,6 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
     if enable_profiling:
         host_profile_path = versioned_dir / 'host_profile.csv'
         cmds.append(f'--torq_profile_host=' + str(host_profile_path))
-        record_property = request.getfixturevalue("record_property")
-        record_property("profiling_output", str(host_profile_path))
 
     print("Running for TORQ with: " + " ".join(cmds))
     if runtime_hw_type == 'aws_fpga':            
@@ -645,7 +683,11 @@ def torq_results(request, torq_results_dir, mlir_io_spec):
         if (torq_results_dir / 'annotated_profile.xlsx').exists():
             shutil.copy(torq_results_dir / 'annotated_profile.xlsx', profiling_output_dir / f'{request.node.name}.xlsx')
         if (torq_results_dir / 'trace.pb').exists():
-            shutil.copy(torq_results_dir / 'trace.pb', profiling_output_dir / f'{request.node.name}.pb')
+            pb_output_path = profiling_output_dir / f'{request.node.name}.pb'
+            shutil.copy(torq_results_dir / 'trace.pb', pb_output_path)
+            # Record the path to the copied .pb file for reporting
+            record_property = request.getfixturevalue("record_property")
+            record_property("profiling_output", str(pb_output_path))
         
         # Generate combined HTML report with all profiling artifacts
         pb_files = sorted(profiling_output_dir.glob('*.pb'))
