@@ -22,4 +22,6 @@ bool isTorqMatMul(Operation *op, std::string &failReason);
 
 bool isTorqNegateOp(Operation *op, std::string &failReason);
 
+bool isLogicNotOp(Operation *op, std::string &failReason);
+
 } // namespace mlir::syna::torq

@@ -30,6 +30,33 @@
 
 namespace mlir::syna::torq {
 
+bool isLogicNotOp(Operation *op, std::string &failReason) {
+    if (!isa<arith::XOrIOp>(op)) {
+        failReason = "not an arith.xori op";
+        return false;
+    }
+
+    auto lhs = op->getOperand(0);
+    auto rhs = op->getOperand(1);
+
+    if (!isa<BlockArgument>(lhs)) {
+        failReason = "lhs is not a block argument";
+        return false;
+    }
+    Operation *rhsDefOp = rhs.getDefiningOp();
+    if (rhsDefOp && isa<arith::ConstantOp>(rhsDefOp)) {
+        auto constOp = cast<arith::ConstantOp>(rhsDefOp);
+        auto intAttr = mlir::dyn_cast<IntegerAttr>(constOp.getValue());
+        // check if rhs is bool value, if so, it's actually a logical not(unary op not
+        // binary op)
+        if (intAttr && intAttr.getValue().isOne()) {
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -49,8 +76,6 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
             );
         }
 
-        auto lhs = op->getOperand(0);
-        auto rhs = op->getOperand(1);
         torq_hl::ElementwiseOpEnum opType;
         bool isUnsigned = false;
         auto input0 = srcOp.getInputs()[0];
@@ -73,20 +98,13 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
             }
         }
         else if (isa<arith::XOrIOp>(op)) {
-            if (isa<BlockArgument>(lhs)) {
-                Operation *rhsDefOp = rhs.getDefiningOp();
-                if (rhsDefOp && isa<arith::ConstantOp>(rhsDefOp)) {
-                    auto constOp = cast<arith::ConstantOp>(rhsDefOp);
-                    auto intAttr = mlir::dyn_cast<IntegerAttr>(constOp.getValue());
-                    // check if rhs is bool value, if so, it's actually a logical not(unary op not
-                    // binary op)
-                    if (intAttr && intAttr.getValue().isOne()) {
-                        return rewriter.notifyMatchFailure(
-                            srcOp, "unary XOrIOp(logical not) op can't be considered as binary op"
-                        );
-                    }
-                }
+            std::string failReason;
+            if (isLogicNotOp(op, failReason)) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "unary XOrIOp(logical not) op can't be considered as binary op"
+                );
             }
+
             if (resultType.getElementType().isInteger(1)) {
                 opType = torq_hl::ElementwiseOpEnum::LOGICAL_XOR;
             }
@@ -187,31 +205,6 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
             return rewriter.notifyMatchFailure(
                 srcOp, "Unsupported elementwise arith operation in linalg.generic"
             );
-        }
-
-        // Note: IREE may replace the scalar as the second operand, even if in the original input it
-        // was the first. We check If the second operand is a scalar, we need to materialize it as a
-        // tensor, until scalar constants are directly supported in ElementWiseOp.
-        if (auto rhsBlockArg = dyn_cast<BlockArgument>(rhs)) {
-            int argIdx = rhsBlockArg.getArgNumber();
-            input1 = srcOp.getInputs()[argIdx];
-        }
-        else if (auto rhsConstOp = dyn_cast<arith::ConstantOp>(rhs.getDefiningOp())) {
-            auto inputType = mlir::cast<RankedTensorType>(input0.getType());
-            Attribute constAttr = computeConstant(srcOp, false);
-            if (!constAttr) {
-                constAttr = rhsConstOp.getValue();
-            }
-            if (!constAttr) {
-                return failure();
-            }
-            auto constTensor = rewriter.create<arith::ConstantOp>(
-                srcOp.getLoc(), inputType, DenseElementsAttr::get(inputType, constAttr)
-            );
-            input1 = constTensor.getResult();
-        }
-        else {
-            return rewriter.notifyMatchFailure(srcOp, "Unsupported rhs operand type");
         }
 
         if (swapInputs) {
