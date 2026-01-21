@@ -367,10 +367,6 @@ KernelEncoding AddOp::getKernelEncoding() {
 
     int inRank1 = cast<RankedTensorType>(getOperand(inIndex1).getType()).getRank();
     int inRank2 = cast<RankedTensorType>(getOperand(inIndex2).getType()).getRank();
-    // if any input is scalar, no encoding required
-    if (inRank1 == 1 || inRank2 == 1) {
-        return getNoEncoding();
-    }
 
     RankedTensorType resultType = dyn_cast<RankedTensorType>(getResult(0).getType());
 
@@ -381,15 +377,20 @@ KernelEncoding AddOp::getKernelEncoding() {
         input1Type.getRank() == resultType.getRank() && "Input and output tensor ranks must match"
     );
 
-    auto enc1 = defaultEncoding(input1Type);
-    auto enc2 = defaultEncoding(input2Type);
+    KernelTensorEncoding emptyEnc = {};
+    auto enc1 = inRank1 == 1 ? emptyEnc : defaultEncoding(input1Type);
+    auto enc2 = inRank2 == 1 ? emptyEnc : defaultEncoding(input2Type);
     auto enc = defaultEncoding(resultType, 0, !getSegmentOutput());
 
     SmallVector<KernelInputEncoding> inEncoding = {{inIndex1, enc1}, {inIndex2, enc2}};
 
     SmallVector<std::pair<unsigned, unsigned>> equalEncodingOperands = {{inIndex1, inIndex2}};
 
-    return {inEncoding, enc, equalEncodingOperands};
+    return {
+        inEncoding, enc,
+        (inRank1 == 1 || inRank2 == 1) ? SmallVector<std::pair<unsigned, unsigned>>{}
+                                       : equalEncodingOperands
+    };
 }
 
 KernelEncoding TableOp::getKernelEncoding() {
