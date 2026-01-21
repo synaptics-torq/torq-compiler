@@ -106,8 +106,8 @@ LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter
     // alu and act process dbus/wbus two 8/16-bit elements size at a time
     uint32_t data_width = input1_element_size * input2_element_size;
 
-    int32_t act_clip_min = op.getOutputMin();
-    int32_t act_clip_max = op.getOutputMax();
+    int32_t act_clip_min = std::numeric_limits<int32_t>::min();
+    int32_t act_clip_max = std::numeric_limits<int32_t>::max();
 
     if (elType1.isBF16() && elType2.isBF16()) {
         data_width = input1_element_size;

@@ -55,6 +55,11 @@ def case_config(request, runtime_hw_type, chip_config):
                 'Elementwise_eq-i32.mlir', # output mismatch
                 'argmax-1x50x256-1axis.mlir', # Number of differences: 121 out of 256 [47.27%]
             ]
+    extra_args = {"--iree-input-type=tosa-torq":""}
+
+    if "mul-1hwc-in-int16-out-int16" in request.param.name:
+        # specific input data for the mul test case
+        extra_args["tweaked_input_data_range"]  = (-32768, 32767)
 
     if any(s in request.param.data.name for s in failed_tc):
         pytest.xfail("output mismatch or error")
@@ -64,7 +69,7 @@ def case_config(request, runtime_hw_type, chip_config):
         "static_mlir_model_file": request.param.data,
         "input_data": "tweaked_random_input_data",
         "comparison_config": "comparison_config_from_mlir",
-        "torq_compiler_options": ["--iree-input-type=tosa-torq"]
+        **extra_args
     }
 
 @pytest.mark.ci
