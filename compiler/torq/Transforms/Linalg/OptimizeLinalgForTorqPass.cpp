@@ -27,6 +27,7 @@ class OptimizeLinalgForTorqPass : public OptimizeLinalgForTorqBase<OptimizeLinal
 
         populateOptimizeMatmuOpPatterns(ctx, patterns);
         populateOptimizeElementwiseBinaryOpPatterns(ctx, patterns);
+        populateRaiseSoftmaxOpPatterns(ctx, patterns);
         populateDecomposeLinalgOpsPatterns(ctx, patterns);
         populateSpecializeTransposeOpPatterns(ctx, patterns);
         linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);

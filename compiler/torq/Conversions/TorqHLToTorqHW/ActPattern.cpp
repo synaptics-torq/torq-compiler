@@ -114,7 +114,7 @@ FailureOr<ActConfig> configureActivation(
     }
     else if (opName == "i2i") {
         config.mode = torq_hw::ACTMode::ACT;
-        // We should not use int8 range here as we want to truncate without clipping
+        // We use full range here as we want to truncate without clipping
         setClipRange(int32_t{});
     }
     else if (opName == "f2f") {

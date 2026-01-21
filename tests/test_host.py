@@ -25,7 +25,7 @@ def get_test_cases():
     test_cases = []
 
     for name in [("tosa_ops", "matmul-notile"),
-                 ("tosa_ops", "softmax"),
+                 ("tosa_ops", "softmax-1x1000xi8"),
                  ("arith_ops", "trunci"),
                  ("arith_ops", "extui"),
                  ("torch_ops", "instancenorm")]:

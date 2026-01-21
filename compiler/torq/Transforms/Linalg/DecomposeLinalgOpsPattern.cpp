@@ -23,11 +23,50 @@
 
 #define DEBUG_TYPE "torq-decompose-linalg-ops-pattern"
 
-static llvm::cl::opt<bool> clForceDivOnHost(
-    "torq-force-div-on-host", llvm::cl::desc("Force arith.div on host"), llvm::cl::init(false)
+using namespace std;
+
+static llvm::cl::list<string> clExecuteOnHost(
+    "torq-execute-on-host", llvm::cl::desc("Force operation execution on host"),
+    llvm::cl::ZeroOrMore, llvm::cl::CommaSeparated, llvm::cl::callback([](const std::string &Str) {
+        llvm::dbgs() << "*** Forced Host Execution: " << Str << "\n";
+    })
+);
+
+static llvm::cl::list<string> clExecuteOnCSS(
+    "torq-execute-on-css", llvm::cl::desc("Force operation execution on CSS"), llvm::cl::ZeroOrMore,
+    llvm::cl::CommaSeparated, llvm::cl::callback([](const std::string &Str) {
+        if (llvm::is_contained(clExecuteOnHost, Str)) {
+            llvm::errs() << "*** Conflict Host/CSS Execution: " << Str << "\n";
+            exit(1);
+        }
+        LLVM_DEBUG(llvm::dbgs() << "*** Forced CSS Execution: " << Str << "\n");
+    })
 );
 
 namespace mlir::syna::torq {
+
+namespace {
+
+pair<bool, LogicalResult>
+setTargetExecutorIfForced(Operation *op, PatternRewriter &rewriter, string opName) {
+    if (llvm::is_contained(clExecuteOnHost, opName)) {
+        if (getTargetExecutor(op) != torq_hl::Executor::Host) {
+            setTargetExecutorAttr(op, torq_hl::Executor::Host);
+            return {true, success()};
+        }
+        return {true, rewriter.notifyMatchFailure(op, "target executor is Host")};
+    }
+    if (llvm::is_contained(clExecuteOnCSS, opName)) {
+        if (getTargetExecutor(op) != torq_hl::Executor::CSS) {
+            setTargetExecutorAttr(op, torq_hl::Executor::CSS);
+            return {true, success()};
+        }
+        return {true, rewriter.notifyMatchFailure(op, "target executor is CSS")};
+    }
+    return {false, failure()};
+}
+
+} // namespace
 
 struct TensorBitcastPattern : public OpRewritePattern<tensor::BitcastOp> {
     TensorBitcastPattern(MLIRContext *context)
@@ -266,12 +305,9 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
             !isa_and_nonnull<arith::DivFOp>(getElementwiseBinaryOp(srcOp))) {
             return rewriter.notifyMatchFailure(srcOp, "Expected bf16 divf");
         }
-        if (clForceDivOnHost) {
-            if (getTargetExecutor(srcOp) != torq_hl::Executor::Host) {
-                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
-                return success();
-            }
-            return rewriter.notifyMatchFailure(srcOp, "target executor is Host");
+        auto [isForced, result] = setTargetExecutorIfForced(srcOp, rewriter, "div");
+        if (isForced) {
+            return result;
         }
 
         auto numerator = srcOp.getOperand(0);
@@ -1026,6 +1062,10 @@ struct BfloatSoftmaxPattern : OpRewritePattern<linalg::SoftmaxOp> {
         // checks
         if (!cast<RankedTensorType>(op.getType(0)).getElementType().isBF16()) {
             return rewriter.notifyMatchFailure(op, "Expected bf16 output");
+        }
+        auto [isForced, result] = setTargetExecutorIfForced(op, rewriter, "softmax");
+        if (isForced) {
+            return result;
         }
 
         // Matched!  Define some useful shorthands.

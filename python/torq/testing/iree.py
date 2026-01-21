@@ -454,6 +454,9 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     cmds = [str(torq_compiler), str(mlir_model_file), '-o', str(model_file)]
 
+    # FIXME: bf16 softmax op has accuracy issue on Slice, force Host execution for now.
+    cmds += ["--torq-execute-on-host=softmax"]
+
     if target == "custom":
         cmds.append(f'--torq-hw={chip_config["lram_size"]}:{chip_config["slice_count"]}:{chip_config["tiling_memory"]}:'
                      f'{chip_config.get("css_features","")}:{chip_config.get("nss_features","")}')

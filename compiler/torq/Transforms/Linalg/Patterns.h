@@ -18,4 +18,6 @@ void populateSpecializeTransposeOpPatterns(MLIRContext *ctx, RewritePatternSet &
 
 void populateOptimizeMatmuOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+void populateRaiseSoftmaxOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 } // namespace mlir::syna::torq

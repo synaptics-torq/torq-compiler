@@ -19,6 +19,7 @@ iree_cc_library(
     FoldConstantsPass.cpp
     GeneralizeLinalgNamedOpsPass.cpp
     OptimizeLinalgForTorqPass.cpp
+    RaiseSoftmaxOpPattern.cpp
     OptimizeElementwiseBinaryOpPattern.cpp
     DecomposeLinalgOpsPattern.cpp
     SpecializeTransposeOpPattern.cpp

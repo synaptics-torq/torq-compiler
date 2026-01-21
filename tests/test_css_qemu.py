@@ -14,7 +14,7 @@ def get_test_cases():
 
     test_cases = []
 
-    for name in ["matmul-notile", "softmax"]:
+    for name in ["matmul-notile", "softmax-1x1000xi8"]:
         test_cases.append(Case("tosa_" + name, {
             "mlir_model_file": "static_mlir_model_file",
             "static_mlir_model_file": MODELS_DIR / "tosa_ops" / (name + ".mlir")

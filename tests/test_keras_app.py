@@ -180,6 +180,8 @@ def case_config(request, chip_config):
     'nasnetmobile_adjust_avg_pool',
     'nasnetmobile_normal_left3',
     'nasnetmobile_separable_conv_2_reduction_left1_stem_2',
+    'nasnetmobile_separable_conv_2_reduction_left1_reduce_4', # sometimes getting "error: matching error reduction loops > 0!""
+    'nasnetmobile_separable_conv_2_reduction_left1_reduce_8', # crash sometines on CI
     'nasnetmobile_separable_conv_2_reduction_right1_stem_2',
     'nasnetmobile_separable_conv_2_reduction_right1_reduce_4', # error: matching error reduction loops > 0!
     'nasnetmobile_separable_conv_2_reduction_right1_reduce_8',

@@ -109,8 +109,6 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     auto &funcPm = pm.nest<func::FuncOp>();
 
-    funcPm.addPass(createDecomposeSoftmaxPass());
-
     // optimize linalg ops for torq
     // this pass use some tags from tile-and-fuse mark pass
     funcPm.addPass(createOptimizeLinalgForTorqPass());
