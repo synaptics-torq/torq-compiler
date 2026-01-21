@@ -837,9 +837,10 @@ class AddPattern : public OpRewritePattern<torq_hl::AddOp> {
 
         int outputSize = getTensorSize(outType);
         int inputSize = getTensorSize(inType);
+        bool isRhsScalar = op.getRhsIsScalar();
 
         // FIXME: compute the real needs
-        int memoryRequired = outputSize + inputSize * 2;
+        int memoryRequired = outputSize + inputSize * (isRhsScalar ? 1 : 2);
 
         const int memoryAvailable = TorqHw::get().getAvailableMemoryForTiling();
 
@@ -848,25 +849,27 @@ class AddPattern : public OpRewritePattern<torq_hl::AddOp> {
             return failure();
         }
 
-        int channelDataSize = getFrameSize(outType) + getFrameSize(inType) * 2;
-        if (channelDataSize < 0) {
+        // For elementwise ops, tiling is layout-agnostic (works same for NCHW/NHWC)
+        // We tile along dimension 1 regardless of what it represents
+        int sliceDataSize = getFrameSize(outType) + getFrameSize(inType) * (isRhsScalar ? 1 : 2);
+        if (sliceDataSize < 0) {
             return failure();
         }
 
-        if (channelDataSize > memoryAvailable) {
+        if (sliceDataSize > memoryAvailable) {
             return op.emitError("Frame size is too large to fit in LRAM");
         }
 
-        int maxChannelsPerTile = memoryAvailable / channelDataSize;
-        maxChannelsPerTile = std::max(1u, align_floor(maxChannelsPerTile, 4));
+        int maxDim1PerTile = memoryAvailable / sliceDataSize;
+        maxDim1PerTile = std::max(1u, align_floor(maxDim1PerTile, 4));
 
-        int channels = getChannelCount(outType);
+        int dim1Size = getChannelCount(outType);
 
-        int fullTilesCount = channels / maxChannelsPerTile;
+        int fullTilesCount = dim1Size / maxDim1PerTile;
 
-        int remainingChannels = channels % maxChannelsPerTile;
+        int remainingDim1 = dim1Size % maxDim1PerTile;
 
-        int totalTiles = fullTilesCount + (remainingChannels > 0 ? 1 : 0);
+        int totalTiles = fullTilesCount + (remainingDim1 > 0 ? 1 : 0);
 
         auto outShape = outType.getShape();
         auto inShape = op.getInput1().getType().getShape();
@@ -875,18 +878,18 @@ class AddPattern : public OpRewritePattern<torq_hl::AddOp> {
             rewriter.create<tensor::EmptyOp>(op.getLoc(), outShape, outType.getElementType());
 
         for (int i = 0; i < totalTiles; i++) {
-            int channelCount = maxChannelsPerTile;
+            int dim1SliceCount = maxDim1PerTile;
 
-            if (i == totalTiles - 1 && remainingChannels > 0) {
-                channelCount = remainingChannels;
+            if (i == totalTiles - 1 && remainingDim1 > 0) {
+                dim1SliceCount = remainingDim1;
             }
 
-            auto tileOffsets = createVector({0, i * maxChannelsPerTile, 0, 0}, rewriter);
+            auto tileOffsets = createVector({0, i * maxDim1PerTile, 0, 0}, rewriter);
 
             auto outTileSizes =
-                createVector({outShape[0], channelCount, outShape[2], outShape[3]}, rewriter);
+                createVector({outShape[0], dim1SliceCount, outShape[2], outShape[3]}, rewriter);
             auto inTileSizes =
-                createVector({inShape[0], channelCount, inShape[2], inShape[3]}, rewriter);
+                createVector({inShape[0], dim1SliceCount, inShape[2], inShape[3]}, rewriter);
 
             auto tileStrides = createVector({1, 1, 1, 1}, rewriter);
 
@@ -895,12 +898,18 @@ class AddPattern : public OpRewritePattern<torq_hl::AddOp> {
             input1Tile = rewriter.create<tensor::ExtractSliceOp>(
                 op.getLoc(), op.getInput1(), tileOffsets, inTileSizes, tileStrides
             );
-            input2Tile = rewriter.create<tensor::ExtractSliceOp>(
-                op.getLoc(), op.getInput2(), tileOffsets, inTileSizes, tileStrides
-            );
+
+            if (op.getRhsIsScalar()) {
+                input2Tile = op.getInput2();
+            }
+            else {
+                input2Tile = rewriter.create<tensor::ExtractSliceOp>(
+                    op.getLoc(), op.getInput2(), tileOffsets, inTileSizes, tileStrides
+                );
+            }
 
             auto tileType = RankedTensorType::get(
-                {outShape[0], channelCount, outShape[2], outShape[3]}, outType.getElementType()
+                {outShape[0], dim1SliceCount, outShape[2], outShape[3]}, outType.getElementType()
             );
 
             auto initTile = rewriter.create<tensor::EmptyOp>(
@@ -910,7 +919,8 @@ class AddPattern : public OpRewritePattern<torq_hl::AddOp> {
             auto outputTile = rewriter.create<torq_hl::AddOp>(
                 op.getLoc(), tileType, initTile.getResult(), op.getName(), op.getInputZp(),
                 op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
-                op.getWeights(), op.getScaleBias(), input1Tile, input2Tile
+                op.getWeights(), op.getScaleBias(), input1Tile, input2Tile, op.getSegmentOutput(),
+                op.getRhsIsScalar()
             );
 
             if (op.getSegmentOutput()) {
