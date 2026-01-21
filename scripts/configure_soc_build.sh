@@ -3,7 +3,7 @@
 # This scripts creates a build directory for IREE with the Synaptics Torq driver suitable for running on targets
 
 function usage () {
-    echo "$0 <soc-fpga-build-dir> <host-build-dir> [target]"
+    echo "$0 <soc-fpga-build-dir> <host-build-dir> [target] [toolchain]"
 }
 
 if [[ -z "$1" ]] ; then
@@ -25,11 +25,21 @@ TARGET=${3:-soc_fpga}
 if [[ "$TARGET" == "astra_machina" ]]; then
     TORQ_ENABLE_SOC_FPGA=OFF
     TORQ_ENABLE_ASTRA_MACHINA=ON
-    TOOLCHAIN_FILE=toolchain.aarch64.cmake
+
+    if [[ "$4" == "poky" ]]; then
+        # Use the Poky toolchain
+        SDK_DIR="/opt/synaptics/astra/toolchain"
+        echo "Sourcing Astra SDK environment..."
+        . "${SDK_DIR}/environment-setup-cortexa55-poky-linux"
+        TOOLCHAIN_FILE="${SDK_DIR}/sysroots/x86_64-pokysdk-linux/usr/share/cmake/cortexa55-poky-linux-toolchain.cmake"
+    else
+        # Default to aarch64 toolchain
+        TOOLCHAIN_FILE=${BASE_DIR}/scripts/toolchain.aarch64.cmake
+    fi
 else
     TORQ_ENABLE_SOC_FPGA=ON
     TORQ_ENABLE_ASTRA_MACHINA=OFF
-    TOOLCHAIN_FILE=toolchain.armhf.cmake
+    TOOLCHAIN_FILE=${BASE_DIR}/scripts/toolchain.armhf.cmake
 fi
 
 cd ${BASE_DIR}
@@ -45,4 +55,4 @@ cmake -B ${SOC_BUILD_DIR} \
             -DTORQ_ENABLE_SOC_FPGA=${TORQ_ENABLE_SOC_FPGA} \
             -DTORQ_ENABLE_ASTRA_MACHINA=${TORQ_ENABLE_ASTRA_MACHINA} \
             -DTORQ_ENABLE_SIMULATOR=OFF \
-            -DCMAKE_TOOLCHAIN_FILE=${BASE_DIR}/scripts/${TOOLCHAIN_FILE}
+            -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_FILE}
