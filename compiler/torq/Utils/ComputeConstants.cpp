@@ -461,7 +461,7 @@ computeValue(Value value, bool recursive, const std::vector<mlir::Value> &assume
 
         // walk the operation and all the nested operations to find all the operands
         // that we need to compute this value
-        auto ret = currentOp->walk([&](Operation *op) {
+        auto ret = currentOp->walk<mlir::WalkOrder::PreOrder>([&](Operation *op) {
             LLVM_DEBUG({
                 llvm::dbgs() << "Visiting operation: ";
                 op->dump();
@@ -486,40 +486,21 @@ computeValue(Value value, bool recursive, const std::vector<mlir::Value> &assume
                 }
 
                 auto blockArgument = dyn_cast<BlockArgument>(operand);
+                auto operandOp = operand.getDefiningOp();
 
                 if (blockArgument) {
 
-                    // we support arguments of block inside operations that will outlined
-                    // we need to perform this loop because we walk in reverse so the parent
-                    // is not yet in the visitedOps set but the top level operation is alraedy
-                    // in the opsSet
                     auto parentOp = blockArgument.getOwner()->getParentOp();
 
-                    while (parentOp) {
+                    if (opsSet.contains(parentOp)) {
                         LLVM_DEBUG({
-                            llvm::dbgs() << "Checking parent operation: ";
-                            parentOp->dump();
-                        });
-                        if (opsSet.contains(parentOp)) {
-                            LLVM_DEBUG({ llvm::dbgs() << "Found parent operation in opsSet\n"; });
-                            break;
-                        }
-                        assert(false); // FIXME? parentOp = parentOp->getParentOp();
-                    }
-
-                    if (parentOp) {
-                        LLVM_DEBUG({
-                            llvm::dbgs() << "Parent operation found in opsSet, accepting operand\n";
+                            llvm::dbgs()
+                                << "If in opset the parent operation is already outlined\n";
                         });
                         continue;
                     }
-
-                    // The operand is a block argument, but the block is not contained
-                    // in the operation we will compute, we cannot process this
-                    return WalkResult::interrupt();
+                    operandOp = parentOp;
                 }
-
-                auto operandOp = operand.getDefiningOp();
 
                 // the value depends on the input, we cannot compute this
                 if (isa<IREE::Flow::DispatchTensorLoadOp, IREE::HAL::InterfaceBindingSubspanOp>(
@@ -537,7 +518,6 @@ computeValue(Value value, bool recursive, const std::vector<mlir::Value> &assume
                 if (!operandOp) {
                     return WalkResult::interrupt();
                 }
-
                 if (!recursive) {
                     auto constOp = dyn_cast<arith::ConstantOp>(operandOp);
 
@@ -545,6 +525,16 @@ computeValue(Value value, bool recursive, const std::vector<mlir::Value> &assume
                         // We only support constant ops if we are not recursive
                         return WalkResult::interrupt();
                     }
+                }
+
+                if (operandOp->isProperAncestor(currentOp)) {
+                    LLVM_DEBUG({ llvm::dbgs() << "Operand and Parent stuck in cycle\n"; });
+                    return WalkResult::interrupt();
+                }
+
+                if (currentOp->isProperAncestor(operandOp)) {
+                    LLVM_DEBUG({ llvm::dbgs() << "Operand is an Op inside the Current Op\n"; });
+                    continue;
                 }
 
                 LLVM_DEBUG({ llvm::dbgs() << "Adding to list to analyze\n"; });
