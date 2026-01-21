@@ -294,7 +294,7 @@ class LData : public DataT<LData> {
     LData &moveDim(int fromDimIndex, int toDimIndex);
 
     // Broadcast dimensions to match the shape of 'other' data
-    // The current shape must have the same rank as 'other'
+    // The current shape must have the same rank as 'other' or be a scalar or 1D tensor with 1 value
     // All dimensions with size 1 are expanded to match the corresponding dimension in 'other'
     // but with stride 0, so that no data duplication occours.
     // Asserts if the shapes are not compatible for broadcasting
@@ -487,8 +487,8 @@ class Alu : SliceComponent {
 
     // Multiply an input of shape {N} with a weight vector of shape {N} and accumulate
     // N can be any value up to wWidth(wType) (A scalar is also accepted for both input and weight)
-    // idata: input tensor data in iram
-    // wdata: weight tensor data in wram
+    // idata: input tensor data in iram (A scalar is also accepted)
+    // wdata: weight tensor data in wram  (A scalar is also accepted)
     // acc: accumulate operation
     // return: pram data of shape {ceil(N/act::width), act::width}:pType
     // where pType is int32 for integer input, fp32 for float input

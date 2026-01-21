@@ -699,6 +699,11 @@ LData &LData::reshapeDim(int dimIndex, const std::vector<int> &newDims, bool all
 }
 
 LData &LData::broadcastAs(const LData &other) {
+    if (shape().empty() || (shape().size() == 1 && shape()[0].count == 1)) {
+        // Broadcasting from scalar or single-element vector
+        // Expand shape to match other rank
+        setShape(Shape(other.shape().size(), 1));
+    }
     assert(shape().size() == other.shape().size() && "Rank mismatch for broadcasting");
     for (int i = 0; i < other.shape().size(); ++i) {
         auto &shapeItem = getShape()[i];
@@ -1657,8 +1662,7 @@ PData SlicePrivate::aluProductAccumulate(
 
     // In some cases multiple partials are required to store the ALU result
     int partialElementWidth = isFloat(dataType) ? 2 : weightSize * sizeofType(dataType);
-    assert(iShape.size() > 0 && "Input shape cannot be empty");
-    const int blockSize = iShape[iShape.size() - 1].count * partialElementWidth;
+    const int blockSize = backDimCount(iShape) * partialElementWidth;
     if (blockSize > HwInfo::max_input) {
         llvm::errs() << "Actual block size: " << blockSize << " > " << HwInfo::max_input << "\n";
         assert(false && "Block size too big");
@@ -2374,6 +2378,13 @@ static int denseDims(const LData &data) {
 }
 
 static void fuse(LData &data, int count) {
+    assert(count >= 0);
+    if (count == 0) {
+        // Fuse means replacing count dimensions with 1 single dimension.
+        // If count is 0 this actually means we have to add one dimension.
+        data.getShape().push_back(1);
+        return;
+    }
     int fused = 1;
     for (; (count < 0 || fused < count) && data.shape().size() > 1 &&
            denseElementCount(data.shape(), 2) > 0;
