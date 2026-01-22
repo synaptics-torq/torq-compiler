@@ -9,6 +9,7 @@
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-conversion-utils"
@@ -171,10 +172,7 @@ RankedTensorType transposeType(Type origType, const SmallVector<int64_t> &permut
     }
     auto inputShape = inputType.getShape();
     assert(inputType.getRank() == permutation.size());
-    SmallVector<int64_t> newShape;
-    for (int i = 0; i < inputType.getRank(); i++) {
-        newShape.push_back(inputShape[permutation[i]]);
-    }
+    SmallVector<int64_t> newShape = applyPermutation(inputShape, permutation);
     return RankedTensorType::get(newShape, inputType.getElementType());
 }
 
