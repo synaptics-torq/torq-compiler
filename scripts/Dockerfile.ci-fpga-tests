@@ -10,11 +10,15 @@ RUN git clone --depth=1 https://github.com/aws/aws-fpga.git && \
     bash -c "source ./sdk_setup.sh" && \
     rm -rf aws-fpga
 
+# this is taken from the "Create new action runner screen in GitHub organization settings" page
+ARG GH_RUNNER_VERSION=2.331.0
+ARG GH_RUNNER_HASH=5fcc01bd546ba5c3f1291c2803658ebd3cedb3836489eda3be357d41bfcf28a7
+
 RUN mkdir /actions-runner && cd /actions-runner && \
-    wget https://github.com/actions/runner/releases/download/v2.329.0/actions-runner-linux-x64-2.329.0.tar.gz && \
-    echo "194f1e1e4bd02f80b7e9633fc546084d8d4e19f3928a324d512ea53430102e1d  actions-runner-linux-x64-2.329.0.tar.gz" | shasum -a 256 -c - && \
-    tar xvzf ./actions-runner-linux-x64-2.329.0.tar.gz && \
-    rm actions-runner-linux-x64-2.329.0.tar.gz
+    curl -o actions-runner-linux-x64-${GH_RUNNER_VERSION}.tar.gz -L https://github.com/actions/runner/releases/download/v${GH_RUNNER_VERSION}/actions-runner-linux-x64-${GH_RUNNER_VERSION}.tar.gz && \
+    echo "${GH_RUNNER_HASH}  actions-runner-linux-x64-${GH_RUNNER_VERSION}.tar.gz" | shasum -a 256 -c && \
+    tar xzf ./actions-runner-linux-x64-${GH_RUNNER_VERSION}.tar.gz && \
+    rm actions-runner-linux-x64-${GH_RUNNER_VERSION}.tar.gz
 
 COPY requirements.txt /code/requirements.txt
 

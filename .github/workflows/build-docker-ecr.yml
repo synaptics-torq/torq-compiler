@@ -9,6 +9,7 @@ on:
         paths:
             - 'scripts/Dockerfile.ci'
             - 'scripts/Dockerfile.ci-tests'
+            - 'scripts/Dockerfile.ci-fpga-tests'
             - 'scripts/install_dependencies.sh'
             - 'scripts/configure_python.sh'
             - 'requirements.txt'
@@ -19,6 +20,7 @@ on:
         paths:
             - 'scripts/Dockerfile.ci'
             - 'scripts/Dockerfile.ci-tests'
+            - 'scripts/Dockerfile.ci-fpga-tests'
             - 'scripts/install_dependencies.sh'
             - 'scripts/configure_python.sh'
             - 'requirements.txt'
