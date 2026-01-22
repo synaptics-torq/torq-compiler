@@ -13,12 +13,6 @@
 
 namespace mlir::syna::torq {
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createLramTilePass();
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createDtcmTilePass();
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollLoopPass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLPreConversionPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToLinalgPass();

@@ -33,6 +33,6 @@ iree_cc_library(
     MLIRPass
     MLIRTransformUtils
     iree::compiler::Dialect::Util::IR
-    iree::target::torq::Dialect::TorqHL::Dialect
+    iree::target::torq::Utils
   PUBLIC
 )

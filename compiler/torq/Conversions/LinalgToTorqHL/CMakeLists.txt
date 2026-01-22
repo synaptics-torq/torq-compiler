@@ -1,10 +1,7 @@
 set(sources
-  ConstantFold.cpp
   Passes.cpp
   Patterns.cpp
   PatternUtils.cpp
-  LinalgTilePass.cpp
-  UnrollLoopPass.cpp
   ArithToTorqHLPattern.cpp
   Conv1DPattern.cpp
   Conv2DPattern.cpp

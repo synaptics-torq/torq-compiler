@@ -57,6 +57,10 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveAddressesPass()
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createLramTilePass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createDtcmTilePass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveInvocationArgumentsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignObjectsIdentifiersPass();
@@ -68,6 +72,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createEncodeTensorsPass();
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createScalarsToTensorsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileTimeConstComputePass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollLoopPass();
 
 void addTorqComprehensiveBufferizePasses(
     OpPassManager &funcPassManager,

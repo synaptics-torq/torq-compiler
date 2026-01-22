@@ -52,12 +52,6 @@ void populateLinalgToTorqHLPatterns(
 
 void populateArithToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
-using ControlFoldingFn = std::function<bool(Operation *operation)>;
-
-void populateTorqConstantFoldLinalgOperations(
-    RewritePatternSet &patterns, const ControlFoldingFn &controlFn
-);
-
 void populateTensorToLinalgPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 } // namespace mlir::syna::torq

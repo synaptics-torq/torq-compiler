@@ -5,11 +5,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "PassesDetail.h"
-// #include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
-#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
+
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqHw.h"
+#include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 
@@ -30,7 +30,6 @@
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
-#include "torq/Utils/TorqUtils.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-linalg-tile"

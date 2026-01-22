@@ -7,36 +7,38 @@
 set(sources
     AddDeallocationPass.cpp
     AssignAddressesPass.cpp
-    KernelSelectionPass.cpp
-    LowerArithConstantsPass.cpp
-    MapBindingsPass.cpp
-    LowerCallProgramToStartWaitPass.cpp
-    OutlineSliceProgramsPass.cpp
-    AssignOperationsToCpuProgramsPass.cpp
-    OutlineCpuProgramsPass.cpp
-    OutlineUtils.cpp
-    CompileCpuProgramsPass.cpp
-    Passes.cpp
-    ProfilingPass.cpp
-    OutlineNSSProgramsPass.cpp
-    SlicingPass.cpp
-    TorqComprehensiveBufferizePass.cpp
-    TORQLowerExecutableTargetPass.cpp
-    TorqHlTilePass.cpp
-    ValidPadToSamePadPass.cpp
-    ResolveAddressesPass.cpp
-    TileAndFusePass.cpp
-    ResolveInvocationArgumentsPass.cpp
     AssignObjectsIdentifiersPass.cpp
+    AssignOperationsToCpuProgramsPass.cpp
     BufferizationUtils.cpp
-    Pool.cpp
-    VirtualMemory.cpp
     CheckCssStackSizePass.cpp
-    EncodeTensorsPass.cpp
-    ScalarsToTensorsPass.cpp
-    FoldConvertPass.cpp
+    CompileCpuProgramsPass.cpp
     CompileTimeConstComputePass.cpp
+    EncodeTensorsPass.cpp
+    FoldConvertPass.cpp
+    KernelSelectionPass.cpp
+    LinalgTilePass.cpp
+    LowerArithConstantsPass.cpp
+    LowerCallProgramToStartWaitPass.cpp
+    MapBindingsPass.cpp
     MarkHostExecutorPass.cpp
+    OutlineCpuProgramsPass.cpp
+    OutlineNSSProgramsPass.cpp
+    OutlineSliceProgramsPass.cpp
+    OutlineUtils.cpp
+    Passes.cpp
+    Pool.cpp
+    ProfilingPass.cpp
+    ResolveAddressesPass.cpp
+    ResolveInvocationArgumentsPass.cpp
+    ScalarsToTensorsPass.cpp
+    SlicingPass.cpp
+    TORQLowerExecutableTargetPass.cpp
+    TorqComprehensiveBufferizePass.cpp
+    TorqHlTilePass.cpp
+    TileAndFusePass.cpp
+    UnrollLoopPass.cpp
+    ValidPadToSamePadPass.cpp
+    VirtualMemory.cpp
 )
 
 if(TORQ_ENABLE_TORQ_GENERIC)

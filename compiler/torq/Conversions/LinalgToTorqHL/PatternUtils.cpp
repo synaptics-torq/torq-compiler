@@ -1591,36 +1591,6 @@ static RegionComputationFn getValueComputeFn(LinalgOp linalgOp, Value value) {
     }
 }
 
-// Compute the constant value for the given LinalgOp.
-DenseIntOrFPElementsAttr
-computeConstant(LinalgOp linalgOp, bool recursive, const std::vector<Value> &assumeZero) {
-
-    if (linalgOp->getNumResults() != 1) {
-        // We only support ops with one output for now.
-        return nullptr;
-    }
-
-    auto maybeAttr = computeValue(linalgOp->getResult(0), recursive, assumeZero);
-
-    if (failed(maybeAttr)) {
-        return nullptr;
-    }
-
-    return *maybeAttr;
-}
-
-DenseIntOrFPElementsAttr
-computeConstant(Value value, bool recursive, const std::vector<Value> &assumeZero) {
-
-    auto maybeAttr = computeValue(value, recursive, assumeZero);
-
-    if (failed(maybeAttr)) {
-        return nullptr;
-    }
-
-    return *maybeAttr;
-}
-
 ScaleClampInfo getDefaultScaleClampInfo(Type outElemType, Operation *srcOp) {
     ScaleClampInfo scInfo;
     scInfo.zp = 0;

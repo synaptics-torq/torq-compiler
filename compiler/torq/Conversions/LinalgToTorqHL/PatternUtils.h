@@ -83,17 +83,6 @@ struct VectorIntOrFloat {
     std::vector<float> floats;
 };
 
-// Return a dense elements vector with the recursively computed content of the constant
-// (nullptr if not const)
-DenseIntOrFPElementsAttr
-computeConstant(Value value, bool recursive = true, const std::vector<Value> &assumeZero = {});
-
-// Return a dense elements vector with the computed content of the constant (nullptr if not const)
-// assumeZero value, if specified, is considered to be a zero-filled tensor
-DenseIntOrFPElementsAttr computeConstant(
-    linalg::LinalgOp linalgOp, bool recursive = true, const std::vector<Value> &assumeZero = {}
-);
-
 bool isI8Type(Value val);
 bool isI32Type(Value val);
 bool isI8Type(Value val, PatternRewriter &rewriter);  // Deprecated

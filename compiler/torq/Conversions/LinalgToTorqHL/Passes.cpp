@@ -4,16 +4,11 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "Passes.h"
 #include "PassesDetail.h"
+#include "PatternUtils.h"
 #include "Patterns.h"
 
-#include "mlir/IR/Builders.h"
-#include "mlir/Interfaces/TilingInterface.h"
-#include "torq/Conversions/LinalgToTorqHL/Passes.h"
-#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
-#include "torq/Conversions/TosaToTorqHL/Passes.h"
-#include "torq/Transforms/Linalg/Passes.h"
-#include "torq/Transforms/TorqHL/Passes.h"
 #include "torq/Utils/ExecutorAssignment.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -21,6 +16,8 @@
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/DialectConversion.h"

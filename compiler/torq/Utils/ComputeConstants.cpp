@@ -1,42 +1,34 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
-#include "mlir/Dialect/Linalg/Passes.h"
-#include "mlir/Pass/PassManager.h"
-#include "llvm/Support/TargetSelect.h"
-
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
-
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
+#include "iree/hal/local/executable_library.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
-#include "mlir/Dialect/MemRef/Transforms/Passes.h"
-
-#include "mlir/Transforms/Passes.h"
-
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
 #include "mlir/ExecutionEngine/OptUtils.h"
-#include "torq/Dialect/TorqHL/TorqHLOps.h"
-#include "torq/Utils/ConversionUtils.h"
-// #include "torq/Codegen/Passes.h"
-#include "llvm/Support/Debug.h"
-
-#include "iree/hal/local/executable_library.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/Passes.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/TargetSelect.h"
+
 #include <numeric>
 
 #define DEBUG_TYPE "torq-compute-constants"
 
-using namespace mlir::syna::torq_hl;
 using namespace mlir::linalg;
 
 namespace mlir::syna::torq {
@@ -580,6 +572,36 @@ computeValue(Value value, bool recursive, const std::vector<mlir::Value> &assume
     LLVM_DEBUG({ llvm::dbgs() << "Value successfully computed\n"; });
 
     return *output;
+}
+
+// Compute the constant value for the given LinalgOp.
+DenseIntOrFPElementsAttr
+computeConstant(LinalgOp linalgOp, bool recursive, const std::vector<Value> &assumeZero) {
+
+    if (linalgOp->getNumResults() != 1) {
+        // We only support ops with one output for now.
+        return nullptr;
+    }
+
+    auto maybeAttr = computeValue(linalgOp->getResult(0), recursive, assumeZero);
+
+    if (failed(maybeAttr)) {
+        return nullptr;
+    }
+
+    return *maybeAttr;
+}
+
+DenseIntOrFPElementsAttr
+computeConstant(Value value, bool recursive, const std::vector<Value> &assumeZero) {
+
+    auto maybeAttr = computeValue(value, recursive, assumeZero);
+
+    if (failed(maybeAttr)) {
+        return nullptr;
+    }
+
+    return *maybeAttr;
 }
 
 } // namespace mlir::syna::torq

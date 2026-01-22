@@ -203,6 +203,42 @@ def TileAndFuse :
 
 }
 
+def LramTile:
+    InterfacePass<"torq-lram-tile",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Tile operations to fit in LRAM";
+
+    let description = [{
+        Tile operations to fit LRAM constraints
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createLramTilePass()";
+
+    let dependentDialects = [
+        "::mlir::linalg::LinalgDialect"
+    ];
+}
+
+def DtcmTile:
+    InterfacePass<"torq-dtcm-tile",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Tile operations to fit in DTCM";
+
+    let description = [{
+        Tile operations to fit DTCM constraints
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createDtcmTilePass()";
+
+    let dependentDialects = [
+        "::mlir::linalg::LinalgDialect"
+    ];
+}
+
 def TorqHlTile :
     InterfacePass<"torq-torqhl-tile",
          "mlir::FunctionOpInterface"> {
@@ -342,6 +378,25 @@ def MarkHostExecutor :
 
     let dependentDialects = [
         "linalg::LinalgDialect"
+    ];
+}
+
+def UnrollLoop:
+    InterfacePass<"torq-unroll-loop",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Unroll loops";
+
+    let description = [{
+       Unroll loop
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createUnrollLoopPass()";
+
+    let dependentDialects = [
+        "::mlir::linalg::LinalgDialect",
+        // "::mlir::scf::SCFDialect"
     ];
 }
 
