@@ -704,7 +704,25 @@ LData &LData::broadcastAs(const LData &other) {
         // Expand shape to match other rank
         setShape(Shape(other.shape().size(), 1));
     }
-    assert(shape().size() == other.shape().size() && "Rank mismatch for broadcasting");
+    if (shape().size() != other.shape().size()) {
+        if (shape().size() == 1 && other.shape().size() > 1) {
+            // FIXME: remove this deprecated implicit broadcast
+            llvm::errs() << "WARNING: deprecated implicit broadcast " << shape() << " to "
+                         << other.shape() << "\n";
+            // Add additional 1-dimensions at the beginning
+            Shape newShape;
+            int rankDiff = other.shape().size() - shape().size();
+            for (int i = 0; i < rankDiff; ++i) {
+                newShape.push_back({1, Stride()});
+            }
+            newShape.push_back(shape()[0]);
+            setShape(newShape);
+        }
+        else {
+            llvm::errs() << "Error: can't broadcast " << shape() << " to " << other.shape() << "\n";
+            assert(false && "Rank mismatch for broadcasting");
+        }
+    }
     for (int i = 0; i < other.shape().size(); ++i) {
         auto &shapeItem = getShape()[i];
         const auto &otherItem = other.shape()[i];
@@ -1022,6 +1040,23 @@ int SlicePrivate::addMemNdlDims(
 
         // Check that we don't have more than 3 A dims (HW limitation)
         // A-dims come from loops whose iteration variable is not used in the indexing
+        // Nearby A-dims with 0-stride (most common case) can be merged together
+        torq_hw::MemNdlDimsData mergedNdlDims;
+        for (const auto &dim : ndlDims) {
+            if (dim.tag == MemDimTag::A && dim.getIntStride().has_value() &&
+                dim.getIntStride() == 0 && !mergedNdlDims.empty() &&
+                mergedNdlDims.back().tag == MemDimTag::A &&
+                mergedNdlDims.back().getIntStride().has_value() &&
+                mergedNdlDims.back().getIntStride() == 0) {
+                mergedNdlDims.back().count *= dim.count;
+            }
+            else {
+                mergedNdlDims.push_back(dim);
+            }
+        }
+        ndlDims = mergedNdlDims;
+
+        // Count A-dims remaining after merge
         int aDimCnt = 0;
         for (auto &dim : ndlDims) {
             aDimCnt += dim.tag == MemDimTag::A;

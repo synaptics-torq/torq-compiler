@@ -427,51 +427,7 @@ template <typename ActOp> static KernelEncoding getActLikeEncoding(ActOp op) {
     return {{}, {{}, 64}};
 }
 
-KernelEncoding MulOp::getKernelEncoding() {
-
-    const int inIndex = getInput1Mutable().getOperandNumber();
-    const int inIndex2 = getInput2Mutable().getOperandNumber();
-
-    int inRank = cast<RankedTensorType>(getOperand(inIndex).getType()).getRank();
-    int inRank2 = cast<RankedTensorType>(getOperand(inIndex2).getType()).getRank();
-    // if any input is scalar, no encoding required
-    if (inRank == 1 || inRank2 == 1) {
-        return getNoEncoding();
-    }
-
-    // FIXME: correct encoding
-    // right now this configs seems work for all the cases
-    // but have to check later
-    return {{}, {{}, 64}};
-
-#if 0
-    auto resultType = getInit().getType();
-    int resultRank = resultType.getRank();
-    const int inIndex = getInput1Mutable().getOperandNumber();
-
-    int inRank = cast<RankedTensorType>(getOperand(inIndex).getType()).getRank();
-
-    assert(inRank == resultRank && "Input and output tensor ranks must match");
-
-    KernelTensorEncoding enc;
-    enc.stridesAlign.resize(resultRank, 0);
-
-    if (resultRank < 2) {
-        enc.stridesAlign[0] = 32;
-    }
-    else {
-        // Require alignment on the 2nd dimension of the tensor.
-        // This also ensures the overall tensor size is aligned.
-        enc.stridesAlign[1] = 32;
-    }
-
-    SmallVector<KernelInputEncoding> inEncoding = {
-        {getInput1Mutable().getOperandNumber(), enc}, {getInput2Mutable().getOperandNumber(), enc}
-    };
-
-    return {inEncoding, enc};
-#endif
-}
+KernelEncoding MulOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding MatMulOp::getKernelEncoding() {
 
