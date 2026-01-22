@@ -25,27 +25,19 @@ createVector(::llvm::ArrayRef<int64_t> values, PatternRewriter &rewriter) {
     return result;
 }
 
-void getDTypeRange(uint32_t element_size, int32_t *v_min, int32_t *v_max) {
-    if (!v_min || !v_max) {
-        llvm::report_fatal_error("Missing input v_min/v_max", true);
+std::pair<int32_t, int32_t> getDTypeRange(Type type) {
+    /// Check if type is float
+    if (isa<FloatType>(type)) {
+        constexpr int32_t minusInfinity = 0xff800000;
+        constexpr int32_t plusInfinity = 0x7f800000;
+        return {minusInfinity, plusInfinity};
     }
 
-    if (element_size == 1) {
-        *v_min = std::numeric_limits<int8_t>::min();
-        *v_max = std::numeric_limits<int8_t>::max();
-    }
-    else if (element_size == 2) {
-        *v_min = std::numeric_limits<int16_t>::min();
-        *v_max = std::numeric_limits<int16_t>::max();
-    }
-    else if (element_size == 4) {
-        *v_min = std::numeric_limits<int32_t>::min();
-        *v_max = std::numeric_limits<int32_t>::max();
-    }
-    else {
-        auto msg = std::string("Unsupported element size ") + std::to_string(element_size);
-        llvm::report_fatal_error(StringRef(msg), true);
-    }
+    // For integer operations we decide to wraparound as done by the LLVM CPU implementation
+    // We could instead saturate by choosing the limits according to the type bitwidth
+    // e.g., for int8_t: -128 to 127 but this would generate mismatches with the CPU implementation
+    // in case of overflow
+    return {std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()};
 }
 
 Value createZeroConstant(OpBuilder &b, Location loc, Type elemTy) {

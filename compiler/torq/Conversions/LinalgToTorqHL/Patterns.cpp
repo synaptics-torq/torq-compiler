@@ -582,10 +582,7 @@ template <typename OpTy> struct MatmulOpConversion final : public OpConversionPa
         const std::vector<int32_t> scale = {1};
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-
-        auto outputElementSize = srcResultType.getElementType().getIntOrFloatBitWidth() / 8;
-        int32_t outMin = -128, outMax = 127;
-        getDTypeRange(outputElementSize, &outMin, &outMax);
+        auto [outMin, outMax] = getDTypeRange(srcResultType.getElementType());
 
         rewriter.replaceOpWithNewOp<torq_hl::MatMulOp>(
             srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
@@ -1097,10 +1094,7 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
         const std::vector<int32_t> scale = {1};
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-
-        auto outputElementSize = srcResultType.getElementType().getIntOrFloatBitWidth() / 8;
-        int32_t outMin = -128, outMax = 127;
-        getDTypeRange(outputElementSize, &outMin, &outMax);
+        auto [outMin, outMax] = getDTypeRange(srcResultType.getElementType());
 
         rewriter.replaceOpWithNewOp<torq_hl::MulOp>(
             srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
@@ -1398,10 +1392,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         );
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-
-        auto outputElementSize = srcResultType.getElementType().getIntOrFloatBitWidth() / 8;
-        int32_t outMin = -128, outMax = 127;
-        getDTypeRange(outputElementSize, &outMin, &outMax);
+        auto [outMin, outMax] = getDTypeRange(srcResultType.getElementType());
 
         rewriter.replaceOpWithNewOp<torq_hl::AddOp>(
             srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),

@@ -261,7 +261,8 @@ createFConst(R &rewriter, T &op, ArrayRef<APFloat> values, llvm::ArrayRef<int64_
     }
 }
 
-void getDTypeRange(uint32_t element_size, int32_t *v_min, int32_t *v_max);
+// return a pair with the minimum and maximum value for the given type
+std::pair<int32_t, int32_t> getDTypeRange(Type type);
 
 std::vector<int32_t>
 interleave(const std::vector<int32_t> &a, const std::vector<int32_t> &b, bool broadcast_b = true);
