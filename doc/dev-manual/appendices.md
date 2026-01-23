@@ -19,6 +19,17 @@ https://www.cs.cornell.edu/courses/cs6120/2020fa/self-guided/
 ## Glossary
 
 :::{glossary}
+Act
+: Activation Unit
+:::
+
+
+:::{glossary}
+ALU
+: Aritmetic Logic Unit
+:::
+
+:::{glossary}
 dialect
 : dialects are the mechanism used in {term}`MLIR` to define new attributes, operations, and types
 and allow to model different levels of abstractions in an uniform way in the same {term}`IR`\
@@ -83,6 +94,23 @@ pass
 : In {term}`MLIR` passes represent the basic infrastructure for transformation and optimization of
 {term}`IR`s\
 https://mlir.llvm.org/docs/PassManagement/
+:::
+
+:::{glossary}
+SIMD
+: Single Instruction, Multiple Data is a parallel processing technique where one instruction operates
+on multiple data values simultaneously
+:::
+
+:::{glossary}
+SISD
+: Single Instruction, Single Data is the traditional, sequential computer architecture with one processor
+executing one instruction on one piece of data at a time
+:::
+
+:::{glossary}
+Slice
+: Vector processing unit in the Torq NPU
 :::
 
 :::{glossary}
