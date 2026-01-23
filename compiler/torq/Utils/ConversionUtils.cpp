@@ -746,4 +746,20 @@ std::optional<SmallVector<int64_t>> isaBroadcastOpInterface(linalg::GenericOp ge
     return broadcastedDims;
 }
 
+DenseIntOrFPElementsAttr returnDenseElementAttr(Value constV) {
+    auto op = constV.getDefiningOp<arith::ConstantOp>();
+    if (!op) {
+        return nullptr;
+    }
+    return mlir::dyn_cast<DenseIntOrFPElementsAttr>(op.getValue());
+}
+
+Attribute returnAttr(Value constV) {
+    auto op = constV.getDefiningOp<arith::ConstantOp>();
+    if (!op) {
+        return nullptr;
+    }
+    return mlir::dyn_cast<Attribute>(op.getValue());
+}
+
 } // namespace mlir::syna::torq

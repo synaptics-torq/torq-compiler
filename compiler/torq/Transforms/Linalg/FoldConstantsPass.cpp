@@ -53,12 +53,11 @@ class FoldConstant : public OpInterfaceRewritePattern<LinalgOp> {
         if (!controlFn(linalgOp))
             return failure();
 
-        DenseElementsAttr outputAttr = computeConstant(linalgOp, false);
-        if (!outputAttr) {
+        auto outV = computeArithConst(linalgOp, false);
+        if (failed(outV)) {
             return failure();
         }
-
-        rewriter.replaceOpWithNewOp<arith::ConstantOp>(linalgOp, outputAttr);
+        rewriter.replaceOp(linalgOp, outV->getDefiningOp());
 
         return success();
     }

@@ -349,14 +349,13 @@ MultiplierShiftInfo getMultiplierAndShift(
 
     std::vector<int32_t> multiplier;
     if (tosaMultiplierValue) {
-        auto multiplierElementsAttr = computeConstant(tosaMultiplierValue, true, {});
-        if (!multiplierElementsAttr) {
+        auto mulConstV = computeArithConst(tosaMultiplierValue, true, {});
+        if (failed(mulConstV)) {
             genericOp.emitError() << "multiplier must be a constant";
             return {};
         }
 
-        auto multiplierElements = multiplierElementsAttr.getValues<int32_t>();
-        multiplier = std::vector<int32_t>(multiplierElements.begin(), multiplierElements.end());
+        multiplier = attrValuesAsVec<int32_t>(*mulConstV);
         if (multiplier.size() != scaleValuesCount) {
             genericOp.emitError() << "multiplier unexpected size:" << multiplier.size() << "\n";
             return {};
@@ -373,14 +372,13 @@ MultiplierShiftInfo getMultiplierAndShift(
 
     std::vector<int8_t> shift;
     if (tosaShiftValue) {
-        DenseIntOrFPElementsAttr shiftElementsAttr = computeConstant(tosaShiftValue, true, {});
-        if (!shiftElementsAttr) {
+        auto shiftConstV = computeArithConst(tosaShiftValue, true, {});
+        if (failed(shiftConstV)) {
             genericOp.emitError() << "shift must be a constant";
             return {};
         }
 
-        auto shiftElements = shiftElementsAttr.getValues<int8_t>();
-        shift = std::vector<int8_t>(shiftElements.begin(), shiftElements.end());
+        shift = attrValuesAsVec<int8_t>(*shiftConstV);
         if (shift.size() != scaleValuesCount) {
             genericOp.emitError() << "shift vect has unexpected size: " << shift.size() << "\n";
             return {};
@@ -1159,7 +1157,8 @@ PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nc
     return PaddingInfo{{left, right, top, bottom}, maybeFillValue.value()};
 }
 
-std::vector<int32_t> computePerChannelValuesInt(DenseElementsAttr constAttr, int channelDim) {
+std::vector<int32_t> computePerChannelValuesInt(Value constV, int channelDim) {
+    auto constAttr = returnDenseElementAttr(constV);
     auto shape = constAttr.getType().getShape();
     const int64_t numChannels = shape[channelDim];
     std::vector<int32_t> perChannelValues(numChannels);
@@ -1184,7 +1183,8 @@ std::vector<int32_t> computePerChannelValuesInt(DenseElementsAttr constAttr, int
     return perChannelValues;
 }
 
-std::vector<float> computePerChannelValuesFloat(DenseElementsAttr constAttr, int channelDim) {
+std::vector<float> computePerChannelValuesFloat(Value constV, int channelDim) {
+    auto constAttr = returnDenseElementAttr(constV);
     auto shape = constAttr.getType().getShape();
     const int64_t numChannels = shape[channelDim];
     std::vector<float> perChannelValues(numChannels);
@@ -1268,10 +1268,10 @@ bool foldForwardPerChannelAdd(
     // TODO: check that one of the operand is coming from inValue if specified
 
     // Compute the result of the add operation assuming value is 0
-    DenseElementsAttr constAttr = computeConstant(addOp, true, {inValue, value});
-    if (!constAttr) {
+    auto maybeConstV = computeArithConst(addOp, true, {inValue, value});
+    if (failed(maybeConstV)) {
         LLVM_DEBUG({
-            llvm::dbgs() << "foldForwardPerChannelAdd computeConstant in:"
+            llvm::dbgs() << "foldForwardPerChannelAdd computeArithConst in:"
                          << addOp.getNumDpsInputs() << " FAILED\n";
         });
         return false;
@@ -1280,7 +1280,7 @@ bool foldForwardPerChannelAdd(
     // Check that all the values in each channel have the same value
     // and update the per-channel bias values
     if (bias.ints.size()) {
-        const auto &perChannel = computePerChannelValuesInt(constAttr, channelDim);
+        const auto &perChannel = computePerChannelValuesInt(*maybeConstV, channelDim);
         if (!elementwiseAdd(bias.ints, perChannel)) {
             // The constant tensor has unexpected size
             LLVM_DEBUG({ llvm::dbgs() << "foldForwardPerChannelAdd int tensor bad size\n"; });
@@ -1288,7 +1288,7 @@ bool foldForwardPerChannelAdd(
         }
     }
     else if (bias.floats.size()) {
-        const auto &perChannel = computePerChannelValuesFloat(constAttr, channelDim);
+        const auto &perChannel = computePerChannelValuesFloat(*maybeConstV, channelDim);
         if (!elementwiseAdd(bias.floats, perChannel)) {
             // The constant tensor has unexpected size
             LLVM_DEBUG({ llvm::dbgs() << "foldForwardPerChannelAdd float tensor bad size\n"; });
@@ -2120,13 +2120,11 @@ bool foldScalarRescale(
 }
 
 // Conv2DMatmulOpConversion weight conversion function
-Value convertWeights(
-    mlir::linalg::MatmulOp srcOp, mlir::DenseIntOrFPElementsAttr weightAttr,
-    PatternRewriter &rewriter
-) {
+Value convertWeights(mlir::linalg::MatmulOp srcOp, mlir::Value weights, PatternRewriter &rewriter) {
     // Reorder weights to OIHW
-    auto weightElemType = weightAttr.getElementType();
-    auto weightShape = dyn_cast<ShapedType>(weightAttr.getType()).getShape();
+    auto weightTy = dyn_cast<RankedTensorType>(weights.getType());
+    auto weightElemType = weightTy.getElementType();
+    auto weightShape = weightTy.getShape();
 
     // Validate expected shape: [OC, IC] for matmul-style
     assert(weightShape.size() == 2);
@@ -2139,14 +2137,12 @@ Value convertWeights(
     std::vector<int64_t> weight_shape{on, in, hn, wn};
 
     if (weightElemType.isBF16()) {
-        auto bfVals = weightAttr.getValues<APFloat>();
-        const std::vector<APFloat> bfVec(bfVals.begin(), bfVals.end());
+        auto bfVec = attrValuesAsVec<APFloat>(weights);
         std::vector<APFloat> reordered = get_weights_OIHW<APFloat>(bfVec, on, hn, wn, in);
         return createFConst(rewriter, srcOp, reordered, weight_shape);
     }
     else if (weightElemType.isInteger(8)) {
-        auto rawVals = weightAttr.getValues<int8_t>();
-        std::vector<int8_t> reordered(rawVals.begin(), rawVals.end());
+        auto reordered = attrValuesAsVec<int8_t>(weights);
         reordered = get_weights_OIHW<int8_t>(reordered, on, hn, wn, in);
         return createI8Const(rewriter, srcOp, reordered, weight_shape);
     }

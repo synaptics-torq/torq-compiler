@@ -377,8 +377,21 @@ rangeValues(mlir::detail::ElementsAttrRange<mlir::DenseElementsAttr::ElementIter
 }
 
 // Convert a DenseIntElementsAttr to an std::vector<int64_t>
-inline std::vector<int64_t> attrValues(DenseIntElementsAttr denseElementAttr) {
+inline std::vector<int64_t> attrValuesAsVec(DenseIntElementsAttr denseElementAttr) {
     return rangeValues(denseElementAttr.getValues<int64_t>());
+}
+
+// Returns the DenseIntOrFPElementsAttr from a arith::ConstantOp Value
+DenseIntOrFPElementsAttr returnDenseElementAttr(Value constV);
+
+// Returns the Attribute from a arith::ConstantOp Value. In cases of scalar constant this will be
+// useful
+Attribute returnAttr(Value constV);
+
+template <typename T> std::vector<T> attrValuesAsVec(Value constV) {
+    auto denseElementAttr = returnDenseElementAttr(constV);
+    auto range = denseElementAttr.getValues<T>();
+    return std::vector<T>(range.begin(), range.end());
 }
 
 RankedTensorType convertTypeNCHWtoNHWC(Type origType);

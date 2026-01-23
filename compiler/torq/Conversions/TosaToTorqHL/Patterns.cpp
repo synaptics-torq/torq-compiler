@@ -214,12 +214,12 @@ LogicalResult reverseTConvWeights(
     auto oihwOutput = createInitTensor(loc, oihwType, rewriter);
     auto oihwTransposeOp =
         rewriter.create<linalg::TransposeOp>(loc, genericOp.getResult(0), oihwOutput, oihwPerm);
-    auto newWeightsOIHW = computeValue(*oihwTransposeOp.getResults().begin(), true, {});
+    auto newWeightsOIHW = computeArithConst(*oihwTransposeOp.getResults().begin(), true, {});
     if (failed(newWeightsOIHW)) {
         return rewriter.notifyMatchFailure(oihwTransposeOp, "Weight computation failed");
     }
 
-    weights = createConst(*newWeightsOIHW, rewriter, loc);
+    weights = *newWeightsOIHW;
 
     return success();
 }

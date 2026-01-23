@@ -229,9 +229,6 @@ bool foldScalarRescale(
     Value &input, ScaleInfo &scaleInfo, const Type &elementType, PatternRewriter &rewriter
 );
 
-Value convertWeights(
-    mlir::linalg::MatmulOp srcOp, mlir::DenseIntOrFPElementsAttr weightAttr,
-    PatternRewriter &rewriter
-);
+Value convertWeights(mlir::linalg::MatmulOp srcOp, mlir::Value weights, PatternRewriter &rewriter);
 
 } // namespace mlir::syna::torq

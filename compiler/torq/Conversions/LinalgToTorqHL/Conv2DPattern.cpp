@@ -628,12 +628,11 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         if (!failed(mWts)) {
             torqWeights = *mWts;
         }
-        auto weightsAttr = computeConstant(torqWeights);
-        if (!weightsAttr) {
+        auto maybeConstWt = computeArithConst(torqWeights);
+        if (failed(maybeConstWt)) {
             return rewriter.notifyMatchFailure(convOp, "Weights must be constant");
         }
-
-        torqWeights = createConst(weightsAttr, rewriter, weights.getLoc());
+        torqWeights = *maybeConstWt;
 
         bool isNchw = _2DNchwChw;
         // NOW that all validation passed (including weight creation),
@@ -664,7 +663,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                        .create<torq_hl::DepthwiseConv2DOp>(
                            loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
                            scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
-                           attrValues(convOp.getStrides()), finalDilationVec,
+                           attrValuesAsVec(convOp.getStrides()), finalDilationVec,
                            torq_hl::VectorizationModeEnum::None, torqWeights, biasScale, input,
                            isDW1DStride1, false, isDW1DStride1
                        )
@@ -675,7 +674,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                        .create<torq_hl::Conv2DOp>(
                            loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
                            scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
-                           attrValues(convOp.getStrides()), finalDilationVec,
+                           attrValuesAsVec(convOp.getStrides()), finalDilationVec,
                            torq_hl::VectorizationModeEnum::None, torqWeights, biasScale, input,
                            nhwcInput
                        )
@@ -746,7 +745,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
 
             auto transposeReshape = rewriter.create<torq_hl::TransposeReshapeOp>(
                 input.getLoc(), transposedType, createInitTensor(convOp, rewriter, transposedType),
-                attrValues(convOp.getStrides()), weightType.getShape(), permAttr, input
+                attrValuesAsVec(convOp.getStrides()), weightType.getShape(), permAttr, input
             );
             input = transposeReshape.getOutput();
         }
@@ -845,8 +844,11 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             return success();
         }
 
-        auto weightAttr = computeConstant(transposeValue(weights, _weightsPerm, loc, rewriter));
-        auto torqWeights = createConst(weightAttr, rewriter, loc);
+        auto maybeConstWt = computeArithConst(transposeValue(weights, _weightsPerm, loc, rewriter));
+        if (failed(maybeConstWt)) {
+            return rewriter.notifyMatchFailure(convOp, "Weights must be constant");
+        }
+        auto torqWeights = *maybeConstWt;
         // TODO: Torq weights should be reorderes in multiple channels cases;
         if (!torqWeights)
             return failure();
@@ -874,7 +876,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
 
         auto torqConv1Op = rewriter.create<torq_hl::Conv1DOp>(
             loc, torqOutType, conv1DOut, 0, weightZp, scInfo.zp, scInfo.min, scInfo.max,
-            scInfo.scaleShift, groups, zeroPad, stride, attrValues(convOp.getDilations()),
+            scInfo.scaleShift, groups, zeroPad, stride, attrValuesAsVec(convOp.getDilations()),
             torq_hl::VectorizationModeEnum::None, torqWeights, biasScale, input
         );
         Value torqOut = torqConv1Op.getOutput();

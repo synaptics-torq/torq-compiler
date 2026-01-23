@@ -174,11 +174,10 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                                : createConst(bias.floats, rewriter, loc);
 
         // Compute weights
-        auto weightAttr = computeConstant(weights);
-        if (!weightAttr) {
+        auto maybeConstWt = computeArithConst(weights);
+        if (failed(maybeConstWt)) {
             return rewriter.notifyMatchFailure(srcOp, "Failed to fold weights");
         }
-
         finalType = convertTypeNHWCtoNCHW(finalType);
         Value initTensor = createInitTensor(srcOp, rewriter, finalType);
         auto vectorizationMode = torq_hl::VectorizationModeEnum::None;
@@ -188,7 +187,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         auto stride = rewriter.getDenseI64ArrayAttr({1, 1});
         auto dilation = rewriter.getDenseI64ArrayAttr({1, 1});
 
-        auto torqWeights = convertWeights(srcOp, weightAttr, rewriter);
+        auto torqWeights = convertWeights(srcOp, *maybeConstWt, rewriter);
 
         auto conv2dOp = rewriter.create<syna::torq_hl::Conv2DOp>(
             loc, finalType, initTensor,
@@ -417,11 +416,10 @@ struct Conv2DNchwMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> 
                                : createConst(bias.floats, rewriter, loc);
 
         // Compute weights
-        auto weightAttr = computeConstant(weights);
-        if (!weightAttr) {
+        auto maybeConstWt = computeArithConst(weights);
+        if (failed(maybeConstWt)) {
             return rewriter.notifyMatchFailure(srcOp, "Failed to fold weights");
         }
-
         Value initTensor = createInitTensor(srcOp, rewriter, finalType);
         auto vectorizationMode = torq_hl::VectorizationModeEnum::None;
 
@@ -429,7 +427,7 @@ struct Conv2DNchwMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> 
         auto stride = rewriter.getDenseI64ArrayAttr({1, 1});
         auto dilation = rewriter.getDenseI64ArrayAttr({1, 1});
 
-        auto torqWeights = convertWeights(srcOp, weightAttr, rewriter);
+        auto torqWeights = convertWeights(srcOp, *maybeConstWt, rewriter);
 
         auto conv2dOp = rewriter.create<syna::torq_hl::Conv2DOp>(
             loc, finalType, initTensor,

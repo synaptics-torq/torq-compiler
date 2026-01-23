@@ -2145,10 +2145,25 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         }
 
         SmallVector<int32_t> convertedValues;
-        auto cstData = computeConstant(cst);
+        auto maybeCstData = computeArithConst(cst);
+        if (failed(maybeCstData)) {
+            // tensor is input
+            auto dataPerm = Permutation::nhc2nch();
+            auto outType = transposeType(
+                mlir::cast<RankedTensorType>(srcOp.getResult(0).getType()), dataPerm.reverse()
+            );
+            auto transposedValue = transposeValue(cst, dataPerm, srcOp.getLoc(), rewriter);
+            auto out = rewriter.create<syna::torq_hl::GatherOp>(
+                srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
+                transposedValue, input
+            );
+            auto resultTranspose =
+                transposeValue(out.getResult(0), dataPerm.reverse(), srcOp.getLoc(), rewriter);
+            rewriter.replaceOp(srcOp, resultTranspose);
+        }
 
-        if (!clTableAsGather && isTableOp) {
-            auto values = cstData.getValues<int8_t>();
+        else if (!clTableAsGather && isTableOp) {
+            auto values = attrValuesAsVec<int8_t>(*maybeCstData);
             for (size_t i = 0; i < 256; i++) {
                 int32_t shiftedValue = static_cast<int32_t>(values[i]) << 8;
                 convertedValues.push_back(shiftedValue);
@@ -2166,70 +2181,35 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 createIConst(rewriter, srcOp, interleave(bias, scale)), input, intArrayAttr
             );
         }
-        else {
+        else if (isTableOp) { // If a table converted Gather then the const values are input(table)
+                              // and extract tensor is indices
             std::vector<APInt> tableValues;
+            auto values = attrValuesAsVec<APInt>(*maybeCstData);
+            tableValues.insert(tableValues.end(), values.begin(), values.end());
+            int tableSize = tableValues.size();
+            std::vector<APInt> modifiedTable;
+            modifiedTable.reserve(tableSize);
+            modifiedTable.insert(modifiedTable.end(), tableValues.begin() + 128, tableValues.end());
+            modifiedTable.insert(
+                modifiedTable.end(), tableValues.begin(), tableValues.begin() + 128
+            );
+            tableValues = modifiedTable;
 
-            if (isTableOp) { // If a table converted Gather then the const values are input(table)
-                             // and extract tensor is indices
-                auto values = cstData.getValues<APInt>();
-                tableValues.insert(tableValues.end(), values.begin(), values.end());
-                int tableSize = tableValues.size();
-                std::vector<APInt> modifiedTable;
-                modifiedTable.reserve(tableSize);
-                modifiedTable.insert(
-                    modifiedTable.end(), tableValues.begin() + 128, tableValues.end()
-                );
-                modifiedTable.insert(
-                    modifiedTable.end(), tableValues.begin(), tableValues.begin() + 128
-                );
-                tableValues = modifiedTable;
+            auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+            rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
+                srcOp, outType, createInitTensor(srcOp, rewriter, outType),
+                createIConst(rewriter, srcOp, tableValues), input
+            );
+        }
+        else { // If not a table converted Gather and the const values are
+               // input(table)
+               // and extract tensor is indices
 
-                auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-                rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
-                    srcOp, outType, createInitTensor(srcOp, rewriter, outType),
-                    createIConst(rewriter, srcOp, tableValues), input
-                );
-            }
-            else if (cstData) { // If not a table converted Gather and the const values are
-                                // input(table)
-                                // and extract tensor is indices
+            auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
 
-                arith::ConstantOp tableConst;
-
-                auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-
-                if (llvm::isa<FloatType>(outType.getElementType())) {
-                    auto values = cstData.getValues<APFloat>();
-                    std::vector<APFloat> tableValues;
-                    tableValues.insert(tableValues.end(), values.begin(), values.end());
-                    tableConst = createFConst(rewriter, srcOp, tableValues);
-                }
-                else {
-                    auto values = cstData.getValues<APInt>();
-                    std::vector<APInt> tableValues;
-                    tableValues.insert(tableValues.end(), values.begin(), values.end());
-                    tableConst = createIConst(rewriter, srcOp, tableValues);
-                }
-
-                rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
-                    srcOp, outType, createInitTensor(srcOp, rewriter, outType), tableConst, input
-                );
-            }
-            else { // If not a table converted Gather and the const values are indices and extract
-                   // tensor is input
-                auto dataPerm = Permutation::nhc2nch();
-                auto outType = transposeType(
-                    mlir::cast<RankedTensorType>(srcOp.getResult(0).getType()), dataPerm.reverse()
-                );
-                auto transposedValue = transposeValue(cst, dataPerm, srcOp.getLoc(), rewriter);
-                auto out = rewriter.create<syna::torq_hl::GatherOp>(
-                    srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
-                    transposedValue, input
-                );
-                auto resultTranspose =
-                    transposeValue(out.getResult(0), dataPerm.reverse(), srcOp.getLoc(), rewriter);
-                rewriter.replaceOp(srcOp, resultTranspose);
-            }
+            rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
+                srcOp, outType, createInitTensor(srcOp, rewriter, outType), *maybeCstData, input
+            );
         }
 
         return success();

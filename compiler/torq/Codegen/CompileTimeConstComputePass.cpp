@@ -39,14 +39,13 @@ class OpToConstOpRewriter : public RewritePattern {
             return failure();
         }
 
-        auto constAttr = computeValue(op->getResults()[0], true, {});
-        if (failed(constAttr)) {
+        auto maybeConstV = computeArithConst(op->getResults()[0], true, {});
+        if (failed(maybeConstV)) {
             op->emitError() << "Failed to compute compile-time constant";
             return failure();
         }
 
-        auto constOp = rewriter.create<arith::ConstantOp>(op->getLoc(), *constAttr);
-        rewriter.replaceOp(op, constOp);
+        rewriter.replaceOp(op, *maybeConstV);
 
         return success();
     }

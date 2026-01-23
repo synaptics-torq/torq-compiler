@@ -57,7 +57,7 @@ struct PoolingNhwcMaxOpConversion : public OpRewritePattern<linalg::PoolingNhwcM
         Value input = srcOp.getInputs()[0];
         Value output = srcOp.getResults()[0];
 
-        auto attrStrides = attrValues(srcOp.getStrides());
+        auto attrStrides = attrValuesAsVec(srcOp.getStrides());
         if (attrStrides.size() != 2) {
             return rewriter.notifyMatchFailure(
                 srcOp, "Expected exactly two strides for PoolingNhwcMaxOp"

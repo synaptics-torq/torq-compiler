@@ -97,32 +97,30 @@ class ArithElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericO
 
         if (auto rhsConstOp = dyn_cast_if_present<arith::ConstantOp>(rhs.getDefiningOp())) {
             // Create a constant tensor from the scalar constant value.
-            Attribute constAttr = computeConstant(srcOp, false);
-            if (!constAttr) {
-                constAttr = rhsConstOp.getValue();
+            auto maybeConstV = computeArithConst(srcOp, false);
+            Value constV = rhsConstOp;
+            if (!failed(maybeConstV)) {
+                LLVM_DEBUG({ llvm::dbgs() << "Computed constant for rhs operand\n"; });
+                constV = *maybeConstV;
             }
-            if (!constAttr) {
-                return failure();
-            }
+            auto constAttr = returnAttr(constV);
             auto constTensor = rewriter.create<arith::ConstantOp>(
                 srcOp.getLoc(), inputType, DenseElementsAttr::get(inputType, constAttr)
             );
-
             newInput0 = input;
             newInput1 = constTensor;
         }
         else if (auto lhsConstOp = dyn_cast_if_present<arith::ConstantOp>(lhs.getDefiningOp())) {
-            Attribute constAttr = computeConstant(srcOp, false);
-            if (!constAttr) {
-                constAttr = lhsConstOp.getValue();
+            auto maybeConstV = computeArithConst(srcOp, false);
+            Value constV = lhsConstOp;
+            if (!failed(maybeConstV)) {
+                LLVM_DEBUG({ llvm::dbgs() << "Computed constant for lhs operand\n"; });
+                constV = *maybeConstV;
             }
-            if (!constAttr) {
-                return failure();
-            }
+            auto constAttr = returnAttr(constV);
             auto constTensor = rewriter.create<arith::ConstantOp>(
                 srcOp.getLoc(), inputType, DenseElementsAttr::get(inputType, constAttr)
             );
-
             newInput0 = constTensor;
             newInput1 = input;
         }

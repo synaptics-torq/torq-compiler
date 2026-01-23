@@ -286,7 +286,7 @@ static void replaceStackAllocationsWithMalloc(IREE::HAL::ExecutableVariantOp evO
     });
 }
 
-FailureOr<DenseIntOrFPElementsAttr> computeValueFromOps(
+FailureOr<DenseElementsAttr> computeValueFromOps(
     Location loc, Value value, ArrayRef<Operation *> ops, const std::vector<Value> &assumeZero
 ) {
 
@@ -387,16 +387,13 @@ FailureOr<DenseIntOrFPElementsAttr> computeValueFromOps(
     mainFn(&environment, &dispatch_state, &workgroup_state);
 
     // create an attribute from the output data
-    DenseIntOrFPElementsAttr output =
-        cast<DenseIntOrFPElementsAttr>(DenseElementsAttr::getFromRawBuffer(outputType, outputData));
-
-    LLVM_DEBUG({ llvm::dbgs() << "Constant successfully computed"; });
+    auto output = DenseElementsAttr::getFromRawBuffer(outputType, outputData);
 
     return output;
 }
 
-FailureOr<DenseIntOrFPElementsAttr>
-computeValue(Value value, bool recursive, const std::vector<mlir::Value> &assumeZero) {
+SmallVector<Operation *>
+outlineAndReturnOps(Value value, bool recursive, const std::vector<mlir::Value> &assumeZero) {
 
     LLVM_DEBUG({
         llvm::dbgs() << "Trying to compute value of:\n";
@@ -407,12 +404,12 @@ computeValue(Value value, bool recursive, const std::vector<mlir::Value> &assume
 
     // we don't support computing constants for non-ranked tensor types
     if (!outputType) {
-        return failure();
+        return {};
     }
 
     // we cannot compute the constant value of an argument
     if (!value.getDefiningOp()) {
-        return failure();
+        return {};
     }
 
     // set of all ops we already visited (including operations within operations)
@@ -540,7 +537,7 @@ computeValue(Value value, bool recursive, const std::vector<mlir::Value> &assume
 
         if (ret == WalkResult::interrupt()) {
             LLVM_DEBUG({ llvm::dbgs() << "Cannot build constant IR to compute value\n"; });
-            return failure();
+            return {};
         }
     }
 
@@ -559,49 +556,49 @@ computeValue(Value value, bool recursive, const std::vector<mlir::Value> &assume
             op->dump();
         }
     });
+    return ops;
+}
 
-    auto output = computeValueFromOps(value.getDefiningOp()->getLoc(), value, ops, assumeZero);
-
-    if (failed(output)) {
-        LLVM_DEBUG({ llvm::errs() << "Failed to compute value\n"; });
-        // Failed to compute the constant value
-        assert(false);
+FailureOr<DenseElementsAttr>
+computeConstAttr(Value value, bool recursive, const std::vector<mlir::Value> &assumeZero) {
+    SmallVector<Operation *> ops = outlineAndReturnOps(value, recursive, assumeZero);
+    if (ops.empty()) {
+        LLVM_DEBUG({ llvm::errs() << "Failed to outline ops to compute value\n"; });
         return failure();
     }
+    auto output = computeValueFromOps(value.getDefiningOp()->getLoc(), value, ops, assumeZero);
 
-    LLVM_DEBUG({ llvm::dbgs() << "Value successfully computed\n"; });
-
-    return *output;
+    return output;
 }
 
 // Compute the constant value for the given LinalgOp.
-DenseIntOrFPElementsAttr
-computeConstant(LinalgOp linalgOp, bool recursive, const std::vector<Value> &assumeZero) {
+FailureOr<Value>
+computeArithConst(Value value, bool recursive, const std::vector<Value> &assumeZero) {
+
+    auto maybeAttr = computeConstAttr(value, recursive, assumeZero);
+
+    if (failed(maybeAttr)) {
+        return failure();
+    }
+
+    OpBuilder builder(value.getDefiningOp());
+    auto outputV = builder.create<arith::ConstantOp>(value.getLoc(), *maybeAttr).getResult();
+    LLVM_DEBUG({ llvm::dbgs() << "Constant successfully computed"; });
+
+    return outputV;
+}
+
+// Compute the constant value for the given LinalgOp.
+FailureOr<Value>
+computeArithConst(LinalgOp linalgOp, bool recursive, const std::vector<Value> &assumeZero) {
 
     if (linalgOp->getNumResults() != 1) {
         // We only support ops with one output for now.
-        return nullptr;
+        return failure();
     }
 
-    auto maybeAttr = computeValue(linalgOp->getResult(0), recursive, assumeZero);
-
-    if (failed(maybeAttr)) {
-        return nullptr;
-    }
-
-    return *maybeAttr;
-}
-
-DenseIntOrFPElementsAttr
-computeConstant(Value value, bool recursive, const std::vector<Value> &assumeZero) {
-
-    auto maybeAttr = computeValue(value, recursive, assumeZero);
-
-    if (failed(maybeAttr)) {
-        return nullptr;
-    }
-
-    return *maybeAttr;
+    auto maybeAttr = computeArithConst(linalgOp->getResult(0), recursive, assumeZero);
+    return maybeAttr;
 }
 
 } // namespace mlir::syna::torq

@@ -115,13 +115,11 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
             return success();
         }
 
-        auto weightAttr = computeConstant(inputB);
-        auto torqWeights = createConst(weightAttr, rewriter, loc);
-        if (!torqWeights) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Failed to create constant for transposed weights"
-            );
+        auto maybeConstV = computeArithConst(inputB);
+        if (failed(maybeConstV)) {
+            return rewriter.notifyMatchFailure(srcOp, "Failed to compute constant for weights");
         }
+        auto torqWeights = *maybeConstV;
         // Prepare bias (and scale for integer ops)
         auto biasScale = isInt ? createConst(interleave(bias.ints, scInfo.scaleNpu), rewriter, loc)
                                : createConst(bias.floats, rewriter, loc);
