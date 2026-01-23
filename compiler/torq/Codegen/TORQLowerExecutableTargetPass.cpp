@@ -129,10 +129,8 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     }
 
     // lower the linalg operators to torq_hl before tiling
-#if !TORQ_EXPERIMENTAL_LINALG_CONV_TILING
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
     funcPm.addPass(createCanonicalizerPass());
-#endif
 
     // Handles valid pad operations
     funcPm.addPass(createValidToSamePadPass());
@@ -142,11 +140,6 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     // tile the linalg ops or tilingInterface ops
     funcPm.addPass(createLramTilePass());
     funcPm.addPass(createCanonicalizerPass());
-
-#ifdef ENABLE_TORQ_GENERIC
-    // specialize linalg.generic ops to linalg named ops
-    funcPm.addPass(createSpecializeLinalgGenericOpPass());
-#endif // ENABLE_TORQ_GENERIC
 
     if (!clEnableTorqTileAndFuse) {
         // unroll loops
@@ -164,18 +157,8 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     funcPm.addPass(createCanonicalizerPass());
 
     // lower the linalg operators to torq_hl
-#if TORQ_EXPERIMENTAL_LINALG_CONV_TILING
-    funcPm.addPass(createLinalgToTorqHLPreConversionPass());
-#endif
     funcPm.addPass(createLinalgToTorqHLConversionPass());
     funcPm.addPass(createCanonicalizerPass());
-
-#ifdef ENABLE_TORQ_GENERIC
-    // we fold all linalg.fill used to initialize pvalues to 0 to constants
-    // so that they don't get converted to torq_hl.generic operations in the
-    // next pass (we will simplify these p values when converting to torq_hw)
-    funcPm.addPass(createFoldPValueInitsPass());
-#endif // ENABLE_TORQ_GENERIC
 
     // FIXME: not working currently
     // convert all the linalg operations that we received to torq_hl.generic

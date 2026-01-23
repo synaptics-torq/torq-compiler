@@ -41,10 +41,6 @@ set(sources
     VirtualMemory.cpp
 )
 
-if(TORQ_ENABLE_TORQ_GENERIC)
-  list(APPEND sources FoldPValueInitsPass.cpp)
-endif()
-
 iree_tablegen_library(
   NAME
     PassesIncGen

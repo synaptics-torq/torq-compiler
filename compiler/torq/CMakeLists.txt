@@ -7,8 +7,6 @@
 set(IREE_PACKAGE_ROOT_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(IREE_PACKAGE_ROOT_PREFIX "iree::target::torq")
 
-option(TORQ_ENABLE_TORQ_GENERIC "Enable Torq Generic support" OFF)
-
 add_subdirectory(Dialect/TorqHL)
 add_subdirectory(Dialect/TorqHW)
 add_subdirectory(Utils)

@@ -309,17 +309,6 @@ def FoldConvert :
         ];
 }
 
-#ifdef ENABLE_TORQ_GENERIC
-def FoldPValueInits :
-    InterfacePass<"torq-fold-pvalue-inits", "mlir::FunctionOpInterface"> {
-        let summary = "Folds filling of P value initialization to arith::const ops";
-        let constructor = "mlir::syna::torq::createFoldPValueInitsPass()";
-        let dependentDialects = [
-            "syna::torq_hl::TorqHLDialect"
-        ];
-}
-#endif // ENABLE_TORQ_GENERIC
-
 def ResolveAddresses :
     InterfacePass<"torq-resolve-addresses", "mlir::FunctionOpInterface"> {
         let summary = "Computes all the addresses used by torq_hw operators and set them as attributes";

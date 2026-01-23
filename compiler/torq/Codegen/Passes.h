@@ -51,8 +51,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createProfilingPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createKernelSelectionPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldPValueInitsPass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveAddressesPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass();

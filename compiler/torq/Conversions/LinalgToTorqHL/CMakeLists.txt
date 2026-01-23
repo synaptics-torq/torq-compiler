@@ -29,25 +29,6 @@ set(deps
     MLIRExecutionEngine
 )
 
-if(TORQ_ENABLE_TORQ_GENERIC)
-  list(APPEND sources
-    ActPatterns.cpp
-    AluPatterns.cpp
-    LinalgToTorqGeneric.cpp
-  )
-
-  list(APPEND deps ::LinalgToTorqGenericIncGen)
-  
-  iree_tablegen_library(
-    NAME
-      LinalgToTorqGenericIncGen
-    TD_FILE
-      LinalgToTorqGeneric.td
-    OUTS
-      --gen-pass-decls LinalgToTorqGeneric.h.inc
-  )
-endif()
-
 iree_tablegen_library(
   NAME
     PassesIncGen

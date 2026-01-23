@@ -25,10 +25,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToTorqHLConversi
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createArithToTorqHLConversionPass();
 
-#ifdef ENABLE_TORQ_GENERIC
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createSpecializeLinalgGenericOpPass();
-#endif // ENABLE_TORQ_GENERIC
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>>
 createLinalgToTorqHLGenericPass(bool specializeConstantComputations = false);
 
