@@ -1,12 +1,12 @@
 try:
     import boto3
+    import botocore
 except ImportError:
     boto3 = None
 
 
 import os
 
-import botocore
 from filelock import FileLock
 
 
