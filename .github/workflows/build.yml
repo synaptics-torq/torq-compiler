@@ -124,6 +124,8 @@ jobs:
   test_cmodel:
     name: Test with C model
 
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || !contains(github.event.pull_request.labels.*.name || '', 'skip-test-cmodel') }}
+
     needs: [ build, user_doc_build ]
 
     permissions:

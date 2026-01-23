@@ -867,10 +867,10 @@ SlicePrivate::SlicePrivate(const string &name) : _name(name) {
     LLVM_DEBUG(llvm::dbgs() << "- Kernel " << _name << " ----------------------------\n");
 }
 
-// Decompose number into two factors, both <= 65535 possible
+// Decompose number into two factors, both <= 0x7fff possible
 // If not possible returns a pair of -1s
 static std::pair<int, int> decomposeIntoTwoFactors(int number) {
-    const int kMaxFactor = 65535;
+    const int kMaxFactor = 0x7fff;
     for (int i = 1; i <= kMaxFactor && i <= number; ++i) {
         if (number % i == 0) {
             int j = number / i;
@@ -1081,7 +1081,7 @@ int SlicePrivate::addMemNdlDims(
             }
 
             // Sequential write to a dense subtensor
-            if (denseCnt > 65535) {
+            if (denseCnt > 0x7fff) {
                 auto cntPair = decomposeIntoTwoFactors(denseCnt);
                 assert(cntPair.first != -1 && "SDIM dense count is a prime number too large");
                 ndlDims.push_back({DimType::S, MemDimTag::X, cntPair.first, elementSize});
