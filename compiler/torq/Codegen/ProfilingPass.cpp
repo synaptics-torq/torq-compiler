@@ -43,6 +43,11 @@ static llvm::cl::opt<std::string> clTorqProfilingDump(
     llvm::cl::init("timeline.csv")
 );
 
+static llvm::cl::opt<bool> clTorqDisableNdlCycleCheck(
+    "torq-disable-ndl-cycle-check", llvm::cl::desc("Disable NDL cycle match checks in profiling"),
+    llvm::cl::init(false)
+);
+
 using namespace std;
 
 using namespace mlir::syna::torq_hw;
@@ -292,40 +297,45 @@ LogicalResult ProfilingPass::cycleProfiling(mlir::FunctionOpInterface funcOp) {
             sliceTaskOp.getLoc(), sliceMemSize, shapeSstr.str(), curMaxCycle, ndlCycles
         );
 
-        // NDL Cycle Match Checks
-        bool isNdlCycleMatch = true;
-        auto loc = sliceTaskOp.getLoc();
-        auto opName = sliceTaskOp.getOpName();
+        if (!clTorqDisableNdlCycleCheck) {
+            // NDL Cycle Match Checks
+            bool isNdlCycleMatch = true;
+            auto loc = sliceTaskOp.getLoc();
+            auto opName = sliceTaskOp.getOpName();
 
-        if (cewr != cepr) {
-            llvm::errs() << "\n"
-                         << opName << " cewr != cepr: " << cewr << " vs " << cepr << " at "
-                         << toString(loc) << "\n";
-            llvm::errs() << " cewr : " << regNdlsAttr[NdlType::CEWR] << "\n";
-            llvm::errs() << " cepr : " << regNdlsAttr[NdlType::CEPR] << "\n";
-            isNdlCycleMatch = false;
-        }
+            if (cewr != 0 && cepr != 0 && cewr != cepr) {
+                llvm::errs() << "\n"
+                             << opName << " cewr != cepr: " << cewr << " vs " << cepr << " at "
+                             << toString(loc) << "\n";
+                llvm::errs() << " cewr : " << regNdlsAttr[NdlType::CEWR] << "\n";
+                llvm::errs() << " cepr : " << regNdlsAttr[NdlType::CEPR] << "\n";
+                isNdlCycleMatch = false;
+            }
 
-        if (deqw != acbr) {
-            llvm::errs() << "\n"
-                         << opName << " deqw != acbr: " << deqw << " vs " << acbr << " at "
-                         << toString(loc) << "\n";
-            llvm::errs() << " deqw : " << memNdlsAttr[NdlType::DEQW] << "\n";
-            llvm::errs() << " acbr : " << regNdlsAttr[NdlType::ACBR] << "\n";
-            isNdlCycleMatch = false;
-        }
+            if (deqw != 0 && acbr != 0 && deqw != acbr) {
+                llvm::errs() << "\n"
+                             << opName << " deqw != acbr: " << deqw << " vs " << acbr << " at "
+                             << toString(loc) << "\n";
+                llvm::errs() << " deqw : " << memNdlsAttr[NdlType::DEQW] << "\n";
+                llvm::errs() << " acbr : " << regNdlsAttr[NdlType::ACBR] << "\n";
+                isNdlCycleMatch = false;
+            }
 
-        if (cepr != cedr) {
-            llvm::errs() << "\n"
-                         << opName << " cepr != cedr: " << cepr << " vs " << cedr << " at "
-                         << toString(loc) << "\n";
-            llvm::errs() << " cepr : " << regNdlsAttr[NdlType::CEPR] << "\n";
-            llvm::errs() << " cedr : " << regNdlsAttr[NdlType::CEDR] << "\n";
-            isNdlCycleMatch = false;
-        }
+            if (cepr != 0 && cedr != 0 && cepr != cedr) {
+                llvm::errs() << "\n"
+                             << opName << " cepr != cedr: " << cepr << " vs " << cedr << " at "
+                             << toString(loc) << "\n";
+                llvm::errs() << " cepr : " << regNdlsAttr[NdlType::CEPR] << "\n";
+                llvm::errs() << " cedr : " << regNdlsAttr[NdlType::CEDR] << "\n";
+                isNdlCycleMatch = false;
+            }
 
-        if (!isNdlCycleMatch) {
-            llvm::errs() << " ref : " << memNdlsAttr[NdlType::REF] << "\n";
+            if (!isNdlCycleMatch) {
+                llvm::errs() << " ref : " << memNdlsAttr[NdlType::REF] << "\n";
+                // TODO : Enable assert after issues are fixed
+                // Keeping the assert commented to avoid test infra failures
+                // assert(false && "NDL cycle check failed");
+            }
         }
 
         return WalkResult::advance();

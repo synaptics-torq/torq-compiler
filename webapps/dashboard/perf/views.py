@@ -1,5 +1,5 @@
-from django.shortcuts import render
-from django.http import JsonResponse
+from django.shortcuts import render, get_object_or_404
+from django.http import JsonResponse, FileResponse, Http404
 from django.db.models import Max
 from .models import TestSession, TestRun, Measurement
 import os
@@ -76,6 +76,7 @@ def test_session(request, session_id):
     pb_files = []
     test_run_by_pb = {}  # Map pb file path to test_run for querying measurements
     test_names_by_pb = {}  # Map pb file path to test case name for display
+    test_run_ids_by_pb = {}  # Map pb file path to test_run.id for download URLs
     
     for batch in session.testrunbatch_set.all():
         for test_run in batch.testrun_set.all():
@@ -88,6 +89,8 @@ def test_session(request, session_id):
                     test_run_by_pb[str(pb_path_obj)] = test_run
                     # Store the test case name for display
                     test_names_by_pb[str(pb_path_obj)] = f"{test_run.test_case.name}[{test_run.test_case.parameters}]"
+                    # Store test_run.id for download URLs
+                    test_run_ids_by_pb[str(pb_path_obj)] = test_run.id
     
     # Fetch metrics from database for all test runs in this session
     db_summaries = {}
@@ -128,8 +131,10 @@ def test_session(request, session_id):
     perfetto_viewer_html = None
     if pb_files:
         try:
-            # Pass database summaries and test names to avoid re-parsing .pb files
-            perfetto_viewer_html = generate_perfetto_html(pb_files, db_summaries=db_summaries, test_names=test_names_by_pb)
+            # Get base URL from request for absolute URLs (when HTML viewed outside server)
+            base_url = f"{request.scheme}://{request.get_host()}"
+            # Pass database summaries, test names, test_run_ids, and base_url to avoid re-parsing .pb files
+            perfetto_viewer_html = generate_perfetto_html(pb_files, db_summaries=db_summaries, test_names=test_names_by_pb, test_run_ids=test_run_ids_by_pb, base_url=base_url)
         except Exception as e:
             print(f'ERROR: Could not generate Perfetto viewer HTML: {e}', flush=True)
             import traceback
@@ -140,3 +145,23 @@ def test_session(request, session_id):
         'perfetto_viewer_html': perfetto_viewer_html,
         'has_perfetto_viewer': perfetto_viewer_html is not None
     })
+
+
+def download_trace(request, test_run_id):
+    """Download a perfetto trace file (.pb) for a specific test run."""
+    test_run = get_object_or_404(TestRun, id=test_run_id)
+    
+    if not test_run.profiling_data:
+        raise Http404("No profiling data available for this test run")
+    
+    file_path = test_run.profiling_data.path
+    if not os.path.exists(file_path):
+        raise Http404("Profiling data file not found")
+    
+    # Generate a friendly filename
+    test_case = test_run.test_case
+    filename = f"{test_case.name}_{test_case.parameters}.pb".replace('[', '_').replace(']', '_').replace(' ', '_')
+    
+    response = FileResponse(open(file_path, 'rb'), content_type='application/octet-stream')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response

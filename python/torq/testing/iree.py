@@ -485,12 +485,14 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     cmds += torq_compiler_options
     
-    # Enable compiler profiling if compile-time profiling output is requested
+    # Enable compiler profiling by default. If output dir is not specified, use the vmfb folder.
     compile_time_profiling_output_dir = request.config.getoption("--torq-compile-time-profiling-output-dir")
-    compiler_profile_csv = None
-    if compile_time_profiling_output_dir is not None:
-        compiler_profile_csv = versioned_dir / 'compiler_profile.csv'
-        cmds.extend(['--torq-enable-profiling', f'--torq-dump-profiling={compiler_profile_csv}'])
+    
+    if compile_time_profiling_output_dir is None:
+        compile_time_profiling_output_dir = versioned_dir
+
+    compiler_profile_csv = versioned_dir / 'compiler_profile.csv'
+    cmds.extend(['--torq-enable-profiling', f'--torq-dump-profiling={compiler_profile_csv}'])
     
     print("Compiling for TORQ with: " + " ".join(cmds))
 

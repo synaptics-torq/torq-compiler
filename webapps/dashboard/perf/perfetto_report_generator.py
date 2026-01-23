@@ -187,7 +187,7 @@ def get_pb_files():
     return pb_files
 
 
-def generate_html(pb_files, db_summaries=None, test_names=None):
+def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=None, base_url=None):
     """
     Generate HTML content with all trace files
     
@@ -196,6 +196,9 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
         db_summaries: Optional dict mapping pb file path to summary dict from database
                      If provided, skips parsing .pb files for metrics
         test_names: Optional dict mapping pb file path to test case display name
+        test_run_ids: Optional dict mapping pb file path to test_run.id for download URLs
+        base_url: Optional base URL for the server (e.g., 'https://server.hf.space')
+                 If provided, download URLs will be absolute
     """
     
     # Collect all model types for filter buttons
@@ -215,10 +218,21 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
         model_types.add(model_type)
         file_path = pb_file.name
         
-        # Read and base64 encode the file
-        with open(pb_file, 'rb') as f:
-            file_data = f.read()
-            encoded_data = base64.b64encode(file_data).decode('utf-8')
+        # Get download URL if test_run_id is available, otherwise use base64 (fallback)
+        if test_run_ids and pb_file_str in test_run_ids:
+            test_run_id = test_run_ids[pb_file_str]
+            # Use absolute URL if base_url provided (for viewing HTML outside server)
+            if base_url:
+                download_url = f"{base_url}/download-trace/{test_run_id}/"
+            else:
+                download_url = f"/download-trace/{test_run_id}/"
+            encoded_data = None  # Don't embed data when we have a download URL
+        else:
+            # Fallback: embed as base64 (for standalone HTML files)
+            with open(pb_file, 'rb') as f:
+                file_data = f.read()
+                encoded_data = base64.b64encode(file_data).decode('utf-8')
+            download_url = None
         
         # Get summary - use database if available, otherwise parse .pb file        
         if db_summaries and pb_file_str in db_summaries:
@@ -441,7 +455,21 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
                         </div>
                     </div>'''
             
-            overview_html = f'''
+            if download_url:
+                # Use download link (for Django web app)
+                overview_html = f'''
+                <div class="overview-section">
+                    <div class="metrics-grid">
+                        {metrics_html}
+                    </div>
+                    <div class="overview-actions">
+                        <button class="open-btn" onclick="event.stopPropagation(); openTraceFromUrl('{download_url}', '{file_path}')">Open in Perfetto</button>
+                        <a href="{download_url}" class="open-btn" style="background-color: #6c757d;" onclick="event.stopPropagation();">Download Trace File</a>
+                    </div>
+                </div>'''
+            else:
+                # Use embedded base64 (for standalone HTML files)
+                overview_html = f'''
                 <div class="overview-section">
                     <div class="metrics-grid">
                         {metrics_html}
@@ -451,7 +479,19 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
                     </div>
                 </div>'''
         else:
-            overview_html = '''
+            if download_url:
+                # Use download link (for Django web app)
+                overview_html = f'''
+                <div class="overview-section">
+                    <div class="overview-unavailable">Overview data not available for this trace</div>
+                    <div class="overview-actions">
+                        <button class="open-btn" onclick="event.stopPropagation(); openTraceFromUrl('{download_url}', '{file_path}')">Open in Perfetto</button>
+                        <a href="{download_url}" class="open-btn" style="background-color: #6c757d;" onclick="event.stopPropagation();">Download Trace File</a>
+                    </div>
+                </div>'''
+            else:
+                # Use embedded base64 (for standalone HTML files)
+                overview_html = '''
                 <div class="overview-section">
                     <div class="overview-unavailable">Overview data not available for this trace</div>
                     <div class="overview-actions">
@@ -483,7 +523,10 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
         type_display = model_type.upper() if model_type != 'other' else 'Other'
         type_badge = f'<span class="type-badge type-badge-{model_type}">{type_display}</span>'
         
-        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" data-encoded="{encoded_data}" data-type="{model_type}" data-original-index="{i}">
+        # Only include data-encoded if we have it (backward compatibility for standalone HTML)
+        data_encoded_attr = f'data-encoded="{encoded_data}"' if encoded_data else ''
+        
+        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" {data_encoded_attr} data-type="{model_type}" data-original-index="{i}">
             <div class="trace-header">
                 <div class="trace-info">
                     <span class="expand-icon">▶</span>
@@ -706,11 +749,12 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
             justify-content: space-between;
             align-items: center;
             gap: 20px;
+            min-height: 60px;
         }}
         
         .trace-info {{
-            flex: 1;
-            min-width: 250px;
+            flex: 1 1 250px;
+            min-width: 0;
             display: flex;
             align-items: center;
             gap: 12px;
@@ -796,6 +840,8 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
             flex-wrap: wrap;
             justify-content: flex-end;
             align-items: center;
+            flex: 0 1 auto;
+            min-width: 0;
         }}
         
         .trace-item.expanded .trace-summary {{
@@ -927,6 +973,9 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
         .overview-actions {{
             display: flex;
             justify-content: flex-end;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
         }}
         
         .overview-unavailable {{
@@ -949,7 +998,10 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
             transition: all 0.3s;
             box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
             white-space: nowrap;
-            margin-left: 20px;
+            text-decoration: none;
+            display: inline-block;
+            text-align: center;
+            min-width: 180px;
         }}
         
         .open-btn:hover {{
@@ -1216,6 +1268,66 @@ def generate_html(pb_files, db_summaries=None, test_names=None):
                     }}
                 }}, 500);
                 
+            }} catch (error) {{
+                console.error('Error loading trace:', error);
+                showStatus('Error loading trace. Please try again.', 'error');
+            }}
+        }}
+        
+        function openTraceFromUrl(downloadUrl, fileName) {{
+            const statusDiv = document.getElementById('status');
+            statusDiv.style.display = 'none';
+            showStatus(`Loading ${{fileName}}...`, 'success');
+
+            try {{
+                // Fetch the trace file from the server
+                fetch(downloadUrl)
+                    .then(response => {{
+                        if (!response.ok) {{
+                            throw new Error(`HTTP error! status: ${{response.status}}`);
+                        }}
+                        return response.arrayBuffer();
+                    }})
+                    .then(traceData => {{
+                        // Open Perfetto UI
+                        const perfettoWindow = window.open('https://ui.perfetto.dev', '_blank');
+                        
+                        if (!perfettoWindow) {{
+                            showStatus('Please allow pop-ups for this site', 'error');
+                            return;
+                        }}
+
+                        // Send trace data to Perfetto UI
+                        let attemptCount = 0;
+                        const maxAttempts = 15;
+                        
+                        const sendTrace = setInterval(() => {{
+                            attemptCount++;
+                            
+                            try {{
+                                perfettoWindow.postMessage({{
+                                    perfetto: {{
+                                        buffer: traceData,
+                                        title: fileName,
+                                    }}
+                                }}, 'https://ui.perfetto.dev');
+                                
+                                if (attemptCount === 3) {{
+                                    showStatus(`✓ Trace loaded successfully: ${{fileName}}`, 'success');
+                                }}
+                            }} catch (e) {{
+                                console.log('PostMessage attempt', attemptCount, 'failed:', e);
+                            }}
+                            
+                            if (attemptCount >= maxAttempts) {{
+                                clearInterval(sendTrace);
+                            }}
+                        }}, 500);
+                    }})
+                    .catch(error => {{
+                        console.error('Error fetching trace:', error);
+                        showStatus('Error loading trace from server. Please try downloading manually.', 'error');
+                    }});
             }} catch (error) {{
                 console.error('Error loading trace:', error);
                 showStatus('Error loading trace. Please try again.', 'error');
