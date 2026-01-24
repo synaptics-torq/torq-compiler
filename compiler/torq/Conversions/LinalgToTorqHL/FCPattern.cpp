@@ -68,11 +68,16 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
                 srcOp, "FCMatmulOpConversion expects 2D inputs and outputs"
             );
         }
-        auto inputAShape = inputAType.getShape();
-        if (inputAShape[0] != 1) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "FCMatmulOpConversion expects inputA shape[0] == 1"
-            );
+        LLVM_DEBUG({
+            llvm::dbgs() << "linalg FC each tensor type:\n"
+                         << " inputAType: " << inputAType << " inputBType: " << inputBType
+                         << " outputType: " << outputType << "\n";
+        });
+
+        // precheck if inputB is constant tensor to be able to continue the fc lowering logic
+        // to avoid conflict with the general matmulOp
+        if (failed(computeArithConst(inputB))) {
+            return rewriter.notifyMatchFailure(srcOp, "Failed to compute constant for weights");
         }
 
         auto outputChannelCount = outputType.getShape()[1];
@@ -138,6 +143,12 @@ template <class OpTy> struct FCMatmulOpConversion : public OpRewritePattern<OpTy
         assert(inputAType.getRank() == 2 && "TORQ FC op expects input tensor rank == 2");
         auto weightType = llvm::cast<RankedTensorType>(torqWeights.getType());
         assert(weightType.getRank() == 2 && "TORQ FC op expects weight rank == 2");
+
+        LLVM_DEBUG({
+            llvm::dbgs() << "Torq FC each tensor type:\n"
+                         << " inputAType: " << inputAType << " weightType: " << weightType
+                         << " outputType: " << outputType << "\n";
+        });
 
         auto fcOp = rewriter.create<torq_hl::FullyConnectedOp>(
             loc, outputType, createInitTensor(srcOp, rewriter, outputType), input_zp,
