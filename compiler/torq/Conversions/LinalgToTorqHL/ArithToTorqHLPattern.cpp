@@ -302,31 +302,6 @@ class ElementwiseUnaryArithOpPattern : public OpRewritePattern<linalg::GenericOp
     }
 };
 
-template <typename OpTy> class ArithCastOpPattern : public OpRewritePattern<OpTy> {
-  public:
-    using OpRewritePattern<OpTy>::OpRewritePattern;
-
-    LogicalResult matchAndRewrite(OpTy srcOp, PatternRewriter &rewriter) const override {
-
-        auto resultType = mlir::dyn_cast<RankedTensorType>(srcOp.getOut().getType());
-        if (!resultType) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Expected the output type to be a RankedTensorType"
-            );
-        }
-
-        auto opName = getCastOpName(srcOp.getIn(), srcOp.getOut());
-
-        rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
-            srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), opName, 0, 0, 0, 0,
-            APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), srcOp.getIn()
-        );
-
-        return success();
-    }
-};
-
 // rounding right shift
 // y = (x >> 7) + (((x >> 6) & 1) ? 1 : 0)
 
@@ -520,8 +495,6 @@ class SelectOpPattern : public OpRewritePattern<linalg::GenericOp> {
 };
 
 void populateArithToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patterns) {
-    patterns.insert<ArithCastOpPattern<arith::ExtUIOp>>(context);
-    patterns.insert<ArithCastOpPattern<arith::TruncIOp>>(context);
 
     patterns.insert<ElementwiseBinaryArithOpPattern>(context);
     patterns.insert<ElementwiseUnaryArithOpPattern>(context);

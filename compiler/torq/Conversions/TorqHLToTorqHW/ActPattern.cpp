@@ -173,12 +173,35 @@ LogicalResult ActPattern::transform(torq_hl::ActOp op, PatternRewriter &rewriter
         if (failed(validateFloatTypeConsistency(op, inputDType, outputDType, opName)))
             return failure();
     }
+    bool isUnsignedCast = false;
+    std::optional<WData> wdata;
+
+    // Load weights if present (used for unsigned integer cast)
+    auto weights = op.getWeights();
+    if (weights) {
+        auto weightsType = mlir::dyn_cast<mlir::MemRefType>(weights.getType());
+        if (weightsType && weightsType.getNumElements() == 1) {
+            isUnsignedCast = true;
+            LData weightsData(weights);
+            wdata = slice.wram.load(weightsData);
+            input.setElementType(toUnsigned(inputDType));
+        }
+        else {
+            return op.emitError() << "Weights for " << opName << " must be a single value.";
+        }
+    }
 
     // Generate hardware kernel
     For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
         For(auto iv = slice.iterate(input.dim(In::Vectors))) {
             IData idata = slice.iram.load(input[ndd][iv]);
-            PData pdata = slice.alu.load(idata);
+            PData pdata;
+            if (isUnsignedCast && wdata.has_value()) {
+                pdata = slice.alu.scalarProductAccumulate(idata, wdata.value());
+            }
+            else {
+                pdata = slice.alu.load(idata);
+            }
             QData res = slice.act.clamp(pdata, config.clipMin, config.clipMax, config.mode);
             slice.append(output[ndd], res);
         }
@@ -186,7 +209,8 @@ LogicalResult ActPattern::transform(torq_hl::ActOp op, PatternRewriter &rewriter
 
     // Replace with hardware operation
     rewriter.replaceOpWithNewOp<SliceTaskOp>(
-        op, op.getName(), ValueRange{op.getInput()}, ValueRange{}, ValueRange{},
+        op, op.getName(), ValueRange{op.getInput()},
+        op.getWeights() ? ValueRange{op.getWeights()} : ValueRange{}, ValueRange{},
         ValueRange{op.getInit()}, ValueRange{}, slice.getCfgAttr(ctx), slice.getNdls()
     );
 

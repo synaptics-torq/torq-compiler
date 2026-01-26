@@ -19,7 +19,6 @@ def case_config(request, runtime_hw_type, chip_config):
     if "trunci-i16-to-i8" in request.param.name:
         # increase input range to check out of bound cases
         extra_args["tweaked_input_data_range"]  = (-1000, 1000)
-
     failed_tc = []
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")

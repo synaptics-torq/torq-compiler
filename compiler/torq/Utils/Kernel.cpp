@@ -397,6 +397,21 @@ bool isUnsigned(DType type) {
     return type == DType::uint8 || type == DType::uint16 || type == DType::uint32;
 }
 
+DType toUnsigned(DType type) {
+    assert(isInt(type) && "toUnsigned expects integer types");
+
+    switch (type) {
+    case DType::int8:
+        return DType::uint8;
+    case DType::int16:
+        return DType::uint16;
+    case DType::int32:
+        return DType::uint32;
+    default:
+        return type;
+    }
+}
+
 int32_t maxVal(DType type) {
     constexpr int32_t plusInf = 0x7f800000;
     return isFloat(type) ? plusInf : int32_t((1 << (sizeofType(type) * 8 - 1)) - 1);

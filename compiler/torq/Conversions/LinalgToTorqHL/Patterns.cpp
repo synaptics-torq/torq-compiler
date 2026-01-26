@@ -36,9 +36,13 @@
 
 namespace mlir::syna::torq {
 
-bool isTorqCastOp(Operation *op, std::string &opName, std::string &failReason) {
+bool isTorqCastOp(Operation *op, std::string &opName, std::string &failReason, bool *isUnsigned) {
 
     auto srcOp = dyn_cast<linalg::GenericOp>(op);
+    // Initialize isUnsigned to false
+    if (isUnsigned) {
+        *isUnsigned = false;
+    }
 
     if (!srcOp) {
         failReason = "Not a linalg.generic op";
@@ -80,10 +84,13 @@ bool isTorqCastOp(Operation *op, std::string &opName, std::string &failReason) {
     else if (inputElementType.isInteger() && outputElementType.isInteger()) {
         // We should check the cast operation type here, as similar logic applies for ExtSIOp in
         // the following condition.
-        if (inputElementType.isInteger(1) &&
+        if ((inputElementType.isInteger(1) || (inputElementType.isInteger(8))) &&
             (outputElementType.isInteger(8) || outputElementType.isInteger(16)) &&
             isa<arith::ExtUIOp>(castOp)) {
             castOp = dyn_cast_or_null<arith::ExtUIOp>(castOp);
+            if (isUnsigned) {
+                *isUnsigned = true;
+            }
         }
         else if (inputElementType.getIntOrFloatBitWidth() >
                  outputElementType.getIntOrFloatBitWidth()) {
@@ -1073,7 +1080,8 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
                          .create<torq_hl::ActOp>(
                              srcOp.getLoc(), inType, createInitTensor(srcOp, rewriter, inType),
                              "i2i", 0, 0, 0, 0, APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-                             APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input1
+                             APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input1,
+                             /*weights=*/mlir::Value()
                          )
                          .getResult(0);
 
@@ -1081,7 +1089,8 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
                          .create<torq_hl::ActOp>(
                              srcOp.getLoc(), inType, createInitTensor(srcOp, rewriter, inType),
                              "i2i", 0, 0, 0, 0, APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-                             APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input2
+                             APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input2,
+                             /*weights=*/mlir::Value()
                          )
                          .getResult(0);
         }
@@ -1435,7 +1444,8 @@ class ClampOpPattern : public OpRewritePattern<linalg::GenericOp> {
             srcOp, srcResultType, createInitTensor(srcOp, rewriter, srcResultType), "clamp", 0, 0,
             minIntValue, maxIntValue,
             APFloat(llvm::APFloat::IEEEsingle(), std::to_string(minFloatValue)),
-            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(maxFloatValue)), input
+            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(maxFloatValue)), input,
+            /*weights=*/mlir::Value()
         );
 
         return success();
@@ -1526,12 +1536,12 @@ class NaiveClampOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 srcOp, "Unsupported element type for NaiveClamp operation"
             );
         }
-
         rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
             srcOp, srcResultType, createInitTensor(srcOp, rewriter, srcResultType), "clamp", 0, 0,
             minIntValue, maxIntValue,
             APFloat(llvm::APFloat::IEEEsingle(), std::to_string(minFloatValue)),
-            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(maxFloatValue)), input
+            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(maxFloatValue)), input,
+            /*weights=*/mlir::Value()
         );
 
         return success();
@@ -1556,7 +1566,8 @@ class AbsOpPattern : public OpRewritePattern<linalg::GenericOp> {
         rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
             srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), "abs", 0, 0, 0, 0,
             APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), srcOp.getInputs()[0]
+            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), srcOp.getInputs()[0],
+            /*weights=*/mlir::Value()
         );
 
         return success();
@@ -1581,7 +1592,7 @@ class NegateOpPattern : public OpRewritePattern<linalg::GenericOp> {
         rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
             srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), "negate", 0, 0, 0, 0,
             APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input
+            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input, /*weights=*/mlir::Value()
         );
 
         return success();
@@ -1629,7 +1640,7 @@ class ClzOpPattern : public OpRewritePattern<linalg::GenericOp> {
         rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
             srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), "clz", 0, 0, 0, 0,
             APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input
+            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input, /*weights=*/mlir::Value()
         );
 
         return success();
@@ -1654,7 +1665,8 @@ class CeilOpPattern : public OpRewritePattern<linalg::GenericOp> {
         rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
             srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), "ceil", 0, 0, 0, 0,
             APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), srcOp.getInputs()[0]
+            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), srcOp.getInputs()[0],
+            /*weights=*/mlir::Value()
         );
 
         return success();
@@ -1679,7 +1691,7 @@ class FloorOpPattern : public OpRewritePattern<linalg::GenericOp> {
         rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
             srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), "floor", 0, 0, 0, 0,
             APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input
+            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input, /*weights=*/mlir::Value()
         );
 
         return success();
@@ -1754,17 +1766,41 @@ class CastOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         std::string failReason;
         std::string opName;
+        bool isUnsignedOp = false;
 
-        if (!isTorqCastOp(srcOp, opName, failReason)) {
+        if (!isTorqCastOp(srcOp, opName, failReason, &isUnsignedOp)) {
             return rewriter.notifyMatchFailure(srcOp, failReason);
         }
-
+        Value input = srcOp.getInputs()[0];
+        auto inputType = dyn_cast<RankedTensorType>(input.getType());
+        auto inputElementType = inputType.getElementType();
         auto resultType = cast<RankedTensorType>(srcOp.getResult(0).getType());
 
+        // Create weights tensor [1] for unsigned input
+        llvm::SmallVector<mlir::Value, 1> weightsVec;
+        if (isUnsignedOp) {
+            if (inputElementType.isInteger()) {
+                int bitWidth = inputElementType.getIntOrFloatBitWidth();
+                // For i1, create weights as int8
+                if (bitWidth == 1) {
+                    weightsVec.push_back(createIConst(rewriter, srcOp, {APInt(8, 1)}));
+                }
+                else {
+                    weightsVec.push_back(createIConst(rewriter, srcOp, {APInt(bitWidth, 1)}));
+                }
+            }
+            else {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Only integer types are supported for unsigned Cast operation"
+                );
+            }
+        }
         rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
             srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), opName, 0, 0, 0, 0,
             APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-            APFloat(llvm::APFloat::IEEEsingle(), "0.0"), srcOp.getInputs()[0]
+            APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
+            /*input=*/srcOp.getInputs()[0],
+            /*weights=*/(weightsVec.empty() ? mlir::Value() : weightsVec.front())
         );
 
         return success();

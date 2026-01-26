@@ -721,6 +721,11 @@ bool isInt(DType type);
 // return true if the given type is an unsigned type
 bool isUnsigned(DType type);
 
+// convert signed integer types to their corresponding unsigned type
+// (int8 -> uint8, int16 -> uint16, int32 -> uint32). Already-unsigned
+// integer types are returned unchanged. Non-integer types will assert.
+DType toUnsigned(DType type);
+
 // Return the max value for the given DType as an integer constant
 int32_t maxVal(DType type);
 

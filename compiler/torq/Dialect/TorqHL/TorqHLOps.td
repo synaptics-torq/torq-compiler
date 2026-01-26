@@ -301,7 +301,8 @@ def TorqHL_ActOp: TorqHL_LayerOp<"act"> {
     I64Attr:$max_int,   // only for CLAMP op
     F32Attr:$min_fp,    // only for CLAMP op
     F32Attr:$max_fp,    // only for CLAMP op
-    TensorOrMemref:$input
+    TensorOrMemref:$input,
+    Optional<TensorOrMemref>:$weights
   ));
 }
 

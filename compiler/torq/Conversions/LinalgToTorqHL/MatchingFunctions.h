@@ -5,7 +5,9 @@
 
 namespace mlir::syna::torq {
 
-bool isTorqCastOp(Operation *op, std::string &opName, std::string &failReason);
+bool isTorqCastOp(
+    Operation *op, std::string &opName, std::string &failReason, bool *isUnsigned = nullptr
+);
 
 bool isTorqAbsOp(Operation *op, std::string &failReason);
 
