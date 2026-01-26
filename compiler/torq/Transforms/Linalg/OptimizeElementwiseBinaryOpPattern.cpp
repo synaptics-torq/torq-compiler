@@ -22,6 +22,7 @@
 #include "numeric"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Debug.h"
@@ -142,6 +143,91 @@ static LogicalResult collapseValue(
     return success();
 }
 
+static void broadcastInput(
+    linalg::LinalgOp srcOp, Value &input, SmallVector<int64_t> &dims,
+    ArrayRef<int64_t> inputNewShape, ArrayRef<int64_t> outputShape,
+    llvm::ArrayRef<AffineMap> newIndexingMaps, PatternRewriter &rewriter
+) {
+    /////////Support Functions///////////
+
+    auto addReshapeOp = [](Value &input, ArrayRef<int64_t> newShape, PatternRewriter &rewriter) {
+        auto type = dyn_cast<RankedTensorType>(input.getType());
+        auto elementType = type.getElementType();
+
+        auto outType = RankedTensorType::get(newShape, elementType);
+        std::vector<int64_t> shVec(newShape.begin(), newShape.end());
+        Value shValue = createConst(shVec, rewriter, input.getLoc());
+        auto reshapeOp =
+            rewriter.create<tensor::ReshapeOp>(input.getLoc(), outType, input, shValue);
+
+        return reshapeOp.getResult();
+    };
+
+    auto addBcastOp = [](linalg::LinalgOp srcOp, Value &input, llvm::ArrayRef<int64_t> bcastShape,
+                         SmallVector<int64_t> &dims, PatternRewriter &rewriter) {
+        auto type = dyn_cast<RankedTensorType>(input.getType());
+        auto elementType = type.getElementType();
+
+        auto outType = RankedTensorType::get(bcastShape, elementType);
+        auto bcastOp = rewriter.create<linalg::BroadcastOp>(
+            srcOp.getLoc(), input, createInitTensor(srcOp, rewriter, outType), dims
+        );
+        auto gOp = linalg::generalizeNamedOp(rewriter, bcastOp);
+        if (failed(gOp)) {
+            return bcastOp.getResults()[0];
+        }
+
+        return gOp->getResults()[0];
+    };
+
+    //////////////End of Support Functions//////////////
+
+    ScaleInfo scaleInfo;
+    Value srcInput = input;
+    while (foldBackwardRescale(input, scaleInfo)) {
+    }
+
+    // Collect the rescale GenericOps between srcOp and the current input
+    SmallVector<linalg::GenericOp> rescaleOps;
+    while (srcInput != input) {
+        auto rescaleOp = srcInput.getDefiningOp<linalg::GenericOp>();
+        rescaleOps.push_back(rescaleOp);
+        srcInput = rescaleOp.getInputs()[0];
+    }
+
+    // Add a reshape and broadcast.
+    // TODO: can dims be empty?
+    if (inputNewShape.size() != outputShape.size() && !dims.empty()) {
+        input = addReshapeOp(input, inputNewShape, rewriter);
+        input = addBcastOp(srcOp, input, outputShape, dims, rewriter);
+    }
+
+    // Propagate the reshape+broadcast through the rescale GenericOps
+    while (!rescaleOps.empty()) {
+        linalg::GenericOp rescaleOp = rescaleOps.back();
+        rescaleOps.pop_back();
+
+        auto output = rescaleOp.getOutputs()[0];
+        auto outputType = dyn_cast<RankedTensorType>(output.getType());
+        auto elementType = outputType.getElementType();
+
+        auto emptyOp =
+            rewriter.create<tensor::EmptyOp>(rescaleOp.getLoc(), outputShape, elementType);
+
+        linalg::GenericOp newOp = rewriter.create<linalg::GenericOp>(
+            rescaleOp.getLoc(), TypeRange{emptyOp.getResult().getType()}, ValueRange{input},
+            ValueRange{emptyOp.getResult()}, newIndexingMaps,
+            SmallVector<utils::IteratorType>{outputShape.size(), utils::IteratorType::parallel}
+        );
+
+        // Copy the region
+        IRMapping mapping;
+        rescaleOp->getRegion(0).cloneInto(&newOp.getRegion(), newOp.getRegion().begin(), mapping);
+
+        input = newOp->getResult(0);
+    }
+}
+
 static LogicalResult
 broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRewriter &rewriter) {
     /////////Support Functions///////////
@@ -166,8 +252,8 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
         return broadcastDims;
     };
 
-    auto calcBcastShapeAndDims = [&](ArrayRef<int64_t> outputShape, SmallVector<int64_t> &shape,
-                                     SmallVector<int64_t> &dims) {
+    auto calcBcastShapeAndDims = [](ArrayRef<int64_t> outputShape, SmallVector<int64_t> &shape,
+                                    SmallVector<int64_t> &dims) {
         // Reshape the input to match with linalg.broadcast requirements
         // 128x1 to be broadcasted to 1x128x32 need to be reshaped to 1x128
         SmallVector<int64_t> newShape;
@@ -186,37 +272,6 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
         }
         dims = newDims;
         shape = newShape;
-    };
-
-    auto addReshapeOp = [&](Value &input, SmallVector<int64_t> &newShape,
-                            PatternRewriter &rewriter) {
-        auto type = dyn_cast<RankedTensorType>(input.getType());
-        auto elementType = type.getElementType();
-
-        auto outType = RankedTensorType::get(newShape, elementType);
-        std::vector<int64_t> shVec(newShape.begin(), newShape.end());
-        Value shValue = createConst(shVec, rewriter, input.getLoc());
-        auto reshapeOp =
-            rewriter.create<tensor::ReshapeOp>(input.getLoc(), outType, input, shValue);
-
-        return reshapeOp.getResult();
-    };
-
-    auto addBcastOp = [&](Value &input, llvm::ArrayRef<int64_t> bcastShape,
-                          SmallVector<int64_t> &dims, PatternRewriter &rewriter) {
-        auto type = dyn_cast<RankedTensorType>(input.getType());
-        auto elementType = type.getElementType();
-
-        auto outType = RankedTensorType::get(bcastShape, elementType);
-        auto bcastOp = rewriter.create<linalg::BroadcastOp>(
-            srcOp.getLoc(), input, createInitTensor(srcOp, rewriter, outType), dims
-        );
-        auto gOp = linalg::generalizeNamedOp(rewriter, bcastOp);
-        if (failed(gOp)) {
-            return bcastOp.getResults()[0];
-        }
-
-        return gOp->getResults()[0];
     };
 
     //////////////End of Support Functions//////////////
@@ -247,9 +302,7 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
     AffineMap input2Map = indexingMaps[1];
     AffineMap outputMap = indexingMaps.back();
 
-    // Recompute shapes (after potential collapse)
-    input1Shape = dyn_cast<RankedTensorType>(input1.getType()).getShape();
-    input2Shape = dyn_cast<RankedTensorType>(input2.getType()).getShape();
+    SmallVector<AffineMap> newIndexingMaps = {outputMap, outputMap};
 
     // Compute initial broadcast dims
     SmallVector<int64_t> dims1 = getBroadcastDimsFromMap(input1Map, outputMap);
@@ -270,21 +323,8 @@ broadcastInputs(linalg::LinalgOp srcOp, Value &input1, Value &input2, PatternRew
         return failure();
     }
 
-    if (input1NewShape.size() == outputShape.size()) {
-        dims1.clear();
-    }
-    if (input2NewShape.size() == outputShape.size()) {
-        dims2.clear();
-    }
-
-    if (!dims1.empty()) {
-        input1 = addReshapeOp(input1, input1NewShape, rewriter);
-        input1 = addBcastOp(input1, outputShape, dims1, rewriter);
-    }
-    if (!dims2.empty()) {
-        input2 = addReshapeOp(input2, input2NewShape, rewriter);
-        input2 = addBcastOp(input2, outputShape, dims2, rewriter);
-    }
+    broadcastInput(srcOp, input1, dims1, input1NewShape, outputShape, newIndexingMaps, rewriter);
+    broadcastInput(srcOp, input2, dims2, input2NewShape, outputShape, newIndexingMaps, rewriter);
 
     return success();
 }

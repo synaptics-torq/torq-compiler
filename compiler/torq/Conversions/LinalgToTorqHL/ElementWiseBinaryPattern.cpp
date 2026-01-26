@@ -95,7 +95,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         return false;
     }
 
-    bool broadcastProcessing(Value &input, ScaleInfo &scaleInfo, PatternRewriter &rewriter) const {
+    bool broadcastProcessing(Value &input, PatternRewriter &rewriter) const {
         auto bkpInput = input;
         if (!input.hasOneUse()) {
             return false;
@@ -152,13 +152,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             else {
                 maybeElemOp = nullptr;
             }
-        }
-
-        if (_markFuseGroups) {
-            return true;
-        }
-
-        while (foldBackwardRescale(input, scaleInfo)) {
         }
 
         auto inputElementType = dyn_cast<RankedTensorType>(input.getType()).getElementType();
@@ -323,9 +316,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         while (foldBackwardRescale(input1, scaleInput1)) {
         }
 
-        broadcastProcessing(input0, scaleInput0, rewriter);
-        broadcastProcessing(input1, scaleInput1, rewriter);
-
         if (_markFuseGroups) {
             markFuseGroupBackward(
                 output, {input0, input1}, rewriter,
@@ -333,6 +323,9 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             );
             return success();
         }
+
+        broadcastProcessing(input0, rewriter);
+        broadcastProcessing(input1, rewriter);
 
         // Compute scale and bias vectors
         const double outputScale = scInfo.scaleDouble[0];
