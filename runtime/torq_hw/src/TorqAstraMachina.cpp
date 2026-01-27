@@ -29,7 +29,12 @@ using namespace std;
 
 #define TORQ_NODE "/dev/torq"
 
+#define DMABUF_USE_UNCACHED
+#if defined (DMABUF_USE_UNCACHED)
+#define DMABUF_NODE "/dev/dma_heap/system-cust-uncached"
+#else
 #define DMABUF_NODE "/dev/dma_heap/system"
+#endif
 
 namespace synaptics {
 
@@ -161,6 +166,9 @@ bool TorqAstraMachina::readLram32(uint32_t addr, uint32_t & data) const {
 }
 
 bool TorqAstraMachina::startXramAccess() const {
+#if defined (DMABUF_USE_UNCACHED)
+    return true;
+#else
     if (_xramAccessActive) {
         return true;
     }
@@ -173,9 +181,13 @@ bool TorqAstraMachina::startXramAccess() const {
     }
     _xramAccessActive = true;
     return true;
+#endif
 }
 
 bool TorqAstraMachina::endXramAccess() const {
+#if defined (DMABUF_USE_UNCACHED)
+    return true;
+#else
     if (!_xramAccessActive) {
         return true;
     }
@@ -187,6 +199,7 @@ bool TorqAstraMachina::endXramAccess() const {
     }
     _xramAccessActive = false;
     return true;
+#endif
 }
 
 const void * TorqAstraMachina::startXramReadAccess(uint32_t addr) const {
