@@ -1454,7 +1454,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             let visibleCount = 0;
             
             // Split search input into words for flexible matching
-            const searchWords = searchInput.trim().split(/\s+/).filter(word => word.length > 0);
+            const searchWords = searchInput.trim().split(/\\s+/).filter(word => word.length > 0);
             
             // Create array of items with their match scores
             const itemsWithScores = Array.from(traceItems).map(item => {{

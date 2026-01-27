@@ -137,3 +137,5 @@ MEDIA_ROOT = '/data/media'
 # Allow embedding the app from huggingface spaces
 if os.environ.get("SPACE_HOST"):
     SECURE_CONTENT_SECURITY_POLICY = "frame-ancestors 'self' https://huggingface.co"
+
+SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin-allow-popups"
