@@ -24,6 +24,7 @@ urlpatterns = [
     path('api/', include('perf.urls')),
     path('health/', perf.views.health, name='health'),
     path('test-sessions/<int:session_id>/', perf.views.test_session, name='test_session'),
+    path('api/session-metrics/<int:session_id>/', perf.views.get_session_metrics, name='get_session_metrics'),
     path('download-trace/<int:test_run_id>/', perf.views.download_trace, name='download_trace'),
     path('', perf.views.home, name='home'),
     path('space', perf.views.space, name='space')

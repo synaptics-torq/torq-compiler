@@ -30,6 +30,31 @@ def extract_model_type(model_name, filename=''):
     return 'other'
 
 
+def parse_time_to_ns(time_str):
+    """Parse time string (e.g., '10.351ms') to nanoseconds as integer."""
+    if not time_str:
+        return None
+    
+    match = re.search(r'([0-9.]+)\s*([a-zµμ]+)', str(time_str), re.IGNORECASE)
+    if not match:
+        return None
+    
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    
+    # Convert to nanoseconds
+    if unit == 'ms':
+        return int(value * 1_000_000)
+    elif unit in ['µs', 'μs', 'us']:
+        return int(value * 1_000)
+    elif unit == 's':
+        return int(value * 1_000_000_000)
+    elif unit == 'ns':
+        return int(value)
+    
+    return None
+
+
 def extract_perfetto_summary(pb_file_path):
     """Extract summary information from Perfetto .pb file by reading readable text sections"""
     try:
@@ -187,7 +212,7 @@ def get_pb_files():
     return pb_files
 
 
-def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=None, base_url=None):
+def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=None, base_url=None, current_session_id=None, available_sessions=None, default_comparison_session_id=None):
     """
     Generate HTML content with all trace files
     
@@ -199,6 +224,9 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         test_run_ids: Optional dict mapping pb file path to test_run.id for download URLs
         base_url: Optional base URL for the server (e.g., 'https://server.hf.space')
                  If provided, download URLs will be absolute
+        current_session_id: Optional current session ID for comparison feature
+        available_sessions: Optional list of available sessions for comparison dropdown
+        default_comparison_session_id: Optional session ID to load by default for comparison
     """
     
     # Collect all model types for filter buttons
@@ -284,18 +312,24 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 1. TOTAL DURATION
             if summary['total_duration']:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="total_duration" data-time-ns="{parse_time_to_ns(summary['total_duration'])}">
                         <div class="metric-label">Total Duration</div>
-                        <div class="metric-value">{summary['total_duration']}</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between;">
+                            <div class="metric-value" style="margin-bottom:0;">{summary['total_duration']}</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                     </div>'''
             
             # 2. OVERLAP (DMA/CDMA VS COMPUTE)
             if summary['overlap_time'] is not None and summary['overlap_percent'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="overlap_time" data-time-ns="{parse_time_to_ns(summary['overlap_time'])}">
                         <div class="metric-label">Overlap (DMA/CDMA vs Compute)</div>
                         <div class="metric-value">{summary['overlap_time']}</div>
-                        <div class="metric-percent">{summary['overlap_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['overlap_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {min(float(summary['overlap_percent']), 100)}%"></div>
                         </div>
@@ -304,10 +338,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 3. SLICE (0+1) UNION
             if summary['slice_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="slice_time" data-time-ns="{parse_time_to_ns(summary['slice_time'])}">
                         <div class="metric-label">SLICE (0+1) Union</div>
                         <div class="metric-value">{summary['slice_time']}</div>
-                        <div class="metric-percent">{summary['slice_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['slice_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['slice_percent']}%"></div>
                         </div>
@@ -316,10 +353,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 4. SLICE 0
             if summary['slice_0_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="slice_0_time" data-time-ns="{parse_time_to_ns(summary['slice_0_time'])}">
                         <div class="metric-label">SLICE 0 Time</div>
                         <div class="metric-value">{summary['slice_0_time']}</div>
-                        <div class="metric-percent">{summary['slice_0_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['slice_0_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['slice_0_percent']}%"></div>
                         </div>
@@ -328,10 +368,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 5. SLICE 1
             if summary['slice_1_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="slice_1_time" data-time-ns="{parse_time_to_ns(summary['slice_1_time'])}">
                         <div class="metric-label">SLICE 1 Time</div>
                         <div class="metric-value">{summary['slice_1_time']}</div>
-                        <div class="metric-percent">{summary['slice_1_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['slice_1_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['slice_1_percent']}%"></div>
                         </div>
@@ -340,10 +383,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 6. SLICE+CSS UNION
             if summary['compute_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="compute_time" data-time-ns="{parse_time_to_ns(summary['compute_time'])}">
                         <div class="metric-label">SLICE+CSS Union</div>
                         <div class="metric-value">{summary['compute_time']}</div>
-                        <div class="metric-percent">{summary['compute_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['compute_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['compute_percent']}%"></div>
                         </div>
@@ -352,10 +398,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 7. CSS TIME
             if summary['css_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="css_time" data-time-ns="{parse_time_to_ns(summary['css_time'])}">
                         <div class="metric-label">CSS Time</div>
                         <div class="metric-value">{summary['css_time']}</div>
-                        <div class="metric-percent">{summary['css_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['css_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['css_percent']}%"></div>
                         </div>
@@ -364,10 +413,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 8. COMPUTE ONLY (NO DMA/CDMA)
             if summary['compute_only_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="compute_only_time" data-time-ns="{parse_time_to_ns(summary['compute_only_time'])}">
                         <div class="metric-label">Compute Only (No DMA/CDMA)</div>
                         <div class="metric-value">{summary['compute_only_time']}</div>
-                        <div class="metric-percent">{summary['compute_only_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['compute_only_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['compute_only_percent']}%"></div>
                         </div>
@@ -376,10 +428,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 9. DMA+CDMA UNION
             if summary['dma_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="dma_time" data-time-ns="{parse_time_to_ns(summary['dma_time'])}">
                         <div class="metric-label">DMA+CDMA Union</div>
                         <div class="metric-value">{summary['dma_time']}</div>
-                        <div class="metric-percent">{summary['dma_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['dma_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['dma_percent']}%"></div>
                         </div>
@@ -388,10 +443,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 10. DMA ONLY (NO COMPUTE)
             if summary['dma_only_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="dma_only_time" data-time-ns="{parse_time_to_ns(summary['dma_only_time'])}">
                         <div class="metric-label">DMA Only (No Compute)</div>
                         <div class="metric-value">{summary['dma_only_time']}</div>
-                        <div class="metric-percent">{summary['dma_only_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['dma_only_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['dma_only_percent']}%"></div>
                         </div>
@@ -400,10 +458,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 11. DMA TOTAL
             if summary['dma_total_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="dma_total_time" data-time-ns="{parse_time_to_ns(summary['dma_total_time'])}">
                         <div class="metric-label">DMA Total</div>
                         <div class="metric-value">{summary['dma_total_time']}</div>
-                        <div class="metric-percent">{summary['dma_total_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['dma_total_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['dma_total_percent']}%"></div>
                         </div>
@@ -412,10 +473,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 12. CDMA TOTAL
             if summary['cdma_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="cdma_time" data-time-ns="{parse_time_to_ns(summary['cdma_time'])}">
                         <div class="metric-label">CDMA Total</div>
                         <div class="metric-value">{summary['cdma_time']}</div>
-                        <div class="metric-percent">{summary['cdma_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['cdma_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['cdma_percent']}%"></div>
                         </div>
@@ -424,10 +488,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             # 13. IDLE TIME
             if summary['idle_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="idle_time" data-time-ns="{parse_time_to_ns(summary['idle_time'])}">
                         <div class="metric-label">Idle Time</div>
                         <div class="metric-value">{summary['idle_time']}</div>
-                        <div class="metric-percent">{summary['idle_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['idle_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill idle" style="width: {summary['idle_percent']}%"></div>
                         </div>
@@ -435,10 +502,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             
             if summary['dma_in_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="dma_in_time" data-time-ns="{parse_time_to_ns(summary['dma_in_time'])}">
                         <div class="metric-label">DMA In Time</div>
                         <div class="metric-value">{summary['dma_in_time']}</div>
-                        <div class="metric-percent">{summary['dma_in_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['dma_in_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['dma_in_percent']}%"></div>
                         </div>
@@ -446,10 +516,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             
             if summary['dma_out_time'] is not None:
                 metrics_html += f'''
-                    <div class="metric-card">
+                    <div class="metric-card" data-metric="dma_out_time" data-time-ns="{parse_time_to_ns(summary['dma_out_time'])}">
                         <div class="metric-label">DMA Out Time</div>
                         <div class="metric-value">{summary['dma_out_time']}</div>
-                        <div class="metric-percent">{summary['dma_out_percent']}%</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div class="metric-percent" style="margin-bottom:0;">{summary['dma_out_percent']}%</div>
+                            <span class="metric-compare" style="display:none;"></span>
+                        </div>
                         <div class="metric-bar">
                             <div class="metric-bar-fill" style="width: {summary['dma_out_percent']}%"></div>
                         </div>
@@ -463,8 +536,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                         {metrics_html}
                     </div>
                     <div class="overview-actions">
-                        <button class="open-btn" onclick="event.stopPropagation(); openTraceFromUrl('{download_url}', '{file_path}')">Open in Perfetto</button>
-                        <a href="{download_url}" class="open-btn" style="background-color: #6c757d;" onclick="event.stopPropagation();">Download Trace File</a>
+                        <div id="currentSessionActions" style="text-align: center;">
+                            {'<div style="font-size: 12px; font-weight: 600; color: #4a5568; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">Current Session #' + str(current_session_id) + '</div>' if current_session_id else ''}
+                            <div style="display: flex; gap: 8px; justify-content: center;">
+                                <button class="open-btn" style="min-width: 140px;" onclick="event.stopPropagation(); openTraceFromUrl('{download_url}', '{file_path}')">Open in Perfetto</button>
+                                <a href="{download_url}" class="open-btn" style="min-width: 140px; background-color: #6c757d;" onclick="event.stopPropagation();">Download Trace File</a>
+                            </div>
+                        </div>
                     </div>
                 </div>'''
             else:
@@ -499,24 +577,29 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                     </div>
                 </div>'''
         
-        # Build collapsed summary tiles
+        # Build collapsed summary tiles with data attributes for comparison
         collapsed_summary = ''
         if summary['available']:
             summary_tiles = []
             if summary['total_duration']:
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Duration</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['total_duration']}</span></div></div>")
+                time_ns = parse_time_to_ns(summary['total_duration'])
+                summary_tiles.append(f"<div class='summary-tile' data-metric='total_duration' data-time-ns='{time_ns}'><div style='display:flex; flex-direction:column; gap:1px;'><span class='tile-label'>Duration</span><span class='tile-compare' style='display:none;'></span></div><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['total_duration']}</span></div></div>")
             
             if summary['dma_time'] is not None:
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>DMA+CDMA</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['dma_time']}</span><span class='tile-percent'>{summary['dma_percent']}%</span></div></div>")
+                time_ns = parse_time_to_ns(summary['dma_time'])
+                summary_tiles.append(f"<div class='summary-tile' data-metric='dma_time' data-time-ns='{time_ns}'><div style='display:flex; flex-direction:column; gap:1px;'><span class='tile-label'>DMA+CDMA</span><span class='tile-compare' style='display:none;'></span></div><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['dma_time']}</span><span class='tile-percent'>{summary['dma_percent']}%</span></div></div>")
             if summary['compute_time'] is not None:
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>SLICE+CSS</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['compute_time']}</span><span class='tile-percent'>{summary['compute_percent']}%</span></div></div>")
+                time_ns = parse_time_to_ns(summary['compute_time'])
+                summary_tiles.append(f"<div class='summary-tile' data-metric='compute_time' data-time-ns='{time_ns}'><div style='display:flex; flex-direction:column; gap:1px;'><span class='tile-label'>SLICE+CSS</span><span class='tile-compare' style='display:none;'></span></div><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['compute_time']}</span><span class='tile-percent'>{summary['compute_percent']}%</span></div></div>")
             
             # Add overlap from .pb file
             if summary['overlap_time'] is not None:
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Overlap</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['overlap_time']}</span><span class='tile-percent'>{summary['overlap_percent']}%</span></div></div>")
+                time_ns = parse_time_to_ns(summary['overlap_time'])
+                summary_tiles.append(f"<div class='summary-tile' data-metric='overlap_time' data-time-ns='{time_ns}'><div style='display:flex; flex-direction:column; gap:1px;'><span class='tile-label'>Overlap</span><span class='tile-compare' style='display:none;'></span></div><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['overlap_time']}</span><span class='tile-percent'>{summary['overlap_percent']}%</span></div></div>")
             
             if summary['idle_time'] is not None:
-                summary_tiles.append(f"<div class='summary-tile'><span class='tile-label'>Idle</span><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['idle_time']}</span><span class='tile-percent'>{summary['idle_percent']}%</span></div></div>")
+                time_ns = parse_time_to_ns(summary['idle_time'])
+                summary_tiles.append(f"<div class='summary-tile' data-metric='idle_time' data-time-ns='{time_ns}'><div style='display:flex; flex-direction:column; gap:1px;'><span class='tile-label'>Idle</span><span class='tile-compare' style='display:none;'></span></div><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['idle_time']}</span><span class='tile-percent'>{summary['idle_percent']}%</span></div></div>")
             collapsed_summary = ''.join(summary_tiles)
         
         # Create type badge
@@ -526,7 +609,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         # Only include data-encoded if we have it (backward compatibility for standalone HTML)
         data_encoded_attr = f'data-encoded="{encoded_data}"' if encoded_data else ''
         
-        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" {data_encoded_attr} data-type="{model_type}" data-original-index="{i}">
+        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" {data_encoded_attr} data-type="{model_type}" data-original-index="{i}" data-test-name="{model_name}">
             <div class="trace-header">
                 <div class="trace-info">
                     <span class="expand-icon">▶</span>
@@ -550,6 +633,37 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         display_type = model_type.upper() if model_type != 'other' else 'Other'
         filter_buttons.append(f'<button class="filter-btn" onclick="filterByType(\'{model_type}\')" data-type="{model_type}">{display_type}</button>')
     filters_html = '\n                '.join(filter_buttons)
+    
+    # Generate comparison dropdown HTML if session info is available
+    comparison_html = ''
+    comparison_data_json = 'null'
+    if current_session_id and available_sessions:
+        import json
+        comparison_data_json = json.dumps({
+            'current_session_id': current_session_id,
+            'available_sessions': available_sessions,
+            'base_url': base_url or ''
+        })
+        
+        session_options = []
+        for session in available_sessions:
+            if session['id'] != current_session_id:
+                selected = ' selected' if session['id'] == default_comparison_session_id else ''
+                session_options.append(f"<option value='{session['id']}'{selected}>Session #{session['id']} - {session['timestamp']} ({session['branch']})</option>")
+        
+        if session_options:
+            comparison_html = f'''
+                <div class="filter-section" style="flex: 1 1 auto; margin-bottom: 0; padding-bottom: 0; border-bottom: none;">
+                    <div class="filter-label">Compare with Previous Session</div>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <select id="compareSessionSelect" class="compare-select" onchange="loadComparisonData()">
+                            <option value="">Select a session to compare...</option>
+                            {"".join(session_options)}
+                        </select>
+                        <button id="clearCompareBtn" class="filter-btn" onclick="clearComparison()" style="display:none;">Clear Comparison</button>
+                    </div>
+                    <div id="comparisonStatus" style="margin-top: 10px; font-size: 13px; color: #718096;"></div>
+                </div>'''
     
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
@@ -676,6 +790,78 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             color: white;
             border-color: #667eea;
             box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+        }}
+        
+        .compare-select {{
+            flex: 1;
+            padding: 10px 16px;
+            font-size: 14px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            background: white;
+            color: #4a5568;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }}
+        
+        .compare-select:hover {{
+            border-color: #667eea;
+        }}
+        
+        .compare-select:focus {{
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }}
+        
+        .tile-compare {{
+            font-weight: 700;
+            font-size: 9px;
+            padding: 2px 5px;
+            border-radius: 3px;
+            display: block;
+            white-space: nowrap;
+            line-height: 1;
+            margin-top: 3px;
+        }}
+        
+        .tile-compare.positive {{
+            color: #22543d;
+            background-color: #c6f6d5;
+        }}
+        
+        .tile-compare.negative {{
+            color: #742a2a;
+            background-color: #fed7d7;
+        }}
+        
+        .tile-compare.neutral {{
+            color: #4a5568;
+            background-color: #e2e8f0;
+        }}
+        
+        .metric-compare {{
+            font-weight: 700;
+            font-size: 11px;
+            padding: 3px 6px;
+            border-radius: 4px;
+            display: inline-block;
+            white-space: nowrap;
+        }}
+        
+        .metric-compare.positive {{
+            color: #22543d;
+            background-color: #c6f6d5;
+        }}
+        
+        .metric-compare.negative {{
+            color: #742a2a;
+            background-color: #fed7d7;
+        }}
+        
+        .metric-compare.neutral {{
+            color: #4a5568;
+            background-color: #e2e8f0;
         }}
                 .search-box {{
             position: relative;
@@ -836,7 +1022,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         
         .trace-summary {{
             display: flex;
-            gap: 8px;
+            gap: 12px;
             flex-wrap: wrap;
             justify-content: flex-end;
             align-items: center;
@@ -858,9 +1044,9 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             align-items: center;
             justify-content: space-between;
             gap: 8px;
-            min-width: 120px;
-            max-width: 180px;
-            height: 45px;
+            min-width: 160px;
+            max-width: 200px;
+            min-height: 45px;
             box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
             transition: all 0.2s ease;
             flex-shrink: 0;
@@ -875,20 +1061,20 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             font-size: 10px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            opacity: 0.9;
+            opacity: 0.95;
             font-weight: 600;
             white-space: nowrap;
+            line-height: 1.2;
         }}
         
         .tile-value {{
             font-size: 14px;
             font-weight: 700;
             line-height: 1.2;
-            text-align: right;
         }}
         
         .tile-percent {{
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 600;
             opacity: 0.95;
             line-height: 1.2;
@@ -973,8 +1159,8 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         .overview-actions {{
             display: flex;
             justify-content: flex-end;
-            gap: 12px;
-            align-items: center;
+            gap: 32px;
+            align-items: flex-start;
             flex-wrap: wrap;
         }}
         
@@ -1152,7 +1338,8 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             }}
             
             .summary-tile {{
-                min-width: 100px;
+                min-width: 100%;
+                flex: 1 1 auto;
             }}
             
             .metrics-grid {{
@@ -1170,11 +1357,14 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
     <div class="container">
         
         <div class="controls">
-            <div class="filter-section">
-                <div class="filter-label">Filter by Type</div>
-                <div class="filter-buttons">
-                    {filters_html}
+            <div style="display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 20px;">
+                <div class="filter-section" style="flex: 0 1 auto; margin-bottom: 0; padding-bottom: 0; border-bottom: none;">
+                    <div class="filter-label">Filter by Type</div>
+                    <div class="filter-buttons">
+                        {filters_html}
+                    </div>
                 </div>
+                {comparison_html}
             </div>
             <div class="search-box">
                 <input 
@@ -1527,6 +1717,191 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 }}, 5000);
             }}
         }}
+        
+        // Comparison functionality
+        const comparisonConfig = {comparison_data_json};
+        let comparisonMetrics = null;
+        
+        async function loadComparisonData() {{
+            const selectElement = document.getElementById('compareSessionSelect');
+            const selectedSessionId = selectElement.value;
+            const statusDiv = document.getElementById('comparisonStatus');
+            const clearBtn = document.getElementById('clearCompareBtn');
+            
+            if (!selectedSessionId) {{
+                clearComparison();
+                return;
+            }}
+            
+            statusDiv.textContent = 'Loading comparison data...';
+            statusDiv.style.color = '#667eea';
+            
+            try {{
+                const response = await fetch(`${{comparisonConfig.base_url}}/api/session-metrics/${{selectedSessionId}}/`);
+                if (!response.ok) {{
+                    throw new Error('Failed to load session data');
+                }}
+                
+                const data = await response.json();
+                comparisonMetrics = data.metrics;
+                
+                applyComparison();
+                
+                statusDiv.textContent = `Comparing with Session #${{selectedSessionId}}`;
+                statusDiv.style.color = '#48bb78';
+                clearBtn.style.display = 'inline-block';
+            }} catch (error) {{
+                console.error('Error loading comparison data:', error);
+                statusDiv.textContent = 'Error loading comparison data';
+                statusDiv.style.color = '#f56565';
+                comparisonMetrics = null;
+            }}
+        }}
+        
+        function applyComparison() {{
+            if (!comparisonMetrics) return;
+            
+            const traceItems = document.querySelectorAll('.trace-item');
+            
+            traceItems.forEach(item => {{
+                const testName = item.getAttribute('data-test-name');
+                const summaryTiles = item.querySelectorAll('.summary-tile[data-metric]');
+                const metricCards = item.querySelectorAll('.metric-card[data-metric]');
+                const overviewSection = item.querySelector('.overview-section');
+                
+                if (!comparisonMetrics[testName]) {{
+                    // Test not found in comparison session
+                    summaryTiles.forEach(tile => {{
+                        const compareSpan = tile.querySelector('.tile-compare');
+                        if (compareSpan) {{
+                            compareSpan.style.display = 'inline-block';
+                            compareSpan.textContent = 'New';
+                            compareSpan.className = 'tile-compare neutral';
+                        }}
+                    }});
+                    metricCards.forEach(card => {{
+                        const compareSpan = card.querySelector('.metric-compare');
+                        if (compareSpan) {{
+                            compareSpan.style.display = 'inline-block';
+                            compareSpan.textContent = 'New test';
+                            compareSpan.className = 'metric-compare neutral';
+                        }}
+                    }});
+                    return;
+                }}
+                
+                const comparisonData = comparisonMetrics[testName];
+                
+                // Apply to summary tiles (collapsed view)
+                summaryTiles.forEach(tile => {{
+                    applyComparisonToElement(tile, '.tile-compare', 'tile-compare', comparisonData.metrics);
+                }});
+                
+                // Apply to metric cards (expanded view)
+                metricCards.forEach(card => {{
+                    applyComparisonToElement(card, '.metric-compare', 'metric-compare', comparisonData.metrics);
+                }});
+                
+                // Add comparison trace buttons in expanded view
+                if (overviewSection && comparisonData.has_trace) {{
+                    const actionsDiv = overviewSection.querySelector('.overview-actions');
+                    if (actionsDiv) {{
+                        // Remove existing comparison buttons if any
+                        const existingCompButtons = actionsDiv.querySelectorAll('.comparison-trace-buttons');
+                        existingCompButtons.forEach(btn => btn.remove());
+                        
+                        // Add comparison trace buttons
+                        const comparisonButtons = document.createElement('div');
+                        comparisonButtons.className = 'comparison-trace-buttons';
+                        comparisonButtons.style.cssText = 'text-align: center;';
+                        
+                        const selectElement = document.getElementById('compareSessionSelect');
+                        const selectedSessionId = selectElement ? selectElement.value : '';
+                        
+                        comparisonButtons.innerHTML = `
+                            <div style="font-size: 12px; font-weight: 600; color: #4a5568; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">Comparison Session #${{selectedSessionId}}</div>
+                            <div style="display: flex; gap: 8px; justify-content: center;">
+                                <button class="open-btn" style="min-width: 140px;" onclick="event.stopPropagation(); openTraceFromUrl('${{comparisonConfig.base_url}}/download-trace/${{comparisonData.test_run_id}}/', 'Session ${{selectedSessionId}} - ${{testName}}')">Open in Perfetto</button>
+                                <a href="${{comparisonConfig.base_url}}/download-trace/${{comparisonData.test_run_id}}/" class="open-btn" style="min-width: 140px;" onclick="event.stopPropagation();">Download Trace</a>
+                            </div>
+                        `;
+                        
+                        actionsDiv.appendChild(comparisonButtons);
+                    }}
+                }}
+            }});
+        }}
+        
+        function applyComparisonToElement(element, compareSelector, compareClass, comparisonData) {{
+            const metricName = element.getAttribute('data-metric');
+            const compareSpan = element.querySelector(compareSelector);
+            
+            if (!compareSpan) return;
+            
+            // Get current value in nanoseconds from data attribute
+            const currentValueNs = parseFloat(element.getAttribute('data-time-ns'));
+            if (isNaN(currentValueNs)) return;
+            
+            // Get comparison value directly using the same metric name
+            const comparisonValueNs = comparisonData[metricName];
+            if (!comparisonValueNs || comparisonValueNs === 0) return;
+            
+            const delta = ((currentValueNs - comparisonValueNs) / comparisonValueNs) * 100;
+            
+            compareSpan.style.display = 'inline-block';
+            
+            if (Math.abs(delta) < 0.01) {{
+                compareSpan.textContent = '±0%';
+                compareSpan.className = `${{compareClass}} neutral`;
+            }} else if (delta < 0) {{
+                // Decrease = improvement (green down arrow)
+                compareSpan.textContent = `▼ ${{Math.abs(delta).toFixed(2)}}%`;
+                compareSpan.className = `${{compareClass}} positive`;
+            }} else {{
+                // Increase = regression (red up arrow)
+                compareSpan.textContent = `▲ ${{delta.toFixed(2)}}%`;
+                compareSpan.className = `${{compareClass}} negative`;
+            }}
+        }}
+        
+        function clearComparison() {{
+            comparisonMetrics = null;
+            
+            const selectElement = document.getElementById('compareSessionSelect');
+            if (selectElement) selectElement.value = '';
+            
+            const statusDiv = document.getElementById('comparisonStatus');
+            if (statusDiv) statusDiv.textContent = '';
+            
+            const clearBtn = document.getElementById('clearCompareBtn');
+            if (clearBtn) clearBtn.style.display = 'none';
+            
+            // Remove all comparison trace buttons
+            document.querySelectorAll('.comparison-trace-buttons').forEach(el => el.remove());
+            
+            // Hide all comparison indicators in summary tiles
+            document.querySelectorAll('.tile-compare').forEach(span => {{
+                span.style.display = 'none';
+                span.textContent = '';
+            }});
+            
+            // Hide all comparison indicators in metric cards
+            document.querySelectorAll('.metric-compare').forEach(span => {{
+                span.style.display = 'none';
+                span.textContent = '';
+            }});
+        }}
+        
+        // Auto-load default comparison session on page load
+        document.addEventListener('DOMContentLoaded', function() {{
+            const selectElement = document.getElementById('compareSessionSelect');
+            if (selectElement && selectElement.value) {{
+                // Small delay to ensure page is fully rendered
+                setTimeout(() => {{
+                    loadComparisonData();
+                }}, 100);
+            }}
+        }});
     </script>
 </body>
 </html>'''

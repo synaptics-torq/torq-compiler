@@ -127,14 +127,37 @@ def test_session(request, session_id):
             if summary:
                 db_summaries[pb_path] = summary
     
+    # Get list of all sessions for comparison
+    recent_sessions = TestSession.objects.order_by('-id')
+    available_sessions = [{'id': s.id, 'timestamp': s.timestamp.strftime('%Y-%m-%d %H:%M'), 'branch': s.git_branch or 'N/A'} for s in recent_sessions]
+    
+    # Find the most recent session from main branch (excluding current session) for default comparison
+    default_comparison_session_id = None
+    for session in recent_sessions:
+        if session.id != session_id and session.git_branch:
+            branch_lower = session.git_branch.lower()
+            if branch_lower == 'main' or branch_lower == 'refs/heads/main':
+                default_comparison_session_id = session.id
+                break
+    
+    # Get base URL from request for absolute URLs (when HTML viewed outside server)
+    base_url = f"{request.scheme}://{request.get_host()}"
+    
     # Generate one combined HTML for all traces in the session
     perfetto_viewer_html = None
     if pb_files:
         try:
-            # Get base URL from request for absolute URLs (when HTML viewed outside server)
-            base_url = f"{request.scheme}://{request.get_host()}"
-            # Pass database summaries, test names, test_run_ids, and base_url to avoid re-parsing .pb files
-            perfetto_viewer_html = generate_perfetto_html(pb_files, db_summaries=db_summaries, test_names=test_names_by_pb, test_run_ids=test_run_ids_by_pb, base_url=base_url)
+            # Pass database summaries, test names, test_run_ids, base_url, and session info for comparison
+            perfetto_viewer_html = generate_perfetto_html(
+                pb_files, 
+                db_summaries=db_summaries, 
+                test_names=test_names_by_pb, 
+                test_run_ids=test_run_ids_by_pb,
+                base_url=base_url,
+                current_session_id=session_id,
+                available_sessions=available_sessions,
+                default_comparison_session_id=default_comparison_session_id
+            )
         except Exception as e:
             print(f'ERROR: Could not generate Perfetto viewer HTML: {e}', flush=True)
             import traceback
@@ -165,3 +188,44 @@ def download_trace(request, test_run_id):
     response = FileResponse(open(file_path, 'rb'), content_type='application/octet-stream')
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     return response
+
+
+def get_session_metrics(request, session_id):
+    """Get all metrics for a test session - used for comparison feature."""
+    try:
+        session = TestSession.objects.get(id=session_id)
+        
+        # Collect all test runs and their metrics
+        metrics_data = {}
+        
+        for batch in session.testrunbatch_set.all():
+            for test_run in batch.testrun_set.all():
+                test_key = f"{test_run.test_case.name}[{test_run.test_case.parameters}]"
+                
+                # Get all measurements for this test run
+                measurements = Measurement.objects.filter(test_run=test_run).select_related('metric')
+                
+                test_metrics = {}
+                for measurement in measurements:
+                    # Store only time-based metrics (unit='ns'), not percentages
+                    if measurement.metric.unit == 'ns':
+                        test_metrics[measurement.metric.name] = float(measurement.value)
+                
+                if test_metrics:
+                    metrics_data[test_key] = {
+                        'metrics': test_metrics,
+                        'test_run_id': test_run.id,
+                        'has_trace': bool(test_run.profiling_data)
+                    }
+        
+        return JsonResponse({
+            'session_id': session_id,
+            'timestamp': session.timestamp.isoformat(),
+            'branch': session.git_branch,
+            'metrics': metrics_data
+        })
+        
+    except TestSession.DoesNotExist:
+        return JsonResponse({'error': 'Session not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
