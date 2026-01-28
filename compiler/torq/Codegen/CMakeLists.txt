@@ -31,6 +31,7 @@ set(sources
     ResolveAddressesPass.cpp
     ResolveInvocationArgumentsPass.cpp
     ScalarsToTensorsPass.cpp
+    SegmentNSSProgramsPass.cpp
     SlicingPass.cpp
     TORQLowerExecutableTargetPass.cpp
     TorqComprehensiveBufferizePass.cpp
@@ -38,7 +39,8 @@ set(sources
     TileAndFusePass.cpp
     UnrollLoopPass.cpp
     ValidPadToSamePadPass.cpp
-    VirtualMemory.cpp
+    VirtualMemory.cpp    
+    AssignNSSProgramsAddressesPass.cpp
 )
 
 iree_tablegen_library(

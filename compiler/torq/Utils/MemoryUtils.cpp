@@ -38,7 +38,7 @@ size_t getShapeTypeDataSize(mlir::ShapedType type) {
     return numElements * elementSize;
 }
 
-static int64_t getMemRefTypeOffsetBytes(MemRefType memRefType) {
+int64_t getMemRefTypeOffsetBytes(MemRefType memRefType) {
     if (auto stridesAttr = mlir::dyn_cast_if_present<StridedLayoutAttr>(memRefType.getLayout())) {
 
         auto offset = stridesAttr.getOffset();
@@ -272,140 +272,6 @@ LogicalResult setAddress(Value value, int64_t address) {
     }
 
     return failure();
-}
-
-static std::optional<int64_t>
-getCssAddress(Value value, int64_t offset, TypedValue<torq_hl::InvocationType> invocation) {
-    auto memrefType = dyn_cast<MemRefType>(value.getType());
-
-    if (!memrefType) {
-        return std::nullopt;
-    }
-
-    auto memSpace = getEncodingMemorySpace(memrefType);
-
-    std::optional<int64_t> addr = getDataStartAddress(value, offset, invocation);
-
-    int64_t baseAddress = 0;
-
-    switch (memSpace) {
-    case torq_hl::MemorySpace::Dtcm:
-        baseAddress = mlir::syna::torq::HwInfo::css_dtcm_base_address;
-        break;
-    case torq_hl::MemorySpace::Itcm:
-        baseAddress = mlir::syna::torq::HwInfo::css_itcm_base_address;
-        break;
-    default:
-        return std::nullopt;
-    }
-
-    if (!addr) {
-        return std::nullopt;
-    }
-
-    return baseAddress + addr.value();
-}
-
-std::optional<int64_t> getExecutorDataStartAddress(
-    torq_hl::Executor executor, Value value, int64_t offset,
-    TypedValue<torq_hl::InvocationType> invocation
-) {
-
-    auto type = cast<MemRefType>(value.getType());
-
-    switch (executor) {
-    case torq_hl::Executor::CSS:
-        return getCssAddress(value, offset, invocation);
-
-    case torq_hl::Executor::Host:
-        if (getEncodingMemorySpace(type) != torq_hl::MemorySpace::Xram) {
-            return std::nullopt;
-        }
-        return getDataStartAddress(value, offset, invocation);
-
-    case torq_hl::Executor::Slice:
-        if (getEncodingMemorySpace(type) != torq_hl::MemorySpace::Lram) {
-            return std::nullopt;
-        }
-        return getDataStartAddress(value, offset, invocation);
-
-    case torq_hl::Executor::NSS:
-        return getDataStartAddress(value, offset, invocation);
-
-    default:
-        llvm::report_fatal_error("unsupported executor");
-    }
-}
-
-std::optional<int64_t>
-getAddress(Value value, int64_t offset, TypedValue<torq_hl::InvocationType> invocation) {
-    if (auto blockArg = dyn_cast<BlockArgument>(value)) {
-
-        auto type = cast<MemRefType>(value.getType());
-
-        if (!invocation) {
-            return std::nullopt; // no invocation provided
-        }
-
-        auto createInvocationOp = invocation.getDefiningOp<torq_hl::CreateInvocationOp>();
-
-        if (!createInvocationOp) {
-            return std::nullopt; // not an invocation argument
-        }
-
-        if (blockArg.getOwner()->getParentOp() != createInvocationOp.getProgram().getDefiningOp()) {
-            return std::nullopt; // this is an argument that is not an argument of the invoked
-                                 // program
-        }
-
-        auto argAddresses = createInvocationOp.getExecutorArgsAddresses();
-
-        if (!argAddresses) {
-            return std::nullopt; // no addresses available
-        }
-
-        if (invocation.getType().getExecutor() == torq_hl::Executor::CSS) {
-            // if the executor is CSS the addresses we get are remapped into a single address space
-            // so we can't use them directly, this is not useful in practice anyways
-            return std::nullopt;
-        }
-
-        // the address in getExecutorArgsAddresses is a start address, not a base address
-        auto baseAddress =
-            (*argAddresses)[blockArg.getArgNumber()] - getMemRefTypeOffsetBytes(type);
-
-        return baseAddress + offset;
-    }
-    else {
-
-        auto memRefType = dyn_cast<MemRefType>(value.getType());
-
-        if (!memRefType) {
-            return std::nullopt; // not a memref type
-        }
-
-        auto memorySpace = getEncodingMemorySpace(memRefType);
-
-        switch (memorySpace) {
-        case torq_hl::MemorySpace::Lram:
-            return getLramAddress(value, offset);
-        case torq_hl::MemorySpace::Dtcm:
-            return getDtcmAddress(value, offset);
-        case torq_hl::MemorySpace::Itcm:
-            return getItcmAddress(value, offset);
-        case torq_hl::MemorySpace::Xram:
-            return getXramAddress(value, offset);
-        default:
-            return std::nullopt; // unsupported memory space
-        }
-    }
-}
-
-std::optional<int64_t>
-getDataStartAddress(Value value, int64_t offset, TypedValue<torq_hl::InvocationType> invocation) {
-
-    MemRefType type = cast<MemRefType>(value.getType());
-    return getAddress(value, offset + getMemRefTypeOffsetBytes(type), invocation);
 }
 
 bool isDerivedMemRefOperation(Operation *op) {

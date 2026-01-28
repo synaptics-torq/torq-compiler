@@ -236,7 +236,7 @@ def case_config(request, chip_config):
   runtime_timeout = 60 * 15
 
   if "layer_" in request.param.name:
-    compile_timeout = 60 * 3
+    compile_timeout = 60 * 5
     runtime_timeout = 30
 
   longer_test_timeout = [

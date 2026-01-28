@@ -2,7 +2,7 @@ import contextlib
 import time
 from typing import Dict, List
 from dataclasses import dataclass
-from iree.compiler.ir import Context, Module, BlockArgument
+from iree.compiler.ir import Context, Module, BlockArgument, InsertionPoint
 import pandas as pd
 import re
 from torq.model_profiler import perfetto_logger
@@ -133,7 +133,8 @@ def extract_program_ops(dispatch_op):
 
     args = {}
     for start_op in find_descendants_of_type(dispatch_op, "torq_hl.start_program", depth=0):
-        args[start_op.operation.operands[0]] = start_op.operation.operands[2:]
+        offset = 1 + start_op.operation.attributes["operandSegmentSizes"][1]        
+        args[start_op.operation.operands[0]] = start_op.operation.operands[offset:]
 
     all_task_ops = []
 
@@ -369,7 +370,32 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                     
                     if operation == "torq_hw.slice_start":
                         invocation_arg = BlockArgument(op.operands[0])
-                        invocation = args[invocation_arg.arg_number]                    
+
+                        current_program = op.operation.parent.parent
+
+                        args_for_current_block = args
+                        current_block = current_program.regions[0].blocks[0]
+
+                        # find the arguments of the current block
+                        while invocation_arg.owner != current_block:
+                            current_block_operations = current_block.operations
+                            terminator = current_block_operations[len(current_block_operations) - 1]
+
+                            assert terminator.operation.name == "torq_hl.next"
+
+                            next_block_args = []
+
+                            for operand in terminator.operation.operands:
+                                try:
+                                    block_arg = BlockArgument(operand)
+                                    next_block_args.append(args_for_current_block[block_arg.arg_number])
+                                except ValueError:
+                                    next_block_args.append(operand)
+
+                            args_for_current_block = next_block_args
+                            current_block = terminator.successors[0]                            
+
+                        invocation = args_for_current_block[invocation_arg.arg_number]
                         invocation_name = str(invocation.owner.attributes["name"].value)                                        
                         invocation_name = invocation_name[len("slice_program_torq_hl."):]
                         last_slice_program_name[slice_id] = invocation_name

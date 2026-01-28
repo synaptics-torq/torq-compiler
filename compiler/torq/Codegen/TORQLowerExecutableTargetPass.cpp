@@ -284,6 +284,12 @@ void TORQLowerExecutableTargetPass::addNssPasses(OpPassManager &pm) {
     // create NSS programs with all the NSS instructions
     funcPm.addPass(createOutlineNSSProgramsPass());
 
+    // segment the NSS programs in small blocks that fit the NSS block size
+    funcPm.addPass(createSegmentNSSProgramsPass());
+
+    // assign addresses to all the NSS programs
+    funcPm.addPass(createAssignNSSProgramsAddressesPass());
+
     // annotate all create_invocation/wait_program operations with addresses/values based
     // on the execution flow
     funcPm.addPass(createResolveInvocationArgumentsPass());

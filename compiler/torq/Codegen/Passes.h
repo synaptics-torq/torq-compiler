@@ -41,6 +41,10 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerCallProgramToStar
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOutlineNSSProgramsPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createSegmentNSSProgramsPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignNSSProgramsAddressesPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHlTilePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createSlicingPass();

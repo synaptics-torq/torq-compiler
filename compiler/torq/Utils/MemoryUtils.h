@@ -45,26 +45,6 @@ LogicalResult setAddress(Operation *op, int64_t address);
 // the value
 LogicalResult setAddress(Value value, int64_t address);
 
-// return the address of the first entry of a memref as seen by the executor, if it is accessible
-std::optional<int64_t> getExecutorDataStartAddress(
-    torq_hl::Executor executor, Value value, int64_t offset = 0,
-    TypedValue<torq_hl::InvocationType> invocation = nullptr
-);
-
-// attribute used to store resolved addesses on operations that use values with addresses
-const std::string RESOLVED_ADDRESSES_ATTR_NAME = "torq.resolved_addresses";
-
-// Returns the address of the given value when it is accesses within the given program invocation
-std::optional<int64_t> getAddress(
-    Value value, int64_t offset = 0, TypedValue<torq_hl::InvocationType> invocation = nullptr
-);
-
-// Returns the address of the first byte of the given value (this is the base address plus the
-// offset in the layout)
-std::optional<int64_t> getDataStartAddress(
-    Value value, int64_t offset = 0, TypedValue<torq_hl::InvocationType> invocation = nullptr
-);
-
 // Returns true if the operation is creating an alias of another existing memref
 bool isDerivedMemRefOperation(Operation *op);
 
@@ -73,5 +53,8 @@ OpOperand &getDerivedMemRefBase(Operation *op);
 
 // Returns the alignment possible with the bytes based on the type
 int getAlignmentByType(int bytes, mlir::Type type);
+
+// Returns the offset in bytes of the first element of the given memref type
+int64_t getMemRefTypeOffsetBytes(MemRefType memRefType);
 
 } // namespace mlir::syna

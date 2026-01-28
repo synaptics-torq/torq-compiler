@@ -163,6 +163,31 @@ def OutlineNSSPrograms :
 
 }
 
+def SegmentNSSPrograms :
+    InterfacePass<"torq-segment-nss-programs", "mlir::FunctionOpInterface"> {
+  let summary = "Segment NSS programs into smaller blocks that fit the NSS block size";
+  let constructor =
+      "mlir::syna::torq::createSegmentNSSProgramsPass()";
+
+  let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect"
+    ];
+
+}
+
+def AssignNSSProgramsAddresses :
+    InterfacePass<"torq-assign-nss-programs-addresses",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Assign addresses to NSS programs";
+  let constructor =
+      "mlir::syna::torq::createAssignNSSProgramsAddressesPass()";
+
+  let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect"
+    ];
+
+}
+
 def ResolveInvocationArguments :
     InterfacePass<"torq-resolve-invocation-arguments",
          "mlir::FunctionOpInterface"> {

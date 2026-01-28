@@ -113,8 +113,11 @@ void ConvertNssProgramToTorqHwPass::runOnOperation() {
 
     ConversionTarget conversionTarget(*ctx);
     conversionTarget.addLegalDialect<torq_hw::TorqHWDialect>();
-    conversionTarget
-        .addLegalOp<torq_hl::ProgramOp, torq_hl::ReturnOp, memref::AllocOp, memref::DeallocOp>();
+    conversionTarget.addLegalDialect<memref::MemRefDialect>();
+
+    conversionTarget.addIllegalOp<memref::CopyOp>();
+
+    conversionTarget.addLegalOp<torq_hl::ProgramOp, torq_hl::ReturnOp, torq_hl::NextOp>();
 
     RewritePatternSet patterns(ctx);
 

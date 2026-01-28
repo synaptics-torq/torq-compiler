@@ -26,7 +26,10 @@
 
 static llvm::cl::opt<int> clNssTaskSize(
     "torq-nss-task-size",
-    llvm::cl::desc("Select the max size of NSS programs in number of operations"), llvm::cl::init(4)
+    llvm::cl::desc(
+        "Select the max size of NSS programs in number of operations (0 = unbounded, default)"
+    ),
+    llvm::cl::init(0)
 );
 
 using namespace mlir::iree_compiler;
@@ -67,6 +70,10 @@ static bool isNssOperation(Operation &op) {
 
         return executor == torq_hl::Executor::Slice || executor == torq_hl::Executor::CSS;
     }
+    else if (isDerivedMemRefOperation(&op)) {
+        auto memRefType = mlir::cast<MemRefType>(op.getResult(0).getType());
+        return isNssManagedMemory(memRefType);
+    }
     else if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
         return isNssManagedMemory(allocOp.getResult().getType());
     }
@@ -101,8 +108,8 @@ static SmallVector<SmallVector<Operation *>> findPrograms(FunctionOpInterface fu
     // to keep space for a load operation to load the next program
     int maxProgramSize = clNssTaskSize - 1;
 
-    if (maxProgramSize <= 0) {
-        funcOp.emitError("NSS max program size must be greater than 1");
+    if (clNssTaskSize != 0 && maxProgramSize <= 0) {
+        funcOp.emitError("NSS max program size must be greater than 1 or 0 for unbounded");
         return {};
     }
 
@@ -118,7 +125,8 @@ static SmallVector<SmallVector<Operation *>> findPrograms(FunctionOpInterface fu
         auto operationSize = getOperationSize(&op);
 
         // if we need to break or the operation doesn't fit in the current program, start a new one
-        if (createNewProgram || programSize + operationSize > maxProgramSize) {
+        if (createNewProgram ||
+            (clNssTaskSize > 0 && programSize + operationSize > maxProgramSize)) {
             nssProgramsOps.push_back({});
             createNewProgram = false;
             programSize = 0;
@@ -133,18 +141,16 @@ static SmallVector<SmallVector<Operation *>> findPrograms(FunctionOpInterface fu
     return nssProgramsOps;
 }
 
-static int64_t getProgramSize(torq_hl::ProgramOp programOp) {
-    // FIXME: we should compute the actual size to reduce the amount of data we DMA
-    return HwInfo::nss_max_program_size;
-}
-
 static FailureOr<torq_hl::StartProgramOp> outlineOperations(
     int index, OpBuilder &builder, Operation *funcOp, SmallVector<Operation *> &programOps,
-    Value lramProgramAlloc, torq_hl::StartProgramOp previousInvocationStart,
-    int64_t xramProgramAddress
+    Value &lramProgramAlloc, Value &lramNextProgramAlloc,
+    torq_hl::StartProgramOp previousInvocationStart
 ) {
 
     auto ctx = funcOp->getContext();
+
+    auto invocationType = torq_hl::InvocationType::get(ctx, torq_hl::Executor::NSS);
+
     if (previousInvocationStart) {
         // if we have a previous invocation start, we need to insert the program before its start
         // so that we will be able to copy it
@@ -164,6 +170,18 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
 
     auto programOp = outliningResults.program;
 
+    auto &programBlock = programOp.getBody().front();
+
+    // add two arguments to the program with the two LRAM allocations, one is the
+    // program area, the other one is the next program area
+    auto currentProgramArg =
+        programBlock.insertArgument(0u, lramProgramAlloc.getType(), programOp.getLoc());
+    auto nextProgramArg =
+        programBlock.insertArgument(1u, lramNextProgramAlloc.getType(), programOp.getLoc());
+
+    // make the program return the next program area as first result
+    programBlock.getTerminator()->insertOperands(0, ValueRange{nextProgramArg, currentProgramArg});
+
     // Use programOp's location if known
     Location loc = programOp->getLoc();
     if (mlir::isa<mlir::UnknownLoc>(loc) && programOps.empty()) {
@@ -171,54 +189,53 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
         // This can happen for very first program which only includes the host copy
         loc = funcOp->getLoc();
     }
-    // create the invocation
-    auto invocationType = torq_hl::InvocationType::get(ctx, torq_hl::Executor::NSS);
-    auto programSize = getProgramSize(programOp);
-    auto programSectionType = MemRefType::get({programSize}, builder.getI8Type());
-    auto codeSectionAddresses = builder.getDenseI64ArrayAttr({xramProgramAddress});
-    auto createInvocationOp = builder.create<torq_hl::CreateInvocationOp>(
-        loc, TypeRange{invocationType, programSectionType}, programOp.getName(),
-        programOp.getProgram(), nullptr, nullptr, codeSectionAddresses, nullptr
-    );
 
-    auto xramProgram = createInvocationOp.getCodeSections()[0];
+    auto programBlockType = MemRefType::get({HwInfo::nss_max_program_size}, builder.getI8Type());
+
+    // create the invocation
+    auto createInvocationOp = builder.create<torq_hl::CreateInvocationOp>(
+        loc, TypeRange{invocationType, programBlockType}, programOp.getName(),
+        programOp.getProgram(), nullptr, nullptr, nullptr, nullptr
+    );
 
     // create the load operation that will load the program into the LRAM
     if (previousInvocationStart) {
 
-        // add the arguments to the previous invocation start
-        previousInvocationStart.getArgsMutable().append(lramProgramAlloc);
-        previousInvocationStart.getArgsMutable().append(xramProgram);
-
         // add the load operation at the end of the previous program
         auto previousInvocation =
             previousInvocationStart.getInvocation().getDefiningOp<torq_hl::CreateInvocationOp>();
+
         auto previousInvocationProgram =
             previousInvocation.getProgram().getDefiningOp<torq_hl::ProgramOp>();
 
-        // add an argument to the block that hosts the load
         auto &previousProgramBlock = previousInvocationProgram.getBody().front();
-        auto dstArg = previousProgramBlock.addArgument(lramProgramAlloc.getType(), loc);
-        auto srcArg = previousProgramBlock.addArgument(programSectionType, loc);
 
-        // add the load operation
+        // add a new argument to the previous program for the next program invocation
+        auto nextInvocationBlock = previousProgramBlock.addArgument(programBlockType, loc);
+
         builder.setInsertionPoint(previousProgramBlock.getTerminator());
 
-        if (failed(createTorqCopy(builder, loc, srcArg, dstArg))) {
+        // load the entry block of the next program into the LRAM area
+        auto prevInvocationNextProgramAreaArg = previousProgramBlock.getArgument(1);
+
+        if (failed(
+                createTorqCopy(builder, loc, nextInvocationBlock, prevInvocationNextProgramAreaArg)
+            )) {
             llvm::report_fatal_error("failed to create copy to LRAM");
         }
+
+        // add the next invocation code block to the previous invocation start to fill the argument
+        previousInvocationStart.getArgsMutable().append(createInvocationOp.getCodeSections()[0]);
     }
     else {
         // create the invocation and the host copy operation
 
-        // to be efficient the copy operation copies a scalar of size programSize
-        // this is ok because we know input and output memrefs are contiguous
         builder.create<torq_hl::HostCopyOp>(
-            loc, lramProgramAlloc, xramProgram,
+            loc, lramProgramAlloc, createInvocationOp.getCodeSections()[0],
             /*inputStridesBytes=*/builder.getDenseI64ArrayAttr({}),
             /*outputStridesBytes=*/builder.getDenseI64ArrayAttr({}),
             /*shape=*/builder.getDenseI64ArrayAttr({}),
-            /*elementSizeBytes=*/builder.getI64IntegerAttr(programSize)
+            /*elementSizeBytes=*/builder.getI64IntegerAttr(HwInfo::nss_max_program_size)
         );
     }
 
@@ -227,22 +244,46 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
     }
 
     // add the start and wait operations
+
+    SmallVector<Value> startInputs;
+
+    // the program receives the two LRAM allocations as next two inputs
+    startInputs.push_back(lramProgramAlloc);
+    startInputs.push_back(lramNextProgramAlloc);
+
+    for (auto input : outliningResults.inputs) {
+        startInputs.push_back(input);
+    }
+
     auto startOp = builder.create<torq_hl::StartProgramOp>(
         loc,
         /* invocation = */ createInvocationOp.getInvocation(),
         /* code_sections = */ ValueRange{lramProgramAlloc},
-        /* args = */ outliningResults.inputs
+        /* args = */ startInputs
     );
 
-    SmallVector<Type> outputTypes;
+    SmallVector<Type> waitOutputTypes;
+
+    // the first two outputs are the next and next-next program areas
+    waitOutputTypes.push_back(lramNextProgramAlloc.getType());
+    waitOutputTypes.push_back(lramProgramAlloc.getType());
+
     for (auto output : outliningResults.outputs) {
-        outputTypes.push_back(output.getType());
+        waitOutputTypes.push_back(output.getType());
     }
 
-    auto waitOp = builder.create<torq_hl::WaitProgramOp>(loc, outputTypes, startOp.getInvocation());
+    SmallVector<Value> waitOutputs;
+
+    auto waitOp =
+        builder.create<torq_hl::WaitProgramOp>(loc, waitOutputTypes, startOp.getInvocation());
+
+    // update the next and current LRAM allocations for the next program
+    lramProgramAlloc = waitOp.getOutputs()[0];
+    lramNextProgramAlloc = waitOp.getOutputs()[1];
 
     // replace all usages of the outputs with the results of the wait operation
-    for (auto [output, result] : llvm::zip(outliningResults.outputs, waitOp.getOutputs())) {
+    for (auto [output, result] :
+         llvm::zip(outliningResults.outputs, waitOp.getOutputs().drop_front(2))) {
         output.replaceAllUsesWith(result);
     }
 
@@ -293,22 +334,21 @@ void OutlineNSSProgramsPass::runOnOperation() {
     // create the two allocations used to load programs (current program and next program)
     auto programAllocs = createLramCodeAreas(funcOp, builder);
 
-    // reserve the XRAM area for the code sections
-    auto startAddress =
-        reserveXramArea(funcOp, HwInfo::nss_max_program_size * nssProgramsOps.size());
-
     // outline the nss programs
     torq_hl::StartProgramOp previousStartProgram;
+
+    Value currentLramBlock = programAllocs[0];
+    Value nextLramBlock = programAllocs[1];
+
     for (auto [idx, nssProgramOps] : llvm::enumerate(nssProgramsOps)) {
         auto maybePreviousStart = outlineOperations(
-            idx, builder, funcOp, nssProgramOps, programAllocs[idx % 2], previousStartProgram,
-            startAddress
+            idx, builder, funcOp, nssProgramOps, currentLramBlock, nextLramBlock,
+            previousStartProgram
         );
         if (failed(maybePreviousStart)) {
             return signalPassFailure();
         }
         previousStartProgram = maybePreviousStart.value();
-        startAddress += HwInfo::nss_max_program_size;
     }
 }
 

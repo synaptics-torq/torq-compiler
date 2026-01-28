@@ -627,6 +627,32 @@ def TorqHl_ReturnOp: TorqHL_Op<"return", [Terminator]> {
 
 }
 
+def MemRefOrInvocation :
+  AnyTypeOf<[AnyMemRef, TorqHL_Invocation], "">;
+
+
+def TorqHl_NextOp: TorqHL_Op<"next", [Terminator]> {
+  let summary = "Jump to next block in segmented program";
+
+  let description = [{
+    Jumps to the next block in a segmented torq_hl.program,
+    passing live-in arguments to the next block.
+  }];
+
+  let arguments = (ins
+    Variadic<MemRefOrInvocation>:$arguments,
+    AnyMemRef:$lramArea
+  );
+
+  let successors = (successor AnySuccessor:$dest);
+
+  let assemblyFormat = [{
+    ($arguments^ `:` type($arguments))? `lram_area` `(` $lramArea `:` type($lramArea) `)` `to` $dest attr-dict
+  }];
+
+}
+
+
 def TorqHl_ProgramOp: TorqHL_Op<"program", [IsolatedFromAbove]> {
   let summary = "A sequence of operations that can be executed on an executor";
 
@@ -713,10 +739,6 @@ def TorqHl_CallProgramOp: TorqHL_Op<"call_program", [DestinationStyleOpInterface
   }];
 
 }
-
-def MemRefOrInvocation :
-  AnyTypeOf<[AnyMemRef, TorqHL_Invocation], "">;
-
 
 def TorqHl_StartProgramOp: TorqHL_Op<"start_program", [AttrSizedOperandSegments]> {
   let summary = "Starts execution of an invocation";

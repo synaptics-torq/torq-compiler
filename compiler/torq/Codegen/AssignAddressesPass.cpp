@@ -377,6 +377,91 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
     return success();
 }
 
+// compute the backward slice of operations that the given operation depends on
+// we can remove this once we rebase on a new version of MLIR that includes
+// https://github.com/llvm/llvm-project/commit/2dd3d3852d16cab2c3a032223fc751db750a78f2
+static void getBackwardSlice(Operation *op, SetVector<Operation *> *slice) {
+    for (auto operand : op->getOperands()) {
+        if (isa<BlockArgument>(operand)) {
+            continue;
+        }
+        auto definingOp = operand.getDefiningOp();
+        if (definingOp && !slice->contains(definingOp)) {
+            getBackwardSlice(definingOp, slice);
+        }
+    }
+    slice->insert(op);
+}
+
+static void moveXramAllocationsToFront(FunctionOpInterface funcOp) {
+
+    SetVector<Operation *> toBeMoved;
+
+    // look for all operations that we want to happen before the NPU is called (and their
+    // depdendencies), these operations define XRAM memrefs
+    for (auto &op : funcOp.getFunctionBody().getOps()) {
+
+        // we want to move only operations that define XRAM memrefs
+        auto isDerivedMemrefOp = isDerivedMemRefOperation(&op);
+        if (!isa<
+                memref::AllocOp, torq_hl::ConstOp, arith::ConstantOp, torq_hl::MapBindingOp,
+                torq_hl::CreateInvocationOp>(op) &&
+            !isDerivedMemrefOp) {
+            continue;
+        }
+
+        // check that the memref returned by the operation is actually in XRAM
+        if (isa<memref::AllocOp>(op) || isDerivedMemrefOp) {
+            auto memRefType = mlir::dyn_cast<MemRefType>(op.getResult(0).getType());
+
+            if (getEncodingMemorySpace(memRefType) != torq_hl::MemorySpace::Xram) {
+                continue;
+            }
+        }
+
+        // ensure all dependencies are also moved
+        getBackwardSlice(&op, &toBeMoved);
+    }
+
+    // Create a list in order of operations to move
+    SmallVector<Operation *> ops;
+    for (auto &op : funcOp.getFunctionBody().getOps()) {
+        if (toBeMoved.contains(&op)) {
+            ops.push_back(&op);
+        }
+    }
+
+    // Move all XRAM allocations to the beginning of the function
+    Block &block = funcOp.getFunctionBody().front();
+
+    for (auto op : llvm::reverse(ops)) {
+        op->moveBefore(&block.front());
+    }
+}
+static void moveXramDeallocToBack(FunctionOpInterface funcOp) {
+
+    SmallVector<Operation *> ops;
+
+    for (auto &op : funcOp.getFunctionBody().getOps()) {
+        // we prefer to allocate everything at the end of the function to avoid
+        // interrupts during execution
+        if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
+            if (getEncodingMemorySpace(deallocOp.getMemref().getType()) ==
+                torq_hl::MemorySpace::Xram) {
+                ops.push_back(deallocOp);
+            }
+        }
+    }
+
+    // Move all XRAM deallocations to the end of the function, just before the terminator
+    Block &block = funcOp.getFunctionBody().front();
+    Operation *terminator = block.getTerminator();
+
+    for (auto deallocOp : ops) {
+        deallocOp->moveBefore(terminator);
+    }
+}
+
 void AssignAddressesPass::runOnOperation() {
     auto funcOp = getOperation();
 
@@ -401,6 +486,14 @@ void AssignAddressesPass::runOnOperation() {
         llvm::errs() << "Failed to allocate ITCM addresses\n";
         return signalPassFailure();
     };
+
+    // move all XRAM allocations to the front to avoid having allocations
+    // during the execution
+    moveXramAllocationsToFront(funcOp);
+
+    // move all XRAM deallocations to the back to avoid having deallocations
+    // during the execution
+    moveXramDeallocToBack(funcOp);
 
     if (failed(allocateXramAddresses(funcOp))) {
         llvm::errs() << "Failed to allocate XRAM addresses\n";

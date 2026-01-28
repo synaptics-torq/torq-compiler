@@ -97,8 +97,10 @@ class Serializer {
 
     LogicalResult processConstOp(torq_hl::ConstOp &op);
 
-    LogicalResult
-    processNssTask(torq_hw::NssTaskOp nssTask, torq_hl::CreateInvocationOp &invocation);
+    LogicalResult processNssTask(
+        torq_hw::NssTaskOp nssTask, torq_hl::CreateInvocationOp &invocation, int lramAddress,
+        int xramAddress
+    );
 
     flatbuffers_uint32_vec_ref_t createUI32Vector(std::optional<ArrayRef<int64_t>> vec);
 
@@ -775,44 +777,74 @@ LogicalResult Serializer::processSliceTaskOp(
 
 LogicalResult Serializer::serializeNssInvocation(torq_hl::CreateInvocationOp &op) {
 
-    if (!op.getXramCodeAddresses() || op.getXramCodeAddresses()->size() != 1) {
-        return op->emitOpError("Expected exactly one XRAM code address for NSS program");
-    }
-
-    auto nssXramAddr = op.getXramCodeAddresses().value()[0];
-
-    if (!op.getExecutorCodeAddresses() || op.getExecutorCodeAddresses()->size() != 1) {
-        return op->emitOpError("Expected exactly one LRAM code address for NSS program");
-    }
-
-    auto nssLramAddr = op.getExecutorCodeAddresses().value()[0];
-
-    if (!_npu.nssBegin(nssLramAddr, nssXramAddr)) {
-        return failure();
-    }
-
-    _nssBlockSize = 0;
-
     auto programOp = op.getProgram().getDefiningOp<torq_hl::ProgramOp>();
 
     if (!programOp) {
         return op->emitOpError("program is not a torq_hl::ProgramOp");
     }
 
-    for (auto &nestedOp : programOp.getBody().getOps()) {
+    auto blockCount = programOp.getBody().getBlocks().size();
 
-        if (isa<torq_hl::ReturnOp, memref::AllocOp, memref::DeallocOp>(nestedOp)) {
-            continue;
-        }
+    if (blockCount == 0) {
+        return op->emitOpError("NSS program must have at least one block");
+    }
 
-        auto nssTaskOp = dyn_cast<torq_hw::NssTaskOp>(nestedOp);
+    if (!op.getXramCodeAddresses() || !op.getExecutorCodeAddresses()) {
+        return op->emitOpError("NSS program must have XRAM and LRAM code addresses");
+    }
 
-        if (!nssTaskOp) {
-            return nestedOp.emitOpError("not supported in a NSS program");
-        }
+    auto xramCodeAddresses = op.getXramCodeAddresses().value();
+    auto lramCodeAddresses = op.getExecutorCodeAddresses().value();
 
-        if (failed(processNssTask(nssTaskOp, op))) {
-            return failure();
+    if (xramCodeAddresses.size() != blockCount) {
+        return op->emitOpError(
+            "Expected as many XRAM code address for NSS program as blocks in the program"
+        );
+    }
+
+    if (lramCodeAddresses.size() != blockCount) {
+        return op->emitOpError(
+            "Expected as many LRAM code address for NSS program as blocks in the program"
+        );
+    }
+
+    if (!_npu.nssBegin(lramCodeAddresses[0], xramCodeAddresses[0])) {
+        return failure();
+    }
+
+    for (auto [idx, block] : llvm::enumerate(programOp.getBody().getBlocks())) {
+
+        // reset the nss block size counter that is used in processNssTask
+        _nssBlockSize = 0;
+
+        // by default append the code
+        int64_t nextLramAddress = idx > 0 ? lramCodeAddresses[idx] : AddressConstants::APPEND;
+        int64_t nextXramAddress = idx > 0 ? xramCodeAddresses[idx] : AddressConstants::APPEND;
+
+        for (auto &nestedOp : block.getOperations()) {
+
+            if (isa<torq_hl::ReturnOp, torq_hl::NextOp, memref::AllocOp, memref::DeallocOp>(nestedOp
+                )) {
+                continue;
+            }
+
+            if (isDerivedMemRefOperation(&nestedOp)) {
+                continue;
+            }
+
+            auto nssTaskOp = dyn_cast<torq_hw::NssTaskOp>(nestedOp);
+
+            if (!nssTaskOp) {
+                return nestedOp.emitOpError("not supported in a NSS program");
+            }
+
+            if (failed(processNssTask(nssTaskOp, op, nextLramAddress, nextXramAddress))) {
+                return failure();
+            }
+
+            // always append after the first iteration
+            nextLramAddress = AddressConstants::APPEND;
+            nextXramAddress = AddressConstants::APPEND;
         }
     }
 
@@ -826,7 +858,8 @@ LogicalResult Serializer::serializeNssInvocation(torq_hl::CreateInvocationOp &op
         std::ofstream file(
             _dump_path + "/job" + std::to_string(_nssProgramCount) + "/tv.cdesc_addr.txt"
         );
-        file << "0x" << std::setw(8) << std::setfill('0') << std::hex << nssLramAddr << "\n";
+        file << "0x" << std::setw(8) << std::setfill('0') << std::hex << lramCodeAddresses[0]
+             << "\n";
         file.close();
     }
 
@@ -1053,7 +1086,8 @@ LogicalResult Serializer::serializeSliceInvocation(torq_hl::CreateInvocationOp &
 }
 
 LogicalResult Serializer::processNssTask(
-    torq_hw::NssTaskOp nssTaskOp, torq_hl::CreateInvocationOp &createInvocationOp
+    torq_hw::NssTaskOp nssTaskOp, torq_hl::CreateInvocationOp &createInvocationOp, int lramAddress,
+    int xramAddress
 ) {
     NssTask task;
     if (!toNssTask(nssTaskOp, task, createInvocationOp)) {
@@ -1065,7 +1099,7 @@ LogicalResult Serializer::processNssTask(
         llvm::dbgs() << task.toLogStr() << "\n";
     });
 
-    int size = task.compile(_npu.get(), AddressConstants::APPEND, AddressConstants::APPEND);
+    int size = task.compile(_npu.get(), lramAddress, xramAddress);
 
     if (size < 0) {
         // Task with negative length is an error
