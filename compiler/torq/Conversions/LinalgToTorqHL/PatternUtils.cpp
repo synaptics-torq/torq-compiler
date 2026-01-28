@@ -1757,8 +1757,8 @@ Operation *getElementwiseBinaryOp(linalg::GenericOp op, bool allowConstants) {
         isa<BlockArgument>(rhs) || (allowConstants && isa<arith::ConstantOp>(rhs.getDefiningOp()));
     if (!(lhsOK && rhsOK)) {
         LLVM_DEBUG({
-            llvm::dbgs(
-            ) << "elementwiseBinaryOp lhs/rhs is not block arg (or constant if allowed)\n";
+            llvm::dbgs() << "lhs is block arg: " << lhsOK << ", rhsOK is block arg: " << rhsOK
+                         << ", constant allowed: " << allowConstants << "\n";
         });
         return {};
     }

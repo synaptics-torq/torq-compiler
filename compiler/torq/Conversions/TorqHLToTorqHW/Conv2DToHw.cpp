@@ -21,6 +21,9 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
 
+// TODO: check if this option is worth it in terms of performance gain
+// #define OPTIMIZE_FOR_SMALL_KERNEL
+
 // Layout of the input/output memref data before vectorization
 using Dim = NCHW;
 
@@ -150,12 +153,22 @@ static torq_hw::SliceTaskOp lowerToHw(
                 PData pdata;
                 For(auto ic = slice.iterate(input.dim(In::C))) {
                     For(auto kh = slice.iterate(kernelDim.h)) {
+#ifdef OPTIMIZE_FOR_SMALL_KERNEL
+                        // For small kernels we can load all weights at once to reduce LRam traffic
                         WData wdata = slice.wram.load(weight[ocv][ic][kh]);
                         For(auto kw = slice.iterate(kernelDim.w)) {
                             IData idata = slice.iram.load(input[batch][ic][kh][kw / alukw][iv]);
                             idata.setShape({{alukw, Stride(1)}, vectStride});
                             pdata = slice.alu.outerProductAccumulate(idata[kw % alukw], wdata[kw]);
                         }
+#else
+                        For(auto kw = slice.iterate(kernelDim.w)) {
+                            WData wdata = slice.wram.load(weight[ocv][ic][kh][kw]);
+                            IData idata = slice.iram.load(input[batch][ic][kh][kw / alukw][iv]);
+                            idata.setShape({{alukw, Stride(1)}, vectStride});
+                            pdata = slice.alu.outerProductAccumulate(idata[kw % alukw], wdata);
+                        }
+#endif
                     }
                 }
                 For(auto o = slice.iterate(outChVectSize)) { // Not necessarily all the pdata

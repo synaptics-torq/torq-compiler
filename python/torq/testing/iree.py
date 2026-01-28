@@ -577,12 +577,19 @@ def torq_mlir_func_name(request, mlir_model_file):
         mlir_content = mlir_file.read()
 
     all_lines = mlir_content.split('\n')
+    func_name = "main"
     for line in all_lines:
         if re.match(r'^\s*(func.func).*', line):
             m = re.search(r'@(\w+)\s*\(', line)
-            return m.group(1) if m else "main"
-
-    return "main"
+            if m:
+                func_name = m.group(1)
+                break
+            m = re.search(r'@"([^"]+)"\s*\(', line)
+            if m:
+                func_name = m.group(1)
+                break
+    #print(f"Detected MLIR function name: {func_name}")
+    return func_name
 
 
 @versioned_hashable_object_fixture
