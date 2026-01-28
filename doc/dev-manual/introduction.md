@@ -11,3 +11,16 @@ any specific support for features commonly needed in machine learning applicatio
 To avoid developing all these features from scratch, Torq compiler is built as a plugin on top of
 {term}`IREE`, an MLIR-based end-to-end compiler and runtime specialized for {term}`lower`ing
 {term}`ML` models to a variety of architectures including CPUs, GPUs and custom hardware.
+
+This guide is intended for developers working on the Torq compiler and runtime.
+It covers the main workflows and extension points for adding new functionality,
+optimizing compute patterns, and integrating custom kernels.
+Each section provides step-by-step instructions, code examples, and references to relevant source files
+to help you get started quickly.
+
+Topics covered include:
+
+- How to add support for new operators and convert them to Torq kernels.
+- Guidelines for developing efficient kernels using Torq EasyKernel API.
+- Instructions for creating and registering new compiler passes.
+- Methods for implementing and testing compute optimizations.

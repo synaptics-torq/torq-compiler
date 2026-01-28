@@ -102,7 +102,9 @@ In the following sections we will see how to write a simple kernel that performs
 of two input tensors. We will start with some strict assumptions on the format of the input data
 and then see how to extend the kernel to be completely generic while still being as efficient as possible.
 
-### Example: 1D tensor multiplication (vanilla)
+### Tutorial
+
+#### Vector Multiplication (basic)
 
 The easiest way to start writing a kernel is to use the Slice as a scalar ({term}`SISD`) processor
 on input tensors with a known shape.
@@ -121,7 +123,9 @@ kernel will operate.
 Normally the data shape, layout, and type of these tensors cannot be decided by the kernel but come from
 higher-level compiler passes via `MemRef` structures.
 Each `MemRef` is associated to an operand of an MLIR *operation* and can be accessed with the name of the operand.
-Conveniently ``LData`` objects can be created directly from MLIR operands:
+Conveniently ``LData`` objects can be created directly from MLIR operands.
+We also create a ``Slice`` object that will allow us to express the
+computation using high-level instruction and translate them to the corresponding HW and NDL configuration.
 
 ```{code} C++
 Slice slice;
@@ -149,9 +153,6 @@ assert(input1.dim(0) == input2.dim(0));
 ```
 
 Now that the data definition is completed we can start to define the algorithm to perform the processing.
-This can be done with the help of a ``Slice`` object that will allow us to express the
-computation using high-level instruction and translate them to the corresponding HW and NDL configuration.
-
 The Torq Slice is not able to use data from LRAM directly, we have first to bring them to one of the
 internal memories (IRAM, WRAM or BRAM). In our case the biasScale tensor is very small (it contains
 only one [bias, scale] pair) so we can simply bring it to internal memory once
@@ -186,8 +187,13 @@ of the data tensors.
 Now let's fill the body of our loop.
 We can access values in the LData tensors by indexing them as we would do with standard arrays and
 multiply each element of the first input by the corresponding element of the second input.
-This will be done with the ALU using the ``scalarProductAccumulate`` instruction (the full list of supported operations is in the ``Alu`` class).
-Since both arguments contains one single value, the resulting pdata will also contain one single partial.
+The ``Alu`` class contains the full list of instruction it supports.
+Two of them could be used here: ``scalarProductAccumulate`` or ``elementwiseProductAccumulate``.
+In the former the second operand must be a scalar, while in the latter it can be a scalar or a vector.
+We use ``elementwiseProductAccumulate`` since it will be compatible with the improved versions
+of this kernel what we will develop below.
+
+Since both arguments contains one single value, the resulting `pdata` will also contain one single value.
 We can rescale and clamp this value using the activation unit (``rescaleClamp`` instruction in the ``Act`` class)
 and store the result in the output tensor.
 
@@ -216,36 +222,13 @@ for a standard CPU. Of course this is not using the full computational power of 
 we will see how to improve this in the next version of this kernel.
 
 :::{note}
-Writing a "*vanilla*" version of a kernel operating one element at a time can often be a good
+Writing a basic version of a kernel operating one element at a time can often be a good
 way to start designing a kernel, since this doesn't require any specific data organization and
 can provide a reference against which to benchmark more optimized implementations.
 :::
 
 
-
-### Kernel Structure
-
-The structure of the kernel in the example above, even if very simple, is quite typical.
-Each kernel must contain the following mandatory instructions:
-
-- One single ``alu`` instruction (specifies the behaviour of the ALU unit)
-- One single ``act`` instruction (specifies the behaviour of the activation unit)
-- One single ``store`` or ``append`` instruction (to store the result of the computation to LRAM)
-
-In addition a kernel normally contains a combination of the following instructions:
-- ``load`` instructions to bring data from LRAM to the internal memories (up to one load instruction
-  for each of IRAM, WRAM, BRAM)
-- ``For`` loops to repeat the computation over all the data to be processed
-  (a loop can contain both the `alu` and `act` instructions, or only one of them)
-- additional configuration instructions as needed
-
-It's important to point out the role of the ``load`` instructions, even if they are conceptually
-very simple they are critical in the design of a kernel since they give the kernel writer full control
-on *which* data to bring to an internal memory and *when*. Ideally load instructions should be put
-in the most outer loop possible to avoid loading the same data multiple times from LRAM.
-
-
-### Example: 1D tensor multiplication (vectorized)
+#### Vector Multiplication (vectorized)
 
 In this example we examine how to improve the previous version of the kernel to take advantage
 of the vector processing features of the ALU and Act units.
@@ -320,7 +303,7 @@ Luckily this can be achieved with a simple change to our kernel.
 Instead of writing the result to the output tensor using the ``store()`` instruction,
 we can use the ``append()`` instruction.
 Append will append the given result to what has already be written in the indicated output (sub)tensor.
-So ``slice.store(output, res)`` will append `res' to the results already written in the
+So ``slice.store(output, res)`` will append `res` to the results already written in the
 output tensor in previous iterations. In the same way ``slice.store(output[i], res)`` will append `res`
 to the results already written in the `output[i]` subtensor in previous iterations.
 What makes ``append()`` so useful is that it never overflows the size of the output (sub)tensor it is writing.
@@ -362,10 +345,10 @@ without overflow.
 :::
 
 
-### Example: n-dimensional tensor multiplication (vectorized)
+#### Tensor multiplication (vectorized)
 
 In practice the input and output tensors of an elementwise mul operation are not required to be
-1D, they can have any number of dimensions as long as the tensors have the same shape.
+vectors with one dimension, they can have any number of dimensions as long as the tensors have the same shape.
 Let's see how to extend our kernel to handle this.
 For the case of rank-2 tensors, the change would be trivial, instead of one `For` loop,
 we would now need two nested loops:
@@ -494,7 +477,7 @@ calling the Slice ``iterate()`` method with a vector of counters.
 from `begin` (included) to `end` (excluded). Negative indexes are interpreted from the end as in numpy.
 :::
 
-### Example: n-dimensional tensor multiplication (optimized)
+#### Tensor multiplication (optimized)
 
 There is still a case where the n-dimensional mul kernel we've seen in the previous section is
 sub-optimal. Imagine that both inputs and output are *dense* tensors with many small dimensions,
@@ -553,7 +536,10 @@ With the above code we can remove the requirement that the two inputs must have 
 Of course the input and output tensors must be compatible for broadcast, otherwise we will get a
 compile error.
 
-Here is the final version of our mul kernel (we have combined fusion and vectorization):
+Here is the final version of our mul kernel (we have combined fusion and vectorization).
+This doesn't look very different from the basic version we have shown at the beginning,
+but it can support tensors of any element type, any rank, dense or not dense, broadcasting without
+data copy, does not require any special memory padding and is optimally efficient.
 
 ```{code} C++
 // Apply implicit broadcasting
@@ -587,7 +573,7 @@ This can provide a performance improvement, in particular on tensors with small 
 For consistency always fuse the *same number of dimensions* in input and output.
 :::
 
-### Example: 2-dimensional reduce
+#### Matrix Reduce
 
 In the *mul* examples above we used the `elementwiseProductAccumulate` instruction, but we didn't really
 accumulate anything, we just multiplied two different vectors at each iteration.
@@ -700,5 +686,129 @@ for an input tensor of any rank (dense or not) and any reduce axis
 For accumulating kernels always use the largest vector size supported by the *ALU*.
 The generated partial result will be vectorized correctly for processing by *Act*
 :::
+
+
+### Reference
+
+
+#### Kernel Structure
+
+The structure of the kernels in the tutorial above is quite typical.
+Each kernel must contain the following mandatory instructions:
+
+- One single ``alu`` instruction (specifies the behaviour of the ALU unit)
+- One single ``act`` instruction (specifies the behaviour of the activation unit)
+- One single ``store`` or ``append`` instruction (to store the result of the computation to LRAM)
+
+In addition a kernel normally contains a combination of the following instructions:
+- ``load`` instructions to bring data from LRAM to the internal memories (up to one load instruction
+  for each of IRAM, WRAM, BRAM)
+- ``For`` loops to repeat the computation over all the data to be processed
+  (a loop can contain both the `alu` and `act` instructions, or only one of them)
+- additional configuration instructions as needed
+
+It's important to point out the role of the ``load`` instructions, even if they are conceptually
+very simple they are critical in the design of a kernel since they give the kernel writer full control
+on *which* data to bring to an internal memory and *when*. Ideally load instructions should be put
+in the most outer loop possible to avoid loading the same data multiple times from LRAM.
+
+
+#### ALU Instructions
+
+The *ALU* provides a set of instructions that can be used to process the input and weight data.
+Most of them implement a variant of *multiply-accumulate*: at each iteration each value *i*
+in the PRAM is updated according to the following formula:
+
+```pdata' = pdata (+) input * weight```
+
+where `(+)` represents the *accumulate* operation to be used (by default `add`).
+
+Here the available instructions:
+
+- ``load(idata)``: simply load the input vector in the partials (PRAM)
+
+- ``accumulate(idata)`` add an input vector of *N* elements to the current partials
+
+- ``scalarProductAccumulate(idata, wdata)``: multiply an input vector of *N* elements with a scalar weight
+    (or weight vector with 1 element) and add to the current partials
+
+- ``multiScalarProductAccumulate(idata, wdata)``: like *scalarProductAccumulate* but the input must be
+  a matrix *[M, N]* and wdata a vector with *M* elements. Each input row is multiplied by
+  the corresponding weight and the entire result added to the current partials.
+
+- ``outerProductAccumulate(idata, wdata)``: perform the outer product between an input vector with
+*N* elements and a weight vector with *M* elements generating a matrix of *[M, N]* products which
+are added to the current partials.
+
+- ``elementwiseProductAccumulate(idata, wdata)``: multiply element by element an input vector with
+*N* elements and a weight vector with the same number of elements, generating a vector of *[N]* products
+which are added to the current partials.
+
+More details are provided directly in the `Alu` class.
+The difference between these instruction is in the expected shape of the input and weight tensors they
+expect, and in how they are used in the computation.
+Which instruction to choose depends on the nature of the computation that we want to implement.
+Some of the instructions are easier to use, for example `scalarProductAccumulate` can also work
+with simple scalars, in which case no special care has to be taken in the layout of the data,
+sice we can access any element we want by indexing the input and weight tensors.
+Other instructions are more complex to use, for example `outerProductAccumulate` requires
+the input elements to be adjacent in memory, same for the weights values.
+This ofter requires some effort to ensure the layout of the input and weights in memory
+respects these requirements. On the other hand this is also much more efficient in the utilization
+of the *ALU*, since it can perform *N * M* multiply-accumulate operations in one single cycle,
+so when it can be used the payoff can be significative.
+
+
+#### Vectorization
+
+Vectorization consists of partitioning input data in *vectors* so that multiple input and/or weight
+values can be processed in parallel. This can be done by calling the `vectorize()` method on the `LData`
+object to vectorize. This method takes in input the size (number of elements) of the desired vector.
+For special situations such as convolution it is also possible to pass a second parameter to indicate
+the *stride* between nearby vectors, but this is normally not needed.
+Only the innermost dimension of a tensor can be vectorized. Vectorization will fail if this
+dimension is not *dense*. To vectorize additional dimensions, they must be *fused* beforehand.
+
+Choosing the right vector size is important for optimal performance.
+Ideally should be as large as possible without going beyond the capablities of the *ALU* and *Act* units.
+The *ALU* supports larger vector sizes than the *Act*, furtermore the vector size for input data
+can be different from that for weights data. Why this difference between *ALU* and *Act*?
+Many of the most common kernels are *accumulating* kernels, that is the *ALU* must process multiple
+input data before the generated partials can be send to the *Act* for processing (see for example
+the *reduce* kernel in the tutorial). This means that a large vector size in *Act* is not needed,
+because while the *ALU* is processing the input values to generate the next partial, the *Act* 
+has all the time to process the previous partials in smaller chunks.
+
+The rule of thumb for choosing the vector size is summarized here below.
+
+:::{important}
+- For *non accumulating* kernels get input vector size from *Act* `width()` method.
+- For *accumulating* kernels get input vector size from *Alu* `iWidth()` method.
+- Weight vector size is always available via the *Alu* `wWidth()` method.
+
+Note that the input vector size is also affected by the data type of the weights, so if weights
+are used `iWidth()` must be called with both types specified.
+:::
+
+When using an input vector size greater than *Act* vector size, the partials generated by *the Alu*
+cannot be processed in one go by the *Act* .
+The `PData` structure returned by the *Alu* instruction is already divided in sub-tensors of the right
+size to be processed by the *Act*, it's enough to iterate on the `PData::Vectors` dimension
+(see the Matrix Reduce example in the tutorial).
+
+
+If the number of elements in the last dimension is not a multiple of the vector size,
+the last vector will extend beyond the end of the tensor, thus reading junk data.
+This is not a problem in itself, the kernel designer must just avoid using these spurious values
+to compute parts of the actual result.
+In the case where the last dimension is smaller than the specified vector size, `vectorize()` will automatically
+use a smaller vector size, so no need to worry about this explicitly.
+
+:::{important}
+Vectorizing output tensors is not necessary and *deprecated* since the last vector may go beyond the
+end of the tensor. This can make the `store()` or `append()` instruction write outside the 
+tensor boundary (this will normally generate an assertion).
+:::
+
 
 
