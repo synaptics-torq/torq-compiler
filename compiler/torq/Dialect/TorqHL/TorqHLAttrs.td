@@ -253,4 +253,28 @@ def TorqHL_AluConfigAttr :
 
 }
 
+def TorqHL_AddressAttr: AttrDef<TorqHL_Dialect, "Address", []>
+{
+  let mnemonic = "addr";
+  let parameters = (ins
+    "MemorySpace": $mem_space,
+    "int64_t":$address
+  );
+
+  let assemblyFormat = "`<` `mem_space` $mem_space `,` `address` $address `>`";
+}
+
+def TorqHL_InvocationAttr: AttrDef<TorqHL_Dialect, "Invocation", []>
+{
+  let mnemonic = "invocation";
+  let parameters = (ins
+    "Executor":$executor,
+    "int64_t":$executor_id,
+    ArrayRefParameter<"int64_t">:$block_addresses
+  );
+
+  let assemblyFormat = "`<` `executor` $executor `(` $executor_id `)` `,` `block_addresses` `=` `[` $block_addresses `]` `>`";
+  
+}
+
 #endif // TORQHL_DIALECT_IR_TORQHLATTRS

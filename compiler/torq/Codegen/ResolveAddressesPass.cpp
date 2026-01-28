@@ -95,13 +95,13 @@ template <typename OpT> class ResolveDmaCfg : public OpRewritePattern<OpT> {
         auto maybeReadAddress = getNdmaDataStartAddress(op.getRead(), nssInvocation);
 
         if (failed(maybeReadAddress)) {
-            return op.emitError("unable to resolve read address");
+            return op.emitError("unable to resolve read address of value of ") << op.getRead();
         }
 
         auto maybeWriteAddress = getNdmaDataStartAddress(op.getWrite(), nssInvocation);
 
         if (failed(maybeWriteAddress)) {
-            return op.emitError("unable to resolve write address");
+            return op.emitError("unable to resolve write address of ") << op.getWrite();
         }
 
         rewriter.modifyOpInPlace(op, [&]() {

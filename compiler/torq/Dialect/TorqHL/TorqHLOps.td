@@ -705,7 +705,7 @@ def TorqHl_CreateInvocationOp: TorqHL_Op<"create_invocation"> {
     OptionalAttr<IndexAttr>:$executor_id,
     OptionalAttr<DenseI64ArrayAttr>:$executor_code_addresses,
     OptionalAttr<DenseI64ArrayAttr>:$xram_code_addresses,
-    OptionalAttr<DenseI64ArrayAttr>:$executor_args_addresses
+    OptionalAttr<ArrayAttr>:$invocation_args
   );
 
   let results = (outs
@@ -736,6 +736,24 @@ def TorqHl_CallProgramOp: TorqHL_Op<"call_program", [DestinationStyleOpInterface
 
   let assemblyFormat = [{
     $program `inits` `(` $inits `)` `inputs` `(` $inputs `)` attr-dict `:` functional-type(operands, results)
+  }];
+
+}
+
+def TorqHl_GetBlockOp: TorqHL_Op<"get_block"> {
+  let summary = "Get a XRAM memref containing a given block of an invocation";
+
+  let arguments = (ins
+    TorqHL_Invocation:$invocation,
+    IndexAttr:$block_index
+  );
+
+  let results = (outs
+    AnyMemRef:$block_data
+  );
+
+  let assemblyFormat = [{
+    $invocation `block` $block_index attr-dict `:` qualified(type($invocation)) `->` type($block_data)
   }];
 
 }

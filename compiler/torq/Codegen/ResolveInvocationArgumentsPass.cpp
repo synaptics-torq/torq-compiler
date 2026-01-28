@@ -8,6 +8,7 @@
 
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"
 
@@ -34,7 +35,7 @@ class ResolveInvocationArgumentsPass
 };
 
 // this function adds to the StartProgramOp that is being analyzed the attributes
-// executor_code_address and executor_args_addresses with the actual addresses of
+// executor_code_address and invocation_args addresses of
 // the code sections and arguments when the invocation is called.
 //
 // The addresses cannot directly be found by inspecting the operands because
@@ -80,7 +81,8 @@ static LogicalResult updateCreateInvocation(
     auto executor = createInvocationOp.getProgram().getType().getExecutor();
 
     // update the address for all the arguments
-    SmallVector<int64_t> executorArgsAddresses;
+    SmallVector<Attribute> argAttrs;
+
     for (auto [idx, arg] : llvm::enumerate(startProgramOp.getArgs())) {
 
         // find the actual value of this argument
@@ -89,39 +91,60 @@ static LogicalResult updateCreateInvocation(
         // we are passing an invocation as argument to the program
         if (auto invocationArg = dyn_cast<TypedValue<torq_hl::InvocationType>>(argValue)) {
 
-            // for invocation arguments we store the executor id as address
             auto sourceInvocationOp = invocationArg.getDefiningOp<torq_hl::CreateInvocationOp>();
 
             if (!sourceInvocationOp) {
                 return startProgramOp.emitError()
                        << "argument #" << idx << " must be an create_invocation op";
             }
+
+            torq_hl::Executor executor = invocationArg.getType().getExecutor();
+
             auto maybeExecutorId = sourceInvocationOp.getExecutorId();
 
-            if (!maybeExecutorId) {
-                return startProgramOp.emitError()
-                       << "argument #" << idx << " must have an executor id";
+            int executorId = -1;
+
+            if (maybeExecutorId) {
+                executorId = (*maybeExecutorId).getZExtValue();
             }
 
-            executorArgsAddresses.push_back((*maybeExecutorId).getZExtValue());
-        }
-        else {
+            auto maybeCodeSectionAddresses = sourceInvocationOp.getXramCodeAddresses();
 
-            // for other arguments we store the address
-            std::optional<int64_t> maybeExecutorAddress =
-                getExecutorDataStartAddress(executor, argValue, 0);
-
-            if (!maybeExecutorAddress) {
+            if (!maybeCodeSectionAddresses) {
                 return startProgramOp.emitError()
-                       << "argument #" << idx << " has no valid addresses for executor "
+                       << "argument #" << idx
+                       << " has no valid code section addresses, see: " << argValue;
+            }
+
+            argAttrs.push_back(torq_hl::InvocationAttr::get(
+                startProgramOp.getContext(), executor, executorId, *maybeCodeSectionAddresses
+            ));
+        }
+        else if (auto memRefArg = dyn_cast<TypedValue<MemRefType>>(argValue)) {
+
+            auto maybeStartAddress = getDataStartAddress(argValue, 0);
+
+            if (!maybeStartAddress) {
+                return startProgramOp.emitError()
+                       << "argument #" << idx << " has no valid addresses "
                        << torq_hl::stringifyExecutor(executor) << ", see: " << argValue;
             }
 
-            executorArgsAddresses.push_back(*maybeExecutorAddress);
+            auto memSpace = getEncodingMemorySpace(memRefArg.getType());
+
+            argAttrs.push_back(
+                torq_hl::AddressAttr::get(startProgramOp.getContext(), memSpace, *maybeStartAddress)
+            );
+        }
+        else {
+            return startProgramOp.emitError() << "argument #" << idx << " has unsupported type "
+                                              << argValue.getType() << ", see: " << argValue;
         }
     }
 
-    createInvocationOp.setExecutorArgsAddresses(executorArgsAddresses);
+    auto invocationArgs = ArrayAttr::get(startProgramOp.getContext(), argAttrs);
+
+    createInvocationOp.setInvocationArgsAttr(invocationArgs);
 
     return success();
 }

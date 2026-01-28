@@ -301,13 +301,21 @@ getExecutorId(InvocationValue invocation, InvocationValue contextInvocation) {
             return std::nullopt;
         }
 
-        auto maybeArgs = contextInvocationOp.getExecutorArgsAddresses();
+        auto maybeArgs = contextInvocationOp.getInvocationArgs();
 
         if (!maybeArgs || blockArg.getArgNumber() >= maybeArgs->size()) {
             return std::nullopt;
         }
 
-        return (*maybeArgs)[blockArg.getArgNumber()];
+        auto args = *maybeArgs;
+
+        auto invocationAttr = dyn_cast<torq_hl::InvocationAttr>(args[blockArg.getArgNumber()]);
+
+        if (!invocationAttr) {
+            return std::nullopt;
+        }
+
+        return invocationAttr.getExecutorId();
     }
     else if (auto createInvocationOp = invocation.getDefiningOp<torq_hl::CreateInvocationOp>()) {
 
@@ -321,73 +329,147 @@ getExecutorId(InvocationValue invocation, InvocationValue contextInvocation) {
     return std::nullopt;
 }
 
+static Attribute getInvocationArgumentAttr(BlockArgument blockArg, InvocationValue invocation) {
+    if (!invocation) {
+        return nullptr; // no invocation provided
+    }
+
+    auto createInvocationOp = invocation.getDefiningOp<torq_hl::CreateInvocationOp>();
+
+    if (!createInvocationOp) {
+        return nullptr; // not an invocation argument
+    }
+
+    if (blockArg.getOwner()->getParentOp() != createInvocationOp.getProgram().getDefiningOp()) {
+        return nullptr; // this is an argument that is not an argument of the invoked
+                        // program
+    }
+
+    auto args = createInvocationOp.getInvocationArgs();
+
+    if (!args) {
+        return nullptr; // no addresses available
+    }
+
+    if (blockArg.getArgNumber() >= args->size()) {
+        return nullptr; // argument index out of bounds
+    }
+
+    return (*args)[blockArg.getArgNumber()];
+}
+
+std::optional<int64_t>
+getAddressFromInvocationArg(BlockArgument blockArg, int64_t offset, InvocationValue invocation) {
+
+    if (invocation.getType().getExecutor() == torq_hl::Executor::CSS) {
+        // if the executor is CSS the addresses we get are remapped into a single address space
+        // so we can't use them directly, this is not useful in practice anyways
+        return std::nullopt;
+    }
+
+    auto argAttr = getInvocationArgumentAttr(blockArg, invocation);
+
+    if (!argAttr) {
+        return std::nullopt; // no argument attribute found
+    }
+
+    auto argAddress = dyn_cast<torq_hl::AddressAttr>(argAttr);
+
+    if (!argAddress) {
+        return std::nullopt; // argument is not an address
+    }
+
+    // the address in the invocation arguments is a start address, not a base address
+    auto type = cast<MemRefType>(blockArg.getType());
+    auto baseAddress = argAddress.getAddress() - getMemRefTypeOffsetBytes(type);
+
+    return baseAddress + offset;
+}
+
+static std::optional<int64_t> getAddressFromGetBlockOp(
+    torq_hl::GetBlockOp getBlockOp, int64_t offset, InvocationValue invocation
+) {
+
+    auto blockInvocation = simplifyBlockArguments(getBlockOp.getInvocation());
+
+    // the invocation in the get_block op is an argument of the current invocation
+    if (auto blockArg = dyn_cast<BlockArgument>(blockInvocation)) {
+
+        auto argAttr = getInvocationArgumentAttr(blockArg, invocation);
+
+        if (!argAttr) {
+            return std::nullopt; // no argument attribute found
+        }
+
+        auto argInvocation = dyn_cast<torq_hl::InvocationAttr>(argAttr);
+
+        if (!argInvocation) {
+            return std::nullopt; // argument is not an invocation
+        }
+
+        return argInvocation.getBlockAddresses()[getBlockOp.getBlockIndex().getZExtValue()] +
+               offset;
+    }
+    // the invocation in the get_block op is value produced by a create_invocation op
+    else if (auto blockCreateInvocationOp =
+                 blockInvocation.getDefiningOp<torq_hl::CreateInvocationOp>()) {
+
+        auto xramCodeAddresses = blockCreateInvocationOp.getXramCodeAddresses();
+
+        if (!xramCodeAddresses) {
+            return std::nullopt; // no addresses available
+        }
+
+        if (getBlockOp.getBlockIndex().getZExtValue() >= xramCodeAddresses->size()) {
+            return std::nullopt; // block index out of bounds
+        }
+
+        return (*xramCodeAddresses)[getBlockOp.getBlockIndex().getZExtValue()] + offset;
+    }
+    else {
+        return std::nullopt; // we don't support any other case
+    }
+}
+
 std::optional<int64_t> getAddress(Value value, int64_t offset, InvocationValue invocation) {
 
+    // the value may be a block argument, if this is not the first block
+    // we need to find how this argument was set (from the next op) and
+    // find either a value or block arg of the entry block
     value = simplifyBlockArguments(value);
 
     if (!value) {
         return std::nullopt;
     }
 
+    // special cases where the value is coming from a block argument or a get_block op
+    // in this case the value doesn't carry the address information directly
     if (auto blockArg = dyn_cast<BlockArgument>(value)) {
-
-        auto type = cast<MemRefType>(value.getType());
-
-        if (!invocation) {
-            return std::nullopt; // no invocation provided
-        }
-
-        auto createInvocationOp = invocation.getDefiningOp<torq_hl::CreateInvocationOp>();
-
-        if (!createInvocationOp) {
-            return std::nullopt; // not an invocation argument
-        }
-
-        if (blockArg.getOwner()->getParentOp() != createInvocationOp.getProgram().getDefiningOp()) {
-            return std::nullopt; // this is an argument that is not an argument of the invoked
-                                 // program
-        }
-
-        auto argAddresses = createInvocationOp.getExecutorArgsAddresses();
-
-        if (!argAddresses) {
-            return std::nullopt; // no addresses available
-        }
-
-        if (invocation.getType().getExecutor() == torq_hl::Executor::CSS) {
-            // if the executor is CSS the addresses we get are remapped into a single address space
-            // so we can't use them directly, this is not useful in practice anyways
-            return std::nullopt;
-        }
-
-        // the address in getExecutorArgsAddresses is a start address, not a base address
-        auto baseAddress =
-            (*argAddresses)[blockArg.getArgNumber()] - getMemRefTypeOffsetBytes(type);
-
-        return baseAddress + offset;
+        return getAddressFromInvocationArg(blockArg, offset, invocation);
     }
-    else {
+    else if (auto getBlockOp = dyn_cast<torq_hl::GetBlockOp>(value.getDefiningOp())) {
+        return getAddressFromGetBlockOp(getBlockOp, offset, invocation);
+    }
 
-        auto memRefType = dyn_cast<MemRefType>(value.getType());
+    auto memRefType = dyn_cast<MemRefType>(value.getType());
 
-        if (!memRefType) {
-            return std::nullopt; // not a memref type
-        }
+    if (!memRefType) {
+        return std::nullopt; // not a memref type
+    }
 
-        auto memorySpace = getEncodingMemorySpace(memRefType);
+    auto memorySpace = getEncodingMemorySpace(memRefType);
 
-        switch (memorySpace) {
-        case torq_hl::MemorySpace::Lram:
-            return getLramAddress(value, offset);
-        case torq_hl::MemorySpace::Dtcm:
-            return getDtcmAddress(value, offset);
-        case torq_hl::MemorySpace::Itcm:
-            return getItcmAddress(value, offset);
-        case torq_hl::MemorySpace::Xram:
-            return getXramAddress(value, offset);
-        default:
-            return std::nullopt; // unsupported memory space
-        }
+    switch (memorySpace) {
+    case torq_hl::MemorySpace::Lram:
+        return getLramAddress(value, offset);
+    case torq_hl::MemorySpace::Dtcm:
+        return getDtcmAddress(value, offset);
+    case torq_hl::MemorySpace::Itcm:
+        return getItcmAddress(value, offset);
+    case torq_hl::MemorySpace::Xram:
+        return getXramAddress(value, offset);
+    default:
+        return std::nullopt; // unsupported memory space
     }
 }
 

@@ -802,7 +802,7 @@ LogicalResult Serializer::serializeNssInvocation(torq_hl::CreateInvocationOp &op
         );
     }
 
-    if (lramCodeAddresses.size() != blockCount) {
+    if (lramCodeAddresses.size() != 1) {
         return op->emitOpError(
             "Expected as many LRAM code address for NSS program as blocks in the program"
         );
@@ -812,19 +812,18 @@ LogicalResult Serializer::serializeNssInvocation(torq_hl::CreateInvocationOp &op
         return failure();
     }
 
+    int64_t nextLramAddress = AddressConstants::APPEND;
+    int64_t nextXramAddress = AddressConstants::APPEND;
+
     for (auto [idx, block] : llvm::enumerate(programOp.getBody().getBlocks())) {
 
         // reset the nss block size counter that is used in processNssTask
         _nssBlockSize = 0;
 
-        // by default append the code
-        int64_t nextLramAddress = idx > 0 ? lramCodeAddresses[idx] : AddressConstants::APPEND;
-        int64_t nextXramAddress = idx > 0 ? xramCodeAddresses[idx] : AddressConstants::APPEND;
-
         for (auto &nestedOp : block.getOperations()) {
 
-            if (isa<torq_hl::ReturnOp, torq_hl::NextOp, memref::AllocOp, memref::DeallocOp>(nestedOp
-                )) {
+            if (isa<torq_hl::ReturnOp, torq_hl::NextOp, torq_hl::GetBlockOp, memref::AllocOp,
+                    memref::DeallocOp>(nestedOp)) {
                 continue;
             }
 
@@ -845,6 +844,20 @@ LogicalResult Serializer::serializeNssInvocation(torq_hl::CreateInvocationOp &op
             // always append after the first iteration
             nextLramAddress = AddressConstants::APPEND;
             nextXramAddress = AddressConstants::APPEND;
+        }
+
+        // find the next LRAM address for the block from the next op
+        if (auto nextOp = dyn_cast<torq_hl::NextOp>(block.getTerminator())) {
+            auto maybeAddress = getAddress(nextOp.getLramArea(), 0, op.getInvocation());
+
+            if (!maybeAddress) {
+                return nextOp.emitError() << "Missing next LRAM address";
+            }
+
+            nextLramAddress = maybeAddress.value();
+
+            // find the next XRAM address
+            nextXramAddress = xramCodeAddresses[idx + 1];
         }
     }
 
@@ -953,9 +966,27 @@ LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &cr
 
     SmallVector<uint32_t> args;
 
-    if (auto argsAttr = createInvocationOp.getExecutorArgsAddresses()) {
-        args.push_back(argsAttr->size());
-        args.append(argsAttr->begin(), argsAttr->end());
+    if (auto maybeArgsAttr = createInvocationOp.getInvocationArgs()) {
+
+        args.push_back(maybeArgsAttr->size());
+
+        for (auto arg : *maybeArgsAttr) {
+            auto argValue = dyn_cast<torq_hl::AddressAttr>(arg);
+            if (!argValue) {
+                return createInvocationOp.emitError() << "Expected AddressAttr in invocation args";
+            }
+
+            switch (argValue.getMemSpace()) {
+            case torq_hl::MemorySpace::Dtcm:
+                args.push_back(argValue.getAddress() + HwInfo::css_dtcm_base_address);
+                break;
+            case torq_hl::MemorySpace::Itcm:
+                args.push_back(argValue.getAddress() + HwInfo::css_itcm_base_address);
+                break;
+            default:
+                return createInvocationOp.emitError() << "Unsupported memory space in CSS arg";
+            }
+        }
     }
     else {
         args.push_back(0); // No arguments, just the size
@@ -1459,7 +1490,7 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
 
         if (isa<torq_hl::ProgramOp, torq_hl::CreateInvocationOp, torq_hl::ConstOp,
                 torq_hl::MapBindingOp, func::ReturnOp, torq_hl::ImportProgramOp,
-                torq_hw::DispatchProfilingOp>(op) ||
+                torq_hl::GetBlockOp, torq_hw::DispatchProfilingOp>(op) ||
             isDerivedMemRefOperation(&op)) {
             continue; // skip these ops
         }
@@ -1563,13 +1594,23 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
 
                 auto programName = _builder.createString(importProgramOp.getName());
 
-                assert(createInvocationOp.getExecutorArgsAddresses().has_value());
+                assert(createInvocationOp.getInvocationArgs().has_value());
 
-                auto args = createInvocationOp.getExecutorArgsAddresses().value();
+                auto args = createInvocationOp.getInvocationArgs().value();
 
                 flatbuffers_uint64_vec_start(_builder);
                 for (auto arg : args) {
-                    flatbuffers_uint64_vec_push_create(_builder, arg);
+
+                    auto argValue = dyn_cast<torq_hl::AddressAttr>(arg);
+                    if (!argValue) {
+                        return startOp.emitError("expected AddressAttr arguments only");
+                    }
+
+                    if (argValue.getMemSpace() != torq_hl::MemorySpace::Xram) {
+                        return startOp.emitError("expected XRAM memory space for host arguments");
+                    }
+
+                    flatbuffers_uint64_vec_push_create(_builder, argValue.getAddress());
                 }
                 auto argsRef = flatbuffers_uint64_vec_end(_builder);
 

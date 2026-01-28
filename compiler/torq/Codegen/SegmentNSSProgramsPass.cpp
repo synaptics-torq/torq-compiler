@@ -128,6 +128,7 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
 
     auto activeLramCodeArea = programOp.getBody().getArgument(0);
     auto inactiveLramCodeArea = programOp.getBody().getArgument(1);
+    auto currentInvocation = programOp.getBody().getArgument(2);
 
     // Find pre-fetching of next program
     torq_hl::ReturnOp originalTerminator;
@@ -161,12 +162,7 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
     OpBuilder builder(programOp);
     auto programBlockType = MemRefType::get({HwInfo::nss_max_program_size}, builder.getI8Type());
 
-    // create block arguments for all the segments of the program
-    for (int i = 0; i < splitPoints.size(); ++i) {
-        codeBlockArgs.push_back(currentBlock->addArgument(programBlockType, loc));
-    }
-
-    for (auto splitPoint : splitPoints) {
+    for (auto [idx, splitPoint] : llvm::enumerate(splitPoints)) {
 
         // Split the current block at the boundary; trailing ops (including terminator if present)
         // move to the new block.
@@ -178,6 +174,7 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
         // first live-ins are always the LRAM code areas
         blockArgs.push_back(inactiveLramCodeArea);
         blockArgs.push_back(activeLramCodeArea);
+        blockArgs.push_back(currentInvocation);
 
         appendLiveIns(newBlock, blockArgs);
 
@@ -189,19 +186,15 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
             });
         }
 
-        // add block arguments for all the remaining code sections
-        SmallVector<Value> newCodeBlockArgs;
-
-        for (int i = 1; i < codeBlockArgs.size(); ++i) {
-            blockArgs.push_back(codeBlockArgs[i]);
-            newCodeBlockArgs.push_back(newBlock->addArgument(programBlockType, loc));
-        }
-
         OpBuilder builder(programOp);
         builder.setInsertionPointToEnd(currentBlock);
 
+        auto nextBlockCode = builder.create<torq_hl::GetBlockOp>(
+            loc, programBlockType, currentInvocation, builder.getIndexAttr(idx + 1)
+        );
+
         // Load the next block into the inactive LRAM area
-        if (failed(createTorqCopy(builder, loc, codeBlockArgs[0], inactiveLramCodeArea))) {
+        if (failed(createTorqCopy(builder, loc, nextBlockCode, inactiveLramCodeArea))) {
             return programOp.emitOpError("failed to create copy to LRAM");
         }
 
@@ -214,9 +207,7 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
         // Update the active/inactive LRAM code area arguments for the next block
         activeLramCodeArea = newBlock->getArgument(0);
         inactiveLramCodeArea = newBlock->getArgument(1);
-
-        // Update the code block arguments for the next block
-        codeBlockArgs = newCodeBlockArgs;
+        currentInvocation = newBlock->getArgument(2);
     }
 
     // Fixup the original load used by load of the next program to use the final inactive LRAM area.
@@ -255,31 +246,6 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
     }
 
     createInvocationOp.erase();
-
-    // pass the code sections to the start_program operation
-    torq_hl::StartProgramOp startProgramOp;
-    for (auto &use : newCreateInvocationOp.getInvocation().getUses()) {
-        if (auto spOp = dyn_cast<torq_hl::StartProgramOp>(use.getOwner())) {
-            startProgramOp = spOp;
-            break;
-        }
-    }
-
-    if (!startProgramOp) {
-        return newCreateInvocationOp.emitOpError(
-            "could not find start_program operation for segmented program invocation"
-        );
-    }
-
-    for (auto codeSections : newCreateInvocationOp.getCodeSections().drop_front(1)) {
-        startProgramOp.getArgsMutable().append(codeSections);
-    }
-
-    // add all the code areas that will be used to execute the program
-    int blockCount = region.getBlocks().size();
-    for (int i = 1; i < blockCount; ++i) {
-        startProgramOp.getCodeSectionsMutable().append(startProgramOp.getArgs()[i % 2]);
-    }
 
     return success();
 }

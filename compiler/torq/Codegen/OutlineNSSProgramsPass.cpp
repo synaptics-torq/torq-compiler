@@ -179,6 +179,10 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
     auto nextProgramArg =
         programBlock.insertArgument(1u, lramNextProgramAlloc.getType(), programOp.getLoc());
 
+    // add one argument to the program for the current invocation
+    // auto currentInvocationArg =
+    programBlock.insertArgument(2u, invocationType, programOp.getLoc());
+
     // make the program return the next program area as first result
     programBlock.getTerminator()->insertOperands(0, ValueRange{nextProgramArg, currentProgramArg});
 
@@ -211,12 +215,16 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
         auto &previousProgramBlock = previousInvocationProgram.getBody().front();
 
         // add a new argument to the previous program for the next program invocation
-        auto nextInvocationBlock = previousProgramBlock.addArgument(programBlockType, loc);
+        auto nextInvocation = previousProgramBlock.addArgument(invocationType, loc);
 
         builder.setInsertionPoint(previousProgramBlock.getTerminator());
 
         // load the entry block of the next program into the LRAM area
         auto prevInvocationNextProgramAreaArg = previousProgramBlock.getArgument(1);
+
+        auto nextInvocationBlock = builder.create<torq_hl::GetBlockOp>(
+            loc, programBlockType, nextInvocation, builder.getIndexAttr(0)
+        );
 
         if (failed(
                 createTorqCopy(builder, loc, nextInvocationBlock, prevInvocationNextProgramAreaArg)
@@ -225,13 +233,17 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
         }
 
         // add the next invocation code block to the previous invocation start to fill the argument
-        previousInvocationStart.getArgsMutable().append(createInvocationOp.getCodeSections()[0]);
+        previousInvocationStart.getArgsMutable().append(createInvocationOp.getInvocation());
     }
     else {
         // create the invocation and the host copy operation
 
+        auto firstCodeBlock = builder.create<torq_hl::GetBlockOp>(
+            loc, programBlockType, createInvocationOp.getInvocation(), builder.getIndexAttr(0)
+        );
+
         builder.create<torq_hl::HostCopyOp>(
-            loc, lramProgramAlloc, createInvocationOp.getCodeSections()[0],
+            loc, lramProgramAlloc, firstCodeBlock,
             /*inputStridesBytes=*/builder.getDenseI64ArrayAttr({}),
             /*outputStridesBytes=*/builder.getDenseI64ArrayAttr({}),
             /*shape=*/builder.getDenseI64ArrayAttr({}),
@@ -247,9 +259,12 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
 
     SmallVector<Value> startInputs;
 
-    // the program receives the two LRAM allocations as next two inputs
+    // the program receives the two LRAM allocations as first two inputs
     startInputs.push_back(lramProgramAlloc);
     startInputs.push_back(lramNextProgramAlloc);
+
+    // the program receives the current invocation as third input
+    startInputs.push_back(createInvocationOp.getInvocation());
 
     for (auto input : outliningResults.inputs) {
         startInputs.push_back(input);
