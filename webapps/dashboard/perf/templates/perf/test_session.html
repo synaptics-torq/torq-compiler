@@ -67,6 +67,35 @@ table tr:hover {
                 </td>
             </tr>
         </table>
+        
+        <h3 style="margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem; font-weight: 600; color: #2d3748;">Test Statistics</h3>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; margin-top: 1rem;">
+            <div style="padding: 1.5rem 1.5rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);">
+                <div style="font-size: 2.5rem; font-weight: bold; color: white; margin-bottom: 0.25rem;">{{ num_total }}</div>
+                <div style="color: rgba(255, 255, 255, 0.95); font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Total Tests</div>
+            </div>
+            <div style="padding: 1.5rem 1.5rem; background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(17, 153, 142, 0.4);">
+                <div style="font-size: 2.5rem; font-weight: bold; color: white; margin-bottom: 0.25rem;">{{ num_passed }}</div>
+                <div style="color: rgba(255, 255, 255, 0.95); font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Passed</div>
+                {% if num_total %}
+                <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.875rem; font-weight: 500; margin-top: 0.25rem;">{% widthratio num_passed num_total 100 %}%</div>
+                {% endif %}
+            </div>
+            <div style="padding: 1.5rem 1.5rem; background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%); border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(235, 51, 73, 0.4);">
+                <div style="font-size: 2.5rem; font-weight: bold; color: white; margin-bottom: 0.25rem;">{{ num_failed }}</div>
+                <div style="color: rgba(255, 255, 255, 0.95); font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Failed</div>
+                {% if num_total %}
+                <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.875rem; font-weight: 500; margin-top: 0.25rem;">{% widthratio num_failed num_total 100 %}%</div>
+                {% endif %}
+            </div>
+            <div style="padding: 1.5rem 1.5rem; background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(250, 112, 154, 0.4);">
+                <div style="font-size: 2.5rem; font-weight: bold; color: white; margin-bottom: 0.25rem;">{{ num_skipped }}</div>
+                <div style="color: rgba(255, 255, 255, 0.95); font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Skipped</div>
+                {% if num_total %}
+                <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.875rem; font-weight: 500; margin-top: 0.25rem;">{% widthratio num_skipped num_total 100 %}%</div>
+                {% endif %}
+            </div>
+        </div>
     </div>
 
     <div class="test-runs" style="margin-bottom: 2rem;">

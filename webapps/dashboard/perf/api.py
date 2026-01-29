@@ -9,6 +9,7 @@ from rest_framework import viewsets, filters, status
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
+from django.db.models import Count, Q
 from .models import TestCase, TestSession, TestRun, TestRunBatch
 from .serializers import TestCaseSerializer, TestSessionSerializer, TestRunSerializer
 from .processing import process_uploaded_zip
@@ -31,7 +32,12 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
 
 class TestSessionViewSet(viewsets.ModelViewSet):
-    queryset = TestSession.objects.all()
+    queryset = TestSession.objects.annotate(
+        num_total=Count('testrunbatch__testrun'),
+        num_passed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.PASS)),
+        num_failed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.FAIL)),
+        num_skipped=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP))
+    ).all()
     serializer_class = TestSessionSerializer
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]

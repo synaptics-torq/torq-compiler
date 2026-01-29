@@ -23,16 +23,16 @@ class TestSessionSerializer(serializers.ModelSerializer):
         read_only_fields = ['timestamp', 'owner', 'num_passed', 'num_failed', 'num_skipped', 'num_total']
 
     def get_num_passed(self, obj):
-        return obj.num_passed
+        return getattr(obj, 'num_passed', 0)
 
     def get_num_failed(self, obj):
-        return obj.num_failed
+        return getattr(obj, 'num_failed', 0)
 
     def get_num_skipped(self, obj):
-        return obj.num_skipped
+        return getattr(obj, 'num_skipped', 0)
 
     def get_num_total(self, obj):
-        return obj.num_total
+        return getattr(obj, 'num_total', 0)
 
 
 class TestRunSerializer(serializers.ModelSerializer):

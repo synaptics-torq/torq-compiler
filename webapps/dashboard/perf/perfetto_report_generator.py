@@ -212,7 +212,7 @@ def get_pb_files():
     return pb_files
 
 
-def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=None, base_url=None, current_session_id=None, available_sessions=None, default_comparison_session_id=None):
+def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=None, test_statuses=None, base_url=None, current_session_id=None, available_sessions=None, default_comparison_session_id=None):
     """
     Generate HTML content with all trace files
     
@@ -222,6 +222,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                      If provided, skips parsing .pb files for metrics
         test_names: Optional dict mapping pb file path to test case display name
         test_run_ids: Optional dict mapping pb file path to test_run.id for download URLs
+        test_statuses: Optional dict mapping pb file path to test status dict with 'outcome' and 'outcome_value'
         base_url: Optional base URL for the server (e.g., 'https://server.hf.space')
                  If provided, download URLs will be absolute
         current_session_id: Optional current session ID for comparison feature
@@ -606,18 +607,50 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         type_display = model_type.upper() if model_type != 'other' else 'Other'
         type_badge = f'<span class="type-badge type-badge-{model_type}">{type_display}</span>'
         
+        # Create status badge if available
+        status_badge = ''
+        if test_statuses and pb_file_str in test_statuses:
+            status_info = test_statuses[pb_file_str]
+            outcome = status_info['outcome']
+            outcome_value = status_info['outcome_value']
+            
+            # Map outcome values: 1=Pass, 2=Fail, 3=Skip
+            if outcome_value == 1:
+                badge_class = 'status-pass'
+            elif outcome_value == 2:
+                badge_class = 'status-fail'
+            elif outcome_value == 3:
+                badge_class = 'status-skip'
+            else:
+                badge_class = 'status-unknown'
+            
+            status_badge = f'<span class="status-badge {badge_class}">{outcome}</span>'
+        
         # Only include data-encoded if we have it (backward compatibility for standalone HTML)
         data_encoded_attr = f'data-encoded="{encoded_data}"' if encoded_data else ''
         
-        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" {data_encoded_attr} data-type="{model_type}" data-original-index="{i}" data-test-name="{model_name}">
+        # Create status filter data attribute
+        status_filter_value = 'unknown'
+        if test_statuses and pb_file_str in test_statuses:
+            outcome_val = test_statuses[pb_file_str]['outcome_value']
+            if outcome_val == 1: status_filter_value = 'pass'
+            elif outcome_val == 2: status_filter_value = 'fail'
+            elif outcome_val == 3: status_filter_value = 'skip'
+        
+        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" {data_encoded_attr} data-type="{model_type}" data-status="{status_filter_value}" data-original-index="{i}" data-test-name="{model_name}">
             <div class="trace-header">
-                <div class="trace-info">
+                <div class="trace-name-wrapper">
                     <span class="expand-icon">▶</span>
                     <div class="trace-name">{model_name}</div>
-                    {type_badge}
                 </div>
-                <div class="trace-summary">
+                <div class="trace-badges-and-summary">
+                    <div class="trace-badges">
+                        {type_badge}
+                        {status_badge}
+                    </div>
+                    <div class="trace-summary">
                     {collapsed_summary}
+                </div>
                 </div>
             </div>
             {overview_html}
@@ -632,7 +665,20 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
     for model_type in sorted(model_types):
         display_type = model_type.upper() if model_type != 'other' else 'Other'
         filter_buttons.append(f'<button class="filter-btn" onclick="filterByType(\'{model_type}\')" data-type="{model_type}">{display_type}</button>')
+    
+    # Create status filter buttons separately
+    status_filter_buttons = []
+    status_filter_buttons.append('<button class="filter-btn active" onclick="filterByStatus(\'all\')" data-status-filter="all">All</button>')
+    status_filter_buttons.append('<button class="filter-btn" onclick="filterByStatus(\'pass\')" data-status-filter="pass">Pass</button>')
+    status_filter_buttons.append('<button class="filter-btn" onclick="filterByStatus(\'fail\')" data-status-filter="fail">Fail</button>')
+    status_filter_buttons.append('<button class="filter-btn" onclick="filterByStatus(\'skip\')" data-status-filter="skip">Skip</button>')
+    
+    # Comparison specific filters (initially hidden)
+    status_filter_buttons.append('<button id="btn-pass-fail" class="filter-btn comparison-filter" onclick="filterByStatus(\'pass_fail\')" data-status-filter="pass_fail" style="display:none; border-color: #f56565; color: #c53030;">Pass → Fail</button>')
+    status_filter_buttons.append('<button id="btn-fail-pass" class="filter-btn comparison-filter" onclick="filterByStatus(\'fail_pass\')" data-status-filter="fail_pass" style="display:none; border-color: #48bb78; color: #2f855a;">Fail → Pass</button>')
+    
     filters_html = '\n                '.join(filter_buttons)
+    status_filters_html = '\n                '.join(status_filter_buttons)
     
     # Generate comparison dropdown HTML if session info is available
     comparison_html = ''
@@ -931,19 +977,35 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         .trace-header {{
             padding: 20px 24px;
             display: flex;
-            flex-wrap: wrap;
+            flex-wrap: nowrap;
             justify-content: space-between;
             align-items: center;
-            gap: 20px;
+            gap: 12px 20px;
             min-height: 60px;
         }}
         
-        .trace-info {{
-            flex: 1 1 250px;
+        .trace-name-wrapper {{
+            flex: 1 1 auto;
             min-width: 0;
             display: flex;
             align-items: center;
             gap: 12px;
+        }}
+        
+        .trace-badges-and-summary {{
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: nowrap;
+            flex-shrink: 0;
+        }}
+        
+        .trace-badges {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
         }}
         
         .expand-icon {{
@@ -951,6 +1013,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             font-size: 12px;
             transition: transform 0.3s ease;
             flex-shrink: 0;
+            margin-top: 2px;
         }}
         
         .trace-name {{
@@ -958,6 +1021,11 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             color: #2d3748;
             font-size: 16px;
             word-wrap: break-word;
+            word-break: break-word;
+            overflow-wrap: break-word;
+            flex: 1 1 auto;
+            min-width: 0;
+            line-height: 1.4;
         }}
         
         .type-badge {{
@@ -968,8 +1036,44 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            margin-left: 12px;
+            margin-left: 0;
             flex-shrink: 0;
+        }}
+        
+        .status-badge {{
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 0;
+            flex-shrink: 0;
+        }}
+        
+        .status-pass {{
+            background: linear-gradient(135deg, #28a745 0%, #20803a 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(40, 167, 69, 0.3);
+        }}
+        
+        .status-fail {{
+            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(220, 53, 69, 0.3);
+        }}
+        
+        .status-skip {{
+            background: linear-gradient(135deg, #ffc107 0%, #e0a800 100%);
+            color: #000;
+            box-shadow: 0 2px 4px rgba(255, 193, 7, 0.3);
+        }}
+        
+        .status-unknown {{
+            background: linear-gradient(135deg, #6c757d 0%, #5a6268 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(108, 117, 125, 0.3);
         }}
         
         .type-badge-mlir {{
@@ -1023,11 +1127,11 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         .trace-summary {{
             display: flex;
             gap: 12px;
-            flex-wrap: wrap;
+            flex-wrap: nowrap;
             justify-content: flex-end;
             align-items: center;
-            flex: 0 1 auto;
-            min-width: 0;
+            flex: 0 0 auto;
+            flex-shrink: 0;
         }}
         
         .trace-item.expanded .trace-summary {{
@@ -1044,8 +1148,8 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             align-items: center;
             justify-content: space-between;
             gap: 8px;
-            min-width: 160px;
-            max-width: 200px;
+            min-width: 140px;
+            max-width: 180px;
             min-height: 45px;
             box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
             transition: all 0.2s ease;
@@ -1332,9 +1436,15 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 gap: 12px;
             }}
             
+            .trace-info {{
+                max-width: 100%;
+                width: 100%;
+            }}
+            
             .trace-summary {{
                 width: 100%;
                 justify-content: flex-start;
+                min-width: 100%;
             }}
             
             .summary-tile {{
@@ -1364,7 +1474,23 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                         {filters_html}
                     </div>
                 </div>
+                <div class="filter-section" style="flex: 0 1 auto; margin-bottom: 0; padding-bottom: 0; border-bottom: none;">
+                    <div class="filter-label">Filter by Status</div>
+                    <div class="filter-buttons">
+                        {status_filters_html}
+                    </div>
+                </div>
                 {comparison_html}
+                <div class="filter-section" style="flex: 0 1 auto; margin-bottom: 0; padding-bottom: 0; border-bottom: none;">
+                    <div class="filter-label">Sort</div>
+                    <select id="sortSelect" class="compare-select" onchange="sortTraces()">
+                        <option value="original">Original Order</option>
+                        <option value="duration_desc">Duration (High → Low)</option>
+                        <option value="duration_asc">Duration (Low → High)</option>
+                        <option value="change_desc" disabled>Change % (Best → Worst)</option>
+                        <option value="change_asc" disabled>Change % (Worst → Best)</option>
+                    </select>
+                </div>
             </div>
             <div class="search-box">
                 <input 
@@ -1618,12 +1744,13 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         }}
         
         let currentTypeFilter = 'all';
+        let currentStatusFilter = 'all';
         
         function filterByType(type) {{
             currentTypeFilter = type;
             
             // Update active button
-            const buttons = document.querySelectorAll('.filter-btn');
+            const buttons = document.querySelectorAll('.filter-btn[data-type]');
             buttons.forEach(btn => {{
                 if (btn.getAttribute('data-type') === type) {{
                     btn.classList.add('active');
@@ -1636,6 +1763,27 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             filterTraces();
         }}
         
+        function filterByStatus(status) {{
+            currentStatusFilter = status;
+            
+            // Update active button
+            const buttons = document.querySelectorAll('.filter-btn[data-status-filter]');
+            buttons.forEach(btn => {{
+                if (btn.getAttribute('data-status-filter') === status) {{
+                    btn.classList.add('active');
+                }} else {{
+                    btn.classList.remove('active');
+                }}
+            }});
+            
+            // Apply filters
+            filterTraces();
+        }}
+        
+        function sortTraces() {{
+            filterTraces();
+        }}
+
         function filterTraces() {{
             const searchInput = document.getElementById('searchInput').value.toLowerCase();
             const traceItems = document.querySelectorAll('.trace-item');
@@ -1650,6 +1798,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             const itemsWithScores = Array.from(traceItems).map(item => {{
                 const name = item.querySelector('.trace-name').textContent.toLowerCase();
                 const itemType = item.getAttribute('data-type');
+                const itemStatus = item.getAttribute('data-status');
                 const originalIndex = parseInt(item.getAttribute('data-original-index'));
                 
                 // Calculate match score (number of search words that match)
@@ -1660,7 +1809,18 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 
                 const matchesSearch = searchWords.length === 0 || matchScore > 0;
                 const matchesType = currentTypeFilter === 'all' || itemType === currentTypeFilter;
-                const isVisible = matchesSearch && matchesType;
+                
+                let matchesStatus = false;
+                if (currentStatusFilter === 'all') {{
+                    matchesStatus = true;
+                }} else if (currentStatusFilter === 'pass_fail' || currentStatusFilter === 'fail_pass') {{
+                     const compStatus = item.getAttribute('data-comparison-status');
+                     matchesStatus = (compStatus === currentStatusFilter);
+                }} else {{
+                     matchesStatus = (itemStatus === currentStatusFilter);
+                }}
+                
+                const isVisible = matchesSearch && matchesType && matchesStatus;
                 
                 return {{
                     element: item,
@@ -1670,9 +1830,47 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 }};
             }});
             
-            // Sort: if search is empty, use original order; otherwise sort by score
             if (searchWords.length === 0) {{
-                itemsWithScores.sort((a, b) => a.originalIndex - b.originalIndex);
+                 const sortSelect = document.getElementById('sortSelect');
+                 const sortBy = sortSelect ? sortSelect.value : 'original';
+                 
+                 itemsWithScores.sort((a, b) => {{
+                     if (sortBy === 'original') {{
+                         return a.originalIndex - b.originalIndex;
+                     }} 
+                     
+                     if (sortBy.includes('duration')) {{
+                         const getDuration = (el) => {{
+                             const t = el.querySelector('.summary-tile[data-time-ns]');
+                             return t ? parseFloat(t.getAttribute('data-time-ns')) : 0;
+                         }};
+                         const vA = getDuration(a.element);
+                         const vB = getDuration(b.element);
+                         return sortBy === 'duration_desc' ? vB - vA : vA - vB;
+                     }}
+                     
+                     if (sortBy.includes('change')) {{
+                         const getChange = (el) => {{
+                             const val = el.getAttribute('data-duration-change');
+                             const num = parseFloat(val);
+                             // Treat missing or 0 change as lowest priority for sorting
+                             if (val === null || val === '' || isNaN(num)) return Infinity;
+                             return num;
+                         }};
+                         const vA = getChange(a.element);
+                         const vB = getChange(b.element);
+                         
+                         // Handle valid vs invalid comparison (put invalid at bottom)
+                         if (vA === Infinity && vB === Infinity) return 0;
+                         if (vA === Infinity) return 1;
+                         if (vB === Infinity) return -1;
+                         
+                         // For change_desc (Best→Worst): sort ascending (negative first = best)
+                         // For change_asc (Worst→Best): sort descending (positive first = worst)
+                         return sortBy === 'change_desc' ? vA - vB : vB - vA;
+                     }}
+                     return a.originalIndex - b.originalIndex;
+                 }});
             }} else {{
                 itemsWithScores.sort((a, b) => {{
                     if (a.visible && b.visible) {{
@@ -1761,6 +1959,16 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         function applyComparison() {{
             if (!comparisonMetrics) return;
             
+            // Show comparison filters
+            document.querySelectorAll('.comparison-filter').forEach(el => el.style.display = 'inline-block');
+            
+            // Enable sort options
+            const sortSelect = document.getElementById('sortSelect');
+            if (sortSelect) {{
+                sortSelect.querySelector('option[value="change_desc"]').disabled = false;
+                sortSelect.querySelector('option[value="change_asc"]').disabled = false;
+            }}
+            
             const traceItems = document.querySelectorAll('.trace-item');
             
             traceItems.forEach(item => {{
@@ -1787,15 +1995,47 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                             compareSpan.className = 'metric-compare neutral';
                         }}
                     }});
+                    item.setAttribute('data-comparison-status', 'new');
+                    item.setAttribute('data-duration-change', '0');
                     return;
                 }}
                 
                 const comparisonData = comparisonMetrics[testName];
                 
-                // Apply to summary tiles (collapsed view)
+                // Determine Status Change
+                const currentStatusRaw = item.getAttribute('data-status') || 'unknown';
+                const prevStatusRaw = comparisonData.outcome || 'unknown';
+                
+                const normalize = (s) => {{
+                    const sl = s.toLowerCase();
+                    if (sl.includes('pass')) return 'pass';
+                    if (sl.includes('fail')) return 'fail';
+                    if (sl.includes('skip')) return 'skip';
+                    return 'unknown';
+                }};
+                
+                const currNorm = normalize(currentStatusRaw);
+                const prevNorm = normalize(prevStatusRaw);
+                
+                let compStatus = 'same';
+                if (prevNorm === 'pass' && currNorm === 'fail') compStatus = 'pass_fail';
+                else if (prevNorm === 'fail' && currNorm === 'pass') compStatus = 'fail_pass';
+                else if (prevNorm !== currNorm) compStatus = 'changed';
+                
+                item.setAttribute('data-comparison-status', compStatus);
+                
+                // Apply to summary tiles (collapsed view) and track total_duration change for sorting
+                let durationChange = 0;
                 summaryTiles.forEach(tile => {{
-                    applyComparisonToElement(tile, '.tile-compare', 'tile-compare', comparisonData.metrics);
+                    const delta = applyComparisonToElement(tile, '.tile-compare', 'tile-compare', comparisonData.metrics);
+                    // Store the total_duration change specifically for sorting purposes
+                    const metricName = tile.getAttribute('data-metric');
+                    if (metricName === 'total_duration' && delta !== null) {{
+                        durationChange = delta;
+                    }}
                 }});
+                
+                item.setAttribute('data-duration-change', durationChange);
                 
                 // Apply to metric cards (expanded view)
                 metricCards.forEach(card => {{
@@ -1830,21 +2070,24 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                     }}
                 }}
             }});
+            
+            // Re-apply filters to ensure sort and visibility are updated with new data
+            filterTraces();
         }}
         
         function applyComparisonToElement(element, compareSelector, compareClass, comparisonData) {{
             const metricName = element.getAttribute('data-metric');
             const compareSpan = element.querySelector(compareSelector);
             
-            if (!compareSpan) return;
+            if (!compareSpan) return null;
             
             // Get current value in nanoseconds from data attribute
             const currentValueNs = parseFloat(element.getAttribute('data-time-ns'));
-            if (isNaN(currentValueNs)) return;
+            if (isNaN(currentValueNs)) return null;
             
             // Get comparison value directly using the same metric name
             const comparisonValueNs = comparisonData[metricName];
-            if (!comparisonValueNs || comparisonValueNs === 0) return;
+            if (!comparisonValueNs || comparisonValueNs === 0) return null;
             
             const delta = ((currentValueNs - comparisonValueNs) / comparisonValueNs) * 100;
             
@@ -1862,6 +2105,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 compareSpan.textContent = `▲ ${{delta.toFixed(2)}}%`;
                 compareSpan.className = `${{compareClass}} negative`;
             }}
+            return delta;
         }}
         
         function clearComparison() {{
