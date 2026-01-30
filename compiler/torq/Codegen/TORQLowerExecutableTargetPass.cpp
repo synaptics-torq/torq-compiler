@@ -124,8 +124,10 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
         funcPm.addPass(createMarkPatternsForTileAndFusePass());
         funcPm.addPass(createTileAndFusePass());
         funcPm.addPass(createCanonicalizerPass());
-        funcPm.addPass(createUnrollLoopPass());
-        funcPm.addPass(createCanonicalizerPass());
+        if (!clUnrollLoopAfterBufferization) {
+            funcPm.addPass(createUnrollLoopPass());
+            funcPm.addPass(createCanonicalizerPass());
+        }
     }
 
     // lower the linalg operators to torq_hl before tiling
@@ -141,15 +143,13 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     funcPm.addPass(createLramTilePass());
     funcPm.addPass(createCanonicalizerPass());
 
-    if (!clEnableTorqTileAndFuse) {
-        // unroll loops
-        // better call this pass later as possible
-        // just after it all are torqhl related passes that need static rank or shape, etc.
-        // some dynamic attr because of tile could be populated by unroll loop pass
-        if (!clUnrollLoopAfterBufferization) {
-            funcPm.addPass(createUnrollLoopPass());
-            funcPm.addPass(createCanonicalizerPass());
-        }
+    // unroll loops
+    // better call this pass later as possible
+    // just after it all are torqhl related passes that need static rank or shape, etc.
+    // some dynamic attr because of tile could be populated by unroll loop pass
+    if (!clUnrollLoopAfterBufferization) {
+        funcPm.addPass(createUnrollLoopPass());
+        funcPm.addPass(createCanonicalizerPass());
     }
 
     // lower arith ops to torq_hl
