@@ -130,33 +130,6 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
     auto inactiveLramCodeArea = programOp.getBody().getArgument(1);
     auto currentInvocation = programOp.getBody().getArgument(2);
 
-    // Find pre-fetching of next program
-    torq_hl::ReturnOp originalTerminator;
-    torq_hl::LoadOp originalLoadNextProgramOp;
-
-    for (auto &use : inactiveLramCodeArea.getUses()) {
-        if (auto retOp = dyn_cast<torq_hl::ReturnOp>(use.getOwner())) {
-            if (originalTerminator) {
-                return programOp.emitOpError("multiple returns using inactive LRAM code area");
-            }
-
-            originalTerminator = retOp;
-        }
-        else if (auto loadOp = dyn_cast<torq_hl::LoadOp>(use.getOwner())) {
-
-            if (originalLoadNextProgramOp) {
-                return programOp.emitOpError(
-                    "multiple loads of next program using inactive LRAM code area"
-                );
-            }
-
-            originalLoadNextProgramOp = loadOp;
-        }
-        else {
-            return programOp.emitOpError("unexpected use of inactive LRAM code area");
-        }
-    }
-
     SmallVector<Value> codeBlockArgs;
 
     OpBuilder builder(programOp);
@@ -178,10 +151,21 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
 
         appendLiveIns(newBlock, blockArgs);
 
-        // Add block arguments to the new block for each live-in and replace uses within newBlock.
+        // create a mapping to replace values in the previous block with the new block arguments
+        IRMapping mapping;
         for (Value v : blockArgs) {
             auto arg = newBlock->addArgument(v.getType(), loc);
-            v.replaceUsesWithIf(arg, [&](OpOperand &useOp) {
+            mapping.map(v, arg);
+        }
+
+        // swap inactive and active LRAM code area for the new block (when we enter the block we
+        // will be using the previously inactive area as active)
+        mapping.map(activeLramCodeArea, newBlock->getArgument(0));
+        mapping.map(inactiveLramCodeArea, newBlock->getArgument(1));
+
+        // replace all uses in the new block with the corresponding block arguments
+        for (Value v : blockArgs) {
+            v.replaceUsesWithIf(mapping.lookup(v), [&](OpOperand &useOp) {
                 return useOp.getOwner()->getBlock() == newBlock;
             });
         }
@@ -209,15 +193,6 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
         inactiveLramCodeArea = newBlock->getArgument(1);
         currentInvocation = newBlock->getArgument(2);
     }
-
-    // Fixup the original load used by load of the next program to use the final inactive LRAM area.
-    if (originalLoadNextProgramOp) {
-        originalLoadNextProgramOp.getOutputMutable().set(inactiveLramCodeArea);
-    }
-
-    // Fixup the original terminator to use the final inactive LRAM area.
-    originalTerminator.getOperation()->setOperand(0, inactiveLramCodeArea);
-    originalTerminator.getOperation()->setOperand(1, activeLramCodeArea);
 
     // change the output of the create_invocation to return all the sections of the code
     auto createInvocationOp =
