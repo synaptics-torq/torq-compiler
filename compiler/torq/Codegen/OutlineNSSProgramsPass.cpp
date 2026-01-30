@@ -91,7 +91,11 @@ static bool isNssOperation(Operation &op) {
 static int getOperationSize(Operation *op) {
 
     // allocations and deallocations do not serialize
-    if (isa<memref::AllocOp, memref::DeallocOp>(op)) {
+    if (isa<memref::AllocOp, memref::DeallocOp, torq_hl::GetBlockOp>(op)) {
+        return 0;
+    }
+
+    if (isDerivedMemRefOperation(op)) {
         return 0;
     }
 

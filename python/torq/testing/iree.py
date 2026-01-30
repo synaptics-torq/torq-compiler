@@ -647,9 +647,18 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         print("Buffer trace will be available in: " + str(buffers_dir) + "\n")
         print("To view the buffer trace run:")
 
+        ir_dir = request.getfixturevalue("torq_compiled_model_phases").data
+
         ir_path = ""
 
-        print(f"cd {TOPDIR} && streamlit run apps/buffer_viewer/buffer_viewer.py {buffers_dir} {ir_path}")
+        if os.path.exists(ir_dir):
+            for irs in os.listdir(ir_dir):
+                if irs.endswith('9.executable-targets.mlir'):
+                    ir_path = str(Path(ir_dir) / irs)
+                    break
+
+
+        print(f"cd {TOPDIR} && streamlit run webapps/buffer_viewer/buffer_viewer.py {buffers_dir} {ir_path}")
         print()
     
     if enable_profiling:

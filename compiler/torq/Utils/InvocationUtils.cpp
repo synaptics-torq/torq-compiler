@@ -35,6 +35,12 @@ struct ProgramExecutor {
         auto startedInvocationOp = startedInvocation.getDefiningOp<torq_hl::CreateInvocationOp>();
 
         if (!startedInvocationOp) {
+
+            // we don't go through descriptors based invocations
+            if (isa<torq_hl::DescriptorOp>(startedInvocation.getDefiningOp())) {
+                return success();
+            }
+
             return startOp.emitError("Expected an invocation created by a create_invocation op or "
                                      "block argument pointing to one");
         }
@@ -86,6 +92,12 @@ struct ProgramExecutor {
         auto waitedInvocationOp = waitedInvocation.getDefiningOp<torq_hl::CreateInvocationOp>();
 
         if (!waitedInvocationOp) {
+
+            // we don't go through descriptors based invocations
+            if (isa<torq_hl::DescriptorOp>(waitedInvocation.getDefiningOp())) {
+                return success();
+            }
+
             return waitOp.emitError("Expected an invocation created by a create_invocation op or "
                                     "block argument pointing to one");
         }
@@ -373,15 +385,15 @@ getAddressFromInvocationArg(BlockArgument blockArg, int64_t offset, InvocationVa
         return std::nullopt; // no argument attribute found
     }
 
-    auto argAddress = dyn_cast<torq_hl::AddressAttr>(argAttr);
+    auto argBuffer = dyn_cast<torq_hl::BufferAttr>(argAttr);
 
-    if (!argAddress) {
+    if (!argBuffer) {
         return std::nullopt; // argument is not an address
     }
 
     // the address in the invocation arguments is a start address, not a base address
-    auto type = cast<MemRefType>(blockArg.getType());
-    auto baseAddress = argAddress.getAddress() - getMemRefTypeOffsetBytes(type);
+    auto type = argBuffer.getMemrefType();
+    auto baseAddress = argBuffer.getAddress() - getMemRefTypeOffsetBytes(type);
 
     return baseAddress + offset;
 }

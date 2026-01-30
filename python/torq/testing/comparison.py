@@ -78,7 +78,7 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
         print("To display the difference between expected and observed tensor run:")
         print(f"{TOPDIR}/scripts/diff-tensor.py {observed_output_path} {expected_output_path}")
         print("or")
-        print(f"cd {TOPDIR} && streamlit run apps/buffer_diff/buffer_diff.py {observed_output_path} {expected_output_path}")
+        print(f"cd {TOPDIR} && streamlit run webapps/buffer_diff/buffer_diff.py {observed_output_path} {expected_output_path}")
         np.save(str(observed_output_path), actual_observed_output)
         np.save(str(expected_output_path), actual_expected_output)
         observed_output, expected_output = check_nans(observed_output, expected_output)

@@ -457,24 +457,34 @@ static LogicalResult processOperationTime(Operation *op, const IRMapping &map, P
         // the invocation is a blockargument, so we use the lookup
         // to find the actual value for the current invocation
         // that is executing when this function gets called
-        auto invocationOp = map.lookup(sliceStartOp.getInvocation());
-
-        auto createInvocationOp = invocationOp.getDefiningOp<torq_hl::CreateInvocationOp>();
-
-        if (!createInvocationOp) {
-            llvm::report_fatal_error("Invocation is not a torq_hl::CreateInvocationOp");
-            return failure();
-        }
-
-        auto programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
-
-        if (!programOp) {
-            llvm::report_fatal_error("Program is not a torq_hl::ProgramOp");
-            return failure();
-        }
+        auto invocation = map.lookup(sliceStartOp.getInvocation());
 
         uint64_t duration = 0;
         std::string opName = "";
+        torq_hl::ProgramOp programOp;
+
+        if (auto createInvocationOp = invocation.getDefiningOp<torq_hl::CreateInvocationOp>()) {
+
+            programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
+
+            if (!programOp) {
+                llvm::report_fatal_error("Program is not a torq_hl::ProgramOp");
+                return failure();
+            }
+        }
+        else if (auto descriptorOp = invocation.getDefiningOp<torq_hl::DescriptorOp>()) {
+
+            programOp = descriptorOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
+
+            if (!programOp) {
+                llvm::report_fatal_error("Program is not a torq_hl::ProgramOp");
+                return failure();
+            }
+        }
+        else {
+            return invocation.getDefiningOp()->emitError()
+                   << "Unsupported invocation operation for profiling";
+        }
 
         programOp.getBody().walk([&](Operation *sop) {
             if (auto profOp = dyn_cast<torq_hw::SliceProfilingOp>(sop)) {
@@ -489,13 +499,15 @@ static LogicalResult processOperationTime(Operation *op, const IRMapping &map, P
             return WalkResult::advance();
         });
 
+        Location loc = programOp.getLoc();
+
         if (opName.empty()) {
             opName = "unknown";
         }
 
         prof.addToSliceTimeline(
             sliceStartOp.getId().getZExtValue(), prof.timestamp, prof.timestamp + duration, opName,
-            toString(programOp.getLoc())
+            toString(loc)
         );
 
         prof.timestamp += 1; // Add 1 cycle for slice start

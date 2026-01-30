@@ -7,6 +7,7 @@
 #pragma once
 
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 
 #include "torq/Dialect/TorqHL/TorqHLEnums.h.inc"
 

@@ -85,7 +85,7 @@ class Serializer {
 
     LogicalResult serializeInvocation(torq_hl::CreateInvocationOp &op);
 
-    LogicalResult serializeSliceInvocation(torq_hl::CreateInvocationOp &op);
+    LogicalResult serializeSliceDescriptor(torq_hl::DescriptorOp op);
 
     LogicalResult serializeCssInvocation(torq_hl::CreateInvocationOp &op);
 
@@ -884,8 +884,6 @@ LogicalResult Serializer::serializeNssInvocation(torq_hl::CreateInvocationOp &op
 LogicalResult Serializer::serializeInvocation(torq_hl::CreateInvocationOp &createInvocationOp) {
 
     switch (createInvocationOp.getProgram().getType().getExecutor()) {
-    case torq_hl::Executor::Slice:
-        return serializeSliceInvocation(createInvocationOp);
     case torq_hl::Executor::CSS:
         return serializeCssInvocation(createInvocationOp);
     case torq_hl::Executor::NSS:
@@ -971,12 +969,14 @@ LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &cr
         args.push_back(maybeArgsAttr->size());
 
         for (auto arg : *maybeArgsAttr) {
-            auto argValue = dyn_cast<torq_hl::AddressAttr>(arg);
+            auto argValue = dyn_cast<torq_hl::BufferAttr>(arg);
             if (!argValue) {
-                return createInvocationOp.emitError() << "Expected AddressAttr in invocation args";
+                return createInvocationOp.emitError() << "Expected BufferAttr in invocation args";
             }
 
-            switch (argValue.getMemSpace()) {
+            auto memSpace = getEncodingMemorySpace(argValue.getMemrefType());
+
+            switch (memSpace) {
             case torq_hl::MemorySpace::Dtcm:
                 args.push_back(argValue.getAddress() + HwInfo::css_dtcm_base_address);
                 break;
@@ -1028,91 +1028,29 @@ LogicalResult Serializer::serializeHostInvocation(torq_hl::CreateInvocationOp &c
     return success();
 }
 
-LogicalResult Serializer::serializeSliceInvocation(torq_hl::CreateInvocationOp &createInvocationOp
-) {
+LogicalResult Serializer::serializeSliceDescriptor(torq_hl::DescriptorOp descriptorOp) {
 
-    // This function generates the bitstream for a task, this is stored only in
-    // XRAM segments and will be loaded by the main NSS program
+    for (auto [codeAddr, codeAttr] :
+         llvm::zip(descriptorOp.getXramCodeAddresses(), descriptorOp.getCodeData())) {
+        auto codeData = cast<DenseI8ArrayAttr>(codeAttr);
 
-    // SliceID is needed only for logging purpose in order to dump the CFG descriptors in text
-    // files, using the same id for all descriptors wouldn´t change the functionality.
+        auto codeDataRef = codeData.getRawData();
 
-    auto maybeId = createInvocationOp.getExecutorId();
+        const uint8_t *codePtr = reinterpret_cast<const uint8_t *>(codeDataRef.data());
 
-    if (!maybeId) {
-        return createInvocationOp->emitOpError("Missing executor id");
-    }
+        auto dataRef = flatbuffers_uint8_vec_create(_builder, codePtr, codeDataRef.size());
 
-    auto slc = (*maybeId).getZExtValue();
+        _segments.push_back(iree_hal_torq_Segment_create(_builder, codeAddr, dataRef));
 
-    auto maybeLramCodeAddresses = createInvocationOp.getExecutorCodeAddresses();
-
-    if (!maybeLramCodeAddresses || maybeLramCodeAddresses->empty()) {
-        return createInvocationOp->emitOpError("Missing lram code address");
-    }
-
-    auto maybeXramCodeAddresses = createInvocationOp.getXramCodeAddresses();
-
-    if (!maybeXramCodeAddresses || maybeLramCodeAddresses->empty()) {
-        return createInvocationOp->emitOpError("Missing xram code address");
-    }
-
-    auto lramAddress = (*maybeLramCodeAddresses)[0];
-    auto xramAddress = (*maybeXramCodeAddresses)[0];
-
-    if (!_npu.beginCfg(slc, lramAddress, xramAddress)) {
-        return failure();
-    }
-
-    auto codeType = cast<MemRefType>(createInvocationOp.getCodeSections()[0].getType());
-
-    uint32_t programSize = getEncodedTotalSizeBytes(codeType);
-
-    // reserve the first 0x200 bytes of the program to store CFGs, the rest for the NDLS
-    // this value is chosen so that at least one CFG can fit there (and given the current
-    // hardcoded choice of program size the corresponding NDLs can fit in the remaining space)
-    // TODO: this program size should be computed based on the actual operations contained
-    // in the program
-    uint32_t remainingCfgSpace = 0x900;
-
-    uint32_t nextNdlXramBaseAddress = xramAddress + remainingCfgSpace;
-    uint32_t nextNdlLramBaseAddress = lramAddress + remainingCfgSpace;
-
-    uint32_t remainingNdlSpace = programSize - remainingCfgSpace;
-
-    if (programSize <= remainingCfgSpace) {
-        return createInvocationOp->emitOpError("Program size too small to fit CFGs instructions");
-    }
-
-    auto programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
-
-    if (!programOp) {
-        return createInvocationOp->emitOpError("program is not a torq_hl::ProgramOp");
-    }
-
-    for (auto &op : programOp.getOps()) {
-
-        if (isa<torq_hw::SliceProfilingOp, torq_hw::GetAddressOp, torq_hl::ReturnOp>(op)) {
-            continue;
-        }
-
-        auto taskOp = dyn_cast<torq_hw::SliceTaskOp>(op);
-
-        if (!taskOp) {
-            op.emitOpError("Unsupported operation in program for slice");
-            return failure();
-        }
-
-        if (failed(processSliceTaskOp(
-                taskOp, nextNdlLramBaseAddress, nextNdlXramBaseAddress, remainingNdlSpace,
-                remainingCfgSpace, createInvocationOp
-            ))) {
-            return failure();
+        if (!_dump_path.empty()) {
+            if (!succeeded(dumpSegmentDescriptor(
+                    0, true, codeAddr, codeDataRef.data(), codeDataRef.size(), true
+                ))) {
+                return failure();
+            }
         }
     }
-    if (_npu.endCfg() < 0) {
-        return failure();
-    }
+
     return success();
 }
 
@@ -1489,8 +1427,8 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
         }
 
         if (isa<torq_hl::ProgramOp, torq_hl::CreateInvocationOp, torq_hl::ConstOp,
-                torq_hl::MapBindingOp, func::ReturnOp, torq_hl::ImportProgramOp,
-                torq_hl::GetBlockOp, torq_hw::DispatchProfilingOp>(op) ||
+                torq_hl::DescriptorOp, torq_hl::MapBindingOp, func::ReturnOp,
+                torq_hl::ImportProgramOp, torq_hl::GetBlockOp, torq_hw::DispatchProfilingOp>(op) ||
             isDerivedMemRefOperation(&op)) {
             continue; // skip these ops
         }
@@ -1601,12 +1539,14 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
                 flatbuffers_uint64_vec_start(_builder);
                 for (auto arg : args) {
 
-                    auto argValue = dyn_cast<torq_hl::AddressAttr>(arg);
+                    auto argValue = dyn_cast<torq_hl::BufferAttr>(arg);
                     if (!argValue) {
-                        return startOp.emitError("expected AddressAttr arguments only");
+                        return startOp.emitError("expected BufferAttr arguments only");
                     }
 
-                    if (argValue.getMemSpace() != torq_hl::MemorySpace::Xram) {
+                    auto memSpace = getEncodingMemorySpace(argValue.getMemrefType());
+
+                    if (memSpace != torq_hl::MemorySpace::Xram) {
                         return startOp.emitError("expected XRAM memory space for host arguments");
                     }
 
@@ -1711,6 +1651,12 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
     LLVM_DEBUG({ llvm::dbgs() << "---- serializing programs\n"; });
     for (auto op : funcOp.getFunctionBody().getOps<torq_hl::CreateInvocationOp>()) {
         if (failed(serializeInvocation(op))) {
+            return failure();
+        }
+    }
+
+    for (auto op : funcOp.getFunctionBody().getOps<torq_hl::DescriptorOp>()) {
+        if (failed(serializeSliceDescriptor(op))) {
             return failure();
         }
     }

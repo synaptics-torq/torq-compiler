@@ -91,34 +91,46 @@ static LogicalResult updateCreateInvocation(
         // we are passing an invocation as argument to the program
         if (auto invocationArg = dyn_cast<TypedValue<torq_hl::InvocationType>>(argValue)) {
 
-            auto sourceInvocationOp = invocationArg.getDefiningOp<torq_hl::CreateInvocationOp>();
+            if (auto sourceInvocationOp =
+                    invocationArg.getDefiningOp<torq_hl::CreateInvocationOp>()) {
 
-            if (!sourceInvocationOp) {
+                torq_hl::Executor executor = invocationArg.getType().getExecutor();
+
+                auto maybeExecutorId = sourceInvocationOp.getExecutorId();
+
+                int executorId = -1;
+
+                if (maybeExecutorId) {
+                    executorId = (*maybeExecutorId).getZExtValue();
+                }
+
+                auto maybeCodeSectionAddresses = sourceInvocationOp.getXramCodeAddresses();
+
+                if (!maybeCodeSectionAddresses) {
+                    return startProgramOp.emitError()
+                           << "argument #" << idx
+                           << " has no valid code section addresses, see: " << argValue;
+                }
+
+                argAttrs.push_back(torq_hl::InvocationAttr::get(
+                    startProgramOp.getContext(), executor, executorId, *maybeCodeSectionAddresses
+                ));
+            }
+            else if (auto descriptorOp = invocationArg.getDefiningOp<torq_hl::DescriptorOp>()) {
+
+                torq_hl::Executor executor = invocationArg.getType().getExecutor();
+
+                int executorId = descriptorOp.getExecutorId().getZExtValue();
+
+                argAttrs.push_back(torq_hl::InvocationAttr::get(
+                    startProgramOp.getContext(), executor, executorId,
+                    descriptorOp.getXramCodeAddresses()
+                ));
+            }
+            else {
                 return startProgramOp.emitError()
                        << "argument #" << idx << " must be an create_invocation op";
             }
-
-            torq_hl::Executor executor = invocationArg.getType().getExecutor();
-
-            auto maybeExecutorId = sourceInvocationOp.getExecutorId();
-
-            int executorId = -1;
-
-            if (maybeExecutorId) {
-                executorId = (*maybeExecutorId).getZExtValue();
-            }
-
-            auto maybeCodeSectionAddresses = sourceInvocationOp.getXramCodeAddresses();
-
-            if (!maybeCodeSectionAddresses) {
-                return startProgramOp.emitError()
-                       << "argument #" << idx
-                       << " has no valid code section addresses, see: " << argValue;
-            }
-
-            argAttrs.push_back(torq_hl::InvocationAttr::get(
-                startProgramOp.getContext(), executor, executorId, *maybeCodeSectionAddresses
-            ));
         }
         else if (auto memRefArg = dyn_cast<TypedValue<MemRefType>>(argValue)) {
 
@@ -130,11 +142,9 @@ static LogicalResult updateCreateInvocation(
                        << torq_hl::stringifyExecutor(executor) << ", see: " << argValue;
             }
 
-            auto memSpace = getEncodingMemorySpace(memRefArg.getType());
-
-            argAttrs.push_back(
-                torq_hl::AddressAttr::get(startProgramOp.getContext(), memSpace, *maybeStartAddress)
-            );
+            argAttrs.push_back(torq_hl::BufferAttr::get(
+                startProgramOp.getContext(), memRefArg.getType(), *maybeStartAddress
+            ));
         }
         else {
             return startProgramOp.emitError() << "argument #" << idx << " has unsupported type "

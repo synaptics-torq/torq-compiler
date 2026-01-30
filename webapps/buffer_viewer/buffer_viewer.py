@@ -350,6 +350,7 @@ st.markdown("""
             """)
 
 action_descs = None
+buffer_actions = None
 
 if len(sys.argv) > 1:
     uploaded_file = sys.argv[1]
@@ -392,8 +393,9 @@ if analysis_mode == "View buffer state across actions":
     for desc in description:        
         st.write(f"**{desc[0]}**: {desc[1]}")
 
-    st.markdown("**Action that creates this buffer**")
-    st.code(buffer_actions[executable][buffer.id], wrap_lines=True)
+    if buffer_actions is not None:
+        st.markdown("**Action that creates this buffer**")
+        st.code(buffer_actions[executable][buffer.id], wrap_lines=True)
 
     st.subheader("Buffer contents")
 

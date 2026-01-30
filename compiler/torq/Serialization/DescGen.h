@@ -10,6 +10,9 @@
 #include <string>
 #include <vector>
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmultichar"
+
 namespace mlir::syna::torq {
 
 typedef void *TorqHandle;
@@ -335,3 +338,5 @@ class DescGen {
 };
 
 } // namespace mlir::syna::torq
+
+#pragma clang diagnostic pop

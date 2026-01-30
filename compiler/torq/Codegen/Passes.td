@@ -138,6 +138,17 @@ def CompileCpuPrograms :
   ];
 }
 
+def CompileSliceInvocation :
+    InterfacePass<"torq-compile-slice-invocation",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Compile slice invocation operations";
+  let constructor = "mlir::syna::torq::createCompileSliceInvocationPass()";
+
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect"
+  ];
+}
+
 def LowerCallProgramToStartWait :
     InterfacePass<"torq-lower-css-calls-to-start-wait",
          "mlir::FunctionOpInterface"> {

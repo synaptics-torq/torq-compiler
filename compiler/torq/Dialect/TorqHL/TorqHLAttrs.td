@@ -253,15 +253,15 @@ def TorqHL_AluConfigAttr :
 
 }
 
-def TorqHL_AddressAttr: AttrDef<TorqHL_Dialect, "Address", []>
+def TorqHL_BufferAttr: AttrDef<TorqHL_Dialect, "Buffer", []>
 {
-  let mnemonic = "addr";
+  let mnemonic = "buffer";
   let parameters = (ins
-    "MemorySpace": $mem_space,
+    "MemRefType": $memref_type,
     "int64_t":$address
   );
 
-  let assemblyFormat = "`<` `mem_space` $mem_space `,` `address` $address `>`";
+  let assemblyFormat = "`<` `memref_type` $memref_type `,` `address` $address `>`";
 }
 
 def TorqHL_InvocationAttr: AttrDef<TorqHL_Dialect, "Invocation", []>

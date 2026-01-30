@@ -12,6 +12,7 @@ set(sources
     BufferizationUtils.cpp
     CheckCssStackSizePass.cpp
     CompileCpuProgramsPass.cpp
+    CompileSliceInvocationPass.cpp
     CompileTimeConstComputePass.cpp
     EncodeTensorsPass.cpp
     FoldConvertPass.cpp
@@ -100,6 +101,7 @@ iree_cc_library(
     iree::target::torq::Conversions::TorqHLToTorqHW
     iree::target::torq::Transforms::Linalg::Transforms    
     iree::target::torq::Codegen::css_bootstrap::torq_kernel_riscv
+    iree::target::torq::Serialization::Serialization
 )
 
 add_subdirectory("css_bootstrap")

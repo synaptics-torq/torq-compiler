@@ -281,6 +281,9 @@ void TORQLowerExecutableTargetPass::addNssPasses(OpPassManager &pm) {
     // lower torq_hl operation inside torq_hl::ProgramOp to torq_hw operations
     funcPm.addNestedPass<torq_hl::ProgramOp>(createConvertSliceProgramToTorqHwPass());
 
+    // compile slice programs
+    funcPm.addPass(createCompileSliceInvocationPass());
+
     // create NSS programs with all the NSS instructions
     funcPm.addPass(createOutlineNSSProgramsPass());
 

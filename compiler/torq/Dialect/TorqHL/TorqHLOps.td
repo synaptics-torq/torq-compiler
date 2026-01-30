@@ -719,6 +719,31 @@ def TorqHl_CreateInvocationOp: TorqHL_Op<"create_invocation"> {
 
 }
 
+
+def TorqHL_DescriptorOp: TorqHL_Op<"descriptor"> {
+  let summary = "Descriptor for program invocation";
+
+  let arguments = (ins
+    StrAttr:$name,
+    IndexAttr:$executor_id,
+    TorqHL_Program:$program, // keep this for the moment to help with profiling
+    DenseI64ArrayAttr:$executor_code_addresses,
+    DenseI64ArrayAttr:$xram_code_addresses,
+    ArrayAttr:$code_data
+  );
+
+  let results = (outs
+    TorqHL_Invocation:$invocation, Variadic<AnyMemRef>:$code_sections
+  );
+
+  let assemblyFormat = [{
+    $name `on` $executor_id `program` $program `:` type($program) `code` $code_data attr-dict `:` qualified(type($invocation)) (`,` type($code_sections)^)?
+  }];
+
+  
+}
+
+
 def TorqHl_CallProgramOp: TorqHL_Op<"call_program", [DestinationStyleOpInterface, AttrSizedOperandSegments]> {
   let summary = "Call program";
 
