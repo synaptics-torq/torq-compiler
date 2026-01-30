@@ -15,6 +15,7 @@ import json
 from iree.compiler.ir import Context, Module
 
 from .aws_fpga import FpgaSession
+from .soc_testing import SoCTestRunner
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
 from torq.performance import annotate_host_profile_from_files
@@ -47,6 +48,7 @@ def pytest_addoption(parser):
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
     parser.addoption("--torq-compile-time-profiling-output-dir", default=None, help="Directory to save per-test compile time profiling outputs")
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
+    parser.addoption("--torq-soc-addr", default=None, help="SSH address to run tests remotely on SoC")
 
 
 def pytest_generate_tests(metafunc):
@@ -616,28 +618,50 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             *iree_input_data_args]
 
     tv_dir = versioned_dir / 'tv'
-    buffers_dir = versioned_dir / 'buffers'    
+    buffers_dir = versioned_dir / 'buffers'
+    extra_runtime_opts = []
 
     if enable_hw_test_vectors:
-        cmds.append('--torq_desc_data_dir=' + str(request.getfixturevalue("torq_compiled_hw_descriptors").data))
-        cmds.append('--torq_dump_mem_data_dir=' + str(tv_dir))
+        extra_runtime_opts.append('--torq_desc_data_dir=' + str(request.getfixturevalue("torq_compiled_hw_descriptors").data))
+        extra_runtime_opts.append('--torq_dump_mem_data_dir=' + str(tv_dir))
 
     if enable_torq_buffer_tracing:
-        cmds.append('--torq_dump_buffers_dir=' + str(buffers_dir))
+        extra_runtime_opts.append('--torq_dump_buffers_dir=' + str(buffers_dir))
 
     if enable_profiling:
         host_profile_path = versioned_dir / 'host_profile.csv'
-        cmds.append(f'--torq_profile_host=' + str(host_profile_path))
+        extra_runtime_opts.append(f'--torq_profile_host=' + str(host_profile_path))
 
-    print("Running for TORQ with: " + " ".join(cmds))
-    if runtime_hw_type == 'aws_fpga':            
-        with FpgaSession(chip_config['aws_fpga']) as fpga_session:
-            with request.getfixturevalue("scenario_log").event("torq_run"):
-                subprocess.check_call(cmds, timeout=torq_runtime_timeout)
-    else:
+    soc_addr = request.config.getoption("--torq-soc-addr")
+    if soc_addr:
+        all_runtime_opts = (
+            list(torq_runtime_options)
+            + list(extra_runtime_opts)
+            + ['--device=torq', '--torq_hw_type=astra_machina']
+        )
+        print("Running for TORQ on SoC with iree-run-module at " + soc_addr)
+        runner = SoCTestRunner(
+            torq_compiled_model,
+            torq_mlir_func_name,
+            iree_input_data_args,
+            output_args,
+            *all_runtime_opts,
+            board_addr=soc_addr,
+            recompute_cache=request.config.getoption("--recompute-cache")
+        )
         with request.getfixturevalue("scenario_log").event("torq_run"):
-            # FIXME: Depending on the platform and the model this will not be enough (tests with desc dumping are particularly slow).
-            subprocess.check_call(cmds, timeout=torq_runtime_timeout)
+            runner.run(timeout=torq_runtime_timeout)
+    else:
+        cmds += extra_runtime_opts
+        print("Running for TORQ with: " + " ".join(cmds))
+        if runtime_hw_type == 'aws_fpga':            
+            with FpgaSession(chip_config['aws_fpga']) as fpga_session:
+                with request.getfixturevalue("scenario_log").event("torq_run"):
+                    subprocess.check_call(cmds, timeout=torq_runtime_timeout)
+        else:
+            with request.getfixturevalue("scenario_log").event("torq_run"):
+                # FIXME: Depending on the platform and the model this will not be enough (tests with desc dumping are particularly slow).
+                subprocess.check_call(cmds, timeout=torq_runtime_timeout)
 
     if enable_hw_test_vectors:
         print(f"Generated test vectors in {tv_dir}")
