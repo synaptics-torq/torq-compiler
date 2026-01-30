@@ -25,7 +25,7 @@
                 {% if main_branch_session.git_commit %}
                 <div class="info-card">
                     <h4>Git Commit</h4>
-                    <p class="info-value monospace">{{ main_branch_session.git_commit|truncatechars:10 }}</p>
+                    <p class="info-value monospace"><a href="{{ main_branch_session.git_commit_url }}" target="_blank" style="color: inherit; text-decoration: underline;">{{ main_branch_session.git_commit|truncatechars:10 }}</a></p>
                 </div>
                 {% endif %}
                 <div class="info-card">
@@ -102,7 +102,7 @@
                         <td class="branch-name"><a href="{% url 'test_session' session.id %}">{{ session.git_branch }}</a></td>
                         <td class="text-center">#{{ session.id }}</td>
                         <td>{{ session.timestamp|date:"M d, H:i" }}</td>
-                        <td class="commit-hash">{{ session.git_commit|truncatechars:10|default:"—" }}</td>
+                        <td class="commit-hash">{% if session.git_commit %}<a href="{{ session.git_commit_url }}" target="_blank" style="color: inherit; text-decoration: underline;">{{ session.git_commit|truncatechars:10 }}</a>{% else %}—{% endif %}</td>
                         <td class="text-center">{{ session.num_total }}</td>
                         <td class="text-center stat-passed">{{ session.num_passed }}</td>
                         <td class="text-center stat-failed">{{ session.num_failed }}</td>

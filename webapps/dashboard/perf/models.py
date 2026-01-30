@@ -92,6 +92,20 @@ class TestSession(models.Model):
     def num_total(self, value):
         self._num_total_cache = value
 
+    @property
+    def git_commit_url(self):
+        """Generate GitHub commit URL from workflow_url if available, otherwise use default repo."""
+        if self.git_commit:
+            # Try to extract repo base URL from workflow_url
+            # Format: https://github.com/owner/repo/actions/runs/...
+            if self.workflow_url and '/actions/runs/' in self.workflow_url:
+                # Extract everything before /actions/runs/
+                repo_base = self.workflow_url.split('/actions/runs/')[0]
+                return f"{repo_base}/commit/{self.git_commit}"
+            # Fallback to default repo
+            return f"https://github.com/synaptics-torq/torq-compiler-dev/commit/{self.git_commit}"
+        return None
+
     def __str__(self):
         return f"Session #{self.id} (commit: {self.git_commit}, branch: {self.git_branch})"
 
