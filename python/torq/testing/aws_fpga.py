@@ -1,28 +1,35 @@
 from filelock import FileLock
 import subprocess
 from contextlib import contextmanager
+from ..utils.remote_runner import SSHCommandRunner
 
-def load_bitstream(agfi, bandwidth, force=False):
+def load_bitstream(agfi, bandwidth, force=False, runner: SSHCommandRunner | None = None):
 
     print(f"Loading FPGA bitstream {agfi} with bandwidth {bandwidth}...")
+    
+    def run(cmd):
+        if runner:
+            return runner.run_cmd(cmd)
+        else:
+            return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
     if not force:
         # find the currently loaded AGFI
-        result = subprocess.run(["fpga-describe-local-image", "-S", "0"], capture_output=True, text=True)
-        if agfi in result.stdout:
+        result = run(["fpga-describe-local-image", "-S", "0"])
+        if agfi in result:
             print("Bitstream already loaded.")
             return
 
     # load the bitstream
-    subprocess.run(["fpga-load-local-image", "-S", "0", "-I", agfi], check=True)
+    run(["fpga-load-local-image", "-S", "0", "-I", agfi])
 
     # setup clocks
-    subprocess.run(["fpga-load-clkgen-recipe", "-S", "0", "-b", str(bandwidth)], check=True)
+    run(["fpga-load-clkgen-recipe", "-S", "0", "-b", str(bandwidth)])
 
     # display current status
-    clk_status = subprocess.run(["fpga-describe-clkgen", "-S", "0"], check=True, capture_output=True, text=True)
+    clk_status = run(["fpga-describe-clkgen", "-S", "0"])
 
-    lines = clk_status.stdout.splitlines()
+    lines = clk_status.splitlines()
     rate = None
 
     for i, line in enumerate(lines):
@@ -49,6 +56,20 @@ def FpgaSession(fpga_configuration):
             yield None
         except:
             load_bitstream(fpga_configuration["agfi"], fpga_configuration["bandwidth"], force=True)
+            raise
+        finally:
+            pass
+
+@contextmanager
+def RemoteFpgaSession(fpga_configuration, remote_address, remote_port):
+
+    with FileLock("/tmp/fpga.lock"):
+        runner = SSHCommandRunner(remote_address, timeout=10*60, port=remote_port)
+        try:
+            load_bitstream(fpga_configuration["agfi"], fpga_configuration["bandwidth"], force=False, runner=runner)
+            yield None
+        except:
+            load_bitstream(fpga_configuration["agfi"], fpga_configuration["bandwidth"], force=True, runner=runner)
             raise
         finally:
             pass

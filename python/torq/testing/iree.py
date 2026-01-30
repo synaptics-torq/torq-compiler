@@ -14,8 +14,8 @@ import json
 
 from iree.compiler.ir import Context, Module
 
-from .aws_fpga import FpgaSession
-from .soc_testing import SoCTestRunner
+from .aws_fpga import FpgaSession, RemoteFpgaSession
+from .remote_testing import RemoteTestRunner
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
 from torq.performance import annotate_host_profile_from_files
@@ -48,7 +48,8 @@ def pytest_addoption(parser):
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
     parser.addoption("--torq-compile-time-profiling-output-dir", default=None, help="Directory to save per-test compile time profiling outputs")
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
-    parser.addoption("--torq-soc-addr", default=None, help="SSH address to run tests remotely on SoC")
+    parser.addoption("--torq-addr", default=None, help="SSH address to run tests remotely")
+    parser.addoption("--torq-port", default=None, help="SSH port to run tests remotely")
 
 
 def pytest_generate_tests(metafunc):
@@ -632,25 +633,33 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         host_profile_path = versioned_dir / 'host_profile.csv'
         extra_runtime_opts.append(f'--torq_profile_host=' + str(host_profile_path))
 
-    soc_addr = request.config.getoption("--torq-soc-addr")
-    if soc_addr:
+    remote_addr = request.config.getoption("--torq-addr")
+    if remote_addr:
+        remote_port = request.config.getoption("--torq-port")
         all_runtime_opts = (
             list(torq_runtime_options)
             + list(extra_runtime_opts)
-            + ['--device=torq', '--torq_hw_type=astra_machina']
+            + ['--device=torq', '--torq_hw_type='+runtime_hw_type]
         )
-        print("Running for TORQ on SoC with iree-run-module at " + soc_addr)
-        runner = SoCTestRunner(
+        print("Running for TORQ remotely with iree-run-module at " + remote_addr + ":" + str(remote_port))
+        runner = RemoteTestRunner(
             torq_compiled_model,
             torq_mlir_func_name,
             iree_input_data_args,
             output_args,
             *all_runtime_opts,
-            board_addr=soc_addr,
+            board_addr=remote_addr,
+            port=remote_port,
             recompute_cache=request.config.getoption("--recompute-cache")
         )
-        with request.getfixturevalue("scenario_log").event("torq_run"):
-            runner.run(timeout=torq_runtime_timeout)
+        if runtime_hw_type == 'aws_fpga':
+            port = request.config.getoption("--torq-port")
+            with RemoteFpgaSession(chip_config['aws_fpga'], remote_addr, port) as fpga_session:
+                with request.getfixturevalue("scenario_log").event("torq_run"):
+                    runner.run(timeout=torq_runtime_timeout)
+        else:
+            with request.getfixturevalue("scenario_log").event("torq_run"):
+                runner.run(timeout=torq_runtime_timeout)
     else:
         cmds += extra_runtime_opts
         print("Running for TORQ with: " + " ".join(cmds))

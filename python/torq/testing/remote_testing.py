@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 from ..utils.remote_runner import SSHCommandRunner
 
 
-class SoCTestRunner:
+class RemoteTestRunner:
 
     def __init__(
         self,
@@ -18,6 +18,7 @@ class SoCTestRunner:
         remote_dir_name: str | None = None,
         recompute_cache: bool = False,
         logger: logging.Logger | None = None,
+        port : int = 22
     ):
         self.vmfb_path = Path(vmfb_path)
         self.function_name = function_name
@@ -25,11 +26,12 @@ class SoCTestRunner:
         self.output_data_args = list(output_data_args)
         self.runtime_opts = list(runtime_opts)
         self.board_addr = board_addr
+        self.port = port
         self._recompute_cache = recompute_cache
         self._logger = logger or logging.getLogger(__class__.__name__)
 
         if not self.board_addr:
-            raise ValueError("SoCTestRunner requires a board address.")
+            raise ValueError("RemoteTestRunner requires a board address.")
 
         if remote_dir_name:
             self.remote_root = PurePosixPath("/tmp") / remote_dir_name
@@ -88,9 +90,9 @@ class SoCTestRunner:
         remote_root = str(self.remote_root)
         remote_model_path = str(self.remote_root / self.vmfb_path.name)
 
-        with SSHCommandRunner(self.board_addr, timeout=int(timeout), multiplex=True) as runner:
+        with SSHCommandRunner(self.board_addr, timeout=int(timeout), multiplex=True, port=self.port) as runner:
             if self._recompute_cache:
-                runner.run_cmd(["rm", "-r", remote_root])
+                runner.run_cmd(["rm", "-rf", remote_root])
             runner.run_cmd(["mkdir", "-p", remote_root])
 
             runner.copy_files(str(self.vmfb_path), remote_root, board_dst=True)
@@ -112,14 +114,14 @@ class SoCTestRunner:
                 remote_output_args.append(remote_arg)
 
             cmd = [
-                "iree-run-module",
+                "IREE_RUN_MODULE=iree-run-module ;  if [ -f /usr/local/bin/setup-test-environment ] ; then source /usr/local/bin/setup-test-environment ; fi ; $IREE_RUN_MODULE",
                 f"--module={remote_model_path}",
                 f"--function={self.function_name}",
                 *remote_runtime_opts,
                 *remote_output_args,
                 *remote_input_args,
             ]
-            self._logger.info("Running SoC test: %s", " ".join(cmd))
+            self._logger.info("Running remote test: %s", " ".join(cmd))
             runner.run_cmd(cmd)
 
             for remote_path, local_path in output_files.items():

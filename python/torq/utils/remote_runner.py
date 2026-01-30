@@ -3,6 +3,8 @@ import os
 import shlex
 import subprocess
 import tempfile
+import platform
+import sys
 from abc import ABC, abstractmethod
 from uuid import uuid4
 
@@ -63,6 +65,7 @@ class SSHCommandRunner(RemoteCommandRunner):
         multiplex: bool = False,
         keep_alive: int = 10,
         logger: logging.Logger | None = None,
+        port: int = 22
     ):
         super().__init__(board_ip, timeout, logger=logger)
         self.multiplex = bool(multiplex)
@@ -72,9 +75,12 @@ class SSHCommandRunner(RemoteCommandRunner):
             "-o", f"ConnectTimeout={self.timeout}",
         ]
         self.ssh_socket = None
+        self.port = port
         if self.multiplex:
             socket_name = f"ssh_mux_{board_ip.replace('.', '_')}_{os.getpid()}_{str(uuid4())}"
-            self.ssh_socket = os.path.join(tempfile.gettempdir(), socket_name)
+            # n MacOs use /tmp since gettempdir() path is too long
+            tempdir = "/tmp" if platform.system() == "Darwin" else tempfile.gettempdir()
+            self.ssh_socket = os.path.join(tempdir, socket_name)
             self._init_connection()
 
     def _init_connection(self) -> None:
@@ -85,6 +91,7 @@ class SSHCommandRunner(RemoteCommandRunner):
             "-o", "ControlMaster=yes",
             "-o", f"ControlPath={self.ssh_socket}",
             "-o", f"ControlPersist={self.keep_alive}s",
+            "-p", str(self.port),
             self.board_addr
         ] + self.ssh_options,
         stdout=subprocess.DEVNULL,
@@ -98,6 +105,7 @@ class SSHCommandRunner(RemoteCommandRunner):
                 [
                     "ssh", "-O", "exit",
                     "-o", f"ControlPath={self.ssh_socket}",
+                    "-p", str(self.port)
                 ] + self.ssh_options + [
                     self.board_addr,
                 ],
@@ -124,12 +132,14 @@ class SSHCommandRunner(RemoteCommandRunner):
                     "ssh", "-T",
                     "-o", "ControlMaster=no",
                     "-o", f"ControlPath={self.ssh_socket}",
+                    "-p", str(self.port),
                 ] + self.ssh_options + [self.board_addr] + cmd
             else:
                 full_cmd = [
                     "ssh", "-T",
                     "-o", "BatchMode=yes",
                     "-o", f"ConnectTimeout={self.timeout}",
+                    "-p", str(self.port),
                     self.board_addr,
                 ] + cmd
             result = subprocess.check_output(
@@ -167,6 +177,7 @@ class SSHCommandRunner(RemoteCommandRunner):
             cmd.extend([
                 "-o", "ControlMaster=no",
                 "-o", f"ControlPath={self.ssh_socket}",
+                "-P", str(self.port),
                 src,
                 dst
             ])
@@ -174,6 +185,7 @@ class SSHCommandRunner(RemoteCommandRunner):
             cmd.extend([
                 "-o", "BatchMode=yes",
                 "-o", f"ConnectTimeout={self.timeout}",
+                "-P", str(self.port),
                 src,
                 dst
             ])
