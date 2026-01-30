@@ -54,19 +54,43 @@ class TestSession(models.Model):
 
     @property
     def num_passed(self):
+        if hasattr(self, "_num_passed_cache"):
+            return self._num_passed_cache
         return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.PASS).count()
+
+    @num_passed.setter
+    def num_passed(self, value):
+        self._num_passed_cache = value
 
     @property
     def num_skipped(self):
+        if hasattr(self, "_num_skipped_cache"):
+            return self._num_skipped_cache
         return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.SKIP).count()
+
+    @num_skipped.setter
+    def num_skipped(self, value):
+        self._num_skipped_cache = value
 
     @property
     def num_failed(self):
+        if hasattr(self, "_num_failed_cache"):
+            return self._num_failed_cache
         return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.FAIL).count()
+
+    @num_failed.setter
+    def num_failed(self, value):
+        self._num_failed_cache = value
 
     @property
     def num_total(self):
+        if hasattr(self, "_num_total_cache"):
+            return self._num_total_cache
         return TestRun.objects.filter(test_run_batch__test_session=self).count()
+
+    @num_total.setter
+    def num_total(self, value):
+        self._num_total_cache = value
 
     def __str__(self):
         return f"Session #{self.id} (commit: {self.git_commit}, branch: {self.git_branch})"

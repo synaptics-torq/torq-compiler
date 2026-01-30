@@ -448,6 +448,7 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                             dma_out_used,
                             cdma_used,
                             css_used,
+                            False, # host_used
                         ))
 
         elif is_host_wait_task: 
@@ -459,6 +460,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
             # TODO: Maybe find a way to determine this from profiling data instead of using this heuristic.
             if operation == "torq_hl.start_program" and str(op.operation.operands[0].type) == "!torq_hl.invocation<host>":
                 operation += " (host)"
+
+            host_used = operation.startswith('torq_hl.host_copy')
 
             row = {
                     "action_id": action_id,
@@ -501,6 +504,7 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                         None, # dma_out_used
                         None, # cdma_used
                         None, # css_used
+                        host_used,
                     ))
 
     df = pd.DataFrame(rows)

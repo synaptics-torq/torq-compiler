@@ -568,12 +568,13 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
     slice_1_intervals = []
     cdma_intervals = []
     css_intervals = []
+    host_copy_intervals = []
     
     for row in all_rows:
-        # Unpack row (15 elements)
+        # Unpack row (16 elements)
         (action_id, job_id, start_time, end_time, mlir_loc, original_operator, 
             invocation_name, operation, slice_id, slice_0_used, slice_1_used, 
-            dma_in_used, dma_out_used, cdma_used, css_used) = row
+            dma_in_used, dma_out_used, cdma_used, css_used, host_used) = row
         
         # Convert microseconds to nanoseconds (ensure integer conversion)
         start_time = int(start_time * 1000)
@@ -596,6 +597,9 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
 
         if css_used:
             css_intervals.append((start_time, end_time))
+        
+        if host_used:
+            host_copy_intervals.append((start_time, end_time))
             
     # Merge overlapping intervals
     merged_dma = merge_intervals(dma_intervals)
@@ -630,8 +634,8 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
     
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
     
-    # Calculate BUSY time (union of DMA+CDMA and SLICE+CSS)
-    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined)
+    # Calculate BUSY time (union of DMA+CDMA, SLICE+CSS, and HOST_COPY)
+    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined + host_copy_intervals)
     busy_time = sum(end - start for start, end in busy_intervals)
     
     # Calculate IDLE time
@@ -815,10 +819,10 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
     unique_events = {}
     
     for row_data in all_rows:
-        # Handle new tuple format (15-tuple)
+        # Handle new tuple format (16-tuple)
         (dispatch_id, job_id, start_time, end_time, mlir_loc, original_operator, 
          invocation_name, operation, slice_id, slice_0_used, slice_1_used, 
-         dma_in_used, dma_out_used, cdma_used, css_used) = row_data
+         dma_in_used, dma_out_used, cdma_used, css_used, host_used) = row_data
         
         # Convert microseconds to nanoseconds (ensure integer conversion)
         start_time = int(start_time * 1000)
@@ -829,11 +833,11 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
         
         # Keep the first occurrence or prefer entries with original_operator
         if event_key not in unique_events:
-            unique_events[event_key] = (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used)
+            unique_events[event_key] = (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used, host_used)
         else:
             # Merge information to capture all details (invocation name, original operator, etc.)
             existing = unique_events[event_key]
-            (e_job_id, e_mlir_loc, e_original_operator, e_invocation_name, e_operation, e_slice_id, e_slice_0_used, e_slice_1_used, e_dma_in_used, e_dma_out_used, e_cdma_used, e_css_used) = existing
+            (e_job_id, e_mlir_loc, e_original_operator, e_invocation_name, e_operation, e_slice_id, e_slice_0_used, e_slice_1_used, e_dma_in_used, e_dma_out_used, e_cdma_used, e_css_used, e_host_used) = existing
             
             def pick_best(new_val, old_val):
                 if new_val and str(new_val) != 'nan' and str(new_val) != 'None' and str(new_val).strip():
@@ -853,23 +857,26 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
             new_dma_out_used = dma_out_used or e_dma_out_used
             new_cdma_used = cdma_used or e_cdma_used
             new_css_used = css_used or e_css_used
+            new_host_used = host_used or e_host_used # Merge host op flag
             
             new_slice_id = slice_id if slice_id is not None else e_slice_id
             
-            unique_events[event_key] = (new_job_id, new_mlir_loc, new_original_operator, new_invocation_name, new_operation, new_slice_id, new_slice_0_used, new_slice_1_used, new_dma_in_used, new_dma_out_used, new_cdma_used, new_css_used)
+            unique_events[event_key] = (new_job_id, new_mlir_loc, new_original_operator, new_invocation_name, new_operation, new_slice_id, new_slice_0_used, new_slice_1_used, new_dma_in_used, new_dma_out_used, new_cdma_used, new_css_used, new_host_used)
     
     # Create tracks in desired order
     input_layer_track = "00_Input_Layer"
     torq_ops_track = "01_Torq_Operations"
-    dma_in_track = "02_DMA_In"
-    dma_out_track = "03_DMA_Out"
-    cdma_track = "04_CDMA"
-    slice_0_track = "05_Slice_0"
-    slice_1_track = "06_Slice_1"
-    css_track = "07_CSS"
+    host_track = "02_Host"
+    dma_in_track = "03_DMA_In"
+    dma_out_track = "04_DMA_Out"
+    cdma_track = "05_CDMA"
+    slice_0_track = "06_Slice_0"
+    slice_1_track = "07_Slice_1"
+    css_track = "08_CSS"
     
     trace_writer.add_thread_descriptor(view_name, input_layer_track)
     trace_writer.add_thread_descriptor(view_name, torq_ops_track)
+    trace_writer.add_thread_descriptor(view_name, host_track)
     trace_writer.add_thread_descriptor(view_name, dma_in_track)
     trace_writer.add_thread_descriptor(view_name, dma_out_track)
     trace_writer.add_thread_descriptor(view_name, cdma_track)
@@ -884,7 +891,7 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
     merged_operator_events = []
     current_operator_event = None
     
-    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used) in sorted_events:
+    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used, host_used) in sorted_events:
         # Only process events that have a valid original_operator
         if original_operator and original_operator != 'nan' and str(original_operator).strip() and original_operator != 'None':
             if current_operator_event is None:
@@ -928,16 +935,21 @@ def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, o
         trace_writer.add_event(operator_event)
     
     # Create events for Torq Operations, DMA, CDMA and Slice tracks
-    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used) in unique_events.items():
+    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used, host_used) in unique_events.items():
         duration = end_time - start_time
         percent = (duration / overall_time * 100) if overall_time else 0
         short_loc = shorten_mlir_location(mlir_loc)
         
         # Create event for Torq Operations track (based on Invocation Name)
         if invocation_name and invocation_name != 'nan' and invocation_name != 'None' and str(invocation_name).strip():
-            torq_ops_details = f"{invocation_name} | {short_loc} | dur={duration} ({percent:.2f}%)"
-            torq_ops_event = PerfettoEvent(view_name, torq_ops_track, torq_ops_details, start_time, end_time)
+            details = f"{invocation_name} | {short_loc} | dur={duration} ({percent:.2f}%)"
+            torq_ops_event = PerfettoEvent(view_name, torq_ops_track, details, start_time, end_time)
             trace_writer.add_event(torq_ops_event)
+        
+        if host_used:
+            details = f"{operation} | {short_loc} | dur={duration} ({percent:.2f}%)"
+            host_event = PerfettoEvent(view_name, host_track, details, start_time, end_time)
+            trace_writer.add_event(host_event)
         
         # Prepare common details
         input_layer_str = original_operator if (original_operator and original_operator != 'nan' and str(original_operator).strip() and original_operator != 'None') else ""
