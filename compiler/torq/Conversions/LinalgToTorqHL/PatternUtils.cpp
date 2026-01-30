@@ -616,8 +616,11 @@ static ScaleClampInfo foldForwardFloatTruncClamp(Value &value) {
                 cnt--;
 
                 auto trueValue = selectOp.getTrueValue();
-                float val = getFloatValue(trueValue).value();
-                vals.push_back(val);
+                auto val = getFloatValue(trueValue);
+                if (!val) {
+                    continue;
+                }
+                vals.push_back(*val);
             }
         }
 
