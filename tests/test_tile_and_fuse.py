@@ -9,6 +9,9 @@ def get_test_cases():
     test_cases = []
 
     base_options = ["--torq-enable-tile-and-fuse"]
+    
+    # FIXME: This should be the default for tile-and-fuse but it doesn't work for some cases:
+    #base_options += ["--torq-unroll-loop-after-bufferization"]
 
     for mlir_file in list_mlir_files("linalg_ops"):
         test_cases.append(Case("linalg_" + mlir_file.stem, {
@@ -43,25 +46,15 @@ def case_config(request, chip_config):
         'torch_reducemean',
         'torch_reducemean-reshape',
         'torch_conv2d-nchw-clip-bf16',
+        'linalg_tanh-bf16', # wrong result, also on standard test_linalg_ops
 
         ### tests from extras ###
 
         # Compiler hang
         'tosa_pw-32x8-7x7x320',
 
-        # crash
-        # argument #1 must have an executor id
-        'tosa_conv-stride1',
-        'tosa_conv-stride1-56',
-
-        # failed to find a tile size for op
+        # failed to find a tile size for op (compiler timeout)
         'tosa_conv-343',
-
-        # result wrong
-        'tosa_pw-stride2',
-
-        # wrong result
-        'linalg_tanh-bf16',
 
         # crash
         'torch_encoder.mlir.230.Conv_0_small',
@@ -83,17 +76,15 @@ def case_config(request, chip_config):
         failed_tc += [
             'tosa_add-rescaled-constant',
             'tosa_conv2d_f5_s2_64x64x16_i16',
-            'tosa_conv-stride2',
-            'tosa_add-constant',
+            'tosa_conv-stride2', # errors in output, 
             'tosa_asr-i32',
             'tosa_add-strided-scalar-i32',
             'tosa_conv2d-stride4-i16',
             'tosa_resize-31x31x33xi8',
-            'tosa_pw-16x16',
-            'tosa_pw-32x8',
+            'tosa_pw-32x8', # Can pass with unroll-loop-after-bufferization but runtime is very long (4min)
             'tosa_matmul-in-bf16-out-fp32_207x207',
             'torch_0037_Add__Add',
-            'tosa_matmul-in-int8-out-int16-64x128x2048', # Compiler too long
+            'tosa_matmul-in-int8-out-int16-64x128x2048', # Compiler too long, can pass with unroll-loop-after-bufferization
         ]
 
     if any(s in request.param.name for s in failed_tc):
