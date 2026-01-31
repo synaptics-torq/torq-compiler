@@ -1,11 +1,14 @@
 import contextlib
 import time
+import logging
 from typing import Dict, List
 from dataclasses import dataclass
 from iree.compiler.ir import Context, Module, BlockArgument, InsertionPoint
 import pandas as pd
 import re
 from torq.model_profiler import perfetto_logger
+
+logger = logging.getLogger("torq.performance")
 
 class Duration(contextlib.AbstractContextManager):
     def __init__(self, scenario: 'Scenario', test_name: str):
@@ -283,6 +286,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
         perfetto_rows (list[tuple]): Accumulates data specifically formatted for the Perfetto trace writer.
                                      Each tuple contains timestamped event data required for visual rendering.
     """
+    logger.debug(f"Starting write_host_annotated_profile, processing {len(actions_ops)} actions")
+    
     rows = []
     perfetto_rows = []
     slice_active = [False, False]
@@ -293,7 +298,9 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
 
     last_slice_program_name = [None, None]
 
-    for (action_id, op, job_id) in actions_ops:
+    for idx, (action_id, op, job_id) in enumerate(actions_ops):
+        if idx % 100 == 0:
+            logger.debug(f"Processing action {idx}/{len(actions_ops)}")
         
         is_host_wait_task = (
             op.operation.name == "torq_hl.wait_program"
@@ -321,6 +328,7 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
         invocation_name = None
         if operation == "torq_hl.wait_program" and job_id is not None:
             ops, args = nss_program_ops[job_id]
+            logger.debug(f"Processing wait_program action {idx} with job_id={job_id}, {len(ops)} ops")
             slice_used = [slice_active[0], slice_active[1]]
             dma_out_used = dma_out_active
             dma_in_used = dma_in_active
@@ -359,7 +367,7 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                 elif operation == "torq_hw.css_wait":
                     css_active = False
 
-            for op in ops:
+            for op_idx, op in enumerate(ops):
                 operation = op.operation.name
 
                 slice_id = None
@@ -507,6 +515,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
                         host_used,
                     ))
 
+    logger.debug(f"Completed action loop, creating DataFrame with {len(rows)} rows")
+    
     df = pd.DataFrame(rows)
 
     # Ensure consistent column order
@@ -519,6 +529,8 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
     # Only keep columns that are actually in the DataFrame
     existing_columns = [col for col in desired_columns if col in df.columns]
     df = df[existing_columns]
+    
+    logger.debug(f"Writing output to {output_file}")
     
     if output_file.endswith('.csv'):
         df.to_csv(output_file, index=False, sep=';')
@@ -556,6 +568,7 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
 
     # Generate Perfetto trace directly
     if perfetto_file and perfetto_rows:
+        logger.debug(f"Generating Perfetto trace: {perfetto_file} with {len(perfetto_rows)} rows")
         # Calculate overall start and end from the collected rows
         overall_start = min(r[2] for r in perfetto_rows)
         overall_end = max(r[3] for r in perfetto_rows)
@@ -568,6 +581,7 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
         perfetto_logger.render_overview_tracks("Host Profile", metrics_result['overall_start'], metrics_result['metrics'], trace_writer)
         
         trace_writer.close()
+        logger.debug(f"Perfetto trace complete: {perfetto_file}")
 
 def write_annotated_profile(profiling_data, program_ops, output_file, perfetto_file=None):
     rows = []
@@ -760,6 +774,8 @@ def parse_profiling_to_dict(profiling_data):
 
 def annotate_host_profile_from_files(mlir_file, profile_file, output_file, original_mlir_file=None, perfetto_file=None):
     """Wrapper function for easy external use."""
+    logger.debug(f"Annotating host profile from {mlir_file}")
+    
     profiling_data = pd.read_csv(profile_file, sep=',')
     profiling_dict = parse_profiling_to_dict(profiling_data)
     
@@ -769,7 +785,7 @@ def annotate_host_profile_from_files(mlir_file, profile_file, output_file, origi
             with open(original_mlir_file, 'r') as f:
                 original_mlir_lines = f.readlines()
         except Exception as e:
-            print(f"Warning: Could not read original MLIR file: {e}")
+            logger.warning(f"Could not read original MLIR file: {e}")
 
     with Context() as ctx:
         parsed_module = parse_mlir_file(mlir_file)
@@ -780,8 +796,10 @@ def annotate_host_profile_from_files(mlir_file, profile_file, output_file, origi
         
         actions_ops = extract_ops_based_on_action_ids(dispatches[0])
         nss_program_ops = extract_program_ops(dispatches[0])
+        logger.debug(f"Found {len(actions_ops)} action ops and {len(nss_program_ops)} NSS program ops")
 
         write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, output_file, original_mlir_lines, perfetto_file)
+        logger.debug(f"Profile annotation completed: {output_file}")
 
 
 def annotate_nss_profile_from_files(mlir_file, profile_file, output_file, perfetto_file=None):

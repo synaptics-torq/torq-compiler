@@ -14,6 +14,7 @@ contributing.md
 debug_tips.md
 appendices.md
 testing.md
+tools.md
 ```
 
 This manual is structured step-by-step, starting from introduction and setup, through model conversion,

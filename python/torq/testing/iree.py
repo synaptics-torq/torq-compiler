@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Tuple
+import logging
 
 import ml_dtypes # support for bfloat16 dtype
 import numpy as np
@@ -20,6 +21,8 @@ from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixtu
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
 from torq.performance import annotate_host_profile_from_files
 from torq.model_profiler.generate_perfetto_combined_report import generate_html, extract_model_name, extract_perfetto_summary
+
+logger = logging.getLogger("torq.testing.iree")
 
 TOPDIR = Path(__file__).parent.parent.parent.parent
 
@@ -49,9 +52,8 @@ def pytest_addoption(parser):
     parser.addoption("--torq-compile-time-profiling-output-dir", default=None, help="Directory to save per-test compile time profiling outputs")
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
     parser.addoption("--torq-addr", default=None, help="SSH address to run tests remotely")
-    parser.addoption("--torq-port", default=None, help="SSH port to run tests remotely")
-
-
+    parser.addoption("--torq-port", default=22, help="SSH port to run tests remotely")
+    
 def pytest_generate_tests(metafunc):
     if 'runtime_hw_type' in metafunc.fixturenames:
 
@@ -483,7 +485,14 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     # when the runtime is cmodel, we need to compile with qemu address map
     if runtime_hw_type == 'sim':
         cmds.append('--torq-css-qemu')
-
+    elif runtime_hw_type == 'astra_machina':
+        # For SoC/hardware targets, use cross-compilation settings
+        # Don't add --torq-css-qemu for actual hardware
+        cmds.extend([
+                "--torq-target-host-triple=aarch64-unknown-linux-gnu",
+                "--torq-target-host-cpu=generic",
+                "--torq-target-host-cpu-features=+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse"
+            ])
     cmds += get_input_type_options(mlir_model_file)
 
     cmds += torq_compiler_options
@@ -600,12 +609,15 @@ def enable_profiling(request):
     profiling_output_dir = request.config.getoption("--torq-runtime-profiling-output-dir")
     return profiling_output_dir is not None
 
+@versioned_hashable_object_fixture
+def skip_profile_annotation(request, case_config):
+    return int(case_config.get("skip_profile_annotation", False))
 
 @versioned_generated_directory_fixture
 def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_data_args, mlir_io_spec, 
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
                         enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name,
-                        enable_profiling):
+                        enable_profiling, skip_profile_annotation):
 
     output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
 
@@ -694,16 +706,22 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         print(f"cd {TOPDIR} && streamlit run webapps/buffer_viewer/buffer_viewer.py {buffers_dir} {ir_path}")
         print()
     
-    if enable_profiling:
+    # Check if profile annotation should be skipped (can be configured via case_config)
+    if enable_profiling and not skip_profile_annotation:
+        logger.debug("Starting profile annotation...")
         ir_path = ""
         ir_dir = request.getfixturevalue("torq_compiled_model_phases").data
-        if os.path.exists(ir_dir):            
+        logger.debug(f"Got torq_compiled_model_phases: {ir_dir}")
+        if os.path.exists(ir_dir):
+            logger.debug("IR dir exists, scanning for files...")
             for irs in os.listdir(ir_dir):
                 if irs.endswith('9.executable-targets.mlir'):
                     ir_path = str(Path(ir_dir) / irs)
+                    logger.debug(f"Found IR file: {ir_path}")
                     
                     original_mlir_file = None
                     try:
+                        logger.debug("Getting mlir_model_file fixture...")
                         # Attempt to get the original MLIR file path
                         mlir_model_file_obj = request.getfixturevalue("mlir_model_file")
                         # Handle VersionedFile or similar wrapper objects
@@ -713,10 +731,13 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
                             original_mlir_file = str(mlir_model_file_obj.data)
                         else:
                             original_mlir_file = str(mlir_model_file_obj)
-                    except Exception:
+                        logger.debug(f"Original MLIR file: {original_mlir_file}")
+                    except Exception as e:
                         # This is optional, so we ignore errors if the fixture is not available
+                        logger.debug(f"Could not get original MLIR file: {e}")
                         pass
 
+                    logger.debug("Calling annotate_host_profile_from_files...")
                     annotate_host_profile_from_files(
                         ir_path,
                         str(versioned_dir / 'host_profile.csv'),
@@ -724,6 +745,9 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
                         original_mlir_file=original_mlir_file,
                         perfetto_file=str(versioned_dir / 'trace.pb')
                     )
+                    logger.debug("Profile annotation completed")
+        else:
+            logger.debug(f"IR dir does not exist: {ir_dir}")
 
 @versioned_unhashable_object_fixture
 def torq_results(request, torq_results_dir, mlir_io_spec):
@@ -731,16 +755,17 @@ def torq_results(request, torq_results_dir, mlir_io_spec):
     profiling_output_dir = request.config.getoption("--torq-runtime-profiling-output-dir")
     
     if profiling_output_dir is not None:
+        record_property = request.getfixturevalue("record_property")
         profiling_output_dir = Path(profiling_output_dir)
         profiling_output_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy(torq_results_dir / 'host_profile.csv', profiling_output_dir / f'{request.node.name}.csv')
+        record_property("host_profile_csv", str(profiling_output_dir / f'{request.node.name}.csv'))
         if (torq_results_dir / 'annotated_profile.xlsx').exists():
             shutil.copy(torq_results_dir / 'annotated_profile.xlsx', profiling_output_dir / f'{request.node.name}.xlsx')
         if (torq_results_dir / 'trace.pb').exists():
             pb_output_path = profiling_output_dir / f'{request.node.name}.pb'
             shutil.copy(torq_results_dir / 'trace.pb', pb_output_path)
             # Record the path to the copied .pb file for reporting
-            record_property = request.getfixturevalue("record_property")
             record_property("profiling_output", str(pb_output_path))
         
         # Generate combined HTML report with all profiling artifacts
