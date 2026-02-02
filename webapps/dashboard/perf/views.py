@@ -159,7 +159,7 @@ def test_session(request, session_id):
         ),
         Prefetch(
             'testrunbatch_set__testrun_set__measurement_set',
-            queryset=Measurement.objects.filter(metric__unit='ns').select_related('metric')
+            queryset=Measurement.objects.filter(metric__unit__in=['ns', '%']).select_related('metric')
         )
     ).get(id=session_id)
     
@@ -235,16 +235,20 @@ def test_session(request, session_id):
             summary = {}
             for measurement in measurements:
                 metric_key = measurement.metric.name
-                # All measurements are already filtered to ns unit at database level
                 
-                # Convert nanoseconds to human-readable format
-                ns = measurement.value
-                if ns >= 1_000_000:
-                    formatted = f"{ns / 1_000_000:.3f}ms"
-                elif ns >= 1_000:
-                    formatted = f"{ns / 1_000:.3f}µs"
+                # Handle different metric units
+                if measurement.metric.unit == '%':
+                    # Percentage metrics - format as string without '%' (will be added in template)
+                    formatted = f"{measurement.value:.2f}"
                 else:
-                    formatted = f"{ns:.3f}ns"
+                    # Time metrics - convert nanoseconds to human-readable format
+                    ns = measurement.value
+                    if ns >= 1_000_000:
+                        formatted = f"{ns / 1_000_000:.3f}ms"
+                    elif ns >= 1_000:
+                        formatted = f"{ns / 1_000:.3f}µs"
+                    else:
+                        formatted = f"{ns:.3f}ns"
                 summary[metric_key] = formatted
             
             # Only add to db_summaries if we got metrics
@@ -258,11 +262,11 @@ def test_session(request, session_id):
     
     # Find the most recent session from main branch (excluding current session) for default comparison
     default_comparison_session_id = None
-    for session in recent_sessions:
-        if session.id != session_id and session.git_branch:
-            branch_lower = session.git_branch.lower()
+    for recent_session in recent_sessions:
+        if recent_session.id != session_id and recent_session.git_branch:
+            branch_lower = recent_session.git_branch.lower()
             if branch_lower == 'main' or branch_lower == 'refs/heads/main':
-                default_comparison_session_id = session.id
+                default_comparison_session_id = recent_session.id
                 break
     
     # Get base URL from request for absolute URLs (when HTML viewed outside server)
@@ -334,7 +338,7 @@ def get_session_metrics(request, session_id):
             'testrunbatch_set__testrun_set__test_case',
             Prefetch(
                 'testrunbatch_set__testrun_set__measurement_set',
-                queryset=Measurement.objects.filter(metric__unit='ns').select_related('metric')
+                queryset=Measurement.objects.filter(metric__unit__in=['ns', '%']).select_related('metric')
             )
         ).get(id=session_id)
         
@@ -350,7 +354,9 @@ def get_session_metrics(request, session_id):
                 
                 test_metrics = {}
                 for measurement in measurements:
-                    # All measurements are already filtered to ns unit at database level
+                    # Handle both time (ns) and percentage (%) metrics
+                    # For time metrics, store as-is in nanoseconds for comparison calculations
+                    # For percentage metrics, store the value directly (not used in comparison but kept for consistency)
                     test_metrics[measurement.metric.name] = float(measurement.value)
                 
                 if test_metrics:

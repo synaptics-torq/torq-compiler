@@ -50,7 +50,15 @@ table tr:hover {
             </tr>
             <tr>
                 <th>Git Commit</th>
-                <td>{{ session.git_commit|default:"N/A" }}</td>
+                <td>
+                    {% if session.git_commit_url %}
+                        <a href="{{ session.git_commit_url }}" target="_blank">{{ session.git_commit }}</a>
+                    {% elif session.git_commit %}
+                        {{ session.git_commit }}
+                    {% else %}
+                        N/A
+                    {% endif %}
+                </td>
             </tr>
             <tr>
                 <th>Git Branch</th>
