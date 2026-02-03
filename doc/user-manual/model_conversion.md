@@ -24,9 +24,9 @@ expressed in the {term}`TOSA` dialect.
     **Model Source:** This model - MobileNetV2 is generated from tf.keras.applications using [tf_model_generator.py](https://github.com/synaptics-torq/iree-synaptics-synpu/blob/main/tests/model_generator/tf_model_generator.py). The dataset for int8 quantization is done using random data.
 
     ```{code} shell
-    $ iree-import-tflite samples/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite -o mobilenetv2.tosa
+    $ iree-import-tflite tests/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite -o mobilenetv2.tosa
     ```
-> **Note:** The `samples/` directory is only included in the [Release Package](./getting_started.md#release-package-ubuntu-24-04) and is not available in the github compiler repository.
+> **Note:** The `tests/hf/` directory is only included in the [Release Package](./getting_started.md#release-package-ubuntu-24-04) and is not available in the compiler github repository.
 
 
 - More details on the IREE TFLite tools can be found in the 

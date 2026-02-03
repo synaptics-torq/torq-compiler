@@ -15,9 +15,9 @@ Profiling helps you understand the performance characteristics of your models on
 
 - Compile the model using torq-compile with the profiling flag:
     ```shell
-    $ torq-compile samples/tosa/add.mlir -o model.vmfb --torq-enable-profiling --torq-dump-profiling=./trace.csv --dump-compilation-phases-to=./compilation_phases
+    $ torq-compile tests/testdata/tosa_ops/add.mlir -o model.vmfb --torq-enable-profiling --torq-dump-profiling=./trace.csv --dump-compilation-phases-to=./compilation_phases
     ```
-> **Note:** The `samples/` directory is only included in the [Release Package](./getting_started.md#release-package-ubuntu-24-04) and is not available in the github compiler repository. The `--dump-compilation-phases-to` flag dumps the debug information into a specified directory. These debug files are later used to annotate the runtime profiling results.
+> **Note:** The `--dump-compilation-phases-to` flag dumps the debug information into a specified directory. These debug files are later used to annotate the runtime profiling results.
 
 - Understanding trace.csv Output
 

@@ -63,22 +63,21 @@ You can use **either** of the following approaches:
     ```
 ## Compile and Run the Model
 
-- Example MLIR models are provided in the `samples/` directory in the package.
+- Example MLIR models are provided in the `tests/` directory in the package.
 
     - **[Release Package](#release-package-ubuntu-24-04):**  
-    Navigate to the `samples/` directory is located in the root of the uncompressed package.
+    Navigate to the `tests/` directory is located in the root of the uncompressed package.
 
     - **[Docker Image](#docker-image):**  
-    The `samples/` directory is located in the `/opt/release` directory.
+    The `tests/` directory is located in the `/opt/release` directory.
     You can navigate there with:
         ```
         $ cd /opt/release
         ```
-    > **Note:** The `samples/` directory is only included in the [Release Package](./getting_started.md#release-package-ubuntu-24-04) and is not available in the github compiler repository.
 
-- Compile an input MLIR file ``samples/tosa/add.mlir`` to a compiled model ``model.vmfb``:
+- Compile an input MLIR file ``tests/testdata/tosa_ops/add.mlir`` to a compiled model ``model.vmfb``:
     ```bash
-    $ torq-compile samples/tosa/add.mlir -o model.vmfb
+    $ torq-compile tests/testdata/tosa_ops/add.mlir -o model.vmfb
     ```
 
 - Run the generated model with the Torq simulator:

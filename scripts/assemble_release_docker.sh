@@ -74,10 +74,12 @@ cp ${BASE_DIR}/requirements.txt ${INSTALL_DIR}/python/requirements.txt
 cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tf ${INSTALL_DIR}/python
 cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tflite ${INSTALL_DIR}/python
 
-mkdir ${INSTALL_DIR}/samples
+# pytest.ini file would required to initialize torq module for tests
+cp ${BASE_DIR}/pytest.ini ${INSTALL_DIR}/pytest.ini
+cp -r ${BASE_DIR}/tests ${INSTALL_DIR}
 
-# Download release models from HF
-python3 ${BASE_DIR}/scripts/model_release.py ${INSTALL_DIR}/samples
+# Release full models from HF(e.g., Mbv2) 
+python3 ${BASE_DIR}/scripts/model_release.py ${INSTALL_DIR}/tests
 
 # remove redundant libIREECompiler.so library
 rm ${INSTALL_DIR}/python/compiler/iree/compiler/_mlir_libs/libIREECompiler.so
