@@ -25,7 +25,7 @@ compiled it. It also assumes you activated the compiler development environment
 
 To run a test suite for a model add the ONNX file in the ``tests/testdata/onnx_models``.
 
-In the rest of this guide we will use the test ``example_matmul.onnx`` already present
+In the rest of this guide we will use the test ``example-matmul.onnx`` already present
 in the directory.
 
 The pytest framework will automatically detect the model and create a set of test
@@ -36,7 +36,7 @@ cases for it for any new file found in this directory.
 To view the test cases run the following command:
 
 ```
-$ pytest tests/test_onnx_model.py -k example_matmul --collect-only
+$ pytest tests/test_onnx_model.py -k example-matmul --collect-only
 ```
 
 The result will look as follows:
@@ -63,35 +63,14 @@ and compares the results.
 The test returns ERROR if the any of the steps required to compute the two inference 
 results fail and return FAIL if the two inputs are not sufficiently similar.
 
-The test leverages a set of [PyTest fixtures](https://docs.pytest.org/en/latest/how-to/fixtures.html) to obtain the different artifacts required
-to perform the comparison. Fixtures can in turn depend on other fixtures. The most
-important are:
 
-- **onnx_mlir_model_file** : this fixture returns the input model converted to MLIR
-  using ``iree.compiler.tools.import_onnx``
-
-- **torq_compiled_model_dir**: the model compiled with ``torq-compile``
-
-- **llvmcpu_compiled_model**: the model compiled with ``iree-compile`` with the LLVMCPU backend
-
-- **tweaked_random_input_data**: random inputs suitable for the model
-
-- **llvmcpu_reference_results** : results of the inference using **tweaked_random_input_data** and the model **llvmcpu_compiled_model**
-
-- **torq_results** : results of the inference using **tweaked_random_input_data** and the model in **torq_compiled_model_dir**
-
-- **chip_config**: the target TORQ-enabled chip for which the model is compiled and simulated (different chips can be enabled with the ``--torq-chips`` command line option)
-
-- **runtime_hw_type**: the target hardware emulation used to run the torq model (can be changed with the ``--torq-runtime-hw-type``)
-
-The source code of the fixtures and their dependecy relatioship can be found by inspecting the files in ``python/torq/testing``.
 
 ## Executing the tests
 
 To run the tests use the following command line:
 
 ```
-$ pytest tests/test_onnx_model.py -k mnist-1
+$ pytest tests/test_onnx_model.py -k example-matmul
 ```
 
 Pytest will provide a report with all the successes, errors and failures and potentially related error logs.
@@ -163,7 +142,7 @@ tolerance of the testing framework is too strict and the tests fails even if thi
 In order to execute a single test you can invoke pytest as follows:
 
 ```
-$ pytest -s test_onnx_model_llvmcpu_torq[example-matmul_layer_MatMul_0-sim-default]
+$ pytest tests/test_onnx_model.py -s -k example-matmul_layer_MatMul_0-sim-default
 ```
 
 The ``-s`` option allows to see the output of the tools called by the testing framework while the test is running.
@@ -175,7 +154,7 @@ the IR the pass that generated the problematic IR).
 This can be done by using the following command line:
 
 ```
-$ pytest -s test_onnx_model_llvmcpu_torq[example-matmul_layer_MatMul_0-sim-default] --debug-ir ir_dump
+$ pytest tests/test_onnx_model.py -s -k example-matmul_layer_MatMul_0-sim-default --debug-ir ir_dump
 ```
 
 The IR produced by the compiler will be stored in the directory ``ir_dump``. Make sure you clean this directory
@@ -222,7 +201,7 @@ the hardware with the following command line:
 pytest tests/test_onnx_model.py -k example-matmul_layer --torq-runtime-hw-type=astra_machina --torq-addr ${board_address}
 ```
 
-where ``${board_address}`` denotes the address of an astra board.
+where ``${board_address}`` denotes the address of an astra board (e.g., ``root@10.3.120.55``).
 
 ## Using the results dashboard
 
@@ -238,3 +217,28 @@ export TORQ_PERF_SERVER=http://localhost:8080
 
 After each test you will see a link to the results in the dashboard. You can use the dashboard to compare the performance
 across different tests and to inspect detailed traces.
+
+## Advanced: Test framework internals and PyTest fixtures
+
+The test leverages a set of [PyTest fixtures](https://docs.pytest.org/en/latest/how-to/fixtures.html) to obtain the different artifacts required
+to perform the comparison. Fixtures can in turn depend on other fixtures. The most
+important are:
+
+- **onnx_mlir_model_file** : this fixture returns the input model converted to MLIR
+  using ``iree.compiler.tools.import_onnx``
+
+- **torq_compiled_model_dir**: the model compiled with ``torq-compile``
+
+- **llvmcpu_compiled_model**: the model compiled with ``iree-compile`` with the LLVMCPU backend
+
+- **tweaked_random_input_data**: random inputs suitable for the model
+
+- **llvmcpu_reference_results** : results of the inference using **tweaked_random_input_data** and the model **llvmcpu_compiled_model**
+
+- **torq_results** : results of the inference using **tweaked_random_input_data** and the model in **torq_compiled_model_dir**
+
+- **chip_config**: the target TORQ-enabled chip for which the model is compiled and simulated (different chips can be enabled with the ``--torq-chips`` command line option)
+
+- **runtime_hw_type**: the target hardware emulation used to run the torq model (can be changed with the ``--torq-runtime-hw-type``)
+
+The source code of the fixtures and their dependecy relatioship can be found by inspecting the files in ``python/torq/testing``.
