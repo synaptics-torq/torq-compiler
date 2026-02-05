@@ -501,6 +501,8 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
                                             );
                                         })
                                         .Case<
+                                            linalg::PoolingNchwMaxOp, linalg::PoolingNchwSumOp,
+                                            linalg::PoolingNcwMaxOp, linalg::PoolingNcwSumOp,
                                             linalg::PoolingNhwcMaxOp,
                                             linalg::PoolingNhwcMaxUnsignedOp,
                                             linalg::PoolingNhwcMinOp,
