@@ -714,7 +714,11 @@ std::optional<SmallVector<int64_t>> isaBroadcastOpInterface(linalg::GenericOp ge
     SmallVector<int64_t> position;
     auto srcMap = genericOp.getIndexingMapsArray()[0];
 
-    if (srcMap.getResults().size() > dstMap.getResults().size())
+    // Return empty broadcast dims if ranks match
+    if (srcMap.getNumResults() == dstMap.getNumResults())
+        return SmallVector<int64_t>{};
+
+    if (srcMap.getNumResults() > dstMap.getNumResults())
         return std::nullopt;
 
     // Check input map is monotonically increasing DimIds.

@@ -21,6 +21,7 @@ iree_cc_library(
     OptimizeLinalgForTorqPass.cpp
     RaiseSoftmaxOpPattern.cpp
     OptimizeElementwiseBinaryOpPattern.cpp
+    OptimizeSelectOpPattern.cpp
     DecomposeLinalgOpsPattern.cpp
     SpecializeTransposeOpPattern.cpp
     OptimizeMatmulOpPattern.cpp

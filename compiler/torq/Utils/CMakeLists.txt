@@ -18,6 +18,7 @@ iree_cc_library(
     TorqHw.cpp
     ExecutorAssignment.cpp
     EncodingUtils.cpp
+    ShapeUtils.cpp
   HDRS
     MemoryUtils.h
     TorqUtils.h
@@ -29,6 +30,7 @@ iree_cc_library(
     TorqHw.h
     ExecutorAssignment.h
     EncodingUtils.h
+    ShapeUtils.h
   DEPS
     MLIRIR
     iree::target::torq::Dialect::TorqHL::Dialect

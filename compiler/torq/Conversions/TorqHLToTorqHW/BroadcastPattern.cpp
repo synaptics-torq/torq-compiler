@@ -22,7 +22,7 @@ static LData expandDims(const LData &input, const LData &output, ArrayRef<int64_
     if (input.shape().size() == output.shape().size()) {
         if (!dimensions.empty()) {
             // This should never happen, makes no sense to specify dimensions if ranks are the same
-            llvm::errs() << "Warning: broadcast in/out have same rank but dimensions not empty\n";
+            assert(false && "Broadcast in/out have same rank but dimensions not empty\n");
         }
         return input;
     }

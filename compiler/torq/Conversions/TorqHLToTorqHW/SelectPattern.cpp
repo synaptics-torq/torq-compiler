@@ -25,7 +25,10 @@ LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &re
     LData input2(op.getInput3());
     LData output(op.getInit());
 
-    assert(weights.dims() == input.dims() && input.dims() == input2.dims());
+    // Handle implicit broadcasting (weights and inputs must have the same rank as output)
+    weights.broadcastAs(output);
+    input.broadcastAs(output);
+    input2.broadcastAs(output);
 
     // SelectOp doesn’t involve computation, so there is no such concepts as floating point or
     // integer. we keep the element type as integer type for simplicity.
