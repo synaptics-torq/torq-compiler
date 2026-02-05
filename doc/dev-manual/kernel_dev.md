@@ -97,26 +97,34 @@ EasyKernel allows to express a kernel as a *sequential program* using these inst
 It's important to keep in mind that despite this illusion of sequentiality, during execution
 all the unit in a Slice will actually operate in *parallel*.
 
-The best way to explain how to write a kernel is probably with an example.
-In the following sections we will see how to write a simple kernel that performs elementwise multiplication
-of two input tensors. We will start with some strict assumptions on the format of the input data
-and then see how to extend the kernel to be completely generic while still being as efficient as possible.
 
 ### Tutorial
 
+The best way to explain how to write a kernel is probably with an example.
+In this section we will see how to write a simple kernel that performs elementwise multiplication
+of two input tensors. We will start with some strict assumptions on the format of the input data
+and then see how to extend the kernel to be completely generic while still being as efficient as possible.
+
+
 #### Vector Multiplication (basic)
 
-The easiest way to start writing a kernel is to use the Slice as a scalar ({term}`SISD`) processor
-on input tensors with a known shape.
+In this example we want to write a kernel to perform element-wise multiplication of two vectors.
 
 **Required kernel behaviour**:
 receive in input two tensors of rank 1 and generate in output a tensor
 containing the rescaled elementwise products of the inputs, clamped to a specified min and max values.
+Rescale is specified with a bias and scale value (the same for all the elements).
 Each output value must be computed as:
 
 ```out[i] = clamp((input1[i] * input2[i] + bias) * scale, min, max)``` 
 
-In this example the bias and scale values will be the same for all the elements.
+The higher level compiler passes will create a ``torq_hl::MulOp`` object representing the operation:
+
+![Slice Logical View](../images/EK-Op.drawio.png)
+
+Our job as kernel writers is to specify how this operation will be executed by the Torq slice.
+The easiest way to start writing a kernel is to use the Slice as a scalar ({term}`SISD`) processor
+on input tensors with a known shape.
 
 The first thing to do when developing a kernel is to define the data tensors in LRAM on which the
 kernel will operate.
@@ -221,7 +229,7 @@ Using the Slice as a scalar processor is not very different from writing the sam
 for a standard CPU. Of course this is not using the full computational power of the Slice, 
 we will see how to improve this in the next version of this kernel.
 
-:::{note}
+:::{tip}
 Writing a basic version of a kernel operating one element at a time can often be a good
 way to start designing a kernel, since this doesn't require any specific data organization and
 can provide a reference against which to benchmark more optimized implementations.
@@ -268,6 +276,21 @@ output.vectorize(vectorSize);  // /!\ Vectorizing output is deprecated
 
 What happens here is that the input and output tensors are reshaped from a vector of shape ``[N]``
 to a 2D tensor of shape ``[N / vectorSize, vectorSize]``.
+
+The rest of the code will remain unchanged:
+
+```{code} C++
+BData bdata = slice.bram.load(biasScale);
+For(auto i = slice.iterate(input1.dim(0))) {  // iterate over all the data vectors
+    IData data1 = slice.iram.load(input1[i]);
+    WData data2 = slice.wram.load(input2[i]);
+    PData pdata = slice.alu.elementwiseProductAccumulate(data1, data2);
+    QData res = slice.act.rescaleClamp(pdata, bdata, shift, 0, outMin, outMax);
+    slice.store(output[i], res);
+}
+```
+
+
 So while in the previous example ``input1[i]`` was referring to a single element, the same syntax
 applied to the 2D tensor above will actually refer to a *vector* of ``vectorSize`` elements. 
 The intersting thing is that since the instructions we used inside the *For* loop in the previous
@@ -303,8 +326,8 @@ Luckily this can be achieved with a simple change to our kernel.
 Instead of writing the result to the output tensor using the ``store()`` instruction,
 we can use the ``append()`` instruction.
 Append will append the given result to what has already be written in the indicated output (sub)tensor.
-So ``slice.store(output, res)`` will append `res` to the results already written in the
-output tensor in previous iterations. In the same way ``slice.store(output[i], res)`` will append `res`
+So ``slice.append(output, res)`` will append `res` to the results already written in the
+output tensor in previous iterations. In the same way ``slice.append(output[i], res)`` will append `res`
 to the results already written in the `output[i]` subtensor in previous iterations.
 What makes ``append()`` so useful is that it never overflows the size of the output (sub)tensor it is writing.
 For example if we try to append two 16-bytes results to a tensor of size 20, the first append will write the
@@ -343,6 +366,8 @@ Use ``vectorize()`` to reorganize the *innermost* dimension of input tensors for
 Never vectorize output tensors. Use the ``append()`` instruction to write vector results to output
 without overflow.
 :::
+
+For more info about vectorization please refer to the [Vectorization](#vectorization) section in the Easykernel reference.
 
 
 #### Tensor multiplication (vectorized)
@@ -465,7 +490,7 @@ We don't care about upper dimensions being dense or not since the multi-iterator
 get the correct count and stride for each dimension from the `LData` structure.
 
 
-:::{important}
+:::{tip}
 `multi-iterators` and the corresponding `multi-indexes` allow to handle in a generic way
 computations involving a variable number of dimensions. A multi-iterator can be created by
 calling the Slice ``iterate()`` method with a vector of counters.
@@ -677,6 +702,40 @@ Since we don't need to rescale we can use the `clamp()` instruction instead of `
 }
 ```
 
+Putting all the pieces together here is our reduce kernel:
+
+```{code} C++
+// Setup input and output tensors
+Slice slice;
+LData input(op.getInput());
+LData output(op.getInit());
+DType outType = output.elementType();
+
+// Input must be 2D with dense rows, output must be 1D dense
+assert(input.shape().size() == 2 && output.shape().size() == 1);
+assert(input.dim(1) == output.dim(0));
+assert(input.denseDims() > 0 && output.denseDims() > 0);
+
+int vectorSize = slice.alu.iWidth(input.elementType(), DType::none);
+input.vectorize(vectorSize);
+
+// For all the columns (column vectors actually)
+For(auto c = slice.iterate(input.dim(In::Cols))) {
+    PData pdata;
+    // Accumulate across the reduce dimension
+    For(auto r = slice.iterate(input.dim(In::Rows))) {
+        IData idata = slice.iram.load(input[r][c]);
+        pdata = slice.alu.accumulate(idata);
+    }
+    // Clamp the accumulated result
+    For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+        QData res = slice.act.clamp(pdata[av], minVal(outType), maxVal(outType));
+        slice.append(output, res);
+    }
+}
+```
+
+
 :::{note}
 Using the techiques we've seen up to here it is straightforward to adapt this example to work
 for an input tensor of any rank (dense or not) and any reduce axis
@@ -761,13 +820,43 @@ so when it can be used the payoff can be significative.
 
 #### Vectorization
 
-Vectorization consists of partitioning input data in *vectors* so that multiple input and/or weight
+Vectorization consists of partitioning data in *vectors* so that multiple input and/or weight
 values can be processed in parallel. This can be done by calling the `vectorize()` method on the `LData`
 object to vectorize. This method takes in input the size (number of elements) of the desired vector.
-For special situations such as convolution it is also possible to pass a second parameter to indicate
+For special situations  (e.g. convolutions) it is also possible to pass a second parameter to indicate
 the *stride* between nearby vectors, but this is normally not needed.
 Only the innermost dimension of a tensor can be vectorized. Vectorization will fail if this
-dimension is not *dense*. To vectorize additional dimensions, they must be *fused* beforehand.
+dimension is not *dense*. To vectorize additional dimensions, they must be *fused* beforehand
+with the last one using the `fuse()` method.
+
+If the number of elements in the last dimension is not a multiple of the vector size,
+the last vector will extend beyond the end of the tensor, thus reading junk data.
+This is not a problem in itself, the kernel designer must just avoid using these spurious values
+to compute parts of the actual result.
+In the case where the last dimension is smaller than the specified vector size, `vectorize()` will automatically
+use a smaller vector size, so no need to worry about this explicitly.
+
+The code and picture below show an example of how vectorization of a data vector works and how to
+access it a before and after .
+
+```{code} C++
+LData input({10}, DType::bf16);           // A vector of 10 elements
+int rank = input.shape().size();          // Number of dimensions: 1
+int count = input.dim(0);                 // Number of items in the first dimension: 10
+```
+
+![Slice Logical View](../images/EK-Vectorize.drawio.png)
+
+```{code} C++
+rank = input.shape().size();              // Number of dimensions: 2
+int vCount = input.dim(0);                // Number of vectors: 3
+vCount= input.dim(Vectorized::Vectors);   // Same as above
+int vSize = input.dim(1);                 // Number of items in each vector: 4
+vSize = input.dim(Vectorized::Elements);  // Same as above
+slice.iram.load(input[0]);                // Load the first vector
+slice.iram.load(input[0][2]);             // Load the third item of the first vector
+```
+
 
 Choosing the right vector size is important for optimal performance.
 Ideally should be as large as possible without going beyond the capablities of the *ALU* and *Act* units.
@@ -797,18 +886,48 @@ size to be processed by the *Act*, it's enough to iterate on the `PData::Vectors
 (see the Matrix Reduce example in the tutorial).
 
 
-If the number of elements in the last dimension is not a multiple of the vector size,
-the last vector will extend beyond the end of the tensor, thus reading junk data.
-This is not a problem in itself, the kernel designer must just avoid using these spurious values
-to compute parts of the actual result.
-In the case where the last dimension is smaller than the specified vector size, `vectorize()` will automatically
-use a smaller vector size, so no need to worry about this explicitly.
-
 :::{important}
 Vectorizing output tensors is not necessary and *deprecated* since the last vector may go beyond the
 end of the tensor. This can make the `store()` or `append()` instruction write outside the 
 tensor boundary (this will normally generate an assertion).
 :::
+
+
+#### Writing output results
+
+The Slice class provides two methods for writing results to the output tensor:
+
+- `store(output[...], res)`
+- `append(output[...], res)`
+
+
+where *[...]* represents any number of indexed dimensions.
+
+Each of the two methods has advantages and limitations.
+
+`store(output[...], res)` will write the *res* tensor into the [sub]tensor specified in the first parameter.
+The constraint is that the number of elements in the two tensors must match. The advantage is
+that any part of the *output* tensor can be written in any order by indexing the desired part of the tensor.
+
+`append(output[...], res)` will instead append *res* to the results already written to the
+*output[...]* [sub]tensor. It's not possible to write the content of this subtensor in a different order,
+but it's still possible to generate multiple subtensors in parallel.
+There is no requirement for *res* to match the size of the subtensor being written.
+Furthermore it never overflows the size of the output (sub)tensor it is writing, if some data would
+go past the end of the specified output (sub)tensor it is simply discarded.
+For example if we try to append two 16-bytes results to a tensor of size 20, the first append will write the
+entire 16 bytes, while the second append will just write the initial 4 bytes and discard the remaining 12.
+This makes `append()` the ideal choice in most cases since it allows to handle in a natural way
+output tensors of any size without requiring any additional padding.
+
+It may not be clear which dimensions have to be specified for the output tensor used in `append()`.
+Can't we just call `append(output, res)` without specifying any index?
+The rule is that if the computation of a given dimension may go beyond the end of the
+dimension itself, then we should append to that dimension, so that the append method will avoid
+the overflow. For example if we are processing a 2D tensor one row at a time, and we process
+each row 64 values at a time, then we can call `append(output[rowIndex], res)` to ensure we will
+not write beyond the end of each row even if it is not a multiple of 64.
+
 
 
 
