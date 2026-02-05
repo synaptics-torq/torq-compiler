@@ -42,8 +42,9 @@ def compare_test_results(request, observed_result, reference_results, case_confi
                         "int_thld": 1,
                         "fp_avg_tol": 1e-2,
                         "fp_max_tol": 1e-2,
+                        "epsilon": 1e-6,
                         "allow_all_zero": False,
-                        "epsilon": 1e-6 }
+                        "skip_nan_check": False }
 
     if 'comparison_config' in case_config:
         configuration_overrides = request.getfixturevalue(case_config['comparison_config'])
@@ -81,7 +82,9 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
         print(f"cd {TOPDIR} && streamlit run webapps/buffer_diff/buffer_diff.py {observed_output_path} {expected_output_path}")
         np.save(str(observed_output_path), actual_observed_output)
         np.save(str(expected_output_path), actual_expected_output)
-        observed_output, expected_output = check_nans(observed_output, expected_output)
+
+        if not comparison_config["skip_nan_check"]:
+            observed_output, expected_output = check_nans(observed_output, expected_output)
 
         # Guard against accidentally returning an all-zero tensor when we expect meaningful data.
         # If the reference is also all-zero (by value), allow an all-zero observed output.
@@ -113,7 +116,8 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
         print(f"Max absolute difference: {np.max(abs_diff)}")
         print(difference_summary)
 
-        if (np.issubdtype(expected_output.dtype, np.integer) or np.issubdtype(expected_output.dtype, bool)):
-            assert (np.max(abs_diff) <= comparison_config['int_thld']) and not (abs_diff != 0).sum(), difference_summary
-        else:
-            assert np.max(rel_diff) <= comparison_config['fp_max_tol'], difference_summary
+        if not comparison_config["skip_nan_check"]:
+            if (np.issubdtype(expected_output.dtype, np.integer) or np.issubdtype(expected_output.dtype, bool)):
+                assert (np.max(abs_diff) <= comparison_config['int_thld']) and not (abs_diff != 0).sum(), difference_summary
+            else:
+                assert np.max(rel_diff) <= comparison_config['fp_max_tol'], difference_summary
