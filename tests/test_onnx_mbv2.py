@@ -19,21 +19,14 @@ def case_config(request, runtime_hw_type, chip_config):
 
     failed_tc = []
 
-    aws_fpga = (runtime_hw_type.data == "aws_fpga")
-    if aws_fpga:
-        failed_tc += [
-            # Compile time timeout
-            "layer_Add_9",
-            # because of the above
-            "full_model"
-        ]
-
     next_chip = (chip_config.data['target'] != "SL2610")
     if next_chip:
         failed_tc += [
             # Compile time timeout
             "layer_Conv_3",
-            # Accuracy issue on a specific
+            # Max relative difference: 0.9999998211860657
+            # Max absolute difference: 6.0
+            # Number of differences: 1914 out of 401408 [0.48%]
             "layer_Conv_0",
             # because of the above
             "full_model"

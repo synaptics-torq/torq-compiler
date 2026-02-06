@@ -46,7 +46,6 @@ def case_config(request, chip_config):
         'torch_reducemean',
         'torch_reducemean-reshape',
         'torch_conv2d-nchw-clip-bf16',
-        'linalg_tanh-bf16', # wrong result, also on standard test_linalg_ops
 
         ### tests from extras ###
 
