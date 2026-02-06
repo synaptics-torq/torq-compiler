@@ -1011,7 +1011,41 @@ static Value create1DimTensorFromScalar(
 class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
+    static Value castToI16(
+        Value input, RankedTensorType inputType, Operation *srcOp, PatternRewriter &rewriter
+    ) {
 
+        ArrayRef<int64_t> shape = inputType.getShape();
+        auto targetType = RankedTensorType::get(shape, IntegerType::get(srcOp->getContext(), 16));
+
+        // Check if input is a constant
+        if (auto constOp = input.getDefiningOp<arith::ConstantOp>()) {
+            auto constAttr = dyn_cast<DenseElementsAttr>(constOp.getValue());
+            if (constAttr && constAttr.getElementType().isInteger(32)) {
+                // Extract i32 values and convert to i16
+                SmallVector<int16_t> i16Values;
+                for (auto val : constAttr.getValues<int32_t>()) {
+                    i16Values.push_back(static_cast<int16_t>(val));
+                }
+
+                // Create new constant with i16 type
+                auto i16Type =
+                    RankedTensorType::get(targetType.getShape(), rewriter.getIntegerType(16));
+                auto newConstAttr = DenseElementsAttr::get(i16Type, ArrayRef<int16_t>(i16Values));
+                return rewriter.create<arith::ConstantOp>(srcOp->getLoc(), i16Type, newConstAttr);
+            }
+        }
+
+        // Not a constant or not i32, use ActOp to convert
+        return rewriter
+            .create<torq_hl::ActOp>(
+                srcOp->getLoc(), targetType, createInitTensor(*srcOp, rewriter, targetType), "i2i",
+                0, 0, 0, 0, APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
+                APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input,
+                /*weights=*/mlir::Value()
+            )
+            .getResult(0);
+    }
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
         if (srcOp.getInputs().empty() || srcOp.getInputs().size() > 2) {
@@ -1025,8 +1059,9 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
         Value input2 = srcOp.getInputs()[srcOp.getInputs().size() > 1 ? 1 : 0];
 
         auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
+        auto input2Type = dyn_cast<RankedTensorType>(input2.getType());
         auto input1ElementType = input1Type.getElementType();
-        auto input2ElementType = dyn_cast<RankedTensorType>(input2.getType()).getElementType();
+        auto input2ElementType = input2Type.getElementType();
 
         if (input1ElementType.isF32() || input1ElementType.isF64()) {
             return rewriter.notifyMatchFailure(srcOp, "mul expects i8, i16, bf16 inputs\n");
@@ -1073,26 +1108,8 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
         // TODO: check if the operations surrounding this Mul allows to use an i16 operation
         bool isInputsi32 = input1ElementType.isInteger(32) && input2ElementType.isInteger(32);
         if (clMulCasti32Toi16 && isInputsi32) {
-            ArrayRef<int64_t> in1Shape = input1Type.getShape();
-            auto inType = RankedTensorType::get(in1Shape, IntegerType::get(srcOp.getContext(), 16));
-
-            input1 = rewriter
-                         .create<torq_hl::ActOp>(
-                             srcOp.getLoc(), inType, createInitTensor(srcOp, rewriter, inType),
-                             "i2i", 0, 0, 0, 0, APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-                             APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input1,
-                             /*weights=*/mlir::Value()
-                         )
-                         .getResult(0);
-
-            input2 = rewriter
-                         .create<torq_hl::ActOp>(
-                             srcOp.getLoc(), inType, createInitTensor(srcOp, rewriter, inType),
-                             "i2i", 0, 0, 0, 0, APFloat(llvm::APFloat::IEEEsingle(), "0.0"),
-                             APFloat(llvm::APFloat::IEEEsingle(), "0.0"), input2,
-                             /*weights=*/mlir::Value()
-                         )
-                         .getResult(0);
+            input1 = castToI16(input1, input1Type, srcOp, rewriter);
+            input2 = castToI16(input2, input2Type, srcOp, rewriter);
         }
         else if (!clMulCasti32Toi16 && isInputsi32) {
             return rewriter.notifyMatchFailure(
@@ -1110,13 +1127,11 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
             srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
             outMin, outMax, createI32Const(rewriter, srcOp, interleave(bias, scale)), 0, input1,
             input2
-
         );
 
         return success();
     }
 };
-
 class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;

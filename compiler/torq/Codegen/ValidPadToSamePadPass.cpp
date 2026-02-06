@@ -149,8 +149,14 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
         // have it
         int64_t new_pad_top, new_pad_bottom, new_pad_left, new_pad_right;
 
+        int hack_offset_h = 1, hack_offset_w = 1;
         if (has_valid_pad_h) {
             new_pad_top = total_pad_h / 2;
+            // Hack to make stride_offset zero for kernel size greater than 3x3 for s2 cases
+            if (ksize_h > 3 && stride_h == 2) {
+                new_pad_top = (ksize_h - 1) / 2;
+                hack_offset_h = 2;
+            }
             new_pad_bottom = total_pad_h - new_pad_top;
         }
         else {
@@ -161,6 +167,11 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
 
         if (has_valid_pad_w) {
             new_pad_left = total_pad_w / 2;
+            // Hack to make stride_offset zero for kernel size greater than 3x3 for s2 cases
+            if (ksize_w > 3 && stride_w == 2) {
+                new_pad_left = (ksize_w - 1) / 2;
+                hack_offset_w = 2;
+            }
             new_pad_right = total_pad_w - new_pad_left;
         }
         else {
@@ -176,10 +187,12 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
 
         // Add padding only for dimensions that were converted from VALID to SAME
         if (has_valid_pad_h) {
-            same_pad_conv_output_shape[NCHW::H] += (new_pad_top + new_pad_bottom);
+            same_pad_conv_output_shape[NCHW::H] =
+                (input_shape[NCHW::H] + new_pad_top + new_pad_bottom - ksize_h) / stride_h + 1;
         }
         if (has_valid_pad_w) {
-            same_pad_conv_output_shape[NCHW::W] += (new_pad_left + new_pad_right);
+            same_pad_conv_output_shape[NCHW::W] =
+                (input_shape[NCHW::W] + new_pad_left + new_pad_right - ksize_w) / stride_w + 1;
         }
 
         auto new_output_type =
@@ -205,8 +218,8 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
         );
 
         // Extract slice offsets: only offset dimensions that were converted from VALID to SAME
-        int64_t offset_h = has_valid_pad_h ? new_pad_top : 0;
-        int64_t offset_w = has_valid_pad_w ? new_pad_left : 0;
+        int64_t offset_h = has_valid_pad_h ? new_pad_top / hack_offset_h : 0;
+        int64_t offset_w = has_valid_pad_w ? new_pad_left / hack_offset_w : 0;
 
         auto offsets = createVector({0, 0, offset_h, offset_w}, rewriter);
         auto sizes = createVector(
@@ -616,6 +629,7 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvOp>
             SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
         );
 
+        int hack_offset_h = 1, hack_offset_w = 1;
         SmallVector<int64_t, 4> newPads(pads.begin(), pads.end());
         if (convertToSame) {
             if (validPadH) {
@@ -623,6 +637,11 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvOp>
                 int64_t totalPadH =
                     std::max((outh - 1) * strides[0] + kh - paddedShape[NCHW::H], int64_t(0));
                 newPads[2] = totalPadH / 2;
+                // Hack to make stride_offset zero for kernel size greater than 3x3 for s2 cases
+                if (kh > 3 && strides[0] == 2) {
+                    newPads[2] = (kh - 1) / 2;
+                    hack_offset_h = 2;
+                }
                 newPads[3] = totalPadH - newPads[2];
             }
             if (validPadW) {
@@ -630,6 +649,11 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvOp>
                 int64_t totalPadW =
                     std::max((outw - 1) * strides[1] + kw - paddedShape[NCHW::W], int64_t(0));
                 newPads[0] = totalPadW / 2;
+                // Hack to make stride_offset zero for kernel size greater than 3x3 for s2 cases
+                if (kw > 3 && strides[1] == 2) {
+                    newPads[0] = (kw - 1) / 2;
+                    hack_offset_w = 2;
+                }
                 newPads[1] = totalPadW - newPads[0];
             }
         }
@@ -671,7 +695,9 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvOp>
             rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
                 op, newConv.getOutput(),
                 createVector(
-                    {0, 0, validPadH ? newPads[2] : 0, validPadW ? newPads[0] : 0}, rewriter
+                    {0, 0, validPadH ? (newPads[2] / hack_offset_h) : 0,
+                     validPadW ? (newPads[0] / hack_offset_w) : 0},
+                    rewriter
                 ),
                 createVector(
                     {origOutShape[NCHW::N], origOutShape[NCHW::C], origOutShape[NCHW::H],

@@ -428,8 +428,7 @@ bool foldBackwardRescale(Value &value, ScaleInfo &scaleInfo) {
     }
     if (rescaleOp.getNumReductionLoops() > 0) {
         // This is not an element-wise operation
-        rescaleOp.emitError() << "matching error reduction loops > 0!\n";
-        return {};
+        return false;
     }
     auto yieldOp = dyn_cast<linalg::YieldOp>(rescaleOp.getBody()->getTerminator());
     if (!yieldOp || yieldOp.getValues().size() != 1) {
@@ -2061,7 +2060,8 @@ Value create1DimTensorFromRescaleScalar(
 
     data = static_cast<int32_t>(std::round(data * scaleFactor));
 
-    RankedTensorType constType = RankedTensorType::get({}, elementType);
+    auto outputType = cast<RankedTensorType>(srcOp.getResults()[0].getType());
+    RankedTensorType constType = RankedTensorType::get(outputType.getShape(), elementType);
     DenseElementsAttr value;
 
     if (elementType.isInteger(16)) {
@@ -2078,7 +2078,6 @@ Value create1DimTensorFromRescaleScalar(
         return input;
     }
     auto output = rewriter.create<arith::ConstantOp>(constOp.getLoc(), constType, value);
-
     return output.getResult();
 }
 

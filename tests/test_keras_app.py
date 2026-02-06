@@ -4,9 +4,13 @@ from torq.testing.comparison import compare_test_results
 from torq.testing.tensorflow import generate_layers_from_model
 from torq.testing.iree import llvmcpu_reference_results
 from torq.testing.cases import get_test_cases_from_tf_model
+from torq.testing.versioned_fixtures import versioned_cached_data_fixture
 
 import tensorflow as tf
 
+@versioned_cached_data_fixture
+def comparison_config_for_efficientnetb0(request):
+    return {"int_tol": 3, "int_thld": 1}
 
 def get_model_cases(model_name, input_shape, include_top=False, full_model=False):
     cases = []
@@ -58,7 +62,7 @@ test_cases = [
     *get_model_cases("nasnetmobile", (224, 224, 3)),
 
     # full model crash (total 237 layers)
-    *get_model_cases("efficientnetb0", (224, 224, 3)),
+    *get_model_cases("efficientnetb0", (224, 224, 3), full_model=True),
 
     # convnext serial model cannot work as many depthwise/pointwise ops crash
     # and mul op need to broadcast on two dims which unsupported now
@@ -68,7 +72,7 @@ test_cases = [
 
 
 @pytest.fixture(params=test_cases)
-def case_config(request, chip_config):
+def case_config(request, runtime_hw_type, chip_config):
 
   failed_str = [
     # resnet50
@@ -186,18 +190,6 @@ def case_config(request, chip_config):
     'nasnetmobile_separable_conv_2_reduction_right1_reduce_4', # error: matching error reduction loops > 0!
     'nasnetmobile_separable_conv_2_reduction_right1_reduce_8',
 
-    # efficientnetb0
-    # wrong results
-    'efficientnetb0_stem_conv',
-    'efficientnetb0_block2a_dwconv',
-    'efficientnetb0_block2a_se_squeeze',
-    'efficientnetb0_block2b_se_squeeze',
-    'efficientnetb0_block3a_dwconv',
-    'efficientnetb0_block3a_se_squeeze',
-    'efficientnetb0_block3b_se_squeeze',
-    'efficientnetb0_block4a_dwconv',
-    'efficientnetb0_block6a_dwconv',
-
     # crash
     'dwconv_pad',
     'drop',
@@ -209,8 +201,6 @@ def case_config(request, chip_config):
     'efficientnetb0_block2a_expand_activation',
     'efficientnetb0_block2a_expand_conv',
   ]
-  if any(s in request.param.name.lower() for s in failed_str):
-    pytest.xfail("failing test or skipped for now")
 
   if chip_config.data['target'] != "SL2610":
     failed_str += [
@@ -228,6 +218,16 @@ def case_config(request, chip_config):
       # doesnt work on github ci for unknown reason
       'xception_block14_sepconv2',
     ]
+
+  extra_args = {}
+  if "full_model_efficientnetb0" in request.param.name.lower():
+        extra_args["comparison_config"] = "comparison_config_for_efficientnetb0"
+
+  aws_fpga = (runtime_hw_type.data == "aws_fpga")
+  if aws_fpga:
+      # Only run full model tests on AWS FPGA
+    if "full_model" not in request.param.name.lower():
+        pytest.skip("AWS FPGA only runs full model tests")
 
   if any(s in request.param.name.lower() for s in failed_str):
     pytest.xfail("failing test or skipped for now")
@@ -258,10 +258,12 @@ def case_config(request, chip_config):
             "quantize_to_int16": False,
             "torq_compiler_options": ["--torq-mul-cast-i32-to-i16"],
             "torq_compiler_timeout": compile_timeout,
-            "torq_runtime_timeout": runtime_timeout
+            "torq_runtime_timeout": runtime_timeout,
+            **extra_args
         }
 
 @pytest.mark.ci
+@pytest.mark.fpga_ci
 def test_keras_app_tflite_torq(request, tflite_reference_results, torq_results, case_config):
     compare_test_results(request, torq_results, tflite_reference_results, case_config)
 
