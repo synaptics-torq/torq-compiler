@@ -26,14 +26,6 @@ def case_config(request, runtime_hw_type, chip_config):
     # SL2610 aws-fpga failures
     if aws_fpga:
         failed_tc += [
-            'select-bf16.mlir', # AssertionError: Nans differ
-            'select-f32-local-scalar.mlir', # AssertionError: Number of differences: 1024 out of 1024 [100.00%]
-            'select-f32.mlir', # AssertionError: Nans differ
-            'select-i16-scalar.mlir', # AssertionError: Output is 0 always
-            'select-i16.mlir', # AssertionError: Number of differences: 985 out of 1024 [96.19%]
-            'select-i32.mlir', # AssertionError: Number of differences: 982 out of 1024 [95.90%]
-            'select-i8-scalar.mlir', # AssertionError: Number of differences: 1024 out of 1024 [100.00%]
-            'select-i8.mlir' #  AssertionError: Number of differences: 989 out of 1024 [96.58%]
         ]
 
     # Next chip failures

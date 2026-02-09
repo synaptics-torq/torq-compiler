@@ -1409,6 +1409,14 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
     // Now add hdims for each loop deeper the wram load
     addDims(NdlType::CEWR, cewrDims, wdata, _wram.loadNesting, true, true);
 
+    // Only used in 'SEL' mode: when CEWR's L_size=2, the same weight is sent twice
+    // with the value flipped between the 2 cycles.
+    if (_cfg.alu_op1_mode[0] == ALUOp1Mode::SEL) {
+        auto &backDim = cewrDims.back();
+        assert(backDim.count == 2);
+        backDim.tag = RegDimTag::L;
+    }
+
     // Actual T count will be adjusted later
     cewrDims.push_back({DimType::H, RegDimTag::T, 1});
     _ndls.add(NdlType::CEWR, cewrDims);
