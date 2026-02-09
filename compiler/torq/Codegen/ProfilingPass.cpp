@@ -45,7 +45,7 @@ static llvm::cl::opt<std::string> clTorqProfilingDump(
 
 static llvm::cl::opt<bool> clTorqDisableNdlCycleCheck(
     "torq-disable-ndl-cycle-check", llvm::cl::desc("Disable NDL cycle match checks in profiling"),
-    llvm::cl::init(false)
+    llvm::cl::init(true)
 );
 
 using namespace std;
