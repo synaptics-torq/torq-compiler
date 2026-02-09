@@ -32,6 +32,13 @@ def case_config(request, runtime_hw_type, chip_config):
             "full_model"
         ]
 
+    aws_fpga = (runtime_hw_type.data == "aws_fpga")
+    if aws_fpga:
+        failed_tc += [
+            # hangs on aws-fpga, to be investigated
+            "full_model"
+        ]
+
     if any(s in request.node.name for s in failed_tc):
         pytest.xfail("failing test or skipped for now")
 

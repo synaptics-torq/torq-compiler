@@ -73,17 +73,25 @@ def case_config(request, chip_config):
 
     if chip_config.data['target'] != "SL2610":
         failed_tc += [
+            # error: unable to free enough space for results and operands
             'tosa_add-rescaled-constant',
-            'tosa_conv2d_f5_s2_64x64x16_i16',
-            'tosa_conv-stride2', # errors in output, 
             'tosa_asr-i32',
-            'tosa_add-strided-scalar-i32',
-            'tosa_conv2d-stride4-i16',
             'tosa_resize-31x31x33xi8',
-            'tosa_pw-32x8', # Can pass with unroll-loop-after-bufferization but runtime is very long (4min)
             'tosa_matmul-in-bf16-out-fp32_207x207',
-            'torch_0037_Add__Add',
-            'tosa_matmul-in-int8-out-int16-64x128x2048', # Compiler too long, can pass with unroll-loop-after-bufferization
+
+            # error: 'linalg.transpose' op dim(result, 1) = 16 doesn't match dim(input, permutation[1]) = 33
+            'tosa_conv2d_f5_s2_64x64x16_i16',
+            # Max absolute difference: 255.0
+            # Number of differences: 102477 out of 401408 [25.53%]
+            'tosa_conv-stride2',
+            # Pass but compiler too long
+            # Fails with unroll-loop-after-bufferization:
+            #    Assertion failed: (inputElementSize * weightElementSize <= sizeof(int32_t)), function iWidth, file Kernel.cpp, line 2251.
+            'tosa_conv2d-stride4-i16',
+            # Can pass with unroll-loop-after-bufferization but runtime is very long (4min)
+            'tosa_pw-32x8',
+            # Compiler too long, can pass with unroll-loop-after-bufferization
+            'tosa_matmul-in-int8-out-int16-64x128x2048',
         ]
 
     if any(s in request.param.name for s in failed_tc):
