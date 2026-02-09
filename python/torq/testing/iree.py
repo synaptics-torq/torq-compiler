@@ -530,16 +530,23 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
                 overview_data = calculate_compile_profile_metrics(str(output_compile_profile))
                 overview_map = {request.node.name: overview_data}
                 
-                # Generate .pb file
+                original_mlir_file = str(mlir_model_file)
+                stage9_files = list((versioned_dir / 'phases').glob("*.9.executable-targets.mlir"))
+                stage9_mlir_file = str(stage9_files[0]) if stage9_files else None
+                
                 pb_output_path = compile_time_profiling_output_dir / f'{request.node.name}_compile.pb'
                 convert_to_perfetto(
-                    {request.node.name: str(output_compile_profile)},
+                    str(output_compile_profile),
                     str(pb_output_path),
-                    overview_map=overview_map
+                    overview_data=overview_data,
+                    original_mlir_file=original_mlir_file,
+                    stage9_mlir_file=stage9_mlir_file
                 )
                 print(f"✓ Generated Perfetto trace: {pb_output_path}")
             except Exception as e:
+                import traceback
                 print(f"⚠ Warning: Could not generate Perfetto trace: {e}")
+                print(f"Traceback: {traceback.format_exc()}")
         else:
             print(f"⚠ Warning: Compiler profile CSV not found at {compiler_profile_csv}")
 

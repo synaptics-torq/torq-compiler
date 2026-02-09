@@ -7,6 +7,7 @@ from iree.compiler.ir import Context, Module, BlockArgument, InsertionPoint
 import pandas as pd
 import re
 from torq.model_profiler import perfetto_logger
+from torq.utils.mlir_utils import extract_line_numbers_from_location, get_operator_from_mlir_line
 
 logger = logging.getLogger("torq.performance")
 
@@ -215,53 +216,6 @@ def extract_ops_based_on_action_ids(dispatch_op):
 
     return action_ops
 
-def extract_line_numbers(location_str):
-    # Extracts line numbers from location string, excluding call site locations after " at "
-    # Handles both simple callsites and fused locations
-    # Example: loc(callsite("...":4:10 at "...":2:3)) -> [4]
-    # Example: loc(fused[callsite("...":147:12 at "...":2:3), callsite("...":145:12 at "...":2:3)]) -> [147, 145]
-    
-    # Split by callsite boundaries to process each separately
-    line_numbers = []
-    # Find all callsite(...) patterns
-    for callsite_match in re.finditer(r'callsite\([^)]+\)', location_str):
-        callsite_str = callsite_match.group(0)
-        # Extract the first line:col before " at " (this is the actual location, not the call site)
-        match = re.search(r'":?(\d+):(\d+)(?:\s+at\s+|")', callsite_str)
-        if match:
-            line_num = int(match.group(1))
-            line_numbers.append(line_num)
-    
-    return line_numbers if line_numbers else [None]
-
-def get_operator_from_line(line):
-    line = line.strip()
-    if not line:
-        return ""
-    
-    # Remove result assignment (e.g., "%0 = ...")
-    if "=" in line:
-        lhs = line.split("=", 1)[0].strip()
-        # Only split if the LHS looks like a result definition (starts with % or ()
-        if lhs.startswith("%") or lhs.startswith("("):
-            line = line.split("=", 1)[1].strip()
-    
-    # Handle torch.operator "..." pattern (covers ONNX and other operators)
-    if line.startswith('torch.operator '):
-        match = re.search(r'"([^"]+)"', line)
-        if match:
-            return match.group(1)
-
-    # Handle TOSA operators (both quoted and unquoted forms)
-    if line.startswith('"tosa.'):
-        match = re.search(r'"([^"]+)"', line)
-        if match:
-            return match.group(1)
-    elif line.startswith('tosa.'):
-        # Return the first token (e.g., "tosa.conv2d")
-        return line.split()[0]
-
-    return ""
 
 def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, output_file, original_mlir_lines=None, perfetto_file=None):
     """
@@ -312,13 +266,13 @@ def write_host_annotated_profile(profiling_dict, actions_ops, nss_program_ops, o
         # we dont log the host_wait_program seperately as host_start_program is synchronous.
         if original_mlir_lines and not is_host_wait_task:
             loc_str = ','.join(profiling_dict[action_id].get("location", []))
-            line_nums = extract_line_numbers(loc_str)
+            line_nums = extract_line_numbers_from_location(loc_str)
             # Sort line numbers in ascending order
             line_nums = sorted([ln for ln in line_nums if ln is not None])
             operators = []
             for line_num in line_nums:
                 if 1 <= line_num <= len(original_mlir_lines):
-                    operator_name = get_operator_from_line(original_mlir_lines[line_num - 1])
+                    operator_name = get_operator_from_mlir_line(original_mlir_lines[line_num - 1])
                     if operator_name:  # Only add non-empty operators
                         # Append line number to operator name
                         operators.append(f"{operator_name}@L{line_num}")
