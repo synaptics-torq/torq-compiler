@@ -51,6 +51,9 @@ void buildTosaTransformPassPipeline(OpPassManager &passManager) {
     // use the standard tosa pipeline
     iree_compiler::buildTOSAInputConversionPassPipeline(passManager);
 
+    // apply Torq-specific type conversion
+    buildTorqTypeConversionPipeline(passManager);
+
     // divide operations into  dispatch into Flow::RegionOps
     if (!clDisableDispatchFusion) {
         passManager.addNestedPass<func::FuncOp>(
@@ -71,6 +74,10 @@ void buildTorchTransformPassPipeline(OpPassManager &passManager) {
     passManager.addPass(mlir::torch::Torch::createLowerToBackendContractPass(10, true, true, {}, "")
     );
     mlir::torch::TorchConversion::createTorchBackendToLinalgOnTensorsBackendPipeline(passManager);
+
+    // apply Torq-specific type conversion
+    buildTorqTypeConversionPipeline(passManager);
+
     if (!clDisableDispatchFusion) {
         passManager.addNestedPass<func::FuncOp>(
             iree_compiler::Preprocessing::createMakeSingleDispatchForFunctionPass()
@@ -79,6 +86,9 @@ void buildTorchTransformPassPipeline(OpPassManager &passManager) {
 }
 
 void buildLinalgTransformPassPipeline(OpPassManager &passManager) {
+    // apply Torq-specific type conversion
+    buildTorqTypeConversionPipeline(passManager);
+
     if (!clDisableDispatchFusion) {
         passManager.addNestedPass<func::FuncOp>(
             createFormDispatchRegionsPass(clDisableDispatchFusion)

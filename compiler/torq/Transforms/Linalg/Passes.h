@@ -6,10 +6,19 @@
 
 #pragma once
 
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
 namespace mlir::syna::torq {
+
+//===---------------------------------------------------------------------===//
+// Torq type-conversion passes.
+//===---------------------------------------------------------------------===//
+std::unique_ptr<OperationPass<ModuleOp>> createTorqDemoteF32ToBF16Pass();
+std::unique_ptr<OperationPass<ModuleOp>> createTorqConvertF16ToBF16Pass();
+std::unique_ptr<OperationPass<ModuleOp>> createTorqDemoteI64ToI32Pass();
+//===---------------------------------------------------------------------===//
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConstantsPass();
 
@@ -22,5 +31,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeLinalgForTorqP
 //----------------------------------------------------------------------------//
 
 void registerOptimizeLinalgForTorqPasses();
+void registerTorqTypeConversionPasses();
+void buildTorqTypeConversionPipeline(OpPassManager &passManager);
 
 } // namespace mlir::syna::torq

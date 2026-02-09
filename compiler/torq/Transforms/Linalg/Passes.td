@@ -10,6 +10,42 @@
 include "mlir/Pass/PassBase.td"
 include "mlir/Rewrite/PassUtil.td"
 
+//===---------------------------------------------------------------------===//
+// Torq type-conversion passes.
+//===---------------------------------------------------------------------===//
+
+def TorqDemoteF32ToBF16 : Pass<"torq-demote-f32-to-bf16", "mlir::ModuleOp"> {
+  let summary = "Demotes float32 tensors to bfloat16 tensors";
+  let description = [{
+    Converts eligible float32 payloads to bfloat16. This pass is intended to
+    run early in the Torq pipeline and may introduce precision loss.
+  }];
+  let constructor = "mlir::syna::torq::createTorqDemoteF32ToBF16Pass()";
+  let dependentDialects = ["arith::ArithDialect"];
+}
+
+def TorqConvertF16ToBF16 : Pass<"torq-convert-f16-to-bf16", "mlir::ModuleOp"> {
+  let summary = "Converts float16 tensors to bfloat16 tensors";
+  let description = [{
+    Converts float16 payloads to bfloat16. This pass is intended to run early in
+    the Torq pipeline and may introduce precision loss.
+  }];
+  let constructor = "mlir::syna::torq::createTorqConvertF16ToBF16Pass()";
+  let dependentDialects = ["arith::ArithDialect"];
+}
+
+def TorqDemoteI64ToI32 : Pass<"torq-demote-i64-to-i32", "mlir::ModuleOp"> {
+  let summary = "Demotes int64 tensors to int32 tensors";
+  let description = [{
+    Converts eligible int64 payloads to int32. This pass is intended to run
+    early in the Torq pipeline and may introduce truncation.
+  }];
+  let constructor = "mlir::syna::torq::createTorqDemoteI64ToI32Pass()";
+  let dependentDialects = ["arith::ArithDialect"];
+}
+
+//===---------------------------------------------------------------------===//
+
 def FoldConstants :
     InterfacePass<"torq-fold-constants",
                   "mlir::FunctionOpInterface"> {

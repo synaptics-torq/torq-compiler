@@ -26,4 +26,9 @@ void registerOptimizeLinalgForTorqPasses() {
     registerPasses();
 }
 
+void registerTorqTypeConversionPasses() {
+    // Generated.
+    registerPasses();
+}
+
 } // namespace mlir::syna::torq

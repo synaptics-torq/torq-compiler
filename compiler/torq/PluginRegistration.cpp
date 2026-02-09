@@ -41,6 +41,7 @@ struct TORQSession : public PluginSession<
         registerCodegenTORQPasses();
         torq_hl::registerTorqHLPasses();
         registerOptimizeLinalgForTorqPasses();
+        registerTorqTypeConversionPasses();
 
         registerLinalgToTorqHLPasses();
         registerTosaToTorqHLPasses();
