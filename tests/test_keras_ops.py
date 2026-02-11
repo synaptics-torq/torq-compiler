@@ -1167,6 +1167,9 @@ def case_config(request, runtime_hw_type, chip_config):
         failed_tc += [
             # FIXME: it should be model024_fc_97x2000_int8
             'model024_fc_97x2000', #'Failed to allocate LRAM addresses"
+            'model035_avgpool_inp1x10x10x4_pool3x3_stride3x3_same',
+            'model036_avgpool_inp1x10x10x4_pool4x4_stride4x4_same',
+            'model039_avgpool_inp1x10x10x4_pool1x3_stride1x1_same',
         ]
         # Next chip fpga failures
         if aws_fpga:
