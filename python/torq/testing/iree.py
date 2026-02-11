@@ -51,7 +51,7 @@ def pytest_addoption(parser):
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
     parser.addoption("--torq-compile-time-profiling-output-dir", default=None, help="Directory to save per-test compile time profiling outputs")
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
-    parser.addoption("--torq-addr", default=None, help="SSH address to run tests remotely")
+    parser.addoption("--torq-addr", default=None, help="SSH address or ADB device ID to run tests remotely, use 'ADB' to select the first detected device")
     parser.addoption("--torq-port", default=22, help="SSH port to run tests remotely")
     
 def pytest_generate_tests(metafunc):

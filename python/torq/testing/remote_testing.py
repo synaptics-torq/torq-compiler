@@ -2,7 +2,7 @@ import logging
 import os
 from pathlib import Path, PurePosixPath
 
-from ..utils.remote_runner import SSHCommandRunner
+from ..utils.remote_runner import RemoteCommandError, remote_command_runner_factory
 
 
 class RemoteTestRunner:
@@ -48,7 +48,7 @@ class RemoteTestRunner:
 
     def _rewrite_runtime_opts(
         self,
-        runner: SSHCommandRunner,
+        runner: RemoteCommandError,
     ) -> tuple[list[str], dict[str, Path], dict[str, Path]]:
         path_options = {
             "--torq_desc_data_dir": "input_dir",
@@ -89,8 +89,14 @@ class RemoteTestRunner:
     def run(self, timeout: int = 5) -> None:
         remote_root = str(self.remote_root)
         remote_model_path = str(self.remote_root / self.vmfb_path.name)
+        remote_runner = remote_command_runner_factory(
+            self.board_addr,
+            int(timeout),
+            ssh_multiplex=True,
+            ssh_port=self.port
+        )
 
-        with SSHCommandRunner(self.board_addr, timeout=int(timeout), multiplex=True, port=self.port) as runner:
+        with remote_runner as runner:
             if self._recompute_cache:
                 runner.run_cmd(["rm", "-rf", remote_root])
             runner.run_cmd(["mkdir", "-p", remote_root])

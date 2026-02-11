@@ -4,7 +4,7 @@ import shlex
 import subprocess
 import tempfile
 import platform
-import sys
+import re
 from abc import ABC, abstractmethod
 from uuid import uuid4
 
@@ -208,6 +208,189 @@ class SSHCommandRunner(RemoteCommandRunner):
                 self._format_cmd(e.cmd),
                 self._format_output(e.stdout),
             ) from e
+
+
+class ADBCommandRunner(RemoteCommandRunner):
+    """
+    Run commands on a remote device using ADB instead of SSH.
+    Notes:
+      - Requires `adb` in PATH.
+    """
+
+    def __init__(
+        self,
+        target_device: str = "",
+        timeout: int = 15,
+        logger: logging.Logger | None = None
+    ):
+        super().__init__("", timeout, logger=logger)
+
+
+        # The target passed to `adb -s`.
+        self._target = (target_device or "").strip() or None
+
+        # Initialize connection
+        self._ensure_server()
+        self._init_connection()
+
+    def _adb_cmd_prefix(self) -> list[str]:
+        prefix = ["adb"]
+        if self._target:
+            prefix += ["-s", self._target]
+        return prefix
+
+    def _ensure_server(self) -> None:
+        """Start the ADB server if not running."""
+        try:
+            subprocess.run(
+                ["adb", "start-server"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RemoteCommandError(
+                self._format_cmd(e.cmd),
+                self._format_output("Timed out starting ADB server", self.timeout),
+            ) from e
+
+    def _init_connection(self) -> None:
+        try:
+            # Wait for the specific device to be ready.
+            subprocess.run(
+                [*self._adb_cmd_prefix(), "wait-for-device"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RemoteCommandError(
+                self._format_cmd(e.cmd),
+                self._format_output("Timed out waiting for ADB device", self.timeout),
+            ) from e
+
+    def _cleanup(self) -> None:
+        pass
+
+    def run_cmd(self, cmd: str | list[str]) -> str | None:
+        """
+        Execute a shell command on the device via `adb shell`.
+        Returns stdout as a string
+        """
+        # Normalize input
+        if isinstance(cmd, str):
+            cmd = shlex.split(cmd)
+
+        # For adb shell we pass a single string for the remote shell to interpret.
+        # If strict quoting is required, pass a single string in the original call.
+        cmd = " ".join(cmd)
+        full_cmd = [*self._adb_cmd_prefix(), "shell", cmd]
+
+        try:
+            result = subprocess.check_output(
+                full_cmd,
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=self.timeout,
+            )
+            self._logger.info(
+                'Successfully executed command "%s" on %s',
+                cmd, self.board_addr
+            )
+            return result
+        except subprocess.TimeoutExpired as e:
+            raise RemoteCommandError(
+                self._format_cmd(e.cmd),
+                self._format_output(e.output, self.timeout),
+            ) from e
+        except subprocess.CalledProcessError as e:
+            raise RemoteCommandError(
+                self._format_cmd(e.cmd),
+                self._format_output(e.stdout),
+            ) from e
+
+    def copy_files(self, src: str, dst: str, recursive: bool = False, board_dst: bool = False) -> None:
+        """
+        Copy files using ADB:
+          - board_dst=True  -> push  (local src -> device dst)
+          - board_dst=False -> pull  (device src -> local dst)
+        """
+        if board_dst:
+            # local -> device
+            cmd = [*self._adb_cmd_prefix(), "push", src, dst]
+        else:
+            # device -> local
+            cmd = [*self._adb_cmd_prefix(), "pull", src, dst]
+
+        try:
+            subprocess.check_output(
+                cmd,
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=self.timeout,
+            )
+            direction = "to device" if board_dst else "from device"
+            self._logger.info('Copied "%s" %s "%s"', src, direction, dst)
+        except subprocess.TimeoutExpired as e:
+            raise RemoteCommandError(
+                self._format_cmd(e.cmd),
+                self._format_output(e.output, self.timeout),
+            ) from e
+        except subprocess.CalledProcessError as e:
+            raise RemoteCommandError(
+                self._format_cmd(e.cmd),
+                self._format_output(e.stdout),
+            ) from e
+
+
+def remote_command_runner_factory(
+    board_address: str,
+    timeout: int = 15,
+    logger: logging.Logger | None = None,
+    *,
+    ssh_multiplex: bool = True,
+    ssh_keep_alive: int = 10,
+    ssh_port: int = 22,
+) -> RemoteCommandRunner:
+    if board_address.lower() == "adb":
+        return ADBCommandRunner(target_device="SL16x0", timeout=timeout)
+    
+    ADB_ID_PATTERN = re.compile(r"^SL16x\d+$")
+    IPV4_BODY = (
+        r"(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)\.){3}"
+        r"(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)"
+    )
+    SSH_IPV4_PATTERN = re.compile(
+        rf"^(?P<user>[A-Za-z_][A-Za-z0-9_.-]*)@"
+        rf"(?P<host>{IPV4_BODY})"
+    )
+
+    def _is_adb_device_id() -> bool:
+        return bool(ADB_ID_PATTERN.fullmatch(board_address))
+
+    def _is_ipv4_address() -> bool:
+        return bool(SSH_IPV4_PATTERN.fullmatch(board_address))
+    
+    if _is_adb_device_id():
+        return ADBCommandRunner(
+            target_device=board_address,
+            timeout=timeout,
+            logger=logger
+        )
+    elif _is_ipv4_address():
+        return SSHCommandRunner(
+            board_ip=board_address,
+            timeout=timeout, logger=logger,
+            multiplex=ssh_multiplex,
+            keep_alive=ssh_keep_alive,
+            port=ssh_port
+        )
+    else:
+        raise ValueError(f"Invalid board address format: expected ADB device ID or IPv4 address, got '{board_address}'")
 
 
 if __name__ == "__main__":
