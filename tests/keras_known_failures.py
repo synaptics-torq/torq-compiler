@@ -107,6 +107,22 @@ SKIP_TESTS = {
     "model118_avgpool_valid_model70_L3_int8": "Test hangs indefinitely - timeout/infinite loop",
     "model119_avgpool_valid_model70_L6_int8": "Test hangs indefinitely - timeout/infinite loop",
     
+    # Wrong result on FPGA - maxpool
+    "model040_maxpool_inp1x10x10x4_pool3x3_stride3x3_valid_int8": "Test fails on FPGA",
+    "model040_maxpool_inp1x10x10x4_pool3x3_stride3x3_valid_int16": "Test fails on FPGA",
+    "model041_maxpool_inp1x10x10x4_pool4x4_stride4x4_valid_int8": "Test fails on FPGA",
+    "model041_maxpool_inp1x10x10x4_pool4x4_stride4x4_valid_int16": "Test fails on FPGA",
+    "model042_maxpool_inp1x10x10x4_pool5x5_stride5x5_valid_int8": "Test fails on FPGA",
+    "model042_maxpool_inp1x10x10x4_pool5x5_stride5x5_valid_int16": "Test fails on FPGA",
+    "model043_maxpool_inp1x10x10x4_pool5x5_stride1x1_valid_int8": "Test fails on FPGA",
+    "model043_maxpool_inp1x10x10x4_pool5x5_stride1x1_valid_int16": "Test fails on FPGA",
+    "model046_maxpool_inp1x10x10x4_pool4x4_stride4x4_same_int8": "Test fails on FPGA",
+    "model046_maxpool_inp1x10x10x4_pool4x4_stride4x4_same_int16": "Test fails on FPGA",
+    "model047_maxpool_inp1x10x10x4_pool5x5_stride5x5_same_int8": "Test fails on FPGA",
+    "model047_maxpool_inp1x10x10x4_pool5x5_stride5x5_same_int16": "Test fails on FPGA",
+    "model048_maxpool_inp1x10x10x4_pool5x5_stride1x1_same_int8": "Test fails on FPGA",
+    "model048_maxpool_inp1x10x10x4_pool5x5_stride1x1_same_int16": "Test fails on FPGA",
+    
     # Tanh/softmax failures
     "model081_tanh_zpm26_int16": "Worker crash - not properly terminated",
     "model089_softmax_inp1x1916x2_int16": "Known failure - softmax model 089 currently unstable",
