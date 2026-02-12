@@ -195,7 +195,8 @@ LogicalResult ProfilingPass::memProfiling(mlir::FunctionOpInterface funcOp) {
     });
 
     memSummary = shape_sstr.str();
-    memSummary.pop_back(); // remove the last '+'
+    if (!memSummary.empty())
+        memSummary.pop_back(); // remove the last '+'
 
     return success();
 }
