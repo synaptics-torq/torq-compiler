@@ -63,8 +63,7 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
     denseDims = std::min(denseDims, rank - axis - 1);
 
     DType inputDType = input.elementType();
-    int vectorSize = slice.alu.iWidthAccumulateClamp(inputDType, hwOp1Mode);
-    DType clampDType = isInt(inputDType) ? DType::int32 : inputDType;
+    int vectorSize = slice.alu.iWidth(inputDType);
 
     // Vectorize only the last dimension (retain)
     input.fuse(denseDims).vectorize(vectorSize);
@@ -85,9 +84,9 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
                     pdata = slice.alu.accumulate(idata, hwOp1Mode);
                 }
 
-                // Clamp the accumulated result
+                // Store the accumulated result
                 For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
-                    QData res = slice.act.clamp(pdata[av], minVal(clampDType), maxVal(clampDType));
+                    QData res = slice.act.load(pdata[av]);
                     slice.append(output[b][i], res);
                 }
             }

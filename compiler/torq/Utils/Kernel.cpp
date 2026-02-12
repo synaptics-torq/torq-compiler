@@ -906,8 +906,14 @@ struct SlicePrivate {
     int _inputChannelHeight{};
     int _inputChannelWidth{};
 
+    // Use hybrid mode: ALU in NumberFormat::BF and ACT in NumberFormat::I
+    bool _useHybridMode{};
+
     // Name of the kernel
     std::string _name;
+
+    // Return true if HW supports ACPR with S:32 in non-MAC mode
+    bool supportACPRs32() const { return false; }
 };
 
 SlicePrivate::SlicePrivate(const string &name) : _name(name) {
@@ -1720,6 +1726,16 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     int actBlockCount = div_ceil(blockSize, actWidth);
     int actBlockSize = actBlockCount > 1 ? actWidth : blockSize;
     DType pDataType = isInt(dataType) ? DType::int32 : isMulAcc ? DType::fp32 : dataType;
+
+    if (isFloat(pDataType) && !isMulAcc && actBlockCount > 1 && !supportACPRs32()) {
+        // This pdata will generate ACPR with multiple transfers of width 8*4 which in non-MAC mode
+        // are not supported by some HW (only 16*4 is supported).
+        // Try to put the slice in hybrid mode so that we can use transfers of full act_width,
+        _useHybridMode = true;
+        actBlockSize *= 2;
+        actBlockCount /= 2;
+    }
+
     Shape pramShape = {actBlockCount, {actBlockSize, (HwInfo::pdat_width / sizeofType(pDataType))}};
     PData pdata(pramShape, pDataType);
     debugData(pdata);
@@ -1800,7 +1816,7 @@ QData SlicePrivate::actClamp(
     const int dataSize = sizeofType(dataType);
     const DType weightType = aluGetWeightType();
     const int weightSize = sizeofType(weightType);
-    const DType partialType = pdata.elementType();
+    DType partialType = pdata.elementType();
     DType resultType = dataType;
     const Shape subShape = pdata.subShape();
     int resultCount = elementCount(subShape);
@@ -1816,6 +1832,18 @@ QData SlicePrivate::actClamp(
         isInt(dataType) && isInt(partialType) && !isFloat(weightType) ||
         isFloat(dataType) && isFloat(partialType) && !isInt(weightType)
     );
+
+    if (_useHybridMode) {
+        // Use hybrid mode with ALU in NumberFormat::BF and ACT in NumberFormat::I.
+        // This only makes sense if the ACT is essentially in bypass.
+        assert(
+            actMode == ACTMode::ACT && actShift == 0 && actZeroPoint == 0 &&
+            actClipMin == minVal(partialType) && actClipMax == maxVal(partialType)
+        );
+        partialType = partialType == DType::bf16 ? DType::int16 : DType::int32;
+        actClipMin = minVal(DType::int32);
+        actClipMax = maxVal(DType::int32);
+    }
 
     if (actMode == torq_hw::ACTMode::I2F) {
         assert(isInt(partialType) && "I2F requires int data");
@@ -1834,7 +1862,7 @@ QData SlicePrivate::actClamp(
     _cfg.act_zero_point = actZeroPoint;
     _cfg.act_sum_bits = 0;
     _cfg.act_mode = actMode;
-    actSetNumberFormat(pdata.elementType());
+    actSetNumberFormat(partialType);
 
     if (isInt(partialType)) {
         if (weightSize == 2 && dataSize == 1) {
@@ -2335,7 +2363,7 @@ int Alu::iWidth(DType iType, DType wType, int weightWidth) const {
     return 0;
 }
 
-int Alu::iWidthAccumulateClamp(DType iType, torq_hw::ALUOp1Mode accMode) const {
+int Alu::iWidthForAccumulateClamp(DType iType, torq_hw::ALUOp1Mode accMode) const {
     int vectorSize = iWidth(iType, DType::none);
     if (iType == DType::bf16 && accMode != ALUOp1Mode::ACC && accMode != ALUOp1Mode::MUL) {
         // Limit vector size due to HW limitation
