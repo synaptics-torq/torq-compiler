@@ -124,7 +124,13 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
         funcPm.addPass(createMarkPatternsForTileAndFusePass());
         funcPm.addPass(createTileAndFusePass());
         funcPm.addPass(createCanonicalizerPass());
-        if (!clUnrollLoopAfterBufferization) {
+        if (clUnrollLoopAfterBufferization) {
+            funcPm.addPass(createPeelTileLoopsPass());
+            funcPm.addPass(createCanonicalizerPass());
+            funcPm.addPass(createUnrollDynamicShapeLoopPass());
+            funcPm.addPass(createCanonicalizerPass());
+        }
+        else {
             funcPm.addPass(createUnrollLoopPass());
             funcPm.addPass(createCanonicalizerPass());
         }

@@ -61,6 +61,10 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveAddressesPass()
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createPeelTileLoopsPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollDynamicShapeLoopPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLramTilePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createDtcmTilePass();

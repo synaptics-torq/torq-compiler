@@ -27,6 +27,7 @@ set(sources
     OutlineSliceProgramsPass.cpp
     OutlineUtils.cpp
     Passes.cpp
+    PeelTileLoopsPass.cpp
     Pool.cpp
     ProfilingPass.cpp
     ResolveAddressesPass.cpp
@@ -39,6 +40,7 @@ set(sources
     TorqHlTilePass.cpp
     TileAndFusePass.cpp
     UnrollLoopPass.cpp
+    UnrollDynamicShapeLoopPass.cpp
     ValidPadToSamePadPass.cpp
     VirtualMemory.cpp    
     AssignNSSProgramsAddressesPass.cpp

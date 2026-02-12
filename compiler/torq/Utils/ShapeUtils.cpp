@@ -584,4 +584,33 @@ ReshapeToCollapseExpand::matchAndRewrite(tensor::ReshapeOp op, PatternRewriter &
     return success();
 }
 
+SmallVector<mlir::Value> collectDynamicShapes(mlir::Region &region) {
+    SmallVector<Value> dynamic;
+
+    region.walk([&](Operation *op) {
+        for (Value result : op->getResults()) {
+            if (auto tensorType = mlir::dyn_cast<TensorType>(result.getType())) {
+                if (!tensorType.hasStaticShape()) {
+                    dynamic.push_back(result);
+                }
+            }
+        }
+
+        // TODO(SF): Do we also need to do this?
+        // for (Region &region : op->getRegions()) {
+        //     for (Block &block : region.getBlocks()) {
+        //         for (BlockArgument arg : block.getArguments()) {
+        //             if (auto tensorType = mlir::dyn_cast<TensorType>(arg.getType())) {
+        //                 if (!tensorType.hasStaticShape()) {
+        //                     dynamic.push_back(arg);
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
+    });
+
+    return dynamic;
+}
+
 } // namespace mlir::syna::torq

@@ -239,6 +239,32 @@ def TileAndFuse :
 
 }
 
+def PeelTileLoops :
+    InterfacePass<"torq-peel-tile-loops",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Peel iterations of tile loops, to make all shapes inside the loops static";
+  let constructor =
+      "mlir::syna::torq::createPeelTileLoopsPass()";
+
+  let dependentDialects = [
+        "linalg::LinalgDialect",
+    ];
+
+}
+
+def UnrollDynamicShapeLoop :
+    InterfacePass<"torq-unroll-dynamic-shape-loop",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Unroll for loops that have dynamic shapes in their body";
+  let constructor =
+      "mlir::syna::torq::createUnrollDynamicShapeLoopPass()";
+
+  let dependentDialects = [
+        "linalg::LinalgDialect",
+    ];
+
+}
+
 def LramTile:
     InterfacePass<"torq-lram-tile",
                   "mlir::FunctionOpInterface"> {

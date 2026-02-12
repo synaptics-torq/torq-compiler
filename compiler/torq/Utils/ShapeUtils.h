@@ -19,6 +19,9 @@
 
 namespace mlir::syna::torq {
 
+// Return a collection of all the Values with dynamic shapes in region.
+SmallVector<mlir::Value> collectDynamicShapes(mlir::Region &region);
+
 LogicalResult collapseShapeWithDim(Value &input, int dim, PatternRewriter &rewriter);
 
 LogicalResult collapseValue(
