@@ -1,6 +1,6 @@
 module {
   func.func @main(%arg0: tensor<2x64xi8>) -> (tensor<64xi8>) {
-    %cst = arith.constant 127 : i8
+    %cst = arith.constant -1 : i8
     %0 = tensor.empty() : tensor<64xi8>
     %1 = linalg.fill ins(%cst : i8) outs(%0 : tensor<64xi8>) -> tensor<64xi8>
     %reduced = linalg.reduce ins(%arg0 : tensor<2x64xi8>) outs(%1 : tensor<64xi8>) dimensions = [0] 

@@ -501,6 +501,11 @@ class Alu : SliceComponent {
     // weightWidth if specified indicates the number of weights that will be used in outerProduct
     int iWidth(DType iType, DType wType = DType::none, int weightWidth = 0) const;
 
+    // Max number of input items that can be processed in parallel for the given in type
+    // when performing accumulate() followed by clamp() or rescaleClamp()
+    // Mostly equivalent to iWidth() but in some cases the returned value will be smaller
+    int iWidthAccumulateClamp(DType iType, torq_hw::ALUOp1Mode accMode) const;
+
     // Max number of weight items that can be processed in parallel
     int wWidth(DType wType) const;
 

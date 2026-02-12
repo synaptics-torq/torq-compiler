@@ -399,11 +399,7 @@ KernelEncoding TableOp::getKernelEncoding() {
     return {{}, {{}, torq::HwInfo::max_input}};
 }
 
-KernelEncoding ReduceOp::getKernelEncoding() {
-    // The reduce kernel writes 64 elements of data. The output tensor size should be align to 64
-    // elements.
-    return {{}, {{}, torq::HwInfo::max_input}};
-}
+KernelEncoding ReduceOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ElementWiseShiftOp::getKernelEncoding() {
     return {

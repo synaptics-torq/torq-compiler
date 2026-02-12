@@ -1,3 +1,4 @@
+// TORQ_FP_MAX_TOL: 1
 module {
   func.func @main(%arg0: tensor<6x64x128xbf16>) -> (tensor<64x128xbf16>) {
     %cst = arith.constant 0.0 : bf16

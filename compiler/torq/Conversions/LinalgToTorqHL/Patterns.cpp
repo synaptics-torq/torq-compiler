@@ -847,10 +847,7 @@ struct ReduceOpConversion : public OpConversionPattern<linalg::ReduceOp> {
             );
         }
 
-        auto loc = srcOp.getLoc();
         Value input = srcOp.getInputs()[0];
-
-        auto inputShape = mlir::cast<RankedTensorType>(srcOp.getInputs()[0].getType()).getShape();
 
         auto srcOutputType = dyn_cast<RankedTensorType>(srcOp->getResultTypes().front());
 
@@ -861,39 +858,6 @@ struct ReduceOpConversion : public OpConversionPattern<linalg::ReduceOp> {
             );
         }
         int64_t axis = dimensions[0];
-
-        if (axis == inputShape.size() - 1 && inputShape.size() > 1) {
-
-            SmallVector<int64_t> permutation(inputShape.size(), 0);
-
-            permutation[0] = inputShape.size() - 1;
-
-            for (int i = 1; i < permutation.size(); i++) {
-                permutation[i] = i - 1;
-            }
-
-            llvm::SmallVector<int64_t> initShape{};
-            for (int i = 0; i < inputShape.size(); i++) {
-                initShape.push_back(inputShape[permutation[i]]);
-            }
-
-            auto initType = RankedTensorType::get(initShape, srcOutputType.getElementType());
-
-            auto initValue =
-                rewriter
-                    .create<tensor::EmptyOp>(loc, initType.getShape(), initType.getElementType())
-                    .getResult();
-
-            auto transposeOp =
-                rewriter.create<linalg::TransposeOp>(loc, input, initValue, permutation);
-
-            input = transposeOp.getResult()[0];
-            axis = 0;
-        }
-
-        if (axis != 0) {
-            return rewriter.notifyMatchFailure(srcOp, "Only support the first dim reduction");
-        }
 
         std::string opName = "reduce_sum";
         auto reduceOp = yieldOp.getOperand(0).getDefiningOp();

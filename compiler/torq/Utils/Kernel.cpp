@@ -266,7 +266,7 @@ struct SliceCfg {
     uint8_t no_p_output;
     LRTBDim kernel;
     LRTBDim pad;
-    int32_t pad_value{-1};
+    int32_t pad_value{/*-1*/};
     int32_t stride{1};
     int32_t stride_offset;
     torq_hw::RoundingMode act_round_mode;
@@ -300,6 +300,37 @@ struct SliceCfg {
         );
     }
 };
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, SliceCfg &cfg) {
+    os << "SliceCfg(\n";
+    os << "  alu_op0_mode: [" << cfg.alu_op0_mode[0] << ", " << cfg.alu_op0_mode[1] << ", "
+       << cfg.alu_op0_mode[2] << ", " << cfg.alu_op0_mode[3] << "],";
+    os << "  alu_op1_mode: [" << cfg.alu_op1_mode[0] << ", " << cfg.alu_op1_mode[1] << ", "
+       << cfg.alu_op1_mode[2] << ", " << cfg.alu_op1_mode[3] << "]\n";
+    os << "  alu_d_unsigned: " << cfg.alu_d_unsigned << ",";
+    os << "  alu_w_unsigned: " << cfg.alu_w_unsigned << "\n";
+    os << "  act_mode: " << cfg.act_mode << ",";
+    os << "  act_lsh: [" << cfg.act_lsh[0] << "," << cfg.act_lsh[1] << "," << cfg.act_lsh[2] << ","
+       << cfg.act_lsh[3] << "],";
+    os << "  act_rsh: " << static_cast<int>(cfg.act_rsh) << ",";
+    os << "  act_clip_min: " << cfg.act_clip_min << ",";
+    os << "  act_clip_max: " << cfg.act_clip_max << ",";
+    os << "  act_zero_point: " << cfg.act_zero_point << "\n";
+    os << "  no_p_clear: " << static_cast<int>(cfg.no_p_clear) << ",";
+    os << "  no_p_output: " << static_cast<int>(cfg.no_p_output) << "\n";
+    os << "  kernel: " << cfg.kernel << ",";
+    os << "  pad: " << cfg.pad << ", pad_value: " << cfg.pad_value << ",";
+    os << "  stride: " << cfg.stride << ", stride_offset: " << cfg.stride_offset << "\n";
+    os << "  act_round_mode: " << cfg.act_round_mode << ",";
+    os << "  weight_format: " << cfg.weight_format << ",";
+    os << "  alu_disable: " << cfg.alu_disable << ",";
+    os << "  act_disable: " << cfg.act_disable << ",";
+    os << "  alu_format: " << cfg.alu_format << ",";
+    os << "  act_format: " << cfg.act_format << ",";
+    os << "  act_sum_bits: " << cfg.act_sum_bits << "\n";
+    os << ")\n";
+    return os;
+}
 
 static void ndlToStr(NdlType type, const torq_hw::MemNdlData *ndl) {
     if (!ndl) {
@@ -830,6 +861,7 @@ struct SlicePrivate {
         const PData &pdata, const BData &bdata, int actShift, int actZeroPoint, int actClipMin,
         int actClipMax, torq_hw::ACTMode actMode
     );
+    int actWidth(DType iType, DType wType, bool biasScalePerItem);
 
     void memNdl(NdlType ndlType, const LData &data, int appendBlockSize = -1);
     void dedr(const LData &data);
@@ -1497,7 +1529,7 @@ void SlicePrivate::acbw(const BData &bdata) {
 
 void SlicePrivate::acpr(const PData &pdata) {
     Shape shape = pdata.subShape();
-    const int elementSize = sizeofType(pdata.elementType());
+    int elementSize = sizeofType(pdata.elementType());
     const int blockSize = backDimCount(shape);
 
     assert(elementSize <= HwInfo::pdat_width && "Invalid data element size");
@@ -1512,16 +1544,23 @@ void SlicePrivate::acpr(const PData &pdata) {
         llvm::errs() << "Invalid ACPR block size: " << dSize << "\n";
         assert(false && "Invalid ACPR block size");
     }
-    const bool aluInBypass = _wram.elementType == DType::none;
-    if (aluInBypass) {
-        // Only PRAM transfer width of 64 is supported in this case.
-        dSize = 64 / HwInfo::pdat_width;
-    }
     acprDims.push_back({DimType::L, RegDimTag::D, dSize, HwInfo::pdat_width});
     acprDims.push_back({DimType::L, RegDimTag::G});
 
-    // Now add hdims for each loop deeper the last endfor (end of the ALU accumulate)
+    // Now add hdims for each loop deeper than the last endfor (end of the ALU accumulate)
     addDims(NdlType::ACPR, acprDims, pdata, _pram.loadNesting, false, true);
+    if (_wram.elementType == DType::none) {
+        // Only PRAM transfer width of 64 is supported when ALU is in bypass,
+        // that is the S dimension, if specified, must have a stride of 64 (even if count is 1)
+        // This is a limitation in current HW for non-MAC bf16 accumulate, supported in next release
+        if (auto &sDim = acprDims.back(); sDim.tag == RegDimTag::S) {
+            assert(
+                (sDim.count == 1 || sDim.stride == 64) &&
+                "Vector size for non-MAC bf16 accumulate() can't exceed Act vector size"
+            );
+            sDim.stride = 64;
+        }
+    }
 
     // And repeat for the number of executions of ALU
     acprDims.push_back({DimType::H, RegDimTag::T, outerIterCount(_forStack, _pram.loadNesting)});
@@ -1577,6 +1616,7 @@ void SlicePrivate::debr(const LData &data) { memNdl(NdlType::DEBR, data); }
 
 void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
     memNdl(NdlType::DEQW, output, appendBlockSize);
+    LLVM_DEBUG(llvm::dbgs() << _cfg << "\n");
 }
 
 void SlicePrivate::ref(const LData &data) {
@@ -1625,17 +1665,17 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     const DType dataType = idata.elementType();
     aluSetNumberFormat(dataType);
 
-    // Weights are not used in bypass mode (no need to generate cewr)
+    // Weights are not used in bypass mode (no need to generate cewr, except for implicit weights)
     _wram.elementType = DType::none;
     _iram.elementType = dataType;
     _cfg.alu_d_unsigned = 0;
-    if (isUnsigned(dataType) || isFloat(dataType)) {
+    if (isUnsigned(dataType)) {
         _cfg.alu_d_unsigned = 0b1111;
     }
-    else if (dataType == DType::int16) {
+    else if (dataType == DType::int16 || dataType == DType::bf16) {
         _cfg.alu_d_unsigned = 0b101;
     }
-    else if (dataType == DType::int32) {
+    else if (dataType == DType::int32 || dataType == DType::fp32) {
         _cfg.alu_d_unsigned = 0b0111;
     }
     _cfg.alu_w_unsigned = 0;
@@ -1657,6 +1697,15 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
         assert(false && "Block size too big");
     }
 
+    if (isMulAcc) {
+        // The HW has auto-generated (implicit) weights that we need to load to the ALU
+        // Implicit 1*bf16 Ws: 1, 1, 1, 1, ... for ACC; 1, -1, 1, -1, ... for SACC
+        // Implicit 2*int8 Ws: 1.0, 1.0, 1.0, 1.0, ... for ACC; 1.0, -1.0, 1.0, -1.0, ... for SACC
+        WData wdata = isFloat(dataType) ? WData({}, DType::bf16) : WData({2}, DType::int8);
+        _wram.loadNesting = 0;
+        _wram.elementType = wdata.elementType();
+        cewr(wdata, false, false);
+    }
     cedr(idata, 0);
 
     // Save a copy of current stack, will be needed later to add N and T dimensions
@@ -1861,6 +1910,21 @@ QData SlicePrivate::actRescaleClamp(
     acbr(bdata);
     QData qdata = actClamp(pdata, actShift, actZeroPoint, actClipMin, actClipMax, actMode);
     return qdata;
+}
+
+int SlicePrivate::actWidth(DType iType, DType wType, bool biasScalePerItem) {
+    if (biasScalePerItem) {
+        return HwInfo::act_limit;
+    }
+    if (isFloat(iType)) {
+        return HwInfo::act_width / 2;
+    }
+    else if (isInt(iType)) {
+        assert(!isFloat(wType) && "Weight type can't be float for int input");
+        return HwInfo::act_width /
+               (wType == DType::none ? 1 : sizeofType(wType) * sizeofType(iType));
+    }
+    return 0;
 }
 
 //
@@ -2271,6 +2335,15 @@ int Alu::iWidth(DType iType, DType wType, int weightWidth) const {
     return 0;
 }
 
+int Alu::iWidthAccumulateClamp(DType iType, torq_hw::ALUOp1Mode accMode) const {
+    int vectorSize = iWidth(iType, DType::none);
+    if (iType == DType::bf16 && accMode != ALUOp1Mode::ACC && accMode != ALUOp1Mode::MUL) {
+        // Limit vector size due to HW limitation
+        vectorSize = std::min(vectorSize, d->actWidth(iType, DType::none, false));
+    }
+    return vectorSize;
+}
+
 int Alu::wWidth(DType wType) const {
     int weightSize = wType == DType::none ? 1 : sizeofType(wType);
     return HwInfo::wram_seg_width / weightSize;
@@ -2298,18 +2371,7 @@ QData Act::rescaleClamp(
 }
 
 int Act::width(DType iType, DType wType, bool biasScalePerItem) const {
-    if (biasScalePerItem) {
-        return HwInfo::act_limit;
-    }
-    if (isFloat(iType)) {
-        return HwInfo::act_width / 2;
-    }
-    else if (isInt(iType)) {
-        assert(!isFloat(wType) && "Weight type can't be float for int input");
-        return HwInfo::act_width /
-               (wType == DType::none ? 1 : sizeofType(wType) * sizeofType(iType));
-    }
-    return 0;
+    return d->actWidth(iType, wType, biasScalePerItem);
 }
 
 //
