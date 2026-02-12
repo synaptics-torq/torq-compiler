@@ -4,6 +4,7 @@
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "torq/Utils/TorqHw.h"
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 
@@ -75,31 +76,7 @@ static LogicalResult computeStrides(
     return success();
 }
 
-LogicalResult createHostCopyOp(OpBuilder &builder, Location loc, Value from, Value to) {
-
-    auto fromType = cast<MemRefType>(from.getType());
-    auto toType = cast<MemRefType>(to.getType());
-
-    SmallVector<int64_t> fromStridesBytes, toStridesBytes, shape;
-    int64_t contiguousElementsSizeBytes;
-
-    if (failed(computeStrides(
-            fromType, toType, fromStridesBytes, toStridesBytes, shape, contiguousElementsSizeBytes
-        ))) {
-        return failure();
-    }
-
-    // Create a host copy operation
-    builder.create<torq_hl::HostCopyOp>(
-        loc, to, from,
-        /*inputStridesBytes=*/fromStridesBytes,
-        /*outputStridesBytes=*/toStridesBytes,
-        /*shape=*/shape,
-        /*elementSizeBytes=*/contiguousElementsSizeBytes
-    );
-
-    return success();
-}
+LogicalResult createHostCopyOp(OpBuilder &builder, Location loc, Value from, Value to);
 
 static LogicalResult createStoreOp(OpBuilder &builder, Location loc, Value from, Value to) {
 
@@ -250,6 +227,72 @@ static LogicalResult createLoadOp(OpBuilder &builder, Location loc, Value from, 
     }
 
     return success();
+}
+
+LogicalResult createHostCopyOp(OpBuilder &builder, Location loc, Value from, Value to) {
+
+    auto fromType = cast<MemRefType>(from.getType());
+    auto toType = cast<MemRefType>(to.getType());
+
+    SmallVector<int64_t> fromStridesBytes, toStridesBytes, shape;
+    int64_t contiguousElementsSizeBytes;
+
+    if (failed(computeStrides(
+            fromType, toType, fromStridesBytes, toStridesBytes, shape, contiguousElementsSizeBytes
+        ))) {
+        return failure();
+    }
+
+    // get input size from fromStridesBytes and element size
+    int64_t fromSizeBytes = 0;
+    if (!fromStridesBytes.empty()) {
+        fromSizeBytes = fromStridesBytes[0] * fromType.getShape()[0];
+    }
+
+    fromSizeBytes *= contiguousElementsSizeBytes;
+
+    int64_t toSizeBytes = 0;
+    if (!toStridesBytes.empty()) {
+        toSizeBytes = toStridesBytes[0] * toType.getShape()[0];
+    }
+    toSizeBytes *= contiguousElementsSizeBytes;
+
+    int64_t availableLramBytes = TorqHw::get().getAvailableMemoryForTiling();
+
+    if (fromSizeBytes > availableLramBytes || toSizeBytes > availableLramBytes ||
+        fromSizeBytes == 0 || toSizeBytes == 0) { // from binding
+        builder.create<torq_hl::HostCopyOp>(
+            loc, to, from,
+            /*inputStridesBytes=*/fromStridesBytes,
+            /*outputStridesBytes=*/toStridesBytes,
+            /*shape=*/shape,
+            /*elementSizeBytes=*/contiguousElementsSizeBytes
+        );
+        return success();
+    }
+    else {
+        // otherwise we can do the copy in LRAM, we first copy from source to a temporary buffer in
+        // LRAM and then copy from the temporary buffer to the destination
+        auto tempBufferType = MemRefType::get(
+            fromType.getShape(), fromType.getElementType(), nullptr,
+            createDenseEncoding(fromType, torq_hl::MemorySpace::Lram)
+        );
+        auto tempBuffer = builder.create<memref::AllocOp>(loc, tempBufferType, ValueRange{});
+
+        // use torq_hl::LoadOp to copy from source to the temporary buffer in LRAM
+        if (failed(createLoadOp(builder, loc, from, tempBuffer))) {
+            return failure();
+        }
+
+        // use torq_hl::StoreOp to copy from the temporary buffer in LRAM to the destination
+        if (failed(createStoreOp(builder, loc, tempBuffer, to))) {
+            return failure();
+        }
+
+        return success();
+    }
+
+    return failure();
 }
 
 LogicalResult createLramToLramCopy(OpBuilder &builder, Location loc, Value from, Value to) {
