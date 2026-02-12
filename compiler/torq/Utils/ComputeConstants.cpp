@@ -544,7 +544,11 @@ outlineAndReturnOps(Value value, bool recursive, const std::vector<mlir::Value> 
     // create an ordered set of ops so that the use-def are ok
     SmallVector<Operation *> ops;
 
-    value.getDefiningOp()->getParentOp()->walk([&](Operation *op) {
+    Operation *topOp = value.getDefiningOp();
+    while (topOp->getParentOp())
+        topOp = topOp->getParentOp();
+
+    topOp->walk([&](Operation *op) {
         if (opsSet.contains(op)) {
             ops.push_back(op);
         }
