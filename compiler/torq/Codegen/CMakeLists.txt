@@ -12,8 +12,10 @@ set(sources
     BufferizationUtils.cpp
     CheckCssStackSizePass.cpp
     CompileCpuProgramsPass.cpp
-    CompileSliceInvocationPass.cpp
+    CompileNSSInvocationsPass.cpp
+    CompileSliceInvocationsPass.cpp
     CompileTimeConstComputePass.cpp
+    CompileInvocationUtils.cpp
     EncodeTensorsPass.cpp
     FoldConvertPass.cpp
     KernelSelectionPass.cpp

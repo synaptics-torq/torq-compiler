@@ -184,6 +184,58 @@ class ResolveCSSStart : public OpRewritePattern<torq_hw::CSSStartOp> {
     }
 };
 
+class ResolveSliceStart : public OpRewritePattern<torq_hw::SliceStartOp> {
+  public:
+    using OpRewritePattern<torq_hw::SliceStartOp>::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(torq_hw::SliceStartOp op, PatternRewriter &rewriter) const override {
+
+        if (op.getProgramAddress()) {
+            return failure();
+        }
+
+        auto nssInvocation = getNssInvocation(op);
+
+        auto maybeProgramAddress = getExecutorDataStartAddress(
+            torq_hl::Executor::Slice, op.getProgram(), 0, nssInvocation
+        );
+
+        if (!maybeProgramAddress) {
+            return op.emitError("unable to resolve program address");
+        }
+
+        rewriter.modifyOpInPlace(op, [&]() { op.setProgramAddress(*maybeProgramAddress); });
+
+        return success();
+    }
+};
+
+class ResolveNext : public OpRewritePattern<torq_hl::NextOp> {
+  public:
+    using OpRewritePattern<torq_hl::NextOp>::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(torq_hl::NextOp op, PatternRewriter &rewriter) const override {
+
+        if (op.getLramAddress()) {
+            return failure();
+        }
+
+        auto nssInvocation = getNssInvocation(op);
+
+        auto maybeProgramAddress =
+            getExecutorDataStartAddress(torq_hl::Executor::NSS, op.getLramArea(), 0, nssInvocation);
+
+        if (!maybeProgramAddress) {
+            return op.emitError("unable to resolve lram area address");
+        }
+
+        rewriter.modifyOpInPlace(op, [&]() { op.setLramAddress(*maybeProgramAddress); });
+
+        return success();
+    }
+};
+
 void ResolveAddressesPass::runOnOperation() {
     auto funcOp = getOperation();
 
@@ -195,6 +247,8 @@ void ResolveAddressesPass::runOnOperation() {
     patterns.add<ResolveDmaCfg<torq_hw::DmaOutCfgOp>>(ctx);
     patterns.add<ResolveCDMAStart>(ctx);
     patterns.add<ResolveCSSStart>(ctx);
+    patterns.add<ResolveSliceStart>(ctx);
+    patterns.add<ResolveNext>(ctx);
 
     if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
         funcOp.emitError("Failed to apply ResolveAddressesVisitor pattern");

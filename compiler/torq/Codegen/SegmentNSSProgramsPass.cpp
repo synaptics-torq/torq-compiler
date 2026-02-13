@@ -183,7 +183,7 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
         }
 
         // Terminate the current block with a branch to the new block, passing live-ins.
-        builder.create<torq_hl::NextOp>(loc, blockArgs, inactiveLramCodeArea, newBlock);
+        builder.create<torq_hl::NextOp>(loc, blockArgs, inactiveLramCodeArea, nullptr, newBlock);
 
         // Advance to the newly created block and continue.
         currentBlock = newBlock;
@@ -238,8 +238,7 @@ LogicalResult processProgramOp(torq_hl::ProgramOp programOp) {
 
     auto blockCount = programOp.getBody().getBlocks().size();
     SmallVector<int32_t> blockSize(blockCount, HwInfo::nss_max_program_size);
-
-    programOp->setAttr("torq_block_size", builder.getI32ArrayAttr(blockSize));
+    programOp.setBlockSizes(blockSize);
 
     return success();
 }

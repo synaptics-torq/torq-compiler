@@ -114,8 +114,9 @@ static void outlineOp(int idx, Operation *op, OpBuilder builder) {
     auto programType = torq_hl::ProgramType::get(ctx, torq_hl::Executor::Slice);
     std::string programName =
         "slice_program_" + op->getName().getStringRef().str() + "_" + std::to_string(idx);
-    auto programOp =
-        builder.create<torq_hl::ProgramOp>(loc, programType, builder.getStringAttr(programName));
+    auto programOp = builder.create<torq_hl::ProgramOp>(
+        loc, programType, builder.getStringAttr(programName), nullptr
+    );
 
     // create the body of the program
     Block &body = programOp.getBody().emplaceBlock();

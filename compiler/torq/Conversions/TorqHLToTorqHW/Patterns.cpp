@@ -248,7 +248,7 @@ class StartProgramOpPattern : public OpRewritePattern<torq_hl::StartProgramOp> {
 
             rewriter.create<SliceStartOp>(
                 op.getLoc(), op.getInvocation(), op.getCodeSections()[0], *maybeSliceId,
-                op.getArgs()
+                op.getArgs(), nullptr
             );
         }
         else if (programType.getExecutor() == torq_hl::Executor::CSS) {

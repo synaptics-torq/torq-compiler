@@ -66,18 +66,18 @@ void AssignNSSProgramsAddressesPass::runOnOperation() {
 
         auto programOp = invocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
 
-        auto blockSizesAttr = programOp->getAttrOfType<ArrayAttr>("torq_block_size");
+        auto blockSizesAttr = programOp.getBlockSizes();
 
         if (!blockSizesAttr) {
-            programOp.emitError("NSS program missing 'torq_block_size' attribute");
+            programOp.emitError("NSS program missing block sizes");
             signalPassFailure();
             return;
         }
 
         int programSize = 0;
 
-        for (auto blockSizeAttr : blockSizesAttr) {
-            programSize += cast<IntegerAttr>(blockSizeAttr).getInt();
+        for (auto blockSize : *blockSizesAttr) {
+            programSize += blockSize;
         }
 
         auto programAddress = reserveXramArea(getOperation(), programSize);
@@ -85,9 +85,9 @@ void AssignNSSProgramsAddressesPass::runOnOperation() {
         SmallVector<int64_t> addresses;
 
         int programOffset = 0;
-        for (auto blockSizeAttr : blockSizesAttr) {
+        for (auto blockSize : *blockSizesAttr) {
             addresses.push_back(programAddress + programOffset);
-            programOffset += cast<IntegerAttr>(blockSizeAttr).getInt();
+            programOffset += blockSize;
         }
 
         invocationOp.setXramCodeAddresses(addresses);

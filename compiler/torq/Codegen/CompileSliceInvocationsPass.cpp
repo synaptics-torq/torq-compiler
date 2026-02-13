@@ -10,6 +10,7 @@
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 
+#include "torq/Codegen/CompileInvocationUtils.h"
 #include "torq/Dialect/TorqHW/TorqHWOps.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -28,9 +29,10 @@ namespace mlir::syna::torq {
 
 namespace {
 
-class CompileSliceInvocationPass : public CompileSliceInvocationBase<CompileSliceInvocationPass> {
+class CompileSliceInvocationsPass
+    : public CompileSliceInvocationsBase<CompileSliceInvocationsPass> {
   public:
-    using CompileSliceInvocationBase::CompileSliceInvocationBase;
+    using CompileSliceInvocationsBase::CompileSliceInvocationsBase;
     void runOnOperation() override;
 };
 
@@ -280,21 +282,6 @@ static SliceTask toSliceTask(syna::torq_hw::SliceTaskOp op, IRMapping &mapping) 
     return task;
 }
 
-static FailureOr<torq_hl::StartProgramOp>
-findStartProgramOp(torq_hl::CreateInvocationOp createInvocationOp) {
-    torq_hl::StartProgramOp startProgramOp;
-
-    for (auto user : createInvocationOp.getInvocation().getUsers()) {
-        startProgramOp = dyn_cast<torq_hl::StartProgramOp>(user);
-
-        if (startProgramOp) {
-            return startProgramOp;
-        }
-    }
-
-    return createInvocationOp.emitError("No start_program operation found for invocation");
-}
-
 static LogicalResult processSliceTaskOp(
     DescGen &_npu, torq_hw::SliceTaskOp &taskOp, uint32_t &nextNdlLramBaseAddress,
     uint32_t &nextNdlXramBaseAddress, uint32_t &remainingNdlSize, uint32_t &remainingCfgSize,
@@ -336,50 +323,6 @@ static LogicalResult processSliceTaskOp(
 
     remainingCfgSize -= totalCfgSize;
     remainingNdlSize -= totalNdlSize;
-
-    return success();
-}
-
-LogicalResult updateCode(DescGen &_npu, uint32_t xramAddress, SmallVector<int8_t> &code) {
-
-    const torq_bitstream_segment_t *segment = _npu.getBitstream();
-
-    while (segment) {
-
-        if (segment->xram_addr == AddressConstants::NONE) {
-            segment = segment->next;
-            continue;
-        }
-
-        LLVM_DEBUG({
-            std::string lramAddrString = llvm::formatv("{0:x+8}", segment->lram_addr);
-            std::string xramAddrString = llvm::formatv("{0:x+8}", segment->xram_addr);
-
-            llvm::dbgs() << " serializing code segment with "
-                         << " xram address = " << xramAddrString << " (size = " << segment->size
-                         << ")\n";
-
-            std::stringstream ss;
-            for (size_t i = 0; i < segment->size; i++) {
-                ss << std::hex << "" << (int)segment->data[i];
-            }
-            llvm::dbgs() << "    data: " << ss.str() << "\n";
-        });
-
-        if (segment->xram_addr < xramAddress) {
-            return failure();
-        }
-
-        auto offset = segment->xram_addr - xramAddress;
-
-        if ((offset + segment->size) > code.size()) {
-            return failure();
-        }
-
-        std::copy(segment->data, segment->data + segment->size, code.begin() + offset);
-
-        segment = segment->next;
-    }
 
     return success();
 }
@@ -588,7 +531,7 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
     return success();
 }
 
-void CompileSliceInvocationPass::runOnOperation() {
+void CompileSliceInvocationsPass::runOnOperation() {
     auto funcOp = getOperation();
 
     SmallVector<torq_hl::CreateInvocationOp> invocationOps;
@@ -609,8 +552,8 @@ void CompileSliceInvocationPass::runOnOperation() {
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileSliceInvocationPass() {
-    return std::make_unique<CompileSliceInvocationPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileSliceInvocationsPass() {
+    return std::make_unique<CompileSliceInvocationsPass>();
 }
 
 } // namespace mlir::syna::torq

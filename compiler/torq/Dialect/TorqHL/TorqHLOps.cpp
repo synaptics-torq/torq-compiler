@@ -619,5 +619,37 @@ void mlir::syna::torq_hl::getLayerOpEffects(
     }
 }
 
+LogicalResult mlir::syna::torq_hl::NextOp::verify() {
+
+    if (getSuccessor()->getNumArguments() != getArguments().size()) {
+        return emitOpError("number of successor block arguments must match number of operands");
+    }
+
+    return success();
+}
+
+LogicalResult mlir::syna::torq_hl::StartProgramOp::verify() {
+
+    auto invocation = getInvocation().getDefiningOp<CreateInvocationOp>();
+
+    if (!invocation) {
+        return success();
+    }
+
+    auto invocationProgram = invocation.getProgram().getDefiningOp<ProgramOp>();
+
+    if (!invocationProgram) {
+        return success();
+    }
+
+    if (invocationProgram.getBody().front().getNumArguments() != getArgs().size()) {
+        return emitOpError(
+            "number of program arguments must match number of start_program arguments"
+        );
+    }
+
+    return success();
+}
+
 #define GET_OP_CLASSES
 #include "torq/Dialect/TorqHL/TorqHLOps.cpp.inc"

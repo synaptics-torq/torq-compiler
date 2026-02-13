@@ -41,7 +41,7 @@ void AssignObjectsIdentifiersPass::runOnOperation() {
 
     // Assign job id to each NSS invocation that will be used for torq-rt interoperability
     auto jobId = 0;
-    for (auto op : funcOp.getFunctionBody().getOps<torq_hl::CreateInvocationOp>()) {
+    for (auto op : funcOp.getFunctionBody().getOps<torq_hl::DescriptorOp>()) {
         if (op.getInvocation().getType().getExecutor() != torq_hl::Executor::NSS) {
             continue;
         }
@@ -57,6 +57,12 @@ void AssignObjectsIdentifiersPass::runOnOperation() {
     for (auto &op : funcOp.getFunctionBody().getOps()) {
 
         SmallVector<int64_t> allocationIds;
+
+        // we don't assign buffer ids to derived memref ops or GetBlockOps
+        // since we are going to dump the whole buffers from which these are derived
+        if (isDerivedMemRefOperation(&op) || isa<torq_hl::GetBlockOp>(op)) {
+            continue;
+        }
 
         for (auto result : op.getResults()) {
             if (auto memrefType = dyn_cast<MemRefType>(result.getType())) {

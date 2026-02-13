@@ -85,13 +85,11 @@ class Serializer {
 
     LogicalResult serializeInvocation(torq_hl::CreateInvocationOp &op);
 
-    LogicalResult serializeSliceDescriptor(torq_hl::DescriptorOp op);
+    LogicalResult serializeDescriptor(torq_hl::DescriptorOp op);
 
     LogicalResult serializeCssInvocation(torq_hl::CreateInvocationOp &op);
 
     LogicalResult serializeHostInvocation(torq_hl::CreateInvocationOp &op);
-
-    LogicalResult serializeNssInvocation(torq_hl::CreateInvocationOp &op);
 
     FailureOr<flatbuffers_uint8_vec_ref_t> serializeHostCode(mlir::FunctionOpInterface funcOp);
 
@@ -775,119 +773,11 @@ LogicalResult Serializer::processSliceTaskOp(
     return success();
 }
 
-LogicalResult Serializer::serializeNssInvocation(torq_hl::CreateInvocationOp &op) {
-
-    auto programOp = op.getProgram().getDefiningOp<torq_hl::ProgramOp>();
-
-    if (!programOp) {
-        return op->emitOpError("program is not a torq_hl::ProgramOp");
-    }
-
-    auto blockCount = programOp.getBody().getBlocks().size();
-
-    if (blockCount == 0) {
-        return op->emitOpError("NSS program must have at least one block");
-    }
-
-    if (!op.getXramCodeAddresses() || !op.getExecutorCodeAddresses()) {
-        return op->emitOpError("NSS program must have XRAM and LRAM code addresses");
-    }
-
-    auto xramCodeAddresses = op.getXramCodeAddresses().value();
-    auto lramCodeAddresses = op.getExecutorCodeAddresses().value();
-
-    if (xramCodeAddresses.size() != blockCount) {
-        return op->emitOpError(
-            "Expected as many XRAM code address for NSS program as blocks in the program"
-        );
-    }
-
-    if (lramCodeAddresses.size() != 1) {
-        return op->emitOpError(
-            "Expected as many LRAM code address for NSS program as blocks in the program"
-        );
-    }
-
-    if (!_npu.nssBegin(lramCodeAddresses[0], xramCodeAddresses[0])) {
-        return failure();
-    }
-
-    int64_t nextLramAddress = AddressConstants::APPEND;
-    int64_t nextXramAddress = AddressConstants::APPEND;
-
-    for (auto [idx, block] : llvm::enumerate(programOp.getBody().getBlocks())) {
-
-        // reset the nss block size counter that is used in processNssTask
-        _nssBlockSize = 0;
-
-        for (auto &nestedOp : block.getOperations()) {
-
-            if (isa<torq_hl::ReturnOp, torq_hl::NextOp, torq_hl::GetBlockOp, memref::AllocOp,
-                    memref::DeallocOp>(nestedOp)) {
-                continue;
-            }
-
-            if (isDerivedMemRefOperation(&nestedOp)) {
-                continue;
-            }
-
-            auto nssTaskOp = dyn_cast<torq_hw::NssTaskOp>(nestedOp);
-
-            if (!nssTaskOp) {
-                return nestedOp.emitOpError("not supported in a NSS program");
-            }
-
-            if (failed(processNssTask(nssTaskOp, op, nextLramAddress, nextXramAddress))) {
-                return failure();
-            }
-
-            // always append after the first iteration
-            nextLramAddress = AddressConstants::APPEND;
-            nextXramAddress = AddressConstants::APPEND;
-        }
-
-        // find the next LRAM address for the block from the next op
-        if (auto nextOp = dyn_cast<torq_hl::NextOp>(block.getTerminator())) {
-            auto maybeAddress = getAddress(nextOp.getLramArea(), 0, op.getInvocation());
-
-            if (!maybeAddress) {
-                return nextOp.emitError() << "Missing next LRAM address";
-            }
-
-            nextLramAddress = maybeAddress.value();
-
-            // find the next XRAM address
-            nextXramAddress = xramCodeAddresses[idx + 1];
-        }
-    }
-
-    if (_npu.nssEnd() < 0) {
-        return failure();
-    }
-
-    // create a file tv.cdesc_addr.txt with the lram address where the NPU should start, this is
-    // not dumped by default in torq_api
-    if (clTorqDescriptorDumpDir != "") {
-        std::ofstream file(
-            _dump_path + "/job" + std::to_string(_nssProgramCount) + "/tv.cdesc_addr.txt"
-        );
-        file << "0x" << std::setw(8) << std::setfill('0') << std::hex << lramCodeAddresses[0]
-             << "\n";
-        file.close();
-    }
-
-    _nssProgramCount++;
-
-    return success();
-}
-
 LogicalResult Serializer::serializeInvocation(torq_hl::CreateInvocationOp &createInvocationOp) {
 
     switch (createInvocationOp.getProgram().getType().getExecutor()) {
     case torq_hl::Executor::CSS:
         return serializeCssInvocation(createInvocationOp);
-    case torq_hl::Executor::NSS:
-        return serializeNssInvocation(createInvocationOp);
     case torq_hl::Executor::Host:
         return serializeHostInvocation(createInvocationOp);
     default:
@@ -1028,7 +918,7 @@ LogicalResult Serializer::serializeHostInvocation(torq_hl::CreateInvocationOp &c
     return success();
 }
 
-LogicalResult Serializer::serializeSliceDescriptor(torq_hl::DescriptorOp descriptorOp) {
+LogicalResult Serializer::serializeDescriptor(torq_hl::DescriptorOp descriptorOp) {
 
     for (auto [codeAddr, codeAttr] :
          llvm::zip(descriptorOp.getXramCodeAddresses(), descriptorOp.getCodeData())) {
@@ -1433,7 +1323,27 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
             continue; // skip these ops
         }
 
+        if (auto constOp = dyn_cast<arith::ConstantOp>(op);
+            constOp && isa<IndexType>(cast<ShapedType>(constOp.getType()).getElementType())) {
+            // Ignore constants with element type of IndexType
+            continue;
+        }
+        else if (auto toMemrefOp = dyn_cast<bufferization::ToMemrefOp>(op);
+                 toMemrefOp && isa<arith::ConstantOp>(toMemrefOp.getTensor().getDefiningOp())) {
+            // Ignore ToMemrefOp whose source is an arith.constant
+            continue;
+        }
+
         iree_hal_torq_HostActionParams_union_ref_t params;
+
+        if (auto actionIdAttr = op.getAttrOfType<IntegerAttr>("torq-action-id")) {
+            if (actionIdAttr.getInt() != actions.size()) {
+                return op.emitOpError("Action IDs must be sequential starting from 0");
+            }
+        }
+        else {
+            return op.emitOpError("All actions must have a torq-action-id attribute");
+        }
 
         if (auto hostActionOp = dyn_cast<torq_hl::HostCopyOp>(op)) {
 
@@ -1465,18 +1375,16 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
         }
         else if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(op)) {
 
-            auto createInvocationOp =
-                startOp.getInvocation().getDefiningOp<torq_hl::CreateInvocationOp>();
-
-            if (!createInvocationOp) {
-                op.emitOpError("must start an invocation created with create_invocation");
-                return failure();
-            }
-
             if (startOp.getInvocation().getType().getExecutor() == torq_hl::Executor::NSS) {
 
-                auto programOp =
-                    createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
+                auto descriptorOp = startOp.getInvocation().getDefiningOp<torq_hl::DescriptorOp>();
+
+                if (!descriptorOp) {
+                    op.emitOpError("must start an invocation created with descriptor");
+                    return failure();
+                }
+
+                auto programOp = descriptorOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
 
                 if (!programOp) {
                     op.emitOpError("program is not a torq_hl::ProgramOp");
@@ -1522,6 +1430,14 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
                 params = iree_hal_torq_HostActionParams_as_StartNSSParams(startNssParams);
             }
             else if (startOp.getInvocation().getType().getExecutor() == torq_hl::Executor::Host) {
+
+                auto createInvocationOp =
+                    startOp.getInvocation().getDefiningOp<torq_hl::CreateInvocationOp>();
+
+                if (!createInvocationOp) {
+                    op.emitOpError("must start an invocation created with create_invocation");
+                    return failure();
+                }
 
                 auto importProgramOp =
                     createInvocationOp.getProgram().getDefiningOp<torq_hl::ImportProgramOp>();
@@ -1622,16 +1538,6 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
 
             params = iree_hal_torq_HostActionParams_as_DeallocParams(deallocParams);
         }
-        else if (auto constOp = dyn_cast<arith::ConstantOp>(op);
-                 constOp && isa<IndexType>(cast<ShapedType>(constOp.getType()).getElementType())) {
-            // Ignore constants with element type of IndexType
-            continue;
-        }
-        else if (auto toMemrefOp = dyn_cast<bufferization::ToMemrefOp>(op);
-                 toMemrefOp && isa<arith::ConstantOp>(toMemrefOp.getTensor().getDefiningOp())) {
-            // Ignore ToMemrefOp whose source is an arith.constant
-            continue;
-        }
         else {
             // unsupported operation
             return op.emitOpError("unsupported in function body");
@@ -1656,7 +1562,7 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
     }
 
     for (auto op : funcOp.getFunctionBody().getOps<torq_hl::DescriptorOp>()) {
-        if (failed(serializeSliceDescriptor(op))) {
+        if (failed(serializeDescriptor(op))) {
             return failure();
         }
     }

@@ -288,7 +288,7 @@ void TORQLowerExecutableTargetPass::addNssPasses(OpPassManager &pm) {
     funcPm.addNestedPass<torq_hl::ProgramOp>(createConvertSliceProgramToTorqHwPass());
 
     // compile slice programs
-    funcPm.addPass(createCompileSliceInvocationPass());
+    funcPm.addPass(createCompileSliceInvocationsPass());
 
     // create NSS programs with all the NSS instructions
     funcPm.addPass(createOutlineNSSProgramsPass());
@@ -309,6 +309,9 @@ void TORQLowerExecutableTargetPass::addNssPasses(OpPassManager &pm) {
     // find the numeric addresses of all the torq_hw operations by looking up the corresponding
     // values
     funcPm.addPass(createResolveAddressesPass());
+
+    // compile NSS programs
+    funcPm.addPass(createCompileNSSInvocationsPass());
 
     // add all object identifiers used in serialization to the IR
     funcPm.addPass(createAssignObjectsIdentifiersPass());

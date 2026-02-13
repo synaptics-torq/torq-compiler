@@ -135,6 +135,9 @@ def extract_program_ops(dispatch_op):
     for invocation in find_descendants_of_type(dispatch_op, "torq_hl.create_invocation", depth=0):
         invocation_programs[invocation.results[0]] = invocation.operation.operands[0].owner
 
+    for descriptor in find_descendants_of_type(dispatch_op, "torq_hl.descriptor", depth=0):
+        invocation_programs[descriptor.results[0]] = descriptor.operation.operands[0].owner
+
     args = {}
     for start_op in find_descendants_of_type(dispatch_op, "torq_hl.start_program", depth=0):
         offset = 1 + start_op.operation.attributes["operandSegmentSizes"][1]        

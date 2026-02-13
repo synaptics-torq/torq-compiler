@@ -138,14 +138,24 @@ def CompileCpuPrograms :
   ];
 }
 
-def CompileSliceInvocation :
-    InterfacePass<"torq-compile-slice-invocation",
+def CompileSliceInvocations :
+    InterfacePass<"torq-compile-slice-invocations",
          "mlir::FunctionOpInterface"> {
   let summary = "Compile slice invocation operations";
-  let constructor = "mlir::syna::torq::createCompileSliceInvocationPass()";
-
+  let constructor = "mlir::syna::torq::createCompileSliceInvocationsPass()";
   let dependentDialects = [
     "syna::torq_hl::TorqHLDialect"
+  ];
+}
+
+def CompileNSSInvocations :
+    InterfacePass<"torq-compile-nss-invocations", "mlir::FunctionOpInterface"> {
+  let summary = "Compile all the NSS invocations";
+  let constructor = "mlir::syna::torq::createCompileNSSInvocationsPass()";
+
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect",
+    "syna::torq_hw::TorqHWDialect"
   ];
 }
 

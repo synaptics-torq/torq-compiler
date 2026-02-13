@@ -48,7 +48,8 @@ def TorqHW_SliceStartOp : TorqHW_Op<"slice_start"> {
     TorqHL_Invocation:$invocation,
     AnyMemRef:$program,
     IndexAttr:$id,
-    Variadic<AnyMemRef>: $args);
+    Variadic<AnyMemRef>: $args,
+    OptionalAttr<I32Attr>:$program_address);
 }
 
 def TorqHW_SliceWaitOp : TorqHW_Op<"slice_wait"> {

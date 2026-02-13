@@ -151,13 +151,13 @@ def show_buffer(buffer, action):
         if len(squeezed.shape) == 0:
             st.write(str(squeezed))
         else:
-            st.dataframe(squeezed)
+            st.dataframe(squeezed, hide_index=False)
     
     else:
 
         st.caption("Buffer data after action " + str(action) + " executed")
 
-        st.dataframe(buffer_data)
+        st.dataframe(buffer_data, hide_index=False)
 
 
 def show_buffer_difference(buffer, action1, action2):

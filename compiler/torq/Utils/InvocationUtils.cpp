@@ -438,6 +438,17 @@ static std::optional<int64_t> getAddressFromGetBlockOp(
 
         return (*xramCodeAddresses)[getBlockOp.getBlockIndex().getZExtValue()] + offset;
     }
+    // the invocation in the get_block op is the value produced by a descriptor op
+    else if (auto blockDescriptorOp = blockInvocation.getDefiningOp<torq_hl::DescriptorOp>()) {
+
+        auto blockAddresses = blockDescriptorOp.getXramCodeAddresses();
+
+        if (getBlockOp.getBlockIndex().getZExtValue() >= blockAddresses.size()) {
+            return std::nullopt; // block index out of bounds
+        }
+
+        return blockAddresses[getBlockOp.getBlockIndex().getZExtValue()] + offset;
+    }
     else {
         return std::nullopt; // we don't support any other case
     }

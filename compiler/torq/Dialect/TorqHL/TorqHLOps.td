@@ -641,7 +641,8 @@ def TorqHl_NextOp: TorqHL_Op<"next", [Terminator]> {
 
   let arguments = (ins
     Variadic<MemRefOrInvocation>:$arguments,
-    AnyMemRef:$lramArea
+    AnyMemRef:$lramArea,
+    OptionalAttr<I64Attr>:$lramAddress
   );
 
   let successors = (successor AnySuccessor:$dest);
@@ -649,6 +650,8 @@ def TorqHl_NextOp: TorqHL_Op<"next", [Terminator]> {
   let assemblyFormat = [{
     ($arguments^ `:` type($arguments))? `lram_area` `(` $lramArea `:` type($lramArea) `)` `to` $dest attr-dict
   }];
+
+  let hasVerifier = 1;
 
 }
 
@@ -669,7 +672,8 @@ def TorqHl_ProgramOp: TorqHL_Op<"program", [IsolatedFromAbove]> {
   }];
 
   let arguments = (ins
-    StrAttr:$name
+    StrAttr:$name,
+    OptionalAttr<DenseI32ArrayAttr>:$block_sizes
   );
 
   let regions = (region
@@ -797,6 +801,8 @@ def TorqHl_StartProgramOp: TorqHL_Op<"start_program", [AttrSizedOperandSegments]
   }];
   
   let hasCanonicalizer = 1;
+
+  let hasVerifier = 1;
 
 }
 
