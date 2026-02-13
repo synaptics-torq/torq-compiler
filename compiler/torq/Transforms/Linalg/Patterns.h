@@ -25,4 +25,6 @@ void populateOptimizeArithElementwiseBinaryOpPatterns(
     MLIRContext *ctx, RewritePatternSet &patterns
 );
 
+void populateCastI32MulPatterns(FunctionOpInterface funcOp, IRRewriter &rewriter);
+
 } // namespace mlir::syna::torq

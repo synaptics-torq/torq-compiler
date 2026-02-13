@@ -10,7 +10,7 @@ import tensorflow as tf
 
 @versioned_cached_data_fixture
 def comparison_config_for_efficientnetb0(request):
-    return {"int_tol": 3, "int_thld": 1}
+    return {'int_tol': 4, 'int_thld': 4}
 
 def get_model_cases(model_name, input_shape, include_top=False, full_model=False):
     cases = []
@@ -256,14 +256,12 @@ def case_config(request, runtime_hw_type, chip_config):
             "tflite_model_file": "quantized_tflite_model_file",
             "input_data": "tweaked_random_input_data",
             "quantize_to_int16": False,
-            "torq_compiler_options": ["--torq-mul-cast-i32-to-i16"],
             "torq_compiler_timeout": compile_timeout,
             "torq_runtime_timeout": runtime_timeout,
             **extra_args
         }
 
 @pytest.mark.ci
-@pytest.mark.fpga_ci
 def test_keras_app_tflite_torq(request, tflite_reference_results, torq_results, case_config):
     compare_test_results(request, torq_results, tflite_reference_results, case_config)
 

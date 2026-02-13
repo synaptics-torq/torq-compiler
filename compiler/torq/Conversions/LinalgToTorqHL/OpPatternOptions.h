@@ -26,12 +26,6 @@ inline llvm::cl::opt<bool> clACTBasedSub(
     llvm::cl::init(false)
 );
 
-inline llvm::cl::opt<bool> clMulCasti32Toi16(
-    "torq-mul-cast-i32-to-i16",
-    llvm::cl::desc("Automatically cast input from i32 to i16 for MUL operation"),
-    llvm::cl::init(false)
-);
-
 inline llvm::cl::opt<bool> clTableAsGather(
     "torq-convert-table-to-gather", llvm::cl::desc("use GatherOp instead of TosaOp for TOSA Table"),
     llvm::cl::init(false)

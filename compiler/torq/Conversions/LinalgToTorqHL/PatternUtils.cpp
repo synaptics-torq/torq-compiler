@@ -1738,7 +1738,13 @@ Operation *getElementwiseBinaryOp(linalg::GenericOp op, bool allowConstants) {
     }
 
     // Check the yielded result comes from an op with two operands
-    Operation *bynaryOp = yieldOp.getOperand(0).getDefiningOp();
+    // Handle case where yield operand is an extsi wrapping the binary op
+    Value yieldValue = yieldOp.getOperand(0);
+    if (auto extsi = yieldValue.getDefiningOp<arith::ExtSIOp>()) {
+        yieldValue = extsi.getIn();
+    }
+
+    Operation *bynaryOp = yieldValue.getDefiningOp();
     if (!bynaryOp || bynaryOp->getNumOperands() != 2) {
         LLVM_DEBUG({ llvm::dbgs() << "elementwiseBinaryOp expect 2 operands\n"; });
         return {};

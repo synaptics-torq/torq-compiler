@@ -27,14 +27,19 @@ iree_cc_library(
     SpecializeTransposeOpPattern.cpp
     OptimizeMatmulOpPattern.cpp
     OptimizeArithElementwiseBinaryOpPattern.cpp
+    CastI32MulPattern.cpp
   DEPS
     ::PassesIncGen
     MLIRArithDialect
     MLIRFunctionInterfaces
     MLIRIR
+    MLIRLinalgDialect
     MLIRPass
+    MLIRTensorDialect
+    MLIRTosaDialect
     MLIRTransformUtils
     iree::compiler::Dialect::Util::IR
+    iree::target::torq::Conversions::LinalgToTorqHL
     iree::target::torq::Utils
   PUBLIC
 )

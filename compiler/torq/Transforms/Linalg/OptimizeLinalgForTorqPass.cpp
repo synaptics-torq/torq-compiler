@@ -41,6 +41,9 @@ class OptimizeLinalgForTorqPass : public OptimizeLinalgForTorqBase<OptimizeLinal
         if (failed(applyPatternsAndFoldGreedily(getOperation(), frozenPatterns))) {
             return signalPassFailure();
         }
+
+        IRRewriter rewriter(ctx);
+        populateCastI32MulPatterns(funcOp, rewriter);
     }
 };
 
