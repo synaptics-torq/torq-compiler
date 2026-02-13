@@ -1555,7 +1555,7 @@ void SlicePrivate::acpr(const PData &pdata) {
 
     // Now add hdims for each loop deeper than the last endfor (end of the ALU accumulate)
     addDims(NdlType::ACPR, acprDims, pdata, _pram.loadNesting, false, true);
-    if (_wram.elementType == DType::none) {
+    if (_wram.elementType == DType::none && !supportACPRs32()) {
         // Only PRAM transfer width of 64 is supported when ALU is in bypass,
         // that is the S dimension, if specified, must have a stride of 64 (even if count is 1)
         // This is a limitation in current HW for non-MAC bf16 accumulate, supported in next release
@@ -2365,7 +2365,8 @@ int Alu::iWidth(DType iType, DType wType, int weightWidth) const {
 
 int Alu::iWidthForAccumulateClamp(DType iType, torq_hw::ALUOp1Mode accMode) const {
     int vectorSize = iWidth(iType, DType::none);
-    if (iType == DType::bf16 && accMode != ALUOp1Mode::ACC && accMode != ALUOp1Mode::MUL) {
+    bool isMACMode = accMode == ALUOp1Mode::ACC || accMode == ALUOp1Mode::MUL;
+    if (!isMACMode && isFloat(iType) && !d->supportACPRs32()) {
         // Limit vector size due to HW limitation
         vectorSize = std::min(vectorSize, d->actWidth(iType, DType::none, false));
     }
