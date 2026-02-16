@@ -16,6 +16,8 @@ namespace mlir::syna::torq {
 // TORQ passes
 //===---------------------------------------------------------------------===//
 
+std::unique_ptr<OperationPass<ModuleOp>> createAnalyzeTensorSizesPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createValidToSamePadPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCheckCssStackSizePass();

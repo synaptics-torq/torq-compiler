@@ -13,6 +13,18 @@ include "mlir/Pass/PassBase.td"
 // TORQ passes (keep alphabetical)
 //===---------------------------------------------------------------------===//
 
+def AnalyzeTensorSizes
+    : Pass<"torq-analyze-tensor-sizes", "ModuleOp"> {
+
+  let summary = "Analyze tensor sizes in the module";
+  
+  let constructor = "mlir::syna::torq::createAnalyzeTensorSizesPass()";
+
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect"
+  ];
+}
+
 def ValidToSamePadPass
     : InterfacePass<"torq-convert-conv-valid-to-same", "mlir::FunctionOpInterface"> {
 

@@ -385,6 +385,8 @@ void TORQLowerExecutableTargetPass::runOnOperation() {
 
     auto pipeline = OpPassManager(getOperation().getOperationName());
 
+    pipeline.addPass(createAnalyzeTensorSizesPass());
+
     if (!clFromPreBufferizedIR && !clDisableSlices) {
         addSlicePasses(pipeline);
     }
