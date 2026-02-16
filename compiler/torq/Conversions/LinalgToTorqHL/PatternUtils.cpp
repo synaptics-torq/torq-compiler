@@ -1087,9 +1087,8 @@ PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nc
             return {};
         }
 
-        // FIXME: not clear how the fill value should be represented for bf16 computations
         float floatFillValue = *maybeFloatFillValue;
-        maybeFillValue = (int32_t)floatFillValue;
+        maybeFillValue = *reinterpret_cast<int32_t *>(&floatFillValue);
     }
 
     // Compute the padding applied to the source tensor

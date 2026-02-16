@@ -266,8 +266,8 @@ struct SliceCfg {
     uint8_t no_p_output;
     LRTBDim kernel;
     LRTBDim pad;
-    int32_t pad_value{/*-1*/};
-    int32_t stride{1};
+    int32_t pad_value;
+    int32_t stride;
     int32_t stride_offset;
     torq_hw::RoundingMode act_round_mode;
     torq_hw::WeightFormat weight_format;
@@ -281,11 +281,15 @@ struct SliceCfg {
     // bit is 1 to disable the 4-ACT group.
     // 0x0 to enable all 16 ACT, 0xf for no operations
     uint32_t act_disable;
-    torq_hw::NumberFormat alu_format{torq_hw::NumberFormat::I};
-    torq_hw::NumberFormat act_format{torq_hw::NumberFormat::I};
+    NumberFormat alu_format{NumberFormat::I};
+    NumberFormat act_format{NumberFormat::I};
     uint32_t act_sum_bits;
 
     SliceCFGAttr toSliceCFGAttr(MLIRContext *ctx) const {
+        // When using fp32 and bf16 we normally represent values as float32 (see min,max in clamp())
+        // For consistency we do the same for the padding value, but HW expects 16 bits here
+        // so we have to adjust the value by discarding the lowest 16 bits of mantissa.
+        int padValue16b = alu_format == NumberFormat::BF ? pad_value >> 16 : pad_value;
         return SliceCFGAttr::get(
             ctx, {alu_op0_mode[0], alu_op0_mode[1], alu_op0_mode[2], alu_op0_mode[3]},
             {alu_op1_mode[0], alu_op1_mode[1], alu_op1_mode[2], alu_op1_mode[3]}, alu_d_unsigned,
@@ -294,7 +298,7 @@ struct SliceCfg {
             no_p_clear,
             no_p_output,                                                       //
             kernel.left, kernel.right, kernel.top, kernel.bottom,              //
-            pad.left, pad.right, pad.top, pad.bottom, pad_value,               //
+            pad.left, pad.right, pad.top, pad.bottom, padValue16b,             //
             stride, stride_offset, act_round_mode, weight_format,              //
             alu_disable, act_disable, alu_format, act_format, act_sum_bits, {} /*table*/
         );

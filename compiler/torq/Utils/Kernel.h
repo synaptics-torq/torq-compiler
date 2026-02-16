@@ -604,6 +604,7 @@ class Slice {
 
     // Store a value to LRAM
     // output must represent a scalar
+    // In case of a floating point scalar, value is interpreted as a float.
     // Can only be used if iram, wram and bram haven't been loaded
     void store(const LData &output, int value);
 
