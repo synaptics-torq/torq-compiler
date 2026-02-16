@@ -120,6 +120,13 @@ class Conv1DPattern : public OpRewritePattern<torq_hl::Conv1DOp> {
 
         int totalTiles = fullTilesCount + (remainingChannels > 0 ? 1 : 0);
 
+        // If the tiling would produce only a single tile with a single stripe,
+        // no actual splitting occurs and the pattern would recreate the same op,
+        // causing an infinite loop in the greedy rewriter.
+        if (totalTiles <= 1 && outStripesCount <= 1) {
+            return failure();
+        }
+
         auto outShape = outType.getShape();
 
         auto inShape = inType.getShape();
@@ -329,6 +336,119 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
             return failure();
         }
 
+        auto outShape = outType.getShape();
+        auto inShape = inType.getShape();
+
+        // --- Batch-first tiling: when the per-batch-element memory still
+        //     exceeds what is available, channel/stripe tiling with the full
+        //     batch would produce tiles that themselves need batch tiling later,
+        //     causing an IR explosion.  Splitting the batch first (one element
+        //     at a time) and letting the greedy rewriter channel/stripe-tile
+        //     each batch=1 conv produces far fewer total operations.
+        {
+            int64_t batchSize = outShape[0];
+            if (batchSize > 1) {
+                int perBatchInputSize = inputSize / batchSize;
+                int perBatchOutputSize = outputSize / batchSize;
+                int perBatchMem = perBatchOutputSize + perBatchInputSize +
+                                  getTensorSize(weightsType) +
+                                  getTensorSize(convOp.getScaleBias().getType());
+                perBatchMem = std::max(perBatchMem, 2 * perBatchInputSize);
+                if (perBatchMem < 2 * perBatchOutputSize) {
+                    perBatchMem = 2 * perBatchOutputSize;
+                }
+
+                if (perBatchMem > memoryAvailable) {
+                    // Even a single batch element exceeds available memory,
+                    // so tile the batch dimension first.
+                    Value outputTensor = rewriter.create<tensor::EmptyOp>(
+                        convOp.getLoc(), outShape, outType.getElementType()
+                    );
+
+                    const auto batchStrides = createVector({1, 1, 1, 1}, rewriter);
+
+                    for (int64_t b = 0; b < batchSize; b++) {
+                        auto inBatchOffsets = createVector({b, 0, 0, 0}, rewriter);
+                        auto inBatchSizes =
+                            createVector({1, inShape[1], inShape[2], inShape[3]}, rewriter);
+
+                        Value inputTile;
+                        if (segmentationOp) {
+                            auto segInputSlice = rewriter.create<tensor::ExtractSliceOp>(
+                                convOp.getLoc(), segmentationOp.getInput(), inBatchOffsets,
+                                inBatchSizes, batchStrides
+                            );
+                            auto segSliceType = segInputSlice.getType();
+
+                            auto segInitTile = rewriter.create<tensor::EmptyOp>(
+                                convOp.getLoc(), segSliceType.getShape(),
+                                segSliceType.getElementType()
+                            );
+
+                            auto segOp = rewriter.create<torq_hl::SegmentationOp>(
+                                segmentationOp.getLoc(), segInputSlice.getType(),
+                                segInitTile.getResult(), segmentationOp.getHSegments(),
+                                segmentationOp.getWSegments(), segmentationOp.getWeights(),
+                                segmentationOp.getScaleBias(), segInputSlice
+                            );
+                            inputTile = segOp.getOutput();
+                        }
+                        else {
+                            inputTile = rewriter
+                                            .create<tensor::ExtractSliceOp>(
+                                                convOp.getLoc(), convOp.getInput(), inBatchOffsets,
+                                                inBatchSizes, batchStrides
+                                            )
+                                            .getResult();
+                        }
+
+                        // batch=1 output type
+                        auto batchOutType = RankedTensorType::get(
+                            {1, outShape[1], outShape[2], outShape[3]}, outType.getElementType()
+                        );
+
+                        auto initTile = rewriter.create<tensor::EmptyOp>(
+                            convOp.getLoc(), batchOutType.getShape(), batchOutType.getElementType()
+                        );
+
+                        const int32_t groups = 1;
+                        auto batchConv = rewriter.create<torq_hl::Conv2DOp>(
+                            convOp.getLoc(), batchOutType, initTile.getResult(),
+                            convOp.getInputZp(), convOp.getWeightZp(), convOp.getOutputZp(),
+                            convOp.getOutputMin(), convOp.getOutputMax(), convOp.getShiftFactor(),
+                            groups, convOp.getPad(), convOp.getStride(), convOp.getDilation(),
+                            convOp.getVectorizationMode(), convOp.getWeights(),
+                            convOp.getScaleBias(), inputTile
+                        );
+
+                        if (convOp.getSegmentOutput()) {
+                            batchConv->setAttr(
+                                convOp.getSegmentOutputAttrName(),
+                                BoolAttr::get(convOp.getContext(), true)
+                            );
+                        }
+
+                        auto outBatchOffsets = createVector({b, 0, 0, 0}, rewriter);
+                        auto outBatchSizes =
+                            createVector({1, outShape[1], outShape[2], outShape[3]}, rewriter);
+
+                        outputTensor = rewriter
+                                           .create<tensor::InsertSliceOp>(
+                                               convOp.getLoc(), batchConv.getOutput(), outputTensor,
+                                               outBatchOffsets, outBatchSizes, batchStrides
+                                           )
+                                           .getResult();
+                    }
+
+                    rewriter.replaceOp(convOp, outputTensor);
+                    if (segmentationOp) {
+                        rewriter.eraseOp(segmentationOp);
+                    }
+                    return success();
+                }
+            }
+        }
+
         const int maxInputSize = memoryAvailable / 2;
         const int maxWeightAndOutputSize = memoryAvailable / 2;
 
@@ -372,9 +492,13 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
 
         int totalTiles = fullTilesCount + (remainingChannels > 0 ? 1 : 0);
 
-        auto outShape = outType.getShape();
+        // If channel/stripe tiling cannot reduce the problem (single tile,
+        // single stripe), and batch is already 1 (or batch-first was not
+        // applicable), we cannot tile further.
+        if (totalTiles <= 1 && outStripesCount <= 1) {
+            return failure();
+        }
 
-        auto inShape = inType.getShape();
         auto inTileSizes = createVector({inShape[0], inShape[1], inShape[2], inShape[3]}, rewriter);
 
         Value outputTensor =
