@@ -483,10 +483,10 @@ def TorqHW_RegNdlAttr :
 }
 
 def TorqHW_MemNdlArrayAttr: ArrayOfAttr<TorqHW_Dialect, "MemNdlArray",
-                                      "Array of MemNdlAttr", "MemNdlAttr", []>;
+                                      "mem_ndl_array", "MemNdlAttr", []>;
 
 def TorqHW_RegNdlArrayAttr: ArrayOfAttr<TorqHW_Dialect, "RegNdlArray",
-                                          "Array of RegNdlAttr", "RegNdlAttr", []>;
+                                          "reg_ndl_array", "RegNdlAttr", []>;
 
 
 def TorqHW_DmaNdlAttr :

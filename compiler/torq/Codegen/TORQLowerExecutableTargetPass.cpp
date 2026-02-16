@@ -27,7 +27,9 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
+
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/FileSystem.h"
 
 #include <algorithm>
 
@@ -41,6 +43,10 @@ using CodeGenPipeline = IREE::Codegen::DispatchLoweringPassPipeline;
 
 static llvm::cl::opt<bool> clEnableTorqProfiling(
     "torq-enable-profiling", llvm::cl::desc("enable torq profiling"), llvm::cl::init(false)
+);
+
+static llvm::cl::opt<std::string> clDebugInfo(
+    "torq-debug-info", llvm::cl::desc("save debug information for a model"), llvm::cl::init("")
 );
 
 llvm::cl::opt<bool> clDisableSlices(
@@ -310,15 +316,15 @@ void TORQLowerExecutableTargetPass::addNssPasses(OpPassManager &pm) {
     // values
     funcPm.addPass(createResolveAddressesPass());
 
-    // compile NSS programs
-    funcPm.addPass(createCompileNSSInvocationsPass());
-
     // add all object identifiers used in serialization to the IR
     funcPm.addPass(createAssignObjectsIdentifiersPass());
 
     if (clEnableTorqProfiling) {
         funcPm.addPass(createProfilingPass());
     }
+
+    // compile NSS programs
+    funcPm.addPass(createCompileNSSInvocationsPass());
 }
 
 static FailureOr<func::FuncOp> getDispatchFunction(ModuleOp moduleOp) {
@@ -329,6 +335,33 @@ static FailureOr<func::FuncOp> getDispatchFunction(ModuleOp moduleOp) {
     }
 
     return *funcOps.begin();
+}
+
+LogicalResult saveDebugInfo(FunctionOpInterface op, const std::string &outputPath) {
+
+    auto funcName = op.getName();
+
+    llvm::sys::fs::create_directories(outputPath);
+
+    std::string fileName = outputPath + "/" + funcName.str() + ".mlirb";
+
+    std::error_code ec;
+
+    llvm::raw_fd_ostream os(fileName, ec, llvm::sys::fs::OF_None);
+
+    if (ec) {
+        llvm::errs() << "Error opening file " << fileName << ": " << ec.message() << "\n";
+        return failure();
+    }
+
+    if (failed(mlir::writeBytecodeToFile(op, os))) {
+        llvm::errs() << "Error writing bytecode to file " << fileName << "\n";
+        return failure();
+    }
+
+    os.close();
+
+    return success();
 }
 
 void TORQLowerExecutableTargetPass::runOnOperation() {
@@ -364,6 +397,12 @@ void TORQLowerExecutableTargetPass::runOnOperation() {
 
     if (failed(runPipeline(pipeline, getOperation()))) {
         return signalPassFailure();
+    }
+
+    if (!clDebugInfo.empty()) {
+        if (failed(saveDebugInfo(*maybeDispatchFuncOp, clDebugInfo))) {
+            return signalPassFailure();
+        }
     }
 }
 

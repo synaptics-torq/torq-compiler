@@ -41,7 +41,7 @@ void AssignObjectsIdentifiersPass::runOnOperation() {
 
     // Assign job id to each NSS invocation that will be used for torq-rt interoperability
     auto jobId = 0;
-    for (auto op : funcOp.getFunctionBody().getOps<torq_hl::DescriptorOp>()) {
+    for (auto op : funcOp.getFunctionBody().getOps<torq_hl::CreateInvocationOp>()) {
         if (op.getInvocation().getType().getExecutor() != torq_hl::Executor::NSS) {
             continue;
         }
@@ -92,6 +92,32 @@ void AssignObjectsIdentifiersPass::runOnOperation() {
         op.setAttr("torq-action-id", builder.getI32IntegerAttr(actionId));
 
         actionId++;
+    }
+
+    // Assign task id to all synpu_hw.task operations
+
+    WalkExecutionOptions options;
+    int nextTaskId = 0;
+
+    auto onExecuteFun =
+        [&nextTaskId](Operation *op, InvocationValue invocation, const IRMapping &map) {
+            if (auto nssTask = dyn_cast<torq_hw::NssTaskOp>(op)) {
+                OpBuilder builder(op);
+                op->setAttr("torq-task-id", builder.getI64IntegerAttr(nextTaskId++));
+            }
+
+            return success();
+        };
+
+    options.onExecute = onExecuteFun;
+    options.walkInto = [&](torq_hl::StartProgramOp startProgramOp, InvocationValue invocation,
+                           const mlir::IRMapping &) {
+        // only walk into NSS tasks executions (do not walk into Host tasks)
+        return startProgramOp.getInvocation().getType().getExecutor() == torq_hl::Executor::NSS;
+    };
+
+    if (failed(walkExecution(funcOp, options))) {
+        return signalPassFailure();
     }
 }
 

@@ -140,7 +140,6 @@ union HostActionParams {
 // Action to be executed on the host
 table HostAction {
   params: HostActionParams (required);
-  location: string;
 }
 
 // A Torq module and runtime configuration description.

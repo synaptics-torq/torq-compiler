@@ -35,7 +35,7 @@ class TorqHw {
     };
 
     virtual ~TorqHw() {}
-    TorqHw(Type type, TorqEventLog* eventLog = nullptr);
+    TorqHw(Type type, TorqDispatchEventLog* eventLog = nullptr);
 
     Type getType() const { return _type; }
 
@@ -118,9 +118,9 @@ class TorqHw {
     /// Job Timer reset at each wait() call.
     Timer _wait_timer;
 
-    TorqEventLog* _eventLog = nullptr;
+    TorqDispatchEventLog* _eventLog = nullptr;
 };
 
-std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir = "", TorqEventLog* eventLog = nullptr);
+std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir = "", TorqDispatchEventLog* eventLog = nullptr);
 
 } // namespace synaptics

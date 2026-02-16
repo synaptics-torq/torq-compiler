@@ -35,7 +35,7 @@ using namespace std;
 
 namespace synaptics {
 
-TorqHw::TorqHw(Type type, TorqEventLog* eventLog)
+TorqHw::TorqHw(Type type, TorqDispatchEventLog* eventLog)
     : _type(type), _eventLog(eventLog) {}
 
 void TorqHw::printNssRegs() {
@@ -84,7 +84,7 @@ void TorqHw::printNssRegs() {
     }
 }
 
-std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir, TorqEventLog* eventLog) {
+std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir, TorqDispatchEventLog* eventLog) {
 #ifdef ENABLE_SIMULATOR
     if (hw_type == "sim") {
         return std::unique_ptr<TorqHw>(new TorqSimulator(xram_start_addr, xram_size, dump_dir, eventLog));

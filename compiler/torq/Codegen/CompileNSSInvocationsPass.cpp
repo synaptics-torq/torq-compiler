@@ -660,13 +660,17 @@ LogicalResult createDescriptors(torq_hl::CreateInvocationOp createInvocationOp) 
 
     IRRewriter rewriter(createInvocationOp);
 
-    rewriter.replaceOpWithNewOp<torq_hl::DescriptorOp>(
+    auto jobId = createInvocationOp->getAttr("torq-job-id");
+
+    auto descriptorOp = rewriter.replaceOpWithNewOp<torq_hl::DescriptorOp>(
         createInvocationOp, createInvocationOp->getResultTypes(), createInvocationOp.getNameAttr(),
         rewriter.getIndexAttr(0), createInvocationOp.getProgram(),
         createInvocationOp.getExecutorCodeAddressesAttr(),
         createInvocationOp.getXramCodeAddressesAttr(),
         rewriter.getArrayAttr({rewriter.getDenseI8ArrayAttr(code)})
     );
+
+    descriptorOp->setAttr("torq-job-id", jobId);
 
     return success();
 }

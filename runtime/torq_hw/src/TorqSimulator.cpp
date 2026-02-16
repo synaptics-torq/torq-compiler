@@ -61,7 +61,9 @@ bool TorqSimulator::start(uint32_t lramAddr) {
     return TorqHw::start(lramAddr);
 }
 
-bool TorqSimulator::close() { return torq_cm_close(cm) >= 0; }
+bool TorqSimulator::close() { 
+    return torq_cm_close(cm) >= 0;
+}
 
 bool TorqSimulator::wfi() { return true; }
 

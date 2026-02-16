@@ -40,7 +40,7 @@
 
 static llvm::cl::opt<std::string> clTorqProfilingDump(
     "torq-dump-profiling", llvm::cl::desc("Dump profiling information to specified path"),
-    llvm::cl::init("timeline.csv")
+    llvm::cl::init("")
 );
 
 static llvm::cl::opt<bool> clTorqDisableNdlCycleCheck(
@@ -62,7 +62,7 @@ typedef uint64_t StartTime;
 typedef uint64_t EndTime;
 
 struct DmaEvent {
-    int actionIndex;
+    int taskId;
     DmaType dmaType;
     StartTime startTime;
     EndTime endTime;
@@ -71,7 +71,7 @@ struct DmaEvent {
 };
 
 struct SliceEvent {
-    int actionIndex;
+    int taskId;
     int id;
     StartTime startTime;
     EndTime endTime;
@@ -79,7 +79,7 @@ struct SliceEvent {
 };
 
 struct CSSEvent {
-    int actionIndex;
+    int taskId;
     StartTime startTime;
     EndTime endTime;
     std::string loc;
@@ -92,6 +92,8 @@ typedef std::vector<CSSEvent> CSSTimeline;
 struct ProfStruct {
 
     uint64_t timestamp{0};
+
+    Attribute lastActionTimestampAttr;
 
     DmaTimeline dmaTimeline;
     SliceTimeline sliceTimeline;
@@ -106,8 +108,10 @@ struct ProfStruct {
     uint64_t currentDmaInBytes;
     uint64_t currentDmaOutBytes;
 
-    void addToSliceTimeline(int actionId, int id, uint64_t start, uint64_t end, std::string loc) {
-        sliceTimeline.push_back({actionId, id, start, end, loc}
+    int nextTaskIndex{0};
+
+    void addToSliceTimeline(int taskId, int id, uint64_t start, uint64_t end, std::string loc) {
+        sliceTimeline.push_back({taskId, id, start, end, loc}
         ); // loc+1 to match with the original line number in dump
     }
 
@@ -120,8 +124,8 @@ struct ProfStruct {
         return 0;
     }
 
-    void addToCSSTimeline(int actionId, uint64_t start, uint64_t end, std::string loc) {
-        cssTimeline.push_back({actionId, start, end, loc});
+    void addToCSSTimeline(int taskId, uint64_t start, uint64_t end, std::string loc) {
+        cssTimeline.push_back({taskId, start, end, loc});
     }
 
     int getLastCSSTime() {
@@ -132,10 +136,10 @@ struct ProfStruct {
     }
 
     void addToDmaTimeline(
-        int actionId, DmaType dmaType, uint64_t start, uint64_t end, std::string loc,
+        int taskId, DmaType dmaType, uint64_t start, uint64_t end, std::string loc,
         uint64_t bytes = 0
     ) {
-        dmaTimeline.push_back({actionId, dmaType, start, end, loc, bytes}
+        dmaTimeline.push_back({taskId, dmaType, start, end, loc, bytes}
         ); // loc+1 to match with the original line number in dump
     }
 
@@ -348,7 +352,7 @@ LogicalResult ProfilingPass::cycleProfiling(mlir::FunctionOpInterface funcOp) {
 }
 
 static LogicalResult
-processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int actionId) {
+processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int taskId) {
 
     LLVM_DEBUG({
         llvm::dbgs() << "Processing operation: ";
@@ -356,6 +360,10 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
 
         llvm::dbgs() << "Current timestamp: " << prof.timestamp << "\n";
     });
+
+    std::string asyncDurationAttrName = "torq-async-duration-cycles";
+
+    Builder builder(op->getContext());
 
     const uint64_t perCycleDmaTransferBytes = 8;
 
@@ -376,16 +384,18 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
     else if (auto dmaInStartOp = dyn_cast<torq_hw::DmaInStartOp>(op)) {
         // TODO: check if there is a concurrent dma out and compute the bandwidth if shared
         prof.addToDmaTimeline(
-            actionId, DmaType::In, prof.timestamp, prof.timestamp + prof.currentDmaInCycles,
+            taskId, DmaType::In, prof.timestamp, prof.timestamp + prof.currentDmaInCycles,
             toString(dmaInStartOp.getLoc()), prof.currentDmaInBytes
         );
+        op->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(prof.currentDmaInCycles));
     }
     else if (auto dmaOutStartOp = dyn_cast<torq_hw::DmaOutStartOp>(op)) {
         // TODO: check if there is a concurrent dma in and compute the bandwidth if shared
         prof.addToDmaTimeline(
-            actionId, DmaType::Out, prof.timestamp, prof.timestamp + prof.currentDmaOutCycles,
+            taskId, DmaType::Out, prof.timestamp, prof.timestamp + prof.currentDmaOutCycles,
             toString(dmaOutStartOp.getLoc()), prof.currentDmaOutBytes
         );
+        op->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(prof.currentDmaOutCycles));
     }
     // Update the timestamp based on the end of dma operation.
     // If the timestamp is less than the end of dma, update the timestamp to the end of dma.
@@ -438,9 +448,10 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
         }
 
         prof.addToDmaTimeline(
-            actionId, type, prof.timestamp, prof.timestamp + cycles, toString(cdmaStartOp.getLoc()),
+            taskId, type, prof.timestamp, prof.timestamp + cycles, toString(cdmaStartOp.getLoc()),
             bytes
         );
+        op->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(cycles));
     }
     else if (isa<torq_hw::CDMAWaitOp>(op)) {
         uint64_t lastTimeStamp = 0;
@@ -502,9 +513,11 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
         std::string locStr = toString(loc);
 
         prof.addToSliceTimeline(
-            actionId, sliceStartOp.getId().getZExtValue(), prof.timestamp,
-            prof.timestamp + duration, locStr
+            taskId, sliceStartOp.getId().getZExtValue(), prof.timestamp, prof.timestamp + duration,
+            locStr
         );
+
+        op->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(duration));
 
         prof.timestamp += 1; // Add 1 cycle for slice start
     }
@@ -523,9 +536,9 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
         // Duration: 10000 cycles as requested
         const uint64_t cssFixedDuration = 8000; // 10us at 800MHz (10us * 800 cycles/us)
         prof.addToCSSTimeline(
-            actionId, prof.timestamp, prof.timestamp + cssFixedDuration,
-            toString(cssStartOp.getLoc())
+            taskId, prof.timestamp, prof.timestamp + cssFixedDuration, toString(cssStartOp.getLoc())
         );
+        op->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(cssFixedDuration));
         prof.timestamp += 1; // Add 1 cycle for CSS start overhead
     }
     else if (isa<torq_hw::CSSWaitOp>(op)) {
@@ -553,45 +566,39 @@ void writeToCsv(const std::string &filename, const ProfStruct &prof) {
     // TODO: print the profiling information sorted by startTime
 
     std::ofstream file(filename);
-    file << "actionIndex, elapsed_time(us), timestamp(us), event, location, bytes\n";
+    file << "taskId, elapsed_time(us), timestamp(us), event, location, bytes\n";
     for (int i = 0; i < prof.dmaTimeline.size(); i++) {
         const auto dmaT = prof.dmaTimeline[i];
         if (dmaT.dmaType == DmaType::In) {
-            file << dmaT.actionIndex << "," << dmaT.endTime - dmaT.startTime << ","
-                 << dmaT.startTime << "," << "DMA In" << "," << dmaT.loc << "," << dmaT.bytes
-                 << "\n";
+            file << dmaT.taskId << "," << dmaT.endTime - dmaT.startTime << "," << dmaT.startTime
+                 << "," << "DMA In" << "," << dmaT.loc << "," << dmaT.bytes << "\n";
         }
         else if (dmaT.dmaType == DmaType::Out) {
-            file << dmaT.actionIndex << "," << dmaT.endTime - dmaT.startTime << ","
-                 << dmaT.startTime << "," << "DMA Out" << "," << dmaT.loc << "," << dmaT.bytes
-                 << "\n";
+            file << dmaT.taskId << "," << dmaT.endTime - dmaT.startTime << "," << dmaT.startTime
+                 << "," << "DMA Out" << "," << dmaT.loc << "," << dmaT.bytes << "\n";
         }
         else if (dmaT.dmaType == DmaType::CdmaLramToDtcm) {
-            file << dmaT.actionIndex << "," << dmaT.endTime - dmaT.startTime << ","
-                 << dmaT.startTime << "," << "CDMA LRAM to DTCM" << "," << dmaT.loc << ","
-                 << dmaT.bytes << "\n";
+            file << dmaT.taskId << "," << dmaT.endTime - dmaT.startTime << "," << dmaT.startTime
+                 << "," << "CDMA LRAM to DTCM" << "," << dmaT.loc << "," << dmaT.bytes << "\n";
         }
         else if (dmaT.dmaType == DmaType::CdmaLramToItcm) {
-            file << dmaT.actionIndex << "," << dmaT.endTime - dmaT.startTime << ","
-                 << dmaT.startTime << "," << "CDMA LRAM to ITCM" << "," << dmaT.loc << ","
-                 << dmaT.bytes << "\n";
+            file << dmaT.taskId << "," << dmaT.endTime - dmaT.startTime << "," << dmaT.startTime
+                 << "," << "CDMA LRAM to ITCM" << "," << dmaT.loc << "," << dmaT.bytes << "\n";
         }
         else if (dmaT.dmaType == DmaType::CdmaDtcmToLram) {
-            file << dmaT.actionIndex << "," << dmaT.endTime - dmaT.startTime << ","
-                 << dmaT.startTime << "," << "CDMA DTCM to LRAM" << "," << dmaT.loc << ","
-                 << dmaT.bytes << "\n";
+            file << dmaT.taskId << "," << dmaT.endTime - dmaT.startTime << "," << dmaT.startTime
+                 << "," << "CDMA DTCM to LRAM" << "," << dmaT.loc << "," << dmaT.bytes << "\n";
         }
     }
     for (int i = 0; i < prof.sliceTimeline.size(); i++) {
         const auto sliceT = prof.sliceTimeline[i];
-        file << sliceT.actionIndex << "," << sliceT.endTime - sliceT.startTime << ","
-             << sliceT.startTime << "," << "Slice " << sliceT.id << "," << sliceT.loc << ","
-             << "\n";
+        file << sliceT.taskId << "," << sliceT.endTime - sliceT.startTime << "," << sliceT.startTime
+             << "," << "Slice " << sliceT.id << "," << sliceT.loc << "," << "\n";
     }
     for (int i = 0; i < prof.cssTimeline.size(); i++) {
         const auto cssT = prof.cssTimeline[i];
-        file << cssT.actionIndex << "," << cssT.endTime - cssT.startTime << "," << cssT.startTime
-             << "," << "CSS" << "," << cssT.loc << "," << "\n";
+        file << cssT.taskId << "," << cssT.endTime - cssT.startTime << "," << cssT.startTime << ","
+             << "CSS" << "," << cssT.loc << "," << "\n";
     }
 };
 
@@ -603,25 +610,21 @@ LogicalResult ProfilingPass::timeProfiling(mlir::Operation *topLevelOp) {
     // we use a pointer to prof to ensure when the lambda is copied the reference is valid
     auto onExecuteFun = [&prof](Operation *op, InvocationValue invocation, const IRMapping &map) {
         if (auto nssTask = dyn_cast<torq_hw::NssTaskOp>(op)) {
-            // Extract action ID from the invocation's uses
-            int actionId = 0;
-            for (OpOperand &use : invocation.getUses()) {
-                Operation *user = use.getOwner();
-                // Skip start_program operations, look for wait_program or other users
-                if (!isa<torq_hl::StartProgramOp>(user)) {
-                    if (auto actionIdAttr =
-                            user->getAttrOfType<mlir::IntegerAttr>("torq-action-id")) {
-                        actionId = actionIdAttr.getInt();
-                        break;
-                    }
-                }
-            }
+
+            OpBuilder builder(op);
+            op->setAttr("torq-task-id", builder.getI64IntegerAttr(prof.nextTaskIndex));
+
+            op->setAttr("torq-start-time-cycles", builder.getI64IntegerAttr(prof.timestamp));
 
             for (auto &nestedOp : op->getRegion(0).getOps()) {
-                if (failed(processOperationTime(&nestedOp, map, prof, actionId))) {
+                if (failed(processOperationTime(&nestedOp, map, prof, prof.nextTaskIndex))) {
                     return failure();
                 }
             }
+
+            op->setAttr("torq-end-time-cycles", builder.getI64IntegerAttr(prof.timestamp));
+
+            prof.nextTaskIndex++;
         }
         else {
             // TODO: the host may be doing copies or spending time in other ways
@@ -634,7 +637,34 @@ LogicalResult ProfilingPass::timeProfiling(mlir::Operation *topLevelOp) {
         return success();
     };
 
+    auto onStartFun =
+        [&prof](torq_hl::StartProgramOp op, InvocationValue invocation, const IRMapping &map) {
+            Builder builder(op);
+            prof.lastActionTimestampAttr = builder.getI64IntegerAttr(prof.timestamp);
+
+            op->setAttr("torq-start-time-cycles", prof.lastActionTimestampAttr);
+
+            // we assume the scheduling of the operation takes 0 cycles
+            op->setAttr("torq-end-time-cycles", prof.lastActionTimestampAttr);
+
+            return success();
+        };
+
+    auto onFinishFun =
+        [&prof](torq_hl::WaitProgramOp op, InvocationValue invocation, InvocationReturns) {
+            // we assume nothing happened since the last start
+            op->setAttr("torq-start-time-cycles", prof.lastActionTimestampAttr);
+
+            Builder builder(op);
+            prof.lastActionTimestampAttr = builder.getI64IntegerAttr(prof.timestamp);
+            op->setAttr("torq-end-time-cycles", prof.lastActionTimestampAttr);
+
+            return success();
+        };
+
     options.onExecute = onExecuteFun;
+    options.onStart = onStartFun;
+    options.onFinish = onFinishFun;
 
     // only walk into NSS tasks executions (do not walk into Host tasks)
     options.walkInto = [&](torq_hl::StartProgramOp startProgramOp, InvocationValue invocation,
@@ -646,7 +676,9 @@ LogicalResult ProfilingPass::timeProfiling(mlir::Operation *topLevelOp) {
         return failure();
     }
 
-    writeToCsv(clTorqProfilingDump, prof);
+    if (!clTorqProfilingDump.empty()) {
+        writeToCsv(clTorqProfilingDump, prof);
+    }
 
     return success();
 }

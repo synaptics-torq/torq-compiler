@@ -12,7 +12,7 @@ namespace synaptics {
 
 class TorqAwsFpga: public TorqHw {
   public:
-    TorqAwsFpga(uint32_t xramStartAddr, size_t xramSize, TorqEventLog* eventLog = nullptr)
+    TorqAwsFpga(uint32_t xramStartAddr, size_t xramSize, TorqDispatchEventLog* eventLog = nullptr)
         : TorqHw(Type::AWS_FPGA, eventLog), _xramStartAddr(xramStartAddr), _xramSize(xramSize) {}
 
     bool open() override;

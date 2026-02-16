@@ -500,61 +500,39 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     # Enable compiler profiling by default. If output dir is not specified, use the vmfb folder.
     compile_time_profiling_output_dir = request.config.getoption("--torq-compile-time-profiling-output-dir")
     
-    if compile_time_profiling_output_dir is None:
-        compile_time_profiling_output_dir = versioned_dir
-
-    compiler_profile_csv = versioned_dir / 'compiler_profile.csv'
-    cmds.extend(['--torq-enable-profiling', f'--torq-dump-profiling={compiler_profile_csv}'])
+    # always write debug info
+    debug_info_dir = versioned_dir / 'debug'
+    cmds.append(f'--torq-debug-info={debug_info_dir}')
     
+    if compile_time_profiling_output_dir:
+        cmds.extend(['--torq-enable-profiling'])
+
     print("Compiling for TORQ with: " + " ".join(cmds))
 
     with request.getfixturevalue("scenario_log").event("torq_compile"):
         subprocess.check_call(cmds, cwd=str(versioned_dir), timeout=torq_compiler_timeout)
 
     # Save compile time profiling data if requested
-    if compile_time_profiling_output_dir is not None and compiler_profile_csv is not None:
-        compile_time_profiling_output_dir = Path(compile_time_profiling_output_dir)
-        compile_time_profiling_output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Copy the compiler-generated profile to the output directory with test name
-        output_compile_profile = compile_time_profiling_output_dir / f'{request.node.name}_compile.csv'
-        if compiler_profile_csv.exists():
-            shutil.copy(compiler_profile_csv, output_compile_profile)
-            print(f"✓ Saved compile time profile: {output_compile_profile}")
-            
-            # Generate Perfetto .pb file from compile time profile
-            try:
-                from torq.model_profiler.perfetto_logger import convert_to_perfetto, calculate_compile_profile_metrics
+    if compile_time_profiling_output_dir:
+                    
+        # Generate Perfetto .pb file from compile time profile            
+        from torq.model_profiler.perfetto_logger import convert_to_perfetto
                 
-                # Calculate metrics for the compile profile
-                overview_data = calculate_compile_profile_metrics(str(output_compile_profile))
-                overview_map = {request.node.name: overview_data}
-                
-                original_mlir_file = str(mlir_model_file)
-                stage9_files = list((versioned_dir / 'phases').glob("*.9.executable-targets.mlir"))
-                stage9_mlir_file = str(stage9_files[0]) if stage9_files else None
-                
-                pb_output_path = compile_time_profiling_output_dir / f'{request.node.name}_compile.pb'
-                convert_to_perfetto(
-                    str(output_compile_profile),
-                    str(pb_output_path),
-                    overview_data=overview_data,
-                    original_mlir_file=original_mlir_file,
-                    stage9_mlir_file=stage9_mlir_file
-                )
-                print(f"✓ Generated Perfetto trace: {pb_output_path}")
-            except Exception as e:
-                import traceback
-                print(f"⚠ Warning: Could not generate Perfetto trace: {e}")
-                print(f"Traceback: {traceback.format_exc()}")
-        else:
-            print(f"⚠ Warning: Compiler profile CSV not found at {compiler_profile_csv}")
+        pb_output_path = Path(compile_time_profiling_output_dir) / f'{request.node.name}_compile'
 
+        convert_to_perfetto(str(debug_info_dir), str(pb_output_path))
+        
+        print(f"✓ Generated Perfetto trace: {pb_output_path}")
+        
 
 @versioned_unhashable_object_fixture
 def torq_compiled_model(torq_compiled_model_dir):
     return torq_compiled_model_dir / 'model.vmfb'
 
+
+@versioned_unhashable_object_fixture
+def torq_compiled_model_debug_info(torq_compiled_model_dir):
+    return torq_compiled_model_dir / 'debug'
 
 @versioned_unhashable_object_fixture
 def torq_compiled_hw_descriptors(torq_compiled_model_dir):
@@ -624,7 +602,7 @@ def skip_profile_annotation(request, case_config):
 def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_data_args, mlir_io_spec, 
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
                         enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name,
-                        enable_profiling, skip_profile_annotation):
+                        enable_profiling, skip_profile_annotation, torq_compiled_model_debug_info):
 
     output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
 
@@ -715,46 +693,13 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
     
     # Check if profile annotation should be skipped (can be configured via case_config)
     if enable_profiling and not skip_profile_annotation:
-        logger.debug("Starting profile annotation...")
-        ir_path = ""
-        ir_dir = request.getfixturevalue("torq_compiled_model_phases").data
-        logger.debug(f"Got torq_compiled_model_phases: {ir_dir}")
-        if os.path.exists(ir_dir):
-            logger.debug("IR dir exists, scanning for files...")
-            for irs in os.listdir(ir_dir):
-                if irs.endswith('9.executable-targets.mlir'):
-                    ir_path = str(Path(ir_dir) / irs)
-                    logger.debug(f"Found IR file: {ir_path}")
-                    
-                    original_mlir_file = None
-                    try:
-                        logger.debug("Getting mlir_model_file fixture...")
-                        # Attempt to get the original MLIR file path
-                        mlir_model_file_obj = request.getfixturevalue("mlir_model_file")
-                        # Handle VersionedFile or similar wrapper objects
-                        if hasattr(mlir_model_file_obj, 'file_path'):
-                            original_mlir_file = str(mlir_model_file_obj.file_path)
-                        elif hasattr(mlir_model_file_obj, 'data'):
-                            original_mlir_file = str(mlir_model_file_obj.data)
-                        else:
-                            original_mlir_file = str(mlir_model_file_obj)
-                        logger.debug(f"Original MLIR file: {original_mlir_file}")
-                    except Exception as e:
-                        # This is optional, so we ignore errors if the fixture is not available
-                        logger.debug(f"Could not get original MLIR file: {e}")
-                        pass
-
-                    logger.debug("Calling annotate_host_profile_from_files...")
-                    annotate_host_profile_from_files(
-                        ir_path,
-                        str(versioned_dir / 'host_profile.csv'),
-                        str(versioned_dir / 'annotated_profile.xlsx'),
-                        original_mlir_file=original_mlir_file,
-                        perfetto_file=str(versioned_dir / 'trace.pb')
-                    )
-                    logger.debug("Profile annotation completed")
-        else:
-            logger.debug(f"IR dir does not exist: {ir_dir}")
+        logger.debug("Starting profile annotation...")        
+        annotate_host_profile_from_files(
+            torq_compiled_model_debug_info,
+            str(versioned_dir / 'host_profile.csv'),
+            [str(versioned_dir / 'annotated_profile.xlsx'), str(versioned_dir / 'trace.pb')]
+        )
+        logger.debug("Profile annotation completed")
 
 @versioned_unhashable_object_fixture
 def torq_results(request, torq_results_dir, mlir_io_spec):

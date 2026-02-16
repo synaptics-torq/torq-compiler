@@ -1,65 +1,131 @@
+// Copyright 2026 Synaptics
+//
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
 #include "TorqEventLog.h"
-#include <algorithm> // Add this line
+
+#include "iree/base/internal/flags.h"
+
+#include <algorithm>
 #include <fstream>
-#include <sstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
+
 
 using namespace std;
 
 namespace synaptics {
 
-bool TorqEventLog::dumpEvents(const std::string& filename){
+IREE_FLAG(string, torq_profile_host, "", "Create host profiling log in the specified file");
+
+TorqEventLog& TorqEventLog::get() {
+    static TorqEventLog instance;
+    
+    if (TorqEventLog::isProfilingEnabled() && !instance.profilingFile_.is_open()) {
+        instance.open(FLAG_torq_profile_host);
+    }
+
+    return instance;
+}
+
+bool TorqEventLog::isProfilingEnabled() {
+    return FLAG_torq_profile_host[0] != '\0';
+}
+
+bool TorqEventLog::open(std::string profilingFile) {
     std::lock_guard<std::mutex> lock(events_mutex_);
-    profilingFile_.open(filename);
+    profilingFile_.open(profilingFile);
+
     if (!profilingFile_.is_open()) {
-        cerr << "Failed to create timing dump file: " << filename << endl;
+        cerr << "Failed to create profiling file: " << profilingFile << endl;
         return false;
     }
 
-    if (events_.empty()) {
-        profilingFile_.close();
-        return true;
-    }
-    profilingFile_ << "actionIndex, elapsed_time(us), timestamp(us), event, location\n";
-    auto start = events_.front().timestamp;
+    profilingFile_ << "dispatch_name,invocation_id,action_id,timestamp_us,event\n";
 
-    for (const auto& e : events_) {
-        auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(e.timestamp - start).count();
-        auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(e.timestamp.time_since_epoch()).count();
-
-        std::ostringstream time_str;
-        time_str << elapsed_us;
-
-        std::string type_str;
-        switch (e.type) {
-            case EventType::HOST_COPY_START:      type_str = "HOST_COPY_START"; break;
-            case EventType::HOST_COPY_END:        type_str = "HOST_COPY_END"; break;
-            case EventType::NSS_START:            type_str = "NSS_START"; break;
-            case EventType::NSS_START_END:        type_str = "NSS_START_END"; break;
-            case EventType::NSS_WAIT_START:       type_str = "NSS_WAIT_START"; break;
-            case EventType::NSS_WAIT_END:         type_str = "NSS_WAIT_END"; break;
-            case EventType::ALLOC_START:          type_str = "ALLOC_START"; break;
-            case EventType::ALLOC_END:            type_str = "ALLOC_END"; break;
-            case EventType::DEALLOC_START:        type_str = "DEALLOC_START"; break;
-            case EventType::DEALLOC_END:          type_str = "DEALLOC_END"; break;
-            case EventType::HOST_PROGRAM_START:   type_str = "HOST_PROGRAM_START"; break;
-            case EventType::HOST_PROGRAM_END:     type_str = "HOST_PROGRAM_END"; break;
-            default:                             type_str = "Unknown"; break;
-        }
-        std::string sanitized_location = e.location;
-        sanitized_location.erase(std::remove(sanitized_location.begin(), sanitized_location.end(), '\n'), sanitized_location.end());
-        // Escape double quotes in location
-        size_t pos = 0;
-        while ((pos = sanitized_location.find('"', pos)) != std::string::npos) {
-            sanitized_location.insert(pos, 1, '"');
-            pos += 2;
-        }
-
-        // Always quote the location field
-        profilingFile_ << e.actionIndex << "," << elapsed_us << "," << timestamp_us << "," << type_str << ",\"" << sanitized_location << "\"\n";
-    }
-    profilingFile_.close();
     return true;
 }
+
+void TorqEventLog::flushUnlocked() {
+    while(!dispatchEvents_.empty()) {
+        auto events = dispatchEvents_.front();
+
+        for (const auto &e : events->events) {
+
+            auto timestamp_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(e.timestamp.time_since_epoch())
+                    .count();
+
+            std::string type_str = eventTypeToString(e.type);
+
+            profilingFile_ << events->dispatchName << "," << events->dispatchIndex << "," << e.actionIndex << "," << timestamp_us << "," << type_str << "\n";
+
+        }
+
+        delete events;
+
+        dispatchEvents_.erase(dispatchEvents_.begin());
+    }
+
+    profilingFile_.flush();
 }
+
+void TorqEventLog::flush() {
+    std::lock_guard<std::mutex> lock(events_mutex_);
+    flushUnlocked();
+}
+
+void TorqEventLog::close() {
+    std::lock_guard<std::mutex> lock(events_mutex_);
+
+    if (profilingFile_.is_open()) {
+        flushUnlocked();
+        profilingFile_.close();
+    }
+}
+
+TorqDispatchEventLog::TorqDispatchEventLog(TorqEventLog& log, std::string dispatchName, size_t dispatchIndex) : log_(log) {
+    events_ = new DispatchEvents{dispatchName, dispatchIndex, {}};
+    events_->events.push_back({
+        std::chrono::steady_clock::now(),
+        EventType::DISPATCH_BEGIN,
+        -1
+    });
+}
+
+void TorqDispatchEventLog::close() {
+    if (closed_) {
+        return;
+    }
+
+    closed_ = true;
+
+    events_->events.push_back({
+        std::chrono::steady_clock::now(),
+        EventType::DISPATCH_END,
+        -1
+    });
+
+    log_.addDispatchEvents(events_);
+
+}
+
+void TorqDispatchEventLog::addEvent(EventType type, int actionIndex) {
+    events_->events.push_back({std::chrono::steady_clock::now(), type, actionIndex});
+}
+
+TorqDispatchEventLog::~TorqDispatchEventLog() {
+    close();
+}
+
+TorqDispatchEventLog* TorqEventLog::startDispatch(const std::string& dispatchName) {
+    std::lock_guard<std::mutex> lock(events_mutex_);
+    return new TorqDispatchEventLog(*this, dispatchName, nextDispatchIndex_++);
+}
+
+
+
+} // namespace synaptics

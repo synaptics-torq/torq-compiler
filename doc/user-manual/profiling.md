@@ -44,7 +44,7 @@ Profiling helps you understand the performance characteristics of your models on
 
 - Run the model using torq-run-module with the profiling flag:
     ```shell
-    $ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1" --torq_profile=./runtime.csv 
+    $ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1" --torq_profile_host=./runtime.csv 
     ```
 - Understanding `runtime.csv` Output
 
@@ -52,12 +52,14 @@ Profiling helps you understand the performance characteristics of your models on
 
   **Column Breakdown:**
 
-  | Column           | Description                                                        |
-  |------------------|--------------------------------------------------------------------|
-  | ID               | Operation index (starting from 0).                                 |
-  | time_since_open  | Cumulative time (μs) since the task was loaded.                    |
-  | time_since_start | Time elapsed (μs) since the previous operation.                    |
-  | Location         | MLIR source location that generated this operation. Helpful for tracing. |
+  | Column           | Description                                                              |
+  |------------------|--------------------------------------------------------------------------|
+  | actionIndex      | Runtime action index (starting from 0).                                  |
+  | elapsed_time(us) | Time elapsed (μs) since the previous operation.                          |
+  | timestamp(us)    | Timestamp (μs) of the event                                              |
+  | event            | Type of action                                                           |
+  | location         | MLIR source location that generated this operation. Helpful for tracing. |
+
 
 - To annotate the runtime profiling ``runtime.csv``, use annotate_profiling.py by passing the runtime.csv file along with the executable-targets phase dump file, which you can obtain using the ``--dump-compilation-phases-to`` flag during compilation.
 
@@ -67,15 +69,22 @@ Profiling helps you understand the performance characteristics of your models on
 
 - This enriches the trace with hardware-level details such as actual DMA operations, kernel launch times, and usage of slices.
 
-  **Annotated CSV Column:**
+  **Annotated CSV Columns:**
 
-  | Column                          | Description                                                                 |
-  |----------------------------------|-----------------------------------------------------------------------------|
-  | NSS Program Index               | Index of the low-level program sequence executed by the Synaptics NPU.      |
-  | torq-hw Operation in program   | Hardware action being profiled                                              |
-  | Slice ID (if applicable)        | Logical slice involved.                                                     |
-  | Invocation Name                 | Name of the task or function associated with the slice.                     |
-  | NSS Program Start Timestamp [us]| Start time in microseconds.                                                 |
-  | NSS Program End Timestamp [us]  | End time in microseconds.                                                   |
-  | NSS Program Total Time [us]     | Duration of that program block.                                             |
-  | Slice 0/1 Used in NSS Program   | Flags indicating if that slice was active during this block.                |
+  | Column | Description |
+  |--------|-------------|
+  | action_id | Index of the runtime action |
+  | job_id | Index of the NSS job associated with the action (if applicable) |
+  | operation | Action being performed |
+  | invocation_names | Name of the slice programs invoked during the action (if applicable) |
+  | original_operator | Original operator from input model |
+  | total_time | Total duration of the operation in μs |
+  | slice_used_0_in_program | Flag indicating if slice 0 was used by this action |
+  | slice_used_1_in_program | Flag indicating if slice 1 was used by this action |
+  | dma_in_used_in_program | Flag indicating if DMA input was used by this action |
+  | dma_out_used_in_program | Flag indicating if DMA output was used by this action |
+  | cdma_used_in_program | Flag indicating if CDMA was used by this action |
+  | css_used_in_program | Flag indicating if CSS was used by this action |
+  | timestamp_start | Start timestamp in μs |
+  | timestamp_end | End timestamp in μs |
+  | location | MLIR source location that generated this operation |

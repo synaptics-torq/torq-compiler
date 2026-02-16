@@ -9,7 +9,7 @@
 # Enable with: -DIREE_EXTERNAL_HAL_DRIVERS=torq
 #-------------------------------------------------------------------------------
 
-set(torq_deps)
+set(torq_deps iree::base::internal)
 set(torq_srcs src/TorqUtils.cpp src/TorqHw.cpp src/TorqEventLog.cpp)
 set(torq_defs)
 set(include_dirs

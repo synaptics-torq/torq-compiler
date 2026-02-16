@@ -1,34 +1,29 @@
 #!/usr/bin/env python3
 
 import argparse
-from torq.performance import annotate_nss_profile_from_files, annotate_host_profile_from_files
+import logging
+from torq.performance import annotate_host_profile_from_files, logger
 
 def main():
     parser = argparse.ArgumentParser(description="Parse an MLIR file.")
     parser.add_argument("mlir_file", type=str, help="Path to the executable-targets phase dump file")
-    parser.add_argument("profile_file", type=str, help="Path to the runtime profile file.")
-    parser.add_argument("annotated_profile_file", type=str, help="Path to the output")
-    parser.add_argument("--host_profiling", action="store_true", default=False, help="Enable annotating the host profiling log")
-    parser.add_argument("--original_mlir_file", type=str, default=None, help="Path to the original input MLIR file for mapping line numbers to operators")
-    parser.add_argument("--perfetto_file", type=str, default=None, help="Path to the output Perfetto trace file")
+    parser.add_argument("profile_file", type=str, help="Path to the file produced with the --torq_profile_host option of torq-run-module ")
+    parser.add_argument("annotated_profile_file", type=str, help="Path to the output (either .csv, .xlsx, or .pb for perfetto trace)")    
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()
-    if args.host_profiling:
-        print("Host profiling enabled")
-        annotate_host_profile_from_files(
-                        args.mlir_file,
-                        args.profile_file,
-                        args.annotated_profile_file,
-                        args.original_mlir_file,
-                        perfetto_file=args.perfetto_file
-                    )
-    else:
-        annotate_nss_profile_from_files(
-                        args.mlir_file,
-                        args.profile_file,
-                        args.annotated_profile_file,
-                        perfetto_file=args.perfetto_file
-                    )
+
+    if args.debug:        
+        handler = logging.StreamHandler()
+        logger.addHandler(handler)
+        logger.setLevel("DEBUG")
+
+
+    annotate_host_profile_from_files(
+                    args.mlir_file,
+                    args.profile_file,
+                    [args.annotated_profile_file]
+                )
 
 if __name__ == "__main__":
     main()

@@ -102,16 +102,12 @@ class Serializer {
 
     flatbuffers_uint32_vec_ref_t createUI32Vector(std::optional<ArrayRef<int64_t>> vec);
 
-    flatbuffers_string_vec_ref_t createLocationsVector(ArrayRef<Location> vec);
-
     iree_hal_torq_BufferDebugInfo_ref_t createBufferDebugInfo(
         int64_t bufferId, uint64_t allocationAction, uint64_t lastUseAction,
         uint64_t deallocationAction, TypedValue<MemRefType> buffer
     );
 
     flatbuffers_vec_ref_t createBuffersDebugInfoVector(mlir::FunctionOpInterface funcOp);
-
-    flatbuffers_ref_t createLocationString(Location loc);
 
     // add the given segment to the segments loaded by jobX in the hardware test vector dump
     // this is required to ensure all buffers (including constants and code segments) required by
@@ -1108,33 +1104,6 @@ flatbuffers_uint32_vec_ref_t Serializer::createUI32Vector(std::optional<ArrayRef
     return flatbuffers_uint32_vec_end(_builder);
 }
 
-flatbuffers_ref_t Serializer::createLocationString(Location loc) {
-
-    std::string v;
-    llvm::raw_string_ostream os(v);
-    loc.print(os);
-    os.flush();
-
-    return flatbuffers_string_create(_builder, v.data(), v.size());
-}
-
-flatbuffers_string_vec_ref_t Serializer::createLocationsVector(ArrayRef<Location> locations) {
-
-    SmallVector<flatbuffers_ref_t> refsVec;
-
-    for (auto loc : locations) {
-        refsVec.push_back(createLocationString(loc));
-    }
-
-    flatbuffers_string_vec_start(_builder);
-
-    for (auto v : refsVec) {
-        flatbuffers_string_vec_push(_builder, v);
-    }
-
-    return flatbuffers_string_vec_end(_builder);
-}
-
 static iree_hal_torq_BufferType_enum_t toBufferType(torq_hl::MemorySpace memorySpace) {
     switch (memorySpace) {
     case torq_hl::MemorySpace::Xram:
@@ -1543,8 +1512,7 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
             return op.emitOpError("unsupported in function body");
         }
 
-        auto action =
-            iree_hal_torq_HostAction_create(_builder, params, createLocationString(op.getLoc()));
+        auto action = iree_hal_torq_HostAction_create(_builder, params);
 
         actions.push_back(action);
     }

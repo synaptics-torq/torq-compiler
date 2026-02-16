@@ -15,10 +15,17 @@ except ImportError:
 
 import csv
 import argparse
+from collections import OrderedDict
 import os
 import re
 from pathlib import Path
-from torq.utils.mlir_utils import extract_line_numbers_from_location, get_operator_from_mlir_line
+from typing import Optional
+from dataclasses import dataclass
+
+from torq.debug_info import DebugInfo, DispatchDebugInfo, HostCopyWorkUnitDebugInfo, HostProgramWorkUnitDebugInfo, NssProgramWorkUnitDebugInfo, NssCfgWorkUnitDebugInfo, \
+                                DmaInWorkUnitDebugInfo, DmaOutWorkUnitDebugInfo, CdmaWorkUnitDebugInfo, SliceProgramWorkUnitDebugInfo, CssProgramWorkUnitDebugInfo
+
+import torq.debug_info
 
 
 # =============================================================================
@@ -60,15 +67,16 @@ def format_time_duration(ns):
 # DATA STRUCTURES
 # =============================================================================
 
+@dataclass
 class PerfettoEvent:
     """Represents a single trace event with timing information."""
-    
-    def __init__(self, process, thread, function, start_time, end_time):
-        self.process = process
-        self.thread = thread
-        self.function = function
-        self.start_time = start_time
-        self.end_time = end_time
+        
+    tuuid: str    
+    function: str
+    start_time: int
+    end_time: int
+    category: Optional[str] = None
+    correlation_id: Optional[str] = None
 
 
 class PerfettoTraceWriter:
@@ -77,8 +85,6 @@ class PerfettoTraceWriter:
     def __init__(self, filename):
         self.file = open(filename, "wb")
         self.trace = perfetto.Trace()
-        self.process_to_uuid = {}
-        self.process_to_thread = {}
         self.global_uuid = 0
 
     def close(self):
@@ -102,45 +108,36 @@ class PerfettoTraceWriter:
 
     def add_process_descriptor(self, process_name):
         """Register a new process in the trace."""
-        if process_name not in self.process_to_uuid:
-            puuid = self.get_next_uuid()
-            self.process_to_uuid[process_name] = puuid
-            
-            packet = self.trace.packet.add()
-            track_des = perfetto.TrackDescriptor()
-            pd = perfetto.ProcessDescriptor()
-            pd.pid = puuid
-            pd.process_name = process_name
-            track_des.process.CopyFrom(pd)
-            track_des.uuid = puuid
-            track_des.child_ordering = perfetto.TrackDescriptor.ChildTracksOrdering.LEXICOGRAPHIC
-            packet.track_descriptor.CopyFrom(track_des)
+        
+        puuid = self.get_next_uuid()        
+        
+        packet = self.trace.packet.add()
+        track_des = perfetto.TrackDescriptor()        
+        track_des.uuid = puuid
+        track_des.name = process_name
+        track_des.child_ordering = perfetto.TrackDescriptor.ChildTracksOrdering.CHRONOLOGICAL
+        packet.track_descriptor.CopyFrom(track_des)
 
-    def add_thread_descriptor(self, process_name, thread_name):
+        return puuid
+
+    def add_thread_descriptor(self, puuid, thread_name):
         """Register a new thread within a process."""
-        if process_name not in self.process_to_thread:
-            self.process_to_thread[process_name] = {}
-            self.add_process_descriptor(process_name)
 
-        if thread_name not in self.process_to_thread[process_name]:
-            thread_to_uuid = self.process_to_thread[process_name]
-            puuid = self.process_to_uuid[process_name]
-            tuuid = self.get_next_uuid()
+        puuid = puuid
+        tuuid = self.get_next_uuid()
+        
+        packet = self.trace.packet.add()
+        track_des = perfetto.TrackDescriptor()
+        track_des.name = thread_name        
+        track_des.uuid = tuuid
+        track_des.parent_uuid = puuid
+        packet.track_descriptor.CopyFrom(track_des)
 
-            thread_to_uuid[thread_name] = tuuid
-            packet = self.trace.packet.add()
-            track_des = perfetto.TrackDescriptor()
-            thd = perfetto.ThreadDescriptor()
-            thd.pid = puuid
-            thd.tid = tuuid
-            thd.thread_name = thread_name
-            track_des.thread.CopyFrom(thd)
-            track_des.uuid = tuuid
-            packet.track_descriptor.CopyFrom(track_des)
+        return tuuid
 
     def add_event(self, event):
         """Add a trace event (slice) to the timeline."""
-        self.add_thread_descriptor(event.process, event.thread)
+
         self.set_track_event(event.start_time, perfetto.TrackEvent.Type.TYPE_SLICE_BEGIN, event)
         self.set_track_event(event.end_time, perfetto.TrackEvent.Type.TYPE_SLICE_END, event)
 
@@ -150,19 +147,21 @@ class PerfettoTraceWriter:
     
     def set_track_event(self, time, event_type, event):
         """Create a Perfetto track event packet."""
-        thread_to_uuid = self.process_to_thread[event.process]
-        tuuid = thread_to_uuid[event.thread]
 
         packet = self.trace.packet.add()
         track_event = perfetto.TrackEvent()
         
         track_event.type = event_type
-        track_event.track_uuid = tuuid
+        track_event.track_uuid = event.tuuid
         track_event.name = event.function
         
-        # Color hint for overview tracks
-        if 'OVERVIEW' in event.thread:
-            track_event.categories.append('overview')
+        # Color hint
+        if event.category is not None:
+            track_event.categories.append(event.category)
+
+        # we need to upgrade perfetto
+        #if event.correlation_id is not None:
+        #    track_event.correlation_id = event.correlation_id
 
         packet.timestamp = time
         packet.track_event.CopyFrom(track_event)
@@ -298,58 +297,6 @@ def intersect_intervals(intervals_a, intervals_b):
 # STRING FORMATTING UTILITIES
 # =============================================================================
 
-def shorten_mlir_location(location):
-    """
-    Shorten MLIR file location to just filename and line/col info.
-    
-    Example:
-        loc(callsite("/path/to/file.mlir":2:3)) -> file.mlir:2:3
-        loc(callsite("/path/to/file.mlir":18:11 at "/path/to/file.mlir":2:3)) -> file.mlir:18:11
-    """
-    if not location or not SHOW_SHORT_LOCATIONS:
-        return location
-    
-    # Remove loc(...) and callsite(...) wrappers
-    normalized = location.replace('\\', '/').strip()
-    
-    # Handle loc(callsite("path":line:col at "path":line:col)) - extract the FIRST path (before "at")
-    match = re.search(r'callsite\("?([^"]+)"?:(\d+):(\d+)', normalized)
-    if match:
-        path = match.group(1)
-        line = match.group(2)
-        col = match.group(3)
-        filename = os.path.basename(path)
-        return f"{filename}:{line}:{col}"
-    
-    # Handle simpler formats: loc("path":line:col)
-    match = re.search(r'"?([^"]+\.mlir)"?:(\d+):(\d+)', normalized)
-    if match:
-        path = match.group(1)
-        line = match.group(2)
-        col = match.group(3)
-        filename = os.path.basename(path)
-        return f"{filename}:{line}:{col}"
-    
-    # Fallback: try basic cleanup
-    normalized = re.sub(r'^loc\(callsite\("?([^"]+)"?\)\)$', r'\1', normalized)
-    normalized = re.sub(r'^loc\("?([^"]+)"?\)$', r'\1', normalized)
-    normalized = normalized.replace('"', '').rstrip(')')
-    
-    trailing = ''
-    temp = normalized
-    
-    # Extract trailing :line:col groups
-    while True:
-        match = re.match(r'^(.*):(\d+)$', temp)
-        if match:
-            trailing = f":{match.group(2)}{trailing}"
-            temp = match.group(1)
-        else:
-            break
-    
-    base = os.path.basename(temp) if temp else temp
-    return base + trailing if base else location
-
 
 def add_numeric_prefix(log_dict, start_index=1, width=2):
     """
@@ -373,107 +320,12 @@ def add_numeric_prefix(log_dict, start_index=1, width=2):
     return ordered
 
 
-# =============================================================================
-# CSV PARSING
-# =============================================================================
-
-# =============================================================================
-# COMPILE PROFILE PARSING
-# =============================================================================
-
-
-def parse_compile_profile(csv_path, original_mlir_lines=None, stage9_mlir_lines=None):
-    """
-    Parse compile profile CSV and extract event intervals.
-    
-    CSV Format: actionIndex, elapsed_time(cycles), timestamp(cycles), event, location[, bytes]
-    
-    Returns:
-        Tuple of (dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end, all_rows)
-    """
-    dma_intervals = []
-    cdma_dtcm_intervals = []
-    cdma_itcm_intervals = []
-    slice_intervals = []
-    css_intervals = []
-    all_rows = []
-    overall_start = None
-    overall_end = None
-    
-    # Dictionary to store all parsed events
-    all_rows = []
-    overall_start = None
-    overall_end = None
-    
-    with open(csv_path, newline='') as fp:
-        reader = csv.reader(fp)
-        next(reader, None)  # Skip header row
-        
-        for row in reader:
-            if len(row) < 5:
-                continue
-            
-            # Parse format: actionIndex, elapsed_time(cycles), timestamp(cycles), event, location[, bytes]
-            try:
-                action_index = row[0].strip()
-                elapsed_time_cycles = int(row[1].strip())
-                timestamp_cycles = int(row[2].strip())
-                event = row[3].strip()
-                location = row[4].strip()
-                bytes_transferred = row[5].strip() if len(row) > 5 else None
-            except (ValueError, IndexError):
-                continue
-            
-            # Convert cycles to nanoseconds using configured clock frequency
-            start_time = cycles_to_ns(timestamp_cycles)
-            end_time = cycles_to_ns(timestamp_cycles + elapsed_time_cycles)
-            
-            # Extract original operator information if available
-            original_operator = ""
-            torq_operator = ""  # Torq operator extraction not supported for compile-time profiling
-            
-            # Extract original operator from original MLIR (like runtime profiling)
-            if original_mlir_lines:
-                line_nums = extract_line_numbers_from_location(location)
-                operators = []
-                for line_num in line_nums:
-                    if line_num and 1 <= line_num <= len(original_mlir_lines):
-                        mlir_line = original_mlir_lines[line_num - 1]
-                        operator_name = get_operator_from_mlir_line(mlir_line)
-                        if operator_name:
-                            operators.append(f"{operator_name}@L{line_num}")
-                original_operator = " + ".join(operators) if operators else ""
-                        
-            # Track overall time span
-            if overall_start is None or start_time < overall_start:
-                overall_start = start_time
-            if overall_end is None or end_time > overall_end:
-                overall_end = end_time
-            
-            # Categorize by event type for metrics calculation
-            if 'DMA' in event and 'CDMA' not in event:
-                dma_intervals.append((start_time, end_time))
-            elif 'CDMA' in event and ('DTCM' in event or 'LRAM' in event):
-                if 'DTCM' in event:
-                    cdma_dtcm_intervals.append((start_time, end_time))
-                elif 'ITCM' in event:
-                    cdma_itcm_intervals.append((start_time, end_time))
-            elif 'CSS' in event:
-                css_intervals.append((start_time, end_time))
-            elif 'Slice' in event:
-                slice_intervals.append((start_time, end_time))
-            
-            # Store in format: (event, start_time, end_time, src_line_id, etype, bytes_transferred, original_operator, torq_operator, action_index)
-            all_rows.append((event, start_time, end_time, location, event, bytes_transferred, original_operator, torq_operator, action_index))
-    
-    return dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end, all_rows
-
 
 # =============================================================================
 # METRICS CALCULATION
 # =============================================================================
 
-def compute_compile_metrics(dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end):
+def compute_compile_metrics(dispatch: DispatchDebugInfo):
     """
     Compute hardware utilization metrics from parsed compile profile intervals.
     
@@ -489,6 +341,40 @@ def compute_compile_metrics(dma_intervals, cdma_dtcm_intervals, cdma_itcm_interv
     Returns:
         Dictionary containing metrics, overall_start, overall_end
     """
+
+    overall_end = dispatch.end_time_ns
+    overall_start = dispatch.start_time_ns
+
+    dma_intervals = []
+    cdma_dtcm_intervals = []
+    cdma_itcm_intervals = []
+    slice_intervals = []
+    css_intervals = []
+
+    for workunit in dispatch.workunits:
+
+        start_time_ns = workunit.start_time_ns
+        end_time_ns = workunit.end_time_ns
+
+        if start_time_ns is None or end_time_ns is None:
+            continue
+
+        if isinstance(workunit, DmaOutWorkUnitDebugInfo) or \
+              isinstance(workunit, DmaInWorkUnitDebugInfo):
+            dma_intervals.append((start_time_ns, end_time_ns))
+
+        elif isinstance(workunit, SliceProgramWorkUnitDebugInfo):
+            slice_intervals.append((start_time_ns, end_time_ns))
+        
+        elif isinstance(workunit, CdmaWorkUnitDebugInfo):
+            if workunit.is_to_dtcm() or workunit.is_from_dtcm():
+                cdma_dtcm_intervals.append((start_time_ns, end_time_ns))
+            elif workunit.is_to_itcm() or workunit.is_from_itcm():
+                cdma_itcm_intervals.append((start_time_ns, end_time_ns))
+                
+        elif isinstance(workunit, CssProgramWorkUnitDebugInfo):
+            css_intervals.append((start_time_ns, end_time_ns))            
+
     # Merge overlapping intervals
     merged_dma = merge_intervals(dma_intervals)
     merged_slice = merge_intervals(slice_intervals)
@@ -566,22 +452,8 @@ def compute_compile_metrics(dma_intervals, cdma_dtcm_intervals, cdma_itcm_interv
     }
 
 
-def calculate_compile_profile_metrics(csv_path):
-    """
-    Calculate hardware utilization metrics for compile profile.
-    
-    Returns:
-        Dictionary containing:
-        - metrics: Dict with DMA, SLICE, IDLE, DMA_ONLY, DMA_SLICE_OVERLAP, OVERALL
-        - overall_start: Start timestamp
-        - overall_end: End timestamp
-    """
-    dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end, _ = parse_compile_profile(csv_path)
-    
-    return compute_compile_metrics(dma_intervals, cdma_dtcm_intervals, cdma_itcm_intervals, slice_intervals, css_intervals, overall_start, overall_end)
 
-
-def compute_runtime_metrics(all_rows, overall_start, overall_end):
+def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     """
     Compute utilization metrics from parsed runtime profile rows.
     
@@ -593,11 +465,9 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
     Returns:
         Dictionary containing metrics, overall_start, overall_end
     """
-    # Convert from microseconds to nanoseconds (ensure integer conversion)
-    if overall_start is not None:
-        overall_start = int(overall_start * 1000)
-    if overall_end is not None:
-        overall_end = int(overall_end * 1000)
+    
+    overall_start = dispatch.start_time_ns
+    overall_end = dispatch.end_time_ns
 
     dma_intervals = []
     slice_intervals = []
@@ -606,37 +476,52 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
     cdma_intervals = []
     css_intervals = []
     host_copy_intervals = []
+    host_intervals = []
     
-    for row in all_rows:
-        # Unpack row (16 elements)
-        (action_id, job_id, start_time, end_time, mlir_loc, original_operator, 
-            invocation_name, operation, slice_id, slice_0_used, slice_1_used, 
-            dma_in_used, dma_out_used, cdma_used, css_used, host_used) = row
+    for workunit in dispatch.workunits:
         
-        # Convert microseconds to nanoseconds (ensure integer conversion)
-        start_time = int(start_time * 1000)
-        end_time = int(end_time * 1000)
+        start_time_ns = workunit.start_time_ns
+        end_time_ns = workunit.end_time_ns
 
-        if dma_in_used or dma_out_used:
-            dma_intervals.append((start_time, end_time))
-
-        if cdma_used:
-            cdma_intervals.append((start_time, end_time))
-        
-        if slice_0_used or slice_1_used:
-            slice_intervals.append((start_time, end_time))
+        if start_time_ns is None or end_time_ns is None:
+            continue
             
-        if slice_0_used:
-            slice_0_intervals.append((start_time, end_time))
-            
-        if slice_1_used:
-            slice_1_intervals.append((start_time, end_time))
+        if isinstance(workunit, NssProgramWorkUnitDebugInfo):
 
-        if css_used:
-            css_intervals.append((start_time, end_time))
-        
-        if host_used:
-            host_copy_intervals.append((start_time, end_time))
+            if start_time_ns is None or end_time_ns is None:
+                raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
+
+            if workunit.dma_in_used or workunit.dma_out_used:
+                dma_intervals.append((start_time_ns, end_time_ns))
+
+            if workunit.cdma_used:
+                cdma_intervals.append((start_time_ns, end_time_ns))
+            
+            if workunit.slice_used[0] or workunit.slice_used[1]:
+                slice_intervals.append((start_time_ns, end_time_ns))
+                
+            if workunit.slice_used[0]:
+                slice_0_intervals.append((start_time_ns, end_time_ns))
+                
+            if workunit.slice_used[1]:
+                slice_1_intervals.append((start_time_ns, end_time_ns))
+
+            if workunit.css_used:
+                css_intervals.append((start_time_ns, end_time_ns))
+    
+        elif isinstance(workunit, HostCopyWorkUnitDebugInfo):        
+
+            if start_time_ns is None or end_time_ns is None:
+                raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
+
+            host_copy_intervals.append((start_time_ns, end_time_ns))
+
+        elif isinstance(workunit, HostProgramWorkUnitDebugInfo):
+
+            if start_time_ns is None or end_time_ns is None:
+                raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
+
+            host_intervals.append((start_time_ns, end_time_ns))
             
     # Merge overlapping intervals
     merged_dma = merge_intervals(dma_intervals)
@@ -645,6 +530,8 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
     merged_slice_0 = merge_intervals(slice_0_intervals)
     merged_slice_1 = merge_intervals(slice_1_intervals)
     merged_css = merge_intervals(css_intervals)
+    merged_host_copy = merge_intervals(host_copy_intervals)
+    merged_host = merge_intervals(host_intervals)
     
     merged_compute_combined = merge_intervals(slice_0_intervals + slice_1_intervals + css_intervals)
     
@@ -668,11 +555,13 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
     total_compute_only = sum(end - start for start, end in compute_only_intervals)
     total_overlap = sum(end - start for start, end in overlap_intervals)
     total_dma_combined = sum(end - start for start, end in merged_dma_combined)
+    total_host_copy = sum(end - start for start, end in merged_host_copy)
+    total_host = sum(end - start for start, end in merged_host)
     
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
     
     # Calculate BUSY time (union of DMA+CDMA, SLICE+CSS, and HOST_COPY)
-    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined + host_copy_intervals)
+    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined + host_copy_intervals + host_intervals)
     busy_time = sum(end - start for start, end in busy_intervals)
     
     # Calculate IDLE time
@@ -694,7 +583,9 @@ def compute_runtime_metrics(all_rows, overall_start, overall_end):
         'DMA_ONLY': {'time': total_dma_only, 'percent': calc_percent(total_dma_only)},
         'COMPUTE_ONLY': {'time': total_compute_only, 'percent': calc_percent(total_compute_only)},
         'DMA_COMPUTE_OVERLAP': {'time': total_overlap, 'percent': calc_percent(total_overlap)},
-        'OVERALL': {'time': overall_time}
+        'OVERALL': {'time': overall_time},
+        'HOST_COPY': {'time': total_host_copy, 'percent': calc_percent(total_host_copy)},
+        'HOST': {'time': total_host, 'percent': calc_percent(total_host)}
     }
     
     return {
@@ -725,77 +616,8 @@ def print_metrics_summary(profile_name, metrics):
 # PERFETTO TRACE RENDERING
 # =============================================================================
 
-def create_compile_profile_event(view_name, event, start_time, end_time, 
-                                 src_line_id, etype, overall_time, bytes_transferred=None, original_operator="", torq_operator="", action_index=None):
-    """
-    Create a Perfetto event for a compile profile entry (matches runtime profiling format).
-    
-    Args:
-        original_operator: Original operator name extracted from MLIR source (e.g., "tosa.mul@L3")
-        torq_operator: Torq operator name extracted from stage9 MLIR (e.g., "mul_0")
-        action_index: Action index from CSV for matching runtime format
-    
-    Returns:
-        PerfettoEvent instance
-    """
-    # Categorize event
-    event_category = "UNKNOWN"
-    event_display = event
-    
-    # Determine category for sorting/grouping
-    if 'DMA In' in event:
-        event_category = "0_DMA_IN"
-    elif 'DMA Out' in event:
-        event_category = "1_DMA_OUT"
-    elif 'Slice' in event:
-        # Extract slice number from "Slice N" format
-        try:
-            slice_num = int(event.split()[1])
-            event_category = f"{2 + slice_num}_SLICE_{slice_num}"
-        except Exception:
-            event_category = "SLICE_UNKNOWN"
-    elif 'CDMA' in event:
-        event_category = "4_CDMA"
-    elif 'CSS' in event:
-        event_category = "5_CSS"
-    
-    # Build event details matching runtime profiling format
-    duration = end_time - start_time
-    percent = (duration / overall_time * 100) if overall_time else 0
-    short_loc = shorten_mlir_location(src_line_id)
-    
-    # Build parts list (same as runtime profiling)
-    parts = [event_display]
-    
-    # Add original operator if available
-    if original_operator:
-        parts.append(f"Input: {original_operator}")
-    
-    # Add Torq operator if available
-    if torq_operator:
-        parts.append(f"Torq: {torq_operator}")
-    
-    # Add action index if available (matches runtime format)
-    if action_index is not None:
-        parts.append(f"Action {action_index}")
-    
-    # Add location
-    if short_loc:
-        parts.append(f"MLIR - {short_loc}")
-    
-    # Add duration and percentage
-    parts.append(f"dur={duration} ({percent:.2f}%)")
-    
-    details = " | ".join(parts)
-    
-    # Add bytes information for DMA/CDMA events
-    if bytes_transferred and bytes_transferred.isdigit():
-        details += f" | bytes={bytes_transferred}"
-    
-    return PerfettoEvent(view_name, event_category, details, start_time, end_time)
 
-
-def create_overview_event(process_name, thread_name, label, metric, base_start):
+def create_overview_event(tuuid, label, metric, base_start):
     """
     Create a Perfetto event for an overview track.
     
@@ -813,335 +635,161 @@ def create_overview_event(process_name, thread_name, label, metric, base_start):
     name = f"{label}: {format_time_duration(duration)}"
     if 'percent' in metric:
         name += f" ({metric['percent']:.2f}%)"
-    
-    return PerfettoEvent(process_name, thread_name, name, start, end)
+
+    return PerfettoEvent(tuuid, name, start, end, "overview")
 
 
-def log_compile_profile_data(view_name, trace_writer, all_rows, overall_start, overall_end):
-    """
-    Log pre-parsed compile profile data to Perfetto trace.
-    
-    Args:
-        view_name: Name of the process/view
-        trace_writer: PerfettoTraceWriter instance
-        all_rows: List of event tuples (event, start_time, end_time, src_line_id, etype, bytes_transferred, original_operator, torq_operator)
-        overall_start: Start timestamp of the entire profile
-        overall_end: End timestamp of the entire profile
-    """
-    overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
-    
-    # Pre-register tracks to ensure specific order in Perfetto UI
-    ordered_tracks = [
-        "0_DMA_IN",
-        "1_DMA_OUT",
-        "2_SLICE_0",
-        "3_SLICE_1",
-        "4_CDMA",
-        "5_CSS"
-    ]
-    for track in ordered_tracks:
-        trace_writer.add_thread_descriptor(view_name, track)
-    
-    for row in all_rows:
-        # Unpack 9-tuple format from parse_compile_profile:
-        # (event, start_time, end_time, src_line_id, etype, bytes_transferred, original_operator, torq_operator, action_index)
-        event, start_time, end_time, src_line_id, etype, bytes_transferred, original_operator, torq_operator, action_index = row
-
-        perfetto_event = create_compile_profile_event(
-            view_name, event, start_time, end_time, src_line_id, etype, overall_time, bytes_transferred, original_operator, torq_operator, action_index
-        )
-        trace_writer.add_event(perfetto_event)
+@dataclass
+class PropertyTrack:
+    property_name: str
+    thread_name: str
+    index: Optional[int] = None
+    uuid: Optional[str] = None
 
 
-def render_compile_profile_events(view_name, trace_writer, csv_path, original_mlir_lines=None, stage9_mlir_lines=None):
-    """Render compile profile events to Perfetto trace using runtime profiling visualization.
-    
-    This converts compile profile data to runtime profile format to reuse the same
-    visualization logic with Input Layer, Torq Operations, and resource tracks.
-    
-    Args:
-        view_name: Name for the process in Perfetto
-        trace_writer: PerfettoTraceWriter instance
-        csv_path: Path to compile profile CSV
-        original_mlir_lines: Optional list of original MLIR source lines for operator extraction
-        stage9_mlir_lines: Optional list of stage9 MLIR lines for Torq operator extraction
-    """
-    _, _, _, _, _, overall_start, overall_end, all_rows = parse_compile_profile(csv_path, original_mlir_lines, stage9_mlir_lines)
-    
-    # Convert compile profile format to unified profiling format
-    # Compile: (event, start_time, end_time, location, event, bytes_transferred, original_operator, torq_operator, action_index)
-    # Unified: (action_id, job_id, start_time, end_time, mlir_loc, original_operator, invocation_name, operation, 
-    #           slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used, host_used, bytes_transferred)
-    
-    profile_rows = []
-    for row in all_rows:
-        event, start_time, end_time, location, etype, bytes_transferred, original_operator, torq_operator, action_index = row
-        
-        # Determine resource usage from event type
-        slice_0_used = False
-        slice_1_used = False
-        dma_in_used = False
-        dma_out_used = False
-        cdma_used = False
-        css_used = False
-        slice_id = None
-        
-        if 'DMA In' in event:
-            dma_in_used = True
-        elif 'DMA Out' in event:
-            dma_out_used = True
-        elif 'Slice' in event:
-            # Extract slice number from "Slice N" format
-            try:
-                slice_num = int(event.split()[1])
-                slice_id = slice_num
-                if slice_num == 0:
-                    slice_0_used = True
-                elif slice_num == 1:
-                    slice_1_used = True
-            except:
-                pass
-        elif 'CDMA' in event:
-            cdma_used = True
-        elif 'CSS' in event:
-            css_used = True
-        
-        # Convert to unified profiling format (17-tuple with bytes for compile-time)
-        profile_row = (
-            action_index if action_index else "",  # action_id
-            "",  # job_id (not applicable for compile profile)
-            start_time,
-            end_time,
-            location,  # mlir_loc
-            original_operator,
-            torq_operator,  # invocation_name (use torq_operator from stage9 MLIR)
-            event,  # operation
-            slice_id,
-            slice_0_used,
-            slice_1_used,
-            dma_in_used,
-            dma_out_used,
-            cdma_used,
-            css_used,
-            False,  # host_used (always False for compile profile)
-            bytes_transferred  # bytes (only for compile-time profiling)
-        )
-        profile_rows.append(profile_row)
-    
-    # Use the same rendering as runtime profile
-    log_runtime_profile_data(view_name, trace_writer, profile_rows, overall_start, overall_end)
-
-
-def log_runtime_profile_data(view_name, trace_writer, all_rows, overall_start, overall_end):
+def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
     """
     Log pre-parsed runtime profile data to Perfetto trace.
     
     Args:
         view_name: Name of the process/view
         trace_writer: PerfettoTraceWriter instance
-        all_rows: List of event tuples
+        all_rows: List of AnnotatedWorkloadProfilingData instances for all the workloads in the profile
         overall_start: Start timestamp of the entire profile
         overall_end: End timestamp of the entire profile
     """
-    # Convert from microseconds to nanoseconds (ensure integer conversion)
-    if overall_start is not None:
-        overall_start = int(overall_start * 1000)
-    if overall_end is not None:
-        overall_end = int(overall_end * 1000)
 
-    overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
+    # track names for each type of workload
+    workunits_track_names = OrderedDict([
+        (torq.debug_info.NssProgramWorkUnitDebugInfo, ["NSS Programs"]),
+        (torq.debug_info.NssCfgWorkUnitDebugInfo, ["NSS CFG Tasks"]),
+        (torq.debug_info.HostProgramWorkUnitDebugInfo, ["Host Programs"]),
+        (torq.debug_info.HostCopyWorkUnitDebugInfo, ["Host Copy"]),
+        (torq.debug_info.CdmaWorkUnitDebugInfo, ["CDMA"]),
+        (torq.debug_info.DmaInWorkUnitDebugInfo, ["NDMA In"]),
+        (torq.debug_info.DmaOutWorkUnitDebugInfo, ["NDMA Out"]),
+        (torq.debug_info.SliceProgramWorkUnitDebugInfo, ["Slice 0", "Slice 1"]),
+        (torq.debug_info.CssProgramWorkUnitDebugInfo, ["CSS"]),
+    ])
+
+    # stores track process and thread for each workunit type track
+    workunits_tracks = {}
+
+    host_process = trace_writer.add_process_descriptor("Host")
+    npu_process = trace_writer.add_process_descriptor("NPU")
+
+    # create the tracks for all workunits
+    for workunit_type, track_names in workunits_track_names.items():
+
+        process = host_process
+
+        if issubclass(workunit_type, torq.debug_info.NssManagedWorkUnitDebugInfo) or \
+           workunit_type == torq.debug_info.NssCfgWorkUnitDebugInfo:
+            process = npu_process
+
+        for track_name in track_names:
+            tuuid = trace_writer.add_thread_descriptor(process, track_name)
+            workunits_tracks.setdefault(workunit_type, []).append(tuuid)
+
+
+    # create tracks of all busy states
+    busy_track_process = trace_writer.add_process_descriptor("NPU Usage")
+
+
+    busy_tracks = [
+        PropertyTrack("dma_in_used", "DMA In Used"),
+        PropertyTrack("dma_out_used", "DMA Out Used"),
+        PropertyTrack("cdma_used", "CDMA Used"),
+        PropertyTrack("slice_used", "Slice 0 Used", 0),
+        PropertyTrack("slice_used", "Slice 1 Used", 1),
+        PropertyTrack("css_used", "CSS Used")
+    ]    
     
-    # Deduplicate events with same action_id and timestamps
-    # Key: (action_id, start_time, end_time)
-    # Value: (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used)
-    unique_events = {}
+    for busy_track in busy_tracks:
+        busy_track.uuid = trace_writer.add_thread_descriptor(busy_track_process, busy_track.thread_name)
     
-    for row_data in all_rows:
-        # Handle tuple format (16-tuple for runtime, 17-tuple for compile with bytes)
-        if len(row_data) == 17:
-            (dispatch_id, job_id, start_time, end_time, mlir_loc, original_operator, 
-             invocation_name, operation, slice_id, slice_0_used, slice_1_used, 
-             dma_in_used, dma_out_used, cdma_used, css_used, host_used, bytes_transferred) = row_data
+    # create an event for each workunit on the appropriate track with detailed information
+    for workunit in dispatch.workunits:
+
+        track_uuids = workunits_tracks.get(type(workunit))
+
+        # Unsupported workunit type - skip        
+        if track_uuids is None:
+            continue
+
+        try:
+            tuuid = track_uuids[workunit.executor_instance_id]
+        except IndexError:
+            # Unsupported executor instance - skip
+            continue
+
+        start_time_ns = workunit.start_time_ns
+        end_time_ns = workunit.end_time_ns
+        duration_ns = workunit.total_time_ns
+
+        # workunit with invalid timing - skip
+        if duration_ns is None:
+            continue
+
+        # create label for event                
+        details = workunit.pretty_print
+
+        ready_time_ns = workunit.ready_time_ns
+
+        if ready_time_ns is not None:
+            event = PerfettoEvent(tuuid, details, start_time_ns, ready_time_ns)
+            trace_writer.add_event(event)
+            event = PerfettoEvent(tuuid, "WAITING", ready_time_ns, end_time_ns)
+            trace_writer.add_event(event)
         else:
-            (dispatch_id, job_id, start_time, end_time, mlir_loc, original_operator, 
-             invocation_name, operation, slice_id, slice_0_used, slice_1_used, 
-             dma_in_used, dma_out_used, cdma_used, css_used, host_used) = row_data
-            bytes_transferred = None
-        
-        # Convert microseconds to nanoseconds (ensure integer conversion)
-        start_time = int(start_time * 1000)
-        end_time = int(end_time * 1000)
+            event = PerfettoEvent(tuuid, details, start_time_ns, end_time_ns)
+            trace_writer.add_event(event)
 
-        # Create unique key based on action_id and timestamps
-        event_key = (dispatch_id, start_time, end_time)
-        
-        # Keep the first occurrence or prefer entries with original_operator
-        if event_key not in unique_events:
-            unique_events[event_key] = (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used, host_used, bytes_transferred)
-        else:
-            # Merge information to capture all details (invocation name, original operator, etc.)
-            existing = unique_events[event_key]
-            (e_job_id, e_mlir_loc, e_original_operator, e_invocation_name, e_operation, e_slice_id, e_slice_0_used, e_slice_1_used, e_dma_in_used, e_dma_out_used, e_cdma_used, e_css_used, e_host_used, e_bytes_transferred) = existing
+        # if this is a NSS program workunit, also log events on the busy tracks for each hardware component used
+        # during this workunit's execution
+        if isinstance(workunit, NssProgramWorkUnitDebugInfo):            
             
-            def pick_best(new_val, old_val):
-                if new_val and str(new_val) != 'nan' and str(new_val) != 'None' and str(new_val).strip():
-                    return new_val
-                return old_val
+            for busy_track in busy_tracks:                
 
-            new_job_id = pick_best(job_id, e_job_id)
-            new_original_operator = pick_best(original_operator, e_original_operator)
-            new_invocation_name = pick_best(invocation_name, e_invocation_name)
-            new_operation = pick_best(operation, e_operation)
-            new_mlir_loc = pick_best(mlir_loc, e_mlir_loc)
+                # get whether a given NPU component is in use during this workunit
+                usage_attr = getattr(workunit, busy_track.property_name)
+
+                if busy_track.index:
+                    usage_attr = usage_attr[busy_track.index]
+
+                # if it busy add an event to the corresponding busy track for the entire duration of the workunit
+                if usage_attr:                    
+                    busy_event = PerfettoEvent(busy_track.uuid, details, start_time_ns, end_time_ns)
+                    trace_writer.add_event(busy_event)
+
+    original_lines_process = trace_writer.add_process_descriptor("Compiler Input Locations")
+
+    for original_loc_info in dispatch.original_locations:
+
+        original_line_desc = f"{original_loc_info.location.file}:{original_loc_info.location.line}:{original_loc_info.location.col}"        
+
+        # we create a new track for each workunit type so that we can have overlapping
+        # slices. Perfetto will group all these tracks that have the same name.
+        workunits_tracks = {}
+
+        for workunit in original_loc_info.workunits:
+
+            details = workunit.pretty_print
+            start_time_ns = workunit.start_time_ns
+            end_time_ns = workunit.end_time_ns
+
+            if start_time_ns is None or end_time_ns is None:
+                continue
+
+            workunit_track = workunits_tracks.get(type(workunit))
+
+            if workunit_track is None:
+                workunit_track = trace_writer.add_thread_descriptor(original_lines_process, original_line_desc)
+                workunits_tracks[type(workunit)] = workunit_track
             
-            # Merge booleans (OR logic)
-            new_slice_0_used = slice_0_used or e_slice_0_used
-            new_slice_1_used = slice_1_used or e_slice_1_used
-            new_dma_in_used = dma_in_used or e_dma_in_used
-            new_dma_out_used = dma_out_used or e_dma_out_used
-            new_cdma_used = cdma_used or e_cdma_used
-            new_css_used = css_used or e_css_used
-            new_host_used = host_used or e_host_used # Merge host op flag
-            
-            new_slice_id = slice_id if slice_id is not None else e_slice_id
-            new_bytes_transferred = pick_best(bytes_transferred, e_bytes_transferred)
-            
-            unique_events[event_key] = (new_job_id, new_mlir_loc, new_original_operator, new_invocation_name, new_operation, new_slice_id, new_slice_0_used, new_slice_1_used, new_dma_in_used, new_dma_out_used, new_cdma_used, new_css_used, new_host_used, new_bytes_transferred)
-    
-    # Create tracks in desired order
-    input_layer_track = "00_Input_Layer"
-    torq_ops_track = "01_Torq_Operations"
-    host_track = "02_Host"
-    dma_in_track = "03_DMA_In"
-    dma_out_track = "04_DMA_Out"
-    cdma_track = "05_CDMA"
-    slice_0_track = "06_Slice_0"
-    slice_1_track = "07_Slice_1"
-    css_track = "08_CSS"
-    
-    trace_writer.add_thread_descriptor(view_name, input_layer_track)
-    trace_writer.add_thread_descriptor(view_name, torq_ops_track)
-    trace_writer.add_thread_descriptor(view_name, host_track)
-    trace_writer.add_thread_descriptor(view_name, dma_in_track)
-    trace_writer.add_thread_descriptor(view_name, dma_out_track)
-    trace_writer.add_thread_descriptor(view_name, cdma_track)
-    trace_writer.add_thread_descriptor(view_name, slice_0_track)
-    trace_writer.add_thread_descriptor(view_name, slice_1_track)
-    trace_writer.add_thread_descriptor(view_name, css_track)
-    
-    # Sort events by start time for proper merging
-    sorted_events = sorted(unique_events.items(), key=lambda x: x[0][1])  # Sort by start_time
-    
-    # Merge consecutive events with same operator for Input Layer track
-    merged_operator_events = []
-    current_operator_event = None
-    
-    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used, host_used, bytes_transferred) in sorted_events:
-        # Only process events that have a valid original_operator
-        if original_operator and original_operator != 'nan' and str(original_operator).strip() and original_operator != 'None':
-            if current_operator_event is None:
-                # Start a new operator event
-                current_operator_event = {
-                    'operator': original_operator,
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'mlir_locs': [mlir_loc]
-                }
-            elif current_operator_event['operator'] == original_operator:
-                # Same operator - extend the end time
-                current_operator_event['end_time'] = max(current_operator_event['end_time'], end_time)
-                if mlir_loc not in current_operator_event['mlir_locs']:
-                    current_operator_event['mlir_locs'].append(mlir_loc)
-            else:
-                # Different operator - save current and start new
-                merged_operator_events.append(current_operator_event)
-                current_operator_event = {
-                    'operator': original_operator,
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'mlir_locs': [mlir_loc]
-                }
-    
-    # Don't forget the last event
-    if current_operator_event is not None:
-        merged_operator_events.append(current_operator_event)
-    
-    # Create Perfetto events for merged operator events in Input Layer track
-    for op_event in merged_operator_events:
-        duration = op_event['end_time'] - op_event['start_time']
-        percent = (duration / overall_time * 100) if overall_time else 0
-        short_locs = [shorten_mlir_location(loc) for loc in op_event['mlir_locs'][:3]]
-        loc_str = ', '.join(short_locs)
-        if len(op_event['mlir_locs']) > 3:
-            loc_str += f" (+{len(op_event['mlir_locs']) - 3} more)"
+            event = PerfettoEvent(workunit_track, details, start_time_ns, end_time_ns, correlation_id=type(workunit).__name__)            
+            trace_writer.add_event(event)
         
-        operator_details = f"{op_event['operator']} | {loc_str} | dur={duration} ({percent:.2f}%)"
-        operator_event = PerfettoEvent(view_name, input_layer_track, operator_details, op_event['start_time'], op_event['end_time'])
-        trace_writer.add_event(operator_event)
-    
-    # Create events for Torq Operations, DMA, CDMA and Slice tracks
-    for (dispatch_id, start_time, end_time), (job_id, mlir_loc, original_operator, invocation_name, operation, slice_id, slice_0_used, slice_1_used, dma_in_used, dma_out_used, cdma_used, css_used, host_used, bytes_transferred) in unique_events.items():
-        duration = end_time - start_time
-        percent = (duration / overall_time * 100) if overall_time else 0
-        short_loc = shorten_mlir_location(mlir_loc)
-        
-        # Create event for Torq Operations track (based on Invocation Name)
-        if invocation_name and invocation_name != 'nan' and invocation_name != 'None' and str(invocation_name).strip():
-            details = f"{invocation_name} | {short_loc} | dur={duration} ({percent:.2f}%)"
-            torq_ops_event = PerfettoEvent(view_name, torq_ops_track, details, start_time, end_time)
-            trace_writer.add_event(torq_ops_event)
-        
-        if host_used:
-            details = f"{operation} | {short_loc} | dur={duration} ({percent:.2f}%)"
-            host_event = PerfettoEvent(view_name, host_track, details, start_time, end_time)
-            trace_writer.add_event(host_event)
-        
-        # Prepare common details
-        input_layer_str = original_operator if (original_operator and original_operator != 'nan' and str(original_operator).strip() and original_operator != 'None') else ""
-        torq_op_str = invocation_name if (invocation_name and invocation_name != 'nan' and invocation_name != 'None' and str(invocation_name).strip()) else ""
-        job_id_str = f"Job {job_id}" if (job_id and job_id != 'nan' and str(job_id).strip()) else ""
-        action_id_str = f"Action {dispatch_id}"
-        
-        # Build compact detail string
-        detail_parts = []
-        if input_layer_str:
-            detail_parts.append(f"Input: {input_layer_str}")
-        if torq_op_str:
-            detail_parts.append(f"Torq: {torq_op_str}")
-        detail_parts.append(action_id_str)
-        if job_id_str:
-            detail_parts.append(job_id_str)
-        detail_parts.append(f"dur={duration} ({percent:.2f}%)")
-        detail_str = " | ".join(detail_parts)
-        
-        bytes_str = f" | bytes={bytes_transferred}" if (bytes_transferred and str(bytes_transferred).isdigit()) else ""
-        
-        if dma_in_used:
-            dma_in_event = PerfettoEvent(view_name, dma_in_track, f"DMA In | {detail_str}{bytes_str}", start_time, end_time)
-            trace_writer.add_event(dma_in_event)
-        
-        # Create event for DMA Out track if DMA Out is used
-        if dma_out_used:
-            dma_out_event = PerfettoEvent(view_name, dma_out_track, f"DMA Out | {detail_str}{bytes_str}", start_time, end_time)
-            trace_writer.add_event(dma_out_event)
-
-        if cdma_used:
-            cdma_event = PerfettoEvent(view_name, cdma_track, f"CDMA | {detail_str}{bytes_str}", start_time, end_time)
-            trace_writer.add_event(cdma_event)
-        
-        # Create event for Slice 0 track if Slice 0 is used
-        if slice_0_used:
-            slice_event = PerfettoEvent(view_name, slice_0_track, f"Slice 0 | {detail_str}", start_time, end_time)
-            trace_writer.add_event(slice_event)
-
-        # Create event for Slice 1 track if Slice 1 is used
-        if slice_1_used:
-            slice_event = PerfettoEvent(view_name, slice_1_track, f"Slice 1 | {detail_str}", start_time, end_time)
-            trace_writer.add_event(slice_event)
-
-        if css_used:
-            css_event = PerfettoEvent(view_name, css_track, f"CSS | {detail_str}", start_time, end_time)
-            trace_writer.add_event(css_event)
 
 
 def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
@@ -1150,7 +798,8 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
     
     Creates a separate process with overview tracks in fixed order.
     """
-    process_name = f"{view_name} Overview"
+    process_uuid= trace_writer.add_process_descriptor(f"{view_name} Overview")
+
     base_start = overall_start if overall_start is not None else 0
     
     # Define track order (using numeric prefix for lexicographic sorting)
@@ -1166,12 +815,15 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
         ("08 OVERVIEW DMA ONLY", "DMA/CDMA ONLY (no compute)", metrics.get('DMA_ONLY', {'time': 0})),
         ("09 OVERVIEW COMPUTE ONLY", "COMPUTE ONLY (no DMA/CDMA)", metrics.get('COMPUTE_ONLY', {'time': 0})),
         ("10 OVERVIEW DMA COMPUTE OVERLAP", "DMA/CDMA<->COMPUTE overlap", metrics.get('DMA_COMPUTE_OVERLAP', {'time': 0})),
+        ("11 OVERVIEW HOST", "HOST total", metrics.get('HOST', {'time': 0})),
+        ("12 OVERVIEW HOST COPY", "HOST COPY total", metrics.get('HOST_COPY', {'time': 0})),
         ("11 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
         ("12 OVERALL", "OVERALL", metrics['OVERALL']),
     ]
     
     for thread_name, label, metric in overview_tracks:
-        perfetto_event = create_overview_event(process_name, thread_name, label, metric, base_start)
+        tuuid = trace_writer.add_thread_descriptor(process_uuid, thread_name)
+        perfetto_event = create_overview_event(tuuid, label, metric, base_start)
         if perfetto_event:
             trace_writer.add_event(perfetto_event)
 
@@ -1180,49 +832,49 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
 # MAIN CONVERSION LOGIC
 # =============================================================================
 
-def convert_to_perfetto(csv_path, pb_path, overview_data=None, original_mlir_file=None, stage9_mlir_file=None, view_name="Compile Profile"):
+def convert_to_perfetto(debug_dir, pb_path, overview_data=None, view_name="Compile Profile"):
     """
     Convert a single compile profile CSV to Perfetto trace format.
     
     Args:
-        csv_path: Path to the compile profile CSV file
+        debug_dir: Path to the debug directory for the model
         pb_path: Output path for Perfetto .pb file
         overview_data: Optional dict with pre-calculated metrics (contains 'metrics', 'overall_start', 'overall_end')
         original_mlir_file: Optional path to original MLIR file for operator extraction
-        stage9_mlir_file: Optional path to stage9 MLIR file for Torq operator extraction
         view_name: Name for the process in Perfetto (default: "Compile Profile")
     
     Returns:
         Path to generated Perfetto trace file
     """
+
     pb_path = Path(pb_path)
-    pb_path.parent.mkdir(parents=True, exist_ok=True)
+    pb_path.mkdir(parents=True, exist_ok=True)
     
-    trace_writer = PerfettoTraceWriter(pb_path)
+    debug_info = DebugInfo(debug_dir)
+
+    for dispatch_name in debug_info.dispatch_names:
+
+        trace_writer = PerfettoTraceWriter(pb_path / (dispatch_name + ".pb"))
     
-    original_mlir_lines = None
-    if original_mlir_file:
+        dispatch_name = debug_info.dispatch_names[0]
+        dispatch = debug_info.get_dispatch(dispatch_name)
+
+        print(f"Processing dispatch: {dispatch_name} with {len(dispatch.workunits)} workunits")
+
+        # compute the timestamps for action and tasks based on the cycle counts and clock frequency
+        dispatch.infer_runtime_profile_from_cycles()
+
         try:
-            with open(original_mlir_file, 'r') as f:
-                original_mlir_lines = f.readlines()
-        except Exception as e:
-            pass
+            log_runtime_profile_data(trace_writer, dispatch)
+
+            overview_data = compute_runtime_metrics(dispatch)
+            
+            render_overview_tracks(view_name, overview_data['overall_start'], 
+                                overview_data['metrics'], trace_writer)
+
+        finally:        
+            trace_writer.close()
     
-    stage9_mlir_lines = None
-    if stage9_mlir_file:
-        try:
-            with open(stage9_mlir_file, 'r') as f:
-                stage9_mlir_lines = f.readlines()
-        except Exception as e:
-            pass
-    
-    render_compile_profile_events(view_name, trace_writer, csv_path, original_mlir_lines, stage9_mlir_lines)
-    
-    if overview_data:
-        render_overview_tracks(view_name, overview_data['overall_start'], 
-                              overview_data['metrics'], trace_writer)
-    
-    trace_writer.close()
     return pb_path
 
 
@@ -1235,25 +887,25 @@ def main():
     parser = argparse.ArgumentParser(
         description="Convert timeline CSV logs to Perfetto trace with overview analysis"
     )
-    parser.add_argument("input_files", nargs='+', 
-                       help="Path(s) to compile profile CSV file(s)")
+    parser.add_argument("debug_dir", nargs='+', 
+                       help="Path(s) to debug directory for the model")
     parser.add_argument("--pb", type=str, required=True,
                        help="Output path for Perfetto .pb file")
     args = parser.parse_args()
     
     # Build profile dictionaries with filenames as keys
     compile_profile_logs = {}
-    for path in args.input_files:
+    for path in args.debug_dir:
         filename = os.path.basename(path)
         compile_profile_logs[filename] = path
     
     # Calculate metrics for all profiles
     overview_map = {}
     
-    for name, path in compile_profile_logs.items():
-        overview_data = calculate_compile_profile_metrics(path)
-        overview_map[name] = overview_data
-        print_metrics_summary(name, overview_data['metrics'])
+    #for name, path in compile_profile_logs.items():
+    #    overview_data = calculate_compile_profile_metrics(path)
+    #    overview_map[name] = overview_data
+    #    print_metrics_summary(name, overview_data['metrics'])
     
     # Add numeric prefixes for process ordering in Perfetto UI only if multiple files
     total_files = len(compile_profile_logs)
@@ -1272,9 +924,9 @@ def main():
     
     # Generate Perfetto trace
     output_path = convert_to_perfetto(
-        compile_profile_logs=compile_prefixed,
-        pb_path=args.pb,
-        overview_map=new_overview_map
+        debug_dir=args.debug_dir[0],
+        pb_path=args.pb#,
+        #overview_map=new_overview_map
     )
     
     print(f"\n✓ Perfetto trace generated: {output_path}")
