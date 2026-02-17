@@ -11,6 +11,7 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/EncodingUtils.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/MemoryUtils.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -180,7 +181,11 @@ static void outlineSlicePrograms(Operation *op) {
         }
 
         // FIXME: kernels should implement an interface to simplify this logic
-        if (isa<DestinationStyleOpInterface>(op) && !isa<torq_hl::CallProgramOp>(op)) {
+        // Only outline ops targeting Slice execution. Host and CSS ops are
+        // handled by AssignOperationsToCpuProgramsPass and must not be outlined
+        // into slice programs (which would incorrectly allocate LRAM for them).
+        if (isa<DestinationStyleOpInterface>(op) && !isa<torq_hl::CallProgramOp>(op) &&
+            getTargetExecutor(op) == torq_hl::Executor::Slice) {
             toOutline.push_back(op);
         }
 

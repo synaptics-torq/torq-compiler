@@ -82,9 +82,15 @@ class LinalgToTorqHLConversionPass
 
         // conversionTargetLinalg.addLegalOp<linalg::YieldOp>();
 
-        // Make sure all tensor::PadOp are converted to linalg::FillOp so that they can be converted
-        // to torq_hl::FillOp
-        conversionTargetLinalg.addIllegalOp<tensor::PadOp>();
+        // Convert tensor::PadOp to torq_hl::FillOp, but keep pads marked for
+        // Host execution so they stay in the tensor dialect and can be included
+        // in the Host CPU program by AssignOperationsToCpuProgramsPass.
+        conversionTargetLinalg.addDynamicallyLegalOp<tensor::PadOp>(
+            [](tensor::PadOp padOp) -> bool {
+                return getTargetExecutor(padOp, torq_hl::Executor::Slice) ==
+                       torq_hl::Executor::Host;
+            }
+        );
 
         RewritePatternSet patternsLinalg(&getContext());
 

@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -135,6 +136,23 @@ void MarkHostExecutorPass::runOnOperation() {
     if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
+
+    // Propagate Host executor to producer operations that feed Host-marked ops.
+    // When an operation (e.g., conv) is marked for Host execution, its input
+    // producers (e.g., tensor.pad) should also run on Host so that the data
+    // stays in system memory and never gets routed through LRAM.
+    funcOp->walk([](Operation *op) {
+        if (getTargetExecutor(op) != torq_hl::Executor::Host)
+            return;
+        for (auto operand : op->getOperands()) {
+            if (auto defOp = operand.getDefiningOp()) {
+                if (isa<tensor::PadOp>(defOp) &&
+                    getTargetExecutor(defOp) != torq_hl::Executor::Host) {
+                    setTargetExecutorAttr(defOp, torq_hl::Executor::Host);
+                }
+            }
+        }
+    });
 }
 
 } // namespace
