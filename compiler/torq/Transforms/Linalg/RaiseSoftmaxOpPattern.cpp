@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "torq/Utils/TorqUtils.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-raise-sofmax"
@@ -123,17 +124,69 @@ SmallVector<Value> findReductionOpInputs(Value value, unsigned int reductionDim)
     return inputs;
 }
 
-/// Matches a tensor.expand_shape operation that splits the last dimension into two unit dimensions.
-/// Works for tensors of arbitrary rank by splitting the last dimension [1] into [1, 1].
-///
+/// Matches a linalg.generic operation that broadcasts along the last dimension.
 /// Pattern:
+///   %broadcast = linalg.generic
+///     {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1)>,
+///                       affine_map<(d0, d1, d2) -> (d0, d1, d2)>],
+///      iterator_types = ["parallel", "parallel", "parallel"]}
+///     ins(%input : tensor<1x1916xf32>) outs(%out : tensor<1x1916x2xf32>) {
+///       ^bb0(%in: f32, %out: f32):
+///         linalg.yield %in : f32
+///     } -> tensor<1x1916x2xf32>
+///
+/// @param value The value to check if it's a broadcast operation
+/// @return The input to the broadcast operation if matched, nullptr otherwise
+Value matchBroadcastOp(Value value) {
+    auto genericOp = value.getDefiningOp<linalg::GenericOp>();
+    if (!genericOp) {
+        return nullptr;
+    }
+
+    // Should have exactly one input
+    if (genericOp.getNumDpsInputs() != 1) {
+        return nullptr;
+    }
+
+    // Check that body just yields the input
+    auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1) {
+        return nullptr;
+    }
+
+    auto blockArg = dyn_cast<BlockArgument>(yieldOp.getOperand(0));
+    if (!blockArg || blockArg.getArgNumber() != 0 || blockArg.getOwner() != genericOp.getBody()) {
+        return nullptr;
+    }
+
+    // Verify it's a broadcast along the last dimension
+    auto inputType = dyn_cast<RankedTensorType>(genericOp.getInputs()[0].getType());
+    auto outputType = dyn_cast<RankedTensorType>(genericOp.getResult(0).getType());
+
+    if (!inputType || !outputType) {
+        return nullptr;
+    }
+
+    // Output should have one more dimension than input
+    if (outputType.getRank() != inputType.getRank() + 1) {
+        return nullptr;
+    }
+
+    return genericOp.getInputs()[0];
+}
+
+/// Matches a tensor.expand_shape operation that adds a trailing dimension of size 1.
+/// Supports two patterns:
+/// 1. Splitting last dimension [1] into [1, 1]
+/// 2. Splitting last dimension [N] into [N, 1]
+///
+/// Pattern 1:
 ///   %expanded = tensor.expand_shape %input [[0], [1], ..., [n-1], [n, n+1]]
-///   output_shape [d0, d1, ..., d_{n-1}, 1, 1]
 ///   : tensor<d0xd1x...xd_{n-1}x1xf32> into tensor<d0xd1x...xd_{n-1}x1x1xf32>
 ///
-/// Example (rank 3 input):
-///   %expanded = tensor.expand_shape %7 [[0], [1], [2, 3]] output_shape [1, 8, 1, 1]
-///   : tensor<1x8x1xf32> into tensor<1x8x1x1xf32>
+/// Pattern 2:
+///   %expanded = tensor.expand_shape %input [[0], [1, 2]]
+///   : tensor<1x1916xf32> into tensor<1x1916x1xf32>
 ///
 /// @param value The value to check if it's an expand_shape operation
 /// @return The input to the expand_shape operation if matched, nullptr otherwise
@@ -182,17 +235,92 @@ Value matchExpandShapeOp(Value value) {
         return nullptr;
     }
 
-    // Verify the last dimension of input is 1 (to be split into [1, 1])
-    if (inputType.getDimSize(inputRank - 1) != 1) {
+    // Verify the last dimension of output is 1 (the newly added trailing dimension)
+    if (outputType.getDimSize(inputRank) != 1) {
         return nullptr;
     }
 
-    // Verify the last two dimensions of output are both 1
-    if (outputType.getDimSize(inputRank - 1) != 1 || outputType.getDimSize(inputRank) != 1) {
+    // Verify the second-to-last output dimension matches the last input dimension
+    if (outputType.getDimSize(inputRank - 1) != inputType.getDimSize(inputRank - 1)) {
         return nullptr;
     }
 
     return expandOp.getSrc();
+}
+
+/// Matches either a tensor.expand_shape or linalg.generic broadcast operation
+/// @param value The value to check
+/// @return The input to the broadcast/expand operation if matched, nullptr otherwise
+Value matchBroadcastOrExpandShape(Value value) {
+    Value result = matchExpandShapeOp(value);
+    if (result) {
+        return result;
+    }
+    return matchBroadcastOp(value);
+}
+
+/// Matches a linalg.generic that computes reciprocal: 1.0 / input
+/// The constant 1.0 can be either:
+/// 1. A captured value from outside the block (e.g., %cst_3)
+/// 2. A constant defined inside the block
+///
+/// Pattern:
+///   %recip = linalg.generic ins(%sum) outs(%out) {
+///     ^bb0(%in: f32, %out: f32):
+///       %result = arith.divf %cst_one, %in : f32
+///       linalg.yield %result : f32
+///   }
+///
+/// @param value The value to check if it's a reciprocal operation
+/// @return The input to the reciprocal (the denominator) if matched, nullptr otherwise
+Value matchReciprocalOp(Value value) {
+    auto genericOp = value.getDefiningOp<linalg::GenericOp>();
+    if (!genericOp) {
+        return nullptr;
+    }
+
+    // Should have exactly one input
+    if (genericOp.getNumDpsInputs() != 1) {
+        return nullptr;
+    }
+
+    // Should have exactly one output
+    if (genericOp.getNumDpsInits() != 1) {
+        return nullptr;
+    }
+
+    // Check the body contains divf yielded directly
+    auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1) {
+        return nullptr;
+    }
+
+    auto divOp = yieldOp.getOperand(0).getDefiningOp<arith::DivFOp>();
+    if (!divOp) {
+        return nullptr;
+    }
+
+    // Check that the divisor (rhs) is the block argument corresponding to the input
+    auto rhsArg = dyn_cast<BlockArgument>(divOp.getRhs());
+    if (!rhsArg || rhsArg.getArgNumber() != 0 || rhsArg.getOwner() != genericOp.getBody()) {
+        return nullptr;
+    }
+
+    // Check that the numerator (lhs) is a constant 1.0
+    // It could be a captured value from outside or a constant inside the block
+    Value lhs = divOp.getLhs();
+
+    // Try to get the constant value - could be from inside or outside the block
+    FloatAttr constValue;
+    if (auto constOp = lhs.getDefiningOp<arith::ConstantOp>()) {
+        constValue = dyn_cast<FloatAttr>(constOp.getValue());
+    }
+
+    if (!constValue || !constValue.getValue().isExactlyValue(1.0)) {
+        return nullptr;
+    }
+
+    return genericOp.getInputs()[0];
 }
 
 class RaiseSoftmaxOnnx : public OpRewritePattern<linalg::GenericOp> {
@@ -248,8 +376,157 @@ class RaiseSoftmaxOnnx : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
+/// Matches the decomposed softmax pattern and rewrites it to linalg.softmax
+///
+/// Softmax formula: softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
+///
+/// Pattern matched (working backwards from result):
+///   %result = mul(%exp, %recip)
+///   %recip = 1.0 / %sum_expanded
+///   %sum_expanded = expand_shape(%sum)
+///   %sum = reduce_add(%exp)
+///   %exp = exp(%sub)
+///   %sub = %input - %max_expanded
+///   %max_expanded = expand_shape(%max)
+///   %max = reduce_max(%input)
+///
+/// Constraints verified:
+///   - sum and max reduce the same dimension
+///   - max and sub operate on the same input
+///   - sum reduces the exp output
+///
+/// If the original tosa.mul has shift != 0, it lowers to arith.mulf + shift operations, which
+/// won't match the simple arith::MulFOp pattern here.
+class RaiseDecomposedSoftmax : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern<linalg::GenericOp>::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(linalg::GenericOp op, PatternRewriter &rewriter) const override {
+        // Match the final multiplication (exp * reciprocal)
+        auto mulInputs = findElementwiseOpInputs<arith::MulFOp>(op.getResult(0));
+        if (mulInputs.size() != 2) {
+            return failure();
+        }
+
+        // Multiplication is commutative, so try both orderings
+        // First try: mulInputs[0] = exp, mulInputs[1] = recip
+        // Second try: mulInputs[0] = recip, mulInputs[1] = exp
+        for (int ordering = 0; ordering < 2; ++ordering) {
+            Value expValue = mulInputs[ordering];
+            Value recipBroadcastValue = mulInputs[1 - ordering];
+
+            // Match reciprocal broadcast (could be a linalg.generic that broadcasts a collapsed
+            // reciprocal)
+            Value recipValue = matchBroadcastOrExpandShape(recipBroadcastValue);
+            if (!recipValue) {
+                recipValue = recipBroadcastValue;
+            }
+            else {
+                auto collapseOp = recipValue.getDefiningOp<tensor::CollapseShapeOp>();
+                if (collapseOp) {
+                    recipValue = collapseOp.getSrc();
+                }
+            }
+
+            // Match reciprocal computation (1.0 / sum)
+            Value sumExpandedValue = matchReciprocalOp(recipValue);
+            if (!sumExpandedValue) {
+                continue; // Try other ordering
+            }
+
+            // Match sum expansion (tensor.expand_shape)
+            Value sumReducedValue = matchExpandShapeOp(sumExpandedValue);
+            if (!sumReducedValue) {
+                continue;
+            }
+
+            // Match sum reduction (linalg.reduce with addf)
+            auto sumReduceOp = sumReducedValue.getDefiningOp<linalg::ReduceOp>();
+            if (!sumReduceOp) {
+                continue;
+            }
+
+            auto sumYield = dyn_cast<linalg::YieldOp>(sumReduceOp.getBody()->getTerminator());
+            if (!sumYield || sumYield.getNumOperands() != 1) {
+                continue;
+            }
+            auto sumAddOp = sumYield.getOperand(0).getDefiningOp<arith::AddFOp>();
+            if (!sumAddOp) {
+                continue;
+            }
+
+            auto sumDimensions = sumReduceOp.getDimensions();
+            if (sumDimensions.size() != 1) {
+                continue;
+            }
+            int64_t reductionDim = sumDimensions[0];
+
+            // Verify input to sum is exp
+            if (sumReduceOp.getInputs()[0] != expValue) {
+                continue;
+            }
+
+            // Match exponential (math.exp)
+            auto expInputs = findElementwiseOpInputs<math::ExpOp>(expValue);
+            if (expInputs.size() != 1) {
+                continue;
+            }
+            Value subValue = expInputs[0];
+
+            // Match subtraction (input - max)
+            auto subInputs = findElementwiseOpInputs<arith::SubFOp>(subValue);
+            if (subInputs.size() != 2) {
+                continue;
+            }
+            Value inputValue = subInputs[0];
+            Value maxBroadcastValue = subInputs[1];
+
+            // Match max broadcast (tensor.expand_shape or linalg.generic broadcast)
+            Value maxReducedValue = matchBroadcastOrExpandShape(maxBroadcastValue);
+            if (!maxReducedValue) {
+                continue;
+            }
+
+            // Match max reduction (linalg.reduce with maximumf)
+            auto maxReduceOp = maxReducedValue.getDefiningOp<linalg::ReduceOp>();
+            if (!maxReduceOp) {
+                continue;
+            }
+
+            auto maxYield = dyn_cast<linalg::YieldOp>(maxReduceOp.getBody()->getTerminator());
+            if (!maxYield || maxYield.getNumOperands() != 1) {
+                continue;
+            }
+            auto maxOp = maxYield.getOperand(0).getDefiningOp<arith::MaximumFOp>();
+            if (!maxOp) {
+                continue;
+            }
+
+            auto maxDimensions = maxReduceOp.getDimensions();
+            if (maxDimensions.size() != 1 || maxDimensions[0] != reductionDim) {
+                continue;
+            }
+
+            // Verify input to max is the same as input to subtraction
+            if (maxReduceOp.getInputs()[0] != inputValue) {
+                continue;
+            }
+
+            // All constraints matched - rewrite to linalg.softmax
+            auto softmaxOp = rewriter.replaceOpWithNewOp<linalg::SoftmaxOp>(
+                op, op.getResultTypes(), inputValue, op.getOutputs()[0], reductionDim
+            );
+            setTargetExecutorIfForced(softmaxOp, rewriter, "softmax");
+            return success();
+        }
+
+        return failure();
+    }
+};
+
 void populateRaiseSoftmaxOpPatterns(MLIRContext *context, RewritePatternSet &patterns) {
     patterns.add<RaiseSoftmaxOnnx>(context);
+    patterns.add<RaiseDecomposedSoftmax>(context);
 }
 
 } // namespace mlir::syna::torq

@@ -10,7 +10,6 @@
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
-#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -25,48 +24,7 @@
 
 using namespace std;
 
-static llvm::cl::list<string> clExecuteOnHost(
-    "torq-execute-on-host", llvm::cl::desc("Force operation execution on host"),
-    llvm::cl::ZeroOrMore, llvm::cl::CommaSeparated, llvm::cl::callback([](const std::string &Str) {
-        llvm::dbgs() << "*** Forced Host Execution: " << Str << "\n";
-    })
-);
-
-static llvm::cl::list<string> clExecuteOnCSS(
-    "torq-execute-on-css", llvm::cl::desc("Force operation execution on CSS"), llvm::cl::ZeroOrMore,
-    llvm::cl::CommaSeparated, llvm::cl::callback([](const std::string &Str) {
-        if (llvm::is_contained(clExecuteOnHost, Str)) {
-            llvm::errs() << "*** Conflict Host/CSS Execution: " << Str << "\n";
-            exit(1);
-        }
-        LLVM_DEBUG(llvm::dbgs() << "*** Forced CSS Execution: " << Str << "\n");
-    })
-);
-
 namespace mlir::syna::torq {
-
-namespace {
-
-pair<bool, LogicalResult>
-setTargetExecutorIfForced(Operation *op, PatternRewriter &rewriter, string opName) {
-    if (llvm::is_contained(clExecuteOnHost, opName)) {
-        if (getTargetExecutor(op) != torq_hl::Executor::Host) {
-            setTargetExecutorAttr(op, torq_hl::Executor::Host);
-            return {true, success()};
-        }
-        return {true, rewriter.notifyMatchFailure(op, "target executor is Host")};
-    }
-    if (llvm::is_contained(clExecuteOnCSS, opName)) {
-        if (getTargetExecutor(op) != torq_hl::Executor::CSS) {
-            setTargetExecutorAttr(op, torq_hl::Executor::CSS);
-            return {true, success()};
-        }
-        return {true, rewriter.notifyMatchFailure(op, "target executor is CSS")};
-    }
-    return {false, failure()};
-}
-
-} // namespace
 
 struct TensorBitcastPattern : public OpRewritePattern<tensor::BitcastOp> {
     TensorBitcastPattern(MLIRContext *context)

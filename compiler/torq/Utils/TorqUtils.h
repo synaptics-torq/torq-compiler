@@ -13,11 +13,15 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Region.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/Support/CommandLine.h"
 
 #ifndef TORQ_EXPERIMENTAL_LINALG_CONV_TILING
 // If != 0 enable experimental linalg conv tiling (1: per channel tiling, 2: y-axis tiling)
 #define TORQ_EXPERIMENTAL_LINALG_CONV_TILING 0
 #endif
+
+extern llvm::cl::list<std::string> clExecuteOnHost;
+extern llvm::cl::list<std::string> clExecuteOnCSS;
 
 namespace mlir::syna {
 
@@ -63,6 +67,9 @@ std::vector<uint32_t> prepareWeightDims(
     std::vector<uint32_t> weight_shapes, size_t alu_groups_check, size_t alu_groups,
     uint32_t wram_seg_width = HwInfo::wram_seg_width
 );
+
+std::pair<bool, LogicalResult>
+setTargetExecutorIfForced(Operation *op, PatternRewriter &rewriter, std::string opName);
 
 } // namespace torq
 
