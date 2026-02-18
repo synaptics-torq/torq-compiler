@@ -263,9 +263,9 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
             !isa_and_nonnull<arith::DivFOp>(getElementwiseBinaryOp(srcOp))) {
             return rewriter.notifyMatchFailure(srcOp, "Expected bf16 divf");
         }
-        auto [isForced, result] = setTargetExecutorIfForced(srcOp, rewriter, "div");
+        auto [isForced, forced] = setTargetExecutorIfForced(srcOp, rewriter, "div");
         if (isForced) {
-            return result;
+            return forced;
         }
 
         auto numerator = srcOp.getOperand(0);
@@ -308,6 +308,10 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
         }
         if (!cast<RankedTensorType>(op.getType(0)).getElementType().isBF16()) {
             return rewriter.notifyMatchFailure(op, "Expected bf16 output");
+        }
+        auto [isForced, forced] = setTargetExecutorIfForced(op, rewriter, "reciprocal");
+        if (isForced) {
+            return forced;
         }
 
         // Matched!  Define some useful values.
@@ -526,6 +530,10 @@ struct BfloatErfPattern : public OpRewritePattern<math::ErfOp> {
         if (!cast<RankedTensorType>(op.getType()).getElementType().isBF16()) {
             return rewriter.notifyMatchFailure(op, "Expected bf16 output");
         }
+        auto [isForced, forced] = setTargetExecutorIfForced(op, rewriter, "erf");
+        if (isForced) {
+            return forced;
+        }
 
         // useful meta-values.
         auto loc = op.getLoc();
@@ -655,9 +663,14 @@ struct BfloatTanhPattern : OpRewritePattern<linalg::TanhOp> {
         setDebugName("BfloatTanhPattern");
     }
     LogicalResult matchAndRewrite(linalg::TanhOp op, PatternRewriter &rewriter) const override {
+
         // checks
         if (!cast<RankedTensorType>(op.getType(0)).getElementType().isBF16()) {
             return rewriter.notifyMatchFailure(op, "Expected bf16 output");
+        }
+        auto [isForced, forced] = setTargetExecutorIfForced(op, rewriter, "tanh");
+        if (isForced) {
+            return forced;
         }
 
         auto ctx = rewriter.getContext();
@@ -1021,9 +1034,9 @@ struct BfloatSoftmaxPattern : OpRewritePattern<linalg::SoftmaxOp> {
         if (!cast<RankedTensorType>(op.getType(0)).getElementType().isBF16()) {
             return rewriter.notifyMatchFailure(op, "Expected bf16 output");
         }
-        auto [isForced, result] = setTargetExecutorIfForced(op, rewriter, "softmax");
+        auto [isForced, forced] = setTargetExecutorIfForced(op, rewriter, "softmax");
         if (isForced) {
-            return result;
+            return forced;
         }
 
         // Matched!  Define some useful shorthands.
@@ -1280,6 +1293,11 @@ class BfloatRsqrtPattern : public OpRewritePattern<linalg::GenericOp> {
             !isa_and_nonnull<math::RsqrtOp>(getElementwiseUnaryOp(op))) {
             return rewriter.notifyMatchFailure(op, "Expected bf16 rsqrt");
         }
+        auto [isForced, forced] = setTargetExecutorIfForced(op, rewriter, "rsqrt");
+        if (isForced) {
+            return forced;
+        }
+
         auto loc = op.getLoc();
         auto bfTensorType = cast<RankedTensorType>(op.getType(0));
         auto bf16 = bfTensorType.getElementType();
