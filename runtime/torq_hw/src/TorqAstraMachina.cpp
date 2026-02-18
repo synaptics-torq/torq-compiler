@@ -93,6 +93,7 @@ bool TorqAstraMachina::open() {
         return false;
     }
 
+    _open_timer.start();
     LOGD << "Network " << _networkId << " created on open()";
     return true;
 }
