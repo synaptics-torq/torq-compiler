@@ -18,6 +18,19 @@ def extract_model_name(filename):
     return filename.replace('.pb', '')
 
 
+def is_compile_profile(filename):
+    """Check if the filename indicates compile-time profiling"""
+    # Check for _compile suffix before .pb or _compile_N.pb pattern
+    return bool(re.search(r'_compile(_\d+)?\.pb$', filename.lower()))
+
+
+def extract_profile_type(filename):
+    """Extract the profile type (compile or runtime) from filename"""
+    if is_compile_profile(filename):
+        return 'compile'
+    return 'runtime'
+
+
 def extract_model_type(model_name, filename=''):
     """Extract the model type from the test function name pattern: test_<type>_"""
     filename_lower = filename.lower()
@@ -190,14 +203,17 @@ def get_pb_files():
 def generate_html(pb_files):
     """Generate HTML content with all trace files"""
     
-    # Collect all model types for filter buttons
+    # Collect all model types and profile types for filter buttons
     model_types = set()
+    profile_types = set()
     
     trace_items = []
     for i, pb_file in enumerate(pb_files):
         model_name = extract_model_name(pb_file.name)
         model_type = extract_model_type(model_name, pb_file.name)
+        profile_type = extract_profile_type(pb_file.name)
         model_types.add(model_type)
+        profile_types.add(profile_type)
         file_path = pb_file.name
         
         # Read and base64 encode the file
@@ -429,12 +445,17 @@ def generate_html(pb_files):
         type_display = model_type.upper() if model_type != 'other' else 'Other'
         type_badge = f'<span class="type-badge type-badge-{model_type}">{type_display}</span>'
         
-        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" data-encoded="{encoded_data}" data-type="{model_type}" data-original-index="{i}">
+        # Create profile type badge (compile vs runtime)
+        profile_display = profile_type.upper()
+        profile_badge = f'<span class="profile-badge profile-badge-{profile_type}">{profile_display}</span>'
+        
+        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" data-encoded="{encoded_data}" data-type="{model_type}" data-profile="{profile_type}" data-original-index="{i}">
             <div class="trace-header">
                 <div class="trace-info">
                     <span class="expand-icon">▶</span>
                     <div class="trace-name">{model_name}</div>
                     {type_badge}
+                    {profile_badge}
                 </div>
                 <div class="trace-summary">
                     {collapsed_summary}
@@ -453,6 +474,14 @@ def generate_html(pb_files):
         display_type = model_type.upper() if model_type != 'other' else 'Other'
         filter_buttons.append(f'<button class="filter-btn" onclick="filterByType(\'{model_type}\')" data-type="{model_type}">{display_type}</button>')
     filters_html = '\n                '.join(filter_buttons)
+    
+    # Generate profile type filter buttons (compile vs runtime)
+    profile_filter_buttons = []
+    profile_filter_buttons.append('<button class="filter-btn active" onclick="filterByProfile(\'all\')" data-profile="all">All</button>')
+    for profile_type in sorted(profile_types):
+        display_profile = profile_type.upper()
+        profile_filter_buttons.append(f'<button class="filter-btn" onclick="filterByProfile(\'{profile_type}\')" data-profile="{profile_type}">{display_profile}</button>')
+    profile_filters_html = '\n                '.join(profile_filter_buttons)
     
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
@@ -732,6 +761,30 @@ def generate_html(pb_files):
             background: linear-gradient(135deg, #a0aec0 0%, #718096 100%);
             color: white;
             box-shadow: 0 2px 4px rgba(160, 174, 192, 0.3);
+        }}
+        
+        .profile-badge {{
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 8px;
+            flex-shrink: 0;
+        }}
+        
+        .profile-badge-runtime {{
+            background: linear-gradient(135deg, #667eea 0%, #5a67d8 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(102, 126, 234, 0.3);
+        }}
+        
+        .profile-badge-compile {{
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(240, 147, 251, 0.3);
         }}
         
         .trace-summary {{
@@ -1023,6 +1076,12 @@ def generate_html(pb_files):
                     {filters_html}
                 </div>
             </div>
+            <div class="filter-section">
+                <div class="filter-label">Filter by Profile</div>
+                <div class="filter-buttons" id="profileFilters">
+                    {profile_filters_html}
+                </div>
+            </div>
             <div class="search-box">
                 <input 
                     type="text" 
@@ -1122,14 +1181,32 @@ def generate_html(pb_files):
         }}
         
         let currentTypeFilter = 'all';
+        let currentProfileFilter = 'all';
         
         function filterByType(type) {{
             currentTypeFilter = type;
             
-            // Update active button
-            const buttons = document.querySelectorAll('.filter-btn');
+            // Update active button (only in the type filter section)
+            const buttons = document.querySelectorAll('.filter-section:first-child .filter-btn');
             buttons.forEach(btn => {{
                 if (btn.getAttribute('data-type') === type) {{
+                    btn.classList.add('active');
+                }} else {{
+                    btn.classList.remove('active');
+                }}
+            }});
+            
+            // Apply filters
+            filterTraces();
+        }}
+        
+        function filterByProfile(profile) {{
+            currentProfileFilter = profile;
+            
+            // Update active button (only in the profile filter section)
+            const buttons = document.querySelectorAll('#profileFilters .filter-btn');
+            buttons.forEach(btn => {{
+                if (btn.getAttribute('data-profile') === profile) {{
                     btn.classList.add('active');
                 }} else {{
                     btn.classList.remove('active');
@@ -1154,6 +1231,7 @@ def generate_html(pb_files):
             const itemsWithScores = Array.from(traceItems).map(item => {{
                 const name = item.querySelector('.trace-name').textContent.toLowerCase();
                 const itemType = item.getAttribute('data-type');
+                const itemProfile = item.getAttribute('data-profile') || 'runtime';
                 const originalIndex = parseInt(item.getAttribute('data-original-index'));
                 
                 // Calculate match score (number of search words that match)
@@ -1164,7 +1242,8 @@ def generate_html(pb_files):
                 
                 const matchesSearch = searchWords.length === 0 || matchScore > 0;
                 const matchesType = currentTypeFilter === 'all' || itemType === currentTypeFilter;
-                const isVisible = matchesSearch && matchesType;
+                const matchesProfile = currentProfileFilter === 'all' || itemProfile === currentProfileFilter;
+                const isVisible = matchesSearch && matchesType && matchesProfile;
                 
                 return {{
                     element: item,

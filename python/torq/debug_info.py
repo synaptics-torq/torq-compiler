@@ -815,8 +815,8 @@ class DispatchDebugInfo:
 
     @cached_property
     def end_time_ns(self):
-        start_times = [workunit.start_time_ns for workunit in self.workunits if workunit.start_time_ns is not None]
-        return min(start_times) if start_times else None
+        end_times = [workunit.end_time_ns for workunit in self.workunits if workunit.end_time_ns is not None]
+        return max(end_times) if end_times else None
 
     @property
     def total_time_ns(self):

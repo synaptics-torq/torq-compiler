@@ -504,8 +504,9 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     debug_info_dir = versioned_dir / 'debug'
     cmds.append(f'--torq-debug-info={debug_info_dir}')
     
+    compile_profile_csv = versioned_dir / 'compile_profile.csv'
     if compile_time_profiling_output_dir:
-        cmds.extend(['--torq-enable-profiling'])
+        cmds.extend(['--torq-enable-profiling', f'--torq-dump-profiling={compile_profile_csv}'])
 
     print("Compiling for TORQ with: " + " ".join(cmds))
 
@@ -514,15 +515,33 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     # Save compile time profiling data if requested
     if compile_time_profiling_output_dir:
+        compile_time_profiling_output_dir = Path(compile_time_profiling_output_dir)
+        compile_time_profiling_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy compile profile CSV with _compile suffix in parent folder
+        if compile_profile_csv.exists():
+            dest_csv = compile_time_profiling_output_dir / f'{request.node.name}_compile.csv'
+            shutil.copy(compile_profile_csv, dest_csv)
+            print(f"✓ Copied compile profile CSV: {dest_csv}")
                     
         # Generate Perfetto .pb file from compile time profile            
         from torq.model_profiler.perfetto_logger import convert_to_perfetto
-                
-        pb_output_path = Path(compile_time_profiling_output_dir) / f'{request.node.name}_compile'
-
-        convert_to_perfetto(str(debug_info_dir), str(pb_output_path))
         
-        print(f"✓ Generated Perfetto trace: {pb_output_path}")
+        # Use a temp directory for pb generation, then move files to parent with _compile suffix
+        temp_pb_dir = compile_time_profiling_output_dir / f'{request.node.name}_compile_temp'
+        convert_to_perfetto(str(debug_info_dir), str(temp_pb_dir))
+        
+        # Move .pb files from temp folder to parent with _compile suffix
+        pb_files = list(temp_pb_dir.glob('*.pb'))
+        for idx, pb_file in enumerate(pb_files):
+            suffix = f'_{idx}' if len(pb_files) > 1 else ''
+            dest_pb = compile_time_profiling_output_dir / f'{request.node.name}_compile{suffix}.pb'
+            shutil.move(str(pb_file), str(dest_pb))
+            print(f"✓ Generated Perfetto trace: {dest_pb}")
+        
+        # Remove temp directory
+        if temp_pb_dir.exists():
+            shutil.rmtree(temp_pb_dir)
         
 
 @versioned_unhashable_object_fixture
@@ -710,15 +729,28 @@ def torq_results(request, torq_results_dir, mlir_io_spec):
         record_property = request.getfixturevalue("record_property")
         profiling_output_dir = Path(profiling_output_dir)
         profiling_output_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(torq_results_dir / 'host_profile.csv', profiling_output_dir / f'{request.node.name}.csv')
-        record_property("host_profile_csv", str(profiling_output_dir / f'{request.node.name}.csv'))
-        if (torq_results_dir / 'annotated_profile.xlsx').exists():
-            shutil.copy(torq_results_dir / 'annotated_profile.xlsx', profiling_output_dir / f'{request.node.name}.xlsx')
-        if (torq_results_dir / 'trace.pb').exists():
-            pb_output_path = profiling_output_dir / f'{request.node.name}.pb'
-            shutil.copy(torq_results_dir / 'trace.pb', pb_output_path)
-            # Record the path to the copied .pb file for reporting
-            record_property("profiling_output", str(pb_output_path))
+        
+        host_profile_csv = torq_results_dir / 'host_profile.csv'
+        if host_profile_csv.exists():
+            shutil.copy(host_profile_csv, profiling_output_dir / f'{request.node.name}.csv')
+            record_property("host_profile_csv", str(profiling_output_dir / f'{request.node.name}.csv'))
+        
+        # Find all annotated_profile*.xlsx files (could be annotated_profile.xlsx or annotated_profile_0_dispatch_name.xlsx)
+        xlsx_files = list(torq_results_dir.glob('annotated_profile*.xlsx'))
+        for idx, xlsx_file in enumerate(xlsx_files):
+            suffix = f'_{idx}' if len(xlsx_files) > 1 else ''
+            dest_path = profiling_output_dir / f'{request.node.name}{suffix}.xlsx'
+            shutil.copy(xlsx_file, dest_path)
+        
+        # Find all trace*.pb files (could be trace.pb or trace_0_dispatch_name.pb)
+        pb_files_in_results = list(torq_results_dir.glob('trace*.pb'))
+        for idx, pb_file in enumerate(pb_files_in_results):
+            suffix = f'_{idx}' if len(pb_files_in_results) > 1 else ''
+            pb_output_path = profiling_output_dir / f'{request.node.name}{suffix}.pb'
+            shutil.copy(pb_file, pb_output_path)
+            if idx == 0:
+                # Record the first .pb file for reporting
+                record_property("profiling_output", str(pb_output_path))
         
         # Generate combined HTML report with all profiling artifacts
         pb_files = sorted(profiling_output_dir.glob('*.pb'))
