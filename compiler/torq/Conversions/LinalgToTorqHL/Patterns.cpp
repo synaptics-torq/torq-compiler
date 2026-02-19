@@ -1224,6 +1224,9 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 srcOp, "addOp doesn't support f32 and f64 right now\n"
             );
         }
+        if (outType.getElementType().isInteger(64)) {
+            return rewriter.notifyMatchFailure(srcOp, "addOp doesn't support i64");
+        }
 
         const bool isBF16 = outType.getElementType().isBF16();
 
@@ -2057,6 +2060,66 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
 // TODO: only support int8 for now in order to use generic tiling for table op
 class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
+
+    LogicalResult demoteGatherIndicesToI32(
+        linalg::GenericOp srcOp, Value indices, PatternRewriter &rewriter, Value &demotedIndices
+    ) const {
+        demotedIndices = indices;
+
+        auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
+        if (!indicesType) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected gather indices to be ranked tensor"
+            );
+        }
+
+        auto indicesElementType = dyn_cast<IntegerType>(indicesType.getElementType());
+        if (!indicesElementType) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected gather indices to be integer tensor"
+            );
+        }
+
+        if (indicesElementType.getWidth() <= 32) {
+            return success();
+        }
+
+        auto i32IndicesType = RankedTensorType::get(
+            indicesType.getShape(), rewriter.getI32Type(), indicesType.getEncoding()
+        );
+
+        auto maybeConstAttr = computeConstAttr(indices, /*recursive=*/true);
+        if (failed(maybeConstAttr)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected gather indices i64 tensor to be constant or constant-foldable"
+            );
+        }
+
+        auto indicesConstAttr = dyn_cast<DenseIntElementsAttr>(*maybeConstAttr);
+        if (!indicesConstAttr) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected gather indices constant to be DenseIntElementsAttr"
+            );
+        }
+
+        SmallVector<APInt> i32IndicesValues;
+        i32IndicesValues.reserve(indicesConstAttr.getNumElements());
+        for (APInt idx : indicesConstAttr.getValues<APInt>()) {
+            if (!idx.isSignedIntN(32)) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Expected gather indices constant values to fit in i32"
+                );
+            }
+            i32IndicesValues.push_back(idx.sextOrTrunc(32));
+        }
+
+        auto i32IndicesAttr = DenseIntElementsAttr::get(i32IndicesType, i32IndicesValues);
+        demotedIndices =
+            rewriter.create<arith::ConstantOp>(srcOp.getLoc(), i32IndicesType, i32IndicesAttr)
+                .getResult();
+        return success();
+    }
+
   public:
     using OpRewritePattern::OpRewritePattern;
 
@@ -2068,8 +2131,6 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         }
 
         Value input = srcOp.getInputs()[0];
-        auto inputType = dyn_cast<RankedTensorType>(input.getType());
-        auto inputElementType = inputType.getElementType();
 
         auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
         if (!yieldOp) {
@@ -2080,6 +2141,14 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         if (!tensorExtractOp) {
             return rewriter.notifyMatchFailure(srcOp, "Expected a tensor.extract op");
         }
+
+        if (failed(demoteGatherIndicesToI32(srcOp, input, rewriter, input))) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Failed to demote tensor.extract indices to int32"
+            );
+        }
+        auto inputType = dyn_cast<RankedTensorType>(input.getType());
+        auto inputElementType = inputType.getElementType();
 
         auto &block = srcOp.getRegion().front();
         auto &firstOp = block.front();
@@ -2121,18 +2190,28 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto maybeCstData = computeArithConst(cst);
         if (failed(maybeCstData)) {
             // tensor is input
-            auto dataPerm = Permutation::nhc2nch();
-            auto outType = transposeType(
-                mlir::cast<RankedTensorType>(srcOp.getResult(0).getType()), dataPerm.reverse()
-            );
-            auto transposedValue = transposeValue(cst, dataPerm, srcOp.getLoc(), rewriter);
-            auto out = rewriter.create<syna::torq_hl::GatherOp>(
-                srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
-                transposedValue, input
-            );
-            auto resultTranspose =
-                transposeValue(out.getResult(0), dataPerm.reverse(), srcOp.getLoc(), rewriter);
-            rewriter.replaceOp(srcOp, resultTranspose);
+            auto cstType = mlir::cast<RankedTensorType>(cst.getType());
+            auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+
+            if (cstType.getRank() == 3) {
+                // NHC->NCH transposition only applies to rank-3 tensors
+                auto dataPerm = Permutation::nhc2nch();
+                auto outType = transposeType(resultType, dataPerm.reverse());
+                auto transposedValue = transposeValue(cst, dataPerm, srcOp.getLoc(), rewriter);
+                auto out = rewriter.create<syna::torq_hl::GatherOp>(
+                    srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
+                    transposedValue, input
+                );
+                auto resultTranspose =
+                    transposeValue(out.getResult(0), dataPerm.reverse(), srcOp.getLoc(), rewriter);
+                rewriter.replaceOp(srcOp, resultTranspose);
+            }
+            else {
+                // For non-rank-3 tensors, create GatherOp directly without transposition
+                rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
+                    srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), cst, input
+                );
+            }
         }
 
         else if (!clTableAsGather && isTableOp) {

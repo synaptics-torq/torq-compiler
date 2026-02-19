@@ -509,12 +509,11 @@ std::unique_ptr<OperationPass<ModuleOp>> createTorqDemoteI64ToI32Pass() {
 }
 
 void buildTorqTypeConversionPipeline(OpPassManager &passManager) {
-    if (!clConvertDtypes) {
-        return;
+    if (clConvertDtypes) {
+        passManager.addPass(createTorqDemoteF32ToBF16Pass());
+        passManager.addPass(createTorqConvertF16ToBF16Pass());
+        passManager.addPass(createTorqDemoteI64ToI32Pass());
     }
-    passManager.addPass(createTorqDemoteF32ToBF16Pass());
-    passManager.addPass(createTorqConvertF16ToBF16Pass());
-    passManager.addPass(createTorqDemoteI64ToI32Pass());
 }
 
 } // namespace mlir::syna::torq

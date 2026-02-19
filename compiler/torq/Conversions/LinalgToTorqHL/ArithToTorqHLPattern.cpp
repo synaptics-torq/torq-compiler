@@ -75,6 +75,25 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
                 srcOp, "Expected the output type to be a RankedTensorType"
             );
         }
+        auto resultElementType = resultType.getElementType();
+        if (resultElementType.isF64() || resultElementType.isInteger(64)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "ElementwiseBinaryArithOpPattern doesn't support 64-bit element type"
+            );
+        }
+        for (Value input : srcOp.getInputs()) {
+            auto inputType = dyn_cast<RankedTensorType>(input.getType());
+            if (!inputType) {
+                continue;
+            }
+            auto inputElementType = inputType.getElementType();
+            if (inputElementType.isF64() || inputElementType.isInteger(64)) {
+                return rewriter.notifyMatchFailure(
+                    srcOp,
+                    "ElementwiseBinaryArithOpPattern doesn't support 64-bit input element type"
+                );
+            }
+        }
 
         torq_hl::ElementwiseOpEnum opType;
         bool isUnsigned = false;
@@ -236,6 +255,12 @@ class ElementwiseUnaryArithOpPattern : public OpRewritePattern<linalg::GenericOp
         if (!resultType) {
             return rewriter.notifyMatchFailure(
                 srcOp, "Expected the output type to be a RankedTensorType"
+            );
+        }
+        auto resultElementType = resultType.getElementType();
+        if (resultElementType.isF64() || resultElementType.isInteger(64)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "ElementwiseUnaryArithOpPattern doesn't support 64-bit element type"
             );
         }
 
@@ -464,6 +489,12 @@ class SelectOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Not an arith.select operation");
         }
         auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+        auto resultElementType = resultType.getElementType();
+        if (resultElementType.isF64() || resultElementType.isInteger(64)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "SelectOpPattern doesn't support 64-bit element type"
+            );
+        }
 
         SmallVector<Value, 3> selectInputs;
         for (int i = 0; i < 3; ++i) {
