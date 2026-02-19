@@ -6,7 +6,6 @@
 
 #include "PassesDetail.h"
 
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/Tensor/IR/Utils.h"
 #include "torq/Utils/TorqHw.h"
@@ -16,6 +15,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -30,6 +30,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -823,7 +824,8 @@ std::tuple<bool, bool> fuseControlMaxProducers(
 
     // Don't fuse if we are tiling a dimension the producer can not be tiled over
     for (size_t index = 0; index < iterSizes.size(); ++index) {
-        if (mappedSizes[index] != iterSizes[index] && !tilingDims.contains(index)) {
+        if (getConstantIntValue(mappedSizes[index]) != getConstantIntValue(iterSizes[index]) &&
+            !tilingDims.contains(index)) {
             return doNotFuse;
         }
     }
@@ -848,10 +850,9 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
 
     LLVM_DEBUG({
         llvm::dbgs() << "tile sizes: ";
-        bool isFirst = true;
+        llvm::ListSeparator LSCross("x");
         for (auto d : tileSizes) {
-            llvm::dbgs() << (isFirst ? "" : "x") << d;
-            isFirst = false;
+            llvm::dbgs() << LSCross << d;
         }
         llvm::dbgs() << "\n";
     });
@@ -944,24 +945,25 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
             llvm::dbgs() << "  " << TORQ_FUSE_GROUP_ID << ": " << getConstantIntValue(groupId)
                          << "\n";
             if (isMarkedFuseGroup(op)) {
-                llvm::dbgs() << "  principal op: " << getFuseGroupPrincipalOpBackward(op)->getName()
+                auto principalOp = getFuseGroupPrincipalOpBackward(op);
+                llvm::dbgs() << "  principal op: " << principalOp->getName() << "\n";
+                auto fuseGroup = principalOp->getAttr(TORQ_FUSE_GROUP_ID);
+                llvm::dbgs() << "  " << TORQ_FUSE_GROUP << ": " << getConstantIntValue(fuseGroup)
                              << "\n";
             }
         }
 
         llvm::dbgs() << "  iteration sizes: ";
-        bool isFirst = true;
+        llvm::ListSeparator LSCross("x");
         for (auto size : iterSizes) {
-            llvm::dbgs() << (isFirst ? "" : "x") << getConstantIntValue(size);
-            isFirst = false;
+            llvm::dbgs() << LSCross << getConstantIntValue(size);
         }
         llvm::dbgs() << "\n";
 
         llvm::dbgs() << "  iteration types: ";
-        isFirst = true;
+        llvm::ListSeparator LS;
         for (auto iterType : tilingInterfaceOp.getLoopIteratorTypes()) {
-            llvm::dbgs() << (isFirst ? "" : ", ") << iterType;
-            isFirst = false;
+            llvm::dbgs() << LS << iterType;
         }
         llvm::dbgs() << "\n";
     });
