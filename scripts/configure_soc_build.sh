@@ -34,6 +34,9 @@ if [[ "$TARGET" == "astra_machina" ]]; then
         TOOLCHAIN_FILE="${SDK_DIR}/sysroots/x86_64-pokysdk-linux/usr/share/cmake/cortexa55-poky-linux-toolchain.cmake"
         PYTHON3="${SDK_DIR}/sysroots/x86_64-pokysdk-linux/usr/bin/python3"
         PYVER="$("${PYTHON3}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+        PYVER_NODOT="${PYVER//./}"
+        TARGET_ARCH="${OECORE_TARGET_ARCH}"
+        PYTHON_EXT_SUFFIX=".cpython-${PYVER_NODOT}-${TARGET_ARCH}-linux-gnu.so"
     else
         # Default to aarch64 toolchain
         TOOLCHAIN_FILE=${BASE_DIR}/scripts/toolchain.aarch64.cmake
@@ -70,6 +73,7 @@ if [[ "$TARGET" == "astra_machina" && "$4" == "poky" ]]; then
     -DPython_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/include/python${PYVER}"
     -DPython_NumPy_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/lib/python${PYVER}/site-packages/numpy/core/include"
     -DPython3_NumPy_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/lib/python${PYVER}/site-packages/numpy/core/include"
+    -DPYTHON_MODULE_EXTENSION="${PYTHON_EXT_SUFFIX}"
   )
 else
   CMAKE_ARGS+=(-DIREE_BUILD_PYTHON_BINDINGS=OFF)
