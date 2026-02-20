@@ -99,6 +99,45 @@ static FailureOr<int> getMemoryRequirements(linalg::LinalgOp op) {
     return totalSize;
 }
 
+// Memory requirements for SoftmaxOp: 2*input + output
+// When decomposing the softmax on NSS, most of the ops follow the same
+// input->output pattern, but two of them are torq_hl::select and
+// torq_hl::ElementwiseBinary which have 2 inputs and 1 output.
+// Until we convert these torq_hl ops to linalg, we have to tile the
+// whole softmax accordingly.
+static FailureOr<int> getMemoryRequirements(linalg::SoftmaxOp op) {
+    auto inputMemReq = getMemoryRequirements(op.getInput());
+    if (failed(inputMemReq)) {
+        return failure();
+    }
+    auto outputMemReq = getMemoryRequirements(op.getOutput());
+    if (failed(outputMemReq)) {
+        return failure();
+    }
+    // 2*input + output for softmax intermediate buffers
+    return 2 * (*inputMemReq) + (*outputMemReq);
+}
+
+// Estimate tile memory requirements for SoftmaxOp
+static FailureOr<int>
+getSoftmaxTileMemoryRequirements(linalg::SoftmaxOp op, const SmallVector<int64_t> &tile) {
+    auto inputType = cast<RankedTensorType>(op.getInput().getType());
+    int64_t elementSize = div_ceil(inputType.getElementTypeBitWidth(), 8);
+
+    int64_t numElements = 1;
+    for (size_t i = 0; i < tile.size(); i++) {
+        if (tile[i] == 0) {
+            numElements *= inputType.getDimSize(i);
+        }
+        else {
+            numElements *= tile[i];
+        }
+    }
+
+    // 2*input + output for softmax
+    return 3 * numElements * elementSize;
+}
+
 static FailureOr<int>
 getTileMemoryRequirements(linalg::LinalgOp op, const SmallVector<int64_t> &tile) {
     auto loopRanges = op.getStaticLoopRanges();
@@ -258,6 +297,86 @@ static bool isIm2ColOp(linalg::LinalgOp op) {
     // check if op has attribute marking it as im2col
     return op && op->hasAttr("torq.im2col") &&
            cast<BoolAttr>(op->getAttr("torq.im2col")).getValue();
+}
+
+// Find a valid tile for SoftmaxOp that fits in maxSize memory
+// Does not tile the reduction dimension (softmax dimension)
+static FailureOr<SmallVector<int64_t>> findValidSoftmaxTile(linalg::SoftmaxOp op, int maxSize) {
+    auto inputType = cast<RankedTensorType>(op.getInput().getType());
+    int64_t rank = inputType.getRank();
+    int64_t reductionDim = op.getDimension();
+
+    // Check for static shape
+    if (!inputType.hasStaticShape()) {
+        return failure();
+    }
+
+    SmallVector<int64_t> tileVector(rank, 0);
+
+    // Initialize tile vector - don't tile reduction dimension
+    for (int64_t i = 0; i < rank; i++) {
+        if (i == reductionDim || inputType.getDimSize(i) == 1) {
+            tileVector[i] = 0; // Don't tile this dimension
+        }
+        else {
+            tileVector[i] = inputType.getDimSize(i);
+        }
+    }
+
+    // Check if we have any parallel dimensions to tile
+    bool hasParallelDim = false;
+    for (int64_t i = 0; i < rank; i++) {
+        if (tileVector[i] > 0) {
+            hasParallelDim = true;
+            break;
+        }
+    }
+    if (!hasParallelDim) {
+        return failure();
+    }
+
+    // Try to find a tile that fits in memory
+    while (true) {
+        bool found = false;
+        for (int64_t idx = 0; idx < rank; idx++) {
+            if (tileVector[idx] <= 1) {
+                continue;
+            }
+            // Halve the tile size
+            tileVector[idx] = std::max(tileVector[idx] / 2, int64_t(1));
+            found = true;
+            break;
+        }
+
+        LLVM_DEBUG({
+            llvm::dbgs() << "Softmax tiling vector: [";
+            for (auto size : tileVector) {
+                llvm::dbgs() << size << ", ";
+            }
+            llvm::dbgs() << "]\n";
+        });
+
+        if (!found) {
+            LLVM_DEBUG({
+                llvm::dbgs(
+                ) << "Failed to find valid tile for softmax (cannot make tile small enough)\n";
+            });
+            return failure();
+        }
+
+        auto maybeMemReq = getSoftmaxTileMemoryRequirements(op, tileVector);
+        if (failed(maybeMemReq)) {
+            return failure();
+        }
+
+        LLVM_DEBUG({ llvm::dbgs() << "Softmax estimated memory: " << *maybeMemReq << "\n"; });
+
+        if (*maybeMemReq < maxSize) {
+            return tileVector;
+        }
+    }
+
+    return failure();
 }
 
 static LogicalResult tileMatMulForSlices(
@@ -424,6 +543,108 @@ class TileReduceOperation : public OpRewritePattern<linalg::LinalgOp> {
 }
 #endif
 
+class TileSoftmaxOperation : public OpRewritePattern<linalg::SoftmaxOp> {
+  public:
+    TileSoftmaxOperation(
+        MLIRContext *context, int maxTileSize,
+        std::optional<torq_hl::Executor> targetExecutor = std::nullopt
+    )
+        : OpRewritePattern<linalg::SoftmaxOp>(context), maxTileSize(maxTileSize),
+          targetExecutor(targetExecutor) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::SoftmaxOp srcOp, PatternRewriter &rewriter) const override {
+
+        if (targetExecutor.has_value() &&
+            getTargetExecutor(srcOp, *targetExecutor) != *targetExecutor) {
+            return failure();
+        }
+
+        auto maybeDataSize = getMemoryRequirements(srcOp);
+
+        if (failed(maybeDataSize)) {
+            if (clDisableHost) {
+                return srcOp->emitError() << "unable to find memory requirements for softmax op "
+                                             "and cannot fall back to host";
+            }
+            rewriter.modifyOpInPlace(srcOp, [&]() {
+                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
+            });
+            return success();
+        }
+
+        if (*maybeDataSize < maxTileSize) {
+            return rewriter.notifyMatchFailure(srcOp, "No need to tile this softmax operation");
+        }
+
+        // Find valid tile that doesn't tile the reduction dimension
+        auto maybeTileVector = findValidSoftmaxTile(srcOp, maxTileSize);
+
+        if (failed(maybeTileVector)) {
+            if (clDisableHost) {
+                return srcOp->emitError()
+                       << "unable to tile softmax operation and cannot fall back to host";
+            }
+            rewriter.modifyOpInPlace(srcOp, [&]() {
+                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
+            });
+            return success();
+        }
+
+        // Create effective tile vector
+        auto inputType = cast<RankedTensorType>(srcOp.getInput().getType());
+        SmallVector<int64_t> effectiveTileVector(maybeTileVector->size());
+
+        for (size_t i = 0; i < effectiveTileVector.size(); i++) {
+            if (inputType.getDimSize(i) == (*maybeTileVector)[i]) {
+                effectiveTileVector[i] = 0;
+            }
+            else {
+                effectiveTileVector[i] = (*maybeTileVector)[i];
+            }
+        }
+
+        // Create tile sizes and tile the operation
+        SmallVector<OpFoldResult> tileSizes =
+            getAsIndexOpFoldResult(rewriter.getContext(), effectiveTileVector);
+        auto options = scf::SCFTilingOptions().setTileSizes(tileSizes);
+
+        auto tilingInterfaceOp = cast<TilingInterface>(srcOp.getOperation());
+
+        FailureOr<scf::SCFTilingResult> maybeTileResult =
+            scf::tileUsingSCF(rewriter, tilingInterfaceOp, options);
+
+        if (failed(maybeTileResult)) {
+            LLVM_DEBUG({ llvm::dbgs() << "Failed to tile softmax op: " << srcOp << "\n"; });
+            if (clDisableHost) {
+                return srcOp->emitError() << "failed to tile softmax operation";
+            }
+            rewriter.modifyOpInPlace(srcOp, [&]() {
+                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
+            });
+            return success();
+        }
+
+        rewriter.replaceOp(srcOp, maybeTileResult->replacements);
+
+        // Peel the loops for fixed size operations
+        SmallVector<scf::ForOp> forOps;
+        for (auto loop : maybeTileResult->loops) {
+            forOps.push_back(cast<scf::ForOp>(loop));
+        }
+
+        linalg::peelLoops(rewriter, forOps);
+
+        LLVM_DEBUG({ llvm::dbgs() << "Successfully tiled softmax op\n"; });
+
+        return success();
+    }
+
+  private:
+    int maxTileSize;
+    std::optional<torq_hl::Executor> targetExecutor;
+};
+
 class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp> {
   public:
     TileLinalgOpOperation(
@@ -530,6 +751,7 @@ class LramTilePass : public LramTileBase<LramTilePass> {
         const uint32_t lramSize = TorqHw::get().getAvailableMemoryForTiling();
 
         tilePatterns.add<TileLinalgOpOperation>(ctx, lramSize, torq_hl::Executor::Slice);
+        tilePatterns.add<TileSoftmaxOperation>(ctx, lramSize, torq_hl::Executor::Slice);
 
         tensor::ControlConstantExtractSliceFusionFn controlFn = [](tensor::ExtractSliceOp op) {
             return true;

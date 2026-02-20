@@ -2158,4 +2158,66 @@ Value convertWeights(mlir::linalg::MatmulOp srcOp, mlir::Value weights, PatternR
     }
 }
 
+Value makeBitcast(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
+) {
+    return rewriter
+        .create<torq_hl::IdentityOp>(
+            srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType), input
+        )
+        .getOutput();
+}
+
+Value makeRescale16(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t scaleFactor,
+    int shiftFactor, int32_t inputZp, int32_t outputZp
+) {
+
+    auto outputType = dyn_cast<RankedTensorType>(input.getType());
+    int16_t weight_data = static_cast<int32_t>(scaleFactor);
+    int32_t bias_data = -static_cast<int32_t>(scaleFactor * inputZp);
+    std::vector<int16_t> weights = {weight_data};
+    const std::vector<APInt> bias = {APInt(32, bias_data)};
+    const std::vector<APInt> scale = {APInt(32, 1)};
+
+    // make the rescale
+    return rewriter
+        .create<torq_hl::FMAOp>(
+            srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType), outputZp,
+            std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max(), shiftFactor,
+            createI16Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
+            createIConst(rewriter, srcOp, interleave(bias, scale)), input
+        )
+        .getResult(0);
+}
+
+Value makeI16LUTFromVals(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, SmallVector<int32_t> values
+) {
+    const std::vector<APInt> bias = {APInt(32, -128, /*isSigned=*/true)};
+    const std::vector<APInt> scale = {APInt(32, 128, /*isSigned=*/true)};
+    return rewriter
+        .create<syna::torq_hl::TableOp>(
+            srcOp.getLoc(), dyn_cast<RankedTensorType>(input.getType()),
+            createInitTensor(srcOp, rewriter, dyn_cast<RankedTensorType>(input.getType())),
+            createIConst(rewriter, srcOp, interleave(bias, scale)), input,
+            DenseI32ArrayAttr::get(rewriter.getContext(), values)
+        )
+        .getResult(0);
+}
+
+// 'a', 'b', 'c' correspond to those in scripts/bf16luts.py comments/prints
+Value makeScaledLut(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t aScaleFactor,
+    int aShiftFactor, int32_t aInputZp, int32_t aOutputZp, SmallVector<int32_t> bValues,
+    int32_t cScaleFactor, int cShiftFactor, int32_t cInputZp, int32_t cOutputZp
+) {
+    auto scaledInput =
+        makeRescale16(srcOp, rewriter, input, cScaleFactor, cShiftFactor, cInputZp, cOutputZp);
+    auto lookuped = makeI16LUTFromVals(srcOp, rewriter, scaledInput, bValues);
+    return makeRescale16(
+        srcOp, rewriter, lookuped, aScaleFactor, aShiftFactor, aInputZp, aOutputZp
+    );
+}
+
 } // namespace mlir::syna::torq

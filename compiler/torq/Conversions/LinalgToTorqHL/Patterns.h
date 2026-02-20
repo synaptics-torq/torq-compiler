@@ -54,4 +54,8 @@ void populateArithToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patt
 
 void populateTensorToLinalgPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+void populateSoftmaxPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
+void populateSigmoidPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 } // namespace mlir::syna::torq

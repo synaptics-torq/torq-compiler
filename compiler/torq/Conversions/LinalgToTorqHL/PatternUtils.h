@@ -231,4 +231,24 @@ bool foldScalarRescale(
 
 Value convertWeights(mlir::linalg::MatmulOp srcOp, mlir::Value weights, PatternRewriter &rewriter);
 
+Value makeBitcast(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
+);
+
+Value makeRescale16(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t scaleFactor,
+    int shiftFactor, int32_t inputZp = 0, int32_t outputZp = 0
+);
+
+Value makeI16LUTFromVals(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, SmallVector<int32_t> values
+);
+
+// 'a', 'b', 'c' correspond to those in scripts/bf16luts.py comments/prints
+Value makeScaledLut(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t aScaleFactor,
+    int aShiftFactor, int32_t aInputZp, int32_t aOutputZp, SmallVector<int32_t> bValues,
+    int32_t cScaleFactor, int cShiftFactor, int32_t cInputZp, int32_t cOutputZp
+);
+
 } // namespace mlir::syna::torq

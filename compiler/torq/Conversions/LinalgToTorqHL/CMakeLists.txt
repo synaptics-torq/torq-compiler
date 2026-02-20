@@ -6,11 +6,13 @@ set(sources
   Conv1DPattern.cpp
   Conv2DPattern.cpp
   Conv2DMatmulPattern.cpp
+  Conv2DOpBigStridePattern.cpp
+  ElementWiseBinaryPattern.cpp
   FCPattern.cpp
   PoolingPattern.cpp
-  ElementWiseBinaryPattern.cpp
   ReduceMeanPattern.cpp
-  Conv2DOpBigStridePattern.cpp
+  SigmoidPattern.cpp
+  SoftmaxPattern.cpp
   TensorToTorqOrLinalgPattern.cpp
 )
 

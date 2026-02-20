@@ -2351,6 +2351,8 @@ void populateLinalgToTorqHLPatterns(
         patterns.insert<FillOpConversionRewrite>(context, markFuseGroups);
         return;
     }
+    populateSigmoidPatterns(context, patterns);
+    populateSoftmaxPatterns(context, patterns);
 
     patterns.insert<TransposeOpConversion>(context);
     patterns.insert<FillOpConversion>(context);
