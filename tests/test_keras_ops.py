@@ -1170,6 +1170,7 @@ def case_config(request, runtime_hw_type, chip_config):
             'model035_avgpool_inp1x10x10x4_pool3x3_stride3x3_same',
             'model036_avgpool_inp1x10x10x4_pool4x4_stride4x4_same',
             'model039_avgpool_inp1x10x10x4_pool1x3_stride1x1_same',
+            'model089_softmax_inp1x1916x2',  # error: unable to free enough space for results and operands
         ]
         # Next chip fpga failures
         if aws_fpga:
@@ -1185,15 +1186,20 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in tc for s in failed_tc):
         pytest.xfail("output mismatch or error")
 
+    extra_args = {}
+    # Sotfmax needs to be converted to bf16 in order to allow pattern matching to use Slice execution
+    if ('softmax' in tc):
+        extra_args['torq_compiler_options'] = ["--torq-convert-dtypes"]
+
     return {
         "keras_model": case.data['keras_model_name'],
         "keras_model_params": case.data.get('keras_model_params', {}),
         "mlir_model_file": "tflite_mlir_model_file",
         "tflite_model_file": "quantized_tflite_model_file",
         "input_data": "tweaked_random_input_data",
-        "quantize_to_int16": case.data.get("quantize_to_int16", False)
+        "quantize_to_int16": case.data.get("quantize_to_int16", False),
+        **extra_args
     }
-
 
 @pytest.mark.ci
 @pytest.mark.fpga_ci
