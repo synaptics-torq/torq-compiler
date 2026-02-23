@@ -44,7 +44,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
     using TorqEltOp = torq_hl::AddOp;
     using OpRewritePattern<LinalgEltOpT>::OpRewritePattern;
 
-    bool foldBackwardScalar(
+    bool foldBackwardScalarConstant(
         Value &input, ScaleInfo &scaleInfo, int32_t *scalarValue, PatternRewriter &rewriter
     ) const {
 
@@ -63,33 +63,49 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
         // FIXME Replacing expand, collapse or its corresponding linalg.generic op
         // with its input only works when the input is a scalar tensor with dims 1x1x..x1.
+        // Probe ahead first to check if the fold will succeed before making
+        // destructive IR changes.  If the underlying value is not a constant,
+        // leave the IR untouched so the caller can bail out cleanly.
+        Value candidateInput = input;
+        Operation *candidateElOp = nullptr;
         if (maybeReplace) {
             auto elOpInput = elOp->getOperand(0);
             auto elOpInputShape = dyn_cast<RankedTensorType>(elOpInput.getType()).getShape();
             if (mlir::computeProduct(elOpInputShape) == 1) {
-                input = elOpInput;
-
-                elOp->getResult(0).replaceAllUsesWith(elOpInput);
-                rewriter.eraseOp(elOp);
+                candidateInput = elOpInput;
+                candidateElOp = elOp;
             }
         }
 
-        auto inputType = dyn_cast<RankedTensorType>(input.getType());
+        auto inputType = dyn_cast<RankedTensorType>(candidateInput.getType());
         auto inputShape = inputType.getShape();
         auto inputElementType = inputType.getElementType();
 
-        Value scalarInput = input;
-        if (inputShape.size() <= 1) {
-            while (foldBackwardRescale(scalarInput, scaleInfo)) {
+        Value scalarInput = candidateInput;
+        ScaleInfo probeScaleInfo = scaleInfo;
+
+        // Check if candidateInput is already a constant before rescale probing
+        auto constOp = dyn_cast<arith::ConstantOp>(scalarInput.getDefiningOp());
+        if (!constOp && inputShape.size() <= 1) {
+            while (foldBackwardRescale(scalarInput, probeScaleInfo)) {
             }
 
-            while (foldScalarRescale(scalarInput, scaleInfo, inputElementType, rewriter)) {
+            while (foldScalarRescale(scalarInput, probeScaleInfo, inputElementType, rewriter)) {
             }
+            constOp = dyn_cast<arith::ConstantOp>(scalarInput.getDefiningOp());
         }
 
-        auto constOp = dyn_cast<arith::ConstantOp>(scalarInput.getDefiningOp());
-
         if (constOp && getIntegerConstantValue(constOp, scalarValue)) {
+            // Only now commit the destructive IR changes
+            if (candidateElOp) {
+                input = candidateInput;
+                candidateElOp->getResult(0).replaceAllUsesWith(candidateInput);
+                rewriter.eraseOp(candidateElOp);
+            }
+            else {
+                input = candidateInput;
+            }
+            scaleInfo = probeScaleInfo;
             return true;
         }
         return false;
@@ -339,10 +355,12 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         int32_t bias1 = -doubleToInt<int32_t>(multiplier1 * scaleFactor * scaleInput1.zp) * sign;
 
         int32_t scalarValue0 = 0;
-        bool input0IsScalar = foldBackwardScalar(input0, scaleInput0, &scalarValue0, rewriter);
+        bool input0IsScalar =
+            foldBackwardScalarConstant(input0, scaleInput0, &scalarValue0, rewriter);
 
         int32_t scalarValue1 = 0;
-        bool input1IsScalar = foldBackwardScalar(input1, scaleInput1, &scalarValue1, rewriter);
+        bool input1IsScalar =
+            foldBackwardScalarConstant(input1, scaleInput1, &scalarValue1, rewriter);
 
         if (input0IsScalar && input1IsScalar) {
             return rewriter.notifyMatchFailure(eltOp, "don't support both input is scalar for now");
@@ -373,7 +391,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             // force weigth1 is 0, input0 * weight0 + input1 * 0
             input1 = input0;
         }
-
         // Generate torq_hl op with input in the expected format
         input0 = transposeValue(input0, dataPerm, loc, rewriter);
         input1 = transposeValue(input1, dataPerm, loc, rewriter);
