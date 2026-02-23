@@ -16,25 +16,25 @@ if [ -f "${THIRDPARTY_PREBUILTS_SOC_KERNEL}/${SYNA_KERNEL_MODULE_BUILD_PKG}" ]; 
     echo "kernel artifacts already packed. To rebuild, remove ${THIRDPARTY_PREBUILTS_SOC_KERNEL}/${SYNA_KERNEL_MODULE_BUILD_PKG}"
 else
     mkdir -p ${THIRDPARTY_PREBUILTS_SOC_KERNEL}
-    # checkout 6.12 kernel from synaptics git
+    # checkout 6.12.62 kernel from synaptics git
+    # kernel commit: f10b8894fa493a1e66b36fb59e2b976798b72f2a (synced from vssdk dev_branch/linux/v6_12/master 2026-02-23)
+    # driver commit: 02b2dc92cf2083ab12b1783c8503f20679808bc2 (synced from vssdk dev_branch/master 2026-02-23)
     cd ${THIRDPARTY_PREBUILTS_SOC_KERNEL}
-    git clone --depth=1 --branch wip_branch/vssdk/sl2619_bringup/202509161205 ssh://${SYNA_GERRIT_USER}@gerrit-ind.synaptics.com:29420/astra/linux/main
+    git clone --depth=1 --branch dev_branch/linux/v6_12/master ssh://${SYNA_GERRIT_USER}@sc-debu-git.synaptics.com:29420/astra/linux/main
     cd main/
     # checkout specific commit to ensure repeatability
-    git fetch --depth=1 origin d4c0cc8d7867fc703c3aac691b115069f70e70d6
-    git checkout d4c0cc8d7867fc703c3aac691b115069f70e70d6
+    git fetch --depth=1 origin f10b8894fa493a1e66b36fb59e2b976798b72f2a
+    git checkout f10b8894fa493a1e66b36fb59e2b976798b72f2a
 
     cd drivers/
-    git clone --depth=1 --branch wip_branch/vssdk/sl2619_bringup/202509161205 ssh://${SYNA_GERRIT_USER}@gerrit-ind.synaptics.com:29420/debu/common/linux-driver/synaptics
+    git clone --depth=1 --branch dev_branch/master ssh://${SYNA_GERRIT_USER}@sc-debu-git.synaptics.com:29420/debu/common/linux-driver/synaptics
     cd synaptics/
-    git fetch --depth=1 origin ca85f3379007a72a13565c130e0e8808dea615e9
-    git checkout ca85f3379007a72a13565c130e0e8808dea615e9
-    git fetch --depth=1 origin 13c82525eea9eebeb87c48e2455f030f795c9df1
-    git cherry-pick 13c82525eea9eebeb87c48e2455f030f795c9df1 --strategy-option theirs --no-commit
+    git fetch --depth=1 origin 02b2dc92cf2083ab12b1783c8503f20679808bc2
+    git checkout 02b2dc92cf2083ab12b1783c8503f20679808bc2
 
     # configure kernel to build the kernel module against it and pack the required headers/Makefiles/scripts
     cd ${SYNA_KERNEL_CHECKOUT}
-    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- sl2610_defconfig
+    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- sl261x_defconfig
     export LOCALVERSION=""
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
     tar -cvzf ${THIRDPARTY_PREBUILTS_SOC_KERNEL}/${SYNA_KERNEL_MODULE_BUILD_PKG} .config include/ arch/arm64/include/ scripts/ Makefile arch/arm64/Makefile
