@@ -369,7 +369,10 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         if (input0IsScalar) {
             double scaleFactor = (1 << scInfo.scaleShift) + 0.5;
             weight0 = 0;
-            bias0 = scalarValue0 * scaleFactor * sign * outputScale;
+            // sign applies to the second operand (input1), not the scalar in
+            // the first operand position.  For SUB: result = scalar - input,
+            // so bias0 (the scalar contribution) must stay positive.
+            bias0 = scalarValue0 * scaleFactor * outputScale;
 
             input0 = input1;
         }
