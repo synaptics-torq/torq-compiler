@@ -1592,7 +1592,20 @@ void SlicePrivate::cepr(const PData &pdata) {
     ceprDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
     ceprDims.push_back({DimType::L, RegDimTag::D, elementCount(pdata.shape()), HwInfo::pdat_width});
 
-    ceprDims.push_back({DimType::H, RegDimTag::N, innerIterCount(_stackCopy, _pram.loadNesting)});
+    int accumulationCount = innerIterCount(_stackCopy, _pram.loadNesting);
+    if (_cfg.stride == 2) {
+        // For stride 2 the accumulation steps are distributed over the 4 quadrants.
+        // The HW will take care of skipping the spurious additional steps, but we have to
+        // explicitly adjust the count in CEPR.  For example for stride2 3x3, the kernel is split
+        // in 4 sub-kernels: 2x2, 2x1, 1x2, 1x1, for a total of 9 accumulations instead of 16
+        int kh = _cfg.kernel.top + _cfg.kernel.bottom + 1;
+        int kw = _cfg.kernel.left + _cfg.kernel.right + 1;
+        int hSteps = div_ceil(kh, 2);
+        int wSteps = div_ceil(kw, 2);
+        assert(accumulationCount == hSteps * wSteps && "Invalid accumulation count for stride 2");
+        accumulationCount = kh * kw;
+    }
+    ceprDims.push_back({DimType::H, RegDimTag::N, accumulationCount});
     ceprDims.push_back({DimType::H, RegDimTag::T, outerIterCount(_stackCopy, _pram.loadNesting)});
 
     // Update iteration count for CEDR and CEWR to match CEPR
