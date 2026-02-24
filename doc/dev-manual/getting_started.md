@@ -111,7 +111,7 @@ In order to cross-compile the runtime for an embedded target use the following c
 2. Configure the cross-compile build:
 
     ```{code} shell
-    $ scripts/configure_soc_build.sh ../iree-build-soc ../iree-build
+    $ scripts/configure_soc_build.sh ../iree-build-soc ../iree-build astra_machina poky
     ```
 
 4. Run the cross-compile build:
