@@ -28,49 +28,40 @@ static LogicalResult computeStrides(
         return failure();
     }
 
+    if (fromType.getRank() == 0) {
+        contiguousElementSizeBytes = (fromType.getElementType().getIntOrFloatBitWidth() + 7) / 8;
+        return success();
+    }
+
     auto fromStrides = getEncodedStridesElements(fromType);
     auto toStrides = getEncodedStridesElements(toType);
+    auto fromShape = fromType.getShape();
 
-    // find the contiguous part of both input and output memrefs
-    int contiguousSizeElements = 1;
-    int lastContiguousDim = fromType.getRank();
+    int accShape = 1;
+    int accFromStride = 1;
+    int accToStride = 1;
 
-    for (int i = fromType.getRank() - 1; i >= 0; --i) {
-
-        // if input and output strides differ we need to
-        // stop because we can't read/write contiguously anymore
-        if (fromStrides[i] != toStrides[i]) {
-            break;
-        }
-
-        // if the stride is not natural we need to stop
-        // because we can't read/write contiguously anymore
-        if (fromStrides[i] != contiguousSizeElements) {
-            break;
-        }
-
-        contiguousSizeElements *= fromType.getShape()[i];
-        lastContiguousDim = i;
-    }
-
-    // create the input/outputs strides and shape (these may be 0-length vectors
-    // if the tensors are contiguous)
     int elementSize = (fromType.getElementType().getIntOrFloatBitWidth() + 7) / 8;
-    for (int i = 0; i < lastContiguousDim; i++) {
-
-        // FIXME: we can further optimize this by merging contiguos dimension
-        // before lastContiguousDim
-
-        // skip 1-dimensions as they don't affect the copy
-        if (fromType.getShape()[i] == 1) {
+    for (int i = fromType.getRank() - 1; i >= 0; --i) {
+        if (fromStrides[i] != accShape * accFromStride || toStrides[i] != accShape * accToStride) {
+            shape.push_back(accShape);
+            fromStridesBytes.push_back(accFromStride * elementSize);
+            toStridesBytes.push_back(accToStride * elementSize);
+            accShape = fromShape[i];
+            accFromStride = fromStrides[i];
+            accToStride = toStrides[i];
             continue;
         }
-
-        fromStridesBytes.push_back(fromStrides[i] * elementSize);
-        toStridesBytes.push_back(toStrides[i] * elementSize);
-        shape.push_back(fromType.getShape()[i]);
+        accShape *= fromShape[i];
     }
+    shape.push_back(accShape);
+    fromStridesBytes.push_back(accFromStride * elementSize);
+    toStridesBytes.push_back(accToStride * elementSize);
+    shape = SmallVector<int64_t>(shape.rbegin(), shape.rend());
+    fromStridesBytes = SmallVector<int64_t>(fromStridesBytes.rbegin(), fromStridesBytes.rend() - 1);
+    toStridesBytes = SmallVector<int64_t>(toStridesBytes.rbegin(), toStridesBytes.rend() - 1);
 
+    int contiguousSizeElements = shape.pop_back_val();
     contiguousElementSizeBytes = contiguousSizeElements * elementSize;
 
     return success();
@@ -245,22 +236,20 @@ LogicalResult createHostCopyOp(OpBuilder &builder, Location loc, Value from, Val
 
     // get input size from fromStridesBytes and element size
     int64_t fromSizeBytes = 0;
-    if (!fromStridesBytes.empty()) {
-        fromSizeBytes = fromStridesBytes[0] * fromType.getShape()[0];
-    }
-
-    fromSizeBytes *= contiguousElementsSizeBytes;
-
     int64_t toSizeBytes = 0;
-    if (!toStridesBytes.empty()) {
-        toSizeBytes = toStridesBytes[0] * toType.getShape()[0];
+    if (!shape.empty()) {
+        fromSizeBytes = fromStridesBytes[0] * shape[0];
+        toSizeBytes = toStridesBytes[0] * shape[0];
     }
-    toSizeBytes *= contiguousElementsSizeBytes;
+    else {
+        fromSizeBytes = contiguousElementsSizeBytes;
+        toSizeBytes = contiguousElementsSizeBytes;
+    }
 
     int64_t availableLramBytes = TorqHw::get().getAvailableMemoryForTiling();
 
     if (fromSizeBytes > availableLramBytes || toSizeBytes > availableLramBytes ||
-        fromSizeBytes == 0 || toSizeBytes == 0) { // from binding
+        fromSizeBytes == 0 || toSizeBytes == 0 || shape.size() > 4) { // from binding
         builder.create<torq_hl::HostCopyOp>(
             loc, to, from,
             /*inputStridesBytes=*/fromStridesBytes,
