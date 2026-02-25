@@ -147,6 +147,23 @@ void setLramAddress(Operation *op, int64_t address) {
     setOperationAddress(op, LRAM_ADDRESS_ATTR_NAME, address);
 }
 
+std::optional<int64_t> getLramAddress(Operation *op, int64_t offset) {
+
+    // TODO: remove this after confirming that we never accidentally use this method
+    assert(
+        !isa<torq_hl::CreateInvocationOp>(op) &&
+        "getLramAddress should not be called on CreateInvocationOps"
+    );
+    assert(
+        !isa<torq_hl::DescriptorOp>(op) && "getLramAddress should not be called on DescriptorOps"
+    );
+    assert(
+        !isa<torq_hl::WaitProgramOp>(op) && "getLramAddress should not be called on WaitProgramOps"
+    );
+
+    return getOperationAddress(op, LRAM_ADDRESS_ATTR_NAME, offset);
+}
+
 std::optional<int64_t> getLramAddress(Value value, int64_t offset) {
 
     if (auto createInvocationOp = value.getDefiningOp<torq_hl::CreateInvocationOp>()) {
@@ -330,6 +347,21 @@ OpOperand &getDerivedMemRefBase(Operation *op) {
 
 int getAlignmentByType(int bytes, mlir::Type type) {
     return bytes / std::ceil(1.0 * type.getIntOrFloatBitWidth() / 8);
+}
+
+void copyAddressAttributes(Operation *srcOp, Operation *dstOp) {
+    if (srcOp->getAttr(LRAM_ADDRESS_ATTR_NAME)) {
+        dstOp->setAttr(LRAM_ADDRESS_ATTR_NAME, srcOp->getAttr(LRAM_ADDRESS_ATTR_NAME));
+    }
+    if (srcOp->getAttr(DTCM_ADDRESS_ATTR_NAME)) {
+        dstOp->setAttr(DTCM_ADDRESS_ATTR_NAME, srcOp->getAttr(DTCM_ADDRESS_ATTR_NAME));
+    }
+    if (srcOp->getAttr(ITCM_ADDRESS_ATTR_NAME)) {
+        dstOp->setAttr(ITCM_ADDRESS_ATTR_NAME, srcOp->getAttr(ITCM_ADDRESS_ATTR_NAME));
+    }
+    if (srcOp->getAttr(XRAM_ADDRESS_ATTR_NAME)) {
+        dstOp->setAttr(XRAM_ADDRESS_ATTR_NAME, srcOp->getAttr(XRAM_ADDRESS_ATTR_NAME));
+    }
 }
 
 } // namespace mlir::syna

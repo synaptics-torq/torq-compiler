@@ -21,6 +21,7 @@ size_t getShapeTypeDataSize(mlir::ShapedType type);
 
 void setLramAddress(Operation *op, int64_t address);
 std::optional<int64_t> getLramAddress(Value value, int64_t offset = 0);
+std::optional<int64_t> getLramAddress(Operation *op, int64_t offset = 0);
 
 void setXramAddress(Operation *op, int64_t address);
 std::optional<int64_t> getXramAddress(Value value, int64_t offset = 0);
@@ -28,9 +29,11 @@ std::optional<int64_t> getXramAddress(Operation *op, int64_t offset = 0);
 
 void setItcmAddress(Operation *op, int64_t address);
 std::optional<int64_t> getItcmAddress(Value value, int64_t offset = 0);
+std::optional<int64_t> getItcmAddress(Operation *op, int64_t offset = 0);
 
 void setDtcmAddress(Operation *op, int64_t address);
 std::optional<int64_t> getDtcmAddress(Value value, int64_t offset = 0);
+std::optional<int64_t> getDtcmAddress(Operation *op, int64_t offset = 0);
 
 // Reserve an XRAM area of the given size, return the address of the reserved area
 // The returned address is guaranteed not to overlap with any other reserved area
@@ -56,5 +59,8 @@ int getAlignmentByType(int bytes, mlir::Type type);
 
 // Returns the offset in bytes of the first element of the given memref type
 int64_t getMemRefTypeOffsetBytes(MemRefType memRefType);
+
+// Copy address attributes from an operation to another
+void copyAddressAttributes(Operation *srcOp, Operation *dstOp);
 
 } // namespace mlir::syna

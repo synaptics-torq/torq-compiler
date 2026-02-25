@@ -564,7 +564,7 @@ static LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp create
 
                 // we need to manually set the address on the subview because the pass that
                 // sets it was already executed
-                auto maybeLramAddress = getLramAddress(hostCopyOp.getOutput());
+                auto maybeLramAddress = getAddress(hostCopyOp.getOutput());
                 if (!maybeLramAddress) {
                     return hostCopyOp->emitOpError("Missing LRAM address on host copy output");
                 }

@@ -257,84 +257,93 @@ void TORQLowerExecutableTargetPass::addCpuPasses(OpPassManager &pm) {
 
 void TORQLowerExecutableTargetPass::addNssPasses(OpPassManager &pm) {
 
-    auto &funcPm = pm.nest<func::FuncOp>();
+    {
+        auto &funcPm = pm.nest<func::FuncOp>();
 
-    if (!clFromPreBufferizedIR) {
+        if (!clFromPreBufferizedIR) {
 
-        // TODO: Do we really need torq_hl::ConstOp? It is used only to get XRAM address, can't
-        // we find another way to do that with arith::ConstantOp?
-        funcPm.addPass(createLowerArithConstantsPass());
+            // TODO: Do we really need torq_hl::ConstOp? It is used only to get XRAM address, can't
+            // we find another way to do that with arith::ConstantOp?
+            funcPm.addPass(createLowerArithConstantsPass());
 
-        addTorqComprehensiveBufferizePasses(
-            funcPm, createTorqAllocation, createTorqCopy, getTorqMemSpaceAttr
-        );
+            addTorqComprehensiveBufferizePasses(
+                funcPm, createTorqAllocation, createTorqCopy, getTorqMemSpaceAttr
+            );
 
-        funcPm.addPass(createEraseHALDescriptorTypeFromMemRefPass());
+            funcPm.addPass(createEraseHALDescriptorTypeFromMemRefPass());
 
-        funcPm.addPass(createMapBindingsPass());
-    }
+            funcPm.addPass(createMapBindingsPass());
+        }
 
-    funcPm.addPass(createLowerCallProgramToStartWaitPass());
+        funcPm.addPass(createLowerCallProgramToStartWaitPass());
 
-    if (clUnrollLoopAfterBufferization) {
-        // unroll all loops since NSS cannot deal with them
-        funcPm.addPass(createUnrollLoopPass());
+        if (clUnrollLoopAfterBufferization) {
+            // unroll all loops since NSS cannot deal with them
+            funcPm.addPass(createUnrollLoopPass());
+            funcPm.addPass(createCanonicalizerPass());
+        }
+
+        funcPm.addPass(createOutlineSliceProgramsPass());
+
+        // Canonicalize to fold constants and types after the loop unrolling in the previous pass
         funcPm.addPass(createCanonicalizerPass());
+
+        if (!clFromPreBufferizedIR) {
+            funcPm.addPass(createAddDeallocationPass());
+        }
+
+        if (!clUnrollLoopAfterBufferization) {
+            // unroll all loops since NSS cannot deal with them
+            funcPm.addPass(createUnrollLoopPass());
+            funcPm.addPass(createCanonicalizerPass());
+        }
+
+        // assign addresses to all allocations
+        funcPm.addPass(createAssignAddressesPass());
+
+        // lower torq_hl operation inside torq_hl::ProgramOp to torq_hw operations
+        funcPm.addNestedPass<torq_hl::ProgramOp>(createConvertSliceProgramToTorqHwPass());
+
+        // compile slice programs
+        funcPm.addPass(createCompileSliceInvocationsPass());
     }
 
-    funcPm.addPass(createOutlineSliceProgramsPass());
+    // create globals for all objects used in the function
+    pm.addPass(createCreateGlobalsPass());
 
-    // Canonicalize to fold constants and types after the loop unrolling in the previous pass
-    funcPm.addPass(createCanonicalizerPass());
+    {
+        auto &funcPm = pm.nest<func::FuncOp>();
 
-    if (!clFromPreBufferizedIR) {
-        funcPm.addPass(createAddDeallocationPass());
+        // create NSS programs with all the NSS instructions
+        funcPm.addPass(createOutlineNSSProgramsPass());
+
+        // segment the NSS programs in small blocks that fit the NSS block size
+        funcPm.addPass(createSegmentNSSProgramsPass());
+
+        // assign addresses to all the NSS programs
+        funcPm.addPass(createAssignNSSProgramsAddressesPass());
+
+        // annotate all create_invocation/wait_program operations with addresses/values based
+        // on the execution flow
+        funcPm.addPass(createResolveInvocationArgumentsPass());
+
+        // lower torq_hl operation inside torq_hl::ProgramOp to torq_hw operations
+        funcPm.addNestedPass<torq_hl::ProgramOp>(createConvertNssProgramToTorqHwPass());
+
+        // find the numeric addresses of all the torq_hw operations by looking up the corresponding
+        // values
+        funcPm.addPass(createResolveAddressesPass());
+
+        // add all object identifiers used in serialization to the IR
+        funcPm.addPass(createAssignObjectsIdentifiersPass());
+
+        if (clEnableTorqProfiling) {
+            funcPm.addPass(createProfilingPass());
+        }
+
+        // compile NSS programs
+        funcPm.addPass(createCompileNSSInvocationsPass());
     }
-
-    if (!clUnrollLoopAfterBufferization) {
-        // unroll all loops since NSS cannot deal with them
-        funcPm.addPass(createUnrollLoopPass());
-        funcPm.addPass(createCanonicalizerPass());
-    }
-
-    // assign addresses to all allocations
-    funcPm.addPass(createAssignAddressesPass());
-
-    // lower torq_hl operation inside torq_hl::ProgramOp to torq_hw operations
-    funcPm.addNestedPass<torq_hl::ProgramOp>(createConvertSliceProgramToTorqHwPass());
-
-    // compile slice programs
-    funcPm.addPass(createCompileSliceInvocationsPass());
-
-    // create NSS programs with all the NSS instructions
-    funcPm.addPass(createOutlineNSSProgramsPass());
-
-    // segment the NSS programs in small blocks that fit the NSS block size
-    funcPm.addPass(createSegmentNSSProgramsPass());
-
-    // assign addresses to all the NSS programs
-    funcPm.addPass(createAssignNSSProgramsAddressesPass());
-
-    // annotate all create_invocation/wait_program operations with addresses/values based
-    // on the execution flow
-    funcPm.addPass(createResolveInvocationArgumentsPass());
-
-    // lower torq_hl operation inside torq_hl::ProgramOp to torq_hw operations
-    funcPm.addNestedPass<torq_hl::ProgramOp>(createConvertNssProgramToTorqHwPass());
-
-    // find the numeric addresses of all the torq_hw operations by looking up the corresponding
-    // values
-    funcPm.addPass(createResolveAddressesPass());
-
-    // add all object identifiers used in serialization to the IR
-    funcPm.addPass(createAssignObjectsIdentifiersPass());
-
-    if (clEnableTorqProfiling) {
-        funcPm.addPass(createProfilingPass());
-    }
-
-    // compile NSS programs
-    funcPm.addPass(createCompileNSSInvocationsPass());
 }
 
 static FailureOr<func::FuncOp> getDispatchFunction(ModuleOp moduleOp) {

@@ -75,6 +75,8 @@ class Serializer {
     LogicalResult
     addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data, bool isCode);
 
+    LogicalResult addUninitializedSegment(uint32_t xramAddress, int size);
+
     FailureOr<flatbuffers_vec_ref_t> serializeRuntimeProgram(FunctionOpInterface funcOp);
 
     LogicalResult serializeInvocation(torq_hl::CreateInvocationOp &op);
@@ -88,6 +90,8 @@ class Serializer {
     FailureOr<flatbuffers_uint8_vec_ref_t> serializeHostCode(mlir::FunctionOpInterface funcOp);
 
     LogicalResult processConstOp(torq_hl::ConstOp &op);
+
+    LogicalResult processGlobalOp(memref::GlobalOp &globalOp);
 
     flatbuffers_uint32_vec_ref_t createUI32Vector(std::optional<ArrayRef<int64_t>> vec);
 
@@ -212,6 +216,34 @@ LogicalResult serializeTorqHW(mlir::ModuleOp moduleOp, DenseIntElementsAttr &bin
 Serializer::Serializer(iree_compiler::FlatbufferBuilder &builder, std::string dump_path)
     : _builder(builder), _dump_path(dump_path) {}
 
+LogicalResult Serializer::processGlobalOp(memref::GlobalOp &globalOp) {
+
+    auto maybeXramAddress = getXramAddress(globalOp.getOperation());
+
+    // if there is no xram address we don't need to serialize this global,
+    // for the moment LRAM/DTCM/ITCM buffers are not described in the model file
+    // (except in the debug information)
+    if (!maybeXramAddress) {
+        return success();
+    }
+
+    auto xramAddress = maybeXramAddress.value();
+
+    if (globalOp.isUninitialized()) {
+        return addUninitializedSegment(xramAddress, getEncodedTotalSizeBytes(globalOp.getType()));
+    }
+    else {
+
+        auto maybeData = globalOp.getInitialValue();
+
+        if (!maybeData) {
+            return globalOp.emitError("Global is initialized but has no initial value");
+        }
+
+        return addSegment(xramAddress, cast<DenseIntOrFPElementsAttr>(*maybeData), false);
+    }
+}
+
 LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
 
     auto data = mlir::cast<DenseIntOrFPElementsAttr>(constOp.getValue());
@@ -267,7 +299,9 @@ LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
             llvm::dbgs() << "*** Constant from splat: size = " << data.getNumElements() << " ***\n";
         });
 
-        _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, dataRef));
+        auto dataSize = bitWidth / 8 * data.getNumElements();
+
+        _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, dataSize, dataRef));
     }
     else {
 
@@ -296,17 +330,33 @@ LogicalResult Serializer::serializeInvocation(torq_hl::CreateInvocationOp &creat
 LogicalResult
 Serializer::addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data, bool isCode) {
 
-    auto dataRef = flatbuffers_uint8_vec_create(
-        _builder, (const uint8_t *)data.getRawData().data(), data.getRawData().size()
-    );
+    auto size = data.getRawData().size();
 
-    if (!succeeded(dumpSegmentDescriptor(
-            0, true, xramAddress, data.getRawData().data(), data.getRawData().size(), isCode
-        ))) {
+    auto dataRef =
+        flatbuffers_uint8_vec_create(_builder, (const uint8_t *)data.getRawData().data(), size);
+
+    if (!succeeded(
+            dumpSegmentDescriptor(0, true, xramAddress, data.getRawData().data(), size, isCode)
+        )) {
         return failure();
     };
 
-    _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, dataRef));
+    _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, size, dataRef));
+
+    return success();
+}
+
+LogicalResult Serializer::addUninitializedSegment(uint32_t xramAddress, int size) {
+
+    if (iree_hal_torq_Segment_start(_builder) ||
+        iree_hal_torq_Segment_xram_address_add(_builder, xramAddress) ||
+        iree_hal_torq_Segment_size_add(_builder, size)) {
+        return failure();
+    }
+
+    auto segmentRef = iree_hal_torq_Segment_end(_builder);
+
+    _segments.push_back(segmentRef);
 
     return success();
 }
@@ -438,7 +488,9 @@ LogicalResult Serializer::serializeDescriptor(torq_hl::DescriptorOp descriptorOp
 
         auto dataRef = flatbuffers_uint8_vec_create(_builder, codePtr, codeDataRef.size());
 
-        _segments.push_back(iree_hal_torq_Segment_create(_builder, codeAddr, dataRef));
+        _segments.push_back(
+            iree_hal_torq_Segment_create(_builder, codeAddr, codeDataRef.size(), dataRef)
+        );
 
         if (!_dump_path.empty()) {
             if (!succeeded(dumpSegmentDescriptor(
@@ -709,7 +761,8 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
 
         if (isa<torq_hl::ProgramOp, torq_hl::CreateInvocationOp, torq_hl::ConstOp,
                 torq_hl::DescriptorOp, torq_hl::MapBindingOp, func::ReturnOp,
-                torq_hl::ImportProgramOp, torq_hl::GetBlockOp, torq_hw::DispatchProfilingOp>(op) ||
+                torq_hl::ImportProgramOp, torq_hl::GetBlockOp, torq_hw::DispatchProfilingOp,
+                memref::GetGlobalOp>(op) ||
             isDerivedMemRefOperation(&op)) {
             continue; // skip these ops
         }
@@ -782,7 +835,7 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
                     return failure();
                 }
 
-                auto maybeCodeAddress = getLramAddress(startOp.getCodeSections()[0]);
+                auto maybeCodeAddress = getAddress(startOp.getCodeSections()[0]);
 
                 if (!maybeCodeAddress) {
                     op.emitOpError("Missing lram code address for start program");
@@ -960,6 +1013,14 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
     LLVM_DEBUG({ llvm::dbgs() << "---- serializing constants\n"; });
     for (auto constOp : funcOp.getFunctionBody().getOps<torq_hl::ConstOp>()) {
         if (failed(processConstOp(constOp))) {
+            return failure();
+        }
+    }
+
+    LLVM_DEBUG({ llvm::dbgs() << "---- serializing uninitalized sections\n"; });
+    for (auto globalOp :
+         funcOp.getOperation()->getParentOfType<ModuleOp>().getOps<memref::GlobalOp>()) {
+        if (failed(processGlobalOp(globalOp))) {
             return failure();
         }
     }

@@ -85,7 +85,7 @@ void AssignObjectsIdentifiersPass::runOnOperation() {
         if (isa<torq_hl::ProgramOp, torq_hl::CreateInvocationOp, torq_hl::DescriptorOp,
                 torq_hl::ConstOp, torq_hl::MapBindingOp, func::ReturnOp, torq_hl::ImportProgramOp,
                 torq_hl::GetBlockOp, torq_hw::DispatchProfilingOp, arith::ConstantOp,
-                bufferization::ToMemrefOp>(op)) {
+                bufferization::ToMemrefOp, memref::GetGlobalOp>(op)) {
             continue; // skip these ops
         }
 

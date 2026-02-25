@@ -39,6 +39,8 @@ std::unique_ptr<OperationPass<ModuleOp>> createOutlineCpuProgramsPass();
 
 std::unique_ptr<OperationPass<ModuleOp>> createCompileCpuProgramsPass();
 
+std::unique_ptr<OperationPass<ModuleOp>> createCreateGlobalsPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileSliceInvocationsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileNSSInvocationsPass();

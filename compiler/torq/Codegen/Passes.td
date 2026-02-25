@@ -450,6 +450,15 @@ def CompileTimeConstOutline :
         ];
 }
 
+def CreateGlobals :
+    Pass<"torq-create-globals", "ModuleOp"> {
+        let summary = "Replace all memref.alloc used in a dispatch with memref.global objects";
+        let constructor = "mlir::syna::torq::createCreateGlobalsPass()";
+        let dependentDialects = [
+            "syna::torq_hl::TorqHLDialect"
+        ];
+}
+
 def MarkHostExecutor :
     InterfacePass<"torq-mark-host-executor",
                   "mlir::FunctionOpInterface"> {

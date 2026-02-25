@@ -314,22 +314,24 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
     return startOp;
 }
 
-static SmallVector<Value> createLramCodeAreas(FunctionOpInterface funcOp, OpBuilder &builder) {
-
-    auto programSectionType = MemRefType::get({HwInfo::nss_max_program_size}, builder.getI8Type());
-    auto lramProgramSectionType =
-        createMemRefTypeWithMemorySpace(programSectionType, torq_hl::MemorySpace::Lram);
+static SmallVector<Value> getLramCodeAreas(FunctionOpInterface funcOp, OpBuilder &builder) {
 
     builder.setInsertionPointToStart(&(funcOp.getCallableRegion()->front()));
 
     SmallVector<Value> values;
 
-    // allocate two memrefs that will be used to load the current and next program
-    // the address has been reserved during the address allocation phase
+    // get the globals mmeref that will be used to load the current and next program
+    // these have been created in the create globals pass
     for (int i = 0; i < 2; i++) {
-        auto allocOp = builder.create<memref::AllocOp>(funcOp.getLoc(), lramProgramSectionType);
-        setLramAddress(allocOp, i * HwInfo::nss_max_program_size);
-        values.push_back(allocOp.getResult());
+        std::string globalName = (llvm::Twine("__program_slot") + llvm::Twine(i)).str();
+
+        auto globalNameAttr = builder.getStringAttr(globalName);
+        auto slotOp =
+            SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(funcOp, globalNameAttr);
+        auto getSlotOp =
+            builder.create<memref::GetGlobalOp>(funcOp.getLoc(), slotOp.getType(), globalNameAttr);
+
+        values.push_back(getSlotOp.getResult());
     }
 
     return values;
@@ -351,7 +353,7 @@ void OutlineNSSProgramsPass::runOnOperation() {
     }
 
     // create the two allocations used to load programs (current program and next program)
-    auto programAllocs = createLramCodeAreas(funcOp, builder);
+    auto programAllocs = getLramCodeAreas(funcOp, builder);
 
     // outline the nss programs
     torq_hl::StartProgramOp previousStartProgram;

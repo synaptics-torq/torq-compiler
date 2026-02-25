@@ -1,4 +1,5 @@
 #include "torq/Utils/InvocationUtils.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/EncodingUtils.h"
@@ -454,6 +455,37 @@ static std::optional<int64_t> getAddressFromGetBlockOp(
     }
 }
 
+// This function returns the addresss of a global memref that is accessed by a memref.get_global op
+static std::optional<int64_t>
+getAddressFromGetGlobal(memref::GetGlobalOp getGlobalOp, int64_t offset) {
+
+    // find the global memref corresponding to the get_global op by looking it up by name
+    auto globalOp = SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(
+        getGlobalOp, getGlobalOp.getNameAttr()
+    );
+
+    if (!globalOp) {
+        return std::nullopt; // global not found
+    }
+
+    // find the address on the operation (we cannot use getAddress functions because memref.global
+    // doesn't return a value)
+    auto memorySpace = getEncodingMemorySpace(globalOp.getType());
+
+    switch (memorySpace) {
+    case torq_hl::MemorySpace::Lram:
+        return getLramAddress(globalOp, offset);
+    case torq_hl::MemorySpace::Dtcm:
+        return getDtcmAddress(globalOp, offset);
+    case torq_hl::MemorySpace::Itcm:
+        return getItcmAddress(globalOp, offset);
+    case torq_hl::MemorySpace::Xram:
+        return getXramAddress(globalOp, offset);
+    default:
+        return std::nullopt; // unsupported memory space
+    }
+}
+
 std::optional<int64_t> getAddress(Value value, int64_t offset, InvocationValue invocation) {
 
     // the value may be a block argument, if this is not the first block
@@ -465,13 +497,16 @@ std::optional<int64_t> getAddress(Value value, int64_t offset, InvocationValue i
         return std::nullopt;
     }
 
-    // special cases where the value is coming from a block argument or a get_block op
-    // in this case the value doesn't carry the address information directly
+    // special cases where operation defining the value doesn't carry the address information
+    // directly
     if (auto blockArg = dyn_cast<BlockArgument>(value)) {
         return getAddressFromInvocationArg(blockArg, offset, invocation);
     }
     else if (auto getBlockOp = dyn_cast<torq_hl::GetBlockOp>(value.getDefiningOp())) {
         return getAddressFromGetBlockOp(getBlockOp, offset, invocation);
+    }
+    else if (auto getGlobalOp = dyn_cast<memref::GetGlobalOp>(value.getDefiningOp())) {
+        return getAddressFromGetGlobal(getGlobalOp, offset);
     }
 
     auto memRefType = dyn_cast<MemRefType>(value.getType());

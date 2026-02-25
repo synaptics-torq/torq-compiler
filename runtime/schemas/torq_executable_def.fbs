@@ -11,13 +11,16 @@ namespace iree.hal.torq;
 file_identifier "SNPU";
 file_extension "torq";
 
-// Segment of a program that is loaded to XRAM
+// Segment of a code/data that is allocated in XRAM
 table Segment {
   // address where the segment has to be loaded in XRAM
   xram_address: uint32;
 
-  // data of the segment
-  data: [ubyte] (required);
+  // size of the segment
+  size: uint32;
+
+  // data of the segment (if the segment is initialized)
+  data: [ubyte];
 }
 
 // Mapping of a code argument in virtual memory visible from the NPU
@@ -149,7 +152,7 @@ table ExecutableDef {
   // name of the hal.executable.export in MLIR
   executable_name: string; 
 
-  // segments of the code that need to be either copied to LRAM or mapped into XRAM
+  // segments of the code/data that need to be created into XRAM
   code: [Segment] (required);
 
   // tracks where the code expects all the bindings to be mapped in XRAM

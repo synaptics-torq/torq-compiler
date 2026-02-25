@@ -1435,9 +1435,8 @@ static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable
     iree_hal_torq_Segment_table_t segment = ns(Segment_vec_at(segments, i));
     
     uint32_t xram_address = ns(Segment_xram_address(segment));
-
-    flatbuffers_uint8_vec_t code = ns(Segment_data(segment));
-    size_t xram_segment_size = flatbuffers_uint8_vec_len(code);
+    auto xram_segment_size = ns(Segment_size(segment));
+    auto initialized = ns(Segment_data_is_present(segment));
 
     if (xram_address < xram_start) {
       xram_start = xram_address;
@@ -1454,7 +1453,8 @@ static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable
     LOGD << "Segment " << i << ": xram_address=" << xram_address 
          << ", xram_segment_size=" << xram_segment_size 
          << ", xram_start=" << xram_start 
-         << ", xram_end=" << xram_end;
+         << ", xram_end=" << xram_end
+         << ", initialized=" << initialized;
   
   }
 
@@ -1626,8 +1626,9 @@ iree_status_t iree_hal_torq_native_executable_run(
     for (size_t i = 0; i < segments_count; i++) {
       iree_hal_torq_Segment_table_t segment = iree_hal_torq_Segment_vec_at(segments, i);
 
+      // skip segments that are uninitialized
       if (!iree_hal_torq_Segment_data_is_present(segment)) {
-        return iree_make_status(IREE_STATUS_INTERNAL, "segment data is missing");
+        continue;
       }
 
       flatbuffers_uint8_vec_t code = iree_hal_torq_Segment_data_get(segment);
@@ -1638,7 +1639,7 @@ iree_status_t iree_hal_torq_native_executable_run(
 
       if (xram_code_address != 1 ) {
       
-        LOGD << "Loading code at XRAM address " << xram_code_address << ", len " << code_len;
+        LOGD << "Loading model segment at XRAM address " << xram_code_address << ", len " << code_len;
 
           if (!torq->writeXram(xram_code_address, code_len, code)) {
             return iree_make_status(IREE_STATUS_INTERNAL, "failed to writeXram()");
