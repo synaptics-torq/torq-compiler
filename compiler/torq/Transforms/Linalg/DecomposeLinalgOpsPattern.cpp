@@ -378,14 +378,6 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
         // remove sign bit for following logic
         auto x = andi(0b0111111111111111, rawX);
 
-        // create `or`-able mask for nan values (is this necessary?
-        // My ML models never have nans to propagate...)
-        auto inf = i16Const(0b0111111110000000);
-        auto boolNanMask = broadcast(x, i1, [&](OpBuilder &b, Location l, ValueRange args) {
-            return b.create<arith::CmpIOp>(l, arith::CmpIPredicate::ugt, args[0], inf);
-        });
-        auto nanMask = rewriter.create<arith::ExtSIOp>(loc, tType(i16), boolNanMask);
-
         // subnormal numbers are exactly the ones that map to
         // infinity.  Check which ones should map there.
         auto isSubnormal = cmp(0b0000000010000000, x, arith::CmpIPredicate::ult);
@@ -393,40 +385,22 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
         // "big" means numbers that map to zero (we flush subnormals to zero).
         auto isNotBig = cmp(0b0111111010000000, x, arith::CmpIPredicate::ule);
 
-        // extract exponent bits
-        auto xExpo = andi(0b0111111110000000, x);
-
-        // compute exponent of reciprocal from extracted reciprocal
-        auto computedExpo = sub(0b0111111010000000, xExpo);
-
-        // extract mantissa bits
-        auto xMant = andi(0b0000000001111111, x);
-
-        // we need to adjust our computed exponent for the special
-        // case where mantissa == 0.
-        auto specialMantissaValue = cmp(0b0000000000000000, xMant, arith::CmpIPredicate::eq);
-
-        // where mantissa == 0, we need to add one to the exponent.
-        auto specialExpoOffset = mul(0b0000000010000000, specialMantissaValue);
-        auto realComputedExpo =
-            rewriter.create<arith::AddIOp>(loc, specialExpoOffset, computedExpo);
-
         // Our magic LUT values!  See
         // scripts/torch/bfloat16_softmax.py to reproduce.
         std::vector<int8_t> lutData{
             // pad zeros for easier lowering
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00,
+            -0x80, 0x7E, 0x7C, 0x7A, 0x78, 0x76, 0x75, 0x73, 0x71, 0x6F, 0x6D, 0x6C, 0x6A, 0x68,
+            0x67, 0x65, 0x64, 0x62, 0x60, 0x5F, 0x5D, 0x5C, 0x5A, 0x59, 0x58, 0x56, 0x55, 0x53,
+            0x52, 0x51, 0x4F, 0x4E, 0x4D, 0x4C, 0x4A, 0x49, 0x48, 0x47, 0x45, 0x44, 0x43, 0x42,
+            0x41, 0x40, 0x3F, 0x3D, 0x3C, 0x3B, 0x3A, 0x39, 0x38, 0x37, 0x36, 0x35, 0x34, 0x33,
+            0x32, 0x31, 0x30, 0x2F, 0x2E, 0x2D, 0x2C, 0x2C, 0x2B, 0x2A, 0x29, 0x28, 0x27, 0x26,
+            0x25, 0x25, 0x24, 0x23, 0x22, 0x21, 0x21, 0x20, 0x1F, 0x1E, 0x1E, 0x1D, 0x1C, 0x1B,
+            0x1B, 0x1A, 0x19, 0x18, 0x18, 0x17, 0x16, 0x16, 0x15, 0x14, 0x14, 0x13, 0x12, 0x12,
+            0x11, 0x10, 0x10, 0x0F, 0x0E, 0x0E, 0x0D, 0x0D, 0x0C, 0x0B, 0x0B, 0x0A, 0x0A, 0x09,
+            0x09, 0x08, 0x07, 0x07, 0x06, 0x06, 0x05, 0x05, 0x04, 0x04, 0x03, 0x03, 0x02, 0x02,
+            0x01, 0x01,
             // actual values
-            0x00, 0x7E, 0x7C, 0x7A, 0x78, 0x76, 0x75, 0x73, 0x71, 0x6F, 0x6D, 0x6C, 0x6A, 0x68,
+            -0x80, 0x7E, 0x7C, 0x7A, 0x78, 0x76, 0x75, 0x73, 0x71, 0x6F, 0x6D, 0x6C, 0x6A, 0x68,
             0x67, 0x65, 0x64, 0x62, 0x60, 0x5F, 0x5D, 0x5C, 0x5A, 0x59, 0x58, 0x56, 0x55, 0x53,
             0x52, 0x51, 0x4F, 0x4E, 0x4D, 0x4C, 0x4A, 0x49, 0x48, 0x47, 0x45, 0x44, 0x43, 0x42,
             0x41, 0x40, 0x3F, 0x3D, 0x3C, 0x3B, 0x3A, 0x39, 0x38, 0x37, 0x36, 0x35, 0x34, 0x33,
@@ -438,6 +412,16 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
             0x01, 0x01
         };
 
+        // naively, we would subtract the exponent, and compute the
+        // mantissa directly from the above lookup table.  However, to
+        // avoid needing to & away the mantissa bits, leave them in
+        // the exponent calculation and subtract that error from the
+        // mantissa LUT.
+        for (int i = 0; i < 256; i++) {
+            lutData[i] = lutData[i] + (i % 128);
+        }
+        auto computedExpo = sub(0b0111111010000000, x);
+
         // create LUT
         auto lut = rewriter.create<arith::ConstantOp>(
             loc, DenseIntElementsAttr::get(
@@ -446,7 +430,7 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
         );
 
         // use mantissa as index to LUT
-        auto xMant8 = rewriter.create<arith::TruncIOp>(loc, tType(i8), xMant);
+        auto xMant8 = rewriter.create<arith::TruncIOp>(loc, tType(i8), x);
         auto outputTens = rewriter.create<tensor::EmptyOp>(loc, tType(i8), ValueRange{});
         auto indexOffset = rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(128));
         auto lutVal =
@@ -465,10 +449,10 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
                 )
                 .getResult(0);
 
-        auto lutVal16 = rewriter.create<arith::ExtSIOp>(loc, tType(i16), lutVal);
+        auto lutVal16 = rewriter.create<arith::ExtUIOp>(loc, tType(i16), lutVal);
 
         // combine computed exponent and mantissa
-        auto computed = rewriter.create<arith::OrIOp>(loc, lutVal16, realComputedExpo);
+        auto computed = rewriter.create<arith::AddIOp>(loc, lutVal16, computedExpo);
 
         // There are a few possible inputs (big inputs) that must also
         // be sqashed to zero.
@@ -488,12 +472,10 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
         auto realComputed = rewriter.create<tensor::BitcastOp>(loc, tType(i16), realComputedBfloat);
 
         // add back our sign bit we saved earlier
-        auto combined = rewriter.create<arith::OrIOp>(loc, xSign, realComputed);
-        // final nan propagation
-        auto combined2 = rewriter.create<arith::OrIOp>(loc, combined, nanMask);
+        auto combined = rewriter.create<arith::AddIOp>(loc, xSign, realComputed);
 
         // bitcast final value back to bfloat16
-        auto bfBitcast = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, combined2);
+        auto bfBitcast = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, combined);
 
         // done.
         rewriter.replaceOp(op, bfBitcast);
