@@ -106,6 +106,7 @@ def TorqHL_MulOp: TorqHL_LayerOp<"mul"> {
   }];
 
   let arguments = !con(commonArgs, (ins
+    I32Attr:$output_zp,
     I32Attr:$output_min,
     I32Attr:$output_max,
     TensorOrMemref:$scale_bias,

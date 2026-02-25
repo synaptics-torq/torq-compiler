@@ -285,7 +285,7 @@ static FailureOr<SmallVector<int64_t>> findValidParallelTile(linalg::LinalgOp sr
 
         LLVM_DEBUG({ llvm::dbgs() << "Estimated memory requirements: " << *maybeMemReq << "\n"; });
 
-        if (*maybeMemReq < maxSize) {
+        if (*maybeMemReq <= maxSize) {
             return tileVector;
         }
     }
@@ -371,7 +371,7 @@ static FailureOr<SmallVector<int64_t>> findValidSoftmaxTile(linalg::SoftmaxOp op
 
         LLVM_DEBUG({ llvm::dbgs() << "Softmax estimated memory: " << *maybeMemReq << "\n"; });
 
-        if (*maybeMemReq < maxSize) {
+        if (*maybeMemReq <= maxSize) {
             return tileVector;
         }
     }
@@ -573,7 +573,7 @@ class TileSoftmaxOperation : public OpRewritePattern<linalg::SoftmaxOp> {
             return success();
         }
 
-        if (*maybeDataSize < maxTileSize) {
+        if (*maybeDataSize <= maxTileSize) {
             return rewriter.notifyMatchFailure(srcOp, "No need to tile this softmax operation");
         }
 
@@ -693,7 +693,7 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
             return success();
         }
 
-        if (*maybeDataSize < maxTileSize) {
+        if (*maybeDataSize <= maxTileSize) {
             return rewriter.notifyMatchFailure(srcOp, "No need to tile this operation");
         }
 

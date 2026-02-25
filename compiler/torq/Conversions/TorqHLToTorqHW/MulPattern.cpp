@@ -29,7 +29,7 @@ LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter
     const int shift = op.getShift();
     const int outMin = op.getOutputMin();
     const int outMax = op.getOutputMax();
-
+    const int outZp = op.getOutputZp();
     // Apply implicit broadcasting
     input1.broadcastAs(output);
     input2.broadcastAs(output);
@@ -50,7 +50,7 @@ LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter
         IData data1 = slice.iram.load(input1[i]);
         WData data2 = slice.wram.load(input2[i]);
         PData pdata = slice.alu.elementwiseProductAccumulate(data1, data2);
-        QData res = slice.act.rescaleClamp(pdata, bdata, shift, 0, outMin, outMax);
+        QData res = slice.act.rescaleClamp(pdata, bdata, shift, outZp, outMin, outMax);
         slice.append(output, res);
     }
 

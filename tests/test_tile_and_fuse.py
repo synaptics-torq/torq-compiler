@@ -96,12 +96,17 @@ def case_config(request, chip_config):
 
     if any(s in request.param.name for s in failed_tc):
         pytest.xfail("known failure")    
-
+    
+    torq_compiler_options = request.param.data.get("torq_compiler_options", [])
+    if "yolov8_block_mul_rescale" in request.param.name:
+        torq_compiler_options += ["--torq-tile-and-fuse-producers-fuse-mode=max-producers", "--torq-unroll-loop-after-bufferization"]
+    
     return {
         "mlir_model_file": "static_mlir_model_file",
         "input_data": "tweaked_random_input_data",
         "comparison_config": "comparison_config_from_mlir",
-        **request.param.data
+        **request.param.data,
+        "torq_compiler_options": torq_compiler_options
     }
 
 @pytest.mark.ci

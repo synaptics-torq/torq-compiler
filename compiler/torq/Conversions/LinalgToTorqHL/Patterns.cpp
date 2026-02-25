@@ -1032,17 +1032,55 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expected arith.muli or arith.mulf");
         }
 
-        const std::vector<int32_t> bias = {0};
-        const std::vector<int32_t> scale = {1};
+        int32_t bias = 0;
+        int32_t scale = 1;
+        Value output = srcOp.getResult(0);
+        const int outChannelCount = 1; // No channels here, only one single scale
+        ScaleClampInfo scInfo = foldForwardScaleClamp(output, outChannelCount, 12, 12, false);
+        auto outType = cast<RankedTensorType>(output.getType());
+        auto [outMin, outMax] = getDTypeRange(outType.getElementType());
+        int32_t outZp = 0;
 
-        auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-        auto [outMin, outMax] = getDTypeRange(srcResultType.getElementType());
+        // shiftFactor is used for torq hw scale computation, it request multiple of 4.
+        // for 48bit value rescale, we need to check multiplier bit < 32bit in case overflow 80bit.
+        int32_t shiftFactor = 0;
+        if (scInfo) {
+            // Default
+            shiftFactor = 4;
+            // // HW needs shift*
+            if (outType.getElementType().isInteger(8) &&
+                (input1ElementType.isInteger(16) || input1ElementType.isInteger(32))) {
+                // FIXME: not clear in which cases we actually need this shiftFactor
+                // TODO: compute this shiftFactor instead of hardcoding it
+                // 12 to make sure rescaled value doens't overflow 64bit
+                shiftFactor = 12;
+            }
+            double rnd_err = 0.5;
+            int32_t hwScale =
+                static_cast<int32_t>(scInfo.scaleDouble[0] * (1 << shiftFactor) + rnd_err);
+            bias = scInfo.bias;
+            scale = hwScale;
+            outMin = scInfo.min;
+            outMax = scInfo.max;
+            outZp = scInfo.zp;
+        }
 
-        rewriter.replaceOpWithNewOp<torq_hl::MulOp>(
-            srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
-            outMin, outMax, createI32Const(rewriter, srcOp, interleave(bias, scale)), 0, input1,
-            input2
-        );
+        Value torqOut =
+            rewriter
+                .create<torq_hl::MulOp>(
+                    srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType), outZp,
+                    outMin, outMax, createI32Const(rewriter, srcOp, interleave({bias}, {scale})),
+                    shiftFactor, input1, input2
+                )
+                .getResult(0);
+
+        if (scInfo) {
+            rewriter.replaceOp(output.getDefiningOp(), torqOut);
+            rewriter.eraseOp(srcOp);
+        }
+        else {
+            rewriter.replaceOp(srcOp, torqOut);
+        }
 
         return success();
     }
