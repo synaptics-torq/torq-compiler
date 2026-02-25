@@ -440,6 +440,16 @@ def CompileTimeConstCompute :
         ];
 }
 
+def CompileTimeConstOutline : 
+    InterfacePass<"torq-compile-time-const-outline", "mlir::FunctionOpInterface"> {
+        let summary = "Outline operations marked as compile-time-const into separate functions";
+        let constructor = "mlir::syna::torq::createCompileTimeConstOutlinePass()";
+        let dependentDialects = [
+            "syna::torq_hl::TorqHLDialect",
+            "tensor::TensorDialect"
+        ];
+}
+
 def MarkHostExecutor :
     InterfacePass<"torq-mark-host-executor",
                   "mlir::FunctionOpInterface"> {

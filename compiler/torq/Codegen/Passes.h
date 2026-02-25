@@ -85,6 +85,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createScalarsToTensorsPass()
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileTimeConstComputePass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileTimeConstOutlinePass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollLoopPass();
 
 void addTorqComprehensiveBufferizePasses(

@@ -9,10 +9,14 @@
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ComputeConstants.h"
+#include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/MemoryUtils.h"
 
+#include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
+#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/DialectRegistry.h"
@@ -23,7 +27,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
-#define DEBUG_TYPE "torq-compute-const"
+#define DEBUG_TYPE "torq-compute-compile-time-const"
 
 namespace mlir::syna::torq {
 
@@ -41,7 +45,7 @@ class OpToConstOpRewriter : public RewritePattern {
 
         auto maybeConstV = computeArithConst(op->getResults()[0], true, {});
         if (failed(maybeConstV)) {
-            op->emitError() << "Failed to compute compile-time constant";
+            LLVM_DEBUG(llvm::dbgs() << "Failed to compute constant for op: "; op->dump(););
             return failure();
         }
 

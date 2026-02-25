@@ -7,9 +7,11 @@
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
+#include "mlir/IR/Verifier.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-conversion-utils"
@@ -174,6 +176,8 @@ Value transposeValue(
     if (permutation.empty()) {
         return input;
     }
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointAfterValue(input);
     auto outputType = transposeType(input.getType(), permutation);
     auto initValue =
         rewriter.create<tensor::EmptyOp>(loc, outputType.getShape(), outputType.getElementType())
@@ -764,6 +768,23 @@ Attribute returnAttr(Value constV) {
         return nullptr;
     }
     return mlir::dyn_cast<Attribute>(op.getValue());
+}
+
+Value cloneAndReplaceToBody(
+    OpBuilder &destBuilder, llvm::SmallVectorImpl<Operation *> &ops, IRMapping &mapping,
+    Block *srcBlock, Block *destBlock
+) {
+    Operation *clonedOp = nullptr;
+    if (srcBlock && destBlock) {
+        for (auto bArg : srcBlock->getArguments()) {
+            mapping.map(bArg, destBlock->getArgument(bArg.getArgNumber()));
+        }
+    }
+    for (auto op : ops) {
+        clonedOp = destBuilder.clone(*op, mapping);
+    }
+    assert(clonedOp->getNumResults() == 1 && "Expected single result for op");
+    return clonedOp->getResult(0);
 }
 
 } // namespace mlir::syna::torq

@@ -38,7 +38,39 @@ void setTargetExecutorAttr(Operation *op, torq_hl::Executor executor) {
 
 void setCompileTimeConstAttr(Operation *op) {
     op->setAttr(COMPILE_TIME_CONST_ATTR_NAME, BoolAttr::get(op->getContext(), true));
+    setTargetExecutorAttr(op, torq_hl::Executor::Host);
+    SmallVector<Operation *, 4> worklist{op};
+    llvm::DenseSet<Operation *> visited;
+    SmallVector<Operation *, 4> opsOfInterest;
+    while (!worklist.empty()) {
+        Operation *currentOp = worklist.pop_back_val();
+        visited.insert(currentOp);
+        for (Value operand : currentOp->getOperands()) {
+            Operation *defOp = operand.getDefiningOp();
+            if (!defOp) {
+                auto bArg = dyn_cast<BlockArgument>(operand);
+                if (bArg) {
+                    auto parentOp = bArg.getParentBlock()->getParentOp();
+                    auto arg = parentOp->getOperand(bArg.getArgNumber());
+                    defOp = arg.getDefiningOp();
+                }
+            }
+            if (!defOp || !visited.insert(defOp).second)
+                continue;
+
+            opsOfInterest.push_back(defOp);
+            worklist.push_back(defOp);
+        }
+    }
+    for (Operation *op : opsOfInterest) {
+        if (op->hasAttr(COMPILE_TIME_CONST_ATTR_NAME)) {
+            op->removeAttr(COMPILE_TIME_CONST_ATTR_NAME);
+        }
+        setTargetExecutorAttr(op, torq_hl::Executor::Host);
+    }
 }
+
+void removeCompileTimeConstAttr(Operation *op) { op->removeAttr(COMPILE_TIME_CONST_ATTR_NAME); }
 
 bool isCompileTimeConst(Operation *op) {
     auto attr = op->getAttr(COMPILE_TIME_CONST_ATTR_NAME);

@@ -522,4 +522,18 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op);
 bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op);
 std::optional<SmallVector<int64_t>> isaBroadcastOpInterface(linalg::GenericOp genericOp);
 
+struct FusionPlan {
+    Operation *anchor;
+    llvm::SmallVector<Operation *> neededOps;
+    llvm::SmallVector<Operation *> opsToFuse;
+    llvm::SmallVector<Operation *> dataSlicer;
+    llvm::DenseMap<Operation *, llvm::SmallVector<Operation *>> dataInMap;
+    llvm::DenseMap<Operation *, llvm::SmallVector<Operation *>> dataOutMap;
+};
+
+Value cloneAndReplaceToBody(
+    OpBuilder &destBuilder, llvm::SmallVectorImpl<Operation *> &ops, IRMapping &mapping,
+    Block *srcBlock = nullptr, Block *destBlock = nullptr
+);
+
 } // namespace mlir::syna::torq

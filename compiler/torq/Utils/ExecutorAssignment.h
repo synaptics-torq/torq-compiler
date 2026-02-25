@@ -8,6 +8,7 @@ torq_hl::Executor getTargetExecutor(Operation *op);
 torq_hl::Executor getTargetExecutor(Operation *op, torq_hl::Executor defaultExecutor);
 NamedAttribute getTargetExecutorAttr(MLIRContext *ctx, torq_hl::Executor executor);
 void setTargetExecutorAttr(Operation *op, torq_hl::Executor executor);
+void removeCompileTimeConstAttr(Operation *op);
 void setCompileTimeConstAttr(Operation *op);
 bool isCompileTimeConst(Operation *op);
 

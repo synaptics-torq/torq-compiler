@@ -163,7 +163,6 @@ static void setupPipeline(PassManager &pm) {
     FunctionLikeNest(modulePassManager).addPass(createLLVMCPULowerExecutableTargetPass);
 
     FunctionLikeNest(modulePassManager).addPass(createEraseHALDescriptorTypeFromMemRefPass);
-
     // FIXME: we should limit the passes below to the minimum required to pre-compute
     // constants
 
@@ -443,7 +442,8 @@ outlineAndReturnOps(Value value, bool recursive, const std::vector<mlir::Value> 
 
         LLVM_DEBUG({
             llvm::dbgs() << "Processing operation: ";
-            currentOp->dump();
+            currentOp->print(llvm::dbgs(), OpPrintingFlags().printGenericOpForm());
+            llvm::dbgs() << "\n";
         });
 
         opsSet.insert(currentOp);
@@ -453,7 +453,8 @@ outlineAndReturnOps(Value value, bool recursive, const std::vector<mlir::Value> 
         auto ret = currentOp->walk<mlir::WalkOrder::PreOrder>([&](Operation *op) {
             LLVM_DEBUG({
                 llvm::dbgs() << "Visiting operation: ";
-                op->dump();
+                op->print(llvm::dbgs(), OpPrintingFlags().printGenericOpForm());
+                llvm::dbgs() << "\n";
             });
 
             // add the operation to the set of visited ops ( doing it here
@@ -464,7 +465,8 @@ outlineAndReturnOps(Value value, bool recursive, const std::vector<mlir::Value> 
 
                 LLVM_DEBUG({
                     llvm::dbgs() << "Processing operand: ";
-                    operand.dump();
+                    operand.print(llvm::dbgs(), OpPrintingFlags().printGenericOpForm());
+                    llvm::dbgs() << "\n";
                 });
 
                 // if the operand is the value that we assume to be zero, we don't
@@ -587,7 +589,7 @@ computeArithConst(Value value, bool recursive, const std::vector<Value> &assumeZ
 
     OpBuilder builder(value.getDefiningOp());
     auto outputV = builder.create<arith::ConstantOp>(value.getLoc(), *maybeAttr).getResult();
-    LLVM_DEBUG({ llvm::dbgs() << "Constant successfully computed"; });
+    LLVM_DEBUG({ llvm::dbgs() << "Constant successfully computed\n"; });
 
     return outputV;
 }
