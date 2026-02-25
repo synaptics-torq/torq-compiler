@@ -208,8 +208,8 @@ def test_session(request, session_id):
             
             # Handle profiling data for Perfetto viewer
             if test_run.profiling_data:
-                pb_path = test_run.profiling_data.path
-                if os.path.exists(pb_path) and pb_path.endswith('.pb'):
+                pb_path = test_run.profiling_data.name
+                if pb_path.endswith('.pb'):
                     pb_path_obj = Path(pb_path)
                     pb_files.append(pb_path_obj)
                     # Use str(Path) as key to match what's checked in generate_html()
@@ -315,16 +315,12 @@ def download_trace(request, test_run_id):
     
     if not test_run.profiling_data:
         raise Http404("No profiling data available for this test run")
-    
-    file_path = test_run.profiling_data.path
-    if not os.path.exists(file_path):
-        raise Http404("Profiling data file not found")
-    
+        
     # Generate a friendly filename
     test_case = test_run.test_case
     filename = f"{test_case.name}_{test_case.parameters}.pb".replace('[', '_').replace(']', '_').replace(' ', '_')
     
-    response = FileResponse(open(file_path, 'rb'), content_type='application/octet-stream')
+    response = FileResponse(test_run.profiling_data.open('rb'), content_type='application/octet-stream')
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     return response
 

@@ -10,3 +10,8 @@ charset-normalizer==3.4.4
 idna==3.11
 requests==2.32.5
 urllib3==2.6.3
+
+# backend database and object storage libs
+psycopg2-binary==2.9.11
+boto3==1.42.54
+django-storages[s3]==1.14.6

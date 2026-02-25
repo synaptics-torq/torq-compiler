@@ -1,0 +1,68 @@
+name: Build and deploy dashboard
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'webapps/dashboard/**'
+      - '.github/workflows/build-dashboard.yml'
+
+  pull_request:
+    paths:
+      - 'webapps/dashboard/**'
+      - '.github/workflows/build-dashboard.yml'
+
+concurrency:
+  group: dashboard-build
+  cancel-in-progress: true
+
+jobs:
+
+    build-and-push:
+
+        environment:
+          name: ${{ github.event_name == 'push' && 'dashboard-prod' || 'dashboard-stage' }}
+          url: ${{ vars.DASHBOARD_ENDPOINT_URL }}
+
+        if: ${{ vars.DASHBOARD_DOCKER_REPOSITORY != '' }}
+
+        permissions:
+            contents: read
+            packages: write
+            attestations: write
+            id-token: write
+
+        runs-on: ubuntu-latest
+
+        steps:
+
+          - name: Configure AWS Credentials
+            uses: aws-actions/configure-aws-credentials@v5.1.0
+            with:
+              aws-region: ${{ vars.DASHBOARD_AWS_REGION }}
+              role-to-assume: ${{ vars.DASHBOARD_AWS_ROLE_ARN }}
+          
+          - name: Show AWS identity
+            run: |
+              aws sts get-caller-identity
+
+          - name: Log in to ECR
+            run: |
+              # extract the registry URL from the full image name (which is in the format <registry>/<repository>:<tag>)
+              REGISTRY_URL=$(echo ${{ vars.DASHBOARD_DOCKER_REPOSITORY }} | cut -d '/' -f 1)
+
+              aws ecr get-login-password --region ${{ vars.DASHBOARD_AWS_REGION }} | docker login --username AWS --password-stdin $REGISTRY_URL
+            
+          - name: Checkout repository
+            uses: actions/checkout@v4
+            with:
+              lfs: true
+
+          - name: Build and push build Docker image
+            uses: docker/build-push-action@v6
+            with:
+              context: webapps/dashboard
+              file: webapps/dashboard/Dockerfile
+              push: ${{ github.event_name == 'push' }}
+              tags: ${{ vars.DASHBOARD_DOCKER_REPOSITORY }}:latest

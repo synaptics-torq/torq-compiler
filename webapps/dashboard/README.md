@@ -35,8 +35,6 @@ To run locally this application:
 3. Start the application:
 
     ```
-    mkdir data
-    sudo chown 1000:1000 data
     docker compose up
     ```
 

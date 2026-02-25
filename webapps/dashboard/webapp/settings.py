@@ -27,11 +27,37 @@ SECRET_KEY = 'django-insecure-z3-vwm@3-wtk4kp_odcx*4hiagl3x^kz15ru1clnv-&o=zme4f
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-
 ALLOWED_HOSTS = []
 
 if os.environ.get("SPACE_HOST"):
     ALLOWED_HOSTS.append(os.environ.get("SPACE_HOST"))    
+
+# Add extra allowed hosts from environment variable, comma separated
+extra_hosts = os.environ.get("EXTRA_ALLOWED_HOSTS")
+if extra_hosts:
+    ALLOWED_HOSTS.extend([host.strip() for host in extra_hosts.split(",")])
+
+
+# Add ECS container IP to allowed hosts if running in ECS
+# (this is to let the load balancer health check work, which hits the container IP directly)
+if os.environ.get("ECS_CONTAINER_METADATA_URI_V4"):
+    print("Running in ECS, adding container IP to ALLOWED_HOSTS")
+
+    import requests
+    
+    metadata_uri = os.environ.get("ECS_CONTAINER_METADATA_URI_V4")
+    response = requests.get(metadata_uri, timeout=1)
+    if response.status_code == 200:
+        container_metadata = response.json()
+        networks = container_metadata.get("Networks", [])
+        for network in networks:
+            if "IPv4Addresses" in network:
+                for ip in network["IPv4Addresses"]:
+                    ALLOWED_HOSTS.append(ip)
+    else:
+        print(f"Failed to retrieve container metadata, status code: {response.status_code}")
+
+    
 
 # Application definition
 
@@ -79,15 +105,31 @@ WSGI_APPLICATION = 'webapp.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': '/data/db.sqlite3',
-        # Use WAL journal mode for better concurrency and to avoid issues on NFS (persistent space data)
-        'OPTIONS': {
-            'timeout': 20,
-            'init_command': "PRAGMA journal_mode=WAL;"
+        'ENGINE': 'django.db.backends.postgresql',
+        'HOST': os.environ.get('PG_DATABASE_HOST'),
+        'PORT': os.environ.get('PG_DATABASE_PORT'),
+        'NAME': os.environ.get('PG_DATABASE_NAME'),
+        'USER': os.environ.get('PG_DATABASE_USER'),
+        'PASSWORD': os.environ.get('PG_DATABASE_PASSWORD'),
+    }
+}
+
+# File storage
+
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": os.environ.get("S3_DATA_BUCKET"),
+            "endpoint_url": os.environ.get("S3_ENDPOINT_URL"),
+            "region_name": os.environ.get("AWS_REGION"),
         }
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
     }
 }
 

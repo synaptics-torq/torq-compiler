@@ -55,11 +55,6 @@ inputs:
     required: false
     default: 'default'
 
-  torq_perf_space_url:
-    description: 'Base URL of the Torq Performance Space'
-    required: false
-    default: ''
-
   s3_hf_cache_bucket:
     description: 'S3 bucket for HuggingFace data cache'
     required: false
@@ -193,7 +188,6 @@ runs:
         TORQ_PERF_SERVER: ${{ inputs.torq_perf_server }}
         TORQ_PERF_SERVER_TOKEN: ${{ inputs.torq_perf_server_token }}
         TORQ_PERF_BATCH_NAME: ${{ inputs.batch_name }}
-        TORQ_PERF_SPACE_URL: ${{ inputs.torq_perf_space_url }}
         S3_HF_CACHE_BUCKET_NAME: ${{ inputs.s3_hf_cache_bucket }}
         S3_HF_CACHE_DIR: ${{ inputs.s3_hf_cache_dir }}
       run: |            

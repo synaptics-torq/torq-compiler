@@ -1,18 +1,52 @@
 services:
-  torq-performance:
+  torq-dashboard:
     build:
       context: .
       dockerfile: Dockerfile
 
-    container_name: torq-performance
-
     ports:      
       - "8080:8080"
 
+    environment:      
+      - PG_DATABASE_HOST=torq-db
+      - PG_DATABASE_PORT=5432
+      - PG_DATABASE_NAME=torqdb
+      - PG_DATABASE_USER=postgres
+      - PG_DATABASE_PASSWORD=password
+      - S3_DATA_BUCKET=torq-data
+      - S3_ENDPOINT_URL=http://torq-bucket:8333
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+
     volumes:
-      - ./data:/data
+      - torq-dashboard-data:/data
       - ./perf:/app/perf:ro
       - ./webapp:/app/webapp:ro
       - ./templates:/app/templates:ro
 
     command: uwsgi --ini uwsgi.ini --py-autoreload 1
+
+
+  torq-db:
+    image: postgres:17.7
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: torqdb
+
+    volumes:
+      - torq-db-data:/var/lib/postgresql/data
+
+  torq-bucket:
+    image: chrislusf/seaweedfs:4.13
+    command: "server -s3 -s3.iam=false"
+
+    volumes:
+      - torq-bucket-data:/data
+
+volumes:
+  torq-db-data:
+  torq-bucket-data:
+  torq-dashboard-data:
