@@ -98,6 +98,14 @@ std::optional<int64_t> getConstIntValue(Value val) {
 }
 
 std::optional<float> getFloatValue(Value val) {
+    // Handle truncf/extf operations that convert from constant float
+    if (auto truncOp = val.getDefiningOp<arith::TruncFOp>()) {
+        return getFloatValue(truncOp.getIn());
+    }
+    if (auto extOp = val.getDefiningOp<arith::ExtFOp>()) {
+        return getFloatValue(extOp.getIn());
+    }
+
     auto constOp = val.getDefiningOp<arith::ConstantOp>();
 
     if (!constOp)

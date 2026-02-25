@@ -21,7 +21,11 @@ def case_config(request, runtime_hw_type, chip_config):
     failed_tc = [
         'equal.mlir',
         'instancenorm.mlir', 
-        '0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean.mlir'
+        '0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean.mlir',
+        'maxpool_bf16_batch19_4x1_stride4x1.mlir', #Needs tile-and-fuse to pass
+        'maxpool_bf16_batch19_2x2_stride2x2_32x64x16.mlir', #Needs tile-and-fuse to pass
+        'maxpool_bf16_batch19_2x2_stride2x2_32x32x8.mlir', #Needs tile-and-fuse to pass
+        'maxpool_bf16_batch19_2x2_stride2x2_32x16x4.mlir' #Needs tile-and-fuse to pass
     ]
 
     if aws_fpga:

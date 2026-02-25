@@ -35,17 +35,55 @@
 
 namespace mlir::syna::torq {
 
-struct PoolingNhwcMaxOpConversion : public OpRewritePattern<linalg::PoolingNhwcMaxOp> {
+template <bool IsNCHW>
+static Value applyInputTranspose(
+    Value input, RankedTensorType &resultType, Location loc, PatternRewriter &rewriter
+) {
+    if constexpr (IsNCHW) {
+        // NCHW is already in correct format, no transpose needed
+        return input;
+    }
+    else {
+        // NHWC needs transpose to NCHW
+        if (resultType.getRank() == 4) {
+            auto dataPerm = Permutation::nhwc2nchw();
+            resultType = transposeType(resultType, dataPerm);
+            return transposeValue(input, dataPerm, loc, rewriter);
+        }
+        return input;
+    }
+}
+
+template <bool IsNCHW>
+static Value applyOutputTranspose(
+    Value output, RankedTensorType resultType, Location loc, PatternRewriter &rewriter
+) {
+    if constexpr (IsNCHW) {
+        return output;
+    }
+    else {
+        if (resultType.getRank() == 4) {
+            auto dataPerm = Permutation::nhwc2nchw();
+            return transposeValue(output, dataPerm.reverse(), loc, rewriter);
+        }
+        return output;
+    }
+}
+
+static bool is1DPooling(llvm::ArrayRef<int64_t> kernels, llvm::ArrayRef<int64_t> strides) {
+    return (kernels[0] == 1 && strides[0] == 1) || (kernels[1] == 1 && strides[1] == 1);
+}
+template <typename PoolingOpType, bool IsNCHW>
+struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
   private:
     const bool _markFuseGroups;
 
   public:
-    using OpRewritePattern::OpRewritePattern;
-    PoolingNhwcMaxOpConversion(MLIRContext *context, bool markFuseGroups)
-        : OpRewritePattern(context), _markFuseGroups(markFuseGroups) {}
+    using OpRewritePattern<PoolingOpType>::OpRewritePattern;
+    PoolingMaxOpConversionBase(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern<PoolingOpType>(context), _markFuseGroups(markFuseGroups) {}
 
-    LogicalResult
-    matchAndRewrite(linalg::PoolingNhwcMaxOp srcOp, PatternRewriter &rewriter) const override {
+    LogicalResult matchAndRewrite(PoolingOpType srcOp, PatternRewriter &rewriter) const override {
         if (_markFuseGroups && isMarkedFuseGroup(srcOp)) {
             return rewriter.notifyMatchFailure(srcOp, "Already marked");
         }
@@ -60,25 +98,34 @@ struct PoolingNhwcMaxOpConversion : public OpRewritePattern<linalg::PoolingNhwcM
         auto attrStrides = attrValuesAsVec(srcOp.getStrides());
         if (attrStrides.size() != 2) {
             return rewriter.notifyMatchFailure(
-                srcOp, "Expected exactly two strides for PoolingNhwcMaxOp"
+                srcOp, "Expected exactly two strides for PoolingMaxOp"
             );
-        }
-        if (attrStrides[0] > 2 || attrStrides[1] > 2) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected strides <= 2 for PoolingNhwcMaxOp");
         }
 
         const std::vector<int32_t> bias = {0};
         const std::vector<int32_t> scale = {1};
-        const std::vector<int8_t> weight = {1};
 
-        PaddingInfo padInfo = foldBackwardPadding(input, rewriter);
+        PaddingInfo padInfo = foldBackwardPadding(input, rewriter, IsNCHW);
 
         auto kernels = mlir::cast<RankedTensorType>(srcOp.getInputs()[1].getType()).getShape();
         if (kernels.size() != 2) {
             return rewriter.notifyMatchFailure(
-                srcOp, "Expected exactly two kernel sizes for PoolingNhwcMaxOp"
+                srcOp, "Expected exactly two kernel sizes for PoolingMaxOp"
             );
         }
+
+        // Check stride constraints after determining if 1D pooling
+        bool is1D = is1DPooling(kernels, attrStrides);
+        if (!is1D) {
+            // For 2D pooling, enforce stride limits
+            constexpr int64_t maxStride = IsNCHW ? 4 : 2;
+            if (attrStrides[0] > maxStride || attrStrides[1] > maxStride) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Stride exceeds maximum supported for 2D pooling"
+                );
+            }
+        }
+        // For 1D pooling, allow larger strides in the pooling dimension
 
         if (_markFuseGroups) {
             markFuseGroupBackward(
@@ -90,24 +137,68 @@ struct PoolingNhwcMaxOpConversion : public OpRewritePattern<linalg::PoolingNhwcM
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
 
-        auto dataPerm =
-            srcResultType.getRank() == 4 ? Permutation::nhwc2nchw() : Permutation::none();
+        input = applyInputTranspose<IsNCHW>(input, srcResultType, loc, rewriter);
 
-        input = transposeValue(input, dataPerm, loc, rewriter);
-        srcResultType = transposeType(srcResultType, dataPerm);
+        auto elementType = srcResultType.getElementType();
+        int32_t outputMin, outputMax;
+        Value weightConst;
+
+        if (elementType.isInteger(8)) {
+            outputMin = -128;
+            outputMax = 127;
+            const std::vector<int8_t> weight = {1};
+            weightConst =
+                createI8Const(rewriter, srcOp, weight, llvm::ArrayRef<int64_t>{1, 1, 1, 1});
+        }
+        else if (elementType.isInteger(16)) {
+            outputMin = -32768;
+            outputMax = 32767;
+            const std::vector<int8_t> weight = {1};
+            weightConst =
+                createI8Const(rewriter, srcOp, weight, llvm::ArrayRef<int64_t>{1, 1, 1, 1});
+        }
+        else if (elementType.isBF16()) {
+            outputMin = 0xff800000; // -inf in bf16 (as int32 bits)
+            outputMax = 0x7f800000; // +inf in bf16 (as int32 bits)
+            // Create BF16 weight with value 1.0
+            auto bf16Type = rewriter.getBF16Type();
+            auto weightType = RankedTensorType::get({1, 1, 1, 1}, bf16Type);
+            auto bf16One = rewriter.getFloatAttr(bf16Type, 1.0);
+            auto weightAttr = DenseElementsAttr::get(weightType, bf16One);
+            weightConst = rewriter.create<arith::ConstantOp>(loc, weightType, weightAttr);
+        }
+        else {
+            outputMin = std::numeric_limits<int32_t>::min();
+            outputMax = std::numeric_limits<int32_t>::max();
+            const std::vector<int8_t> weight = {1};
+            weightConst =
+                createI8Const(rewriter, srcOp, weight, llvm::ArrayRef<int64_t>{1, 1, 1, 1});
+        }
 
         auto maxpoolOp = rewriter.create<torq_hl::MaxPool2dOp>(
             loc, srcResultType, createInitTensor(srcOp, rewriter, srcResultType), padInfo.padValue,
-            attrStrides, padInfo.lrtbPad, kernels,
-            createI8Const(rewriter, srcOp, weight, llvm::ArrayRef<int64_t>{1, 1, 1, 1}),
-            createI32Const(rewriter, srcOp, interleave(bias, scale)), input
+            outputMin, outputMax, attrStrides, padInfo.lrtbPad, kernels, weightConst,
+            createI32Const(rewriter, srcOp, interleave(bias, scale)), input,
+            /*segment_output=*/false
         );
-        auto result = transposeValue(maxpoolOp.getOutput(), dataPerm.reverse(), loc, rewriter);
+
+        Value result =
+            applyOutputTranspose<IsNCHW>(maxpoolOp.getOutput(), srcResultType, loc, rewriter);
 
         rewriter.replaceOp(output.getDefiningOp(), result);
 
         return success();
     }
+};
+
+struct PoolingNhwcMaxOpConversion
+    : public PoolingMaxOpConversionBase<linalg::PoolingNhwcMaxOp, false> {
+    using PoolingMaxOpConversionBase::PoolingMaxOpConversionBase;
+};
+
+struct PoolingNchwMaxOpConversion
+    : public PoolingMaxOpConversionBase<linalg::PoolingNchwMaxOp, true> {
+    using PoolingMaxOpConversionBase::PoolingMaxOpConversionBase;
 };
 
 struct PoolingNhwcSumOpConversion : public OpRewritePattern<linalg::PoolingNhwcSumOp> {
@@ -208,6 +299,7 @@ void populateLinalgToTorqHLPoolingPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
     patterns.insert<PoolingNhwcMaxOpConversion>(context, markFuseGroups);
+    patterns.insert<PoolingNchwMaxOpConversion>(context, markFuseGroups);
     patterns.insert<PoolingNhwcSumOpConversion>(context, 20, 20 /* FIXME */, markFuseGroups);
 }
 

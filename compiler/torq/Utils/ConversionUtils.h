@@ -520,6 +520,7 @@ Value convertScalarToRankedTensor(Value &input, Location loc, PatternRewriter &r
 
 bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op);
 bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op);
+bool hasEkLoweringMaxPool(mlir::syna::torq_hl::MaxPool2dOp op);
 std::optional<SmallVector<int64_t>> isaBroadcastOpInterface(linalg::GenericOp genericOp);
 
 struct FusionPlan {

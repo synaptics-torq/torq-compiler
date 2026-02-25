@@ -1277,8 +1277,9 @@ class MaxPoolPattern : public OpRewritePattern<torq_hl::MaxPool2dOp> {
             );
 
             auto outputTile = rewriter.create<torq_hl::MaxPool2dOp>(
-                op.getLoc(), tileType, initTile.getResult(), op.getInputZp(), op.getStride(),
-                op.getPad(), op.getKernel(), op.getWeights(), op.getScaleBias(), inputTile
+                op.getLoc(), tileType, initTile.getResult(), op.getInputZp(), op.getOutputMin(),
+                op.getOutputMax(), op.getStride(), op.getPad(), op.getKernel(), op.getWeights(),
+                op.getScaleBias(), inputTile
             );
 
             if (op.getSegmentOutput()) {

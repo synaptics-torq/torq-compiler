@@ -677,6 +677,33 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
     return true;
 }
 
+// Check if the MaxPool2dOp can be lowered using EK kernel
+bool hasEkLoweringMaxPool(mlir::syna::torq_hl::MaxPool2dOp op) {
+    auto kernel = op.getKernel();
+    int kh = kernel[0];
+    int kw = kernel[1];
+
+    auto stride = op.getStride();
+    int strideH = stride[0];
+    int strideW = stride[1];
+
+    // Stride > 2 is not supported by EK kernel
+    if (strideH > 2 || strideW > 2) {
+        return false;
+    }
+
+    // For stride 2, only 2x2 kernel is supported by EK kernel
+    if ((strideH == 2 || strideW == 2) && (kh != 2 || kw != 2)) {
+        return false;
+    }
+
+    // Limit kernel sizes (similar to conv constraints)
+    if (kh > 3 || kw > 3) {
+        return false;
+    }
+    return true;
+}
+
 // FIXME: Copied from
 // https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/Linalg/IR/LinalgInterfaces.cpp#L141.
 // Remove after upgrading to latest MLIR.

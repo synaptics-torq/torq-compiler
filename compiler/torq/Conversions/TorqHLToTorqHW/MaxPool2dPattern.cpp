@@ -15,9 +15,16 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
 
+LogicalResult convertToHw(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter);
+
 template <>
 LogicalResult
 MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) const {
+    // Try EK kernel first for stride 1 cases
+    if (convertToHw(op, rewriter).succeeded()) {
+        return success();
+    }
+
     // input
     auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
     auto input_shape = input_type.getShape();
@@ -37,6 +44,7 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
     int32_t qdat_width = 1;
     NumberFormat alu_format = NumberFormat::I;
     NumberFormat act_format = NumberFormat::I;
+
     auto rounding_mode = RoundingMode::NTP;
 
     SmallVector<uint32_t> act_lsh = {0, 0, 0, 0};
@@ -44,10 +52,17 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
     int32_t alu_w_unsigned = 0;
     uint32_t act_sum_bits = 32;
 
-    if (input_type.getElementType().isInteger(16)) {
+    if (input_type.getElementType().isBF16()) {
         ddat_width = 2;
         qdat_width = 2;
-
+        alu_format = NumberFormat::BF;
+        rounding_mode = RoundingMode::OFF; // No rounding needed for bf16
+        act_sum_bits = 16;
+        alu_d_unsigned = 5;
+    }
+    else if (input_type.getElementType().isInteger(16)) {
+        ddat_width = 2;
+        qdat_width = 2;
         alu_d_unsigned = 5;
     }
 
@@ -112,6 +127,10 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
 
     auto ctx = rewriter.getContext();
 
+    int32_t pad_value = op.getInputZp();
+
+    int padValue16b = alu_format == NumberFormat::BF ? pad_value >> 16 : pad_value;
+
     auto slice_cfg_attr = torq_hw::SliceCFGAttr::get(
         ctx, {ALUOp0Mode::DBYP, ALUOp0Mode::DBYP, ALUOp0Mode::DBYP, ALUOp0Mode::DBYP},
         {ALUOp1Mode::MAX, ALUOp1Mode::MAX, ALUOp1Mode::MAX, ALUOp1Mode::MAX},
@@ -127,7 +146,7 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
         0,                                                    // no_p_output
         kernel_left, kernel_right, kernel_top, kernel_bottom, // Kernel
         pad_left, pad_right, pad_top, pad_bottom,             // Pad
-        op.getInputZp(),                                      // pad_value
+        padValue16b,                                          // pad_value
         stride,                                               // stride
         stride_offset,                                        // stride_offset
         rounding_mode,                                        // rounding_mode

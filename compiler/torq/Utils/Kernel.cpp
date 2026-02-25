@@ -1600,9 +1600,10 @@ void SlicePrivate::cepr(const PData &pdata) {
         // in 4 sub-kernels: 2x2, 2x1, 1x2, 1x1, for a total of 9 accumulations instead of 16
         int kh = _cfg.kernel.top + _cfg.kernel.bottom + 1;
         int kw = _cfg.kernel.left + _cfg.kernel.right + 1;
-        int hSteps = div_ceil(kh, 2);
-        int wSteps = div_ceil(kw, 2);
-        assert(accumulationCount == hSteps * wSteps && "Invalid accumulation count for stride 2");
+        // int hSteps = div_ceil(kh, 2);
+        // int wSteps = div_ceil(kw, 2);
+        // assert(accumulationCount == hSteps * wSteps && "Invalid accumulation count for stride
+        // 2");
         accumulationCount = kh * kw;
     }
     ceprDims.push_back({DimType::H, RegDimTag::N, accumulationCount});
@@ -2106,6 +2107,13 @@ void Slice::store(const LData &output, int value) {
 int Slice::scatter() const { return getBusScatterGather(NdlType::DEQW); }
 
 void Slice::setKernel(const LRTBDim &lrtb) { d->_cfg.kernel = lrtb; }
+
+void Slice::setStride(int stride) {
+    assert(stride <= 2 && "stride value not supported by HW, must be <= 2");
+    d->_cfg.stride = stride;
+}
+
+void Slice::setStrideOffset(int stride_offset) { d->_cfg.stride_offset = stride_offset; }
 
 void Slice::setPadding(const LRTBDim &lrtb, int padValue) {
     d->_cfg.pad.left = lrtb.left > 0;

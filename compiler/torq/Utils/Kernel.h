@@ -644,6 +644,17 @@ class Slice {
     // Mandatory for convolutions
     void setPadding(const LRTBDim &lrtb, int padValue);
 
+    // Configure the spatial stride for the hardware descriptor.
+    // The same stride value applies to both horizontal and vertical directions.
+    // Only stride=1 (default, no striding) and stride=2 are supported by the hardware.
+    // Any other stride value is not supported and will trigger an assertion failure.
+    void setStride(int stride);
+
+    // Configure the stride offset for the hardware descriptor.
+    // stride_offset=0: the first output pixel aligns with an even-indexed input pixel.
+    // stride_offset=1: the first output pixel aligns with an odd-indexed input pixel.
+    void setStrideOffset(int stride_offset);
+
     // Segment the output in 4 quadrants of shape {N, C, 4, H/2, W/2}
     // outShape: NCHW shape of the output tensor. if empty the output is not segmented.
     // channelStride: stride of the channel dimension

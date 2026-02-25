@@ -416,6 +416,8 @@ def TorqHL_MaxPool2dOp: TorqHL_LayerOp<"maxpool2d"> {
 
   let arguments = !con(commonArgs, (ins
     I32Attr:$input_zp,
+    I32Attr:$output_min,
+    I32Attr:$output_max,
     DenseI64ArrayAttr:$stride,
     DenseI64ArrayAttr:$pad,
     DenseI64ArrayAttr:$kernel,

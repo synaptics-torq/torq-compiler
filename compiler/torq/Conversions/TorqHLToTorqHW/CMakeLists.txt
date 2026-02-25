@@ -23,6 +23,7 @@ set(sources
     IdentityPattern.cpp
     MatMulPattern.cpp
     MaxPool2dPattern.cpp
+    MaxPool2dToHw.cpp
     MulPattern.cpp
     Passes.cpp
     Patterns.cpp
