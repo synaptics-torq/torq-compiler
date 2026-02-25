@@ -105,12 +105,8 @@ class Serializer {
         int jobId, bool xram, int address, const void *data, int size, bool isCode
     );
 
-    LogicalResult saveCodeSegments();
-
     iree_compiler::FlatbufferBuilder &_builder;
     SmallVector<iree_hal_torq_Segment_ref_t> _segments;
-    DenseSet<void *> _savedSegments;
-    DescGen _npu;
 
     int _nssBlockSize = 0;
     int _nssProgramCount = 0;
@@ -214,12 +210,7 @@ LogicalResult serializeTorqHW(mlir::ModuleOp moduleOp, DenseIntElementsAttr &bin
 }
 
 Serializer::Serializer(iree_compiler::FlatbufferBuilder &builder, std::string dump_path)
-    : _builder(builder), _dump_path(dump_path) {
-    if (!_npu.open(dump_path.c_str())) {
-        llvm::errs() << "Serializer failed to open " << dump_path << "\n";
-        llvm::report_fatal_error("Serializer failed to open dump_path");
-    }
-}
+    : _builder(builder), _dump_path(dump_path) {}
 
 LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
 
@@ -518,57 +509,6 @@ LogicalResult Serializer::dumpSegmentDescriptor(
     memListFile << "   1  hex  " << filename << "\n";
 
     _segmentDumpInfo += memListFile.str();
-
-    return success();
-}
-
-LogicalResult Serializer::saveCodeSegments() {
-
-    // add all segments that were not saved yet to the segments list
-    const torq_bitstream_segment_t *segment = _npu.getBitstream();
-
-    while (segment) {
-
-        if (!_savedSegments.contains(segment->data)) {
-
-            if (segment->xram_addr == AddressConstants::NONE) {
-                segment = segment->next;
-                continue;
-            }
-
-            LLVM_DEBUG({
-                std::string lramAddrString = llvm::formatv("{0:x+8}", segment->lram_addr);
-                std::string xramAddrString = llvm::formatv("{0:x+8}", segment->xram_addr);
-
-                llvm::dbgs() << " serializing code segment with "
-                             << " xram address = " << xramAddrString << " (size = " << segment->size
-                             << ")\n";
-
-                stringstream ss;
-                for (size_t i = 0; i < segment->size; i++) {
-                    ss << std::hex << "" << (int)segment->data[i];
-                }
-                llvm::dbgs() << "    data: " << ss.str() << "\n";
-            });
-
-            auto dataRef = flatbuffers_uint8_vec_create(_builder, segment->data, segment->size);
-
-            _segments.push_back(iree_hal_torq_Segment_create(_builder, segment->xram_addr, dataRef)
-            );
-
-            _savedSegments.insert(segment->data);
-
-            if (!_dump_path.empty() && segment->xram_addr != AddressConstants::NONE) {
-                if (!succeeded(dumpSegmentDescriptor(
-                        0, true, segment->xram_addr, segment->data, segment->size, true
-                    ))) {
-                    return failure();
-                }
-            }
-        }
-
-        segment = segment->next;
-    }
 
     return success();
 }
@@ -1017,11 +957,6 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
         }
     }
 
-    LLVM_DEBUG({ llvm::dbgs() << "---- saving xram segments\n"; });
-    if (!succeeded(saveCodeSegments())) {
-        return failure();
-    };
-
     LLVM_DEBUG({ llvm::dbgs() << "---- serializing constants\n"; });
     for (auto constOp : funcOp.getFunctionBody().getOps<torq_hl::ConstOp>()) {
         if (failed(processConstOp(constOp))) {
@@ -1047,9 +982,6 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
             mapBindingOp.getIsWriteOnly()
         ));
     });
-
-    // close the _torq object so that all the open file descriptors are released
-    _npu.close();
 
     // write out the list of extra segments that need to be loaded in job0
     if (!_dump_path.empty()) {
