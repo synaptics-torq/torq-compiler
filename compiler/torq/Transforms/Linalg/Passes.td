@@ -89,4 +89,46 @@ def OptimizeLinalgForTorq :
     ];
 }
 
+def OptimizeTransposeLayout :
+    InterfacePass<"torq-optimize-transpose-layout",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Optimize layout transposes by forward propagation through elementwise chains";
+
+    let description = [{
+        Optimizes NHWC<->NCHW layout transposes by creating transpose pairs around
+        layout-agnostic operations, then relying on canonicalization to eliminate
+        redundant pairs. This moves transposes closer to operations that actually
+        require specific layouts.
+
+        The pass uses dataflow analysis to identify operations that can propagate
+        transpose permutations. For each such operation, it creates inverse transpose
+        pairs (before and after) and transforms the operation to work in the
+        inverse-permuted layout. Canonicalization then removes adjacent transpose pairs
+
+        Strategy: Temporarily increase transposes, then let canonicalization clean up.
+
+        Example transformation:
+          transpose(NCHW->NHWC) -> elementwise -> elementwise -> conv(requires NCHW)
+
+        After creating transpose pairs:
+          inv_transpose(NHWC->NCHW) -> transpose(NCHW->NHWC) ->
+          inv_transpose(NHWC->NCHW) -> elementwise_transformed -> fwd_transpose(NCHW->NHWC) ->
+          inv_transpose(NHWC->NCHW) -> elementwise_transformed -> fwd_transpose(NCHW->NHWC) ->
+          inv_transpose(NHWC->NCHW) -> conv(requires NCHW) -> fwd_transpose(NCHW->NHWC)
+
+        After canonicalization (adjacent pairs cancel):
+          elementwise_transformed -> elementwise_transformed -> conv(requires NCHW)
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createOptimizeTransposeLayoutPass()";
+
+    let options = RewritePassUtils.options;
+
+    let dependentDialects = [
+        "linalg::LinalgDialect",
+        "tensor::TensorDialect"
+    ];
+}
 #endif // IREE_CODEGEN_SYNPHL_TO_HW_PASSES

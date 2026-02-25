@@ -26,6 +26,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createGeneralizeLinalgNamedO
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeLinalgForTorqPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeTransposeLayoutPass();
+
 //----------------------------------------------------------------------------//
 // Registration
 //----------------------------------------------------------------------------//

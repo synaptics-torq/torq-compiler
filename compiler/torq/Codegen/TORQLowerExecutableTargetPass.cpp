@@ -86,6 +86,11 @@ static llvm::cl::opt<bool> clDisableSlicing(
     "torq-disable-slicing", llvm::cl::desc("disable slicing"), llvm::cl::init(false)
 );
 
+static llvm::cl::opt<bool> clEnableTransposeOptimization(
+    "torq-enable-transpose-optimization",
+    llvm::cl::desc("enable transpose layout optimization pass"), llvm::cl::init(false)
+);
+
 static llvm::cl::opt<bool> clUnrollLoopAfterBufferization(
     "torq-unroll-loop-after-bufferization", llvm::cl::desc("unroll loops after bufferization"),
     llvm::cl::init(false)
@@ -145,6 +150,11 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
     funcPm.addPass(createCanonicalizerPass());
+
+    // Move layout transposes through elementwise chains to enable cancellation
+    if (clEnableTransposeOptimization) {
+        funcPm.addPass(createOptimizeTransposeLayoutPass());
+    }
 
     // Handles valid pad operations
     funcPm.addPass(createValidToSamePadPass());
