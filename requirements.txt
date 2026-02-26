@@ -14,6 +14,9 @@ streamlit==1.45.1
 # (iree has a >= dependency which is picking up 2.19.0 which is not compatible)
 tensorflow==2.18.1
 
+# for TFLite layer extraction (tflite_layer_extractor.py)
+flatbuffers>=24.3.25
+
 # we depend on this specific version of keras at the moment
 keras==3.12.0
 
