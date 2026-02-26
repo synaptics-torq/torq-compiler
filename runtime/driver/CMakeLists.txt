@@ -28,6 +28,7 @@ set(torq_hdrs
     torq_driver.h
     torq_event.h
     torq_semaphore.h
+    TorqExecutable.h
 )
 set(torq_srcs
     native_executable.cc
@@ -37,6 +38,7 @@ set(torq_srcs
     torq_driver.c
     torq_event.c
     torq_semaphore.c
+    TorqExecutable.cc
 )
 set(torq_deps
     iree::base

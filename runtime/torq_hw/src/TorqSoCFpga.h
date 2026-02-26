@@ -27,9 +27,7 @@ class TorqSoCFpga: public TorqHw {
     bool endXramReadAccess() override;
     void * startXramWriteAccess(uint32_t xramAddr) override;
     bool endXramWriteAccess() override;
-    bool load() override { return true; };
-    bool release() override { return true; };
-
+    
   private:
     /// XRAM start address
     const uint32_t _xramStartAddr;

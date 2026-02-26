@@ -35,8 +35,7 @@ using namespace std;
 
 namespace synaptics {
 
-TorqHw::TorqHw(Type type, TorqDispatchEventLog* eventLog)
-    : _type(type), _eventLog(eventLog) {}
+TorqHw::TorqHw(Type type) : _type(type) {}
 
 void TorqHw::printNssRegs() {
 
@@ -84,15 +83,15 @@ void TorqHw::printNssRegs() {
     }
 }
 
-std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir, TorqDispatchEventLog* eventLog) {
+std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir) {
 #ifdef ENABLE_SIMULATOR
     if (hw_type == "sim") {
-        return std::unique_ptr<TorqHw>(new TorqSimulator(xram_start_addr, xram_size, dump_dir, eventLog));
+        return std::unique_ptr<TorqHw>(new TorqSimulator(xram_start_addr, xram_size, dump_dir));
     }
 #endif
 #ifdef ENABLE_AWS_FPGA
     if (hw_type == "aws_fpga") {
-        return std::unique_ptr<TorqHw>(new TorqAwsFpga(xram_start_addr, xram_size, eventLog));
+        return std::unique_ptr<TorqHw>(new TorqAwsFpga(xram_start_addr, xram_size));
     }
 #endif
 #ifdef ENABLE_SOC_FPGA

@@ -7,7 +7,6 @@
 #pragma once
 
 #include "Timer.h"
-#include "TorqEventLog.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -35,7 +34,7 @@ class TorqHw {
     };
 
     virtual ~TorqHw() {}
-    TorqHw(Type type, TorqDispatchEventLog* eventLog = nullptr);
+    TorqHw(Type type);
 
     Type getType() const { return _type; }
 
@@ -46,10 +45,26 @@ class TorqHw {
     /// wait time-out
     virtual Timer::Duration waitTimeout() = 0;
 
-    /// load resources required for the jobs
-    virtual bool load() = 0;
-    /// release the loaded resources
-    virtual bool release() = 0;
+    /// acquire control of the hardware
+    virtual bool acquire() {
+      _isAcquired = true;
+      return true;
+    }
+
+    /// release the hardware
+    virtual bool release() {
+      
+      if (!_isAcquired) {
+        return false;
+      }
+
+      _isAcquired = false;
+      return true;
+    }
+    
+    /// returns true if the hardware is currently acquired
+    virtual bool isAcquired() const { return _isAcquired; }
+
     /// start device execution
     virtual bool start(uint32_t lramAddr);
     /// wait device to complete
@@ -118,9 +133,9 @@ class TorqHw {
     /// Job Timer reset at each wait() call.
     Timer _wait_timer;
 
-    TorqDispatchEventLog* _eventLog = nullptr;
+    bool _isAcquired{false};
 };
 
-std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir = "", TorqDispatchEventLog* eventLog = nullptr);
+std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir = "");
 
 } // namespace synaptics

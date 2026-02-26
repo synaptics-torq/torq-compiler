@@ -444,20 +444,31 @@ bool TorqAstraMachina::destroyNetwork() {
     return true;
 }
 
-bool TorqAstraMachina::load() {
+bool TorqAstraMachina::acquire() {
     if (!_networkId) {
         cerr << "unable to load, network not setup yet\n";
         return false;
     }
+
+    if (!TorqHw::acquire()) {
+        return false;
+    }
+
     if (!startNetwork()) {
         cerr << "Failed to start network for ExecutionContext\n";
         return false;
     }
     _networkActive = true;
+
     return true;
 }
 
 bool TorqAstraMachina::release() {
+
+    if (!TorqHw::release()) {
+        return false;
+    }
+
     if (_networkActive) {
         stopNetwork();
         _networkActive = false;

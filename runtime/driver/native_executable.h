@@ -9,6 +9,7 @@
 
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
+#include "iree/task/task.h"
 
 #include "iree/hal/local/executable_library.h"
 
@@ -22,10 +23,16 @@ typedef struct iree_hal_torq_native_executable_t {
   iree_allocator_t allocator;
   iree_hal_device_t *device;
   iree_host_size_t entry_point_count;
-  //iree_hal_torq_ExecutableDef_table_t executable_def;
+  
   uint32_t* constants;
   iree_host_size_t pipeline_layout_count;
+
+  // binary data the executable flat buffer
   void *program;
+
+  // the torq executable associated with this executable
+  void *torq_executable;
+
   iree_hal_pipeline_layout_t* pipeline_layouts[];
 } iree_hal_torq_native_executable_t;
 

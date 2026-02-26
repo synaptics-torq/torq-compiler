@@ -36,7 +36,7 @@ class TorqAstraMachina: public TorqHw {
     void * startXramWriteAccess(uint32_t xramAddr) override;
     bool endXramWriteAccess() override;
 
-    bool load() override;
+    bool acquire() override;
     bool release() override;
     bool start(uint32_t lramAddr) override;
     bool wait(bool nssCfg = true, bool slice1Cfg = false, bool slice2Cfg = false, bool dmaInCfg = false, bool dmaOutCfg = false) override;

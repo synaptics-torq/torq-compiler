@@ -6,12 +6,51 @@
 
 #include "TorqUtils.h"
 
+#include "iree/base/internal/flags.h"
+
 #include <torq_nss_regs_struct.h>
 
 #include <cassert>
 #include <iomanip>
 #include <variant>
 #include <bitset>
+
+int TorqLogger::request_log_level = TORQ_LOG_NONE;
+
+iree_status_t parse_debug_level_callback(iree_string_view_t flag_name, void* storage,
+                               iree_string_view_t value) {   
+    
+    if (iree_string_view_equal(flag_name, iree_make_cstring_view("torq_debug"))) {
+        TorqLogger::request_log_level = TORQ_LOG_DEBUG;
+    } else if (iree_string_view_equal(flag_name, iree_make_cstring_view("torq_verbose"))) {
+        TorqLogger::request_log_level = TORQ_LOG_VERBOSE;
+    } else {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "unknown flag name");
+
+    }
+
+    return iree_ok_status();
+}
+
+void print_debug_level_callback(iree_string_view_t flag_name, void* storage, FILE* file) {
+    
+    if (iree_string_view_equal(flag_name, iree_make_cstring_view("torq_debug"))) {
+        if (TorqLogger::request_log_level == TORQ_LOG_DEBUG) {
+            fprintf(file, "--torq_debug=true\n");
+        } else {
+            fprintf(file, "--torq_debug=false\n");
+        }
+    } else if (iree_string_view_equal(flag_name, iree_make_cstring_view("torq_verbose"))) {
+        if (TorqLogger::request_log_level == TORQ_LOG_VERBOSE) {
+            fprintf(file, "--torq_verbose=true\n");
+        } else {
+            fprintf(file, "--torq_verbose=false\n");
+        }
+    }    
+}
+
+IREE_FLAG_CALLBACK(parse_debug_level_callback, print_debug_level_callback, nullptr, torq_debug, "Enable debug logs");
+IREE_FLAG_CALLBACK(parse_debug_level_callback, print_debug_level_callback, nullptr, torq_verbose, "Enable verbose logs (more than debug logs)");
 
 using namespace std;
 
