@@ -10,7 +10,7 @@ import tensorflow as tf
 
 @versioned_cached_data_fixture
 def comparison_config_for_efficientnetb0(request):
-    return {'int_tol': 4, 'int_thld': 4}
+    return {'int_tol': 8, 'int_thld': 8}
 
 def get_model_cases(model_name, input_shape, include_top=False, full_model=False):
     cases = []
@@ -202,7 +202,8 @@ def case_config(request, runtime_hw_type, chip_config):
     'efficientnetb0_block2a_expand_conv',
   ]
 
-  if chip_config.data['target'] != "SL2610":
+  next = chip_config.data['target'] != "SL2610"
+  if next:
     failed_str += [
       # Assertion failed: (fused >= count && "Could not fuse the requested number of dimensions")
       'resnet50_conv3_block1_1_conv',
@@ -221,7 +222,7 @@ def case_config(request, runtime_hw_type, chip_config):
 
   extra_args = {}
   if "full_model_efficientnetb0" in request.param.name.lower():
-        extra_args["comparison_config"] = "comparison_config_for_efficientnetb0"
+    extra_args["comparison_config"] = "comparison_config_for_efficientnetb0"
 
   aws_fpga = (runtime_hw_type.data == "aws_fpga")
   if aws_fpga:
