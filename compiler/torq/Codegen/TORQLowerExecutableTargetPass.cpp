@@ -373,7 +373,7 @@ LogicalResult saveDebugInfo(FunctionOpInterface op, const std::string &outputPat
         return failure();
     }
 
-    if (failed(mlir::writeBytecodeToFile(op, os))) {
+    if (failed(mlir::writeBytecodeToFile(op->getParentOp(), os))) {
         llvm::errs() << "Error writing bytecode to file " << fileName << "\n";
         return failure();
     }

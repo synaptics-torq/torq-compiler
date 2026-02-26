@@ -516,7 +516,14 @@ class DispatchDebugInfo:
         self.module = module
 
         self.debug_info = debug_info
-        self.dispatch = module.body.operations[0]                
+
+        for op in module.body.operations:
+            print(op.name)
+            if op.operation.name == "func.func":
+                self.dispatch = op
+                break
+        else:
+            raise ValueError("Dispatch function not found in module")                
 
         self.operation_times_ns = {}
         self.actions = self._load_actions()                        
