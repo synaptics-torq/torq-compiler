@@ -12,6 +12,7 @@ set(sources
   PoolingPattern.cpp
   ReduceMeanPattern.cpp
   SigmoidPattern.cpp
+  ExpPattern.cpp
   SoftmaxPattern.cpp
   TensorToTorqOrLinalgPattern.cpp
 )

@@ -58,4 +58,6 @@ void populateSoftmaxPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateSigmoidPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+void populateExpPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 } // namespace mlir::syna::torq

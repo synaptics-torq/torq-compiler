@@ -52,6 +52,8 @@ def case_config(request, runtime_hw_type, chip_config):
         pytest.xfail("output mismatch or error")
 
     extra_args["torq_compiler_options"] = ["--iree-input-type=linalg-torq"]
+    if "exp.mlir" in request.param.name:
+        extra_args["torq_compiler_options"].append("--torq-enable-general-exp")
     if "reciprocal-inf" in request.param.name:
         extra_args["torq_compiler_options"].append("--torq-enable-reciprocal-inf")
 

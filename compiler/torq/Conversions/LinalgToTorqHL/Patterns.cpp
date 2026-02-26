@@ -2389,7 +2389,14 @@ void populateLinalgToTorqHLPatterns(
         patterns.insert<FillOpConversionRewrite>(context, markFuseGroups);
         return;
     }
+
+    // IMPORTANT: Since sigmoid op contains exp in its body Exp pattern must be called after Sigmoid
+    // pattern in order to make sure that exp pattern doesn't match sigmoid op, see:
+    // https://mlir.llvm.org/docs/PatternRewriter/#walk-pattern-rewrite-driver
+    // This works because we are using Greedy Pattern Rewrite Driver which applies patterns in the
+    // order they are added to the pattern list.
     populateSigmoidPatterns(context, patterns);
+    populateExpPatterns(context, patterns);
     populateSoftmaxPatterns(context, patterns);
 
     patterns.insert<TransposeOpConversion>(context);
