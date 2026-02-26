@@ -84,14 +84,21 @@ static bool isNssOperation(Operation &op) {
         return isNssManagedMemory(copyOp.getSource().getType()) ||
                isNssManagedMemory(copyOp.getTarget().getType());
     }
+    else if (auto getGlobalOp = dyn_cast<memref::GetGlobalOp>(op)) {
+        // get_global for NSS memory are going to be outlined in the NSS programs
+        // other get_global are kept in the main program (may be used by
+        //  host_copy and host_programs only)
+        return isNssManagedMemory(getGlobalOp.getType());
+    }
 
     return false;
 }
 
 static int getOperationSize(Operation *op) {
 
-    // allocations and deallocations do not serialize
-    if (isa<memref::AllocOp, memref::DeallocOp, torq_hl::GetBlockOp>(op)) {
+    // all these operations do not generate any bitstream instruction so
+    // we can treat them as size 0 for the purpose of splitting programs
+    if (isa<memref::AllocOp, memref::DeallocOp, torq_hl::GetBlockOp, memref::GetGlobalOp>(op)) {
         return 0;
     }
 

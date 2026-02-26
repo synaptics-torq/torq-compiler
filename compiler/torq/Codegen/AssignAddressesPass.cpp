@@ -405,13 +405,13 @@ static void moveXramAllocationsToFront(FunctionOpInterface funcOp) {
         auto isDerivedMemrefOp = isDerivedMemRefOperation(&op);
         if (!isa<
                 memref::AllocOp, torq_hl::ConstOp, arith::ConstantOp, torq_hl::MapBindingOp,
-                torq_hl::CreateInvocationOp>(op) &&
+                torq_hl::CreateInvocationOp, memref::GetGlobalOp>(op) &&
             !isDerivedMemrefOp) {
             continue;
         }
 
         // check that the memref returned by the operation is actually in XRAM
-        if (isa<memref::AllocOp>(op) || isDerivedMemrefOp) {
+        if (isa<memref::AllocOp, memref::GetGlobalOp>(op) || isDerivedMemrefOp) {
             auto memRefType = mlir::dyn_cast<MemRefType>(op.getResult(0).getType());
 
             if (getEncodingMemorySpace(memRefType) != torq_hl::MemorySpace::Xram) {

@@ -330,7 +330,7 @@ static LogicalResult compileInvocation(
         for (auto &nestedOp : block.getOperations()) {
 
             if (isa<torq_hl::ReturnOp, torq_hl::NextOp, torq_hl::GetBlockOp, memref::AllocOp,
-                    memref::DeallocOp>(nestedOp)) {
+                    memref::DeallocOp, memref::GetGlobalOp>(nestedOp)) {
                 continue;
             }
 
