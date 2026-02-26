@@ -53,6 +53,7 @@ def pytest_addoption(parser):
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
     parser.addoption("--torq-addr", default=None, help="SSH address or ADB device ID to run tests remotely, use 'ADB' to select the first detected device")
     parser.addoption("--torq-port", default=22, help="SSH port to run tests remotely")
+    parser.addoption("--torq-benchmark-output-dir", default=None, help="Directory to save run time benchmarks outputs")
     
 def pytest_generate_tests(metafunc):
     if 'runtime_hw_type' in metafunc.fixturenames:
@@ -341,6 +342,36 @@ def llvmcpu_compiler():
 
     return _find_iree_tool('IREE_COMPILE', 'iree-compile')
 
+# this fixture is used to have a None value that is versioned
+@versioned_unhashable_object_fixture
+def null_fixture():
+    return None
+
+
+@pytest.fixture
+def torq_benchmark(request, benchmark_output_dir):
+    """
+    This fixture returns the path to the torq benchmark binary.
+
+    It is automatically invalidated when the benchmark binary mtime changes.
+    """
+
+    # we are not running benchmarking we don't try to find the benchmark binary
+    # as it may not be available (e.g. when running tests from a release)
+    if benchmark_output_dir.data is None:
+        return request.getfixturevalue("null_fixture")
+
+    file_path = _find_iree_tool('TORQ_BENCHMARK_MODULE', 'iree-benchmark-module')
+
+    if request.config.getoption("--ignore-binary-mtime"):
+        runtime_mtime = 0
+    else:
+        runtime_mtime = os.path.getmtime(file_path)
+
+    version = "torq_benchmark_" + str(runtime_mtime)
+
+    return VersionedFile(file_path, version)
+
 
 @pytest.fixture
 def torq_runtime(request):
@@ -614,22 +645,20 @@ def enable_profiling(request):
 def skip_profile_annotation(request, case_config):
     return int(case_config.get("skip_profile_annotation", False))
 
+
+@versioned_hashable_object_fixture
+def benchmark_output_dir(request):
+    return request.config.getoption("--torq-benchmark-output-dir")
+
+
 @versioned_generated_directory_fixture
 def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_data_args, mlir_io_spec, 
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
                         enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name,
-                        enable_profiling, skip_profile_annotation, torq_compiled_model_debug_info):
+                        enable_profiling, skip_profile_annotation, torq_compiled_model_debug_info, 
+                        torq_benchmark, benchmark_output_dir):
 
     output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
-
-    cmds = [str(torq_runtime),
-            '--device=torq',
-            '--module=' + str(torq_compiled_model),
-            '--function=' + torq_mlir_func_name,
-            *output_args,
-            '--torq_hw_type=' + runtime_hw_type,
-            *torq_runtime_options,
-            *iree_input_data_args]
 
     tv_dir = versioned_dir / 'tv'
     buffers_dir = versioned_dir / 'buffers'
@@ -674,16 +703,39 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             with request.getfixturevalue("scenario_log").event("torq_run"):
                 runner.run(timeout=torq_runtime_timeout)
     else:
+        
+        cmds = ['--device=torq',
+                '--module=' + str(torq_compiled_model),
+                '--function=' + torq_mlir_func_name,
+                *output_args,
+                '--torq_hw_type=' + runtime_hw_type,
+                *torq_runtime_options,
+                *iree_input_data_args]
+
         cmds += extra_runtime_opts
-        print("Running for TORQ with: " + " ".join(cmds))
+
+        def run_module():
+
+            # first run the module to obtain the outputs
+            run_cmd = [str(torq_runtime), *cmds]            
+
+            with request.getfixturevalue("scenario_log").event("torq_run"):
+                print("Running for TORQ with: " + " ".join(run_cmd))
+                subprocess.check_call(run_cmd, timeout=torq_runtime_timeout)
+
+            # the re-run the module with the benchmark tool if benchmarking is enabled, this will generate a benchmark.json
+            if benchmark_output_dir is not None:
+                
+                benchmark_file = versioned_dir / 'benchmark.json'
+                benchmark_cmd = [str(torq_benchmark), "--benchmark_out=" + str(benchmark_file), "--benchmark_out_format=json", *cmds]
+                print("Running benchmark for TORQ with: " + " ".join(benchmark_cmd))
+                subprocess.check_call(benchmark_cmd, timeout=torq_runtime_timeout)
+
         if runtime_hw_type == 'aws_fpga':            
             with FpgaSession(chip_config['aws_fpga']) as fpga_session:
-                with request.getfixturevalue("scenario_log").event("torq_run"):
-                    subprocess.check_call(cmds, timeout=torq_runtime_timeout)
+                run_module()
         else:
-            with request.getfixturevalue("scenario_log").event("torq_run"):
-                # FIXME: Depending on the platform and the model this will not be enough (tests with desc dumping are particularly slow).
-                subprocess.check_call(cmds, timeout=torq_runtime_timeout)
+            run_module()
 
     if enable_hw_test_vectors:
         print(f"Generated test vectors in {tv_dir}")
@@ -717,8 +769,15 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         )
         logger.debug("Profile annotation completed")
 
+
 @versioned_unhashable_object_fixture
-def torq_results(request, torq_results_dir, mlir_io_spec):
+def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir):
+
+    if benchmark_output_dir:
+        benchmark_file = torq_results_dir / 'benchmark.json'        
+        dest_file = Path(benchmark_output_dir) / f'{request.node.name}_benchmark.json'
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(benchmark_file, dest_file)
 
     profiling_output_dir = request.config.getoption("--torq-runtime-profiling-output-dir")
     
