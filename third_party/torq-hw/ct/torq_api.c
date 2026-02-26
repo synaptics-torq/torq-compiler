@@ -1898,7 +1898,7 @@ static int _proc_mem_ndl_cmd(torq_wrap_t *wrap, uint32_t tag, int set_id, torq_n
             if ((sdims.xn[0] == 1 || sdims.xs[0] == sdims.bn) && sdims.xn[1] == 1) { // 1 address, no split
                 s = 0;
             }
-            else if (sdims.xn[0] == 2 && sdims.xn[1] > 1 && sdims.xs[1] == sdims.bn) { // 2 addresses, even/odd split
+            else if (sdims.xn[0] == 2 && sdims.xn[1] >= 1 && (sdims.xs[1] == sdims.bn || sdims.xn[1]==1)) { // 2 addresses, even/odd split
                 wrap->regs.SLC0.DE_REGS.DE_Q_W.split_en = 1;
                 wrap->regs.SLC0.DE_REGS.DE_Q_W.split_type = 0;
                 s = sdims.xs[0];
