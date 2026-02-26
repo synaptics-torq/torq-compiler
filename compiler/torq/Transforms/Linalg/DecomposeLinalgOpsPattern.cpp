@@ -291,6 +291,12 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
+static llvm::cl::opt<bool> clEnableTorqReciprocalInf(
+    "torq-enable-reciprocal-inf",
+    llvm::cl::desc("enable torq support for inf input and output for reciprocal operation"),
+    llvm::cl::init(false)
+);
+
 struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
     BfloatReciprocalPattern(MLIRContext *context)
         : OpRewritePattern<linalg::ReciprocalOp>(context, /*benefit=*/0) {
@@ -369,21 +375,28 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
             });
         };
 
-        // bitcast to i16
-        auto rawX = rewriter.create<tensor::BitcastOp>(loc, tType(i16), op.getInputs()[0]);
+        // create variable names that survive the following if block
+        Value rawX, xSign, x, isSubnormal, isNotBig;
+        if (clEnableTorqReciprocalInf) {
+            rawX = rewriter.create<tensor::BitcastOp>(loc, tType(i16), op.getInputs()[0]);
 
-        // record sign bit
-        auto xSign = andi(0b1000000000000000, rawX);
+            // record sign bit
+            xSign = andi(0b1000000000000000, rawX);
 
-        // remove sign bit for following logic
-        auto x = andi(0b0111111111111111, rawX);
+            // remove sign bit for following logic
+            x = andi(0b0111111111111111, rawX);
 
-        // subnormal numbers are exactly the ones that map to
-        // infinity.  Check which ones should map there.
-        auto isSubnormal = cmp(0b0000000010000000, x, arith::CmpIPredicate::ult);
+            // subnormal numbers are exactly the ones that map to
+            // infinity.  Check which ones should map there.
+            isSubnormal = cmp(0b0000000010000000, x, arith::CmpIPredicate::ult);
 
-        // "big" means numbers that map to zero (we flush subnormals to zero).
-        auto isNotBig = cmp(0b0111111010000000, x, arith::CmpIPredicate::ule);
+            // "big" means numbers that map to zero (we flush subnormals to zero).
+            isNotBig = cmp(0b0111111010000000, x, arith::CmpIPredicate::ule);
+        }
+        else {
+            // bitcast to i16
+            x = rewriter.create<tensor::BitcastOp>(loc, tType(i16), op.getInputs()[0]);
+        }
 
         // Our magic LUT values!  See
         // scripts/torch/bfloat16_softmax.py to reproduce.
@@ -453,29 +466,31 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
 
         // combine computed exponent and mantissa
         auto computed = rewriter.create<arith::AddIOp>(loc, lutVal16, computedExpo);
+        if (clEnableTorqReciprocalInf) {
+            // There are a few possible inputs (big inputs) that must also
+            // be sqashed to zero.
+            auto computed2 = rewriter.create<arith::MulIOp>(loc, computed, isNotBig);
 
-        // There are a few possible inputs (big inputs) that must also
-        // be sqashed to zero.
-        auto computed2 = rewriter.create<arith::MulIOp>(loc, computed, isNotBig);
+            // conversely, we need a way to ensure all subnormals map to
+            // infinity.
+            auto maybeInf = mul(0b0111111110000000, isSubnormal);
 
-        // conversely, we need a way to ensure all subnormals map to
-        // infinity.
-        auto maybeInf = mul(0b0111111110000000, isSubnormal);
+            // We want to combine our computed maybeInf and our current
+            // computed using bfloat addition.  Bitcast it real quick,
+            // add, and bitcast back.
+            auto computedBfloat = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, computed2);
+            auto maybeInfBfloat = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, maybeInf);
+            auto realComputedBfloat =
+                rewriter.create<arith::AddFOp>(loc, computedBfloat, maybeInfBfloat);
+            auto realComputed =
+                rewriter.create<tensor::BitcastOp>(loc, tType(i16), realComputedBfloat);
 
-        // We want to combine our computed maybeInf and our current
-        // computed using bfloat addition.  Bitcast it real quick,
-        // add, and bitcast back.
-        auto computedBfloat = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, computed2);
-        auto maybeInfBfloat = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, maybeInf);
-        auto realComputedBfloat =
-            rewriter.create<arith::AddFOp>(loc, computedBfloat, maybeInfBfloat);
-        auto realComputed = rewriter.create<tensor::BitcastOp>(loc, tType(i16), realComputedBfloat);
-
-        // add back our sign bit we saved earlier
-        auto combined = rewriter.create<arith::AddIOp>(loc, xSign, realComputed);
+            // add back our sign bit we saved earlier
+            computed = rewriter.create<arith::AddIOp>(loc, xSign, realComputed);
+        }
 
         // bitcast final value back to bfloat16
-        auto bfBitcast = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, combined);
+        auto bfBitcast = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, computed);
 
         // done.
         rewriter.replaceOp(op, bfBitcast);
