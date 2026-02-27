@@ -257,7 +257,7 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *op) {
 }
 
 SmallVector<OpOperand *>
-getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, OpResult result) {
+getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, Value result) {
     SmallVector<OpOperand *> principalOperands;
 
     std::deque<OpOperand *> queue;

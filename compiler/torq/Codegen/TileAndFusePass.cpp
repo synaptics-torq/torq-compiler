@@ -32,6 +32,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
@@ -199,7 +200,7 @@ int64_t bytesOfSlice(Type type, ArrayRef<OpFoldResult> resultSizes, Attribute ze
     if (auto rankedType = dyn_cast<RankedTensorType>(type)) {
         int64_t bytes = div_ceil(rankedType.getElementTypeBitWidth(), 8);
         for (auto sizeFoldResult : resultSizes) {
-            auto constSize = getConstantIntValue(sizeFoldResult);
+            std::optional<int64_t> constSize = getConstantIntValue(sizeFoldResult);
             if (!constSize) {
                 assert(sizeFoldResult.is<Value>() && "expected Value");
                 auto sizeValue = sizeFoldResult.get<Value>();
@@ -234,7 +235,7 @@ typedef std::tuple<
     OpIterationDomain;
 // This iteration domain is only for the result loops (the owner op might have more loops).
 typedef std::tuple<
-    OpResult, SmallVector<OpFoldResult> /* offsets */, SmallVector<OpFoldResult> /* sizes */>
+    Value, SmallVector<OpFoldResult> /* offsets */, SmallVector<OpFoldResult> /* sizes */>
     OpResultIterationDomain;
 
 llvm::FailureOr<SmallVector<OpResultIterationDomain>> linalgOperandSlicesFromIterDomain(
@@ -248,35 +249,51 @@ llvm::FailureOr<SmallVector<OpResultIterationDomain>> linalgOperandSlicesFromIte
     SmallVector<OpResultIterationDomain> oprandIterDomains;
     oprandIterDomains.reserve(allSliceParameter.size());
     for (auto [operand, sliceParams] : llvm::zip(linalgOp->getOperands(), allSliceParameter)) {
-
-        OpResult operandOpResult = dyn_cast<OpResult>(operand);
-
         if (sliceParams) {
             oprandIterDomains.push_back(
-                std::make_tuple(operandOpResult, sliceParams->offsets, sliceParams->sizes)
+                std::make_tuple(operand, sliceParams->offsets, sliceParams->sizes)
             );
             continue;
         }
 
-        if (RankedTensorType rankedType = dyn_cast<RankedTensorType>(operandOpResult.getType())) {
-            SmallVector<OpFoldResult> sizes, offsets;
-            sizes.reserve(rankedType.getShape().size());
-            offsets.reserve(rankedType.getShape().size());
-            for (auto size : rankedType.getShape()) {
-                sizes.push_back(rewriter.getIndexAttr(size));
-                offsets.push_back(rewriter.getIndexAttr(0));
+        if (OpResult operandOpResult = dyn_cast<OpResult>(operand)) {
+            if (RankedTensorType rankedType =
+                    dyn_cast<RankedTensorType>(operandOpResult.getType())) {
+                SmallVector<OpFoldResult> sizes, offsets;
+                sizes.reserve(rankedType.getShape().size());
+                offsets.reserve(rankedType.getShape().size());
+                for (auto size : rankedType.getShape()) {
+                    sizes.push_back(rewriter.getIndexAttr(size));
+                    offsets.push_back(rewriter.getIndexAttr(0));
+                }
+                oprandIterDomains.push_back(std::make_tuple(operandOpResult, offsets, sizes));
+                continue;
             }
-            oprandIterDomains.push_back(std::make_tuple(operandOpResult, offsets, sizes));
-            continue;
         }
 
         oprandIterDomains.push_back(std::make_tuple(
-            operandOpResult, SmallVector<OpFoldResult>{rewriter.getIndexAttr(0)},
+            operand, SmallVector<OpFoldResult>{rewriter.getIndexAttr(0)},
             SmallVector<OpFoldResult>{rewriter.getIndexAttr(1)}
         ));
     }
 
     return oprandIterDomains;
+}
+
+llvm::FailureOr<SmallVector<OpResultIterationDomain>> softmaxOperandSlicesFromIterDomain(
+    IRRewriter &rewriter, linalg::SoftmaxOp softmaxOp, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes
+) {
+    return SmallVector<OpResultIterationDomain>{
+        std::make_tuple(
+            softmaxOp->getOperand(0), SmallVector<OpFoldResult>(offsets),
+            SmallVector<OpFoldResult>(sizes)
+        ),
+        std::make_tuple(
+            softmaxOp->getOperand(1), SmallVector<OpFoldResult>(offsets),
+            SmallVector<OpFoldResult>(sizes)
+        )
+    };
 }
 
 llvm::FailureOr<SmallVector<OpResultIterationDomain>>
@@ -289,15 +306,9 @@ tensorCollapseShapeOperandSlicesFromIterDomain(
 
     assert(sliceParams.has_value());
 
-    SmallVector<OpResultIterationDomain> oprandIterDomains;
-    auto operand = collapseOp.getOperand();
-    OpResult operandOpResult = dyn_cast<OpResult>(operand);
-
-    oprandIterDomains.push_back(
-        std::make_tuple(operandOpResult, sliceParams->offsets, sliceParams->sizes)
-    );
-
-    return oprandIterDomains;
+    return SmallVector<OpResultIterationDomain>{
+        std::make_tuple(collapseOp.getOperand(), sliceParams->offsets, sliceParams->sizes)
+    };
 }
 
 llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorExpandShapeOperandSlicesFromIterDomain(
@@ -309,28 +320,19 @@ llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorExpandShapeOperandSl
 
     assert(sliceParams.has_value());
 
-    SmallVector<OpResultIterationDomain> oprandIterDomains;
-    auto operand = expandOp.getOperand(0);
-    OpResult operandOpResult = dyn_cast<OpResult>(operand);
-
-    oprandIterDomains.push_back(
-        std::make_tuple(operandOpResult, sliceParams->offsets, sliceParams->sizes)
-    );
-
-    return oprandIterDomains;
+    return SmallVector<OpResultIterationDomain>{
+        std::make_tuple(expandOp.getOperand(0), sliceParams->offsets, sliceParams->sizes)
+    };
 }
 
 llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorPadOperandSlicesFromIterDomain(
     IRRewriter &rewriter, mlir::tensor::PadOp padOp, ArrayRef<OpFoldResult> offsets,
     ArrayRef<OpFoldResult> sizes
 ) {
-    auto operand = padOp.getSource();
-    OpResult operandOpResult = dyn_cast<OpResult>(operand);
-
     // TODO: I think the following is a safe over approximation, maybe do
     // something more precise.
     return SmallVector<OpResultIterationDomain>{std::make_tuple(
-        operandOpResult, SmallVector<OpFoldResult>(offsets), SmallVector<OpFoldResult>(sizes)
+        padOp.getSource(), SmallVector<OpFoldResult>(offsets), SmallVector<OpFoldResult>(sizes)
     )};
 }
 
@@ -366,6 +368,168 @@ llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorInsertSliceOperandSl
     }
 
     return operandIterDomains;
+}
+
+llvm::FailureOr<SmallVector<OpResultIterationDomain>> operandSlicesFromIterDomain(
+    IRRewriter &rewriter, Operation *op, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes
+) {
+    return TypeSwitch<Operation *, llvm::FailureOr<SmallVector<OpResultIterationDomain>>>(op)
+        .Case<linalg::LinalgOp>([&](auto linalgOp) {
+            return linalgOperandSlicesFromIterDomain(rewriter, linalgOp, offsets, sizes);
+        })
+        .Case<linalg::SoftmaxOp>([&](linalg::SoftmaxOp softmaxOp) {
+            return softmaxOperandSlicesFromIterDomain(rewriter, softmaxOp, offsets, sizes);
+        })
+        .Case<mlir::tensor::PadOp>([&](auto padOp) {
+            return tensorPadOperandSlicesFromIterDomain(rewriter, padOp, offsets, sizes);
+        })
+        .Case<mlir::tensor::InsertSliceOp>([&](auto insertSliceOp) {
+            return tensorInsertSliceOperandSlicesFromIterDomain(
+                rewriter, insertSliceOp, offsets, sizes
+            );
+        })
+        .Case<mlir::tensor::CollapseShapeOp>([&](auto collapseOp) {
+            return tensorCollapseShapeOperandSlicesFromIterDomain(
+                rewriter, collapseOp, offsets, sizes
+            );
+        })
+        .Case<mlir::tensor::ExpandShapeOp>([&](auto expandOp) {
+            return tensorExpandShapeOperandSlicesFromIterDomain(rewriter, expandOp, offsets, sizes);
+        })
+        .Default([&](auto) {
+            LLVM_DEBUG({ llvm::dbgs() << "unknown op type: " << op->getName() << "\n"; });
+            assert(false);
+            return LogicalResult::failure();
+        });
+}
+
+bool isFirstOperandWithStride(OpOperand *operand) {
+    if (operand->getOperandNumber() != 0) {
+        return false;
+    }
+
+    auto strides =
+        TypeSwitch<Operation *, SmallVector<int64_t>>(operand->getOwner())
+            .Case<linalg::Conv2DNhwcHwcfOp>([](auto convOp) {
+                return convOp.getStrides().template getValues<int64_t>();
+            })
+            .Case<linalg::DepthwiseConv2DNhwcHwcOp>([](auto convOp) {
+                return convOp.getStrides().template getValues<int64_t>();
+            })
+            .Case<
+                linalg::PoolingNchwMaxOp, linalg::PoolingNchwSumOp, linalg::PoolingNcwMaxOp,
+                linalg::PoolingNcwSumOp, linalg::PoolingNhwcMaxOp, linalg::PoolingNhwcMaxUnsignedOp,
+                linalg::PoolingNhwcMinOp, linalg::PoolingNhwcMinUnsignedOp,
+                linalg::PoolingNhwcSumOp>([](auto convOp) {
+                return convOp.getStrides().template getValues<int64_t>();
+            })
+            .Default([&](auto) -> SmallVector<int64_t> { return {}; });
+
+    return llvm::any_of(strides, [](auto s) { return s > 1; });
+}
+
+void bytesOfFusedOpTile(
+    Operation *op, ArrayRef<OpResultIterationDomain> operandSlices,
+    llvm::DenseMap<IntegerAttr, int64_t> &fusedGroupsBytes,
+    llvm::SetVector<Operation *> &shareFuseGroup, Attribute zero
+) {
+    for (auto [resultVal, resultOffsets, resultSizes] : operandSlices) {
+        Operation *resultOp = nullptr;
+        ArrayAttr operandFuseGroupAttr;
+
+        if (auto opResult = dyn_cast<OpResult>(resultVal)) {
+            resultOp = opResult.getOwner();
+            operandFuseGroupAttr = resultOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+        }
+
+        int64_t operandBytes = bytesOfSlice(resultVal.getType(), resultSizes, zero);
+
+        auto fuseGroupAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+        assert(fuseGroupAttr);
+
+        // Check if this is an external operand, and add it to the group's
+        // memory.
+        for (auto intAttr : fuseGroupAttr.getAsRange<IntegerAttr>()) {
+            if (operandFuseGroupAttr && llvm::is_contained(operandFuseGroupAttr, intAttr)) {
+                // Not an external operand
+                shareFuseGroup.insert(resultOp);
+                continue;
+            }
+
+            // Don't count tensor::EmptyOp feeding the output operand, except for the output
+            // op of the group.
+            auto opDsoi = dyn_cast<DestinationStyleOpInterface>(op);
+            if (llvm::isa_and_nonnull<mlir::tensor::EmptyOp>(resultOp) && !isFuseGroupOutput(op) &&
+                opDsoi) {
+                auto inits = opDsoi.getDpsInits();
+                if (llvm::is_contained(inits, resultVal)) {
+                    continue;
+                }
+            }
+
+            // If opResult feeds the first input of the principal op,
+            // and that op has stride > 1, we need to double the memory,
+            // except if opResult comes from conv2d/dw/pooling.
+            auto principalOperands = getFuseGroupPrincipalOpOperandsForward(intAttr, resultVal);
+            if (llvm::any_of(principalOperands, isFirstOperandWithStride)) {
+
+                if (operandFuseGroupAttr) {
+                    Operation *sourcePrincipal = getFuseGroupPrincipalOpBackward(resultOp);
+                    assert(
+                        sourcePrincipal != nullptr &&
+                        "could not find the principal op of the fuse group"
+                    );
+                    if (!isa<
+                            linalg::Conv2DNhwcHwcfOp, linalg::DepthwiseConv2DNhwcHwcOp,
+                            linalg::AddOp>(sourcePrincipal)) {
+                        operandBytes *= 2;
+                    }
+                }
+                else {
+                    operandBytes *= 2;
+                }
+            }
+
+            fusedGroupsBytes[intAttr] += operandBytes;
+        }
+    }
+}
+
+int64_t
+bytesOfOpTile(Operation *op, ArrayRef<OpResultIterationDomain> operandSlices, Attribute zero) {
+    return TypeSwitch<Operation *, int64_t>(op)
+        .Case<linalg::SoftmaxOp>([&](auto softmaxOp) {
+            // Memory requirements for SoftmaxOp: 2*input + output When
+            // decomposing the softmax on NSS, most of the ops follow the same
+            // input->output pattern, but two of them are torq_hl::select and
+            // torq_hl::ElementwiseBinary which have 2 inputs and 1 output.
+            // Until we convert these torq_hl ops to linalg, we have to tile the
+            // whole softmax accordingly.
+
+            int64_t totalBytes = 0;
+
+            assert(operandSlices.size() == 2 && "linalg.softmax should have exactly two inputs");
+
+            for (int i = 0; i < 2; ++i) {
+                auto [opResult, resultOffsets, resultSizes] = operandSlices[i];
+                int64_t bytes = bytesOfSlice(opResult.getType(), resultSizes, zero);
+                totalBytes += bytes;
+                if (i == 0) {
+                    // 2*input
+                    totalBytes += bytes;
+                }
+            }
+
+            return totalBytes;
+        })
+        .Default([&](auto) {
+            int64_t totalBytes = 0;
+            for (auto [opResult, resultOffsets, resultSizes] : operandSlices) {
+                totalBytes += bytesOfSlice(opResult.getType(), resultSizes, zero);
+            }
+            return totalBytes;
+        });
 }
 
 // Return true iff the tile (including consumerOp and producerOps) can fit in availableMemoryBytes.
@@ -406,160 +570,69 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
         // supports it):
         // auto [op, offsets, sizes] = queue.front();
         // so Instead we do this:
-        auto op = std::get<0>(queue.front());
-        auto offsets = std::get<1>(queue.front());
-        auto sizes = std::get<2>(queue.front());
+        Operation *op = std::get<0>(queue.front());
+        SmallVector<OpFoldResult> offsets = std::get<1>(queue.front());
+        SmallVector<OpFoldResult> sizes = std::get<2>(queue.front());
         queue.pop_front();
 
         // Compute operand slices
         llvm::FailureOr<SmallVector<OpResultIterationDomain>> operandSlices =
-            TypeSwitch<Operation *, llvm::FailureOr<SmallVector<OpResultIterationDomain>>>(op)
-                .Case<linalg::LinalgOp>([&](auto linalgOp) {
-                    return linalgOperandSlicesFromIterDomain(rewriter, linalgOp, offsets, sizes);
-                })
-                .Case<mlir::tensor::PadOp>([&](auto padOp) {
-                    return tensorPadOperandSlicesFromIterDomain(rewriter, padOp, offsets, sizes);
-                })
-                .Case<mlir::tensor::InsertSliceOp>([&](auto insertSliceOp) {
-                    return tensorInsertSliceOperandSlicesFromIterDomain(
-                        rewriter, insertSliceOp, offsets, sizes
-                    );
-                })
-                .Case<mlir::tensor::CollapseShapeOp>([&](auto collapseOp) {
-                    return tensorCollapseShapeOperandSlicesFromIterDomain(
-                        rewriter, collapseOp, offsets, sizes
-                    );
-                })
-                .Case<mlir::tensor::ExpandShapeOp>([&](auto expandOp) {
-                    return tensorExpandShapeOperandSlicesFromIterDomain(
-                        rewriter, expandOp, offsets, sizes
-                    );
-                })
-                .Default([&](auto) {
-                    LLVM_DEBUG({ llvm::dbgs() << "unknown op type: " << op->getName() << "\n"; });
-                    return LogicalResult::failure();
-                });
-
+            operandSlicesFromIterDomain(rewriter, op, offsets, sizes);
         if (failed(operandSlices)) {
             op->emitError("failed to compute operand slices");
             return LogicalResult::failure();
         }
 
-        // Accumulate memory used by operand slices
-        int64_t totalOpBytes = 0;
+        SetVector<Operation *> shareFuseGroup = {};
 
-        // For each operand slice, compute its memory usage, and add the owner to the queue as
-        // needed.
-        for (auto [opResult, resultOffsets, resultSizes] : *operandSlices) {
-            Operation *resultOp = opResult.getOwner();
+        if (auto fuseGroupAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
+            // Update fusedGroupsBytes
+            bytesOfFusedOpTile(op, *operandSlices, fusedGroupsBytes, shareFuseGroup, zero);
 
+            // Check if any fuse group exceeds the available memory
+            for (auto intAttr : fuseGroupAttr.getAsRange<IntegerAttr>()) {
+                if (fusedGroupsBytes[intAttr] > availableMemoryBytes) {
+                    return false;
+                }
+            }
+        }
+        else {
             // Compute memory usage
-            int64_t operandBytes = bytesOfSlice(opResult.getType(), resultSizes, zero);
-            if ((totalOpBytes += operandBytes) > availableMemoryBytes && !isMarkedFuseGroup(op)) {
+            int64_t requiredBytes = bytesOfOpTile(op, *operandSlices, zero);
+            if (requiredBytes > availableMemoryBytes) {
                 return false;
             }
+        }
 
-            bool shareFuseGroup = false;
+        // For each operand slice, add the owner to the queue as needed.
+        for (auto [resultVal, resultOffsets, resultSizes] : *operandSlices) {
+            auto opResult = dyn_cast<OpResult>(resultVal);
+            if (!opResult)
+                continue;
 
-            // If op is in a fuse group, check if this is an external operand, and add it to the
-            // group's memory.
-            if (auto fuseGroupAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
-                auto operandFuseGroupAttr = resultOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+            Operation *resultOp = opResult.getOwner();
 
-                for (auto intAttr : fuseGroupAttr.getAsRange<IntegerAttr>()) {
-                    if (operandFuseGroupAttr && llvm::is_contained(operandFuseGroupAttr, intAttr)) {
-                        shareFuseGroup = true;
-                        continue;
-                    }
+            if (!producerOps.contains(resultOp) && !shareFuseGroup.contains(resultOp))
+                continue;
 
-                    // Don't count tensor::EmptyOp feeding the output operand, except for the output
-                    // op of the group.
-                    auto opDsoi = dyn_cast<DestinationStyleOpInterface>(op);
-                    if (isa<mlir::tensor::EmptyOp>(resultOp) && !isFuseGroupOutput(op) && opDsoi) {
-                        auto inits = opDsoi.getDpsInits();
-                        if (llvm::is_contained(inits, opResult)) {
-                            continue;
-                        }
-                    }
-
-                    // If opResult feeds the first input of the principal op,
-                    // and that op has stride > 1, we need to double the memory,
-                    // except if opResult comes from conv2d/dw/add.
-                    auto principalOperands =
-                        getFuseGroupPrincipalOpOperandsForward(intAttr, opResult);
-                    if (llvm::any_of(principalOperands, [](OpOperand *principalOperand) {
-                            if (principalOperand->getOperandNumber() == 0) {
-                                auto strides =
-                                    TypeSwitch<Operation *, SmallVector<int64_t>>(
-                                        principalOperand->getOwner()
-                                    )
-                                        .Case<linalg::Conv2DNhwcHwcfOp>([](auto convOp) {
-                                            return convOp.getStrides().template getValues<int64_t>(
-                                            );
-                                        })
-                                        .Case<linalg::DepthwiseConv2DNhwcHwcOp>([](auto convOp) {
-                                            return convOp.getStrides().template getValues<int64_t>(
-                                            );
-                                        })
-                                        .Case<
-                                            linalg::PoolingNchwMaxOp, linalg::PoolingNchwSumOp,
-                                            linalg::PoolingNcwMaxOp, linalg::PoolingNcwSumOp,
-                                            linalg::PoolingNhwcMaxOp,
-                                            linalg::PoolingNhwcMaxUnsignedOp,
-                                            linalg::PoolingNhwcMinOp,
-                                            linalg::PoolingNhwcMinUnsignedOp,
-                                            linalg::PoolingNhwcSumOp>([](auto convOp) {
-                                            return convOp.getStrides().template getValues<int64_t>(
-                                            );
-                                        })
-                                        .Default([&](auto) -> SmallVector<int64_t> { return {}; });
-                                return llvm::any_of(strides, [](auto s) { return s > 1; });
-                            }
-                            return false;
-                        })) {
-
-                        if (operandFuseGroupAttr) {
-                            Operation *sourcePrincipal = getFuseGroupPrincipalOpBackward(resultOp);
-                            assert(
-                                sourcePrincipal != nullptr &&
-                                "could not find the principal op of the fuse group"
-                            );
-                            if (!isa<
-                                    linalg::Conv2DNhwcHwcfOp, linalg::DepthwiseConv2DNhwcHwcOp,
-                                    linalg::AddOp>(sourcePrincipal)) {
-                                operandBytes *= 2;
-                            }
-                        }
-                        else {
-                            operandBytes *= 2;
-                        }
-                    }
-
-                    if ((fusedGroupsBytes[intAttr] += operandBytes) > availableMemoryBytes) {
-                        return false;
-                    }
-                }
-            }
-
-            // Add operand to the queue as needed
             // Skip tensor::InsertSliceOp as it's a data movement operation that doesn't need tiling
-            if ((producerOps.contains(resultOp) || shareFuseGroup) &&
-                !isa<mlir::tensor::InsertSliceOp>(resultOp)) {
-                auto tiOp = cast<TilingInterface>(resultOp);
+            if (isa<mlir::tensor::InsertSliceOp>(resultOp))
+                continue;
 
-                // Get the iteration domain for all the loops of the operand owner
-                SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
-                if (failed(tiOp.getIterationDomainTileFromResultTile(
-                        rewriter, opResult.getResultNumber(), resultOffsets, resultSizes,
-                        mappedOffsets, mappedSizes
-                    ))) {
+            auto tiOp = cast<TilingInterface>(resultOp);
 
-                    tiOp->emitError("getIterationDomainTileFromResultTile failed");
-                    return LogicalResult::failure();
-                }
+            // Get the iteration domain for all the loops of the operand owner
+            SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
+            if (failed(tiOp.getIterationDomainTileFromResultTile(
+                    rewriter, opResult.getResultNumber(), resultOffsets, resultSizes, mappedOffsets,
+                    mappedSizes
+                ))) {
 
-                queue.push_back(std::make_tuple(resultOp, mappedOffsets, mappedSizes));
+                tiOp->emitError("getIterationDomainTileFromResultTile failed");
+                return LogicalResult::failure();
             }
+
+            queue.push_back(std::make_tuple(resultOp, mappedOffsets, mappedSizes));
         }
     }
 
@@ -650,8 +723,17 @@ llvm::FailureOr<bool> fitTileToMemory(
         return true;
     }
 
-    consumerOp->emitWarning("operation can't be tiled: no more dimensions to tile");
+    LLVM_DEBUG({
+        llvm::dbgs() << "FAILED: no more dimensions to tile\n";
+        for (auto producerOp : producerOps) {
+            llvm::dbgs() << "  | " << producerOp->getName();
+            if (auto groupId = producerOp->getAttr(TORQ_FUSE_GROUP_ID))
+                llvm::dbgs() << " (" << getConstantIntValue(groupId) << ")";
+            llvm::dbgs() << "\n";
+        }
+    });
 
+    // consumerOp->emitWarning("operation can't be tiled: no more dimensions to tile");
     return LogicalResult::failure();
 }
 
@@ -836,7 +918,8 @@ std::tuple<bool, bool> fuseControlMaxProducers(
 
 FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
     IRRewriter &rewriter, TilingInterface tilingInterfaceOp, int64_t availableMemoryBytes,
-    llvm::ArrayRef<OpFoldResult> completeIterSizes, ArrayRef<OpFoldResult> tileIterSizes
+    llvm::ArrayRef<OpFoldResult> completeIterSizes, ArrayRef<OpFoldResult> tileIterSizes,
+    TileAndFuseProducersFuseMode fuseMode
 ) {
     // set dimensions that are not being tiled to 0 (and convert to int64_t).
     SmallVector<int64_t> tileSizes(completeIterSizes.size(), 0);
@@ -862,30 +945,44 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
     scf::SCFTileAndFuseOptions options{};
     // Consider using setSCFTileSizes from iree/compiler/Codegen/Utils/Utils.h
     options.tilingOptions.setTileSizes(getAsIndexOpFoldResult(rewriter.getContext(), tileSizes));
-    options.setFusionControlFn([&](mlir::tensor::ExtractSliceOp candidateSliceOp,
-                                   OpResult producerOpResult, bool isDestinationOperand) {
-        switch (clTorqTileAndFuseProducersFuseMode.getValue()) {
-        case TileAndFuseProducersFuseMode::MaxSize:
+
+    scf::SCFTileAndFuseOptions::ControlFnTy fusionControlFn;
+    switch (fuseMode) {
+    case TileAndFuseProducersFuseMode::MaxSize:
+        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
+                              OpResult producerOpResult, bool isDestinationOperand) {
             return fuseControlMaxSize(
                 rewriter, availableMemoryBytes, candidateSliceOp, producerOpResult,
                 isDestinationOperand
             );
+        };
+        break;
 
-        case TileAndFuseProducersFuseMode::MaxProducers:
+    case TileAndFuseProducersFuseMode::MaxProducers:
+        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
+                              OpResult producerOpResult, bool isDestinationOperand) {
             return fuseControlMaxProducers(
                 rewriter, candidateSliceOp, producerOpResult, isDestinationOperand
             );
+        };
+        break;
 
-        case TileAndFuseProducersFuseMode::OnlyPatterns: {
+    case TileAndFuseProducersFuseMode::OnlyPatterns:
+        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
+                              OpResult producerOpResult, bool isDestinationOperand) {
             bool shouldFuse =
                 maybePatternFuseGroup && isMarkedFuseGroup(producerOpResult.getOwner());
             return std::make_tuple(shouldFuse, false);
-        }
+        };
+        break;
 
-        case TileAndFuseProducersFuseMode::NoFuse:
-            return std::make_tuple(false, false);
-        }
-    });
+    case TileAndFuseProducersFuseMode::NoFuse:
+        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
+                              OpResult producerOpResult,
+                              bool isDestinationOperand) { return std::make_tuple(false, false); };
+    }
+
+    options.setFusionControlFn(fusionControlFn);
 
     return scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp, options);
 }
@@ -968,8 +1065,10 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
         llvm::dbgs() << "\n";
     });
 
-    FailureOr<scf::SCFTileAndFuseResult> tiledResults =
-        tileAndFuseToSize(rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes);
+    FailureOr<scf::SCFTileAndFuseResult> tiledResults = tileAndFuseToSize(
+        rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes,
+        clTorqTileAndFuseProducersFuseMode.getValue()
+    );
     if (failed(tiledResults)) {
         op->emitError("tile and fuse failed");
         return;
@@ -977,25 +1076,30 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
 
     if (clTorqTileAndFuseProducersFuseMode.getValue() ==
         TileAndFuseProducersFuseMode::MaxProducers) {
+        SmallVector<OpFoldResult> fitTileOffsets(tileOffsets), fitTileSizes(tileSizes);
+
         // Now that we know which producers were fused, find a tile that fits them too.
         tileChanged = fitTileToMemory(
             rewriter, op, tiledResults->fusedProducers, tilingDimOrder, availableMemoryBytes,
-            *iterIntSizes, tileOffsets, tileSizes
+            *iterIntSizes, fitTileOffsets, fitTileSizes
         );
         if (failed(tileChanged)) {
-            // REMOEV:
-            llvm::dbgs() << "DEBUG: " << __FILE__ << ":" << __LINE__ << " fit after fuse failed\n";
-            op->dump();
-            assert(false);
-            op->emitError("failed to find a tile size for producers");
-            return;
+            tiledResults = tileAndFuseToSize(
+                rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes,
+                TileAndFuseProducersFuseMode::MaxProducers
+            );
+            if (failed(tiledResults)) {
+                op->emitError("tile and fuse failed");
+                assert(false);
+                return;
+            }
         }
-
-        if (*tileChanged) {
+        else if (*tileChanged) {
             // The second fitTileToMemory returned a smaller tile.
 
             tiledResults = tileAndFuseToSize(
-                rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes
+                rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, fitTileSizes,
+                clTorqTileAndFuseProducersFuseMode.getValue()
             );
             if (failed(tiledResults)) {
                 op->emitError("tile and fuse failed");

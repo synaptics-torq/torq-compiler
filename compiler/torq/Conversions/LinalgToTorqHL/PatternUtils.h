@@ -133,7 +133,7 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *op);
 // return all the OpOperands that are owned by the principal operation of
 // fuseGroupAttr, and reachable by the walk.
 SmallVector<OpOperand *>
-getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, OpResult result);
+getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, Value result);
 
 // Return true iff op is already marked as part of a fuse group.
 bool isMarkedFuseGroup(Operation *op);
