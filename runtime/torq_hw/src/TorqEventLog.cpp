@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <queue>
 #include <sstream>
 
 
@@ -49,25 +50,64 @@ bool TorqEventLog::open(std::string profilingFile) {
     return true;
 }
 
+/// Do a K-way merge to order events globally based on timestamps.
+/// Assuming `Event` vectors are already monotonic, this is cheaper than a
+/// global stable sort.
 void TorqEventLog::flushUnlocked() {
-    while(!dispatchEvents_.empty()) {
-        auto events = dispatchEvents_.front();
+    struct DispatchCursor {
+        DispatchEvents* dispatch;
+        size_t dispatchOrder;
+        size_t eventIndex;
+    };
 
-        for (const auto &e : events->events) {
-
-            auto timestamp_us =
-                std::chrono::duration_cast<std::chrono::microseconds>(e.timestamp.time_since_epoch())
-                    .count();
-
-            std::string type_str = eventTypeToString(e.type);
-
-            profilingFile_ << events->dispatchName << "," << events->dispatchIndex << "," << e.actionIndex << "," << timestamp_us << "," << type_str << "\n";
-
+    auto cursorCompare = [](const DispatchCursor& lhs, const DispatchCursor& rhs) {
+        const Event& lhsEvent = lhs.dispatch->events[lhs.eventIndex];
+        const Event& rhsEvent = rhs.dispatch->events[rhs.eventIndex];
+        if (lhsEvent.timestamp != rhsEvent.timestamp) {
+            // priority_queue is max-heap by default, invert to get earliest first.
+            return lhsEvent.timestamp > rhsEvent.timestamp;
         }
+        // Keep deterministic order for same timestamp rows.
+        if (lhs.dispatchOrder != rhs.dispatchOrder) {
+            return lhs.dispatchOrder > rhs.dispatchOrder;
+        }
+        return lhs.eventIndex > rhs.eventIndex;
+    };
 
-        delete events;
+    std::priority_queue<DispatchCursor, std::vector<DispatchCursor>, decltype(cursorCompare)> mergeQueue(cursorCompare);
 
-        dispatchEvents_.erase(dispatchEvents_.begin());
+    size_t dispatchOrder = 0;
+    for (auto* dispatch : dispatchEvents_) {
+        if (!dispatch->events.empty()) {
+            mergeQueue.push(DispatchCursor{dispatch, dispatchOrder, 0});
+        }
+        ++dispatchOrder;
+    }
+
+    while (!mergeQueue.empty()) {
+        DispatchCursor cursor = mergeQueue.top();
+        mergeQueue.pop();
+
+        const Event& event = cursor.dispatch->events[cursor.eventIndex];
+        auto timestamp_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                event.timestamp.time_since_epoch())
+                .count();
+        std::string type_str = eventTypeToString(event.type);
+        profilingFile_ << cursor.dispatch->dispatchName << ","
+                      << cursor.dispatch->dispatchIndex << ","
+                      << event.actionIndex << "," << timestamp_us << ","
+                      << type_str << "\n";
+
+        ++cursor.eventIndex;
+        if (cursor.eventIndex < cursor.dispatch->events.size()) {
+            mergeQueue.push(cursor);
+        }
+    }
+
+    while (!dispatchEvents_.empty()) {
+        delete dispatchEvents_.front();
+        dispatchEvents_.pop_front();
     }
 
     profilingFile_.flush();
@@ -87,11 +127,15 @@ void TorqEventLog::close() {
     }
 }
 
-TorqDispatchEventLog::TorqDispatchEventLog(TorqEventLog& log, std::string dispatchName, size_t dispatchIndex) : log_(log) {
+TorqDispatchEventLog::TorqDispatchEventLog(
+    TorqEventLog& log, std::string dispatchName, size_t dispatchIndex,
+    EventType beginEventType, EventType endEventType
+)
+    : log_(log), beginEventType_(beginEventType), endEventType_(endEventType) {
     events_ = new DispatchEvents{dispatchName, dispatchIndex, {}};
     events_->events.push_back({
         std::chrono::steady_clock::now(),
-        EventType::DISPATCH_BEGIN,
+        beginEventType_,
         -1
     });
 }
@@ -105,7 +149,7 @@ void TorqDispatchEventLog::close() {
 
     events_->events.push_back({
         std::chrono::steady_clock::now(),
-        EventType::DISPATCH_END,
+        endEventType_,
         -1
     });
 
@@ -121,9 +165,13 @@ TorqDispatchEventLog::~TorqDispatchEventLog() {
     close();
 }
 
-TorqDispatchEventLog* TorqEventLog::startDispatch(const std::string& dispatchName) {
+TorqDispatchEventLog* TorqEventLog::startDispatch(
+    const std::string& dispatchName,
+    EventType beginEventType,
+    EventType endEventType
+) {
     std::lock_guard<std::mutex> lock(events_mutex_);
-    return new TorqDispatchEventLog(*this, dispatchName, nextDispatchIndex_++);
+    return new TorqDispatchEventLog(*this, dispatchName, nextDispatchIndex_++, beginEventType, endEventType);
 }
 
 

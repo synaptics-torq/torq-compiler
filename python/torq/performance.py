@@ -1,16 +1,40 @@
 import contextlib
 import time
 import logging
-from pathlib import Path
 from typing import Dict, List
 from dataclasses import dataclass
 import pandas as pd
 from torq.model_profiler import perfetto_logger
-from dataclasses import dataclass
-from .debug_info import DebugInfo, DispatchDebugInfo, ActionDebugInfo, NssProgramWorkUnitDebugInfo, parse_profiling_log
+from .debug_info import DebugInfo, DispatchDebugInfo, ActionDebugInfo, NssProgramWorkUnitDebugInfo, HalDispatchDebugInfo, CombinedDispatchDebugInfo, BaseDispatchDebugInfo, parse_profiling_log
 
 
 logger = logging.getLogger("torq.performance")
+
+
+_DESIRED_COLUMNS = [
+    "action_id", "job_id", "operation", "invocation_names", "original_operators", "total_time",
+    "slice_used_0_in_program", "slice_used_1_in_program",
+    "dma_in_used_in_program", "dma_out_used_in_program", "cdma_used_in_program", "css_used_in_program",
+    "timestamp_start", "timestamp_end", "location"
+]
+
+_HUMAN_FRIENDLY_COLUMNS = {
+    "action_id": "Action ID",
+    "job_id": "Job ID",
+    "operation": "Action in program",
+    "invocation_names": "Slice Invocation Names (if applicable)",
+    "total_time": "Total Time [us]",
+    "slice_used_0_in_program": "Slice 0 Used in NSS Program",
+    "slice_used_1_in_program": "Slice 1 Used in NSS Program",
+    "dma_in_used_in_program": "DMA In Used in NSS Program",
+    "dma_out_used_in_program": "DMA Out Used in NSS Program",
+    "cdma_used_in_program": "CDMA Used in CSS Program",
+    "css_used_in_program": "CSS Used in CSS Program",
+    "timestamp_start": "Timestamp Start [us]",
+    "timestamp_end": "Timestamp End [us]",
+    "location": "Location",
+    "original_operators": "Original Operators"
+}
 
 
 class Duration(contextlib.AbstractContextManager):
@@ -125,7 +149,13 @@ def _to_tabular_data(data: ActionDebugInfo):
     }
 
 
-def _write_perfetto_trace(debug_info: DispatchDebugInfo, perfetto_file: str):
+def _build_action_dataframe(debug_info: BaseDispatchDebugInfo) -> pd.DataFrame:
+    """Build a DataFrame from the actions in a dispatch debug info container."""
+    rows = [_to_tabular_data(x) for x in debug_info.actions.values()]
+    return pd.DataFrame(rows, columns=_DESIRED_COLUMNS)
+
+
+def _write_perfetto_trace(debug_info: BaseDispatchDebugInfo, perfetto_file: str):
     """
     Writes the annotated profiling data to a Perfetto trace file.
     """
@@ -141,63 +171,22 @@ def _write_perfetto_trace(debug_info: DispatchDebugInfo, perfetto_file: str):
     logger.debug(f"Perfetto trace complete: {perfetto_file}")
 
 
-def _write_host_annotated_csv(debug_info: DispatchDebugInfo, output_file: str):
+def _write_host_annotated_csv(debug_info: BaseDispatchDebugInfo, output_file: str):
     """
     Writes the annotated profiling data to a CSV file.
     """
-
-    desired_columns = [
-        "action_id", "job_id", "operation", "invocation_names", "original_operators", "total_time",
-        "slice_used_0_in_program", "slice_used_1_in_program",
-        "dma_in_used_in_program", "dma_out_used_in_program", "cdma_used_in_program", "css_used_in_program",
-        "timestamp_start", "timestamp_end", "location"
-    ]   
-
-    rows = [_to_tabular_data(x) for x in debug_info.actions.values()]
-
-    df = pd.DataFrame(rows, columns=desired_columns)
-    
+    df = _build_action_dataframe(debug_info)
     df.to_csv(output_file, index=False, sep=';')
 
 
-def _write_host_annotated_xlsx(debug_info: DispatchDebugInfo, output_file: str):
+def _write_host_annotated_xlsx(debug_info: BaseDispatchDebugInfo, output_file: str):
     """
     Writes the annotated profiling data to an Excel file with human-friendly formatting.
     """
-
-    desired_columns = [
-        "action_id", "job_id", "operation", "invocation_names", "original_operators", "total_time",
-        "slice_used_0_in_program", "slice_used_1_in_program",
-        "dma_in_used_in_program", "dma_out_used_in_program", "cdma_used_in_program", "css_used_in_program",
-        "timestamp_start", "timestamp_end", "location"
-    ]   
-
-    rows = [_to_tabular_data(x) for x in debug_info.actions.values()]
-        
-    df = pd.DataFrame(rows, columns=desired_columns)
+    df = _build_action_dataframe(debug_info)
 
     with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
-        
-        # Use human-friendly column names            
-        human_friendly_columns = {
-            "action_id": "Action ID",
-            "job_id": "Job ID",
-            "operation": "Action in program",
-            "invocation_names": "Slice Invocation Names (if applicable)",
-            "total_time": "Total Time [us]",
-            "slice_used_0_in_program": "Slice 0 Used in NSS Program",
-            "slice_used_1_in_program": "Slice 1 Used in NSS Program",
-            "dma_in_used_in_program": "DMA In Used in NSS Program",
-            "dma_out_used_in_program": "DMA Out Used in NSS Program",
-            "cdma_used_in_program": "CDMA Used in CSS Program",
-            "css_used_in_program": "CSS Used in CSS Program",
-            "timestamp_start": "Timestamp Start [us]",
-            "timestamp_end": "Timestamp End [us]",
-            "location": "Location",
-            "original_operators": "Original Operators"
-        }
-        
-        df.rename(columns=human_friendly_columns, inplace=True)
+        df.rename(columns=_HUMAN_FRIENDLY_COLUMNS, inplace=True)
         sheet_name = "Detailed Performance Data"
         df.to_excel(writer, index=False, sheet_name=sheet_name)        
 
@@ -205,7 +194,18 @@ def _write_host_annotated_xlsx(debug_info: DispatchDebugInfo, output_file: str):
             for idx, col in enumerate(df.columns):
                 max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
                 worksheet.set_column(idx, idx, max_len)
-    
+
+
+def _write_dispatch_outputs(dispatch_debug_info, output_files):
+    for output_file in output_files:
+        if output_file.endswith(".xlsx"):
+            _write_host_annotated_xlsx(dispatch_debug_info, output_file)
+        elif output_file.endswith(".csv"):
+            _write_host_annotated_csv(dispatch_debug_info, output_file)
+        elif output_file.endswith(".pb"):
+            _write_perfetto_trace(dispatch_debug_info, output_file)
+        else:
+            raise ValueError(f"Unsupported output file format: {output_file}")
 
 def annotate_host_profile_from_files(debug_info, profile_file, output_files):
     """
@@ -215,28 +215,24 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files):
     """
 
     logger.debug(f"Annotating host profile from {profile_file}")
-        
-    debug_info = DebugInfo(debug_info)
 
     invocation_data = parse_profiling_log(profile_file)
+    combined_dispatch_debug_info = CombinedDispatchDebugInfo()
+    hal_dispatch_debug_info = HalDispatchDebugInfo()
+    has_hal_events = False
 
     for invocation in invocation_data:
-    
-        dispatch_debug_info = debug_info.get_dispatch(invocation.dispatch_name)
+        if invocation.dispatch_name.startswith("__HAL"):
+            has_hal_events = True
+            hal_dispatch_debug_info.append_runtime_events(invocation.event_data, invocation.dispatch_name)
+            continue
 
+        # Use a fresh DebugInfo so each invocation keeps independent timing data.
+        dispatch_debug_info = DebugInfo(debug_info).get_dispatch(invocation.dispatch_name)
         dispatch_debug_info.load_runtime_events(invocation.event_data)
+        combined_dispatch_debug_info.add_dispatch(dispatch_debug_info)
 
-        for output_file in output_files:
+    if has_hal_events:
+        combined_dispatch_debug_info.add_dispatch(hal_dispatch_debug_info)
 
-            if len(invocation.event_data) > 1:
-                orig_file = Path(output_file)
-                output_file = str(orig_file.parent / (orig_file.stem + f"_{invocation.invocation_id}_{invocation.dispatch_name}" + orig_file.suffix))
-
-            if output_file.endswith(".xlsx"):
-                _write_host_annotated_xlsx(dispatch_debug_info, output_file)
-            elif output_file.endswith(".csv"):
-                _write_host_annotated_csv(dispatch_debug_info, output_file)
-            elif output_file.endswith(".pb"):
-                _write_perfetto_trace(dispatch_debug_info, output_file)
-            else:
-                raise ValueError(f"Unsupported output file format: {output_file}")        
+    _write_dispatch_outputs(combined_dispatch_debug_info, output_files)

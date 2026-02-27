@@ -6,6 +6,7 @@
 
 #include "torq_command_buffer.h"
 #include "native_executable.h"
+#include "torq_profile_scope.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -335,8 +336,17 @@ static iree_status_t iree_hal_torq_command_buffer_copy_buffer(
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
     iree_device_size_t length) {
-  return iree_hal_buffer_map_copy(source_buffer, source_offset, target_buffer,
-                                  target_offset, length);
+  void* profile_scope =
+      iree_hal_torq_profile_scope_begin("__HAL_COMMAND_BUFFER_COPY_BUFFER__");
+  iree_status_t status = iree_ok_status();
+  IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
+      profile_scope, status,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_COPY_BUFFER_BEGIN,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_COPY_BUFFER_END,
+      iree_hal_buffer_map_copy(source_buffer, source_offset, target_buffer,
+                               target_offset, length));
+  iree_hal_torq_profile_scope_end(profile_scope);
+  return status;
 }
 
 //===----------------------------------------------------------------------===//
@@ -383,7 +393,7 @@ static iree_status_t iree_hal_torq_command_buffer_push_constants(
 //===----------------------------------------------------------------------===//
 // NOTE: command buffer state change only; enqueues no tasks.
 
-static iree_status_t iree_hal_torq_command_buffer_push_descriptor_set(
+static iree_status_t iree_hal_torq_command_buffer_push_descriptor_set_impl(
     iree_hal_command_buffer_t* base_command_buffer,
     iree_hal_pipeline_layout_t* pipeline_layout, uint32_t set,
     iree_host_size_t binding_count,
@@ -423,6 +433,24 @@ static iree_status_t iree_hal_torq_command_buffer_push_descriptor_set(
   return iree_ok_status();
 }
 
+static iree_status_t iree_hal_torq_command_buffer_push_descriptor_set(
+    iree_hal_command_buffer_t* base_command_buffer,
+    iree_hal_pipeline_layout_t* pipeline_layout, uint32_t set,
+    iree_host_size_t binding_count,
+    const iree_hal_descriptor_set_binding_t* bindings) {
+  void* profile_scope = iree_hal_torq_profile_scope_begin(
+      "__HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET__");
+  iree_status_t status = iree_ok_status();
+  IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
+      profile_scope, status,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_BEGIN,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_END,
+      iree_hal_torq_command_buffer_push_descriptor_set_impl(
+          base_command_buffer, pipeline_layout, set, binding_count, bindings));
+  iree_hal_torq_profile_scope_end(profile_scope);
+  return status;
+}
+
 //===----------------------------------------------------------------------===//
 // iree_hal_command_buffer_dispatch
 //===----------------------------------------------------------------------===//
@@ -434,111 +462,123 @@ static iree_status_t iree_hal_torq_command_buffer_dispatch(
 
   iree_hal_torq_command_buffer_t* command_buffer =
       iree_hal_torq_command_buffer_cast(base_command_buffer);
+  void* profile_scope =
+      iree_hal_torq_profile_scope_begin("__HAL_COMMAND_BUFFER_DISPATCH__");
+  iree_status_t status = iree_ok_status();
+  iree_byte_span_t local_memory = iree_make_byte_span(NULL, 0);
+  iree_fpu_state_t fpu_state = (iree_fpu_state_t){0};
+  bool fpu_state_pushed = false;
+  do {
+    iree_hal_torq_native_executable_t* torq_executable =
+        iree_hal_torq_native_executable_cast(executable);
+    /*if (IREE_UNLIKELY(!torq_executable->pipeline_layouts)) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "layouts not provided during executable creation; cannot dispatch");
+    }*/
 
-  
-  iree_hal_torq_native_executable_t* torq_executable =
-      iree_hal_torq_native_executable_cast(executable);
-  /*if (IREE_UNLIKELY(!torq_executable->pipeline_layouts)) {
-    return iree_make_status(
-        IREE_STATUS_FAILED_PRECONDITION,
-        "layouts not provided during executable creation; cannot dispatch");
-  }*/
-  
+    iree_hal_local_pipeline_layout_t* local_layout =
+        (iree_hal_local_pipeline_layout_t*)
+            torq_executable->pipeline_layouts[entry_point];
 
-  iree_hal_local_pipeline_layout_t* local_layout =
-      (iree_hal_local_pipeline_layout_t*)
-          torq_executable->pipeline_layouts[entry_point];
-          
-  iree_host_size_t local_memory_size = 0;
-/*      torq_executable->dispatch_attrs
-          ? torq_executable->dispatch_attrs[entry_point].local_memory_pages *
-                IREE_HAL_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE
-          : 0;*/
-  
-  // Update the ID of the processor we are running on.
-  // We don't know how much time has passed since we last updated as we are
-  // running inline with the user program; if we knew we were going to be
-  // handling a batch of dispatches we could reduce the amount of times we call
-  // this - but that's what the task system is for.
-  iree_hal_torq_command_buffer_update_processor_id(command_buffer);
+    iree_host_size_t local_memory_size = 0;
+    /*      torq_executable->dispatch_attrs
+            ? torq_executable->dispatch_attrs[entry_point].local_memory_pages *
+                  IREE_HAL_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE
+            : 0;*/
 
-  iree_hal_executable_dispatch_state_v0_t* dispatch_state =
-      &command_buffer->state.dispatch_state;
+    // Update the ID of the processor we are running on.
+    // We don't know how much time has passed since we last updated as we are
+    // running inline with the user program; if we knew we were going to be
+    // handling a batch of dispatches we could reduce the amount of times we call
+    // this - but that's what the task system is for.
+    iree_hal_torq_command_buffer_update_processor_id(command_buffer);
 
-  // TODO(benvanik): expose on API or keep fixed on executable.
-  dispatch_state->workgroup_size_x = 1;
-  dispatch_state->workgroup_size_y = 1;
-  dispatch_state->workgroup_size_z = 1;
-  dispatch_state->workgroup_count_x = workgroup_x;
-  dispatch_state->workgroup_count_y = workgroup_y;
-  dispatch_state->workgroup_count_z = workgroup_z;
+    iree_hal_executable_dispatch_state_v0_t* dispatch_state =
+        &command_buffer->state.dispatch_state;
 
-  // Single-threaded.
-  dispatch_state->max_concurrency = 1;
+    // TODO(benvanik): expose on API or keep fixed on executable.
+    dispatch_state->workgroup_size_x = 1;
+    dispatch_state->workgroup_size_y = 1;
+    dispatch_state->workgroup_size_z = 1;
+    dispatch_state->workgroup_count_x = workgroup_x;
+    dispatch_state->workgroup_count_y = workgroup_y;
+    dispatch_state->workgroup_count_z = workgroup_z;
 
-  // Push constants are pulled directly from the command buffer state, but we
-  // only allow the dispatch to read what we know is initialized based on the
-  // layout.
-  //dispatch_state->push_constant_count = local_layout->push_constants;
+    // Single-threaded.
+    dispatch_state->max_concurrency = 1;
 
-  // Produce the dense binding list based on the declared bindings used.
-  // This allows us to change the descriptor sets and bindings counts supported
-  // in the HAL independent of any executable as each executable just gets the
-  // flat dense list and doesn't care about our descriptor set stuff.
-  //
-  // Note that we are just directly setting the binding data pointers here with
-  // no ownership/retaining/etc - it's part of the HAL contract that buffers are
-  // kept valid for the duration they may be in use.
-  iree_hal_local_binding_mask_t used_binding_mask = local_layout->used_bindings;
-  iree_host_size_t used_binding_count =
-      iree_math_count_ones_u64(used_binding_mask);
+    // Push constants are pulled directly from the command buffer state, but we
+    // only allow the dispatch to read what we know is initialized based on the
+    // layout.
+    //dispatch_state->push_constant_count = local_layout->push_constants;
 
-  dispatch_state->binding_count = used_binding_count;
-  void** binding_ptrs = (void**)dispatch_state->binding_ptrs;
-  size_t* binding_lengths = (size_t*)dispatch_state->binding_lengths;
-  iree_host_size_t binding_base = 0;
-  for (iree_host_size_t i = 0; i < used_binding_count; ++i) {
-    int mask_offset = iree_math_count_trailing_zeros_u64(used_binding_mask);
-    int binding_ordinal = binding_base + mask_offset;
-    binding_base += mask_offset + 1;
-    used_binding_mask = iree_shr(used_binding_mask, mask_offset + 1);
-    binding_ptrs[i] = command_buffer->state.full_bindings[binding_ordinal];
-    if (!binding_ptrs[i]) {
-      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                              "(flat) binding %d is NULL", binding_ordinal);
+    // Produce the dense binding list based on the declared bindings used.
+    // This allows us to change the descriptor sets and bindings counts supported
+    // in the HAL independent of any executable as each executable just gets the
+    // flat dense list and doesn't care about our descriptor set stuff.
+    //
+    // Note that we are just directly setting the binding data pointers here with
+    // no ownership/retaining/etc - it's part of the HAL contract that buffers are
+    // kept valid for the duration they may be in use.
+    iree_hal_local_binding_mask_t used_binding_mask = local_layout->used_bindings;
+    iree_host_size_t used_binding_count =
+        iree_math_count_ones_u64(used_binding_mask);
+
+    dispatch_state->binding_count = used_binding_count;
+    void** binding_ptrs = (void**)dispatch_state->binding_ptrs;
+    size_t* binding_lengths = (size_t*)dispatch_state->binding_lengths;
+    iree_host_size_t binding_base = 0;
+    for (iree_host_size_t i = 0; i < used_binding_count; ++i) {
+      int mask_offset = iree_math_count_trailing_zeros_u64(used_binding_mask);
+      int binding_ordinal = binding_base + mask_offset;
+      binding_base += mask_offset + 1;
+      used_binding_mask = iree_shr(used_binding_mask, mask_offset + 1);
+      binding_ptrs[i] = command_buffer->state.full_bindings[binding_ordinal];
+      if (!binding_ptrs[i]) {
+        status = iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                                  "(flat) binding %d is NULL", binding_ordinal);
+        break;
+      }
+      binding_lengths[i] =
+          command_buffer->state.full_binding_lengths[binding_ordinal];
     }
-    binding_lengths[i] =
-        command_buffer->state.full_binding_lengths[binding_ordinal];
-  }
-  
-  // TODO(benvanik): plumb through an arena or fixed-size reservation to use.
-  // For now when deploying to devices where you want something like the
-  // inline command buffer you probably don't want 256KB of transient memory
-  // getting allocated and retained implicitly - this should be a compiler
-  // option. For now we just malloc here to make things work and strongly
-  // encourage the kind of user who wants synchronous inline execution to not
-  // also want tons of scratch memory.
-  iree_byte_span_t local_memory = iree_make_byte_span(NULL, local_memory_size);
-  if (local_memory_size > 0) {
-    IREE_RETURN_IF_ERROR(iree_allocator_malloc(command_buffer->host_allocator,
-                                               local_memory_size,
-                                               (void**)&local_memory.data));
-  }
+    if (!iree_status_is_ok(status)) break;
 
-  // Since we are running on a borrowed thread, we know nothing about the
-  // floating point state. Reset it.
-  iree_fpu_state_t fpu_state =
-      iree_fpu_state_push(IREE_FPU_STATE_FLAG_FLUSH_DENORMALS_TO_ZERO);
-  /*iree_status_t status = iree_hal_local_executable_issue_dispatch_inline(
-      local_executable, entry_point, dispatch_state,
-      command_buffer->state.processor_id, local_memory);*/
-  iree_status_t status = iree_hal_torq_native_executable_run(executable, dispatch_state);
-  iree_fpu_state_pop(fpu_state);
+    // TODO(benvanik): plumb through an arena or fixed-size reservation to use.
+    // For now when deploying to devices where you want something like the
+    // inline command buffer you probably don't want 256KB of transient memory
+    // getting allocated and retained implicitly - this should be a compiler
+    // option. For now we just malloc here to make things work and strongly
+    // encourage the kind of user who wants synchronous inline execution to not
+    // also want tons of scratch memory.
+    local_memory = iree_make_byte_span(NULL, local_memory_size);
+    if (local_memory_size > 0) {
+      status = iree_allocator_malloc(command_buffer->host_allocator,
+                                     local_memory_size,
+                                     (void**)&local_memory.data);
+      if (!iree_status_is_ok(status)) break;
+    }
 
+    // Since we are running on a borrowed thread, we know nothing about the
+    // floating point state. Reset it.
+    fpu_state =
+        iree_fpu_state_push(IREE_FPU_STATE_FLAG_FLUSH_DENORMALS_TO_ZERO);
+    fpu_state_pushed = true;
+    /*iree_status_t status = iree_hal_local_executable_issue_dispatch_inline(
+        local_executable, entry_point, dispatch_state,
+        command_buffer->state.processor_id, local_memory);*/
+    status = iree_hal_torq_native_executable_run(executable, dispatch_state);
+  } while (false);
+
+  if (fpu_state_pushed) {
+    iree_fpu_state_pop(fpu_state);
+  }
   if (local_memory.data) {
     iree_allocator_free(command_buffer->host_allocator, local_memory.data);
   }
 
+  iree_hal_torq_profile_scope_end(profile_scope);
   return status;
 }
 

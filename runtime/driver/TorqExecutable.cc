@@ -38,6 +38,28 @@ static synaptics::TorqExecutable* get_torq_executable(iree_hal_torq_native_execu
   return (synaptics::TorqExecutable*)executable->torq_executable;
 }
 
+class ScopedDispatchPhaseEvent {
+ public:
+  ScopedDispatchPhaseEvent(TorqDispatchEventLog* event_log, EventType begin_event,
+                           EventType end_event, int action_index = -1)
+      : event_log_(event_log), end_event_(end_event), action_index_(action_index) {
+    if (event_log_) {
+      event_log_->addEvent(begin_event, action_index_);
+    }
+  }
+
+  ~ScopedDispatchPhaseEvent() {
+    if (event_log_) {
+      event_log_->addEvent(end_event_, action_index_);
+    }
+  }
+
+ private:
+  TorqDispatchEventLog* event_log_;
+  EventType end_event_;
+  int action_index_;
+};
+
 
 static EventType toEventStartType(ns(HostActionParams_union_type_t) paramsType) {
 
@@ -859,7 +881,19 @@ static void dump_buffers(TorqHw *torq, int32_t action_id, iree_hal_torq_native_e
 iree_status_t TorqExecutable::initialize() {  
   
   uint32_t xram_base, xram_size;
-  auto ret = compute_xram_footprint(executableDef(), &xram_base, &xram_size);
+  iree_status_t ret = iree_ok_status();
+  std::unique_ptr<TorqDispatchEventLog> eventLog{nullptr};
+
+  if (TorqEventLog::isProfilingEnabled()) {
+    eventLog.reset(TorqEventLog::get().startDispatch(executableName()));
+  }
+
+  {
+    ScopedDispatchPhaseEvent phase(
+        eventLog.get(), EventType::DISPATCH_COMPUTE_XRAM_FOOTPRINT_BEGIN,
+        EventType::DISPATCH_COMPUTE_XRAM_FOOTPRINT_END);
+    ret = compute_xram_footprint(executableDef(), &xram_base, &xram_size);
+  }
 
   if (!iree_status_is_ok(ret)) {
     return ret;
@@ -868,12 +902,21 @@ iree_status_t TorqExecutable::initialize() {
   LOGD << "xram_base " << xram_base << " xram_end " << (xram_base + xram_size)  << " xram_size " << xram_size;
   LOGD << "Running executable " << executableName();
 
-  torq_ = newTorqHw(FLAG_torq_hw_type, xram_base, xram_size, get_mem_dump_data_root_dir(executableName()));
-  if (!torq_.get() || !torq_->open()) {
-      return iree_make_status(IREE_STATUS_INTERNAL, "failed to open TorqHw");
+  {
+    ScopedDispatchPhaseEvent phase(
+        eventLog.get(), EventType::DISPATCH_HW_OPEN_BEGIN,
+        EventType::DISPATCH_HW_OPEN_END);
+    torq_ = newTorqHw(FLAG_torq_hw_type, xram_base, xram_size,
+                      get_mem_dump_data_root_dir(executableName()));
+    if (!torq_.get() || !torq_->open()) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to open TorqHw");
+    }
   }
 
   if (FLAG_torq_clear_memory) {
+    ScopedDispatchPhaseEvent phase(
+        eventLog.get(), EventType::DISPATCH_CLEAR_MEMORY_BEGIN,
+        EventType::DISPATCH_CLEAR_MEMORY_END);
     std::vector<uint8_t> zeros(512 * 1024, 0);
     torq_->writeLram(0, zeros.size(), zeros.data());
 
@@ -881,17 +924,30 @@ iree_status_t TorqExecutable::initialize() {
     torq_->writeXram(xram_base, zeros1.size(), zeros1.data());
   }
 
-  ret = loadNpuCode();
+  {
+    ScopedDispatchPhaseEvent phase(
+        eventLog.get(), EventType::DISPATCH_LOAD_CODE_SEGMENTS_BEGIN,
+        EventType::DISPATCH_LOAD_CODE_SEGMENTS_END);
+    ret = loadNpuCode();
+  }
 
   if (!iree_status_is_ok(ret)) {
     return ret;
   }
 
-  ret = loadHostCode();
+  {
+    ScopedDispatchPhaseEvent phase(
+        eventLog.get(), EventType::DISPATCH_LOAD_HOST_CODE_BEGIN,
+        EventType::DISPATCH_LOAD_HOST_CODE_END);
+    ret = loadHostCode();
+  }
 
   if (!iree_status_is_ok(ret)) {
     return ret;
   }
+
+  // Avoid attributing this setup delay to any profiled phase.
+  eventLog.reset();
 
   return iree_ok_status();
 
@@ -962,13 +1018,7 @@ std::string TorqExecutable::executableName() {
 }
 
 // runs all the host actions in the executable, one after the other
-iree_status_t TorqExecutable::executeActions() {
-
-  std::unique_ptr<TorqDispatchEventLog> eventLog{nullptr};
-
-  if (TorqEventLog::isProfilingEnabled()) {
-    eventLog.reset(TorqEventLog::get().startDispatch(executableName()));
-  }
+iree_status_t TorqExecutable::executeActions(TorqDispatchEventLog* eventLog) {
 
   pendingHostCopies_ = false;
   actionIndex_ = 0;
@@ -1048,9 +1098,19 @@ iree_status_t TorqExecutable::setupDumpDirectories() {
 iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state_v0_t* state) {
 
   iree_status_t status;
+  std::unique_ptr<TorqDispatchEventLog> eventLog{nullptr};
+
+  if (TorqEventLog::isProfilingEnabled()) {
+    eventLog.reset(TorqEventLog::get().startDispatch(executableName()));
+  }
 
   // setup dump directories before execution if necessary
-  status = setupDumpDirectories();
+  {
+    ScopedDispatchPhaseEvent phase(
+        eventLog.get(), EventType::DISPATCH_PREPARE_OUTPUT_DIRS_BEGIN,
+        EventType::DISPATCH_PREPARE_OUTPUT_DIRS_END);
+    status = setupDumpDirectories();
+  }
 
   if (!iree_status_is_ok(status)) {
     return status;
@@ -1061,19 +1121,29 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
   std::lock_guard<std::mutex> lock(mutex_);
   
   // load all the inputs to XRAM
-  status = writeInputs(state);
+  {
+    ScopedDispatchPhaseEvent phase(
+        eventLog.get(), EventType::DISPATCH_SYNC_BINDINGS_IN_BEGIN,
+        EventType::DISPATCH_SYNC_BINDINGS_IN_END);
+    status = writeInputs(state);
+  }
 
   if (!iree_status_is_ok(status)) {            
     return status;
   }
 
   // acquire the hardware, this won't start execution on it yet
-  if (!torq_->acquire()) {
-    return iree_make_status(IREE_STATUS_INTERNAL, "failed to acquire hardware");
+  {
+    ScopedDispatchPhaseEvent phase(
+        eventLog.get(), EventType::DISPATCH_LOAD_HW_RESOURCES_BEGIN,
+        EventType::DISPATCH_LOAD_HW_RESOURCES_END);
+    if (!torq_->acquire()) {
+      return iree_make_status(IREE_STATUS_INTERNAL, "failed to acquire hardware");
+    }
   }
 
   // run all host actions using the hardware if necessary
-  status = executeActions();
+  status = executeActions(eventLog.get());
 
   // release the hardware so that it can be used by another user
   torq_->release();

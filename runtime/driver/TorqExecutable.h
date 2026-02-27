@@ -13,6 +13,8 @@
 
 namespace synaptics {
 
+class TorqDispatchEventLog;
+
 class TorqExecutable {
 
 public:
@@ -75,7 +77,7 @@ private:
   iree_status_t copyDimension(int dim, int inputOffset, int outputOffset, ns(HostCopyParams_table_t) params);
 
   // runs all the host actions in the executable, one after the other
-  iree_status_t executeActions();
+  iree_status_t executeActions(TorqDispatchEventLog* eventLog);
 
   iree_status_t setupDumpDirectories();
   

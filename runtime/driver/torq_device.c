@@ -7,6 +7,7 @@
 
 #include "torq_device.h"
 #include "nop_executable_cache.h"
+#include "torq_profile_scope.h"
 #include "torq_command_buffer.h"
 
 #include <stddef.h>
@@ -425,6 +426,9 @@ static iree_status_t iree_hal_torq_device_queue_execute(
     iree_host_size_t command_buffer_count,
     iree_hal_command_buffer_t* const* command_buffers) {
   iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
+  void* profile_scope = iree_hal_torq_profile_scope_begin(
+      "__HAL_QUEUE_EXECUTE__");
+  iree_status_t status = iree_ok_status();
 
   // TODO(#4680): there is some better error handling here needed; we should
   // propagate failures to all signal semaphores. Today we aren't as there
@@ -432,20 +436,32 @@ static iree_status_t iree_hal_torq_device_queue_execute(
   // do - chances are we already executed everything inline!
 
   // Wait for semaphores to be signaled before performing any work.
-  IREE_RETURN_IF_ERROR(iree_hal_torq_semaphore_multi_wait(
-      &device->semaphore_state, IREE_HAL_WAIT_MODE_ALL, wait_semaphore_list,
-      iree_infinite_timeout()));
+  IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
+      profile_scope, status, IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_WAIT_BEGIN,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_WAIT_END,
+      iree_hal_torq_semaphore_multi_wait(
+          &device->semaphore_state, IREE_HAL_WAIT_MODE_ALL, wait_semaphore_list,
+          iree_infinite_timeout()));
 
-  // Run all deferred command buffers - any we could have run inline we already
-  // did during recording.
-  IREE_RETURN_IF_ERROR(iree_hal_torq_device_apply_deferred_command_buffers(
-      device, command_buffer_count, command_buffers));
+  // Run all deferred command buffers - any we could have run inline we
+  // already did during recording.
+  IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
+      profile_scope, status,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_APPLY_DEFERRED_BEGIN,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_APPLY_DEFERRED_END,
+      iree_hal_torq_device_apply_deferred_command_buffers(
+          device, command_buffer_count, command_buffers));
 
   // Signal all semaphores now that batch work has completed.
-  IREE_RETURN_IF_ERROR(iree_hal_torq_semaphore_multi_signal(
-      &device->semaphore_state, signal_semaphore_list));
+  IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
+      profile_scope, status,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_SIGNAL_BEGIN,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_SIGNAL_END,
+      iree_hal_torq_semaphore_multi_signal(&device->semaphore_state,
+                                           signal_semaphore_list));
 
-  return iree_ok_status();
+  iree_hal_torq_profile_scope_end(profile_scope);
+  return status;
 }
 
 static iree_status_t iree_hal_torq_device_queue_flush(

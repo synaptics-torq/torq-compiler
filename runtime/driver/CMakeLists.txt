@@ -27,6 +27,7 @@ set(torq_hdrs
     torq_device.h
     torq_driver.h
     torq_event.h
+    torq_profile_scope.h
     torq_semaphore.h
     TorqExecutable.h
 )
@@ -37,6 +38,7 @@ set(torq_srcs
     torq_device.c
     torq_driver.c
     torq_event.c
+    torq_profile_scope.cc
     torq_semaphore.c
     TorqExecutable.cc
 )

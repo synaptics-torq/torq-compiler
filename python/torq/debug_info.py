@@ -1,13 +1,17 @@
 import logging
 import os
-from typing import List, Optional, Dict, Set
+from typing import (
+    Dict,
+    List,
+    Optional,
+    Tuple,
+)
 from dataclasses import dataclass, field
 from iree.compiler.ir import Context, Operation, Value, Location, Block, BlockArgument, Module
 import pandas as pd
 from collections import OrderedDict
 from enum import Enum
 from abc import ABC, abstractmethod
-from functools import cached_property
 import re
 import torq.utils.location as loc_utils
 
@@ -21,6 +25,13 @@ def cycles_to_ns(cycles: int, frequency_mhz: int):
     """Convert cycles to nanoseconds given a clock frequency in MHz."""
 
     return int(cycles * 1000 / frequency_mhz)
+
+
+def _safe_total_time_ns(start_time_ns: Optional[int], end_time_ns: Optional[int]) -> Optional[int]:
+    """Compute total time in ns, returning None if either endpoint is None."""
+    if start_time_ns is not None and end_time_ns is not None:
+        return end_time_ns - start_time_ns
+    return None
 
 
 @dataclass
@@ -182,13 +193,7 @@ class ActionDebugInfo:
 
     @property
     def total_time_ns(self) -> Optional[int]:
-        start_time = self.start_time_ns
-        end_time = self.end_time_ns
-
-        if start_time is None or end_time is None:
-            return None
-        
-        return end_time - start_time
+        return _safe_total_time_ns(self.start_time_ns, self.end_time_ns)
     
     @property
     def location(self) -> Location:
@@ -205,6 +210,7 @@ class Executor(Enum):
     DMA_IN = "DMA_IN"
     DMA_OUT = "DMA_OUT"
     NSS_CFG = "NSS_CFG"
+    HAL = "HAL"
 
 
 class WorkUnitDebugInfo(ABC):
@@ -243,13 +249,7 @@ class WorkUnitDebugInfo(ABC):
 
     @property
     def total_time_ns(self) -> Optional[int]:
-        start_time = self.start_time_ns
-        end_time = self.end_time_ns
-
-        if start_time is not None and end_time is not None:
-            return end_time - start_time
-        
-        return None
+        return _safe_total_time_ns(self.start_time_ns, self.end_time_ns)
     
     @property
     def ready_time_ns(self) -> Optional[int]:
@@ -283,9 +283,6 @@ class WorkUnitDebugInfo(ABC):
 
 class HostProgramWorkUnitDebugInfo(WorkUnitDebugInfo):
 
-    def __init__(self, dispatch, start_operation, end_operation):
-        super().__init__(dispatch, start_operation, end_operation)
-
     @property
     def invocation(self) -> Value:
         return self.start_operation.operands[0]
@@ -296,13 +293,17 @@ class HostProgramWorkUnitDebugInfo(WorkUnitDebugInfo):
 
 
 class HostCopyWorkUnitDebugInfo(WorkUnitDebugInfo):
-    
-    def __init__(self, dispatch, start_operation, end_operation):
-        super().__init__(dispatch, start_operation, end_operation)
 
     @property
     def executor(self) -> Executor:
         return Executor.HOST_COPY
+
+
+class HalWorkUnitDebugInfo(WorkUnitDebugInfo):
+
+    @property
+    def executor(self) -> Executor:
+        return Executor.HAL
 
 
 class NssProgramWorkUnitDebugInfo(WorkUnitDebugInfo):
@@ -399,19 +400,13 @@ class NssManagedWorkUnitDebugInfo(WorkUnitDebugInfo):
 
 
 class CssProgramWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
-    
-    def __init__(self, dispatch, start_operation, end_operation):
-        super().__init__(dispatch, start_operation, end_operation)
-    
+
     @property
     def executor(self) -> Executor:
         return Executor.CSS
 
 
 class SliceProgramWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
-    
-    def __init__(self, dispatch, start_operation, end_operation):
-        super().__init__(dispatch, start_operation, end_operation)
 
     @property
     def executor_instance_id(self) -> int:
@@ -432,9 +427,6 @@ class SliceProgramWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
 
 
 class CdmaWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
-    
-    def __init__(self, dispatch, start_operation, end_operation):
-        super().__init__(dispatch, start_operation, end_operation)
 
     @property
     def executor(self) -> Executor:
@@ -442,9 +434,6 @@ class CdmaWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
 
 
 class DmaInWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
-    
-    def __init__(self, dispatch, start_operation, end_operation):
-        super().__init__(dispatch, start_operation, end_operation)
 
     @property
     def executor(self) -> Executor:
@@ -452,9 +441,6 @@ class DmaInWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
 
 
 class DmaOutWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
-    
-    def __init__(self, dispatch, start_operation, end_operation):
-        super().__init__(dispatch, start_operation, end_operation)
 
     @property
     def executor(self) -> Executor:
@@ -508,8 +494,52 @@ class TimeDebugInfo:
     async_duration_ns: Optional[int] = None
 
 
-class DispatchDebugInfo:
+class BaseDispatchDebugInfo(ABC):
+    """
+    Shared state and time-computation logic for all dispatch-level debug info
+    containers (MLIR dispatches, HAL dispatches, combined views).
+    """
+
+    def __init__(self):
+        self.operation_times_ns: Dict = {}
+        self.actions: OrderedDict = OrderedDict()
+        self.workunits: List[WorkUnitDebugInfo] = []
+        self.original_locations: List = []
+
+    # --- operation-level time queries ---
+
+    def get_operation_start_time_ns(self, operation) -> Optional[int]:
+        time_info = self.operation_times_ns.get(operation)
+        return time_info.start_time_ns if time_info is not None else None
+
+    def get_operation_end_time_ns(self, operation) -> Optional[int]:
+        time_info = self.operation_times_ns.get(operation)
+        return time_info.end_time_ns if time_info is not None else None
+
+    def get_operation_async_duration_ns(self, operation) -> Optional[int]:
+        time_info = self.operation_times_ns.get(operation)
+        return time_info.async_duration_ns if time_info is not None else None
+
+    # --- aggregate time from workunits ---
+
+    @property
+    def start_time_ns(self):
+        start_times = [wu.start_time_ns for wu in self.workunits if wu.start_time_ns is not None]
+        return min(start_times) if start_times else None
+
+    @property
+    def end_time_ns(self):
+        end_times = [wu.end_time_ns for wu in self.workunits if wu.end_time_ns is not None]
+        return max(end_times) if end_times else None
+
+    @property
+    def total_time_ns(self):
+        return _safe_total_time_ns(self.start_time_ns, self.end_time_ns)
+
+
+class DispatchDebugInfo(BaseDispatchDebugInfo):
     def __init__(self, debug_info: 'DebugInfo', module: Operation):
+        super().__init__()
         # ! IMPORTANT: we need to keep a reference to the module or it
         # will be garbage collected and all operations will lose their
         # parent and thus become invalid
@@ -525,29 +555,10 @@ class DispatchDebugInfo:
         else:
             raise ValueError("Dispatch function not found in module")                
 
-        self.operation_times_ns = {}
         self.actions = self._load_actions()                        
         self.nss_blocks_info = self._load_nss_blocks_info()
         self.workunits = self._load_host_workunits()
         self.original_locations = self._load_original_locations()        
-
-    def get_operation_start_time_ns(self, operation: Operation) -> Optional[int]:
-        time_info = self.operation_times_ns.get(operation)
-        if time_info is not None:
-            return time_info.start_time_ns
-        return None
-    
-    def get_operation_end_time_ns(self, operation: Operation) -> Optional[int]:
-        time_info = self.operation_times_ns.get(operation)
-        if time_info is not None:
-            return time_info.end_time_ns
-        return None
-    
-    def get_operation_async_duration_ns(self, operation: Operation) -> Optional[int]:
-        time_info = self.operation_times_ns.get(operation)
-        if time_info is not None:
-            return time_info.async_duration_ns
-        return None
 
     def _load_actions(self) -> OrderedDict[int, ActionDebugInfo]:
         actions = []                
@@ -815,21 +826,167 @@ class DispatchDebugInfo:
             self._update_time_ns(workunit.start_operation, frequency_mhz)
             self._update_time_ns(workunit.end_operation, frequency_mhz)
 
-    @cached_property
-    def start_time_ns(self):
-        start_times = [workunit.start_time_ns for workunit in self.workunits if workunit.start_time_ns is not None]
-        return min(start_times) if start_times else None
 
-    @cached_property
-    def end_time_ns(self):
-        end_times = [workunit.end_time_ns for workunit in self.workunits if workunit.end_time_ns is not None]
-        return max(end_times) if end_times else None
+@dataclass(frozen=True, eq=False)
+class HalOperation:
+    name: str
+    location: str
+
+
+class HalDebugInfo:
+    def __init__(self, dispatch_name: str):
+        self.dispatch_name = dispatch_name
+
+    def pretty_print_location(self, loc):
+        return str(loc)
+
+    def get_original_operators(self, _location):
+        return []
+
+
+class HalActionDebugInfo:
+    def __init__(self, dispatch, action_id: int, operation: HalOperation, start_time_ns: Optional[int], end_time_ns: Optional[int]):
+        self.dispatch = dispatch
+        self.action_id = action_id
+        self.operation = operation
+        self.workunit = None
+        self._start_time_ns = start_time_ns
+        self._end_time_ns = end_time_ns
 
     @property
-    def total_time_ns(self):
-        if self.start_time_ns is not None and self.end_time_ns is not None:
-            return self.end_time_ns - self.start_time_ns
-        return None
+    def start_time_ns(self) -> Optional[int]:
+        return self._start_time_ns
+
+    @property
+    def end_time_ns(self) -> Optional[int]:
+        return self._end_time_ns
+
+    @property
+    def total_time_ns(self) -> Optional[int]:
+        return _safe_total_time_ns(self._start_time_ns, self._end_time_ns)
+
+    @property
+    def location(self):
+        return self.operation.location
+
+
+class HalDispatchDebugInfo(BaseDispatchDebugInfo):
+    def __init__(self, dispatch_name: str = "__HAL"):
+        super().__init__()
+        self.dispatch_name = dispatch_name
+        self.debug_info = HalDebugInfo(dispatch_name)
+        self._next_action_index = 0
+
+    @staticmethod
+    def _parse_event_name(event_name: str) -> Tuple[str, Optional[str]]:
+        if event_name.endswith("_BEGIN"):
+            return event_name[:-6], "BEGIN"
+        if event_name.endswith("_END"):
+            return event_name[:-4], "END"
+        return event_name, None
+
+    @staticmethod
+    def _pick_workunit_type(event_name: str):
+        return HalWorkUnitDebugInfo
+
+    def load_runtime_events(self, events_data: List[EventData]):
+        self.actions = OrderedDict()
+        self.workunits = []
+        self.operation_times_ns = {}
+        self._next_action_index = 0
+        self.append_runtime_events(events_data, self.dispatch_name)
+
+    def append_runtime_events(self, events_data: List[EventData], dispatch_name: Optional[str] = None):
+        if dispatch_name is None:
+            dispatch_name = self.dispatch_name
+
+        parsed_events = []
+        has_specific_events = False
+        for event in events_data:
+            event_name, event_type = self._parse_event_name(event.event)
+            parsed_events.append((event_name, event_type, event))
+            if event_name != "HAL_CALL":
+                has_specific_events = True
+
+        open_events: Dict[str, List[Tuple[int, int]]] = {}
+        completed_actions: List[Tuple[int, int, str, int]] = []
+
+        for event_name, event_type, event in parsed_events:
+            stack = open_events.setdefault(event_name, [])
+
+            if event_type == "BEGIN":
+                stack.append((event.action_id, event.timestamp_ns))
+                continue
+
+            if event_type == "END":
+                if stack:
+                    start_action_id, start_time_ns = stack.pop()
+                    completed_actions.append((start_time_ns, event.timestamp_ns, event_name, start_action_id))
+                else:
+                    completed_actions.append((event.timestamp_ns, event.timestamp_ns, event_name, event.action_id))
+                continue
+
+            completed_actions.append((event.timestamp_ns, event.timestamp_ns, event_name, event.action_id))
+
+        for event_name, stack in open_events.items():
+            for action_id, start_time_ns in stack:
+                completed_actions.append((start_time_ns, start_time_ns, event_name, action_id))
+
+        completed_actions.sort(key=lambda item: (item[0], item[3], item[2]))
+
+        for start_time_ns, end_time_ns, event_name, action_id in completed_actions:
+            if has_specific_events and event_name == "HAL_CALL":
+                continue
+
+            if end_time_ns < start_time_ns:
+                start_time_ns, end_time_ns = end_time_ns, start_time_ns
+
+            qualified_event_name = event_name if dispatch_name == self.dispatch_name else f"{dispatch_name}.{event_name}"
+
+            operation = HalOperation(
+                name=qualified_event_name,
+                location=dispatch_name.strip("_") if event_name == "HAL_CALL" else event_name
+            )
+
+            self.operation_times_ns[operation] = TimeDebugInfo(
+                start_time_ns=start_time_ns,
+                end_time_ns=end_time_ns,
+            )
+
+            action = HalActionDebugInfo(
+                dispatch=self,
+                action_id=action_id,
+                operation=operation,
+                start_time_ns=start_time_ns,
+                end_time_ns=end_time_ns,
+            )
+
+            workunit_type = self._pick_workunit_type(event_name)
+            workunit = workunit_type(self, operation, operation)
+            action.workunit = workunit
+
+            self.actions[(action_id, self._next_action_index)] = action
+            self.workunits.append(workunit)
+            self._next_action_index += 1
+
+
+class CombinedDispatchDebugInfo(BaseDispatchDebugInfo):
+    """
+    Aggregates multiple dispatch debug info instances into one view so we can
+    emit a single combined output file.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._next_action_index = 0
+
+    def add_dispatch(self, dispatch_debug_info):
+        for action in dispatch_debug_info.actions.values():
+            self.actions[self._next_action_index] = action
+            self._next_action_index += 1
+
+        self.workunits.extend(dispatch_debug_info.workunits)
+        self.original_locations.extend(dispatch_debug_info.original_locations)
 
 
 class DebugInfo:
@@ -871,20 +1028,23 @@ class DebugInfo:
         return [f[:-6] for f in os.listdir(self.path) if f.endswith(".mlirb")]
 
     def pretty_print_location(self, loc: Location):
-        ploc = loc_utils.parse_location(str(loc))
+        loc_str = str(loc)
+        ploc = loc_utils.parse_location(loc_str)
 
         def pretty_print_parsed_location(ploc: loc_utils.LocationAST):
 
             if isinstance(ploc, loc_utils.CallsiteLocation):
-                file_location = ploc.callee
+                return pretty_print_parsed_location(ploc.callee)
             elif isinstance(ploc, loc_utils.FileLineColLocation):
-                file_location = ploc
+                return f"@L{ploc.line}C{ploc.col}"
             elif isinstance(ploc, loc_utils.FusedLocation):
                 return "+".join([pretty_print_parsed_location(l) for l in ploc.locations])
+            elif isinstance(ploc, loc_utils.NameLocation):
+                if ploc.child is not None:
+                    return pretty_print_parsed_location(ploc.child)
+                return ploc.name.strip('"')
             else:
-                return str(loc)
-
-            return f"@L{file_location.line}C{file_location.col}"
+                return loc_str
         
         return pretty_print_parsed_location(ploc)
 

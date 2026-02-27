@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
-from torq.debug_info import DebugInfo, DispatchDebugInfo, HostCopyWorkUnitDebugInfo, HostProgramWorkUnitDebugInfo, NssProgramWorkUnitDebugInfo, NssCfgWorkUnitDebugInfo, \
+from torq.debug_info import DebugInfo, DispatchDebugInfo, HostCopyWorkUnitDebugInfo, HostProgramWorkUnitDebugInfo, HalWorkUnitDebugInfo, NssProgramWorkUnitDebugInfo, NssCfgWorkUnitDebugInfo, \
                                 DmaInWorkUnitDebugInfo, DmaOutWorkUnitDebugInfo, CdmaWorkUnitDebugInfo, SliceProgramWorkUnitDebugInfo, CssProgramWorkUnitDebugInfo
 
 import torq.debug_info
@@ -475,6 +475,7 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     slice_1_intervals = []
     cdma_intervals = []
     css_intervals = []
+    hal_intervals = []
     host_copy_intervals = []
     host_intervals = []
     
@@ -522,6 +523,13 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
                 raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
 
             host_intervals.append((start_time_ns, end_time_ns))
+
+        elif isinstance(workunit, HalWorkUnitDebugInfo):
+
+            if start_time_ns is None or end_time_ns is None:
+                raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
+
+            hal_intervals.append((start_time_ns, end_time_ns))
             
     # Merge overlapping intervals
     merged_dma = merge_intervals(dma_intervals)
@@ -530,6 +538,7 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     merged_slice_0 = merge_intervals(slice_0_intervals)
     merged_slice_1 = merge_intervals(slice_1_intervals)
     merged_css = merge_intervals(css_intervals)
+    merged_hal = merge_intervals(hal_intervals)
     merged_host_copy = merge_intervals(host_copy_intervals)
     merged_host = merge_intervals(host_intervals)
     
@@ -550,6 +559,7 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     total_slice_0 = sum(end - start for start, end in merged_slice_0)
     total_slice_1 = sum(end - start for start, end in merged_slice_1)
     total_css = sum(end - start for start, end in merged_css)
+    total_hal = sum(end - start for start, end in merged_hal)
     total_compute_combined = sum(end - start for start, end in merged_compute_combined)
     total_dma_only = sum(end - start for start, end in dma_only_intervals)
     total_compute_only = sum(end - start for start, end in compute_only_intervals)
@@ -560,8 +570,8 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
     
-    # Calculate BUSY time (union of DMA+CDMA, SLICE+CSS, and HOST_COPY)
-    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined + host_copy_intervals + host_intervals)
+    # Calculate BUSY time (union of DMA+CDMA, SLICE+CSS, HAL, HOST, and HOST_COPY)
+    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined + merged_hal + host_copy_intervals + host_intervals)
     busy_time = sum(end - start for start, end in busy_intervals)
     
     # Calculate IDLE time
@@ -584,6 +594,7 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
         'COMPUTE_ONLY': {'time': total_compute_only, 'percent': calc_percent(total_compute_only)},
         'DMA_COMPUTE_OVERLAP': {'time': total_overlap, 'percent': calc_percent(total_overlap)},
         'OVERALL': {'time': overall_time},
+        'HAL': {'time': total_hal, 'percent': calc_percent(total_hal)},
         'HOST_COPY': {'time': total_host_copy, 'percent': calc_percent(total_host_copy)},
         'HOST': {'time': total_host, 'percent': calc_percent(total_host)}
     }
@@ -661,6 +672,7 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
 
     # track names for each type of workload
     workunits_track_names = OrderedDict([
+        (torq.debug_info.HalWorkUnitDebugInfo, ["HAL"]),
         (torq.debug_info.NssProgramWorkUnitDebugInfo, ["NSS Programs"]),
         (torq.debug_info.NssCfgWorkUnitDebugInfo, ["NSS CFG Tasks"]),
         (torq.debug_info.HostProgramWorkUnitDebugInfo, ["Host Programs"]),
@@ -815,10 +827,11 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
         ("08 OVERVIEW DMA ONLY", "DMA/CDMA ONLY (no compute)", metrics.get('DMA_ONLY', {'time': 0})),
         ("09 OVERVIEW COMPUTE ONLY", "COMPUTE ONLY (no DMA/CDMA)", metrics.get('COMPUTE_ONLY', {'time': 0})),
         ("10 OVERVIEW DMA COMPUTE OVERLAP", "DMA/CDMA<->COMPUTE overlap", metrics.get('DMA_COMPUTE_OVERLAP', {'time': 0})),
-        ("11 OVERVIEW HOST", "HOST total", metrics.get('HOST', {'time': 0})),
-        ("12 OVERVIEW HOST COPY", "HOST COPY total", metrics.get('HOST_COPY', {'time': 0})),
-        ("11 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
-        ("12 OVERALL", "OVERALL", metrics['OVERALL']),
+        ("11 OVERVIEW HAL", "HAL total", metrics.get('HAL', {'time': 0})),
+        ("12 OVERVIEW HOST", "HOST total", metrics.get('HOST', {'time': 0})),
+        ("13 OVERVIEW HOST COPY", "HOST COPY total", metrics.get('HOST_COPY', {'time': 0})),
+        ("14 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
+        ("15 OVERALL", "OVERALL", metrics['OVERALL']),
     ]
     
     for thread_name, label, metric in overview_tracks:
