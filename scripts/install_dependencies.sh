@@ -6,13 +6,18 @@
 set -e
 
 apt-get update
+
+# vim, ccache : for development convenience
+# file: is used by the toolchain extraction script
+# graphviz imagemagick : these are for building the documentation
 apt-get install -y cmake ninja-build clang lld llvm wget curl git git-lfs clang-format-18 \
                          python3-pip python3-dev python3-venv python3-setuptools \
                          qemu-system-misc \
                          libc6-dev-armhf-cross libgcc-s1-armhf-cross libgcc-13-dev-armhf-cross libstdc++-13-dev-armhf-cross binutils-arm-linux-gnueabihf \
                          libstdc++-13-dev-arm64-cross \
                          gcc-aarch64-linux-gnu flex bison bc \
-                         graphviz imagemagick # these are for building the documentation
+                         file ccache vim \
+                         graphviz imagemagick
 
 # Install Synaptics Astra Toolchain if not present
 TOOLCHAIN_DIR="/opt/synaptics/astra/toolchain"
@@ -29,7 +34,8 @@ if [ ! -d "$TOOLCHAIN_DIR" ]; then
 
     if echo "$HASH $FILE" | md5sum -c -; then
         chmod +x "$FILE"
-        ./"$FILE" -y -d "$TOOLCHAIN_DIR" && rm -f "$FILE"
+        ./"$FILE" -y -d "$TOOLCHAIN_DIR"
+        rm -f "$FILE"
         echo "Toolchain installed to $TOOLCHAIN_DIR"
     else
         echo "MD5 Verification Failed!"
