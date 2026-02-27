@@ -272,6 +272,8 @@ void TORQLowerExecutableTargetPass::addNssPasses(OpPassManager &pm) {
 
             funcPm.addPass(createEraseHALDescriptorTypeFromMemRefPass());
 
+            funcPm.addPass(createLowerHostCopiesToNpuPass());
+
             funcPm.addPass(createMapBindingsPass());
         }
 

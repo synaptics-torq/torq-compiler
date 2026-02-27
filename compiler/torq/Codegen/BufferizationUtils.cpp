@@ -234,54 +234,15 @@ LogicalResult createHostCopyOp(OpBuilder &builder, Location loc, Value from, Val
         return failure();
     }
 
-    // get input size from fromStridesBytes and element size
-    int64_t fromSizeBytes = 0;
-    int64_t toSizeBytes = 0;
-    if (!shape.empty()) {
-        fromSizeBytes = fromStridesBytes[0] * shape[0];
-        toSizeBytes = toStridesBytes[0] * shape[0];
-    }
-    else {
-        fromSizeBytes = contiguousElementsSizeBytes;
-        toSizeBytes = contiguousElementsSizeBytes;
-    }
+    builder.create<torq_hl::HostCopyOp>(
+        loc, to, from,
+        /*inputStridesBytes=*/fromStridesBytes,
+        /*outputStridesBytes=*/toStridesBytes,
+        /*shape=*/shape,
+        /*elementSizeBytes=*/contiguousElementsSizeBytes
+    );
 
-    int64_t availableLramBytes = TorqHw::get().getAvailableMemoryForTiling();
-
-    if (fromSizeBytes > availableLramBytes || toSizeBytes > availableLramBytes ||
-        fromSizeBytes == 0 || toSizeBytes == 0 || shape.size() > 4) { // from binding
-        builder.create<torq_hl::HostCopyOp>(
-            loc, to, from,
-            /*inputStridesBytes=*/fromStridesBytes,
-            /*outputStridesBytes=*/toStridesBytes,
-            /*shape=*/shape,
-            /*elementSizeBytes=*/contiguousElementsSizeBytes
-        );
-        return success();
-    }
-    else {
-        // otherwise we can do the copy in LRAM, we first copy from source to a temporary buffer in
-        // LRAM and then copy from the temporary buffer to the destination
-        auto tempBufferType = MemRefType::get(
-            fromType.getShape(), fromType.getElementType(), nullptr,
-            createDenseEncoding(fromType, torq_hl::MemorySpace::Lram)
-        );
-        auto tempBuffer = builder.create<memref::AllocOp>(loc, tempBufferType, ValueRange{});
-
-        // use torq_hl::LoadOp to copy from source to the temporary buffer in LRAM
-        if (failed(createLoadOp(builder, loc, from, tempBuffer))) {
-            return failure();
-        }
-
-        // use torq_hl::StoreOp to copy from the temporary buffer in LRAM to the destination
-        if (failed(createStoreOp(builder, loc, tempBuffer, to))) {
-            return failure();
-        }
-
-        return success();
-    }
-
-    return failure();
+    return success();
 }
 
 LogicalResult createLramToLramCopy(OpBuilder &builder, Location loc, Value from, Value to) {

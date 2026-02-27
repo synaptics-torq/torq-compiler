@@ -25,6 +25,7 @@ set(sources
     LinalgTilePass.cpp
     LowerArithConstantsPass.cpp
     LowerCallProgramToStartWaitPass.cpp
+    LowerHostCopiesToNpuPass.cpp
     MapBindingsPass.cpp
     MarkHostExecutorPass.cpp
     OutlineCpuProgramsPass.cpp

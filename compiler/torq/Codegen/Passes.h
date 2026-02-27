@@ -47,6 +47,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileNSSInvocationsP
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerCallProgramToStartWaitPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerHostCopiesToNpuPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOutlineNSSProgramsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createSegmentNSSProgramsPass();

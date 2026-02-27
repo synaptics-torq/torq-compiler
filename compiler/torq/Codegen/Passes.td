@@ -183,6 +183,19 @@ def LowerCallProgramToStartWait :
   ];
 }
 
+def LowerHostCopiesToNpu :
+    InterfacePass<"torq-lower-host-copies-to-npu",
+         "mlir::FunctionOpInterface"> {
+
+  let summary = "Lower host-side memory copies to NPU operations";
+  let constructor = "mlir::syna::torq::createLowerHostCopiesToNpuPass()";
+
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def OutlineNSSPrograms :
     InterfacePass<"torq-outline-nss-programs",
          "mlir::FunctionOpInterface"> {
