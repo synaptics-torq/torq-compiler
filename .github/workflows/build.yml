@@ -87,13 +87,13 @@ jobs:
           cmake --build .
           sccache --show-stats
 
-      - name: Configure build for soc
+      - name: Configure build for Astra machina
         working-directory: /workspace/code
         run: |
-          ./scripts/configure_soc_build.sh /workspace/build-soc /workspace/build
+          ./scripts/configure_soc_build.sh /workspace/build-astra-sl /workspace/build astra_machina poky
 
-      - name: Build for soc
-        working-directory: /workspace/build-soc
+      - name: Build for Astra machina
+        working-directory: /workspace/build-astra-sl
         run: |
           cmake --build . --target torq-run-module
 
@@ -110,7 +110,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          /workspace/code/scripts/assemble_release_docker.sh /workspace/build /workspace/build-soc release
+          /workspace/code/scripts/assemble_release_docker.sh /workspace/build /workspace/build-astra-sl release
           echo "${{ steps.vars.outputs.TAG }}" > release/VERSION
           tar -zcf release.tar.gz release
 

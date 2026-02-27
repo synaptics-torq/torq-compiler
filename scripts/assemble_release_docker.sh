@@ -52,7 +52,7 @@ cp ${BUILD_DIR}/third_party/iree/tools/torq-compile ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-opt ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/lib/libIREECompiler.so ${INSTALL_DIR}/lib
 
-cp ${TARGET_BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools/armhf-torq-run-module
+cp ${TARGET_BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools/astra-sl-torq-run-module
 
 cp ${BASE_DIR}/scripts/Dockerfile.release ${INSTALL_DIR}/Dockerfile
 cp ${BASE_DIR}/scripts/setup.sh ${INSTALL_DIR}
@@ -89,4 +89,4 @@ find ${INSTALL_DIR} -type d -name "__pycache__" -prune -exec rm -rf {} \;
 
 # strip all the binaries and libraries
 find ${INSTALL_DIR} -name "*.so" -exec strip {} \;
-find ${INSTALL_DIR}/tools -type f -executable ! -name "armhf-*" -exec strip {} \;
+find ${INSTALL_DIR}/tools -type f -executable ! -name "astra-sl-*" -exec strip {} \;

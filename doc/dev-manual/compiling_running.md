@@ -14,7 +14,7 @@ Example MLIR models are provided in the `tests/` directory.
 - Run the generated model with the Torq simulator:
 
     ```{code} shell
-    $ ../iree-build/third_party/iree/tools/iree-run-module --device=torq --module=conv2d-stride4.vmfb \
+    $ ../iree-build/third_party/iree/tools/torq-run-module --module=conv2d-stride4.vmfb \
         --function=main --input="1x256x256x1xi8=0"
     ```
 
