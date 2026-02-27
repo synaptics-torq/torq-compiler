@@ -43,8 +43,11 @@ class TorqAstraMachina: public TorqHw {
     bool end() override;
 
   private:
-    int _torqDevNode;
-    int _dmabufDevNode;
+    static constexpr int kInvalidFd = -1;
+    static constexpr uint32_t kInvalidNetworkId = 0;
+
+    int _torqDevNode{kInvalidFd};
+    int _dmabufDevNode{kInvalidFd};
     mutable bool _xramAccessActive{false};
     const uint32_t _xramStartAddr;
     const size_t _xramSize;
@@ -52,11 +55,11 @@ class TorqAstraMachina: public TorqHw {
     uint32_t _alignOffset;
     uint32_t _xramStartAligned;
     size_t _xramSizeAligned;
-    int _dmabufHandle;
+    int _dmabufHandle{kInvalidFd};
     uint8_t *_xramVBase{};
 
-    uint32_t _networkId;
-    bool _networkActive;
+    uint32_t _networkId{kInvalidNetworkId};
+    bool _networkActive{false};
 
     bool wfi() override;
     bool cli() override;
@@ -80,4 +83,3 @@ class TorqAstraMachina: public TorqHw {
 };
 
 } // namespace synaptics
-

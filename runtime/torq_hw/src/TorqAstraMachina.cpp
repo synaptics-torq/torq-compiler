@@ -14,7 +14,6 @@
 
 #include <iostream>
 #include <cstring>
-#include <mutex>
 
 extern "C" {
   #include <sys/types.h>
@@ -38,8 +37,6 @@ using namespace std;
 
 namespace synaptics {
 
-static mutex _session_lock;
-
 TorqAstraMachina::~TorqAstraMachina() {
     // Clean up network if still active
     if (_networkActive) {
@@ -51,9 +48,6 @@ TorqAstraMachina::~TorqAstraMachina() {
 
 TorqAstraMachina::TorqAstraMachina(uint32_t xramStartAddr, size_t xramSize): TorqHw(Type::ASTRA_MACHINA), _xramStartAddr(xramStartAddr), _xramSize(xramSize) {
     _xramVBase = NULL;
-    _dmabufHandle = 0;
-    _networkId = 0;
-    _networkActive = false;
     alignXram();
 }
 
@@ -72,10 +66,8 @@ void TorqAstraMachina::alignXram() {
 }
 
 bool TorqAstraMachina::open() {
-    _session_lock.lock();
-
     _torqDevNode = ::open(TORQ_NODE, O_RDWR | O_SYNC);
-    if (_torqDevNode <= 0) {
+    if (_torqDevNode == kInvalidFd) {
         cerr << "torq node not available" << endl;
         close();
         return false;
@@ -103,26 +95,25 @@ bool TorqAstraMachina::close() {
     if (_networkActive) {
         stopNetwork();
     }
-    if (_networkId != 0) {
+    if (_networkId != kInvalidNetworkId) {
         destroyNetwork();
     }
     if ((_xramVBase != MAP_FAILED) && (_xramVBase != NULL)) {
-        munmap(_xramVBase, _xramSize);
+        munmap(_xramVBase, _xramSizeAligned);
         _xramVBase = NULL;
     }
-    if (_dmabufHandle) {
+    if (_dmabufHandle != kInvalidFd) {
         ::close(_dmabufHandle);
-        _dmabufHandle = 0;
+        _dmabufHandle = kInvalidFd;
     }
-    if (_dmabufDevNode) {
+    if (_dmabufDevNode != kInvalidFd) {
         ::close(_dmabufDevNode);
-        _dmabufDevNode = 0;
+        _dmabufDevNode = kInvalidFd;
     }
-    if (_torqDevNode) {
+    if (_torqDevNode != kInvalidFd) {
         ::close(_torqDevNode);
-        _torqDevNode = 0;
+        _torqDevNode = kInvalidFd;
     }
-    _session_lock.unlock();
     return true;
 }
 
@@ -300,7 +291,7 @@ bool TorqAstraMachina::readLram(uint32_t addr, size_t size, void *dataOut) const
 
 bool TorqAstraMachina::setupXramSpace() {
     _dmabufDevNode = ::open(DMABUF_NODE, O_RDWR);
-    if (_dmabufDevNode <= 0) {
+    if (_dmabufDevNode == kInvalidFd) {
         cerr << "dmabuf node not available for xram buffer" << endl;
         return false;
     }
@@ -329,7 +320,7 @@ bool TorqAstraMachina::createNetwork() {
     torq_create_network_req createReq;
     createReq.xram_start = _xramStartAddr;
     createReq.dmabuf_fd = _dmabufHandle;
-    createReq.network_id = 0;
+    createReq.network_id = kInvalidNetworkId;
 
     int ret = ioctl(_torqDevNode, TORQ_IOCTL_CREATE_NETWORK, &createReq);
     if (ret < 0) {
@@ -407,7 +398,7 @@ bool TorqAstraMachina::waitNetwork(uint32_t waitBits) {
 }
 
 bool TorqAstraMachina::stopNetwork() {
-    if (_networkId == 0) {
+    if (_networkId == kInvalidNetworkId) {
         return true;
     }
 
@@ -425,7 +416,7 @@ bool TorqAstraMachina::stopNetwork() {
 }
 
 bool TorqAstraMachina::destroyNetwork() {
-    if (_networkId == 0) {
+    if (_networkId == kInvalidNetworkId) {
         return true;
     }
 
@@ -439,13 +430,13 @@ bool TorqAstraMachina::destroyNetwork() {
     }
 
     LOGD << "Network " << _networkId << " destroyed successfully";
-    _networkId = 0;
+    _networkId = kInvalidNetworkId;
     _networkActive = false;
     return true;
 }
 
 bool TorqAstraMachina::acquire() {
-    if (!_networkId) {
+    if (_networkId == kInvalidNetworkId) {
         cerr << "unable to load, network not setup yet\n";
         return false;
     }
