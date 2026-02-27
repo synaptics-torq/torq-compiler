@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import List, Tuple
+import atexit
 import logging
+import signal
 
 import ml_dtypes # support for bfloat16 dtype
 import numpy as np
@@ -16,7 +18,7 @@ import json
 from iree.compiler.ir import Context, Module
 
 from .aws_fpga import FpgaSession, RemoteFpgaSession
-from .remote_testing import RemoteTestRunner
+from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
 from torq.performance import annotate_host_profile_from_files
@@ -54,6 +56,81 @@ def pytest_addoption(parser):
     parser.addoption("--torq-addr", default=None, help="SSH address or ADB device ID to run tests remotely, use 'ADB' to select the first detected device")
     parser.addoption("--torq-port", default=22, help="SSH port to run tests remotely")
     parser.addoption("--torq-benchmark-output-dir", default=None, help="Directory to save run time benchmarks outputs")
+    parser.addoption("--update-astra-runtime", action="store_true", default=False, help="Enable runtime update: auto-deploy torq-run-module to the board (hash-based), session-level board lock for exclusive access, and per-user runner paths")
+    parser.addoption("--torq-ko-path", default=None, help="Path to a local NPU kernel module (.ko) to deploy to the board when --update-astra-runtime is active (if omitted, the default on-board module is used)")
+
+
+def pytest_sessionstart(session):
+    """Prepare the remote board at session start when --update-astra-runtime is active.
+
+    Deploys torq-run-module and checks the NPU kernel module.
+    Only runs when both --update-astra-runtime and --torq-addr are provided.
+    """
+    update_runtime = session.config.getoption("--update-astra-runtime", default=False)
+    board_addr = session.config.getoption("--torq-addr", default=None)
+    ko_path = session.config.getoption("--torq-ko-path", default=None)
+
+    if ko_path and not update_runtime:
+        raise pytest.UsageError(
+            "--torq-ko-path requires --update-astra-runtime to be set."
+        )
+
+    if not update_runtime or not board_addr:
+        return
+    port = int(session.config.getoption("--torq-port", default=22))
+    timeout_minutes = int(session.config.getoption("--torq-runtime-timeout", default=60 * 4))
+    setup_dev_board(
+        board_addr=board_addr,
+        port=port,
+        remote_runner_path=_default_remote_runner_path(),
+        local_ko_path=ko_path,
+        timeout=timeout_minutes,
+        logger=logger,
+    )
+
+    # Acquire session-level exclusive lock on the board.  This prevents
+    # other pytest sessions from touching the board (runner binary, ko
+    # files, etc.) while this session is running.
+    acquire_board_lock(board_addr, port, logger=logger)
+
+    # Track whether the lock has been released to avoid double-release
+    # (signal handler + pytest_sessionfinish).
+    _lock_state = {"released": False}
+
+    def _release_once():
+        if _lock_state["released"]:
+            return
+        _lock_state["released"] = True
+        try:
+            release_board_lock(board_addr, port, logger=logger)
+        except Exception:
+            pass
+
+    # Ensure the lock is released even if the session is interrupted
+    # (Ctrl+C) or terminated (SIGTERM).  Signal handlers restore the
+    # default handler and re-raise so Python's normal behaviour (e.g.
+    # KeyboardInterrupt) is preserved.
+    def _signal_cleanup(signum, frame):
+        _release_once()
+        # Restore the default handler and re-raise the signal so the
+        # process terminates normally (KeyboardInterrupt for SIGINT).
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    atexit.register(_release_once)
+    signal.signal(signal.SIGINT, _signal_cleanup)
+    signal.signal(signal.SIGTERM, _signal_cleanup)
+
+    # Stash the release function so pytest_sessionfinish can call it.
+    session.config._torq_release_board_lock = _release_once
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Release the board lock at the end of the pytest session."""
+    release_fn = getattr(session.config, "_torq_release_board_lock", None)
+    if release_fn:
+        release_fn()
+
     
 def pytest_generate_tests(metafunc):
     if 'runtime_hw_type' in metafunc.fixturenames:
@@ -675,6 +752,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         host_profile_path = versioned_dir / 'host_profile.csv'
         extra_runtime_opts.append(f'--torq_profile_host=' + str(host_profile_path))
 
+    update_runtime = request.config.getoption("--update-astra-runtime")
     remote_addr = request.config.getoption("--torq-addr")
     if remote_addr:
         remote_port = request.config.getoption("--torq-port")
@@ -692,16 +770,22 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             *all_runtime_opts,
             board_addr=remote_addr,
             port=remote_port,
+            remote_runner_path=_default_remote_runner_path() if update_runtime else None,
+            update_runtime=update_runtime,
             recompute_cache=request.config.getoption("--recompute-cache")
         )
         if runtime_hw_type == 'aws_fpga':
             port = request.config.getoption("--torq-port")
             with RemoteFpgaSession(chip_config['aws_fpga'], remote_addr, port) as fpga_session:
                 with request.getfixturevalue("scenario_log").event("torq_run"):
-                    runner.run(timeout=torq_runtime_timeout)
+                    wall_time = runner.run(timeout=torq_runtime_timeout)
         else:
             with request.getfixturevalue("scenario_log").event("torq_run"):
-                runner.run(timeout=torq_runtime_timeout)
+                wall_time = runner.run(timeout=torq_runtime_timeout)
+
+        if update_runtime and wall_time is not None:
+            wall_time_file = versioned_dir / 'wall_time.txt'
+            wall_time_file.write_text(f"{wall_time:.3f}")
     else:
         
         cmds = ['--device=torq',
@@ -808,6 +892,12 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir):
                 # Record the first .pb file for reporting
                 record_property("profiling_output", str(pb_output_path))
         
+        # Record wall time if available (--update-astra-runtime only)
+        if request.config.getoption("--update-astra-runtime"):
+            wall_time_file = torq_results_dir / 'wall_time.txt'
+            if wall_time_file.exists():
+                record_property("wall_time", wall_time_file.read_text().strip())
+
         # Generate combined HTML report with all profiling artifacts
         pb_files = sorted(profiling_output_dir.glob('*.pb'))
         if pb_files:

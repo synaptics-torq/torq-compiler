@@ -203,6 +203,101 @@ pytest tests/test_onnx_model.py -k example-matmul_layer --torq-runtime-hw-type=a
 
 where ``${board_address}`` denotes the address of an astra board (e.g., ``root@10.3.120.55``).
 
+### Auto-deploying the runtime to the board
+
+When iterating on the runtime binary (``torq-run-module``) or the NPU kernel module, use
+``--update-astra-runtime`` to automatically deploy your locally built artifacts to the board
+before running tests:
+
+```
+pytest tests/test_onnx_model.py -k example-matmul_layer \
+  --torq-runtime-hw-type=astra_machina \
+  --torq-addr ${board_address} \
+  --update-astra-runtime
+```
+
+This flag enables:
+
+- **Auto-deploy torq-run-module**: the locally cross-compiled binary is compared (MD5) against
+  the one on the board and copied only if it differs.
+- **Per-user runner paths**: each developer gets an isolated binary on the board under
+  ``/home/root/iree-build-soc/<username>/torq-run-module``.
+- **Board hostname validation**: the board's hostname must match the pattern
+  ``sl2619-dev-board-NNN`` (e.g. ``sl2619-dev-board-002``).  If it doesn't, pytest
+  fails immediately with guidance on how to set the hostname using
+  ``scripts/set_board_hostname.py``.
+- **Exclusive board access**: a session-level lock is acquired at the start of the
+  pytest session and released when it ends.  The lock records the owner's username,
+  hostname, and timestamp so others can see who is using the board.  If a previous
+  session crashed without releasing the lock you can clear it with:
+
+  ```
+  python3 scripts/reset_board_lock.py root@<board-ip>
+  ```
+
+  Even if the session is interrupted with Ctrl+C or killed with SIGTERM, the lock
+  is released automatically via signal handlers and ``atexit``.
+- **Wall-clock timing**: the total remote execution time is measured and printed in the
+  profiling summary at the end of the session.
+
+### Deploying a custom NPU kernel module
+
+To deploy a custom ``.ko`` file to the board, pass ``--torq-ko-path``:
+
+```
+pytest tests/test_onnx_model.py -k example-matmul_layer \
+  --torq-runtime-hw-type=astra_machina \
+  --torq-addr ${board_address} \
+  --update-astra-runtime \
+  --torq-ko-path /path/to/syna_npu.ko
+```
+
+The framework compares the local ``.ko`` hash with the on-board module at
+``/usr/lib/modules/6.12.11/updates/syna_npu.ko``. If they differ, the on-board
+copy is replaced and the board is **rebooted** — the pytest session exits with an
+error asking you to re-run after the board finishes booting.
+
+``--torq-ko-path`` requires ``--update-astra-runtime`` to be set.
+
+### Finding boards on the network
+
+Three utility scripts help manage boards:
+
+**Scan for reachable boards** (only boards with hostname ``sl2619-dev-board-NNN`` are shown):
+
+```
+python3 scripts/scan_boards.py
+```
+
+Output:
+
+```
+IP                   HOSTNAME
+----------------------------------------
+10.46.130.17         sl2619-dev-board-001
+10.46.130.42         sl2619-dev-board-002
+----------------------------------------
+2 board(s) reachable.
+```
+
+**Search for a specific board by hostname:**
+
+```
+python3 scripts/scan_boards.py --find sl2619-dev-board-001
+```
+
+**Set a hostname on a board** (persists across reboots):
+
+```
+python3 scripts/set_board_hostname.py 10.46.130.17 sl2619-dev-board-001
+```
+
+**Reset a stale board lock** (if a previous session crashed without releasing it):
+
+```
+python3 scripts/reset_board_lock.py root@10.46.130.17
+```
+
 ## Using the results dashboard
 
 In order to analyze large number of tests e.g. when the model contains many layers. It may be beneficial to use the

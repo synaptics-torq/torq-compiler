@@ -75,6 +75,14 @@ if [[ "$TARGET" == "astra_machina" && "$4" == "poky" ]]; then
     -DPython3_NumPy_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/lib/python${PYVER}/site-packages/numpy/core/include"
     -DPYTHON_MODULE_EXTENSION="${PYTHON_EXT_SUFFIX}"
   )
+elif [[ "$TARGET" == "astra_machina" ]]; then
+  # Explicitly use the host Python3 to prevent CMake from picking up a
+  # cross-SDK Python that may have been sourced into the environment.
+  HOST_PYTHON3="$(command -v python3)"
+  CMAKE_ARGS+=(
+    -DIREE_BUILD_PYTHON_BINDINGS=OFF
+    -DPython3_EXECUTABLE="${HOST_PYTHON3}"
+  )
 else
   CMAKE_ARGS+=(-DIREE_BUILD_PYTHON_BINDINGS=OFF)
 fi

@@ -79,6 +79,10 @@ def extract_perfetto_summary(pb_file_path):
             'overlap_percent': None,
             'idle_time': None,
             'idle_percent': None,
+            'host_time': None,
+            'host_percent': None,
+            'host_copy_time': None,
+            'host_copy_percent': None,
             'available': False
         }
         # Note: time values stored as formatted strings (e.g., "47.545ms"), percent as strings (e.g., "99.94")
@@ -186,6 +190,18 @@ def extract_perfetto_summary(pb_file_path):
         if idle_match:
             summary['idle_time'] = idle_match.group(1)
             summary['idle_percent'] = idle_match.group(2)
+        
+        # Extract HOST total - maps to "12 OVERVIEW HOST"
+        host_match = re.search(r'(?<!COPY\s)HOST\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        if host_match:
+            summary['host_time'] = host_match.group(1)
+            summary['host_percent'] = host_match.group(2)
+        
+        # Extract HOST COPY total - maps to "13 OVERVIEW HOST COPY"
+        host_copy_match = re.search(r'HOST\s+COPY\s+total:\s*([0-9.]+(?:\s*[a-zµμ]+)?)\s*\(([0-9.]+)%\)', content, re.IGNORECASE)
+        if host_copy_match:
+            summary['host_copy_time'] = host_copy_match.group(1)
+            summary['host_copy_percent'] = host_copy_match.group(2)
         
         return summary
     except Exception as e:

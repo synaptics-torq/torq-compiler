@@ -88,3 +88,58 @@ Profiling helps you understand the performance characteristics of your models on
   | timestamp_start | Start timestamp in μs |
   | timestamp_end | End timestamp in μs |
   | location | MLIR source location that generated this operation |
+
+
+## Profiling with the Test Framework
+
+When running tests on real hardware via pytest, you can combine runtime profiling with
+``--update-astra-runtime`` to get a profiling summary printed at the end of the session:
+
+```bash
+pytest tests/test_onnx_model.py -k example-matmul_layer \
+  --torq-runtime-hw-type=astra_machina \
+  --torq-addr root@10.46.130.17 \
+  --torq-runtime-profiling-output-dir=./profile \
+  --update-astra-runtime \
+  --recompute-cache
+```
+
+At the end of the session, a **Host Profile Overview** section is printed with a
+summary extracted from the Perfetto ``.pb`` trace files:
+
+```
+====================== Host Profile Overview =======================
+  Model: conv2d_f4_s4_64x64x16_i16
+  ────────────────────────────────────────────────────────
+  WALL_TIME                       207.000ms
+  OVERALL                          12.845ms
+  Dma                             453.000µs  (3.53%)
+  Dma Only                         46.000µs  (0.36%)
+  Dma Total                       453.000µs  (3.53%)
+  Cdma                                  0ns  (0.00%)
+  Compute                         407.000µs  (3.17%)
+  Compute Only                          0ns  (0.00%)
+  Slice                           407.000µs  (3.17%)
+  Slice 0                         407.000µs  (3.17%)
+  Slice 1                         407.000µs  (3.17%)
+  Css                                   0ns  (0.00%)
+  Overlap                         407.000µs  (3.17%)
+  Idle                              6.000µs  (0.05%)
+  Host                                  0ns  (0.00%)
+  Host Copy                        12.386ms  (96.43%)
+```
+
+The summary dynamically displays all available metrics from the trace — no hard-coded
+list of keys. ``WALL_TIME`` is the end-to-end time measured on the host (including SSH
+overhead), while ``OVERALL`` and the breakdown rows come from the on-device trace.
+
+### Wall-time measurement
+
+When ``--update-astra-runtime`` is active, the framework measures wall-clock time around
+the remote ``torq-run-module`` invocation using Python's ``time.monotonic()``. The result
+is:
+
+- Logged during the test (``Wall time: 1.234s``)
+- Saved as ``wall_time.txt`` in the test results directory
+- Attached to the test report via ``record_property("wall_time", ...)``
+- Printed at the top of the Host Profile Overview summary

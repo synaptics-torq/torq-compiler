@@ -17,6 +17,8 @@ from typing import Dict, Any, List, Optional
 
 import random
 
+from torq.model_profiler.generate_perfetto_combined_report import extract_perfetto_summary, extract_model_name
+
 logger = logging.getLogger("torq.testing.reporting")
 
 
@@ -444,3 +446,99 @@ def _generate_template_profiling_report(session):
         print(f"✓ Profiling plots generated in: {output_dir} (X={x_axis}, Y={y_axis})")
     except Exception as e:
         logger.warning(f"Failed to generate profiling plots: {e}")
+
+
+def _format_profiling_summary(summary: dict, model_name: str, wall_time: str | None = None) -> str:
+    """Format an extracted profiling summary into a human-readable table.
+
+    Dynamically prints all metrics present in summary (e.g. dma_time, compute_time, etc.) 
+    along with their percentages, and includes wall time if provided.
+    """
+    if not summary.get('available'):
+        return ""
+
+    lines = []
+    lines.append(f"  Model: {model_name}")
+    lines.append(f"  {'─' * 52}")
+
+    # Wall time first (if available).
+    if wall_time is not None:
+        try:
+            secs = float(wall_time)
+            wall_time_str = f"{secs:.3f}s" if secs >= 1.0 else f"{secs * 1000:.3f}ms"
+        except ValueError:
+            wall_time_str = wall_time
+        lines.append(f"  {'WALL_TIME':<26s} {wall_time_str:>14s}")
+
+    # OVERALL duration (special key — no percent).
+    total_duration = summary.get('total_duration')
+    if total_duration is not None:
+        lines.append(f"  {'OVERALL':<26s} {total_duration:>14s}")
+
+    # Pretty labels: strip _time suffix, replace underscores with spaces,
+    # title-case.  E.g. 'dma_total_time' -> 'Dma Total'.
+    def _label(key: str) -> str:
+        return key.removesuffix('_time').replace('_', ' ').title()
+
+    # Print every *_time key and its matching *_percent (if present).
+    skip = {'total_duration', 'available'}
+    for key, value in summary.items():
+        if key in skip or value is None or not key.endswith('_time'):
+            continue
+        label = _label(key)
+        pct_key = key.removesuffix('_time') + '_percent'
+        pct = summary.get(pct_key)
+        if pct is not None:
+            lines.append(f"  {label:<26s} {value:>14s}  ({pct}%)")
+        else:
+            lines.append(f"  {label:<26s} {value:>14s}")
+
+    return "\n".join(lines)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Print Host Profile Overview summary at the end of the pytest session.
+
+    Only active when --update-astra-runtime is enabled.
+    """
+    if not config.getoption("--update-astra-runtime", default=False):
+        return
+
+    profiling_output_dir = config.getoption("--torq-runtime-profiling-output-dir", default=None)
+    if not profiling_output_dir:
+        return
+
+    profiling_output_dir = Path(profiling_output_dir)
+    if not profiling_output_dir.exists():
+        return
+
+    # Collect .pb files and wall times recorded by tests in this session
+    pb_files_from_session = []
+    wall_times: dict[Path, str] = {}  # pb_file -> wall_time string
+    for node_id, report_phases in reports.items():
+        for phase in ['call', 'setup']:
+            if phase not in report_phases:
+                continue
+            report = report_phases[phase]
+            props = dict(report.user_properties)
+            pb_path = props.get('profiling_output')
+            if pb_path and Path(pb_path).exists():
+                pb = Path(pb_path)
+                pb_files_from_session.append(pb)
+                wt = props.get('wall_time')
+                if wt:
+                    wall_times[pb] = wt
+
+    if not pb_files_from_session:
+        return
+
+    terminalreporter.section("Host Profile Overview")
+
+    for pb_file in sorted(set(pb_files_from_session)):
+        model_name = extract_model_name(pb_file.name)
+        summary = extract_perfetto_summary(str(pb_file))
+        formatted = _format_profiling_summary(summary, model_name, wall_times.get(pb_file))
+        if formatted:
+            terminalreporter.write_line(formatted)
+            terminalreporter.write_line("")
