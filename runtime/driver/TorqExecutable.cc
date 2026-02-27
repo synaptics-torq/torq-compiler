@@ -893,8 +893,6 @@ iree_status_t TorqExecutable::initialize() {
     return ret;
   }
 
-  sleep(5);
-
   return iree_ok_status();
 
 }
@@ -1127,6 +1125,9 @@ iree_status_t TorqExecutable::loadNpuCode() {
     flatbuffers_uint8_vec_t code = iree_hal_torq_Segment_data_get(segment);
     size_t code_len = flatbuffers_uint8_vec_len(code);
 
+    if (code_len != ns(Segment_size(segment))) {
+      return iree_make_status(IREE_STATUS_INTERNAL, "invalid buffer size");
+    }
 
     uint32_t xram_code_address = iree_hal_torq_Segment_xram_address_get(segment);
 
