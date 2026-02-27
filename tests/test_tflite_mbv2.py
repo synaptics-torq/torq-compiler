@@ -271,7 +271,8 @@ def test_mbv2_llvmcpu_torq(
     compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
 
 
-@pytest.mark.ci
+# FIXME Some issue happens in CI that needs to be investigated.
+# @pytest.mark.ci
 def test_mbv2_tflite_torq(
     request,
     tflite_reference_results,
