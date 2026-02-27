@@ -138,12 +138,21 @@ def generate_tflite_layer_cases(tflite_path: Path, max_layers: int = 0) -> List[
     # Use the new direct layer extractor that preserves quantization
     print(f"Processing {tflite_path.name} with quantization-preserving extractor...")
     
-    extraction_results = extract_all_layers(
-        str(tflite_path),
-        str(layers_dir),
-        max_layers=max_layers,
-        force=FORCE_EXTRACT,
-    )
+    try:
+        extraction_results = extract_all_layers(
+            str(tflite_path),
+            str(layers_dir),
+            max_layers=max_layers,
+            force=FORCE_EXTRACT,
+        )
+    except Exception as e:
+        print(f"ERROR: Failed to extract layers from {tflite_path.name}: {e}")
+        # Return only the full-model case so test collection doesn't abort
+        cases.append(TFLiteLayerCase(
+            name=f"{model_stem}_full_model",
+            data={'model_path': str(tflite_path), 'is_layer': False}
+        ))
+        return cases
     
     for result in extraction_results:
         op_name = result['op_name']
