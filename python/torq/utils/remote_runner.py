@@ -289,6 +289,7 @@ class ADBCommandRunner(RemoteCommandRunner):
         # If strict quoting is required, pass a single string in the original call.
         cmd = " ".join(cmd)
         full_cmd = [*self._adb_cmd_prefix(), "shell", cmd]
+        print("[ADB]", cmd)
 
         try:
             result = subprocess.check_output(

@@ -42,10 +42,13 @@ If you are using a different environment you can use a Docker image:
 1. Log-in to the GitHub docker registry
 
    ```{code} shell
-   $ docker login ghcr.io
+   $ echo $CR_PAT | docker login ghcr.io -u $GITHUB_USERNAME --password-stdin
    ```
 
-   Use your Github username and a Github personal access token as password.
+   You can use your GitHub username and a GitHub personal *classic* access token as password.
+   The access token must be configured with the following permissions: read:packages, repo
+   The $CR_PAT varible must be set to the github access token.
+
    Please refer to [Github documentation for the creation and usage of a
    personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic).
    
@@ -83,6 +86,13 @@ If you are using a different environment you can use a Docker image:
 
 3. (optional but strongly suggested) Setup `ccache` as follows::
 
+    If running inside a docker be sure the CCACHE_DIR is configured correctly, eg:
+    ```{code} shell
+    export CCACHE_DIR=../iree-build/ccache
+    ```
+    This can be configured when the docker image is started using the `-e` option.
+
+    Initialize the ccache:
     ```{code} shell
     $ ccache --max-size=20G
     ```

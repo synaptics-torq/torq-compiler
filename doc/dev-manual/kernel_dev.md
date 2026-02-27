@@ -201,6 +201,20 @@ In the former the second operand must be a scalar, while in the latter it can be
 We use ``elementwiseProductAccumulate`` since it will be compatible with the improved versions
 of this kernel what we will develop below.
 
+The first argument of this instruction is of type ``IData``
+while the second one is of type ``WData``: this means that we have to bring the corresponding
+operands in IRAM and WRAM respectively. This can be done using the ``load()`` instruction.
+At each iteration we will load one element of the first vector in IRAM and one element of the
+second vector in WRAM, then multiply them.
+We specify which element to load by indexing the corresponding input with the iteration variable defined
+in the *For* loop:
+
+```{code} C++
+IData data1 = slice.iram.load(input1[i]);
+WData data2 = slice.wram.load(input2[i]);
+PData pdata = slice.alu.elementwiseProductAccumulate(data1, data2);
+```
+
 Since both arguments contains one single value, the resulting `pdata` will also contain one single value.
 We can rescale and clamp this value using the activation unit (``rescaleClamp`` instruction in the ``Act`` class)
 and store the result in the output tensor.

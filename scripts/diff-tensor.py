@@ -63,8 +63,8 @@ def print_tensor(tensor):
                 print(colorIx + f"{line:{2 if line == 0 else 3}}: " + colorEnd, end="")
             else:
                 print("    ", end="")
-            print(" ".join(f"{v:{field_width}}" for v in data[i:i+items_per_row//2]), end="   ")
-            print(" ".join(f"{v:{field_width}}" for v in data[i+items_per_row//2:i+items_per_row]), end="")
+            print(" ".join(f"{v:>{field_width}}" for v in data[i:i+items_per_row//2]), end="   ")
+            print(" ".join(f"{v:>{field_width}}" for v in data[i+items_per_row//2:i+items_per_row]), end="")
             print("]" if line == len(line_count) - 1 else "")
 
 
