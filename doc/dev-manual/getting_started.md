@@ -117,7 +117,7 @@ In order to cross-compile the runtime for an embedded target use the following c
 4. Run the cross-compile build:
 
     ```{code} shell
-    $ cmake --build ../iree-build-soc/ --target iree-run-module
+    $ cmake --build ../iree-build-soc/ --target torq-run-module
     ```
 
-The statically linked ``iree-run-module`` is available in ``../iree-build-soc/third_party/iree/tools/iree-run-module``.
+The statically linked ``torq-run-module`` is available in ``../iree-build-soc/third_party/iree/tools/torq-run-module``.

@@ -51,8 +51,7 @@ Follow the steps below to convert, and run a MobileNetV2 model on Torq.
 
 - Use the compiled model with the Torq runtime to run inference. For example:
   ```shell
-  $ iree-run-module \
-    --device=torq \
+  $ torq-run-module \
     --module=mobilenetv2.vmfb \
     --function=main \
     --input="1x224x224x3xi8=1"

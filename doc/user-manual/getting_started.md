@@ -82,5 +82,5 @@ You can use **either** of the following approaches:
 
 - Run the generated model with the Torq simulator:
     ```bash
-    $ iree-run-module --device=torq --module=model.vmfb --input="1x56x56x24xi8=1"
+    $ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1"
     ```

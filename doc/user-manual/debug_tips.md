@@ -12,7 +12,7 @@
 
 - To print line numbers (locations) in the source input when printing IRs use ``--mlir-print-debuginfo --mlir-pretty-debuginfo --mlir-print-local-scope``
 
-- To view more debug information during execution pass the parameter `--torq_debug` to `iree-run-module`
+- To view more debug information during execution pass the parameter `--torq_debug` to `torq-run-module`
 
 - A {term}`VMFB` file can be inspected using ``zip``.
     For example to inspect a Torq flat buffer install ``flatc`` on your host and then run a command
@@ -48,7 +48,7 @@
   3. Run the model with the ``--torq_debug`` option:
 
      ```{code} shell
-     iree-run-module .... --torq_debug
+     torq-run-module .... --torq_debug
      ```
 
   4. In the debug log the line where the hardware gets stuck

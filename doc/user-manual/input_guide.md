@@ -26,9 +26,9 @@ $ torq-compile --help | grep torq
 
 
 
-## Input Structure for `iree-run-module`
+## Input Structure for `torq-run-module`
 
-This section explains how to provide inputs to the iree-run-module tool when running models. You’ll need to match the expected shape, data type, and order of the model's inputs. Mismatches in input specifications (e.g., wrong dtype or shape) will result in execution errors. Inputs can be provided directly as literals or loaded from files like .npz or .bin.
+This section explains how to provide inputs to the torq-run-module tool when running models. You’ll need to match the expected shape, data type, and order of the model's inputs. Mismatches in input specifications (e.g., wrong dtype or shape) will result in execution errors. Inputs can be provided directly as literals or loaded from files like .npz or .bin.
 
 - **Dtype:** Match the compiled model (e.g., `i8`, `i16`, `f32`). Mismatched dtypes will fail.
 - **Shapes:** Use the exact input shapes expected by the model.
@@ -42,12 +42,12 @@ This section explains how to provide inputs to the iree-run-module tool when run
 
 - Example:  
   ```shell
-  $ iree-run-module --device=torq --module=model.vmfb --input="1x64x64x3xi8=0"
+  $ torq-run-module --module=model.vmfb --input="1x64x64x3xi8=0"
   ```
 
 - List syntax (comma-separated) for tensors:  
   ```shell
-  $ iree-run-module --device=torq --module=model.vmfb --input="1x3xi8=[[1,2,3]]"
+  $ torq-run-module --module=model.vmfb --input="1x3xi8=[[1,2,3]]"
   ```
 
 ### Multiple Inputs
@@ -56,7 +56,7 @@ Order matters: pass inputs in the same order as the model’s signature.
 
 - Example with two inputs (e.g., image tensor + scale):  
   ```shell
-  $ iree-run-module --device=torq --module=model.vmfb \
+  $ torq-run-module --module=model.vmfb \
     --input="1x224x224x3xi32=0" \
     --input="1xi16=1"
   ```
@@ -65,12 +65,12 @@ Order matters: pass inputs in the same order as the model’s signature.
 
 - **NPY (numpy arrays):** Numpy npy files from *numpy.save*.
   ```shell
-  $ iree-run-module --device=torq --module=model.vmfb --input=@input.npy
+  $ torq-run-module --module=model.vmfb --input=@input.npy
   ```
 
 - **Raw binary:** Raw binary files can be read to provide buffer contents.
   ```shell
-  $ iree-run-module --device=torq --module=model.vmfb \
+  $ torq-run-module --module=model.vmfb \
     --input="1x224x224x3xf16=@input.bin"
   ```
   (Suppose `input.bin` holds float16 data for shape `1x224x224x3`)
@@ -98,5 +98,5 @@ $ image_to_tensor.py --input=image.png -o=input.bin --format=rgb
 
 For more information, run:
 ```shell
-  $ iree-run-module --help
+  $ torq-run-module --help
   ```
