@@ -97,8 +97,7 @@ class XramToXramHostCopyPattern : public OpRewritePattern<torq_hl::HostCopyOp> {
         // erase the original host copy operation
         copyOp.erase();
 
-        llvm::dbgs() << "Erased host copy op and replaced it with a pair of load and store ops to "
-                        "copy through LRAM\n";
+        LLVM_DEBUG({ llvm::dbgs() << "Replace host copy with pair of load and store ops\n"; });
 
         return success();
     }

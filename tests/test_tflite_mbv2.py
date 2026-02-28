@@ -112,6 +112,7 @@ def case_config(request):
         "tflite_model": "tflite_layer_model",
         "mlir_model_file": "tflite_mlir_model_file",
         "input_data": "mbv2_input_data",
+        "torq_compiler_options": ["--torq-convert-dtypes"]
     }
 
 
@@ -271,8 +272,8 @@ def test_mbv2_llvmcpu_torq(
     compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
 
 
-# FIXME Some issue happens in CI that needs to be investigated.
-# @pytest.mark.ci
+@pytest.mark.ci
+@pytest.mark.fpga_ci
 def test_mbv2_tflite_torq(
     request,
     tflite_reference_results,

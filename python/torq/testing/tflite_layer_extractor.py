@@ -418,7 +418,7 @@ def extract_all_layers(
             success = extractor.extract_layer_as_tflite(layer['index'], layer_file)
         else:
             success = True
-            print(f"  Using cached {layer['op_name']}")
+            # print(f"  Using cached {layer['op_name']}")
         
         results.append({
             'layer_index': layer['index'],
