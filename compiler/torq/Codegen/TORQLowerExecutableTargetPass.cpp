@@ -91,11 +91,6 @@ static llvm::cl::opt<bool> clEnableTransposeOptimization(
     llvm::cl::desc("enable transpose layout optimization pass"), llvm::cl::init(false)
 );
 
-static llvm::cl::opt<bool> clUnrollLoopAfterBufferization(
-    "torq-unroll-loop-after-bufferization", llvm::cl::desc("unroll loops after bufferization"),
-    llvm::cl::init(false)
-);
-
 namespace {
 /// Lowers a hal.executable.variant inner module to TORQ scalar/native-vector
 /// code. Invokes different compilation pipeline to
@@ -139,10 +134,6 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
         funcPm.addPass(createCanonicalizerPass());
         funcPm.addPass(createUnrollDynamicShapeLoopPass());
         funcPm.addPass(createCanonicalizerPass());
-        if (!clUnrollLoopAfterBufferization) {
-            funcPm.addPass(createUnrollLoopPass());
-            funcPm.addPass(createCanonicalizerPass());
-        }
     }
 
     // lower the linalg operators to torq_hl before tiling
@@ -172,15 +163,6 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     // tile the linalg ops or tilingInterface ops
     funcPm.addPass(createLramTilePass());
     funcPm.addPass(createCanonicalizerPass());
-
-    // unroll loops
-    // better call this pass later as possible
-    // just after it all are torqhl related passes that need static rank or shape, etc.
-    // some dynamic attr because of tile could be populated by unroll loop pass
-    if (!clUnrollLoopAfterBufferization) {
-        funcPm.addPass(createUnrollLoopPass());
-        funcPm.addPass(createCanonicalizerPass());
-    }
 
     // lower arith ops to torq_hl
     funcPm.addPass(createArithToTorqHLConversionPass());
@@ -221,12 +203,8 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     funcPm.addPass(createFoldConvertPass());
     funcPm.addPass(createCanonicalizerPass());
-
-    if (clUnrollLoopAfterBufferization) {
-
-        funcPm.addPass(createUnrollLoopPass());
-        funcPm.addPass(createCanonicalizerPass());
-    }
+    funcPm.addPass(createUnrollLoopPass());
+    funcPm.addPass(createCanonicalizerPass());
 }
 
 void TORQLowerExecutableTargetPass::addCpuPasses(OpPassManager &pm) {
@@ -259,10 +237,6 @@ void TORQLowerExecutableTargetPass::addCpuPasses(OpPassManager &pm) {
     // by another program
     funcPm.addPass(createScalarsToTensorsPass());
 
-    if (!clUnrollLoopAfterBufferization) {
-        funcPm.addPass(createUnrollLoopPass());
-    }
-
     // since to run on CSS we inserted a bunch of copies to LRAM we can
     // now simplify them
     funcPm.addPass(createFoldConvertPass());
@@ -294,11 +268,9 @@ void TORQLowerExecutableTargetPass::addNssPasses(OpPassManager &pm) {
 
         funcPm.addPass(createLowerCallProgramToStartWaitPass());
 
-        if (clUnrollLoopAfterBufferization) {
-            // unroll all loops since NSS cannot deal with them
-            funcPm.addPass(createUnrollLoopPass());
-            funcPm.addPass(createCanonicalizerPass());
-        }
+        // unroll all loops since NSS cannot deal with them
+        funcPm.addPass(createUnrollLoopPass());
+        funcPm.addPass(createCanonicalizerPass());
 
         funcPm.addPass(createOutlineSliceProgramsPass());
 
@@ -307,12 +279,6 @@ void TORQLowerExecutableTargetPass::addNssPasses(OpPassManager &pm) {
 
         if (!clFromPreBufferizedIR) {
             funcPm.addPass(createAddDeallocationPass());
-        }
-
-        if (!clUnrollLoopAfterBufferization) {
-            // unroll all loops since NSS cannot deal with them
-            funcPm.addPass(createUnrollLoopPass());
-            funcPm.addPass(createCanonicalizerPass());
         }
 
         // assign addresses to all allocations
