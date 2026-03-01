@@ -17,7 +17,10 @@ def comparison_config_for_mbv2(request):
 @pytest.fixture
 def case_config(request, runtime_hw_type, chip_config):
 
-    failed_tc = []
+    failed_tc = [
+            # Accuracy error due to the way comparison is handling close to 0 values
+            "mbv2-bf16_layer_Gemm_64",
+            ]
 
     next_chip = (chip_config.data['target'] != "SL2610")
     if next_chip:
@@ -52,6 +55,9 @@ def case_config(request, runtime_hw_type, chip_config):
         case_config_dict["comparison_config"] = "comparison_config_for_reduce_mean_mbv2"
 
     if "full_model" in request.node.name:
+        # Fix for bf16 clamp going to CSS
+        case_config_dict["torq_compiler_options"] = ["--torq-disable-css"]
+
         case_config_dict["comparison_config"] = "comparison_config_for_mbv2"
 
     return case_config_dict

@@ -177,6 +177,10 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             return false;
         };
 
+        auto isScalarConstant = [&](Value val, ShapedType type) {
+            return isConstantValue(val) && type.getRank() == 1 && type.getShape()[0] == 1;
+        };
+
         auto rank1 = input1Type.getRank();
         auto rank2 = input2Type.getRank();
 
@@ -186,8 +190,8 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             );
         }
 
-        // if one input is rank=1 constant, no need to broadcast
-        if ((isConstantValue(input1) && rank1 < 2) || (isConstantValue(input2) && rank2 < 2)) {
+        // if one input is rank=1 scalar constant, no need to broadcast
+        if (isScalarConstant(input1, input1Type) || isScalarConstant(input2, input2Type)) {
             return rewriter.notifyMatchFailure(
                 srcOp, "one of input or both input is rank=1 constant, no need broadcast\n"
             );

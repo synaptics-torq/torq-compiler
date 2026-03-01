@@ -8,11 +8,15 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/Pass/PassManager.h"
 #include "torq/Utils/ComputeConstants.h"
+#include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/TargetSelect.h"
 
@@ -2135,7 +2139,7 @@ bool foldScalarRescale(
 }
 
 // Conv2DMatmulOpConversion weight conversion function
-Value convertWeights(mlir::linalg::MatmulOp srcOp, mlir::Value weights, PatternRewriter &rewriter) {
+Value convertWeights(mlir::Value weights, PatternRewriter &rewriter) {
     // Reorder weights to OIHW
     auto weightTy = dyn_cast<RankedTensorType>(weights.getType());
     auto weightElemType = weightTy.getElementType();
@@ -2151,15 +2155,17 @@ Value convertWeights(mlir::linalg::MatmulOp srcOp, mlir::Value weights, PatternR
     int wn = 1;
     std::vector<int64_t> weight_shape{on, in, hn, wn};
 
+    auto srcOp = weights.getDefiningOp();
+
     if (weightElemType.isBF16()) {
         auto bfVec = attrValuesAsVec<APFloat>(weights);
         std::vector<APFloat> reordered = get_weights_OIHW<APFloat>(bfVec, on, hn, wn, in);
-        return createFConst(rewriter, srcOp, reordered, weight_shape);
+        return createFConst(rewriter, *srcOp, reordered, weight_shape);
     }
     else if (weightElemType.isInteger(8)) {
         auto reordered = attrValuesAsVec<int8_t>(weights);
         reordered = get_weights_OIHW<int8_t>(reordered, on, hn, wn, in);
-        return createI8Const(rewriter, srcOp, reordered, weight_shape);
+        return createI8Const(rewriter, *srcOp, reordered, weight_shape);
     }
     else {
         assert(false && "Unsupported weight type");
@@ -2226,6 +2232,853 @@ Value makeScaledLut(
     return makeRescale16(
         srcOp, rewriter, lookuped, aScaleFactor, aShiftFactor, aInputZp, aOutputZp
     );
+}
+
+Value pickGroupResultInt8(Value value) {
+    // Follow single-use chain forward until we hit an int rescale/clamp boundary,
+    // which defines the terminal value for fusion planning.
+    while (true) {
+        if (!value.hasOneUse()) {
+            // Ambiguous fanout: stop to avoid planning across multiple consumers.
+            return nullptr;
+        }
+        auto userOp = value.getUsers().begin();
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
+            value = genericOp.getResult(0);
+            for (auto &op : genericOp.getRegion().getOps()) {
+                if (isa<linalg::YieldOp>(op)) {
+                    continue;
+                }
+                if (isa<tosa::ApplyScaleOp>(op) || isa<arith::TruncIOp>(op) ||
+                    isa<arith::MaxSIOp>(op) || isa<arith::MinSIOp>(op)) {
+                    // Found quantized rescale tail (apply_scale + clamp/trunc).
+                    return value;
+                }
+            }
+        }
+        else if (isa<tensor::ExpandShapeOp>(*userOp)) {
+            // Shape-only op: keep walking through the transformed value.
+            value = (*userOp)->getResult(0);
+        }
+        else {
+            // Non-target user kind: current value is the best terminal point.
+            return value;
+        }
+    }
+    return value;
+}
+
+Value pickGroupResultFloat(Value value) {
+    // Float path mirrors int path but uses float rescale/clamp markers.
+    while (true) {
+        if (!value.hasOneUse()) {
+            return nullptr;
+        }
+        auto userOp = value.getUsers().begin();
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
+            value = genericOp.getResult(0);
+            for (auto &op : genericOp.getRegion().getOps()) {
+                if (isa<linalg::YieldOp>(op)) {
+                    continue;
+                }
+                if (isa<arith::TruncFOp>(op) || isa<arith::MaximumFOp>(op) ||
+                    isa<arith::MinimumFOp>(op)) {
+                    // Found float rescale tail (clamp/trunc boundary).
+                    return value;
+                }
+            }
+        }
+        else if (isa<tensor::ExpandShapeOp>(*userOp)) {
+            value = (*userOp)->getResult(0);
+        }
+        else {
+            return value;
+        }
+    }
+    return value;
+}
+
+Value pickGroupResult(Value value) {
+    // Dispatch terminal-value selection by element type family.
+    auto valueType = dyn_cast<ShapedType>(value.getType()).getElementType();
+    if (valueType.isInteger()) {
+        return pickGroupResultInt8(value);
+    }
+    if (valueType.isBF16() || valueType.isF32()) {
+        return pickGroupResultFloat(value);
+    }
+    return nullptr;
+}
+
+bool isSingleTensorReductionOp(linalg::LinalgOp linalgOp) {
+    // Keep only simple reductions that are safe to include in fusion clone:
+    // one input, one init/output, projected-permutation indexing.
+    if (linalgOp.getNumReductionLoops() == 0) {
+        return false;
+    }
+    if (linalgOp.getNumDpsInits() != 1) {
+        return false;
+    }
+    if (linalgOp.getNumDpsInputs() != 1) {
+        return false;
+    }
+    if (!linalgOp.hasOnlyProjectedPermutations()) {
+        return false;
+    }
+
+    return true;
+}
+
+bool shouldInclude(Operation *op, Value value) {
+    // Allow-list of ops that are considered fusible/supporting for bias/scale
+    // extraction. Anything else becomes a traversal boundary.
+    if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
+        if (linalg::isElementwise(linalgOp)) {
+            return true;
+        }
+        else if (isSingleTensorReductionOp(linalgOp)) {
+            return true;
+        }
+    }
+    else if (isa<tensor::ExtractSliceOp, tensor::InsertSliceOp, tensor::CollapseShapeOp,
+                 tensor::ExpandShapeOp, tensor::EmptyOp>(op)) {
+        return true;
+    }
+    else if (isa<linalg::TransposeOp, linalg::FillOp>(op)) {
+        return true;
+    }
+    else if (isa<arith::ConstantOp>(op)) {
+        return true;
+    }
+
+    else if (isa<affine::AffineApplyOp>(op)) {
+        return true;
+    }
+    return false;
+}
+
+// Support functions for fusion plan
+bool computeGroup(Value value, Value groupResult, SmallVector<Operation *> &opsToGroup);
+
+bool createFusionPlan(Value &value, FusionPlan &fusionPlan) {
+    // Build a backward fusion plan rooted at `value`.
+    // The plan captures operations between `value` (anchor) and a selected terminal
+    // result (`groupResult`) that are eligible for cloning/folding later.
+
+    auto valueType = dyn_cast<ShapedType>(value.getType());
+    if (!valueType) {
+        LLVM_DEBUG({ llvm::errs() << "matching error value is not a ShapedType!\n"; });
+        return {};
+    }
+
+    // Choose the final op/value of the fusible chain (typically at the end of
+    // elementwise/rescale/clamp sequence).
+    auto groupResult = pickGroupResult(value);
+    if (!groupResult) {
+        LLVM_DEBUG({ llvm::dbgs() << "pickGroupResult FAILED\n"; });
+        return false;
+    }
+
+    // Walk backward from groupResult toward anchor and collect only supported ops.
+    SmallVector<Operation *> opsToGroup;
+    if (!computeGroup(value, groupResult, opsToGroup)) {
+        LLVM_DEBUG({ llvm::dbgs() << "computeGroup FAILED\n"; });
+        return false;
+    }
+
+    // Persist the computed plan for downstream bias/scale extraction utilities.
+    fusionPlan.anchor = value.getDefiningOp();
+    fusionPlan.neededOps.insert(fusionPlan.neededOps.end(), opsToGroup.begin(), opsToGroup.end());
+    for (auto op : fusionPlan.neededOps) {
+        LLVM_DEBUG({
+            llvm::dbgs() << "createFusionPlan neededOp: ";
+            op->print(llvm::dbgs());
+            llvm::dbgs() << "\n";
+        });
+    }
+
+    return true;
+}
+
+bool computeGroup(Value anchor, Value groupResult, SmallVector<Operation *> &opsToGroup) {
+    // Backward traversal from the chosen terminal result to collect the minimal
+    // connected subgraph needed to compute bias/scale relative to `anchor`.
+    llvm::SmallVector<Value, 8> worklist;
+    worklist.push_back(groupResult);
+    llvm::SmallPtrSet<Operation *, 8> visited;
+
+    while (!worklist.empty()) {
+        Value v = worklist.pop_back_val();
+        Operation *defOp = v.getDefiningOp();
+        if (!defOp || visited.contains(defOp)) {
+            continue;
+        }
+        if (v.getParentRegion() != anchor.getParentRegion()) {
+            // Do not cross region boundaries (e.g. nested control-flow regions).
+            continue;
+        }
+        visited.insert(defOp);
+
+        // Stop expansion through non-allowlisted ops (except anchor itself).
+        if (v != anchor && !shouldInclude(defOp, v)) {
+            continue;
+        }
+        if (v == anchor) {
+            // Anchor is handled as external root; no need to include it in neededOps.
+            continue;
+        }
+        // Insert at front so producer ordering is closer to topological order.
+        opsToGroup.insert(opsToGroup.begin(), defOp);
+
+        for (Value input : defOp->getOperands()) {
+            worklist.push_back(input);
+        }
+    }
+    // opsToGroup.insert(opsToGroup.begin(), anchor.getDefiningOp());
+    LLVM_DEBUG({
+        llvm::dbgs() << "computeGroup opsToGroup:\n";
+        for (auto op : opsToGroup) {
+            op->print(llvm::dbgs());
+            llvm::dbgs() << "\n";
+        }
+    });
+
+    // Sort the ops by their order in the block to ensure correct cloning order later
+    LLVM_DEBUG({
+        llvm::dbgs() << "computeGroup before sort opsToGroup:\n";
+        for (auto op : opsToGroup) {
+            op->print(llvm::dbgs(), OpPrintingFlags().printGenericOpForm());
+            llvm::dbgs() << "\n";
+        }
+    });
+    std::sort(opsToGroup.begin(), opsToGroup.end(), [](Operation *a, Operation *b) {
+        return a->isBeforeInBlock(b);
+    });
+    LLVM_DEBUG({
+        llvm::dbgs() << "computeGroup after sort opsToGroup:\n";
+        for (auto op : opsToGroup) {
+            op->print(llvm::dbgs(), OpPrintingFlags().printGenericOpForm());
+            llvm::dbgs() << "\n";
+        }
+    });
+    return true;
+}
+
+bool isRescaleF32(Operation *op) {
+    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
+        for (auto &op : genericOp.getRegion().getOps()) {
+            if (isa<arith::TruncFOp>(op) || isa<arith::MaximumFOp>(op) ||
+                isa<arith::MinimumFOp>(op)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool isRescaleInt(Operation *op) {
+    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
+        for (auto &op : genericOp.getRegion().getOps()) {
+            if (isa<tosa::ApplyScaleOp>(op) || isa<arith::TruncIOp>(op) ||
+                isa<arith::MaxSIOp>(op) || isa<arith::MinSIOp>(op)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool isRescale(Operation *op) {
+    auto valueType = dyn_cast<ShapedType>(op->getResult(0).getType()).getElementType();
+    if (valueType.isInteger()) {
+        return isRescaleInt(op);
+    }
+    if (valueType.isBF16() || valueType.isF32()) {
+        return isRescaleF32(op);
+    }
+    return false;
+}
+
+FailureOr<Value> getWeightZp(Value bias, OpBuilder &builder) {
+    auto biasOp = mlir::dyn_cast<linalg::GenericOp>(bias.getDefiningOp());
+    if (!biasOp) {
+        return failure();
+    }
+    if (biasOp.getNumOperands() < 4) {
+        return failure();
+    }
+
+    // Get the first Op from start of biasOp block
+    auto &region = biasOp.getRegion();
+    auto &block = region.front();
+    auto firstOp = block.getOperations().begin();
+
+    auto weightZpOp = firstOp->getOperand(1).getDefiningOp();
+    if (auto constOp = dyn_cast<arith::ConstantOp>(weightZpOp)) {
+        auto constType = dyn_cast<RankedTensorType>(constOp.getType());
+        if (!constType) {
+            OpBuilder::InsertionGuard guard(builder);
+            builder.setInsertionPointAfter(constOp);
+            auto ty = dyn_cast<IntegerType>(constOp.getType());
+            SmallVector<int64_t> newShape{1};
+            auto newTy = RankedTensorType::get(newShape, builder.getIntegerType(ty.getWidth()));
+            auto emTensor =
+                builder
+                    .create<tensor::EmptyOp>(
+                        biasOp.getLoc(), ArrayRef<int64_t>{newShape}, newTy.getElementType()
+                    )
+                    .getResult();
+            auto zeroOp =
+                builder.create<linalg::FillOp>(bias.getLoc(), constOp.getResult(), emTensor);
+            return zeroOp.getResult(0);
+        }
+    }
+    return weightZpOp->getResult(0);
+}
+
+Value postProcessBias(Value bias, OpBuilder &builder) {
+    // This rewrite targets the specific fused-bias form that carries extra operands.
+    // Leave simpler generics unchanged.
+    auto biasOp = mlir::dyn_cast<linalg::GenericOp>(bias.getDefiningOp());
+    if (!biasOp) {
+        // Nothing to normalize when bias is not produced by linalg.generic.
+        return bias;
+    }
+    if (biasOp->getNumOperands() < 4) {
+        // Extra operands are the weight zero point tensors
+        return bias;
+    }
+
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(biasOp);
+    assert(biasOp->getNumOperands() < 5 && "Bias op with greater than 4 operands is not expected");
+    // Operand#1 is the weight zero point, we explicitly neutralize to zero
+    auto operand = biasOp.getOperand(1);
+
+    auto opTy = mlir::dyn_cast<ShapedType>(operand.getType());
+
+    auto zeroAttr = DenseElementsAttr::get(opTy, builder.getZeroAttr(opTy.getElementType()));
+    auto zeroConst = builder.create<arith::ConstantOp>(biasOp->getLoc(), opTy, zeroAttr);
+
+    biasOp->setOperand(1, zeroConst);
+
+    return biasOp->getResult(0);
+}
+
+Value createNewBias(
+    FusionPlan &fusionPlan, OpBuilder &builder, int biasChDim,
+    llvm::SmallVectorImpl<Operation *> &opsToDelete, std::optional<Value> &optionalWeightZp
+) {
+    // Builds a per-channel bias tensor from a fusion plan by cloning the relevant
+    // subgraph, optionally extracting weight zero-point information, normalizing
+    // shape (including inverse collapse when needed), and reducing non-channel
+    // dimensions into a 1D bias vector with appropriate accumulator type handling.
+    auto firstOp = fusionPlan.anchor;
+    auto firstOpResult = firstOp->getResult(0);
+    auto firstOpResultType = dyn_cast<ShapedType>(firstOpResult.getType());
+    int endIdx = fusionPlan.neededOps.size() - 1;
+    if (!isRescale(fusionPlan.neededOps.back())) {
+        // If the tail op is not a rescale/clamp stage, include the full fusion range.
+        // This usually happens in BF16 cases where there is no rescale after anchor op
+        endIdx = fusionPlan.neededOps.size();
+    }
+    auto bias =
+        createClonedBlock(builder, fusionPlan, fusionPlan.neededOps, 0, endIdx, opsToDelete);
+
+    if (!bias) {
+        // Fallback: no cloneable bias-producing chain was found.
+        // Materialize a zero 1D bias over the channel dimension.
+        bias = builder
+                   .create<arith::ConstantOp>(
+                       firstOp->getLoc(), builder.getZeroAttr(RankedTensorType::get(
+                                              {firstOpResultType.getShape()[biasChDim]},
+                                              firstOpResultType.getElementType()
+                                          ))
+                   )
+                   .getResult();
+        return bias;
+    }
+    auto maybeWeightZp = getWeightZp(bias, builder);
+    if (succeeded(maybeWeightZp)) {
+        // Thread optional weight zero-point back to caller for downstream quant handling.
+        optionalWeightZp = *maybeWeightZp;
+    }
+    // Canonicalize bias clone shape/operands before reduction. Currently weight zero-point is
+    // neutralized
+    bias = postProcessBias(bias, builder);
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "computeBias: Ops to Delete:\n";
+        for (auto op : opsToDelete) {
+            op->print(llvm::dbgs(), OpPrintingFlags().printGenericOpForm());
+            llvm::dbgs() << "\n";
+        }
+    });
+
+    llvm::SmallVector<ReassociationIndices> reassoc;
+    tensor::ExpandShapeOp expandShapeOp;
+    for (auto op : opsToDelete) {
+        if (isa<tensor::ExpandShapeOp>(op)) {
+            // If clone path introduced expand_shape, restore source rank before reduction.
+            expandShapeOp = cast<tensor::ExpandShapeOp>(op);
+            reassoc = expandShapeOp.getReassociationIndices();
+        }
+    }
+
+    if (reassoc.size() > 0) {
+        bias = builder
+                   .create<tensor::CollapseShapeOp>(
+                       firstOp->getLoc(), expandShapeOp.getSrc().getType(), bias, reassoc
+                   )
+                   .getResult();
+    }
+    // setTargetExecutorAttr(bias.getDefiningOp(), torq_hl::Executor::Host);
+
+    auto biasTy = dyn_cast<ShapedType>(bias.getType());
+    auto reduceTy = RankedTensorType::get(
+        {firstOpResultType.getShape()[biasChDim]}, firstOpResultType.getElementType()
+    );
+    // Reduce across all non-channel dims to produce per-channel bias.
+    SmallVector<int64_t, 4> reduceD;
+    reduceD.reserve(biasTy.getRank() - 1);
+    for (int i = 0; i < biasTy.getRank(); ++i) {
+        if (i != biasChDim)
+            reduceD.push_back(i);
+    }
+
+    if (biasTy.getElementType().isBF16()) {
+        auto emTensor = builder
+                            .create<tensor::EmptyOp>(
+                                firstOp->getLoc(), reduceTy.getShape(), builder.getF32Type()
+                            )
+                            .getResult();
+        bias = builder
+                   .create<linalg::ReduceOp>(
+                       firstOp->getLoc(), bias, emTensor, reduceD,
+                       [](OpBuilder &b, Location loc, ValueRange args) {
+                           Value y = b.create<arith::ExtFOp>(loc, b.getF32Type(), args[0]);
+                           b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
+                       }
+                   )
+                   .getResult(0);
+    }
+    else if (biasTy.getElementType().isInteger(8) || biasTy.getElementType().isInteger(16)) {
+        auto emTensor = builder
+                            .create<tensor::EmptyOp>(
+                                firstOp->getLoc(), reduceTy.getShape(), builder.getI32Type()
+                            )
+                            .getResult();
+        bias = builder
+                   .create<linalg::ReduceOp>(
+                       firstOp->getLoc(), bias, emTensor, reduceD,
+                       [](OpBuilder &b, Location loc, ValueRange args) {
+                           Value y = b.create<arith::ExtSIOp>(loc, b.getI32Type(), args[0]);
+                           b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
+                       }
+                   )
+                   .getResult(0);
+    }
+    else {
+        auto emTensor = builder
+                            .create<tensor::EmptyOp>(
+                                firstOp->getLoc(), reduceTy.getShape(), reduceTy.getElementType()
+                            )
+                            .getResult();
+        bias = builder
+                   .create<linalg::ReduceOp>(
+                       firstOp->getLoc(), bias, emTensor, reduceD,
+                       [](OpBuilder &b, Location loc, ValueRange args) {
+                           b.create<linalg::YieldOp>(loc, ArrayRef<Value>{args[0]});
+                       }
+                   )
+                   .getResult(0);
+    }
+
+    return bias;
+}
+
+bool computeBias(
+    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim,
+    int biasChDim
+) {
+
+    biasChDim = biasChDim < 0 ? channelDim : biasChDim;
+
+    auto firstOp = fusionPlan.anchor;
+    auto firstOpResult = firstOp->getResult(0);
+    auto firstOpResultType = dyn_cast<ShapedType>(firstOpResult.getType());
+
+    if (!firstOpResultType) {
+        LLVM_DEBUG({ llvm::dbgs() << "computeBias: first op result is not ShapedType\n"; });
+        return false;
+    }
+
+    auto parentRegion = fusionPlan.anchor->getParentRegion();
+    auto owner = parentRegion->getParentOp();
+    OpBuilder builder(owner->getContext());
+    SmallVector<Operation *, 8> opsToDelete;
+
+    {
+        OpBuilder::InsertionGuard g(builder);
+        builder.setInsertionPoint(firstOp);
+        bias = createNewBias(fusionPlan, builder, biasChDim, opsToDelete, optionalWeightZp);
+    }
+
+    setCompileTimeConstAttr(bias.getDefiningOp());
+    return true;
+}
+
+mlir::FailureOr<Value>
+modifyMulValue(Value mul, Value biasScale, Operation *lastOp, OpBuilder &builder) {
+    auto bTy = mlir::dyn_cast<ShapedType>(biasScale.getType());
+    auto mulTy = mul.getType();
+
+    // Handle ShapedType mul value
+    if (auto ty = mlir::dyn_cast<ShapedType>(mulTy)) {
+        // If shape already matches, return as-is
+        if (ty.getShape().back() == bTy.getShape().back()) {
+            return mul;
+        }
+        // Otherwise, reshape it to match the bias scale shape
+        auto newShape = bTy.getShape().back();
+        auto init = builder
+                        .create<tensor::EmptyOp>(
+                            lastOp->getLoc(), ArrayRef<int64_t>{newShape}, ty.getElementType()
+                        )
+                        .getResult();
+        return builder
+            .create<linalg::BroadcastOp>(lastOp->getLoc(), mul, init, SmallVector<int64_t>{0})
+            .getResult()[0];
+    }
+
+    // Handle IntegerType mul value
+    if (auto ty = mlir::dyn_cast<IntegerType>(mulTy)) {
+        auto newShape = bTy.getShape().back();
+        auto newTy = RankedTensorType::get(newShape, builder.getIntegerType(ty.getWidth()));
+        auto emTensor =
+            builder
+                .create<tensor::EmptyOp>(
+                    lastOp->getLoc(), ArrayRef<int64_t>{newShape}, newTy.getElementType()
+                )
+                .getResult();
+        return builder.create<linalg::FillOp>(lastOp->getLoc(), mul, emTensor).getResult(0);
+    }
+
+    // If neither type, return failure
+    return failure();
+}
+
+mlir::FailureOr<Value>
+modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuilder &builder) {
+    Value minShiftV;
+    Value origShiftV = shift;
+    if (shift.getDefiningOp<tensor::ExtractSliceOp>()) {
+        origShiftV = shift.getDefiningOp<tensor::ExtractSliceOp>().getSource();
+    }
+    auto shiftTy = origShiftV.getType();
+
+    OpBuilder::InsertionGuard g(builder);
+    builder.setInsertionPointAfter(origShiftV.getDefiningOp());
+    if (auto shapedTy = mlir::dyn_cast<ShapedType>(shiftTy)) {
+        auto emTensor = createI8Const(
+            builder, *lastOp, ArrayRef<int8_t>{std::numeric_limits<int8_t>::max()}, {}
+        );
+        auto rOp = builder.create<linalg::ReduceOp>(
+            lastOp->getLoc(), origShiftV, emTensor.getResult(), ArrayRef<int64_t>{0},
+            [](OpBuilder &b, Location loc, ValueRange args) {
+                auto min = b.create<arith::MinSIOp>(loc, args[0], args[1]);
+                b.create<linalg::YieldOp>(loc, ArrayRef<Value>{min});
+            }
+        );
+
+        minShiftV =
+            builder.create<tensor::ExtractOp>(lastOp->getLoc(), rOp.getResult(0), ValueRange{})
+                .getResult();
+    }
+    else if (auto intTy = mlir::dyn_cast<IntegerType>(shiftTy)) {
+        minShiftV = shift;
+    }
+    else {
+        // Unsupported shift type
+        LLVM_DEBUG({ llvm::dbgs() << "modifyShiftValue: unsupported shift type\n"; });
+        return failure();
+    }
+
+    auto modShiftV = builder
+                         .create<tensor::EmptyOp>(
+                             lastOp->getLoc(), ArrayRef<int64_t>{1}, builder.getIntegerType(8)
+                         )
+                         .getResult();
+    auto fillOp = builder.create<linalg::FillOp>(lastOp->getLoc(), minShiftV, modShiftV);
+    // ComputeArithConst works only on tensor so getting the shift value from ReduceOp
+    // result
+    auto maybeShiftFactor = computeArithConst(fillOp.getResult(0), true, {});
+    if (failed(maybeShiftFactor)) {
+        LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: failed to compute shift factor\n"; });
+        return failure();
+    }
+    // FIXME: ScaleShift is currently calculated. May need to change this to constant later
+    // Also this is a side effect, probably better to change it later
+    scInfo.scaleShift = returnDenseElementAttr(*maybeShiftFactor).getValues<int8_t>()[0];
+
+    return fillOp.getResult(0);
+}
+
+bool computeRescaleInfo(
+    FusionPlan &fusionPlan, bool isElementWiseOp, Value &biasScale, ScaleClampInfo &scInfo
+) {
+    // Parse the terminal rescale generic and reconstruct explicit scale/clamp metadata.
+    // The goal is to materialize per-channel scale values and interleave them with biasScale.
+    /////////////////////////// Support////////////////////////////////////////
+    struct ScaleInfoOps {
+        tosa::ApplyScaleOp applyScaleOp;
+        arith::AddIOp addOp;
+        arith::MaxSIOp maxOp;
+        arith::MinSIOp minOp;
+        arith::TruncIOp truncOp;
+    } scaleInfoOps;
+    ///////////////////////////////////////////////////////////////////////////
+
+    // Check whether last op is apply_scale
+    auto lastOp = fusionPlan.neededOps.back();
+    if (!isRescale(lastOp)) {
+        LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: last op is not a rescale op\n"; });
+        return true;
+    }
+    auto rescaleOp = dyn_cast<linalg::GenericOp>(lastOp);
+    // Rescale Op Ex:
+    //  %21 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>,
+    //  affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0,
+    //  d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel",
+    //  "parallel"]} ins(%expanded, %cst_1, %cst_2 : tensor<1x28x56x24xi32>, tensor<24xi32>,
+    //  tensor<24xi8>) outs(%extracted_slice_8 : tensor<1x28x56x24xi8>) attrs =  {"torq-fuse-group"
+    //  = [4], "torq-fuse-group-id" = 10 : i64, "torq-tiling-dfs" = false} {
+    // ^bb0(%in: i32, %in_9: i32, %in_10: i8, %out: i8):
+    //   %22 = tosa.apply_scale %in, %in_9, %in_10 {double_round = true} : (i32, i32, i8) -> i32
+    //   %23 = arith.addi %22, %c-3_i32 : i32
+    //   %24 = arith.maxsi %23, %c-128_i32 : i32
+    //   %25 = arith.minsi %24, %c127_i32 : i32
+    //   %26 = arith.trunci %25 : i32 to i8
+    //   linalg.yield %26 : i8
+    // } -> tensor<1x28x56x24xi8>
+    for (auto &op : rescaleOp.getRegion().getOps()) {
+        // Collect the canonical quantized-rescale pieces from the linalg.generic body.
+        if (auto applyScaleOp = dyn_cast<tosa::ApplyScaleOp>(op)) {
+            scaleInfoOps.applyScaleOp = applyScaleOp;
+        }
+        else if (auto addOp = dyn_cast<arith::AddIOp>(op)) {
+            scaleInfoOps.addOp = addOp;
+        }
+        else if (auto maxOp = dyn_cast<arith::MaxSIOp>(op)) {
+            scaleInfoOps.maxOp = maxOp;
+        }
+        else if (auto minOp = dyn_cast<arith::MinSIOp>(op)) {
+            scaleInfoOps.minOp = minOp;
+        }
+        else if (auto truncOp = dyn_cast<arith::TruncIOp>(op)) {
+            scaleInfoOps.truncOp = truncOp;
+        }
+    }
+
+    OpBuilder builder(lastOp);
+
+    // Get the constant values as integers from the add, max, min ops if present
+    if (scaleInfoOps.minOp) {
+        if (auto o = dyn_cast<arith::ConstantOp>(scaleInfoOps.minOp.getRhs().getDefiningOp())) {
+            scInfo.max = mlir::cast<IntegerAttr>(o.getValue()).getInt();
+        }
+    }
+    if (scaleInfoOps.maxOp) {
+        if (auto o = dyn_cast<arith::ConstantOp>(scaleInfoOps.maxOp.getRhs().getDefiningOp())) {
+            scInfo.min = mlir::cast<IntegerAttr>(o.getValue()).getInt();
+        }
+    }
+    if (scaleInfoOps.addOp) {
+        if (auto o = dyn_cast<arith::ConstantOp>(scaleInfoOps.addOp.getRhs().getDefiningOp())) {
+            scInfo.zp = mlir::cast<IntegerAttr>(o.getValue()).getInt();
+        }
+    }
+    if (!scaleInfoOps.applyScaleOp) {
+        LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: applyScaleOp not found in rescaleOp\n"; }
+        );
+        return true;
+    }
+    // Create a linalg generic op that divides the multiplier by 2^shift and multiplies by 2^shift8b
+    // or 16b Get the multiplier and shift values from the block arguments of the linalg generic
+    auto mul = scaleInfoOps.applyScaleOp.getMultiplier();
+    if (isa<BlockArgument>(mul)) {
+        auto mulBArg = mlir::cast<BlockArgument>(mul);
+        // Lift block argument back to the parent generic operand so we can reuse upstream tensors.
+        mul = mulBArg.getOwner()->getParentOp()->getOperand(mulBArg.getArgNumber());
+    }
+
+    auto shift = scaleInfoOps.applyScaleOp.getShift();
+    if (isa<BlockArgument>(shift)) {
+        auto shiftBArg = mlir::cast<BlockArgument>(shift);
+        // Same for shift: remap region arg to enclosing op operand.
+        shift = shiftBArg.getOwner()->getParentOp()->getOperand(shiftBArg.getArgNumber());
+    }
+
+    // Returns a value with single shift value of type tensor<i32>
+    auto maybeShiftV = modifyShiftValue(shift, lastOp, scInfo, builder);
+    if (failed(maybeShiftV)) {
+        LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: failed to modify shift value\n"; });
+        return false;
+    }
+    auto modShiftV = *maybeShiftV;
+
+    auto shiftTy = shift.getType();
+    // Cache type casts to avoid redundant dyn_cast operations
+    auto shiftShapedTy = mlir::dyn_cast<ShapedType>(shiftTy);
+    auto shiftIntTy = mlir::dyn_cast<IntegerType>(shiftTy);
+
+    auto maybeMulV = modifyMulValue(mul, biasScale, lastOp, builder);
+    if (failed(maybeMulV)) {
+        LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: failed to modify mul value\n"; });
+        return false;
+    }
+    auto mulV = *maybeMulV;
+    auto mulTy = mlir::dyn_cast<ShapedType>(mulV.getType());
+
+    Value finalScaleV;
+
+    auto biasScaleTy = dyn_cast<ShapedType>(biasScale.getType());
+    auto newScaleV = builder
+                         .create<tensor::EmptyOp>(
+                             lastOp->getLoc(), biasScaleTy.getShape().back(), builder.getI32Type()
+                         )
+                         .getResult();
+
+    llvm::SmallVector<AffineMap, 4> rescaleMap;
+    AffineMap mulVMap = builder.getDimIdentityMap();
+    AffineMap shiftVMap = builder.getDimIdentityMap();
+    AffineMap modScaleVMap =
+        AffineMap::get(/*dimCount=*/1, /*symbolCount=*/0, builder.getAffineConstantExpr(0));
+
+    // Build indexing maps that support scalar or length-1 multiplier/shift via broadcast.
+    if (mulTy.getShape()[0] == 1) {
+        mulVMap =
+            AffineMap::get(/*dimCount=*/1, /*symbolCount=*/0, builder.getAffineConstantExpr(0));
+    }
+    if (shiftShapedTy) {
+        if (shiftShapedTy.getShape()[0] == 1) {
+            shiftVMap = modScaleVMap;
+        }
+    }
+    else if (shiftIntTy) {
+        // Scalar integer shift is normalized to tensor form produced by modifyShiftValue.
+        shift = modShiftV;
+        shiftVMap = modScaleVMap;
+    }
+    rescaleMap.push_back(mulVMap);
+    rescaleMap.push_back(shiftVMap);
+    rescaleMap.push_back(modScaleVMap);
+    rescaleMap.push_back(builder.getDimIdentityMap());
+
+    auto rescaleLinalg = builder.create<linalg::GenericOp>(
+        lastOp->getLoc(), newScaleV.getType(), llvm::ArrayRef<Value>{mulV, shift, modShiftV},
+        llvm::ArrayRef<Value>{newScaleV}, rescaleMap,
+        llvm::SmallVector<utils::IteratorType, 4>(1, utils::IteratorType::parallel),
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+            // Effective multiplier := multiplier >> (orig_shift - normalized_shift).
+            // This folds shift normalization into scale tensor generation.
+            auto arg1I32 = builder.create<arith::ExtSIOp>(loc, builder.getI32Type(), args[1]);
+            auto arg2I32 = builder.create<arith::ExtSIOp>(loc, builder.getI32Type(), args[2]);
+            auto shift = builder.create<arith::SubIOp>(loc, arg1I32, arg2I32);
+            auto multiplier = b.create<arith::ShRSIOp>(loc, args[0], shift);
+            b.create<linalg::YieldOp>(loc, ArrayRef<Value>{multiplier});
+        }
+    );
+    finalScaleV = rescaleLinalg.getResult(0);
+    LLVM_DEBUG({
+        llvm::dbgs() << "computeRescaleInfo: created rescaleLinalg:\n";
+        rescaleLinalg.print(llvm::dbgs());
+        llvm::dbgs() << "\n";
+    });
+
+    // Interleave [bias, scale] per channel into a single 1D tensor:
+    // even indices  <- biasScale, odd indices <- finalScaleV.
+
+    SmallVector<int64_t, 1> sh{biasScaleTy.getShape()[0] * 2};
+
+    auto iTy = RankedTensorType::get(sh, biasScaleTy.getElementType());
+
+    auto init =
+        builder.create<tensor::EmptyOp>(lastOp->getLoc(), iTy.getShape(), iTy.getElementType())
+            .getResult();
+
+    auto iOp = builder
+                   .create<tensor::InsertSliceOp>(
+                       lastOp->getLoc(), biasScale, init,
+                       llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(0)},
+                       llvm::ArrayRef<OpFoldResult>{
+                           builder.getIndexAttr(biasScaleTy.getShape()[0]),
+                       },
+                       llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+                   )
+                   .getResult();
+
+    // Insert scales at odd offsets with stride=2 to complete interleaving.
+    iOp = builder
+              .create<tensor::InsertSliceOp>(
+                  lastOp->getLoc(), finalScaleV, iOp,
+                  llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(1)},
+                  llvm::ArrayRef<OpFoldResult>{
+                      builder.getIndexAttr(biasScaleTy.getShape()[0]),
+                  },
+                  llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+              )
+              .getResult();
+
+    biasScale = iOp;
+    setCompileTimeConstAttr(biasScale.getDefiningOp());
+    return true;
+}
+
+bool computeBiasForMatmul(
+    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim
+) {
+    if (channelDim > 1) {
+        return computeBias(fusionPlan, bias, optionalWeightZp, channelDim, 1);
+    }
+    return computeBias(fusionPlan, bias, optionalWeightZp, channelDim, 0);
+}
+
+bool modifyWeightWithZp(
+    Value &weights, Value weightZp, ScaleClampInfo &scInfo, PatternRewriter &rewriter
+) {
+    // Convert quantized weights into zero-point-adjusted signed domain:
+    //   adjusted_w = sext(weight_i8) - trunc(weight_zp)
+    // Result is materialized as i16 to preserve headroom for downstream arithmetic.
+    auto wTy = mlir::cast<RankedTensorType>(weights.getType());
+    auto rankedI16Type = RankedTensorType::get(wTy.getShape(), rewriter.getIntegerType(16));
+    auto initTensor = createInitTensor(*weights.getDefiningOp(), rewriter, rankedI16Type);
+    SmallVector<utils::IteratorType> iterTypes(wTy.getRank(), utils::IteratorType::parallel);
+    SmallVector<AffineMap> indexingMaps = {
+        rewriter.getMultiDimIdentityMap(wTy.getRank()),
+        // Treat weightZp as a scalar-like/broadcasted input across all weight elements.
+        AffineMap::get(wTy.getRank(), 0, rewriter.getAffineConstantExpr(0), rewriter.getContext()),
+        rewriter.getMultiDimIdentityMap(wTy.getRank())
+    };
+    auto rescaledWeights =
+        rewriter
+            .create<linalg::GenericOp>(
+                weights.getLoc(), rankedI16Type, ValueRange{weights, weightZp},
+                ValueRange{initTensor}, indexingMaps, iterTypes,
+                [](OpBuilder &b, Location loc, ValueRange args) {
+                    // Sign-extend weights to i16 first to avoid overflow/underflow on subtraction.
+                    auto w = b.create<arith::ExtSIOp>(loc, b.getIntegerType(16), args[0]);
+                    // Zero-point is narrowed to i16 so both operands share arithmetic type.
+                    auto zp = b.create<arith::TruncIOp>(loc, b.getIntegerType(16), args[1]);
+                    auto sub = b.create<arith::SubIOp>(loc, w, zp);
+                    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{sub});
+                }
+            )
+            .getResult(0);
+    weights = rescaledWeights;
+    // Mark as compile-time-const so later passes can fold/use it as static data.
+    setCompileTimeConstAttr(weights.getDefiningOp());
+    return true;
 }
 
 } // namespace mlir::syna::torq

@@ -7,12 +7,14 @@
 #pragma once
 
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Utils/ConversionUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
+#include "mlir/IR/Dominance.h"
 
 namespace mlir::syna::torq {
 
@@ -165,6 +167,36 @@ bool foldForwardPerChannelAdd(
     Value inValue = nullptr, int32_t *w_zp = nullptr
 );
 
+// Build a fusion plan rooted at `value` by selecting a terminal fusible result
+// and collecting intermediate operations needed to reconstruct that chain.
+// On success, `fusionPlan.anchor` and `fusionPlan.neededOps` are populated.
+bool createFusionPlan(Value &value, FusionPlan &fusionPlan);
+
+// Build per-channel bias from the fusion plan rooted at `fusionPlan.anchor`.
+// Optionally surfaces folded weight zero-point through `optionalWeightZp`.
+// `biasChDim` can override the channel dimension used for reduction.
+bool computeBias(
+    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim,
+    int biasChDim = -1
+);
+// Convenience wrapper for matmul-like cases, selecting bias channel mapping
+// based on `channelDim`.
+bool computeBiasForMatmul(
+    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim
+);
+
+// Extract scale/clamp/zero-point info from the trailing rescale pattern in
+// `fusionPlan` and interleave scale into `biasScale` for NPU consumption.
+bool computeRescaleInfo(
+    FusionPlan &fusionPlan, bool isElementWiseOp, Value &biasScale, ScaleClampInfo &scInfo
+);
+
+// Apply weight zero-point correction to quantized weights:
+// adjusted_w = sext(weight) - trunc(weightZp), materialized as i16 tensor.
+bool modifyWeightWithZp(
+    Value &weights, Value weightZp, ScaleClampInfo &scInfo, PatternRewriter &rewriter
+);
+
 // Deduce ScaleClampInfo forward
 // scaleValuesCount is the expected number of scale values
 // shift8b is the shift amount of the scale values for 8bits computations
@@ -229,7 +261,7 @@ bool foldScalarRescale(
     Value &input, ScaleInfo &scaleInfo, const Type &elementType, PatternRewriter &rewriter
 );
 
-Value convertWeights(mlir::linalg::MatmulOp srcOp, mlir::Value weights, PatternRewriter &rewriter);
+Value convertWeights(mlir::Value weights, PatternRewriter &rewriter);
 
 Value makeBitcast(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input

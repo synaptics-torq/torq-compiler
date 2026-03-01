@@ -39,19 +39,65 @@ inline int64_t smallest_multiple(int64_t n, int64_t d) { return ((n + d - 1) / d
 // inner_on. This allows to accomodate the parallel computation of inner_on
 // output channels.
 template <typename T>
-static void biasScale_inflate(
-    std::vector<T> &biases, std::vector<int64_t> &shape, int64_t inner_on, T biasValue, T scaleValue
-) {
+static void biasScale_inflate(Value &biases, int64_t inner_on, T biasValue, T scaleValue) {
+    auto biasType = llvm::cast<RankedTensorType>(biases.getType());
+    auto shape = biasType.getShape().vec();
     auto out_ch = shape[0];
     auto inflated_out_ch = 2 * std::max(smallest_multiple(out_ch, inner_on), inner_on);
     shape[0] = inflated_out_ch;
-    biases.reserve(inflated_out_ch);
 
-    auto pad_ch = (inflated_out_ch - out_ch) / 2;
-    for (int i = 0; i < pad_ch; ++i) {
-        biases.push_back(biasValue);
-        biases.push_back(scaleValue);
-    }
+    auto padCh = (inflated_out_ch - out_ch) / 2;
+
+    OpBuilder builder(biases.getContext());
+    auto inflatedBias =
+        builder.create<tensor::EmptyOp>(biases.getLoc(), shape, biasType.getElementType());
+
+    // Inflate the biases tensor by padding biasValue and scaleValue at the end in interleaved
+    // fashion
+    builder.setInsertionPointAfterValue(biases);
+
+    DenseElementsAttr biasAttr = DenseElementsAttr::get(
+        RankedTensorType::get({padCh}, biasType.getElementType()),
+        llvm::SmallVector<T>(padCh, biasValue)
+    );
+    auto padBiasV =
+        builder.create<arith::ConstantOp>(biases.getLoc(), biasType.getElementType(), biasAttr);
+
+    DenseElementsAttr scaleAttr = DenseElementsAttr::get(
+        RankedTensorType::get({padCh}, biasType.getElementType()),
+        llvm::SmallVector<T>(padCh, scaleValue)
+    );
+    auto padScaleV =
+        builder.create<arith::ConstantOp>(biases.getLoc(), biasType.getElementType(), scaleAttr);
+    auto iOp = builder
+                   .create<tensor::InsertSliceOp>(
+                       biases.getLoc(), biases, inflatedBias,
+                       /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(0)},
+                       /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch)},
+                       /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(1)}
+                   )
+                   .getResult();
+
+    iOp = builder
+              .create<tensor::InsertSliceOp>(
+                  biases.getLoc(), padBiasV, iOp,
+                  /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch)},
+                  /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(padCh)},
+                  /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+              )
+              .getResult();
+    iOp = builder
+              .create<tensor::InsertSliceOp>(
+                  biases.getLoc(), padScaleV, iOp,
+                  /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch + 1)},
+                  /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(padCh)},
+                  /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+              )
+              .getResult();
+
+    biases = iOp;
+
+    setCompileTimeConstAttr(biases.getDefiningOp());
 }
 
 // Convert weights from OI[HW] to OI[HW]O layout
@@ -62,6 +108,9 @@ static mlir::Value weights_OIHW_to_OIHWO(
 ) {
     llvm::SmallVector<int64_t> innerDimsPos(1, 0);
     llvm::SmallVector<OpFoldResult> innerTiles(1, OpFoldResult(rewriter.getIndexAttr(inner_on)));
+
+    mlir::OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointAfterValue(weights);
     auto empty = tensor::PackOp::createDestinationTensor(
         rewriter, loc, weights, innerTiles, innerDimsPos, {}
     );
@@ -74,7 +123,6 @@ static mlir::Value weights_OIHW_to_OIHWO(
         rewriter.create<tensor::PackOp>(loc, weights, empty, innerDimsPos, innerTiles, zeroVal);
 
     setCompileTimeConstAttr(packedWeights);
-    setTargetExecutorAttr(packedWeights, torq_hl::Executor::NSS);
     return packedWeights.getResult();
 }
 
@@ -239,7 +287,6 @@ static mlir::Value weights_swap_even_odd(
         rewriter.create<tensor::InsertSliceOp>(loc, oddExtract, r1, ins1Off, ins1Sz, insStride);
 
     setCompileTimeConstAttr(res);
-    setTargetExecutorAttr(res, torq_hl::Executor::NSS);
     return res.getResult();
 }
 
@@ -259,7 +306,6 @@ weights_insert_dimension(PatternRewriter &rewriter, Location loc, Value weights,
     auto newTy = RankedTensorType::get(newShape, wtRankedTy.getElementType());
     auto res = rewriter.create<tensor::ExpandShapeOp>(loc, newTy, weights, reassoc);
     setCompileTimeConstAttr(res);
-    setTargetExecutorAttr(res, torq_hl::Executor::NSS);
     return res.getResult();
 }
 
@@ -270,11 +316,10 @@ static mlir::Value weights_ChHW_to_ChHW32(
 ) {
     auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
     SmallVector<int64_t> shape(wtRankedTy.getShape());
-    assert(shape.size() == 3 && "Expected 3D weight tensor [Ch, Kh, Kw]");
 
     const int ch = shape[0];
-    const int kh = shape[1];
-    const int kw = shape[2];
+    const int kh = shape[2];
+    const int kw = shape[3];
 
     assert(ch % inner_ch == 0 && "Channel dimension must be divisible by inner_ch");
 
@@ -296,7 +341,6 @@ static mlir::Value weights_ChHW_to_ChHW32(
     auto res = rewriter.create<tensor::PackOp>(loc, weights, empty, innerDimsPos, innerTiles);
 
     setCompileTimeConstAttr(res);
-    setTargetExecutorAttr(res, torq_hl::Executor::NSS);
     return res.getResult();
 }
 
@@ -331,7 +375,6 @@ static mlir::Value weights_pad_with_zero(
     auto res =
         rewriter.create<tensor::InsertSliceOp>(loc, weights, paddedEmpty, insOff, insSz, strides);
     setCompileTimeConstAttr(res);
-    setTargetExecutorAttr(res, torq_hl::Executor::NSS);
     return res.getResult();
 }
 
@@ -352,26 +395,12 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
         const int parallel_outs = static_cast<int>(vectorizationMode);
         Value outputs = op.getOutput();
         Value weights = op.getWeights();
-        arith::ConstantOp constOp = weights.getDefiningOp<arith::ConstantOp>();
 
         Value biases = op.getScaleBias();
-        arith::ConstantOp biasConstOp = biases.getDefiningOp<arith::ConstantOp>();
-
-        if (!constOp || !biasConstOp) {
-            op->emitError() << "weights or biases don't come from a arith::ConstantOp";
-
-            // here we assert because we need to always select a kernel
-            llvm::report_fatal_error("cannot select kernel");
-        }
 
         auto weightType = cast<RankedTensorType>(weights.getType());
         auto weightElementType = weightType.getElementType();
         auto weightShape = weightType.getShape().vec();
-
-        auto convBias = biasConstOp.getValue();
-        auto biasValues = mlir::cast<DenseIntOrFPElementsAttr>(convBias);
-        auto biasType = biasValues.getType();
-        auto biasShape = biasType.getShape().vec();
 
         // Check if this is a depthwise 1D stride=1 special case
         bool isDw1dStride1 = false;
@@ -380,7 +409,7 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
         }
 
         if (vectorizationMode == torq_hl::VectorizationModeEnum::_32x32) {
-            if (isDw1dStride1 && weightShape.size() == 3) {
+            if (isDw1dStride1) {
                 // Special case: depthwise 1D stride=1
                 // Pack weights from [Ch, Kh, Kw] to [(Ch/inner), Kh, Kw, inner]
                 // For BF16: inner=16 (WRAM holds 16*2=32 bytes)
@@ -391,43 +420,22 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
                 );
             }
             else {
-                if (weightShape.size() == 3) {
-                    // Linalg depthwise conv2d has 3D weights: HW0, make it IHW0
-                    weights = weights_insert_dimension(rewriter, op.getLoc(), weights, 0);
-                }
                 weights = weights_pad_with_zero(rewriter, op.getLoc(), weights, 3, parallel_outs);
             }
 
-            Value bias_tensor;
+            auto biasType = mlir::cast<RankedTensorType>(biases.getType());
             auto biasElemType = biasType.getElementType();
             if (biasElemType.isInteger()) {
-                std::vector<llvm::APInt> biasData(
-                    biasValues.value_begin<llvm::APInt>(), biasValues.value_end<llvm::APInt>()
-                );
-                biasScale_inflate(biasData, biasShape, parallel_outs, APInt(32, 0), APInt(32, 0));
-                bias_tensor = createIConst(rewriter, op, biasData, biasShape);
-            }
-            else {
-                // For floating point bias (e.g., BF16/F32), keep the bias as-is
-                // The _32x32 vectorization mode for BF16 doesn't require bias inflation
-                bias_tensor = biases;
+                biasScale_inflate(biases, parallel_outs, APInt(32, 0), APInt(32, 0));
             }
 
             rewriter.modifyOpInPlace(op, [&]() {
                 op.setVectorizationMode(vectorizationMode);
                 op.setOperand(1, weights);
-                op.setOperand(2, bias_tensor);
+                op.setOperand(2, biases);
             });
 
             return success();
-        }
-
-        if (weightShape.size() == 3) {
-            // Linalg depthwise conv2d has 3D weights: OHW, make it OIHW
-            // Ex: 576x3x3 --> 576x1x3x3
-            weights = weights_insert_dimension(rewriter, op.getLoc(), weights, 1);
-            rewriter.modifyOpInPlace(op, [&]() { op.setOperand(1, weights); });
-            weightShape = {weightShape[0], 1, weightShape[1], weightShape[2]};
         }
 
         const int on = weightShape[0];
@@ -437,12 +445,6 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
         std::vector<int64_t> weight_shape{on, in, hn, wn};
 
         rewriter.modifyOpInPlace(op, [&]() { op.setVectorizationMode(vectorizationMode); });
-
-        if (!(weightElementType.isBF16() ||
-              (weightElementType.isInteger() && weightElementType.getIntOrFloatBitWidth() == 8))) {
-            op->emitError() << "Unsupported weight element type: " << weightElementType;
-            llvm::report_fatal_error("cannot select kernel");
-        }
 
         // Inflate and reorder weights
         const auto &strides = op.getStride();
@@ -482,7 +484,6 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
                           )
                           .getResult();
             setCompileTimeConstAttr(weights.getDefiningOp());
-            setTargetExecutorAttr(weights.getDefiningOp(), torq_hl::Executor::NSS);
 
             // Expand dimensions 1 weights using a memref::ExpandShapeOp
             weightShape[1] = weightShape[1] * sh;
@@ -495,7 +496,6 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
                           )
                           .getResult();
             setCompileTimeConstAttr(weights.getDefiningOp());
-            setTargetExecutorAttr(weights.getDefiningOp(), torq_hl::Executor::NSS);
 
             // Segment input rown in sh groups (even/odd rows for sh == 2) and reshape accordingly
             insertSegmentationOp(op, rewriter, sh, 0);
@@ -546,17 +546,7 @@ class FullyConnectedKernelSelection : public OpRewritePattern<torq_hl::FullyConn
         }
 
         Value weights = op.getWeights();
-        arith::ConstantOp constOp = weights.getDefiningOp<arith::ConstantOp>();
-        if (!constOp) {
-            op->emitError() << "weights don't come from a arith::ConstantOp";
-            llvm::report_fatal_error("cannot select kernel", true);
-        }
-
-        auto convWeights = constOp.getValue();
-        auto weightValues = mlir::cast<DenseIntOrFPElementsAttr>(convWeights);
-        auto weightData = weightValues.getRawData().vec();
-        auto weightShape = weightValues.getType().getShape().vec();
-
+        auto weightTy = mlir::cast<RankedTensorType>(weights.getType());
         auto vectorizationMode = getVectorizationMode(op);
 
         auto outputElementType = op.getInit().getType().getElementType();
@@ -564,7 +554,7 @@ class FullyConnectedKernelSelection : public OpRewritePattern<torq_hl::FullyConn
         int parallel_outs = outputElementType.getIntOrFloatBitWidth() <= 8 ? 64 : 32;
 
         weights = weights_OIHW_to_OIHWO(
-            rewriter, op.getLoc(), weights, parallel_outs, weightValues.getType().getElementType()
+            rewriter, op.getLoc(), weights, parallel_outs, weightTy.getElementType()
         );
 
         // FIXME: use createI8Const from CoversionUtils.h

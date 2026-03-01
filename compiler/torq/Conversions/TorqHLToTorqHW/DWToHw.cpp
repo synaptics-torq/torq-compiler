@@ -97,8 +97,8 @@ static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
 
     // Reshape weights from [Ch_outer, Kh, Kw, inner] to [Ch_outer, Kw, inner]
     // Since Kh=1 for depthwise 1D, fuse last 3 dims then reshape
-    int kw = weight.dim(2); // Kernel width
-    weight.fuse(3);
+    int kw = weight.dim(3); // Kernel width
+    weight.fuse(4);
     weight.reshapeDim(1, {kw, outChVectSize}, false);
 
     Slice slice("DepthwiseConv1dStride1");

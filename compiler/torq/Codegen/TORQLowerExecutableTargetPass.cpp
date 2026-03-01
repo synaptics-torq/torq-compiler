@@ -135,13 +135,11 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
         funcPm.addPass(createMarkPatternsForTileAndFusePass());
         funcPm.addPass(createTileAndFusePass());
         funcPm.addPass(createCanonicalizerPass());
-        if (clUnrollLoopAfterBufferization) {
-            funcPm.addPass(createPeelTileLoopsPass());
-            funcPm.addPass(createCanonicalizerPass());
-            funcPm.addPass(createUnrollDynamicShapeLoopPass());
-            funcPm.addPass(createCanonicalizerPass());
-        }
-        else {
+        funcPm.addPass(createPeelTileLoopsPass());
+        funcPm.addPass(createCanonicalizerPass());
+        funcPm.addPass(createUnrollDynamicShapeLoopPass());
+        funcPm.addPass(createCanonicalizerPass());
+        if (!clUnrollLoopAfterBufferization) {
             funcPm.addPass(createUnrollLoopPass());
             funcPm.addPass(createCanonicalizerPass());
         }
@@ -149,15 +147,25 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
-    funcPm.addPass(createCanonicalizerPass());
 
+    // Handles valid pad operations
+    funcPm.addPass(createValidToSamePadPass());
+
+    if (clEnableTorqTileAndFuse) {
+        funcPm.addPass(createCanonicalizerPass());
+        funcPm.addPass(createKernelSelectionPass());
+        funcPm.addPass(createCompileTimeConstOutlinePass());
+        funcPm.addPass(createCompileTimeConstComputePass());
+        funcPm.addPass(createCanonicalizerPass());
+    }
+    else {
+        funcPm.addPass(createCompileTimeConstComputePass());
+        funcPm.addPass(createCanonicalizerPass());
+    }
     // Move layout transposes through elementwise chains to enable cancellation
     if (clEnableTransposeOptimization) {
         funcPm.addPass(createOptimizeTransposeLayoutPass());
     }
-
-    // Handles valid pad operations
-    funcPm.addPass(createValidToSamePadPass());
 
     funcPm.addPass(createMarkHostExecutorPass());
 
@@ -191,8 +199,9 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     if (!clEnableTorqTileAndFuse || clForceTorqHLTiling) {
         funcPm.addPass(createTorqHlTilePass());
+        funcPm.addPass(createKernelSelectionPass());
+        funcPm.addPass(createCompileTimeConstComputePass());
     }
-    funcPm.addPass(createKernelSelectionPass());
     // op segment output feature enabled by default, diabled it for cross-check
     if (!clDisableSeg) {
         funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
@@ -211,7 +220,13 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     }
 
     funcPm.addPass(createFoldConvertPass());
-    funcPm.addPass(createCompileTimeConstComputePass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    if (clUnrollLoopAfterBufferization) {
+
+        funcPm.addPass(createUnrollLoopPass());
+        funcPm.addPass(createCanonicalizerPass());
+    }
 }
 
 void TORQLowerExecutableTargetPass::addCpuPasses(OpPassManager &pm) {

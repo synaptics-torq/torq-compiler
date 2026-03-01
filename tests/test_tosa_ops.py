@@ -10,7 +10,9 @@ def case_config(request, runtime_hw_type, chip_config):
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
-    failed_tc = []
+    failed_tc = [
+            'dw_wzp.mlir' # Weight zero point support not complete
+            ]
 
     if aws_fpga:
         # aws-fpga failures

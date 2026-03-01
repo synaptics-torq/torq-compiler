@@ -10,11 +10,13 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 
+#include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
@@ -28,6 +30,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OperationSupport.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/Support/Debug.h"
 #include <optional>
@@ -102,8 +106,7 @@ static FailureOr<Value> expandWeightsForDilation(
         }
     );
 
-    genericOp->setAttr("torq-compile-time-const", rewriter.getBoolAttr(true));
-
+    setCompileTimeConstAttr(genericOp);
     return genericOp.getResult(0);
 }
 
@@ -272,9 +275,10 @@ static mlir::FailureOr<Value> convertToInterleaved(
     return interleavedOutput;
 }
 
-// Static helper functions for Conv2D conversion
 template <class LinalgConvOp>
 static bool checkDW1DStride1(LinalgConvOp convOp, Value weights, int channelDim) {
+    // Identify a depthwise-Conv1D-on-Conv2D form that should remain on a 1D-like path
+    // when equivalent 2D expanded dilation would exceed kernel-size limits.
     auto weightType = llvm::cast<RankedTensorType>(weights.getType());
     auto weightShape = weightType.getShape();
 
@@ -303,6 +307,7 @@ static bool checkDW1DStride1(LinalgConvOp convOp, Value weights, int channelDim)
 
 static bool isStridedInsertSlice(Value input, bool isDW1DStride1) {
     if (isDW1DStride1) {
+        // Dedicated DW1D path handles stride semantics separately.
         return false;
     }
     if (auto insertSliceOp = input.getDefiningOp<tensor::InsertSliceOp>()) {
@@ -344,6 +349,7 @@ static mlir::FailureOr<Value> getDilatedWts(
     Value weights, std::vector<int64_t> &finalDilationVec, bool isDW1DStride1,
     PatternRewriter &rewriter
 ) {
+    // Materialize dilation into the weight tensor itself, then run with dilation=[1,1].
     SmallVector<int64_t> dilationVec(finalDilationVec.begin(), finalDilationVec.end());
 
     auto maxKernelSize = isDW1DStride1 ? 1024 : 7;
@@ -360,30 +366,11 @@ static mlir::FailureOr<Value> getDilatedWts(
     return weights;
 }
 
-static bool modifyWeightWithZp(
-    Value &weights, int32_t weightZp, VectorIntOrFloat &bias, ScaleClampInfo &scInfo,
-    PatternRewriter &rewriter
-) {
-    if (weightZp != 0) {
-        // Divide weights and wZp by two so we can safely add them together without overlflow
-        constexpr int scaleFactor = 2;
-        weights = rescaleValue(weights, scaleFactor, -weightZp / 2, weights.getLoc(), rewriter);
-        // Same for the bias
-        for (auto &val : bias.ints) {
-            val /= scaleFactor;
-        }
-        // Reduce the scaling shift to compensate
-        // (We could multiply the scaling factor by 2 instead, but that could cause overflow)
-        scInfo.scaleShift -= 1;
-        return true;
-    }
-    return false;
-}
-
 static Value preConversion(
     Value input, Permutation dataPerm, Location loc, PatternRewriter &rewriter, bool isNchw,
     bool isDW1DStride1
 ) {
+    // Normalize activation layout only when needed by the chosen lowering path.
     if (!isNchw && isDW1DStride1) {
         return input;
     }
@@ -406,6 +393,7 @@ static Value preConversion(
 static Value createOutput(
     Value output, Permutation dataPerm, PatternRewriter &rewriter, bool isNchw, bool isDW1DStride1
 ) {
+    // Create init tensor in the same normalized layout expected by the Torq op.
     if (!isNchw && isDW1DStride1) {
         dataPerm = Permutation::none();
     }
@@ -422,18 +410,45 @@ static Value createOutput(
 }
 
 static Value preConversionWeights(
-    Value weights, const Permutation &_weightsPerm, int32_t weightZp, VectorIntOrFloat &bias,
-    ScaleClampInfo &scInfo, PatternRewriter &rewriter
+    Value weights, const Permutation &_weightsPerm, std::optional<Value> weightZpV,
+    ScaleClampInfo &scInfo, PatternRewriter &rewriter, bool isDepthwise
 ) {
+    // Normalize filter layout first, then fold optional weight zero-point.
     auto transposedWeights = transposeValue(weights, _weightsPerm, weights.getLoc(), rewriter);
 
-    modifyWeightWithZp(transposedWeights, weightZp, bias, scInfo, rewriter);
+    if (weightZpV) {
+        modifyWeightWithZp(transposedWeights, *weightZpV, scInfo, rewriter);
+    }
+
+    if (isDepthwise) {
+
+        // Depthwise op expects a 4D filter form; expand transposed [IC, KH, KW] to
+        // [IC, 1, KH, KW] for Torq HL emission.
+
+        auto tWeightTy = mlir::cast<RankedTensorType>(transposedWeights.getType());
+        auto tWeightShape = tWeightTy.getShape();
+        assert(
+            tWeightTy.getRank() == 3 &&
+            "Expected transposed weights to have rank 3 for depthwise conv"
+        );
+        SmallVector<ReassociationIndices> reassoc;
+        reassoc.push_back({0, 1}); // IC
+        reassoc.push_back({2});    // KH
+        reassoc.push_back({3});    // KW
+        SmallVector<int64_t> newShape{tWeightShape[0], 1, tWeightShape[1], tWeightShape[2]};
+        transposedWeights = rewriter.create<tensor::ExpandShapeOp>(
+            weights.getLoc(), RankedTensorType::get(newShape, tWeightTy.getElementType()),
+            transposedWeights, reassoc
+        );
+    }
+    setCompileTimeConstAttr(transposedWeights.getDefiningOp());
     return transposedWeights;
 }
 
 static Value postConversion(
     Value output, Permutation dataPerm, bool isNchw, bool isDW1DStride1, PatternRewriter &rewriter
 ) {
+    // Convert back from normalized layout to original graph layout if needed.
     auto loc = output.getLoc();
     if (!isNchw && isDW1DStride1) {
         return output;
@@ -481,6 +496,11 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
           _markFuseGroups(markFuseGroups), _2DNchwChw(isNchw) {}
 
     LogicalResult matchAndRewrite(LinalgConvOp convOp, PatternRewriter &rewriter) const override {
+
+        // High-level flow:
+        // 1) validate Conv2D/Conv1D-depthwise shape+stride capability,
+        // 2) build fusion plan and extract bias/scale/zp metadata,
+        // 3) normalize input/weights/layout and emit Torq Conv2D/DepthwiseConv2D.
 
         if (_markFuseGroups && isMarkedFuseGroup(convOp)) {
             return rewriter.notifyMatchFailure(convOp, "Already marked");
@@ -562,55 +582,24 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             );
         }
 
-        // Fold any per-channel bias
-        const auto outType = cast<RankedTensorType>(output.getType());
-        const int outChannelCount = outType.getShape()[_channelDim];
-        bool isInt = outType.getElementType().isInteger();
-        VectorIntOrFloat bias(outChannelCount, isInt);
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Folding per-channel bias\n";
-            llvm::dbgs() << "Current output\n";
-            output.print(llvm::dbgs());
-        });
-
-        while (foldForwardPerChannelAdd(output, _channelDim, bias)) {
-        }
-        LLVM_DEBUG({
-            llvm::dbgs() << "Output after bias folding\n";
-            output.print(llvm::dbgs());
-        });
-
-        // Fold operations that take care of zero-point in weight quantization if present
-        int weightZp = foldForwardWeightZp(output);
-        LLVM_DEBUG({
-            llvm::dbgs() << "Output after weights folding\n";
-            output.print(llvm::dbgs());
-            llvm::dbgs() << "Weight Zp folded: " << weightZp << "\n";
-        });
-
-        // Fold any additional per-channel bias
-        while (foldForwardPerChannelAdd(output, _channelDim, bias)) {
-        }
-        LLVM_DEBUG({
-            llvm::dbgs() << "Output after more bias folding\n";
-            output.print(llvm::dbgs());
-        });
-
-        // Fold scale and clamp. This is mandatory for integer operations.
-        ScaleClampInfo scInfo =
-            foldForwardScaleClamp(output, outChannelCount, _shift8b, _shift16b, false);
-        LLVM_DEBUG({
-            llvm::dbgs() << "Output after more scale folding\n";
-            output.print(llvm::dbgs());
-        });
-        if (!scInfo && isInt) {
+        FusionPlan fusionPlan;
+        DominanceInfo dom(convOp->template getParentOfType<FunctionOpInterface>());
+        if (!createFusionPlan(output, fusionPlan)) {
             return rewriter.notifyMatchFailure(
-                convOp, "Expected scale and clamp info for integer operations"
+                convOp, "Failed to compute fusion group for per-channel add"
             );
         }
+        output = fusionPlan.neededOps.back()->getResult(0);
+        auto finalType = cast<RankedTensorType>(output.getType());
 
+        LLVM_DEBUG({
+            llvm::dbgs() << "Marking fuse group for Conv2DMatmulOpConversion\n";
+            output.print(llvm::dbgs());
+            input.print(llvm::dbgs());
+            convOp->print(llvm::dbgs());
+        });
         if (_markFuseGroups) {
+            // Discovery mode: only annotate fusible chain; do not rewrite yet.
             markFuseGroupBackward(
                 output, {input}, rewriter,
                 convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
@@ -618,9 +607,31 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             return success();
         }
 
+        // Fold any per-channel bias
+        Value biasV;
+        std::optional<Value> weightZpV;
+
+        // Compute bias
+        if (!computeBias(fusionPlan, biasV, weightZpV, _channelDim)) {
+            return rewriter.notifyMatchFailure(convOp, "Failed to compute per-channel bias");
+        }
+
+        ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, convOp);
+        // Compute scale zero-point and clamp info
+        if (!computeRescaleInfo(fusionPlan, false, biasV, scInfo)) {
+            return rewriter.notifyMatchFailure(convOp, "Failed to compute scale/zp/clamp info");
+        }
+        for (auto &op : llvm::reverse(fusionPlan.opsToFuse)) {
+            if (op->use_empty()) {
+                // Remove now-dead ops from fused tail after bias/scale extraction.
+                rewriter.eraseOp(op);
+            }
+        }
+        assert(succeeded(verify(convOp->getParentOp())) && "Parent function verification failed");
+
         // Convert weights to the required format
         auto torqWeights =
-            preConversionWeights(weights, _weightsPerm, weightZp, bias, scInfo, rewriter);
+            preConversionWeights(weights, _weightsPerm, weightZpV, scInfo, rewriter, isDepthwise);
 
         auto dilations = convOp.getDilations().template getValues<int64_t>();
         std::vector<int64_t> finalDilationVec(dilations.begin(), dilations.end());
@@ -628,11 +639,6 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         if (!failed(mWts)) {
             torqWeights = *mWts;
         }
-        auto maybeConstWt = computeArithConst(torqWeights);
-        if (failed(maybeConstWt)) {
-            return rewriter.notifyMatchFailure(convOp, "Weights must be constant");
-        }
-        torqWeights = *maybeConstWt;
 
         bool isNchw = _2DNchwChw;
         // NOW that all validation passed (including weight creation),
@@ -644,44 +650,43 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             padInfo = foldBackwardPadding(input, rewriter, isNchw);
         }
 
-        inputType = cast<RankedTensorType>(input.getType());
-        shape = inputType.getShape();
-
-        // Prepare bias (and scale for integer ops)
-        auto biasScale = isInt ? createConst(interleave(bias.ints, scInfo.scaleNpu), rewriter, loc)
-                               : createConst(bias.floats, rewriter, loc);
-
         // Generate torq_hl op with input/output in the expected format
         input = preConversion(input, _dataPerm, loc, rewriter, isNchw, isDW1DStride1);
         bool nhwcInput = (!isNchw && _dataPerm == Permutation::none()) || isDW1DStride1;
         auto newConvOutput = createOutput(output, _dataPerm, rewriter, isNchw, isDW1DStride1);
         auto torqOutType = newConvOutput.getType();
 
-        Value outV;
-        if (isDepthwise) {
-            outV = rewriter
-                       .create<torq_hl::DepthwiseConv2DOp>(
-                           loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
-                           scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
-                           attrValuesAsVec(convOp.getStrides()), finalDilationVec,
-                           torq_hl::VectorizationModeEnum::None, torqWeights, biasScale, input,
-                           isDW1DStride1, false, isDW1DStride1
-                       )
-                       .getResult(0);
+        {
+            OpBuilder::InsertionGuard g(rewriter);
+            rewriter.setInsertionPoint(output.getDefiningOp());
+            Value outV;
+            if (isDepthwise) {
+                // Depthwise path (including optional DW1D-stride1 specialization).
+                outV = rewriter
+                           .create<torq_hl::DepthwiseConv2DOp>(
+                               loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
+                               scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
+                               attrValuesAsVec(convOp.getStrides()), finalDilationVec,
+                               torq_hl::VectorizationModeEnum::None, torqWeights, biasV, input,
+                               isDW1DStride1, false, isDW1DStride1
+                           )
+                           .getResult(0);
+            }
+            else {
+                // Standard Conv2D path.
+                outV = rewriter
+                           .create<torq_hl::Conv2DOp>(
+                               loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
+                               scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
+                               attrValuesAsVec(convOp.getStrides()), finalDilationVec,
+                               torq_hl::VectorizationModeEnum::None, torqWeights, biasV, input,
+                               nhwcInput
+                           )
+                           .getResult(0);
+            }
+            auto torqOut = postConversion(outV, _dataPerm, isNchw, isDW1DStride1, rewriter);
+            rewriter.replaceOp(output.getDefiningOp(), torqOut);
         }
-        else {
-            outV = rewriter
-                       .create<torq_hl::Conv2DOp>(
-                           loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
-                           scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
-                           attrValuesAsVec(convOp.getStrides()), finalDilationVec,
-                           torq_hl::VectorizationModeEnum::None, torqWeights, biasScale, input,
-                           nhwcInput
-                       )
-                       .getResult(0);
-        }
-        auto torqOut = postConversion(outV, _dataPerm, isNchw, isDW1DStride1, rewriter);
-        rewriter.replaceOp(output.getDefiningOp(), torqOut);
         return success();
     }
 

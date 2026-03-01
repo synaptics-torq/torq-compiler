@@ -9,6 +9,7 @@
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
@@ -77,12 +78,10 @@ struct Conv2DOpBigStride : public OpRewritePattern<syna::torq_hl::Conv2DOp> {
             return rewriter.notifyMatchFailure(op, "Already marked");
         }
 
-        const auto loc = op.getLoc();
         auto strides = op.getStride();
         Value weights = op.getWeights();
-        arith::ConstantOp constOp = weights.getDefiningOp<arith::ConstantOp>();
-        auto convWeights = cast<DenseElementsAttr>(constOp.getValue());
-        auto weightType = llvm::cast<RankedTensorType>(convWeights.getType());
+        Operation *weightsOp = weights.getDefiningOp();
+        auto weightType = llvm::cast<RankedTensorType>(weightsOp->getResult(0).getType());
         auto weightShape = weightType.getShape().vec();
         bool supportedStrides = strides.size() == 2 && ((strides[0] == 1 && strides[1] == 1) ||
                                                         (strides[0] == 2 && strides[1] == 2));
@@ -100,7 +99,6 @@ struct Conv2DOpBigStride : public OpRewritePattern<syna::torq_hl::Conv2DOp> {
 
         // This is a 2D conv with strides [h,w] with kern size == strides
         // Rewrite it as (space2depth + conv2d(stride1) with weights [O,h*w*I,H/sh,W/sw])
-        auto weightElementType = weightType.getElementType();
         auto sh = strides[0];
         auto sw = strides[1];
 
@@ -113,15 +111,10 @@ struct Conv2DOpBigStride : public OpRewritePattern<syna::torq_hl::Conv2DOp> {
 
         // Convert input from [N, C, H, W] to [N, C*h*w, H/sh, W/sw]
         Value inToDepth = getSpaceToDepth(op.getInput(), sh, sw, rewriter);
-
         // Reshape weights from [OIHW] to [O,I*h*w,H/sh,W/sw]
-        auto newWeightType = RankedTensorType::get(
-            {weightShape[0], weightShape[1] * sh * sw, weightShape[2] / sh, weightShape[2] / sw},
-            weightElementType
-        );
-        auto newWeightAttr = DenseElementsAttr::get(newWeightType, convWeights.getRawData());
-        auto torqWeights = rewriter.create<arith::ConstantOp>(loc, newWeightType, newWeightAttr);
+        Value torqWeights = getSpaceToDepth(weights, sh, sw, rewriter);
 
+        setCompileTimeConstAttr(torqWeights.getDefiningOp());
         // Update conv2d
         rewriter.modifyOpInPlace(op, [&]() {
             op.setOperand(op.getInputMutable().getOperandNumber(), inToDepth);

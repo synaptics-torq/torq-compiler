@@ -814,4 +814,83 @@ Value cloneAndReplaceToBody(
     return clonedOp->getResult(0);
 }
 
+// Clones a contiguous segment of fusion-plan operations into the current builder context,
+// clone with a zero-initialized tensor to replace the anchor(including runtime dynamic sizes),
+// remaps intermediate values through IRMapping, and returns the cloned segment's final value.
+// Any source ops consumed by the cloned segment are appended to `opsToDelete` for cleanup.
+Value createClonedBlock(
+    OpBuilder &builder, FusionPlan &fusionPlan, SmallVectorImpl<Operation *> &opsToFuse,
+    int fusionStartIdx, int fusionEndIdx, llvm::SmallVectorImpl<Operation *> &opsToDelete
+) {
+    Operation *parent = fusionPlan.anchor;
+    auto pResultTy = dyn_cast<ShapedType>(parent->getResult(0).getType());
+
+    // For dynamic result shapes, tensor.empty requires runtime index operands for dynamic dims.
+    // Walk backward from the anchor op to recover those runtime size values.
+    // Current heuristic prioritizes tensor.extract_slice mixed sizes when present.
+    SmallVector<Value> indexV;
+    {
+        SmallVector<Operation *, 8> toAnalyze{parent};
+        while (toAnalyze.size() > 0) {
+            auto currentOp = toAnalyze.pop_back_val();
+            if (auto extractOp = dyn_cast<tensor::ExtractSliceOp>(currentOp)) {
+                // Collect dynamic sizes from extract_slice; static sizes are attributes and
+                // ignored.
+                for (auto s : extractOp.getMixedSizes()) {
+                    if (auto sVal = dyn_cast<Value>(s)) {
+                        indexV.push_back(sVal);
+                    }
+                }
+                continue;
+            }
+            for (auto operand : currentOp->getOperands()) {
+                // If an operand is dynamically shaped, continue traversing its defining op to
+                // locate index values that can materialize the destination tensor shape.
+                if (auto opTy = dyn_cast<ShapedType>(operand.getType())) {
+                    if (!opTy.hasStaticShape()) {
+                        toAnalyze.push_back(operand.getDefiningOp());
+                        break;
+                    }
+                }
+            }
+            if (!indexV.empty()) {
+                // Stop once we have enough runtime sizes for the current clone scenario.
+                // FIXME: gather all dynamic size values across all relevant parent paths.
+                break;
+            }
+        }
+    }
+
+    auto zeroAttr = builder.getZeroAttr(pResultTy.getElementType());
+    auto zeroTensor =
+        builder.create<arith::ConstantOp>(parent->getLoc(), pResultTy.getElementType(), zeroAttr)
+            .getResult();
+    // Pass recovered runtime indices into tensor.empty when pResultTy has dynamic dims.
+    auto emptyTensor =
+        builder.create<tensor::EmptyOp>(parent->getLoc(), pResultTy, indexV).getResult();
+    zeroTensor =
+        builder.create<linalg::FillOp>(parent->getLoc(), pResultTy, zeroTensor, emptyTensor)
+            .getResult(0);
+
+    llvm::SmallVector<Operation *, 8> opsToMove;
+    opsToMove.reserve(fusionEndIdx - fusionStartIdx);
+    llvm::DenseMap<Value, Value> valueMap;
+
+    Value lastV;
+    IRMapping mapping;
+    mapping.map(fusionPlan.anchor->getResult(0), zeroTensor);
+    for (int i = fusionStartIdx; i < fusionEndIdx; ++i) {
+        auto op = opsToFuse[i];
+        opsToMove.push_back(op);
+
+        // We are moving linalg.generic and support ops till that point to produces the bias
+        if (auto gOp = dyn_cast<linalg::GenericOp>(op)) {
+            lastV = cloneAndReplaceToBody(builder, opsToMove, mapping);
+            opsToDelete.insert(opsToDelete.end(), opsToMove.begin(), opsToMove.end());
+            opsToMove.clear();
+        }
+    }
+    return lastV;
+}
+
 } // namespace mlir::syna::torq

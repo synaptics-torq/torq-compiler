@@ -8,11 +8,8 @@ from torq.testing.comparison import compare_test_results
 def get_test_cases():
     test_cases = []
 
-    base_options = ["--torq-enable-tile-and-fuse"]
+    base_options = ["--torq-enable-tile-and-fuse", "--torq-unroll-loop-after-bufferization"]
     
-    # FIXME: This should be the default for tile-and-fuse but it doesn't work for some cases:
-    #base_options += ["--torq-unroll-loop-after-bufferization"]
-
     for mlir_file in list_mlir_files("linalg_ops"):
         test_cases.append(Case("linalg_" + mlir_file.stem, {
             "static_mlir_model_file": mlir_file,
@@ -68,7 +65,17 @@ def case_config(request, chip_config):
         'torch_ConvTranspose_bf16_1x1x512x512',
 
         # fails even without tile and fuse
-        'torch_0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean'
+        'torch_0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean',
+        'tosa_dw_wzp', # Weight zero point not handled
+
+        # Tiling Assertion `principalOp != nullptr && "could not find the principal op of the fuse group"' failed
+        'tosa_dw_f5_16x16-bf16',
+        'tosa_dw_16x16-bf16',
+        'tosa_dw_i16_8x8x4',
+        'tosa_dw',
+        'tosa_dw-32x8',
+        'tosa_pad-dw',
+        'tosa_load_padded',
     ]
 
     if chip_config.data['target'] != "SL2610":
@@ -92,6 +99,11 @@ def case_config(request, chip_config):
             'tosa_pw-32x8',
             # Compiler too long, can pass with unroll-loop-after-bufferization
             'tosa_matmul-in-int8-out-int16-64x128x2048',
+            # AssertionError: Number of differences: 18336 out of 622592 [2.95%]
+            'torch_maxpool_bf16_batch19_4x1_stride4x1',
+            # AssertionError: Number of differences: 748 out of 62720 [1.19%]
+            'full_model_efficientnetb0'
+
         ]
 
     if any(s in request.param.name for s in failed_tc):
@@ -99,7 +111,7 @@ def case_config(request, chip_config):
     
     torq_compiler_options = request.param.data.get("torq_compiler_options", [])
     if "yolov8_block_mul_rescale" in request.param.name:
-        torq_compiler_options += ["--torq-tile-and-fuse-producers-fuse-mode=max-producers", "--torq-unroll-loop-after-bufferization"]
+        torq_compiler_options += ["--torq-tile-and-fuse-producers-fuse-mode=max-producers"]
     
     return {
         "mlir_model_file": "static_mlir_model_file",

@@ -35,14 +35,16 @@ namespace mlir::syna::torq {
 namespace {
 
 LogicalResult walkDefChainContained(
-    Operation *op, Operation *parent, SmallVectorImpl<Operation *> &opsToMoveStack,
-    SmallVectorImpl<Operation *> &visitedOps
+    Operation *op, Operation *parent, SmallVectorImpl<Operation *> &opsToMoveStack
 ) {
     // Walk and collect the operand-def chains and verify every dependency stays within the loop.
-    if (llvm::is_contained(visitedOps, op)) {
+    // If the depended op is outside the loop, consider it as a constant for now and do not move it
+    // Even if after the outline if the op is not constant it shouldn't affect the overall flow
+    if (llvm::is_contained(opsToMoveStack, op)) {
         return success();
     }
-    visitedOps.push_back(op);
+    opsToMoveStack.push_back(op);
+
     for (Value operand : op->getOperands()) {
         Operation *defOp = operand.getDefiningOp();
         LLVM_DEBUG(
@@ -72,12 +74,7 @@ LogicalResult walkDefChainContained(
             return failure();
         }
 
-        opsToMoveStack.push_back(defOp);
-
-        if (isa<arith::ConstantOp>(defOp)) {
-            continue;
-        }
-        if (failed(walkDefChainContained(defOp, parent, opsToMoveStack, visitedOps))) {
+        if (failed(walkDefChainContained(defOp, parent, opsToMoveStack))) {
             return failure();
         }
     }
@@ -104,9 +101,8 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
             LLVM_DEBUG(llvm::dbgs() << "No parent ForOp found for op: "; op->dump(););
             return failure();
         }
-        SmallVector<Operation *, 4> opsToMoveStack{op};
-        SmallVector<Operation *, 4> visitedOps;
-        if (failed(walkDefChainContained(op, forOp.getOperation(), opsToMoveStack, visitedOps))) {
+        SmallVector<Operation *, 4> opsToMoveStack;
+        if (failed(walkDefChainContained(op, forOp.getOperation(), opsToMoveStack))) {
             LLVM_DEBUG(llvm::dbgs() << "Failed to walk def chain for op: "; op->dump(););
             return failure();
         }

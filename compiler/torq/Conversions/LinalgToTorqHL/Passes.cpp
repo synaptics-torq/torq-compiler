@@ -36,7 +36,6 @@ void populateLinalgToTorqHLPrePatterns(
     populateLinalgToTorqHLConv1DPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLConv2DPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLConv2DMatmulPatterns(context, patterns, markFuseGroups);
-    populateLinalgToTorqHLFCPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLPoolingPatterns(context, patterns, markFuseGroups);
 }
 

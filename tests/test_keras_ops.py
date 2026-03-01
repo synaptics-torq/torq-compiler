@@ -741,6 +741,7 @@ def get_keras_fc_test_cases():
         "keras_model_name": "model020_fc_1x1"
     }))
 
+    # Not enough free space error
     # Add model021_fc_1991x61 test case
     test_cases.append(Case("model021_fc_1991x61", {
         "keras_model_name": "model021_fc_1991x61"
@@ -761,6 +762,7 @@ def get_keras_fc_test_cases():
         "keras_model_name": "model024_fc_97x2000"
     }))
 
+    # Not enough free space error
     # Add model026_fc_1991x61 test case
     test_cases.append(Case("model026_fc_1991x61", {
         "keras_model_name": "model026_fc_1991x61"
@@ -1170,7 +1172,10 @@ def case_config(request, runtime_hw_type, chip_config):
             'model035_avgpool_inp1x10x10x4_pool3x3_stride3x3_same',
             'model036_avgpool_inp1x10x10x4_pool4x4_stride4x4_same',
             'model039_avgpool_inp1x10x10x4_pool1x3_stride1x1_same',
-            'model089_softmax_inp1x1916x2',  # error: unable to free enough space for results and operands
+            # error: unable to free enough space for results and operands
+            'model089_softmax_inp1x1916x2',
+            'model021_fc_1991x61',
+            'model026_fc_1991x61'
         ]
         # Next chip fpga failures
         if aws_fpga:

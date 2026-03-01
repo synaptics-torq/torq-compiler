@@ -537,4 +537,8 @@ Value cloneAndReplaceToBody(
     Block *srcBlock = nullptr, Block *destBlock = nullptr
 );
 
+Value createClonedBlock(
+    OpBuilder &builder, FusionPlan &fusionPlan, llvm::SmallVectorImpl<Operation *> &values,
+    int fusionStartIdx, int fusionEndIdx, llvm::SmallVectorImpl<Operation *> &opsToDelete
+);
 } // namespace mlir::syna::torq

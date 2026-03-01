@@ -8,7 +8,6 @@ set(sources
   Conv2DMatmulPattern.cpp
   Conv2DOpBigStridePattern.cpp
   ElementWiseBinaryPattern.cpp
-  FCPattern.cpp
   PoolingPattern.cpp
   ReduceMeanPattern.cpp
   SigmoidPattern.cpp

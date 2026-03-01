@@ -2407,7 +2407,6 @@ void populateLinalgToTorqHLPatterns(
     // Make sure to add the new class to isTorqMatmulOp function if here
     // is changed
     patterns.insert<MatmulOpConversion<linalg::BatchMatmulOp>>(context);
-    patterns.insert<MatmulOpConversion<linalg::MatmulOp>>(context);
     patterns.insert<MatmulOpConversion<linalg::DotOp>>(context);
     patterns.insert<MatmulOpConversion<linalg::MatvecOp>>(context);
 
