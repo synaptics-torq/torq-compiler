@@ -196,37 +196,101 @@ SmallVector<int64_t> getTilingDimOrder(TilingInterface tilingInterfaceOp) {
     }
 }
 
-int64_t bytesOfSlice(Type type, ArrayRef<OpFoldResult> resultSizes, Attribute zero) {
-    if (auto rankedType = dyn_cast<RankedTensorType>(type)) {
-        int64_t bytes = div_ceil(rankedType.getElementTypeBitWidth(), 8);
-        for (auto sizeFoldResult : resultSizes) {
-            std::optional<int64_t> constSize = getConstantIntValue(sizeFoldResult);
-            if (!constSize) {
-                assert(sizeFoldResult.is<Value>() && "expected Value");
-                auto sizeValue = sizeFoldResult.get<Value>();
-
-                constSize =
-                    llvm::TypeSwitch<Operation *, std::optional<int64_t>>(sizeValue.getDefiningOp())
-                        .Case<affine::AffineMinOp>([&](auto minOp) {
-                            // Evaluate the size at 0,0,...
-                            // This is a bit of a hack, what we really want is a tight upper bound
-                            // of size.
-                            SmallVector<Attribute> dims(minOp.getDimOperands().size(), zero);
-                            return getConstantIntValue(minOp.fold({dims}));
-                        })
-                        // TODO: implement for other operations as needed.
-                        .Default([](auto) {
-                            assert(false && "unexpected operation");
-                            return std::nullopt;
-                        });
-                assert(constSize && "failed to fold slice size to a constant");
-            }
-            bytes *= *constSize;
-        }
-        return bytes;
+int64_t computeMinMaxAtZero(Operation *op, Attribute zero) {
+    bool isMin;
+    AffineMap map;
+    SmallVector<Value> operands;
+    if (auto minOp = dyn_cast<affine::AffineMinOp>(op)) {
+        isMin = true;
+        map = minOp.getMap();
+        operands = minOp.getOperands();
+    }
+    else if (auto maxOp = dyn_cast<affine::AffineMaxOp>(op)) {
+        isMin = false;
+        map = maxOp.getMap();
+        operands = maxOp.getOperands();
+    }
+    else {
+        assert(false && "expected min/max op");
     }
 
-    return div_ceil(type.getIntOrFloatBitWidth(), 8);
+    affine::fullyComposeAffineMapAndOperands(&map, &operands);
+    SmallVector<Attribute> zeros(map.getNumDims(), zero);
+    SmallVector<Attribute> results;
+    if (failed(map.constantFold(zeros, results)))
+        assert(false && "failed to compute map when all inputs are zero");
+
+    Attribute *result;
+    if (isMin) {
+        result = llvm::min_element(results, [](mlir::Attribute a, mlir::Attribute b) {
+            return cast<mlir::IntegerAttr>(a).getInt() < cast<mlir::IntegerAttr>(b).getInt();
+        });
+    }
+    else {
+        result = llvm::max_element(results, [](mlir::Attribute a, mlir::Attribute b) {
+            return cast<mlir::IntegerAttr>(a).getInt() < cast<mlir::IntegerAttr>(b).getInt();
+        });
+    }
+    assert(result && "failed to find minimum");
+
+    return cast<mlir::IntegerAttr>(*result).getInt();
+}
+
+int64_t bytesOfSlice(Type type, ArrayRef<OpFoldResult> resultSizes, Attribute zero) {
+    auto rankedType = dyn_cast<RankedTensorType>(type);
+    if (!rankedType) {
+        return div_ceil(type.getIntOrFloatBitWidth(), 8);
+    }
+
+    int64_t elements = 1;
+    for (auto sizeFoldResult : resultSizes) {
+        std::optional<int64_t> constSize = getConstantIntValue(sizeFoldResult);
+        if (constSize) {
+            elements *= *constSize;
+            continue;
+        }
+
+        assert(sizeFoldResult.is<Value>() && "expected Value");
+        auto sizeValue = sizeFoldResult.get<Value>();
+
+        constSize =
+            llvm::TypeSwitch<Operation *, std::optional<int64_t>>(sizeValue.getDefiningOp())
+                .Case<affine::AffineMinOp, affine::AffineMaxOp>([&](auto minMaxOp) {
+                    // Evaluate the size at 0,0,...
+                    // This is a bit of a hack, what we really want is a tight upper bound
+                    // of size.
+                    return computeMinMaxAtZero(minMaxOp, zero);
+                })
+                .Case<affine::AffineApplyOp>([&](auto applyOp) {
+                    // Evaluate the size at 0,0,...
+                    // This is a bit of a hack, what we really want is a tight upper bound
+                    // of size.
+                    AffineMap map = applyOp.getMap();
+                    SmallVector<Value> operands = applyOp.getOperands();
+
+                    affine::fullyComposeAffineMapAndOperands(&map, &operands);
+                    SmallVector<Attribute> zeros(map.getNumDims(), zero);
+                    SmallVector<Attribute> results;
+                    if (failed(map.constantFold(zeros, results)))
+                        assert(false && "failed to compute map when all inputs are zero");
+
+                    assert(results.size() == 1 && "AffineApplyOp should have exactly one reault");
+
+                    return cast<mlir::IntegerAttr>(results[0]).getInt();
+                })
+                // TODO: implement for other operations as needed.
+                .Default([](auto) {
+                    assert(false && "unexpected operation");
+                    return std::nullopt;
+                });
+        assert(constSize && "failed to fold slice size to a constant");
+
+        elements *= *constSize;
+    }
+
+    int64_t bytes = div_ceil(rankedType.getElementTypeBitWidth(), 8);
+
+    return bytes * elements;
 }
 
 // This iteration domain is for all the loops of the op.
@@ -256,19 +320,17 @@ llvm::FailureOr<SmallVector<OpResultIterationDomain>> linalgOperandSlicesFromIte
             continue;
         }
 
-        if (OpResult operandOpResult = dyn_cast<OpResult>(operand)) {
-            if (RankedTensorType rankedType =
-                    dyn_cast<RankedTensorType>(operandOpResult.getType())) {
-                SmallVector<OpFoldResult> sizes, offsets;
-                sizes.reserve(rankedType.getShape().size());
-                offsets.reserve(rankedType.getShape().size());
-                for (auto size : rankedType.getShape()) {
-                    sizes.push_back(rewriter.getIndexAttr(size));
-                    offsets.push_back(rewriter.getIndexAttr(0));
-                }
-                oprandIterDomains.push_back(std::make_tuple(operandOpResult, offsets, sizes));
-                continue;
+        if (RankedTensorType rankedType = dyn_cast<RankedTensorType>(operand.getType())) {
+            SmallVector<OpFoldResult> sizes, offsets;
+            sizes.reserve(rankedType.getShape().size());
+            offsets.reserve(rankedType.getShape().size());
+            for (auto size : rankedType.getShape()) {
+                sizes.push_back(rewriter.getIndexAttr(size));
+                offsets.push_back(rewriter.getIndexAttr(0));
             }
+
+            oprandIterDomains.push_back(std::make_tuple(operand, offsets, sizes));
+            continue;
         }
 
         oprandIterDomains.push_back(std::make_tuple(
@@ -556,7 +618,7 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
     // This does not take into account that while computing an operand, other operands already take
     // space.
 
-    Attribute zero = getAsIndexOpFoldResult(rewriter.getContext(), 1).get<Attribute>();
+    Attribute zero = getAsIndexOpFoldResult(rewriter.getContext(), 0).get<Attribute>();
 
     // Accumulate for each fuse-group the size of operands external to the group.
     llvm::DenseMap<IntegerAttr, int64_t> fusedGroupsBytes;
