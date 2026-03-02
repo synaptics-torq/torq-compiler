@@ -125,11 +125,11 @@ SmallVector<Value> getFuseGroupOperands(Operation *root, const IntegerAttr &fuse
 bool isFuseGroupPrincipalOp(Operation *op, IntegerAttr fuseGroupAttr);
 
 // Return the principal Operation of the fuse group (i.e. the operation from
-// which the pattern matching started) op belongs to, or nullptr if something
+// which the pattern matching started) outputOp belongs to, or nullptr if something
 // goes wrong.
-// op - an Operation in the output of the principal Operation (it must have
+// outputOp - an Operation in the output of the principal Operation (it must have
 // exactly one source that is in the same fuse group);
-Operation *getFuseGroupPrincipalOpBackward(Operation *op);
+Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp);
 
 // Walks forward from result, over operations that belong to fuseGroupAttr, and
 // return all the OpOperands that are owned by the principal operation of

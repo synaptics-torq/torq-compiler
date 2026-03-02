@@ -228,36 +228,32 @@ bool isFuseGroupPrincipalOp(Operation *op, IntegerAttr fuseGroupAttr) {
     return fuseGroupIdAttr && fuseGroupIdAttr == fuseGroupAttr;
 }
 
-Operation *getFuseGroupPrincipalOpBackward(Operation *op) {
-    ArrayAttr fuseGroupArrAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-    assert(fuseGroupArrAttr && "op is not part of a fuse-group");
+Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp) {
+    ArrayAttr fuseGroupArrAttr = outputOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+    assert(fuseGroupArrAttr && "outputOp is not part of a fuse-group");
 
-    assert(fuseGroupArrAttr.size() == 1 && "op is part of multiple fuse-groups");
+    assert(fuseGroupArrAttr.size() == 1 && "outputOp is part of multiple fuse-groups");
     IntegerAttr fuseGroupAttr = *fuseGroupArrAttr.getAsRange<IntegerAttr>().begin();
 
-    while (true) {
+    std::deque<Operation *> stack = {outputOp};
+    while (!stack.empty()) {
+        Operation *op = stack.front();
+        stack.pop_front();
+
         if (isFuseGroupPrincipalOp(op, fuseGroupAttr)) {
             return op;
         }
 
-        bool foundSrc = false;
-        // Because we are at the output of the principal operation, there should
-        // be exactly one source from the same fuse-group.
         for (auto operand : op->getOperands()) {
             auto srcOp = operand.getDefiningOp();
             if (auto attr = srcOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
                 attr && llvm::is_contained(attr, fuseGroupAttr)) {
-                op = srcOp;
-                foundSrc = true;
-                break;
+                stack.push_back(srcOp);
             }
         }
-
-        if (!foundSrc)
-            return nullptr;
     }
 
-    llvm_unreachable("the while loop should terminate by return");
+    return nullptr;
 }
 
 SmallVector<OpOperand *>
