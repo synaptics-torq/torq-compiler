@@ -22,8 +22,6 @@ Usage:
 import pytest
 import subprocess
 import os
-import sys
-import shutil
 import numpy as np
 from pathlib import Path
 from PIL import Image
@@ -32,20 +30,13 @@ from torq.testing.comparison import compare_test_results
 from torq.testing.hf import get_hf_dataset_file, get_hf_model_file
 from torq.testing.iree import _find_iree_tool
 from torq.testing.versioned_fixtures import (
+    versioned_cached_data_fixture,
     versioned_generated_file_fixture,
     versioned_static_file_fixture,
     VersionedUncachedData,
 )
 
-# Ensure tests/ directory is on the import path
-TESTS_DIR = Path(__file__).resolve().parent
-if str(TESTS_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTS_DIR))
-
 from test_tflite_model import generate_tflite_layer_cases, TFLiteLayerCase
-
-# Directory where test_tflite_model.py looks for tflite files
-TFLITE_MODELS_DIR = Path(__file__).resolve().parent / "testdata" / "tflite_models"
 
 # Configuration
 MAX_LAYERS = int(os.environ.get('MAX_LAYERS', '0'))
@@ -57,6 +48,11 @@ def _fixture_data(value):
 
 def _is_full_model_case(tflite_layer_model):
     data = _fixture_data(tflite_layer_model)
+    return isinstance(data, dict) and not data.get("is_layer", True)
+
+
+def _is_full_model_case_data(data):
+    """Check if raw (unwrapped) data represents a full model case."""
     return isinstance(data, dict) and not data.get("is_layer", True)
 
 
@@ -88,17 +84,8 @@ def _compare_full_model_pair(left_results, right_results, left_name, right_name)
 # ============================================================================
 
 def download_mobilenetv2_model(cache):
-    """
-    Download MobileNetV2 int8 TFLite model from HuggingFace and copy to the
-    tflite_models directory so it can be used by the layer extractor.
-    """
-    TFLITE_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-
-    model_path = Path(get_hf_model_file(cache, "Synaptics/MobileNetV2", "MobileNetV2_int8.tflite"))
-    dest = TFLITE_MODELS_DIR / model_path.name
-    if not dest.exists():
-        shutil.copy2(model_path, dest)
-    return dest
+    """Download MobileNetV2 int8 TFLite model from HuggingFace."""
+    return Path(get_hf_model_file(cache, "Synaptics/MobileNetV2", "MobileNetV2_int8.tflite"))
 
 
 # ============================================================================
@@ -116,17 +103,15 @@ def case_config(request):
     }
 
 
-@pytest.fixture
+@versioned_cached_data_fixture
 def mbv2_input_data(request, tflite_layer_model, tweaked_random_input_data, mlir_io_spec):
-    if not _is_full_model_case(tflite_layer_model):
+    if not _is_full_model_case_data(tflite_layer_model):
         return tweaked_random_input_data
 
-    io_spec = _fixture_data(mlir_io_spec)
-
-    if not io_spec.inputs:
+    if not mlir_io_spec.inputs:
         return tweaked_random_input_data
 
-    input_spec = io_spec.inputs[0]
+    input_spec = mlir_io_spec.inputs[0]
     if len(input_spec.shape) != 4:
         return tweaked_random_input_data
 
@@ -144,10 +129,7 @@ def mbv2_input_data(request, tflite_layer_model, tweaked_random_input_data, mlir
     else:
         return tweaked_random_input_data
 
-    return VersionedUncachedData(
-        data=[np.expand_dims(input_tensor, axis=0)],
-        version=f"mbv2_full_model_input_{input_spec.fmt}_{'x'.join(map(str, input_spec.shape))}",
-    )
+    return [np.expand_dims(input_tensor, axis=0)]
 
 
 @pytest.fixture
@@ -212,11 +194,17 @@ _CASES_CACHE = {}
 
 
 def _is_full_model_only(metafunc):
-    """Check if -k filter targets only full model tests."""
+    """Check if only the full model case should be generated.
+
+    Returns True when running with -k "full_model" or -m ci.
+    """
     keyword_expr = metafunc.config.option.keyword
-    if not keyword_expr:
-        return False
-    return 'full' in keyword_expr.lower()
+    if keyword_expr and 'full_model' in keyword_expr.lower():
+        return True
+    marker_expr = metafunc.config.option.markexpr
+    if marker_expr and 'ci' in marker_expr.lower():
+        return True
+    return False
 
 
 def pytest_generate_tests(metafunc):
@@ -257,6 +245,15 @@ def pytest_generate_tests(metafunc):
 # Tests
 # ============================================================================
 
+def _compare_results(request, left_results, right_results, left_name, right_name,
+                     case_config, tflite_layer_model):
+    """Dispatch to full-model or layer comparison."""
+    if _is_full_model_case(tflite_layer_model):
+        _compare_full_model_pair(left_results, right_results, left_name, right_name)
+    else:
+        compare_test_results(request, right_results, left_results, case_config)
+
+
 def test_mbv2_llvmcpu_torq(
     request,
     llvmcpu_reference_results,
@@ -265,11 +262,8 @@ def test_mbv2_llvmcpu_torq(
     tflite_layer_model,
 ):
     """Compare MobileNetV2 results between LLVM-CPU and Torq backends."""
-    if _is_full_model_case(tflite_layer_model):
-        _compare_full_model_pair(llvmcpu_reference_results, torq_results, "LLVMCPU", "TORQ")
-        return
-
-    compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
+    _compare_results(request, llvmcpu_reference_results, torq_results,
+                     "LLVMCPU", "TORQ", case_config, tflite_layer_model)
 
 
 @pytest.mark.ci
@@ -282,11 +276,8 @@ def test_mbv2_tflite_torq(
     tflite_layer_model,
 ):
     """Compare MobileNetV2 results between TFLite and Torq backends."""
-    if _is_full_model_case(tflite_layer_model):
-        _compare_full_model_pair(tflite_reference_results, torq_results, "TFLite", "TORQ")
-        return
-
-    compare_test_results(request, torq_results, tflite_reference_results, case_config)
+    _compare_results(request, tflite_reference_results, torq_results,
+                     "TFLite", "TORQ", case_config, tflite_layer_model)
 
 
 def test_mbv2_llvmcpu_tflite(
@@ -297,8 +288,5 @@ def test_mbv2_llvmcpu_tflite(
     tflite_layer_model,
 ):
     """Compare MobileNetV2 results between LLVM-CPU and TFLite backends."""
-    if _is_full_model_case(tflite_layer_model):
-        _compare_full_model_pair(llvmcpu_reference_results, tflite_reference_results, "LLVMCPU", "TFLite")
-        return
-
-    compare_test_results(request, tflite_reference_results, llvmcpu_reference_results, case_config)
+    _compare_results(request, llvmcpu_reference_results, tflite_reference_results,
+                     "LLVMCPU", "TFLite", case_config, tflite_layer_model)

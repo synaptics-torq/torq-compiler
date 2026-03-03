@@ -165,6 +165,7 @@ def chip_config(request):
     if request.param == 'default':
 
         return {
+            "chip_name": "default",
             "target": "SL2610"
         }    
 
@@ -173,11 +174,14 @@ def chip_config(request):
 
     if not config_file.exists():
         return {
+            "chip_name": request.param,
             "target": request.param
         }
 
     with open(TOPDIR / 'extras' / 'chips' / f'{request.param}.json', 'r') as f:
-        return json.load(f)
+        config = json.load(f)
+        config["chip_name"] = request.param
+        return config
 
 
 def _find_iree_tool(env_var, tool_name):
