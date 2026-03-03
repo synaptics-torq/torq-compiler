@@ -1391,133 +1391,9 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
-class ClampOpPattern : public OpRewritePattern<linalg::GenericOp> {
-  public:
-    using OpRewritePattern::OpRewritePattern;
-
-    LogicalResult
-    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
-
-        std::string failReason;
-        int32_t minIntValue = 0, maxIntValue = 0;
-        float minFloatValue = 0.0f, maxFloatValue = 0.0f;
-
-        if (!isTorqClampOp(
-                srcOp, minIntValue, maxIntValue, minFloatValue, maxFloatValue, failReason
-            )) {
-            return rewriter.notifyMatchFailure(srcOp, failReason);
-        }
-
-        Value input = srcOp.getInputs()[0];
-        auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-
-        rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
-            srcOp, srcResultType, createInitTensor(srcOp, rewriter, srcResultType), "clamp", 0, 0,
-            minIntValue, maxIntValue,
-            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(minFloatValue)),
-            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(maxFloatValue)), input,
-            /*weights=*/mlir::Value()
-        );
-
-        return success();
-    }
-};
-
-// The current version of the IREE math dialect does not provide a Math::clamp op.
-// BfloatTanhPattern will introduce this generic op.
-// linalg.generic {indexing_maps = ... } ins(%inserted_slice_16 : tensor<1x1024x64xbf16>) outs(%50 :
-// tensor<1x1024x64xbf16>) {
-// ^bb0(%in: bf16, %out: bf16):
-//     %52 = arith.cmpf olt, %cst_3, %in : bf16
-//     %53 = arith.select %52, %cst_3, %in : bf16
-//     %54 = arith.cmpf ogt, %cst_2, %53 : bf16
-//     %55 = arith.select %54, %cst_2, %53 : bf16
-//     linalg.yield %55 : bf16
-// } -> tensor<1x1024x64xbf16>
-class NaiveClampOpPattern : public OpRewritePattern<linalg::GenericOp> {
-  public:
-    using OpRewritePattern::OpRewritePattern;
-
-    LogicalResult
-    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
-
-        if (srcOp.getInputs().size() != 1 || srcOp.getOutputs().size() != 1) {
-            return rewriter.notifyMatchFailure(srcOp, "Expects 1 input and 1 output");
-        }
-        Value input = srcOp.getInputs()[0];
-        auto inputType = dyn_cast<RankedTensorType>(input.getType());
-        auto inputElementType = inputType.getElementType();
-        auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-
-        auto &block = srcOp.getRegion().front();
-        // Expect 5 ops: cmpf, select, cmpf, select, yield
-        if (block.getOperations().size() != 5)
-            return rewriter.notifyMatchFailure(srcOp, "Expected exactly 5 ops in block");
-
-        // 1. cmpf olt, %cst_3, %in
-        auto *cmpfOltOp = &block.front();
-        auto cmpfOlt = dyn_cast<arith::CmpFOp>(cmpfOltOp);
-        if (!cmpfOlt || cmpfOlt.getPredicate() != arith::CmpFPredicate::OLT)
-            return rewriter.notifyMatchFailure(srcOp, "Expected cmpf olt as first op");
-        auto cst3 = cmpfOlt.getLhs().getDefiningOp<arith::ConstantOp>();
-        auto inArg = dyn_cast<BlockArgument>(cmpfOlt.getRhs());
-        if (!cst3 || !inArg || inArg.getArgNumber() != 0)
-            return rewriter.notifyMatchFailure(srcOp, "cmpf olt operands must be (const, %in)");
-
-        // 2. select %cmpfOlt, %cst_3, %in
-        auto select1 = dyn_cast<arith::SelectOp>(cmpfOltOp->getNextNode());
-        if (!select1 || select1.getCondition() != cmpfOlt.getResult())
-            return rewriter.notifyMatchFailure(srcOp, "Expected select after cmpf olt");
-        auto cst3_1 = select1.getTrueValue().getDefiningOp<arith::ConstantOp>();
-        auto inArg2 = dyn_cast<BlockArgument>(select1.getFalseValue());
-        if (!cst3_1 || !inArg2 || inArg2.getArgNumber() != 0)
-            return rewriter.notifyMatchFailure(srcOp, "select operands must be (const, %in)");
-
-        // 3. cmpf ogt, %cst_2, %select1
-        auto cmpfOgt = dyn_cast<arith::CmpFOp>(select1->getNextNode());
-        if (!cmpfOgt || cmpfOgt.getPredicate() != arith::CmpFPredicate::OGT)
-            return rewriter.notifyMatchFailure(srcOp, "Expected cmpf ogt as third op");
-        auto cst2 = cmpfOgt.getLhs().getDefiningOp<arith::ConstantOp>();
-        if (!cst2 || cmpfOgt.getRhs() != select1.getResult())
-            return rewriter.notifyMatchFailure(srcOp, "cmpf ogt operands must be (const, select)");
-
-        // 4. select %cmpfOgt, %cst_2, %select1
-        auto select2 = dyn_cast<arith::SelectOp>(cmpfOgt->getNextNode());
-        if (!select2 || select2.getCondition() != cmpfOgt.getResult())
-            return rewriter.notifyMatchFailure(srcOp, "Expected select after cmpf ogt");
-        auto cst2_2 = select2.getTrueValue().getDefiningOp<arith::ConstantOp>();
-        if (!cst2_2 || select2.getFalseValue() != select1.getResult())
-            return rewriter.notifyMatchFailure(srcOp, "select operands must be (const, select)");
-
-        // 5. yield select2
-        auto yieldOp = dyn_cast<linalg::YieldOp>(select2->getNextNode());
-        if (!yieldOp || yieldOp.getValues().size() != 1 ||
-            yieldOp.getValues()[0] != select2.getResult())
-            return rewriter.notifyMatchFailure(srcOp, "Yield must use last select result");
-
-        int32_t minIntValue = 0, maxIntValue = 0;
-        float minFloatValue = 0.0f, maxFloatValue = 0.0f;
-
-        if (inputElementType.isF32() || inputElementType.isBF16()) {
-            maxFloatValue = dyn_cast<FloatAttr>(cst3.getValue()).getValue().convertToFloat();
-            minFloatValue = dyn_cast<FloatAttr>(cst2.getValue()).getValue().convertToFloat();
-        }
-        else {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Unsupported element type for NaiveClamp operation"
-            );
-        }
-        rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
-            srcOp, srcResultType, createInitTensor(srcOp, rewriter, srcResultType), "clamp", 0, 0,
-            minIntValue, maxIntValue,
-            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(minFloatValue)),
-            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(maxFloatValue)), input,
-            /*weights=*/mlir::Value()
-        );
-
-        return success();
-    }
-};
+// Clamp patterns (ClampOpPattern, NaiveClampOpPattern, UnorderedClampOpPattern)
+// have been moved to ClampPattern.cpp and consolidated into ClampOpConversion.
+// They are registered via populateLinalgToTorqHLClampPatterns().
 
 class AbsOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
@@ -2412,8 +2288,7 @@ void populateLinalgToTorqHLPatterns(
 
     patterns.insert<ReduceOpConversion>(context);
     patterns.insert<MulOpPattern>(context);
-    patterns.insert<ClampOpPattern>(context);
-    patterns.insert<NaiveClampOpPattern>(context);
+    populateLinalgToTorqHLClampPatterns(context, patterns, markFuseGroups);
 
     patterns.insert<CastOpPattern>(context);
     patterns.insert<BroadcastOpConversion>(context);

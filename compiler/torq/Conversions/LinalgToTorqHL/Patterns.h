@@ -20,6 +20,9 @@ void populateLinalgToTorqHLPrePatterns(
 void populateLinalgToTorqHLConv1DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
+void populateLinalgToTorqHLClampPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
 void populateLinalgToTorqHLConv2DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

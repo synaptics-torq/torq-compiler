@@ -83,6 +83,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignObjectsIdentifie
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createFuseActWithConvPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createEncodeTensorsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createScalarsToTensorsPass();

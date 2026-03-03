@@ -505,4 +505,15 @@ def UnrollLoop:
     ];
 }
 
+def FuseActWithConv :
+    InterfacePass<"torq-fuse-act-with-conv", "mlir::FunctionOpInterface"> {
+  let summary = "Fuse torq_hl.act (clamp) into a preceding torq_hl.conv2d by "
+                "updating output_min / output_max on the conv2d and removing the act";
+  let constructor = "mlir::syna::torq::createFuseActWithConvPass()";
+
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect"
+  ];
+}
+
 #endif // IREE_CODEGEN_TORQ_PASSES

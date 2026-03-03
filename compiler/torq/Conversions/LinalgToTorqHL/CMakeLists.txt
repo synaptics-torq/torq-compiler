@@ -3,6 +3,7 @@ set(sources
   Patterns.cpp
   PatternUtils.cpp
   ArithToTorqHLPattern.cpp
+  ClampPattern.cpp
   Conv1DPattern.cpp
   Conv2DPattern.cpp
   Conv2DMatmulPattern.cpp
