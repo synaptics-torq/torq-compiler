@@ -292,6 +292,8 @@ def case_config(request, runtime_hw_type, chip_config):
     'layer_nasnetmobile_stem_conv1',
     'layer_nasnetmobile_reduction_conv_1_stem_1',
     'layer_nasnetmobile_normal_conv_1_10',
+
+    'full_model_efficientnetb0',
   ]
 
   if any(s in request.param.name for s in torq_tiling_tc):
