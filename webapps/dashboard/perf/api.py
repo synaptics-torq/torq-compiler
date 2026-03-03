@@ -27,8 +27,8 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['module', 'name']
-    ordering_fields = ['module', 'name']
-    ordering = ['module', 'name']
+    ordering_fields = ['module', 'name', 'parameters', 'id']
+    ordering = ['module', 'name', 'parameters', 'id']
 
 
 class TestSessionViewSet(viewsets.ModelViewSet):

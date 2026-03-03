@@ -873,24 +873,29 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir):
         record_property = request.getfixturevalue("record_property")
         profiling_output_dir = Path(profiling_output_dir)
         profiling_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build a unique prefix from the module path to avoid filename collisions
+        # e.g. tests/test_tosa_ops.py -> test_tosa_ops
+        module_prefix = Path(request.node.module.__file__).stem if hasattr(request.node, 'module') else ''
+        unique_name = f'{module_prefix}__{request.node.name}' if module_prefix else request.node.name
         
         host_profile_csv = torq_results_dir / 'host_profile.csv'
         if host_profile_csv.exists():
-            shutil.copy(host_profile_csv, profiling_output_dir / f'{request.node.name}.csv')
-            record_property("host_profile_csv", str(profiling_output_dir / f'{request.node.name}.csv'))
+            shutil.copy(host_profile_csv, profiling_output_dir / f'{unique_name}.csv')
+            record_property("host_profile_csv", str(profiling_output_dir / f'{unique_name}.csv'))
         
         # Find all annotated_profile*.xlsx files (could be annotated_profile.xlsx or annotated_profile_0_dispatch_name.xlsx)
         xlsx_files = list(torq_results_dir.glob('annotated_profile*.xlsx'))
         for idx, xlsx_file in enumerate(xlsx_files):
             suffix = f'_{idx}' if len(xlsx_files) > 1 else ''
-            dest_path = profiling_output_dir / f'{request.node.name}{suffix}.xlsx'
+            dest_path = profiling_output_dir / f'{unique_name}{suffix}.xlsx'
             shutil.copy(xlsx_file, dest_path)
         
         # Find all trace*.pb files (could be trace.pb or trace_0_dispatch_name.pb)
         pb_files_in_results = list(torq_results_dir.glob('trace*.pb'))
         for idx, pb_file in enumerate(pb_files_in_results):
             suffix = f'_{idx}' if len(pb_files_in_results) > 1 else ''
-            pb_output_path = profiling_output_dir / f'{request.node.name}{suffix}.pb'
+            pb_output_path = profiling_output_dir / f'{unique_name}{suffix}.pb'
             shutil.copy(pb_file, pb_output_path)
             if idx == 0:
                 # Record the first .pb file for reporting

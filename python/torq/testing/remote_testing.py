@@ -3,6 +3,7 @@ import getpass
 import hashlib
 import logging
 import os
+import re
 import socket
 import subprocess
 import tarfile
@@ -11,6 +12,20 @@ import time as _time
 from pathlib import Path, PurePosixPath
 
 from ..utils.remote_runner import RemoteCommandError, remote_command_runner_factory
+
+
+def _parse_board_wall_time(output: str | None) -> float | None:
+    """Parse wall-clock time from the shell ``time`` built-in output.
+
+    Looks for a line like ``real  0m1.234s`` and returns the value in seconds.
+    Returns *None* when the pattern is not found.
+    """
+    if not output:
+        return None
+    m = re.search(r'^real\s+(\d+)m([\d.]+)s', output, re.MULTILINE)
+    if m:
+        return int(m.group(1)) * 60.0 + float(m.group(2))
+    return None
 
 
 TOPDIR = Path(__file__).parent.parent.parent.parent
@@ -563,10 +578,22 @@ class RemoteTestRunner:
                 ]
             self._logger.info("Running remote test: %s", " ".join(cmd))
             if self._update_runtime:
-                t0 = _time.monotonic()
-                runner.run_cmd(cmd)
-                wall_time = _time.monotonic() - t0
-                self._logger.info("Wall time: %.3fs", wall_time)
+                # Wrap the command with the shell 'time' built-in so that
+                # the wall-clock measurement happens on the board itself,
+                # excluding any SSH transport overhead.  The entire command
+                # must be inside a compound block so that 'time' covers the
+                # full invocation, not just the first statement.
+                cmd_str = " ".join(cmd)
+                timed_cmd = [f"time {{ {cmd_str} ; }}"]
+                output = runner.run_cmd(timed_cmd)
+                wall_time = _parse_board_wall_time(output)
+                if wall_time is not None:
+                    self._logger.info("Board wall time: %.3fs", wall_time)
+                else:
+                    self._logger.warning(
+                        "Could not parse board-side wall time from output, "
+                        "'time' output not found in command output"
+                    )
             else:
                 runner.run_cmd(cmd)
                 wall_time = None

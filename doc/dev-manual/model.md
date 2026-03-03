@@ -219,9 +219,11 @@ pytest tests/test_onnx_model.py -k example-matmul_layer \
 This flag enables:
 
 - **Auto-deploy torq-run-module**: the locally cross-compiled binary is compared (MD5) against
-  the one on the board and copied only if it differs.
+  the one in your user-specific board path and copied only if it differs.
 - **Per-user runner paths**: each developer gets an isolated binary on the board under
-  ``/home/root/iree-build-soc/<username>/torq-run-module``.
+  ``/home/root/iree-build-soc/<username>/torq-run-module``. Runtime execution uses this
+  copied binary, so tests run with the developer's locally built runtime rather than a
+  shared system binary.
 - **Board hostname validation**: the board's hostname must match the pattern
   ``sl2619-dev-board-NNN`` (e.g. ``sl2619-dev-board-002``).  If it doesn't, pytest
   fails immediately with guidance on how to set the hostname using
@@ -237,8 +239,10 @@ This flag enables:
 
   Even if the session is interrupted with Ctrl+C or killed with SIGTERM, the lock
   is released automatically via signal handlers and ``atexit``.
-- **Wall-clock timing**: the total remote execution time is measured and printed in the
-  profiling summary at the end of the session.
+- **Wall-clock timing**: the remote execution time is measured **on the board itself**
+  using the shell ``time`` built-in, so the reported value excludes SSH transport
+  overhead.  The ``real`` time printed by ``time`` is parsed from the command output
+  and recorded in the profiling summary at the end of the session.
 
 ### Deploying a custom NPU kernel module
 

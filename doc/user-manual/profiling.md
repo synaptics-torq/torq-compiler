@@ -135,9 +135,10 @@ overhead), while ``OVERALL`` and the breakdown rows come from the on-device trac
 
 ### Wall-time measurement
 
-When ``--update-astra-runtime`` is active, the framework measures wall-clock time around
-the remote ``torq-run-module`` invocation using Python's ``time.monotonic()``. The result
-is:
+When ``--update-astra-runtime`` is active, the framework first syncs your locally built
+``torq-run-module`` into your user-specific board path
+(``/home/root/iree-build-soc/<username>/torq-run-module``) and then measures wall-clock time
+around that remote invocation using Python's ``time.monotonic()``. The result is:
 
 - Logged during the test (``Wall time: 1.234s``)
 - Saved as ``wall_time.txt`` in the test results directory
