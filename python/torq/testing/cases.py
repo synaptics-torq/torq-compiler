@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from typing import List, Dict, Any
 from pathlib import Path
 
-from torq.testing.tensorflow import generate_layers_from_model
-
 """
 
 This module provides an helper fixture and class that allows to setup
@@ -117,6 +115,7 @@ def get_test_cases_from_tf_model(model, model_name, full_model=False) -> List[Ca
         full_model_config = model.get_config()
         cases.append(Case(f"full_model_{model_name}", full_model_config))
     else:
+        from torq.testing.tensorflow import generate_layers_from_model
         layers = generate_layers_from_model(model)
 
         for layer_name, layer_config in layers.items():

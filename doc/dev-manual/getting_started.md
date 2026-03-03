@@ -52,6 +52,8 @@ If you are using a different environment you can use a Docker image:
    Please refer to [Github documentation for the creation and usage of a
    personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic).
    
+   Please refer to the official docker documentation to install docker on your machine.
+   Some hints for linux, Windows and MacOS are also available in the [SyNAP guide](https://synaptics-synap.github.io/doc/v/latest/docs/manual/working_with_models.html#installing-docker).
 
 2. Start a development container with access to the current directory and your ssh configuration:
 
@@ -60,6 +62,38 @@ If you are using a different environment you can use a Docker image:
    ```{code} shell
    $ cd .. && torq-compiler/scripts/dev.sh
    ```
+
+   In alternative you can customize the docker execution with an alias such as the one in the example here below:
+
+   ```{code} shell
+   $ alias torq-dev='docker run -it --rm -u $(id -u):$(id -g) -v $MOUNT_PATH:$MOUNT_PATH -w $(pwd) -e PATH=$VENV_PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin -e CCACHE_DIR=$CCACHE_PATH -e HOME=$HOME_PATH -e IREE_BUILD_DIR=$BUILD_PATH -e ADB_SERVER_SOCKET=tcp:host.docker.internal:5037 ghcr.io/synaptics-torq/torq-compiler-dev/builder'
+   ```
+
+   where the variables have the following meaning:
+   ``$MOUNT_PATH`` root directory to be mounted inside the docker container
+   ``$VENV_PATH`` path to the ``bin`` directory inside the python virtual env to be used
+   ``CCACHE_PATH`` path to the ``ccache`` working directory
+   ``HOME_PATH`` path to the home directory (some utilities store info inside the home dir)
+   ``BUILD_PATH`` path to the build directory (if not using the default ``iree-build``)
+
+   The alias can then be used directly to start the torq development environment:
+
+   ```{code} shell
+   $ torq-dev
+   ```
+   
+   Some tests download items from HuggingFace, in order for this to work you have to login
+   to HuggingFace as well. This has to be done only once using an HuggingFace token,
+   the registration information will be stored inside the ``$HOME_PATH`` directory:
+   
+   ```{code} shell
+   hf auth login --token $HF_PAT
+   ```
+   
+   where ``$HF_PAT`` is the personal access token received from HuggingFace.
+   
+   The docker comes with ``adb`` preinstalled and it is possible to use it to connect
+   to an astra board via TCP/IP or USB.
 
 3. Inside the container, go to the `torq-compiler` directory and continue with the build steps:
 
