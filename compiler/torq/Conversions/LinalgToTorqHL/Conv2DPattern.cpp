@@ -321,30 +321,6 @@ static bool isStridedInsertSlice(Value input, bool isDW1DStride1) {
     return false;
 }
 
-static PaddingInfo populatePadInfo(Value input, bool hasStridedInsertSlice, int channelDim) {
-    PaddingInfo prelimPadInfo{{0, 0, 0, 0}, 0};
-    // For regular convs (no strided insert), peek at padding without consuming it
-    // We need this for the match function check below
-    if (!hasStridedInsertSlice) {
-        // Just peek at padding values without modifying IR
-        if (auto padOp = input.getDefiningOp<tensor::PadOp>()) {
-            auto lp = padOp.getStaticLow();
-            auto hp = padOp.getStaticHigh();
-            if (lp.size() == 4 && hp.size() == 4) {
-                // Use correct dimension indices based on layout
-                // NCHW: [N, C, H, W] -> H=dim2, W=dim3
-                // NHWC: [N, H, W, C] -> H=dim1, W=dim2
-                int hDim = (channelDim == 3) ? 1 : 2;
-                int wDim = (channelDim == 3) ? 2 : 3;
-                prelimPadInfo.lrtbPad = {
-                    lp[wDim], lp[hDim], hp[wDim], hp[hDim]
-                }; // [left, top, right, bottom]
-            }
-        }
-    }
-    return prelimPadInfo;
-}
-
 static mlir::FailureOr<Value> getDilatedWts(
     Value weights, std::vector<int64_t> &finalDilationVec, bool isDW1DStride1,
     PatternRewriter &rewriter
@@ -470,9 +446,7 @@ static bool isLinalgDW(Operation *op) {
 template <class LinalgConvOp, class TorqConvOp>
 struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
   private:
-    using MatchFn = bool(
-        ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape, ArrayRef<int64_t> padShape
-    );
+    using MatchFn = bool(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape);
 
     const int _channelDim;          // Channel dimension index in data shape
     const Permutation _dataPerm;    // Dim permutation for data transpose
@@ -570,13 +544,9 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                 llvm::dbgs() << "Input has strided insert_slice pattern\n";
             }
         });
-        // Get preliminary padding info without modifying IR yet
-        // For strided insert slice cases, no preliminary padding needed (handled later)
-        // For regular cases, we'll compute padding after validation passes
-        PaddingInfo prelimPadInfo = populatePadInfo(input, hasStridedInsertSlice, _channelDim);
 
         // Check if we can support this layer
-        if (_matchFn && !_matchFn(shape, weightShape, prelimPadInfo.lrtbPad)) {
+        if (_matchFn && !_matchFn(shape, weightShape)) {
             return rewriter.notifyMatchFailure(
                 convOp, "Conv does not match expected kernel dimension or padding"
             );
@@ -1080,45 +1050,32 @@ struct InterleavedInsertSlicePattern : public OpRewritePattern<tensor::InsertSli
 };
 
 // Checker methods for convolutions with input: NHWC, weights: HWC(F) or NCHW, weights: CHW(F)
-template <int channelIndex> struct Check {
-    static constexpr int kh = channelIndex == 3 ? 0 : 1;
-    static constexpr int ih = kh + 1;
-    static constexpr int iw = ih + 1, kw = kh + 1;
-    static constexpr int maxKerHW = 9;
-    using Shape = ArrayRef<int64_t>;
-
-    // Check that the kernel shape is small enough
-    static bool isKerSmall(Shape iShape, Shape wShape, Shape padShape) {
-        return iShape.size() == 4 && wShape.size() >= 3 && wShape[kh] <= maxKerHW &&
-               wShape[kw] <= maxKerHW;
-    }
-
-    // Check that the kernel shape is equal to the input shape (without padding)
-    static bool isKerEqInput(Shape iShape, Shape wShape, Shape padShape) {
-        bool noPadding = llvm::all_of(padShape, [](auto p) { return p == 0; });
-        return noPadding && iShape.size() == 4 && wShape.size() >= 3 && wShape[kh] > 1 &&
-               wShape[kw] > 1 && iShape[ih] == wShape[kh] && iShape[iw] == wShape[kw];
-    }
-};
+static bool isKerSmall(int channelIndex, ArrayRef<int64_t> iShape, ArrayRef<int64_t> wShape) {
+    int kh = channelIndex == 3 ? 0 : 1;
+    int kw = kh + 1;
+    int maxKerHW = 9;
+    return iShape.size() == 4 && wShape.size() >= 3 && wShape[kh] <= maxKerHW &&
+           wShape[kw] <= maxKerHW;
+}
 
 void populateLinalgToTorqHLConv2DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
     patterns.insert<Conv2dConvert<linalg::Conv2DNhwcHwcfOp, syna::torq_hl::Conv2DOp>>(
         context, 3, Permutation::nhwc2nchw(), Permutation::hwcf2fchw(), 28, 12,
-        Check<3>::isKerSmall, markFuseGroups
+        [](auto i, auto w) { return isKerSmall(3, i, w); }, markFuseGroups
     );
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
-        context, 3, Permutation::nhwc2nchw(), Permutation::hwc2chw(), 20, 12, Check<3>::isKerSmall,
-        markFuseGroups
+        context, 3, Permutation::nhwc2nchw(), Permutation::hwc2chw(), 20, 12,
+        [](auto i, auto w) { return isKerSmall(3, i, w); }, markFuseGroups
     );
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNchwChwOp, torq_hl::DepthwiseConv2DOp>>(
-        context, 1, Permutation::none(), Permutation::none(), 20, 12, Check<1>::isKerSmall,
-        markFuseGroups, true
+        context, 1, Permutation::none(), Permutation::none(), 20, 12,
+        [](auto i, auto w) { return isKerSmall(1, i, w); }, markFuseGroups, true
     );
     patterns.insert<Conv2dConvert<linalg::Conv2DNchwFchwOp, syna::torq_hl::Conv2DOp>>(
-        context, 1, Permutation::none(), Permutation::none(), 28, 12, Check<1>::isKerSmall,
-        markFuseGroups, true
+        context, 1, Permutation::none(), Permutation::none(), 28, 12,
+        [](auto i, auto w) { return isKerSmall(1, i, w); }, markFuseGroups, true
     );
 }
 
