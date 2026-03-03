@@ -39,7 +39,8 @@ def case_config(request):
             "mlir_model_file": "tflite_mlir_model_file",
             "tflite_model_file": "quantized_tflite_model_file",
             "input_data": "tweaked_random_input_data",
-            "quantize_to_int16": False
+            "quantize_to_int16": False,
+            "torq_compiler_options": ["--torq-convert-dtypes", "--torq-enable-torq-hl-tiling"]
         }
 
 

@@ -22,10 +22,6 @@ def case_config(request, runtime_hw_type, chip_config):
         'equal.mlir',
         'instancenorm.mlir', 
         '0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean.mlir',
-        'maxpool_bf16_batch19_4x1_stride4x1.mlir', #Needs tile-and-fuse to pass
-        'maxpool_bf16_batch19_2x2_stride2x2_32x64x16.mlir', #Needs tile-and-fuse to pass
-        'maxpool_bf16_batch19_2x2_stride2x2_32x32x8.mlir', #Needs tile-and-fuse to pass
-        'maxpool_bf16_batch19_2x2_stride2x2_32x16x4.mlir' #Needs tile-and-fuse to pass
     ]
 
     if aws_fpga:
@@ -40,8 +36,15 @@ def case_config(request, runtime_hw_type, chip_config):
         print(f"[pytest] True Running test with chip target: {chip_config.data['target']}")
 
         failed_tc += [
-            'conv2d-nchw-clip-bf16.mlir', # Number of differences: 1914 out of 401408 [0.48%]
-            'encoder.mlir.230.Conv_0_small.mlir' # Compiler Timeout (exceeded 300 seconds)
+            # Max relative difference: 1.0
+            # Max absolute difference: 40.0
+            # Number of differences: 18432 out of 622592 [2.96%]
+            'maxpool_bf16_batch19_4x1_stride4x1',
+
+            # Max relative difference: 0.9999998211860657
+            # Max absolute difference: 6.0
+            # Number of differences: 1914 out of 401408 [0.48%]
+            'conv2d-nchw-clip-bf16.mlir',
         ]
         if aws_fpga:
             # aws-fpga failures
@@ -53,7 +56,6 @@ def case_config(request, runtime_hw_type, chip_config):
                 '0730_Cast__layers.5_Add_output_0_cast_to_fp32.mlir', # output mismatch
                 'encoder.mlir.230.Conv_0_small.mlir', # output mismatch
                 'abs.mlir',  # output mismatch
-
             ]
     else:
         print(f"[pytest] False Running test with chip target: {chip_config.data['target']}")
@@ -61,6 +63,25 @@ def case_config(request, runtime_hw_type, chip_config):
 
     if any(s in request.param.name for s in failed_tc):
         pytest.xfail("output mismatch or error")
+
+    torq_tiling_tc = [
+        # <unknown>:0: error: expected integer or index type
+        # Assertion failed: (succeeded(ConcreteT::verify(getDefaultDiagnosticEmitFn(ctx), args...))), 
+        #    function get, file StorageUniquerSupport.h, line 180.
+        # Triggered from ConvertOddDimensionStrideConvPattern<mlir::syna::torq_hl::Conv2DOp>::matchAndRewrite()
+        'conv2d-nchw-clip-bf16.mlir',
+
+        'Conv2d_bf16_1x1x64x8192',
+        'reducemean-reshape',
+        'reducemean.mlir',
+        # crash
+        'encoder.mlir.230.Conv_0_small',
+        'encoder.mlir.243.Conv_2_small',
+        'encoder.mlir.237.Conv_1_small',
+    ]
+
+    if any(s in request.param.data.name for s in torq_tiling_tc):
+        extra_args["torq_compiler_options"]  = ["--torq-enable-torq-hl-tiling"]
 
     return {
         "mlir_model_file": "static_mlir_model_file",

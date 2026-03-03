@@ -32,10 +32,6 @@ def case_config(request, runtime_hw_type, chip_config):
 
     # Next chip failures
     if chip_config.data['target'] != "SL2610":
-        failed_tc += [
-            'quantized_batch_matmul.mlir',
-            'reciprocal-bf16.mlir'
-        ]
         if aws_fpga:
             failed_tc += [
                 'dot-in-int16-out-int16.mlir', # output mismatch

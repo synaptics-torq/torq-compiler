@@ -45,19 +45,22 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in request.node.name for s in failed_tc):
         pytest.xfail("failing test or skipped for now")
 
+    torq_compiler_options = ["--torq-enable-torq-hl-tiling"]
+    if "full_model" in request.node.name:
+        # Fix for bf16 clamp going to CSS
+        torq_compiler_options += ["--torq-disable-css"]
+
     case_config_dict = {
          "onnx_model": "onnx_layer_model",
          "mlir_model_file": "onnx_mlir_model_file",
          "input_data": "tweaked_random_input_data",
+         "torq_compiler_options": torq_compiler_options
     }
 
     if "layer_ReduceMean" in request.node.name:
         case_config_dict["comparison_config"] = "comparison_config_for_reduce_mean_mbv2"
 
     if "full_model" in request.node.name:
-        # Fix for bf16 clamp going to CSS
-        case_config_dict["torq_compiler_options"] = ["--torq-disable-css"]
-
         case_config_dict["comparison_config"] = "comparison_config_for_mbv2"
 
     return case_config_dict

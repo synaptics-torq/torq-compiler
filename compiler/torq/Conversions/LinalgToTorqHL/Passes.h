@@ -25,9 +25,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToTorqHLConversi
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createArithToTorqHLConversionPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>>
-createLinalgToTorqHLGenericPass(bool specializeConstantComputations = false);
-
 void registerLinalgToTorqHLPasses();
 
 } // namespace mlir::syna::torq

@@ -235,6 +235,71 @@ def case_config(request, runtime_hw_type, chip_config):
   if any(s in request.param.name.lower() for s in failed_str):
     pytest.xfail("failing test or skipped for now")
 
+  torq_tiling_tc = [
+     
+    'layer_xception_add_2',
+    'layer_xception_block3_pool',
+    'layer_xception_block5_sepconv1',
+    'layer_xception_block14_sepconv1',
+    'layer_xception_block13_sepconv2',
+    'layer_xception_block14_sepconv2',
+
+    'layer_inceptionv3_conv2d_5',
+    'layer_inceptionv3_conv2d_7',
+    'layer_inceptionv3_conv2d_10',
+    'layer_inceptionv3_conv2d_12',
+    'layer_inceptionv3_conv2d_15', # only for next
+    'layer_inceptionv3_conv2d_19',
+    'layer_inceptionv3_conv2d_24',
+    'layer_inceptionv3_conv2d_26',
+    'layer_inceptionv3_conv2d_34',
+    'layer_inceptionv3_conv2d_38',
+    'layer_inceptionv3_conv2d_90',
+    'layer_inceptionv3_conv2d_93',
+    'layer_inceptionv3_conv2d_97',
+
+    'layer_resnet50_conv2_block1_2_conv',
+    'layer_resnet50_conv2_block1_0_conv',
+    'layer_resnet50_conv3_block1_0_conv',
+    'layer_resnet50_conv3_block1_1_conv',
+    'layer_resnet50_conv4_block1_0_conv',
+    'layer_resnet50_conv4_block1_1_conv',
+    'layer_resnet50_conv4_block1_3_conv',
+    'layer_resnet50_conv4_block2_1_conv',
+    'layer_resnet50_conv5_block1_add',
+    'layer_resnet50_conv5_block1_0_conv',
+    'layer_resnet50_conv5_block1_3_conv',
+    'layer_resnet50_conv5_block2_1_conv',
+
+    'layer_inceptionresnetv2_block8_1_conv',
+    'layer_inceptionresnetv2_block17_1_conv',
+    'layer_inceptionresnetv2_block35_1_conv',
+    'layer_inceptionresnetv2_custom_scale_layer_30',
+    'layer_inceptionresnetv2_custom_scale_layer_39',
+    'layer_inceptionresnetv2_conv_7b',
+
+    'layer_densenet121_conv2_block1_2_conv', # Failed
+    'layer_densenet121_conv4_block18_1_conv',
+    'layer_densenet121_conv4_block19_1_conv',
+    'layer_densenet121_conv4_block20_1_conv',
+    'layer_densenet121_conv4_block21_1_conv',
+    'layer_densenet121_conv4_block22_1_conv',
+    'layer_densenet121_conv4_block23_1_conv',
+    'layer_densenet121_conv4_block24_1_conv',
+    'layer_densenet121_conv5_block6_1_conv',
+    'layer_densenet121_conv5_block7_1_conv',
+    'layer_densenet121_pool3_conv',
+    'layer_densenet121_pool4_conv',
+
+    'layer_nasnetmobile_stem_conv1',
+    'layer_nasnetmobile_reduction_conv_1_stem_1',
+    'layer_nasnetmobile_normal_conv_1_10',
+  ]
+
+  if any(s in request.param.name for s in torq_tiling_tc):
+      extra_args["torq_compiler_options"]  = ["--torq-enable-torq-hl-tiling"]
+
+
   compile_timeout = 60 * 15
   runtime_timeout = 60 * 15
 

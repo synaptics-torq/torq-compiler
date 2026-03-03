@@ -74,8 +74,8 @@ static llvm::cl::opt<bool> clDisableSeg(
     llvm::cl::desc("Disable fusion of segmentation operations with producer"), llvm::cl::init(false)
 );
 
-static llvm::cl::opt<bool> clEnableTorqTileAndFuse(
-    "torq-enable-tile-and-fuse", llvm::cl::desc("enable torq tiling"), llvm::cl::init(false)
+static llvm::cl::opt<bool> clEnableTorqHLTiling(
+    "torq-enable-torq-hl-tiling", llvm::cl::desc("enable TorqHL tiling"), llvm::cl::init(false)
 );
 
 static llvm::cl::opt<bool> clForceTorqHLTiling(
@@ -126,7 +126,7 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     // handle them consistently.
     funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
 
-    if (clEnableTorqTileAndFuse) {
+    if (!clEnableTorqHLTiling) {
         funcPm.addPass(createMarkPatternsForTileAndFusePass());
         funcPm.addPass(createTileAndFusePass());
         funcPm.addPass(createCanonicalizerPass());
@@ -142,14 +142,14 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     // Handles valid pad operations
     funcPm.addPass(createValidToSamePadPass());
 
-    if (clEnableTorqTileAndFuse) {
-        funcPm.addPass(createCanonicalizerPass());
-        funcPm.addPass(createKernelSelectionPass());
-        funcPm.addPass(createCompileTimeConstOutlinePass());
+    if (clEnableTorqHLTiling) {
         funcPm.addPass(createCompileTimeConstComputePass());
         funcPm.addPass(createCanonicalizerPass());
     }
     else {
+        funcPm.addPass(createCanonicalizerPass());
+        funcPm.addPass(createKernelSelectionPass());
+        funcPm.addPass(createCompileTimeConstOutlinePass());
         funcPm.addPass(createCompileTimeConstComputePass());
         funcPm.addPass(createCanonicalizerPass());
     }
@@ -172,14 +172,7 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
     funcPm.addPass(createLinalgToTorqHLConversionPass());
     funcPm.addPass(createCanonicalizerPass());
 
-    // FIXME: not working currently
-    // convert all the linalg operations that we received to torq_hl.generic
-    // so that we will be able to run them on the NPU, this is a conversion
-    // that will fail if anything remains that cannot be converted to torq_hl.
-    // generic (we don't know how to run those anyways)
-    // funcPm.addPass(createLinalgToTorqHLGenericPass(true));
-
-    if (!clEnableTorqTileAndFuse || clForceTorqHLTiling) {
+    if (clEnableTorqHLTiling || clForceTorqHLTiling) {
         funcPm.addPass(createTorqHlTilePass());
         funcPm.addPass(createKernelSelectionPass());
         funcPm.addPass(createCompileTimeConstComputePass());

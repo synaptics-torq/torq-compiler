@@ -112,7 +112,7 @@ def case_config(request):
         "tflite_model": "tflite_layer_model",
         "mlir_model_file": "tflite_mlir_model_file",
         "input_data": "mbv2_input_data",
-        "torq_compiler_options": ["--torq-convert-dtypes"]
+        "torq_compiler_options": ["--torq-convert-dtypes", "--torq-enable-torq-hl-tiling"]
     }
 
 
