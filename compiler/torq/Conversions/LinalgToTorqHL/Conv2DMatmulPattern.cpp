@@ -244,7 +244,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
             // Swap roles so downstream conversion logic sees canonical (input, weights).
             input = rhs;
             weights = lhs;
-            channelDim = 0;
+            channelDim = 1;
         }
         // Check if the Conv2D input (lhs) is produced by a CollapseShapeOp —
         // this typically means the input tensor is being flattened before the convolution.

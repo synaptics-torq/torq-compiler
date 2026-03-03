@@ -200,8 +200,6 @@ def case_config(request, runtime_hw_type, chip_config):
     'se_excite',
     'efficientnetb0_block2a_expand_activation',
     'efficientnetb0_block2a_expand_conv',
-    # regression after merging unroll branch
-    'full_model_efficientnetb0',
   ]
 
   next = chip_config.data['target'] != "SL2610"
