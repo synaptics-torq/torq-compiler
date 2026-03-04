@@ -341,3 +341,128 @@ important are:
 - **runtime_hw_type**: the target hardware emulation used to run the torq model (can be changed with the ``--torq-runtime-hw-type``)
 
 The source code of the fixtures and their dependecy relatioship can be found by inspecting the files in ``python/torq/testing``.
+
+
+
+## TFLite model testing
+
+The testing framework also supports TFLite models. Unlike ONNX models which are imported via ``iree.compiler.tools.import_onnx``, TFLite models go through a different conversion pipeline: ``iree-import-tflite`` (TFLite → TOSA bytecode) followed by ``iree-opt`` (TOSA → text MLIR).
+
+A key difference from the ONNX workflow is how layers are extracted. TFLite layers are extracted by directly manipulating the TFLite flatbuffer, which **preserves quantization parameters exactly** from the original model. This ensures that each extracted layer remains correctly quantized with its original scale and zero-point values.
+
+The test file is ``tests/test_tflite_model.py``. Place your ``.tflite`` model files in
+``tests/testdata/tflite_models/`` and the framework will automatically detect them and
+create test cases for each layer and the full model.
+
+### Initial setup
+
+Place the ``.tflite`` file in ``tests/testdata/tflite_models/``.
+The framework will automatically detect it and create test cases.
+
+### Collecting tests
+
+To view the test cases:
+
+```
+$ pytest tests/test_tflite_model.py --collect-only
+```
+
+The output will show individual layer tests and a full model test:
+
+```
+<Function test_tflite_model_llvmcpu_torq[my_model_layer_CONV_2D_0-sim-default]>
+<Function test_tflite_model_llvmcpu_torq[my_model_layer_ADD_3-sim-default]>
+...
+<Function test_tflite_model_llvmcpu_torq[my_model_full_model-sim-default]>
+```
+
+### What the tests do
+
+Each TFLite test case:
+
+1. **Extracts layers** from the TFLite flatbuffer (at collection time). Each layer becomes a standalone ``.tflite`` model preserving the original quantization.
+2. **Converts to MLIR** via ``iree-import-tflite`` → ``iree-opt`` (at test runtime, cached by versioned fixtures).
+3. **Compiles** the MLIR for Torq simulation (``torq-compile``) and LLVM-CPU (``iree-compile``).
+4. **Runs inference** with random inputs on both backends.
+5. **Compares results** element-wise between the two backends.
+
+### Environment variables
+
+The following environment variables control test behaviour:
+
+- ``MAX_LAYERS``: limit the number of layers extracted (default: ``0`` = no limit).
+  Example: ``MAX_LAYERS=5 pytest tests/test_tflite_model.py -v --collect-only``
+
+- ``FORCE_EXTRACT``: set to ``1`` to force re-extraction of layers even if cached.
+  Example: ``FORCE_EXTRACT=1 pytest tests/test_tflite_model.py -v --collect-only``
+
+### Running specific subsets
+
+```bash
+# Full model only:
+pytest tests/test_tflite_model.py -v -k "full_model"
+
+# Specific layer type:
+pytest tests/test_tflite_model.py -v -s -k "layer_CONV_2D"
+
+# A single specific layer:
+pytest tests/test_tflite_model.py -v -s -k "my_model_layer_CONV_2D_1"
+
+# Parallel execution:
+pytest tests/test_tflite_model.py -v -n 8
+```
+
+### How layer extraction works
+
+The layer extraction is performed by ``torq.testing.tflite_layer_extractor.extract_all_layers``.
+It works directly on the TFLite flatbuffer:
+
+1. Parses the flatbuffer to enumerate all operators.
+2. For each operator, builds a new single-operator TFLite model that includes only the relevant
+   tensors, buffers, and quantization parameters.
+3. Saves each layer as a standalone ``.tflite`` file in
+   ``tests/testdata/tflite_models/.mlir_cache/<model_stem>_layers/``.
+4. A ``_cases_cache.json`` is saved alongside so that subsequent runs skip extraction entirely
+   and load the test case list from the JSON cache.
+
+The extraction happens at **test collection time** (inside ``pytest_generate_tests``), since pytest needs the list of layers to parametrize the tests. The TOSA/MLIR conversion happens later at **test runtime** via the ``tflite_mlir_model_file`` versioned fixture.
+
+### Caching
+
+TFLite tests use two caching layers:
+
+1. **Layer extraction cache** (``tests/testdata/tflite_models/.mlir_cache/``):
+   stores extracted layer ``.tflite`` files and ``_cases_cache.json``. Cleared with
+   ``FORCE_EXTRACT=1``.
+
+2. **Versioned fixtures cache** (``.pytest_cache/d/versioned_fixtures/``):
+   stores TOSA/MLIR files, compiled models, and inference results. Each artifact is
+   keyed by a hash of its inputs, so changes propagate automatically. Cleared with
+   ``--recompute-cache``.
+
+### Investigating errors and failures
+
+The same debugging approaches described in the ONNX sections above apply. The key fixture
+names differ for TFLite:
+
+- **tflite_mlir_model_file**: converts TFLite → TOSA (via ``iree-import-tflite``) → text MLIR (via ``iree-opt``). Errors here indicate unsupported TFLite operators or conversion issues.
+
+- **torq_compiled_model_dir**: compiles the MLIR with ``torq-compile``. Same as ONNX.
+
+Debugging options (``--debug-ir``, ``-s``, ``--recompute-cache``), performance profiling
+(``--torq-compile-time-profiling-output-dir``, ``--torq-runtime-profiling-output-dir``), and hardware execution (``--torq-runtime-hw-type``, ``--torq-addr`` , ``--update-astra-runtime``)
+all work identically to the ONNX workflow described above.
+
+### Key TFLite fixtures
+
+- **tflite_layer_model**: provides the test case data (layer path, op name, quantization info)
+
+- **tflite_model_file**: versioned static file fixture wrapping the ``.tflite`` path
+
+- **tflite_mlir_model_file**: converts TFLite → TOSA → MLIR (cached)
+
+- **tweaked_random_input_data**: random inputs used for layer and full model tests
+
+- **llvmcpu_reference_results**: results of inference using LLVM-CPU backend
+
+- **torq_results**: results of inference using Torq backend
