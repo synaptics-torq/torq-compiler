@@ -1049,13 +1049,13 @@ struct InterleavedInsertSlicePattern : public OpRewritePattern<tensor::InsertSli
     }
 };
 
-// Checker methods for convolutions with input: NHWC, weights: HWC(F) or NCHW, weights: CHW(F)
-static bool isKerSmall(int channelIndex, ArrayRef<int64_t> iShape, ArrayRef<int64_t> wShape) {
-    int kh = channelIndex == 3 ? 0 : 1;
-    int kw = kh + 1;
+// Checker methods for convolutions with input: NHWC, weights: HWC(F) or NCHW, weights: (F)CHW
+static bool
+isKerSmall(int kernelHIndex, ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape) {
+    int kernelWIndex = kernelHIndex + 1;
     int maxKerHW = 9;
-    return iShape.size() == 4 && wShape.size() >= 3 && wShape[kh] <= maxKerHW &&
-           wShape[kw] <= maxKerHW;
+    return inputShape.size() == 4 && kernelShape.size() >= 3 &&
+           kernelShape[kernelHIndex] <= maxKerHW && kernelShape[kernelWIndex] <= maxKerHW;
 }
 
 void populateLinalgToTorqHLConv2DPatterns(
@@ -1063,11 +1063,11 @@ void populateLinalgToTorqHLConv2DPatterns(
 ) {
     patterns.insert<Conv2dConvert<linalg::Conv2DNhwcHwcfOp, syna::torq_hl::Conv2DOp>>(
         context, 3, Permutation::nhwc2nchw(), Permutation::hwcf2fchw(), 28, 12,
-        [](auto i, auto w) { return isKerSmall(3, i, w); }, markFuseGroups
+        [](auto i, auto w) { return isKerSmall(0, i, w); }, markFuseGroups
     );
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
         context, 3, Permutation::nhwc2nchw(), Permutation::hwc2chw(), 20, 12,
-        [](auto i, auto w) { return isKerSmall(3, i, w); }, markFuseGroups
+        [](auto i, auto w) { return isKerSmall(0, i, w); }, markFuseGroups
     );
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNchwChwOp, torq_hl::DepthwiseConv2DOp>>(
         context, 1, Permutation::none(), Permutation::none(), 20, 12,
@@ -1075,7 +1075,7 @@ void populateLinalgToTorqHLConv2DPatterns(
     );
     patterns.insert<Conv2dConvert<linalg::Conv2DNchwFchwOp, syna::torq_hl::Conv2DOp>>(
         context, 1, Permutation::none(), Permutation::none(), 28, 12,
-        [](auto i, auto w) { return isKerSmall(1, i, w); }, markFuseGroups, true
+        [](auto i, auto w) { return isKerSmall(2, i, w); }, markFuseGroups, true
     );
 }
 
