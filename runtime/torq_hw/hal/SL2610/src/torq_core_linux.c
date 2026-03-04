@@ -851,7 +851,7 @@ static void torq_remove(struct platform_device *pdev)
     LOG_ENTER();
 
     if (torq_dev->default_domain) {
-        iommu_domain_free(torq_dev->default_domain);
+        torq_dev->default_domain = NULL;
     }
 
     if (torq_dev->misc_registered) {
