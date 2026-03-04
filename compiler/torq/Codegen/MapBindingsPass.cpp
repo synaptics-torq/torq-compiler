@@ -74,6 +74,17 @@ static void updateSubViewUserTypes(PatternRewriter &rewriter, Operation *op) {
 
                     return true;
                 })
+                .Case<memref::CollapseShapeOp>([&](memref::CollapseShapeOp collapseOp) {
+                    auto newType = memref::CollapseShapeOp::computeCollapsedType(
+                        collapseOp.getSrcType(), collapseOp.getReassociationIndices()
+                    );
+
+                    rewriter.modifyOpInPlace(collapseOp, [&]() {
+                        collapseOp.getResult().setType(newType);
+                    });
+
+                    return true;
+                })
                 .Default([](auto) { return false; });
 
         if (changedOutput) {
