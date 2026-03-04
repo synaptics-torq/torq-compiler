@@ -63,23 +63,6 @@ class TFLiteLayerCase:
 
 
 # ============================================================================
-# TOSA/MLIR Conversion
-# ============================================================================
-
-def convert_tflite_to_tosa(tflite_path: Path, output_path: Path) -> bool:
-    """Convert TFLite to TOSA using iree-import-tflite."""
-    try:
-        result = subprocess.run(
-            ["iree-import-tflite", str(tflite_path), "-o", str(output_path)],
-            capture_output=True, text=True, timeout=60
-        )
-        return result.returncode == 0
-    except Exception as e:
-        print(f"  TOSA conversion failed: {e}")
-        return False
-
-
-# ============================================================================
 # Test Case Generation
 # ============================================================================
 
@@ -172,33 +155,13 @@ def generate_tflite_layer_cases(tflite_path: Path, max_layers: int = 0) -> List[
             continue
         
         layer_tflite = Path(result['layer_file'])
-        layer_tosa = layer_tflite.with_suffix('.tosa')
-        
-        # Convert to TOSA
-        if layer_tflite.exists() and (FORCE_EXTRACT or not layer_tosa.exists()):
-            print(f"  Converting {op_name} to TOSA/MLIR...")
-            convert_tflite_to_tosa(layer_tflite, layer_tosa)
-        
-        # Also save text-format MLIR alongside the TOSA bytecode
-        layer_mlir = layer_tflite.with_suffix('.mlir')
-        if layer_tosa.exists() and (FORCE_EXTRACT or not layer_mlir.exists()):
-            try:
-                iree_opt = _find_iree_tool('IREE_OPT', 'iree-opt')
-                subprocess.run(
-                    [iree_opt, str(layer_tosa), "-o", str(layer_mlir)],
-                    capture_output=True, text=True, timeout=60
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-                print(f"  Could not save text MLIR for {op_name}: {e}")
         
         cases.append(TFLiteLayerCase(name=layer_name, data={
             'model_path': str(tflite_path),
             'layer_tflite_path': str(layer_tflite),
-            'tosa_path': str(layer_tosa) if layer_tosa.exists() else None,
             'op_name': op_name,
             'op_index': op_index,
             'is_layer': True,
-            'is_tosa_layer': layer_tosa.exists(),
             'is_quantized': result.get('is_quantized', False),
             'inputs': result.get('inputs', []),
             'outputs': result.get('outputs', []),

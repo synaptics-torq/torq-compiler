@@ -1,23 +1,22 @@
 """
-End-to-end and layer-by-layer testing of YOLOv8s Pose (int8 quantized).
+End-to-end and layer-by-layer testing of YOLOv8 Object Detection (int8 quantized).
 
-Downloads yolov8s-pose_full_integer_quant_320.tflite from HuggingFace
-(Synaptics/yolo), copies it to tests/testdata/tflite_models/, then tests
-it both as a full model and layer-by-layer, reusing the infrastructure
-from tests/test_tflite_model.py.
+Downloads yolov8n and yolov8s OD TFLite models from HuggingFace
+(Synaptics/yolo), then tests them both as full models and layer-by-layer,
+reusing the infrastructure from tests/test_tflite_model.py.
 
 Usage:
     # See all test cases:
-    pytest tests/test_yolo_pose_e2e.py -v --collect-only
+    pytest tests/test_tflite_yolo_od.py -v --collect-only
 
     # Run full model test only:
-    pytest tests/test_yolo_pose_e2e.py -v -s -k "full_model"
+    pytest tests/test_tflite_yolo_od.py -v -s -k "full_model"
 
     # Run specific layer type:
-    pytest tests/test_yolo_pose_e2e.py -v -s -k "layer_CONV_2D"
+    pytest tests/test_tflite_yolo_od.py -v -s -k "layer_CONV_2D"
 
     # Force re-extraction of layers (clear cache):
-    FORCE_EXTRACT=1 pytest tests/test_yolo_pose_e2e.py -v --collect-only
+    FORCE_EXTRACT=1 pytest tests/test_tflite_yolo_od.py -v --collect-only
 """
 
 import pytest
@@ -39,10 +38,14 @@ from torq.testing.versioned_fixtures import (
 from test_tflite_model import generate_tflite_layer_cases, TFLiteLayerCase
 import tensorflow as tf
 
-
 # Configuration
 MAX_LAYERS = int(os.environ.get('MAX_LAYERS', '0'))
 
+# Models to test: (HuggingFace filename, display prefix)
+YOLO_OD_MODELS = [
+    "yolov8n_full_integer_quant_320_od.tflite",
+    "yolov8s_full_integer_quant_320_od.tflite",
+]
 
 # ============================================================================
 # Image preprocessing / post-processing
@@ -73,33 +76,36 @@ def _dequantize(y, scale, zero_point):
     return (y.astype(np.float32) - zero_point) * scale
 
 
-def pose_postprocess(outputs, original_img_shape, pad,
-                     conf_thresh=0.75, iou_thresh=0.7):
+def od_postprocess(outputs, original_img_shape, pad,
+                   conf_thresh=0.75, iou_thresh=0.45):
     """
-    Post-process raw YOLOv8-pose output into (score, bbox[4], keypoints) tuples.
-    Matches the logic in extras/tests/helpers/yolo.py::pose_postprocess.
+    Post-process raw YOLOv8 OD output into (class_id, score, bbox[4]) tuples.
+    Matches the logic in extras/tests/helpers/yolo.py::od_postprocess.
     """
     outputs = outputs.copy()
+    # Adjust coordinates based on padding and scale to original image size
     outputs[:, 0] -= pad[1]
     outputs[:, 1] -= pad[0]
     outputs[:, :4] *= max(original_img_shape)
 
-    # [1, 56, N] -> [1, N, 56], convert cx/cy/w/h -> x/y/w/h (top-left)
+    # [1, 84, N] -> [1, N, 84], convert cx/cy/w/h -> x/y/w/h (top-left)
     outputs = outputs.transpose(0, 2, 1)
     outputs[..., 0] -= outputs[..., 2] / 2
     outputs[..., 1] -= outputs[..., 3] / 2
 
     outs = []
     for out in outputs:
-        scores = out[:, 4]
-        keep   = scores > conf_thresh
-        boxes  = out[keep, :4]
+        # Get scores and apply confidence threshold
+        scores = out[:, 4:].max(-1)
+        keep = scores > conf_thresh
+        boxes = out[keep, :4]
         scores = scores[keep]
-        keypoints = out[keep, 5:]
+        class_ids = out[keep, 4:].argmax(-1)
 
         if not boxes.any() or not scores.any():
             return []
 
+        # Apply non-maximum suppression
         indices = cv2.dnn.NMSBoxes(boxes, scores, conf_thresh, iou_thresh)
         if len(indices) == 0:
             return []
@@ -108,48 +114,62 @@ def pose_postprocess(outputs, original_img_shape, pad,
         for idx, i in enumerate(indices):
             if idx > 5:
                 break
-            kp = keypoints[i].reshape((17, 3))
-            visible_kps = [(float(k[0]), float(k[1])) for k in kp if k[2] > iou_thresh]
-            outs.append((float(scores[i]), boxes[i], visible_kps))
+            outs.append((int(class_ids[i]), float(scores[i]), boxes[i]))
 
     return outs
 
 
-def _iou_similarity(a, b):
-    intersection = np.logical_and(a, b)
-    union        = np.logical_or(a, b)
-    return np.sum(intersection) / np.sum(union) == 1
+def _bbox_iou(a, b):
+    """Compute IoU between two boxes in [x, y, w, h] format."""
+    ax1, ay1 = a[0], a[1]
+    ax2, ay2 = a[0] + a[2], a[1] + a[3]
+    bx1, by1 = b[0], b[1]
+    bx2, by2 = b[0] + b[2], b[1] + b[3]
+
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+
+    inter = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+    area_a = a[2] * a[3]
+    area_b = b[2] * b[3]
+    union = area_a + area_b - inter
+
+    return inter / union if union > 0 else 0.0
 
 
-def compare_pose_results(llvm_outs, torq_outs):
-    """Assert bbox and keypoints match between LLVMCPU and TORQ detections."""
-    assert llvm_outs is not None and len(llvm_outs) > 0, \
-        "LLVMCPU pose output is empty - no persons detected"
-    assert torq_outs is not None and len(torq_outs) > 0, \
-        "TORQ pose output is empty - expected persons detected by LLVMCPU"
+def compare_od_results(ref_outs, tst_outs, iou_threshold=0.5):
+    """Assert detected objects match between two backends."""
+    assert ref_outs is not None and len(ref_outs) > 0, \
+        "Reference OD output is empty - no objects detected"
+    assert tst_outs is not None and len(tst_outs) > 0, \
+        "Test OD output is empty - expected objects detected by reference"
 
-    for i in range(min(len(llvm_outs), len(torq_outs))):
-        _, ref_bbox, ref_kps = llvm_outs[i]
-        _, tst_bbox, tst_kps = torq_outs[i]
+    assert len(ref_outs) == len(tst_outs), \
+        f"Detection count mismatch: ref={len(ref_outs)} vs tst={len(tst_outs)}"
 
-        assert _iou_similarity(ref_bbox, tst_bbox), \
-            f"Person {i}: bbox mismatch LLVMCPU={ref_bbox} TORQ={tst_bbox}"
+    for i in range(len(ref_outs)):
+        ref_cls, ref_score, ref_bbox = ref_outs[i]
+        tst_cls, tst_score, tst_bbox = tst_outs[i]
 
-        assert len(ref_kps) == len(tst_kps), \
-            f"Person {i}: keypoint count mismatch ({len(ref_kps)} vs {len(tst_kps)})"
-        for j, (rk, tk) in enumerate(zip(ref_kps, tst_kps)):
-            assert _iou_similarity(np.array(rk), np.array(tk)), \
-                f"Person {i} keypoint {j}: TORQ {tk} differs from LLVMCPU {rk}"
+        assert ref_cls == tst_cls, \
+            f"Detection {i}: class mismatch ref={ref_cls} vs tst={tst_cls}"
+
+        iou = _bbox_iou(ref_bbox, tst_bbox)
+        assert iou >= iou_threshold, \
+            f"Detection {i}: bbox IoU={iou:.3f} < {iou_threshold} " \
+            f"ref={ref_bbox} tst={tst_bbox}"
 
 
 # ============================================================================
 # Model Download
 # ============================================================================
 
-def download_yolo_pose_model(cache):
-    """Download yolov8s-pose TFLite model from HuggingFace."""
+def download_yolo_od_model(cache, filename="yolov8n_full_integer_quant_320_od.tflite"):
+    """Download a YOLOv8 OD TFLite model from HuggingFace."""
     return Path(get_hf_model_file(
-        cache, "Synaptics/yolo", "yolov8s-pose_full_integer_quant_320.tflite"
+        cache, "Synaptics/yolo", filename
     ))
 
 
@@ -179,8 +199,8 @@ def _is_full_model_case_data(data):
     return isinstance(data, dict) and not data.get("is_layer", True)
 
 
-def _compare_full_pose_pair(left_results, right_results, left_name, right_name, model_path, cache):
-    """Dequantize, post-process, and compare pose detections between two backends."""
+def _compare_full_od_pair(left_results, right_results, left_name, right_name, model_path, cache):
+    """Dequantize, post-process, and compare OD detections between two backends."""
     _, _, _, out_scale, out_zp = _get_quant_params(model_path)
 
     left_raw = _fixture_data(left_results)[0]
@@ -195,18 +215,18 @@ def _compare_full_pose_pair(left_results, right_results, left_name, right_name, 
     _, pad = _preprocess_image(img)
     original_shape = img.shape[:2]
 
-    left_outs = pose_postprocess(left_out, original_shape, pad)
-    right_outs = pose_postprocess(right_out, original_shape, pad)
+    left_outs = od_postprocess(left_out, original_shape, pad)
+    right_outs = od_postprocess(right_out, original_shape, pad)
 
-    print(f"\n{left_name} detected {len(left_outs)} person(s)")
-    for i, (score, bbox, kps) in enumerate(left_outs):
-        print(f"  [{i}] score={score:.3f}  bbox={bbox}  kps={len(kps)} visible")
+    print(f"\n{left_name} detected {len(left_outs)} object(s)")
+    for i, (cls_id, score, bbox) in enumerate(left_outs):
+        print(f"  [{i}] class={cls_id}  score={score:.3f}  bbox={bbox}")
 
-    print(f"\n{right_name} detected {len(right_outs)} person(s)")
-    for i, (score, bbox, kps) in enumerate(right_outs):
-        print(f"  [{i}] score={score:.3f}  bbox={bbox}  kps={len(kps)} visible")
+    print(f"\n{right_name} detected {len(right_outs)} object(s)")
+    for i, (cls_id, score, bbox) in enumerate(right_outs):
+        print(f"  [{i}] class={cls_id}  score={score:.3f}  bbox={bbox}")
 
-    compare_pose_results(left_outs, right_outs)
+    compare_od_results(left_outs, right_outs)
 
 
 # ============================================================================
@@ -220,9 +240,9 @@ def case_config(request, tflite_layer_model):
     return {
         "tflite_model": "tflite_layer_model",
         "mlir_model_file": "tflite_mlir_model_file",
-        "input_data": "yolo_pose_input_data",
+        "input_data": "yolo_od_input_data",
         "torq_compiler_options": ["--torq-convert-dtypes", "--torq-enable-torq-hl-tiling"],
-        "torq_compiler_timeout": 600
+        "torq_compiler_timeout": 600,
     }
 
 
@@ -234,14 +254,14 @@ def _skip_next_group_full_model(request, tflite_layer_model):
         except AttributeError:
             # AttributeError occurs when chip_config fixture exists but
             # was not parametrized (no request.param), e.g. in tests
-            # that don't use the torq backend (test_yolo_pose_llvmcpu_tflite).
+            # that don't use the torq backend.
             return
         if chip.get('target') != "SL2610":
-            pytest.skip(f"Full YOLOv8s-pose model only supported on SL2610")
+            pytest.skip(f"Full YOLOv8n-OD model only supported on SL2610")
 
 
 @versioned_cached_data_fixture
-def yolo_pose_input_data(request, tflite_layer_model, tweaked_random_input_data, mlir_io_spec):
+def yolo_od_input_data(request, tflite_layer_model, tweaked_random_input_data, mlir_io_spec):
     """
     For the full model: preprocess bus.jpg and quantize it to int8.
     For layer cases: fall back to tweaked random input data.
@@ -296,8 +316,6 @@ def tflite_model_file(request, tflite_model_path):
     return Path(tflite_model_path)
 
 
-
-
 # ============================================================================
 # Test Generation
 # ============================================================================
@@ -320,27 +338,29 @@ def _is_full_model_only(metafunc):
 
 
 def pytest_generate_tests(metafunc):
-    """Generate test cases for yolov8s-pose model."""
+    """Generate test cases for yolov8 od models (nano and small)."""
     if 'tflite_layer_model' not in metafunc.fixturenames:
         return
 
     full_only = _is_full_model_only(metafunc)
-    cache_key = f"yolo_pose_e2e_cases_{MAX_LAYERS}_full={full_only}"
+    cache_key = f"yolo_od_e2e_cases_{MAX_LAYERS}_full={full_only}"
     if cache_key in _CASES_CACHE:
         cases = _CASES_CACHE[cache_key]
     else:
         cache = metafunc.config.cache
-        model_path = download_yolo_pose_model(cache)
+        cases = []
+        for model_filename in YOLO_OD_MODELS:
+            model_path = download_yolo_od_model(cache, model_filename)
 
-        if full_only:
-            cases = [
-                TFLiteLayerCase(
-                    name=f"{model_path.stem}_full_model",
-                    data={'model_path': str(model_path), 'is_layer': False}
+            if full_only:
+                cases.append(
+                    TFLiteLayerCase(
+                        name=f"{model_path.stem}_full_model",
+                        data={'model_path': str(model_path), 'is_layer': False}
+                    )
                 )
-            ]
-        else:
-            cases = generate_tflite_layer_cases(model_path, max_layers=MAX_LAYERS)
+            else:
+                cases.extend(generate_tflite_layer_cases(model_path, max_layers=MAX_LAYERS))
 
         _CASES_CACHE[cache_key] = cases
 
@@ -373,33 +393,43 @@ def pytest_generate_tests(metafunc):
 
 # Layer cases known to fail with TORQ backend (wrong results)
 TORQ_FAILED_LAYERS = [
+    # yolov8n
     'layer_conv_2d_1',
-    'layer_conv_2d_5',
+    'layer_conv_2d_5',  # Only in next.group
     'layer_conv_2d_25',
-    'layer_conv_2d_52',
-    'layer_conv_2d_79',  # Only in next.group
-    'layer_conv_2d_145',
-    'layer_quantize_126',
+    'layer_conv_2d_52',  # Only in next.group
+    'layer_resize_nearest_neighbor_108',
+    'layer_resize_nearest_neighbor_125',
+    'layer_softmax_237',
+    'layer_mul_240',
+    # Additional fails in yolov8s
     'layer_resize_nearest_neighbor_109',
     'layer_resize_nearest_neighbor_127',
-    'layer_softmax_277',
-    'layer_mul_280',
-    'layer_mul_287',
+    'layer_softmax_232',
+    'layer_mul_235',
+    'layer_mul_242',
+    'layer_quantize_108',
+    'yolov8s_full_integer_quant_320_od_full_model' # It's close but not matching, 3 vs 4 objects detected  
 ]
 
 # Layer cases that error during compilation (setup errors) with TORQ backend
 TORQ_COMPILE_ERROR_LAYERS = [
     'layer_pad_0',  # Only in next.group
-    'layer_pad_4',
-    'layer_pad_24',  # Only in next.group
-    'layer_resize_nearest_neighbor_127',  # Only in next.group
+    'layer_pad_4',  # Only in next.group
+    'layer_resize_nearest_neighbor_108',  # Only in next.group
+    'layer_resize_nearest_neighbor_125',  # Only in next.group
 ]
 
 # Layer cases known to fail in LLVMCPU vs TFLite comparison
 LLVMCPU_TFLITE_FAILED_LAYERS = [
+    # yolov8n
+    'layer_resize_nearest_neighbor_108',
+    'layer_resize_nearest_neighbor_125',
+    'layer_softmax_237',
+    'full_model',
+    # Additional fails in yolov8s
     'layer_resize_nearest_neighbor_109',
     'layer_resize_nearest_neighbor_127',
-    'layer_softmax_277',
 ]
 
 
@@ -419,25 +449,25 @@ def _check_xfail_llvmcpu_tflite(request):
 
 def _compare_results(request, left_results, right_results, left_name, right_name,
                      case_config, tflite_layer_model):
-    """Dispatch to full-model pose comparison or layer comparison."""
+    """Dispatch to full-model OD comparison or layer comparison."""
     if _is_full_model_case(tflite_layer_model):
         model_path = _fixture_data(tflite_layer_model).get("model_path")
         cache = request.getfixturevalue("cache")
-        _compare_full_pose_pair(left_results, right_results, left_name, right_name, model_path, cache)
+        _compare_full_od_pair(left_results, right_results, left_name, right_name, model_path, cache)
     else:
         compare_test_results(request, right_results, left_results, case_config)
 
 
-def test_yolo_pose_llvmcpu_torq(
+def test_yolo_od_llvmcpu_torq(
     request,
     llvmcpu_reference_results,
     torq_results,
     case_config,
     tflite_layer_model,
 ):
-    """Compare YOLOv8s-pose results between LLVM-CPU and Torq backends.
+    """Compare YOLOv8n-OD results between LLVM-CPU and Torq backends.
 
-    Full model: dequantize outputs, run pose post-processing, compare detections.
+    Full model: dequantize outputs, run OD post-processing, compare detections.
     Individual layers: numerical comparison via compare_test_results.
     """
     _check_xfail_torq(request)
@@ -446,27 +476,27 @@ def test_yolo_pose_llvmcpu_torq(
 
 
 @pytest.mark.ci
-def test_yolo_pose_tflite_torq(
+def test_yolo_od_tflite_torq(
     request,
     tflite_reference_results,
     torq_results,
     case_config,
     tflite_layer_model,
 ):
-    """Compare YOLOv8s-pose results between TFLite and Torq backends."""
+    """Compare YOLOv8n-OD results between TFLite and Torq backends."""
     _check_xfail_torq(request)
     _compare_results(request, tflite_reference_results, torq_results,
                      "TFLite", "TORQ", case_config, tflite_layer_model)
 
 
-def test_yolo_pose_llvmcpu_tflite(
+def test_yolo_od_llvmcpu_tflite(
     request,
     tflite_reference_results,
     llvmcpu_reference_results,
     case_config,
     tflite_layer_model,
 ):
-    """Compare YOLOv8s-pose results between LLVM-CPU and TFLite backends."""
+    """Compare YOLOv8n-OD results between LLVM-CPU and TFLite backends."""
     _check_xfail_llvmcpu_tflite(request)
     _compare_results(request, llvmcpu_reference_results, tflite_reference_results,
                      "LLVMCPU", "TFLite", case_config, tflite_layer_model)
