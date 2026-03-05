@@ -793,9 +793,9 @@ llvm::FailureOr<bool> fitTileToMemory(
     auto one = getAsIndexOpFoldResult(rewriter.getContext(), 1);
 
     // Shrink pass: set dimensions to 1, one by one, until the tile fits.
-    std::optional<size_t> firstPassEnd;
-    for (size_t i = 0; i < tilingDimOrder.size(); ++i) {
-        auto dim = tilingDimOrder[i];
+    size_t dimIndex;
+    for (dimIndex = 0; dimIndex < tilingDimOrder.size(); ++dimIndex) {
+        auto dim = tilingDimOrder[dimIndex];
         if (*getConstantIntValue(sizes[dim]) == 1)
             continue;
 
@@ -806,21 +806,19 @@ llvm::FailureOr<bool> fitTileToMemory(
         if (failed(tileFits))
             return LogicalResult::failure();
         if (*tileFits) {
-            firstPassEnd = i;
             break;
         }
     }
 
-    if (!firstPassEnd) {
+    if (dimIndex == tilingDimOrder.size()) {
         consumerOp->emitWarning("operation can't be tiled: no more dimensions to tile");
         return LogicalResult::failure();
     }
 
     // Grow-back pass: inflate dimensions forced to 1 above back to larger tiles
     // using binary search. Iterate in reverse from where the shrink pass stopped.
-    size_t i = *firstPassEnd;
     do {
-        auto dim = tilingDimOrder[i];
+        auto dim = tilingDimOrder[dimIndex];
         if (originalSizes[dim] == 1)
             continue;
 
@@ -842,7 +840,7 @@ llvm::FailureOr<bool> fitTileToMemory(
                 originalSizes[dim], /*minFactor=*/1, /*maxFactor=*/originalSizes[dim]
             )))
             return LogicalResult::failure();
-    } while (i-- > 0);
+    } while (dimIndex-- > 0);
 
     return true;
 }
