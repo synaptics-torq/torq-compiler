@@ -15,6 +15,8 @@ set(sources
   ExpPattern.cpp
   SoftmaxPattern.cpp
   TensorToTorqOrLinalgPattern.cpp
+  MulPattern.cpp
+  ExtractPattern.cpp
 )
 
 set(deps

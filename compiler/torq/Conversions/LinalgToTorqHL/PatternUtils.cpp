@@ -2210,8 +2210,8 @@ Value makeRescale16(
 Value makeI16LUTFromVals(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, SmallVector<int32_t> values
 ) {
-    const std::vector<APInt> bias = {APInt(32, -128, /*isSigned=*/true)};
-    const std::vector<APInt> scale = {APInt(32, 128, /*isSigned=*/true)};
+    const std::vector<APInt> bias = {APInt(32, 0, /*isSigned=*/true)};
+    const std::vector<APInt> scale = {APInt(32, 1, /*isSigned=*/true)};
     return rewriter
         .create<syna::torq_hl::TableOp>(
             srcOp.getLoc(), dyn_cast<RankedTensorType>(input.getType()),

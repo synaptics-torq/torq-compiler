@@ -651,6 +651,8 @@ struct TableOpConversion : public OpConversionPattern<tosa::TableOp> {
         else {
             return failure();
         }
+        std::vector<APInt> bias = {APInt(32, 0, /*isSigned=*/true)};
+        std::vector<APInt> scale = {APInt(32, 1, /*isSigned=*/true)};
 
         SmallVector<int32_t> convertedValues;
         auto elementType = attr.getType().getElementType();
@@ -669,13 +671,12 @@ struct TableOpConversion : public OpConversionPattern<tosa::TableOp> {
                 int32_t shiftedValue = static_cast<int32_t>(values[i]) << 8;
                 convertedValues.push_back(shiftedValue);
             }
+            bias = {APInt(32, -128, /*isSigned=*/true)};
+            scale = {APInt(32, 128, /*isSigned=*/true)};
         }
         DenseI32ArrayAttr intArrayAttr =
             DenseI32ArrayAttr::get(rewriter.getContext(), convertedValues);
         Value initTensor = createInitTensor(srcOp, rewriter);
-
-        const std::vector<APInt> bias = {APInt(32, -128, /*isSigned=*/true)};
-        const std::vector<APInt> scale = {APInt(32, 128, /*isSigned=*/true)};
 
         rewriter.replaceOpWithNewOp<syna::torq_hl::TableOp>(
             srcOp, srcOp.getOutput().getType(), initTensor,

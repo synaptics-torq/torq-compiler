@@ -29,6 +29,8 @@ iree_cc_library(
     OptimizeMatmulOpPattern.cpp
     OptimizeArithElementwiseBinaryOpPattern.cpp
     CastI32MulPattern.cpp
+    OptimizeMulOpPattern.cpp
+    OptimizeSwishActivationPattern.cpp
   DEPS
     ::PassesIncGen
     MLIRArithDialect

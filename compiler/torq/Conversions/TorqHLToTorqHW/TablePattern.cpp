@@ -95,28 +95,23 @@ LogicalResult TablePattern::transform(torq_hl::TableOp op, PatternRewriter &rewr
 
     MemNdlDimsData debr;
 
-    if (data_bytes == 1) {
-        debr = {
-            {DimType::L, MemDimTag::B, HwInfo::breg_width, 1},
-            {DimType::H, MemDimTag::A, 1, HwInfo::breg_width}
-        };
-    }
+    debr = {
+        {DimType::L, MemDimTag::B, HwInfo::breg_width, 1},
+        {DimType::H, MemDimTag::A, 1, HwInfo::breg_width}
+    };
 
     RegNdlDimsData acbw;
     RegNdlDimsData acbr;
 
-    if (data_bytes == 1) {
+    acbw = {
+        {DimType::L, RegDimTag::B, HwInfo::breg_width, 1},
+        {DimType::H, RegDimTag::T, 1, HwInfo::bbus_width}
+    };
 
-        acbw = {
-            {DimType::L, RegDimTag::B, HwInfo::breg_width, 1},
-            {DimType::H, RegDimTag::T, 1, HwInfo::bbus_width}
-        };
-
-        acbr = {
-            {DimType::L, RegDimTag::B, HwInfo::breg_width, 1},
-            {DimType::H, RegDimTag::M, total_px_block, 0}
-        };
-    }
+    acbr = {
+        {DimType::L, RegDimTag::B, HwInfo::breg_width, 1},
+        {DimType::H, RegDimTag::M, total_px_block, 0}
+    };
 
     RegNdlDimsData acpw;
     if (data_bytes == 2) {

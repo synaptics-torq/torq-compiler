@@ -74,7 +74,7 @@ static llvm::cl::opt<bool> clDisableSeg(
     llvm::cl::desc("Disable fusion of segmentation operations with producer"), llvm::cl::init(false)
 );
 
-static llvm::cl::opt<bool> clEnableTorqHLTiling(
+llvm::cl::opt<bool> clEnableTorqHLTiling(
     "torq-enable-torq-hl-tiling", llvm::cl::desc("enable TorqHL tiling"), llvm::cl::init(false)
 );
 

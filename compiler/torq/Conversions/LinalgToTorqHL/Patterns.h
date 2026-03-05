@@ -63,4 +63,12 @@ void populateSigmoidPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateExpPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+void populateLinalgToTorqHLMulPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+
+void populateLinalgToTorqHLExtractPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+
 } // namespace mlir::syna::torq
