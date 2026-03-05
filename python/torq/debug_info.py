@@ -99,6 +99,7 @@ class ActionType(str, Enum):
     HOST_WAIT = "HOST_WAIT"
     HOST_COPY = "HOST_COPY"
     DISPATCH = "DISPATCH"
+    INIT = "INIT"
 
 
 @dataclass

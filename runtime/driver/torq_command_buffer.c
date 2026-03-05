@@ -341,8 +341,7 @@ static iree_status_t iree_hal_torq_command_buffer_copy_buffer(
   iree_status_t status = iree_ok_status();
   IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
       profile_scope, status,
-      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_COPY_BUFFER_BEGIN,
-      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_COPY_BUFFER_END,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_COPY_BUFFER,
       iree_hal_buffer_map_copy(source_buffer, source_offset, target_buffer,
                                target_offset, length));
   iree_hal_torq_profile_scope_end(profile_scope);
@@ -443,8 +442,7 @@ static iree_status_t iree_hal_torq_command_buffer_push_descriptor_set(
   iree_status_t status = iree_ok_status();
   IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
       profile_scope, status,
-      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_BEGIN,
-      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_END,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET,
       iree_hal_torq_command_buffer_push_descriptor_set_impl(
           base_command_buffer, pipeline_layout, set, binding_count, bindings));
   iree_hal_torq_profile_scope_end(profile_scope);

@@ -12,153 +12,100 @@
 namespace synaptics {
 
 enum class EventType {
-    DISPATCH_BEGIN,
-    DISPATCH_END,
-    DISPATCH_PREPARE_OUTPUT_DIRS_BEGIN,
-    DISPATCH_PREPARE_OUTPUT_DIRS_END,
-    DISPATCH_COMPUTE_XRAM_FOOTPRINT_BEGIN,
-    DISPATCH_COMPUTE_XRAM_FOOTPRINT_END,
+    INIT,
+    INIT_PREPARE_OUTPUT_DIRS,
+    INIT_COMPUTE_XRAM_FOOTPRINT,
     // Backend-specific runtime/session initialization (TorqHw::open()).
-    DISPATCH_HW_OPEN_BEGIN,
-    DISPATCH_HW_OPEN_END,
-    DISPATCH_CLEAR_MEMORY_BEGIN,
-    DISPATCH_CLEAR_MEMORY_END,
+    INIT_HW_OPEN,
+    INIT_CLEAR_MEMORY,
     // Upload executable code segments into device-accessible memory.
-    DISPATCH_LOAD_CODE_SEGMENTS_BEGIN,
-    DISPATCH_LOAD_CODE_SEGMENTS_END,
-    DISPATCH_SYNC_BINDINGS_IN_BEGIN,
-    DISPATCH_SYNC_BINDINGS_IN_END,
-    DISPATCH_LOAD_HOST_CODE_BEGIN,
-    DISPATCH_LOAD_HOST_CODE_END,
-    DISPATCH_LOAD_HW_RESOURCES_BEGIN,
-    DISPATCH_LOAD_HW_RESOURCES_END,
-    HAL_CALL_BEGIN,
-    HAL_CALL_END,
-    HAL_QUEUE_WAIT_BEGIN,
-    HAL_QUEUE_WAIT_END,
-    HAL_QUEUE_APPLY_DEFERRED_BEGIN,
-    HAL_QUEUE_APPLY_DEFERRED_END,
-    HAL_QUEUE_SIGNAL_BEGIN,
-    HAL_QUEUE_SIGNAL_END,
-    HAL_COMMAND_BUFFER_COPY_BUFFER_BEGIN,
-    HAL_COMMAND_BUFFER_COPY_BUFFER_END,
-    HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_BEGIN,
-    HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_END,
-    HOST_COPY_BEGIN,
-    HOST_COPY_END,
-    NSS_START_BEGIN,
-    NSS_START_END,
-    NSS_WAIT_BEGIN,
-    NSS_WAIT_END,
-    ALLOC_BEGIN,
-    ALLOC_END,
-    DEALLOC_BEGIN,
-    DEALLOC_END,
-    HOST_START_BEGIN,
-    HOST_START_END,
-    HOST_WAIT_BEGIN,
-    HOST_WAIT_END
+    INIT_LOAD_CODE_SEGMENTS,
+    INIT_LOAD_HOST_CODE,
+    // 
+    DISPATCH,
+    DISPATCH_SYNC_BINDINGS_IN,
+    DISPATCH_SYNC_BINDINGS_OUT,
+    DISPATCH_ACQUIRE_HW_RESOURCES,
+    DISPATCH_RELEASE_HW_RESOURCES,
+    DISPATCH_EXECUTE_ACTIONS,
+    HAL_CALL,
+    HAL_QUEUE_WAIT,
+    HAL_QUEUE_APPLY_DEFERRED,
+    HAL_QUEUE_SIGNAL,
+    HAL_COMMAND_BUFFER_COPY_BUFFER,
+    HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET,
+    HOST_COPY,
+    NSS_START,
+    NSS_WAIT,
+    ALLOC,
+    DEALLOC,
+    HOST_START,
+    HOST_WAIT
 };
-
 
 inline std::string eventTypeToString(EventType type) {
     switch (type) {
-        case EventType::DISPATCH_BEGIN:
-            return "DISPATCH_BEGIN";
-        case EventType::DISPATCH_END:
-            return "DISPATCH_END";
-        case EventType::DISPATCH_PREPARE_OUTPUT_DIRS_BEGIN:
-            return "DISPATCH_PREPARE_OUTPUT_DIRS_BEGIN";
-        case EventType::DISPATCH_PREPARE_OUTPUT_DIRS_END:
-            return "DISPATCH_PREPARE_OUTPUT_DIRS_END";
-        case EventType::DISPATCH_COMPUTE_XRAM_FOOTPRINT_BEGIN:
-            return "DISPATCH_COMPUTE_XRAM_FOOTPRINT_BEGIN";
-        case EventType::DISPATCH_COMPUTE_XRAM_FOOTPRINT_END:
-            return "DISPATCH_COMPUTE_XRAM_FOOTPRINT_END";
-        case EventType::DISPATCH_HW_OPEN_BEGIN:
-            return "DISPATCH_HW_OPEN_BEGIN";
-        case EventType::DISPATCH_HW_OPEN_END:
-            return "DISPATCH_HW_OPEN_END";
-        case EventType::DISPATCH_CLEAR_MEMORY_BEGIN:
-            return "DISPATCH_CLEAR_MEMORY_BEGIN";
-        case EventType::DISPATCH_CLEAR_MEMORY_END:
-            return "DISPATCH_CLEAR_MEMORY_END";
-        case EventType::DISPATCH_LOAD_CODE_SEGMENTS_BEGIN:
-            return "DISPATCH_LOAD_CODE_SEGMENTS_BEGIN";
-        case EventType::DISPATCH_LOAD_CODE_SEGMENTS_END:
-            return "DISPATCH_LOAD_CODE_SEGMENTS_END";
-        case EventType::DISPATCH_SYNC_BINDINGS_IN_BEGIN:
-            return "DISPATCH_SYNC_BINDINGS_IN_BEGIN";
-        case EventType::DISPATCH_SYNC_BINDINGS_IN_END:
-            return "DISPATCH_SYNC_BINDINGS_IN_END";
-        case EventType::DISPATCH_LOAD_HOST_CODE_BEGIN:
-            return "DISPATCH_LOAD_HOST_CODE_BEGIN";
-        case EventType::DISPATCH_LOAD_HOST_CODE_END:
-            return "DISPATCH_LOAD_HOST_CODE_END";
-        case EventType::DISPATCH_LOAD_HW_RESOURCES_BEGIN:
-            return "DISPATCH_LOAD_HW_RESOURCES_BEGIN";
-        case EventType::DISPATCH_LOAD_HW_RESOURCES_END:
-            return "DISPATCH_LOAD_HW_RESOURCES_END";
-        case EventType::HAL_CALL_BEGIN:
-            return "HAL_CALL_BEGIN";
-        case EventType::HAL_CALL_END:
-            return "HAL_CALL_END";
-        case EventType::HAL_QUEUE_WAIT_BEGIN:
-            return "HAL_QUEUE_WAIT_BEGIN";
-        case EventType::HAL_QUEUE_WAIT_END:
-            return "HAL_QUEUE_WAIT_END";
-        case EventType::HAL_QUEUE_APPLY_DEFERRED_BEGIN:
-            return "HAL_QUEUE_APPLY_DEFERRED_BEGIN";
-        case EventType::HAL_QUEUE_APPLY_DEFERRED_END:
-            return "HAL_QUEUE_APPLY_DEFERRED_END";
-        case EventType::HAL_QUEUE_SIGNAL_BEGIN:
-            return "HAL_QUEUE_SIGNAL_BEGIN";
-        case EventType::HAL_QUEUE_SIGNAL_END:
-            return "HAL_QUEUE_SIGNAL_END";
-        case EventType::HAL_COMMAND_BUFFER_COPY_BUFFER_BEGIN:
-            return "HAL_COMMAND_BUFFER_COPY_BUFFER_BEGIN";
-        case EventType::HAL_COMMAND_BUFFER_COPY_BUFFER_END:
-            return "HAL_COMMAND_BUFFER_COPY_BUFFER_END";
-        case EventType::HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_BEGIN:
-            return "HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_BEGIN";
-        case EventType::HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_END:
-            return "HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET_END";
-        case EventType::HOST_COPY_BEGIN:
-            return "HOST_COPY_BEGIN";
-        case EventType::HOST_COPY_END:
-            return "HOST_COPY_END";
-        case EventType::NSS_START_BEGIN:
-            return "NSS_START_BEGIN";
-        case EventType::NSS_START_END:
-            return "NSS_START_END";
-        case EventType::NSS_WAIT_BEGIN:
-            return "NSS_WAIT_BEGIN";
-        case EventType::NSS_WAIT_END:
-            return "NSS_WAIT_END";
-        case EventType::ALLOC_BEGIN:
-            return "ALLOC_BEGIN";
-        case EventType::ALLOC_END:
-            return "ALLOC_END";
-        case EventType::DEALLOC_BEGIN:
-            return "DEALLOC_BEGIN";
-        case EventType::DEALLOC_END:
-            return "DEALLOC_END";
-        case EventType::HOST_START_BEGIN:
-            return "HOST_START_BEGIN";
-        case EventType::HOST_START_END:
-            return "HOST_START_END";
-        case EventType::HOST_WAIT_BEGIN:
-            return "HOST_WAIT_BEGIN";
-        case EventType::HOST_WAIT_END:
-            return "HOST_WAIT_END";
+        case EventType::INIT:
+            return "INIT";
+        case EventType::INIT_PREPARE_OUTPUT_DIRS:
+            return "INIT_PREPARE_OUTPUT_DIRS";
+        case EventType::INIT_COMPUTE_XRAM_FOOTPRINT:
+            return "INIT_COMPUTE_XRAM_FOOTPRINT";
+        case EventType::INIT_HW_OPEN:
+            return "INIT_HW_OPEN";
+        case EventType::INIT_CLEAR_MEMORY:
+            return "INIT_CLEAR_MEMORY";
+        case EventType::INIT_LOAD_CODE_SEGMENTS:
+            return "INIT_LOAD_CODE_SEGMENTS";
+        case EventType::INIT_LOAD_HOST_CODE:
+            return "INIT_LOAD_HOST_CODE";
+        case EventType::DISPATCH:
+            return "DISPATCH";
+        case EventType::DISPATCH_SYNC_BINDINGS_IN:
+            return "DISPATCH_SYNC_BINDINGS_IN";
+        case EventType::DISPATCH_SYNC_BINDINGS_OUT:
+            return "DISPATCH_SYNC_BINDINGS_OUT";
+        case EventType::DISPATCH_ACQUIRE_HW_RESOURCES:
+            return "DISPATCH_ACQUIRE_HW_RESOURCES";
+        case EventType::DISPATCH_RELEASE_HW_RESOURCES:
+            return "DISPATCH_RELEASE_HW_RESOURCES";
+        case EventType::DISPATCH_EXECUTE_ACTIONS:
+            return "DISPATCH_EXECUTE_ACTIONS";
+        case EventType::HAL_CALL:
+            return "HAL_CALL";
+        case EventType::HAL_QUEUE_WAIT:
+            return "HAL_QUEUE_WAIT";
+        case EventType::HAL_QUEUE_APPLY_DEFERRED:
+            return "HAL_QUEUE_APPLY_DEFERRED";
+        case EventType::HAL_QUEUE_SIGNAL:
+            return "HAL_QUEUE_SIGNAL";
+        case EventType::HAL_COMMAND_BUFFER_COPY_BUFFER:
+            return "HAL_COMMAND_BUFFER_COPY_BUFFER";
+        case EventType::HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET:
+            return "HAL_COMMAND_BUFFER_PUSH_DESCRIPTOR_SET";
+        case EventType::HOST_COPY:
+            return "HOST_COPY";
+        case EventType::NSS_START:
+            return "NSS_START";
+        case EventType::NSS_WAIT:
+            return "NSS_WAIT";
+        case EventType::ALLOC:
+            return "ALLOC";
+        case EventType::DEALLOC:
+            return "DEALLOC";
+        case EventType::HOST_START:
+            return "HOST_START";
+        case EventType::HOST_WAIT:
+            return "HOST_WAIT";
     }
     assert(false && "unknown event type");
 }
 
-
 struct Event {
     std::chrono::steady_clock::time_point timestamp;
     EventType type;
+    enum TimeTag { BEGIN, END};
+    TimeTag action;
     int actionIndex;
 };
 
@@ -176,13 +123,12 @@ public:
 
     TorqDispatchEventLog(
         TorqEventLog& log, std::string dispatchName, size_t dispatchIndex,
-        EventType beginEventType = EventType::DISPATCH_BEGIN,
-        EventType endEventType = EventType::DISPATCH_END
+        EventType eventType // = EventType::DISPATCH
     );
 
     void close();
 
-    void addEvent(EventType type, int actionIndex);
+    void addEvent(EventType type, Event::TimeTag action, int actionIndex);
 
     ~TorqDispatchEventLog();
 
@@ -194,8 +140,7 @@ public:
 private:    
     TorqEventLog &log_;
     DispatchEvents *events_;
-    EventType beginEventType_;
-    EventType endEventType_;
+    EventType eventType_;
     bool closed_{false};
 };
 
@@ -207,8 +152,7 @@ public:
 
     TorqDispatchEventLog* startDispatch(
         const std::string& dispatchName,
-        EventType beginEventType = EventType::DISPATCH_BEGIN,
-        EventType endEventType = EventType::DISPATCH_END
+        EventType eventType
     );
 
     static bool isProfilingEnabled();
@@ -237,5 +181,20 @@ private:
     std::deque<DispatchEvents *> dispatchEvents_;
     size_t nextDispatchIndex_ = 0;
 };
+
+#define TORQ_ADD_PROFILING_EVENT_BEGIN(event_log, event)   \
+  if (event_log) {                                         \
+      event_log->addEvent(event, Event::BEGIN, -1);        \
+  }
+
+#define TORQ_ADD_PROFILING_EVENT_END(event_log, event)     \
+  if (event_log) {                                         \
+      event_log->addEvent(event, Event::END, -1);          \
+  }
+
+#define TORQ_PROFILE_EVENT(event_log, event, status, expr) \
+  TORQ_ADD_PROFILING_EVENT_BEGIN(event_log, event);        \
+  (status) = (expr);                                       \
+  TORQ_ADD_PROFILING_EVENT_END(event_log, event);          \
 
 } // namespace synaptics

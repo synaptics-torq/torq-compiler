@@ -93,11 +93,12 @@ void TorqEventLog::flushUnlocked() {
             std::chrono::duration_cast<std::chrono::microseconds>(
                 event.timestamp.time_since_epoch())
                 .count();
-        std::string type_str = eventTypeToString(event.type);
+
         profilingFile_ << cursor.dispatch->dispatchName << ","
                       << cursor.dispatch->dispatchIndex << ","
                       << event.actionIndex << "," << timestamp_us << ","
-                      << type_str << "\n";
+                      << eventTypeToString(event.type)
+                      << (event.action == Event::BEGIN ? "_BEGIN" : "_END") << "\n";
 
         ++cursor.eventIndex;
         if (cursor.eventIndex < cursor.dispatch->events.size()) {
@@ -129,13 +130,14 @@ void TorqEventLog::close() {
 
 TorqDispatchEventLog::TorqDispatchEventLog(
     TorqEventLog& log, std::string dispatchName, size_t dispatchIndex,
-    EventType beginEventType, EventType endEventType
+    EventType eventType
 )
-    : log_(log), beginEventType_(beginEventType), endEventType_(endEventType) {
+    : log_(log), eventType_(eventType) {
     events_ = new DispatchEvents{dispatchName, dispatchIndex, {}};
     events_->events.push_back({
         std::chrono::steady_clock::now(),
-        beginEventType_,
+        eventType_,
+        Event::BEGIN,
         -1
     });
 }
@@ -149,7 +151,8 @@ void TorqDispatchEventLog::close() {
 
     events_->events.push_back({
         std::chrono::steady_clock::now(),
-        endEventType_,
+        eventType_,
+        Event::END,
         -1
     });
 
@@ -157,8 +160,8 @@ void TorqDispatchEventLog::close() {
 
 }
 
-void TorqDispatchEventLog::addEvent(EventType type, int actionIndex) {
-    events_->events.push_back({std::chrono::steady_clock::now(), type, actionIndex});
+void TorqDispatchEventLog::addEvent(EventType type, Event::TimeTag action, int actionIndex) {
+    events_->events.push_back({std::chrono::steady_clock::now(), type, action, actionIndex});
 }
 
 TorqDispatchEventLog::~TorqDispatchEventLog() {
@@ -167,11 +170,10 @@ TorqDispatchEventLog::~TorqDispatchEventLog() {
 
 TorqDispatchEventLog* TorqEventLog::startDispatch(
     const std::string& dispatchName,
-    EventType beginEventType,
-    EventType endEventType
+    EventType eventType
 ) {
     std::lock_guard<std::mutex> lock(events_mutex_);
-    return new TorqDispatchEventLog(*this, dispatchName, nextDispatchIndex_++, beginEventType, endEventType);
+    return new TorqDispatchEventLog(*this, dispatchName, nextDispatchIndex_++, eventType);
 }
 
 

@@ -437,8 +437,7 @@ static iree_status_t iree_hal_torq_device_queue_execute(
 
   // Wait for semaphores to be signaled before performing any work.
   IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
-      profile_scope, status, IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_WAIT_BEGIN,
-      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_WAIT_END,
+      profile_scope, status, IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_WAIT,
       iree_hal_torq_semaphore_multi_wait(
           &device->semaphore_state, IREE_HAL_WAIT_MODE_ALL, wait_semaphore_list,
           iree_infinite_timeout()));
@@ -447,16 +446,14 @@ static iree_status_t iree_hal_torq_device_queue_execute(
   // already did during recording.
   IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
       profile_scope, status,
-      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_APPLY_DEFERRED_BEGIN,
-      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_APPLY_DEFERRED_END,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_APPLY_DEFERRED,
       iree_hal_torq_device_apply_deferred_command_buffers(
           device, command_buffer_count, command_buffers));
 
   // Signal all semaphores now that batch work has completed.
   IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
       profile_scope, status,
-      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_SIGNAL_BEGIN,
-      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_SIGNAL_END,
+      IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_SIGNAL,
       iree_hal_torq_semaphore_multi_signal(&device->semaphore_state,
                                            signal_semaphore_list));
 
