@@ -28,6 +28,7 @@
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-kernel-selection"
+#define ENABLE_HW_32x8_16x16 0
 
 namespace mlir::syna::torq {
 
@@ -153,6 +154,7 @@ template <typename T> static torq_hl::VectorizationModeEnum getVectorizationMode
 
     auto vectorizationMode = torq_hl::VectorizationModeEnum::_64x4;
 
+#if ENABLE_HW_32x8_16x16
     auto outShape = llvm::cast<RankedTensorType>(convOp.getOutput().getType()).getShape().vec();
     if (outShape.size() <= 2) {
         return vectorizationMode;
@@ -174,6 +176,7 @@ template <typename T> static torq_hl::VectorizationModeEnum getVectorizationMode
     // Check 16x16
     if (maccCount_16x16 < bestValue && out_channel >= 16)
         vectorizationMode = torq_hl::VectorizationModeEnum::_16x16;
+#endif
     return vectorizationMode;
 }
 

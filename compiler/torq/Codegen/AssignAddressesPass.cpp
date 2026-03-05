@@ -282,7 +282,7 @@ static LogicalResult allocateLramAddresses(FunctionOpInterface funcOp) {
     int nssProgramPoolSize = HwInfo::nss_max_program_size * 2;
 
     // FIXME: Work-around to get bias with 8 bytes alignment, we need a better solution
-    Pool pool(TorqHw::get().getLramSize(), nssProgramPoolSize, 8);
+    Pool pool(TorqHw::get().getLramSize(), nssProgramPoolSize, 8, 8 * 1024);
 
     // rewrite all the memrefs in the function to ensure we can
     // allocated addresses for all of them
