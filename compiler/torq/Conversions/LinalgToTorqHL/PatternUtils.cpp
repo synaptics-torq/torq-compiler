@@ -1276,8 +1276,14 @@ bool foldForwardPerChannelAdd(
     // TODO: check that one of the operand is coming from value
     // TODO: check that one of the operand is coming from inValue if specified
 
-    // Compute the result of the add operation assuming value is 0
-    auto maybeConstV = computeArithConst(addOp, true, {inValue, value});
+    // Compute the result of the add operation assuming value is 0.
+    // Also zero-out the DPS init (outs) operands: for a pure elementwise op
+    // they are completely overwritten, so their provenance is irrelevant, but
+    // outlineAndReturnOps would otherwise try to trace them back and fail when
+    // they originate from a dispatch input load.
+    SmallVector<Value> zeros = {inValue, value};
+    zeros.append(addOp.getDpsInits().begin(), addOp.getDpsInits().end());
+    auto maybeConstV = computeArithConst(addOp, true, zeros);
     if (failed(maybeConstV)) {
         LLVM_DEBUG({
             llvm::dbgs() << "foldForwardPerChannelAdd computeArithConst in:"

@@ -496,7 +496,8 @@ void bytesOfFusedOpTile(
     llvm::DenseMap<IntegerAttr, int64_t> &fusedGroupsBytes,
     llvm::SetVector<Operation *> &shareFuseGroup, Attribute zero
 ) {
-    for (auto [resultVal, resultOffsets, resultSizes] : operandSlices) {
+    for (auto [idx, slice] : llvm::enumerate(operandSlices)) {
+        auto [resultVal, resultOffsets, resultSizes] = slice;
         Operation *resultOp = nullptr;
         ArrayAttr operandFuseGroupAttr;
 
@@ -506,6 +507,22 @@ void bytesOfFusedOpTile(
         }
 
         int64_t operandBytes = bytesOfSlice(resultVal.getType(), resultSizes, zero);
+
+        // Account for weight packing on matmul RHS (operand 1 = B in [A, B, init]):
+        // kernel selection pads the N dimension to a multiple of parallel_outs.
+        // TODO: this adjustment is skipped when the RHS owner is in the same fuse
+        // group (e.g. a transpose), because operandBytes is not used for internal
+        // operands. The packing overhead should be tracked at the group level.
+        if (idx == 1 && isa<linalg::MatmulOp, linalg::BatchMatmulOp>(op)) {
+            auto outType = cast<RankedTensorType>(
+                cast<DestinationStyleOpInterface>(op).getDpsInits()[0].getType()
+            );
+            int64_t packFactor = outType.getElementTypeBitWidth() <= 8 ? 64 : 32;
+            if (auto nSize = getConstantIntValue(resultSizes.back()); nSize && *nSize > 0) {
+                int64_t padded = div_ceil(*nSize, packFactor) * packFactor;
+                operandBytes = (operandBytes / *nSize) * padded;
+            }
+        }
 
         auto fuseGroupAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
         assert(fuseGroupAttr);
@@ -583,6 +600,28 @@ bytesOfOpTile(Operation *op, ArrayRef<OpResultIterationDomain> operandSlices, At
                 }
             }
 
+            return totalBytes;
+        })
+        .Case<linalg::MatmulOp, linalg::BatchMatmulOp>([&](auto) {
+            // Account for weight packing on RHS (operand 1 = B in [A, B, init]):
+            // kernel selection pads the N dimension to a multiple of parallel_outs.
+            auto outType = cast<RankedTensorType>(
+                cast<DestinationStyleOpInterface>(op).getDpsInits()[0].getType()
+            );
+            int64_t packFactor = outType.getElementTypeBitWidth() <= 8 ? 64 : 32;
+
+            int64_t totalBytes = 0;
+            for (auto [idx, slice] : llvm::enumerate(operandSlices)) {
+                auto [opResult, resultOffsets, resultSizes] = slice;
+                int64_t bytes = bytesOfSlice(opResult.getType(), resultSizes, zero);
+                if (idx == 1) {
+                    if (auto nSize = getConstantIntValue(resultSizes.back()); nSize && *nSize > 0) {
+                        int64_t padded = div_ceil(*nSize, packFactor) * packFactor;
+                        bytes = (bytes / *nSize) * padded;
+                    }
+                }
+                totalBytes += bytes;
+            }
             return totalBytes;
         })
         .Default([&](auto) {
@@ -704,6 +743,33 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
 // C++20 std::midpoint: computes average without overflow
 inline int64_t midpoint(int64_t min, int64_t max) { return min + ((max - min) / 2); }
 
+// Binary-search for the largest tile size along a single dimension that fits in memory.
+// Precondition: the tile fits when sizes[dim] = div_ceil(originalSize, maxFactor),
+//               and does not fit when sizes[dim] = div_ceil(originalSize, minFactor).
+// Postcondition: sizes[dim] is set to the largest fitting tile size.
+static LogicalResult searchTileSizeForDim(
+    IRRewriter &rewriter, Operation *consumerOp, const SetVector<Operation *> &producerOps,
+    size_t availableMemoryBytes, MutableArrayRef<OpFoldResult> offsets,
+    MutableArrayRef<OpFoldResult> sizes, size_t dim, int64_t originalSize, int64_t minFactor,
+    int64_t maxFactor
+) {
+    while (maxFactor != minFactor + 1) {
+        int64_t midFactor = midpoint(minFactor, maxFactor);
+        sizes[dim] = rewriter.getIndexAttr(div_ceil(originalSize, midFactor));
+        auto tileFits = checkTileFitsInMemory(
+            rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
+        );
+        if (failed(tileFits))
+            return LogicalResult::failure();
+        if (*tileFits)
+            maxFactor = midFactor;
+        else
+            minFactor = midFactor;
+    }
+    sizes[dim] = rewriter.getIndexAttr(div_ceil(originalSize, maxFactor));
+    return LogicalResult::success();
+}
+
 // Return true iff sizes was changed (made smaller).
 // If the tile is not big enough, use binary search to find the biggest tile that fits in
 // availableMemoryBytes.
@@ -726,77 +792,59 @@ llvm::FailureOr<bool> fitTileToMemory(
 
     auto one = getAsIndexOpFoldResult(rewriter.getContext(), 1);
 
-    // For each dimension, find a factor such that originalSizes[dim]/factor fits in memory, or set
-    // sizes[dim] to 1 and move to the next dimension. We first establish bounds for factor, and
-    // then do a binary search to find the optimal factor.
-    for (auto dim : tilingDimOrder) {
-        int64_t size = *getConstantIntValue(sizes[dim]);
-        if (size == 1) {
-            // This dimension can't be split anymore, move to the next dimension.
+    // Shrink pass: set dimensions to 1, one by one, until the tile fits.
+    std::optional<size_t> firstPassEnd;
+    for (size_t i = 0; i < tilingDimOrder.size(); ++i) {
+        auto dim = tilingDimOrder[i];
+        if (*getConstantIntValue(sizes[dim]) == 1)
             continue;
-        }
-
-        size_t minFactor = originalSizes[dim] / size;
-        // NB: `size` is too big and `size <= div_ceil(originalSizes[dim], minFactor)`
 
         sizes[dim] = one;
         tileFits = checkTileFitsInMemory(
             rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
         );
-        if (failed(tileFits)) {
+        if (failed(tileFits))
             return LogicalResult::failure();
+        if (*tileFits) {
+            firstPassEnd = i;
+            break;
         }
-        if (!*tileFits) {
-            // the tile does not fit even when sizes[dim] is set to 1, so keep it set to 1 and move
-            // to the next dimension.
-            continue;
-        }
-
-        int64_t maxFactor = originalSizes[dim];
-        // NB: 1 fits (maybe smaller than needed) and `1 == div_ceil(originalSizes[dim], maxFactor)`
-
-        // Invariant: consumerOp tiled to sizes (and fused with producerOps) fits in
-        // availableMemoryBytes, when sizes[dim] is set to div_ceil(originalSizes[dim], maxFactor),
-        // and does not fit when it is set to div_ceil(originalSizes[dim], minFactor).
-
-        // While keeping the invariant, decrease maxFactor, and increase minFactor, until they are
-        // consecutive, by splitting the difference in each step.
-        while (maxFactor != minFactor + 1) {
-            int64_t midFactor = midpoint(minFactor, maxFactor);
-            // NB: minFactor < midFactor < maxFactor
-            sizes[dim] = rewriter.getIndexAttr(div_ceil(originalSizes[dim], midFactor));
-
-            tileFits = checkTileFitsInMemory(
-                rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
-            );
-            if (failed(tileFits)) {
-                return LogicalResult::failure();
-            }
-
-            if (*tileFits) {
-                maxFactor = midFactor;
-            }
-            else {
-                minFactor = midFactor;
-            }
-        }
-        sizes[dim] = rewriter.getIndexAttr(div_ceil(originalSizes[dim], maxFactor));
-
-        return true;
     }
 
-    LLVM_DEBUG({
-        llvm::dbgs() << "FAILED: no more dimensions to tile\n";
-        for (auto producerOp : producerOps) {
-            llvm::dbgs() << "  | " << producerOp->getName();
-            if (auto groupId = producerOp->getAttr(TORQ_FUSE_GROUP_ID))
-                llvm::dbgs() << " (" << getConstantIntValue(groupId) << ")";
-            llvm::dbgs() << "\n";
-        }
-    });
+    if (!firstPassEnd) {
+        consumerOp->emitWarning("operation can't be tiled: no more dimensions to tile");
+        return LogicalResult::failure();
+    }
 
-    // consumerOp->emitWarning("operation can't be tiled: no more dimensions to tile");
-    return LogicalResult::failure();
+    // Grow-back pass: inflate dimensions forced to 1 above back to larger tiles
+    // using binary search. Iterate in reverse from where the shrink pass stopped.
+    size_t i = *firstPassEnd;
+    do {
+        auto dim = tilingDimOrder[i];
+        if (originalSizes[dim] == 1)
+            continue;
+
+        sizes[dim] = rewriter.getIndexAttr(originalSizes[dim]);
+        tileFits = checkTileFitsInMemory(
+            rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
+        );
+        if (failed(tileFits))
+            return LogicalResult::failure();
+        if (*tileFits)
+            continue;
+
+        // We know `originalSizes[dim]` is too big (tested above), hence factor
+        // 1 = originalSizes[dim]/originalSizes[dim] is a good minimum, and we know
+        // sizes[dim] = 1 does fit, hence factor originalSizes[dim] = originalSizes[dim]/1
+        // is a good maximum.
+        if (failed(searchTileSizeForDim(
+                rewriter, consumerOp, producerOps, availableMemoryBytes, offsets, sizes, dim,
+                originalSizes[dim], /*minFactor=*/1, /*maxFactor=*/originalSizes[dim]
+            )))
+            return LogicalResult::failure();
+    } while (i-- > 0);
+
+    return true;
 }
 
 void replaceTiledOp(

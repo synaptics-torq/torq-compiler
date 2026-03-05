@@ -7,23 +7,24 @@
 #pragma once
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
+#include "llvm/ADT/ArrayRef.h"
 
 namespace mlir::syna::torq {
 
 // Return a dense elements vector with the recursively computed content of the constant
 // (nullptr if not const)
 FailureOr<Attribute>
-computeConstAttr(Value value, bool recursive = true, const std::vector<Value> &assumeZero = {});
+computeConstAttr(Value value, bool recursive = true, llvm::ArrayRef<Value> assumeZero = {});
 
 // Return a dense elements vector with the recursively computed content of the constant
 // (nullptr if not const)
 FailureOr<Value>
-computeArithConst(Value value, bool recursive = true, const std::vector<Value> &assumeZero = {});
+computeArithConst(Value value, bool recursive = true, llvm::ArrayRef<Value> assumeZero = {});
 
 // Return a dense elements vector with the computed content of the constant (nullptr if not const)
 // assumeZero value, if specified, is considered to be a zero-filled tensor
 FailureOr<Value> computeArithConst(
-    linalg::LinalgOp linalgOp, bool recursive = true, const std::vector<Value> &assumeZero = {}
+    linalg::LinalgOp linalgOp, bool recursive = true, llvm::ArrayRef<Value> assumeZero = {}
 );
 
 } // namespace mlir::syna::torq

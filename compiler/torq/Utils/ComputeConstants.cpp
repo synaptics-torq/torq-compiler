@@ -64,7 +64,7 @@ createZeroConstant(Value value, Location loc, OpBuilder &builder, IRMapping &map
 
 static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
     ModuleOp topModuleOp, MLIRContext *context, Location loc, Value value,
-    ArrayRef<Operation *> ops, const std::vector<Value> &assumeZero
+    ArrayRef<Operation *> ops, llvm::ArrayRef<Value> assumeZero
 ) {
     OpBuilder builder(topModuleOp);
 
@@ -286,7 +286,7 @@ static void replaceStackAllocationsWithMalloc(IREE::HAL::ExecutableVariantOp evO
 }
 
 FailureOr<DenseElementsAttr> computeValueFromOps(
-    Location loc, Value value, ArrayRef<Operation *> ops, const std::vector<Value> &assumeZero
+    Location loc, Value value, ArrayRef<Operation *> ops, llvm::ArrayRef<Value> assumeZero
 ) {
 
     RankedTensorType outputType = cast<RankedTensorType>(value.getType());
@@ -392,7 +392,7 @@ FailureOr<DenseElementsAttr> computeValueFromOps(
 }
 
 SmallVector<Operation *>
-outlineAndReturnOps(Value value, bool recursive, const std::vector<mlir::Value> &assumeZero) {
+outlineAndReturnOps(Value value, bool recursive, llvm::ArrayRef<Value> assumeZero) {
 
     LLVM_DEBUG({
         llvm::dbgs() << "Trying to compute value of:\n";
@@ -566,7 +566,7 @@ outlineAndReturnOps(Value value, bool recursive, const std::vector<mlir::Value> 
 }
 
 FailureOr<DenseElementsAttr>
-computeConstAttr(Value value, bool recursive, const std::vector<mlir::Value> &assumeZero) {
+computeConstAttr(Value value, bool recursive, llvm::ArrayRef<Value> assumeZero) {
     SmallVector<Operation *> ops = outlineAndReturnOps(value, recursive, assumeZero);
     if (ops.empty()) {
         LLVM_DEBUG({ llvm::errs() << "Failed to outline ops to compute value\n"; });
@@ -578,8 +578,7 @@ computeConstAttr(Value value, bool recursive, const std::vector<mlir::Value> &as
 }
 
 // Compute the constant value for the given LinalgOp.
-FailureOr<Value>
-computeArithConst(Value value, bool recursive, const std::vector<Value> &assumeZero) {
+FailureOr<Value> computeArithConst(Value value, bool recursive, llvm::ArrayRef<Value> assumeZero) {
 
     auto maybeAttr = computeConstAttr(value, recursive, assumeZero);
 
@@ -596,7 +595,7 @@ computeArithConst(Value value, bool recursive, const std::vector<Value> &assumeZ
 
 // Compute the constant value for the given LinalgOp.
 FailureOr<Value>
-computeArithConst(LinalgOp linalgOp, bool recursive, const std::vector<Value> &assumeZero) {
+computeArithConst(LinalgOp linalgOp, bool recursive, llvm::ArrayRef<Value> assumeZero) {
 
     if (linalgOp->getNumResults() != 1) {
         // We only support ops with one output for now.
