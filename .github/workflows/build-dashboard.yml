@@ -64,5 +64,6 @@ jobs:
             with:
               context: webapps/dashboard
               file: webapps/dashboard/Dockerfile
-              push: ${{ github.event_name == 'push' }}
+              push: true
+              build-args: GIT_COMMIT=${{ github.sha }}
               tags: ${{ vars.DASHBOARD_DOCKER_REPOSITORY }}:latest

@@ -82,8 +82,6 @@ def home(request):
     other_branches = TestSession.objects.exclude(
         git_branch=main_branch
     ).exclude(
-        git_branch__isnull=True
-    ).exclude(
         git_branch=''
     ).values('git_branch').annotate(
         latest_timestamp=Max('timestamp')
@@ -138,7 +136,8 @@ def home(request):
         'main_branch_session': main_branch_session,
         'main_branch_test_data': main_branch_test_data,
         'other_branch_sessions': other_branch_sessions,
-        'other_branch_test_data': other_branch_test_data
+        'other_branch_test_data': other_branch_test_data,
+        'dashboard_git_commit': os.environ.get('DASHBOARD_GIT_COMMIT', 'unknown')
     })
 
 
@@ -208,21 +207,20 @@ def test_session(request, session_id):
             
             # Handle profiling data for Perfetto viewer
             if test_run.profiling_data:
-                pb_path = test_run.profiling_data.name
-                if pb_path.endswith('.pb'):
-                    pb_path_obj = Path(pb_path)
-                    pb_files.append(pb_path_obj)
-                    # Use str(Path) as key to match what's checked in generate_html()
-                    test_run_by_pb[str(pb_path_obj)] = test_run
-                    # Store the test case name for display
-                    test_names_by_pb[str(pb_path_obj)] = f"{test_run.test_case.name}[{test_run.test_case.parameters}]"
-                    # Store test_run.id for download URLs
-                    test_run_ids_by_pb[str(pb_path_obj)] = test_run.id
-                    # Store test status (using cached outcome display)
-                    test_statuses_by_pb[str(pb_path_obj)] = {
-                        'outcome': outcome_display,
-                        'outcome_value': test_run.outcome
-                    }
+                pb_path = test_run.test_case.module + '_' + test_run.test_case.name + '_' + test_run.test_case.parameters + '.pb'
+
+                pb_files.append(Path(pb_path))
+                # Use str(Path) as key to match what's checked in generate_html()
+                test_run_by_pb[pb_path] = test_run
+                # Store the test case name for display (module::name[params] matches session-metrics key)
+                test_names_by_pb[pb_path] = f"{test_run.test_case.module}::{test_run.test_case.name}[{test_run.test_case.parameters}]"
+                # Store test_run.id for download URLs
+                test_run_ids_by_pb[pb_path] = test_run.id
+                # Store test status (using cached outcome display)
+                test_statuses_by_pb[pb_path] = {
+                    'outcome': outcome_display,
+                    'outcome_value': test_run.outcome
+                }
     
     # Fetch metrics from database for all test runs in this session
     db_summaries = {}
@@ -343,7 +341,7 @@ def get_session_metrics(request, session_id):
         
         for batch in session.testrunbatch_set.all():
             for test_run in batch.testrun_set.all():
-                test_key = f"{test_run.test_case.name}[{test_run.test_case.parameters}]"
+                test_key = f"{test_run.test_case.module}::{test_run.test_case.name}[{test_run.test_case.parameters}]"
                 
                 # Access prefetched measurements (no additional database query)
                 measurements = test_run.measurement_set.all()

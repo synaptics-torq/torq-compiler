@@ -16,6 +16,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip python3-setuptools python3-wheel \
                                             python3-dev sqlite3 python3-venv wget curl git
 
+ARG GIT_COMMIT=unknown
+ENV DASHBOARD_GIT_COMMIT=${GIT_COMMIT}
+
 # install all the python dependencies
 COPY --from=build /wheels /tmp/wheels
 

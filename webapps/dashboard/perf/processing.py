@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from django.core.files.base import File
+from django.db import IntegrityError, transaction
 
 # conditionally import uwsgi spool decorator to make sure this module can be imported also in manage.py
 try:
@@ -95,123 +96,125 @@ def process_uploaded_zip(args):
 
             test_runs = manifest.get('test_runs', [])
             
-            for item in test_runs:                
-                module = item.get('module', '')
-                name = item.get('name', '')
-                parameters = item.get('parameters', '')
-                outcome = item.get('outcome', '')
-                profiling_rel = item.get('profiling_file')  # relative path inside zip (optional)
+            for item in test_runs:
+                try:
+                    module = item.get('module', '')
+                    name = item.get('name', '')
+                    parameters = item.get('parameters', '')
+                    outcome = item.get('outcome', '')
+                    profiling_rel = item.get('profiling_file')  # relative path inside zip (optional)
 
-                if not module or not name or outcome not in outcome_map:
-                    # Log error but continue processing other test runs
-                    print(f'Invalid run entry in manifest: module={module}, name={name}, outcome={outcome}')
-                    continue
-                
-                test_case, _ = TestCase.objects.get_or_create(
-                    module=str(module), name=str(name), parameters=str(parameters)
-                )
+                    if not module or not name or outcome not in outcome_map:
+                        # Log error but continue processing other test runs
+                        print(f'Invalid run entry in manifest: module={module}, name={name}, outcome={outcome}')
+                        continue
+                    
+                    try:
+                        with transaction.atomic():
+                            test_case, _ = TestCase.objects.get_or_create(
+                                module=str(module), name=str(name), parameters=str(parameters)
+                            )
+                    except IntegrityError:
+                        # Race condition: another worker inserted the same TestCase concurrently.
+                        # The UniqueConstraint fired; simply fetch the existing row.
+                        test_case = TestCase.objects.get(
+                            module=str(module), name=str(name), parameters=str(parameters)
+                        )
 
-                test_run = TestRun.objects.create(
-                    test_run_batch=test_run_batch,
-                    test_case=test_case,
-                    outcome=outcome_map[outcome],
-                )
+                    test_run = TestRun.objects.create(
+                        test_run_batch=test_run_batch,
+                        test_case=test_case,
+                        outcome=outcome_map[outcome],
+                    )
 
-                if profiling_rel:
-                    profiling_path = os.path.join(os.path.dirname(manifest_path), profiling_rel)
+                    if profiling_rel:
+                        profiling_path = os.path.join(os.path.dirname(manifest_path), profiling_rel)
 
-                    if os.path.exists(profiling_path):
-                        # Save the profiling file
-                        with open(profiling_path, 'rb') as pf:
-                            test_run.profiling_data.save(os.path.basename(profiling_path), File(pf), save=False)
-                        
-                        # Extract and save metrics from the .pb file
-                        try:
-                            summary = extract_perfetto_summary(profiling_path)
-                            if summary and summary.get('available'):
-                                for key, value in summary.items():
-                                    print(f'DEBUG: Processing metric: {key} = {value} (type: {type(value).__name__})', flush=True)
-                                    if key == 'available' or not value:
-                                        print(f'DEBUG: Skipping {key} (available or empty)', flush=True)
-                                        continue
-                                    
-                                    # Parse and normalize value
-                                    parsed_value = None
-                                    unit = ""
-                                    
-                                    if isinstance(value, str):
-                                        # Check if this is a percentage metric by name
-                                        if key.endswith('_percent'):
-                                            try:
-                                                parsed_value = float(value.replace('%', '').strip())
-                                                unit = '%'
-                                            except ValueError as e:
-                                                continue
-                                        # Parse time values to nanoseconds - check specific patterns first
-                                        elif 'ms' in value:
-                                            try:
-                                                num = float(value.replace('ms', '').strip())
-                                                parsed_value = num * 1_000_000  # ms to ns
-                                                unit = 'ns'
-                                            except ValueError as e:
-                                                continue
-                                        elif 'µs' in value or 'μs' in value:
-                                            try:
-                                                num = float(value.replace('µs', '').replace('μs', '').strip())
-                                                parsed_value = num * 1_000  # µs to ns
-                                                unit = 'ns'
-                                            except ValueError as e:
-                                                continue
-                                        elif 'ns' in value:
-                                            # Handle "0ns", "123ns", etc.
-                                            try:
-                                                num = float(value.replace('ns', '').strip())
-                                                parsed_value = num  # already in ns
-                                                unit = 'ns'
-                                            except ValueError as e:
-                                                continue
-                                        elif value.endswith('s'):
-                                            # Must be seconds (after ruling out ms, µs, ns)
-                                            try:
-                                                num = float(value.replace('s', '').strip())
-                                                parsed_value = num * 1_000_000_000  # s to ns
-                                                unit = 'ns'
-                                            except ValueError as e:
+                        if os.path.exists(profiling_path):
+                            # Save the profiling file
+                            try:
+                                with open(profiling_path, 'rb') as pf:
+                                    test_run.profiling_data.save("trace.pb", File(pf), save=False)
+                            except Exception as e:
+                                print(f'Warning: Could not upload profiling file {profiling_rel}: {e}')
+                            
+                            # Extract and save metrics from the .pb file
+                            try:
+                                summary = extract_perfetto_summary(profiling_path)
+                                if summary and summary.get('available'):
+                                    for key, value in summary.items():
+                                        if key == 'available' or not value:
+                                            continue
+
+                                        # Parse and normalize value
+                                        parsed_value = None
+                                        unit = ""
+
+                                        if isinstance(value, str):
+                                            if key.endswith('_percent'):
+                                                try:
+                                                    parsed_value = float(value.replace('%', '').strip())
+                                                    unit = '%'
+                                                except ValueError:
+                                                    continue
+                                            elif 'ms' in value:
+                                                try:
+                                                    num = float(value.replace('ms', '').strip())
+                                                    parsed_value = num * 1_000_000
+                                                    unit = 'ns'
+                                                except ValueError:
+                                                    continue
+                                            elif 'µs' in value or 'μs' in value:
+                                                try:
+                                                    num = float(value.replace('µs', '').replace('μs', '').strip())
+                                                    parsed_value = num * 1_000
+                                                    unit = 'ns'
+                                                except ValueError:
+                                                    continue
+                                            elif 'ns' in value:
+                                                try:
+                                                    num = float(value.replace('ns', '').strip())
+                                                    parsed_value = num
+                                                    unit = 'ns'
+                                                except ValueError:
+                                                    continue
+                                            elif value.endswith('s'):
+                                                try:
+                                                    num = float(value.replace('s', '').strip())
+                                                    parsed_value = num * 1_000_000_000
+                                                    unit = 'ns'
+                                                except ValueError:
+                                                    continue
+                                            else:
                                                 continue
                                         else:
                                             continue
-                                    else:
-                                        continue
-                                    
-                                    if parsed_value is None:
-                                        continue
-                                    
-                                    # Get or create metric (will be cached after first access)
-                                    metric = metrics_cache.get(key)
-                                    if not metric:
-                                        # Get description for this metric
-                                        description = metric_descriptions.get(key, '')
-                                        
-                                        metric, created = Metric.objects.get_or_create(
-                                            name=key, 
-                                            defaults={'unit': unit, 'description': description}
-                                        )
-                                        # Update description if metric already exists but has no description
-                                        if not created and not metric.description:
-                                            metric.description = description
-                                            metric.save()
-                                        
-                                        # Cache it for reuse
-                                        metrics_cache[key] = metric
-                                    
-                                    # Store normalized numeric value
-                                    Measurement.objects.create(test_run=test_run, metric=metric, value=parsed_value)
-                        except Exception as e:
+
+                                        if parsed_value is None:
+                                            continue
+
+                                        metric = metrics_cache.get(key)
+                                        if not metric:
+                                            description = metric_descriptions.get(key, '')
+                                            metric, created = Metric.objects.get_or_create(
+                                                name=key,
+                                                defaults={'unit': unit, 'description': description}
+                                            )
+                                            if not created and not metric.description:
+                                                metric.description = description
+                                                metric.save()
+                                            metrics_cache[key] = metric
+
+                                        Measurement.objects.create(test_run=test_run, metric=metric, value=parsed_value)
+                            except Exception as e:
                                 print(f'Warning: Could not extract metrics from {profiling_path}: {e}')
-                        
-                        test_run.save()
-                    else:
-                        print(f'Warning: Profiling file {profiling_rel} not found in archive.')
+                            
+                            test_run.save()
+                        else:
+                            print(f'Warning: Profiling file {profiling_rel} not found in archive.')
+
+                except Exception as e:
+                    print(f'Error processing test run {module}::{name}: {e}')
 
             # Mark the batch as processed after all test runs have been created
             test_run_batch.processed = True

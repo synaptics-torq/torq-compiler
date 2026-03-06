@@ -874,10 +874,11 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir):
         profiling_output_dir = Path(profiling_output_dir)
         profiling_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build a unique prefix from the module path to avoid filename collisions
-        # e.g. tests/test_tosa_ops.py -> test_tosa_ops
-        module_prefix = Path(request.node.module.__file__).stem if hasattr(request.node, 'module') else ''
-        unique_name = f'{module_prefix}__{request.node.name}' if module_prefix else request.node.name
+        # Build a unique output name: <module_stem>__<test_name>
+        # e.g. test_tosa_ops__test_mlir_files[conv2d-astra_machina-default]
+        node = request.node
+        module_stem = Path(node.module.__file__).stem if hasattr(node, 'module') else ''
+        unique_name = f'{module_stem}__{node.name}' if module_stem else node.name
         
         host_profile_csv = torq_results_dir / 'host_profile.csv'
         if host_profile_csv.exists():

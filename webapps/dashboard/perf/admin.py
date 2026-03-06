@@ -5,7 +5,7 @@ from .models import TestCase, TestSession, TestRun, TestRunBatch, Metric, Measur
 @admin.register(TestCase)
 class TestCaseAdmin(admin.ModelAdmin):
     list_display = ('id', 'module', 'name', 'parameters')
-    search_fields = ('module', 'name')
+    search_fields = ('module', 'name', 'parameters')
 
 
 @admin.register(TestSession)
@@ -28,7 +28,7 @@ class TestRunBatchAdmin(admin.ModelAdmin):
 class TestRunAdmin(admin.ModelAdmin):
     list_display = ('id', 'test_case', 'test_run_batch', 'outcome')
     list_filter = ('outcome',)
-    search_fields = ('test_case__name',)
+    search_fields = ('test_case__module', 'test_case__name', 'test_case__parameters')
 
 
 @admin.register(Metric)

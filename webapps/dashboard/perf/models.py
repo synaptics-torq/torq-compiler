@@ -1,36 +1,19 @@
 import os
 from django.db import models
-from django.utils.text import slugify
 
-
-## Helper functions
-
-def _profiling_data_upload_path(instance, filename):
-    """Generate a custom path for profiling data files."""
-    # Extract file extension
-    ext = os.path.splitext(filename)[1]
-    
-    # Create a naming convention: session_id/testcase_module_name_params.ext
-    test_case = instance.test_case
-    session_id = instance.test_run_batch.test_session.id
-    batch_id = instance.test_run_batch.id
-    
-    # Sanitize the components
-    module = slugify(test_case.module)
-    name = slugify(test_case.name)
-    params = slugify(test_case.parameters)
-    
-    # Build the filename
-    new_filename = f"{module}_{name}_{params}{ext}"
-    
-    return f"profiling_data/session_{session_id}/batch_{batch_id}/{new_filename}"
-
-## Models
 
 class TestCase(models.Model):
     module = models.TextField()
     name = models.TextField()
     parameters = models.TextField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['module', 'name', 'parameters'],
+                name='unique_testcase_module_name_parameters'
+            )
+        ]
 
     def __str__(self):
         return f"{self.module}::{self.name}[{self.parameters}]"
@@ -142,7 +125,7 @@ class TestRun(models.Model):
 
     test_run_batch = models.ForeignKey(TestRunBatch, on_delete=models.CASCADE)
     test_case = models.ForeignKey(TestCase, on_delete=models.CASCADE)
-    profiling_data = models.FileField(blank=True, null=True, upload_to=_profiling_data_upload_path)
+    profiling_data = models.FileField(blank=True, null=True)
     outcome = models.IntegerField(choices=Outcome.choices)
 
     def __str__(self):
