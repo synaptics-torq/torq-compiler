@@ -22,7 +22,7 @@ class TorqSimulator: public TorqHw {
 
     bool open() override;
     bool close() override;
-    Timer::Duration waitTimeout() override { return Timer::Duration(100000000); }
+    Timer::Duration waitTimeout() override { return Timer::Duration(300000000); }
     bool start(uint32_t lramAddr) override;
 
     bool writeXram(uint32_t addr, size_t size, const void *dataIn) override;

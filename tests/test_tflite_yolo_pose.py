@@ -217,12 +217,17 @@ def _compare_full_pose_pair(left_results, right_results, left_name, right_name, 
 def case_config(request, tflite_layer_model):
     """Configure test case settings."""
     _skip_next_group_full_model(request, tflite_layer_model)
+    torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-css", "--torq-disable-host"]
+    torq_compiler_options += ["--torq-enable-transpose-optimization"]
+    # tile-and-fuse is not working yet
+    torq_compiler_options += ["--torq-enable-torq-hl-tiling"]
     return {
         "tflite_model": "tflite_layer_model",
         "mlir_model_file": "tflite_mlir_model_file",
         "input_data": "yolo_pose_input_data",
-        "torq_compiler_options": ["--torq-convert-dtypes", "--torq-enable-torq-hl-tiling"],
-        "torq_compiler_timeout": 600
+        "torq_compiler_options": torq_compiler_options,
+        "torq_compiler_timeout": 600,
+        "torq_runtime_timeout": 600,
     }
 
 
@@ -446,6 +451,7 @@ def test_yolo_pose_llvmcpu_torq(
 
 
 @pytest.mark.ci
+@pytest.mark.fpga_ci
 def test_yolo_pose_tflite_torq(
     request,
     tflite_reference_results,
