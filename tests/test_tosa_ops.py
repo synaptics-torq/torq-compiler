@@ -65,41 +65,19 @@ def case_config(request, runtime_hw_type, chip_config):
         pytest.xfail("output mismatch or error")
 
     torq_tiling_tc = [
-        # Output channels 0 to 5 are correct but channel 6 is wrong:
-        # [[-54 -11   1 ...  13   2 -26]   vs  [[-34 -32 -27 ... 119 119 119]
-        #  [-54  -6  -1 ...  13   3 -27]        [  8  13  22 ... 119 119 119]
-        #  [-48  -4   0 ...  24  -2 -29]        [ 24  24  24 ... 119 119 119]
-        #   ...
-        #  [-43  -2  -2 ...  14  -2 -25].       [ 19  12  16 ... 119 119 119]      
-        #  [-61  -3   1 ...  18   1 -23]        [ 15  18  16 ... -34  19  71]
-        #  [-48   4   0 ...  13  10 -25]].      [ 42  45  28 ...  13  10 -25]]
-        # 
-        # if can pass with 1 slice using --torq-disable-slicing
-        'pw-32x8-7x7x320',
-
-        # # failed to find a tile size for op (compiler timeout)
+        # Channels 0 to 9 are correct, channels 10 to 18 are wrong
         'conv-343',
 
         # error: unable to free enough space for results and operands
         'conv2d-f4',
-
-        # # Tiling Assertion `principalOp != nullptr && "could not find the principal op of the fuse group"' failed
-        'dw_f5_16x16-bf16',
-        'dw_16x16-bf16',
-        'dw_i16_8x8x4',
-        'dw',
-        'dw-32x8',
-        'pad-dw',
-        'load_padded',
     ]
 
     if chip_config.data['target'] != "SL2610":
         torq_tiling_tc += [
             # error: unable to free enough space for results and operands
             'add-rescaled-constant',
-            # output mismatch
-            # Max absolute difference: 255.0
-            # Number of differences: 293051 out of 401408 [73.01%]
+
+            # Channels 0 to 55 are wrong, channels 56 to 111 are correct
             'conv-stride2',
         ]
 
