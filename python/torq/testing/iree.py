@@ -34,6 +34,12 @@ BUILD_DIR = Path(os.environ.get('IREE_BUILD_DIR', str(TOPDIR.parent / 'iree-buil
 SOC_BUILD_DIR = Path(os.environ.get('IREE_SOC_BUILD_DIR', str(TOPDIR.parent / 'iree-build-soc')))
 
 
+def _nodeid_to_filename(nodeid: str) -> str:
+    # Keep only alnum, underscore and dash; normalize dots and separators to '_'
+    safe_nodeid = re.sub(r'[^A-Za-z0-9_-]+', '_', nodeid).strip('_')
+    return safe_nodeid or 'unknown_test'
+
+
 def pytest_addoption(parser):
     parser.addoption("--debug-ir", nargs='?', const=True, default=False, help="Enable detailed IR dump of after each pass (optionally set the dump directory)")
     parser.addoption("--generate-hw-test-vectors", action="store_true", default=False, help="Generate hardware test vectors")
@@ -861,9 +867,11 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
 @versioned_unhashable_object_fixture
 def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir):
 
+    unique_name = _nodeid_to_filename(request.node.nodeid)
+
     if benchmark_output_dir:
         benchmark_file = torq_results_dir / 'benchmark.json'        
-        dest_file = Path(benchmark_output_dir) / f'{request.node.name}_benchmark.json'
+        dest_file = Path(benchmark_output_dir) / f'{unique_name}_benchmark.json'
         dest_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(benchmark_file, dest_file)
 
@@ -874,16 +882,17 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir):
         profiling_output_dir = Path(profiling_output_dir)
         profiling_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build a unique output name: <module_stem>__<test_name>
-        # e.g. test_tosa_ops__test_mlir_files[conv2d-astra_machina-default]
-        node = request.node
-        module_stem = Path(node.module.__file__).stem if hasattr(node, 'module') else ''
-        unique_name = f'{module_stem}__{node.name}' if module_stem else node.name
+        # Build a unique output name from fully qualified pytest nodeid.
+        # Example nodeid:
+        # tests/foo/test_tosa_ops.py::test_mlir_files[conv2d-astra_machina-default]
+        # Example file-safe name:
+        # tests_foo_test_tosa_ops.py_test_mlir_files_conv2d-astra_machina-default
         
         host_profile_csv = torq_results_dir / 'host_profile.csv'
         if host_profile_csv.exists():
-            shutil.copy(host_profile_csv, profiling_output_dir / f'{unique_name}.csv')
-            record_property("host_profile_csv", str(profiling_output_dir / f'{unique_name}.csv'))
+            host_csv_dest = profiling_output_dir / f'{unique_name}.csv'
+            shutil.copy(host_profile_csv, host_csv_dest)
+            record_property("host_profile_csv", str(host_csv_dest))
         
         # Find all annotated_profile*.xlsx files (could be annotated_profile.xlsx or annotated_profile_0_dispatch_name.xlsx)
         xlsx_files = list(torq_results_dir.glob('annotated_profile*.xlsx'))
