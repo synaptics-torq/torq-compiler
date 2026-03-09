@@ -918,6 +918,9 @@ struct SlicePrivate {
 
     // Return true if HW supports ACPR with S:32 in non-MAC mode
     bool supportACPRs32() const { return false; }
+
+    // Applying bias,scale per-item in ACT
+    bool _biasScalePerItem{false};
 };
 
 SlicePrivate::SlicePrivate(const string &name) : _name(name) {
@@ -1811,6 +1814,12 @@ PData SlicePrivate::aluProductAccumulate(
 
     // Automatically infer the shape of the pram data
     int actWidth = HwInfo::act_width;
+    if (_biasScalePerItem) {
+        // If a different {bias,scale} pair is required for each output the ACT witdh is reduced.
+        // For floating point values there is no actual reduction since there is no scale, so we can
+        // load 8 different bias values which corresponds to the floating-point ACT width.
+        actWidth = HwInfo::act_limit * partialElementWidth * (hasScale(dataType) ? 1 : 2);
+    }
     int actBlockCount = div_ceil(blockSize, actWidth);
     int actBlockSize = actBlockCount > 1 ? actWidth : blockSize;
     bool resUnsigned = isUnsigned(dataType) && isUnsigned(weightType);
@@ -1960,7 +1969,9 @@ QData SlicePrivate::actRescaleClamp(
 
 int SlicePrivate::actWidth(DType iType, DType wType, bool biasScalePerItem) {
     if (biasScalePerItem) {
-        return HwInfo::act_limit;
+        _biasScalePerItem = true;
+        // Floating-point values have no scale, so we can double the max number of biases
+        return hasScale(iType) ? HwInfo::act_limit : HwInfo::act_limit * 2;
     }
     if (isFloat(iType)) {
         return HwInfo::act_width / 2;

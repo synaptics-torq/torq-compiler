@@ -104,7 +104,7 @@ static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
     Slice slice("DepthwiseConv1dStride1");
 
     // Calculate activation block parameters
-    const int32_t actBlockSize = slice.act.width(input.elementType(), weight.elementType());
+    const int32_t actBlockSize = slice.act.width(input.elementType(), weight.elementType(), true);
     const int32_t actBlockCount = div_ceil(outChVectSize, actBlockSize);
 
     // Reshape tensors to split channels into [Ch_outer, outChVectSize]

@@ -550,7 +550,7 @@ class Act : SliceComponent {
     // qdata = t5;
     //
     // In case of floating point partials the rescaling is not available so
-    // bdata must have shape {1}:float32 or {BS,1}:float32 where BS can be 1, 2 or 4
+    // bdata must have shape {1}:float32 or {BS,1}:float32 where BS can be 1, 2, 4 or 8
     // Furthermore shift must be 0 and clipMax and clipMin are interpreted as float values.
     // Each value i in the generated QData is computed according to the following pseudocode:
     // float t0 = pdata + bdata[i % BS][0];

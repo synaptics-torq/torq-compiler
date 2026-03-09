@@ -63,11 +63,6 @@ static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewri
                 pdata = slice.alu.scalarProductAccumulate(fcWeights, fcInput);
             }
 
-            // Reshape partials since ACT can only process actVectSize results at a time
-            int actVects = biasScale.dim(BiasScale::ActVect);
-            assert(elementCount(pdata.shape()) % actVects == 0);
-            pdata.setShape({actVects, elementCount(pdata.shape()) / actVects});
-
             // Apply biaas and scale
             For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                 BData bdata = slice.bram.load(biasScale[ocv][av]);
