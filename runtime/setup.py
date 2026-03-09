@@ -73,22 +73,8 @@ if TORQ_WHEEL_VERSION:
     # Release build: use explicit version
     VERSION = TORQ_WHEEL_VERSION
 else:
-    # Debug build (default): use short commit ID + build timestamp
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    try:
-        commit = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=TORQ_SOURCE_DIR,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        commit = "unknown"
-    # PEP 440 requires at least a base version for the local segment to be valid
-    VERSION = f"0.dev0+{timestamp}.g{commit}"
+    # Debug build (default)    
+    VERSION = f"0.dev"
 
 # ---------------------------------------------------------------------------
 # Paths to pure-Python source packages in the source trees
