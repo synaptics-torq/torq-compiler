@@ -375,12 +375,6 @@ jobs:
           name: user-manual
           path: dist/doc
 
-      - name: Download runtime wheel
-        uses: actions/download-artifact@v4
-        with:
-          name: runtime-wheel
-          path: dist
-
       - name: Compress the user manual as a zip
         run: |
           cd dist
