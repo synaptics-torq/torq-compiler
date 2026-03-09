@@ -28,7 +28,7 @@ namespace mlir::syna::torq {
 
 namespace {
 
-enum class ClampVariant { Ordered, NaiveOrdered, Unordered };
+enum class ClampVariant { Ordered, NaiveOrdered, Unordered, ReLU };
 
 struct ClampInfo {
     ClampVariant variant;
@@ -189,9 +189,64 @@ static bool matchUnorderedClamp(linalg::GenericOp srcOp, ClampInfo &info) {
     return true;
 }
 
+// ReLU: a one-sided lower clamp expressed as a single cmpf/select pair.
+//
+//   %0 = linalg.generic ... ins(%in : tensor<Nxbf16>) outs(%out : tensor<Nxbf16>) {
+//   ^bb0(%arg0: bf16, %arg1: bf16):
+//     %cmp = arith.cmpf ugt, %arg0, %cst_min : bf16
+//     %sel = arith.select %cmp, %arg0, %cst_min : bf16
+//     linalg.yield %sel : bf16
+//   }
+//
+// This is equivalent to clamp(x, cst_min, +inf), i.e. ReLU when cst_min == 0.
+static bool matchReLU(linalg::GenericOp srcOp, ClampInfo &info) {
+    if (srcOp.getInputs().size() != 1 || srcOp.getOutputs().size() != 1)
+        return false;
+    auto inputType = dyn_cast<RankedTensorType>(srcOp.getInputs()[0].getType());
+    if (!inputType)
+        return false;
+    auto elemTy = inputType.getElementType();
+    if (!elemTy.isF32() && !elemTy.isBF16())
+        return false;
+    // Body must have exactly 3 ops: cmpf, select, yield.
+    if (srcOp.getRegion().front().getOperations().size() != 3)
+        return false;
+
+    auto &block = srcOp.getRegion().front();
+
+    // First op: arith.cmpf ugt, %arg0, %cst
+    auto cmpOp = dyn_cast<arith::CmpFOp>(block.front());
+    if (!cmpOp || cmpOp.getPredicate() != arith::CmpFPredicate::UGT)
+        return false;
+    auto inArg = dyn_cast<BlockArgument>(cmpOp.getLhs());
+    auto cstMin = cmpOp.getRhs().getDefiningOp<arith::ConstantOp>();
+    if (!inArg || inArg.getArgNumber() != 0 || !cstMin)
+        return false;
+
+    // Second op: arith.select %cmp, %arg0, %cst
+    auto selOp = dyn_cast<arith::SelectOp>(cmpOp->getNextNode());
+    if (!selOp || selOp.getCondition() != cmpOp.getResult())
+        return false;
+    auto selTrueArg = dyn_cast<BlockArgument>(selOp.getTrueValue());
+    if (!selTrueArg || selTrueArg.getArgNumber() != 0)
+        return false;
+    if (!selOp.getFalseValue().getDefiningOp<arith::ConstantOp>())
+        return false;
+
+    // Third op: linalg.yield %sel
+    auto yieldOp = dyn_cast<linalg::YieldOp>(selOp->getNextNode());
+    if (!yieldOp || yieldOp.getValues().size() != 1 || yieldOp.getValues()[0] != selOp.getResult())
+        return false;
+
+    info.variant = ClampVariant::ReLU;
+    info.minFloat = toFloat(cstMin);
+    info.maxFloat = std::numeric_limits<float>::max();
+    return true;
+}
+
 static bool matchClamp(linalg::GenericOp srcOp, ClampInfo &info) {
     return matchOrderedClamp(srcOp, info) || matchNaiveOrderedClamp(srcOp, info) ||
-           matchUnorderedClamp(srcOp, info);
+           matchUnorderedClamp(srcOp, info) || matchReLU(srcOp, info);
 }
 
 struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
