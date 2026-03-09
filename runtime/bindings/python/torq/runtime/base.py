@@ -1,6 +1,6 @@
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from time import perf_counter_ns
 
@@ -12,6 +12,7 @@ __all__ = [
 
 
 class InferenceRunner(ABC):
+    """Abstract base for model inference runners."""
 
     def __init__(
         self,
@@ -29,10 +30,18 @@ class InferenceRunner(ABC):
         return self._infer_time_ms
 
     @abstractmethod
-    def _infer(self, inputs: Sequence[npt.NDArray] | Mapping[str, npt.NDArray]) -> Sequence[npt.NDArray]:
+    def _infer(self, inputs: Iterable[npt.NDArray] | Mapping[str, npt.NDArray]) -> Sequence[npt.NDArray]:
         ...
 
-    def infer(self, inputs: Sequence[npt.NDArray] | Mapping[str, npt.NDArray]) -> Sequence[npt.NDArray]:
+    def infer(self, inputs: Iterable[npt.NDArray] | Mapping[str, npt.NDArray]) -> Sequence[npt.NDArray]:
+        """Run inference and record elapsed time in ``infer_time_ms``.
+
+        Args:
+            inputs: Input arrays or a name-to-array mapping.
+
+        Returns:
+            Sequence of output arrays.
+        """
         st = perf_counter_ns()
         results = self._infer(inputs)
         self._infer_time_ms = (perf_counter_ns() - st) / 1e6

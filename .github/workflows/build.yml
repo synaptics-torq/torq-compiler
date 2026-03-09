@@ -97,6 +97,19 @@ jobs:
         run: |
           cmake --build . --target torq-run-module
 
+      - name: Build runtime wheels
+        working-directory: /workspace/code
+        run: |
+          ./scripts/build_runtime_wheel.sh /workspace/build
+          ./scripts/build_runtime_wheel.sh /workspace/build /workspace/build-astra-sl astra_machina poky
+
+      - name: Upload runtime wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-wheel
+          path: /workspace/code/dist/*.whl
+          retention-days: 30
+
       - name: Set tag variable
         id: vars
         run: |
@@ -361,6 +374,12 @@ jobs:
         with:
           name: user-manual
           path: dist/doc
+
+      - name: Download runtime wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-wheel
+          path: dist
 
       - name: Compress the user manual as a zip
         run: |

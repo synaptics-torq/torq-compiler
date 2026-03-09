@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright © 2025 Synaptics Incorporated.
+
+[build-system]
+requires = ["setuptools>=42", "wheel", "cmake", "ninja", "numpy>=2.0.0b1"]
+build-backend = "setuptools.build_meta"

@@ -21,3 +21,7 @@ add_subdirectory(schemas)
 if(IREE_TORQ_ENABLE_TORQ_DRIVER)
     add_subdirectory(driver)
 endif()
+
+if(IREE_BUILD_PYTHON_BINDINGS)
+    add_subdirectory(bindings/python)
+endif()

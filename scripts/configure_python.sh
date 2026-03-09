@@ -57,6 +57,8 @@ ${BUILD_DIR}/third_party/iree/runtime/bindings/python
 EOF
 
 # register library code in virtual env
+# this is fragile and currently works only because neither torq namespace has an __init__.py
 cat > $(python -c "import site; print(site.getsitepackages()[0])")/torq.pth << EOF
 ${BASE_DIR}/python
+${BASE_DIR}/runtime/bindings/python
 EOF

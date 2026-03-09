@@ -6,3 +6,15 @@ CMakeLists.txt.user
 tmp
 tests/testdata/dev_ops
 venv
+*.py[cod]
+*$py.class
+.Python
+parts/
+sdist/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+__pypackages__/
+runtime/build
