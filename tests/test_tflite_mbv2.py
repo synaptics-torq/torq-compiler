@@ -20,40 +20,17 @@ Usage:
 """
 
 import pytest
-import subprocess
-import os
 import numpy as np
 from pathlib import Path
 from PIL import Image
 
 from torq.testing.comparison import compare_test_results
 from torq.testing.hf import get_hf_dataset_file, get_hf_model_file
-from torq.testing.iree import _find_iree_tool
 from torq.testing.versioned_fixtures import (
-    versioned_cached_data_fixture,
-    versioned_generated_file_fixture,
-    versioned_static_file_fixture,
-    VersionedUncachedData,
+    versioned_cached_data_fixture
 )
 
-from test_tflite_model import generate_tflite_layer_cases, TFLiteLayerCase
-
-# Configuration
-MAX_LAYERS = int(os.environ.get('MAX_LAYERS', '0'))
-
-
-def _fixture_data(value):
-    return value.data if hasattr(value, "data") else value
-
-
-def _is_full_model_case(tflite_layer_model):
-    data = _fixture_data(tflite_layer_model)
-    return isinstance(data, dict) and not data.get("is_layer", True)
-
-
-def _is_full_model_case_data(data):
-    """Check if raw (unwrapped) data represents a full model case."""
-    return isinstance(data, dict) and not data.get("is_layer", True)
+from torq.testing.tflite_layer_tests import generate_parametrized_tests, TFLiteLayerCase
 
 
 def _dequantize_mbv2_output(output_data):
@@ -61,8 +38,8 @@ def _dequantize_mbv2_output(output_data):
 
 
 def _compare_full_model_pair(left_results, right_results, left_name, right_name):
-    left_output = np.squeeze(_fixture_data(left_results)[0])
-    right_output = np.squeeze(_fixture_data(right_results)[0])
+    left_output = np.squeeze(left_results.data[0])
+    right_output = np.squeeze(right_results.data[0])
 
     left_output_deq = _dequantize_mbv2_output(left_output)
     right_output_deq = _dequantize_mbv2_output(right_output)
@@ -100,7 +77,7 @@ def case_config(request):
     # and cannot be folded.
     torq_compiler_options += ["--torq-enable-torq-hl-tiling"]
     return {
-        "tflite_model": "tflite_layer_model",
+        "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",
         "input_data": "mbv2_input_data",
         "torq_compiler_options": torq_compiler_options
@@ -108,8 +85,9 @@ def case_config(request):
 
 
 @versioned_cached_data_fixture
-def mbv2_input_data(request, tflite_layer_model, tweaked_random_input_data, mlir_io_spec):
-    if not _is_full_model_case_data(tflite_layer_model):
+def mbv2_input_data(request, tflite_layer_model: TFLiteLayerCase, tweaked_random_input_data, mlir_io_spec):
+
+    if tflite_layer_model.is_layer:
         return tweaked_random_input_data
 
     if not mlir_io_spec.inputs:
@@ -136,114 +114,17 @@ def mbv2_input_data(request, tflite_layer_model, tweaked_random_input_data, mlir
     return [np.expand_dims(input_tensor, axis=0)]
 
 
-@pytest.fixture
-def tflite_layer_model(request):
-    """Fixture that provides the TFLite model for the current test case."""
-    case = request.param
-    version = "tflite_layer_model_" + case.name
-    return VersionedUncachedData(data=case.data, version=version)
-
-
-@pytest.fixture
-def tflite_model_path(tflite_layer_model):
-    """Get the TFLite model path."""
-    data = tflite_layer_model.data if isinstance(tflite_layer_model, VersionedUncachedData) else tflite_layer_model
-    if isinstance(data, dict):
-        layer_path = data.get('layer_tflite_path')
-        if layer_path and Path(layer_path).exists():
-            return layer_path
-        return data.get('model_path')
-    return str(data)
-
-
-@versioned_static_file_fixture
-def tflite_model_file(request, tflite_model_path):
-    """Provide the TFLite model file path."""
-    return Path(tflite_model_path)
-
-
-@versioned_generated_file_fixture("mlir")
-def tflite_mlir_model_file(request, versioned_file, tflite_model_file):
-    """Convert TFLite model to MLIR format (text)."""
-    mlir_output = str(versioned_file)
-    tosa_output = mlir_output.replace('.mlir', '.tosa')
-
-    # Step 1: iree-import-tflite -> TOSA bytecode
-    result = subprocess.run(
-        ["iree-import-tflite", str(tflite_model_file), "-o", tosa_output],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        pytest.skip(f"Failed to convert TFLite to TOSA: {result.stderr}")
-
-    # Step 2: iree-opt -> text MLIR
-    try:
-        iree_opt = _find_iree_tool('IREE_OPT', 'iree-opt')
-    except FileNotFoundError:
-        pytest.skip("iree-opt not found, could not convert to text MLIR")
-
-    result = subprocess.run(
-        [iree_opt, tosa_output, "-o", mlir_output],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        pytest.skip(f"iree-opt failed: {result.stderr}")
-
-
 # ============================================================================
 # Test Generation
 # ============================================================================
 
-_CASES_CACHE = {}
-
-
-def _is_full_model_only(metafunc):
-    """Check if only the full model case should be generated.
-
-    Returns True when running with -k "full_model" or -m ci.
-    """
-    keyword_expr = metafunc.config.option.keyword
-    if keyword_expr and 'full_model' in keyword_expr.lower():
-        return True
-    marker_expr = metafunc.config.option.markexpr
-    if marker_expr and 'ci' in marker_expr.lower():
-        return True
-    return False
-
-
 def pytest_generate_tests(metafunc):
     """Generate test cases for MobileNetV2 model."""
-    if 'tflite_layer_model' not in metafunc.fixturenames:
-        return
 
-    full_only = _is_full_model_only(metafunc)
-    cache_key = f"mbv2_e2e_cases_{MAX_LAYERS}_full={full_only}"
-    if cache_key in _CASES_CACHE:
-        cases = _CASES_CACHE[cache_key]
-    else:
-        cache = metafunc.config.cache
-        model_path = download_mobilenetv2_model(cache)
+    model_path = download_mobilenetv2_model(metafunc.config.cache)
 
-        if full_only:
-            cases = [
-                TFLiteLayerCase(
-                    name=f"{model_path.stem}_full_model",
-                    data={'model_path': str(model_path), 'is_layer': False}
-                )
-            ]
-        else:
-            cases = generate_tflite_layer_cases(model_path, max_layers=MAX_LAYERS)
-
-        _CASES_CACHE[cache_key] = cases
-
-    if cases:
-        metafunc.parametrize(
-            "tflite_layer_model",
-            cases,
-            indirect=True,
-            ids=[c.name for c in cases]
-        )
-
+    generate_parametrized_tests(metafunc, ["mbv2"], [model_path])
+    
 
 # ============================================================================
 # Tests
@@ -252,11 +133,11 @@ def pytest_generate_tests(metafunc):
 def _compare_results(request, left_results, right_results, left_name, right_name,
                      case_config, tflite_layer_model):
     """Dispatch to full-model or layer comparison."""
-    if _is_full_model_case(tflite_layer_model):
-        _compare_full_model_pair(left_results, right_results, left_name, right_name)
-    else:
+    if tflite_layer_model.data.is_layer:        
         compare_test_results(request, right_results, left_results, case_config)
-
+    else:
+        _compare_full_model_pair(left_results, right_results, left_name, right_name)
+    
 
 def test_mbv2_llvmcpu_torq(
     request,

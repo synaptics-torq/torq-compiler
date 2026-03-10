@@ -21,27 +21,15 @@ Usage:
 """
 
 import pytest
-import os
 import numpy as np
 import cv2
 from pathlib import Path
 
 from torq.testing.comparison import compare_test_results
 from torq.testing.hf import get_hf_model_file
-from torq.testing.iree import chip_config  # noqa: F401 - used as pytest fixture
-from torq.testing.tensorflow import tflite_mlir_model_file  # noqa: F401 - used as pytest fixture
-from torq.testing.versioned_fixtures import (
-    versioned_cached_data_fixture,
-    versioned_static_file_fixture,
-    VersionedUncachedData,
-)
+from torq.testing.versioned_fixtures import versioned_cached_data_fixture
 
-from test_tflite_model import generate_tflite_layer_cases, TFLiteLayerCase
-import tensorflow as tf
-
-
-# Configuration
-MAX_LAYERS = int(os.environ.get('MAX_LAYERS', '0'))
+from torq.testing.tflite_layer_tests import generate_parametrized_tests, get_quant_params, TFLiteLayerCase
 
 
 # ============================================================================
@@ -153,35 +141,13 @@ def download_yolo_pose_model(cache):
     ))
 
 
-def _get_quant_params(model_path):
-    """Return (in_scale, in_zp, is_int8, out_scale, out_zp) from a TFLite model."""
-    interp = tf.lite.Interpreter(model_path=str(model_path))
-    interp.allocate_tensors()
-    in_detail  = interp.get_input_details()[0]
-    out_detail = interp.get_output_details()[0]
-    in_scale,  in_zp  = in_detail["quantization"]
-    out_scale, out_zp = out_detail["quantization"]
-    is_int8 = (in_detail["dtype"] == np.int8)
-    return float(in_scale), int(in_zp), is_int8, float(out_scale), int(out_zp)
-
-
 def _fixture_data(value):
     return value.data if hasattr(value, "data") else value
 
 
-def _is_full_model_case(tflite_layer_model):
-    data = _fixture_data(tflite_layer_model)
-    return isinstance(data, dict) and not data.get("is_layer", True)
-
-
-def _is_full_model_case_data(data):
-    """Check if raw (unwrapped) data represents a full model case."""
-    return isinstance(data, dict) and not data.get("is_layer", True)
-
-
 def _compare_full_pose_pair(left_results, right_results, left_name, right_name, model_path, cache):
     """Dequantize, post-process, and compare pose detections between two backends."""
-    _, _, _, out_scale, out_zp = _get_quant_params(model_path)
+    _, _, _, out_scale, out_zp = get_quant_params(model_path)
 
     left_raw = _fixture_data(left_results)[0]
     right_raw = _fixture_data(right_results)[0]
@@ -223,6 +189,7 @@ def case_config(request, tflite_layer_model):
     torq_compiler_options += ["--torq-enable-torq-hl-tiling"]
     return {
         "tflite_model": "tflite_layer_model",
+        "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",
         "input_data": "yolo_pose_input_data",
         "torq_compiler_options": torq_compiler_options,
@@ -233,7 +200,7 @@ def case_config(request, tflite_layer_model):
 
 def _skip_next_group_full_model(request, tflite_layer_model):
     """Skip full model tests on unsupported targets."""
-    if _is_full_model_case(tflite_layer_model):
+    if not tflite_layer_model.data.is_layer:
         try:
             chip = request.getfixturevalue("chip_config").data
         except AttributeError:
@@ -246,19 +213,19 @@ def _skip_next_group_full_model(request, tflite_layer_model):
 
 
 @versioned_cached_data_fixture
-def yolo_pose_input_data(request, tflite_layer_model, tweaked_random_input_data, mlir_io_spec):
+def yolo_pose_input_data(request, tflite_layer_model: TFLiteLayerCase, tweaked_random_input_data, mlir_io_spec):
     """
     For the full model: preprocess bus.jpg and quantize it to int8.
     For layer cases: fall back to tweaked random input data.
     """
-    if not _is_full_model_case_data(tflite_layer_model):
+    if tflite_layer_model.is_layer:
         return tweaked_random_input_data
 
     if not mlir_io_spec.inputs or len(mlir_io_spec.inputs[0].shape) != 4:
         return tweaked_random_input_data
 
-    model_path = tflite_layer_model.get("model_path")
-    in_scale, in_zp, is_int8, _, _ = _get_quant_params(model_path)
+    model_path = tflite_layer_model.model_path
+    in_scale, in_zp, is_int8, _, _ = get_quant_params(model_path)
 
     cache = request.getfixturevalue("cache")
     image_path = get_hf_model_file(cache, "Synaptics/yolo", "bus.jpg")
@@ -275,101 +242,27 @@ def yolo_pose_input_data(request, tflite_layer_model, tweaked_random_input_data,
     return [input_tensor]
 
 
-@pytest.fixture
-def tflite_layer_model(request):
-    """Fixture that provides the TFLite model for the current test case."""
-    case = request.param
-    version = "tflite_layer_model_" + case.name
-    return VersionedUncachedData(data=case.data, version=version)
-
-
-@pytest.fixture
-def tflite_model_path(tflite_layer_model):
-    """Get the TFLite model path."""
-    data = _fixture_data(tflite_layer_model)
-    if isinstance(data, dict):
-        layer_path = data.get('layer_tflite_path')
-        if layer_path and Path(layer_path).exists():
-            return layer_path
-        return data.get('model_path')
-    return str(data)
-
-
-@versioned_static_file_fixture
-def tflite_model_file(request, tflite_model_path):
-    """Provide the TFLite model file path."""
-    return Path(tflite_model_path)
-
-
-
-
 # ============================================================================
 # Test Generation
 # ============================================================================
 
-_CASES_CACHE = {}
-
-
-def _is_full_model_only(metafunc):
-    """Check if only the full model case should be generated.
-
-    Returns True when running with -k "full_model" or -m ci.
-    """
-    keyword_expr = metafunc.config.option.keyword
-    if keyword_expr and 'full_model' in keyword_expr.lower():
-        return True
-    marker_expr = metafunc.config.option.markexpr
-    if marker_expr and 'ci' in marker_expr.lower():
-        return True
-    return False
-
-
 def pytest_generate_tests(metafunc):
     """Generate test cases for yolov8s-pose model."""
-    if 'tflite_layer_model' not in metafunc.fixturenames:
-        return
 
-    full_only = _is_full_model_only(metafunc)
-    cache_key = f"yolo_pose_e2e_cases_{MAX_LAYERS}_full={full_only}"
-    if cache_key in _CASES_CACHE:
-        cases = _CASES_CACHE[cache_key]
-    else:
-        cache = metafunc.config.cache
-        model_path = download_yolo_pose_model(cache)
-
-        if full_only:
-            cases = [
-                TFLiteLayerCase(
-                    name=f"{model_path.stem}_full_model",
-                    data={'model_path': str(model_path), 'is_layer': False}
-                )
-            ]
-        else:
-            cases = generate_tflite_layer_cases(model_path, max_layers=MAX_LAYERS)
-
-        _CASES_CACHE[cache_key] = cases
-
-    if cases:
+    # Mark compile-error layers as xfail(run=False) for torq tests
+    def mark_xfail(name):
+        name_lower = name.lower()
         test_name = metafunc.function.__name__
+
         is_torq_test = 'torq' in test_name.lower()
+        
+        if is_torq_test and any(s in name_lower for s in TORQ_COMPILE_ERROR_LAYERS):
+            return [pytest.mark.xfail(reason="compiler error", run=False)]
+        else:
+            return ()
 
-        params = []
-        ids = []
-        for c in cases:
-            name_lower = c.name.lower()
-            # Mark compile-error layers as xfail(run=False) for torq tests
-            if is_torq_test and any(s in name_lower for s in TORQ_COMPILE_ERROR_LAYERS):
-                params.append(pytest.param(c, marks=pytest.mark.xfail(reason="compiler error", run=False)))
-            else:
-                params.append(c)
-            ids.append(c.name)
-
-        metafunc.parametrize(
-            "tflite_layer_model",
-            params,
-            indirect=True,
-            ids=ids,
-        )
+    model_path = download_yolo_pose_model(metafunc.config.cache)
+    generate_parametrized_tests(metafunc, ["yolo_pose"], [model_path], mark_xfail)
 
 
 # ============================================================================
@@ -425,8 +318,11 @@ def _check_xfail_llvmcpu_tflite(request):
 def _compare_results(request, left_results, right_results, left_name, right_name,
                      case_config, tflite_layer_model):
     """Dispatch to full-model pose comparison or layer comparison."""
-    if _is_full_model_case(tflite_layer_model):
-        model_path = _fixture_data(tflite_layer_model).get("model_path")
+
+    layer_data : TFLiteLayerCase = tflite_layer_model.data
+
+    if not layer_data.is_layer:
+        model_path = layer_data.model_path
         cache = request.getfixturevalue("cache")
         _compare_full_pose_pair(left_results, right_results, left_name, right_name, model_path, cache)
     else:

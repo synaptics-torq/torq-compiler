@@ -21,6 +21,7 @@ from packaging.version import Version
 try:
     if Version(metadata.version("tensorflow")) >= Version("2.18.1"):
         pytest_plugins.append("torq.testing.tensorflow")
+        pytest_plugins.append("torq.testing.tflite_layer_tests")
     else:
         print("Warning: obsolete tensorflow version")
 except metadata.PackageNotFoundError:

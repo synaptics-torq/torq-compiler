@@ -54,7 +54,7 @@ def _dataclass_dict_deep(obj):
 def _hash_data(data) -> str:
     """
     Returns the hash of an object by serializing it to JSON using sorted keys.
-    """
+    """    
     hash_data = json.dumps(_dataclass_dict_deep(data), sort_keys=True).encode('utf-8')
     hash_obj = hashlib.sha256()
     hash_obj.update(hash_data)
