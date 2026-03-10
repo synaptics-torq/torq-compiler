@@ -14,16 +14,15 @@ namespace synaptics {
 
 class TorqSimulator: public TorqHw {
   public:
-    TorqSimulator(uint32_t xram_start_addr, size_t xram_size, std::string dump_dir = "")
+    TorqSimulator(uint32_t xram_start_addr, size_t xram_size)
         // Init memory to some non-null value. Kernels must not rely on uninitialized memory being at 0.
         // We use 0x77 which is visually visible and a big value as both an int and a float exponent
         // so it is more likely to show up in the results if used by mistake.
-        : TorqHw(Type::SIMULATOR), _xramStartAddr(xram_start_addr), _xram(xram_size, (uint8_t)0x77), _dump_dir{dump_dir} {}
+        : TorqHw(Type::SIMULATOR), _xramStartAddr(xram_start_addr), _xram(xram_size, (uint8_t)0x77) {}
 
     bool open() override;
     bool close() override;
     Timer::Duration waitTimeout() override { return Timer::Duration(300000000); }
-    bool start(uint32_t lramAddr) override;
 
     bool writeXram(uint32_t addr, size_t size, const void *dataIn) override;
     bool readXram(uint32_t addr, size_t size, void *dataOut) const override;
@@ -31,6 +30,8 @@ class TorqSimulator: public TorqHw {
     bool endXramReadAccess() override;
     void * startXramWriteAccess(uint32_t xramAddr) override;
     bool endXramWriteAccess() override;
+
+    void setDumpDirectory(std::string dump_dir) override;
 
   private:
     /// CModel handle
@@ -41,10 +42,7 @@ class TorqSimulator: public TorqHw {
     /// XRAM content
     std::vector<uint8_t> _xram;
     /// directory where to dump the CModel data
-    std::string _dump_dir;
-    /// current job dump dir (we need to keep a reference here
-    /// because the cmodel is not going to copy it)
-    std::string _job_dump_dir{};
+    std::string _dump_dir{};
 
     /// how many times start has been called
     int job_id{0};

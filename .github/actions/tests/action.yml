@@ -179,6 +179,7 @@ runs:
       env:
         LD_LIBRARY_PATH: ${{github.workspace}}/release/lib/
         TORQ_RUN_MODULE: ${{github.workspace}}/release/tools/torq-run-module
+        TORQ_RT_CM: ${{github.workspace}}/release/tools/torq_rt_cm
         TORQ_COMPILE: ${{github.workspace}}/release/tools/torq-compile
         IREE_RUN_MODULE: ${{github.workspace}}/release/tools/iree-run-module
         IREE_COMPILE: ${{github.workspace}}/release/tools/iree-compile

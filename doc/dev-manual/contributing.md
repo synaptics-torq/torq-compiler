@@ -54,9 +54,6 @@ To contribute to this repository the recommended process is the following:
    corresponding FPGA a maintainer must review and approve the deployment 
    (maintainers can self-approve their own requests).
 
-   By default PRs do not generate HW test vectors. If you want to generate HW
-   test vectors add the ``test-rt`` label to the PR.
-
 8. Address any change discussed during review. It is normally better to commit
    these changes as a new commit instead of performing an amend of the original
    commit to facilitate review.

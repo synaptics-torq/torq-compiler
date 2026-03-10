@@ -79,6 +79,8 @@ class TorqHw {
     bool readDtcm(uint32_t addr, size_t size, void *dataOut) const;
     /// read data from ITCM, only for debugging purpose
     bool readItcm(uint32_t addr, size_t size, void *dataOut) const;
+    /// set the directory for dumping trace data, only for debugging purpose and not always implemented by all hardware types
+    virtual void setDumpDirectory(std::string dump_dir) {};
 
     /// start XRAM read access
     virtual const void * startXramReadAccess(uint32_t xramAddr) const = 0;
@@ -136,6 +138,6 @@ class TorqHw {
     bool _isAcquired{false};
 };
 
-std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir = "");
+std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size);
 
 } // namespace synaptics

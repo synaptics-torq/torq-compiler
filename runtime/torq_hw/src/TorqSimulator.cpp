@@ -29,11 +29,6 @@ namespace synaptics {
 bool TorqSimulator::open() {
     cm = torq_cm_open(_xram.data(), _xramStartAddr, _xram.size());
 
-    if (!_dump_dir.empty()) {
-        _job_dump_dir = _dump_dir + "/job0";
-        torq_cm_set_dump(cm, _job_dump_dir.c_str());
-    }
-
 #ifdef TORQ_CORALNPU_SIMULATOR
     auto simulator = FLAG_torq_enable_coralnpu ? &run_cpu_kelvin_binary : &run_cpu_qemu_binary;
 #else
@@ -51,14 +46,11 @@ bool TorqSimulator::open() {
     return true;
 }
 
-bool TorqSimulator::start(uint32_t lramAddr) {
-    if (!_dump_dir.empty()) {
-        _job_dump_dir = _dump_dir + "/job" + to_string(job_id);
-        torq_cm_set_dump(cm, _job_dump_dir.c_str());
+void TorqSimulator::setDumpDirectory(std::string dump_dir) {
+    _dump_dir = dump_dir;
+    if (cm) {        
+        torq_cm_set_dump(cm, _dump_dir.c_str());
     }
-
-    job_id++;
-    return TorqHw::start(lramAddr);
 }
 
 bool TorqSimulator::close() { 

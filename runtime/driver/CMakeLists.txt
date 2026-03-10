@@ -23,6 +23,7 @@ iree_register_external_hal_driver(
 set(torq_hdrs
     native_executable.h
     nop_executable_cache.h
+    TestVectorWriter.h
     torq_command_buffer.h
     torq_device.h
     torq_driver.h
@@ -34,6 +35,7 @@ set(torq_hdrs
 set(torq_srcs
     native_executable.cc
     nop_executable_cache.cc
+    TestVectorWriter.cc
     torq_command_buffer.c
     torq_device.c
     torq_driver.c

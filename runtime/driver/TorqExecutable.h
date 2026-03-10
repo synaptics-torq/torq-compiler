@@ -1,5 +1,7 @@
 #include "native_executable.h"
 #include "TorqHw.h"
+#include "TestVectorWriter.h"
+
 #include <mutex>
 #include <vector>
 #include <string>
@@ -35,11 +37,13 @@ public:
 private:
 
   std::unique_ptr<TorqHw> torq_;
+  std::unique_ptr<TestVectorWriter> testVectorWriter_{nullptr};
   iree_hal_torq_native_executable_t* nativeExecutable_;   
   bool pendingHostCopies_{false}; // true if there are host copies pending and therefore bindings are not up to date yet
   int actionIndex_;
-  int jobId_{0};
+  int nextJobId_{0};
   void *hostCodeLibHandle_{nullptr};
+  int nextInvocationId_{0};
 
   // this mutex is used to ensure we only run one dispatch at a time, this is important
   // because there is one XRAM per executable so we can only load one state at a time
@@ -70,7 +74,7 @@ private:
 
   iree_status_t processAction(ns(HostAction_table_t) action);
   
-  iree_status_t dumpMemData(const std::vector<uint8_t> & data, uint32_t outputAddress, uint32_t outputOffset, ns(BufferType_enum_t) outputType);
+  iree_status_t writeHostCopyDataToTestVector(const std::vector<uint8_t> & data, uint32_t outputAddress, uint32_t inputOffset, uint32_t outputOffset, ns(BufferType_enum_t) inputType, ns(BufferType_enum_t) outputType);
 
   iree_status_t copyElement(int inputOffset, int outputOffset, int size, ns(HostCopyParams_table_t) params);
 
@@ -80,9 +84,12 @@ private:
   iree_status_t executeActions(TorqDispatchEventLog* eventLog);
 
   iree_status_t setupDumpDirectories();
-  
-  int lastCompletedJobId();
 
+  iree_status_t syncBinding(int binding_id, iree_hal_torq_Binding_table_t binding, iree_hal_executable_dispatch_state_v0_t *state, bool from_host);
+
+  // writes out the initial XRAM and LRAM state to the test vector dump
+  void writeInitialStateToTestVector();
+  
 };
 
 }

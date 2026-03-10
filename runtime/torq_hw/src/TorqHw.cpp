@@ -83,10 +83,10 @@ void TorqHw::printNssRegs() {
     }
 }
 
-std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size, std::string dump_dir) {
+std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size) {
 #ifdef ENABLE_SIMULATOR
     if (hw_type == "sim") {
-        return std::unique_ptr<TorqHw>(new TorqSimulator(xram_start_addr, xram_size, dump_dir));
+        return std::unique_ptr<TorqHw>(new TorqSimulator(xram_start_addr, xram_size));
     }
 #endif
 #ifdef ENABLE_AWS_FPGA

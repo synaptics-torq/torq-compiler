@@ -69,18 +69,25 @@ def download_mobilenetv2_model(cache):
 # Fixtures
 # ============================================================================
 
-@pytest.fixture
-def case_config(request):
-    """Configure test case settings."""
+def mbv2_compile_options():
     torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-css", "--torq-disable-host"]
+    
     # tile-and-fuse is less optimal because of the transpose ops which are tiled in incompatible ways
     # and cannot be folded.
     torq_compiler_options += ["--torq-enable-torq-hl-tiling"]
+
+    return torq_compiler_options
+
+
+@pytest.fixture
+def case_config(request):
+    """Configure test case settings."""
+    
     return {
         "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",
         "input_data": "mbv2_input_data",
-        "torq_compiler_options": torq_compiler_options
+        "torq_compiler_options": mbv2_compile_options()
     }
 
 

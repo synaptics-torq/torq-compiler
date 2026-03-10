@@ -50,6 +50,7 @@ cp ${BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-compile ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/torq-compile ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-opt ${INSTALL_DIR}/tools
+cp ${BUILD_DIR}/third_party/torq-hw/rt/torq_rt_cm ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/lib/libIREECompiler.so ${INSTALL_DIR}/lib
 
 cp ${TARGET_BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools/astra-sl-torq-run-module
