@@ -5,6 +5,16 @@ import hashlib
 import sys
 import os
 from contextlib import contextmanager
+from enum import Enum
+
+
+class BufferState(Enum):
+    ALLOCATED_AND_DEALLOCATED = 1,
+    ALLOCATED = 2,
+    DEALLOCATED = 3,
+    NO_DUMP_AVAILABLE = 4,
+    CHANGED = 5,
+    UNCHANGED = 6
 
 
 class Buffer:
@@ -23,7 +33,15 @@ class Buffer:
         self.size = int(self.size)
 
     def load(self, action):
-        return self.executable.buffer_dump.load_buffer(self, action)
+        buffer_data = self.executable.buffer_dump.load_buffer(self, action)
+        if st.session_state.transpose:
+            if len(buffer_data.shape) == 4:
+                buffer_data = buffer_data.transpose(0, 3, 1, 2)
+            elif len(buffer_data.shape) == 3:
+                buffer_data = buffer_data.transpose(0, 2, 1)
+            else:
+                st.warning("Transpose is only supported for 3D and 4D buffers.")
+        return buffer_data
 
 
 class Executable:
@@ -151,13 +169,13 @@ def show_buffer(buffer, action):
         if len(squeezed.shape) == 0:
             st.write(str(squeezed))
         else:
-            st.dataframe(squeezed, hide_index=False)
+            st.dataframe(squeezed, hide_index=False, row_height=get_table_row_height())
     
     else:
 
         st.caption("Buffer data after action " + str(action) + " executed")
 
-        st.dataframe(buffer_data, hide_index=False)
+        st.dataframe(buffer_data, hide_index=False, row_height=get_table_row_height())
 
 
 def show_buffer_difference(buffer, action1, action2):
@@ -226,6 +244,14 @@ def show_any_buffer_difference(buffer_data_1, buffer_data_2):
     st.image(buffer_map, caption="Buffer difference image (red difference, green unchanged, gray outside buffer)")
 
     st.dataframe(buffer_data_slice)
+
+
+def get_table_row_height():
+    """Return the height of the buffer table based on view mode."""
+    if st.session_state.view_mode == 'compact':
+        return 18  # Show more rows in compact mode with smaller row height
+    else:
+        return None
 
 
 def find_descendants_of_type(op, descendant_type, depth=-1):
@@ -407,7 +433,16 @@ if analysis_mode == "View buffer state across actions":
     show_buffer(buffer, action)
 
 elif analysis_mode == "View buffers changes for each action":
-
+    # Session state for view mode
+    if 'view_mode' not in st.session_state:
+        st.session_state.view_mode = 'standard'
+    st.session_state.view_mode = st.radio("View Mode", ["standard", "compact"], horizontal=True, key="view_mode_selector")
+    
+    # Session state for buffer order
+    if 'buffer_order' not in st.session_state:
+        st.session_state.buffer_order = 'id'
+    st.session_state.buffer_order = st.radio("Buffer Order", ["id", "state"], horizontal=True, key="buffer_order_selector")
+    
     executable = st.selectbox("Dispatch", buffer_dump.executables.keys())
 
     executable_obj = buffer_dump.executables[executable]
@@ -431,44 +466,55 @@ elif analysis_mode == "View buffers changes for each action":
 
     active_buffers = []
     active_buffer_objs = []
+    state_strs = {
+        BufferState.ALLOCATED_AND_DEALLOCATED: "🟣 Allocated and deallocated",
+        BufferState.ALLOCATED: "🟢 Allocated",
+        BufferState.DEALLOCATED: "🔴 Deallocated",
+        BufferState.NO_DUMP_AVAILABLE: "⚫ No dump available",
+        BufferState.CHANGED: "🟡 Changed",
+        BufferState.UNCHANGED: "⚪ Unchanged"
+    }
+    ordered_states = [BufferState.CHANGED, BufferState.ALLOCATED, BufferState.ALLOCATED_AND_DEALLOCATED, BufferState.UNCHANGED, BufferState.DEALLOCATED, BufferState.NO_DUMP_AVAILABLE]
 
-    for buffer in executable_obj.buffers:
-        if buffer.allocation_action <= action <= buffer.deallocation_action:
+    for show_state in ([None] if st.session_state.buffer_order == 'id' else ordered_states):
+        for buffer in executable_obj.buffers:
+            if buffer.allocation_action <= action <= buffer.deallocation_action:
+                dump_exists = buffer_dump.exists(buffer, action)
+                if buffer.allocation_action == action and buffer.deallocation_action == action:
+                    state = BufferState.ALLOCATED_AND_DEALLOCATED
+                elif buffer.allocation_action == action:
+                    state = BufferState.ALLOCATED
+                elif buffer.deallocation_action == action:
+                    state = BufferState.DEALLOCATED
+                elif not dump_exists:
+                    state = BufferState.NO_DUMP_AVAILABLE
+                elif buffer_dump.has_changed(action, buffer):
+                    state = BufferState.CHANGED
+                else:
+                    state = BufferState.UNCHANGED
+    
+                if show_state and state != show_state:
+                    continue
+    
+                arg = ""
+                if buffer.id in buffer_to_arg:
+                    arg = "arg" + str(buffer_to_arg[buffer.id])
+    
+                active_buffers.append({
+                    "id": buffer.id,
+                    "argument": arg,
+                    "shape": buffer.shape,
+                    "type": buffer.type,
+                    "size": buffer.size,
+                    "start address": hex(buffer.address),
+                    "end address": hex(buffer.address + buffer.size),
+                    "state": state_strs[state],
+                    "sha1": buffer_dump.sha1_buffer(buffer, action) if dump_exists else "n/a"
+                })
+    
+                active_buffer_objs.append(buffer)
 
-            dump_exists = buffer_dump.exists(buffer, action)
-
-            if buffer.allocation_action == action and buffer.deallocation_action == action:
-                state = "🟣 Allocated and deallocated"
-            elif buffer.allocation_action == action:
-                state = "🟢 Allocated"
-            elif buffer.deallocation_action == action:
-                state = "🔴 Deallocated"
-            elif not dump_exists:
-                state = "⚫ No dump available"
-            elif buffer_dump.has_changed(action, buffer):
-                state = "🟡 Changed"
-            else:
-                state = "⚪ Unchanged"
-
-            arg = ""
-            if buffer.id in buffer_to_arg:
-                arg = "arg" + str(buffer_to_arg[buffer.id])
-
-            active_buffers.append({
-                "id": buffer.id,
-                "argument": arg,
-                "shape": buffer.shape,
-                "type": buffer.type,
-                "size": buffer.size,
-                "start address": hex(buffer.address),
-                "end address": hex(buffer.address + buffer.size),
-                "state": state,
-                "sha1": buffer_dump.sha1_buffer(buffer, action) if dump_exists else "n/a"
-            })
-
-            active_buffer_objs.append(buffer)
-
-    buffer_selection = st.dataframe(active_buffers, selection_mode="single-row", hide_index=True, key="id", on_select="rerun")
+    buffer_selection = st.dataframe(active_buffers, selection_mode="single-row", hide_index=True, key="id", on_select="rerun", row_height=get_table_row_height())
     
     if len(buffer_selection['selection']['rows']) == 0:
         st.stop()
@@ -481,6 +527,11 @@ elif analysis_mode == "View buffers changes for each action":
         st.stop()
 
     view = st.radio("Buffer contents", ["Before action", "After action", "Difference"])
+
+    # Transpose channel
+    if 'transpose' not in st.session_state:
+        st.session_state.transpose = False
+    st.session_state.transpose = st.checkbox("Transpose NHWC -> HCHW", key="transpose_checkbox")
 
     if view == "Before action":        
         if action == selected_buffer.allocation_action:
