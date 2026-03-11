@@ -351,6 +351,29 @@ LogicalResult ProfilingPass::cycleProfiling(mlir::FunctionOpInterface funcOp) {
     return success();
 }
 
+static uint64_t getDmaNdlTransferElements(torq_hw::DmaNdlAttr ndl) {
+    if (!ndl) {
+        return 0;
+    }
+
+    uint64_t elements = 1;
+    for (auto dim : ndl.getDims()) {
+        elements *= static_cast<uint64_t>(dim.getCount());
+    }
+    return elements;
+}
+
+static uint64_t getDmaNdlTransferBytes(torq_hw::DmaNdlAttr ndl, Type bufferType) {
+    auto shapedType = dyn_cast<ShapedType>(bufferType);
+    if (!shapedType) {
+        return 0;
+    }
+
+    uint64_t elements = getDmaNdlTransferElements(ndl);
+    uint64_t elementBytes = static_cast<uint64_t>(getElementSizeBytes(shapedType));
+    return elements * elementBytes;
+}
+
 static LogicalResult
 processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int taskId) {
 
@@ -369,14 +392,14 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
 
     // DMA in config contains reference to slice_program op
     if (auto dmaInCfgOp = dyn_cast<torq_hw::DmaInCfgOp>(op)) {
-        // TODO: check if this is correct for strided types
-        prof.currentDmaInBytes = getEncodedTotalSizeBytes(dmaInCfgOp.getRead().getType());
+        prof.currentDmaInBytes =
+            getDmaNdlTransferBytes(dmaInCfgOp.getWriteNdl(), dmaInCfgOp.getWrite().getType());
         prof.currentDmaInCycles = prof.currentDmaInBytes / perCycleDmaTransferBytes;
         prof.currentDmaInLoc = toString(dmaInCfgOp.getLoc());
     }
     else if (auto dmaOutCfgOp = dyn_cast<torq_hw::DmaOutCfgOp>(op)) {
-        // TODO: check if this is correct for strided types
-        prof.currentDmaOutBytes = getEncodedTotalSizeBytes(dmaOutCfgOp.getRead().getType());
+        prof.currentDmaOutBytes =
+            getDmaNdlTransferBytes(dmaOutCfgOp.getReadNdl(), dmaOutCfgOp.getRead().getType());
         prof.currentDmaOutCycles = prof.currentDmaOutBytes / perCycleDmaTransferBytes;
         prof.currentDmaOutLoc = toString(dmaOutCfgOp.getLoc());
     }
@@ -414,7 +437,7 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
     else if (auto cdmaStartOp = dyn_cast<torq_hw::CDMAStartOp>(op)) {
         auto srcType = cdmaStartOp.getSrc().getType();
         auto dstType = cdmaStartOp.getDest().getType();
-        uint64_t bytes = getEncodedTotalSizeBytes(srcType);
+        uint64_t bytes = getEncodedDataSizeElements(srcType);
 
         double factor = 1.0;
         auto hw = TorqHw::get();
