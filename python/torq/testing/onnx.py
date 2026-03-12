@@ -391,6 +391,22 @@ def _has_bf16_matmul(model):
                 return True
     return False
 
+def _has_bf16_einsum(model):
+    """Check if model contains Einsum with bf16."""
+    graph = model.graph
+    value_info = {vi.name: vi.type.tensor_type.elem_type 
+                  for vi in list(graph.value_info) + list(graph.input) + list(graph.output)
+                  if hasattr(vi.type, 'tensor_type')}
+    for node in graph.node:
+        if node.op_type == 'Einsum':
+            node_inputs = list(node.input)
+            node_outputs = list(node.output)
+            if any(value_info.get(name) == TensorProto.BFLOAT16 for name in node_inputs + node_outputs):
+                return True
+            if any(init.data_type == TensorProto.BFLOAT16 for init in graph.initializer 
+                   if init.name in node_inputs):
+                return True
+    return False
 
 def _execute_onnx_model_numpy(model, input_data):
     """
@@ -430,6 +446,22 @@ def _execute_onnx_model_numpy(model, input_data):
                 if hasattr(vi.type, 'tensor_type') and vi.type.tensor_type.elem_type == TensorProto.BFLOAT16:
                     result = result.astype('bfloat16')
             tensor_values[node.output[0]] = result
+          
+        elif node.op_type == "Einsum":
+            # Get equation attribute
+            eq = next((attr.s.decode("utf-8") if isinstance(attr.s, (bytes, bytearray)) else attr.s)
+                    for attr in node.attribute if attr.name == "equation")
+
+            # Gather inputs in order
+            a = tensor_values[node.input[0]]
+            b = tensor_values[node.input[1]]
+
+            if eq == "n,d->nd":
+                result = a[:, None] * b[None, :]
+            else:
+                result = np.einsum(eq, a, b)
+            tensor_values[node.output[0]] = result
+          
         else:
             # For other operations, try to use onnxruntime
             try:
@@ -462,11 +494,11 @@ def _execute_onnx_model_numpy(model, input_data):
 
 
 @versioned_unhashable_object_fixture
-def numpy_reference_results(request, onnx_model_file, input_data, llvmcpu_reference_results):
+def numpy_reference_results(request, onnx_model_file, input_data):
     """Generate reference using numpy for bf16 MatMul (onnxruntime doesn't support it).
     Falls back to llvmcpu if numpy cannot handle an operation."""
     onnx_model = onnx.load(str(onnx_model_file))
-    if not _has_bf16_matmul(onnx_model):
+    if not _has_bf16_matmul(onnx_model) or not _has_bf16_einsum(onnx_model):
         try:
             ort_session = onnxruntime.InferenceSession(str(onnx_model_file))
             ort_inputs = {inp.name: input_data[i] for i, inp in enumerate(ort_session.get_inputs())}
@@ -477,5 +509,6 @@ def numpy_reference_results(request, onnx_model_file, input_data, llvmcpu_refere
         return _execute_onnx_model_numpy(onnx_model, input_data)
     except Exception as e:
         # Fall back to llvmcpu if numpy cannot handle the operation
+        llvmcpu_reference_results = request.getfixturevalue("llvmcpu_reference_results").data
         print(f"Warning: Numpy reference failed, falling back to llvmcpu: {e}")
         return llvmcpu_reference_results

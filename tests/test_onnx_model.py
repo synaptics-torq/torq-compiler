@@ -7,7 +7,7 @@ import onnx
 from onnx import shape_inference
 
 from torq.testing.comparison import compare_test_results
-from torq.testing.onnx import generate_onnx_layer_from_file, _has_bf16_matmul
+from torq.testing.onnx import generate_onnx_layer_from_file, _has_bf16_matmul, _has_bf16_einsum
 from torq.testing.iree import llvmcpu_reference_results
 from torq.testing.iree import  list_files
 
@@ -60,9 +60,15 @@ def pytest_generate_tests(metafunc):
     metafunc.parametrize("onnx_layer_model", cases, indirect=True, ids=[c.name for c in cases])
 
 @pytest.fixture
-def reference_results(request, onnx_layer_model, numpy_reference_results, llvmcpu_reference_results):
-    """Select reference: numpy for bf16 MatMul, llvmcpu otherwise."""
-    return numpy_reference_results if _has_bf16_matmul(onnx_layer_model.data) else llvmcpu_reference_results
+def reference_results(request, onnx_layer_model):
+    """Select reference: numpy for bf16 MatMul and Einsum, llvmcpu otherwise."""
+
+    if _has_bf16_einsum(onnx_layer_model.data) or _has_bf16_matmul(onnx_layer_model.data):
+        numpy_reference_results = request.getfixturevalue("numpy_reference_results")
+        return numpy_reference_results
+
+    llvmcpu_reference_results = request.getfixturevalue("llvmcpu_reference_results")
+    return llvmcpu_reference_results
 
 # Not ready for that (Nan differs)
 # @pytest.mark.fpga_ci
