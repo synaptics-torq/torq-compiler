@@ -3024,8 +3024,26 @@ bool computeRescaleInfo(
 }
 
 bool computeBiasForMatmul(
-    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim
+    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim,
+    bool isFC
 ) {
+    auto anchor = fusionPlan.anchor;
+    auto anchorTy = anchor ? dyn_cast<ShapedType>(anchor->getResult(0).getType()) : nullptr;
+    if (isFC && anchorTy &&
+        (anchorTy.getElementType().isBF16() || anchorTy.getElementType().isF32())) {
+        // Floating-point matmul/fc lowering keeps explicit post-op adds in the graph.
+        // Using fusion-derived bias here can accidentally capture dynamic activation
+        // tensors (e.g. truncated matmul outputs) instead of static per-channel bias.
+        // Use neutral bias and let the explicit add op carry the real bias.
+        int64_t biasDim = anchorTy.getShape().size() > 1 ? anchorTy.getShape()[1] : 1;
+        OpBuilder builder(anchor->getContext());
+        builder.setInsertionPoint(anchor);
+        auto zeroBiasTy = RankedTensorType::get({biasDim}, anchorTy.getElementType());
+        bias = builder.create<arith::ConstantOp>(anchor->getLoc(), builder.getZeroAttr(zeroBiasTy));
+        optionalWeightZp.reset();
+        return true;
+    }
+
     if (channelDim > 1) {
         return computeBias(fusionPlan, bias, optionalWeightZp, channelDim, 1);
     }

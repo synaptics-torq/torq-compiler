@@ -248,8 +248,13 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         }
         // Check if the Conv2D input (lhs) is produced by a CollapseShapeOp —
         // this typically means the input tensor is being flattened before the convolution.
-        while (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(input.getDefiningOp())) {
-            input = extractSlice.getSource();
+        // For FC lowering, keep tiled extract_slice on the activation input.
+        // Peeling it here would expand back to the full source tensor and can
+        // break tile-local memory planning downstream.
+        if (!isFC) {
+            while (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(input.getDefiningOp())) {
+                input = extractSlice.getSource();
+            }
         }
         if (!isFC &&
             input.getDefiningOp<tensor::CollapseShapeOp>(
@@ -282,7 +287,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         // Compute per-channel bias value and scale/clamp info from fused chain
         Value biasV;
         std::optional<Value> weightZpV;
-        if (!computeBiasForMatmul(fusionPlan, biasV, weightZpV, channelDim)) {
+        if (!computeBiasForMatmul(fusionPlan, biasV, weightZpV, channelDim, isFC)) {
             return rewriter.notifyMatchFailure(srcOp, "Failed to compute per-channel bias");
         }
 

@@ -182,7 +182,8 @@ bool computeBias(
 // Convenience wrapper for matmul-like cases, selecting bias channel mapping
 // based on `channelDim`.
 bool computeBiasForMatmul(
-    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim
+    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim,
+    bool isFC
 );
 
 // Extract scale/clamp/zero-point info from the trailing rescale pattern in
