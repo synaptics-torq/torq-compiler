@@ -22,40 +22,11 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 #define DEBUG_TYPE "torq-compute-compile-time-const"
 
 namespace mlir::syna::torq {
-
-namespace {
-
-class OpToConstOpRewriter : public RewritePattern {
-  public:
-    OpToConstOpRewriter(MLIRContext *context)
-        : RewritePattern(MatchAnyOpTypeTag(), /*benefit*/ 11, context) {}
-
-    LogicalResult matchAndRewrite(Operation *op, PatternRewriter &rewriter) const override {
-        if (!isCompileTimeConst(op)) {
-            return failure();
-        }
-
-        auto maybeConstV = computeArithConst(op->getResults()[0], true, {});
-        if (failed(maybeConstV)) {
-            LLVM_DEBUG(llvm::dbgs() << "Failed to compute constant for op: "; op->dump(););
-            return failure();
-        }
-
-        rewriter.replaceOp(op, *maybeConstV);
-
-        return success();
-    }
-};
-
-} // namespace
 
 // The pass looks for operations marked as compile-time-const and
 // replaces them with constant operations computed at compile time.
@@ -65,20 +36,39 @@ class CompileTimeConstComputePass
     using CompileTimeConstComputeBase::CompileTimeConstComputeBase;
 
     void runOnOperation() override {
-        SmallVector<Operation *> opsToProcess;
+        SmallVector<Value> valuesToProcess;
+
         auto funcOp = getOperation();
         funcOp->walk([&](Operation *op) {
+            if (op->getNumResults() != 1) {
+                LLVM_DEBUG({
+                    llvm::dbgs(
+                    ) << "Skipping compile-time const op with unsupported result count: ";
+                    op->dump();
+                });
+                return WalkResult::advance();
+            }
+
             if (!isCompileTimeConst(op)) {
                 return WalkResult::advance();
             }
-            opsToProcess.push_back(op);
+
+            valuesToProcess.push_back(op->getResult(0));
             return WalkResult::advance();
         });
-        RewritePatternSet patterns(&getContext());
-        patterns.add<OpToConstOpRewriter>(&getContext());
 
-        if (failed(applyOpPatternsAndFold(opsToProcess, std::move(patterns)))) {
-            return signalPassFailure();
+        if (valuesToProcess.empty()) {
+            return;
+        }
+
+        auto maybeConstValues = computeAllArithConst(valuesToProcess, true, {});
+        if (failed(maybeConstValues)) {
+            LLVM_DEBUG({ llvm::dbgs() << "Failed to compute compile-time constants in batch\n"; });
+            return;
+        }
+
+        for (auto [idx, v] : llvm::enumerate(valuesToProcess)) {
+            v.replaceAllUsesWith((*maybeConstValues)[idx]);
         }
     }
 };

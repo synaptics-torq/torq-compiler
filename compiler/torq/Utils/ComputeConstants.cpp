@@ -22,6 +22,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/TargetSelect.h"
 
@@ -63,9 +64,13 @@ createZeroConstant(Value value, Location loc, OpBuilder &builder, IRMapping &map
 }
 
 static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
-    ModuleOp topModuleOp, MLIRContext *context, Location loc, Value value,
-    ArrayRef<Operation *> ops, llvm::ArrayRef<Value> assumeZero
+    ModuleOp topModuleOp, MLIRContext *context, Location loc, ArrayRef<Value> values,
+    ArrayRef<SmallVector<Operation *>> opsSets, llvm::ArrayRef<Value> assumeZero
 ) {
+    if (values.empty() || values.size() != opsSets.size()) {
+        return failure();
+    }
+
     OpBuilder builder(topModuleOp);
 
     builder.setInsertionPointToStart(topModuleOp.getBody());
@@ -97,14 +102,20 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
 
     builder.setInsertionPointToStart(&funcOp.getBody().front());
 
-    // create a subspan that we will use to return the result
-    RankedTensorType resultType = cast<RankedTensorType>(value.getType());
-    auto dispatchTensorType =
-        IREE::Flow::DispatchTensorType::get(IREE::Flow::TensorAccess::WriteOnly, resultType);
-    auto subspanOp = builder.create<IREE::HAL::InterfaceBindingSubspanOp>(
-        loc, dispatchTensorType, APInt(64, 0), APInt(64, 0),
-        IREE::HAL::DescriptorType::StorageBuffer, nullptr, ValueRange{}, builder.getIndexAttr(4)
-    );
+    SmallVector<IREE::HAL::InterfaceBindingSubspanOp, 4> subspanOps;
+    subspanOps.reserve(values.size());
+
+    // Create one output binding per requested value.
+    for (auto [binding, value] : llvm::enumerate(values)) {
+        RankedTensorType resultType = cast<RankedTensorType>(value.getType());
+        auto dispatchTensorType =
+            IREE::Flow::DispatchTensorType::get(IREE::Flow::TensorAccess::WriteOnly, resultType);
+        auto subspanOp = builder.create<IREE::HAL::InterfaceBindingSubspanOp>(
+            loc, dispatchTensorType, APInt(64, 0), APInt(64, binding),
+            IREE::HAL::DescriptorType::StorageBuffer, nullptr, ValueRange{}, builder.getIndexAttr(4)
+        );
+        subspanOps.push_back(subspanOp);
+    }
 
     IRMapping map;
 
@@ -117,15 +128,22 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
         }
     }
 
-    // clone all the operations in the new function
-    for (auto op : ops) {
-        builder.clone(*op, map);
+    // Clone each operation once while preserving ordering from the op sets.
+    DenseSet<Operation *> clonedOps;
+    for (auto ops : opsSets) {
+        for (auto op : ops) {
+            if (clonedOps.insert(op).second) {
+                builder.clone(*op, map);
+            }
+        }
     }
 
-    // store the value that corresponds to the original value in the binding subspan
-    builder.create<IREE::Flow::DispatchTensorStoreOp>(
-        loc, map.lookup(value), subspanOp, ValueRange{}
-    );
+    // Store each requested result to its dedicated output binding.
+    for (auto [binding, value] : llvm::enumerate(values)) {
+        builder.create<IREE::Flow::DispatchTensorStoreOp>(
+            loc, map.lookup(value), subspanOps[binding], ValueRange{}
+        );
+    }
 
     // return nothing (this is the calling convention for IREE dispatches)
     builder.create<func::ReturnOp>(loc, ValueRange{});
@@ -285,28 +303,10 @@ static void replaceStackAllocationsWithMalloc(IREE::HAL::ExecutableVariantOp evO
     });
 }
 
-FailureOr<DenseElementsAttr> computeValueFromOps(
-    Location loc, Value value, ArrayRef<Operation *> ops, llvm::ArrayRef<Value> assumeZero
+static LogicalResult passManagerSetup(
+    ModuleOp moduleOp, MLIRContext *context, IREE::HAL::ExecutableVariantOp variantOp
 ) {
-
-    RankedTensorType outputType = cast<RankedTensorType>(value.getType());
-
-    // create a new free-standing module containing the operations we were asked to compute
-    ModuleOp moduleOp = ModuleOp::create(loc);
-
-    auto maybeVariantOp =
-        createModule(moduleOp, moduleOp.getContext(), loc, value, ops, assumeZero);
-
-    if (failed(maybeVariantOp)) {
-        return failure();
-    }
-
-    LLVM_DEBUG({
-        llvm::dbgs() << "Module that will be compiled:\n";
-        moduleOp.dump();
-    });
-
-    auto pm = PassManager(value.getContext());
+    auto pm = PassManager(context);
 
     // create a pipeline that compiles from tensor to LLVM
     setupPipeline(pm);
@@ -314,40 +314,46 @@ FailureOr<DenseElementsAttr> computeValueFromOps(
     // try to run the pipeline on the IR we just created to lower the module to llvm IR
     if (failed(pm.run(moduleOp))) {
         LLVM_DEBUG({ llvm::dbgs() << "Failed to compile module\n"; });
-
         return failure();
     }
 
     // replace alloca with malloc/free to avoid stack overflow on large allocations
-    replaceStackAllocationsWithMalloc(*maybeVariantOp);
+    replaceStackAllocationsWithMalloc(variantOp);
 
-    LLVM_DEBUG({
-        llvm::dbgs() << "Module that will be JIT-ed:\n";
-        moduleOp.dump();
-    });
+    return success();
+}
 
+static FailureOr<std::unique_ptr<mlir::ExecutionEngine>>
+executionEngineSetup(IREE::HAL::ExecutableVariantOp variantOp) {
     // FIXME:
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
 
     // create a optimization pipeline for llvm
     auto optPipeline = mlir::makeOptimizingTransformer(
-        /*optLevel=*/3, /*sizeLevel=*/0,
+        /*optLevel=*/0, /*sizeLevel=*/0,
         /*targetMachine=*/nullptr
     );
 
     // compile the module using the JIT engine
     mlir::ExecutionEngineOptions engineOptions;
     engineOptions.transformer = optPipeline;
-    auto maybeEngine =
-        mlir::ExecutionEngine::create(maybeVariantOp->getInnerModule(), engineOptions);
+    auto maybeEngine = mlir::ExecutionEngine::create(variantOp.getInnerModule(), engineOptions);
     if (!maybeEngine) {
         return failure();
     }
 
-    auto &engine = maybeEngine.get();
-
     LLVM_DEBUG({ llvm::dbgs() << "Compilation succeeded\n"; });
+
+    return std::move(maybeEngine.get());
+}
+
+static FailureOr<SmallVector<DenseElementsAttr>>
+invokeExecution(mlir::ExecutionEngine &engine, ArrayRef<RankedTensorType> outputTypes) {
+    if (outputTypes.empty()) {
+        LLVM_DEBUG({ llvm::dbgs() << "Invalid output bindings passed to invokeExecution\n"; });
+        return failure();
+    }
 
     // create the parameters for the function call
     iree_hal_executable_environment_v0_t environment;
@@ -358,17 +364,23 @@ FailureOr<DenseElementsAttr> computeValueFromOps(
     memset(&dispatch_state, 0, sizeof(dispatch_state));
     memset(&workgroup_state, 0, sizeof(workgroup_state));
 
-    auto bufferSize = outputType.getNumElements() * outputType.getElementTypeBitWidth() / 8;
+    SmallVector<SmallVector<char, 0>, 4> outputData;
+    outputData.reserve(outputTypes.size());
 
-    SmallVector<char> outputData(bufferSize, 0);
+    SmallVector<void *, 4> bindingsAddr;
+    bindingsAddr.reserve(outputTypes.size());
 
-    void *bindingsAddr[1];
-    bindingsAddr[0] = outputData.data();
+    for (auto outputType : outputTypes) {
+        auto bufferSize = outputType.getNumElements() * outputType.getElementTypeBitWidth() / 8;
+        outputData.emplace_back(bufferSize, 0);
+        bindingsAddr.push_back(outputData.back().data());
+    }
 
-    dispatch_state.binding_ptrs = bindingsAddr;
+    dispatch_state.binding_count = outputTypes.size();
+    dispatch_state.binding_ptrs = bindingsAddr.data();
 
     // look for the main function in the module
-    auto main = engine->lookup("main");
+    auto main = engine.lookup("main");
 
     if (!main) {
         llvm::errs() << "Failed to find 'main' function in the module\n";
@@ -385,10 +397,59 @@ FailureOr<DenseElementsAttr> computeValueFromOps(
 
     mainFn(&environment, &dispatch_state, &workgroup_state);
 
-    // create an attribute from the output data
-    auto output = DenseElementsAttr::getFromRawBuffer(outputType, outputData);
+    SmallVector<DenseElementsAttr> outputs;
+    outputs.reserve(outputTypes.size());
+    for (auto [idx, outputType] : llvm::enumerate(outputTypes)) {
+        outputs.push_back(DenseElementsAttr::getFromRawBuffer(outputType, outputData[idx]));
+    }
 
-    return output;
+    return outputs;
+}
+
+FailureOr<SmallVector<DenseElementsAttr>> computeValueFromOps(
+    Location loc, ArrayRef<Value> values, ArrayRef<SmallVector<Operation *>> opsSets,
+    llvm::ArrayRef<Value> assumeZero
+) {
+    if (values.empty() || values.size() != opsSets.size()) {
+        return failure();
+    }
+
+    SmallVector<RankedTensorType, 4> outputBindings;
+    outputBindings.reserve(values.size());
+    for (auto value : values) {
+        outputBindings.push_back(cast<RankedTensorType>(value.getType()));
+    }
+
+    // create a new free-standing module containing the operations we were asked to compute
+    ModuleOp moduleOp = ModuleOp::create(loc);
+
+    auto maybeVariantOp =
+        createModule(moduleOp, moduleOp.getContext(), loc, values, opsSets, assumeZero);
+
+    if (failed(maybeVariantOp)) {
+        return failure();
+    }
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "Module that will be compiled:\n";
+        moduleOp.dump();
+    });
+
+    if (failed(passManagerSetup(moduleOp, moduleOp.getContext(), *maybeVariantOp))) {
+        return failure();
+    }
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "Module that will be JIT-ed:\n";
+        moduleOp.dump();
+    });
+
+    auto maybeEngine = executionEngineSetup(*maybeVariantOp);
+    if (failed(maybeEngine)) {
+        return failure();
+    }
+
+    return invokeExecution(**maybeEngine, outputBindings);
 }
 
 SmallVector<Operation *>
@@ -565,45 +626,150 @@ outlineAndReturnOps(Value value, bool recursive, llvm::ArrayRef<Value> assumeZer
     return ops;
 }
 
-FailureOr<DenseElementsAttr>
-computeConstAttr(Value value, bool recursive, llvm::ArrayRef<Value> assumeZero) {
-    SmallVector<Operation *> ops = outlineAndReturnOps(value, recursive, assumeZero);
-    if (ops.empty()) {
-        LLVM_DEBUG({ llvm::errs() << "Failed to outline ops to compute value\n"; });
+FailureOr<SmallVector<Attribute>> computeAllConstAttr(
+    SmallVectorImpl<Value> &values, bool recursive, llvm::ArrayRef<Value> assumeZero
+) {
+    if (values.empty()) {
+        return SmallVector<Attribute>{};
+    }
+
+    SmallVector<SmallVector<Operation *>, 4> opsSets;
+    opsSets.reserve(values.size());
+
+    SmallVector<Value> constValues;
+    constValues.reserve(values.size());
+    for (auto value : values) {
+        SmallVector<Operation *> ops = outlineAndReturnOps(value, recursive, assumeZero);
+        if (ops.empty()) {
+            LLVM_DEBUG({ llvm::errs() << "Failed to outline ops to compute value\n"; });
+            continue;
+        }
+        constValues.push_back(value);
+        opsSets.push_back(std::move(ops));
+    }
+    if (constValues.empty()) {
         return failure();
     }
-    auto output = computeValueFromOps(value.getDefiningOp()->getLoc(), value, ops, assumeZero);
 
-    return output;
+    auto output = computeValueFromOps(
+        values.front().getDefiningOp()->getLoc(), constValues, opsSets, assumeZero
+    );
+
+    if (failed(output) || output->size() != constValues.size()) {
+        return failure();
+    }
+
+    SmallVector<Attribute> attrs;
+    attrs.reserve(output->size());
+    for (auto attr : *output) {
+        attrs.push_back(attr);
+    }
+    values = constValues;
+    return attrs;
+}
+
+FailureOr<Attribute>
+computeConstAttr(Value value, bool recursive, llvm::ArrayRef<Value> assumeZero) {
+    SmallVector<Value, 1> values = {value};
+    auto output = computeAllConstAttr(values, recursive, assumeZero);
+    if (failed(output) || output->empty()) {
+        return failure();
+    }
+
+    auto denseAttr = dyn_cast<DenseElementsAttr>(output->front());
+    if (!denseAttr) {
+        return failure();
+    }
+
+    return denseAttr;
+}
+
+// Compute the constant value for the given LinalgOp.
+FailureOr<SmallVector<Value>> computeAllArithConst(
+    SmallVectorImpl<Value> &values, bool recursive, llvm::ArrayRef<Value> assumeZero
+) {
+    if (values.empty()) {
+        return SmallVector<Value>{};
+    }
+
+    auto maybeAttrs = computeAllConstAttr(values, recursive, assumeZero);
+
+    if (failed(maybeAttrs)) {
+        return failure();
+    }
+
+    SmallVector<Value> constants;
+    constants.reserve(values.size());
+    for (auto [idx, value] : llvm::enumerate(values)) {
+        auto denseAttr = dyn_cast<DenseElementsAttr>((*maybeAttrs)[idx]);
+        if (!denseAttr) {
+            return failure();
+        }
+
+        OpBuilder builder(value.getDefiningOp());
+        constants.push_back(builder.create<arith::ConstantOp>(value.getLoc(), denseAttr).getResult()
+        );
+    }
+
+    LLVM_DEBUG({ llvm::dbgs() << "Constants successfully computed\n"; });
+
+    return constants;
 }
 
 // Compute the constant value for the given LinalgOp.
 FailureOr<Value> computeArithConst(Value value, bool recursive, llvm::ArrayRef<Value> assumeZero) {
-
-    auto maybeAttr = computeConstAttr(value, recursive, assumeZero);
-
-    if (failed(maybeAttr)) {
+    SmallVector<Value, 1> values = {value};
+    auto maybeValues = computeAllArithConst(values, recursive, assumeZero);
+    if (failed(maybeValues) || maybeValues->empty()) {
         return failure();
     }
 
-    OpBuilder builder(value.getDefiningOp());
-    auto outputV = builder.create<arith::ConstantOp>(value.getLoc(), *maybeAttr).getResult();
-    LLVM_DEBUG({ llvm::dbgs() << "Constant successfully computed\n"; });
+    return maybeValues->front();
+}
 
-    return outputV;
+// Compute the constant value for the given LinalgOp.
+FailureOr<SmallVector<Value>> computeAllArithConst(
+    SmallVectorImpl<Operation *> &ops, bool recursive, llvm::ArrayRef<Value> assumeZero
+) {
+    if (ops.empty()) {
+        return SmallVector<Value>{};
+    }
+
+    SmallVector<Value> values;
+    values.reserve(ops.size());
+    DenseMap<Value, Operation *> valueToOps;
+
+    for (auto op : ops) {
+        if (op->getNumResults() != 1) {
+            // We only support ops with one output for now.
+            return failure();
+        }
+        valueToOps[op->getResult(0)] = op;
+        values.push_back(op->getResult(0));
+    }
+
+    auto allConsts = computeAllArithConst(values, recursive, assumeZero);
+    SmallVector<Operation *> opsToProcess;
+    opsToProcess.reserve(values.size());
+    for (auto value : values) {
+        if (valueToOps.contains(value)) {
+            opsToProcess.push_back(valueToOps[value]);
+        }
+    }
+    ops = opsToProcess;
+    return allConsts;
 }
 
 // Compute the constant value for the given LinalgOp.
 FailureOr<Value>
 computeArithConst(LinalgOp linalgOp, bool recursive, llvm::ArrayRef<Value> assumeZero) {
-
-    if (linalgOp->getNumResults() != 1) {
-        // We only support ops with one output for now.
+    SmallVector<Operation *, 1> ops = {linalgOp.getOperation()};
+    auto maybeValues = computeAllArithConst(ops, recursive, assumeZero);
+    if (failed(maybeValues) || maybeValues->empty()) {
         return failure();
     }
 
-    auto maybeAttr = computeArithConst(linalgOp->getResult(0), recursive, assumeZero);
-    return maybeAttr;
+    return maybeValues->front();
 }
 
 } // namespace mlir::syna::torq
