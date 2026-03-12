@@ -11,10 +11,11 @@ on:
             - 'scripts/Dockerfile.ci-tests'
             - 'scripts/Dockerfile.ci-fpga-tests'
             - 'scripts/install_dependencies.sh'
+            - 'scripts/download_tflite_binaries.py'
             - 'scripts/configure_python.sh'
             - 'requirements.txt'
             - 'third_party/iree'
-            - '.github/workflows/build-docker-ecr.yml'
+            - '.github/workflows/build-docker-ecr.yml'            
 
     pull_request:
         paths:
@@ -22,6 +23,7 @@ on:
             - 'scripts/Dockerfile.ci-tests'
             - 'scripts/Dockerfile.ci-fpga-tests'
             - 'scripts/install_dependencies.sh'
+            - 'scripts/download_tflite_binaries.py'
             - 'scripts/configure_python.sh'
             - 'requirements.txt'
             - 'third_party/iree'
@@ -93,6 +95,9 @@ jobs:
               file: scripts/Dockerfile.ci
               push: ${{ github.ref == 'refs/heads/main' }}
               tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
+              build-args: GITHUB_REPOSITORY=${{ github.repository }}
+              secrets: |
+                "github_token=${{ secrets.GITHUB_TOKEN }}"
 
           - name: Build and push tests Docker image
             uses: docker/build-push-action@v6            
@@ -101,6 +106,9 @@ jobs:
               file: scripts/Dockerfile.ci-tests
               push: ${{ github.ref == 'refs/heads/main' }}
               tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-tests
+              build-args: GITHUB_REPOSITORY=${{ github.repository }}
+              secrets: |
+                "github_token=${{ secrets.GITHUB_TOKEN }}"
 
           - name: Build and push FPGA tests Docker image
             uses: docker/build-push-action@v6            
@@ -109,3 +117,6 @@ jobs:
               file: scripts/Dockerfile.ci-fpga-tests
               push: ${{ github.ref == 'refs/heads/main' }}
               tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-fpga-tests
+              build-args: GITHUB_REPOSITORY=${{ github.repository }}
+              secrets: |
+                "github_token=${{ secrets.GITHUB_TOKEN }}"

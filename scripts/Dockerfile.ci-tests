@@ -4,6 +4,15 @@ RUN apt-get update && \
     apt-get install -y cmake lld wget curl git git-lfs python3-pip python3-dev python3-venv python3-setuptools qemu-system-misc zip && \
     rm -rf /var/lib/apt/lists/*
 
+COPY scripts/download_tflite_binaries.py .
+
+ARG GITHUB_REPOSITORY
+
+RUN --mount=type=secret,id=github_token \
+    GITHUB_TOKEN="$(cat /run/secrets/github_token)" \
+    GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+    ./download_tflite_binaries.py --output-dir /opt/synaptics/astra/tensorflow
+
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
     unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip && rm -rf /root/.cache
 

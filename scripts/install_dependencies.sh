@@ -46,3 +46,7 @@ if [ ! -d "$TOOLCHAIN_DIR" ]; then
 else
     echo "Toolchain already installed at $TOOLCHAIN_DIR"
 fi
+
+# Install extra TensorFlow binaries
+SCRIPT_DIR=$(dirname ${BASH_SOURCE[0]})
+"$SCRIPT_DIR/download_tflite_binaries.py" --output-dir /opt/synaptics/astra/tensorflow

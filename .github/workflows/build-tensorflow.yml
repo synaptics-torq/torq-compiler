@@ -1,0 +1,108 @@
+name: Build TensorFlow binaries
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-tensorflow.yml'
+  
+  pull_request:    
+    paths:
+      - '.github/workflows/build-tensorflow.yml'
+
+  release:
+    types: [published]
+
+
+concurrency:
+  group: build-tensorflow-${{ github.ref }}
+  cancel-in-progress: true
+
+
+env:
+  TF_VERSION: v2.20.0
+
+jobs:
+
+  build:
+
+    runs-on:
+    - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+      image:ubuntu-7.0
+      instance-size:xlarge 
+
+    permissions:
+      contents: write
+
+    steps:
+
+    - uses: actions/checkout@v3
+      with:
+        repository: tensorflow/tensorflow
+        ref: ${{ env.TF_VERSION }}
+
+    - name: Install bazelisk
+      run: |        
+        curl -LO "https://github.com/bazelbuild/bazelisk/releases/download/v1.27.0/bazelisk-linux-amd64"
+        chmod +x bazelisk-linux-amd64
+        mv bazelisk-linux-amd64 /usr/local/bin/bazel
+
+    - name: Install clang
+      run: |
+        wget https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.2/clang+llvm-17.0.2-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+
+        tar -xf clang+llvm-17.0.2-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+        
+        cp -r clang+llvm-17.0.2-x86_64-linux-gnu-ubuntu-22.04/* /usr
+    
+    - name: Configure build
+      run: |
+        yes "" | ./configure
+    
+    - name: Build TensorFlow binaries
+      run: |
+        bazel build //tensorflow/compiler/mlir/lite:flatbuffer_translate //tensorflow/compiler/mlir/tosa:tf-tosa-opt
+
+    - name: Create zip package
+      run: |
+        mkdir tflite-tools-${{ env.TF_VERSION }}
+
+        cp bazel-bin/tensorflow/compiler/mlir/lite/stablehlo/libcomposite_utils.so \
+            bazel-bin/tensorflow/core/ir/libDialect.so \
+            bazel-bin/external/llvm-project/llvm/libSupport.so \
+            bazel-bin/external/llvm-project/mlir/libDestinationStyleOpInterface.so \
+            bazel-bin/external/llvm-project/mlir/libPDLDialect.so \
+            bazel-bin/external/llvm-project/mlir/libSparseTensorDialect.so \
+            bazel-bin/tensorflow/compiler/mlir/lite/flatbuffer_translate \
+            bazel-bin/tensorflow/compiler/mlir/tosa/tf-tosa-opt.runfiles/org_tensorflow/tensorflow/compiler/mlir/tosa/tf-tosa-opt \
+            tflite-tools-${{ env.TF_VERSION }}/
+
+        zip -r tflite-tools-${{ env.TF_VERSION }}.zip tflite-tools-${{ env.TF_VERSION }}
+
+    - name: Ensure snapshot release exists
+      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.github_token }}
+      run: |
+        if gh release -R ${{ github.repository }} view snapshot >/dev/null 2>&1; then
+          echo "snapshot release exists"
+        else
+          gh release -R ${{ github.repository }} create snapshot \
+            -t "Development Snapshot" \
+            -n "Latest build from main. Unstable. Replaced on each commit." \
+            --prerelease
+        fi
+
+    - name: Upload to GitHub release
+      env:
+        GITHUB_TOKEN: ${{ secrets.github_token }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: |
+        if [[ "$EVENT_NAME" == "release" && "$EVENT_ACTION" == "published" ]]; then
+          gh release -R ${{ github.repository }} upload "$RELEASE_TAG" tflite-tools-${{ env.TF_VERSION }}.zip --clobber
+        else
+          gh release -R ${{ github.repository }} upload snapshot tflite-tools-${{ env.TF_VERSION }}.zip --clobber
+        fi

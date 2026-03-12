@@ -1,6 +1,13 @@
 FROM ubuntu:24.04
 
 COPY scripts/install_dependencies.sh .
-RUN ./install_dependencies.sh && rm -rf /var/lib/apt/lists/*
+COPY scripts/download_tflite_binaries.py .
+
+ARG GITHUB_REPOSITORY
+
+RUN --mount=type=secret,id=github_token \
+    GITHUB_TOKEN="$(cat /run/secrets/github_token)" \
+    GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+    ./install_dependencies.sh && rm -rf /var/lib/apt/lists/*
 
 

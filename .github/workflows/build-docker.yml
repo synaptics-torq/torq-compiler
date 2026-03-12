@@ -10,7 +10,14 @@ on:
             - '.github/workflows/build-docker.yml'
             - 'scripts/Dockerfile.localdev'
             - 'scripts/install_dependencies.sh'
+            - 'scripts/download_tflite_binaries.py'
 
+    pull_request:
+        paths:
+            - '.github/workflows/build-docker.yml'
+            - 'scripts/Dockerfile.localdev'
+            - 'scripts/install_dependencies.sh'
+            - 'scripts/download_tflite_binaries.py'
 jobs:
 
     build-and-push:
@@ -41,4 +48,7 @@ jobs:
             context: .
             file: scripts/Dockerfile.localdev
             push: ${{ github.ref == 'refs/heads/main' }}
-            tags: ghcr.io/${{ github.repository }}/builder:latest
+            tags: ghcr.io/${{ github.repository }}/builder:latest            
+            build-args: GITHUB_REPOSITORY=${{ github.repository }}
+            secrets: |
+                "github_token=${{ secrets.GITHUB_TOKEN }}"
