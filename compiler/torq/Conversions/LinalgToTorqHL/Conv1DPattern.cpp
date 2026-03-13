@@ -29,18 +29,34 @@
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/Support/Debug.h"
-#include <optional>
 
 #define DEBUG_TYPE "linalg-torq-conv1d-pattern"
 
 namespace mlir::syna::torq {
 
 struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
+  private:
+    const bool _markFuseGroups;
+
+  public:
     using OpRewritePattern::OpRewritePattern;
+    Conv1DNcwFcwToLinalgMatmulPattern(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern(context), _markFuseGroups(markFuseGroups) {}
 
     LogicalResult
     matchAndRewrite(linalg::Conv1DNcwFcwOp convOp, PatternRewriter &rewriter) const override {
-        llvm::errs() << "Applying Conv1DNcwFcwToLinalgMatmul\n";
+        if (_markFuseGroups) {
+            if (isMarkedFuseGroup(convOp)) {
+                return rewriter.notifyMatchFailure(convOp, "Already marked");
+            }
+
+            markFuseGroupBackward(
+                convOp.getResult(0), {convOp.getInputs()[0]}, rewriter,
+                convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            );
+            return success();
+        }
+
         auto loc = convOp.getLoc();
 
         // Extract tensors and shapes
@@ -148,7 +164,6 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         auto matmulInit = rewriter.create<tensor::EmptyOp>(loc, matmulResultShape, outputElemType);
 
         // Perform the actual matmul
-        // Perform the actual matmul
         SmallVector<Value> inputs;
         inputs.push_back(reshapedFilter.getResult());
         inputs.push_back(transposedUnfolded.getResults()[0]);
@@ -180,22 +195,26 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
 };
 
 struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
+  private:
+    const bool _markFuseGroups;
+
+  public:
     using OpRewritePattern::OpRewritePattern;
+    Conv1DNcwFcwToLinalgConv2DPattern(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern(context), _markFuseGroups(markFuseGroups) {}
 
     LogicalResult
     matchAndRewrite(linalg::Conv1DNcwFcwOp convOp, PatternRewriter &rewriter) const override {
-        // Guard: Prevent infinite loop with Conv2dConvert pattern.
-        // This pattern converts Conv1D -> Conv2D with height=1 (NHWC format, dim 1 = 1).
-        // Conv2dConvert detects Conv2D with height=1 and converts it back to Conv1D,
-        // causing an infinite loop. To prevent this, we check if the operation has
-        // already been processed or if we're in a context where the loop would occur.
-        //
-        // Check if this operation was created by a previous conversion attempt
-        // (indicated by a marker attribute or by checking the defining operation)
-        if (convOp->hasAttr("torq.conv1d_to_conv2d_processed")) {
-            return rewriter.notifyMatchFailure(
-                convOp, "Conv1D already processed, skipping to prevent infinite loop"
+        if (_markFuseGroups) {
+            if (isMarkedFuseGroup(convOp)) {
+                return rewriter.notifyMatchFailure(convOp, "Already marked");
+            }
+
+            markFuseGroupBackward(
+                convOp.getResult(0), {convOp.getInputs()[0]}, rewriter,
+                convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
+            return success();
         }
 
         auto loc = convOp.getLoc();
@@ -295,14 +314,10 @@ void populateLinalgToTorqHLConv1DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
     if (clConv1dAsMatmul) {
-        patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
+        patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context, markFuseGroups);
     }
-    // Conv1DNcwFcwToLinalgConv2DPattern now has a guard to prevent infinite loop:
-    // It converts Conv1D to Conv2D with height=1, and marks the Conv2D with
-    // "torq.skip_conv2d_to_conv1d" attribute. Conv2dConvert checks for this
-    // attribute and skips conversion to prevent the infinite loop.
     else {
-        patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
+        patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context, markFuseGroups);
     }
 }
 
