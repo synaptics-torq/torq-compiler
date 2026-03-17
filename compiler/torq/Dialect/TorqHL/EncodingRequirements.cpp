@@ -499,7 +499,14 @@ KernelEncoding TransposeReshapeOp::getKernelEncoding() {
     return {{}, outEncoding};
 }
 
-KernelEncoding MaxPool2dOp::getKernelEncoding() { return getDefault1InputEncoding(*this); }
+KernelEncoding MaxPool2dOp::getKernelEncoding() {
+    if (torq::hasEkLoweringMaxPool(*this)) {
+        return getDefault1InputEncoding(*this);
+    }
+
+    auto resultType = cast<RankedTensorType>(this->getResult(0).getType());
+    return {{}, defaultEncoding(resultType, 4)};
+}
 
 KernelEncoding SegmentationOp::getKernelEncoding() { return getNoEncoding(); }
 
