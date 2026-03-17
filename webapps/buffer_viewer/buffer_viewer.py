@@ -155,13 +155,16 @@ def show_buffer(buffer, action):
     if len(buffer_data.shape) > 2:
         idx = []
         
-        for dim in range(len(buffer_data.shape) - 2):        
-            if buffer_data.shape[dim] > 1:                
-                idx.append(st.slider("Dimension " + str(dim), 0, buffer_data.shape[dim] - 1, 0, key=f"dim_{buffer.id}_{action}_{dim}"))        
-            else:
-                st.caption("Dimension " + str(dim))
-                st.write(1)
-                idx.append(0)
+        if len(buffer_data.shape) > 2:
+            cols = st.columns(len(buffer_data.shape) - 2)
+            for dim in range(len(buffer_data.shape) - 2):  
+                with cols[dim]:      
+                    if buffer_data.shape[dim] > 1:                
+                        idx.append(st.slider("Dimension " + str(dim), 0, buffer_data.shape[dim] - 1, 0, key=f"dim_{buffer.id}_{action}_{dim}"))        
+                    else:
+                        st.caption("Dimension " + str(dim))
+                        st.write(0)
+                        idx.append(0)
 
         st.caption("Buffer data at index [" + ", ".join([str(i) for i in idx]) + ",:,:] after action " + str(action) + " executed")
         
@@ -169,13 +172,13 @@ def show_buffer(buffer, action):
         if len(squeezed.shape) == 0:
             st.write(str(squeezed))
         else:
-            st.dataframe(squeezed, hide_index=False, row_height=get_table_row_height())
+            st.dataframe(squeezed, hide_index=False, row_height=get_table_row_height(), height=608)
     
     else:
 
         st.caption("Buffer data after action " + str(action) + " executed")
 
-        st.dataframe(buffer_data, hide_index=False, row_height=get_table_row_height())
+        st.dataframe(buffer_data, hide_index=False, row_height=get_table_row_height(), height=608)
 
 
 def show_buffer_difference(buffer, action1, action2):
@@ -248,10 +251,7 @@ def show_any_buffer_difference(buffer_data_1, buffer_data_2):
 
 def get_table_row_height():
     """Return the height of the buffer table based on view mode."""
-    if st.session_state.view_mode == 'compact':
-        return 18  # Show more rows in compact mode with smaller row height
-    else:
-        return None
+    return 18  # Show more rows in compact mode with smaller row height
 
 
 def find_descendants_of_type(op, descendant_type, depth=-1):
@@ -327,10 +327,35 @@ def parse_code(file_path):
                             if action_id != len(actions[dispatch_name]):
                                 raise ValueError(f"Unexpected action id {action_id} in dispatch {dispatch_name}, expected {len(actions[dispatch_name])}")
                                                         
-                            action_desc = [("Action", str(child))]
+                            # Parse IR to show the name of the torq-hl op being executed (if any)
+                            operation_str = child.operation.name
+                            if child.operation.name in ["torq_hl.start_program"]:
+                                opp = child.operation.operands[5]
+                                for a in opp.owner.operation.attributes:
+                                    if a.name == 'name':
+                                        operation_str += ': ' + str(a.attr)
+
+                            # Parse IR to show the operations in the program being executed
+                            if child.operation.name in ["torq_hl.start_program", "torq_hl.wait_program"]:                                                                
+                                invocation = child.operation.operands[0]
+                                invocation_op = invocation.owner                                
+                                program_op = invocation_op.operands[0].owner
+                                # Parse the tasks in program_op
+                                ops = []
+                                for region in program_op.regions:
+                                    for block in region:
+                                        for op in block.operations:
+                                            if op.name == "torq_hw.nss_task":
+                                                for region2 in op.regions:
+                                                    for block2 in region2:
+                                                        for op2 in block2.operations:
+                                                            ops.append(op2.name.removeprefix("torq_hw."))
+                                operation_str +=  ' (' + ", ".join(ops) + ')'
+                                        
+                            action_desc = [("", operation_str)]
+                            action_desc.append(("Action", str(child)))
 
                             program_arguments[dispatch_name][action_id] = []
-
                             if child.operation.name in ["torq_hl.start_program", "torq_hl.wait_program"]:                                                                
                                 invocation = child.operation.operands[0]
                                 invocation_op = invocation.owner                                
@@ -356,45 +381,50 @@ def parse_code(file_path):
 
 st.set_page_config(page_title="Torq Buffer dump viewer", layout="wide")
 
-st.title("Torq Buffer dump viewer")
+# Use smaller font size for the whole app and reduce padding at the top of the page
+st.markdown("""<style>:root { font-size: 14px; } html, body, .stApp { font-size: 1rem; }</style>""", unsafe_allow_html=True)
+st.markdown("""<style>.block-container {padding-top: 2rem;}</style>""", unsafe_allow_html=True)
 
-st.markdown("""
-            This is a simple viewer for the Torq buffer dump files.
-
-            To analyze the buffers dumps of a model use the following steps:
-            
-            1. Compile a model with debug information enabled using the  `--torq-enable-buffer-debug-info` flag
-            
-            2. Execute the model with buffer dumps enabled using the `--torq_dump_buffers_dir=${PATH}` command line option
-
-            3. Zip the contents of the dump directory and upload it here to view the contents
-
-            If you started this tool from the command line, you can also pass the path to the dump directory as an argument.
-
-            Optionally, you can also pass the path to the source `executable-targets` IR of the model as a second argument to see the code locations of each action.
-            
-            """)
+col1, col2 = st.columns([3, 1], vertical_alignment="top")
+with col1:
+    st.title("Torq Buffer dump viewer")
+    show_info = st.checkbox("Show Info")
+with col2:
+    analysis_mode = st.radio("Analysis mode", ["View buffers changes for each action", "View buffer state across actions", "Compare two buffer states"])
 
 action_descs = None
 buffer_actions = None
 
 if len(sys.argv) > 1:
     uploaded_file = sys.argv[1]
-    st.write("File name: " + uploaded_file)
+    if show_info:
+        st.write("File name: " + uploaded_file)
 
     if len(sys.argv) > 2:
         code_path = sys.argv[2]
-        st.write("Code: " + code_path)
+        if show_info:
+            st.write("Code: " + code_path)
         action_descs, buffer_actions, program_arguments = parse_code(code_path)
 else:
     uploaded_file = st.file_uploader("Buffer dump zip file")
+
+if show_info:
+    st.markdown("""
+                This is a simple viewer for the Torq buffer dump files.
+                To analyze the buffers dumps of a model use the following steps:
+                1. Compile a model with debug information enabled using the  `--torq-enable-buffer-debug-info` flag
+                2. Execute the model with buffer dumps enabled using the `--torq_dump_buffers_dir=${PATH}` command line option
+                3. Zip the contents of the dump directory and upload it here to view the contents
+
+                If you started this tool from the command line, you can also pass the path to the dump directory as an argument.
+                Optionally, you can also pass the path to the source `executable-targets` IR of the model as a second argument to see the code locations of each action.
+                """)
 
 if uploaded_file is None:
     st.stop()
 
 buffer_dump = BufferDump(uploaded_file)
 
-analysis_mode = st.radio("Analysis mode", ["View buffers changes for each action", "View buffer state across actions", "Compare two buffer states"])
 
 if analysis_mode == "View buffer state across actions":
 
@@ -433,16 +463,20 @@ if analysis_mode == "View buffer state across actions":
     show_buffer(buffer, action)
 
 elif analysis_mode == "View buffers changes for each action":
-    # Session state for view mode
-    if 'view_mode' not in st.session_state:
-        st.session_state.view_mode = 'standard'
-    st.session_state.view_mode = st.radio("View Mode", ["standard", "compact"], horizontal=True, key="view_mode_selector")
-    
+    col1, col2, col3= st.columns([1, 1, 8], vertical_alignment="bottom")
+
     # Session state for buffer order
     if 'buffer_order' not in st.session_state:
-        st.session_state.buffer_order = 'id'
-    st.session_state.buffer_order = st.radio("Buffer Order", ["id", "state"], horizontal=True, key="buffer_order_selector")
-    
+        st.session_state.buffer_order = 'state'
+    with col1:
+        st.session_state.buffer_order = st.radio("Buffer Order", ["state", "id"], horizontal=True, key="buffer_order_selector")
+
+    # Verbose IR view
+    if 'show_ir' not in st.session_state:
+        st.session_state.show_ir = False
+    with col2:
+        st.session_state.transpose = st.checkbox("Show IR", key="show_ir")
+
     executable = st.selectbox("Dispatch", buffer_dump.executables.keys())
 
     executable_obj = buffer_dump.executables[executable]
@@ -455,9 +489,10 @@ elif analysis_mode == "View buffers changes for each action":
     if action_descs is not None:        
         st.markdown("**Action**")
         st.code(action_descs[executable][action][0][1], wrap_lines=True)
-        for action_desc in action_descs[executable][action][1:]:
-            st.markdown(action_desc[0] + ":")
-            st.code(action_desc[1], wrap_lines=True)        
+        if st.session_state.show_ir:
+            for action_desc in action_descs[executable][action][1:]:
+                st.markdown(action_desc[0] + ":")
+                st.code(action_desc[1], wrap_lines=True)        
         buffer_to_arg = {x: idx for idx, x in enumerate(program_arguments[executable][action])}
 
     job_id = action - 1
@@ -503,18 +538,18 @@ elif analysis_mode == "View buffers changes for each action":
                 active_buffers.append({
                     "id": buffer.id,
                     "argument": arg,
+                    "state": state_strs[state],
                     "shape": buffer.shape,
                     "type": buffer.type,
                     "size": buffer.size,
                     "start address": hex(buffer.address),
                     "end address": hex(buffer.address + buffer.size),
-                    "state": state_strs[state],
                     "sha1": buffer_dump.sha1_buffer(buffer, action) if dump_exists else "n/a"
                 })
     
                 active_buffer_objs.append(buffer)
 
-    buffer_selection = st.dataframe(active_buffers, selection_mode="single-row", hide_index=True, key="id", on_select="rerun", row_height=get_table_row_height())
+    buffer_selection = st.dataframe(active_buffers, selection_mode="single-row", hide_index=True, key="id", on_select="rerun", row_height=get_table_row_height(), height=212)
     
     if len(buffer_selection['selection']['rows']) == 0:
         st.stop()
@@ -526,12 +561,15 @@ elif analysis_mode == "View buffers changes for each action":
         show_buffer(selected_buffer, selected_buffer.last_use_action)
         st.stop()
 
-    view = st.radio("Buffer contents", ["Before action", "After action", "Difference"])
+    col1, col2, _ = st.columns([2, 1, 7], vertical_alignment="bottom")
+    with col1:
+        view = st.radio("Buffer contents", ["Before action", "After action", "Difference"], horizontal=True)
 
     # Transpose channel
     if 'transpose' not in st.session_state:
         st.session_state.transpose = False
-    st.session_state.transpose = st.checkbox("Transpose NHWC -> HCHW", key="transpose_checkbox")
+    with col2:
+        st.session_state.transpose = st.checkbox("Transpose NHWC -> HCHW", key="transpose_checkbox")
 
     if view == "Before action":        
         if action == selected_buffer.allocation_action:

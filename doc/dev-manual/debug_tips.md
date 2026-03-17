@@ -61,7 +61,7 @@
   dump is listed in the output. The buffer logs can be inspected with:
 
   ```{code} shell
-  $ streamlit run apps/buffer_viewer/buffer_viewer.py PATH/TO/DUMP_DIR
+  $ streamlit run webapps/buffer_viewer/buffer_viewer.py PATH/TO/DUMP_DIR
   ```
 
 - To run lit style tests use the following commands:
@@ -120,7 +120,7 @@
 
   The generated PNG shows the call dependencies detected in the code of each function and the cumulative size of the function and all the functions it calls
 
-- To force NSS program blocks to contain only one slice task set the compiler option ``--torq-nss-task-size=1``, this ensures each slice start happens in a
+- To force NSS program blocks to contain only one slice task set the compiler option ``--torq-nss-task-size=2``, this ensures each slice start happens in a
   different NSS task and therefore the input/outputs can be visible in the buffer trace.
 
 - To compare the output and the IR of two branches of the code base you can use the following script:

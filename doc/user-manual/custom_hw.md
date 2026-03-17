@@ -24,7 +24,7 @@ $ torq-compile ... --torq-hw=<LRAM>:<Slices>:<tiling_memory>:<CSS features>:<NSS
 - `<tiling_memory>`: Tiling memory size in kilobytes (kb)
     > **Tiling memory:** specifies the available memory for tiling operations. When an operation's memory requirement exceeds the LRAM value, the compiler will automatically tile the operation to fit within the specified tiling memory.
 - `<CSS features>`: indicates the css features to enable (at the moment "+m")
-- `<NSS features >`: indicates the css features to enable (at the moment "nss_v1")
+- `<NSS features >`: indicates the NSS features to enable (at the moment "nss_v1")
 
 #### Example Configurations
 
@@ -59,7 +59,7 @@ This is the default configuration:
 
   Compile with:
   ```shell
-  $ torq-compile ... --torq-hw=512,1,400,+m,nss_v2
+  $ torq-compile ... --torq-hw=512:1:400:+m:nss_v2
   ```
 
 > **Note:** When compiling models with a smaller LRAM configuration, stability may vary due to the need for very small tile sizes. Support for this configuration is still under development. Full compatibility is not guaranteed in this release. For a more representative configuration, you can compile with 512kB size of LRAM and keep the rest of the configuration the same.
