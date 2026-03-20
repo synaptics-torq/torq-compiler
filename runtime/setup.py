@@ -126,6 +126,8 @@ def cmake_configure_and_build():
 
 def cmake_install():
     """Run cmake --install for both IREE and Torq Python components."""
+    if os.path.exists(CMAKE_INSTALL_DIR_ABS):
+        shutil.rmtree(CMAKE_INSTALL_DIR_ABS)
     os.makedirs(CMAKE_INSTALL_DIR_ABS, exist_ok=True)
 
     cmake_install_script = os.path.join(CMAKE_BUILD_DIR, "cmake_install.cmake")

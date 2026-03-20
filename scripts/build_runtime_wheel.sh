@@ -87,13 +87,12 @@ done
 mkdir -p "${OUTPUT_DIR}"
 export TORQ_RUNTIME_CMAKE_BUILD_DIR="${CMAKE_BUILD_DIR}"
 
-# Compute version once and export it so setup.py uses the same value across all invocations
 if [[ -z "${TORQ_WHEEL_VERSION:-}" ]]; then
     TIMESTAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
     COMMIT="$(cd "${PROJECT_DIR}" && git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
     export TORQ_WHEEL_VERSION="0.dev0+${TIMESTAMP}.g${COMMIT}"
-    echo "Using version: ${TORQ_WHEEL_VERSION}"
 fi
+echo "Using version: ${TORQ_WHEEL_VERSION}"
 
 pip wheel \
     --no-build-isolation \

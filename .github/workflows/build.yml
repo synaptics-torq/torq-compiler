@@ -100,6 +100,10 @@ jobs:
       - name: Build runtime wheels
         working-directory: /workspace/code
         run: |
+          TIMESTAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
+          COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+          export TORQ_WHEEL_VERSION="0.dev0+${TIMESTAMP}.g${COMMIT}"
+
           ./scripts/build_runtime_wheel.sh /workspace/build
           ./scripts/build_runtime_wheel.sh /workspace/build /workspace/build-astra-sl astra_machina poky
 
@@ -374,6 +378,12 @@ jobs:
         with:
           name: user-manual
           path: dist/doc
+
+      - name: Download runtime wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-wheel
+          path: dist
 
       - name: Compress the user manual as a zip
         run: |
