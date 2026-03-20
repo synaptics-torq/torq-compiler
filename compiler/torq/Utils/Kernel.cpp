@@ -2544,7 +2544,8 @@ static void partitionByIndexParity2D(LData &data) {
     // To be verified if the below assert is really needed
     int h = subShape[0].count;
     int w = subShape[1].count;
-    // Note: this works also if h or w are odd
+    assert(h % 2 == 0 && "Height must be even for partitioning");
+    assert(w % 2 == 0 && "Width must be even for partitioning");
     int subFrameSize = (h * w) / 4;
 
     shape.pop_back();

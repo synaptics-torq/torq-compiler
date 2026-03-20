@@ -470,10 +470,12 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvOp>
             }
         }
 
-        // Verify padding only in height dimension: offsets = [0, 0, pad_top, 0]
-        if (offsetValues[NCHW::N] != 0 || offsetValues[NCHW::C] != 0 || offsetValues[NCHW::W] != 0)
+        // Prevent the pattern from triggering on unsupported stride-2 cases
+        bool rank4 = sourceType && destType && sourceType.getRank() == 4 && destType.getRank() == 4;
+        if (!rank4 || conv2dOp.getStride()[0] != 1 || conv2dOp.getStride()[1] != 1)
             return failure();
 
+        // Verify padding only in height dimension: offsets = [0, 0, pad_top, 0]
         int64_t pad_top = offsetValues[NCHW::H];
         int64_t pad_bottom = destShape[NCHW::H] - sourceShape[NCHW::H] - pad_top;
         if (pad_bottom < 0)
