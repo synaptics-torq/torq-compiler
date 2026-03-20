@@ -161,6 +161,8 @@ void NssTask::setDmaParams(DmaParams p) {
     d->cfg.dma_xw_start = p.xwStart;
     d->cfg.dma_xr_wait = p.xrWait;
     d->cfg.dma_xw_wait = p.xwWait;
+    d->cfg.dma_mtu_xr = p.mtuXr;
+    d->cfg.dma_mtu_xw = p.mtuXw;
 }
 
 void NssTask::setSliceParams(size_t sliceId, SliceParams p) {

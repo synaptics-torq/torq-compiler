@@ -148,4 +148,14 @@
     --debug-only pass-manager --mlir-disable-threading
     ```
 
+## Troubleshooting
+
+- If the model execution affects the system responsiveness (e.g. the NPU DMA traffic is starving other bus masters), try reducing the DMA burst size by lowering the MTU value:
+
+  ```{code} shell
+  $ torq-compile ... --torq-dma-in-mtu=2 --torq-dma-out-mtu=2
+  ```
+
+  The default MTU is 4 (16 beats / 128 bytes per AXI burst). Lowering it to 2 (4 beats / 32 bytes) reduces the burst length, giving other bus masters more opportunities to access DDR at the cost of lower NPU DMA throughput.
+
   

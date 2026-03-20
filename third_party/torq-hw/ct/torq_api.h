@@ -145,6 +145,13 @@ typedef union torq_cfg_t
         uint32_t    cdma_src_addr;  // Source address in the torq address space (host view)
         uint32_t    cdma_dst_addr;  // Destination address in the torq address space (host view)
         uint32_t    cdma_len;       // Total transfer length in bytes
+
+        // [torq-compiler change BEGIN]
+        // DMA burst length: burst = (1 << mtu) beats, each beat = 8 bytes.
+        // Set via --torq-dma-in-mtu / --torq-dma-out-mtu compiler flags.
+        uint32_t    dma_mtu_xr; // MTU for DMA read (XR) channel
+        uint32_t    dma_mtu_xw; // MTU for DMA write (XW) channel
+        // [torq-compiler change END]
     };
 } torq_cfg_t;
 

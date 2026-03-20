@@ -34,6 +34,18 @@ static llvm::cl::opt<bool> clDisableAsyncSliceWait(
     llvm::cl::init(false)
 );
 
+static llvm::cl::opt<unsigned> clDmaInMtu(
+    "torq-dma-in-mtu",
+    llvm::cl::desc("DMA In (XRAM read) burst length as MTU value: burst = (1 << mtu) beats."),
+    llvm::cl::init(4)
+);
+
+static llvm::cl::opt<unsigned> clDmaOutMtu(
+    "torq-dma-out-mtu",
+    llvm::cl::desc("DMA Out (XRAM write) burst length as MTU value: burst = (1 << mtu) beats."),
+    llvm::cl::init(4)
+);
+
 namespace {
 
 class CompileNSSInvocationsPass : public CompileNSSInvocationsBase<CompileNSSInvocationsPass> {
@@ -217,6 +229,8 @@ static LogicalResult toNssTask(syna::torq_hw::NssTaskOp taskOp, NssTask &task) {
     }
     task.setCssParams(cssParams);
     task.setCdmaParams(cdmaParams);
+    dmaParams.mtuXr = clDmaInMtu;
+    dmaParams.mtuXw = clDmaOutMtu;
     task.setDmaParams(dmaParams);
     for (size_t i = 0; i < HwInfo::slice_count; ++i)
         task.setSliceParams(i, sparams[i]);

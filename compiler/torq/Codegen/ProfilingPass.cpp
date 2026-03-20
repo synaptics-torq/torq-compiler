@@ -388,19 +388,21 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
 
     Builder builder(op->getContext());
 
-    const uint64_t perCycleDmaTransferBytes = 8;
+    const double perCycleDmaTransferBytes = 4.33;
 
     // DMA in config contains reference to slice_program op
     if (auto dmaInCfgOp = dyn_cast<torq_hw::DmaInCfgOp>(op)) {
         prof.currentDmaInBytes =
             getDmaNdlTransferBytes(dmaInCfgOp.getWriteNdl(), dmaInCfgOp.getWrite().getType());
-        prof.currentDmaInCycles = prof.currentDmaInBytes / perCycleDmaTransferBytes;
+        prof.currentDmaInCycles =
+            (uint64_t)std::ceil(prof.currentDmaInBytes / perCycleDmaTransferBytes);
         prof.currentDmaInLoc = toString(dmaInCfgOp.getLoc());
     }
     else if (auto dmaOutCfgOp = dyn_cast<torq_hw::DmaOutCfgOp>(op)) {
         prof.currentDmaOutBytes =
             getDmaNdlTransferBytes(dmaOutCfgOp.getReadNdl(), dmaOutCfgOp.getRead().getType());
-        prof.currentDmaOutCycles = prof.currentDmaOutBytes / perCycleDmaTransferBytes;
+        prof.currentDmaOutCycles =
+            (uint64_t)std::ceil(prof.currentDmaOutBytes / perCycleDmaTransferBytes);
         prof.currentDmaOutLoc = toString(dmaOutCfgOp.getLoc());
     }
     // Add the dma time to the timeline

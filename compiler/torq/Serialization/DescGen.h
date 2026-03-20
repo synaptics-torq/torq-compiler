@@ -182,6 +182,10 @@ struct DmaParams {
     bool xwStart;
     bool xrWait;
     bool xwWait;
+    // AXI burst length: burst = (1 << mtu) beats. Each beat is 8 bytes.
+    // e.g. mtu=2 -> 4 beats (32B), mtu=3 -> 8 beats (64B), mtu=4 -> 16 beats (128B).
+    uint32_t mtuXr; // MTU for DMA read (XR) channel. Set via --torq-dma-in-mtu.
+    uint32_t mtuXw; // MTU for DMA write (XW) channel. Set via --torq-dma-out-mtu.
 };
 
 class NssTask : public TorqCfg {

@@ -1105,11 +1105,15 @@ static int _nss_ndl_desc_gen(torq_wrap_t *wrap, uint32_t tag, torq_ndl_cmd_t *cm
             wrap->regs.DMA.DMA_XR.CFG.pad_ops = cmd->p[cmd->nld]<0 ? 1 : 0;
             wrap->regs.DMA.DMA_XR.CFG.pad_n = abs(cmd->p[cmd->nld])*ldims.bn;
         }
-#ifndef TORQ_DMA_MTU_SIZE
-        wrap->regs.DMA.DMA_XR.CFG.mtu = 2; //4 beats
-#else
-        wrap->regs.DMA.DMA_XR.CFG.mtu = TORQ_DMA_MTU_SIZE; // (1<<TORQ_DMA_MTU_SIZE) beats
-#endif
+        // [torq-compiler change BEGIN]
+// #ifndef TORQ_DMA_MTU_SIZE
+//         wrap->regs.DMA.DMA_XR.CFG.mtu = 2; //4 beats
+// #else
+//         wrap->regs.DMA.DMA_XR.CFG.mtu = TORQ_DMA_MTU_SIZE; // (1<<TORQ_DMA_MTU_SIZE) beats
+// #endif
+        // use dma_mtu_xr from torq_cfg_t, set via --torq-dma-in-mtu compiler flag
+        wrap->regs.DMA.DMA_XR.CFG.mtu = (wrap->cfg.dma_mtu_xr == 0) ? 2 : wrap->cfg.dma_mtu_xr; // default 2 (4 beats)
+        // [torq-compiler change END]
         wrap->regs.DMA.DMA_XR.CFG.pix_size = ldims.bn==1?0:1;
         wrap->regs.DMA.DMA_XR.SRC.HEAD.a = cmd->base_addr;
         wrap->regs.DMA.DMA_XR.CFG.nd = (cmd->nhd==1)?1:cmd->nhd-1;
@@ -1181,11 +1185,15 @@ static int _nss_ndl_desc_gen(torq_wrap_t *wrap, uint32_t tag, torq_ndl_cmd_t *cm
             wrap->regs.DMA.DMA_XW.CFG.pad_ops = cmd->p[cmd->nld]<0 ? 1 : 0;
             wrap->regs.DMA.DMA_XW.CFG.pad_n = abs(cmd->p[cmd->nld])*ldims.bn;
         }
-#ifndef TORQ_DMA_MTU_SIZE
-        wrap->regs.DMA.DMA_XW.CFG.mtu = 2; //4 beats
-#else
-        wrap->regs.DMA.DMA_XW.CFG.mtu = TORQ_DMA_MTU_SIZE; //(1<<TORQ_DMA_MTU_SIZE) beats
-#endif
+        // [torq-compiler change BEGIN]
+// #ifndef TORQ_DMA_MTU_SIZE
+//         wrap->regs.DMA.DMA_XW.CFG.mtu = 2; //4 beats
+// #else
+//         wrap->regs.DMA.DMA_XW.CFG.mtu = TORQ_DMA_MTU_SIZE; //(1<<TORQ_DMA_MTU_SIZE) beats
+// #endif
+        // use dma_mtu_xw from torq_cfg_t, set via --torq-dma-out-mtu compiler flag
+        wrap->regs.DMA.DMA_XW.CFG.mtu = (wrap->cfg.dma_mtu_xw == 0) ? 2 : wrap->cfg.dma_mtu_xw; // default 2 (4 beats)
+        // [torq-compiler change END]
         wrap->regs.DMA.DMA_XW.CFG.pix_size = ldims.bn==1?0:1;
         wrap->regs.DMA.DMA_XW.DST.HEAD.a   = cmd->base_addr;
         wrap->regs.DMA.DMA_XW.CFG.nd       = (cmd->nhd==1)?1:cmd->nhd-1;
