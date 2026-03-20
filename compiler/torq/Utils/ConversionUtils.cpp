@@ -687,13 +687,22 @@ bool hasEkLoweringMaxPool(mlir::syna::torq_hl::MaxPool2dOp op) {
     int strideH = stride[0];
     int strideW = stride[1];
 
+    auto pad = op.getPad();
+    int32_t pad_top = pad[0];
+    int32_t pad_left = pad[2];
+
     // Stride > 2 is not supported by EK kernel
     if (strideH > 2 || strideW > 2) {
         return false;
     }
 
-    // For stride 2, only 2x2 kernel is supported by EK kernel
-    if ((strideH == 2 || strideW == 2) && (kh != 2 || kw != 2)) {
+    // For stride 2, only 2x2 and 3x3 kernels are supported by EK kernel
+    if ((strideH == 2 || strideW == 2) && !((kh == 2 && kw == 2) || (kh == 3 && kw == 3))) {
+        return false;
+    }
+
+    // Top-left padding with stride 2 and 3x3 kernel is not supported by EK kernel
+    if ((strideH == 2 || strideW == 2) && (kh == 3 || kw == 3) && (pad_top > 0 || pad_left > 0)) {
         return false;
     }
 

@@ -202,18 +202,21 @@ static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
     Slice slice("MaxPool2D");
 
     HWDim kernelDim(kh, kw);
-    LRTBDim pad(op.getPad());
     LRTBDim kernelBorder = LRTBDim::symmetric(kernelDim);
-
     slice.setKernel(kernelBorder);
-    slice.setPadding(pad, op.getInputZp());
-    slice.setInputChannelShape(inputHeight, inputWidth);
-    slice.setStride(2);
+
+    LRTBDim pad(op.getPad());
     // For 2x2 (and generally when pad == (kw-1)/2), stride_offset should be 0
     // because the kernel tiles evenly without needing an offset. For other kernels
     // (e.g. 3x3 with same padding), stride_offset=1 is required.
     int strideOffset = (pad.left == pad.top && pad.left == (kw - 1) / 2) ? 0 : 1;
     slice.setStrideOffset(strideOffset);
+    slice.setPadding(pad, op.getInputZp());
+
+    int outputWidth = output.dim(Dim::W);
+    int outputHeight = output.dim(Dim::H);
+    slice.setInputChannelShape(outputHeight, outputWidth);
+    slice.setStride(2);
 
     const int alukw = slice.alu.kerWidth();
 
@@ -222,6 +225,8 @@ static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
     int vectSize = vectStride + std::min(kernelBorder.left, alukw - 1);
 
     input.fuse({Dim::H, Dim::W}).reshapeDim(Dim::H, {2, 2, -1}).vectorize(vectSize, vectStride);
+
+    input.getShape()[In::RowQuadrant].tag = ShapeItem::Tag::KernelRows;
 
     int inCh = input.dim(In::C);
 
@@ -252,9 +257,15 @@ static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
         }
     }
 
+    torq_hw::Ndls ndls = slice.getNdls();
+
+    if (auto *dedr = ndls.getMemNdl(torq_hw::NdlType::DEDR)) {
+        dedr->offset = 0;
+    }
+
     return rewriter.create<torq_hw::SliceTaskOp>(
         op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
-        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), ndls
     );
 }
 
