@@ -132,22 +132,6 @@ static bool isLayoutAgnosticElementwise(linalg::GenericOp genericOp) {
     return true;
 }
 
-/// Check if op can propagate layout changes (layout-agnostic)
-static bool canPropagate(Operation *op) {
-    // linalg.generic elementwise ops can propagate
-    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
-        // Must be all parallel iterators
-        return isLayoutAgnosticElementwise(genericOp);
-    }
-
-    // Slice ops can propagate
-    if (isa<tensor::ExtractSliceOp, tensor::InsertSliceOp>(op))
-        return true;
-
-    // Everything else (conv, matmul, etc.) cannot propagate
-    return false;
-}
-
 /// Check if transpose is NCHW↔NHWC layout conversion (4D only)
 static bool isLayoutConversionTranspose(linalg::TransposeOp transposeOp) {
     auto perm = transposeOp.getPermutation();
@@ -165,61 +149,6 @@ static SmallVector<int64_t> getInversePermutation(ArrayRef<int64_t> perm) {
     for (size_t i = 0; i < perm.size(); ++i)
         inverse[perm[i]] = i;
     return inverse;
-}
-
-//===----------------------------------------------------------------------===//
-// Topological Sorting for Entry Block
-//===----------------------------------------------------------------------===//
-
-/// Collect all computational ops from entry block in topological order
-static SmallVector<Operation *> collectTopologicalOrder(FunctionOpInterface funcOp) {
-    SmallVector<Operation *> allOps;
-    Block &entryBlock = funcOp.getFunctionBody().front();
-    // Collect computational ops (skip constants, allocations, etc.)
-    for (Operation &op : entryBlock) {
-        StringRef opName = op.getName().getStringRef();
-        if (opName.starts_with("arith") || opName.starts_with("hal.") ||
-            opName.starts_with("flow.") || opName == "func.return")
-            continue;
-        allOps.push_back(&op);
-    }
-
-    // Build in-degree map
-    DenseMap<Operation *, int> inDegree;
-    for (Operation *op : allOps)
-        inDegree[op] = 0;
-
-    for (Operation *op : allOps) {
-        for (Value result : op->getResults()) {
-            for (Operation *user : result.getUsers()) {
-                if (inDegree.count(user))
-                    inDegree[user]++;
-            }
-        }
-    }
-
-    // Topological sort using queue
-    SmallVector<Operation *> sorted;
-    SmallVector<Operation *> queue;
-
-    for (Operation *op : allOps) {
-        if (inDegree[op] == 0)
-            queue.push_back(op);
-    }
-
-    while (!queue.empty()) {
-        Operation *op = queue.pop_back_val();
-        sorted.push_back(op);
-
-        for (Value result : op->getResults()) {
-            for (Operation *user : result.getUsers()) {
-                if (inDegree.count(user) && --inDegree[user] == 0)
-                    queue.push_back(user);
-            }
-        }
-    }
-
-    return sorted;
 }
 
 //===----------------------------------------------------------------------===//
@@ -807,7 +736,7 @@ static Value transformInsertSliceOp(
     return newInsert.getResult();
 }
 
-/// Create transpose pairs around CanPropagate ops for eventual cancellation
+/// Create transpose pairs around CanPropagate ops for eventual cancellation.
 /// Strategy: For ops that CanPropagate[perm], create inverse transpose before
 /// and forward transpose after, then rely on canonicalization to cancel adjacent pairs.
 /// This transforms: transpose → canPropagate_op → blocking_op
@@ -815,13 +744,19 @@ static Value transformInsertSliceOp(
 static void insertTransposePairsAroundPropagateOps(
     FunctionOpInterface funcOp, DataFlowSolver &solver, IRRewriter &rewriter
 ) {
-    auto allOps = collectTopologicalOrder(funcOp);
+
+    SmallVector<Operation *> allOps;
+    for (Operation &op : funcOp.getFunctionBody().front())
+        allOps.push_back(&op);
 
     for (Operation *op : allOps) {
-        // Skip ops with no results
-        if (op->getNumResults() == 0) {
+        // Op may have been erased by a prior iteration (e.g., dead-code removal).
+        if (op->getNumResults() == 0)
             continue;
-        }
+
+        // Skip if already a transpose — don't create redundant pairs.
+        if (isa<linalg::TransposeOp>(op))
+            continue;
 
         const auto *lattice = solver.lookupState<TransposePropagationLattice>(op->getResult(0));
         if (!lattice || !lattice->canPropagate())
@@ -830,12 +765,7 @@ static void insertTransposePairsAroundPropagateOps(
         auto perm = lattice->getPermutation();
         auto inversePerm = getInversePermutation(perm);
 
-        // Skip if this is already a transpose - don't create redundant pairs
-        if (isa<linalg::TransposeOp>(op)) {
-            continue;
-        }
-
-        // Step 1: Create transformed version of the operation with permuted shapes
+        // Step 1: Create transformed version of the operation with permuted shapes.
         rewriter.setInsertionPoint(op);
         Value transformedResult = nullptr;
 
@@ -852,7 +782,11 @@ static void insertTransposePairsAroundPropagateOps(
             continue;
         }
 
-        // Step 2: Insert forward transpose after transformed op to restore original layout
+        // Guard: skip if transform produced nothing.
+        if (!transformedResult)
+            continue;
+
+        // Step 2: Insert forward transpose after transformed op to restore original layout.
         Value originalResult = op->getResult(0);
         auto originalType = cast<RankedTensorType>(originalResult.getType());
         auto transformedType = cast<RankedTensorType>(transformedResult.getType());
@@ -905,14 +839,10 @@ class OptimizeTransposeLayoutPass
         auto funcOp = getOperation();
         auto *ctx = funcOp.getContext();
 
-        // Collect topological order for stats
-        auto allOps = collectTopologicalOrder(funcOp);
-
         // Step 1: Run dataflow analysis
         DataFlowSolver solver;
-        solver.load<dataflow::DeadCodeAnalysis>();          // Standard dead code analysis
-        solver.load<dataflow::SparseConstantPropagation>(); // Required for sparse analysis
-        solver.load<TransposePropagationAnalysis>();        // Our custom analysis
+        solver.load<dataflow::DeadCodeAnalysis>();   // Standard dead code analysis
+        solver.load<TransposePropagationAnalysis>(); // Our custom analysis
 
         if (failed(solver.initializeAndRun(funcOp))) {
             return signalPassFailure();
@@ -922,14 +852,19 @@ class OptimizeTransposeLayoutPass
         IRRewriter rewriter(ctx);
         insertTransposePairsAroundPropagateOps(funcOp, solver, rewriter);
 
-        // Step 3: Apply transpose canonicalization for back-to-back cancellation
+        // Step 3: Apply transpose canonicalization for back-to-back cancellation.
+        // Use applyOpPatternsAndFold targeting only TransposeOps to avoid
+        // full region-wide greedy iteration -- patterns applied once per op.
         RewritePatternSet patterns(ctx);
         linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
 
         auto frozenPatterns =
             FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyPatternsAndFoldGreedily(funcOp, frozenPatterns))) {
+        SmallVector<Operation *> transposeOps;
+        funcOp.walk([&](linalg::TransposeOp op) { transposeOps.push_back(op); });
+
+        if (failed(applyOpPatternsAndFold(transposeOps, frozenPatterns))) {
             LLVM_DEBUG(llvm::dbgs() << "WARNING: Canonicalization failed\n");
         }
     }

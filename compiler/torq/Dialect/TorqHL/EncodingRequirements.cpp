@@ -554,7 +554,7 @@ KernelEncoding ActOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ElementWiseUnaryOp::getKernelEncoding() { return getActLikeEncoding(*this); }
 
-KernelEncoding FMAOp::getKernelEncoding() { return getActLikeEncoding(*this); }
+KernelEncoding FMAOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding BroadcastOp::getKernelEncoding() { return getNoEncoding(); }
 

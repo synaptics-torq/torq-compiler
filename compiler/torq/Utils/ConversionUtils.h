@@ -279,7 +279,7 @@ std::vector<int32_t> compute_scale(
 inline double computeScaleDouble(int32_t tosaMultiplier, int8_t tosaShift) {
     // Here we compute the scale factor as a floating point value according to
     // tosa spec https://www.mlplatform.org/tosa/tosa_spec.html#_rescale
-    return static_cast<double>(tosaMultiplier) / (1ul << tosaShift);
+    return static_cast<double>(tosaMultiplier) / (1ull << tosaShift);
 }
 
 std::vector<double>

@@ -927,13 +927,20 @@ SlicePrivate::SlicePrivate(const string &name) : _name(name) {
     LLVM_DEBUG(llvm::dbgs() << "- Kernel " << _name << " ----------------------------\n");
 }
 
-// Decompose number into two factors, both <= 0x7fff possible
-// If not possible returns a pair of -1s
-static std::pair<int, int> decomposeIntoTwoFactors(int number) {
-    const int kMaxFactor = 0x7fff;
-    for (int i = 1; i <= kMaxFactor && i <= number; ++i) {
+// Decompose number into two factors a, b both <= 0x7fff.
+// Returns {-1, -1} if no such factorization exists.
+std::pair<int64_t, int64_t> decomposeIntoTwoFactors(int64_t number) {
+    const int64_t kMaxFactor = 0x7fff;
+    // Start from ceil(number / kMaxFactor), since for any smaller i,
+    // the paired factor j = number / i would exceed kMaxFactor.
+    // It is sufficient to search up to sqrt(number), because any factorization
+    // number = i * j must have at least one factor less than or equal to sqrt(number).
+    // Also, since kMaxFactor < number <= kMaxFactor * kMaxFactor, we know
+    // sqrt(number) <= kMaxFactor.
+    for (int64_t i = div_ceil(number, kMaxFactor); i <= (int64_t)std::sqrt((double)number) + 1;
+         ++i) {
         if (number % i == 0) {
-            int j = number / i;
+            int64_t j = number / i;
             if (j <= kMaxFactor) {
                 return {i, j};
             }
@@ -1912,7 +1919,7 @@ QData SlicePrivate::actClamp(
             // We have 4 partials for each data
             // Each partial is processed with different left shifts
             _cfg.act_lsh = {0, 8, 8, 16};
-            _cfg.act_sum_bits = 48;
+            _cfg.act_sum_bits = 32;
             resultType = DType::int32;
             resultCount /= 4;
         }
@@ -1920,7 +1927,7 @@ QData SlicePrivate::actClamp(
             _cfg.alu_d_unsigned = 7;
             _cfg.alu_w_unsigned = 0;
             _cfg.act_lsh = {0, 8, 16, 24};
-            _cfg.act_sum_bits = 48;
+            _cfg.act_sum_bits = 32;
             resultType = DType::int32;
             resultCount /= 4;
         }

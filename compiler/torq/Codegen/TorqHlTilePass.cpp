@@ -174,11 +174,11 @@ class Conv1DPattern : public OpRewritePattern<torq_hl::Conv1DOp> {
             );
 
             int remainingOutStripes = outShape[2] % outStripesCount;
-
-            int remainingInStripes = inShape[2] % outStripesCount;
-
-            int fixedInStripeHeight = inShape[2] / outStripesCount;
             int fixedOutStripeHeight = outShape[2] / outStripesCount;
+
+            int strideH = convOp.getStride()[0];
+            int fixedInStripeHeight = fixedOutStripeHeight * strideH;
+            int remainingInStripes = remainingOutStripes * strideH;
 
             if (remainingOutStripes > 0) {
                 outStripesCount += 1;
@@ -541,11 +541,11 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
             );
 
             int remainingOutStripes = outShape[2] % outStripesCount;
-
-            int remainingInStripes = inShape[2] % outStripesCount;
-
-            int fixedInStripeHeight = inShape[2] / outStripesCount;
             int fixedOutStripeHeight = outShape[2] / outStripesCount;
+
+            int strideH = convOp.getStride()[0];
+            int fixedInStripeHeight = fixedOutStripeHeight * strideH;
+            int remainingInStripes = remainingOutStripes * strideH;
 
             if (remainingOutStripes > 0) {
                 outStripesCount += 1;

@@ -161,24 +161,20 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
         int32_t shiftFactor = 0;
         if (scInfo) {
             // Default
-            shiftFactor = 4;
-            // // HW needs shift*
-            if (outType.getElementType().isInteger(8) &&
-                (input1ElementType.isInteger(16) || input1ElementType.isInteger(32))) {
-                // FIXME: not clear in which cases we actually need this shiftFactor
-                // TODO: compute this shiftFactor instead of hardcoding it
-                // 12 to make sure rescaled value doens't overflow 64bit
-                shiftFactor = 12;
-            }
-            double rnd_err = 0.5;
-            int32_t hwScale =
-                static_cast<int32_t>(scInfo.scaleDouble[0] * (1 << shiftFactor) + rnd_err);
+            shiftFactor = scInfo.scaleShift;
+            int32_t hwScale = static_cast<int32_t>(scInfo.scaleDouble[0] * (1ull << shiftFactor));
             bias = scInfo.bias;
             scale = hwScale;
             outMin = scInfo.min;
             outMax = scInfo.max;
             outZp = scInfo.zp;
         }
+
+        LLVM_DEBUG(
+            llvm::dbgs() << "bias: " << bias << " scale: " << scale
+                         << " shiftFactor: " << shiftFactor << " outMin: " << outMin
+                         << " outMax: " << outMax << " outZp: " << outZp << "\n"
+        );
 
         Value torqOut =
             rewriter
@@ -334,28 +330,15 @@ class MulRescaleOpPattern : public OpRewritePattern<linalg::GenericOp> {
         Value input1 = srcOp.getInputs()[0];
         Value input2 = srcOp.getInputs()[1];
 
-        auto input1Type = cast<RankedTensorType>(input1.getType());
-        auto input1ElementType = input1Type.getElementType();
-
         auto outType = cast<RankedTensorType>(srcOp.getResult(0).getType());
 
-        // shiftFactor: 12 for i16 input -> i8 output rescale
-        int32_t shiftFactor = 4;
-        if (outType.getElementType().isInteger(8) &&
-            (input1ElementType.isInteger(16) || input1ElementType.isInteger(32))) {
-            shiftFactor = 12;
-        }
-
-        double scaleFactor = static_cast<double>(ms.multiplier[0]) / (1l << ms.shift[0]);
-        double rnd_err = 0.5;
-        int32_t hwScale = static_cast<int32_t>(scaleFactor * (1 << shiftFactor) + rnd_err);
-
+        int32_t shiftFactor = ms.shift[0];
         int32_t bias = 0;
-        int32_t scale = hwScale;
+        int32_t scale = ms.multiplier[0];
 
         LLVM_DEBUG(
-            llvm::dbgs() << "[MulRescale] scaleFactor=" << scaleFactor << ", shiftFactor="
-                         << shiftFactor << ", hwScale=" << hwScale << ", bias=" << bias << "\n"
+            llvm::dbgs() << "[MulRescale] shiftFactor=" << shiftFactor << ", scale=" << scale
+                         << ", bias=" << bias << "\n"
         );
 
         // --- Create torq_hl::MulOp ---

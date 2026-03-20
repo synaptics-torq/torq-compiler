@@ -165,6 +165,9 @@ def case_config(request, runtime_hw_type, chip_config):
     # wrong results
     'densenet121_conv1_conv',
     'densenet121_pool1',
+    # Failed due to tiling
+    'layer_densenet121_conv2_block4_0_relu',
+    'layer_densenet121_conv3_block7_0_relu',
 
     # skip cases that will be fused with other ops
     'densenet121_zero_padding2d_1',

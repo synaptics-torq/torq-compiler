@@ -1624,11 +1624,6 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         int32_t outputMin = 0, outputMax = 0;
         int32_t outputZp = 0, input_zp = 0;
 
-        // shiftFactor is used for torq hw scale computation, it request multiple of 4.
-        // for 48bit value rescale, we need to check multiplier bit < 32bit in case overflow 80bit.
-        int32_t shiftFactor = 4;
-        double rnd_err = 0.5;
-
         tosa::ApplyScaleOp applyScaleOp;
         Value input;
 
@@ -1720,14 +1715,6 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
                 }
                 outputMin = *maybeMinConst;
 
-                if (outputElementType.isInteger(8) &&
-                    (inputElementType.isInteger(16) || inputElementType.isInteger(32))) {
-                    // FIXME: not clear in which cases we actually need this shiftFactor
-                    // TODO: compute this shiftFactor instead of hardcoding it
-                    // 12 to make sure rescaled value doens't overflow 64bit
-                    shiftFactor = 12;
-                }
-
                 if (auto addOp = maxOp.getLhs().getDefiningOp<arith::AddIOp>()) {
                     auto maybeAddConst = getConstIntValue(addOp.getRhs());
                     if (!maybeAddConst) {
@@ -1766,14 +1753,21 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             }
         }
 
-        double scaleFactor = static_cast<double>(ms.multiplier[0]) / (1l << ms.shift[0]);
-
-        int16_t weight_data = static_cast<int32_t>(scaleFactor * (1 << shiftFactor) + rnd_err);
-        int32_t bias_data = -static_cast<int32_t>(scaleFactor * (1 << shiftFactor) * input_zp);
-
-        std::vector<int16_t> weights = {weight_data};
-        const std::vector<APInt> bias = {APInt(32, bias_data)};
-        const std::vector<APInt> scale = {APInt(32, 1)};
+        // FMA in hardware implements quantized rescale as:
+        //   output = (((input_value - input_zp) * scale) >> shift) + outputZP
+        // We model this as:
+        //   ALU operation: input_value * weight, with weight = 1
+        //   ACT operation: ((ALU_output + bias) * scale) >> shift + outputZP
+        // where:
+        //   bias  = -input_zp
+        //   scale = multiplier
+        //   shift = shiftFactor
+        int32_t shiftFactor = ms.shift[0];
+        int32_t bias_data = -input_zp;
+        int8_t weight_data = 1;
+        std::vector<int8_t> weights = {weight_data};
+        const std::vector<int32_t> bias = {bias_data};
+        const std::vector<int32_t> scale = {ms.multiplier[0]};
 
         LLVM_DEBUG({
             llvm::dbgs() << "rescale params : input_zp: " << input_zp << ", "
@@ -1785,8 +1779,8 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         auto fmaOp = rewriter.create<torq_hl::FMAOp>(
             srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType), outputZp,
             outputMin, outputMax, shiftFactor,
-            createI16Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
-            createIConst(rewriter, srcOp, interleave(bias, scale)), input
+            createI8Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
+            createI32Const(rewriter, srcOp, interleave(bias, scale)), input
         );
         rewriter.replaceOp(srcOp, fmaOp.getOutput());
 

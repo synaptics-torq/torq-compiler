@@ -271,12 +271,6 @@ def pytest_generate_tests(metafunc):
 
 # Layer cases known to fail with TORQ backend (wrong results)
 TORQ_FAILED_LAYERS = [
-    'layer_conv_2d_1',
-    'layer_conv_2d_5',
-    'layer_conv_2d_25',
-    'layer_conv_2d_52',
-    'layer_conv_2d_79',  # Only in next.group
-    'layer_conv_2d_145',
     'layer_quantize_126',
     'layer_resize_nearest_neighbor_109',
     'layer_resize_nearest_neighbor_127',

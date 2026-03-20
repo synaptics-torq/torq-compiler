@@ -299,22 +299,13 @@ def pytest_generate_tests(metafunc):
 # Layer cases known to fail with TORQ backend (wrong results)
 TORQ_FAILED_LAYERS = [
     # yolov8n
-    'layer_conv_2d_1',
-    'layer_conv_2d_5',  # Only in next.group
-    'layer_conv_2d_25',
-    'layer_conv_2d_52',  # Only in next.group
     'layer_resize_nearest_neighbor_108',
     'layer_resize_nearest_neighbor_125',
     'layer_softmax_237',
-    'layer_mul_240',
     # Additional fails in yolov8s
     'layer_resize_nearest_neighbor_109',
     'layer_resize_nearest_neighbor_127',
     'layer_softmax_232',
-    'layer_mul_235',
-    'layer_mul_242',
-    'layer_quantize_108',
-    'yolov8s_full_integer_quant_320_od_full_model' # It's close but not matching, 3 vs 4 objects detected  
 ]
 
 # Layer cases that error during compilation (setup errors) with TORQ backend

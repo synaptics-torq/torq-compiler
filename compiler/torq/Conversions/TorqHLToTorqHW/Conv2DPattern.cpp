@@ -336,7 +336,7 @@ LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &re
                 NdlType::DEDR,
                 {{DimType::L, MemDimTag::B, ddat_width, 1},
                  {DimType::L, MemDimTag::A, max_input + step_adj, ddat_width},
-                 {DimType::H, MemDimTag::I, ksize_x_split, ksize_x_max},
+                 {DimType::H, MemDimTag::I, ksize_x_split, ksize_x_max * ddat_width},
                  {DimType::H, MemDimTag::J, ksize_y, output_shape[3] * ddat_width},
                  {DimType::H, MemDimTag::U, input_shape[1], input_strides[1] * ddat_width},
                  {DimType::H, MemDimTag::A, total_px_block, max_input * ddat_width},
@@ -379,7 +379,7 @@ LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &re
                 NdlType::DEDR,
                 {{DimType::L, MemDimTag::B, ddat_width, 1},
                  {DimType::L, MemDimTag::A, max_input + step_adj, ddat_width},
-                 {DimType::H, MemDimTag::I, ksize_x_split, ksize_x_max},
+                 {DimType::H, MemDimTag::I, ksize_x_split, ksize_x_max * ddat_width},
                  {DimType::H, MemDimTag::I, 2,
                   (start_pos_x == 0 ? data_part_size : -data_part_size) +
                       (kernel_left_even - kernel_left_odd) * ddat_width},

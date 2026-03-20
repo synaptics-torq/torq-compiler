@@ -2190,19 +2190,19 @@ Value makeRescale16(
 ) {
 
     auto outputType = dyn_cast<RankedTensorType>(input.getType());
-    int16_t weight_data = static_cast<int32_t>(scaleFactor);
-    int32_t bias_data = -static_cast<int32_t>(scaleFactor * inputZp);
-    std::vector<int16_t> weights = {weight_data};
-    const std::vector<APInt> bias = {APInt(32, bias_data)};
-    const std::vector<APInt> scale = {APInt(32, 1)};
+    int8_t weight_data = 1;
+    int32_t bias_data = -inputZp;
+    std::vector<int8_t> weights = {weight_data};
+    const std::vector<int32_t> bias = {bias_data};
+    const std::vector<int32_t> scale = {scaleFactor};
 
     // make the rescale
     return rewriter
         .create<torq_hl::FMAOp>(
             srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType), outputZp,
             std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max(), shiftFactor,
-            createI16Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
-            createIConst(rewriter, srcOp, interleave(bias, scale)), input
+            createI8Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
+            createI32Const(rewriter, srcOp, interleave(bias, scale)), input
         )
         .getResult(0);
 }
