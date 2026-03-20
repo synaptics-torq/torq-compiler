@@ -405,6 +405,32 @@ jobs:
               --prerelease
           fi
 
+      - name: Remove old wheel assets from release
+        env:
+          GITHUB_TOKEN: ${{ secrets.github_token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "release" && "$EVENT_ACTION" == "published" ]]; then
+            TAG="$RELEASE_TAG"
+          else
+            TAG="snapshot"
+          fi
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release '$TAG' does not exist, nothing to delete."
+            exit 0
+          fi
+
+          gh release view "$TAG" --json assets --jq '.assets[] | select(.name | endswith(".whl")) | .name' |
+          while IFS= read -r asset; do
+            echo "Deleting asset: $asset"
+            gh release delete-asset "$TAG" "$asset" --yes
+          done
+
       - name: Upload to GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.github_token }}
