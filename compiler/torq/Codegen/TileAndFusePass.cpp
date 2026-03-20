@@ -8,6 +8,7 @@
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/Tensor/IR/Utils.h"
+#include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -743,6 +744,48 @@ llvm::FailureOr<bool> checkTileFitsInMemory(
 // C++20 std::midpoint: computes average without overflow
 inline int64_t midpoint(int64_t min, int64_t max) { return min + ((max - min) / 2); }
 
+// Return true if a length can be represented using the SDIM encoding in
+// Utils/Kernel.cpp without tripping the decomposeIntoTwoFactors() assert.
+// A "SDIM-friendly" length is either:
+//   * <= 0x7fff  – fits in a single SDIM counter, or
+//   * factorizable as a * b with a, b <= 0x7fff – can be encoded as two nested SDIM loops.
+static bool isSdimFriendlyCount(int64_t number) {
+    const int64_t kMaxFactor = 0x7fff;
+    if (number <= kMaxFactor)
+        return true;
+
+    for (int64_t i = div_ceil(number, kMaxFactor); i <= (int64_t)std::sqrt((double)number) + 1;
+         ++i) {
+        if (number % i == 0) {
+            int64_t j = number / i;
+            if (j <= kMaxFactor) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Return true if using `tileSize` to 1-D tile `originalSize` is compatible
+// with SDIM handling in Kernel.cpp.
+//
+// We require that both:
+//   * tileSize          – the common tile length, and
+//   * remainder         – the final (possibly smaller) tile where
+//
+//         originalSize = k * tileSize + remainder
+//
+// are SDIM-friendly. This guarantees that addMemNdlDims() can always encode
+// both the main tiles and the tail tile without decomposeIntoTwoFactors()
+// ever returning {-1, -1}.
+bool isValidTileSize(int64_t originalSize, int64_t tileSize) {
+    if (!isSdimFriendlyCount(tileSize))
+        return false;
+
+    int64_t remainder = originalSize % tileSize;
+    return (remainder == 0 || isSdimFriendlyCount(remainder));
+}
+
 // Binary-search for the largest tile size along a single dimension that fits in memory.
 // Precondition: the tile fits when sizes[dim] = div_ceil(originalSize, maxFactor),
 //               and does not fit when sizes[dim] = div_ceil(originalSize, minFactor).
@@ -766,7 +809,19 @@ static LogicalResult searchTileSizeForDim(
         else
             minFactor = midFactor;
     }
-    sizes[dim] = rewriter.getIndexAttr(div_ceil(originalSize, maxFactor));
+    int64_t tileSize = div_ceil(originalSize, maxFactor);
+    tileSize = std::min(int64_t(0x7fff * 0x7fff), tileSize);
+
+    // Adjust tileSize downwards until both the common tile size and the
+    // remainder tile size are SDIM-friendly. This preserves the
+    // memory-fit invariant because we only shrink the tile.
+    while (tileSize > 0 && !isValidTileSize(originalSize, tileSize)) {
+        --tileSize;
+    }
+
+    assert(tileSize > 0 && "failed to find SDIM-friendly tile size for dimension");
+
+    sizes[dim] = rewriter.getIndexAttr(tileSize);
     return LogicalResult::success();
 }
 

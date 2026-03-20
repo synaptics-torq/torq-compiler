@@ -130,6 +130,9 @@ class Conv1DPattern : public OpRewritePattern<torq_hl::Conv1DOp> {
         auto outShape = outType.getShape();
 
         auto inShape = inType.getShape();
+
+        int strideH = convOp.getStride()[0];
+        assert(inShape[2] % strideH == 0 && "Input shape is not divisible by stripe size");
         auto inTileSizes = createVector({inShape[0], inShape[1], inShape[2], inShape[3]}, rewriter);
 
         Value outputTensor =
@@ -176,7 +179,6 @@ class Conv1DPattern : public OpRewritePattern<torq_hl::Conv1DOp> {
             int remainingOutStripes = outShape[2] % outStripesCount;
             int fixedOutStripeHeight = outShape[2] / outStripesCount;
 
-            int strideH = convOp.getStride()[0];
             int fixedInStripeHeight = fixedOutStripeHeight * strideH;
             int remainingInStripes = remainingOutStripes * strideH;
 
