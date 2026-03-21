@@ -393,7 +393,11 @@ static Value preConversionWeights(
     auto transposedWeights = transposeValue(weights, _weightsPerm, weights.getLoc(), rewriter);
 
     if (weightZpV) {
-        modifyWeightWithZp(transposedWeights, *weightZpV, scInfo, rewriter);
+        auto modifiedWeights = buildWeightWithZp(transposedWeights, *weightZpV, rewriter);
+        if (succeeded(modifiedWeights)) {
+            LLVM_DEBUG(llvm::dbgs() << "Folded weight zero-point into weights\n");
+            transposedWeights = *modifiedWeights;
+        }
     }
 
     if (isDepthwise) {
@@ -552,14 +556,13 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             );
         }
 
-        FusionPlan fusionPlan;
         DominanceInfo dom(convOp->template getParentOfType<FunctionOpInterface>());
-        if (!createFusionPlan(output, fusionPlan)) {
+        FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output);
+        if (failed(fusionPlanOr)) {
             return rewriter.notifyMatchFailure(
                 convOp, "Failed to compute fusion group for per-channel add"
             );
         }
-        output = fusionPlan.neededOps.back()->getResult(0);
         auto finalType = cast<RankedTensorType>(output.getType());
 
         LLVM_DEBUG({
@@ -578,30 +581,30 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         }
 
         // Fold any per-channel bias
-        Value biasV;
-        std::optional<Value> weightZpV;
-
-        // Compute bias
-        if (!computeBias(fusionPlan, biasV, weightZpV, _channelDim)) {
-            return rewriter.notifyMatchFailure(convOp, "Failed to compute per-channel bias");
-        }
+        std::optional<Value> optionalWeightZpV;
 
         ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, convOp);
-        // Compute scale zero-point and clamp info
-        if (!computeRescaleInfo(fusionPlan, false, biasV, scInfo)) {
-            return rewriter.notifyMatchFailure(convOp, "Failed to compute scale/zp/clamp info");
+        FailureOr<Value> biasV =
+            computeBiasAndRescaleInfo(*fusionPlanOr, _channelDim, optionalWeightZpV, scInfo);
+        if (failed(biasV)) {
+            return rewriter.notifyMatchFailure(convOp, "Failed to compute bias for fused conv");
         }
-        for (auto &op : llvm::reverse(fusionPlan.opsToFuse)) {
+        for (auto &op : llvm::reverse(fusionPlanOr->opsToFuse)) {
             if (op->use_empty()) {
                 // Remove now-dead ops from fused tail after bias/scale extraction.
                 rewriter.eraseOp(op);
             }
         }
-        assert(succeeded(verify(convOp->getParentOp())) && "Parent function verification failed");
+        LLVM_DEBUG({
+            assert(
+                succeeded(verify(convOp->getParentOp())) && "Parent function verification failed"
+            );
+        });
 
         // Convert weights to the required format
-        auto torqWeights =
-            preConversionWeights(weights, _weightsPerm, weightZpV, scInfo, rewriter, isDepthwise);
+        auto torqWeights = preConversionWeights(
+            weights, _weightsPerm, optionalWeightZpV, scInfo, rewriter, isDepthwise
+        );
 
         auto dilations = convOp.getDilations().template getValues<int64_t>();
         std::vector<int64_t> finalDilationVec(dilations.begin(), dilations.end());
@@ -637,7 +640,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                                loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
                                scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
                                attrValuesAsVec(convOp.getStrides()), finalDilationVec,
-                               torq_hl::VectorizationModeEnum::None, torqWeights, biasV, input,
+                               torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input,
                                isDW1DStride1, false, isDW1DStride1
                            )
                            .getResult(0);
@@ -649,7 +652,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                                loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
                                scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
                                attrValuesAsVec(convOp.getStrides()), finalDilationVec,
-                               torq_hl::VectorizationModeEnum::None, torqWeights, biasV, input,
+                               torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input,
                                nhwcInput
                            )
                            .getResult(0);

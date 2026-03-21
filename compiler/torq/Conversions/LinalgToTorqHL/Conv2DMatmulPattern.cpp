@@ -134,7 +134,11 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         }
         if (weightZpV) {
             // Fold weight zero-point directly into constant weights when available.
-            modifyWeightWithZp(weights, *weightZpV, scInfo, rewriter);
+            auto modifiedWeights = buildWeightWithZp(weights, *weightZpV, rewriter);
+            if (succeeded(modifiedWeights)) {
+                LLVM_DEBUG(llvm::dbgs() << "Folded weight zero-point into weights\n");
+                weights = *modifiedWeights;
+            }
         }
         // Weights may become static payload.
         setCompileTimeConstAttr(weights.getDefiningOp());
@@ -213,25 +217,25 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         }
 
         // Build fusion plan and compute bias/scale using PatternUtils helpers
-        FusionPlan fusionPlan;
-        if (!createFusionPlan(output, fusionPlan)) {
-            return rewriter.notifyMatchFailure(srcOp, "Failed to create fusion plan");
-        }
-
-        // Move to the last required op in the fusion chain
-        if (fusionPlan.neededOps.empty()) {
-            // No fusible post-matmul chain: lower to a plain MatMul op and exit early.
+        FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output);
+        if (failed(fusionPlanOr) || !fusionPlanOr->isFusable()) {
+            if (_markFuseGroups) {
+                // Discovery-only mode: mark the chain and defer material rewrite.
+                markFuseGroupBackward(
+                    output, {lhs, rhs}, rewriter,
+                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                );
+                return success();
+            }
             replaceWithTorqMatmul(srcOp, rewriter);
             return success();
         }
-        output = fusionPlan.neededOps.back()->getResult(0);
-        RankedTensorType finalType = cast<RankedTensorType>(output.getType());
 
         // If there is an expand_shape user, use it to determine 4D output shape
         if (output.hasOneUse() && isa<tensor::ExpandShapeOp>(*output.getUsers().begin())) {
             output = (*output.getUsers().begin())->getResult(0);
-            finalType = cast<RankedTensorType>(output.getType());
         }
+        RankedTensorType finalType = cast<RankedTensorType>(output.getType());
 
         bool isNCHW = isNCHWMatmul(srcOp);
         bool isFC = finalType.getRank() == 2;
@@ -262,11 +266,6 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                  // we a better way to detect the channel dimension in such cases
             input = input.getDefiningOp()->getOperand(0);
         }
-        // auto inputType = dyn_cast<RankedTensorType>(input.getType());
-
-        // if (!inputType || inputType.getRank() != 4) {
-        //     return rewriter.notifyMatchFailure(srcOp, "Expected input to be 4D pre-collapse");
-        // }
 
         // Check weights are supported
         auto weightElemType = dyn_cast<RankedTensorType>(weights.getType()).getElementType();
@@ -285,20 +284,23 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         }
 
         // Compute per-channel bias value and scale/clamp info from fused chain
-        Value biasV;
-        std::optional<Value> weightZpV;
-        if (!computeBiasForMatmul(fusionPlan, biasV, weightZpV, channelDim, isFC)) {
-            return rewriter.notifyMatchFailure(srcOp, "Failed to compute per-channel bias");
+        std::optional<Value> optionalWeightZpV;
+        FailureOr<Value> biasV =
+            computeBiasForMatmul(*fusionPlanOr, channelDim, optionalWeightZpV, isFC);
+        if (failed(biasV)) {
+            replaceWithTorqMatmul(srcOp, rewriter);
+            return success();
         }
 
         ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, srcOp);
-        if (!computeRescaleInfo(fusionPlan, /*symmetric=*/false, biasV, scInfo)) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected scale info for int ops");
+        biasV = computeRescaleInfo(*fusionPlanOr, *biasV, scInfo);
+        if (failed(biasV)) {
+            replaceWithTorqMatmul(srcOp, rewriter);
+            return success();
         }
 
-        assert(succeeded(verify(srcOp->getParentOp())) && "Parent function verification failed");
         // Erase in reverse order to avoid invalidating users while pruning folded tail ops.
-        for (auto &op : llvm::reverse(fusionPlan.opsToFuse)) {
+        for (auto &op : llvm::reverse(fusionPlanOr->opsToFuse)) {
             if (op->use_empty()) {
                 LLVM_DEBUG({
                     llvm::dbgs() << "Erasing op in fusion plan: ";
@@ -308,6 +310,11 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                 rewriter.eraseOp(op);
             }
         }
+        LLVM_DEBUG({
+            assert(
+                succeeded(verify(srcOp->getParentOp())) && "Parent function verification failed"
+            );
+        });
 
         {
             rewriter.setInsertionPoint(output.getDefiningOp());
@@ -317,7 +324,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
             input = preConversion(input, rewriter, /*isNchw=*/isNCHW, isFC);
 
             auto torqWeights =
-                preConversionWeights(weights, weightZpV, scInfo, rewriter, isNCHW, isFC);
+                preConversionWeights(weights, optionalWeightZpV, scInfo, rewriter, isNCHW, isFC);
 
             auto pad = rewriter.getDenseI64ArrayAttr({0, 0, 0, 0});
             auto stride = rewriter.getDenseI64ArrayAttr({1, 1});
@@ -340,7 +347,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                     pad,      // pad
                     stride,   // stride
                     dilation, // dilation
-                    vectorizationMode, torqWeights, biasV, input
+                    vectorizationMode, torqWeights, *biasV, input
                 );
 
                 torqOut = postConversion(conv2dOp.getOutput(), rewriter, isNCHW, isFC);
@@ -351,7 +358,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                     loc, finalType, initTensor, input_zp,
                     0, // weight zp
                     scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift,
-                    torq_hl::VectorizationModeEnum::None, torqWeights, biasV, input
+                    torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input
                 );
                 torqOut = fcOp.getResult(0);
             }

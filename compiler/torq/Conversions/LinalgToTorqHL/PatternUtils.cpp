@@ -300,7 +300,18 @@ std::optional<int64_t> isFuseGroupOutput(Operation *op) {
         return std::nullopt;
     }
 
-    for (auto intAttr : fuseGroupAttr.getAsRange<IntegerAttr>()) {
+    for (auto attr : fuseGroupAttr) {
+        // TODO: check "torq-fuse-group" = [<<NULL ATTRIBUTE>>] NULL attribute coming like this and
+        // causing issues, need to investigate why it happens and if it can be prevented.
+        if (!attr) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "Warning: found null attribute in " << TORQ_FUSE_GROUP
+                             << " of op: " << *op << "\n";
+            });
+            continue;
+        }
+        auto intAttr = cast<IntegerAttr>(attr);
+
         bool foundUser = false;
         for (auto user : op->getUsers()) {
             if (auto userFuseGroupAttr = user->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
@@ -2236,13 +2247,13 @@ Value makeScaledLut(
     );
 }
 
-Value pickGroupResultInt8(Value value) {
+FailureOr<Value> pickGroupResultInt8(Value value) {
     // Follow single-use chain forward until we hit an int rescale/clamp boundary,
     // which defines the terminal value for fusion planning.
     while (true) {
         if (!value.hasOneUse()) {
             // Ambiguous fanout: stop to avoid planning across multiple consumers.
-            return nullptr;
+            return failure();
         }
         auto userOp = value.getUsers().begin();
         if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
@@ -2270,11 +2281,11 @@ Value pickGroupResultInt8(Value value) {
     return value;
 }
 
-Value pickGroupResultFloat(Value value) {
+FailureOr<Value> pickGroupResultFloat(Value value) {
     // Float path mirrors int path but uses float rescale/clamp markers.
     while (true) {
         if (!value.hasOneUse()) {
-            return nullptr;
+            return failure();
         }
         auto userOp = value.getUsers().begin();
         if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
@@ -2300,7 +2311,7 @@ Value pickGroupResultFloat(Value value) {
     return value;
 }
 
-Value pickGroupResult(Value value) {
+FailureOr<Value> pickGroupResult(Value value) {
     // Dispatch terminal-value selection by element type family.
     auto valueType = dyn_cast<ShapedType>(value.getType()).getElementType();
     if (valueType.isInteger()) {
@@ -2309,7 +2320,7 @@ Value pickGroupResult(Value value) {
     if (valueType.isBF16() || valueType.isF32()) {
         return pickGroupResultFloat(value);
     }
-    return nullptr;
+    return failure();
 }
 
 bool isSingleTensorReductionOp(linalg::LinalgOp linalgOp) {
@@ -2342,8 +2353,8 @@ bool shouldInclude(Operation *op, Value value) {
             return true;
         }
     }
-    else if (isa<tensor::ExtractSliceOp, tensor::InsertSliceOp, tensor::CollapseShapeOp,
-                 tensor::ExpandShapeOp, tensor::EmptyOp>(op)) {
+    else if (isa<tensor::ExtractSliceOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
+                 tensor::EmptyOp>(op)) {
         return true;
     }
     else if (isa<linalg::TransposeOp, linalg::FillOp>(op)) {
@@ -2360,32 +2371,42 @@ bool shouldInclude(Operation *op, Value value) {
 }
 
 // Support functions for fusion plan
-bool computeGroup(Value value, Value groupResult, SmallVector<Operation *> &opsToGroup);
+LogicalResult computeGroup(Value value, Value groupResult, SmallVector<Operation *> &opsToGroup);
 
-bool createFusionPlan(Value &value, FusionPlan &fusionPlan) {
+FailureOr<FusionPlan> buildFusionPlanAndRebindOutput(Value &value) {
+    auto plan = createFusionPlan(value);
+    if (failed(plan)) {
+        return failure();
+    }
+    // Update the output to be the selected group result for downstream use.
+    value = plan->getFusedOutput();
+    return *plan;
+}
+
+FailureOr<FusionPlan> createFusionPlan(Value value) {
     // Build a backward fusion plan rooted at `value`.
     // The plan captures operations between `value` (anchor) and a selected terminal
     // result (`groupResult`) that are eligible for cloning/folding later.
-
+    FusionPlan fusionPlan;
     auto valueType = dyn_cast<ShapedType>(value.getType());
     if (!valueType) {
         LLVM_DEBUG({ llvm::errs() << "matching error value is not a ShapedType!\n"; });
-        return {};
+        return failure();
     }
 
     // Choose the final op/value of the fusible chain (typically at the end of
     // elementwise/rescale/clamp sequence).
     auto groupResult = pickGroupResult(value);
-    if (!groupResult) {
+    if (failed(groupResult)) {
         LLVM_DEBUG({ llvm::dbgs() << "pickGroupResult FAILED\n"; });
-        return false;
+        return failure();
     }
 
     // Walk backward from groupResult toward anchor and collect only supported ops.
     SmallVector<Operation *> opsToGroup;
-    if (!computeGroup(value, groupResult, opsToGroup)) {
+    if (failed(computeGroup(value, *groupResult, opsToGroup))) {
         LLVM_DEBUG({ llvm::dbgs() << "computeGroup FAILED\n"; });
-        return false;
+        return failure();
     }
 
     // Persist the computed plan for downstream bias/scale extraction utilities.
@@ -2399,10 +2420,10 @@ bool createFusionPlan(Value &value, FusionPlan &fusionPlan) {
         });
     }
 
-    return true;
+    return fusionPlan;
 }
 
-bool computeGroup(Value anchor, Value groupResult, SmallVector<Operation *> &opsToGroup) {
+LogicalResult computeGroup(Value anchor, Value groupResult, SmallVector<Operation *> &opsToGroup) {
     // Backward traversal from the chosen terminal result to collect the minimal
     // connected subgraph needed to compute bias/scale relative to `anchor`.
     llvm::SmallVector<Value, 8> worklist;
@@ -2463,7 +2484,7 @@ bool computeGroup(Value anchor, Value groupResult, SmallVector<Operation *> &ops
             llvm::dbgs() << "\n";
         }
     });
-    return true;
+    return success();
 }
 
 bool isRescaleF32(Operation *op) {
@@ -2605,13 +2626,12 @@ FailureOr<Value> createNewBias(
             llvm::dbgs() << "\n";
         }
     });
-
+    fusionPlan.opsToFuse.insert(fusionPlan.opsToFuse.end(), opsToDelete.begin(), opsToDelete.end());
     return bias;
 }
 
-bool computeBias(
-    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim,
-    int biasChDim
+FailureOr<Value> computeBias(
+    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp, int biasChDim
 ) {
 
     biasChDim = biasChDim < 0 ? channelDim : biasChDim;
@@ -2622,13 +2642,14 @@ bool computeBias(
 
     if (!firstOpResultType) {
         LLVM_DEBUG({ llvm::dbgs() << "computeBias: first op result is not ShapedType\n"; });
-        return false;
+        return failure();
     }
 
     auto parentRegion = fusionPlan.anchor->getParentRegion();
     auto owner = parentRegion->getParentOp();
     OpBuilder builder(owner->getContext());
     SmallVector<Operation *, 8> opsToDelete;
+    Value bias;
 
     {
         OpBuilder::InsertionGuard g(builder);
@@ -2643,7 +2664,7 @@ bool computeBias(
                                               ))
                        )
                        .getResult();
-            return true;
+            return bias;
         }
         bias = *maybeBias;
 
@@ -2713,7 +2734,7 @@ bool computeBias(
     }
 
     setCompileTimeConstAttr(bias.getDefiningOp());
-    return true;
+    return bias;
 }
 
 mlir::FailureOr<Value>
@@ -2812,9 +2833,8 @@ modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuild
     return fillOp.getResult(0);
 }
 
-bool computeRescaleInfo(
-    FusionPlan &fusionPlan, bool isElementWiseOp, Value &biasScale, ScaleClampInfo &scInfo
-) {
+FailureOr<Value>
+computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scInfo) {
     // Parse the terminal rescale generic and reconstruct explicit scale/clamp metadata.
     // The goal is to materialize per-channel scale values and interleave them with biasScale.
     /////////////////////////// Support////////////////////////////////////////
@@ -2831,7 +2851,7 @@ bool computeRescaleInfo(
     auto lastOp = fusionPlan.neededOps.back();
     if (!isRescale(lastOp)) {
         LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: last op is not a rescale op\n"; });
-        return true;
+        return biasScale;
     }
     auto rescaleOp = dyn_cast<linalg::GenericOp>(lastOp);
     // Rescale Op Ex:
@@ -2889,7 +2909,7 @@ bool computeRescaleInfo(
     if (!scaleInfoOps.applyScaleOp) {
         LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: applyScaleOp not found in rescaleOp\n"; }
         );
-        return true;
+        return biasScale;
     }
     // Create a linalg generic op that divides the multiplier by 2^shift and multiplies by 2^shift8b
     // or 16b Get the multiplier and shift values from the block arguments of the linalg generic
@@ -2911,7 +2931,7 @@ bool computeRescaleInfo(
     auto maybeShiftV = modifyShiftValue(shift, lastOp, scInfo, builder);
     if (failed(maybeShiftV)) {
         LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: failed to modify shift value\n"; });
-        return false;
+        return failure();
     }
     auto modShiftV = *maybeShiftV;
 
@@ -2923,7 +2943,7 @@ bool computeRescaleInfo(
     auto maybeMulV = modifyMulValue(mul, biasScale, lastOp, builder);
     if (failed(maybeMulV)) {
         LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: failed to modify mul value\n"; });
-        return false;
+        return failure();
     }
     auto mulV = *maybeMulV;
     auto mulTy = mlir::dyn_cast<ShapedType>(mulV.getType());
@@ -3020,12 +3040,11 @@ bool computeRescaleInfo(
 
     biasScale = iOp;
     setCompileTimeConstAttr(biasScale.getDefiningOp());
-    return true;
+    return biasScale;
 }
 
-bool computeBiasForMatmul(
-    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim,
-    bool isFC
+FailureOr<Value> computeBiasForMatmul(
+    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp, bool isFC
 ) {
     auto anchor = fusionPlan.anchor;
     auto anchorTy = anchor ? dyn_cast<ShapedType>(anchor->getResult(0).getType()) : nullptr;
@@ -3039,20 +3058,30 @@ bool computeBiasForMatmul(
         OpBuilder builder(anchor->getContext());
         builder.setInsertionPoint(anchor);
         auto zeroBiasTy = RankedTensorType::get({biasDim}, anchorTy.getElementType());
-        bias = builder.create<arith::ConstantOp>(anchor->getLoc(), builder.getZeroAttr(zeroBiasTy));
+        Value bias =
+            builder.create<arith::ConstantOp>(anchor->getLoc(), builder.getZeroAttr(zeroBiasTy));
         optionalWeightZp.reset();
-        return true;
+        return bias;
     }
 
     if (channelDim > 1) {
-        return computeBias(fusionPlan, bias, optionalWeightZp, channelDim, 1);
+        return computeBias(fusionPlan, channelDim, optionalWeightZp, 1);
     }
-    return computeBias(fusionPlan, bias, optionalWeightZp, channelDim, 0);
+    return computeBias(fusionPlan, channelDim, optionalWeightZp, 0);
 }
 
-bool modifyWeightWithZp(
-    Value &weights, Value weightZp, ScaleClampInfo &scInfo, PatternRewriter &rewriter
+FailureOr<Value> computeBiasAndRescaleInfo(
+    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp,
+    ScaleClampInfo &scInfo
 ) {
+    auto maybeBias = computeBias(fusionPlan, channelDim, optionalWeightZp);
+    if (failed(maybeBias)) {
+        return failure();
+    }
+    return computeRescaleInfo(fusionPlan, *maybeBias, scInfo);
+}
+
+FailureOr<Value> buildWeightWithZp(Value weights, Value weightZp, PatternRewriter &rewriter) {
     // Convert quantized weights into zero-point-adjusted signed domain:
     //   adjusted_w = sext(weight_i8) - trunc(weight_zp)
     // Result is materialized as i16 to preserve headroom for downstream arithmetic.
@@ -3084,7 +3113,7 @@ bool modifyWeightWithZp(
     weights = rescaledWeights;
     // Mark as compile-time-const so later passes can fold/use it as static data.
     setCompileTimeConstAttr(weights.getDefiningOp());
-    return true;
+    return weights;
 }
 
 } // namespace mlir::syna::torq

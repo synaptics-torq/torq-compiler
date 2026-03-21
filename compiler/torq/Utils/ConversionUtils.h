@@ -527,9 +527,14 @@ struct FusionPlan {
     Operation *anchor;
     llvm::SmallVector<Operation *> neededOps;
     llvm::SmallVector<Operation *> opsToFuse;
-    llvm::SmallVector<Operation *> dataSlicer;
-    llvm::DenseMap<Operation *, llvm::SmallVector<Operation *>> dataInMap;
-    llvm::DenseMap<Operation *, llvm::SmallVector<Operation *>> dataOutMap;
+
+    Value getFusedOutput() const {
+        if (neededOps.empty()) {
+            return anchor->getResult(0);
+        }
+        return neededOps.back()->getResult(0);
+    }
+    bool isFusable() const { return !neededOps.empty(); }
 };
 
 Value cloneAndReplaceToBody(

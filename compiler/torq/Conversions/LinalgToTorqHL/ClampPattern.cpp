@@ -281,11 +281,11 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
         // producing i32 followed by tosa.apply_scale + trunc). Float clamps never
         // have a fusible tail, so skip the IR walk entirely for f32/bf16.
         auto outputElemTy = mlir::cast<RankedTensorType>(output.getType()).getElementType();
-        FusionPlan fusionPlan;
+        FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output);
         bool hasFusionPlan =
-            !outputElemTy.isF32() && !outputElemTy.isBF16() && createFusionPlan(output, fusionPlan);
+            !outputElemTy.isF32() && !outputElemTy.isBF16() && succeeded(fusionPlanOr);
 
-        if (!hasFusionPlan || fusionPlan.neededOps.empty()) {
+        if (!hasFusionPlan || !fusionPlanOr->isFusable()) {
             if (_markFuseGroups) {
                 markFuseGroupBackward(
                     output, {input}, rewriter, srcOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
@@ -303,7 +303,6 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
             return success();
         }
 
-        output = fusionPlan.neededOps.back()->getResult(0);
         auto finalType = cast<RankedTensorType>(output.getType());
 
         if (_markFuseGroups) {
@@ -315,10 +314,13 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
         ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, srcOp);
         Value biasScale = createI32Const(rewriter, srcOp, interleave({0}, {1}));
-        if (!computeRescaleInfo(fusionPlan, /*isElementWiseOp=*/true, biasScale, scInfo))
-            return rewriter.notifyMatchFailure(srcOp, "Failed to extract rescale info");
 
-        for (auto &op : llvm::reverse(fusionPlan.opsToFuse)) {
+        FailureOr<Value> biasV = computeRescaleInfo(*fusionPlanOr, biasScale, scInfo);
+        if (failed(biasV)) {
+            return rewriter.notifyMatchFailure(srcOp, "Failed to extract rescale info");
+        }
+
+        for (auto &op : llvm::reverse(fusionPlanOr->opsToFuse)) {
             if (op->use_empty()) {
                 LLVM_DEBUG({
                     llvm::dbgs() << "ClampOpConversion erasing: ";

@@ -91,6 +91,7 @@ bool isI8Type(Value val, PatternRewriter &rewriter);  // Deprecated
 bool isI32Type(Value val, PatternRewriter &rewriter); // Deprecated
 
 std::optional<int64_t> getConstIntValue(Value val);
+std::optional<float> getFloatValue(Value val);
 
 // return the single operation using the value
 // return nullptr if no user or more than one user
@@ -170,33 +171,41 @@ bool foldForwardPerChannelAdd(
 // Build a fusion plan rooted at `value` by selecting a terminal fusible result
 // and collecting intermediate operations needed to reconstruct that chain.
 // On success, `fusionPlan.anchor` and `fusionPlan.neededOps` are populated.
-bool createFusionPlan(Value &value, FusionPlan &fusionPlan);
+FailureOr<FusionPlan> createFusionPlan(Value value);
+
+// Convenience wrapper for createFusionPlan that also updates the defining op of `value`
+// to the terminal fused result, so that subsequent patterns can match against it.
+FailureOr<FusionPlan> buildFusionPlanAndRebindOutput(Value &value);
 
 // Build per-channel bias from the fusion plan rooted at `fusionPlan.anchor`.
 // Optionally surfaces folded weight zero-point through `optionalWeightZp`.
 // `biasChDim` can override the channel dimension used for reduction.
-bool computeBias(
-    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim,
+FailureOr<Value> computeBias(
+    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp,
     int biasChDim = -1
 );
 // Convenience wrapper for matmul-like cases, selecting bias channel mapping
 // based on `channelDim`.
-bool computeBiasForMatmul(
-    FusionPlan &fusionPlan, Value &bias, std::optional<Value> &optionalWeightZp, int channelDim,
-    bool isFC
+FailureOr<Value> computeBiasForMatmul(
+    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp, bool isFC
 );
 
 // Extract scale/clamp/zero-point info from the trailing rescale pattern in
 // `fusionPlan` and interleave scale into `biasScale` for NPU consumption.
-bool computeRescaleInfo(
-    FusionPlan &fusionPlan, bool isElementWiseOp, Value &biasScale, ScaleClampInfo &scInfo
+FailureOr<Value>
+computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scInfo);
+
+// Convenience wrapper: compute per-channel bias from the fusion plan and then
+// interleave scale/clamp info from the trailing rescale stage into biasScale.
+// Equivalent to calling computeBias followed by computeRescaleInfo.
+FailureOr<Value> computeBiasAndRescaleInfo(
+    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp,
+    ScaleClampInfo &scInfo
 );
 
 // Apply weight zero-point correction to quantized weights:
 // adjusted_w = sext(weight) - trunc(weightZp), materialized as i16 tensor.
-bool modifyWeightWithZp(
-    Value &weights, Value weightZp, ScaleClampInfo &scInfo, PatternRewriter &rewriter
-);
+FailureOr<Value> buildWeightWithZp(Value weights, Value weightZp, PatternRewriter &rewriter);
 
 // Deduce ScaleClampInfo forward
 // scaleValuesCount is the expected number of scale values
