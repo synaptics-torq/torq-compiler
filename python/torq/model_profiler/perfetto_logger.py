@@ -872,7 +872,7 @@ def convert_to_perfetto(debug_dir, pb_path, overview_data=None, view_name="Compi
         dispatch_name = debug_info.dispatch_names[0]
         dispatch = debug_info.get_dispatch(dispatch_name)
 
-        print(f"Processing dispatch: {dispatch_name} with {len(dispatch.workunits)} workunits")
+        # print(f"Processing dispatch: {dispatch_name} with {len(dispatch.workunits)} workunits")
 
         # compute the timestamps for action and tasks based on the cycle counts and clock frequency
         dispatch.infer_runtime_profile_from_cycles()

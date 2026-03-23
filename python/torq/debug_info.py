@@ -549,7 +549,6 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
         self.debug_info = debug_info
 
         for op in module.body.operations:
-            print(op.name)
             if op.operation.name == "func.func":
                 self.dispatch = op
                 break
