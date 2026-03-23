@@ -26,14 +26,14 @@ namespace mlir::syna::torq {
 
 namespace {
 
-template <class TorqConvOp>
-class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> {
+template <class TorqConvPoolOp>
+class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPoolOp> {
   public:
-    using OpRewritePattern<TorqConvOp>::OpRewritePattern;
+    using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
 
-    LogicalResult matchAndRewrite(TorqConvOp conv2dOp, PatternRewriter &rewriter) const override {
+    LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
 
-        auto inputType = llvm::cast<RankedTensorType>(conv2dOp.getInput().getType());
+        auto inputType = llvm::cast<RankedTensorType>(op.getInput().getType());
         if (!inputType)
             return failure();
 
@@ -41,7 +41,7 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
         if (input_shape.size() != 4)
             return failure();
 
-        auto weight_type = llvm::cast<RankedTensorType>(conv2dOp.getWeights().getType());
+        auto weight_type = llvm::cast<RankedTensorType>(op.getWeights().getType());
         if (!weight_type)
             return failure();
 
@@ -62,13 +62,13 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
             return failure();
         }
 
-        int32_t stride_h = conv2dOp.getStride()[0];
-        int32_t stride_w = conv2dOp.getStride()[1];
+        int32_t stride_h = op.getStride()[0];
+        int32_t stride_w = op.getStride()[1];
 
-        int32_t pad_left = conv2dOp.getPad()[0];
-        int32_t pad_right = conv2dOp.getPad()[1];
-        int32_t pad_top = conv2dOp.getPad()[2];
-        int32_t pad_bottom = conv2dOp.getPad()[3];
+        int32_t pad_left = op.getPad()[0];
+        int32_t pad_right = op.getPad()[1];
+        int32_t pad_top = op.getPad()[2];
+        int32_t pad_bottom = op.getPad()[3];
 
         // Check which dimensions have VALID padding (pad == 0)
         bool has_valid_pad_h = (pad_top == 0 && pad_bottom == 0);
@@ -93,7 +93,7 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
 
         // Skip if this conv can use hardware padding (handled by DirectPattern)
         if (ksize_w <= 7 && ksize_h <= 7) {
-            Value currentInput = conv2dOp.getInput();
+            Value currentInput = op.getInput();
             for (int depth = 0; depth < 5 && currentInput; ++depth) {
                 auto definingOp = currentInput.getDefiningOp();
                 if (!definingOp)
@@ -109,7 +109,7 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
             }
         }
 
-        auto output_type = llvm::dyn_cast<RankedTensorType>(conv2dOp.getInit().getType());
+        auto output_type = llvm::dyn_cast<RankedTensorType>(op.getInit().getType());
         auto output_shape = output_type.getShape();
 
         // Calculate SAME padding for dimensions with VALID padding
@@ -202,20 +202,29 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
         SmallVector<int64_t, 4> newPads{new_pad_left, new_pad_right, new_pad_top, new_pad_bottom};
         auto newPadAttr = rewriter.getDenseI64ArrayAttr(newPads);
 
-        rewriter.setInsertionPoint(conv2dOp);
-        auto loc = conv2dOp.getLoc();
+        rewriter.setInsertionPoint(op);
+        auto loc = op.getLoc();
 
         auto ConvInit = rewriter.create<tensor::EmptyOp>(
-            conv2dOp.getLoc(), new_output_type.getShape(), new_output_type.getElementType()
+            op.getLoc(), new_output_type.getShape(), new_output_type.getElementType()
         );
 
-        auto samepadConv = rewriter.create<TorqConvOp>(
-            loc, new_output_type, ConvInit.getResult(), conv2dOp.getInputZp(),
-            conv2dOp.getWeightZp(), conv2dOp.getOutputZp(), conv2dOp.getOutputMin(),
-            conv2dOp.getOutputMax(), conv2dOp.getShiftFactor(), conv2dOp.getGroups(), newPadAttr,
-            conv2dOp.getStride(), conv2dOp.getDilation(), conv2dOp.getVectorizationMode(),
-            conv2dOp.getWeights(), conv2dOp.getScaleBias(), conv2dOp.getInput()
-        );
+        TorqConvPoolOp samepadOp;
+        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+            samepadOp = rewriter.create<TorqConvPoolOp>(
+                loc, new_output_type, ConvInit.getResult(), op.getInputZp(), op.getOutputMin(),
+                op.getOutputMax(), op.getStride(), op.getPad(), op.getKernel(), op.getWeights(),
+                op.getScaleBias(), op.getInput()
+            );
+        }
+        else {
+            samepadOp = rewriter.create<TorqConvPoolOp>(
+                loc, new_output_type, ConvInit.getResult(), op.getInputZp(), op.getWeightZp(),
+                op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
+                op.getGroups(), newPadAttr, op.getStride(), op.getDilation(),
+                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), op.getInput()
+            );
+        }
 
         // Extract slice offsets: only offset dimensions that were converted from VALID to SAME
         int64_t offset_h = has_valid_pad_h ? new_pad_top / hack_offset_h : 0;
@@ -229,10 +238,10 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
         );
         auto slice_strides = createVector({1, 1, 1, 1}, rewriter);
         auto extractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
-            loc, samepadConv.getOutput(), offsets, sizes, slice_strides
+            loc, samepadOp.getOutput(), offsets, sizes, slice_strides
         );
 
-        rewriter.replaceOp(conv2dOp, extractSliceOp.getResult());
+        rewriter.replaceOp(op, extractSliceOp.getResult());
         return success();
     }
 };
@@ -242,14 +251,14 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvOp> 
 //   1. Direct: interleaved_insert -> conv (prevents explicit padding creation)
 //   2. Cleanup: interleaved_insert -> fill+insert_slice -> conv (removes explicit padding)
 // Only applies when kernel size <= 7 (hardware constraint).
-template <class TorqConvOp>
-class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvOp> {
+template <class TorqConvPoolOp>
+class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvPoolOp> {
   public:
-    using OpRewritePattern<TorqConvOp>::OpRewritePattern;
+    using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
 
-    LogicalResult matchAndRewrite(TorqConvOp conv2dOp, PatternRewriter &rewriter) const override {
+    LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
 
-        auto inputType = llvm::cast<RankedTensorType>(conv2dOp.getInput().getType());
+        auto inputType = llvm::cast<RankedTensorType>(op.getInput().getType());
         if (!inputType)
             return failure();
 
@@ -257,7 +266,7 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvO
         if (input_shape.size() != 4)
             return failure();
 
-        auto weight_type = llvm::cast<RankedTensorType>(conv2dOp.getWeights().getType());
+        auto weight_type = llvm::cast<RankedTensorType>(op.getWeights().getType());
         if (!weight_type)
             return failure();
 
@@ -279,19 +288,19 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvO
         if (ksize_h > 7 || ksize_w > 7)
             return failure();
 
-        int32_t stride_h = conv2dOp.getStride()[0];
-        int32_t stride_w = conv2dOp.getStride()[1];
+        int32_t stride_h = op.getStride()[0];
+        int32_t stride_w = op.getStride()[1];
 
-        int32_t pad_left = conv2dOp.getPad()[0];
-        int32_t pad_right = conv2dOp.getPad()[1];
-        int32_t pad_top = conv2dOp.getPad()[2];
-        int32_t pad_bottom = conv2dOp.getPad()[3];
+        int32_t pad_left = op.getPad()[0];
+        int32_t pad_right = op.getPad()[1];
+        int32_t pad_top = op.getPad()[2];
+        int32_t pad_bottom = op.getPad()[3];
 
         if (!(pad_top == 0 && pad_left == 0 && pad_right == 0 && pad_bottom == 0 && ksize_h > 1 &&
               ksize_w > 1))
             return failure();
 
-        auto input = conv2dOp.getInput();
+        auto input = op.getInput();
         Value sourceData = input;
 
         // If input is from insert_slice + fill, use the source instead
@@ -354,7 +363,7 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvO
         int64_t new_pad_left = total_pad_w / 2;
         int64_t new_pad_right = total_pad_w - new_pad_left;
 
-        auto output_type = llvm::dyn_cast<RankedTensorType>(conv2dOp.getInit().getType());
+        auto output_type = llvm::dyn_cast<RankedTensorType>(op.getInit().getType());
         auto output_shape = output_type.getShape();
 
         // Conv2d output shape matches sourceData (without explicit padding) since hardware applies
@@ -372,20 +381,29 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvO
         SmallVector<int64_t, 4> newPads{new_pad_left, new_pad_right, new_pad_top, new_pad_bottom};
         auto newPadAttr = rewriter.getDenseI64ArrayAttr(newPads);
 
-        rewriter.setInsertionPoint(conv2dOp);
-        auto loc = conv2dOp.getLoc();
+        rewriter.setInsertionPoint(op);
+        auto loc = op.getLoc();
 
         auto ConvInit = rewriter.create<tensor::EmptyOp>(
             loc, new_output_shape, new_output_type.getElementType()
         );
 
-        auto samepadConv = rewriter.create<TorqConvOp>(
-            loc, new_output_type, ConvInit.getResult(), conv2dOp.getInputZp(),
-            conv2dOp.getWeightZp(), conv2dOp.getOutputZp(), conv2dOp.getOutputMin(),
-            conv2dOp.getOutputMax(), conv2dOp.getShiftFactor(), conv2dOp.getGroups(), newPadAttr,
-            conv2dOp.getStride(), conv2dOp.getDilation(), conv2dOp.getVectorizationMode(),
-            conv2dOp.getWeights(), conv2dOp.getScaleBias(), sourceData
-        );
+        TorqConvPoolOp samepadOp;
+        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+            samepadOp = rewriter.create<TorqConvPoolOp>(
+                loc, new_output_type, ConvInit.getResult(), op.getInputZp(), op.getOutputMin(),
+                op.getOutputMax(), op.getStride(), op.getPad(), op.getKernel(), op.getWeights(),
+                op.getScaleBias(), sourceData
+            );
+        }
+        else {
+            samepadOp = rewriter.create<TorqConvPoolOp>(
+                loc, new_output_type, ConvInit.getResult(), op.getInputZp(), op.getWeightZp(),
+                op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
+                op.getGroups(), newPadAttr, op.getStride(), op.getDilation(),
+                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), sourceData
+            );
+        }
 
         // NPU handles padding internally, so output matches input dimensions
         // Only add extract_slice if final output dimensions differ from input
@@ -394,7 +412,7 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvO
             output_shape[NCHW::H] == input_shape[NCHW::H] &&
             output_shape[NCHW::W] == input_shape[NCHW::W]) {
             // No dimension change needed - NPU output is already correct
-            rewriter.replaceOp(conv2dOp, samepadConv.getOutput());
+            rewriter.replaceOp(op, samepadOp.getOutput());
         }
         else {
             // Extract to final output dimensions if they differ (e.g., width reduction)
@@ -406,23 +424,23 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvO
             );
             auto slice_strides = createVector({1, 1, 1, 1}, rewriter);
             auto extractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
-                loc, samepadConv.getOutput(), offsets, sizes, slice_strides
+                loc, samepadOp.getOutput(), offsets, sizes, slice_strides
             );
-            rewriter.replaceOp(conv2dOp, extractSliceOp.getResult());
+            rewriter.replaceOp(op, extractSliceOp.getResult());
         }
         return success();
     }
 };
 
 // Remove redundant explicit padding when conv already has matching SAME padding.
-template <class TorqConvOp>
-class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvOp> {
+template <class TorqConvPoolOp>
+class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvPoolOp> {
   public:
-    using OpRewritePattern<TorqConvOp>::OpRewritePattern;
+    using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
 
-    LogicalResult matchAndRewrite(TorqConvOp conv2dOp, PatternRewriter &rewriter) const override {
+    LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
 
-        auto input = conv2dOp.getInput();
+        auto input = op.getInput();
 
         auto insertSliceOp = input.template getDefiningOp<tensor::InsertSliceOp>();
         if (!insertSliceOp)
@@ -442,7 +460,7 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvOp>
         auto sourceShape = sourceType.getShape();
         auto destShape = destType.getShape();
 
-        auto weightType = llvm::cast<RankedTensorType>(conv2dOp.getWeights().getType());
+        auto weightType = llvm::cast<RankedTensorType>(op.getWeights().getType());
         if (!weightType || weightType.getRank() != 4)
             return failure();
 
@@ -472,7 +490,7 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvOp>
 
         // Prevent the pattern from triggering on unsupported stride-2 cases
         bool rank4 = sourceType && destType && sourceType.getRank() == 4 && destType.getRank() == 4;
-        if (!rank4 || conv2dOp.getStride()[0] != 1 || conv2dOp.getStride()[1] != 1)
+        if (!rank4 || op.getStride()[0] != 1 || op.getStride()[1] != 1)
             return failure();
 
         // Verify padding only in height dimension: offsets = [0, 0, pad_top, 0]
@@ -484,7 +502,7 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvOp>
         if (destShape[NCHW::W] != sourceShape[NCHW::W])
             return failure();
 
-        auto padAttr = conv2dOp.getPad();
+        auto padAttr = op.getPad();
         if (padAttr.size() != 4)
             return failure();
 
@@ -497,29 +515,38 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvOp>
         if (destType != llvm::cast<RankedTensorType>(input.getType()))
             return failure();
 
-        auto convOutputType = llvm::cast<RankedTensorType>(conv2dOp.getResult(0).getType());
+        auto convOutputType = llvm::cast<RankedTensorType>(op.getResult(0).getType());
 
         SmallVector<int64_t, 4> newOutputShape = {
             sourceShape[NCHW::N], sourceShape[NCHW::C], sourceShape[NCHW::H], sourceShape[NCHW::W]
         };
 
         auto newOutputType = RankedTensorType::get(newOutputShape, convOutputType.getElementType());
-        auto loc = conv2dOp.getLoc();
+        auto loc = op.getLoc();
 
         auto newInit =
             rewriter.create<tensor::EmptyOp>(loc, newOutputShape, convOutputType.getElementType());
 
-        auto newConv = rewriter.create<TorqConvOp>(
-            loc, newOutputType, newInit.getResult(), conv2dOp.getInputZp(), conv2dOp.getWeightZp(),
-            conv2dOp.getOutputZp(), conv2dOp.getOutputMin(), conv2dOp.getOutputMax(),
-            conv2dOp.getShiftFactor(), conv2dOp.getGroups(), conv2dOp.getPadAttr(),
-            conv2dOp.getStride(), conv2dOp.getDilation(), conv2dOp.getVectorizationMode(),
-            conv2dOp.getWeights(), conv2dOp.getScaleBias(), sourceData
-        );
+        TorqConvPoolOp newOp;
+        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+            newOp = rewriter.create<TorqConvPoolOp>(
+                loc, newOutputType, newInit.getResult(), op.getInputZp(), op.getOutputMin(),
+                op.getOutputMax(), op.getStride(), op.getPad(), op.getKernel(), op.getWeights(),
+                op.getScaleBias(), sourceData
+            );
+        }
+        else {
+            newOp = rewriter.create<TorqConvPoolOp>(
+                loc, newOutputType, newInit.getResult(), op.getInputZp(), op.getWeightZp(),
+                op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
+                op.getGroups(), op.getPadAttr(), op.getStride(), op.getDilation(),
+                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), sourceData
+            );
+        }
 
         // Update extract_slice if present
-        if (conv2dOp.getOutput().hasOneUse()) {
-            auto user = *conv2dOp.getOutput().getUsers().begin();
+        if (op.getOutput().hasOneUse()) {
+            auto user = *op.getOutput().getUsers().begin();
             if (auto extractSliceOp = dyn_cast<tensor::ExtractSliceOp>(user)) {
                 auto extractOffsets = extractSliceOp.getMixedOffsets();
                 auto extractSizes = extractSliceOp.getMixedSizes();
@@ -537,30 +564,30 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvOp>
                     }
 
                     auto newExtractSlice = rewriter.create<tensor::ExtractSliceOp>(
-                        extractSliceOp.getLoc(), newConv.getOutput(), newExtractOffsets,
-                        extractSizes, extractStrides
+                        extractSliceOp.getLoc(), newOp.getOutput(), newExtractOffsets, extractSizes,
+                        extractStrides
                     );
 
                     rewriter.replaceOp(extractSliceOp, newExtractSlice.getResult());
-                    rewriter.eraseOp(conv2dOp);
+                    rewriter.eraseOp(op);
                     return success();
                 }
             }
         }
 
-        rewriter.replaceOp(conv2dOp, newConv.getOutput());
+        rewriter.replaceOp(op, newOp.getOutput());
         return success();
     }
 };
 
 // Fix stride-2 convolutions with odd dimensions by adding explicit padding.
 // NPU segmentation for stride-2 requires even H/W dimensions.
-template <class TorqConvOp>
-class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvOp> {
+template <class TorqConvPoolOp>
+class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoolOp> {
   public:
-    using OpRewritePattern<TorqConvOp>::OpRewritePattern;
+    using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
 
-    LogicalResult matchAndRewrite(TorqConvOp op, PatternRewriter &rewriter) const override {
+    LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
         auto inputType = llvm::cast<RankedTensorType>(op.getInput().getType());
         if (!inputType || inputType.getRank() != 4)
             return failure();
@@ -684,18 +711,30 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvOp>
             convOutShape.assign(origOutShape.begin(), origOutShape.end());
         }
 
-        auto newConv = rewriter.create<TorqConvOp>(
-            loc, RankedTensorType::get(convOutShape, outputType.getElementType()),
-            rewriter.create<tensor::EmptyOp>(loc, convOutShape, outputType.getElementType()),
-            op.getInputZp(), op.getWeightZp(), op.getOutputZp(), op.getOutputMin(),
-            op.getOutputMax(), op.getShiftFactor(), op.getGroups(),
-            rewriter.getDenseI64ArrayAttr(newPads), op.getStride(), op.getDilation(),
-            op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), insertOp
-        );
+        auto outputElType = outputType.getElementType();
+        auto newOutputType = RankedTensorType::get(convOutShape, outputElType);
+        auto newInitTensor = rewriter.create<tensor::EmptyOp>(loc, convOutShape, outputElType);
+        TorqConvPoolOp newOp;
+        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+            newOp = rewriter.create<TorqConvPoolOp>(
+                loc, newOutputType, newInitTensor, op.getInputZp(), op.getOutputMin(),
+                op.getOutputMax(), op.getStride(), op.getPad(), op.getKernel(), op.getWeights(),
+                op.getScaleBias(), insertOp
+            );
+        }
+        else {
+            newOp = rewriter.create<TorqConvPoolOp>(
+                loc, newOutputType, newInitTensor, op.getInputZp(), op.getWeightZp(),
+                op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
+                op.getGroups(), rewriter.getDenseI64ArrayAttr(newPads), op.getStride(),
+                op.getDilation(), op.getVectorizationMode(), op.getWeights(), op.getScaleBias(),
+                insertOp
+            );
+        }
 
         if (convertToSame) {
             rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
-                op, newConv.getOutput(),
+                op, newOp.getOutput(),
                 createVector(
                     {0, 0, validPadH ? (newPads[2] / hack_offset_h) : 0,
                      validPadW ? (newPads[0] / hack_offset_w) : 0},
@@ -710,7 +749,7 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvOp>
             );
         }
         else {
-            rewriter.replaceOp(op, newConv.getResult(0));
+            rewriter.replaceOp(op, newOp.getResult(0));
         }
 
         return success();
@@ -732,6 +771,7 @@ void ValidToSamePadPass::runOnOperation() {
         RewritePatternSet oddDimPatterns(ctx);
         oddDimPatterns.add<ConvertOddDimensionStrideConvPattern<torq_hl::Conv2DOp>>(ctx);
         oddDimPatterns.add<ConvertOddDimensionStrideConvPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
+        oddDimPatterns.add<ConvertOddDimensionStrideConvPattern<torq_hl::MaxPool2dOp>>(ctx);
 
         if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(oddDimPatterns)))) {
             return signalPassFailure();
@@ -750,6 +790,11 @@ void ValidToSamePadPass::runOnOperation() {
         patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
         patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
         patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
+
+        // Register patterns for MaxPool2dOp
+        patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::MaxPool2dOp>>(ctx);
+        patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::MaxPool2dOp>>(ctx);
+        patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::MaxPool2dOp>>(ctx);
 
         if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
             return signalPassFailure();
