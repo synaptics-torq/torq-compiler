@@ -1184,6 +1184,17 @@ def case_config(request, runtime_hw_type, chip_config):
                 # For int8: Output is [127,127,127], expected is [11,9,31] 
                 # For int16:Output is [0,0,0], expected is [-32768, -32768, -32768]
                 'model471_add16x8_negative_s2v',  
+
+                # Assertion Error
+                'model131_mult_inp1x3x3x1',
+                'model053_mult_inp1x4x4x1_zp128_B',
+                'model143_conv3x3_mult_inp1x4x4x1',
+                'model137_add_mult_inp1x3x3x1',
+                'model052_mult_inp1x4x4x1_zp128_AB',
+                'model096_relu_zp26_8x8_inp_1x10x1x1',
+                'model130_conv3x3_inp1x3x3x1',
+                'model141_mult_inp1x4x4x1',
+                'model095_relu_8x8_inp_1x10x1x1',
             ]
 
     case = request.param

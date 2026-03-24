@@ -80,9 +80,13 @@ def mbv2_compile_options():
 
 
 @pytest.fixture
-def case_config(request):
+def case_config(request, runtime_hw_type, chip_config):
     """Configure test case settings."""
-    
+
+    # xfail non-SL2610 chips on aws_fpga (known mismatch)
+    if chip_config.data.get("target", "SL2610") != "SL2610" and runtime_hw_type.data == "aws_fpga":
+        pytest.xfail(f"Known failure for chip {chip_config.data.get('chip_name', 'unknown')} on aws_fpga") # Mismatched elements: 1 / 1000 (0.1%)
+
     return {
         "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",

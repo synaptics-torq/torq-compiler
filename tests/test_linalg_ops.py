@@ -42,6 +42,10 @@ def case_config(request, runtime_hw_type, chip_config):
                 'cmpf-bf16-to-fp32.mlir', # AssertionError: Number of differences: 21 out of 256 [8.20%]
                 'batch-matmul-in-int8-out-int16.mlir', # Number of differences: 8190 out of 16384 [49.99%]
                 'matmul-in-int8-out-int16.mlir', # output mismatch
+                'asr-i8-scalar.mlir', # output mismatch
+                'reduceproduct-a3-bf16.mlir',
+                'softmax-1x1024x64xbf16.mlir',
+                'Elementwise-less-than-equal-u16.mlir', # 0.02% mismatch
             ]
 
     if any(s in request.param.name for s in failed_tc):

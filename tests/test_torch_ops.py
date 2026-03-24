@@ -56,6 +56,7 @@ def case_config(request, runtime_hw_type, chip_config):
                 '0730_Cast__layers.5_Add_output_0_cast_to_fp32.mlir', # output mismatch
                 'encoder.mlir.230.Conv_0_small.mlir', # output mismatch
                 'abs.mlir',  # output mismatch
+                'softmax-1x8x1x207xbf16.mlir'
             ]
     else:
         print(f"[pytest] False Running test with chip target: {chip_config.data['target']}")

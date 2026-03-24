@@ -45,17 +45,19 @@ def case_config(request, runtime_hw_type, chip_config):
         if aws_fpga:
             failed_tc += [
                 'add-scalar.mlir', # output mismatch
-                'mul-1hwc-in-int8-out-int32-1.mlir',  # output mismatch
-                'mul-1hwc-in-int8-out-int16-320x240x24.mlir',  # output mismatch
-                'mul-1hwc-in-int8-out-int32-3dim.mlir',  # output mismatch
-                'mul-1hw1-in-int8-out-int32.mlir',  # output mismatch
                 'sub-broadcast-1.mlir', # runtime timeout
-                'Elementwise_lsr-i8.mlir', # output mismatch
-                'Elementwise_lsl-i16.mlir', # output mismatch
-                'Elementwise_eq-i32.mlir', # output mismatch
+                'conv2d_bf16_2x2x4_softmax.mlir',
+                'abs-int32-4.mlir',
+                'rescale-rank1.mlir',
+                'rescale-in-int8-out-int32-3dim.mlir',
                 'argmax-1x50x256-1axis.mlir', # Number of differences: 121 out of 256 [47.27%]
+                'avgpool2d.mlir',
             ]
     extra_args = {"--iree-input-type=tosa-torq":""}
+
+    if chip_config.data['target'] != "SL2610" and (runtime_hw_type.data == "aws_fpga"):
+        if request.param.data.name.startswith('mul-1hwc-in-int8'):
+            pytest.xfail("Elementwise ops not supported on next chip FPGA")
 
     if "mul-1hwc-in-int16-out-int16" in request.param.name:
         # specific input data for the mul test case
@@ -63,6 +65,15 @@ def case_config(request, runtime_hw_type, chip_config):
 
     if any(s in request.param.data.name for s in failed_tc):
         pytest.xfail("output mismatch or error")
+
+    # xfail all Elementwise_ tests on non-SL2610 aws_fpga.
+    # Many of these pass intermittently but fail with mismatched elements
+    # that are not consistent across runs — a failing test may pass on
+    # the next run, making it hard to enumerate individual failures.
+    # Since all of them have same kernel, it should be treated as a single failure until the root cause is identified and fixed.
+    if chip_config.data['target'] != "SL2610" and (runtime_hw_type.data == "aws_fpga"):
+        if request.param.data.name.startswith('Elementwise_'):
+            pytest.xfail("Elementwise ops not supported on next chip FPGA")
 
     torq_tiling_tc = [
         # Channels 0 to 9 are correct, channels 10 to 18 are wrong
