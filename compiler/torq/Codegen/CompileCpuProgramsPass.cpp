@@ -477,11 +477,31 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
 
     if (hostBuild) {
 
-        auto hostTriple =
-            clTargetHostTriple.empty() ? llvm::sys::getProcessTriple() : clTargetHostTriple;
-        auto hostCpu = clTargetHostCpu.empty() ? std::string("host") : clTargetHostCpu;
-        auto hostFeatures =
-            clTargetHostCpuFeatures.empty() ? std::string("host") : clTargetHostCpuFeatures;
+        auto &hw = TorqHw::get();
+        // Priority: CLI flag > TorqHW config > default
+        std::string hostTriple;
+        if (!clTargetHostTriple.empty())
+            hostTriple = clTargetHostTriple;
+        else if (!hw.getHostTriple().empty())
+            hostTriple = hw.getHostTriple();
+        else
+            hostTriple = llvm::sys::getProcessTriple();
+
+        std::string hostCpu;
+        if (!clTargetHostCpu.empty())
+            hostCpu = clTargetHostCpu;
+        else if (!hw.getHostCpu().empty())
+            hostCpu = hw.getHostCpu();
+        else
+            hostCpu = "host";
+
+        std::string hostFeatures;
+        if (!clTargetHostCpuFeatures.empty())
+            hostFeatures = clTargetHostCpuFeatures;
+        else if (!hw.getHostCpuFeatures().empty())
+            hostFeatures = hw.getHostCpuFeatures();
+        else
+            hostFeatures = "host";
 
         maybeTarget = IREE::HAL::LLVMTarget::create(hostTriple, hostCpu, hostFeatures, false);
     }
