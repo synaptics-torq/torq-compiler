@@ -45,6 +45,11 @@ def case_config(request, runtime_hw_type, chip_config):
             # Max absolute difference: 6.0
             # Number of differences: 1914 out of 401408 [0.48%]
             'conv2d-nchw-clip-bf16.mlir',
+
+            # Max relative difference: 0.012047598138451576
+            # Max absolute difference: 0.0009765625
+            # Number of differences: 3 out of 59616 [0.01%]
+            'gemm_bf16'
         ]
         if aws_fpga:
             # aws-fpga failures

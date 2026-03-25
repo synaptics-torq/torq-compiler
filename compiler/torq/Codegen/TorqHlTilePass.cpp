@@ -848,6 +848,119 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
     }
 };
 
+/// Helper for tiling a FullyConnectedOp along the row dimension (dim 0).
+///
+/// Breaks down large FC into smaller FC ops which
+/// are then subject to existing channel based tiling.
+static LogicalResult tileFullyConnectedByRows(
+    torq_hl::FullyConnectedOp fcOp, PatternRewriter &rewriter, RankedTensorType outputType,
+    ArrayRef<int64_t> outputShape, ShapedType inputType, size_t inputSize, size_t outputSize,
+    size_t weightsSize, size_t scaleBiasSize, uint32_t memMaxSize
+) {
+    if (outputType.getRank() != 2) {
+        fcOp.emitOpError("expected 2D tensors for FullyConnectedOp tiling, got rank ")
+            << outputType.getRank();
+        return failure();
+    }
+
+    int64_t numRows = outputShape[0];
+    if (numRows <= 1) {
+        fcOp.emitOpError("Unable to tile FullyConnectedOp in the available memory");
+        return failure();
+    }
+
+    auto inputShape = inputType.getShape();
+    size_t inputPerRow = inputSize / numRows;
+    size_t outputPerRow = outputSize / numRows;
+    int64_t outputChannels = outputShape[1];
+
+    // Compute the maximum rows per tile such that subsequent
+    // channel tiling can still create tiles of at least 64 channels.
+    // From the channel-tiling formula we need:
+    //   (mem - R*inputPerRow) / ceil((R*outputPerRow + wS + sbS) / outCh) >= 64
+    // Relaxing the ceil gives:
+    //   R <= (mem*outCh - 64*(wS+sbS)) / (inputPerRow*outCh + 64*outputPerRow)
+    int64_t numerator =
+        (int64_t)memMaxSize * outputChannels - 64 * (int64_t)(weightsSize + scaleBiasSize);
+    int64_t denominator = (int64_t)inputPerRow * outputChannels + 64 * (int64_t)outputPerRow;
+
+    int64_t rowsPerTile = (numerator > 0 && denominator > 0) ? numerator / denominator : 1;
+    if (rowsPerTile < 1)
+        rowsPerTile = 1;
+    if (rowsPerTile >= numRows) {
+        // Should not happen (we already verified tiling is needed).
+        fcOp.emitOpError("Unable to tile FullyConnectedOp in the available memory");
+        return failure();
+    }
+
+    // Safety check: verify the computed rowsPerTile actually allows
+    // at least 64-channel tiles using the exact formula.
+    for (;;) {
+        size_t tileInputSz = rowsPerTile * inputPerRow;
+        if (tileInputSz < memMaxSize) {
+            size_t tileOutputSz = rowsPerTile * outputPerRow;
+            int maxCh = (memMaxSize - tileInputSz) /
+                        div_ceil(tileOutputSz + weightsSize + scaleBiasSize, outputChannels);
+            if (maxCh >= 64)
+                break;
+        }
+        if (rowsPerTile <= 1) {
+            fcOp.emitOpError("Unable to tile FullyConnectedOp in the available memory");
+            return failure();
+        }
+        rowsPerTile--;
+    }
+
+    Value outputTensor =
+        rewriter.create<tensor::EmptyOp>(fcOp.getLoc(), outputShape, outputType.getElementType());
+
+    int64_t trailingRows = numRows % rowsPerTile;
+    int64_t totalFullTiles = numRows / rowsPerTile;
+    int64_t totalTiles = totalFullTiles + (trailingRows > 0 ? 1 : 0);
+
+    for (int64_t i = 0; i < totalTiles; i++) {
+        int64_t rowOffset = i * rowsPerTile;
+        int64_t currentRows =
+            (trailingRows > 0 && i == totalTiles - 1) ? trailingRows : rowsPerTile;
+
+        auto tileStrides = createVector({1, 1}, rewriter);
+
+        // Slice input along rows: [rowOffset : rowOffset+currentRows, :]
+        auto inputSlice = rewriter.create<tensor::ExtractSliceOp>(
+            fcOp.getLoc(), fcOp.getInput(), createVector({rowOffset, (int64_t)0}, rewriter),
+            createVector({currentRows, inputShape[1]}, rewriter),
+            createVector({(int64_t)1, (int64_t)1}, rewriter)
+        );
+
+        auto outputTileType =
+            RankedTensorType::get({currentRows, outputChannels}, outputType.getElementType());
+
+        auto initTile = rewriter.create<tensor::EmptyOp>(
+            fcOp.getLoc(), outputTileType.getShape(), outputTileType.getElementType()
+        );
+
+        auto outputTile = rewriter.create<torq_hl::FullyConnectedOp>(
+            fcOp.getLoc(), outputTileType, initTile.getResult(), fcOp.getInputZp(),
+            fcOp.getWeightZp(), fcOp.getOutputZp(), fcOp.getOutputMin(), fcOp.getOutputMax(),
+            fcOp.getShiftFactor(), fcOp.getVectorizationMode(), fcOp.getWeights(),
+            fcOp.getScaleBias(), inputSlice.getResult()
+        );
+
+        auto outputTileOffsets = createVector({rowOffset, (int64_t)0}, rewriter);
+        auto outputTileSizes = createVector({currentRows, outputChannels}, rewriter);
+
+        outputTensor = rewriter
+                           .create<tensor::InsertSliceOp>(
+                               fcOp.getLoc(), outputTile.getOutput(), outputTensor,
+                               outputTileOffsets, outputTileSizes, tileStrides
+                           )
+                           .getResult();
+    }
+
+    rewriter.replaceOp(fcOp, outputTensor);
+    return success();
+}
+
 class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -856,6 +969,7 @@ class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp>
     matchAndRewrite(torq_hl::FullyConnectedOp fcOp, PatternRewriter &rewriter) const override {
         auto outputType = fcOp.getOutput().getType();
         auto outputShape = outputType.getShape();
+
         size_t outputSize = getShapeTypeDataSize(outputType);
 
         auto inputType = fcOp.getInput().getType();
@@ -875,6 +989,27 @@ class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp>
             return failure();
         }
 
+        // Check whether channel-only tiling is possible: the input must fit
+        // in memory, and the remaining space must allow at least 64-channel tiles.
+        bool needsRowTiling = (inputSize >= mem_max_size);
+        if (!needsRowTiling) {
+            int maxCh = (mem_max_size - inputSize) /
+                        div_ceil(outputSize + weightsSize + scaleBiasSize, outputShape[1]);
+            needsRowTiling = (maxCh < 64);
+        }
+
+        // --- Row tiling: if the input alone exceeds the available memory,
+        //     or channel-only tiling can't produce tiles of at least 64
+        //     channels, split along the row dimension (dim 0) first.
+        //     The greedy rewriter will re-apply this pattern for channel
+        //     tiling on the resulting smaller ops.
+        if (needsRowTiling) {
+            return tileFullyConnectedByRows(
+                fcOp, rewriter, outputType, outputShape, inputType, inputSize, outputSize,
+                weightsSize, scaleBiasSize, mem_max_size
+            );
+        }
+
         int maxChannelsPerTile = (mem_max_size - inputSize) /
                                  div_ceil(outputSize + weightsSize + scaleBiasSize, outputShape[1]);
 
@@ -882,6 +1017,7 @@ class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp>
         int channelsPerTile = align_floor(maxChannelsPerTile, 64);
         if (maxChannelsPerTile < 64) {
             fcOp.emitOpError("Unable to tile FullyConnectedOp in the available memory");
+            return failure();
         }
 
         int trailingChannels = outputShape[1] % channelsPerTile;
