@@ -72,6 +72,11 @@ static FailureOr<DmaNdlAttr> createNdl(
     ndlDims.push_back(DmaDimAttr::get(ctx, contiguousElementsSizeBytes, 1));
 
     for (int i = shape.size() - 1; i >= 0; i--) {
+        // Skip degenerate dimensions (count <= 1) — these are no-ops that can
+        // confuse the DMA engine (e.g., batch dim with size 1 but mismatched
+        // strides between source and destination).
+        if (shape[i] <= 1)
+            continue;
         ndlDims.push_back(DmaDimAttr::get(ctx, shape[i], strideBytes[i]));
     }
 

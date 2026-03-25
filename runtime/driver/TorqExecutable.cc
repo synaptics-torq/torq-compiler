@@ -1161,6 +1161,125 @@ iree_status_t TorqExecutable::loadHostCode() {
   return iree_ok_status();
 }
 
+// Compute the dense (contiguous) strides in bytes from shape and element size.
+// The element size is inferred from the innermost XRAM stride.
+static std::vector<uint64_t> computeDenseStridesBytes(
+    const uint32_t* xramStrides, const uint32_t* shape, int ndim) {
+  std::vector<uint64_t> dense(ndim);
+  if (ndim == 0) return dense;
+  dense[ndim - 1] = xramStrides[ndim - 1]; // element size in bytes
+  for (int i = ndim - 2; i >= 0; i--) {
+    dense[i] = dense[i + 1] * shape[i + 1];
+  }
+  return dense;
+}
+
+// Check if any XRAM stride differs from the expected dense stride.
+static bool hasNonTrivialStrides(
+    const uint32_t* xramStrides, const uint32_t* shape, int ndim) {
+  auto dense = computeDenseStridesBytes(xramStrides, shape, ndim);
+  for (int i = 0; i < ndim; i++) {
+    if (xramStrides[i] != dense[i]) return true;
+  }
+  return false;
+}
+
+// Copy data from XRAM (with given strides) into a contiguous dense buffer.
+// Finds the largest contiguous inner chunk to minimize the number of reads.
+static void stridedXramRead(const TorqHw* torq, uint64_t baseAddress,
+                            uint8_t* denseBuffer,
+                            const uint32_t* xramStrides,
+                            const uint32_t* shape, int ndim) {
+  auto denseStrides = computeDenseStridesBytes(xramStrides, shape, ndim);
+
+  // Find the outermost dimension where xram stride != dense stride.
+  // All dimensions from splitDim onward are contiguous and can be copied as
+  // a single chunk.
+  int splitDim = 0;
+  for (int i = ndim - 1; i >= 0; i--) {
+    if (xramStrides[i] != denseStrides[i]) {
+      splitDim = i + 1;
+      break;
+    }
+  }
+
+  // Size of each contiguous chunk (product of inner dims * element size)
+  uint64_t chunkSize = xramStrides[ndim - 1]; // element size
+  for (int i = splitDim; i < ndim; i++) {
+    chunkSize *= shape[i];
+  }
+
+  // Number of chunks (product of outer dims)
+  uint64_t numChunks = 1;
+  for (int i = 0; i < splitDim; i++) {
+    numChunks *= shape[i];
+  }
+
+  std::vector<uint64_t> indices(splitDim, 0);
+  for (uint64_t c = 0; c < numChunks; c++) {
+    uint64_t xramOffset = 0;
+    uint64_t denseOffset = 0;
+    for (int i = 0; i < splitDim; i++) {
+      xramOffset += indices[i] * xramStrides[i];
+      denseOffset += indices[i] * denseStrides[i];
+    }
+
+    torq->readXram(static_cast<uint32_t>(baseAddress + xramOffset),
+                   chunkSize, denseBuffer + denseOffset);
+
+    for (int i = splitDim - 1; i >= 0; i--) {
+      indices[i]++;
+      if (indices[i] < shape[i]) break;
+      indices[i] = 0;
+    }
+  }
+}
+
+// Copy data from a contiguous dense buffer back to XRAM with given strides.
+static void stridedXramWrite(TorqHw* torq, uint64_t baseAddress,
+                             const uint8_t* denseBuffer,
+                             const uint32_t* xramStrides,
+                             const uint32_t* shape, int ndim) {
+  auto denseStrides = computeDenseStridesBytes(xramStrides, shape, ndim);
+
+  int splitDim = 0;
+  for (int i = ndim - 1; i >= 0; i--) {
+    if (xramStrides[i] != denseStrides[i]) {
+      splitDim = i + 1;
+      break;
+    }
+  }
+
+  uint64_t chunkSize = xramStrides[ndim - 1];
+  for (int i = splitDim; i < ndim; i++) {
+    chunkSize *= shape[i];
+  }
+
+  uint64_t numChunks = 1;
+  for (int i = 0; i < splitDim; i++) {
+    numChunks *= shape[i];
+  }
+
+  std::vector<uint64_t> indices(splitDim, 0);
+  for (uint64_t c = 0; c < numChunks; c++) {
+    uint64_t xramOffset = 0;
+    uint64_t denseOffset = 0;
+    for (int i = 0; i < splitDim; i++) {
+      xramOffset += indices[i] * xramStrides[i];
+      denseOffset += indices[i] * denseStrides[i];
+    }
+
+    torq->writeXram(static_cast<uint32_t>(baseAddress + xramOffset),
+                    chunkSize, denseBuffer + denseOffset);
+
+    for (int i = splitDim - 1; i >= 0; i--) {
+      indices[i]++;
+      if (indices[i] < shape[i]) break;
+      indices[i] = 0;
+    }
+  }
+}
+
 iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) action, ns(StartHostParams_table_t) params) {
 
   std::string functionName = ns(StartHostParams_function_name(params));
@@ -1182,15 +1301,49 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
 
   assert(sizeof(uintptr_t) == sizeof(uint64_t) && "Host pointer size not compatible");
 
-  // read the arguments from XRAM 
+  // Read optional stride metadata for strided XRAM access
+  auto strides_fb = ns(StartHostParams_strides(params));
+  auto shapes_fb = ns(StartHostParams_shapes(params));
+  auto ndims_fb = ns(StartHostParams_ndims(params));
+  bool hasStrideInfo = strides_fb && shapes_fb && ndims_fb;
+
+  int numArgs = flatbuffers_uint64_vec_len(args);
+
+  // Precompute per-arg offsets into the flattened strides/shapes arrays
+  std::vector<int> argStrideOffsets(numArgs, 0);
+  std::vector<int> argNdims(numArgs, 0);
+  if (hasStrideInfo) {
+    int offset = 0;
+    for (int i = 0; i < numArgs; i++) {
+      argStrideOffsets[i] = offset;
+      argNdims[i] = flatbuffers_uint32_vec_at(ndims_fb, i);
+      offset += argNdims[i];
+    }
+  }
+
+  // read the arguments from XRAM (strided copy when strides differ from dense)
   std::vector<std::vector<uint8_t>> arguments;
   std::vector<void*> argumentAddresses;
 
-  for (int i = 0; i < flatbuffers_uint64_vec_len(args); i++) {
+  for (int i = 0; i < numArgs; i++) {
     auto xramAddress = flatbuffers_uint64_vec_at(args, i);
     auto size = flatbuffers_uint64_vec_at(sizes, i);
     std::vector<uint8_t> xramBuffer(size);
-    torq_->readXram(xramAddress, xramBuffer.size(), xramBuffer.data());
+
+    bool strided = false;
+    if (hasStrideInfo && argNdims[i] > 0) {
+      const uint32_t* argStrides = strides_fb + argStrideOffsets[i];
+      const uint32_t* argShape = shapes_fb + argStrideOffsets[i];
+      if (hasNonTrivialStrides(argStrides, argShape, argNdims[i])) {
+        strided = true;
+        stridedXramRead(torq_.get(), xramAddress, xramBuffer.data(),
+                        argStrides, argShape, argNdims[i]);
+      }
+    }
+    if (!strided) {
+      torq_->readXram(xramAddress, xramBuffer.size(), xramBuffer.data());
+    }
+
     arguments.push_back(std::move(xramBuffer));
     argumentAddresses.push_back(arguments.back().data());
 
@@ -1225,12 +1378,24 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
   // call the code
   hostFunction(&environment, &dispatch_state, &workgroup_state);
 
-  // read back the results to XRAM
-  for (int i = 0; i < flatbuffers_uint64_vec_len(args); i++) {      
+  // read back the results to XRAM (strided write when strides differ from dense)
+  for (int i = 0; i < numArgs; i++) {      
 
     auto xramAddress = flatbuffers_uint64_vec_at(args, i);
 
-    torq_->writeXram(xramAddress, arguments[i].size(), arguments[i].data());
+    bool strided = false;
+    if (hasStrideInfo && argNdims[i] > 0) {
+      const uint32_t* argStrides = strides_fb + argStrideOffsets[i];
+      const uint32_t* argShape = shapes_fb + argStrideOffsets[i];
+      if (hasNonTrivialStrides(argStrides, argShape, argNdims[i])) {
+        strided = true;
+        stridedXramWrite(torq_.get(), xramAddress, arguments[i].data(),
+                         argStrides, argShape, argNdims[i]);
+      }
+    }
+    if (!strided) {
+      torq_->writeXram(xramAddress, arguments[i].size(), arguments[i].data());
+    }
 
     if (testVectorWriter_) {
 

@@ -115,6 +115,12 @@ table StartHostParams {
   function_name: string;
   args: [uint64];
   sizes: [uint64];
+  // Per-arg stride/shape info for strided XRAM reads (all args concatenated).
+  // Use ndims to delimit per-arg boundaries.
+  // When present, the runtime does strided copies instead of contiguous reads.
+  strides: [uint32];
+  shapes: [uint32];
+  ndims: [uint32];
 }
 
 // Action to wait for an host program to complete

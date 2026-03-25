@@ -925,8 +925,25 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
                 }
                 auto sizesRef = flatbuffers_uint64_vec_end(_builder);
 
-                auto startHostParams =
-                    iree_hal_torq_StartHostParams_create(_builder, programName, argsRef, sizesRef);
+                // Serialize per-arg strides (bytes), shapes, and ndims from the
+                // BufferAttr memref types which carry the actual XRAM layout
+                // (including strided subview information).
+                SmallVector<int64_t> allStrides, allShapes, allNdims;
+                for (auto arg : args) {
+                    auto argValue = cast<torq_hl::BufferAttr>(arg);
+                    auto memrefType = argValue.getMemrefType();
+                    auto stridesBytes = getEncodedStridesBytes(memrefType);
+                    allStrides.append(stridesBytes);
+                    allShapes.append(SmallVector<int64_t>(memrefType.getShape()));
+                    allNdims.push_back(memrefType.getRank());
+                }
+                auto stridesRef = createUI32Vector(ArrayRef<int64_t>(allStrides));
+                auto shapesRef = createUI32Vector(ArrayRef<int64_t>(allShapes));
+                auto ndimsRef = createUI32Vector(ArrayRef<int64_t>(allNdims));
+
+                auto startHostParams = iree_hal_torq_StartHostParams_create(
+                    _builder, programName, argsRef, sizesRef, stridesRef, shapesRef, ndimsRef
+                );
 
                 params = iree_hal_torq_HostActionParams_as_StartHostParams(startHostParams);
             }
