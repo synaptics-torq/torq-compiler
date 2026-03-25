@@ -583,7 +583,8 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     if target == "custom":
         cmds.append(f'--torq-hw={chip_config["lram_size"]}:{chip_config["slice_count"]}:{chip_config["tiling_memory"]}:'
-                     f'{chip_config.get("css_features","")}:{chip_config.get("nss_features","")}')
+                     f'{chip_config.get("css_features","")}:{chip_config.get("nss_features","")}:'
+                     f'{chip_config.get("host_triple","native")}:{chip_config.get("host_cpu","host")}:{chip_config.get("host_cpu_features","host")}')
     else:
         cmds.append(f'--torq-hw={target}')
 
@@ -600,15 +601,9 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     # when the runtime is cmodel, we need to compile with qemu address map
     if runtime_hw_type == 'sim':
-        cmds.append('--torq-css-qemu')
-    elif runtime_hw_type == 'astra_machina':
-        # For SoC/hardware targets, use cross-compilation settings
-        # Don't add --torq-css-qemu for actual hardware
-        cmds.extend([
-                "--torq-target-host-triple=aarch64-unknown-linux-gnu",
-                "--torq-target-host-cpu=generic",
-                "--torq-target-host-cpu-features=+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse"
-            ])
+        cmds.extend(['--torq-css-qemu', "--torq-target-host-triple=native"])
+    elif runtime_hw_type == 'aws_fpga':
+        cmds.extend(["--torq-target-host-triple=native"])
     cmds += get_input_type_options(mlir_model_file)
 
     cmds += torq_compiler_options

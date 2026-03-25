@@ -17,7 +17,8 @@ llvm::SmallVector<TorqHw, 1> hwTypes = {TorqHw(
 )};
 
 #define TORQ_CUSTOM_FORMAT                                                                         \
-    "<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_features>"
+    "<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_features>:" \
+    "<host_triple>:<host_cpu>:<host_cpu_features>"
 
 struct TorqHwParser : public llvm::cl::parser<TorqHw> {
 
@@ -54,9 +55,9 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
             );
         }
 
-        if (parts.size() != 5) {
+        if (parts.size() != 8) {
             return O.error(
-                ArgName, " custom hardware specification requires 4 colon-separated "
+                ArgName, " custom hardware specification requires 8 colon-separated "
                          "values: " TORQ_CUSTOM_FORMAT
             );
         }
@@ -89,6 +90,9 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
 
         std::string cpu_config = parts[3].str();
         std::string nss_config = parts[4].str();
+        std::string host_triple = parts[5].str();
+        std::string host_cpu = parts[6].str();
+        std::string host_cpu_features = parts[7].str();
 
         llvm::outs() << "Custom Torq Hardware Configuration:\n";
         llvm::outs() << "  LRAM Size: " << lram_size << " bytes\n";
@@ -97,10 +101,13 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
                      << " bytes\n";
         llvm::outs() << "  CSS Config: " << cpu_config << "\n";
         llvm::outs() << "  NSS Config: " << nss_config << "\n";
+        llvm::outs() << "  Host Triple: " << host_triple << "\n";
+        llvm::outs() << "  Host CPU: " << host_cpu << "\n";
+        llvm::outs() << "  Host CPU Features: " << host_cpu_features << "\n";
 
         Val = TorqHw(
             name, description, lram_size, slice_count, available_memory_for_tiling, cpu_config,
-            nss_config
+            nss_config, host_triple, host_cpu, host_cpu_features
         );
 
         // no error
