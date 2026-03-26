@@ -6,6 +6,7 @@
 
 #include "PassesDetail.h"
 
+#include "torq/Dialect/TorqHL/TorqHLAttrs.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqHw.h"
@@ -31,12 +32,14 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/LogicalResult.h"
 
 #define DEBUG_TYPE "torq-linalg-tile"
 
 namespace mlir::syna::torq {
 
 extern llvm::cl::opt<bool> clDisableHost;
+extern llvm::cl::opt<bool> clEnableTorqHLTiling;
 extern llvm::cl::opt<bool> clFallbackF32ToHost;
 
 namespace {
@@ -560,6 +563,11 @@ class TileSoftmaxOperation : public OpRewritePattern<linalg::SoftmaxOp> {
             return failure();
         }
 
+        // If tile-and-fuse is enabled (i.e. !clEnableTorqHLTiling), we
+        // shouldn't need to tile anything again here.
+        if (!clEnableTorqHLTiling)
+            return rewriter.notifyMatchFailure(srcOp, "No need to tile this operation");
+
         auto maybeDataSize = getMemoryRequirements(srcOp);
 
         if (failed(maybeDataSize)) {
@@ -676,6 +684,13 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
             }
         }
 
+        // If this is an LRAM run, and tile-and-fuse is enabled (i.e.
+        // !clEnableTorqHLTiling), we shouldn't need to tile anything again
+        // here.
+        if (targetExecutor.has_value() && *targetExecutor == torq_hl::Executor::Slice &&
+            !clEnableTorqHLTiling)
+            return rewriter.notifyMatchFailure(srcOp, "No need to tile this operation");
+
         auto maybeDataSize = getMemoryRequirements(srcOp);
 
         if (failed(maybeDataSize)) {
@@ -697,7 +712,7 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
             return rewriter.notifyMatchFailure(srcOp, "No need to tile this operation");
         }
 
-        // tile the operation to fit it in DTCM
+        // tile the operation to fit it in maxTileSize
         auto status = parallelTileAndPeel(srcOp, rewriter, maxTileSize, targetExecutor);
 
         if (failed(status)) {
@@ -721,18 +736,17 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
     std::optional<torq_hl::Executor> targetExecutor;
 };
 
-struct TensorPadOpConversion : public OpRewritePattern<tensor::PadOp> {
-    using OpRewritePattern<tensor::PadOp>::OpRewritePattern;
+template <typename OpTy> struct TensorOpConversion : public OpRewritePattern<OpTy> {
+    using OpRewritePattern<OpTy>::OpRewritePattern;
 
-    LogicalResult
-    matchAndRewrite(tensor::PadOp padTensorOp, PatternRewriter &rewriter) const override {
+    LogicalResult matchAndRewrite(OpTy tensorOp, PatternRewriter &rewriter) const override {
 
-        if (getTargetExecutor(padTensorOp, torq_hl::Executor::CSS) != torq_hl::Executor::CSS) {
+        if (getTargetExecutor(tensorOp, torq_hl::Executor::CSS) != torq_hl::Executor::CSS) {
             return failure();
         }
 
         return static_cast<LogicalResult>(
-            linalg::rewriteInDestinationPassingStyle(rewriter, padTensorOp)
+            linalg::rewriteInDestinationPassingStyle(rewriter, tensorOp)
         );
     }
 };
@@ -779,8 +793,9 @@ class DtcmTilePass : public DtcmTileBase<DtcmTilePass> {
 
         RewritePatternSet tilePatterns(ctx);
 
-        // to make tiling of tensor.pad possible we convert them to linalg ops first
-        tilePatterns.add<TensorPadOpConversion>(ctx);
+        // to make tiling of tensor.pad/generate possible we convert them to linalg ops first
+        tilePatterns.add<TensorOpConversion<tensor::PadOp>>(ctx);
+        tilePatterns.add<TensorOpConversion<tensor::GenerateOp>>(ctx);
 
         const uint32_t cssMem = HwInfo::dtcm_size - HwInfo::css_stack_size;
         tilePatterns.add<TileLinalgOpOperation>(ctx, cssMem, torq_hl::Executor::CSS);
@@ -791,7 +806,7 @@ class DtcmTilePass : public DtcmTileBase<DtcmTilePass> {
         tensor::populateFoldConstantExtractSlicePatterns(tilePatterns, controlFn);
 
         GreedyRewriteConfig config;
-        config.strictMode = GreedyRewriteStrictness::ExistingOps;
+        config.strictMode = GreedyRewriteStrictness::ExistingAndNewOps;
         if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(tilePatterns), config))) {
             return signalPassFailure();
         }

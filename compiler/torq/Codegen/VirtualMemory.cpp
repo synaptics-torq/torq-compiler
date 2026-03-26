@@ -396,10 +396,10 @@ class PhysicalMemory {
     FailureOr<PhysicalBuffer *> add(VirtualBuffer &obj, Value value, bool allowDefragment) {
         assert(!physicalBuffers_.contains(&obj) && "Physical buffer already exists for this value");
 
-        assert(
-            obj.size() + totalPhysicalBufferSize() <= pool_.usableSize() &&
-            "Not enough memory to add physical buffer"
-        );
+        if (obj.size() + totalPhysicalBufferSize() > pool_.usableSize()) {
+            LLVM_DEBUG(llvm::dbgs() << "Not enough memory to add physical buffer\n");
+            return failure();
+        }
 
         auto maybeAddr = pool_.allocate(value);
 

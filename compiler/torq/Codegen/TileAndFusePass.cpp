@@ -7,46 +7,57 @@
 #include "PassesDetail.h"
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
-#include "torq/Dialect/Tensor/IR/Utils.h"
-#include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Iterators.h"
+#include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/Visitors.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Support/LLVM.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetOperations.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/ADT/iterator_range.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <cassert>
 #include <cstdint>
-#include <deque>
 #include <mlir/Analysis/SliceAnalysis.h>
 #include <optional>
 #include <tuple>
 #include <utility>
-
-// TODO: all the TypeSwitchs should be extracted to TileAndFuseInterface
 
 #define DEBUG_TYPE "torq-tile-and-fuse"
 
@@ -81,123 +92,101 @@ static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFus
     llvm::cl::init(TileAndFuseProducersFuseMode::MaxSize) // Default value
 );
 
-class TileAndFusePass : public TileAndFuseBase<TileAndFusePass> {
-  public:
-    TileAndFusePass() = default;
-    TileAndFusePass(const TileAndFusePass &pass) {}
-
-    void runOnOperation() override;
-};
-
-static const std::string TORQ_TILING_DFS = "torq-tiling-dfs";
-static const std::string TORQ_TILING_FUSED = "torq-tiling-fused";
-
 torq_hl::Executor getExecutor(Operation *op) {
     return isMarkedFuseGroup(op) ? torq_hl::Executor::Slice : torq_hl::Executor::CSS;
 }
 
-void forwardDfs(Operation *firstOp, SmallVector<Operation *> &orderTi) {
-    // auto boolAttrTrue = BoolAttr::get(firstOp->getContext(), true);
-    auto boolAttrFalse = BoolAttr::get(firstOp->getContext(), false);
-
-    std::deque<std::pair<Operation *, ResultRange::user_iterator>> stack;
-
-    if (firstOp->getAttrOfType<BoolAttr>(TORQ_TILING_DFS) ||
-        !isa_and_nonnull<TilingInterface>(firstOp))
-        return;
-
-    firstOp->setAttr(TORQ_TILING_DFS, boolAttrFalse);
-    stack.push_back(std::make_pair(firstOp, firstOp->getResults().user_begin()));
-
-    while (!stack.empty()) {
-        auto &[op, user] = stack.back();
-
-        if (user == op->getResults().user_end()) {
-            // Close op
-            stack.pop_back();
-            orderTi.push_back(op);
-            continue;
-        }
-
-        auto userOp = *user++;
-        if (userOp->getAttrOfType<BoolAttr>(TORQ_TILING_DFS) ||
-            !isa_and_nonnull<TilingInterface>(userOp)) {
-            // userOp was already opened (and possibly closed).
-            continue;
-        }
-
-        // Open userOp
-        userOp->setAttr(TORQ_TILING_DFS, boolAttrFalse);
-        stack.push_back(std::make_pair(userOp, userOp->getResults().user_begin()));
-    }
-}
-
-void orderTiOps(FunctionOpInterface &funcOp, SmallVector<Operation *> &orderTi) {
-    for (auto &block : funcOp.getBlocks()) {
-        for (auto &op : block.getOperations()) {
-            forwardDfs(&op, orderTi);
+// Replace the untiled `op` with its tiled version from `tiledResults.
+void replaceTiledOp(
+    IRRewriter &rewriter, Operation *op, const scf::SCFTileAndFuseResult &tiledResults
+) {
+    for (OpResult res : op->getResults()) {
+        if (Value replacement = tiledResults.replacements.lookup(res)) {
+            rewriter.replaceAllUsesWith(res, replacement);
         }
     }
 }
 
-SmallVector<int64_t> getTilingDimOrder(TilingInterface tilingInterfaceOp) {
+// Replace the untiled consumer `op` with its tiled version from `tiledResults`,
+// and do the same for any producer that was yielded as well.
+void applyTiledResults(
+    IRRewriter &rewriter, Operation *op, scf::SCFTileAndFuseResult &tiledResults
+) {
+    // Replace the root with its tiled result
+    replaceTiledOp(rewriter, op, tiledResults);
+
+    // In general, fused producers can declare that they want to be yielded.
+    // Here we replace the untiled producers with the yielded result.
+    for (Operation *prodOp : tiledResults.fusedProducers) {
+        replaceTiledOp(rewriter, prodOp, tiledResults);
+    }
+}
+
+// Return the iteration domains of `tilingInterfaceOp` that can be tiled, in the order which we
+// should tile them.
+// NB: The order of insertion to SmallSetVector is important. That is the order
+// in which we will tile the domains. First one we insert, is the first we tile.
+llvm::SmallSetVector<int64_t, 4> getTilingIterDomainsOrder(TilingInterface tilingInterfaceOp) {
+    llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder;
+
     auto loopIteratorTypes = tilingInterfaceOp.getLoopIteratorTypes();
 
-    // Handler that use all dimensions for tiling (as needed), in that order.
-    auto allParallelDims = [&]() {
-        SmallVector<int64_t> tilingDimOrder;
-        for (size_t dim = 0; dim < loopIteratorTypes.size(); ++dim) {
-            if (loopIteratorTypes[dim] == utils::IteratorType::parallel)
-                tilingDimOrder.push_back(dim);
+    // Handler that uses all the parallel domains.
+    auto allParallelDomains = [&]() {
+        for (size_t domain = 0; domain < loopIteratorTypes.size(); ++domain) {
+            if (loopIteratorTypes[domain] == utils::IteratorType::parallel)
+                tilingIterDomsOrder.insert(domain);
         }
-        return tilingDimOrder;
     };
 
     // Handler for nhwc operations: we tile C, followed by H.
     auto nhwcOpHandler = [&]() {
-        SmallVector<int64_t> tilingDimOrder;
-
         assert(
             loopIteratorTypes[3] == utils::IteratorType::parallel &&
-            "expected dimension 3 to be parallel"
+            "expected domain 3 to be parallel"
         );
-        tilingDimOrder.push_back(3); // C
+        tilingIterDomsOrder.insert(3); // C
 
         assert(
             loopIteratorTypes[1] == utils::IteratorType::parallel &&
-            "expected dimension 1 to be parallel"
+            "expected domain 1 to be parallel"
         );
-        tilingDimOrder.push_back(1); // H
-
-        return tilingDimOrder;
+        tilingIterDomsOrder.insert(1); // H
     };
 
-    // Decide which dimensions to tile, and in what order, based on the executor and the operation.
+    // Decide which domains to tile, and in what order, based on the executor and the operation.
     switch (getExecutor(tilingInterfaceOp)) {
     case torq_hl::Executor::Slice: {
         Operation *principalOp = getFuseGroupPrincipalOpBackward(tilingInterfaceOp);
         assert(principalOp != nullptr && "could not find the principal op of the fuse group");
 
-        return TypeSwitch<Operation *, SmallVector<int64_t>>(principalOp)
+        TypeSwitch<Operation *>(principalOp)
             .Case<
                 linalg::Conv2DNhwcHwcfOp, // NB: 4th iteration domain is actually F
                                           // (filters/output-channels) in this case
                 linalg::DepthwiseConv2DNhwcHwcOp, linalg::PoolingNhwcMaxOp,
                 linalg::PoolingNhwcMaxUnsignedOp, linalg::PoolingNhwcMinOp,
                 linalg::PoolingNhwcMinUnsignedOp, linalg::PoolingNhwcSumOp>([&](auto) {
-                return nhwcOpHandler();
+                nhwcOpHandler();
             })
-            .Default([&](auto) { return allParallelDims(); });
+            .Default([&](auto) { allParallelDomains(); });
+        break;
     }
     case torq_hl::Executor::CSS:
-        return allParallelDims();
+        allParallelDomains();
+        break;
 
     default:
-        llvm_unreachable("expected NSS or CSS executor");
+        llvm_unreachable("expected Slice or CSS executor");
     }
+
+    return tilingIterDomsOrder;
 }
 
-int64_t computeMinMaxAtZero(Operation *op, Attribute zero) {
+// Compute the result of `op` fully composed with preceding AffineApplyOps, and
+// everything else set to 0.
+// `op` must be one of AffineMinOp/AffineMaxOp.
+llvm::FailureOr<int64_t> computeMinMaxAtZero(Operation *op) {
     bool isMin;
     AffineMap map;
     SmallVector<Value> operands;
@@ -206,20 +195,20 @@ int64_t computeMinMaxAtZero(Operation *op, Attribute zero) {
         map = minOp.getMap();
         operands = minOp.getOperands();
     }
-    else if (auto maxOp = dyn_cast<affine::AffineMaxOp>(op)) {
+    else {
+        auto maxOp = cast<affine::AffineMaxOp>(op);
         isMin = false;
         map = maxOp.getMap();
         operands = maxOp.getOperands();
     }
-    else {
-        assert(false && "expected min/max op");
-    }
 
     affine::fullyComposeAffineMapAndOperands(&map, &operands);
-    SmallVector<Attribute> zeros(map.getNumDims(), zero);
+    SmallVector<Attribute> zeros(
+        map.getNumDims(), getAsIndexOpFoldResult(op->getContext(), 0).template get<Attribute>()
+    );
     SmallVector<Attribute> results;
     if (failed(map.constantFold(zeros, results)))
-        assert(false && "failed to compute map when all inputs are zero");
+        return llvm::failure();
 
     Attribute *result;
     if (isMin) {
@@ -232,525 +221,407 @@ int64_t computeMinMaxAtZero(Operation *op, Attribute zero) {
             return cast<mlir::IntegerAttr>(a).getInt() < cast<mlir::IntegerAttr>(b).getInt();
         });
     }
-    assert(result && "failed to find minimum");
+    if (!result)
+        return llvm::failure();
 
     return cast<mlir::IntegerAttr>(*result).getInt();
 }
 
-int64_t bytesOfSlice(Type type, ArrayRef<OpFoldResult> resultSizes, Attribute zero) {
-    auto rankedType = dyn_cast<RankedTensorType>(type);
-    if (!rankedType) {
-        return div_ceil(type.getIntOrFloatBitWidth(), 8);
-    }
+// Compute the result of `op` fully composed with preceding AffineApplyOps, and
+// everything else set to 0.
+// `op` must be one of AffineMinOp/AffineMaxOp.
+llvm::FailureOr<int64_t> computeIntAtZero(OpFoldResult sizeFoldResult) {
+    if (std::optional<int64_t> constSize = getConstantIntValue(sizeFoldResult))
+        return *constSize;
 
-    int64_t elements = 1;
-    for (auto sizeFoldResult : resultSizes) {
-        std::optional<int64_t> constSize = getConstantIntValue(sizeFoldResult);
-        if (constSize) {
-            elements *= *constSize;
-            continue;
-        }
+    assert(sizeFoldResult.is<Value>() && "expected a Value");
 
-        assert(sizeFoldResult.is<Value>() && "expected Value");
-        auto sizeValue = sizeFoldResult.get<Value>();
+    Value sizeValue = sizeFoldResult.get<Value>();
 
-        constSize =
-            llvm::TypeSwitch<Operation *, std::optional<int64_t>>(sizeValue.getDefiningOp())
-                .Case<affine::AffineMinOp, affine::AffineMaxOp>([&](auto minMaxOp) {
-                    // Evaluate the size at 0,0,...
-                    // This is a bit of a hack, what we really want is a tight upper bound
-                    // of size.
-                    return computeMinMaxAtZero(minMaxOp, zero);
-                })
-                .Case<affine::AffineApplyOp>([&](auto applyOp) {
-                    // Evaluate the size at 0,0,...
-                    // This is a bit of a hack, what we really want is a tight upper bound
-                    // of size.
-                    AffineMap map = applyOp.getMap();
-                    SmallVector<Value> operands = applyOp.getOperands();
+    return llvm::TypeSwitch<Operation *, FailureOr<int64_t>>(sizeValue.getDefiningOp())
+        .Case<affine::AffineMinOp, affine::AffineMaxOp>([&](auto minMaxOp) {
+            // Evaluate the size at 0,0,...
+            // This is a bit of a hack, what we really want is a tight upper bound
+            // of size.
+            return computeMinMaxAtZero(minMaxOp);
+        })
+        .Case<affine::AffineApplyOp>([&](auto applyOp) -> FailureOr<int64_t> {
+            // Evaluate the size at 0,0,...
+            // This is a bit of a hack, what we really want is a tight upper bound
+            // of size.
+            AffineMap map = applyOp.getMap();
+            SmallVector<Value> operands = applyOp.getOperands();
 
-                    affine::fullyComposeAffineMapAndOperands(&map, &operands);
-                    SmallVector<Attribute> zeros(map.getNumDims(), zero);
-                    SmallVector<Attribute> results;
-                    if (failed(map.constantFold(zeros, results)))
-                        assert(false && "failed to compute map when all inputs are zero");
-
-                    assert(results.size() == 1 && "AffineApplyOp should have exactly one reault");
-
-                    return cast<mlir::IntegerAttr>(results[0]).getInt();
-                })
-                // TODO: implement for other operations as needed.
-                .Default([](auto) {
-                    assert(false && "unexpected operation");
-                    return std::nullopt;
-                });
-        assert(constSize && "failed to fold slice size to a constant");
-
-        elements *= *constSize;
-    }
-
-    int64_t bytes = div_ceil(rankedType.getElementTypeBitWidth(), 8);
-
-    return bytes * elements;
-}
-
-// This iteration domain is for all the loops of the op.
-typedef std::tuple<
-    Operation *, SmallVector<OpFoldResult> /* offsets */, SmallVector<OpFoldResult> /* sizes */>
-    OpIterationDomain;
-// This iteration domain is only for the result loops (the owner op might have more loops).
-typedef std::tuple<
-    Value, SmallVector<OpFoldResult> /* offsets */, SmallVector<OpFoldResult> /* sizes */>
-    OpResultIterationDomain;
-
-llvm::FailureOr<SmallVector<OpResultIterationDomain>> linalgOperandSlicesFromIterDomain(
-    IRRewriter &rewriter, linalg::LinalgOp linalgOp, ArrayRef<OpFoldResult> offsets,
-    ArrayRef<OpFoldResult> sizes
-) {
-    auto allSliceParameter = linalg::computeAllSliceParameters(
-        rewriter, linalgOp->getLoc(), linalgOp, linalgOp->getOperands(), offsets, sizes, {}, true
-    );
-
-    SmallVector<OpResultIterationDomain> oprandIterDomains;
-    oprandIterDomains.reserve(allSliceParameter.size());
-    for (auto [operand, sliceParams] : llvm::zip(linalgOp->getOperands(), allSliceParameter)) {
-        if (sliceParams) {
-            oprandIterDomains.push_back(
-                std::make_tuple(operand, sliceParams->offsets, sliceParams->sizes)
+            affine::fullyComposeAffineMapAndOperands(&map, &operands);
+            SmallVector<Attribute> zeros(
+                map.getNumDims(),
+                getAsIndexOpFoldResult(applyOp->getContext(), 0).template get<Attribute>()
             );
-            continue;
-        }
+            SmallVector<Attribute> results;
+            if (failed(map.constantFold(zeros, results)))
+                return llvm::failure();
 
-        if (RankedTensorType rankedType = dyn_cast<RankedTensorType>(operand.getType())) {
-            SmallVector<OpFoldResult> sizes, offsets;
-            sizes.reserve(rankedType.getShape().size());
-            offsets.reserve(rankedType.getShape().size());
-            for (auto size : rankedType.getShape()) {
-                sizes.push_back(rewriter.getIndexAttr(size));
-                offsets.push_back(rewriter.getIndexAttr(0));
-            }
+            assert(results.size() == 1 && "AffineApplyOp should have exactly one reault");
 
-            oprandIterDomains.push_back(std::make_tuple(operand, offsets, sizes));
-            continue;
-        }
-
-        oprandIterDomains.push_back(std::make_tuple(
-            operand, SmallVector<OpFoldResult>{rewriter.getIndexAttr(0)},
-            SmallVector<OpFoldResult>{rewriter.getIndexAttr(1)}
-        ));
-    }
-
-    return oprandIterDomains;
-}
-
-llvm::FailureOr<SmallVector<OpResultIterationDomain>> softmaxOperandSlicesFromIterDomain(
-    IRRewriter &rewriter, linalg::SoftmaxOp softmaxOp, ArrayRef<OpFoldResult> offsets,
-    ArrayRef<OpFoldResult> sizes
-) {
-    return SmallVector<OpResultIterationDomain>{
-        std::make_tuple(
-            softmaxOp->getOperand(0), SmallVector<OpFoldResult>(offsets),
-            SmallVector<OpFoldResult>(sizes)
-        ),
-        std::make_tuple(
-            softmaxOp->getOperand(1), SmallVector<OpFoldResult>(offsets),
-            SmallVector<OpFoldResult>(sizes)
-        )
-    };
-}
-
-llvm::FailureOr<SmallVector<OpResultIterationDomain>>
-tensorCollapseShapeOperandSlicesFromIterDomain(
-    IRRewriter &rewriter, mlir::tensor::CollapseShapeOp collapseOp, ArrayRef<OpFoldResult> offsets,
-    ArrayRef<OpFoldResult> sizes
-) {
-    std::optional<linalg::SliceParameters> sliceParams =
-        tensor::computeCollapseSliceParameters(rewriter, collapseOp, offsets, sizes, {}, true);
-
-    assert(sliceParams.has_value());
-
-    return SmallVector<OpResultIterationDomain>{
-        std::make_tuple(collapseOp.getOperand(), sliceParams->offsets, sliceParams->sizes)
-    };
-}
-
-llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorExpandShapeOperandSlicesFromIterDomain(
-    IRRewriter &rewriter, mlir::tensor::ExpandShapeOp expandOp, ArrayRef<OpFoldResult> offsets,
-    ArrayRef<OpFoldResult> sizes
-) {
-    std::optional<linalg::SliceParameters> sliceParams =
-        tensor::computeExpandSliceParameters(rewriter, expandOp, offsets, sizes, {}, true);
-
-    assert(sliceParams.has_value());
-
-    return SmallVector<OpResultIterationDomain>{
-        std::make_tuple(expandOp.getOperand(0), sliceParams->offsets, sliceParams->sizes)
-    };
-}
-
-llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorPadOperandSlicesFromIterDomain(
-    IRRewriter &rewriter, mlir::tensor::PadOp padOp, ArrayRef<OpFoldResult> offsets,
-    ArrayRef<OpFoldResult> sizes
-) {
-    // TODO: I think the following is a safe over approximation, maybe do
-    // something more precise.
-    return SmallVector<OpResultIterationDomain>{std::make_tuple(
-        padOp.getSource(), SmallVector<OpFoldResult>(offsets), SmallVector<OpFoldResult>(sizes)
-    )};
-}
-
-llvm::FailureOr<SmallVector<OpResultIterationDomain>> tensorInsertSliceOperandSlicesFromIterDomain(
-    IRRewriter &rewriter, mlir::tensor::InsertSliceOp insertSliceOp, ArrayRef<OpFoldResult> offsets,
-    ArrayRef<OpFoldResult> sizes
-) {
-    SmallVector<OpResultIterationDomain> operandIterDomains;
-
-    // Handle source operand (the tensor being inserted)
-    auto source = insertSliceOp.getSource();
-    if (auto sourceOpResult = dyn_cast<OpResult>(source)) {
-        auto sourceType = cast<RankedTensorType>(sourceOpResult.getType());
-        SmallVector<OpFoldResult> sourceOffsets, sourceSizes;
-        for (auto size : sourceType.getShape()) {
-            sourceOffsets.push_back(rewriter.getIndexAttr(0));
-            sourceSizes.push_back(rewriter.getIndexAttr(size));
-        }
-        operandIterDomains.push_back(std::make_tuple(sourceOpResult, sourceOffsets, sourceSizes));
-    }
-
-    // Handle destination operand (the tensor being inserted into)
-    auto dest = insertSliceOp.getDest();
-    if (auto destOpResult = dyn_cast<OpResult>(dest)) {
-        // Use the full destination tensor size as a safe over-approximation
-        auto destType = cast<RankedTensorType>(destOpResult.getType());
-        SmallVector<OpFoldResult> destOffsets, destSizes;
-        for (auto size : destType.getShape()) {
-            destOffsets.push_back(rewriter.getIndexAttr(0));
-            destSizes.push_back(rewriter.getIndexAttr(size));
-        }
-        operandIterDomains.push_back(std::make_tuple(destOpResult, destOffsets, destSizes));
-    }
-
-    return operandIterDomains;
-}
-
-llvm::FailureOr<SmallVector<OpResultIterationDomain>> operandSlicesFromIterDomain(
-    IRRewriter &rewriter, Operation *op, ArrayRef<OpFoldResult> offsets,
-    ArrayRef<OpFoldResult> sizes
-) {
-    return TypeSwitch<Operation *, llvm::FailureOr<SmallVector<OpResultIterationDomain>>>(op)
-        .Case<linalg::LinalgOp>([&](auto linalgOp) {
-            return linalgOperandSlicesFromIterDomain(rewriter, linalgOp, offsets, sizes);
+            return cast<mlir::IntegerAttr>(results[0]).getInt();
         })
-        .Case<linalg::SoftmaxOp>([&](linalg::SoftmaxOp softmaxOp) {
-            return softmaxOperandSlicesFromIterDomain(rewriter, softmaxOp, offsets, sizes);
-        })
-        .Case<mlir::tensor::PadOp>([&](auto padOp) {
-            return tensorPadOperandSlicesFromIterDomain(rewriter, padOp, offsets, sizes);
-        })
-        .Case<mlir::tensor::InsertSliceOp>([&](auto insertSliceOp) {
-            return tensorInsertSliceOperandSlicesFromIterDomain(
-                rewriter, insertSliceOp, offsets, sizes
-            );
-        })
-        .Case<mlir::tensor::CollapseShapeOp>([&](auto collapseOp) {
-            return tensorCollapseShapeOperandSlicesFromIterDomain(
-                rewriter, collapseOp, offsets, sizes
-            );
-        })
-        .Case<mlir::tensor::ExpandShapeOp>([&](auto expandOp) {
-            return tensorExpandShapeOperandSlicesFromIterDomain(rewriter, expandOp, offsets, sizes);
-        })
-        .Default([&](auto) {
-            LLVM_DEBUG({ llvm::dbgs() << "unknown op type: " << op->getName() << "\n"; });
-            assert(false);
-            return LogicalResult::failure();
+        .Default([](Operation *op) {
+            op->emitWarning("can't compute producers tile size (unexpected operation type; "
+                            "expected affine.min/max/apply)");
+            LLVM_DEBUG(assert(false && "unexpected operation"));
+            return llvm::failure();
         });
 }
 
-bool isFirstOperandWithStride(OpOperand *operand) {
-    if (operand->getOperandNumber() != 0) {
-        return false;
-    }
-
-    auto strides =
-        TypeSwitch<Operation *, SmallVector<int64_t>>(operand->getOwner())
-            .Case<linalg::Conv2DNhwcHwcfOp>([](auto convOp) {
-                return convOp.getStrides().template getValues<int64_t>();
-            })
-            .Case<linalg::DepthwiseConv2DNhwcHwcOp>([](auto convOp) {
-                return convOp.getStrides().template getValues<int64_t>();
-            })
-            .Case<
-                linalg::PoolingNchwMaxOp, linalg::PoolingNchwSumOp, linalg::PoolingNcwMaxOp,
-                linalg::PoolingNcwSumOp, linalg::PoolingNhwcMaxOp, linalg::PoolingNhwcMaxUnsignedOp,
-                linalg::PoolingNhwcMinOp, linalg::PoolingNhwcMinUnsignedOp,
-                linalg::PoolingNhwcSumOp>([](auto convOp) {
-                return convOp.getStrides().template getValues<int64_t>();
-            })
-            .Default([&](auto) -> SmallVector<int64_t> { return {}; });
-
-    return llvm::any_of(strides, [](auto s) { return s > 1; });
-}
-
-void bytesOfFusedOpTile(
-    Operation *op, ArrayRef<OpResultIterationDomain> operandSlices,
-    llvm::DenseMap<IntegerAttr, int64_t> &fusedGroupsBytes,
-    llvm::SetVector<Operation *> &shareFuseGroup, Attribute zero
+// Add to `ops` all the ops that need to be cloned to support `op` and
+// `producerOps` (including those ops); and add to `inputs` all the values that
+// are needed to drive `ops`, and are not in `ops`. An op is added to `ops` if
+// it is accessed by an op in `ops`, and is from the same pattern-fuse-group, or
+// it's not a TilingInterface.
+void collectOpsForMemoryCheck(
+    Operation *op, const SetVector<Operation *> &producerOps, SmallVector<Operation *> &ops,
+    SmallVector<Value> &inputs
 ) {
-    for (auto [idx, slice] : llvm::enumerate(operandSlices)) {
-        auto [resultVal, resultOffsets, resultSizes] = slice;
-        Operation *resultOp = nullptr;
-        ArrayAttr operandFuseGroupAttr;
+    SmallVector<Operation *> queue = {op};
+    queue.reserve(queue.size() + producerOps.size());
+    llvm::append_range(queue, producerOps);
 
-        if (auto opResult = dyn_cast<OpResult>(resultVal)) {
-            resultOp = opResult.getOwner();
-            operandFuseGroupAttr = resultOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-        }
+    DenseSet<Operation *> visitedOps(producerOps.size());
+    llvm::set_union(visitedOps, queue);
 
-        int64_t operandBytes = bytesOfSlice(resultVal.getType(), resultSizes, zero);
+    SmallVector<Value> maybeInputs;
 
-        // Account for weight packing on matmul RHS (operand 1 = B in [A, B, init]):
-        // kernel selection pads the N dimension to a multiple of parallel_outs.
-        // TODO: this adjustment is skipped when the RHS owner is in the same fuse
-        // group (e.g. a transpose), because operandBytes is not used for internal
-        // operands. The packing overhead should be tracked at the group level.
-        if (idx == 1 && isa<linalg::MatmulOp, linalg::BatchMatmulOp>(op)) {
-            auto outType = cast<RankedTensorType>(
-                cast<DestinationStyleOpInterface>(op).getDpsInits()[0].getType()
-            );
-            int64_t packFactor = outType.getElementTypeBitWidth() <= 8 ? 64 : 32;
-            if (auto nSize = getConstantIntValue(resultSizes.back()); nSize && *nSize > 0) {
-                int64_t padded = div_ceil(*nSize, packFactor) * packFactor;
-                operandBytes = (operandBytes / *nSize) * padded;
-            }
-        }
+    while (!queue.empty()) {
+        Operation *currentOp = queue.pop_back_val();
 
-        auto fuseGroupAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-        assert(fuseGroupAttr);
+        // TODO(sflur): use visitUsedValuesDefinedAbove instead (from
+        // mlir/include/mlir/Transforms/RegionUtils.h)?
+        currentOp->walk([&](Operation *walkOp) {
+            for (Value operand : walkOp->getOperands()) {
+                if (operand.getParentBlock() != currentOp->getBlock())
+                    continue;
 
-        // Check if this is an external operand, and add it to the group's
-        // memory.
-        for (auto intAttr : fuseGroupAttr.getAsRange<IntegerAttr>()) {
-            if (operandFuseGroupAttr && llvm::is_contained(operandFuseGroupAttr, intAttr)) {
-                // Not an external operand
-                shareFuseGroup.insert(resultOp);
-                continue;
-            }
-
-            // Don't count tensor::EmptyOp feeding the output operand, except for the output
-            // op of the group.
-            auto opDsoi = dyn_cast<DestinationStyleOpInterface>(op);
-            if (llvm::isa_and_nonnull<mlir::tensor::EmptyOp>(resultOp) && !isFuseGroupOutput(op) &&
-                opDsoi) {
-                auto inits = opDsoi.getDpsInits();
-                if (llvm::is_contained(inits, resultVal)) {
+                // BlockArguments are definitely inputs
+                if (isa<BlockArgument>(operand)) {
+                    inputs.push_back(operand);
                     continue;
                 }
-            }
 
-            // If opResult feeds the first input of the principal op,
-            // and that op has stride > 1, we need to double the memory,
-            // except if opResult comes from conv2d/dw/pooling.
-            auto principalOperands = getFuseGroupPrincipalOpOperandsForward(intAttr, resultVal);
-            if (llvm::any_of(principalOperands, isFirstOperandWithStride)) {
+                // Value is either a BlockArgument or the result of an operation
+                Operation *operandOp = operand.getDefiningOp();
+                assert(operandOp);
 
-                if (operandFuseGroupAttr) {
-                    Operation *sourcePrincipal = getFuseGroupPrincipalOpBackward(resultOp);
-                    assert(
-                        sourcePrincipal != nullptr &&
-                        "could not find the principal op of the fuse group"
-                    );
-                    if (!isa<
-                            linalg::Conv2DNhwcHwcfOp, linalg::DepthwiseConv2DNhwcHwcOp,
-                            linalg::AddOp>(sourcePrincipal)) {
-                        operandBytes *= 2;
-                    }
+                if (visitedOps.contains(operandOp))
+                    continue;
+
+                if (!llvm::isa<TilingInterface>(operandOp) ||
+                    checkShareFuseGroup(currentOp, operandOp)) {
+                    visitedOps.insert(operandOp);
+                    queue.push_back(operandOp);
+                    continue;
                 }
-                else {
-                    operandBytes *= 2;
-                }
+
+                // the defining op of operand might still be in `ops`, so this
+                // is a maybeInput. We will check again at the end.
+                maybeInputs.push_back(operand);
             }
-
-            fusedGroupsBytes[intAttr] += operandBytes;
-        }
-    }
-}
-
-int64_t
-bytesOfOpTile(Operation *op, ArrayRef<OpResultIterationDomain> operandSlices, Attribute zero) {
-    return TypeSwitch<Operation *, int64_t>(op)
-        .Case<linalg::SoftmaxOp>([&](auto softmaxOp) {
-            // Memory requirements for SoftmaxOp: 2*input + output When
-            // decomposing the softmax on NSS, most of the ops follow the same
-            // input->output pattern, but two of them are torq_hl::select and
-            // torq_hl::ElementwiseBinary which have 2 inputs and 1 output.
-            // Until we convert these torq_hl ops to linalg, we have to tile the
-            // whole softmax accordingly.
-
-            int64_t totalBytes = 0;
-
-            assert(operandSlices.size() == 2 && "linalg.softmax should have exactly two inputs");
-
-            for (int i = 0; i < 2; ++i) {
-                auto [opResult, resultOffsets, resultSizes] = operandSlices[i];
-                int64_t bytes = bytesOfSlice(opResult.getType(), resultSizes, zero);
-                totalBytes += bytes;
-                if (i == 0) {
-                    // 2*input
-                    totalBytes += bytes;
-                }
-            }
-
-            return totalBytes;
-        })
-        .Case<linalg::MatmulOp, linalg::BatchMatmulOp>([&](auto) {
-            // Account for weight packing on RHS (operand 1 = B in [A, B, init]):
-            // kernel selection pads the N dimension to a multiple of parallel_outs.
-            auto outType = cast<RankedTensorType>(
-                cast<DestinationStyleOpInterface>(op).getDpsInits()[0].getType()
-            );
-            int64_t packFactor = outType.getElementTypeBitWidth() <= 8 ? 64 : 32;
-
-            int64_t totalBytes = 0;
-            for (auto [idx, slice] : llvm::enumerate(operandSlices)) {
-                auto [opResult, resultOffsets, resultSizes] = slice;
-                int64_t bytes = bytesOfSlice(opResult.getType(), resultSizes, zero);
-                if (idx == 1) {
-                    if (auto nSize = getConstantIntValue(resultSizes.back()); nSize && *nSize > 0) {
-                        int64_t padded = div_ceil(*nSize, packFactor) * packFactor;
-                        bytes = (bytes / *nSize) * padded;
-                    }
-                }
-                totalBytes += bytes;
-            }
-            return totalBytes;
-        })
-        .Default([&](auto) {
-            int64_t totalBytes = 0;
-            for (auto [opResult, resultOffsets, resultSizes] : operandSlices) {
-                totalBytes += bytesOfSlice(opResult.getType(), resultSizes, zero);
-            }
-            return totalBytes;
         });
+    }
+
+    // Now that we know all the visited ops, add the real inputs from
+    // `maybeInputs` to `inputs`.
+    for (Value input : maybeInputs) {
+        if (!visitedOps.contains(input.getDefiningOp()))
+            inputs.push_back(input);
+    }
+
+    ops.reserve(ops.size() + visitedOps.size());
+    llvm::append_range(ops, visitedOps);
 }
 
-// Return true iff the tile (including consumerOp and producerOps) can fit in availableMemoryBytes.
-// When consumerOp is a member of a fuse group, it must be the output operation of that group. In
-// that case, the entire group will be checked, even if the other members are not in producerOps.
-// This gives the correct result when the function is called to check if the group needs to be
-// tiled, before it was tiled.
-// TODO: cache all the iteration domains so they don't need to be reallocated every time.
-llvm::FailureOr<bool> checkTileFitsInMemory(
-    IRRewriter &rewriter, Operation *consumerOp, ArrayRef<OpFoldResult> offsets,
-    ArrayRef<OpFoldResult> sizes, const SetVector<Operation *> &producerOps,
-    int64_t availableMemoryBytes
+// Construct a module with a single function, that includes tilingInterfaceOp
+// and producerOps, and any other producers needed to keep pattern-fuse-groups
+// intact. In addition, other ops that are not TilingInterface, that drive the
+// included ops are included. The function arguments are, in order, the
+// sizes of the domains that can be tiled as in tilingIterDomsOrder, and values
+// that drive the included ops.
+// The tile size arguments are left unused here as we don't do the tiling yet.
+// This allows the function to be used when we initially check if an untiled op
+// requires tiling at all.
+ModuleOp extractOpsForMemoryCheck(
+    Operation *consumerOp, ArrayRef<int64_t> tilingIterDomsOrder = {},
+    const SetVector<Operation *> &producerOps = {}
 ) {
-    // How it works: we start from consumerOp, we calculate for each operand the slice needed for
-    // the tile, and sum up the bytes for all the slices. If the sum is greater than
-    // availableMemoryBytes, we return false; otherwise, we compute the iteration domain for each
-    // operand based on its slice (it might have more loops), and add them to the queue. We process
-    // elements in the queue in the same way until it is empty. For members of fuse groups, we don't
-    // check the sum of their immediate operands, instead we check the sum of operands that are not
-    // in the same group. We also don't count the init operands for fuse-group memebers, except for
-    // the init of the group's ouput operator (this seems to match what the rewrite patterns do).
+    MLIRContext *context = consumerOp->getContext();
+    Location loc = consumerOp->getLoc();
 
-    // FIXME: we currently check that each operation/fuse-group can fit in availableMemoryBytes.
-    // This does not take into account that while computing an operand, other operands already take
-    // space.
+    OpBuilder builder(context);
 
-    Attribute zero = getAsIndexOpFoldResult(rewriter.getContext(), 0).get<Attribute>();
+    ModuleOp moduleOp = builder.create<ModuleOp>(loc, "extracted_for_memory_check");
+    builder.setInsertionPointToStart(moduleOp.getBody());
 
-    // Accumulate for each fuse-group the size of operands external to the group.
-    llvm::DenseMap<IntegerAttr, int64_t> fusedGroupsBytes;
+    SmallVector<Operation *> ops;
+    SmallVector<Value> inputs;
+    collectOpsForMemoryCheck(consumerOp, producerOps, ops, inputs);
 
-    std::deque<OpIterationDomain> queue;
-    queue.push_back(std::make_tuple(
-        consumerOp, SmallVector<OpFoldResult>(offsets), SmallVector<OpFoldResult>(sizes)
-    ));
-    while (!queue.empty()) {
-        // Can't use structured bindings because we later capture some of them in a lambda (C++20
-        // supports it):
-        // auto [op, offsets, sizes] = queue.front();
-        // so Instead we do this:
-        Operation *op = std::get<0>(queue.front());
-        SmallVector<OpFoldResult> offsets = std::get<1>(queue.front());
-        SmallVector<OpFoldResult> sizes = std::get<2>(queue.front());
-        queue.pop_front();
+    SmallVector<Type> inputTypes;
+    inputTypes.reserve(tilingIterDomsOrder.size() + inputs.size());
 
-        // Compute operand slices
-        llvm::FailureOr<SmallVector<OpResultIterationDomain>> operandSlices =
-            operandSlicesFromIterDomain(rewriter, op, offsets, sizes);
-        if (failed(operandSlices)) {
-            op->emitError("failed to compute operand slices");
-            return LogicalResult::failure();
-        }
+    for (size_t i = 0; i < tilingIterDomsOrder.size(); ++i)
+        inputTypes.push_back(builder.getIndexType());
 
-        SetVector<Operation *> shareFuseGroup = {};
+    for (Value input : inputs)
+        inputTypes.push_back(input.getType());
 
-        if (auto fuseGroupAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
-            // Update fusedGroupsBytes
-            bytesOfFusedOpTile(op, *operandSlices, fusedGroupsBytes, shareFuseGroup, zero);
+    FunctionType functionType = builder.getFunctionType(inputTypes, consumerOp->getResultTypes());
 
-            // Check if any fuse group exceeds the available memory
-            for (auto intAttr : fuseGroupAttr.getAsRange<IntegerAttr>()) {
-                if (fusedGroupsBytes[intAttr] > availableMemoryBytes) {
-                    return false;
-                }
-            }
-        }
-        else {
-            // Compute memory usage
-            int64_t requiredBytes = bytesOfOpTile(op, *operandSlices, zero);
-            if (requiredBytes > availableMemoryBytes) {
-                return false;
-            }
-        }
+    func::FuncOp funcOp = builder.create<func::FuncOp>(loc, "extracted_tile", functionType);
+    funcOp.addEntryBlock();
 
-        // For each operand slice, add the owner to the queue as needed.
-        for (auto [resultVal, resultOffsets, resultSizes] : *operandSlices) {
-            auto opResult = dyn_cast<OpResult>(resultVal);
-            if (!opResult)
-                continue;
+    IRMapping extractionMap;
 
-            Operation *resultOp = opResult.getOwner();
+    // Map the inputs to the function args. This will result in the function
+    // args driving the appropriate cloned ops, when we clone them.
+    auto nonDomainArgs = llvm::make_range(
+        funcOp.getFunctionBody().getArguments().begin() + tilingIterDomsOrder.size(),
+        funcOp.getFunctionBody().getArguments().end()
+    );
+    for (auto [input, arg] : llvm::zip_equal(inputs, nonDomainArgs))
+        extractionMap.map(input, arg);
 
-            if (!producerOps.contains(resultOp) && !shareFuseGroup.contains(resultOp))
-                continue;
+    // We have to clone `ops` in the order they appear in their parent block.
+    llvm::sort(ops, [](auto lhsOp, auto rhsOp) {
+        assert(lhsOp->getBlock() == rhsOp->getBlock() && "ops are not from the same block");
+        return lhsOp->isBeforeInBlock(rhsOp);
+    });
 
-            // Skip tensor::InsertSliceOp as it's a data movement operation that doesn't need tiling
-            if (isa<mlir::tensor::InsertSliceOp>(resultOp))
-                continue;
+    builder.setInsertionPointToStart(&funcOp.getFunctionBody().front());
 
-            auto tiOp = cast<TilingInterface>(resultOp);
+    for (Operation *op : ops)
+        builder.clone(*op, extractionMap);
 
-            // Get the iteration domain for all the loops of the operand owner
-            SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
-            if (failed(tiOp.getIterationDomainTileFromResultTile(
-                    rewriter, opResult.getResultNumber(), resultOffsets, resultSizes, mappedOffsets,
-                    mappedSizes
-                ))) {
+    Operation *clonedConsumerOp = extractionMap.lookupOrNull(consumerOp);
+    assert(clonedConsumerOp);
 
-                tiOp->emitError("getIterationDomainTileFromResultTile failed");
-                return LogicalResult::failure();
-            }
+    // NB: tileModuleForMemoryCheck relies on this being the last op in the
+    // block, and clonedConsumerOp being it's immediate source.
+    builder.create<func::ReturnOp>(loc, clonedConsumerOp->getResults());
 
-            queue.push_back(std::make_tuple(resultOp, mappedOffsets, mappedSizes));
-        }
+    return moduleOp;
+}
+
+// "symbolically" tile and fuse everything in the only function in `moduleOp`.
+// Tile sizes are non-constant (hence "symbolically"), and are the first
+// arguments of the only function in the module.
+llvm::LogicalResult tileModuleForMemoryCheck(
+    ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder, size_t tileSizesCount
+) {
+    OpBuilder builder(moduleOp->getContext());
+
+    auto funcOp = cast<func::FuncOp>(&moduleOp.getBody()->front());
+    auto clonedConsumerOp = cast<func::ReturnOp>(&funcOp.getFunctionBody().front().back())
+                                .getOperand(0)
+                                .getDefiningOp();
+
+    // Initially set all tile sizes to 0 (don't tile).
+    SmallVector<OpFoldResult> tileSizes(tileSizesCount, builder.getIndexAttr(0));
+    // Drive the sizes that we can tile by the appropriate function args.
+    auto tileSizeArgs = llvm::make_range(
+        funcOp.getFunctionBody().args_begin(),
+        funcOp.getFunctionBody().args_begin() + tilingIterDomsOrder.size()
+    );
+    for (auto [domain, arg] : llvm::zip_equal(tilingIterDomsOrder, tileSizeArgs))
+        tileSizes[domain] = arg;
+
+    scf::SCFTileAndFuseOptions options{};
+    options.tilingOptions.setTileSizes(tileSizes);
+
+    // Do the tile and fuse.
+    IRRewriter rewriter(moduleOp->getContext());
+    auto tiledResults = scf::tileConsumerAndFuseProducersUsingSCF(
+        rewriter, cast<TilingInterface>(clonedConsumerOp), options
+    );
+    if (failed(tiledResults)) {
+        LLVM_DEBUG(assert(false));
+        return llvm::failure();
     }
+    applyTiledResults(rewriter, clonedConsumerOp, *tiledResults);
+
+    // Since we don't care about the computation here, only the memory
+    // footprint, and assuming the first tile is a good approximation for that,
+    // we fix the tiling loops upper bound to their step, effectively resulting
+    // in a single itteration. Canonicalize should simplify this later.
+    for (LoopLikeOpInterface loop : tiledResults->loops) {
+        auto forOp = dyn_cast<scf::ForOp>(loop.getOperation());
+        if (!forOp)
+            return llvm::failure();
+
+        forOp.setUpperBound(forOp.getStep());
+    }
+
+    return llvm::success();
+}
+
+class TileAndFusePass : public TileAndFuseBase<TileAndFusePass> {
+  private:
+    // Normally one should use OpPassManager, and run it with the pass'
+    // runPipeline. This is not possible in this case as it requires that only
+    // operations nested under the current operation can be scheduled, and we
+    // want to run on a module. Hence, we have to use PassManager. PassManager
+    // requires a context to be constructed (and is not copy constructable).
+    // Hence, we delay the construction until its first use, and we don't copy
+    // it (will be constructed again in the new pass).
+    std::unique_ptr<PassManager> assignAddressesPipeline_;
+
+    // Holds all the untiled ops we have already tiled, so we don't tile them
+    // again.
+    llvm::DenseSet<Operation *> untiledTiledOps_;
+
+  public:
+    TileAndFusePass() {}
+
+    TileAndFusePass(const TileAndFusePass &pass) : TileAndFuseBase(pass) {}
+
+    void runOnOperation() override;
+
+  private:
+    llvm::LogicalResult runAssignAddressesPipeline(ModuleOp moduleOp);
+
+    llvm::FailureOr<bool> checkModuleFitsInMemory(ModuleOp moduleOp);
+
+    llvm::FailureOr<bool> checkTileFitsInMemory(
+        ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder, ArrayRef<OpFoldResult> offsets,
+        ArrayRef<OpFoldResult> sizes
+    );
+
+    void tileAndFuse(TilingInterface tiOp);
+
+    LogicalResult searchTileSizeForDim(
+        IRRewriter &rewriter, ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder,
+        MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes, size_t dim,
+        int64_t iterDomainSize, int64_t minFactor, int64_t maxFactor
+    );
+
+    llvm::FailureOr<bool> fitTileToMemory(
+        Operation *consumerOp, const SetVector<Operation *> &producerOps,
+        ArrayRef<int64_t> tilingIterDomsOrder, ArrayRef<int64_t> iterDomainSizes,
+        MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
+    );
+
+    std::tuple<bool, bool> fuseControlMaxSize(
+        IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp,
+        OpResult producerOpResult, bool isDestinationOperand
+    );
+
+    FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
+        IRRewriter &rewriter, TilingInterface tilingInterfaceOp,
+        llvm::ArrayRef<OpFoldResult> iterDomainSizes, SmallVector<OpFoldResult> tileSizes,
+        TileAndFuseProducersFuseMode fuseMode
+    );
+};
+
+llvm::LogicalResult TileAndFusePass::runAssignAddressesPipeline(ModuleOp moduleOp) {
+    if (assignAddressesPipeline_ == nullptr) {
+        assignAddressesPipeline_ = std::make_unique<PassManager>(moduleOp->getContext());
+
+        if (failed(applyPassManagerCLOptions(*assignAddressesPipeline_)))
+            assert(false);
+
+        addPassesPostTileAndFuseUpToAssignLramAddresses(*assignAddressesPipeline_);
+    }
+
+    return assignAddressesPipeline_->run(moduleOp);
+}
+
+// NB: moduleOp is mutated by this function, and can't be used again.
+llvm::FailureOr<bool> TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp) {
+    bool failure = false;
+    bool memoryOverflow = false;
+    mlir::ScopedDiagnosticHandler diagHandler(
+        moduleOp->getContext(),
+        [&](mlir::Diagnostic &diag) -> LogicalResult {
+            // TODO(sflur): is there a better way to identify this? The pass
+            // could write something to the IR and we will look for it here?
+            // Maybe use an argument (see diag.getArguments()).
+            if (diag.str() == OUT_OF_MEMORY_MESSAGE) {
+                memoryOverflow = true;
+                // Signal to the rest of the system that we are handling this issue.
+                return llvm::success();
+            }
+
+            // Something else (other than the expected memory overflow) bad happened.
+            failure = true;
+            llvm::errs() << "Tiling-and-fuse: the following error was encountered while running "
+                            "the pipeline to checking if a tile fits in memory (it might not be "
+                            "a real error):\n";
+            llvm::errs().flush();
+
+            // Signal that we are not handling this issue.
+            return llvm::failure();
+        }
+    );
+
+    if (failed(runAssignAddressesPipeline(moduleOp))) {
+        if (memoryOverflow)
+            return false;
+
+        // This assert is just to catch things early in debug
+        LLVM_DEBUG(assert(!failure));
+
+        if (failure)
+            return llvm::failure();
+    }
+
+    assert(!memoryOverflow && "this should have been captured above");
 
     return true;
 }
 
-// C++20 std::midpoint: computes average without overflow
-inline int64_t midpoint(int64_t min, int64_t max) { return min + ((max - min) / 2); }
+// Return true iff the tile fits in memory
+llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
+    ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes
+) {
+    OpBuilder builder(moduleOp->getContext());
+
+    // Clone the module, as the check is distructive
+    IRMapping map;
+    ModuleOp fixedModuleOp = cast<ModuleOp>(builder.clone(*moduleOp, map));
+    OpEraseGuard fixedModuleEraseGuard(fixedModuleOp);
+
+    auto funcOp = cast<func::FuncOp>(&fixedModuleOp.getBody()->front());
+    builder.setInsertionPointToStart(&funcOp.getFunctionBody().front());
+    auto tileSizeArgs = llvm::make_range(
+        funcOp.getFunctionBody().args_begin(),
+        funcOp.getFunctionBody().args_begin() + tilingIterDomsOrder.size()
+    );
+    for (auto [domain, arg] : llvm::zip_equal(tilingIterDomsOrder, tileSizeArgs)) {
+        // NB1: sizes[domain] is a Value/Attribute in the original module, so we
+        // need to copy it to the fixedModuleOp before we can use it there.
+        // NB2: as far as I can tell, it is almost always an attribute, except
+        // when called from fuseControlMaxSize/Producers, where it is an affine
+        // op, in which case we will try to evaluate its value in the first tile (ignoring offsets).
+        llvm::FailureOr<int64_t> maybeSize = computeIntAtZero(sizes[domain]);
+        if (failed(maybeSize))
+            return llvm::failure();
+
+        Value size = builder.create<arith::ConstantOp>(
+            funcOp->getLoc(), builder.getIntegerAttr(builder.getIndexType(), *maybeSize)
+        );
+
+        arg.replaceAllUsesWith(size);
+    }
+
+    return checkModuleFitsInMemory(fixedModuleOp);
+}
 
 // Return true if a length can be represented using the SDIM encoding in
 // Utils/Kernel.cpp without tripping the decomposeIntoTwoFactors() assert.
 // A "SDIM-friendly" length is either:
 //   * <= 0x7fff  – fits in a single SDIM counter, or
 //   * factorizable as a * b with a, b <= 0x7fff – can be encoded as two nested SDIM loops.
-static bool isSdimFriendlyCount(int64_t number) {
-    const int64_t kMaxFactor = 0x7fff;
+const int64_t kMaxFactor = 0x7fff;
+bool isSdimFriendlyCount(int64_t number) {
     if (number <= kMaxFactor)
         return true;
 
@@ -778,173 +649,167 @@ static bool isSdimFriendlyCount(int64_t number) {
 // are SDIM-friendly. This guarantees that addMemNdlDims() can always encode
 // both the main tiles and the tail tile without decomposeIntoTwoFactors()
 // ever returning {-1, -1}.
-bool isValidTileSize(int64_t originalSize, int64_t tileSize) {
+bool isValidTileSize(int64_t iterDomainSize, int64_t tileSize) {
     if (!isSdimFriendlyCount(tileSize))
         return false;
 
-    int64_t remainder = originalSize % tileSize;
+    int64_t remainder = iterDomainSize % tileSize;
     return (remainder == 0 || isSdimFriendlyCount(remainder));
 }
 
-// Binary-search for the largest tile size along a single dimension that fits in memory.
-// Precondition: the tile fits when sizes[dim] = div_ceil(originalSize, maxFactor),
-//               and does not fit when sizes[dim] = div_ceil(originalSize, minFactor).
-// Postcondition: sizes[dim] is set to the largest fitting tile size.
-static LogicalResult searchTileSizeForDim(
-    IRRewriter &rewriter, Operation *consumerOp, const SetVector<Operation *> &producerOps,
-    size_t availableMemoryBytes, MutableArrayRef<OpFoldResult> offsets,
-    MutableArrayRef<OpFoldResult> sizes, size_t dim, int64_t originalSize, int64_t minFactor,
-    int64_t maxFactor
+// Binary-search for the largest tile size along a single iteration domain that fits in memory.
+// Precondition: the tile fits when sizes[domain] = div_ceil(iterDomainSize, maxFactor),
+//               and does not fit when sizes[domain] = div_ceil(iterDomainSize, minFactor).
+// Postcondition: sizes[domain] is set to the largest fitting tile size.
+LogicalResult TileAndFusePass::searchTileSizeForDim(
+    IRRewriter &rewriter, ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder,
+    MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes, size_t domain,
+    int64_t iterDomainSize, int64_t minFactor, int64_t maxFactor
 ) {
+    // TODO(sflur): rethinking the whole search. benchmark an example with
+    // different tile sizes but the same factor and see if there's a difference.
+    // I suspect the size does matter.
+    // TODO(sflur): given the double div_ceil optimization below, the factor
+    // space is not linear, hence the binary search is not splitting it in half
+    // correctly in each step. The result is still valid, just could converge
+    // faster. There are only about 2*sqrt(iterDomainSize) effective factors,
+    // which optimally can reduce the search from log(iterDomainSize) to
+    // log(sqrt(iterDomainSize)).
+    // nth_factor(n) = if n <= sqrt(iterDomainSize) then n
+    //                 else iterDomainSize / (2*sqrt(iterDomainSize) - n)
+    // Now we can do a binary search over n between 1 and 2*sqrt(iterDomainSize).
+    // For each n we calculate midFactor = nth_factor(n).
     while (maxFactor != minFactor + 1) {
         int64_t midFactor = midpoint(minFactor, maxFactor);
-        sizes[dim] = rewriter.getIndexAttr(div_ceil(originalSize, midFactor));
-        auto tileFits = checkTileFitsInMemory(
-            rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
-        );
+        sizes[domain] = rewriter.getIndexAttr(div_ceil(iterDomainSize, midFactor));
+        llvm::FailureOr<bool> tileFits =
+            checkTileFitsInMemory(moduleOp, tilingIterDomsOrder, offsets, sizes);
         if (failed(tileFits))
             return LogicalResult::failure();
-        if (*tileFits)
-            maxFactor = midFactor;
-        else
-            minFactor = midFactor;
+        if (*tileFits) {
+            // At the very end of the file there's a proof that the assignment
+            // below is better than `maxFactor = midFactor`.
+            maxFactor = div_ceil(iterDomainSize, div_ceil(iterDomainSize, midFactor));
+        }
+        else {
+            // At the very end of the file there's a proof that the assignment
+            // below is better than `minFactor = midFacto`.
+            minFactor = div_ceil(iterDomainSize, div_ceil(iterDomainSize, midFactor) - 1) - 1;
+        }
     }
-    int64_t tileSize = div_ceil(originalSize, maxFactor);
-    tileSize = std::min(int64_t(0x7fff * 0x7fff), tileSize);
+
+    int64_t tileSize = div_ceil(iterDomainSize, maxFactor);
 
     // Adjust tileSize downwards until both the common tile size and the
     // remainder tile size are SDIM-friendly. This preserves the
     // memory-fit invariant because we only shrink the tile.
-    while (tileSize > 0 && !isValidTileSize(originalSize, tileSize)) {
-        --tileSize;
+    for (tileSize = std::min(int64_t(kMaxFactor * kMaxFactor), tileSize); tileSize > 0;
+         --tileSize) {
+        if (isValidTileSize(iterDomainSize, tileSize))
+            break;
     }
+    // isValidTileSize should always succeed for tileSize == 1
+    assert(tileSize > 0 && "failed to find SDIM-friendly tile size for domain");
 
-    assert(tileSize > 0 && "failed to find SDIM-friendly tile size for dimension");
+    sizes[domain] = rewriter.getIndexAttr(tileSize);
 
-    sizes[dim] = rewriter.getIndexAttr(tileSize);
     return LogicalResult::success();
 }
 
-// Return true iff sizes was changed (made smaller).
-// If the tile is not big enough, use binary search to find the biggest tile that fits in
-// availableMemoryBytes.
-llvm::FailureOr<bool> fitTileToMemory(
-    IRRewriter &rewriter, Operation *consumerOp, const SetVector<Operation *> &producerOps,
-    ArrayRef<int64_t> tilingDimOrder, size_t availableMemoryBytes, ArrayRef<int64_t> originalSizes,
+// Return true iff sizes was changed (made smaller). If the tile is not big
+// enough, use binary search to find the biggest tile that fits in memory.
+llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
+    Operation *consumerOp, const SetVector<Operation *> &producerOps,
+    ArrayRef<int64_t> tilingIterDomsOrder, ArrayRef<int64_t> iterDomainSizes,
     MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
 ) {
-    // First establish that the original tile is not big enough.
-    auto tileFits = checkTileFitsInMemory(
-        rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
+    ModuleOp moduleOp = extractOpsForMemoryCheck(
+        cast<TilingInterface>(consumerOp), tilingIterDomsOrder, producerOps
     );
-    if (failed(tileFits)) {
+    OpEraseGuard moduleEraseGuard(moduleOp);
+
+    if (failed(tileModuleForMemoryCheck(moduleOp, tilingIterDomsOrder, iterDomainSizes.size())))
+        return llvm::failure();
+
+    // First establish that the original tile is not big enough.
+    llvm::FailureOr<bool> tileFits =
+        checkTileFitsInMemory(moduleOp, tilingIterDomsOrder, offsets, sizes);
+    if (failed(tileFits))
         return LogicalResult::failure();
-    }
-    if (*tileFits) {
-        // ops fit in memory, no need to change the tile
+    if (*tileFits)
+        // fits in memory, no need to change the tile
         return false;
-    }
 
-    auto one = getAsIndexOpFoldResult(rewriter.getContext(), 1);
+    IRRewriter rewriter(moduleOp->getContext());
 
-    // Shrink pass: set dimensions to 1, one by one, until the tile fits.
-    size_t dimIndex;
-    for (dimIndex = 0; dimIndex < tilingDimOrder.size(); ++dimIndex) {
-        auto dim = tilingDimOrder[dimIndex];
-        if (*getConstantIntValue(sizes[dim]) == 1)
+    OpFoldResult one = getAsIndexOpFoldResult(rewriter.getContext(), 1);
+
+    // Shrink pass: set domains to 1, one by one, until the tile fits.
+    ArrayRef<int64_t>::iterator tilingDomainIter;
+    for (tilingDomainIter = tilingIterDomsOrder.begin();
+         tilingDomainIter != tilingIterDomsOrder.end(); ++tilingDomainIter) {
+        int64_t domain = *tilingDomainIter;
+        if (*getConstantIntValue(sizes[domain]) == 1)
             continue;
 
-        sizes[dim] = one;
-        tileFits = checkTileFitsInMemory(
-            rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
-        );
+        sizes[domain] = one;
+        tileFits = checkTileFitsInMemory(moduleOp, tilingIterDomsOrder, offsets, sizes);
         if (failed(tileFits))
             return LogicalResult::failure();
-        if (*tileFits) {
+        if (*tileFits)
             break;
-        }
     }
 
-    if (dimIndex == tilingDimOrder.size()) {
-        consumerOp->emitWarning("operation can't be tiled: no more dimensions to tile");
+    if (tilingDomainIter == tilingIterDomsOrder.end()) {
+        consumerOp->emitWarning("tile-and-fuse: operation can't be tiled: no more domains to tile");
+        LLVM_DEBUG(assert(false));
         return LogicalResult::failure();
     }
 
-    // Grow-back pass: inflate dimensions forced to 1 above back to larger tiles
+    // Grow-back pass: inflate domains forced to 1 above back to larger tiles
     // using binary search. Iterate in reverse from where the shrink pass stopped.
     do {
-        auto dim = tilingDimOrder[dimIndex];
-        if (originalSizes[dim] == 1)
+        int64_t domain = *tilingDomainIter;
+        if (iterDomainSizes[domain] == 1)
             continue;
 
-        sizes[dim] = rewriter.getIndexAttr(originalSizes[dim]);
-        tileFits = checkTileFitsInMemory(
-            rewriter, consumerOp, offsets, sizes, producerOps, availableMemoryBytes
-        );
+        sizes[domain] = rewriter.getIndexAttr(iterDomainSizes[domain]);
+        tileFits = checkTileFitsInMemory(moduleOp, tilingIterDomsOrder, offsets, sizes);
         if (failed(tileFits))
             return LogicalResult::failure();
         if (*tileFits)
             continue;
 
-        // We know `originalSizes[dim]` is too big (tested above), hence factor
-        // 1 = originalSizes[dim]/originalSizes[dim] is a good minimum, and we know
-        // sizes[dim] = 1 does fit, hence factor originalSizes[dim] = originalSizes[dim]/1
-        // is a good maximum.
+        // We know `iterDomainSizes[domain]` is too big (tested above), hence factor
+        // 1 = iterDomainSizes[domain]/iterDomainSizes[domain] is a good minimum, and we know
+        // sizes[domain] = 1 does fit, hence factor iterDomainSizes[domain] =
+        // iterDomainSizes[domain]/1 is a good maximum.
         if (failed(searchTileSizeForDim(
-                rewriter, consumerOp, producerOps, availableMemoryBytes, offsets, sizes, dim,
-                originalSizes[dim], /*minFactor=*/1, /*maxFactor=*/originalSizes[dim]
+                rewriter, moduleOp, tilingIterDomsOrder, offsets, sizes, domain,
+                iterDomainSizes[domain],
+                /*minFactor=*/1, /*maxFactor=*/iterDomainSizes[domain]
             )))
             return LogicalResult::failure();
-    } while (dimIndex-- > 0);
+    } while (tilingDomainIter-- != tilingIterDomsOrder.begin());
+    // NB: the tilingDimIter-- above goes passed the .begin() at the very end,
+    // which is not nice, and depending on the implementation of
+    // ArrayRef::iterator, could fail. The implementation is just a pointer, so
+    // this is ok (as long as we don't try to dereference it, which we don't).
 
     return true;
 }
 
-void replaceTiledOp(
-    IRRewriter &rewriter, Operation *op, const scf::SCFTileAndFuseResult &tiledResults
-) {
-    for (OpResult res : op->getResults()) {
-        if (auto replacement = tiledResults.replacements.lookup(res)) {
-            rewriter.replaceAllUsesWith(res, replacement);
-        }
-    }
-}
-
-void applyTiledResults(
-    IRRewriter &rewriter, Operation *op, scf::SCFTileAndFuseResult &tiledResults
-) {
-    // Replace the root with its tiled result
-    replaceTiledOp(rewriter, op, tiledResults);
-
-    // Mark root so we don't tile it's producers (as roots)
-    op->setAttr(TORQ_TILING_FUSED, rewriter.getBoolAttr(true));
-
-    for (auto prodOp : tiledResults.fusedProducers) {
-        // In general, fused producers can declare that they want to be
-        // yielded. Here we replace the original producers with the yielded
-        // result. In practice, we use the default fusion options, so no
-        // producers are yielded.
-        replaceTiledOp(rewriter, prodOp, tiledResults);
-
-        // Mark producers so we don't tile their producers (as roots)
-        prodOp->setAttr(TORQ_TILING_FUSED, rewriter.getBoolAttr(true));
-    }
-}
-
-std::tuple<bool, bool> fuseControlMaxSize(
-    IRRewriter &rewriter, int64_t availableMemoryBytes,
-    mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
+// an SCFTileAndFuseOptions::ControlFnTy for the max-size fuse mode.
+std::tuple<bool, bool> TileAndFusePass::fuseControlMaxSize(
+    IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
     bool isDestinationOperand
 ) {
-    const auto doNotFuse = std::make_tuple(false, false);
+    static const std::tuple<bool, bool> doNotFuse = std::make_tuple(false, false);
 
     Operation *producerOp = producerOpResult.getOwner();
-
     auto producerTi = dyn_cast<TilingInterface>(producerOp);
-    if (!producerTi) {
-        // Producer has no TilingInterface
+    if (!producerTi)
         return doNotFuse;
-    }
 
     // TODO: if producer has users outside of the tiling fuse group, maybe we should yield it?
     bool yieldProducerReplacement = false;
@@ -954,21 +819,47 @@ std::tuple<bool, bool> fuseControlMaxSize(
     //     return doNotFuse;
     // }
 
+    // Get the producer's operand tiles
     SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
     if (failed(producerTi.getIterationDomainTileFromResultTile(
             rewriter, producerOpResult.getResultNumber(), candidateSliceOp.getMixedOffsets(),
             candidateSliceOp.getMixedSizes(), mappedOffsets, mappedSizes
         ))) {
+        producerOp->emitWarning(
+            "tile-and-fuse: failed to compute producer's operand slices, skipping producer."
+        );
+        LLVM_DEBUG(assert(false));
         return doNotFuse;
     }
 
-    if (!isMarkedFuseGroup(producerOp)) {
-        // Not part of a pattern-fuse-group; there are no restrictions on the dimensions.
+    auto [iterOffsets, iterSizes, iterStrides] =
+        getOffsetsSizesAndStrides(producerTi.getIterationDomain(rewriter));
 
-        auto producerFits = checkTileFitsInMemory(
-            rewriter, producerOp, mappedOffsets, mappedSizes, {}, availableMemoryBytes
+    assert(
+        mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
+    );
+
+    if (!isMarkedFuseGroup(producerOp)) {
+        // Not part of a pattern-fuse-group; there are no restrictions on the domains.
+
+        llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder =
+            getTilingIterDomainsOrder(producerTi);
+
+        ModuleOp moduleOp = extractOpsForMemoryCheck(producerTi, tilingIterDomsOrder.getArrayRef());
+        OpEraseGuard moduleEraseGuard(moduleOp);
+        if (failed(tileModuleForMemoryCheck(
+                moduleOp, tilingIterDomsOrder.getArrayRef(), iterSizes.size()
+            )))
+            assert(false && "failed to compute producer's tiled memory size");
+
+        llvm::FailureOr<bool> producerFits = checkTileFitsInMemory(
+            moduleOp, tilingIterDomsOrder.getArrayRef(), mappedOffsets, mappedSizes
         );
         if (failed(producerFits)) {
+            producerOp->emitWarning(
+                "tile-and-fuse: failed to check if tiled producer overflows, skipping producer."
+            );
+            LLVM_DEBUG(assert(false));
             return doNotFuse;
         }
 
@@ -982,28 +873,30 @@ std::tuple<bool, bool> fuseControlMaxSize(
         return std::make_tuple(true, yieldProducerReplacement);
     }
 
-    // The dimensions the producer can be tiled over
-    auto dimOrder = getTilingDimOrder(producerTi);
-    llvm::SmallSetVector<int64_t, 4> tilingDims{dimOrder.begin(), dimOrder.end()};
+    llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(producerTi);
 
-    auto [iterOffsets, iterSizes, iterStrides] =
-        getOffsetsSizesAndStrides(producerTi.getIterationDomain(rewriter));
-
-    assert(
-        mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
-    );
-
-    // Don't fuse if we are tiling a dimension the producer can not be tiled over
+    // The domains the producer can be tiled over
+    // Don't fuse if we are tiling a domain the producer's fuse group can not be tiled over
     for (size_t index = 0; index < iterSizes.size(); ++index) {
-        if (mappedSizes[index] != iterSizes[index] && !tilingDims.contains(index)) {
+        if (mappedSizes[index] != iterSizes[index] && !tilingIterDomsOrder.contains(index)) {
             return doNotFuse;
         }
     }
 
-    auto producerFuseGroupFits = checkTileFitsInMemory(
-        rewriter, producerOp, mappedOffsets, mappedSizes, {}, availableMemoryBytes
+    ModuleOp moduleOp = extractOpsForMemoryCheck(producerTi, tilingIterDomsOrder.getArrayRef());
+    OpEraseGuard moduleEraseGuard(moduleOp);
+    if (failed(
+            tileModuleForMemoryCheck(moduleOp, tilingIterDomsOrder.getArrayRef(), iterSizes.size())
+        ))
+        assert(false && "failed to compute producer's tiled memory size");
+
+    llvm::FailureOr<bool> producerFuseGroupFits = checkTileFitsInMemory(
+        moduleOp, tilingIterDomsOrder.getArrayRef(), mappedOffsets, mappedSizes
     );
     if (failed(producerFuseGroupFits)) {
+        producerOp->emitWarning("tile-and-fuse: failed to check if tiled (pattern-fuse-group) "
+                                "producers overflows, skipping producer.");
+        LLVM_DEBUG(assert(false));
         return doNotFuse;
     }
 
@@ -1011,19 +904,17 @@ std::tuple<bool, bool> fuseControlMaxSize(
     return std::make_tuple(*producerFuseGroupFits, yieldProducerReplacement);
 }
 
+// an SCFTileAndFuseOptions::ControlFnTy for the max-producers fuse mode.
 std::tuple<bool, bool> fuseControlMaxProducers(
     IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
     bool isDestinationOperand
 ) {
-    const auto doNotFuse = std::make_tuple(false, false);
+    static const std::tuple<bool, bool> doNotFuse = std::make_tuple(false, false);
 
     Operation *producerOp = producerOpResult.getOwner();
-
     auto producerTi = dyn_cast<TilingInterface>(producerOp);
-    if (!producerTi) {
-        // Producer has no TilingInterface
+    if (!producerTi)
         return doNotFuse;
-    }
 
     // TODO: if producer has users outside of the tiling fuse group, maybe we should yield it?
     bool yieldProducerReplacement = false;
@@ -1033,12 +924,12 @@ std::tuple<bool, bool> fuseControlMaxProducers(
     //     return doNotFuse;
     // }
 
-    // From here on we check if the producer can be tiled on the dimensions that
+    // From here on we check if the producer can be tiled on the domains that
     // are being tiled. The first element in the return tuple indicates if the
     // producer should be fused (true) or not (false).
 
     if (!isMarkedFuseGroup(producerOp)) {
-        // Not part of a pattern-fuse-group; there are no restrictions on the dimensions.
+        // Not part of a pattern-fuse-group; there are no restrictions on the domains.
         return std::make_tuple(true, yieldProducerReplacement);
     }
 
@@ -1048,15 +939,18 @@ std::tuple<bool, bool> fuseControlMaxProducers(
         return std::make_tuple(true, yieldProducerReplacement);
     }
 
-    // The dimensions the producer can be tiled over
-    auto dimOrder = getTilingDimOrder(producerTi);
-    llvm::SmallSetVector<int64_t, 4> tilingDims{dimOrder.begin(), dimOrder.end()};
+    // The domains the producer can be tiled over
+    llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(producerTi);
 
     SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
     if (failed(producerTi.getIterationDomainTileFromResultTile(
             rewriter, producerOpResult.getResultNumber(), candidateSliceOp.getMixedOffsets(),
             candidateSliceOp.getMixedSizes(), mappedOffsets, mappedSizes
         ))) {
+        producerOp->emitWarning(
+            "tile-and-fuse: failed to compute producer's operand slices, skipping producer."
+        );
+        LLVM_DEBUG(assert(false));
         return doNotFuse;
     }
 
@@ -1067,10 +961,15 @@ std::tuple<bool, bool> fuseControlMaxProducers(
         mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
     );
 
-    // Don't fuse if we are tiling a dimension the producer can not be tiled over
+    // Don't fuse if we are tiling a domain the producer can not be tiled over
     for (size_t index = 0; index < iterSizes.size(); ++index) {
         if (getConstantIntValue(mappedSizes[index]) != getConstantIntValue(iterSizes[index]) &&
-            !tilingDims.contains(index)) {
+            !tilingIterDomsOrder.contains(index)) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "Do not fuse (can not be tiled over domain " << index << ", "
+                             << mappedSizes[index] << " != " << iterSizes[index]
+                             << "): " << producerOp->getName() << "\n";
+            });
             return doNotFuse;
         }
     }
@@ -1079,35 +978,28 @@ std::tuple<bool, bool> fuseControlMaxProducers(
     return std::make_tuple(true, yieldProducerReplacement);
 }
 
-FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
-    IRRewriter &rewriter, TilingInterface tilingInterfaceOp, int64_t availableMemoryBytes,
-    llvm::ArrayRef<OpFoldResult> completeIterSizes, ArrayRef<OpFoldResult> tileIterSizes,
+FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
+    IRRewriter &rewriter, TilingInterface tilingInterfaceOp,
+    llvm::ArrayRef<OpFoldResult> iterDomainSizes, SmallVector<OpFoldResult> tileSizes,
     TileAndFuseProducersFuseMode fuseMode
 ) {
-    // set dimensions that are not being tiled to 0 (and convert to int64_t).
-    SmallVector<int64_t> tileSizes(completeIterSizes.size(), 0);
-    for (size_t i = 0; i < completeIterSizes.size(); ++i) {
-        auto iterSize = getConstantIntValue(completeIterSizes[i]);
-        auto tileSize = getConstantIntValue(tileIterSizes[i]);
-        if (*tileSize != *iterSize) {
-            tileSizes[i] = *tileSize;
-        }
+    // set domains that are not being tiled to 0
+    OpFoldResult zero = getAsIndexOpFoldResult(&getContext(), 0);
+    for (auto &&[iterDomainSize, tileSize] : llvm::zip_equal(iterDomainSizes, tileSizes)) {
+        if (iterDomainSize == tileSize)
+            tileSize = zero;
     }
 
     LLVM_DEBUG({
-        llvm::dbgs() << "tile sizes: ";
-        llvm::ListSeparator LSCross("x");
-        for (auto d : tileSizes) {
-            llvm::dbgs() << LSCross << d;
-        }
+        llvm::dbgs() << "  tile sizes: ";
+        llvm::interleave(*getConstantIntValues(tileSizes), llvm::dbgs(), "x");
         llvm::dbgs() << "\n";
     });
 
-    auto maybePatternFuseGroup = isFuseGroupOutput(tilingInterfaceOp);
-
     scf::SCFTileAndFuseOptions options{};
-    // Consider using setSCFTileSizes from iree/compiler/Codegen/Utils/Utils.h
-    options.tilingOptions.setTileSizes(getAsIndexOpFoldResult(rewriter.getContext(), tileSizes));
+    options.tilingOptions.setTileSizes(tileSizes);
+
+    std::optional<int64_t> maybePatternFuseGroup = isFuseGroupOutput(tilingInterfaceOp);
 
     scf::SCFTileAndFuseOptions::ControlFnTy fusionControlFn;
     switch (fuseMode) {
@@ -1115,8 +1007,7 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
         fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                               OpResult producerOpResult, bool isDestinationOperand) {
             return fuseControlMaxSize(
-                rewriter, availableMemoryBytes, candidateSliceOp, producerOpResult,
-                isDestinationOperand
+                rewriter, candidateSliceOp, producerOpResult, isDestinationOperand
             );
         };
         break;
@@ -1131,8 +1022,10 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
         break;
 
     case TileAndFuseProducersFuseMode::OnlyPatterns:
-        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
-                              OpResult producerOpResult, bool isDestinationOperand) {
+        fusionControlFn = [maybePatternFuseGroup](
+                              mlir::tensor::ExtractSliceOp candidateSliceOp,
+                              OpResult producerOpResult, bool isDestinationOperand
+                          ) {
             bool shouldFuse =
                 maybePatternFuseGroup && isMarkedFuseGroup(producerOpResult.getOwner());
             return std::make_tuple(shouldFuse, false);
@@ -1140,9 +1033,9 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
         break;
 
     case TileAndFuseProducersFuseMode::NoFuse:
-        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
-                              OpResult producerOpResult,
-                              bool isDestinationOperand) { return std::make_tuple(false, false); };
+        fusionControlFn = [](mlir::tensor::ExtractSliceOp candidateSliceOp,
+                             OpResult producerOpResult,
+                             bool isDestinationOperand) { return std::make_tuple(false, false); };
     }
 
     options.setFusionControlFn(fusionControlFn);
@@ -1150,122 +1043,147 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
     return scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp, options);
 }
 
-void tileAndFuse(MLIRContext *context, Operation *op) {
-    // Check if it was already fused as a producer
-    if (op->getAttrOfType<BoolAttr>(TORQ_TILING_FUSED)) {
+void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
+    // Check if we already tiled tiOp (as producer)
+    if (untiledTiledOps_.contains(tiOp))
         return;
-    }
 
-    // For fuse-groups, we only tile from the bottom most op
-    if (isMarkedFuseGroup(op) && !isFuseGroupOutput(op)) {
+    // For pattern-fuse-groups, we only tile from the bottom most op, to make
+    // sure the whole group is tiled together.
+    if (isMarkedFuseGroup(tiOp) && !isFuseGroupOutput(tiOp))
         return;
-    }
 
-    IRRewriter rewriter(context);
+    // Check if tiOp already fits in memory.
+    {
+        ModuleOp moduleOp = extractOpsForMemoryCheck(tiOp);
+        OpEraseGuard moduleEraseGuard(moduleOp);
+        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(moduleOp);
+        if (failed(opFitsInMemory)) {
+            tiOp->emitWarning(
+                "tile-and-fuse: initial memory overflow check failed, skipping this operation."
+            );
+            LLVM_DEBUG(assert(false));
+            return;
+        }
 
-    int64_t availableMemoryBytes = TorqHw::get().getAvailableMemoryForTiling();
-
-    auto tilingInterfaceOp = cast<TilingInterface>(op);
-    assert(tilingInterfaceOp && "operation not implementing TilingInterface");
-
-    auto [iterOffsets, iterSizes, iterStrides] =
-        getOffsetsSizesAndStrides(tilingInterfaceOp.getIterationDomain(rewriter));
-
-    auto iterIntSizes = getConstantIntValues(iterSizes);
-    if (!iterIntSizes) {
-        tilingInterfaceOp.emitError("iteration domain sizes are not constants");
-        return;
-    }
-
-    SmallVector<OpFoldResult> tileOffsets(iterOffsets), tileSizes(iterSizes);
-
-    // Get the order in which we should tile the dimensions.
-    SmallVector<int64_t> tilingDimOrder = getTilingDimOrder(tilingInterfaceOp);
-
-    // Find a tile that can fit op, starting from tileSizes.
-    auto tileChanged = fitTileToMemory(
-        rewriter, op, {}, tilingDimOrder, availableMemoryBytes, *iterIntSizes, tileOffsets,
-        tileSizes
-    );
-    if (failed(tileChanged)) {
-        op->emitError("failed to find a tile size for op");
-        return;
-    }
-
-    // If the original tileSizes fits, there's no need to tile.
-    if (!*tileChanged) {
-        return;
+        if (*opFitsInMemory)
+            return;
     }
 
     LLVM_DEBUG({
-        llvm::dbgs() << op->getName() << " needs to be tiled\n";
-        llvm::dbgs() << "  " << availableMemoryBytes << " bytes of available memory for tiling\n";
+        llvm::dbgs() << tiOp->getName() << " needs to be tiled\n";
+        llvm::dbgs() << "  " << TorqHw::get().getAvailableMemoryForTiling()
+                     << " bytes of available memory for tiling\n";
 
-        if (auto groupId = op->getAttr(TORQ_FUSE_GROUP_ID)) {
+        if (Attribute groupId = tiOp->getAttr(TORQ_FUSE_GROUP_ID)) {
             llvm::dbgs() << "  " << TORQ_FUSE_GROUP_ID << ": " << getConstantIntValue(groupId)
                          << "\n";
-            if (isMarkedFuseGroup(op)) {
-                auto principalOp = getFuseGroupPrincipalOpBackward(op);
+            if (isMarkedFuseGroup(tiOp)) {
+                Operation *principalOp = getFuseGroupPrincipalOpBackward(tiOp);
                 llvm::dbgs() << "  principal op: " << principalOp->getName() << "\n";
-                auto fuseGroup = principalOp->getAttr(TORQ_FUSE_GROUP_ID);
+                Attribute fuseGroup = principalOp->getAttr(TORQ_FUSE_GROUP_ID);
                 llvm::dbgs() << "  " << TORQ_FUSE_GROUP << ": " << getConstantIntValue(fuseGroup)
                              << "\n";
             }
         }
-
-        llvm::dbgs() << "  iteration sizes: ";
-        llvm::ListSeparator LSCross("x");
-        for (auto size : iterSizes) {
-            llvm::dbgs() << LSCross << getConstantIntValue(size);
-        }
-        llvm::dbgs() << "\n";
-
-        llvm::dbgs() << "  iteration types: ";
-        llvm::ListSeparator LS;
-        for (auto iterType : tilingInterfaceOp.getLoopIteratorTypes()) {
-            llvm::dbgs() << LS << iterType;
-        }
-        llvm::dbgs() << "\n";
     });
 
-    FailureOr<scf::SCFTileAndFuseResult> tiledResults = tileAndFuseToSize(
-        rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes,
-        clTorqTileAndFuseProducersFuseMode.getValue()
-    );
-    if (failed(tiledResults)) {
-        op->emitError("tile and fuse failed");
+    IRRewriter rewriter(&getContext());
+
+    // The untiled domain sizes
+    auto [iterDomainOffsets, iterDomainSizes, iterDomainStrides] =
+        getOffsetsSizesAndStrides(tiOp.getIterationDomain(rewriter));
+
+    std::optional<SmallVector<int64_t>> iterDomainConstSizes =
+        getConstantIntValues(iterDomainSizes);
+    if (!iterDomainConstSizes) {
+        tiOp->emitWarning(
+            "tile-and-fuse: iteration domain sizes are not constants, skipping this operation."
+        );
+        LLVM_DEBUG(assert(false));
         return;
     }
 
+    // Will hold the new tile size
+    SmallVector<OpFoldResult> tileOffsets(iterDomainOffsets), tileSizes(iterDomainSizes);
+
+    // Get the order in which we should tile the domains.
+    llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(tiOp);
+
+    // Find a tile size that fits tiOp in memory (no producers, except for the
+    // required pattern-fuse-group members)
+    llvm::FailureOr<bool> tileChanged = fitTileToMemory(
+        tiOp, {}, tilingIterDomsOrder.getArrayRef(), *iterDomainConstSizes, tileOffsets, tileSizes
+    );
+    if (failed(tileChanged)) {
+        tiOp->emitWarning("tile-and-fuse: failed to tile an operation, skipping it");
+        LLVM_DEBUG(assert(false));
+        return;
+    }
+
+    assert(*tileChanged && "untiled op does not fit in memory but tiling to a single tile does");
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "  iteration sizes: ";
+        llvm::interleave(*getConstantIntValues(iterDomainSizes), llvm::dbgs(), "X");
+        llvm::dbgs() << "\n";
+
+        llvm::dbgs() << "  iteration types: ";
+        llvm::interleave(tiOp.getLoopIteratorTypes(), llvm::dbgs(), ", ");
+        llvm::dbgs() << "\n";
+    });
+
+    // Do the actual tiling (might need to do it again later)!
+    FailureOr<scf::SCFTileAndFuseResult> tiledResults = tileAndFuseToSize(
+        rewriter, tiOp, iterDomainSizes, tileSizes, clTorqTileAndFuseProducersFuseMode.getValue()
+    );
+    if (failed(tiledResults)) {
+        tiOp->emitWarning("tile-and-fuse: failed to tile operation, skipping it.");
+        LLVM_DEBUG(assert(false));
+        return;
+    }
+
+    // In MaxProducers mode, we readjust the tile sizes to fit all the producers.
     if (clTorqTileAndFuseProducersFuseMode.getValue() ==
         TileAndFuseProducersFuseMode::MaxProducers) {
-        SmallVector<OpFoldResult> fitTileOffsets(tileOffsets), fitTileSizes(tileSizes);
+
+        // Will hold the new tile size
+        SmallVector<OpFoldResult> producersTileOffsets(tileOffsets), producersTileSizes(tileSizes);
 
         // Now that we know which producers were fused, find a tile that fits them too.
-        tileChanged = fitTileToMemory(
-            rewriter, op, tiledResults->fusedProducers, tilingDimOrder, availableMemoryBytes,
-            *iterIntSizes, fitTileOffsets, fitTileSizes
+        llvm::FailureOr<bool> tileChanged = fitTileToMemory(
+            tiOp, tiledResults->fusedProducers, tilingIterDomsOrder.getArrayRef(),
+            *iterDomainConstSizes, producersTileOffsets, producersTileSizes
         );
         if (failed(tileChanged)) {
+            // Fall back to MaxSize
+            // This can happen if one of the producers does not tile well over
+            // the domains that the consumer dictates. A better solution will
+            // be to find the problematic producers and not fuse them, if
+            // possible, and only if that does not work fall back to MaxSize.
+            // The problem is to identify the culprits. We could add to
+            // fuseControlMaxProducers a check that the producer can be tiled to
+            // a 1x1x.. tile (over all the domains in tilingIterDomsOrder) before
+            // fusing it.
             tiledResults = tileAndFuseToSize(
-                rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, tileSizes,
-                TileAndFuseProducersFuseMode::MaxProducers
+                rewriter, tiOp, iterDomainSizes, tileSizes, TileAndFuseProducersFuseMode::MaxSize
             );
             if (failed(tiledResults)) {
-                op->emitError("tile and fuse failed");
-                assert(false);
+                tiOp->emitWarning("tile-and-fuse: failed to tile operation, skipping it.");
+                LLVM_DEBUG(assert(false));
                 return;
             }
         }
         else if (*tileChanged) {
-            // The second fitTileToMemory returned a smaller tile.
-
+            // Producers required a smaller tile, do the actual tiling one more
+            // time (the previous one will be discarded by canonicalize).
             tiledResults = tileAndFuseToSize(
-                rewriter, tilingInterfaceOp, availableMemoryBytes, iterSizes, fitTileSizes,
+                rewriter, tiOp, iterDomainSizes, producersTileSizes,
                 clTorqTileAndFuseProducersFuseMode.getValue()
             );
             if (failed(tiledResults)) {
-                op->emitError("tile and fuse failed");
+                tiOp->emitError("tile-and-fuse: failed to tile operation, skipping it.");
+                LLVM_DEBUG(assert(false));
                 return;
             }
         }
@@ -1273,23 +1191,60 @@ void tileAndFuse(MLIRContext *context, Operation *op) {
 
     LLVM_DEBUG({
         llvm::dbgs() << "  fused " << tiledResults->fusedProducers.size() << " producers\n";
+        for (Operation *producerOp : tiledResults->fusedProducers) {
+            llvm::dbgs() << "  | " << producerOp->getName() << "\n";
+        }
     });
 
-    applyTiledResults(rewriter, op, *tiledResults);
+    // Replace the untiled tiOp with the tiled results.
+    applyTiledResults(rewriter, tiOp, *tiledResults);
+
+    LLVM_DEBUG({
+        // Check if the tiled and fused loop fits in memory
+
+        Operation *tiledOp = nullptr;
+        for (OpResult res : tiOp->getResults()) {
+            if (Value replacement = tiledResults->replacements.lookup(res)) {
+                tiledOp = replacement.getDefiningOp();
+                break;
+            }
+        }
+        assert(tiledOp);
+
+        ModuleOp moduleOp = extractOpsForMemoryCheck(tiledOp);
+        OpEraseGuard moduleEraseGuard(moduleOp);
+
+        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(moduleOp);
+        assert(succeeded(opFitsInMemory));
+        assert(*opFitsInMemory);
+    });
+
+    untiledTiledOps_.insert(tiOp);
+    llvm::set_union(untiledTiledOps_, tiledResults->fusedProducers);
 }
 
 void TileAndFusePass::runOnOperation() {
-    auto funcOp = getOperation();
-    MLIRContext *context = &getContext();
+    LLVM_DEBUG(llvm::dbgs() << "Tile and Fuse - START\n");
 
-    SmallVector<Operation *> orderTi;
-    orderTiOps(funcOp, orderTi);
+    FunctionOpInterface funcOp = getOperation();
 
-    for (auto *op : orderTi) {
-        tileAndFuse(context, op);
+    // Walk on all the TilingInterface ops in the function, in reverse order of
+    // appearance. This guarantees that when we tile an op, we have already
+    // considered all its users.
+    // NB: Since tileAndFuse mutates the IR, we can't call it directly from the
+    // walk. We first construct a queue, and than iterate over it.
+    SmallVector<TilingInterface> orderTi;
+    funcOp.walk<WalkOrder::PostOrder, ReverseIterator>([&](TilingInterface tiOp) {
+        orderTi.push_back(tiOp);
+    });
+
+    untiledTiledOps_.reserve(orderTi.size());
+
+    for (TilingInterface tiOp : orderTi) {
+        tileAndFuse(tiOp);
     }
 
-    LLVM_DEBUG({ llvm::dbgs() << "Tile and Fuse - DONE\n"; });
+    LLVM_DEBUG(llvm::dbgs() << "Tile and Fuse - DONE\n");
 }
 
 } // namespace
@@ -1299,3 +1254,68 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass() {
 }
 
 } // namespace mlir::syna::torq
+
+// A quick explanation for the optimizations in TileAndFusePass::searchTileSizeForDim
+//
+// Explaining why `maxFactor = div_ceil(iterDomainSize, div_ceil(iterDomainSize, midFactor))` is
+// safe.
+//
+// We need to show:
+// 1. That the new maxFactor results in the same tile size as midFactor, which
+//    we already checked and found to fit in memory.
+//    That is, we need to show `div_ceil(iterDomainSize, maxFactor) == div_ceil(iterDomainSize,
+//    midFactor)`, where maxFactor is the double div_ceil.
+//
+// 2. And, `maxFactor <= midFactor`, so the binary search will converge (and
+//    because in most cases the inequality is actually strict, we get a faster
+//    convergence, but we don't show this here).
+//
+// From here on everything is in math semantics. In particular "/" means
+// division over real numbers (i.e. no rounding), and "=" means equality (not assignment).
+//
+// Lemma: for every natural numbers a,b,c,d, if ceil(a / b) = c and ceil(a / c) = d then d <= b
+// Proof: a / b <= ceil(a / b) = c  ==>  a <= c*b
+//        d = ceil(a / c) <= ceil(c*b / c) = b  ==>  d <= b
+//
+// To prove 1 and 2 above, we first rewrite things like this:
+//   midSize = ceil(iterDomainSize / midFactor)
+//   maxFactor = ceil(iterDomainSize / midSize)
+//   maxSize = ceil(iterDomainSize / maxFactor)
+//
+// The proof of 2 is immediate from the lemma, where a=iterDomainSize, b=midFactor, c=midSize, and
+// d=maxFactor.
+//
+// To prove 1 we need to show midSize == maxSize, which we will do by showing midSize <= maxSize,
+// and midSize >= maxSize. The latter is just another application of the lemma where
+// a=iterDomainSize, b=midSize, c=maxFactor, and d=maxSize. And the former:
+//   maxFactor <= midFactor  ==>  ceil(iterDomainSize / maxFactor) >= ceil(iterDomainSize /
+//   midFactor)  ==>  maxSize >= midSize
+
+// Explaining why `minFactor = div_ceil(iterDomainSize, div_ceil(iterDomainSize, midFactor) - 1) -1`
+// is safe.
+//
+// From here on everything is in math semantics.
+//
+// We rewrite things like this:
+//   midSize = ceil(iterDomainSize / midFactor)
+//   midSize' = ceil(iterDomainSize / midFactor) - 1
+//   minFactor = ceil(iterDomainSize / midSize') - 1
+//   minSize = ceil(iterDomainSize / minFactor)
+//   Note that: minSize - 1 = ceil(iterDomainSize / minFactor) - 1
+//
+// We need to show:
+// 1. midSize = minSize
+// 2. midFactor <= minFactor
+//
+// Lemma: for every natural numbers a,b,c,d, if ceil(a / b) - 1 = c, and ceil(a / c) - 1 = d, then d
+// >= b Proof: a / b + 1 - 1 > ceil(a / b) - 1 = c  ==>  a > b*c
+//        d = ceil(a / c) - 1 > ceil(b*c / c) - 1 = b - 1  ==> d >= b
+//
+// The proof of 2 is immediate from the lemma.
+//
+// To prove 1 we need to show midSize == minSize, which we will do by showing minSize >= midSize,
+// and minSize <= midSize. An application of the lemma gives us:
+//   minSize - 1 >= midSize'  ==>  minSize - 1 >= midSize - 1  ==>  minSize >= midSize.
+// And:
+//   minFactor >= midFactor  ==>  ceil(iterDomainSize / minFactor) <= ceil(iterDomainSize /
+//   midFactor)  ==>  minSize <= midSize

@@ -36,15 +36,9 @@ using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
+const std::string OUT_OF_MEMORY_MESSAGE = "failed to allocate LRAM addresses";
+
 namespace {
-
-class AssignAddressesPass : public AssignAddressesBase<AssignAddressesPass> {
-  public:
-    AssignAddressesPass() = default;
-    AssignAddressesPass(const AssignAddressesPass &pass) {}
-
-    void runOnOperation() override;
-};
 
 // check if we peak memory usage exceeds the pool size before ever trying to find addresses
 // (we may later fail allocation even if peak usage is below the pool size)
@@ -462,49 +456,75 @@ static void moveXramDeallocToBack(FunctionOpInterface funcOp) {
     }
 }
 
-void AssignAddressesPass::runOnOperation() {
-    auto funcOp = getOperation();
+class AssignLramAddressesPass : public AssignLramAddressesBase<AssignLramAddressesPass> {
+  public:
+    AssignLramAddressesPass() = default;
+    AssignLramAddressesPass(const AssignLramAddressesPass &pass) {}
 
-    if (failed(allocateLramAddresses(funcOp))) {
-        llvm::errs() << "Failed to allocate LRAM addresses\n";
-        return signalPassFailure();
+    // TODO(sflur): except for the emitError below, that tile-and-fuse expects,
+    // this pass should not report errors that tile-and-fuse can not suppress.
+    // Those will appear to the user as real errors, when tile-and-fuse is
+    // looking for the right tile size (so they are not real errors).
+    void runOnOperation() override {
+        auto funcOp = getOperation();
+
+        if (failed(allocateLramAddresses(funcOp))) {
+            // TileAndFusePass relies on this message to identify memory overflow
+            funcOp->emitError() << OUT_OF_MEMORY_MESSAGE;
+            return signalPassFailure();
+        }
     }
+};
 
-    Pool dtcmPool(HwInfo::dtcm_size - HwInfo::css_stack_size, 0, 4);
+class AssignDtcmItcmXramAddressesPass
+    : public AssignDtcmItcmXramAddressesBase<AssignDtcmItcmXramAddressesPass> {
+  public:
+    AssignDtcmItcmXramAddressesPass() = default;
+    AssignDtcmItcmXramAddressesPass(const AssignDtcmItcmXramAddressesPass &pass) {}
 
-    if (failed(allocateAddresses(funcOp, dtcmPool, syna::torq_hl::MemorySpace::Dtcm))) {
-        llvm::errs() << "Failed to allocate DTCM addresses\n";
-        return signalPassFailure();
+    void runOnOperation() override {
+        auto funcOp = getOperation();
+
+        Pool dtcmPool(HwInfo::dtcm_size - HwInfo::css_stack_size, 0, 4);
+
+        if (failed(allocateAddresses(funcOp, dtcmPool, syna::torq_hl::MemorySpace::Dtcm))) {
+            llvm::errs() << "Failed to allocate DTCM addresses\n";
+            return signalPassFailure();
+        }
+
+        // FIXME: here we all allocations to be at the begining of the pool
+        // so that we end up using only address 0 for the ITCM which is the
+        // only addrees where the compiled dispatches can currently run
+        Pool itcmPool(HwInfo::itcm_size, 0, 4, 8 * 1024);
+
+        if (failed(allocateAddresses(funcOp, itcmPool, syna::torq_hl::MemorySpace::Itcm))) {
+            llvm::errs() << "Failed to allocate ITCM addresses\n";
+            return signalPassFailure();
+        };
+
+        // move all XRAM allocations to the front to avoid having allocations
+        // during the execution
+        moveXramAllocationsToFront(funcOp);
+
+        // move all XRAM deallocations to the back to avoid having deallocations
+        // during the execution
+        moveXramDeallocToBack(funcOp);
+
+        if (failed(allocateXramAddresses(funcOp))) {
+            llvm::errs() << "Failed to allocate XRAM addresses\n";
+            return signalPassFailure();
+        }
     }
-
-    // FIXME: here we all allocations to be at the begining of the pool
-    // so that we end up using only address 0 for the ITCM which is the
-    // only addrees where the compiled dispatches can currently run
-    Pool itcmPool(HwInfo::itcm_size, 0, 4, 8 * 1024);
-
-    if (failed(allocateAddresses(funcOp, itcmPool, syna::torq_hl::MemorySpace::Itcm))) {
-        llvm::errs() << "Failed to allocate ITCM addresses\n";
-        return signalPassFailure();
-    };
-
-    // move all XRAM allocations to the front to avoid having allocations
-    // during the execution
-    moveXramAllocationsToFront(funcOp);
-
-    // move all XRAM deallocations to the back to avoid having deallocations
-    // during the execution
-    moveXramDeallocToBack(funcOp);
-
-    if (failed(allocateXramAddresses(funcOp))) {
-        llvm::errs() << "Failed to allocate XRAM addresses\n";
-        return signalPassFailure();
-    };
-}
+};
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignAddressesPass() {
-    return std::make_unique<AssignAddressesPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignLramAddressesPass() {
+    return std::make_unique<AssignLramAddressesPass>();
+}
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignDtcmItcmXramAddressesPass() {
+    return std::make_unique<AssignDtcmItcmXramAddressesPass>();
 }
 
 } // namespace mlir::syna::torq

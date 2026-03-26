@@ -141,6 +141,9 @@ getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, Value result);
 // Return true iff op is already marked as part of a fuse group.
 bool isMarkedFuseGroup(Operation *op);
 
+// Return true iff op1 and op2 share at least one fuse group.
+bool checkShareFuseGroup(Operation *op1, Operation *op2);
+
 // If op is the bottom most operation of a fuse group, return the id of that group,
 // otherwise return std::nullopt.
 std::optional<int64_t> isFuseGroupOutput(Operation *op);

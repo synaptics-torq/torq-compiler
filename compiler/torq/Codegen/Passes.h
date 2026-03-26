@@ -12,6 +12,10 @@
 
 namespace mlir::syna::torq {
 
+// This message is emitted by AssignLramAddressesPass and recognized by
+// TileAndFusePass as an indicating that a smaller tile is needed.
+extern const std::string OUT_OF_MEMORY_MESSAGE;
+
 //===---------------------------------------------------------------------===//
 // TORQ passes
 //===---------------------------------------------------------------------===//
@@ -28,7 +32,9 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createMapBindingsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerArithConstantsPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignAddressesPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignLramAddressesPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignDtcmItcmXramAddressesPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOutlineSliceProgramsPass();
 
@@ -103,6 +109,8 @@ void addTorqComprehensiveBufferizePasses(
 );
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkHostExecutorPass();
+
+void addPassesPostTileAndFuseUpToAssignLramAddresses(OpPassManager &pipeline);
 
 //----------------------------------------------------------------------------//
 // Registration

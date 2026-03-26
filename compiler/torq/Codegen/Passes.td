@@ -247,12 +247,26 @@ def ResolveInvocationArguments :
 
 }
 
-def AssignAddresses :
-    InterfacePass<"torq-assign-addresses",
+def AssignLramAddresses :
+    InterfacePass<"torq-assign-lram-addresses",
          "mlir::FunctionOpInterface"> {
-  let summary = "Assign an addresses to all ops that declare regions in memory (torq_hl::AllocOp, arith::ConstantOp, etc.)";
+  let summary = "Assign addresses to all ops that declare regions in LRAM";
   let constructor =
-      "mlir::syna::torq::createAssignAddressesPass()";
+      "mlir::syna::torq::createAssignLramAddressesPass()";
+
+  let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect",
+        "bufferization::BufferizationDialect"
+    ];
+
+}
+
+def AssignDtcmItcmXramAddresses :
+    InterfacePass<"torq-assign-dtcm-itcm-xram-addresses",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Assign addresses to all ops that declare regions in DTCM, ITCM, and XRAM";
+  let constructor =
+      "mlir::syna::torq::createAssignDtcmItcmXramAddressesPass()";
 
   let dependentDialects = [
         "syna::torq_hl::TorqHLDialect",

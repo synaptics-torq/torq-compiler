@@ -51,8 +51,10 @@ void setCompileTimeConstAttr(Operation *op) {
                 auto bArg = dyn_cast<BlockArgument>(operand);
                 if (bArg) {
                     auto parentOp = bArg.getParentBlock()->getParentOp();
-                    auto arg = parentOp->getOperand(bArg.getArgNumber());
-                    defOp = arg.getDefiningOp();
+                    if (parentOp->getNumOperands() > bArg.getArgNumber()) {
+                        auto arg = parentOp->getOperand(bArg.getArgNumber());
+                        defOp = arg.getDefiningOp();
+                    }
                 }
             }
             if (!defOp || !visited.insert(defOp).second)

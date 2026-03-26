@@ -32,6 +32,7 @@
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include <optional>
 
@@ -67,7 +68,8 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         // If RHS is already direct (no transpose), treat as NCHW-style layout.
         Value rhs = matmulOp.getInputs()[1];
 
-        if (auto transposeOp = dyn_cast<linalg::TransposeOp>(rhs.getDefiningOp())) {
+        if (auto transposeOp =
+                llvm::dyn_cast_if_present<linalg::TransposeOp>(rhs.getDefiningOp())) {
             return false;
         }
         return true;
@@ -256,7 +258,8 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         // Peeling it here would expand back to the full source tensor and can
         // break tile-local memory planning downstream.
         if (!isFC) {
-            while (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(input.getDefiningOp())) {
+            while (auto extractSlice =
+                       llvm::dyn_cast_if_present<tensor::ExtractSliceOp>(input.getDefiningOp())) {
                 input = extractSlice.getSource();
             }
         }
@@ -268,7 +271,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         }
 
         // Check weights are supported
-        auto weightElemType = dyn_cast<RankedTensorType>(weights.getType()).getElementType();
+        auto weightElemType = cast<RankedTensorType>(weights.getType()).getElementType();
 
         if (!weightElemType.isBF16() && !weightElemType.isInteger(8)) {
             return rewriter.notifyMatchFailure(srcOp, "Unsupported weight type");

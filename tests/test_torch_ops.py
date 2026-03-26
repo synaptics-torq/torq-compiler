@@ -28,6 +28,14 @@ def case_config(request, runtime_hw_type, chip_config):
         'equal.mlir',
         'instancenorm.mlir', 
         '0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean.mlir',
+
+        # Tracked by issue #1091
+        # A big tensor.extract inside a linalg.generic causes tile-and-fuse to fail
+        'ConvTranspose_bf16_1x1x512x512.mlir',
+
+        # Tracked by issue #1092
+        # LLVM ERROR: Unsupported non-tensor input during outlining
+        'dynamicquantize.mlir',
     ]
 
     if aws_fpga:

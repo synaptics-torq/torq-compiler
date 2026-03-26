@@ -9,6 +9,7 @@
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -18,6 +19,7 @@
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
@@ -292,6 +294,22 @@ bool isMarkedFuseGroup(Operation *op) {
     // We don't check if the array attribute is not empty, because we always add
     // something to it when we created it.
     return (bool)op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+}
+
+bool checkShareFuseGroup(Operation *op1, Operation *op2) {
+    ArrayAttr fuseGroupAttr1 = op1->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+    ArrayAttr fuseGroupAttr2 = op2->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+
+    if (!fuseGroupAttr1 || !fuseGroupAttr2)
+        return false;
+
+    for (IntegerAttr intAttr1 : fuseGroupAttr1.getAsRange<IntegerAttr>()) {
+        if (llvm::is_contained(fuseGroupAttr2.getAsRange<IntegerAttr>(), intAttr1)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 std::optional<int64_t> isFuseGroupOutput(Operation *op) {
@@ -2972,14 +2990,18 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
     if (isa<BlockArgument>(mul)) {
         auto mulBArg = mlir::cast<BlockArgument>(mul);
         // Lift block argument back to the parent generic operand so we can reuse upstream tensors.
-        mul = mulBArg.getOwner()->getParentOp()->getOperand(mulBArg.getArgNumber());
+        Operation *parentOp = mulBArg.getOwner()->getParentOp();
+        if (llvm::isa_and_nonnull<linalg::GenericOp>(parentOp))
+            mul = parentOp->getOperand(mulBArg.getArgNumber());
     }
 
     auto shift = bodyOps.applyScaleOp.getShift();
     if (isa<BlockArgument>(shift)) {
         auto shiftBArg = mlir::cast<BlockArgument>(shift);
         // Same for shift: remap region arg to enclosing op operand.
-        shift = shiftBArg.getOwner()->getParentOp()->getOperand(shiftBArg.getArgNumber());
+        Operation *parentOp = shiftBArg.getOwner()->getParentOp();
+        if (llvm::isa_and_nonnull<linalg::GenericOp>(parentOp))
+            shift = parentOp->getOperand(shiftBArg.getArgNumber());
     }
 
     // Returns a value with single shift value of type tensor<i32>

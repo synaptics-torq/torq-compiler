@@ -14,12 +14,16 @@
 #include "torq/Utils/MemoryUtils.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
 
@@ -325,35 +329,90 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
 
         for (auto scalarInput : scalarInputs) {
 
-            auto tensorType = RankedTensorType::get({}, scalarInput.getType());
+            SmallVector<Operation *> scalarInputUsers(scalarInput.getUsers());
+            computeTopologicalSorting(scalarInputUsers);
 
-            OpBuilder rewriter(scalarInput.getDefiningOp());
-            rewriter.setInsertionPointAfter(scalarInput.getDefiningOp());
+            // Insert just before the top most user.
+            OpBuilder rewriter(scalarInputUsers.back());
+
+            Value insertionValue = scalarInput;
+
+            Type scalarInputType = scalarInput.getType();
+            bool isIndex = isa<IndexType>(scalarInputType);
+            if (isIndex) {
+                scalarInputType = rewriter.getI32Type();
+                insertionValue = rewriter
+                                     .create<arith::IndexCastOp>(
+                                         scalarInput.getLoc(), scalarInputType, scalarInput
+                                     )
+                                     .getResult();
+            }
+
+            auto tensorType = RankedTensorType::get({}, scalarInputType);
 
             // we use tensor.insert to be symmetric with the output conversion
             auto emptyOp =
                 rewriter.create<tensor::EmptyOp>(scalarInput.getLoc(), tensorType, ValueRange{});
-            auto toTensorOp = rewriter.create<tensor::InsertOp>(
-                scalarInput.getLoc(), tensorType, scalarInput, emptyOp.getResult(), ValueRange{}
+
+            tensor::InsertOp toTensorOp = rewriter.create<tensor::InsertOp>(
+                scalarInput.getLoc(), tensorType, insertionValue, emptyOp.getResult(), ValueRange{}
             );
 
-            auto toScalarOp = rewriter.create<tensor::ExtractOp>(
-                scalarInput.getLoc(), scalarInput.getType(), toTensorOp.getResult(), ValueRange{}
+            Operation *toScalarOp = rewriter.create<tensor::ExtractOp>(
+                scalarInput.getLoc(), scalarInputType, toTensorOp.getResult(), ValueRange{}
             );
 
             // insert at the beginning of the group so that it is outlined before
             // their users
             group.toOutline.insert(group.toOutline.begin(), toScalarOp);
 
-            scalarInput.replaceAllUsesExcept(toScalarOp.getResult(), toTensorOp);
+            if (isIndex) {
+                toScalarOp = rewriter.create<arith::IndexCastUIOp>(
+                    scalarInput.getLoc(), rewriter.getIndexType(), toScalarOp->getResult(0)
+                );
+
+                group.toOutline.insert(group.toOutline.begin() + 1, toScalarOp);
+            }
+
+            scalarInput.replaceUsesWithIf(toScalarOp->getResult(0), [&](OpOperand &operand) {
+                return outlinedOps.contains(operand.getOwner());
+            });
+
+            if (isIndex)
+                outlinedOps.insert(insertionValue.getDefiningOp());
+            else
+                outlinedOps.insert(toTensorOp);
         }
 
         for (auto scalarOutput : scalarOutputs) {
 
-            auto tensorType = RankedTensorType::get({}, scalarOutput.getType());
+            SmallVector<Operation *> scalarOutputUsers(scalarOutput.getUsers());
+            mlir::computeTopologicalSorting(scalarOutputUsers);
 
-            IRRewriter rewriter(scalarOutput.getDefiningOp());
-            rewriter.setInsertionPointAfter(scalarOutput.getDefiningOp());
+            // Insert just before the top most user.
+            OpBuilder rewriter(scalarOutputUsers.back());
+
+            Value insertionValue = scalarOutput;
+
+            Type scalarOutputType = scalarOutput.getType();
+            bool isIndex = isa<IndexType>(scalarOutputType);
+            if (isIndex) {
+                scalarOutputType = rewriter.getI32Type();
+
+                auto indexCastOp = rewriter.create<arith::IndexCastOp>(
+                    scalarOutput.getLoc(), scalarOutputType, scalarOutput
+                );
+
+                // This will make sure we don't replace the input when we do scalarOutput.replace...
+                // below.
+                outlinedOps.insert(indexCastOp);
+
+                insertionValue = indexCastOp.getResult();
+
+                group.toOutline.push_back(indexCastOp);
+            }
+
+            auto tensorType = RankedTensorType::get({}, scalarOutputType);
 
             auto emptyTensor =
                 rewriter.create<tensor::EmptyOp>(scalarOutput.getLoc(), tensorType, ValueRange{});
@@ -361,28 +420,36 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
             // here we use insert op instead of from_elements to avoid
             // an error during compilation with LLVMCPU backend
             auto toTensorOp = rewriter.create<tensor::InsertOp>(
-                scalarOutput.getLoc(), tensorType, scalarOutput, emptyTensor.getResult(),
+                scalarOutput.getLoc(), tensorType, insertionValue, emptyTensor.getResult(),
                 ValueRange{}
             );
+            // This will make sure we don't replace the input when we do scalarOutput.replace...
+            // below.
+            if (insertionValue == scalarOutput)
+                outlinedOps.insert(toTensorOp);
 
-            auto toScalarOp = rewriter.create<tensor::ExtractOp>(
-                scalarOutput.getLoc(), scalarOutput.getType(), toTensorOp.getResult(), ValueRange{}
+            Operation *toScalarOp = rewriter.create<tensor::ExtractOp>(
+                scalarOutput.getLoc(), scalarOutputType, toTensorOp.getResult(), ValueRange{}
             );
+
+            if (isIndex) {
+                toScalarOp = rewriter.create<arith::IndexCastUIOp>(
+                    scalarOutput.getLoc(), rewriter.getIndexType(), toScalarOp->getResult(0)
+                );
+            }
 
             // insert at the end of the group so that it is outlined after their producer
             group.toOutline.push_back(emptyTensor);
             group.toOutline.push_back(toTensorOp);
 
-            scalarOutput.replaceAllUsesExcept(toScalarOp.getResult(), toTensorOp);
+            scalarOutput.replaceUsesWithIf(toScalarOp->getResult(0), [&](OpOperand &operand) {
+                return !outlinedOps.contains(operand.getOwner());
+            });
         }
     }
 }
 
 static LogicalResult outlineGroup(OutliningGroup &group) {
-
-    IRRewriter rewriter(group.root);
-
-    rewriter.setInsertionPoint(group.root);
 
     torq_hl::MemorySpace executorMemorySpace;
 
@@ -397,7 +464,7 @@ static LogicalResult outlineGroup(OutliningGroup &group) {
     }
 
     // create an program with all the operations we want to outline (this copies the operations)
-    rewriter.setInsertionPoint(group.root);
+    IRRewriter rewriter(group.root);
 
     auto maybeOutlineResult = outlineProgram(
         rewriter, group.name, group.executor, group.toOutline, /*destinationStyle=*/true

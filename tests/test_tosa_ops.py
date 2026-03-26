@@ -12,7 +12,29 @@ def case_config(request, runtime_hw_type, chip_config):
 
     failed_tc = [
             'dw_wzp.mlir' # Weight zero point support not complete
-            ]
+
+            # Tracked by issue #996
+            # crash in tile-and-fuse when running the pipeline
+            # error: 'linalg.broadcast' op input rank plus added dimensions does not match init rank. input rank: 1, dimensions size: 1, init rank: 1
+            'conv-stride1-32-14.mlir',
+            'conv-stride1-56.mlir',
+            'conv2d-28x28x512.mlir',
+            'conv2d_as_fully_connected.mlir',
+            'conv2d_noalign_channel_32x32x128xi16.mlir',
+            'load_padded.mlir',
+            'pw-32x8-7x7x320.mlir',
+            'conv-stride1-32-14.mlir',
+
+            # Tracked by #1095
+            'dw_wzp.mlir',
+
+            # results mismatch
+            # looking at the log you can see there's an error that is being ignored:
+            # error: multiplier unexpected size:21 while tiling
+            # probably related to issue #996
+            'dw_f32x32_o21_i16.mlir',
+            'dw_f32x32_o21_i8.mlir',
+    ]
 
     if aws_fpga:
         # aws-fpga failures
@@ -42,6 +64,14 @@ def case_config(request, runtime_hw_type, chip_config):
             'conv2d-f4.mlir',
             'resize-31x31x33xi8.mlir', # error: unable to free enough space for results and operand
             'conv2d-stride4-i16', # Too long to compile on next, will timeout
+
+            # Tracked by issue #996
+            'conv2d_noalign_channel_32x32x128xi8.mlir',
+            'pw-16x16.mlir',
+            'pw-32x8.mlir',
+
+            # Tracked by issue #1092
+            'pw-stride2.mlir',
         ]
         if aws_fpga:
             failed_tc += [

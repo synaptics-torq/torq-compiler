@@ -200,6 +200,26 @@ def case_config(request, runtime_hw_type, chip_config):
     'se_excite',
     'efficientnetb0_block2a_expand_activation',
     'efficientnetb0_block2a_expand_conv',
+
+    # Tracked by issue #996
+    # crash in tile-and-fuse when running the pipeline
+    # error: 'linalg.broadcast' op input rank plus added dimensions does not match init rank. input rank: 1, dimensions size: 1, init rank: 1
+    'layer_densenet121_conv2_block1_1_conv',
+    'layer_densenet121_conv2_block2_1_conv',
+    'layer_densenet121_conv2_block3_1_conv',
+    'layer_densenet121_conv2_block4_1_conv',
+    'layer_densenet121_conv2_block5_1_conv',
+    'layer_densenet121_conv2_block6_1_conv',
+    'layer_densenet121_conv3_block10_1_conv',
+    'layer_densenet121_conv3_block11_1_conv',
+    'layer_densenet121_conv3_block12_1_conv',
+    'layer_densenet121_conv3_block8_1_conv',
+    'layer_densenet121_conv3_block9_1_conv',
+    'layer_densenet121_pool2_conv',
+    'layer_inceptionv3_conv2d_17',
+    'layer_resnet50_conv2_block2_1_conv',
+    'layer_resnet50_conv3_block1_3_conv',
+    'layer_resnet50_conv3_block2_1_conv',
   ]
 
   next = chip_config.data['target'] != "SL2610"
@@ -220,6 +240,21 @@ def case_config(request, runtime_hw_type, chip_config):
       'nasnetmobile_cropping2d_2',
       # doesnt work on github ci for unknown reason
       'xception_block14_sepconv2',
+
+      # Tracked by issue #996
+      'layer_densenet121_conv3_block3_1_conv',
+      'layer_densenet121_conv3_block4_1_conv',
+      'layer_densenet121_conv3_block5_1_conv',
+      'layer_densenet121_conv3_block6_1_conv',
+      'layer_densenet121_conv3_block7_1_conv',
+      'layer_densenet121_conv4_block14_1_conv',
+      'layer_densenet121_conv4_block15_1_conv',
+      'layer_densenet121_conv4_block16_1_conv',
+      'layer_densenet121_conv4_block17_1_conv',
+      'layer_nasnetmobile_normal_conv_1_1',
+      'layer_nasnetmobile_reduction_conv_1_reduce_4',
+      'layer_nasnetmobile_reduction_conv_1_stem_2',
+      'layer_resnet50_conv2_block1_1_conv',
     ]
 
   extra_args = {}

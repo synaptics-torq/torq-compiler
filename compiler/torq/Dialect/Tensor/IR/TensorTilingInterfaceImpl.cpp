@@ -195,7 +195,7 @@ struct ExpandShapeOpTilingInterface
             RankedTensorType::get(tiledResultShape, tiledSrcTensor.getElementType());
 
         tensor::ExpandShapeOp tiledOp = b.create<tensor::ExpandShapeOp>(
-            op->getLoc(), resultTensor, tiledSrc, expandOp.getReassociationIndices()
+            op->getLoc(), resultTensor, tiledSrc, expandOp.getReassociationIndices(), sizes
         );
         // linalg uses clone to create the tiled op, but for ExpandShapeOp it's
         // easier to use create (i.e. build), which will infer the

@@ -50,11 +50,11 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
         auto elOp = input.getDefiningOp<Operation *>();
         bool maybeReplace = false;
-        if (isa<tensor::ExpandShapeOp>(elOp) || isa<tensor::CollapseShapeOp>(elOp)) {
+        if (isa_and_nonnull<tensor::ExpandShapeOp>(elOp) ||
+            isa_and_nonnull<tensor::CollapseShapeOp>(elOp)) {
             maybeReplace = true;
         }
-        if (isa<linalg::GenericOp>(elOp)) {
-            auto maybeElemOp = dyn_cast<linalg::GenericOp>(elOp);
+        if (auto maybeElemOp = dyn_cast_if_present<linalg::GenericOp>(elOp)) {
             auto &r = maybeElemOp.getRegion();
             if (r.hasOneBlock() && isa<linalg::YieldOp>(r.front().front())) {
                 maybeReplace = true;
@@ -85,7 +85,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         ScaleInfo probeScaleInfo = scaleInfo;
 
         // Check if candidateInput is already a constant before rescale probing
-        auto constOp = dyn_cast<arith::ConstantOp>(scalarInput.getDefiningOp());
+        auto constOp = dyn_cast_if_present<arith::ConstantOp>(scalarInput.getDefiningOp());
         if (!constOp && inputShape.size() <= 1) {
             while (foldBackwardRescale(scalarInput, probeScaleInfo)) {
             }

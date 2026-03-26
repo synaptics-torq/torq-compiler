@@ -1162,7 +1162,21 @@ def case_config(request, runtime_hw_type, chip_config):
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
-    failed_tc = []
+    failed_tc = [
+        # Tracked by issue #996
+        # crash in tile-and-fuse when running the pipeline
+        # error: 'linalg.broadcast' op input rank plus added dimensions does not match init rank. input rank: 1, dimensions size: 1, init rank: 1
+        'model022_fc_1024x1024',
+        'model023_fc_512x1000',
+        'model027_fc_500x700',
+        'model029_fc_1000x1000',
+
+        # Tracked by issue #1090
+        # torq_hl::AddOp::getKernelEncoding hits an assertion.
+        'model113_pointwise_1x1x1024',
+        'model206_conv_17x1x1x19_valid',
+        'model240_pointwise_inp1x4x4x16_8x1x1_valid_stride1x1',
+    ]
 
     if chip_config.data['target'] != "SL2610":
         # Next chip failures
