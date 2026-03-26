@@ -63,8 +63,6 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
     denseDims = std::min(denseDims, rank - axis - 1);
 
     DType inputDType = input.elementType();
-    DType outputDType = output.elementType();
-    DType accDType = isFloat(inputDType) ? outputDType : inputDType;
     int vectorSize = slice.alu.iWidth(inputDType);
 
     // Vectorize only the last dimension (retain)
@@ -83,8 +81,7 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
                 For(auto r = slice.iterate(input.dim(axis))) {
                     // Accumulate across the reduce dimension
                     IData idata = slice.iram.load(input[b][r][i][rv]);
-                    // Use accDType for accumulation to prevent precision loss
-                    pdata = slice.alu.accumulate(idata, hwOp1Mode, accDType);
+                    pdata = slice.alu.accumulate(idata, hwOp1Mode);
                 }
 
                 // Store the accumulated result
