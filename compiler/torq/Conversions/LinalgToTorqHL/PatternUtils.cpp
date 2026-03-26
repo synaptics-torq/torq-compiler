@@ -2833,94 +2833,149 @@ modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuild
     return fillOp.getResult(0);
 }
 
+/// Ops collected from the body of an int8 quantized rescale linalg.generic.
+struct Int8RescaleBodyOps {
+    tosa::ApplyScaleOp applyScaleOp;
+    arith::AddIOp addOp;
+    arith::MaxSIOp maxOp;
+    arith::MinSIOp minOp;
+    arith::TruncIOp truncOp;
+};
+
+/// Scan the linalg.generic body for the canonical int8 rescale ops and
+/// populate ScaleClampInfo with clamp/zero-point constants.
+/// Returns true iff an apply_scale op was found.
+static bool extractInt8RescaleBodyOps(
+    linalg::GenericOp rescaleOp, Int8RescaleBodyOps &out, ScaleClampInfo &scInfo
+) {
+    for (auto &op : rescaleOp.getRegion().getOps()) {
+        if (auto o = dyn_cast<tosa::ApplyScaleOp>(op))
+            out.applyScaleOp = o;
+        else if (auto o = dyn_cast<arith::AddIOp>(op))
+            out.addOp = o;
+        else if (auto o = dyn_cast<arith::MaxSIOp>(op))
+            out.maxOp = o;
+        else if (auto o = dyn_cast<arith::MinSIOp>(op))
+            out.minOp = o;
+        else if (auto o = dyn_cast<arith::TruncIOp>(op))
+            out.truncOp = o;
+    }
+    // minsi rhs is the upper clamp bound (confusingly stored in scInfo.max).
+    if (out.minOp)
+        if (auto c = dyn_cast<arith::ConstantOp>(out.minOp.getRhs().getDefiningOp()))
+            scInfo.max = mlir::cast<IntegerAttr>(c.getValue()).getInt();
+    // maxsi rhs is the lower clamp bound (stored in scInfo.min).
+    if (out.maxOp)
+        if (auto c = dyn_cast<arith::ConstantOp>(out.maxOp.getRhs().getDefiningOp()))
+            scInfo.min = mlir::cast<IntegerAttr>(c.getValue()).getInt();
+    if (out.addOp)
+        if (auto c = dyn_cast<arith::ConstantOp>(out.addOp.getRhs().getDefiningOp()))
+            scInfo.zp = mlir::cast<IntegerAttr>(c.getValue()).getInt();
+    return !!out.applyScaleOp;
+}
+
+/// Returns true if op is the fused f32-relu6-clamp-then-truncf linalg.generic:
+///   ins(%f32_tensor) outs(%bf16_tensor)
+///   body: cmpf(ult) + select + cmpf(ugt) + select + truncf
+static bool isFusedF32ClampTruncf(linalg::GenericOp op) {
+    if (!op || op.getNumDpsInputs() != 1 || op.getNumDpsInits() != 1)
+        return false;
+    auto inputElemTy = dyn_cast<ShapedType>(op.getInputs()[0].getType()).getElementType();
+    auto outputElemTy = dyn_cast<ShapedType>(op.getResultTypes()[0]).getElementType();
+    if (!inputElemTy.isF32() || !outputElemTy.isBF16())
+        return false;
+    bool hasCmpfUlt = false, hasCmpfUgt = false, hasTruncf = false;
+    for (auto &bodyOp : op.getRegion().front().without_terminator()) {
+        if (auto cmp = dyn_cast<arith::CmpFOp>(bodyOp)) {
+            if (cmp.getPredicate() == arith::CmpFPredicate::ULT)
+                hasCmpfUlt = true;
+            if (cmp.getPredicate() == arith::CmpFPredicate::UGT)
+                hasCmpfUgt = true;
+        }
+        else if (isa<arith::TruncFOp>(bodyOp)) {
+            hasTruncf = true;
+        }
+    }
+    return hasCmpfUlt && hasCmpfUgt && hasTruncf;
+}
+
+/// Extract the f32 clamp bounds from the fused linalg.generic body and store
+/// them as int32 values in ScaleClampInfo.min / ScaleClampInfo.max.
+/// Returns true on success.
+static bool extractF32ClampTruncfInfo(linalg::GenericOp op, ScaleClampInfo &scInfo) {
+    if (!isFusedF32ClampTruncf(op))
+        return false;
+    for (auto &bodyOp : op.getRegion().front().without_terminator()) {
+        auto cmp = dyn_cast<arith::CmpFOp>(bodyOp);
+        if (!cmp)
+            continue;
+        auto boundConst = cmp.getRhs().getDefiningOp<arith::ConstantOp>();
+        if (!boundConst)
+            continue;
+        auto floatAttr = dyn_cast<FloatAttr>(boundConst.getValue());
+        if (!floatAttr)
+            continue;
+        // Store the IEEE 754 binary representation of the f32 value as int32.
+        // bitcastToAPInt() gives the raw bit pattern without any numeric conversion.
+        int32_t boundBits =
+            static_cast<int32_t>(floatAttr.getValue().bitcastToAPInt().getZExtValue());
+        if (cmp.getPredicate() == arith::CmpFPredicate::ULT)
+            scInfo.min = boundBits;
+        else if (cmp.getPredicate() == arith::CmpFPredicate::UGT)
+            scInfo.max = boundBits;
+    }
+    return true;
+}
+
 FailureOr<Value>
 computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scInfo) {
     // Parse the terminal rescale generic and reconstruct explicit scale/clamp metadata.
     // The goal is to materialize per-channel scale values and interleave them with biasScale.
-    /////////////////////////// Support////////////////////////////////////////
-    struct ScaleInfoOps {
-        tosa::ApplyScaleOp applyScaleOp;
-        arith::AddIOp addOp;
-        arith::MaxSIOp maxOp;
-        arith::MinSIOp minOp;
-        arith::TruncIOp truncOp;
-    } scaleInfoOps;
-    ///////////////////////////////////////////////////////////////////////////
-
-    // Check whether last op is apply_scale
     auto lastOp = fusionPlan.neededOps.back();
     if (!isRescale(lastOp)) {
         LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: last op is not a rescale op\n"; });
         return biasScale;
     }
     auto rescaleOp = dyn_cast<linalg::GenericOp>(lastOp);
+
+    // Dispatch: fused f32 relu6-clamp+truncf path — extract float clamp bounds as int32
+    // and return early (no quantized scale tensor to interleave).
+    if (isFusedF32ClampTruncf(rescaleOp)) {
+        LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: handling fused f32 clamp+truncf\n"; });
+        extractF32ClampTruncfInfo(rescaleOp, scInfo);
+        return biasScale;
+    }
+
+    // --- int8 quantized rescale path ---
     // Rescale Op Ex:
-    //  %21 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>,
-    //  affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0,
-    //  d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel",
-    //  "parallel"]} ins(%expanded, %cst_1, %cst_2 : tensor<1x28x56x24xi32>, tensor<24xi32>,
-    //  tensor<24xi8>) outs(%extracted_slice_8 : tensor<1x28x56x24xi8>) attrs =  {"torq-fuse-group"
-    //  = [4], "torq-fuse-group-id" = 10 : i64, "torq-tiling-dfs" = false} {
-    // ^bb0(%in: i32, %in_9: i32, %in_10: i8, %out: i8):
-    //   %22 = tosa.apply_scale %in, %in_9, %in_10 {double_round = true} : (i32, i32, i8) -> i32
-    //   %23 = arith.addi %22, %c-3_i32 : i32
-    //   %24 = arith.maxsi %23, %c-128_i32 : i32
-    //   %25 = arith.minsi %24, %c127_i32 : i32
-    //   %26 = arith.trunci %25 : i32 to i8
-    //   linalg.yield %26 : i8
-    // } -> tensor<1x28x56x24xi8>
-    for (auto &op : rescaleOp.getRegion().getOps()) {
-        // Collect the canonical quantized-rescale pieces from the linalg.generic body.
-        if (auto applyScaleOp = dyn_cast<tosa::ApplyScaleOp>(op)) {
-            scaleInfoOps.applyScaleOp = applyScaleOp;
-        }
-        else if (auto addOp = dyn_cast<arith::AddIOp>(op)) {
-            scaleInfoOps.addOp = addOp;
-        }
-        else if (auto maxOp = dyn_cast<arith::MaxSIOp>(op)) {
-            scaleInfoOps.maxOp = maxOp;
-        }
-        else if (auto minOp = dyn_cast<arith::MinSIOp>(op)) {
-            scaleInfoOps.minOp = minOp;
-        }
-        else if (auto truncOp = dyn_cast<arith::TruncIOp>(op)) {
-            scaleInfoOps.truncOp = truncOp;
-        }
-    }
-
-    OpBuilder builder(lastOp);
-
-    // Get the constant values as integers from the add, max, min ops if present
-    if (scaleInfoOps.minOp) {
-        if (auto o = dyn_cast<arith::ConstantOp>(scaleInfoOps.minOp.getRhs().getDefiningOp())) {
-            scInfo.max = mlir::cast<IntegerAttr>(o.getValue()).getInt();
-        }
-    }
-    if (scaleInfoOps.maxOp) {
-        if (auto o = dyn_cast<arith::ConstantOp>(scaleInfoOps.maxOp.getRhs().getDefiningOp())) {
-            scInfo.min = mlir::cast<IntegerAttr>(o.getValue()).getInt();
-        }
-    }
-    if (scaleInfoOps.addOp) {
-        if (auto o = dyn_cast<arith::ConstantOp>(scaleInfoOps.addOp.getRhs().getDefiningOp())) {
-            scInfo.zp = mlir::cast<IntegerAttr>(o.getValue()).getInt();
-        }
-    }
-    if (!scaleInfoOps.applyScaleOp) {
+    //  %21 = linalg.generic ... ins(%expanded, %cst_1, %cst_2 : tensor<...xi32>, tensor<24xi32>,
+    //  tensor<24xi8>) outs(%extracted_slice_8 : tensor<...xi8>) {
+    //  ^bb0(%in: i32, %in_9: i32, %in_10: i8, %out: i8):
+    //    %22 = tosa.apply_scale %in, %in_9, %in_10 {double_round = true} : (i32,i32,i8) -> i32
+    //    %23 = arith.addi %22, %c-3_i32 : i32
+    //    %24 = arith.maxsi %23, %c-128_i32 : i32
+    //    %25 = arith.minsi %24, %c127_i32 : i32
+    //    %26 = arith.trunci %25 : i32 to i8
+    //    linalg.yield %26 : i8
+    //  } -> tensor<...xi8>
+    Int8RescaleBodyOps bodyOps;
+    if (!extractInt8RescaleBodyOps(rescaleOp, bodyOps, scInfo)) {
         LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: applyScaleOp not found in rescaleOp\n"; }
         );
         return biasScale;
     }
-    // Create a linalg generic op that divides the multiplier by 2^shift and multiplies by 2^shift8b
-    // or 16b Get the multiplier and shift values from the block arguments of the linalg generic
-    auto mul = scaleInfoOps.applyScaleOp.getMultiplier();
+
+    OpBuilder builder(lastOp);
+
+    // Lift apply_scale multiplier / shift block-arguments back to the enclosing operands.
+    auto mul = bodyOps.applyScaleOp.getMultiplier();
     if (isa<BlockArgument>(mul)) {
         auto mulBArg = mlir::cast<BlockArgument>(mul);
         // Lift block argument back to the parent generic operand so we can reuse upstream tensors.
         mul = mulBArg.getOwner()->getParentOp()->getOperand(mulBArg.getArgNumber());
     }
 
-    auto shift = scaleInfoOps.applyScaleOp.getShift();
+    auto shift = bodyOps.applyScaleOp.getShift();
     if (isa<BlockArgument>(shift)) {
         auto shiftBArg = mlir::cast<BlockArgument>(shift);
         // Same for shift: remap region arg to enclosing op operand.

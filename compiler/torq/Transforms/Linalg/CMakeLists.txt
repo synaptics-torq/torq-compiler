@@ -32,6 +32,7 @@ iree_cc_library(
     CastI32MulPattern.cpp
     OptimizeMulOpPattern.cpp
     OptimizeSwishActivationPattern.cpp
+    FuseReluClampWithTruncfPattern.cpp
   DEPS
     ::PassesIncGen
     MLIRArithDialect

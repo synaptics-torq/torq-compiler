@@ -54,4 +54,8 @@ struct ReshapeToCollapseExpand : public OpRewritePattern<tensor::ReshapeOp> {
     LogicalResult matchAndRewrite(tensor::ReshapeOp op, PatternRewriter &rewriter) const override;
 };
 
+/// Returns true if all indexing maps in op are identity-like
+/// (identity, or broadcast from a size-1 dimension via constant-zero expr).
+bool checkIdentityLikeMaps(linalg::GenericOp op);
+
 } // namespace mlir::syna::torq

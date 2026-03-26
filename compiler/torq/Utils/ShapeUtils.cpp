@@ -613,4 +613,29 @@ SmallVector<mlir::Value> collectDynamicShapes(mlir::Region &region) {
     return dynamic;
 }
 
+bool checkIdentityLikeMaps(linalg::GenericOp op) {
+    for (auto [operandIdx, map] : llvm::enumerate(op.getIndexingMapsArray())) {
+        if (map.isIdentity())
+            continue;
+        for (auto [idx, result] : llvm::enumerate(map.getResults())) {
+            if (auto dim = dyn_cast<AffineDimExpr>(result)) {
+                if (dim.getPosition() != idx)
+                    return false;
+            }
+            else if (auto constExpr = dyn_cast<AffineConstantExpr>(result)) {
+                if (constExpr.getValue() != 0)
+                    return false;
+                auto operandType = op.getOperand(operandIdx).getType();
+                if (auto shapedType = dyn_cast<ShapedType>(operandType))
+                    if (shapedType.getDimSize(idx) != 1)
+                        return false;
+            }
+            else {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace mlir::syna::torq
