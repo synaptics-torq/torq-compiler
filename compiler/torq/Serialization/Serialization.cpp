@@ -674,18 +674,32 @@ flatbuffers_vec_ref_t Serializer::createBuffersDebugInfoVector(mlir::FunctionOpI
 
             int64_t lastUseId = definingActionId;
 
-            for (auto &use : memref.getUses()) {
-                auto maybeActionId = use.getOwner()->getAttrOfType<IntegerAttr>("torq-action-id");
+            // Use a worklist to follow uses transitively through
+            // memref.subview and other view-like ops that don't carry
+            // a torq-action-id themselves.
+            SmallVector<Value> worklist;
+            worklist.push_back(memref);
 
-                if (!maybeActionId) {
-                    continue;
-                }
+            while (!worklist.empty()) {
+                Value current = worklist.pop_back_val();
+                for (auto &use : current.getUses()) {
+                    Operation *owner = use.getOwner();
+                    auto maybeActionId = owner->getAttrOfType<IntegerAttr>("torq-action-id");
 
-                if (auto deallocOp = dyn_cast<memref::DeallocOp>(use.getOwner())) {
-                    deallocationId = maybeActionId.getInt();
-                }
-                else {
-                    lastUseId = std::max(lastUseId, maybeActionId.getInt());
+                    if (maybeActionId) {
+                        if (isa<memref::DeallocOp>(owner)) {
+                            deallocationId = maybeActionId.getInt();
+                        }
+                        else {
+                            lastUseId = std::max(lastUseId, maybeActionId.getInt());
+                        }
+                    }
+                    else if (isa<memref::SubViewOp>(owner)) {
+                        // Follow through the subview to its users
+                        for (auto result : owner->getResults()) {
+                            worklist.push_back(result);
+                        }
+                    }
                 }
             }
 
