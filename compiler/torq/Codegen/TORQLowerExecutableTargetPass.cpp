@@ -201,8 +201,6 @@ void TORQLowerExecutableTargetPass::addSlicePasses(OpPassManager &pm) {
 
     funcPm.addPass(createFoldConvertPass());
     funcPm.addPass(createCanonicalizerPass());
-    funcPm.addPass(createUnrollLoopPass());
-    funcPm.addPass(createCanonicalizerPass());
 }
 
 void TORQLowerExecutableTargetPass::addCpuPasses(OpPassManager &pm) {

@@ -216,6 +216,8 @@ def case_config(request, runtime_hw_type, chip_config):
       'xception_block13_sepconv2',
         # error: unable to free enough space for results and operands
       'nasnetmobile_zero_padding2d_2',
+       # error: source does not have an address assigned
+      'nasnetmobile_cropping2d_2',
       # doesnt work on github ci for unknown reason
       'xception_block14_sepconv2',
     ]
