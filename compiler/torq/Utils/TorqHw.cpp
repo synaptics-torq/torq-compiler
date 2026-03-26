@@ -17,8 +17,8 @@ llvm::SmallVector<TorqHw, 1> hwTypes = {TorqHw(
 )};
 
 #define TORQ_CUSTOM_FORMAT                                                                         \
-    "<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_features>:" \
-    "<host_triple>:<host_cpu>:<host_cpu_features>"
+    "<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_features>"  \
+    "[:<host_triple>:<host_cpu>:<host_cpu_features>]"
 
 struct TorqHwParser : public llvm::cl::parser<TorqHw> {
 
@@ -28,7 +28,7 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
         llvm::cl::Option &O, llvm::StringRef ArgName, const llvm::StringRef &ArgValue, TorqHw &Val
     ) {
 
-        llvm::SmallVector<llvm::StringRef, 4> parts;
+        llvm::SmallVector<llvm::StringRef, 8> parts;
         ArgValue.split(parts, ':');
 
         if (parts.size() == 1) {
@@ -55,11 +55,17 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
             );
         }
 
+        if (parts.size() == 5) {
+            parts.push_back("native"); // host triple default
+        }
+        if (parts.size() == 6) {
+            parts.push_back("host"); // host cpu default
+        }
+        if (parts.size() == 7) {
+            parts.push_back("host"); // host cpu features default
+        }
         if (parts.size() != 8) {
-            return O.error(
-                ArgName, " custom hardware specification requires 8 colon-separated "
-                         "values: " TORQ_CUSTOM_FORMAT
-            );
+            return O.error(ArgName, " custom hardware specification format: " TORQ_CUSTOM_FORMAT);
         }
 
         std::string name = "custom";
