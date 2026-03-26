@@ -851,6 +851,7 @@ struct SlicePrivate {
     void aluSetNumberFormat(DType dtype);
     DType aluGetWeightType() const;
     PData aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc);
+    PData aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc, DType accType);
     PData aluProductAccumulate(
         const IData &idata, const WData &wdata, ALUOp1Mode acc, bool outer, bool repeatWeight
     );
@@ -1694,11 +1695,13 @@ DType SlicePrivate::aluGetWeightType() const {
 }
 
 PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
-    // Configure the alu in bypass mode with the specified accumulate operation
+    return aluAccumulate(idata, acc, idata.elementType());
+}
+
+PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc, DType accType) {
+    // Configure the ALU in bypass mode with the specified accumulate operation.
     aluSetMode(ALUOp0Mode::DBYP, acc);
     const DType dataType = idata.elementType();
-    aluSetNumberFormat(dataType);
-
     // Weights are not used in bypass mode (no need to generate cewr, except for implicit weights)
     _wram.elementType = DType::none;
     _iram.elementType = dataType;
@@ -1749,11 +1752,17 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     // Will be overwritten if we are inside a for loop
     _pram.loadNesting = _forStack.size();
 
-    // Automatically infer the shape of the pram data
+    // Automatically infer the shape of the pram (partial result) data.
+    // The pDataType determines the precision of accumulated values in PRAM.
+    //
+    // pDataType selection logic:
+    //   - Integer inputs: Always use int32 to prevent overflow during accumulation
+    //   - Float inputs: Use accType (allows fp32 accumulation for bf16 input)
+    //   - Fallback: Use input data type (for non-float, non-int types)
     int actWidth = isFloat(dataType) && !isMulAcc ? HwInfo::act_width / 2 : HwInfo::act_width;
     int actBlockCount = div_ceil(blockSize, actWidth);
     int actBlockSize = actBlockCount > 1 ? actWidth : blockSize;
-    DType pDataType = isInt(dataType) ? DType::int32 : isMulAcc ? DType::fp32 : dataType;
+    DType pDataType = isInt(dataType) ? DType::int32 : isFloat(accType) ? accType : dataType;
 
     if (isFloat(pDataType) && !isMulAcc && actBlockCount > 1 && !supportACPRs32()) {
         // This pdata will generate ACPR with multiple transfers of width 8*4 which in non-MAC mode
@@ -2322,6 +2331,10 @@ BData BRam::load(const LData &data) {
 
 PData Alu::accumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     return d->aluAccumulate(idata, acc);
+}
+
+PData Alu::accumulate(const IData &idata, torq_hw::ALUOp1Mode acc, DType accType) {
+    return d->aluAccumulate(idata, acc, accType);
 }
 
 PData Alu::load(const IData &idata) {

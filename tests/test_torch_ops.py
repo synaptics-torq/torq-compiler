@@ -5,6 +5,12 @@ from torq.testing.iree import list_mlir_file_group
 from torq.testing.cases import get_test_cases_from_files
 
 
+@pytest.fixture
+def comparison_config_for_conv_truncf(request):
+    """Comparison config for conv1d with truncf before reduce (memory-optimized mode)."""
+    return {"fp_avg_tol": 0.2, "fp_max_tol": 1.0}
+
+
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_file_group("torch_ops")))
 def case_config(request, runtime_hw_type, chip_config):
 
@@ -80,14 +86,16 @@ def case_config(request, runtime_hw_type, chip_config):
         'Conv2d_bf16_1x1x64x8192',
         'reducemean-reshape',
         'reducemean.mlir',
-        # crash
-        'encoder.mlir.230.Conv_0_small',
-        'encoder.mlir.243.Conv_2_small',
-        'encoder.mlir.237.Conv_1_small',
     ]
 
     if any(s in request.param.data.name for s in torq_tiling_tc):
         extra_args["torq_compiler_options"]  = ["--torq-enable-torq-hl-tiling"]
+
+    # Option Test for conv1d with truncf before reduce (memory-optimized mode) to maintain easily
+    # This enables --torq-conv1d-truncate-for-reduce to test bf16 reduce input
+    if 'encoder.mlir.230.Conv_0_small.mlir' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-conv1d-truncate-for-reduce=true"]
+        extra_args["comparison_config"] = "comparison_config_for_conv_truncf"
 
     return {
         "mlir_model_file": "static_mlir_model_file",

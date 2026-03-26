@@ -31,9 +31,4 @@ inline llvm::cl::opt<bool> clTableAsGather(
     llvm::cl::init(false)
 );
 
-inline llvm::cl::opt<bool> clConv1dAsMatmul(
-    "torq-convert-conv1d-to-matmul", llvm::cl::desc("Convert conv1d to imToCol + matmul"),
-    llvm::cl::init(false)
-);
-
 } // namespace mlir::syna::torq

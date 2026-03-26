@@ -25,14 +25,24 @@ class OptimizeLinalgForTorqPass : public OptimizeLinalgForTorqBase<OptimizeLinal
         auto *ctx = funcOp.getContext();
         RewritePatternSet patterns(ctx);
 
+        populateOptimizeConv1DPatterns(ctx, patterns);
+
         populateOptimizeMatmuOpPatterns(ctx, patterns);
+
         populateOptimizeElementwiseBinaryOpPatterns(ctx, patterns);
+
         populateRaiseSoftmaxOpPatterns(ctx, patterns);
+
         populateOptimizeSelectPatterns(ctx, patterns);
+
         populateDecomposeLinalgOpsPatterns(ctx, patterns);
+
         populateSpecializeTransposeOpPatterns(ctx, patterns);
+
         linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
+
         populateOptimizeArithElementwiseBinaryOpPatterns(ctx, patterns);
+
         // Configure disabled/enabled patterns based on pass options.
         auto frozenPatterns =
             FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);

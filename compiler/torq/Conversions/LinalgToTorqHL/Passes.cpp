@@ -13,6 +13,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -33,9 +34,14 @@ namespace mlir::syna::torq {
 void populateLinalgToTorqHLPrePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-    populateLinalgToTorqHLConv1DPatterns(context, patterns, markFuseGroups);
+    // populateLinalgToTorqHLConv1DPatterns(context, patterns, markFuseGroups);
+
+    populateLinalgConv2DToTorqHLConv1DPatterns(context, patterns, markFuseGroups);
+
     populateLinalgToTorqHLConv2DPatterns(context, patterns, markFuseGroups);
+
     populateLinalgToTorqHLConv2DMatmulPatterns(context, patterns, markFuseGroups);
+
     populateLinalgToTorqHLPoolingPatterns(context, patterns, markFuseGroups);
 }
 

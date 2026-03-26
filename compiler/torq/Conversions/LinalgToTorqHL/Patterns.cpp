@@ -504,6 +504,87 @@ bool isTorqNegateOp(Operation *op, std::string &failReason) {
     return true;
 }
 
+bool isTorqReduceSumOp(Operation *op, std::string &failReason) {
+    auto reduceOp = dyn_cast<linalg::ReduceOp>(op);
+    if (!reduceOp) {
+        failReason = "Not a linalg.reduce op";
+        return false;
+    }
+
+    // Only support single input
+    if (reduceOp.getInputs().size() != 1) {
+        failReason = "Reduce sum only supports exactly one input";
+        return false;
+    }
+
+    // Check input element type - bf16, f32, or integers
+    auto inputType = dyn_cast<RankedTensorType>(reduceOp.getInputs()[0].getType());
+    if (!inputType) {
+        failReason = "Input is not a ranked tensor";
+        return false;
+    }
+    auto inputElementType = inputType.getElementType();
+
+    // Support BF16, F32, or integer types.
+    // Both bf16 and f32 inputs are supported by the hardware kernel.
+    if (!inputElementType.isBF16() && !inputElementType.isF32() && !inputElementType.isInteger()) {
+        failReason = "Reduce sum only supports BF16, F32, or integer input types";
+        return false;
+    }
+
+    // Check bit width
+    if (inputElementType.getIntOrFloatBitWidth() != 8 &&
+        inputElementType.getIntOrFloatBitWidth() != 16 &&
+        inputElementType.getIntOrFloatBitWidth() != 32) {
+        failReason = "Reduce sum only supports 8, 16, or 32 bit element types";
+        return false;
+    }
+
+    // Check that it's a sum reduction (arith.addf or arith.addi in the body)
+    auto yieldOp = dyn_cast<linalg::YieldOp>(reduceOp.getBody()->getTerminator());
+    if (!yieldOp) {
+        failReason = "Expected linalg::YieldOp as the terminator";
+        return false;
+    }
+
+    auto reduceBodyOp = yieldOp.getOperand(0).getDefiningOp();
+    if (!isa<arith::AddIOp>(reduceBodyOp) && !isa<arith::AddFOp>(reduceBodyOp)) {
+        failReason = "Not a sum reduction (expected arith.addf or arith.addi)";
+        return false;
+    }
+
+    // Check output type - can be same as input or f32 (for bf16 input)
+    auto outputType = dyn_cast<RankedTensorType>(reduceOp->getResultTypes().front());
+    if (!outputType) {
+        failReason = "Output is not a ranked tensor";
+        return false;
+    }
+    auto outputElementType = outputType.getElementType();
+
+    // For bf16 input, output can be bf16 or f32
+    if (inputElementType.isBF16()) {
+        if (!outputElementType.isBF16() && !outputElementType.isF32()) {
+            failReason = "BF16 reduce sum output must be BF16 or F32";
+            return false;
+        }
+    }
+    else {
+        // For integer inputs, output must match input type
+        if (inputElementType != outputElementType) {
+            failReason = "Integer reduce sum output type must match input type";
+            return false;
+        }
+    }
+
+    // Only support single dimension reduction
+    if (reduceOp.getDimensions().size() != 1) {
+        failReason = "Reduce sum only supports single dimension reduction";
+        return false;
+    }
+
+    return true;
+}
+
 namespace {
 
 // NOTE: this struct is duplicated below (TransposeOpConversionRewrite) as a OpRewritePattern.
@@ -805,12 +886,11 @@ struct FillOpConversionRewrite : public OpRewritePattern<linalg::FillOp> {
     }
 };
 
-struct ReduceOpConversion : public OpConversionPattern<linalg::ReduceOp> {
+struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
 
-    ReduceOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
-    LogicalResult matchAndRewrite(
-        linalg::ReduceOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
-    ) const override {
+    ReduceOpConversion(MLIRContext *context) : OpRewritePattern(context) {}
+    LogicalResult
+    matchAndRewrite(linalg::ReduceOp srcOp, PatternRewriter &rewriter) const override {
 
         if (srcOp.getInputs().size() != 1) {
             return rewriter.notifyMatchFailure(srcOp, "Supported exactly one input for ReduceOp");
@@ -825,9 +905,12 @@ struct ReduceOpConversion : public OpConversionPattern<linalg::ReduceOp> {
             );
         }
 
-        if (!inputElementType.isBF16() && !inputElementType.isInteger()) {
+        // Support BF16, F32, or integer inputs.
+        // Both bf16 and f32 inputs are supported by the hardware kernel.
+        if (!inputElementType.isBF16() && !inputElementType.isF32() &&
+            !inputElementType.isInteger()) {
             return rewriter.notifyMatchFailure(
-                srcOp, "Only support BF16 or integer element types for ReduceOp"
+                srcOp, "Only support BF16, F32, or integer element types for ReduceOp"
             );
         }
 
@@ -839,6 +922,8 @@ struct ReduceOpConversion : public OpConversionPattern<linalg::ReduceOp> {
             );
         }
 
+        auto srcOutputType = dyn_cast<RankedTensorType>(srcOp->getResultTypes().front());
+
         auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
 
         if (!yieldOp) {
@@ -848,8 +933,6 @@ struct ReduceOpConversion : public OpConversionPattern<linalg::ReduceOp> {
         }
 
         Value input = srcOp.getInputs()[0];
-
-        auto srcOutputType = dyn_cast<RankedTensorType>(srcOp->getResultTypes().front());
 
         ArrayRef<int64_t> dimensions = srcOp.getDimensions();
         if (dimensions.size() != 1) {
@@ -861,6 +944,7 @@ struct ReduceOpConversion : public OpConversionPattern<linalg::ReduceOp> {
 
         std::string opName = "reduce_sum";
         auto reduceOp = yieldOp.getOperand(0).getDefiningOp();
+
         if (isa<arith::AddIOp>(reduceOp) || isa<arith::AddFOp>(reduceOp)) {
             opName = "reduce_sum";
         }
@@ -896,10 +980,13 @@ struct ReduceOpConversion : public OpConversionPattern<linalg::ReduceOp> {
         const std::vector<int32_t> scale = {1};
         std::vector<int16_t> weights = {1, 1};
 
+        // For bf16 reduce_sum with f32 output, preserve f32 type for better precision
+        // If output is bf16, keep it as bf16 (user's choice for memory/performance)
+        RankedTensorType resultType = srcOutputType;
+
         rewriter.replaceOpWithNewOp<syna::torq_hl::ReduceOp>(
-            srcOp, srcOutputType, createInitTensor(srcOp, rewriter, srcOutputType), opName, axis, 0,
-            0, 0, shift_factor,
-            createI16Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{2}),
+            srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), opName, axis, 0, 0, 0,
+            shift_factor, createI16Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{2}),
             createI32Const(rewriter, srcOp, interleave(bias, scale)), input
         );
 

@@ -16,11 +16,10 @@ void populateLinalgToAluPatterns(MLIRContext *context, RewritePatternSet &patter
 void populateLinalgToTorqHLPrePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
-
 void populateLinalgToTorqHLConv1DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
-void populateLinalgToTorqHLClampPatterns(
+void populateLinalgConv2DToTorqHLConv1DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
 void populateLinalgToTorqHLConv2DPatterns(
@@ -35,7 +34,9 @@ void populateLinalgToTorqHLFCPatterns(
 void populateLinalgToTorqHLPoolingPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
-
+void populateLinalgToTorqHLClampPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
 void populateLinalgToTorqHLPrePatternsLowPrio(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

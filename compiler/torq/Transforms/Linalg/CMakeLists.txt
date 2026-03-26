@@ -27,6 +27,7 @@ iree_cc_library(
     DecomposeLinalgOpsPattern.cpp
     SpecializeTransposeOpPattern.cpp
     OptimizeMatmulOpPattern.cpp
+    OptimizeConv1DPattern.cpp
     OptimizeArithElementwiseBinaryOpPattern.cpp
     CastI32MulPattern.cpp
     OptimizeMulOpPattern.cpp

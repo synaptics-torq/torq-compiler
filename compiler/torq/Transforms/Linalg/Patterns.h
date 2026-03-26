@@ -10,6 +10,8 @@
 
 namespace mlir::syna::torq {
 
+void populateOptimizeConv1DPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 void populateOptimizeElementwiseBinaryOpPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateOptimizeSelectPatterns(MLIRContext *context, RewritePatternSet &patterns);
@@ -21,6 +23,7 @@ void populateSpecializeTransposeOpPatterns(MLIRContext *ctx, RewritePatternSet &
 void populateOptimizeMatmuOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
 void populateRaiseSoftmaxOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 void populateOptimizeArithElementwiseBinaryOpPatterns(
     MLIRContext *ctx, RewritePatternSet &patterns
 );

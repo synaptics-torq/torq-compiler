@@ -446,7 +446,7 @@ class Alu : SliceComponent {
     // where pType is int32 for integer input, iType for float input
     PData load(const IData &idata);
 
-    // Accumulate an input of shape {N}
+    // Accumulate an input of shape {N} with same-type accumulation
     // N can be any value up to act.width(iType)
     // idata: input tensor data in iram
     // acc: accumulate operation (accumulate with ALUOp1Mode::BOR is equivalent to load()
@@ -454,6 +454,19 @@ class Alu : SliceComponent {
     // where pType is int32 for integer input, iType for float input
     // if N < act::width the result will be {1, N}:pType
     PData accumulate(const IData &idata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC);
+
+    // Accumulate an input of shape {N} with specified accumulation precision
+    // N can be any value up to act.width(iType)
+    // idata: input tensor data in iram
+    // acc: accumulate operation
+    // accType: the data type for accumulation (matches output type for float operations)
+    // return: pram data of shape {ceil(N/act::width), act::width}:pType
+    // where pType is int32 for integer input, accType for float input
+    // if N < act::width the result will be {1, N}:pType
+    //
+    // Example: accumulate(bf16_idata, ALUOp1Mode::ACC, DType::fp32) uses bf16 input with
+    // fp32 accumulation precision, preventing error accumulation when summing many values.
+    PData accumulate(const IData &idata, torq_hw::ALUOp1Mode acc, DType accType);
 
     // Multiply an input of shape {N} with a scalar weight (or vector of shape {1}) and accumulate
     // N can be any value up to iWidth(iType, wType)
