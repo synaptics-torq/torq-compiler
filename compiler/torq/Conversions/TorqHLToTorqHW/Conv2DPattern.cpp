@@ -262,7 +262,10 @@ LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &re
 
     const int32_t ksize_y_parts = div_ceil(ksize_y, stride);
 
-    int32_t step_adj = div_ceil(kernel_left + kernel_right, stride);
+    int32_t step_adj = kernel_left + kernel_right;
+    if (stride == 2) {
+        step_adj = ((step_adj + 1 + 1) / 2) - 1;
+    }
     step_adj = step_adj > 2 ? 2 : step_adj;
 
     auto ctx = rewriter.getContext();

@@ -533,7 +533,10 @@ LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewrite
         }
     }
 
-    int32_t step_adj = div_ceil(kernel_left + kernel_right, stride);
+    int32_t step_adj = kernel_left + kernel_right;
+    if (stride == 2) {
+        step_adj = ((step_adj + 1 + 1) / 2) - 1;
+    }
     step_adj = step_adj > 2 ? 2 : step_adj;
 
     SmallVector<uint32_t> act_lsh = {0, 0, 0, 0};
