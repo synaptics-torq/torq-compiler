@@ -133,13 +133,72 @@ class TFLiteLayerExtractor:
     """
     Extract individual layers from TFLite models preserving quantization.
     """
-    
+
+    # Map TFLite TensorType enum to numpy dtype string
+    _DTYPE_MAP = {
+        0: 'float32', 1: 'float16', 2: 'int32', 3: 'uint8',
+        4: 'int64', 5: 'string', 6: 'bool', 7: 'int16',
+        8: 'complex64', 9: 'int8', 10: 'float64', 11: 'complex128',
+        12: 'uint64', 13: 'resource', 14: 'variant', 15: 'uint32',
+        16: 'uint16', 17: 'int4', 18: 'bfloat16',
+    }
+
+    # Build reverse map from BuiltinOperator enum value to name
+    _BUILTIN_OP_NAMES = {
+        v: k for k, v in vars(tflite_schema.BuiltinOperator).items()
+        if isinstance(v, int) and not k.startswith('_')
+    }
+
     def __init__(self, model_path: str):
         self.parser = TFLiteModelParser(model_path)
         self.model_path = model_path
-        self.tensors = self.parser.get_tensor_details()
-        self.operators = self.parser.get_operator_details()
         self.model_obj = self.parser.get_model_object()
+        # Derive tensor/operator info from the flatbuffer object tree so we
+        # don't need the TF Lite interpreter (which may reject the model).
+        self.tensors = self._tensors_from_flatbuffer()
+        self.operators = self._operators_from_flatbuffer()
+
+    def _tensors_from_flatbuffer(self) -> Dict[int, TensorInfo]:
+        """Extract tensor details directly from the flatbuffer model object."""
+        subgraph = self.model_obj.subgraphs[0]
+        tensors: Dict[int, TensorInfo] = {}
+        for idx, t in enumerate(subgraph.tensors):
+            quant = None
+            if t.quantization is not None:
+                scales = list(t.quantization.scale) if t.quantization.scale is not None else []
+                zeros = list(t.quantization.zeroPoint) if t.quantization.zeroPoint is not None else []
+                if len(scales) > 0:
+                    quant = QuantizationParams(
+                        scale=scales,
+                        zero_point=zeros,
+                        quantized_dimension=t.quantization.quantizedDimension,
+                    )
+            tensors[idx] = TensorInfo(
+                index=idx,
+                name=t.name.decode() if isinstance(t.name, bytes) else (t.name or f"tensor_{idx}"),
+                shape=list(t.shape) if t.shape is not None else [],
+                dtype=self._DTYPE_MAP.get(t.type, f"unknown({t.type})"),
+                quantization=quant,
+            )
+        return tensors
+
+    def _operators_from_flatbuffer(self) -> List[OperatorInfo]:
+        """Extract operator details directly from the flatbuffer model object."""
+        subgraph = self.model_obj.subgraphs[0]
+        ops: List[OperatorInfo] = []
+        for idx, op in enumerate(subgraph.operators):
+            opcode = self.model_obj.operatorCodes[op.opcodeIndex]
+            # deprecatedBuiltinCode is used for codes < 127; builtinCode for all
+            code = opcode.builtinCode if opcode.builtinCode != 0 else opcode.deprecatedBuiltinCode
+            op_name = self._BUILTIN_OP_NAMES.get(code, f"CUSTOM_{code}")
+            ops.append(OperatorInfo(
+                index=idx,
+                opcode_index=op.opcodeIndex,
+                op_name=op_name,
+                inputs=list(op.inputs),
+                outputs=list(op.outputs),
+            ))
+        return ops
         
     def get_layer_info(self) -> List[Dict]:
         """Get information about all layers in the model."""

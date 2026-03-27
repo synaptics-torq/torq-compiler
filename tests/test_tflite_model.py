@@ -92,15 +92,15 @@ def pytest_generate_tests(metafunc):
 # Tests
 # ============================================================================
 
-def test_tflite_model_llvmcpu_torq(
+def test_tflite_model_tflite_torq(
     request,
-    llvmcpu_reference_results,
+    tflite_reference_results,
     torq_results,
     case_config,
     tflite_layer_model,  # needed for pytest_generate_tests parametrization
 ):
     """Compare TFLite model results between LLVM-CPU and Torq backends."""
-    compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
+    compare_test_results(request, torq_results, tflite_reference_results, case_config)
 
 
 # ============================================================================

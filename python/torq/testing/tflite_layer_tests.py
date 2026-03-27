@@ -204,6 +204,7 @@ def generate_parametrized_tests(metafunc, model_names, model_paths, marks=lambda
     max_layers = metafunc.config.getoption("--tflite-layer-test-max-layers")
     full_only = metafunc.config.getoption("--tflite-layer-test-generate-full-model-only")
 
+    all_cases = []
     for model_name, model_path in zip(model_names, model_paths):
 
         cache_key = f"{model_name}_max_layers={max_layers}_full={full_only}"
@@ -226,13 +227,15 @@ def generate_parametrized_tests(metafunc, model_names, model_paths, marks=lambda
 
             _CASES_CACHE[cache_key] = cases
 
+        all_cases.extend(cases)
+
     # no test case was returned, we can skip parametrization
-    if not cases:
+    if not all_cases:
         return
 
     # create pytest.param object that carry name and marks
     params = []
-    for case in cases:
+    for case in all_cases:
         test_marks = []
 
         if case.is_layer:
