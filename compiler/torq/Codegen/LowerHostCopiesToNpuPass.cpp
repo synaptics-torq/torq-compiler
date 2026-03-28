@@ -19,6 +19,8 @@
 #include "torq/Utils/EncodingUtils.h"
 #include "llvm/Support/Debug.h"
 
+#include <algorithm>
+
 #define DEBUG_TYPE "torq-lower-host-copies-to-npu"
 
 using namespace mlir::iree_compiler;
@@ -36,6 +38,36 @@ class XramToXramHostCopyPattern : public OpRewritePattern<torq_hl::HostCopyOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
 
+  private:
+    static LogicalResult
+    lowerSingleCopy(PatternRewriter &rewriter, Location loc, Value input, Value output) {
+        // create a temporary dense buffer in LRAM to copy the data
+        auto inputType = cast<MemRefType>(input.getType());
+        auto tempBufferType = MemRefType::get(
+            inputType.getShape(), inputType.getElementType(), nullptr,
+            createDenseEncoding(inputType, torq_hl::MemorySpace::Lram)
+        );
+
+        auto tempBuffer = rewriter.create<memref::AllocOp>(loc, tempBufferType, ValueRange{});
+
+        // create a torq copy to copy from the source buffer in XRAM to the temporary buffer in
+        // LRAM this will be a torq_hl::LoadOp
+        if (failed(createTorqCopy(rewriter, loc, input, tempBuffer))) {
+            emitError(loc, "failed to create torq copy from XRAM to LRAM");
+            return failure();
+        }
+
+        // create a torq copy to copy from the temporary buffer in LRAM to the destination buffer
+        // in XRAM this will be a torq_hl::StoreOp
+        if (failed(createTorqCopy(rewriter, loc, tempBuffer, output))) {
+            emitError(loc, "failed to create torq copy from LRAM to XRAM");
+            return failure();
+        }
+
+        return success();
+    }
+
+  public:
     LogicalResult
     matchAndRewrite(torq_hl::HostCopyOp copyOp, PatternRewriter &rewriter) const override {
 
@@ -65,33 +97,84 @@ class XramToXramHostCopyPattern : public OpRewritePattern<torq_hl::HostCopyOp> {
             llvm::divideCeil(inputType.getElementType().getIntOrFloatBitWidth(), 8);
         auto totalElementSizeBytes = elementSizeBytes * inputType.getNumElements();
 
-        // if the total size of the elements is larger than the available memory for tiling in
-        // LRAM, we can't do the copy in LRAM with a single load/store pair
-        if (totalElementSizeBytes > TorqHw::get().getAvailableMemoryForTiling()) {
+        auto maxChunkSizeBytes = TorqHw::get().getAvailableMemoryForTiling();
+
+        if (maxChunkSizeBytes < elementSizeBytes) {
             return failure();
         }
 
-        // create a temporary dense buffer in LRAM to copy the data
-        auto tempBufferType = MemRefType::get(
-            inputType.getShape(), inputType.getElementType(), nullptr,
-            createDenseEncoding(inputType, torq_hl::MemorySpace::Lram)
-        );
-
-        auto tempBuffer =
-            rewriter.create<memref::AllocOp>(copyOp.getLoc(), tempBufferType, ValueRange{});
-
-        // create a torq copy to copy from the source buffer in XRAM to the temporary buffer in LRAM
-        // this will be a torq_hl::LoadOp
-        if (failed(createTorqCopy(rewriter, copyOp.getLoc(), copyOp.getInput(), tempBuffer))) {
-            copyOp->emitError("failed to create torq copy from XRAM to LRAM");
-            llvm::report_fatal_error("failed to create torq copy from XRAM to LRAM");
+        // if the total size of the elements is larger than the available memory for tiling in
+        // LRAM, we can't do the copy in LRAM with a single load/store pair
+        if (totalElementSizeBytes <= maxChunkSizeBytes) {
+            if (failed(lowerSingleCopy(
+                    rewriter, copyOp.getLoc(), copyOp.getInput(), copyOp.getOutput()
+                ))) {
+                copyOp->emitError("failed to lower host copy to load/store pair");
+                return failure();
+            }
         }
+        else {
+            // for oversized copies, tile contiguous buffers into chunks that fit in LRAM
+            // this avoids host copy for large XRAM transfers
+            if (!inputType.hasStaticShape() || !outputType.hasStaticShape() ||
+                !isDenseInMemory(inputType) || !isDenseInMemory(outputType)) {
+                return failure();
+            }
 
-        // create a torq copy to copy from the temporary buffer in LRAM to the destination buffer in
-        // XRAM this will be a torq_hl::StoreOp
-        if (failed(createTorqCopy(rewriter, copyOp.getLoc(), tempBuffer, copyOp.getOutput()))) {
-            copyOp->emitError("failed to create torq copy from LRAM to XRAM");
-            llvm::report_fatal_error("failed to create torq copy from LRAM to XRAM");
+            int64_t maxChunkElements = maxChunkSizeBytes / elementSizeBytes;
+            int64_t totalElements = inputType.getNumElements();
+
+            if (maxChunkElements <= 0 || totalElements <= 0) {
+                return failure();
+            }
+
+            Value flatInput = copyOp.getInput();
+            Value flatOutput = copyOp.getOutput();
+
+            if (inputType.getRank() > 1) {
+                SmallVector<ReassociationIndices> reassociation(1);
+                reassociation[0].reserve(inputType.getRank());
+                for (int64_t i = 0, e = inputType.getRank(); i < e; ++i) {
+                    reassociation[0].push_back(i);
+                }
+
+                auto flatInputType =
+                    memref::CollapseShapeOp::computeCollapsedType(inputType, reassociation);
+                auto flatOutputType =
+                    memref::CollapseShapeOp::computeCollapsedType(outputType, reassociation);
+
+                flatInput = rewriter
+                                .create<memref::CollapseShapeOp>(
+                                    copyOp.getLoc(), flatInputType, copyOp.getInput(), reassociation
+                                )
+                                .getResult();
+                flatOutput =
+                    rewriter
+                        .create<memref::CollapseShapeOp>(
+                            copyOp.getLoc(), flatOutputType, copyOp.getOutput(), reassociation
+                        )
+                        .getResult();
+            }
+
+            for (int64_t offset = 0; offset < totalElements; offset += maxChunkElements) {
+                int64_t currChunkElements = std::min(maxChunkElements, totalElements - offset);
+
+                SmallVector<OpFoldResult> offsets{rewriter.getIndexAttr(offset)};
+                SmallVector<OpFoldResult> sizes{rewriter.getIndexAttr(currChunkElements)};
+                SmallVector<OpFoldResult> strides{rewriter.getIndexAttr(1)};
+
+                auto inputChunk = rewriter.create<memref::SubViewOp>(
+                    copyOp.getLoc(), flatInput, offsets, sizes, strides
+                );
+                auto outputChunk = rewriter.create<memref::SubViewOp>(
+                    copyOp.getLoc(), flatOutput, offsets, sizes, strides
+                );
+
+                if (failed(lowerSingleCopy(rewriter, copyOp.getLoc(), inputChunk, outputChunk))) {
+                    copyOp->emitError("failed to lower tiled host copy chunk to load/store pair");
+                    return failure();
+                }
+            }
         }
 
         // erase the original host copy operation
