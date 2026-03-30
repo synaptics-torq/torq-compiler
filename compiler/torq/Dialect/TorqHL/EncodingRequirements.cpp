@@ -371,23 +371,19 @@ KernelEncoding AddOp::getKernelEncoding() {
     RankedTensorType resultType = dyn_cast<RankedTensorType>(getResult(0).getType());
 
     auto input1Type = cast<RankedTensorType>(getInput1().getType());
-    auto input2Type = cast<RankedTensorType>(getInput2().getType());
 
     assert(
         input1Type.getRank() == resultType.getRank() && "Input and output tensor ranks must match"
     );
 
     KernelTensorEncoding emptyEnc = {};
-    auto enc1 = inRank1 == 1 ? emptyEnc : defaultEncoding(input1Type);
-    auto enc2 = inRank2 == 1 ? emptyEnc : defaultEncoding(input2Type);
-    auto enc = defaultEncoding(resultType, 0, !getSegmentOutput());
 
-    SmallVector<KernelInputEncoding> inEncoding = {{inIndex1, enc1}, {inIndex2, enc2}};
+    SmallVector<KernelInputEncoding> inEncoding = {{inIndex1, emptyEnc}, {inIndex2, emptyEnc}};
 
     SmallVector<std::pair<unsigned, unsigned>> equalEncodingOperands = {{inIndex1, inIndex2}};
 
     return {
-        inEncoding, enc,
+        inEncoding, emptyEnc,
         (inRank1 == 1 || inRank2 == 1) ? SmallVector<std::pair<unsigned, unsigned>>{}
                                        : equalEncodingOperands
     };
