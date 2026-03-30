@@ -73,6 +73,8 @@ class SSHCommandRunner(RemoteCommandRunner):
         self.ssh_options = [
             "-o", "BatchMode=yes",
             "-o", f"ConnectTimeout={self.timeout}",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
         ]
         self.ssh_socket = None
         self.port = port
@@ -137,9 +139,8 @@ class SSHCommandRunner(RemoteCommandRunner):
             else:
                 full_cmd = [
                     "ssh", "-T",
-                    "-o", "BatchMode=yes",
-                    "-o", f"ConnectTimeout={self.timeout}",
                     "-p", str(self.port),
+                ] + self.ssh_options + [
                     self.board_addr,
                 ] + cmd
             result = subprocess.check_output(
@@ -182,9 +183,7 @@ class SSHCommandRunner(RemoteCommandRunner):
                 dst
             ])
         else:
-            cmd.extend([
-                "-o", "BatchMode=yes",
-                "-o", f"ConnectTimeout={self.timeout}",
+            cmd.extend(self.ssh_options + [
                 "-P", str(self.port),
                 src,
                 dst
