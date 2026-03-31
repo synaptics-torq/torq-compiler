@@ -540,23 +540,23 @@ llvm::FailureOr<bool> TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp
     mlir::ScopedDiagnosticHandler diagHandler(
         moduleOp->getContext(),
         [&](mlir::Diagnostic &diag) -> LogicalResult {
-            // TODO(sflur): is there a better way to identify this? The pass
-            // could write something to the IR and we will look for it here?
-            // Maybe use an argument (see diag.getArguments()).
+            if (memoryOverflow) {
+                // If we already saw the OUT_OF_MEMORY_MESSAGE, suppress all messages.
+                return llvm::success();
+            }
+
             if (diag.str() == OUT_OF_MEMORY_MESSAGE) {
                 memoryOverflow = true;
-                // Signal to the rest of the system that we are handling this issue.
+                // Signal that we are handling this issue (don't print error message).
                 return llvm::success();
             }
 
             // Something else (other than the expected memory overflow) bad happened.
             failure = true;
-            llvm::errs() << "Tiling-and-fuse: the following error was encountered while running "
-                            "the pipeline to checking if a tile fits in memory (it might not be "
-                            "a real error):\n";
-            llvm::errs().flush();
-
-            // Signal that we are not handling this issue.
+            diag.append(
+                " (encountered while running the pipeline to checking if a tile fits in memory)"
+            );
+            // Signal that we are not handling this issue (error message will be printed).
             return llvm::failure();
         }
     );

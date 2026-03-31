@@ -11,19 +11,24 @@
 #include "torq/Codegen/VirtualMemory.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/CodeSizeUtils.h"
 #include "torq/Utils/EncodingUtils.h"
+#include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqHw.h"
-
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
-#include "torq/Utils/CodeSizeUtils.h"
-#include "torq/Utils/InvocationUtils.h"
-#include "torq/Utils/TorqUtils.h"
+
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/LogicalResult.h"
+
+#include <optional>
 
 #define DEBUG_TYPE "torq-assign-addresses"
 
@@ -468,10 +473,48 @@ class AssignLramAddressesPass : public AssignLramAddressesBase<AssignLramAddress
     void runOnOperation() override {
         auto funcOp = getOperation();
 
-        if (failed(allocateLramAddresses(funcOp))) {
+        LogicalResult result = llvm::failure();
+
+        // When tile and fuse runs the pipeline it expects to see
+        // OUT_OF_MEMORY_MESSAGE as the first error, if the tile does not fit in
+        // memory. Any errors after that one will be suppressed. The diagHandler
+        // below catches all the errors/warnings the pass emits, and re-emits
+        // them after emitting OUT_OF_MEMORY_MESSAGE.
+        llvm::SmallVector<mlir::InFlightDiagnostic> inFlightDiags;
+
+        { // This scopes delimits diagHandler, so at the end we can actually
+          // re-emit the errors without it catching them again.
+            mlir::ScopedDiagnosticHandler diagHandler(
+                funcOp->getContext(),
+                [&](mlir::Diagnostic &diag) -> LogicalResult {
+                    InFlightDiagnostic inFlightDiag =
+                        getContext().getDiagEngine().emit(diag.getLocation(), diag.getSeverity());
+
+                    inFlightDiag << diag.str();
+
+                    for (Diagnostic &note : diag.getNotes())
+                        inFlightDiag.attachNote(note.getLocation()) << note.str();
+
+                    inFlightDiags.emplace_back(std::move(inFlightDiag));
+
+                    return llvm::success();
+                }
+            );
+
+            result = allocateLramAddresses(funcOp);
+        } // destruct diagHandler;
+
+        if (failed(result)) {
             // TileAndFusePass relies on this message to identify memory overflow
             funcOp->emitError() << OUT_OF_MEMORY_MESSAGE;
-            return signalPassFailure();
+            signalPassFailure();
+        }
+
+        // re-emit all the errors/warnings (after OUT_OF_MEMORY_MESSAGE).
+        if (!inFlightDiags.empty()) {
+            for (auto &inFlightDiag : inFlightDiags) {
+                inFlightDiag.report();
+            }
         }
     }
 };
