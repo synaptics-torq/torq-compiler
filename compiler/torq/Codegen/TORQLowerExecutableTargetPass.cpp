@@ -134,9 +134,6 @@ void addSlicePassesPostTileAndFuse(OpPassManager &pm) {
         if (!clEnableTorqHLTiling) {
             funcPm.addPass(createCanonicalizerPass());
             funcPm.addPass(createPeelTileLoopsPass());
-            funcPm.addPass(createCanonicalizerPass());
-            funcPm.addPass(createUnrollDynamicShapeLoopPass());
-            funcPm.addPass(createCanonicalizerPass());
         }
 
         // lower the linalg operators to torq_hl before tiling
