@@ -506,12 +506,11 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
         Value outputTensor =
             rewriter.create<tensor::EmptyOp>(convOp.getLoc(), outShape, outType.getElementType());
 
-        int outPaddingLines = (kernelHeight - 1) / 2;
-        int inPaddingLines = outPaddingLines;
-        if (isStride2conv) {
-            // Make number of padding lines even to avoid misalignment with stride
-            inPaddingLines = align_ceil(inPaddingLines, 2);
-        }
+        const int outPadTop = (kernelHeight - 1) / 2;
+        const int outPadBottom = kernelHeight - outPadTop - 1;
+        const int inPadTop = isStride2conv ? align_ceil(outPadTop, 2) : outPadTop;
+        const int inPadBottom = isStride2conv ? align_ceil(outPadBottom, 2) : outPadBottom;
+
         const auto tileStrides = createVector({1, 1, 1, 1}, rewriter);
 
         for (int i = 0; i < totalTiles; i++) {
@@ -563,19 +562,18 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
                     currentInStripeHeight = remainingInStripes;
                 }
 
-                const int inPadTop = s > 0 ? inPaddingLines : 0;
-                const int inPadBottom = s < outStripesCount - 1 ? inPaddingLines : 0;
+                const int inpadtop = s > 0 ? inPadTop : 0;
+                const int inpadbottom = s < outStripesCount - 1 ? inPadBottom : 0;
+                const int outpadtop = s > 0 ? outPadTop : 0;
+                const int outpadbottom = s < outStripesCount - 1 ? outPadBottom : 0;
 
-                const int outPadTop = s > 0 ? outPaddingLines : 0;
-                const int outPadBottom = s < outStripesCount - 1 ? outPaddingLines : 0;
-
-                currentOutStripeHeight += outPadTop + outPadBottom;
-                currentInStripeHeight += inPadTop + inPadBottom;
+                currentOutStripeHeight += outpadtop + outpadbottom;
+                currentInStripeHeight += inpadtop + inpadbottom;
 
                 auto inStripeOffsets = inTileOffsets;
-                inStripeOffsets[2] = rewriter.getIndexAttr(s * fixedInStripeHeight - inPadTop);
+                inStripeOffsets[2] = rewriter.getIndexAttr(s * fixedInStripeHeight - inpadtop);
                 auto outStripeOffsets = outTileOffsets;
-                outStripeOffsets[2] = rewriter.getIndexAttr(s * fixedOutStripeHeight - outPadTop);
+                outStripeOffsets[2] = rewriter.getIndexAttr(s * fixedOutStripeHeight - outpadtop);
                 auto inStripeSizes = inTileSizes;
                 inStripeSizes[2] = rewriter.getIndexAttr(currentInStripeHeight);
                 auto outStripeSizes = outTileSizes;
@@ -636,10 +634,10 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
                     );
                 }
 
-                auto lramOutStripeOffsets = createVector({0, 0, outPadTop, 0}, rewriter);
+                auto lramOutStripeOffsets = createVector({0, 0, outpadtop, 0}, rewriter);
                 auto lramOutStripeSizes = outStripeSizes;
                 lramOutStripeSizes[2] =
-                    rewriter.getIndexAttr(currentOutStripeHeight - outPadTop - outPadBottom);
+                    rewriter.getIndexAttr(currentOutStripeHeight - outpadtop - outpadbottom);
                 auto outputTile = rewriter.create<tensor::ExtractSliceOp>(
                     convOp.getLoc(), outputTileWithPad.getOutput(), lramOutStripeOffsets,
                     lramOutStripeSizes, tileStrides
@@ -647,7 +645,7 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
 
                 outStripeOffsets[2] = rewriter.getIndexAttr(s * fixedOutStripeHeight);
                 outStripeSizes[2] =
-                    rewriter.getIndexAttr(currentOutStripeHeight - outPadTop - outPadBottom);
+                    rewriter.getIndexAttr(currentOutStripeHeight - outpadtop - outpadbottom);
                 outputTensor = rewriter
                                    .create<tensor::InsertSliceOp>(
                                        convOp.getLoc(), outputTile.getResult(), outputTensor,
