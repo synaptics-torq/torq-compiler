@@ -27,7 +27,7 @@ The runtime supports emulation with QEMU and it executes the CSS binaries in QEM
 To compile the program using QEMU emulation, pass the following arguments at the time of compilation:
 
 ```{code} shell
-$ torq-compile ... --iree-input-type=tosa --torq-css-qemu
+$ torq-compile ... --torq-css-qemu
 ```
 
 

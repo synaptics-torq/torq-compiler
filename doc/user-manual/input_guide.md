@@ -4,13 +4,11 @@
 
 The input type tells the compiler what kind of intermediate representation (IR) it's processing, such as TOSA or Torch dialects, and selects the appropriate frontend pipeline.
 
-> **Note:** By default, `torq-compile` expects TOSA MLIR input, so you do not need to specify `--iree-input-type=tosa-torq` unless you want to override the default.
-
-When compiling a model, specify the input type with `--iree-input-type`.  
+By default, `torq-compile` automatically detects the input type (`--iree-input-type=auto`), so you typically don't need to specify it. If auto-detection doesn't work for your model, you can explicitly override it with `--iree-input-type`:
 - For TOSA MLIR: `--iree-input-type=tosa-torq`
 - For Torch MLIR: `--iree-input-type=torch-torq`
-
-Choose the appropriate value based on your model's origin.
+- For ONNX MLIR: `--iree-input-type=onnx-torq`
+- For Linalg MLIR: `--iree-input-type=linalg-torq`
 
 For more options, run:
 ```shell

@@ -6,6 +6,7 @@ getting_started.md
 model_conversion.md
 input_guide.md
 step_by_step_examples.md
+torq_runtime.md
 ops.md
 profiling.md
 css_host_fallback.md

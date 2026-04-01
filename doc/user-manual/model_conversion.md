@@ -12,21 +12,24 @@ IREE provides a command line tool that can be used to convert a _TFLite_ model t
 expressed in the {term}`TOSA` dialect.
 
 
-- If not yet done, activate python environment as explained in  [Getting Started](./getting_started.md) (skip this step if using the Docker container).
+- If not yet done, activate the Python environment as explained in [Getting Started](./getting_started.md) (skip this step if using the Docker container).
 
 - Navigate to the root directory of the [Release Package](./getting_started.md#release-package-ubuntu-24-04), or run the [Docker container](./getting_started.md#docker-image).
-  For the Docker container, release package is located at:  
+  For the Docker container, the release package is located at:  
   ```
   $ cd /opt/release
   ```
-- Convert the model to TOSA use the following command:
+- Convert the model to TOSA using the following command:
     
     **Model Source:** This model - MobileNetV2 is generated from tf.keras.applications using [tf_model_generator.py](https://github.com/synaptics-torq/iree-synaptics-synpu/blob/main/tests/model_generator/tf_model_generator.py). The dataset for int8 quantization is done using random data.
 
     ```{code} shell
     $ iree-import-tflite tests/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite -o mobilenetv2.tosa
     ```
-> **Note:** The `tests/hf/` directory is only included in the [Release Package](./getting_started.md#release-package-ubuntu-24-04) and is not available in the compiler github repository.
+
+```{note}
+The `tests/hf/` directory is only included in the [Release Package](./getting_started.md#release-package-ubuntu-24-04) and is not available in the compiler GitHub repository.
+```
 
 
 - More details on the IREE TFLite tools can be found in the 
@@ -85,6 +88,26 @@ expressed in the {term}`TOSA` dialect.
     - LINALG_ON_TENSORS
     - TOSA
     - STABLEHLO
+
+## Convert ONNX Model to MLIR
+
+IREE provides an ONNX importer that converts ONNX models into a text-based MLIR representation. The importer is available in the Torq compiler Python environment.
+
+- If not using the Docker container, activate the Python environment as explained in [Getting Started](./getting_started.md).
+
+- Run the IREE importer to convert an ONNX model to MLIR:
+
+    ```{code}shell
+    $ python -m iree.compiler.tools.import_onnx path/to/model.onnx -o path/to/model.mlir --data-prop
+    ```
+
+    ```{tip}
+    Use the `-h` flag to view all available importer options.
+    ```{code}shell
+    $ python -m iree.compiler.tools.import_onnx -h
+    ```
+
+The output MLIR file can be compiled with Torq by specifying `onnx-torq` as the input dialect.
 
 ## References
 
