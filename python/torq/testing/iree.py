@@ -218,21 +218,6 @@ def iree_opt():
     return _find_iree_tool('IREE_OPT', 'iree-opt')
 
 
-
-def get_input_type_options(input_path):
-    """
-    Auto-detects the pipeline suitable to run the MLIR input file
-    """
-
-    with open(input_path, 'r') as mlir_file:
-        mlir_content = mlir_file.read()
-    if "torch.onnx" in mlir_content:
-        return ['--iree-input-type=onnx-torq']
-    elif "torch." in mlir_content:
-        return ['--iree-input-type=torch-torq']
-    return []
-
-
 def create_output_args(output_path_root, output_specs):
     """
     Creates the output command line args to invoke torq-run-module
@@ -604,7 +589,6 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         cmds.extend(['--torq-css-qemu', "--torq-target-host-triple=native"])
     elif runtime_hw_type == 'aws_fpga':
         cmds.extend(["--torq-target-host-triple=native"])
-    cmds += get_input_type_options(mlir_model_file)
 
     cmds += torq_compiler_options
     

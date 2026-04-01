@@ -102,6 +102,88 @@ struct TORQSession : public PluginSession<
         typeMnemonics.insert("linalg-torq");
     }
 
+    void populateDetectedCustomInputConversionTypes(ModuleOp &module, StringSet<> &typeMnemonics)
+        override {
+        // Only run when target backend is Torq.
+        // Otherwise, we would override the base input types (e.g. "onnx")
+        // and run the torq pipeline even for non-torq backends like llvm-cpu, which can't handle
+        // the resulting IR.
+        auto targetsAttr = module->getAttrOfType<ArrayAttr>("hal.device.targets");
+        if (!targetsAttr)
+            return;
+        bool hasTorqTarget = false;
+        for (auto attr : targetsAttr) {
+            if (auto deviceTarget = dyn_cast<IREE::HAL::DeviceTargetAttr>(attr)) {
+                if (deviceTarget.getDeviceID().getValue() == "torq") {
+                    hasTorqTarget = true;
+                    break;
+                }
+            }
+        }
+        if (!hasTorqTarget)
+            return;
+
+        auto *ctx = module.getContext();
+        const Dialect *tosaDialect = ctx->getLoadedDialect("tosa");
+        const Dialect *torchDialect = ctx->getLoadedDialect("torch");
+        const Dialect *torchConversionDialect = ctx->getLoadedDialect("torch_c");
+        const Dialect *linalgDialect = ctx->getLoadedDialect("linalg");
+
+        bool hasTosa = false;
+        bool hasTorch = false;
+        bool hasLinalg = false;
+
+        module.walk([&](Operation *op) {
+            Dialect *d = op->getDialect();
+            if (d == tosaDialect) {
+                hasTosa = true;
+            }
+            else if (d == torchDialect || d == torchConversionDialect) {
+                hasTorch = true;
+            }
+            else if (d == linalgDialect) {
+                hasLinalg = true;
+            }
+            return WalkResult::advance();
+        });
+
+        bool hasOnnx = false;
+        for (auto funcOp : module.getOps<func::FuncOp>()) {
+            if (funcOp->getAttrOfType<mlir::IntegerAttr>("torch.onnx_meta.opset_version")) {
+                hasOnnx = true;
+                break;
+            }
+        }
+
+        if (hasTosa) {
+            typeMnemonics.insert("tosa-torq");
+        }
+        else if (hasOnnx) {
+            typeMnemonics.insert("onnx-torq");
+        }
+        else if (hasTorch) {
+            typeMnemonics.insert("torch-torq");
+        }
+        else if (hasLinalg) {
+            typeMnemonics.insert("linalg-torq");
+        }
+    }
+
+    void resolveDetectedCustomInputConversionTypes(StringSet<> &typeMnemonics) override {
+        // Remove corresponding base types for Torq specific input types.
+        // This avoids "mixture of input types" errors.
+        static const std::pair<StringRef, StringRef> overrides[] = {
+            {"tosa-torq", "tosa"},
+            {"torch-torq", "torch"},
+            {"onnx-torq", "onnx"},
+        };
+        for (auto &[torqType, baseType] : overrides) {
+            if (typeMnemonics.contains(torqType)) {
+                typeMnemonics.erase(baseType);
+            }
+        }
+    }
+
     void populateHALTargetDevices(IREE::HAL::TargetDeviceList &targets) override {
         targets.add("torq", [&]() { return createTarget(options); });
     }

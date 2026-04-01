@@ -17,8 +17,7 @@ int main(int argc, char **argv) {
                                          "--iree-flow-inline-constants-max-byte-length=100000000",
                                          "--iree-hal-target-backends=torq" };
 
-    // FIXME: this is the current default but it is wrong because we should use auto-detection
-    allArgs.push_back("--iree-input-type=tosa-torq");
+    allArgs.push_back("--iree-input-type=auto");
 
     for (int i = 1; i < argc; ++i) {
         allArgs.push_back(argv[i]);

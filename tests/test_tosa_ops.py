@@ -84,7 +84,7 @@ def case_config(request, runtime_hw_type, chip_config):
                 'argmax-1x50x256-1axis.mlir', # Number of differences: 121 out of 256 [47.27%]
                 'avgpool2d.mlir',
             ]
-    extra_args = {"--iree-input-type=tosa-torq":""}
+    extra_args = {}
 
     if chip_config.data['target'] != "SL2610" and (runtime_hw_type.data == "aws_fpga"):
         if request.param.data.name.startswith('mul-1hwc-in-int8'):
