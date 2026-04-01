@@ -554,7 +554,7 @@ KernelEncoding FMAOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding BroadcastOp::getKernelEncoding() { return getNoEncoding(); }
 
-KernelEncoding ResizeNearestNeighborOp::getKernelEncoding() { return getResizeLikeEncoding(*this); }
+KernelEncoding ResizeNearestNeighborOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding DepthToSpaceOp::getKernelEncoding() { return getResizeLikeEncoding(*this); }
 

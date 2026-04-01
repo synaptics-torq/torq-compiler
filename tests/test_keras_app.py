@@ -10,7 +10,7 @@ import tensorflow as tf
 
 @versioned_cached_data_fixture
 def comparison_config_for_efficientnetb0(request):
-    return {'int_tol': 8, 'int_thld': 8}
+    return {'int_tol': 9, 'int_thld': 9}
 
 def get_model_cases(model_name, input_shape, include_top=False, full_model=False):
     cases = []

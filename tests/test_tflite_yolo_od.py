@@ -209,9 +209,19 @@ def case_config(request, tflite_layer_model):
     """Configure test case settings."""
     _skip_next_group_full_model(request, tflite_layer_model)
     torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-css", "--torq-disable-host"]
-    torq_compiler_options += ["--torq-enable-transpose-optimization"]
-    # tile-and-fuse is not working yet
-    torq_compiler_options += ["--torq-enable-torq-hl-tiling"]
+
+    # Add a warning if neither tiling nor transpose optimization is enabled,
+    # since that is required for correct results on some layers & to get max performance on the full model.
+    is_full_model = not tflite_layer_model.data.is_layer
+    if (is_full_model and "--torq-enable-torq-hl-tiling" not in torq_compiler_options and
+        "--torq-enable-transpose-optimization" not in torq_compiler_options):
+        msg = (
+            "################################################################################\n"
+            "NOTE: For correct results and best performance on YOLO OD full-model tests, "
+            "enable --torq-enable-torq-hl-tiling and --torq-enable-transpose-optimization.\n"
+            "################################################################################\n"
+        )
+        print(msg)
     return {
         "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",

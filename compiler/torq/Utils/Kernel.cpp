@@ -697,6 +697,14 @@ IData &IData::insertDim(int pos, const ShapeItem &item) {
     return *this;
 }
 
+IData &IData::repeat(int count) {
+    assert(count > 0);
+    this->repeatFactor = count;
+    if (!this->getShape().empty())
+        this->getShape().back().count *= count;
+    return *this;
+}
+
 LData &LData::eraseDim(int pos) {
     auto &shape = getShape();
     shape.erase(shape.begin() + pos);
@@ -1358,9 +1366,13 @@ void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
     RegNdlDimsData cedrDims;
     if (weightSize > 1 && isInt(idata.elementType())) {
         assert(weightSize == 2 && "Only int8 or int16 weights supported for now");
-        cedrDims.push_back({DimType::L, RegDimTag::I, weightSize});
+        cedrDims.push_back({DimType::L, RegDimTag::I, weightSize * idata.getRepeatFactor()});
         biCount *= weightSize;
     }
+    else if (idata.getRepeatFactor() > 1) {
+        cedrDims.push_back({DimType::L, RegDimTag::I, idata.getRepeatFactor()});
+    }
+    bi.size /= idata.getRepeatFactor();
     cedrDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
     static const int sValidDataCount[] = {8, 16, 32, 64, 0};
     int dCount = biCount * bi.size;

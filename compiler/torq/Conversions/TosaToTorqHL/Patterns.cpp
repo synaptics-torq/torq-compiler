@@ -887,6 +887,7 @@ struct ElementWiseShiftOpConversion final : public OpConversionPattern<OpTy> {
     }
 };
 
+// FIXME: This is supported only upscale of 2, Need to support more
 struct ResizeNearestNeighborOpConversion : public OpConversionPattern<tosa::ResizeOp> {
     ResizeNearestNeighborOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
 
@@ -895,22 +896,45 @@ struct ResizeNearestNeighborOpConversion : public OpConversionPattern<tosa::Resi
     ) const override {
         auto scale = adaptor.getScale();
         auto mode = adaptor.getMode();
-        if (mode != "NEAREST_NEIGHBOR") {
-            return srcOp.emitError("Current support only for NEAREST_NEIGHBOR with scale 2");
+        // the code only supported for scale factor of 2
+        bool isScaleFactor2 = (scale[0] == (scale[1] * 2));
+        if (mode != "NEAREST_NEIGHBOR" || !isScaleFactor2) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Current support only for NEAREST_NEIGHBOR with scale 2"
+            );
         }
-        auto output = rewriter.create<syna::torq_hl::ResizeNearestNeighborOp>(
-            srcOp.getLoc(), convertTypeNHWCtoNCHW(srcOp.getResult().getType()),
-            createInitTensorNCHW(srcOp, rewriter), scale[0],
-            convertNHWCtoNCHW(srcOp.getInput(), srcOp.getLoc(), rewriter)
+
+        // Transpose input NHWC -> NCHW, run the resize in NCHW, then transpose back.
+        auto resultTypeNCHW = convertTypeNHWCtoNCHW(srcOp.getResult().getType());
+        AffineExpr n, c, h, w;
+        bindDims(rewriter.getContext(), n, c, h, w);
+        // NCHW maps: input[n, c, h/2, w/2] -> output[n, c, h, w]
+        auto inputMap =
+            AffineMap::get(4, 0, {n, c, h.floorDiv(2), w.floorDiv(2)}, rewriter.getContext());
+        auto outputMap = AffineMap::get(4, 0, {n, c, h, w}, rewriter.getContext());
+        SmallVector<AffineMap, 4> indexingMaps = {inputMap, outputMap};
+        SmallVector<mlir::utils::IteratorType, 4> iteratorTypes(
+            4, mlir::utils::IteratorType::parallel
         );
-        auto transposeOp = convertNCHWtoNHWC(output.getOutput(), srcOp.getLoc(), rewriter);
-        rewriter.replaceOp(srcOp, transposeOp);
+        auto input = convertNHWCtoNCHW(adaptor.getInput(), srcOp.getLoc(), rewriter);
+        auto output = rewriter.create<linalg::GenericOp>(
+            srcOp.getLoc(), resultTypeNCHW, input,
+            createInitTensor(srcOp.getLoc(), resultTypeNCHW, rewriter), indexingMaps, iteratorTypes,
+            [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
+                nestedBuilder.create<linalg::YieldOp>(nestedLoc, args[0]);
+            }
+        );
+        auto outputTransposed = convertNCHWtoNHWC(output.getResult(0), srcOp.getLoc(), rewriter);
+        rewriter.replaceOp(srcOp, outputTransposed);
+
         return success();
     }
 };
 
 } // namespace
 
+// FIXME: Change the file name to TosaToTorqHLPattern to TosaToLinalgPattern once we have changed
+// all to linalg
 void populateTOSAToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patterns) {
 
     patterns.insert<RescaleOpConversion>(context);

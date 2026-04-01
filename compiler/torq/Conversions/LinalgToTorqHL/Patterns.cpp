@@ -1948,6 +1948,62 @@ struct GenericToBroadcastOpConversion : public OpRewritePattern<linalg::GenericO
     }
 };
 
+// Input will always be in NCHW format
+struct ResizeNearestNeighborOpConversion : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
+
+        auto indexingMaps = genericOp.getIndexingMapsArray();
+        if (indexingMaps.size() != 2) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected exactly 2 indexing maps for ResizeNearestNeighborOpConversion"
+            );
+        }
+        auto inputMap = indexingMaps[0];
+        if (inputMap.getNumResults() != 4) {
+            return rewriter.notifyMatchFailure(
+                genericOp,
+                "Expected affine map with 4 results for ResizeNearestNeighborOpConversion"
+            );
+        }
+        // NCHW
+        auto dim0 = dyn_cast<AffineDimExpr>(inputMap.getResult(0));
+        auto dim1 = dyn_cast<AffineDimExpr>(inputMap.getResult(1));
+        auto dim2 = dyn_cast<AffineBinaryOpExpr>(inputMap.getResult(2));
+        auto dim3 = dyn_cast<AffineBinaryOpExpr>(inputMap.getResult(3));
+        if (!dim0 || !dim1 || !dim2 || !dim3) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected affine map with dim0, dim1 floordiv 2, dim2 floordiv 2, dim3 "
+                           "for ResizeNearestNeighborOpConversion"
+            );
+        }
+        // NCHW
+        auto binaryExpr1 = dim2;
+        auto binaryExpr2 = dim3;
+        if (binaryExpr1.getKind() != AffineExprKind::FloorDiv ||
+            binaryExpr2.getKind() != AffineExprKind::FloorDiv) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected affine map with dim1 and dim2 as floordiv for "
+                           "ResizeNearestNeighborOpConversion"
+            );
+        }
+
+        auto resizeType = genericOp.getResult(0).getType();
+        Value resizeInput = genericOp.getDpsInputs()[0];
+        Value resizeInit =
+            createInitTensor(genericOp, rewriter, mlir::cast<RankedTensorType>(resizeType));
+        auto resizeOp = rewriter.create<syna::torq_hl::ResizeNearestNeighborOp>(
+            genericOp.getLoc(), resizeType, resizeInit, 2, resizeInput
+        );
+
+        rewriter.replaceOp(genericOp, resizeOp.getOutput());
+        return success();
+    }
+};
+
 void populateLinalgToTorqHLPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
@@ -1998,6 +2054,7 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<ReinterpretCastOpPattern>(context);
 
     patterns.insert<GenericToBroadcastOpConversion>(context);
+    patterns.insert<ResizeNearestNeighborOpConversion>(context);
 }
 
 } // namespace mlir::syna::torq

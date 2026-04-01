@@ -124,6 +124,11 @@ struct NCHW {
     enum { N, C, H, W };
 };
 
+// Dimension indicators for NHWC data
+struct NHWC {
+    enum { N, H, W, C };
+};
+
 // Dimension structure for Height and Width
 struct HWDim {
     HWDim() = default;
@@ -314,11 +319,20 @@ class IData : public DataT<IData> {
     using DataT::DataT;
     IData(const Shape &shape, DType elementType, int offs) = delete;
 
+  private:
+    int repeatFactor = 1;
+
   public:
     static std::string name() { return "IData"; }
 
     // Insert a new dimension at the specified index
     IData &insertDim(int dimIndex, const ShapeItem &item);
+
+    // Repeat the data along the last dimension count times
+    IData &repeat(int count);
+
+    // Get the repeat factor count
+    int getRepeatFactor() const { return repeatFactor; }
 };
 
 // Data in WRAM

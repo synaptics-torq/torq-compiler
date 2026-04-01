@@ -279,6 +279,12 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
 
         if (_markFuseGroups) {
             // Discovery-only mode: mark the chain and defer material rewrite.
+            // check if the weight input is transposed, then move the weight mark to the transpose
+            if (auto transposeOp =
+                    llvm::dyn_cast_if_present<linalg::TransposeOp>(weights.getDefiningOp())) {
+                weights = transposeOp.getInput();
+            }
+
             markFuseGroupBackward(
                 output, {input, weights}, rewriter,
                 srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)

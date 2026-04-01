@@ -263,7 +263,6 @@ void addNssUpToAssignLramAddressesPasses(OpPassManager &pm) {
 
     // unroll all loops since NSS cannot deal with them
     funcPm.addPass(createUnrollLoopPass());
-    funcPm.addPass(createCanonicalizerPass());
 
     funcPm.addPass(createOutlineSliceProgramsPass());
 

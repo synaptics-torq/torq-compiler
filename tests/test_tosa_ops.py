@@ -11,22 +11,8 @@ def case_config(request, runtime_hw_type, chip_config):
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
     failed_tc = [
-            'dw_wzp.mlir' # Weight zero point support not complete
-
-            # Tracked by issue #996
-            # crash in tile-and-fuse when running the pipeline
-            # error: 'linalg.broadcast' op input rank plus added dimensions does not match init rank. input rank: 1, dimensions size: 1, init rank: 1
-            'conv-stride1-32-14.mlir',
-            'conv-stride1-56.mlir',
-            'conv2d-28x28x512.mlir',
-            'conv2d_as_fully_connected.mlir',
-            'conv2d_noalign_channel_32x32x128xi16.mlir',
-            'load_padded.mlir',
-            'pw-32x8-7x7x320.mlir',
-            'conv-stride1-32-14.mlir',
-
             # Tracked by #1095
-            'dw_wzp.mlir',
+            'dw_wzp.mlir', # Weight zero point support not complete
 
             # results mismatch
             # looking at the log you can see there's an error that is being ignored:
