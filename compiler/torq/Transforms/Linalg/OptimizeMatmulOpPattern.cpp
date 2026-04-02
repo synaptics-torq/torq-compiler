@@ -95,10 +95,6 @@ static void expandConstantInput(Value &input, PatternRewriter &rewriter) {
     if (definingOp.getNumDpsInputs() != 1 || definingOp.getNumResults() != 1) {
         return;
     }
-    TypedAttr constAttr;
-    if (!matchPattern(definingOp.getInputs()[0], m_Constant(&constAttr))) {
-        return;
-    }
 
     auto resultType = dyn_cast<RankedTensorType>(definingOp.getResultTypes().front());
     auto inputType = dyn_cast<RankedTensorType>(definingOp.getInputs()[0].getType());
@@ -115,6 +111,16 @@ static void expandConstantInput(Value &input, PatternRewriter &rewriter) {
     }
     for (auto it : llvm::zip(inputShape, outputShape.drop_front())) {
         if (std::get<0>(it) != std::get<1>(it)) {
+            return;
+        }
+    }
+
+    // When the broadcast dimension is 1, expand_shape is a zero-copy reshape and always valid
+    // regardless if the input is constant or tensor.
+    // Thus, bail out only if bcast_dim != 1 and input != arith.constant.
+    if (outputShape[0] != 1) {
+        TypedAttr constAttr;
+        if (!matchPattern(definingOp.getInputs()[0], m_Constant(&constAttr))) {
             return;
         }
     }
