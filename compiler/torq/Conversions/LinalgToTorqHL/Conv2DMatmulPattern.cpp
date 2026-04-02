@@ -234,13 +234,24 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         }
 
         // If there is an expand_shape user, use it to determine 4D output shape
+        tensor::ExpandShapeOp outputExpandOp = nullptr;
         if (output.hasOneUse() && isa<tensor::ExpandShapeOp>(*output.getUsers().begin())) {
-            output = (*output.getUsers().begin())->getResult(0);
+            outputExpandOp = cast<tensor::ExpandShapeOp>(*output.getUsers().begin());
+            output = outputExpandOp.getResult();
         }
         RankedTensorType finalType = cast<RankedTensorType>(output.getType());
 
         bool isNCHW = isNCHWMatmul(srcOp);
-        bool isFC = finalType.getRank() == 2;
+        // A matmul always has rank-2 output, so start by assuming FC.
+        // Override to conv when an ExpandShapeOp reveals real spatial dims.
+        bool isFC = true;
+        if (finalType.getRank() == 4) {
+            auto shape = finalType.getShape();
+            bool hasSpatial =
+                isNCHW ? (shape[2] > 1 || shape[3] > 1) : (shape[1] > 1 || shape[2] > 1);
+            if (hasSpatial)
+                isFC = false;
+        }
 
         Value input = lhs;
         Value weights = rhs;
@@ -362,14 +373,35 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                 torqOut = postConversion(conv2dOp.getOutput(), rewriter, isNCHW, isFC);
             }
             else {
-                // Rank-2 outputs are lowered through FullyConnected.
+                // FullyConnected always operates on rank-2 tensors.
+                // If the output was expanded beyond rank 2 (e.g. by an
+                // absorbed ExpandShapeOp), collapse to rank 2 for the FC op
+                // and expand back afterwards.
+                RankedTensorType fcType = finalType;
+                if (finalType.getRank() > 2) {
+                    auto shape = finalType.getShape();
+                    int64_t batchDims = 1;
+                    for (int i = 0; i < finalType.getRank() - 1; ++i)
+                        batchDims *= shape[i];
+                    fcType = RankedTensorType::get(
+                        {batchDims, shape[finalType.getRank() - 1]}, finalType.getElementType()
+                    );
+                    initTensor = createInitTensor(*output.getDefiningOp(), rewriter, fcType);
+                }
                 auto fcOp = rewriter.create<torq_hl::FullyConnectedOp>(
-                    loc, finalType, initTensor, input_zp,
+                    loc, fcType, initTensor, input_zp,
                     0, // weight zp
                     scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift,
                     torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input
                 );
                 torqOut = fcOp.getResult(0);
+                if (fcType != finalType) {
+                    auto reassoc =
+                        getReassociationIndicesForCollapse(finalType.getShape(), fcType.getShape());
+                    assert(reassoc && "Failed to get reassociation for FC expand");
+                    torqOut =
+                        rewriter.create<tensor::ExpandShapeOp>(loc, finalType, torqOut, *reassoc);
+                }
             }
             rewriter.replaceOp(output.getDefiningOp(), torqOut);
         }
