@@ -257,12 +257,53 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
         setDebugName("BfloatDivfPattern");
     }
 
+    LogicalResult maybeMatchConstDiv(linalg::GenericOp srcOp, PatternRewriter &rewriter) const {
+
+        auto yield = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
+        if (!yield || yield.getNumOperands() != 1)
+            return rewriter.notifyMatchFailure(srcOp, "div requires one output");
+
+        auto div = yield.getOperand(0).getDefiningOp<arith::DivFOp>();
+        if (!div)
+            return rewriter.notifyMatchFailure(srcOp, "div should end in div");
+
+        auto constant = div.getRhs().getDefiningOp<arith::ConstantOp>();
+        if (!isa<BlockArgument>(div.getLhs()) || !constant)
+            return rewriter.notifyMatchFailure(
+                srcOp, "Constant div matching requires non-const numerator"
+            );
+
+        auto bf16 = cast<RankedTensorType>(srcOp.getType(0)).getElementType();
+        float denom = cast<FloatAttr>(constant.getValueAttr()).getValue().convertToDouble();
+        assert(denom != 0.0f && "denominator should not be zero");
+        auto recip = rewriter.create<arith::ConstantOp>(
+            srcOp.getLoc(), rewriter.getFloatAttr(bf16, 1 / denom)
+        );
+
+        rewriter.replaceOp(
+            srcOp,
+            rewriter.create<linalg::GenericOp>(
+                srcOp.getLoc(), TypeRange{srcOp.getOutputs()[0].getType()}, srcOp.getInputs(),
+                srcOp.getOutputs(), srcOp.getIndexingMapsArray(), srcOp.getIteratorTypesArray(),
+                [&](OpBuilder &b, Location l, ValueRange args) {
+                    rewriter.create<linalg::YieldOp>(
+                        l, ValueRange{rewriter.create<arith::MulFOp>(l, args[0], recip)}
+                    );
+                }
+            )
+        );
+        return success();
+    }
+
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
-        if (!cast<RankedTensorType>(srcOp.getType(0)).getElementType().isBF16() ||
-            !isa_and_nonnull<arith::DivFOp>(getElementwiseBinaryOp(srcOp))) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected bf16 divf");
-        }
+
+        if (!cast<RankedTensorType>(srcOp.getType(0)).getElementType().isBF16())
+            return rewriter.notifyMatchFailure(srcOp, "Expected bf16 for divf matching");
+
+        if (!isa_and_nonnull<arith::DivFOp>(getElementwiseBinaryOp(srcOp)))
+            return maybeMatchConstDiv(srcOp, rewriter);
+
         auto [isForced, forced] = setTargetExecutorIfForced(srcOp, rewriter, "div");
         if (isForced) {
             return forced;

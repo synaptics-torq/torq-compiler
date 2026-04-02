@@ -58,29 +58,52 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expected yield");
         }
 
+        // check for divf or mulf
         auto divFOp = dyn_cast_or_null<arith::DivFOp>(yieldOp.getValues()[0].getDefiningOp());
-        if (!divFOp) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected div op");
-        }
+        auto mulFOp = dyn_cast_or_null<arith::MulFOp>(yieldOp.getValues()[0].getDefiningOp());
+        float meanValue;
+        if (divFOp) {
+            if (!isa<BlockArgument>(divFOp.getLhs())) {
+                return rewriter.notifyMatchFailure(srcOp, "Div lhs must be block arg");
+            }
 
-        if (!isa<BlockArgument>(divFOp.getLhs())) {
-            return rewriter.notifyMatchFailure(srcOp, "Div lhs must be block arg");
-        }
+            auto divRhs = divFOp.getRhs().getDefiningOp<arith::ConstantOp>();
+            if (!divRhs) {
+                return rewriter.notifyMatchFailure(srcOp, "Div rhs must be constant");
+            }
 
-        auto divRhs = divFOp.getRhs().getDefiningOp<arith::ConstantOp>();
-        if (!divRhs) {
-            return rewriter.notifyMatchFailure(srcOp, "Div rhs must be constant");
-        }
+            auto divConstAttr = dyn_cast_or_null<FloatAttr>(divRhs.getValue());
+            if (!divConstAttr) {
+                return rewriter.notifyMatchFailure(srcOp, "Div constant must be float");
+            }
 
-        auto divConstAttr = dyn_cast_or_null<FloatAttr>(divRhs.getValue());
-        if (!divConstAttr) {
-            return rewriter.notifyMatchFailure(srcOp, "Div constant must be float");
-        }
+            double divConst = divConstAttr.getValueAsDouble();
+            if (divConst <= 0.0) {
+                return rewriter.notifyMatchFailure(srcOp, "Div constant must be positive");
+            }
 
-        double divConst = divConstAttr.getValueAsDouble();
-        if (divConst <= 0.0) {
-            return rewriter.notifyMatchFailure(srcOp, "Div constant must be positive");
+            // Scale = 1 / meanConst for mean calculation
+            meanValue = 1.0f / divConst;
         }
+        else if (mulFOp) {
+            if (!isa<BlockArgument>(mulFOp.getLhs())) {
+                return rewriter.notifyMatchFailure(srcOp, "Mul lhs must be block arg");
+            }
+
+            auto mulRhs = mulFOp.getRhs().getDefiningOp<arith::ConstantOp>();
+            if (!mulRhs) {
+                return rewriter.notifyMatchFailure(srcOp, "Mul rhs must be constant");
+            }
+
+            auto mulConstAttr = dyn_cast_or_null<FloatAttr>(mulRhs.getValue());
+            if (!mulConstAttr) {
+                return rewriter.notifyMatchFailure(srcOp, "Mul constant must be float");
+            }
+
+            meanValue = mulConstAttr.getValueAsDouble();
+        }
+        else
+            return rewriter.notifyMatchFailure(srcOp, "Expected div or mul op");
 
         // if output is used by CollapseShape, fold collapseShape op
         if (output.hasOneUse() && (isa<tensor::CollapseShapeOp>(*output.getUsers().begin()) ||
@@ -126,8 +149,6 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
         Permutation dataPerm(permVec.begin(), permVec.end());
         input = transposeValue(input, dataPerm, loc, rewriter);
 
-        // Scale = 1 / meanConst for mean calculation
-        float meanValue = 1.0f / divConst;
         const llvm::fltSemantics &bf16 = APFloat::BFloat();
         std::vector<llvm::APFloat> weightsData(1, llvm::APFloat(bf16, std::to_string(meanValue)));
         auto weights = createConst(weightsData, rewriter, srcOp.getLoc());
@@ -177,25 +198,51 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(meanOp, "Expected div op");
 
         // Only bf16 (DivFOp) is supported
-        auto divFOp = dyn_cast<arith::DivFOp>(divOp);
-        if (!divFOp)
-            return rewriter.notifyMatchFailure(meanOp, "Only bf16 (DivFOp) supported");
+        auto divFOp = dyn_cast_or_null<arith::DivFOp>(divOp);
+        auto mulFOp = dyn_cast_or_null<arith::MulFOp>(divOp);
+        float meanValue;
+        if (divFOp) {
+            if (!isa<BlockArgument>(divFOp.getLhs())) {
+                return rewriter.notifyMatchFailure(meanOp, "Div lhs must be block arg");
+            }
 
-        Value divLhs = divFOp.getLhs();
-        if (!isa<BlockArgument>(divLhs))
-            return rewriter.notifyMatchFailure(meanOp, "Div lhs must be block arg");
+            auto divRhs = divFOp.getRhs().getDefiningOp<arith::ConstantOp>();
+            if (!divRhs) {
+                return rewriter.notifyMatchFailure(meanOp, "Div rhs must be constant");
+            }
 
-        auto divRhs = divFOp.getRhs().getDefiningOp<arith::ConstantOp>();
-        if (!divRhs)
-            return rewriter.notifyMatchFailure(meanOp, "Div rhs must be constant");
+            auto divConstAttr = dyn_cast_or_null<FloatAttr>(divRhs.getValue());
+            if (!divConstAttr) {
+                return rewriter.notifyMatchFailure(meanOp, "Div constant must be float");
+            }
 
-        auto divConstAttr = dyn_cast<FloatAttr>(divRhs.getValue());
-        if (!divConstAttr)
-            return rewriter.notifyMatchFailure(meanOp, "Div constant must be float");
+            double divConst = divConstAttr.getValueAsDouble();
+            if (divConst <= 0.0) {
+                return rewriter.notifyMatchFailure(meanOp, "Div constant must be positive");
+            }
 
-        double divConst = divConstAttr.getValueAsDouble();
-        if (divConst <= 0.0)
-            return rewriter.notifyMatchFailure(meanOp, "Div constant must be positive");
+            // Scale = 1 / meanConst for mean calculation
+            meanValue = 1.0f / divConst;
+        }
+        else if (mulFOp) {
+            if (!isa<BlockArgument>(mulFOp.getLhs())) {
+                return rewriter.notifyMatchFailure(meanOp, "Mul lhs must be block arg");
+            }
+
+            auto mulRhs = mulFOp.getRhs().getDefiningOp<arith::ConstantOp>();
+            if (!mulRhs) {
+                return rewriter.notifyMatchFailure(meanOp, "Mul rhs must be constant");
+            }
+
+            auto mulConstAttr = dyn_cast_or_null<FloatAttr>(mulRhs.getValue());
+            if (!mulConstAttr) {
+                return rewriter.notifyMatchFailure(meanOp, "Mul constant must be float");
+            }
+
+            meanValue = mulConstAttr.getValueAsDouble();
+        }
+        else
+            return rewriter.notifyMatchFailure(meanOp, "Expected div or mul op");
 
         auto sumOp = meanOp.getInputs()[0].getDefiningOp<linalg::GenericOp>();
         if (!sumOp)
@@ -241,7 +288,6 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         Value input = sumOp.getInputs()[0];
         auto inputType = cast<RankedTensorType>(input.getType());
         auto resultType = cast<RankedTensorType>(meanOp.getResult(0).getType());
-        int64_t reducedDimSize = static_cast<int64_t>(divConst);
 
         // Reshape to NCHW rank-4
         Value inputNCHW = input;
@@ -309,9 +355,8 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         }
 
         // Scale = 1/reducedDimSize for mean calculation (e.g., 1/288 = 0.003472)
-        float scaleValue = 1.0f / static_cast<float>(reducedDimSize);
         const llvm::fltSemantics &bf16 = APFloat::BFloat();
-        std::vector<llvm::APFloat> weightsData(1, llvm::APFloat(bf16, std::to_string(scaleValue)));
+        std::vector<llvm::APFloat> weightsData(1, llvm::APFloat(bf16, std::to_string(meanValue)));
         auto weights = createConst(weightsData, rewriter, loc);
 
         // Create f32 bias tensor
