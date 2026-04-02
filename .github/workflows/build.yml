@@ -222,9 +222,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # FIXME next chip fails
-        #chip_group: [ default.group , next.group ]
-        chip_group: [ default.group]
+        chip_group: [ default.group , next.group ]
 
     steps:
       

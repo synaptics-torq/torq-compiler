@@ -275,7 +275,7 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto bf16 = cast<RankedTensorType>(srcOp.getType(0)).getElementType();
         float denom = cast<FloatAttr>(constant.getValueAttr()).getValue().convertToDouble();
-        assert(denom != 0.0f && "denominator should not be zero");
+        // denom = 0 is accepted by the hardware and results in inf output
         auto recip = rewriter.create<arith::ConstantOp>(
             srcOp.getLoc(), rewriter.getFloatAttr(bf16, 1 / denom)
         );
