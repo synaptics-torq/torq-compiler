@@ -140,10 +140,13 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
         auto reassoc = getReassociationIndicesForCollapse(expandShape, shape);
 
         auto stepAttr = returnAttr(step);
+        auto lbAttr = returnAttr(lb);
         auto stepInt = dyn_cast<IntegerAttr>(stepAttr).getInt();
+        auto lbInt = dyn_cast<IntegerAttr>(lbAttr).getInt();
         AffineExpr d0 = rewriter.getAffineDimExpr(0);
         AffineExpr cStep = rewriter.getAffineConstantExpr(stepInt);
-        AffineExpr divExpr = d0.floorDiv(cStep);
+        AffineExpr cLowerBound = rewriter.getAffineConstantExpr(lbInt);
+        AffineExpr divExpr = (d0 - cLowerBound).floorDiv(cStep);
 
         AffineMap newIvMap = AffineMap::get(1, 0, divExpr, rewriter.getContext());
 

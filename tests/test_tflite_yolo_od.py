@@ -236,10 +236,6 @@ def _skip_next_group_full_model(request, tflite_layer_model):
     """Skip full model tests on unsupported targets."""
     if tflite_layer_model.data.is_layer:
         return
-
-    if "yolov8s_full_integer_quant_320_od.tflite_full_model-sim" in request.node.name.lower():
-        pytest.xfail("yolov8s full model is too run-time intensive for simulation")
-
     try:
         chip = request.getfixturevalue("chip_config").data
     except AttributeError:
@@ -248,7 +244,7 @@ def _skip_next_group_full_model(request, tflite_layer_model):
         # that don't use the torq backend.
         return
     if chip.get('target') != "SL2610":
-        pytest.skip(f"Full YOLOv8n/s-OD model only supported on SL2610")
+        pytest.skip(f"Full YOLOv8n-OD model only supported on SL2610")
 
 
 @versioned_cached_data_fixture
