@@ -6,6 +6,7 @@
 
 #include "PassesDetail.h"
 
+#include "mlir/IR/PatternMatch.h"
 #include "torq/Codegen/BufferizationUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
@@ -42,12 +43,25 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
     LogicalResult
     matchAndRewrite(scf::ForallOp forallOp, PatternRewriter &rewriter) const override {
 
-        // extract loop information
-        llvm::ArrayRef<int64_t> upper = forallOp.getStaticUpperBound();
-        assert(upper.size() == 1 && "expected single static upper bound in forall op");
-        auto unrollFactor = upper[0];
+        assert(
+            forallOp.getStaticLowerBound().size() == 1 && forallOp.getDynamicLowerBound().empty() &&
+            "expected single static lower bound in forall op"
+        );
+        assert(
+            forallOp.getStaticUpperBound().size() == 1 && forallOp.getDynamicUpperBound().empty() &&
+            "expected single static upper bound in forall op"
+        );
+        assert(
+            forallOp.getStaticStep().size() == 1 && forallOp.getDynamicStep().empty() &&
+            "expected single static step size in forall op"
+        );
 
-        auto builder = OpBuilder(forallOp);
+        std::optional<int64_t> unrollFactor = mlir::constantTripCount(
+            forallOp.getLowerBound(rewriter)[0], forallOp.getUpperBound(rewriter)[0],
+            forallOp.getStep(rewriter)[0]
+        );
+
+        assert(unrollFactor && "trip count is not a constant");
 
         // track the original operations in the body loop
         SmallVector<Operation *> originalOps;
@@ -56,11 +70,11 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
         }
 
         // create an operand map for each unrolled iteration
-        SmallVector<IRMapping> operandMaps(unrollFactor - 1);
+        SmallVector<IRMapping> operandMaps(*unrollFactor - 1);
 
         // insert in the operand map the induction variable
         if (!forallOp.getInductionVar(0).use_empty()) {
-            for (unsigned i = 1; i < unrollFactor; i++) {
+            for (unsigned i = 1; i < *unrollFactor; i++) {
                 Value ivUnroll =
                     rewriter.create<arith::ConstantOp>(forallOp.getLoc(), rewriter.getIndexAttr(i));
                 operandMaps[i - 1].map(forallOp.getInductionVar(0), ivUnroll);
@@ -72,19 +86,22 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
         // scan the original operations and accumulate operations until a wait,
         // when a wait is found create unrollFactor - 1 copies of the accumulated operations
         // and continue
-        for (auto op : originalOps) {
-            if (isa<torq_hl::WaitProgramOp>(op) || op->getBlock()->getTerminator() == op) {
-                builder.setInsertionPoint(op);
-                for (unsigned i = 1; i < unrollFactor; i++) {
-                    // Clone the original loop body operations
-                    for (auto prevOp : operationsToClone) {
-                        builder.clone(*prevOp, operandMaps[i - 1]);
+        {
+            PatternRewriter::InsertionGuard insertionGuard(rewriter);
+            for (auto op : originalOps) {
+                if (isa<torq_hl::WaitProgramOp>(op) || op->getBlock()->getTerminator() == op) {
+                    rewriter.setInsertionPoint(op);
+                    for (unsigned i = 1; i < *unrollFactor; i++) {
+                        // Clone the original loop body operations
+                        for (auto prevOp : operationsToClone) {
+                            rewriter.clone(*prevOp, operandMaps[i - 1]);
+                        }
                     }
+                    operationsToClone.clear();
                 }
-                operationsToClone.clear();
+                operationsToClone.push_back(op);
             }
-            operationsToClone.push_back(op);
-        }
+        } // distruct insertionGuard
 
         // Loop now has a single iteration so we can remove it
         forallOp.setStaticUpperBound(1);

@@ -82,6 +82,10 @@ static llvm::cl::opt<bool> clForceTorqHLTiling(
     "torq-force-torq-hl-tiling", llvm::cl::desc("force TorqHL tiling"), llvm::cl::init(false)
 );
 
+static llvm::cl::opt<bool> clDisableLinalgSlicing(
+    "torq-disable-linalg-slicing", llvm::cl::desc("disable linalg slicing"), llvm::cl::init(true)
+);
+
 static llvm::cl::opt<bool> clDisableSlicing(
     "torq-disable-slicing", llvm::cl::desc("disable slicing"), llvm::cl::init(false)
 );
@@ -135,6 +139,9 @@ void addSlicePassesPostTileAndFuse(OpPassManager &pm) {
             funcPm.addPass(createCanonicalizerPass());
             funcPm.addPass(createPeelTileLoopsPass());
         }
+
+        if (!clDisableLinalgSlicing)
+            addLinalgSlicingPasses(funcPm);
 
         // lower the linalg operators to torq_hl before tiling
         funcPm.addPass(createLinalgToTorqHLPreConversionPass());

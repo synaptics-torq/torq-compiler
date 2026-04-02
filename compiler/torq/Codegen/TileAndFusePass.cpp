@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "PassesDetail.h"
+#include "TilingUtils.h"
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/TorqHw.h"
@@ -94,32 +95,6 @@ static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFus
 
 torq_hl::Executor getExecutor(Operation *op) {
     return isMarkedFuseGroup(op) ? torq_hl::Executor::Slice : torq_hl::Executor::CSS;
-}
-
-// Replace the untiled `op` with its tiled version from `tiledResults.
-void replaceTiledOp(
-    IRRewriter &rewriter, Operation *op, const scf::SCFTileAndFuseResult &tiledResults
-) {
-    for (OpResult res : op->getResults()) {
-        if (Value replacement = tiledResults.replacements.lookup(res)) {
-            rewriter.replaceAllUsesWith(res, replacement);
-        }
-    }
-}
-
-// Replace the untiled consumer `op` with its tiled version from `tiledResults`,
-// and do the same for any producer that was yielded as well.
-void applyTiledResults(
-    IRRewriter &rewriter, Operation *op, scf::SCFTileAndFuseResult &tiledResults
-) {
-    // Replace the root with its tiled result
-    replaceTiledOp(rewriter, op, tiledResults);
-
-    // In general, fused producers can declare that they want to be yielded.
-    // Here we replace the untiled producers with the yielded result.
-    for (Operation *prodOp : tiledResults.fusedProducers) {
-        replaceTiledOp(rewriter, prodOp, tiledResults);
-    }
 }
 
 // Return the iteration domains of `tilingInterfaceOp` that can be tiled, in the order which we

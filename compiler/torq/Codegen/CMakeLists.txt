@@ -23,6 +23,7 @@ set(sources
     FoldConvertPass.cpp
     FuseActWithConvPass.cpp
     KernelSelectionPass.cpp
+    LinalgSlicingPass.cpp
     LinalgTilePass.cpp
     LowerArithConstantsPass.cpp
     LowerCallProgramToStartWaitPass.cpp
@@ -46,6 +47,7 @@ set(sources
     TorqComprehensiveBufferizePass.cpp
     TorqHlTilePass.cpp
     TileAndFusePass.cpp
+    TilingUtils.cpp
     UnrollLoopPass.cpp
     UnrollDynamicShapeLoopPass.cpp
     ValidPadToSamePadPass.cpp

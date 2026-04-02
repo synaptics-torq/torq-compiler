@@ -230,6 +230,20 @@ bool isFuseGroupPrincipalOp(Operation *op, IntegerAttr fuseGroupAttr) {
     return fuseGroupIdAttr && fuseGroupIdAttr == fuseGroupAttr;
 }
 
+IntegerAttr isFuseGroupPrincipalOp(Operation *op) {
+    ArrayAttr fuseGroupAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+
+    if (!fuseGroupAttr)
+        return nullptr;
+
+    for (IntegerAttr intAttr : fuseGroupAttr.getAsRange<IntegerAttr>()) {
+        if (isFuseGroupPrincipalOp(op, intAttr))
+            return intAttr;
+    }
+
+    return nullptr;
+}
+
 Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp) {
     ArrayAttr fuseGroupArrAttr = outputOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
     assert(fuseGroupArrAttr && "outputOp is not part of a fuse-group");
@@ -303,8 +317,8 @@ bool checkShareFuseGroup(Operation *op1, Operation *op2) {
     if (!fuseGroupAttr1 || !fuseGroupAttr2)
         return false;
 
-    for (IntegerAttr intAttr1 : fuseGroupAttr1.getAsRange<IntegerAttr>()) {
-        if (llvm::is_contained(fuseGroupAttr2.getAsRange<IntegerAttr>(), intAttr1)) {
+    for (auto attr1 : fuseGroupAttr1) {
+        if (llvm::is_contained(fuseGroupAttr2, attr1)) {
             return true;
         }
     }
@@ -347,6 +361,26 @@ std::optional<int64_t> isFuseGroupOutput(Operation *op) {
     }
 
     return std::nullopt;
+}
+
+Operation *getFuseGroupOutputOp(Operation *op, IntegerAttr fuseGroupAttr) {
+    Operation *currentOp = op;
+    bool inGroup = true;
+    while (inGroup) {
+        inGroup = false;
+        for (auto user : currentOp->getUsers()) {
+            auto userFuseGroupAttr = user->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+            if (!userFuseGroupAttr)
+                continue;
+
+            if (llvm::is_contained(userFuseGroupAttr, fuseGroupAttr)) {
+                inGroup = true;
+                currentOp = user;
+                break;
+            }
+        }
+    }
+    return currentOp;
 }
 
 // Extract and return the tosa multiplier and shift values from a tosa::ApplyScaleOp

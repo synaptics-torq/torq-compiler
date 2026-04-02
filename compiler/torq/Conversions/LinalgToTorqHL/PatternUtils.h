@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "mlir/IR/BuiltinAttributes.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
 
@@ -125,6 +126,10 @@ SmallVector<Value> getFuseGroupOperands(Operation *root, const IntegerAttr &fuse
 // operation from which the pattern matching started).
 bool isFuseGroupPrincipalOp(Operation *op, IntegerAttr fuseGroupAttr);
 
+// Return the ID of the pattern fuse group for which `op` is the principal
+// operation, if it is such, otherwise return `nullptr`.
+IntegerAttr isFuseGroupPrincipalOp(Operation *op);
+
 // Return the principal Operation of the fuse group (i.e. the operation from
 // which the pattern matching started) outputOp belongs to, or nullptr if something
 // goes wrong.
@@ -147,6 +152,10 @@ bool checkShareFuseGroup(Operation *op1, Operation *op2);
 // If op is the bottom most operation of a fuse group, return the id of that group,
 // otherwise return std::nullopt.
 std::optional<int64_t> isFuseGroupOutput(Operation *op);
+
+// Assuming `op` is a member of the pattern fuse group `fuseGroupAttr`, return
+// the bottom most member of the group.
+Operation *getFuseGroupOutputOp(Operation *op, IntegerAttr fuseGroupAttr);
 
 // Deduce Left,Right,Top,Bottom padding info by analyzing value backward
 // - value comes from an tensor.slice_insert into a filled tensor, or from tensor.pad
