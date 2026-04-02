@@ -36,4 +36,4 @@ jobs:
           REPO_URL="https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{github.repository_owner}}/${{ inputs.target_repository }}.git"
 
           # push without forcing so that we fail if things were merged in the other repo in meantime
-          git push "$REPO_URL" main:main
+          git push "$REPO_URL" ${{github.ref_name}}:${{github.ref_name}}
