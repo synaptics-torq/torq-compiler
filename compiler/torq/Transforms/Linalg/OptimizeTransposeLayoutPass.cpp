@@ -29,29 +29,28 @@
 // actually need specific layouts.
 //
 // **EXAMPLE**:
-//   BEFORE:
-//     %t2 = elementwise %input             // works in NHWC
-//     %t1 = transpose [0,2,3,1] %t2        // NCHW→NHWC
-//     %out = conv %t2                      // requires NHWC
-//     %t1 = transpose [0,2,3,1] %out       // NCHW→NHWC
+//   BEFORE (transpose between elementwise and conv):
+//     %input    = ...                                // NCHW data
+//     %t1       = transpose [0,2,3,1] %input         // NCHW→NHWC
+//     %elem     = elementwise %t1                     // elementwise in NHWC
+//     %conv     = conv %elem                          // conv requires NHWC
 //
-//   AFTER TRANSFORMATION (more transposes initially):
-//     %inv2 = transpose [0,3,1,2] %t1             // NHWC→NCHW (inverse)
-//     %elem_new = elementwise %inv2               // elementwise in NCHW
-//     %t1 =  transpose [0,2,3,1] %elem_new        // NCHW→NHWC (forward)
-//     %fwd = transpose [0,2,3,1] %t1              // NCHW→NHWC
-//     %out = conv %fwd                            // requires NHWC
-//     %t1 = transpose [0,2,3,1] %out              // NCHW→NHWC
+//   AFTER TRANSFORMATION (Step 2 — inverse/forward pairs wrap elementwise):
+//     %input    = ...                                // NCHW data
+//     %t1       = transpose [0,2,3,1] %input         // NCHW→NHWC (original)
+//     %inv      = transpose [0,3,1,2] %t1            // NHWC→NCHW (new inverse)
+//     %elem_new = elementwise %inv                    // elementwise in NCHW
+//     %fwd      = transpose [0,2,3,1] %elem_new      // NCHW→NHWC (new forward)
+//     %conv     = conv %fwd                           // conv requires NHWC
 //
-//   AFTER CANONICALIZATION (redundant pairs cancelled):
-//     %inv2 = transpose [0,3,1,2] %t1             // NHWC→NCHW (inverse)
-//     %elem_new = elementwise %inv2               // elementwise in original NCHW
-//     %out = conv %elem_new                       // requires NHWC
-//     %t1 = transpose [0,2,3,1] %out              // NCHW→NHWC only when needed
+//   AFTER CANONICALIZATION (Step 3 — [0,2,3,1] + [0,3,1,2] = identity, cancelled):
+//     %input    = ...                                // NCHW data
+//     %elem_new = elementwise %input                  // elementwise directly on NCHW
+//     %fwd      = transpose [0,2,3,1] %elem_new      // single NCHW→NHWC
+//     %conv     = conv %fwd                           // conv requires NHWC
 //
-//
-//   for smaller models we can't expect much improvement but for
-//   larger models with many elementwise ops we can get significant reduction in transposes.
+//   Net result: the transpose moved past the elementwise, closer to the conv.
+//   With N consecutive elementwise ops, N-1 intermediate transposes are eliminated.
 //===----------------------------------------------------------------------===//
 
 #include "PassesDetail.h"
@@ -825,6 +824,71 @@ static void insertTransposePairsAroundPropagateOps(
 }
 
 //===----------------------------------------------------------------------===//
+// Fixed Transpose Composition Pattern
+//===----------------------------------------------------------------------===//
+
+/// Compose back-to-back transposes: transpose(transpose(x, p1), p2) →
+/// transpose(x, compose(p1, p2)).
+///
+/// Fixes upstream FoldTransposeWithTranspose which reuses the outer
+/// transpose's init tensor.  After composition the init shape may be wrong
+/// (e.g. when p1∘p2 = identity), causing fold() to crash with
+/// "Assertion `false && "incorrect fold result type"' failed" at
+/// mlir/lib/IR/Operation.cpp:624.
+///
+/// Our fix: build a fresh tensor.empty with the correct composed shape.
+/// When the composed permutation is identity, eliminate both transposes.
+struct ComposeTransposeOps : OpRewritePattern<linalg::TransposeOp> {
+    using OpRewritePattern<linalg::TransposeOp>::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::TransposeOp transposeOp, PatternRewriter &rewriter) const override {
+        auto defTransposeOp = transposeOp.getInput().getDefiningOp<linalg::TransposeOp>();
+        if (!defTransposeOp)
+            return failure();
+
+        ArrayRef<int64_t> defPerms = defTransposeOp.getPermutation();
+        ArrayRef<int64_t> perms = transposeOp.getPermutation();
+
+        SmallVector<int64_t> foldedPerms;
+        foldedPerms.reserve(perms.size());
+        for (int64_t p : perms)
+            foldedPerms.push_back(defPerms[p]);
+
+        Value origInput = defTransposeOp.getInput();
+
+        // If the composed permutation is identity, both transposes cancel out.
+        bool isIdentity = true;
+        for (int64_t i = 0; i < static_cast<int64_t>(foldedPerms.size()); ++i) {
+            if (foldedPerms[i] != i) {
+                isIdentity = false;
+                break;
+            }
+        }
+        if (isIdentity) {
+            rewriter.replaceOp(transposeOp, origInput);
+            return success();
+        }
+
+        // Build init tensor with the correct shape for the composed perm.
+        auto origType = cast<RankedTensorType>(origInput.getType());
+        SmallVector<int64_t> newInitShape;
+        newInitShape.reserve(foldedPerms.size());
+        for (int64_t p : foldedPerms)
+            newInitShape.push_back(origType.getDimSize(p));
+
+        auto newInit = rewriter.create<tensor::EmptyOp>(
+            transposeOp.getLoc(), newInitShape, origType.getElementType()
+        );
+
+        rewriter.replaceOpWithNewOp<linalg::TransposeOp>(
+            transposeOp, origInput, newInit, foldedPerms
+        );
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
 // OptimizeTransposeLayoutPass
 //===----------------------------------------------------------------------===//
 
@@ -852,11 +916,15 @@ class OptimizeTransposeLayoutPass
         IRRewriter rewriter(ctx);
         insertTransposePairsAroundPropagateOps(funcOp, solver, rewriter);
 
-        // Step 3: Apply transpose canonicalization for back-to-back cancellation.
-        // Use applyOpPatternsAndFold targeting only TransposeOps to avoid
-        // full region-wide greedy iteration -- patterns applied once per op.
+        // Step 3: Apply transpose canonicalization for back-to-back cancellation
+        // Register the upstream canonicalization patterns (identity removal, etc.)
+        // plus our fixed ComposeTransposeOps at higher benefit so it handles
+        // back-to-back transpose composition instead of the buggy upstream
+        // FoldTransposeWithTranspose (which reuses the outer transpose's init
+        // tensor with the wrong shape after composition).
         RewritePatternSet patterns(ctx);
         linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
+        patterns.add<ComposeTransposeOps>(ctx, /*benefit=*/2);
 
         auto frozenPatterns =
             FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);

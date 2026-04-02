@@ -124,50 +124,103 @@ LogicalResult getFromConst(Value value, ElementsAttr &attr) {
 }
 
 LogicalResult getFromArithConst(Value value, ElementsAttr &attr) {
-    arith::ConstantOp constOp = mlir::dyn_cast<arith::ConstantOp>(value.getDefiningOp());
-    if (!constOp) {
-        return failure();
+    if (auto arithConstOp = mlir::dyn_cast<arith::ConstantOp>(value.getDefiningOp())) {
+        attr = mlir::cast<mlir::ElementsAttr>(arithConstOp.getValue());
+        return success();
     }
-    attr = mlir::cast<mlir::ElementsAttr>(constOp.getValue());
-
-    return success();
+    // Fall back to tosa.const
+    if (auto tosaConstOp = mlir::dyn_cast<tosa::ConstOp>(value.getDefiningOp())) {
+        attr = tosaConstOp.getValue();
+        return success();
+    }
+    return failure();
 }
 
 // Weights converted to
-// Example 32x4x4x32
+// Example 32x4x4x32 with stride=[2,2]
 // Expand 32x2x2x2x2x32
-// Transpose 2x2x32x2x2x32 perm [2, 4, 0, 1, 5, 3]
+// Transpose 2x2x32x2x2x32 perm [2, 4, 0, 1, 3, 5]
 // Collapse 128x2x2x32
 // Reverse oxhxwxi -> oxrev_hxrev_wxi
+//
+// The conv kernel becomes sH x sW with OC*hBlocks*wBlocks output channels.
+// This produces more output channels but a smaller kernel, which is more
+// favorable for LRAM tiling (the scheduler can split along OC more easily).
 LogicalResult reverseTConvWeights(
-    tosa::RescaleOp srcOp, Value &weights, llvm::SmallVector<int64_t> outputShape,
-    ConversionPatternRewriter &rewriter
+    tosa::RescaleOp srcOp, Value &weights, llvm::SmallVector<int64_t> outputShape, int64_t strideH,
+    int64_t strideW, ConversionPatternRewriter &rewriter
 ) {
     mlir::Location loc = mlir::NameLoc::get(rewriter.getStringAttr("weight_restructure_op"));
     auto elementType = mlir::cast<RankedTensorType>(weights.getType()).getElementType();
 
+    // Pad kernel dimensions to multiples of stride if needed.
+    // Weight shape is [OC, kH, kW, IC].
+    int64_t kH = outputShape[1];
+    int64_t kW = outputShape[2];
+    int64_t paddedH = ((kH + strideH - 1) / strideH) * strideH;
+    int64_t paddedW = ((kW + strideW - 1) / strideW) * strideW;
+
+    if (paddedH != kH || paddedW != kW) {
+        // Zero-pad the constant weight tensor along kH and/or kW.
+        // Uses generic Attribute-based access so it works for any element type
+        // (int8, int16, bf16, etc.).  Produces a pre-computed arith.constant
+        // so downstream passes never see a tensor.pad operation.
+        ElementsAttr weightAttr;
+        if (failed(getFromArithConst(weights, weightAttr))) {
+            return rewriter.notifyMatchFailure(srcOp, "Cannot pad non-constant weights");
+        }
+        auto weightValues = weightAttr.getValues<Attribute>();
+        int64_t OC = outputShape[0];
+        int64_t IC = outputShape[3];
+        auto zeroAttr = rewriter.getZeroAttr(elementType);
+        int64_t paddedSize = OC * paddedH * paddedW * IC;
+        SmallVector<Attribute> paddedData(paddedSize, zeroAttr);
+        for (int64_t oc = 0; oc < OC; ++oc) {
+            for (int64_t h = 0; h < kH; ++h) {
+                for (int64_t w = 0; w < kW; ++w) {
+                    for (int64_t ic = 0; ic < IC; ++ic) {
+                        int64_t srcIdx = ((oc * kH + h) * kW + w) * IC + ic;
+                        int64_t dstIdx = ((oc * paddedH + h) * paddedW + w) * IC + ic;
+                        paddedData[dstIdx] = weightValues[srcIdx];
+                    }
+                }
+            }
+        }
+        llvm::SmallVector<int64_t> paddedShape{OC, paddedH, paddedW, IC};
+        auto paddedType = RankedTensorType::get(paddedShape, elementType);
+        auto paddedAttr = DenseElementsAttr::get(paddedType, ArrayRef<Attribute>(paddedData));
+        weights = rewriter.create<arith::ConstantOp>(loc, paddedAttr).getResult();
+        outputShape[1] = paddedH;
+        outputShape[2] = paddedW;
+    }
+
+    int64_t hBlocks = outputShape[1] / strideH;
+    int64_t wBlocks = outputShape[2] / strideW;
+
+    // Expand [OC, kH, kW, IC] -> [OC, sH, hBlocks, sW, wBlocks, IC]
     llvm::SmallVector<llvm::SmallVector<int64_t, 2>> expandReassoc{{0}, {1, 2}, {3, 4}, {5}};
-    llvm::SmallVector<int64_t> modWeightShape{outputShape[0],     2,
-                                              outputShape[1] / 2, 2,
-                                              outputShape[2] / 2, outputShape[3]};
+    llvm::SmallVector<int64_t> modWeightShape{outputShape[0], strideH, hBlocks,
+                                              strideW,        wBlocks, outputShape[3]};
     auto expandType = mlir::RankedTensorType::get(modWeightShape, elementType);
 
     auto expand = rewriter.create<tensor::ExpandShapeOp>(
         loc, expandType, weights, llvm::ArrayRef<llvm::SmallVector<int64_t, 2>>(expandReassoc)
     );
 
+    // Transpose to [hBlocks, wBlocks, OC, sH, sW, IC]
+    // perm: dim0(OC)->2, dim1(sH)->3, dim2(hBlocks)->0, dim3(sW)->4, dim4(wBlocks)->1, dim5(IC)->5
     llvm::SmallVector<int64_t> perm{2, 4, 0, 1, 3, 5};
-    llvm::SmallVector<int64_t> modTransposeShape{
-        outputShape[1] / 2, outputShape[2] / 2, outputShape[0], 2, 2, outputShape[3]
-    };
+    llvm::SmallVector<int64_t> modTransposeShape{hBlocks, wBlocks, outputShape[0],
+                                                 strideH, strideW, outputShape[3]};
     auto transposeType = mlir::RankedTensorType::get(modTransposeShape, elementType);
     auto transposeOutput = createInitTensor(loc, transposeType, rewriter);
     auto transpose =
         rewriter.create<linalg::TransposeOp>(loc, expand.getResult(), transposeOutput, perm);
 
+    // Collapse [hBlocks, wBlocks, OC] -> [OC*hBlocks*wBlocks], keeping [sH, sW, IC]
     llvm::SmallVector<llvm::SmallVector<int64_t, 2>> collapseReassoc{{0, 1, 2}, {3}, {4}, {5}};
     llvm::SmallVector<int64_t> newWeightShape{
-        outputShape[0] * (outputShape[1] / 2) * (outputShape[2] / 2), 2, 2, outputShape[3]
+        outputShape[0] * hBlocks * wBlocks, strideH, strideW, outputShape[3]
     };
     auto collapseType = mlir::RankedTensorType::get(newWeightShape, elementType);
 
@@ -186,10 +239,12 @@ LogicalResult reverseTConvWeights(
     // -> 3 2
     //	  1 0
     // linalg.generic(1-i, 1-j -> i, j)
+    // Reverse the spatial kernel dims: flip (sH-1-h, sW-1-w)
     AffineExpr o, h, w, i;
     bindDims(rewriter.getContext(), o, h, w, i);
 
-    auto inputMap = AffineMap::get(4, 0, {o, 1 - h, 1 - w, i}, rewriter.getContext());
+    auto inputMap =
+        AffineMap::get(4, 0, {o, strideH - 1 - h, strideW - 1 - w, i}, rewriter.getContext());
     auto outputMap = AffineMap::get(4, 0, {o, h, w, i}, rewriter.getContext());
 
     llvm::SmallVector<AffineMap, 2> indexingMaps{inputMap, outputMap};
@@ -260,7 +315,20 @@ static LogicalResult fuseWithRescaleOp(
         mlir::cast<RankedTensorType>(weights.getType()).getShape();
     llvm::SmallVector<int64_t> weightShape(weightShapeArr.begin(), weightShapeArr.end());
 
-    if (failed(reverseTConvWeights(rescaleOp, weights, weightShape, rewriter)
+    int64_t strideH = tconvOp.getStride()[0];
+    int64_t strideW = tconvOp.getStride()[1];
+
+    // The conv+D2S decomposition requires at least one stride >= 2 to do
+    // spatial upsampling. If both strides are 1, the transpose convolution
+    // is just a regular conv with flipped weights — no D2S needed. Bail out
+    // and let the generic TOSA-to-linalg lowering handle it.
+    if (strideH < 2 && strideW < 2) {
+        return rewriter.notifyMatchFailure(
+            rescaleOp, "TConv stride < 2 not supported by conv+D2S decomposition"
+        );
+    }
+
+    if (failed(reverseTConvWeights(rescaleOp, weights, weightShape, strideH, strideW, rewriter)
         )) /*Rearrange the weights in SpaceToDepth style modification and reverse the weights*/ {
         return rewriter.notifyMatchFailure(rescaleOp, "TConv reverse failed");
     }
@@ -272,12 +340,13 @@ static LogicalResult fuseWithRescaleOp(
 
     auto transInput = tconvOp.getInput();
 
-    int blockSize = tconvOp.getStride()[0]; // TODO current support only for blocksize 2
-    assert(blockSize == 2 && "Current upscale of only 2 supported");
+    int blockSize = strideH; // blockSize used for DepthToSpace
 
     auto vectorizationMode = torq_hl::VectorizationModeEnum::None;
 
-    auto pad = rewriter.getDenseI64ArrayAttr({0, 1, 0, 1});
+    int64_t padH = strideH - 1;
+    int64_t padW = strideW - 1;
+    auto pad = rewriter.getDenseI64ArrayAttr({0, padH, 0, padW});
     auto stride = rewriter.getDenseI64ArrayAttr({1, 1});
     auto dilation = rewriter.getDenseI64ArrayAttr({1, 1});
 
@@ -341,15 +410,15 @@ static LogicalResult fuseWithRescaleOp(
     auto inputShape = mlir::cast<RankedTensorType>(input.getType()).getShape();
 
     llvm::SmallVector<int64_t> padOutShape{
-        inputShape[0], inputShape[1], inputShape[2] + 1, inputShape[3] + 1
+        inputShape[0], inputShape[1], inputShape[2] + padH, inputShape[3] + padW
     };
 
     RankedTensorType padInitType =
         RankedTensorType::get(llvm::ArrayRef<int64_t>(padOutShape), elementType);
 
     llvm::SmallVector<OpFoldResult> lowPad{
-        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(1),
-        rewriter.getIndexAttr(1)
+        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(padH),
+        rewriter.getIndexAttr(padW)
     };
     llvm::SmallVector<OpFoldResult> highPad{
         rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(0),
@@ -368,10 +437,13 @@ static LogicalResult fuseWithRescaleOp(
         transposeValue(padOp, Permutation::nhwc2nchw().reverse(), rescaleOp.getLoc(), rewriter);
     auto convInput = transposeValue(padOut, Permutation::nhwc2nchw(), rescaleOp.getLoc(), rewriter);
 
+    // The conv output channels = weight OC after restructuring (in OIHW format).
+    // newWeightShape is in OHWI before the final OIHW transpose; after computeArithConst
+    // the weight is OIHW with shape [newOC, IC, strideH, strideW].
+    // The newOC = OC_orig * hBlocks * wBlocks.
     llvm::SmallVector<int64_t> convOutShape{
-        padOutShape[0], padOutShape[1] * blockSize * blockSize, padOutShape[2], padOutShape[3]
-    }; // output shape of conv will be square of the blocksize, so that next
-       // depth2space will rearrange it
+        padOutShape[0], newWeightShape[0], padOutShape[2], padOutShape[3]
+    };
     RankedTensorType convInitType =
         RankedTensorType::get(llvm::ArrayRef<int64_t>(convOutShape), elementType);
 
@@ -393,47 +465,116 @@ static LogicalResult fuseWithRescaleOp(
         conv2dOp.getOutput(), Permutation::nhwc2nchw().reverse(), rescaleOp.getLoc(), rewriter
     );
 
-    // DepthToSpace
-    int dtype_size = elementType.getIntOrFloatBitWidth() / 8;
-    const auto wram_width = 32 / dtype_size;
-    const auto num_inputs = 2;
+    Value upsampledOut;
+    llvm::SmallVector<int64_t> upsampledShape;
 
-    auto d2s_input_type = Permutation::nhwc2nchw();
-    auto d2s_output_type = d2s_input_type.reverse();
-    auto d2s_input = transposeValue(convOut, d2s_input_type, rescaleOp.getLoc(), rewriter);
+    if (strideH == strideW) {
+        // DepthToSpace — square stride case (original path)
+        int dtype_size = elementType.getIntOrFloatBitWidth() / 8;
+        const auto wram_width = 32 / dtype_size;
+        const auto num_inputs = 2;
 
-    // Create weights for the d2s interleaving operation
-    auto d2s_weights = genD2SWeights(wram_width);
-    auto d2s_enum_mode = torq_hl::DepthToSpaceModeEnum::DCR;
+        auto d2s_input_type = Permutation::nhwc2nchw();
+        auto d2s_output_type = d2s_input_type.reverse();
+        auto d2s_input = transposeValue(convOut, d2s_input_type, rescaleOp.getLoc(), rewriter);
 
-    llvm::SmallVector<int64_t> d2sOutputShape{
-        convOutShape[0], convOutShape[1] / (blockSize * blockSize), convOutShape[2] * blockSize,
-        convOutShape[3] * blockSize
-    };
-    RankedTensorType d2sInitType =
-        RankedTensorType::get(llvm::ArrayRef<int64_t>(d2sOutputShape), elementType);
+        auto d2s_weights = genD2SWeights(wram_width);
+        auto d2s_enum_mode = torq_hl::DepthToSpaceModeEnum::DCR;
 
-    auto d2sOp = rewriter.create<torq_hl::DepthToSpaceOp>(
-        rescaleOp.getLoc(), d2sInitType,
-        createInitTensor(rescaleOp.getLoc(), d2sInitType, rewriter), blockSize, d2s_enum_mode,
-        createI8Const(
-            rewriter, rescaleOp, d2s_weights, llvm::ArrayRef<int64_t>{wram_width * num_inputs}
-        ),
-        // transposeValue(conv2dOp.getOperand(0), d2s_input_type, rescaleOp.getLoc(), rewriter)
-        d2s_input
-    );
-    auto d2sTransposedOut =
-        transposeValue(d2sOp.getOutput(), d2s_output_type, rescaleOp.getLoc(), rewriter);
+        upsampledShape = {
+            convOutShape[0], convOutShape[1] / (blockSize * blockSize), convOutShape[2] * blockSize,
+            convOutShape[3] * blockSize
+        };
+        RankedTensorType d2sInitType =
+            RankedTensorType::get(llvm::ArrayRef<int64_t>(upsampledShape), elementType);
 
-    // Extract slice
+        auto d2sOp = rewriter.create<torq_hl::DepthToSpaceOp>(
+            rescaleOp.getLoc(), d2sInitType,
+            createInitTensor(rescaleOp.getLoc(), d2sInitType, rewriter), blockSize, d2s_enum_mode,
+            createI8Const(
+                rewriter, rescaleOp, d2s_weights, llvm::ArrayRef<int64_t>{wram_width * num_inputs}
+            ),
+            d2s_input
+        );
+        upsampledOut =
+            transposeValue(d2sOp.getOutput(), d2s_output_type, rescaleOp.getLoc(), rewriter);
+    }
+    else {
+        // Asymmetric stride: use reshape + transpose to interleave spatial blocks.
+        // Conv output (NCHW): [N, OC*hBlocks*wBlocks, H, W]
+        // Reshape → [N, OC, hBlocks, wBlocks, H, W]
+        // Transpose → [N, OC, hBlocks, H, wBlocks, W]  (perm: swap dims 3,4)
+        // Collapse → [N, OC, hBlocks*H, wBlocks*W]
+        // This correctly interleaves the blocks into spatial dimensions.
+        Value nchwConvOut =
+            transposeValue(convOut, Permutation::nhwc2nchw(), rescaleOp.getLoc(), rewriter);
+        // nchwConvOut: [N, OC*hBlocks*wBlocks, H, W]
+        int64_t N = convOutShape[0];
+        int64_t C_total = convOutShape[1]; // OC * hBlocks * wBlocks
+        int64_t H = convOutShape[2];
+        int64_t W = convOutShape[3];
+
+        // Compute hBlocks and wBlocks from original weight shape
+        int64_t kH = weightShape[1];
+        int64_t kW = weightShape[2];
+        int64_t paddedKH = ((kH + strideH - 1) / strideH) * strideH;
+        int64_t paddedKW = ((kW + strideW - 1) / strideW) * strideW;
+        int64_t hBlocks = paddedKH / strideH;
+        int64_t wBlocks = paddedKW / strideW;
+        int64_t OC_orig = C_total / (hBlocks * wBlocks);
+
+        // Expand: [N, OC, hBlocks, wBlocks, H, W]
+        llvm::SmallVector<int64_t> expandedShape{N, OC_orig, hBlocks, wBlocks, H, W};
+        auto expandedType = RankedTensorType::get(expandedShape, elementType);
+        llvm::SmallVector<llvm::SmallVector<int64_t, 2>> expandReassoc{{0}, {1, 2, 3}, {4}, {5}};
+        auto expandOp = rewriter.create<tensor::ExpandShapeOp>(
+            rescaleOp.getLoc(), expandedType, nchwConvOut,
+            llvm::ArrayRef<llvm::SmallVector<int64_t, 2>>(expandReassoc)
+        );
+
+        // Transpose: [N, OC, hBlocks, wBlocks, H, W]
+        //          → [N, OC, hBlocks, H, wBlocks, W]  (swap dims 3 and 4)
+        llvm::SmallVector<int64_t> d2sPerm{0, 1, 2, 4, 3, 5};
+        llvm::SmallVector<int64_t> transposedShape{N, OC_orig, hBlocks, H, wBlocks, W};
+        auto transposedType = RankedTensorType::get(transposedShape, elementType);
+        auto transInitTensor = createInitTensor(rescaleOp.getLoc(), transposedType, rewriter);
+        auto transposeOp = rewriter.create<linalg::TransposeOp>(
+            rescaleOp.getLoc(), expandOp.getResult(), transInitTensor, d2sPerm
+        );
+
+        // Collapse: [N, OC, hBlocks*H, wBlocks*W]
+        upsampledShape = {N, OC_orig, hBlocks * H, wBlocks * W};
+        auto collapsedType = RankedTensorType::get(upsampledShape, elementType);
+        llvm::SmallVector<llvm::SmallVector<int64_t, 2>> collapseReassoc{{0}, {1}, {2, 3}, {4, 5}};
+        auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
+            rescaleOp.getLoc(), collapsedType, *transposeOp.getResults().begin(),
+            llvm::ArrayRef<llvm::SmallVector<int64_t, 2>>(collapseReassoc)
+        );
+
+        // Back to NHWC
+        upsampledOut = transposeValue(
+            collapseOp.getResult(), Permutation::nhwc2nchw().reverse(), rescaleOp.getLoc(), rewriter
+        );
+    }
+
+    // Extract slice — crop the padded output to the expected TOSA output size.
+    // The upsampled result in NCHW is [N, OC, H_up, W_up] and we need to crop
+    // to the original transpose_conv output shape.
+    // Padding was applied at the start (low=strideH-1, strideW-1) so the upsampled
+    // output has extra elements on each spatial dim.
     llvm::SmallVector<OpFoldResult> extractOffset = {
-        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(1),
-        rewriter.getIndexAttr(1)
+        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(padH),
+        rewriter.getIndexAttr(padW)
     };
+
+    // Target output spatial dims: the original tosa.transpose_conv2d output shape (NHWC)
+    // outputShape is [N, H_out, W_out, OC] in NHWC
+    int64_t targetH = outputShape[1]; // expected H
+    int64_t targetW = outputShape[2]; // expected W
 
     llvm::SmallVector<OpFoldResult> extractSize = {
-        rewriter.getIndexAttr(d2sOutputShape[0]), rewriter.getIndexAttr(d2sOutputShape[1]),
-        rewriter.getIndexAttr(d2sOutputShape[2] - 2), rewriter.getIndexAttr(d2sOutputShape[3] - 2)
+        rewriter.getIndexAttr(upsampledShape[0]), rewriter.getIndexAttr(upsampledShape[1]),
+        rewriter.getIndexAttr(targetH), rewriter.getIndexAttr(targetW)
     };
 
     llvm::SmallVector<OpFoldResult> extractStrides = {
@@ -442,7 +583,7 @@ static LogicalResult fuseWithRescaleOp(
     };
 
     Value extractInput =
-        transposeValue(d2sTransposedOut, Permutation::nhwc2nchw(), rescaleOp.getLoc(), rewriter);
+        transposeValue(upsampledOut, Permutation::nhwc2nchw(), rescaleOp.getLoc(), rewriter);
     auto extractSlice = rewriter.create<tensor::ExtractSliceOp>(
         rescaleOp.getLoc(), extractInput, extractOffset, extractSize, extractStrides
     );
