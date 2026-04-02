@@ -8,9 +8,17 @@
 #include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-lower-torqhl"
+
+static llvm::cl::opt<bool> clTorqFakeReduce(
+    "torq-fake-reduce",
+    llvm::cl::desc("Replace reduce kernel with a single-iteration no-op kernel "
+                   "(useful to isolate DMA transfer time for throughput measurement)"),
+    llvm::cl::init(false)
+);
 
 using namespace mlir::syna::torq_hw;
 
@@ -74,20 +82,30 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
         };
     };
 
-    For(auto b = slice.iterate(input.dims(In::Batch, axis))) {
-        For(auto i = slice.iterate(input.dims(axis + 1, In::Vectors))) {
-            For(auto rv = slice.iterate(input.dim(In::Vectors))) {
-                PData pdata;
-                For(auto r = slice.iterate(input.dim(axis))) {
-                    // Accumulate across the reduce dimension
-                    IData idata = slice.iram.load(input[b][r][i][rv]);
-                    pdata = slice.alu.accumulate(idata, hwOp1Mode);
-                }
+    if (clTorqFakeReduce) {
+        // Single-iteration kernel: makes compute negligible so DMA transfer
+        // time dominates. Used for DMA throughput measurement.
+        IData idata = slice.iram.load(input[Indexes(input.shape().size(), 0)]);
+        PData pdata = slice.alu.accumulate(idata, hwOp1Mode);
+        QData res = slice.act.load(pdata);
+        slice.append(output, res);
+    }
+    else {
+        For(auto b = slice.iterate(input.dims(In::Batch, axis))) {
+            For(auto i = slice.iterate(input.dims(axis + 1, In::Vectors))) {
+                For(auto rv = slice.iterate(input.dim(In::Vectors))) {
+                    PData pdata;
+                    For(auto r = slice.iterate(input.dim(axis))) {
+                        // Accumulate across the reduce dimension
+                        IData idata = slice.iram.load(input[b][r][i][rv]);
+                        pdata = slice.alu.accumulate(idata, hwOp1Mode);
+                    }
 
-                // Store the accumulated result
-                For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
-                    QData res = slice.act.load(pdata[av]);
-                    slice.append(output[b][i], res);
+                    // Store the accumulated result
+                    For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                        QData res = slice.act.load(pdata[av]);
+                        slice.append(output[b][i], res);
+                    }
                 }
             }
         }

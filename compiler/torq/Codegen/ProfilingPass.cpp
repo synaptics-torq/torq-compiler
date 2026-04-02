@@ -54,6 +54,10 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
 
+// Defined in CompileNSSInvocationsPass.cpp; set via --torq-dma-in-mtu / --torq-dma-out-mtu.
+extern llvm::cl::opt<unsigned> clDmaInMtu;
+extern llvm::cl::opt<unsigned> clDmaOutMtu;
+
 namespace {
 
 enum class DmaType { In, Out, CdmaLramToDtcm, CdmaLramToItcm, CdmaDtcmToLram };
@@ -363,6 +367,35 @@ static uint64_t getDmaNdlTransferElements(torq_hw::DmaNdlAttr ndl) {
     return elements;
 }
 
+/// Compute MTU (Maximum Transfer Unit) efficiency for AXI burst transfers.
+///
+/// Each AXI burst transfers (1 << mtu) beats of 16 bytes each. Every burst
+/// incurs a fixed setup overhead on the AXI bus:
+///
+///   Cycle 1:   ARVALID  – master sends the address
+///   Cycle 2:   ARREADY  – interconnect / DDR controller accepts the request
+///   Cycle 3-6: DDR latency – row open / column access / data fetch
+///   Cycle 7:   first 16 B data beat arrives
+///   Cycle 8+:  continuous 16 B per cycle
+///
+/// As MTU increases, the setup overhead is amortised over more data beats:
+///
+///   MTU 2  (4 beats)  => [setup] 16B 16B 16B 16B              [setup] ...
+///   MTU 3  (8 beats)  => [setup] 16B 16B 16B 16B 16B 16B 16B 16B  [setup] ...
+///   MTU 4  (16 beats) => [setup] 16B x16                          [setup] ...
+///
+/// MTU efficiency captures this overhead:
+///
+///   mtu_efficiency = 2^mtu / (2^mtu + delta)
+///
+/// where delta models the per-burst setup penalty in beat-equivalent cycles
+/// (address phase + DDR latency). delta is typically in the range [1, 3];
+/// we default to 1.5.
+static double mtuEfficiency(unsigned mtu, double delta = 1.5) {
+    double beats = static_cast<double>(1u << mtu);
+    return beats / (beats + delta);
+}
+
 static uint64_t getDmaNdlTransferBytes(torq_hw::DmaNdlAttr ndl, Type bufferType) {
     auto shapedType = dyn_cast<ShapedType>(bufferType);
     if (!shapedType) {
@@ -388,21 +421,33 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
 
     Builder builder(op->getContext());
 
-    const double perCycleDmaTransferBytes = 4.33;
+    // DMA cycle estimation:
+    //   cycles = total_bytes / (theoretical_throughput * dma_factor * mtu_efficiency)
+    //
+    // getDmaThroughputBytesPerCycle() already returns theoretical * dma_factor.
+    // We multiply by the MTU efficiency for each direction separately.
+    //
+    // TODO: Currently we model DMA as unidirectional (in or out, not both
+    // simultaneously). Once bidirectional DMA support is available, the
+    // estimation formula must account for shared bandwidth between
+    // concurrent DMA in and DMA out transfers.
+    const double baseThroughput = TorqHw::get().getDmaThroughputBytesPerCycle();
+    const double dmaInEffectiveThroughput = baseThroughput * mtuEfficiency(clDmaInMtu);
+    const double dmaOutEffectiveThroughput = baseThroughput * mtuEfficiency(clDmaOutMtu);
 
     // DMA in config contains reference to slice_program op
     if (auto dmaInCfgOp = dyn_cast<torq_hw::DmaInCfgOp>(op)) {
         prof.currentDmaInBytes =
             getDmaNdlTransferBytes(dmaInCfgOp.getWriteNdl(), dmaInCfgOp.getWrite().getType());
         prof.currentDmaInCycles =
-            (uint64_t)std::ceil(prof.currentDmaInBytes / perCycleDmaTransferBytes);
+            (uint64_t)std::ceil(prof.currentDmaInBytes / dmaInEffectiveThroughput);
         prof.currentDmaInLoc = toString(dmaInCfgOp.getLoc());
     }
     else if (auto dmaOutCfgOp = dyn_cast<torq_hw::DmaOutCfgOp>(op)) {
         prof.currentDmaOutBytes =
             getDmaNdlTransferBytes(dmaOutCfgOp.getReadNdl(), dmaOutCfgOp.getRead().getType());
         prof.currentDmaOutCycles =
-            (uint64_t)std::ceil(prof.currentDmaOutBytes / perCycleDmaTransferBytes);
+            (uint64_t)std::ceil(prof.currentDmaOutBytes / dmaOutEffectiveThroughput);
         prof.currentDmaOutLoc = toString(dmaOutCfgOp.getLoc());
     }
     // Add the dma time to the timeline

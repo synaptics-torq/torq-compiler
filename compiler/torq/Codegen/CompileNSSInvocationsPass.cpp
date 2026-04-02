@@ -34,13 +34,13 @@ static llvm::cl::opt<bool> clDisableAsyncSliceWait(
     llvm::cl::init(false)
 );
 
-static llvm::cl::opt<unsigned> clDmaInMtu(
+llvm::cl::opt<unsigned> clDmaInMtu(
     "torq-dma-in-mtu",
     llvm::cl::desc("DMA In (XRAM read) burst length as MTU value: burst = (1 << mtu) beats."),
     llvm::cl::init(4)
 );
 
-static llvm::cl::opt<unsigned> clDmaOutMtu(
+llvm::cl::opt<unsigned> clDmaOutMtu(
     "torq-dma-out-mtu",
     llvm::cl::desc("DMA Out (XRAM write) burst length as MTU value: burst = (1 << mtu) beats."),
     llvm::cl::init(4)

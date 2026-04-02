@@ -43,16 +43,29 @@ class TorqHw {
     // Get the target host CPU features for cross-compilation
     std::string getHostCpuFeatures() const { return _hostCpuFeatures; }
 
+    // Get the effective DMA throughput in bytes per cycle (theoretical * dma_factor)
+    double getDmaThroughputBytesPerCycle() const {
+        return _dmaTheoreticalBytesPerCycle * _dmaFactor;
+    }
+
+    // Get the theoretical peak DMA throughput in bytes per cycle
+    double getDmaTheoreticalBytesPerCycle() const { return _dmaTheoreticalBytesPerCycle; }
+
+    // Get the DMA efficiency factor (practical ratio, typically 0.60-0.70)
+    double getDmaFactor() const { return _dmaFactor; }
+
     TorqHw(
         std::string name, std::string description, size_t lramSize, size_t sliceCount,
         size_t availableMemoryForTiling, std::string cssConfigName, std::string nssConfigName,
+        double dmaTheoreticalBytesPerCycle, double dmaFactor = 1.0,
         std::string hostTriple = "native", std::string hostCpu = "host",
         std::string hostCpuFeatures = "host"
     )
         : _name(name), _description(description), _lramSize(lramSize), _sliceCount(sliceCount),
           _availableMemoryForTiling(availableMemoryForTiling), _cssConfigName(cssConfigName),
           _nssConfigName(nssConfigName), _hostTriple(hostTriple), _hostCpu(hostCpu),
-          _hostCpuFeatures(hostCpuFeatures) {}
+          _hostCpuFeatures(hostCpuFeatures),
+          _dmaTheoreticalBytesPerCycle(dmaTheoreticalBytesPerCycle), _dmaFactor(dmaFactor) {}
 
     TorqHw() = default;
 
@@ -68,6 +81,8 @@ class TorqHw {
     std::string _hostTriple{};
     std::string _hostCpu{};
     std::string _hostCpuFeatures{};
+    double _dmaTheoreticalBytesPerCycle = 0.0;
+    double _dmaFactor = 1.0;
 
     static const TorqHw *_instance;
 };

@@ -19,6 +19,12 @@ def case_config(request, runtime_hw_type, chip_config):
     if "trunci-i16-to-i8" in request.param.name:
         # increase input range to check out of bound cases
         extra_args["tweaked_input_data_range"]  = (-1000, 1000)
+
+    # Skip DMA throughput test cases - they require --torq-fake-reduce and are
+    # meant to be run only via test_dma_throughput.py.
+    if "reducesum-dma-throughput-test" in request.param.name:
+        pytest.skip("DMA throughput test file; run via test_dma_throughput.py")
+
     failed_tc = []
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
