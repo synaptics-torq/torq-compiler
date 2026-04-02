@@ -994,10 +994,15 @@ def random_uniform_input_data(request, mlir_io_spec):
     for inp_spec in mlir_io_spec.inputs:
         dtype = get_dtype(inp_spec.fmt)
 
-        if not np.issubdtype(dtype, np.integer):
-            raise ValueError("Requested random uniform integer data for float type")
-
-        data = rng.integers(np.iinfo(dtype).min, np.iinfo(dtype).max, size=inp_spec.shape, dtype=dtype)
+        if is_float_type(dtype):
+            finfo = ml_dtypes.finfo if dtype == ml_dtypes.bfloat16 else np.finfo
+            data = rng.uniform(finfo(dtype).min, finfo(dtype).max, inp_spec.shape).astype(dtype)
+        elif np.issubdtype(dtype, np.integer):
+            data = rng.integers(np.iinfo(dtype).min, np.iinfo(dtype).max, size=inp_spec.shape, dtype=dtype, endpoint=True)
+        elif dtype is bool:
+            data = rng.integers(0, 2, inp_spec.shape, dtype=dtype)
+        else:
+            raise ValueError(f"Requested random uniform data for unsupported dtype '{dtype}'")
 
         result.append(data)
 

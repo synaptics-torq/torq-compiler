@@ -70,6 +70,12 @@ def case_config(request, runtime_hw_type, chip_config):
                 'argmax-1x50x256-1axis.mlir', # Number of differences: 121 out of 256 [47.27%]
                 'avgpool2d.mlir',
             ]
+
+    # Prevent torq-run-module timing out on aws_fpga with specific testcases
+    need_input_type_tc = []
+    if aws_fpga:
+        need_input_type_tc += ["pad_TL_8x8x4.mlir"]
+
     extra_args = {}
 
     if chip_config.data['target'] != "SL2610" and (runtime_hw_type.data == "aws_fpga"):
@@ -109,8 +115,11 @@ def case_config(request, runtime_hw_type, chip_config):
             'conv-stride2',
         ]
 
+    extra_args["torq_compiler_options"] = []
     if any(s in request.param.data.name for s in torq_tiling_tc):
-        extra_args["torq_compiler_options"]  = ["--torq-enable-torq-hl-tiling"]
+        extra_args["torq_compiler_options"].append("--torq-enable-torq-hl-tiling")
+    if any(s in request.param.data.name for s in need_input_type_tc):
+        extra_args["torq_compiler_options"].append("--iree-input-type=tosa-torq")
 
     # Note: "yolov8_block_mul_rescale" might need "--torq-tile-and-fuse-producers-fuse-mode=max-producers"
 

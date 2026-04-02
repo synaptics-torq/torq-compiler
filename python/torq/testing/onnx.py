@@ -152,6 +152,7 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
         new_inputs = []
         new_outputs = []
         new_initializers = []
+        added_initializer_names = set()
 
         import copy as _copy
 
@@ -175,6 +176,7 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
             elif name in orig_initializers:
                 init = orig_initializers[name]
                 new_initializers.append(_copy.deepcopy(init))
+                added_initializer_names.add(name)
                 new_inputs.append(_value_info_from_initializer(init))
             else:
                 # unknown; synthesize a placeholder value_info (float, scalar)
@@ -182,7 +184,7 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
 
         # Include initializers referenced by used names
         for name in sorted((external_inputs | used)):
-            if name in orig_initializers:
+            if name in orig_initializers and name not in added_initializer_names:
                 new_initializers.append(_copy.deepcopy(orig_initializers[name]))
 
         # Populate outputs

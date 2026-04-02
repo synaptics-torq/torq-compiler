@@ -48,6 +48,11 @@ def case_config(request, runtime_hw_type, chip_config):
                 'Elementwise-less-than-equal-u16.mlir', # 0.02% mismatch
             ]
 
+    # Prevent torq-run-module timing out on aws_fpga with specific testcases
+    need_input_type_tc = []
+    if aws_fpga:
+        need_input_type_tc += ["reshape-collapse-expand.mlir"]
+
     if any(s in request.param.name for s in failed_tc):
         pytest.xfail("output mismatch or error")
 
@@ -56,6 +61,8 @@ def case_config(request, runtime_hw_type, chip_config):
         extra_args["torq_compiler_options"].append("--torq-enable-general-exp")
     if "reciprocal-inf" in request.param.name:
         extra_args["torq_compiler_options"].append("--torq-enable-reciprocal-inf")
+    if any(s in request.param.data.name for s in need_input_type_tc):
+        extra_args["torq_compiler_options"].append("--iree-input-type=linalg-torq")
 
     return {
         "mlir_model_file": "static_mlir_model_file",
