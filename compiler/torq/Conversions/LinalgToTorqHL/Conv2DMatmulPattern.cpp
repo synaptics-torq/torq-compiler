@@ -244,13 +244,20 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         bool isNCHW = isNCHWMatmul(srcOp);
         // A matmul always has rank-2 output, so start by assuming FC.
         // Override to conv when an ExpandShapeOp reveals real spatial dims.
+        // For NCHW matmuls the operands are in weights×input order; the conv
+        // path handles the required swap while the FC path does not, so always
+        // keep NCHW 4D outputs on the conv path.
         bool isFC = true;
         if (finalType.getRank() == 4) {
-            auto shape = finalType.getShape();
-            bool hasSpatial =
-                isNCHW ? (shape[2] > 1 || shape[3] > 1) : (shape[1] > 1 || shape[2] > 1);
-            if (hasSpatial)
+            if (isNCHW) {
                 isFC = false;
+            }
+            else {
+                auto shape = finalType.getShape();
+                bool hasSpatial = (shape[1] > 1 || shape[2] > 1);
+                if (hasSpatial)
+                    isFC = false;
+            }
         }
 
         Value input = lhs;
