@@ -84,7 +84,7 @@ jobs:
           SCCACHE_SERVER_UDS: ${{github.workspace}}/sccache.sock
         run: |
           sccache --start-server
-          cmake --build .
+          cmake --build . --target torq
           sccache --show-stats
 
       - name: Configure build for Astra machina
