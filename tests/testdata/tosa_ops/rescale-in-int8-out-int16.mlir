@@ -1,6 +1,10 @@
 module {
-  func.func @main(%arg0: tensor<1x64x64x4xi8>) -> (tensor<1x64x64x4xi16>) {
-    %0 = tosa.rescale %arg0 {double_round = true, input_zp = -128 : i32, multiplier = array<i32: 1073741824>, output_zp = 0 : i32, per_channel = false, scale32 = true, shift = array<i8: 30>} : (tensor<1x64x64x4xi8>) -> tensor<1x64x64x4xi16>
+  func.func @main(%arg0: tensor<1x64x64x4xi8>) -> tensor<1x64x64x4xi16> {
+    %cst = arith.constant dense<1073741824> : tensor<1xi32>
+    %cst_0 = arith.constant dense<30> : tensor<1xi8>
+    %cst_1 = arith.constant dense<-128> : tensor<1xi8>
+    %cst_2 = arith.constant dense<0> : tensor<1xi16>
+    %0 = tosa.rescale %arg0, %cst, %cst_0, %cst_1, %cst_2 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x64x64x4xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi16>) -> tensor<1x64x64x4xi16>
     return %0 : tensor<1x64x64x4xi16>
   }
 }

@@ -22,11 +22,13 @@
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 
+#include "iree/compiler/Dialect/HAL/Target/TargetOptions.h"
 #include "iree/compiler/Dialect/HAL/Target/TargetRegistry.h"
 #include "iree/compiler/PluginAPI/Client.h"
 
 #include "torch-mlir/Conversion/TorchOnnxToTorch/Passes.h"
 
+#include <algorithm>
 #include <stdio.h>
 
 using namespace mlir::iree_compiler;
@@ -104,22 +106,19 @@ struct TORQSession : public PluginSession<
 
     void populateDetectedCustomInputConversionTypes(ModuleOp &module, StringSet<> &typeMnemonics)
         override {
+
         // Only run when target backend is Torq.
         // Otherwise, we would override the base input types (e.g. "onnx")
         // and run the torq pipeline even for non-torq backends like llvm-cpu, which can't handle
         // the resulting IR.
-        auto targetsAttr = module->getAttrOfType<ArrayAttr>("hal.device.targets");
-        if (!targetsAttr)
-            return;
-        bool hasTorqTarget = false;
-        for (auto attr : targetsAttr) {
-            if (auto deviceTarget = dyn_cast<IREE::HAL::DeviceTargetAttr>(attr)) {
-                if (deviceTarget.getDeviceID().getValue() == "torq") {
-                    hasTorqTarget = true;
-                    break;
-                }
-            }
-        }
+
+        // FIXME (upgrade): this is a quick workaround
+        const auto &halTargetOptions = IREE::HAL::TargetOptions::FromFlags::get();
+        bool hasTorqTarget = std::find(
+                                 halTargetOptions.legacyTargetBackends.begin(),
+                                 halTargetOptions.legacyTargetBackends.end(), "torq"
+                             ) != halTargetOptions.legacyTargetBackends.end();
+
         if (!hasTorqTarget)
             return;
 

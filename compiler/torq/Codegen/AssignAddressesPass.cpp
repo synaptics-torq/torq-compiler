@@ -461,7 +461,7 @@ static void moveXramDeallocToBack(FunctionOpInterface funcOp) {
     }
 }
 
-class AssignLramAddressesPass : public AssignLramAddressesBase<AssignLramAddressesPass> {
+class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramAddressesPass> {
   public:
     AssignLramAddressesPass() = default;
     AssignLramAddressesPass(const AssignLramAddressesPass &pass) {}
@@ -520,7 +520,7 @@ class AssignLramAddressesPass : public AssignLramAddressesBase<AssignLramAddress
 };
 
 class AssignDtcmItcmXramAddressesPass
-    : public AssignDtcmItcmXramAddressesBase<AssignDtcmItcmXramAddressesPass> {
+    : public impl::AssignDtcmItcmXramAddressesBase<AssignDtcmItcmXramAddressesPass> {
   public:
     AssignDtcmItcmXramAddressesPass() = default;
     AssignDtcmItcmXramAddressesPass(const AssignDtcmItcmXramAddressesPass &pass) {}

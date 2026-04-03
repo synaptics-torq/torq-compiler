@@ -116,7 +116,7 @@ void propagateStaticOffsetToExpandShapeChain(mlir::FunctionOpInterface funcOp) {
     });
 }
 
-class UnrollLoopPass : public UnrollLoopBase<UnrollLoopPass> {
+class UnrollLoopPass : public impl::UnrollLoopBase<UnrollLoopPass> {
   public:
     using UnrollLoopBase<UnrollLoopPass>::UnrollLoopBase;
 

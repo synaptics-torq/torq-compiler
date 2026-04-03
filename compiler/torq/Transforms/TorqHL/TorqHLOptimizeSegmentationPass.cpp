@@ -56,7 +56,7 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
 };
 
 class TorqHLOptimizeSegmentationPass
-    : public TorqHLOptimizeSegmentationBase<TorqHLOptimizeSegmentationPass> {
+    : public impl::TorqHLOptimizeSegmentationBase<TorqHLOptimizeSegmentationPass> {
   public:
     using TorqHLOptimizeSegmentationBase::TorqHLOptimizeSegmentationBase;
     void runOnOperation() override;
@@ -71,7 +71,7 @@ void TorqHLOptimizeSegmentationPass::runOnOperation() {
 
     patterns.add<SegmentOptimizePattern>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
 }

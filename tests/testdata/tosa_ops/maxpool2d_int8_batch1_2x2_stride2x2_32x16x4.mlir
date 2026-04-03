@@ -4,3 +4,4 @@ module {
     return %0 : tensor<1x8x2x32xi8>
   }
 }
+

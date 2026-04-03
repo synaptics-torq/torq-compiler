@@ -1,14 +1,22 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
-#include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "iree/hal/local/executable_library.h"
+
+#include "mlir/Dialect/LLVMIR/Transforms/Passes.h"
+#include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/LocationSnapshot.h"
+#include "llvm/Support/TargetSelect.h"
+
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Dialect/Affine/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -39,6 +47,12 @@ llvm::cl::opt<std::string> clDumpComputeConstantsIR(
     llvm::cl::desc("Dump IR used to compute constants to a directory"), llvm::cl::init("")
 );
 
+llvm::cl::opt<bool> clInsertDebugTrapInComputeConstants(
+    "torq-insert-debug-trap-in-compute-constants",
+    llvm::cl::desc("Insert a debug trap in the generated code for computing constants"),
+    llvm::cl::init(false)
+);
+
 using namespace mlir::iree_compiler;
 
 static LogicalResult
@@ -50,7 +64,7 @@ createZeroConstant(Value value, Location loc, OpBuilder &builder, IRMapping &map
         return failure();
     }
 
-    auto zeroValue = builder.create<arith::ConstantOp>(loc, value.getType(), zeroAttr);
+    auto zeroValue = arith::ConstantOp::create(builder, loc, value.getType(), zeroAttr);
 
     // map any reference to assumeZero to zeroValue
     map.map(value, zeroValue);
@@ -75,20 +89,20 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
 
     builder.setInsertionPointToStart(topModuleOp.getBody());
 
-    auto executableOp = builder.create<IREE::HAL::ExecutableOp>(loc, "test");
+    auto executableOp = IREE::HAL::ExecutableOp::create(builder, loc, "test");
 
     builder.setInsertionPointToStart(&executableOp.getBody().front());
     auto targetAttr = IREE::HAL::ExecutableTargetAttr::get(
         context, builder.getStringAttr("llvm-native"), builder.getStringAttr("native")
     );
-    auto variantOp = builder.create<IREE::HAL::ExecutableVariantOp>(loc, "native", targetAttr);
+    auto variantOp = IREE::HAL::ExecutableVariantOp::create(builder, loc, "native", targetAttr);
     builder.setInsertionPointToStart(&variantOp.getBody().front());
 
-    auto moduleOp = builder.create<ModuleOp>(loc);
+    auto moduleOp = ModuleOp::create(builder, loc);
     builder.setInsertionPointToStart(moduleOp.getBody());
 
-    auto funcOp = builder.create<func::FuncOp>(
-        loc, "main", builder.getFunctionType(TypeRange{}, TypeRange{})
+    auto funcOp = func::FuncOp::create(
+        builder, loc, "main", builder.getFunctionType(TypeRange{}, TypeRange{})
     );
 
     auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
@@ -105,14 +119,26 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
     SmallVector<IREE::HAL::InterfaceBindingSubspanOp, 4> subspanOps;
     subspanOps.reserve(values.size());
 
+    auto bindingAttr = IREE::HAL::PipelineBindingAttr::get(
+        context, IREE::HAL::DescriptorType::StorageBuffer, IREE::HAL::DescriptorFlags::Indirect
+    );
+
+    SmallVector<IREE::HAL::PipelineBindingAttr> bindingsAttrs(values.size(), bindingAttr);
+
+    auto layoutAttr = IREE::HAL::PipelineLayoutAttr::get(
+        context, bindingsAttrs, 0, IREE::HAL::PipelineLayoutFlags::Indirect
+    );
+
     // Create one output binding per requested value.
     for (auto [binding, value] : llvm::enumerate(values)) {
+
         RankedTensorType resultType = cast<RankedTensorType>(value.getType());
-        auto dispatchTensorType =
-            IREE::Flow::DispatchTensorType::get(IREE::Flow::TensorAccess::WriteOnly, resultType);
+        auto dispatchTensorType = IREE::TensorExt::DispatchTensorType::get(
+            IREE::TensorExt::TensorAccess::WriteOnly, resultType
+        );
         auto subspanOp = builder.create<IREE::HAL::InterfaceBindingSubspanOp>(
-            loc, dispatchTensorType, APInt(64, 0), APInt(64, binding),
-            IREE::HAL::DescriptorType::StorageBuffer, nullptr, ValueRange{}, builder.getIndexAttr(4)
+            loc, dispatchTensorType, layoutAttr, APInt(64, binding), nullptr, ValueRange{},
+            builder.getIndexAttr(4)
         );
         subspanOps.push_back(subspanOp);
     }
@@ -140,13 +166,13 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
 
     // Store each requested result to its dedicated output binding.
     for (auto [binding, value] : llvm::enumerate(values)) {
-        builder.create<IREE::Flow::DispatchTensorStoreOp>(
+        builder.create<IREE::TensorExt::DispatchTensorStoreOp>(
             loc, map.lookup(value), subspanOps[binding], ValueRange{}
         );
     }
 
     // return nothing (this is the calling convention for IREE dispatches)
-    builder.create<func::ReturnOp>(loc, ValueRange{});
+    func::ReturnOp::create(builder, loc, ValueRange{});
 
     return variantOp;
 }
@@ -196,27 +222,33 @@ static void setupPipeline(PassManager &pm) {
         .addPass(createCSEPass);
 
     // Handled tensor-type constants.
-    addConstantBufferizePasses(modulePassManager);
+    modulePassManager.addPass(createIREEBufferizeConstantsPass());
 
     FunctionLikeNest(modulePassManager)
         .addPass(createFoldTensorExtractOpPass)
-        // math dialect elementry functions -> polynomial form.
-        .addPass(createPolynomialApproximationPass)
+        .addPass(createMathTransformPass)
         .addPass(createHoistStaticallyBoundAllocationsPass);
 
     FunctionLikeNest(modulePassManager)
-        // Resolve get_buffer_descriptor ops. All structural buffer manipulations
-        // must conclude before this point.
+        .addPass(memref::createFoldMemRefAliasOpsPass)
         .addPass(createIREEExpandStridedMetadataPass)
         .addPass(createCleanupBufferAllocViewPass)
         // SCF -> CF
-        .addPass(createConvertSCFToCFPass)
+        .addPass(createSCFToControlFlowPass)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass)
         // (HAL, IREE, Linalg, CF) -> LLVM
-        .addPass(arith::createArithExpandOpsPass)
-        .addPass(memref::createExpandOpsPass)
         .addPass(memref::createFoldMemRefAliasOpsPass)
+        .addPass(affine::createAffineExpandIndexOpsPass)
+        .addPass([&]() {
+            arith::ArithExpandOpsPassOptions options;
+            options.includeBf16 = true;
+            options.includeF4E2M1 = true;
+            options.includeF8E8M0 = true;
+            return arith::createArithExpandOpsPass(options);
+        })
+        //.addPass(memref::createExpandOpsPass)
+        //.addPass(memref::createFoldMemRefAliasOpsPass)
         .addPass(createEmulateNarrowTypePass)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
@@ -233,6 +265,32 @@ static void setupPipeline(PassManager &pm) {
     modulePassManager.addNestedPass<LLVM::LLVMFuncOp>(createAddFastMathFlagsPass());
 }
 
+static void insertDebugTrap(IREE::HAL::ExecutableVariantOp evOp) {
+
+    // import llvm.debugtrap() in the module
+    OpBuilder builder(evOp);
+    builder.setInsertionPointToStart(evOp.getInnerModule().getBody());
+
+    auto llvmVoidType = mlir::LLVM::LLVMVoidType::get(evOp.getContext());
+    auto llvmFuncType = mlir::LLVM::LLVMFunctionType::get(llvmVoidType, {}, false);
+    auto debugTrapFunc =
+        mlir::LLVM::LLVMFuncOp::create(builder, evOp.getLoc(), "llvm.debugtrap", llvmFuncType);
+    debugTrapFunc.setLinkage(LLVM::Linkage::External);
+
+    // add a debug trap at the start of the function to make it easier to set a breakpoint on the
+    // generated code
+    evOp.walk([&](LLVM::LLVMFuncOp funcOp) {
+        if (funcOp.getName() != "main") {
+            return WalkResult::advance();
+        }
+
+        OpBuilder builder(funcOp);
+        builder.setInsertionPointToStart(&funcOp.getBody().front());
+        builder.create<LLVM::CallOp>(funcOp.getLoc(), debugTrapFunc, ValueRange{});
+        return WalkResult::interrupt();
+    });
+}
+
 // By default llvm lowers allocations to llvm.alloca() which allocate memory on the stack.
 // This can be an issue if we allocate large buffers because we can overflow the stack.
 // To avoid this we replace alloca with calls to malloc() and free() so that the memory
@@ -245,13 +303,13 @@ static void replaceStackAllocationsWithMalloc(IREE::HAL::ExecutableVariantOp evO
     auto llvmI64Type = builder.getIntegerType(64);
     auto llvmPtrType = LLVM::LLVMPointerType::get(evOp.getContext());
     auto funcType = LLVM::LLVMFunctionType::get(llvmPtrType, {llvmI64Type}, false);
-    LLVM::LLVMFuncOp mallocFunc = builder.create<LLVM::LLVMFuncOp>(loc, "malloc", funcType);
+    LLVM::LLVMFuncOp mallocFunc = LLVM::LLVMFuncOp::create(builder, loc, "malloc", funcType);
     mallocFunc.setLinkage(LLVM::Linkage::External);
 
     // import free() in the module
     auto llvmVoidType = mlir::LLVM::LLVMVoidType::get(evOp.getContext());
     funcType = LLVM::LLVMFunctionType::get(llvmVoidType, {llvmPtrType}, false);
-    auto freeFunc = builder.create<LLVM::LLVMFuncOp>(loc, "free", funcType);
+    auto freeFunc = LLVM::LLVMFuncOp::create(builder, loc, "free", funcType);
     freeFunc.setLinkage(LLVM::Linkage::External);
 
     // Replace stack alloca with call to malloc
@@ -266,23 +324,28 @@ static void replaceStackAllocationsWithMalloc(IREE::HAL::ExecutableVariantOp evO
         auto elementSize = allocaOp.getElemType().getIntOrFloatBitWidth() / 8;
         assert(elementSize > 0);
 
-        Value sizeValue = builder.create<LLVM::ConstantOp>(
-            allocaOp.getLoc(), llvmI64Type, builder.getIntegerAttr(llvmI64Type, elementSize)
+        Value sizeValue = LLVM::ConstantOp::create(
+            builder, allocaOp.getLoc(), llvmI64Type,
+            builder.getIntegerAttr(llvmI64Type, elementSize)
         );
 
         if (allocaOp.getArraySize()) {
+
+            Value arraySize = allocaOp.getArraySize();
+
+            // convert the array size to i64 if it's not already
+            if (arraySize.getType().getIntOrFloatBitWidth() < 64) {
+                arraySize =
+                    LLVM::ZExtOp::create(builder, allocaOp.getLoc(), llvmI64Type, arraySize);
+            }
+
             // multiply by the array size
-            sizeValue = builder.create<LLVM::MulOp>(
-                allocaOp.getLoc(), sizeValue,
-                builder.create<LLVM::ZExtOp>(
-                    allocaOp.getLoc(), llvmI64Type, allocaOp.getArraySize()
-                )
-            );
+            sizeValue = LLVM::MulOp::create(builder, allocaOp.getLoc(), sizeValue, arraySize);
         }
 
         // create the malloc call
         auto mallocCall =
-            builder.create<LLVM::CallOp>(allocaOp.getLoc(), mallocFunc, ValueRange{sizeValue});
+            LLVM::CallOp::create(builder, allocaOp.getLoc(), mallocFunc, ValueRange{sizeValue});
 
         // replace all uses of the alloca with the result of the cast
         allocaOp.replaceAllUsesWith(mallocCall.getResult());
@@ -297,10 +360,16 @@ static void replaceStackAllocationsWithMalloc(IREE::HAL::ExecutableVariantOp evO
         funcOp.walk([&](LLVM::ReturnOp returnOp) {
             OpBuilder builder(returnOp);
             for (auto alloc : allocations) {
-                builder.create<LLVM::CallOp>(returnOp.getLoc(), freeFunc, ValueRange{alloc});
+                LLVM::CallOp::create(builder, returnOp.getLoc(), freeFunc, ValueRange{alloc});
             }
         });
     });
+
+    if (failed(verify(evOp.getInnerModule()))) {
+        llvm::report_fatal_error(
+            "Failed to verify module after replacing stack allocations with malloc"
+        );
+    }
 }
 
 static LogicalResult passManagerSetup(
@@ -320,6 +389,28 @@ static LogicalResult passManagerSetup(
     // replace alloca with malloc/free to avoid stack overflow on large allocations
     replaceStackAllocationsWithMalloc(variantOp);
 
+    if (clInsertDebugTrapInComputeConstants) {
+
+        // insert a debug trap in the generated code that will interrupt the compiler when
+        // we try to execute the generated code
+        insertDebugTrap(variantOp);
+
+        auto llvmModuleOp = variantOp.getInnerModule();
+
+        // print out the IR and reset the location of operations to this IR dump
+        OpPrintingFlags printFlags;
+        if (failed(generateLocationsFromIR("/tmp/constants.mlir", llvmModuleOp, printFlags))) {
+            return failure();
+        }
+
+        // add the IR necessary to emit debug infos
+        PassManager debugPm(context);
+        debugPm.addPass(LLVM::createDIScopeForLLVMFuncOpPass());
+        if (failed(debugPm.run(llvmModuleOp))) {
+            return failure();
+        }
+    }
+
     return success();
 }
 
@@ -338,6 +429,11 @@ executionEngineSetup(IREE::HAL::ExecutableVariantOp variantOp) {
     // compile the module using the JIT engine
     mlir::ExecutionEngineOptions engineOptions;
     engineOptions.transformer = optPipeline;
+
+    if (clInsertDebugTrapInComputeConstants) {
+        engineOptions.enableGDBNotificationListener = true;
+    }
+
     auto maybeEngine = mlir::ExecutionEngine::create(variantOp.getInnerModule(), engineOptions);
     if (!maybeEngine) {
         return failure();
@@ -555,9 +651,8 @@ outlineAndReturnOps(Value value, bool recursive, llvm::ArrayRef<Value> assumeZer
                 }
 
                 // the value depends on the input, we cannot compute this
-                if (isa<IREE::Flow::DispatchTensorLoadOp, IREE::HAL::InterfaceBindingSubspanOp>(
-                        operandOp
-                    )) {
+                if (isa<IREE::TensorExt::DispatchTensorLoadOp,
+                        IREE::HAL::InterfaceBindingSubspanOp>(operandOp)) {
                     LLVM_DEBUG({
                         llvm::dbgs() << "Value depends on inputs, cannot compute statically\n";
                     });

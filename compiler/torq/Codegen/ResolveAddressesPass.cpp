@@ -29,7 +29,7 @@ namespace mlir::syna::torq {
 
 namespace {
 
-class ResolveAddressesPass : public ResolveAddressesBase<ResolveAddressesPass> {
+class ResolveAddressesPass : public impl::ResolveAddressesBase<ResolveAddressesPass> {
   public:
     ResolveAddressesPass() = default;
     ResolveAddressesPass(const ResolveAddressesPass &pass) {}
@@ -250,7 +250,7 @@ void ResolveAddressesPass::runOnOperation() {
     patterns.add<ResolveSliceStart>(ctx);
     patterns.add<ResolveNext>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
         funcOp.emitError("Failed to apply ResolveAddressesVisitor pattern");
         signalPassFailure();
     }

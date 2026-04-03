@@ -51,10 +51,10 @@ SmallVector<OpFoldResult> createVector(int64_t value, int size, PatternRewriter 
 
 // Create an empty tensor with the given type
 Value createEmptyTensor(RankedTensorType tensorType, Location loc, PatternRewriter &rewriter) {
-    return rewriter
-        .create<tensor::EmptyOp>(
-            loc, tensorType.getShape(), tensorType.getElementType(), tensorType.getEncoding()
-        )
+    return tensor::EmptyOp::create(
+               rewriter, loc, tensorType.getShape(), tensorType.getElementType(),
+               tensorType.getEncoding()
+    )
         ->getResult(0);
 }
 
@@ -64,7 +64,7 @@ static Value getSlice(
     const SmallVector<OpFoldResult> &strides, PatternRewriter &rewriter
 ) {
     auto sliceOp =
-        rewriter.create<tensor::ExtractSliceOp>(value.getLoc(), value, offsets, sizes, strides);
+        tensor::ExtractSliceOp::create(rewriter, value.getLoc(), value, offsets, sizes, strides);
     return sliceOp.getResult();
 }
 
@@ -84,8 +84,8 @@ createForallOp(int count, RankedTensorType returnType, Location loc, PatternRewr
     OpFoldResult one = rewriter.getIndexAttr(1);
     OpFoldResult parallel_count = rewriter.getIndexAttr(count);
     auto outputTensor = createEmptyTensor(returnType, loc, rewriter);
-    return rewriter.create<scf::ForallOp>(
-        loc, ArrayRef<OpFoldResult>{zero}, ArrayRef<OpFoldResult>{parallel_count},
+    return scf::ForallOp::create(
+        rewriter, loc, ArrayRef<OpFoldResult>{zero}, ArrayRef<OpFoldResult>{parallel_count},
         ArrayRef<OpFoldResult>{one}, ValueRange({outputTensor}),
         ArrayAttr::get(rewriter.getContext(), {})
     );
@@ -123,7 +123,7 @@ FailureOr<torq_hl::ConvertOp> getConvertResultToXram(Operation *op) {
 OpFoldResult affineEval(AffineExpr affineExpr, Value arg, PatternRewriter &rewriter) {
     Location loc = UnknownLoc::get(rewriter.getContext());
     mlir::AffineMap affineMap = mlir::AffineMap::get(1, 0, affineExpr, rewriter.getContext());
-    auto affineApplyOp = rewriter.create<affine::AffineApplyOp>(loc, affineMap, ValueRange{arg});
+    auto affineApplyOp = affine::AffineApplyOp::create(rewriter, loc, affineMap, ValueRange{arg});
     return affineApplyOp->getResult(0);
 }
 
@@ -209,15 +209,15 @@ class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp>
         const auto outTileStrides = createVector(1, outTileShape.size(), rewriter);
 
         auto initTile = createEmptyTensor(outTileType, loc, rewriter);
-        auto outTileOp = rewriter.create<torq_hl::FullyConnectedOp>(
-            loc, TypeRange{outTileType},
+        auto outTileOp = torq_hl::FullyConnectedOp::create(
+            rewriter, loc, TypeRange{outTileType},
             ValueRange{initTile, weightsTile, scaleBiasTile, op.getInput()}, op->getAttrs()
         );
 
         // Merge the result in the destination tensor
         rewriter.setInsertionPointToEnd(forallOp.getTerminator().getBody());
-        rewriter.create<tensor::ParallelInsertSliceOp>(
-            loc, outTileOp.getResult(0), forallOp.getRegionIterArgs()[0], outTileOffsets,
+        tensor::ParallelInsertSliceOp::create(
+            rewriter, loc, outTileOp.getResult(0), forallOp.getRegionIterArgs()[0], outTileOffsets,
             outTileSizes, outTileStrides
         );
 
@@ -327,15 +327,15 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
         const auto outTileStrides = createVector(1, outTileShape.size(), rewriter);
 
         auto initTile = createEmptyTensor(outTileType, loc, rewriter);
-        auto outTileOp = rewriter.create<torq_hl::Conv2DOp>(
-            loc, TypeRange{outTileType},
+        auto outTileOp = torq_hl::Conv2DOp::create(
+            rewriter, loc, TypeRange{outTileType},
             ValueRange{initTile, weightsTile, scaleBiasTile, op.getInput()}, op->getAttrs()
         );
 
         // Merge the result in the destination tensorb
         rewriter.setInsertionPointToEnd(forallOp.getTerminator().getBody());
-        rewriter.create<tensor::ParallelInsertSliceOp>(
-            loc, outTileOp.getResult(0), forallOp.getRegionIterArgs()[0], outTileOffsets,
+        tensor::ParallelInsertSliceOp::create(
+            rewriter, loc, outTileOp.getResult(0), forallOp.getRegionIterArgs()[0], outTileOffsets,
             outTileSizes, outTileStrides
         );
 
@@ -463,15 +463,15 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
         const auto outTileStrides = createVector(1, outTileShape.size(), rewriter);
 
         auto initTile = createEmptyTensor(outTileType, loc, rewriter);
-        auto outTileOp = rewriter.create<torq_hl::DepthwiseConv2DOp>(
-            loc, TypeRange{outTileType},
+        auto outTileOp = torq_hl::DepthwiseConv2DOp::create(
+            rewriter, loc, TypeRange{outTileType},
             ValueRange{initTile, weightsTile, scaleBiasTile, inputTile}, op->getAttrs()
         );
 
         // Merge the result in the destination tensor
         rewriter.setInsertionPointToEnd(forallOp.getTerminator().getBody());
-        rewriter.create<tensor::ParallelInsertSliceOp>(
-            loc, outTileOp.getResult(0), forallOp.getRegionIterArgs()[0], outTileOffsets,
+        tensor::ParallelInsertSliceOp::create(
+            rewriter, loc, outTileOp.getResult(0), forallOp.getRegionIterArgs()[0], outTileOffsets,
             outTileSizes, outTileStrides
         );
 
@@ -502,7 +502,7 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
     }
 };
 
-class SlicingPass : public SlicingBase<SlicingPass> {
+class SlicingPass : public impl::SlicingBase<SlicingPass> {
   public:
     using SlicingBase<SlicingPass>::SlicingBase;
 
@@ -523,7 +523,7 @@ void SlicingPass::runOnOperation() {
     };
 
     tensor::populateFoldConstantExtractSlicePatterns(patterns, controlFn);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
 }

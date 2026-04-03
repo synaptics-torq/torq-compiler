@@ -31,6 +31,7 @@ class TensorInfo:
     shape: List[int]
     dtype: str
     quantization: Optional[QuantizationParams] = None
+    buffer_index: int = -1  # Index into model.buffers; -1 = no buffer
 
 
 @dataclass
@@ -83,6 +84,7 @@ class TFLiteModelParser:
     def get_tensor_details(self) -> Dict[int, TensorInfo]:
         """Get all tensor details including quantization."""
         interp = self._get_interpreter()
+        model_obj = self.get_model_object()
         tensors = {}
         
         for t in interp.get_tensor_details():
@@ -98,12 +100,20 @@ class TFLiteModelParser:
                         quantized_dimension=qp.get('quantized_dimension', 0),
                     )
             
+            # Get buffer index from model object
+            buffer_index = -1
+            if model_obj.subgraphs and len(model_obj.subgraphs) > 0:
+                subgraph = model_obj.subgraphs[0]
+                if t['index'] < len(subgraph.tensors):
+                    buffer_index = subgraph.tensors[t['index']].buffer
+            
             tensors[t['index']] = TensorInfo(
                 index=t['index'],
                 name=t['name'],
                 shape=list(t['shape']),
                 dtype=str(t['dtype']).replace("<class 'numpy.", "").replace("'>", ""),
                 quantization=quant,
+                buffer_index=buffer_index,
             )
         
         return tensors
@@ -158,6 +168,21 @@ class TFLiteLayerExtractor:
         self.tensors = self._tensors_from_flatbuffer()
         self.operators = self._operators_from_flatbuffer()
 
+    
+    def _is_tensor_constant(self, tensor: TensorInfo) -> bool:
+        """
+        Check if a tensor is a constant (has buffer data).
+        
+        A tensor is considered constant if it has a valid buffer index
+        and that buffer contains data.
+        """
+        if tensor.buffer_index < 0 or tensor.buffer_index >= len(self.model_obj.buffers):
+            return False
+        
+        buffer = self.model_obj.buffers[tensor.buffer_index]
+        return buffer.data is not None and len(buffer.data) > 0
+
+
     def _tensors_from_flatbuffer(self) -> Dict[int, TensorInfo]:
         """Extract tensor details directly from the flatbuffer model object."""
         subgraph = self.model_obj.subgraphs[0]
@@ -173,12 +198,14 @@ class TFLiteLayerExtractor:
                         zero_point=zeros,
                         quantized_dimension=t.quantization.quantizedDimension,
                     )
+
             tensors[idx] = TensorInfo(
                 index=idx,
                 name=t.name.decode() if isinstance(t.name, bytes) else (t.name or f"tensor_{idx}"),
                 shape=list(t.shape) if t.shape is not None else [],
                 dtype=self._DTYPE_MAP.get(t.type, f"unknown({t.type})"),
                 quantization=quant,
+                buffer_index=t.buffer
             )
         return tensors
 
@@ -218,6 +245,7 @@ class TFLiteLayerExtractor:
                     'name': t.name,
                     'shape': t.shape,
                     'dtype': t.dtype,
+                    'is_constant': self._is_tensor_constant(t),
                     'quantized': t.quantization is not None,
                     'quantization': {
                         'scale': t.quantization.scale,
@@ -420,6 +448,62 @@ class TFLiteLayerExtractor:
             print(f"  Warning: extracted model verification failed: {e}")
 
         return True
+
+
+
+class TFLiteTensorOutputExporter:
+    """
+    Transforms a TFLite model so that a specific tensor is exposed
+    as a subgraph output.
+
+    Usage::
+
+        exporter = TFLiteTensorOutputExporter("model.tflite")
+        exporter.get_output_tensor_names() # List all tensors with indices and names
+        out_path = exporter.export("model_tensor_output.tflite", tensor_index=42)
+    """
+
+    def __init__(self, model_path: str):
+        self.model_path = Path(model_path)
+        self._parser = TFLiteModelParser(model_path)
+        self._model_obj = self._parser.get_model_object()
+
+    def export(self, output_path: str, tensor_indexes: List[int]) -> Path:
+        """
+        Write a new TFLite model where a specific tensor is exposed as a subgraph output.
+
+        The original model is not modified.  Existing subgraph outputs are
+        kept first so the output ordering is stable and backward-compatible.
+
+        Args:
+            output_path: Destination path for the new ``.tflite`` file.
+            tensor_indexes: List of indices of the tensors to expose as subgraph outputs.
+
+
+        Returns:
+            The resolved :class:`Path` of the written model.
+        """
+        new_model = copy.deepcopy(self._model_obj)
+
+        if len(new_model.subgraphs) != 1:
+            raise ValueError("Only single-subgraph models are supported")
+
+        subgraph = new_model.subgraphs[0]
+                
+        subgraph.outputs = np.array(tensor_indexes, dtype=np.int32)            
+
+        # Serialize.
+        builder = flatbuffers.Builder(1024 * 1024)
+        packed = new_model.Pack(builder)
+        builder.Finish(packed, b"TFL3")
+        buf = builder.Output()
+
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "wb") as f:
+            f.write(bytes(buf))
+
+        return out
 
 
 

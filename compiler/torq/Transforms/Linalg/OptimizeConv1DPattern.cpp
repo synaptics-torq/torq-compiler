@@ -404,6 +404,12 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         auto filterType = cast<RankedTensorType>(filter.getType());
         auto outputType = cast<RankedTensorType>(output.getType());
 
+        if (!inputType.getElementType().isFloat()) {
+            return rewriter.notifyMatchFailure(
+                convOp, "Only floating point element type supported at the moment"
+            );
+        }
+
         ArrayRef<int64_t> inputShape = inputType.getShape();
         ArrayRef<int64_t> filterShape = filterType.getShape();
         ArrayRef<int64_t> outputShape = outputType.getShape();

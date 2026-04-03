@@ -117,7 +117,7 @@ class FuseClampActIntoProducer : public OpRewritePattern<torq_hl::ActOp> {
     }
 };
 
-class FuseActWithConvPass : public FuseActWithConvBase<FuseActWithConvPass> {
+class FuseActWithConvPass : public impl::FuseActWithConvBase<FuseActWithConvPass> {
   public:
     using FuseActWithConvBase<FuseActWithConvPass>::FuseActWithConvBase;
 

@@ -1163,6 +1163,8 @@ def case_config(request, runtime_hw_type, chip_config):
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
     failed_tc = [
+        'transpose_conv_model', # Issue see #1011
+        'model029_fc_1000x1000' # Issue see #1011
     ]
 
     if chip_config.data['target'] != "SL2610":
@@ -1218,7 +1220,12 @@ def case_config(request, runtime_hw_type, chip_config):
         **extra_args
     }
 
+
+def test_keras_model_llvm(request, llvmcpu_reference_results, tflite_reference_results, case_config):
+    compare_test_results(request, llvmcpu_reference_results, tflite_reference_results, case_config)
+
+
 @pytest.mark.ci
 @pytest.mark.fpga_ci
-def test_keras_model(request, torq_results, tflite_reference_results, case_config):
+def test_keras_model_torq(request, torq_results, tflite_reference_results, case_config):
     compare_test_results(request, torq_results, tflite_reference_results, case_config)

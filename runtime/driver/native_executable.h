@@ -25,7 +25,6 @@ typedef struct iree_hal_torq_native_executable_t {
   iree_host_size_t entry_point_count;
   
   uint32_t* constants;
-  iree_host_size_t pipeline_layout_count;
 
   // binary data the executable flat buffer
   void *program;
@@ -33,9 +32,7 @@ typedef struct iree_hal_torq_native_executable_t {
   // the torq executable associated with this executable
   void *torq_executable;
 
-  iree_hal_pipeline_layout_t* pipeline_layouts[];
 } iree_hal_torq_native_executable_t;
-
 
 typedef struct iree_hal_torq_source_location_t {
   iree_string_view_t file_name;
@@ -52,6 +49,11 @@ iree_status_t iree_hal_torq_native_executable_create(
 void iree_hal_torq_native_executable_entry_point_source_location(
     iree_hal_executable_t* executable, iree_host_size_t entry_ordinal,
     iree_hal_torq_source_location_t* out_source_location);
+
+iree_status_t iree_hal_torq_native_executable_infer_format(
+    iree_const_byte_span_t executable_data,
+    iree_host_size_t executable_format_capacity, char* executable_format,
+    iree_host_size_t* out_inferred_size);
 
 iree_status_t iree_hal_torq_native_executable_run(
     iree_hal_executable_t* base_value, iree_hal_executable_dispatch_state_v0_t* dispatch_state);

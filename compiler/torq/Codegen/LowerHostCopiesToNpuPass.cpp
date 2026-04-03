@@ -186,7 +186,7 @@ class XramToXramHostCopyPattern : public OpRewritePattern<torq_hl::HostCopyOp> {
     }
 };
 
-class LowerHostCopiesToNpuPass : public LowerHostCopiesToNpuBase<LowerHostCopiesToNpuPass> {
+class LowerHostCopiesToNpuPass : public impl::LowerHostCopiesToNpuBase<LowerHostCopiesToNpuPass> {
   public:
     LowerHostCopiesToNpuPass() = default;
     LowerHostCopiesToNpuPass(const LowerHostCopiesToNpuPass &pass) {}

@@ -31,7 +31,7 @@ namespace mlir::syna::torq {
 // The pass looks for operations marked as compile-time-const and
 // replaces them with constant operations computed at compile time.
 class CompileTimeConstComputePass
-    : public CompileTimeConstComputeBase<CompileTimeConstComputePass> {
+    : public impl::CompileTimeConstComputeBase<CompileTimeConstComputePass> {
   public:
     using CompileTimeConstComputeBase::CompileTimeConstComputeBase;
 

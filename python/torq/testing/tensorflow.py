@@ -131,13 +131,9 @@ def tflite_model_file(request, case_config):
 
 
 @versioned_generated_file_fixture("mlir")
-def tflite_mlir_model_file(request, iree_opt, versioned_file, tflite_model_file):    
+def tflite_mlir_model_file(request, versioned_file, tflite_model_file):
 
-    mlirb_model_path = str(versioned_file) + "b"
-    iree_tflite_compile.compile_file(str(tflite_model_file), save_temp_iree_input=str(mlirb_model_path), import_only=True)
-
-    subprocess.check_call([iree_opt, str(mlirb_model_path), "-o", str(versioned_file)])
-
+    subprocess.check_call(["tosa-converter-for-tflite", "--text", str(tflite_model_file), "-o", str(versioned_file)])
 
 @versioned_hashable_object_fixture
 def tflite_quantization_params(case_config):
@@ -165,9 +161,7 @@ def float32_tflite_model_file(request, versioned_file, keras_model):
         f.write(tflite_model)
 
 
-@versioned_cached_data_fixture
-def tflite_reference_results(request, tflite_model_file, input_data):
-
+def run_with_tflite(tflite_model_file, input_data):
     interpreter = tf.lite.Interpreter(model_path=str(tflite_model_file))
     interpreter.allocate_tensors()
 
@@ -179,7 +173,12 @@ def tflite_reference_results(request, tflite_model_file, input_data):
 
     interpreter.invoke()
 
-    return [interpreter.get_tensor(output_details[i]['index']) for i in range(len(output_details))] 
+    return [(out, interpreter.get_tensor(out['index'])) for out in output_details]
+
+@versioned_cached_data_fixture
+def tflite_reference_results(request, tflite_model_file, input_data):
+    results = run_with_tflite(tflite_model_file, input_data)
+    return [output[1] for output in results] 
 
 
 @versioned_hashable_object_fixture

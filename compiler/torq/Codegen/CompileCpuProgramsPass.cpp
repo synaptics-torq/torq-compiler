@@ -16,6 +16,7 @@
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 
 #include "mlir/Conversion/Passes.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
@@ -40,6 +41,8 @@
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/TargetParser/Host.h"
+
+#include "llvm/TargetParser/Triple.h"
 
 #define DEBUG_TYPE "torq-compile-css-tasks"
 
@@ -311,7 +314,7 @@ static FailureOr<std::vector<uint8_t>> linkSharedHostLibrary(
     return std::vector<uint8_t>{elfFile->begin(), elfFile->end()};
 }
 
-class CompileCpuProgramsPass : public CompileCpuProgramsBase<CompileCpuProgramsPass> {
+class CompileCpuProgramsPass : public impl::CompileCpuProgramsBase<CompileCpuProgramsPass> {
   public:
     using CompileCpuProgramsBase<CompileCpuProgramsPass>::CompileCpuProgramsBase;
 
@@ -349,14 +352,13 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         .addPass(createCSEPass);
 
     // Handled tensor-type constants.
-    addConstantBufferizePasses(modulePassManager);
+    modulePassManager.addPass(createIREEBufferizeConstantsPass());
 
     FunctionLikeNest(modulePassManager)
         .addPass(createFoldTensorExtractOpPass)
+        .addPass(createMathTransformPass)
         // Handle complex operation conversion.
         .addPass(createConvertComplexToStandardPass)
-        // math dialect elementry functions -> polynomial form.
-        .addPass(createPolynomialApproximationPass)
         .addPass(createHoistStaticallyBoundAllocationsPass);
 
     FunctionLikeNest(modulePassManager)
@@ -366,7 +368,7 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         .addPass(createCleanupBufferAllocViewPass)
         .addPass(createCheckCssStackSizePass)
         // SCF -> CF
-        .addPass(createConvertSCFToCFPass)
+        .addPass(createSCFToControlFlowPass)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass)
         // (HAL, IREE, Linalg, CF) -> LLVM
@@ -447,7 +449,7 @@ FailureOr<std::string> CompileCpuProgramsPass::compile(
     }
 
     llvmModule->setDataLayout(targetMachine.createDataLayout());
-    llvmModule->setTargetTriple(targetMachine.getTargetTriple().str());
+    llvmModule->setTargetTriple(targetMachine.getTargetTriple());
 
     if (failed(IREE::HAL::runLLVMIRPasses(target, &targetMachine, llvmModule.get()))) {
         return variantOp.emitError()
@@ -496,12 +498,19 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
         if (!clTargetHostCpuFeatures.empty())
             hostFeatures = clTargetHostCpuFeatures;
 
-        maybeTarget = IREE::HAL::LLVMTarget::create(hostTriple, hostCpu, hostFeatures, false);
+        IREE::HAL::ResolveCPUAndCPUFeaturesStatus status;
+        maybeTarget =
+            IREE::HAL::LLVMTarget::create(hostTriple, hostCpu, hostFeatures, false, status);
+        if (status != IREE::HAL::ResolveCPUAndCPUFeaturesStatus::OK) {
+            return variantOp.emitError() << getMessage(status, hostTriple);
+        }
     }
     else {
 
+        IREE::HAL::ResolveCPUAndCPUFeaturesStatus status;
         maybeTarget = IREE::HAL::LLVMTarget::create(
-            "riscv32-pc-linux-elf", "generic-rv32", TorqHw::get().getCssConfig().mattrs, true
+            "riscv32-pc-linux-elf", "generic-rv32", TorqHw::get().getCssConfig().mattrs, true,
+            status
         );
     }
 
@@ -589,8 +598,8 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
 
     OpBuilder builder(variantOp);
 
-    builder.create<IREE::HAL::ExecutableBinaryOp>(
-        variantOp.getLoc(), "code", hostBuild ? "host" : "css", codeVec
+    IREE::HAL::ExecutableBinaryOp::create(
+        builder, variantOp.getLoc(), "code", hostBuild ? "host" : "css", codeVec
     );
 
     variantOp.erase();

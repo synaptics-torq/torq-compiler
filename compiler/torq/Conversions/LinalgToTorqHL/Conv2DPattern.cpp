@@ -64,7 +64,7 @@ static FailureOr<Value> expandWeightsForDilation(
     newShape[newShape.size() - 1] = kwNew;
 
     Location loc = rewriter.getUnknownLoc();
-    auto emptyTensor = rewriter.create<tensor::EmptyOp>(loc, newShape, elemType);
+    auto emptyTensor = tensor::EmptyOp::create(rewriter, loc, newShape, elemType);
 
     TypedAttr zeroAttr;
     if (elemType.isBF16() || elemType.isF16() || elemType.isF32()) {
@@ -78,9 +78,9 @@ static FailureOr<Value> expandWeightsForDilation(
         return failure();
     }
 
-    auto zeroConst = rewriter.create<arith::ConstantOp>(loc, zeroAttr);
+    auto zeroConst = arith::ConstantOp::create(rewriter, loc, zeroAttr);
     auto filledTensor =
-        rewriter.create<linalg::FillOp>(loc, ValueRange{zeroConst}, ValueRange{emptyTensor});
+        linalg::FillOp::create(rewriter, loc, ValueRange{zeroConst}, ValueRange{emptyTensor});
 
     SmallVector<AffineMap> indexingMaps;
     SmallVector<utils::IteratorType> iteratorTypes;
@@ -98,8 +98,8 @@ static FailureOr<Value> expandWeightsForDilation(
         iteratorTypes.push_back(utils::IteratorType::parallel);
     }
 
-    auto genericOp = rewriter.create<linalg::GenericOp>(
-        loc, RankedTensorType::get(newShape, elemType), ValueRange{weights},
+    auto genericOp = linalg::GenericOp::create(
+        rewriter, loc, RankedTensorType::get(newShape, elemType), ValueRange{weights},
         ValueRange{filledTensor.getResult(0)}, indexingMaps, iteratorTypes,
         [&](OpBuilder &b, Location loc, ValueRange args) {
             b.create<linalg::YieldOp>(loc, args[0]);
@@ -169,7 +169,7 @@ static mlir::FailureOr<Value> convertToInterleaved(
     }
 
     auto interleavedResultType = RankedTensorType::get(interleavedShape4D, elemType);
-    Value interleavedInit = rewriter.create<tensor::EmptyOp>(loc, interleavedShape4D, elemType);
+    Value interleavedInit = tensor::EmptyOp::create(rewriter, loc, interleavedShape4D, elemType);
 
     // Set clipping values based on data type
     int32_t output_min, output_max;
@@ -211,10 +211,10 @@ static mlir::FailureOr<Value> convertToInterleaved(
     }
 
     // Create InterleavedInsertOp
-    auto interleavedOp = rewriter.create<torq_hl::InterleavedInsertOp>(
-        loc, interleavedResultType, interleavedInit, rewriter.getI32IntegerAttr(strideValue),
-        rewriter.getI32IntegerAttr(output_min), rewriter.getI32IntegerAttr(output_max), weights,
-        source
+    auto interleavedOp = torq_hl::InterleavedInsertOp::create(
+        rewriter, loc, interleavedResultType, interleavedInit,
+        rewriter.getI32IntegerAttr(strideValue), rewriter.getI32IntegerAttr(output_min),
+        rewriter.getI32IntegerAttr(output_max), weights, source
     );
 
     Value interleavedOutput = interleavedOp.getOutput();
@@ -225,7 +225,7 @@ static mlir::FailureOr<Value> convertToInterleaved(
         SmallVector<int64_t> paddedShape4D = interleavedShape4D;
         paddedShape4D[interleavedDim] = destShape[interleavedDim]; // Use original dest size
 
-        Value paddedInit = rewriter.create<tensor::EmptyOp>(loc, paddedShape4D, elemType);
+        Value paddedInit = tensor::EmptyOp::create(rewriter, loc, paddedShape4D, elemType);
 
         // Fill with zeros
         TypedAttr fillValue;
@@ -242,9 +242,9 @@ static mlir::FailureOr<Value> convertToInterleaved(
             fillValue = rewriter.getZeroAttr(elemType);
         }
 
-        Value fillValueAsValue = rewriter.create<arith::ConstantOp>(loc, fillValue);
-        auto fillOp = rewriter.create<linalg::FillOp>(
-            loc, ValueRange{fillValueAsValue}, ValueRange{paddedInit}
+        Value fillValueAsValue = arith::ConstantOp::create(rewriter, loc, fillValue);
+        auto fillOp = linalg::FillOp::create(
+            rewriter, loc, ValueRange{fillValueAsValue}, ValueRange{paddedInit}
         );
 
         // Insert the interleaved output at the correct offset
@@ -258,8 +258,8 @@ static mlir::FailureOr<Value> convertToInterleaved(
 
         SmallVector<OpFoldResult> strides(paddedShape4D.size(), rewriter.getIndexAttr(1));
 
-        interleavedOutput = rewriter.create<tensor::InsertSliceOp>(
-            loc, interleavedOutput, fillOp.getResult(0), offsets, sizes, strides
+        interleavedOutput = tensor::InsertSliceOp::create(
+            rewriter, loc, interleavedOutput, fillOp.getResult(0), offsets, sizes, strides
         );
 
         LLVM_DEBUG({
@@ -511,7 +511,8 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         auto weightShape = weightType.getShape();
         // Layout: NHWC → height is dim 1,  NCHW → height is dim 2
         const int heightDim = (_channelDim == 3) ? 1 : 2;
-        bool isConv1D = (inputType.getRank() == 4 && shape[heightDim] == 1);
+        bool isConv1D = inputType.getElementType().isFloat() &&
+                        (inputType.getRank() == 4 && shape[heightDim] == 1);
 
         bool isDW1DStride1 = false;
         // Check if this is a depthwise 1D case
@@ -739,8 +740,8 @@ struct InterleavedInsertSlicePattern : public OpRewritePattern<tensor::InsertSli
             SmallVector<int64_t> expanded4DShape = {1, 1, sourceShape[0], sourceShape[1]};
             auto expanded4DType =
                 RankedTensorType::get(expanded4DShape, sourceType.getElementType());
-            source4D = rewriter.create<tensor::ExpandShapeOp>(
-                insertSliceOp.getLoc(), expanded4DType, source, expandReassoc
+            source4D = tensor::ExpandShapeOp::create(
+                rewriter, insertSliceOp.getLoc(), expanded4DType, source, expandReassoc
             );
             sourceType = expanded4DType;
             sourceShape = expanded4DShape;
@@ -766,8 +767,8 @@ struct InterleavedInsertSlicePattern : public OpRewritePattern<tensor::InsertSli
             RankedTensorType::get(interleavedShape4D, sourceType.getElementType());
 
         // Create init tensor for the interleaved output (4D NCHW, without padding)
-        Value interleavedInit = rewriter.create<tensor::EmptyOp>(
-            insertSliceOp.getLoc(), interleavedShape4D, sourceType.getElementType()
+        Value interleavedInit = tensor::EmptyOp::create(
+            rewriter, insertSliceOp.getLoc(), interleavedShape4D, sourceType.getElementType()
         );
 
         // Get element type for determining data type-specific values
@@ -821,8 +822,8 @@ struct InterleavedInsertSlicePattern : public OpRewritePattern<tensor::InsertSli
             );
         }
 
-        auto interleavedOp = rewriter.create<torq_hl::InterleavedInsertOp>(
-            insertSliceOp.getLoc(), interleavedResultType, interleavedInit,
+        auto interleavedOp = torq_hl::InterleavedInsertOp::create(
+            rewriter, insertSliceOp.getLoc(), interleavedResultType, interleavedInit,
             rewriter.getI32IntegerAttr(strideValue), rewriter.getI32IntegerAttr(output_min),
             rewriter.getI32IntegerAttr(output_max), weights, source4D
         );

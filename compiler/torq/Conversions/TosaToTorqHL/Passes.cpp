@@ -23,7 +23,8 @@
 
 namespace mlir::syna::torq {
 
-class TosaToTorqHLConversionPass : public TosaToTorqHLConversionBase<TosaToTorqHLConversionPass> {
+class TosaToTorqHLConversionPass
+    : public impl::TosaToTorqHLConversionBase<TosaToTorqHLConversionPass> {
   public:
     using TosaToTorqHLConversionBase::TosaToTorqHLConversionBase;
 

@@ -48,7 +48,8 @@ llvm::cl::opt<unsigned> clDmaOutMtu(
 
 namespace {
 
-class CompileNSSInvocationsPass : public CompileNSSInvocationsBase<CompileNSSInvocationsPass> {
+class CompileNSSInvocationsPass
+    : public impl::CompileNSSInvocationsBase<CompileNSSInvocationsPass> {
   public:
     CompileNSSInvocationsPass() = default;
     CompileNSSInvocationsPass(const CompileNSSInvocationsPass &pass) {}

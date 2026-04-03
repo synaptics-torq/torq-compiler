@@ -68,8 +68,8 @@ class ArithConstPattern : public OpRewritePattern<arith::ConstantOp> {
         // create a new torq_hl::ConstOp that stores the value, this op returns
         // a memref so we can't use it to substitute the arith::ConstantOp that
         // returns a tensor
-        auto torqConstOp = rewriter.create<syna::torq_hl::ConstOp>(
-            constOp.getLoc(), outputType, constOp.getValue()
+        auto torqConstOp = syna::torq_hl::ConstOp::create(
+            rewriter, constOp.getLoc(), outputType, constOp.getValue()
         );
 
         // replace the arith::ConstantOp with a bufferization::ToTensorOp that
@@ -83,7 +83,7 @@ class ArithConstPattern : public OpRewritePattern<arith::ConstantOp> {
     }
 };
 
-class LowerArithConstantsPass : public LowerArithConstantsBase<LowerArithConstantsPass> {
+class LowerArithConstantsPass : public impl::LowerArithConstantsBase<LowerArithConstantsPass> {
   public:
     LowerArithConstantsPass() = default;
     LowerArithConstantsPass(const LowerArithConstantsPass &pass) {}
@@ -100,7 +100,7 @@ void LowerArithConstantsPass::runOnOperation() {
 
     patterns.add<ArithConstPattern>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
 }

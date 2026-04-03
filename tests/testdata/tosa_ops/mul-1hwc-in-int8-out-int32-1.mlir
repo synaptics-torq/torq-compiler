@@ -1,7 +1,8 @@
 module {
-  func.func @main(%arg0: tensor<1xi8>, %arg1: tensor<1xi8>) -> (tensor<1xi32>) {
-    %2 = tosa.mul %arg0, %arg1 {shift = 0 : i8} : (tensor<1xi8>, tensor<1xi8>) -> tensor<1xi32>
-    return %2 : tensor<1xi32>
+  func.func @main(%arg0: tensor<1xi8>, %arg1: tensor<1xi8>) -> tensor<1xi32> {
+    %cst = arith.constant dense<0> : tensor<1xi8>
+    %0 = tosa.mul %arg0, %arg1, %cst : (tensor<1xi8>, tensor<1xi8>, tensor<1xi8>) -> tensor<1xi32>
+    return %0 : tensor<1xi32>
   }
 }
 

@@ -26,7 +26,7 @@ namespace mlir::syna::torq {
 namespace {
 
 class ResolveInvocationArgumentsPass
-    : public ResolveInvocationArgumentsBase<ResolveInvocationArgumentsPass> {
+    : public impl::ResolveInvocationArgumentsBase<ResolveInvocationArgumentsPass> {
   public:
     ResolveInvocationArgumentsPass() = default;
     ResolveInvocationArgumentsPass(const ResolveInvocationArgumentsPass &pass) {}

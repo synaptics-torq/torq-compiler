@@ -143,8 +143,8 @@ static void expandConstantInput(Value &input, PatternRewriter &rewriter) {
         }
     }
 
-    auto expandOp = rewriter.create<tensor::ExpandShapeOp>(
-        definingOp.getLoc(), outType, definingOp.getInputs()[0], reassoc
+    auto expandOp = tensor::ExpandShapeOp::create(
+        rewriter, definingOp.getLoc(), outType, definingOp.getInputs()[0], reassoc
     );
 
     input = expandOp.getResult();

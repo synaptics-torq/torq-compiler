@@ -20,7 +20,7 @@ namespace mlir::syna::torq {
 
 namespace {
 
-class CreateGlobalsPass : public CreateGlobalsBase<CreateGlobalsPass> {
+class CreateGlobalsPass : public impl::CreateGlobalsBase<CreateGlobalsPass> {
   public:
     using CreateGlobalsBase<CreateGlobalsPass>::CreateGlobalsBase;
 

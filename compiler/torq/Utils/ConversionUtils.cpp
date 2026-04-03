@@ -13,8 +13,11 @@
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/IR/Verifier.h"
 #include "llvm/Support/Debug.h"
+#include <cstdint>
 
 #define DEBUG_TYPE "torq-conversion-utils"
+
+using namespace mlir;
 
 namespace mlir::syna::torq {
 
@@ -57,7 +60,7 @@ Value createZeroConstant(OpBuilder &b, Location loc, Type elemTy) {
     else {
         llvm_unreachable("unsupported element type for zero constant");
     }
-    return b.create<arith::ConstantOp>(loc, attr).getResult();
+    return arith::ConstantOp::create(b, loc, attr).getResult();
 }
 
 std::vector<int32_t>
@@ -180,10 +183,10 @@ Value transposeValue(
     rewriter.setInsertionPointAfterValue(input);
     auto outputType = transposeType(input.getType(), permutation);
     auto initValue =
-        rewriter.create<tensor::EmptyOp>(loc, outputType.getShape(), outputType.getElementType())
+        tensor::EmptyOp::create(rewriter, loc, outputType.getShape(), outputType.getElementType())
             .getResult();
 
-    auto transposeOp = rewriter.create<linalg::TransposeOp>(loc, input, initValue, permutation);
+    auto transposeOp = linalg::TransposeOp::create(rewriter, loc, input, initValue, permutation);
     return transposeOp.getResult()[0];
 }
 
@@ -193,29 +196,29 @@ Value rescaleValue(Value input, int divFactor, int bias, Location loc, PatternRe
     auto elementType = inputType.getElementType();
     auto outputType = RankedTensorType::get(inputType.getShape(), elementType);
     auto initValue =
-        rewriter.create<tensor::EmptyOp>(loc, outputType.getShape(), outputType.getElementType())
+        tensor::EmptyOp::create(rewriter, loc, outputType.getShape(), outputType.getElementType())
             .getResult();
     size_t rank = inputType.getRank();
     SmallVector<AffineMap> maps{2, AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext())};
     SmallVector<utils::IteratorType> iteratorTypes{rank, utils::IteratorType::parallel};
 
-    auto genericOp = rewriter.create<linalg::GenericOp>(
-        loc, TypeRange{outputType}, ValueRange{input}, ValueRange{initValue}, maps,
+    auto genericOp = linalg::GenericOp::create(
+        rewriter, loc, TypeRange{outputType}, ValueRange{input}, ValueRange{initValue}, maps,
         iteratorTypes, /*rewriter.getStringAttr("parallel"),*/
         /* doc = */ "", /* library_call = */ "",
         [divFactor, bias](OpBuilder &b, Location loc, ValueRange args) {
             // args[0] is input value
             // Multiply by scale factor and add bias
-            auto scaled = b.create<arith::DivSIOp>(
-                loc, args[0],
-                b.create<arith::ConstantOp>(loc, b.getIntegerAttr(args[0].getType(), divFactor))
+            auto scaled = arith::DivSIOp::create(
+                b, loc, args[0],
+                arith::ConstantOp::create(b, loc, b.getIntegerAttr(args[0].getType(), divFactor))
             );
-            auto biased = b.create<arith::AddIOp>(
-                loc, scaled,
-                b.create<arith::ConstantOp>(loc, b.getIntegerAttr(args[0].getType(), bias))
+            auto biased = arith::AddIOp::create(
+                b, loc, scaled,
+                arith::ConstantOp::create(b, loc, b.getIntegerAttr(args[0].getType(), bias))
             );
             SmallVector<Value> yieldValues{biased};
-            b.create<linalg::YieldOp>(loc, yieldValues);
+            linalg::YieldOp::create(b, loc, yieldValues);
         }
     );
     return genericOp.getResult(0);
@@ -262,12 +265,12 @@ Value convertNHWCtoNCHW(Value input, Location loc, PatternRewriter &rewriter) {
     auto outputType = convertTypeNHWCtoNCHW(input.getType());
 
     auto initValue =
-        rewriter.create<tensor::EmptyOp>(loc, outputType.getShape(), outputType.getElementType())
+        tensor::EmptyOp::create(rewriter, loc, outputType.getShape(), outputType.getElementType())
             .getResult();
 
     SmallVector<int64_t> permutation = {0, 3, 1, 2};
 
-    auto transposeOp = rewriter.create<linalg::TransposeOp>(loc, input, initValue, permutation);
+    auto transposeOp = linalg::TransposeOp::create(rewriter, loc, input, initValue, permutation);
 
     return transposeOp.getResult()[0];
 }
@@ -277,12 +280,12 @@ Value convertNCHWtoNHWC(Value input, Location loc, PatternRewriter &rewriter) {
     auto outputType = convertTypeNCHWtoNHWC(input.getType());
 
     auto initValue =
-        rewriter.create<tensor::EmptyOp>(loc, outputType.getShape(), outputType.getElementType())
+        tensor::EmptyOp::create(rewriter, loc, outputType.getShape(), outputType.getElementType())
             .getResult();
 
     SmallVector<int64_t> permutation = {0, 2, 3, 1};
 
-    auto transposeOp = rewriter.create<linalg::TransposeOp>(loc, input, initValue, permutation);
+    auto transposeOp = linalg::TransposeOp::create(rewriter, loc, input, initValue, permutation);
 
     return transposeOp.getResult()[0];
 }
@@ -305,12 +308,12 @@ Value convertNHCtoNCH(Value input, Location loc, PatternRewriter &rewriter) {
     auto outputType = convertTypeNHCtoNCH(input.getType());
 
     auto initValue =
-        rewriter.create<tensor::EmptyOp>(loc, outputType.getShape(), outputType.getElementType())
+        tensor::EmptyOp::create(rewriter, loc, outputType.getShape(), outputType.getElementType())
             .getResult();
 
     SmallVector<int64_t> permutation = {0, 2, 1};
 
-    auto transposeOp = rewriter.create<linalg::TransposeOp>(loc, input, initValue, permutation);
+    auto transposeOp = linalg::TransposeOp::create(rewriter, loc, input, initValue, permutation);
 
     return transposeOp.getResult()[0];
 }
@@ -321,8 +324,9 @@ Value convertNCHtoNHC(Value input, Location loc, PatternRewriter &rewriter) {
 
 Value createInitTensorNCHW(Operation *srcOp, PatternRewriter &rewriter) {
     auto nchwType = convertTypeNHWCtoNCHW(srcOp->getResult(0).getType());
-    return rewriter
-        .create<tensor::EmptyOp>(srcOp->getLoc(), nchwType.getShape(), nchwType.getElementType())
+    return tensor::EmptyOp::create(
+               rewriter, srcOp->getLoc(), nchwType.getShape(), nchwType.getElementType()
+    )
         .getResult();
 }
 
@@ -621,7 +625,7 @@ Value convertScalarToRankedTensor(Value &input, Location loc, PatternRewriter &r
     else {
         assert(false && "Cannot convert Scalar to RankedTensor");
     }
-    input_new = rewriter.create<arith::ConstantOp>(loc, tensorType, denseAttr);
+    input_new = arith::ConstantOp::create(rewriter, loc, tensorType, denseAttr);
     return input_new;
 }
 
@@ -716,7 +720,7 @@ bool hasEkLoweringMaxPool(mlir::syna::torq_hl::MaxPool2dOp op) {
 // FIXME: Copied from
 // https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/Linalg/IR/LinalgInterfaces.cpp#L141.
 // Remove after upgrading to latest MLIR.
-std::optional<SmallVector<int64_t>> isaBroadcastOpInterface(linalg::GenericOp genericOp) {
+std::optional<SmallVector<int64_t>> torqIsaBroadcastOpInterface(linalg::GenericOp genericOp) {
     // Is single Input and Output
     if (genericOp.getInputs().size() != 1 || genericOp.getOutputs().size() != 1)
         return std::nullopt;
@@ -788,22 +792,6 @@ std::optional<SmallVector<int64_t>> isaBroadcastOpInterface(linalg::GenericOp ge
             broadcastedDims.push_back(dim);
     }
     return broadcastedDims;
-}
-
-DenseIntOrFPElementsAttr returnDenseElementAttr(Value constV) {
-    auto op = constV.getDefiningOp<arith::ConstantOp>();
-    if (!op) {
-        return nullptr;
-    }
-    return mlir::dyn_cast<DenseIntOrFPElementsAttr>(op.getValue());
-}
-
-Attribute returnAttr(Value constV) {
-    auto op = constV.getDefiningOp<arith::ConstantOp>();
-    if (!op) {
-        return nullptr;
-    }
-    return mlir::dyn_cast<Attribute>(op.getValue());
 }
 
 Value cloneAndReplaceToBody(
@@ -900,6 +888,41 @@ Value createClonedBlock(
         }
     }
     return lastV;
+}
+
+DenseIntOrFPElementsAttr returnDenseElementAttr(Value constV) {
+    auto op = constV.getDefiningOp<arith::ConstantOp>();
+    if (!op) {
+        return nullptr;
+    }
+    return mlir::dyn_cast<DenseIntOrFPElementsAttr>(op.getValue());
+}
+
+Attribute returnAttr(Value constV) {
+    auto op = constV.getDefiningOp<arith::ConstantOp>();
+    if (!op) {
+        return nullptr;
+    }
+    return mlir::dyn_cast<Attribute>(op.getValue());
+}
+
+void FusionPlan::dump() const {
+    llvm::dbgs() << "FusionPlan:\n";
+    llvm::dbgs() << "  Anchor: ";
+    anchor->dump();
+    llvm::dbgs() << "\n";
+    llvm::dbgs() << "  Needed Ops:\n";
+    for (auto *op : neededOps) {
+        llvm::dbgs() << "  -  ";
+        op->dump();
+        llvm::dbgs() << "\n";
+    }
+    llvm::dbgs() << "  Ops to Fuse:\n";
+    for (auto *op : opsToFuse) {
+        llvm::dbgs() << "  -  ";
+        op->dump();
+        llvm::dbgs() << "\n";
+    }
 }
 
 } // namespace mlir::syna::torq

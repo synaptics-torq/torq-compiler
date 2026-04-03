@@ -34,7 +34,7 @@ llvm::cl::opt<bool> clUseNewKernels(
 namespace {
 
 class ConvertSliceProgramToTorqHwPass
-    : public ConvertSliceProgramToTorqHwBase<ConvertSliceProgramToTorqHwPass> {
+    : public impl::ConvertSliceProgramToTorqHwBase<ConvertSliceProgramToTorqHwPass> {
   public:
     using ConvertSliceProgramToTorqHwBase::ConvertSliceProgramToTorqHwBase;
     void runOnOperation() override;
@@ -96,7 +96,7 @@ void ConvertSliceProgramToTorqHwPass::runOnOperation() {
 }
 
 class ConvertNssProgramToTorqHwPass
-    : public ConvertNssProgramToTorqHwBase<ConvertNssProgramToTorqHwPass> {
+    : public impl::ConvertNssProgramToTorqHwBase<ConvertNssProgramToTorqHwPass> {
   public:
     using ConvertNssProgramToTorqHwBase::ConvertNssProgramToTorqHwBase;
     void runOnOperation() override;

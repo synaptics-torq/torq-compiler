@@ -17,7 +17,7 @@
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -112,16 +112,16 @@ static mlir::Value weights_OIHW_to_OIHWO(
 
     mlir::OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointAfterValue(weights);
-    auto empty = tensor::PackOp::createDestinationTensor(
+    auto empty = linalg::PackOp::createDestinationTensor(
         rewriter, loc, weights, innerTiles, innerDimsPos, {}
     );
     auto zeroAttr = rewriter.getZeroAttr(ty);
-    auto zeroVal = rewriter.create<arith::ConstantOp>(loc, ty, zeroAttr);
+    auto zeroVal = arith::ConstantOp::create(rewriter, loc, ty, zeroAttr);
 
     // tensor.PackOp %weights { inner_tiles = [inner_on], inner_dims_pos = [0] }
     // 32x5x3x3 --> 8x5x3x3x4  (for inner_on=4)
     auto packedWeights =
-        rewriter.create<tensor::PackOp>(loc, weights, empty, innerDimsPos, innerTiles, zeroVal);
+        linalg::PackOp::create(rewriter, loc, weights, empty, innerDimsPos, innerTiles, zeroVal);
 
     setCompileTimeConstAttr(packedWeights);
     return packedWeights.getResult();
@@ -139,7 +139,7 @@ arith::ConstantOp createI8Const2(
 
     auto type = RankedTensorType::get(shape, rewriter.getI8Type());
     auto attr = DenseIntElementsAttr::get(type, values);
-    return rewriter.create<arith::ConstantOp>(loc, attr);
+    return arith::ConstantOp::create(rewriter, loc, attr);
 }
 
 // Get the vectorization mode from the Op
@@ -191,14 +191,14 @@ void insertSegmentationOp(Stride2Op op, PatternRewriter &rewriter, int h, int w)
     auto outputType = inputType;
 
     rewriter.setInsertionPoint(op);
-    Value initTensor = rewriter.create<tensor::EmptyOp>(op.getLoc(), outputType, ValueRange{});
+    Value initTensor = tensor::EmptyOp::create(rewriter, op.getLoc(), outputType, ValueRange{});
     auto dummy_weights =
         createI8Const(rewriter, op, std::vector<int8_t>{1}, llvm::ArrayRef<int64_t>{1, 1, 1, 1});
     auto dummy_scale_bias =
         createIConst(rewriter, op, std::vector<APInt>{APInt(32, 0), APInt(32, 1)});
 
-    auto segmentationOp = rewriter.create<syna::torq_hl::SegmentationOp>(
-        op.getLoc(), outputType, initTensor, h, w, dummy_weights.getResult(),
+    auto segmentationOp = syna::torq_hl::SegmentationOp::create(
+        rewriter, op.getLoc(), outputType, initTensor, h, w, dummy_weights.getResult(),
         dummy_scale_bias.getResult(), op.getInput()
     );
 
@@ -215,8 +215,8 @@ static Value staticTensorReshape(
     auto newType = RankedTensorType::get(shape, tensorType.getElementType());
     auto shapeType = RankedTensorType::get({(int)shape.size()}, rewriter.getIndexType());
     auto shapeAttr = DenseIntElementsAttr::get(shapeType, shape);
-    Value shapeConst = rewriter.create<arith::ConstantOp>(loc, shapeAttr);
-    return rewriter.create<tensor::ReshapeOp>(loc, newType, tensor, shapeConst).getResult();
+    Value shapeConst = arith::ConstantOp::create(rewriter, loc, shapeAttr);
+    return tensor::ReshapeOp::create(rewriter, loc, newType, tensor, shapeConst).getResult();
 }
 
 // This function rearranges weights by placing even-indexed values first,
@@ -243,10 +243,10 @@ static mlir::Value weights_swap_even_odd(
     auto evenTy = RankedTensorType::get(evenShape, wtRankedTy.getElementType());
     auto oddTy = RankedTensorType::get(oddShape, wtRankedTy.getElementType());
     // Constants
-    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value cStride = rewriter.create<arith::ConstantIndexOp>(loc, stride);
-    Value cevenColSz = rewriter.create<arith::ConstantIndexOp>(loc, evenColSz);
+    Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value cStride = arith::ConstantIndexOp::create(rewriter, loc, stride);
+    Value cevenColSz = arith::ConstantIndexOp::create(rewriter, loc, evenColSz);
 
     // Extract even channels: offsets [0,0,0,0], sizes [O,I,H,evenColSz], strides [1,1,1,2]
     SmallVector<OpFoldResult> evenOffsets(rank, rewriter.getIndexAttr(0));
@@ -255,8 +255,8 @@ static mlir::Value weights_swap_even_odd(
     evenSizes[swapDim] = rewriter.getIndexAttr(evenColSz);
     SmallVector<OpFoldResult> evenStrides(rank, rewriter.getIndexAttr(1));
     evenStrides[swapDim] = cStride;
-    Value evenExtract = rewriter.create<tensor::ExtractSliceOp>(
-        loc, evenTy, weights, evenOffsets, evenSizes, evenStrides
+    Value evenExtract = tensor::ExtractSliceOp::create(
+        rewriter, loc, evenTy, weights, evenOffsets, evenSizes, evenStrides
     );
 
     // Extract odd channels: offsets [0,0,0,1], sizes [O,I,H,oddColSz], strides [1,1,1,2]
@@ -266,20 +266,21 @@ static mlir::Value weights_swap_even_odd(
     oddSizes[swapDim] = rewriter.getIndexAttr(oddColSz);
     SmallVector<OpFoldResult> oddStrides(rank, rewriter.getIndexAttr(1));
     oddStrides[swapDim] = cStride;
-    Value oddExtract = rewriter.create<tensor::ExtractSliceOp>(
-        loc, oddTy, weights, oddOffsets, oddSizes, oddStrides
+    Value oddExtract = tensor::ExtractSliceOp::create(
+        rewriter, loc, oddTy, weights, oddOffsets, oddSizes, oddStrides
     );
 
     // Stitch evens then odds into a new tensor
-    Value empty = rewriter.create<tensor::EmptyOp>(loc, shape, wtRankedTy.getElementType());
+    Value empty = tensor::EmptyOp::create(rewriter, loc, shape, wtRankedTy.getElementType());
 
     // Insert evens at offset last-dim = 0
     SmallVector<OpFoldResult> ins0Off(rank, rewriter.getIndexAttr(0));
     SmallVector<OpFoldResult> ins0Sz(sizes);
     ins0Sz[swapDim] = rewriter.getIndexAttr(evenColSz);
     SmallVector<OpFoldResult> insStride(rank, rewriter.getIndexAttr(1));
-    Value r1 =
-        rewriter.create<tensor::InsertSliceOp>(loc, evenExtract, empty, ins0Off, ins0Sz, insStride);
+    Value r1 = tensor::InsertSliceOp::create(
+        rewriter, loc, evenExtract, empty, ins0Off, ins0Sz, insStride
+    );
 
     // Insert odds at offset last-dim = evenColSz
     SmallVector<OpFoldResult> ins1Off(rank, rewriter.getIndexAttr(0));
@@ -287,7 +288,7 @@ static mlir::Value weights_swap_even_odd(
     SmallVector<OpFoldResult> ins1Sz(sizes);
     ins1Sz[swapDim] = rewriter.getIndexAttr(oddColSz);
     auto res =
-        rewriter.create<tensor::InsertSliceOp>(loc, oddExtract, r1, ins1Off, ins1Sz, insStride);
+        tensor::InsertSliceOp::create(rewriter, loc, oddExtract, r1, ins1Off, ins1Sz, insStride);
 
     setCompileTimeConstAttr(res);
     return res.getResult();
@@ -307,7 +308,7 @@ weights_insert_dimension(PatternRewriter &rewriter, Location loc, Value weights,
     SmallVector<int64_t> newShape = shape;
     newShape.insert(newShape.begin() + insertDim, 1);
     auto newTy = RankedTensorType::get(newShape, wtRankedTy.getElementType());
-    auto res = rewriter.create<tensor::ExpandShapeOp>(loc, newTy, weights, reassoc);
+    auto res = tensor::ExpandShapeOp::create(rewriter, loc, newTy, weights, reassoc);
     setCompileTimeConstAttr(res);
     return res.getResult();
 }
@@ -337,11 +338,11 @@ static mlir::Value weights_ChHW_to_ChHW32(
     llvm::SmallVector<int64_t> innerDimsPos(1, 0);
     llvm::SmallVector<OpFoldResult> innerTiles(1, OpFoldResult(rewriter.getIndexAttr(inner_ch)));
 
-    auto empty = tensor::PackOp::createDestinationTensor(
+    auto empty = linalg::PackOp::createDestinationTensor(
         rewriter, loc, weights, innerTiles, innerDimsPos, {}
     );
 
-    auto res = rewriter.create<tensor::PackOp>(loc, weights, empty, innerDimsPos, innerTiles);
+    auto res = linalg::PackOp::create(rewriter, loc, weights, empty, innerDimsPos, innerTiles);
 
     setCompileTimeConstAttr(res);
     return res.getResult();
@@ -366,17 +367,16 @@ static mlir::Value weights_pad_with_zero(
     SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
     // Create empty padded tensor
     Value paddedEmpty =
-        rewriter.create<tensor::EmptyOp>(loc, paddedShape, wtRankedTy.getElementType());
+        tensor::EmptyOp::create(rewriter, loc, paddedShape, wtRankedTy.getElementType());
     // Fill with zeros
     auto zeroAttr = rewriter.getZeroAttr(wtRankedTy.getElementType());
-    Value zeroVal = rewriter.create<arith::ConstantOp>(loc, wtRankedTy.getElementType(), zeroAttr);
-    paddedEmpty = rewriter.create<linalg::FillOp>(loc, zeroVal, paddedEmpty).getResult(0);
-
+    Value zeroVal = arith::ConstantOp::create(rewriter, loc, wtRankedTy.getElementType(), zeroAttr);
+    paddedEmpty = linalg::FillOp::create(rewriter, loc, zeroVal, paddedEmpty).getResult(0);
     // Insert original weights into padded tensor
     SmallVector<OpFoldResult> insOff(rank, rewriter.getIndexAttr(0));
     SmallVector<OpFoldResult> insSz = sizes;
     auto res =
-        rewriter.create<tensor::InsertSliceOp>(loc, weights, paddedEmpty, insOff, insSz, strides);
+        tensor::InsertSliceOp::create(rewriter, loc, weights, paddedEmpty, insOff, insSz, strides);
     setCompileTimeConstAttr(res);
     return res.getResult();
 }
@@ -479,24 +479,22 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
             SmallVector<int64_t, 4> collapsedShape{
                 weightShape[0], weightShape[1] * weightShape[2], weightShape[3]
             };
-            weights = rewriter
-                          .create<tensor::CollapseShapeOp>(
-                              op.getLoc(),
-                              RankedTensorType::get(collapsedShape, wtRankedTy.getElementType()),
-                              weights, reassoc
-                          )
+            weights = tensor::CollapseShapeOp::create(
+                          rewriter, op.getLoc(),
+                          RankedTensorType::get(collapsedShape, wtRankedTy.getElementType()),
+                          weights, reassoc
+            )
                           .getResult();
             setCompileTimeConstAttr(weights.getDefiningOp());
 
             // Expand dimensions 1 weights using a memref::ExpandShapeOp
             weightShape[1] = weightShape[1] * sh;
             weightShape[2] /= sh;
-            weights = rewriter
-                          .create<tensor::ExpandShapeOp>(
-                              op.getLoc(),
-                              RankedTensorType::get(weightShape, wtRankedTy.getElementType()),
-                              weights, reassoc
-                          )
+            weights = tensor::ExpandShapeOp::create(
+                          rewriter, op.getLoc(),
+                          RankedTensorType::get(weightShape, wtRankedTy.getElementType()), weights,
+                          reassoc
+            )
                           .getResult();
             setCompileTimeConstAttr(weights.getDefiningOp());
 
@@ -597,7 +595,7 @@ class MaxPool2dKernelSelectionOp : public OpRewritePattern<torq_hl::MaxPool2dOp>
     }
 };
 
-class KernelSelectionPass : public KernelSelectionBase<KernelSelectionPass> {
+class KernelSelectionPass : public impl::KernelSelectionBase<KernelSelectionPass> {
   public:
     using KernelSelectionBase<KernelSelectionPass>::KernelSelectionBase;
     void runOnOperation() override;
@@ -615,7 +613,7 @@ void KernelSelectionPass::runOnOperation() {
     patterns.add<FullyConnectedKernelSelection>(ctx);
     patterns.add<MaxPool2dKernelSelectionOp>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
 }

@@ -109,13 +109,25 @@ static iree_status_t iree_hal_torq_nop_executable_cache_prepare_executable(
       executable_cache->allocator, executable_params, out_executable);
 }
 
+static iree_status_t iree_hal_torq_nop_executable_cache_infer_format(
+    iree_hal_executable_cache_t* base_executable_cache,
+    iree_hal_executable_caching_mode_t caching_mode,
+    iree_const_byte_span_t executable_data,
+    iree_host_size_t executable_format_capacity, char* executable_format,
+    iree_host_size_t* out_inferred_size) {
+  iree_status_t status = iree_hal_torq_native_executable_infer_format(
+      executable_data, executable_format_capacity, executable_format,
+      out_inferred_size);
+  return status;
+}
+
+
 namespace {
 const iree_hal_executable_cache_vtable_t
     iree_hal_torq_nop_executable_cache_vtable = {
-        /*.destroy=*/iree_hal_torq_nop_executable_cache_destroy,
-        /*.can_prepare_format=*/
-        iree_hal_torq_nop_executable_cache_can_prepare_format,
-        /*.prepare_executable=*/
-        iree_hal_torq_nop_executable_cache_prepare_executable,
+        .destroy = iree_hal_torq_nop_executable_cache_destroy,
+        .infer_format = iree_hal_torq_nop_executable_cache_infer_format,
+        .can_prepare_format = iree_hal_torq_nop_executable_cache_can_prepare_format,
+        .prepare_executable = iree_hal_torq_nop_executable_cache_prepare_executable
 };
 }  // namespace

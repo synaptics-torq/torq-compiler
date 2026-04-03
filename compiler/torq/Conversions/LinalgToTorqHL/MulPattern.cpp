@@ -362,8 +362,9 @@ class MulRescaleOpPattern : public OpRewritePattern<linalg::GenericOp> {
 void populateLinalgToTorqHLMulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-    patterns.insert<MulOpPattern>(context);
-    patterns.insert<MulRescaleOpPattern>(context);
+    // FIXME (upgrade):
+    // patterns.insert<MulOpPattern>(context);
+    // patterns.insert<MulRescaleOpPattern>(context);
 }
 
 } // namespace mlir::syna::torq

@@ -39,14 +39,14 @@ class CopyPattern : public OpRewritePattern<memref::CopyOp> {
              (sourceMemSpace == torq_hl::MemorySpace::Dtcm ||
               sourceMemSpace == torq_hl::MemorySpace::Itcm))) {
 
-            auto copyTaskOp = rewriter.create<torq_hw::NssTaskOp>(op.getLoc());
+            auto copyTaskOp = torq_hw::NssTaskOp::create(rewriter, op.getLoc());
 
             rewriter.createBlock(&copyTaskOp.getBody());
 
-            rewriter.create<torq_hw::CDMAStartOp>(
-                op.getLoc(), op.getTarget(), op.getSource(), nullptr, nullptr
+            torq_hw::CDMAStartOp::create(
+                rewriter, op.getLoc(), op.getTarget(), op.getSource(), nullptr, nullptr
             );
-            rewriter.create<torq_hw::CDMAWaitOp>(op.getLoc());
+            torq_hw::CDMAWaitOp::create(rewriter, op.getLoc());
             ;
 
             rewriter.eraseOp(op);
@@ -151,13 +151,14 @@ class StoreOpPattern : public OpRewritePattern<torq_hl::StoreOp> {
             return op.emitError("cannot create write NDL for output type");
         }
 
-        auto taskOp = rewriter.create<torq_hw::NssTaskOp>(op.getLoc());
+        auto taskOp = torq_hw::NssTaskOp::create(rewriter, op.getLoc());
         rewriter.createBlock(&taskOp.getBody());
-        rewriter.create<torq_hw::DmaOutCfgOp>(
-            op.getLoc(), op.getInput(), op.getOutput(), readNdl, *maybeWriteNdl, nullptr, nullptr
+        torq_hw::DmaOutCfgOp::create(
+            rewriter, op.getLoc(), op.getInput(), op.getOutput(), readNdl, *maybeWriteNdl, nullptr,
+            nullptr
         );
-        rewriter.create<torq_hw::DmaOutStartOp>(op.getLoc());
-        rewriter.create<torq_hw::DmaOutWaitOp>(op.getLoc());
+        torq_hw::DmaOutStartOp::create(rewriter, op.getLoc());
+        torq_hw::DmaOutWaitOp::create(rewriter, op.getLoc());
         rewriter.replaceOp(op, taskOp);
 
         return success();
@@ -202,13 +203,14 @@ class LoadOpPattern : public OpRewritePattern<torq_hl::LoadOp> {
         auto totalInputSizeBytes = totalCount * op.getElementSizeBytes();
         auto writeNdl = DmaNdlAttr::get(ctx, DmaDimAttr::get(ctx, totalInputSizeBytes, 1));
 
-        auto taskOp = rewriter.create<torq_hw::NssTaskOp>(op.getLoc());
+        auto taskOp = torq_hw::NssTaskOp::create(rewriter, op.getLoc());
         rewriter.createBlock(&taskOp.getBody());
-        rewriter.create<torq_hw::DmaInCfgOp>(
-            op.getLoc(), op.getInput(), op.getOutput(), *maybeReadNdl, writeNdl, nullptr, nullptr
+        torq_hw::DmaInCfgOp::create(
+            rewriter, op.getLoc(), op.getInput(), op.getOutput(), *maybeReadNdl, writeNdl, nullptr,
+            nullptr
         );
-        rewriter.create<torq_hw::DmaInStartOp>(op.getLoc());
-        rewriter.create<torq_hw::DmaInWaitOp>(op.getLoc());
+        torq_hw::DmaInStartOp::create(rewriter, op.getLoc());
+        torq_hw::DmaInWaitOp::create(rewriter, op.getLoc());
         rewriter.replaceOp(op, taskOp);
 
         return success();
@@ -236,7 +238,7 @@ class StartProgramOpPattern : public OpRewritePattern<torq_hl::StartProgramOp> {
 
         auto programType = cast<torq_hl::InvocationType>(op.getInvocation().getType());
 
-        auto taskOp = rewriter.create<torq_hw::NssTaskOp>(op.getLoc());
+        auto taskOp = torq_hw::NssTaskOp::create(rewriter, op.getLoc());
         rewriter.createBlock(&taskOp.getBody());
 
         if (programType.getExecutor() == torq_hl::Executor::Slice) {
@@ -251,8 +253,8 @@ class StartProgramOpPattern : public OpRewritePattern<torq_hl::StartProgramOp> {
                 return failure();
             }
 
-            rewriter.create<SliceStartOp>(
-                op.getLoc(), op.getInvocation(), op.getCodeSections()[0], *maybeSliceId,
+            SliceStartOp::create(
+                rewriter, op.getLoc(), op.getInvocation(), op.getCodeSections()[0], *maybeSliceId,
                 op.getArgs(), nullptr
             );
         }
@@ -262,9 +264,9 @@ class StartProgramOpPattern : public OpRewritePattern<torq_hl::StartProgramOp> {
                 return op.emitError("CSS executor must have one code section");
             }
 
-            rewriter.create<CSSStartOp>(
-                op.getLoc(), op.getInvocation(), op.getCodeSections()[0], op.getCodeSections()[1],
-                op.getArgs(), nullptr, nullptr
+            CSSStartOp::create(
+                rewriter, op.getLoc(), op.getInvocation(), op.getCodeSections()[0],
+                op.getCodeSections()[1], op.getArgs(), nullptr, nullptr
             );
         }
         else {
@@ -284,7 +286,7 @@ class WaitProgramOpPattern : public OpRewritePattern<torq_hl::WaitProgramOp> {
     LogicalResult
     matchAndRewrite(torq_hl::WaitProgramOp waitOp, PatternRewriter &rewriter) const override {
 
-        auto taskOp = rewriter.create<torq_hw::NssTaskOp>(waitOp.getLoc());
+        auto taskOp = torq_hw::NssTaskOp::create(rewriter, waitOp.getLoc());
         rewriter.createBlock(&taskOp.getBody());
 
         if (waitOp.getInvocation().getType().getExecutor() == torq_hl::Executor::Slice) {
@@ -295,10 +297,10 @@ class WaitProgramOpPattern : public OpRewritePattern<torq_hl::WaitProgramOp> {
                 return failure();
             }
 
-            rewriter.create<SliceWaitOp>(waitOp.getLoc(), *maybeSliceId);
+            SliceWaitOp::create(rewriter, waitOp.getLoc(), *maybeSliceId);
         }
         else if (waitOp.getInvocation().getType().getExecutor() == torq_hl::Executor::CSS) {
-            rewriter.create<CSSWaitOp>(waitOp.getLoc());
+            CSSWaitOp::create(rewriter, waitOp.getLoc());
         }
         else {
             return waitOp.emitError("unsupported executor type: ")

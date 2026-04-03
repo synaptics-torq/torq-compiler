@@ -30,7 +30,7 @@ namespace mlir::syna::torq {
 namespace {
 
 class CompileSliceInvocationsPass
-    : public CompileSliceInvocationsBase<CompileSliceInvocationsPass> {
+    : public impl::CompileSliceInvocationsBase<CompileSliceInvocationsPass> {
   public:
     using CompileSliceInvocationsBase::CompileSliceInvocationsBase;
     void runOnOperation() override;

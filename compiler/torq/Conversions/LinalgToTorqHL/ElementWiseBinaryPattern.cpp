@@ -127,7 +127,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         linalg::GenericOp bcastOp = input.getDefiningOp<linalg::GenericOp>();
         std::optional<SmallVector<int64_t>> bcastDims;
         if (bcastOp) {
-            bcastDims = isaBroadcastOpInterface(bcastOp);
+            bcastDims = torqIsaBroadcastOpInterface(bcastOp);
             if (bcastDims) {
                 auto success = selectInput(input, bcastOp.getDpsInputOperand(0)->get());
                 if (!success) {
@@ -181,12 +181,14 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                 auto newOutputType =
                     RankedTensorType::get(maybeElemOpOutputShape, inputElementType);
 
-                auto emptyOp = rewriter.create<tensor::EmptyOp>(
-                    maybeElemOp.getLoc(), newOutputType.getShape(), newOutputType.getElementType()
+                auto emptyOp = tensor::EmptyOp::create(
+                    rewriter, maybeElemOp.getLoc(), newOutputType.getShape(),
+                    newOutputType.getElementType()
                 );
 
-                auto newOp = rewriter.create<linalg::GenericOp>(
-                    loc, ArrayRef<Type>{newOutputType}, ValueRange{input}, ValueRange{emptyOp},
+                auto newOp = linalg::GenericOp::create(
+                    rewriter, loc, ArrayRef<Type>{newOutputType}, ValueRange{input},
+                    ValueRange{emptyOp},
                     /*indexingMaps=*/
                     ArrayRef<AffineMap>{
                         maybeElemOp.getIndexingMapsArray().front(),
@@ -213,8 +215,9 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             auto collapseShape = collapseOp.getResultType().getShape();
             auto newOutputType = RankedTensorType::get(collapseShape, inputElementType);
 
-            auto newCollapseOp = rewriter.create<tensor::CollapseShapeOp>(
-                collapseOp.getLoc(), newOutputType, input, collapseOp.getReassociationIndices()
+            auto newCollapseOp = tensor::CollapseShapeOp::create(
+                rewriter, collapseOp.getLoc(), newOutputType, input,
+                collapseOp.getReassociationIndices()
             );
             collapseOp->getResult(0).replaceAllUsesWith(newCollapseOp.getResult());
             rewriter.eraseOp(collapseOp);
@@ -226,8 +229,9 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             auto expandShape = expandOp.getResultType().getShape();
             auto newOutputType = RankedTensorType::get(expandShape, inputElementType);
 
-            auto newExpandOp = rewriter.create<tensor::ExpandShapeOp>(
-                expandOp.getLoc(), newOutputType, input, expandOp.getReassociationIndices()
+            auto newExpandOp = tensor::ExpandShapeOp::create(
+                rewriter, expandOp.getLoc(), newOutputType, input,
+                expandOp.getReassociationIndices()
             );
             expandOp->getResult(0).replaceAllUsesWith(newExpandOp.getResult());
             rewriter.eraseOp(expandOp);
@@ -241,8 +245,9 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             auto bOutputShape = mlir::cast<RankedTensorType>(dstTy).getShape();
             auto bOutputType = RankedTensorType::get(bOutputShape, inputElementType);
 
-            auto op = rewriter.create<linalg::BroadcastOp>(
-                bcastOp.getLoc(), src, createInitTensor(bcastOp, rewriter, bOutputType), *bcastDims
+            auto op = linalg::BroadcastOp::create(
+                rewriter, bcastOp.getLoc(), src, createInitTensor(bcastOp, rewriter, bOutputType),
+                *bcastDims
             );
             auto gOp = linalg::generalizeNamedOp(rewriter, op);
             rewriter.replaceOp(bcastOp, gOp->getResults()[0]);
@@ -332,6 +337,19 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         while (foldBackwardRescale(input1, scaleInput1)) {
         }
 
+        // Compute scale and bias vectors
+        const double outputScale = scInfo.scaleDouble[0];
+        double multiplier0 = outputScale * scaleInput0.scale;
+        double multiplier1 = outputScale * scaleInput1.scale;
+        int scaleFactor = 1 << scInfo.scaleShift;
+
+        if (multiplier0 * scaleFactor > std::numeric_limits<int16_t>::max() ||
+            multiplier0 * scaleFactor < std::numeric_limits<int16_t>::min() ||
+            multiplier1 * scaleFactor > std::numeric_limits<int16_t>::max() ||
+            multiplier1 * scaleFactor < std::numeric_limits<int16_t>::min()) {
+            return rewriter.notifyMatchFailure(eltOp, "Multiplier overflow");
+        }
+
         if (_markFuseGroups) {
             markFuseGroupBackward(
                 output, {input0, input1}, rewriter,
@@ -342,12 +360,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
         broadcastProcessing(input0, rewriter);
         broadcastProcessing(input1, rewriter);
-
-        // Compute scale and bias vectors
-        const double outputScale = scInfo.scaleDouble[0];
-        double multiplier0 = outputScale * scaleInput0.scale;
-        double multiplier1 = outputScale * scaleInput1.scale;
-        int scaleFactor = 1 << scInfo.scaleShift;
 
         auto weight0 = doubleToInt<int16_t>(multiplier0 * scaleFactor);
         auto bias0 = -doubleToInt<int32_t>(multiplier0 * scaleFactor * scaleInput0.zp);
@@ -414,8 +426,8 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
         // Generate torq_hl op with output in the expected format
         auto torqOutType = transposeType(output.getType(), dataPerm);
-        auto torqOp = rewriter.create<TorqEltOp>(
-            loc, torqOutType, createInitTensor(eltOp, rewriter, torqOutType), opName,
+        auto torqOp = TorqEltOp::create(
+            rewriter, loc, torqOutType, createInitTensor(eltOp, rewriter, torqOutType), opName,
             /* input zp not needed */ 0, scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift,
             torqWeights, biasScale, input0, input1
         );

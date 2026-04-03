@@ -104,8 +104,8 @@ class ArithElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericO
                 constV = *maybeConstV;
             }
             auto constAttr = returnAttr(constV);
-            auto constTensor = rewriter.create<arith::ConstantOp>(
-                srcOp.getLoc(), inputType, DenseElementsAttr::get(inputType, constAttr)
+            auto constTensor = arith::ConstantOp::create(
+                rewriter, srcOp.getLoc(), inputType, DenseElementsAttr::get(inputType, constAttr)
             );
             newInput0 = input;
             newInput1 = constTensor;
@@ -118,8 +118,8 @@ class ArithElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericO
                 constV = *maybeConstV;
             }
             auto constAttr = returnAttr(constV);
-            auto constTensor = rewriter.create<arith::ConstantOp>(
-                srcOp.getLoc(), inputType, DenseElementsAttr::get(inputType, constAttr)
+            auto constTensor = arith::ConstantOp::create(
+                rewriter, srcOp.getLoc(), inputType, DenseElementsAttr::get(inputType, constAttr)
             );
             newInput0 = constTensor;
             newInput1 = input;
@@ -143,8 +143,8 @@ class ArithElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericO
         SmallVector<utils::IteratorType> iteratorTypes(tensorRank, utils::IteratorType::parallel);
 
         SmallVector<Value, 2> inputs{newInput0, newInput1};
-        auto genericOp = rewriter.create<linalg::GenericOp>(
-            loc, srcOp.getResultTypes(), inputs, srcOp.getOutputs(), maps, iteratorTypes,
+        auto genericOp = linalg::GenericOp::create(
+            rewriter, loc, srcOp.getResultTypes(), inputs, srcOp.getOutputs(), maps, iteratorTypes,
             [&](OpBuilder &b, Location innerLoc, ValueRange args) {
                 Value res;
                 if (auto cmpf = dyn_cast<arith::CmpFOp>(op)) {

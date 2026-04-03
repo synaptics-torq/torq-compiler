@@ -126,7 +126,7 @@ class LinalgOpPattern : public OpInterfaceRewritePattern<linalg::LinalgOp> {
     }
 };
 
-class MarkHostExecutorPass : public MarkHostExecutorBase<MarkHostExecutorPass> {
+class MarkHostExecutorPass : public impl::MarkHostExecutorBase<MarkHostExecutorPass> {
   public:
     MarkHostExecutorPass() = default;
     MarkHostExecutorPass(const MarkHostExecutorPass &pass) {}

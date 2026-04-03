@@ -7,6 +7,7 @@
 #include "PassesDetail.h"
 #include "TilingUtils.h"
 
+#include "mlir/IR/Attributes.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
@@ -437,7 +438,7 @@ llvm::LogicalResult tileModuleForMemoryCheck(
     return llvm::success();
 }
 
-class TileAndFusePass : public TileAndFuseBase<TileAndFusePass> {
+class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
   private:
     // Normally one should use OpPassManager, and run it with the pass'
     // runPipeline. This is not possible in this case as it requires that only
@@ -477,13 +478,13 @@ class TileAndFusePass : public TileAndFuseBase<TileAndFusePass> {
         int64_t iterDomainSize, int64_t minFactor, int64_t maxFactor
     );
 
-    llvm::FailureOr<bool> fitTileToMemory(
+    FailureOr<bool> fitTileToMemory(
         Operation *consumerOp, const SetVector<Operation *> &producerOps,
         ArrayRef<int64_t> tilingIterDomsOrder, ArrayRef<int64_t> iterDomainSizes,
         MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
     );
 
-    std::tuple<bool, bool> fuseControlMaxSize(
+    std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxSize(
         IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp,
         OpResult producerOpResult, bool isDestinationOperand
     );
@@ -775,11 +776,12 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
 }
 
 // an SCFTileAndFuseOptions::ControlFnTy for the max-size fuse mode.
-std::tuple<bool, bool> TileAndFusePass::fuseControlMaxSize(
+std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuseControlMaxSize(
     IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
     bool isDestinationOperand
 ) {
-    static const std::tuple<bool, bool> doNotFuse = std::make_tuple(false, false);
+    static const std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> doNotFuse =
+        std::nullopt;
 
     Operation *producerOp = producerOpResult.getOwner();
     auto producerTi = dyn_cast<TilingInterface>(producerOp);
@@ -838,14 +840,18 @@ std::tuple<bool, bool> TileAndFusePass::fuseControlMaxSize(
             return doNotFuse;
         }
 
-        // Fuse iff producer fits in the tile
-        return std::make_tuple(*producerFits, yieldProducerReplacement);
+        if (!*producerFits) {
+            // Producer does not fit in memory, don't fuse.
+            return doNotFuse;
+        }
+
+        return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
     }
 
     if (!isFuseGroupOutput(producerOp)) {
         // Is part of a pattern-fuse-group, but not the output operation (bottom most).
         // We only check the output operation of such group.
-        return std::make_tuple(true, yieldProducerReplacement);
+        return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
     }
 
     llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(producerTi);
@@ -876,15 +882,15 @@ std::tuple<bool, bool> TileAndFusePass::fuseControlMaxSize(
     }
 
     // Fuse iff producer fits in the tile
-    return std::make_tuple(*producerFuseGroupFits, yieldProducerReplacement);
+    return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
 }
 
 // an SCFTileAndFuseOptions::ControlFnTy for the max-producers fuse mode.
-std::tuple<bool, bool> fuseControlMaxProducers(
+std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProducers(
     IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
     bool isDestinationOperand
 ) {
-    static const std::tuple<bool, bool> doNotFuse = std::make_tuple(false, false);
+    const auto doNotFuse = std::nullopt;
 
     Operation *producerOp = producerOpResult.getOwner();
     auto producerTi = dyn_cast<TilingInterface>(producerOp);
@@ -905,13 +911,13 @@ std::tuple<bool, bool> fuseControlMaxProducers(
 
     if (!isMarkedFuseGroup(producerOp)) {
         // Not part of a pattern-fuse-group; there are no restrictions on the domains.
-        return std::make_tuple(true, yieldProducerReplacement);
+        return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
     }
 
     if (!isFuseGroupOutput(producerOp)) {
         // Is part of a pattern-fuse-group, but not the output operation (bottom most).
         // We only check the output operation of such group.
-        return std::make_tuple(true, yieldProducerReplacement);
+        return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
     }
 
     // The domains the producer can be tiled over
@@ -950,7 +956,7 @@ std::tuple<bool, bool> fuseControlMaxProducers(
     }
 
     // Producer can be fused
-    return std::make_tuple(true, yieldProducerReplacement);
+    return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
 }
 
 FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
@@ -997,20 +1003,24 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
         break;
 
     case TileAndFuseProducersFuseMode::OnlyPatterns:
-        fusionControlFn = [maybePatternFuseGroup](
-                              mlir::tensor::ExtractSliceOp candidateSliceOp,
+        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                               OpResult producerOpResult, bool isDestinationOperand
-                          ) {
+                          ) -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
             bool shouldFuse =
                 maybePatternFuseGroup && isMarkedFuseGroup(producerOpResult.getOwner());
-            return std::make_tuple(shouldFuse, false);
+
+            if (!shouldFuse) {
+                return std::nullopt;
+            }
+
+            return scf::SCFTileAndFuseOptions::ControlFnResult{false};
         };
         break;
 
     case TileAndFuseProducersFuseMode::NoFuse:
-        fusionControlFn = [](mlir::tensor::ExtractSliceOp candidateSliceOp,
-                             OpResult producerOpResult,
-                             bool isDestinationOperand) { return std::make_tuple(false, false); };
+        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
+                              OpResult producerOpResult,
+                              bool isDestinationOperand) { return std::nullopt; };
     }
 
     options.setFusionControlFn(fusionControlFn);

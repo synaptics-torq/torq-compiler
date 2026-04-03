@@ -101,15 +101,15 @@ class MergePInitialization : public OpRewritePattern<torq_hl::GenericOp> {
 
         auto biasMap = pOpInMap.compose(genericOpPMap);
 
-        Value emptyTensor = rewriter.create<tensor::EmptyOp>(
-            genericOp.getLoc(), genericOp.getP().getType(), ValueRange{}
+        Value emptyTensor = tensor::EmptyOp::create(
+            rewriter, genericOp.getLoc(), genericOp.getP().getType(), ValueRange{}
         );
 
         Value zeroConst =
-            rewriter.create<arith::ConstantOp>(genericOp.getLoc(), rewriter.getI32IntegerAttr(0));
+            arith::ConstantOp::create(rewriter, genericOp.getLoc(), rewriter.getI32IntegerAttr(0));
 
         Value zeroTensor =
-            rewriter.create<linalg::FillOp>(genericOp.getLoc(), zeroConst, emptyTensor).result();
+            linalg::FillOp::create(rewriter, genericOp.getLoc(), zeroConst, emptyTensor).result();
 
         GenericOpConfig config = GenericOpConfig::fromOperation(genericOp);
 
@@ -218,8 +218,8 @@ class MergeAluAct : public OpRewritePattern<torq_hl::GenericOp> {
                 return failure();
             }
 
-            Value emptyTensor = rewriter.create<tensor::EmptyOp>(
-                actOp.getLoc(), actOp.getBias().getType(), ValueRange{}
+            Value emptyTensor = tensor::EmptyOp::create(
+                rewriter, actOp.getLoc(), actOp.getBias().getType(), ValueRange{}
             );
 
             newBias = rewriter
@@ -252,7 +252,7 @@ class MergeAluAct : public OpRewritePattern<torq_hl::GenericOp> {
     }
 };
 
-class SimplifyGenericPass : public SimplifyGenericBase<SimplifyGenericPass> {
+class SimplifyGenericPass : public impl::SimplifyGenericBase<SimplifyGenericPass> {
   public:
     using SimplifyGenericBase::SimplifyGenericBase;
 
@@ -267,7 +267,7 @@ class SimplifyGenericPass : public SimplifyGenericBase<SimplifyGenericPass> {
         // we apply the patter because as we it is written it won't match after
         // we merge ACT and ALU (which may happend with the next patterns)
         // TODO: we need to generalize the above pattern to handle this case
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
             getOperation().emitError() << "pass failed";
             return signalPassFailure();
         }
@@ -277,7 +277,7 @@ class SimplifyGenericPass : public SimplifyGenericBase<SimplifyGenericPass> {
         patterns2.add<MergeBiasScale>(&context);
         patterns2.add<MergeAluAct>(&context);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns2)))) {
+        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns2)))) {
             getOperation().emitError() << "pass failed";
             return signalPassFailure();
         }

@@ -144,7 +144,7 @@ SmallVector<int64_t> getEncodedStridesElements(ShapedType type) {
         else if (!memRefType.getLayout().isIdentity()) {
 
             // FIXME: all this is very ugly, we should revisit the whole encoding system
-            auto [memRefStrides, memRefOffset] = getStridesAndOffset(memRefType);
+            auto [memRefStrides, memRefOffset] = memRefType.getStridesAndOffset();
 
             auto encoding = getEncoding(type);
 
@@ -248,7 +248,7 @@ int64_t getEncodedTotalSizeElements(ShapedType type) {
 
             SmallVector<int64_t> strides;
             int64_t offset;
-            auto ret = getStridesAndOffset(memrefType, strides, offset);
+            auto ret = memrefType.getStridesAndOffset(strides, offset);
 
             if (failed(ret)) {
                 llvm::report_fatal_error("Failed to get memref strides and offset");
@@ -492,26 +492,24 @@ Value convertTensorToEncoding(
     }
 
     auto dstType = createRankedTensorTypeWithEncoding(value.getType(), encodingAttr);
-    Value emptyValue = initValue
-                           ? initValue
-                           : builder.create<tensor::EmptyOp>(value.getLoc(), dstType, ValueRange{});
+    Value emptyValue =
+        initValue ? initValue
+                  : tensor::EmptyOp::create(builder, value.getLoc(), dstType, ValueRange{});
 
     if (requirements) {
 
-        return builder
-            .create<torq_hl::ConvertOp>(
-                value.getLoc(), dstType, emptyValue, intermediateValue,
-                /* requirements = */ requirements->toAttr(value.getContext()),
-                /* encoding = */ nullptr
-            )
+        return torq_hl::ConvertOp::create(
+                   builder, value.getLoc(), dstType, emptyValue, intermediateValue,
+                   /* requirements = */ requirements->toAttr(value.getContext()),
+                   /* encoding = */ nullptr
+        )
             .getResult(0);
     }
     else {
-        return builder
-            .create<torq_hl::ConvertOp>(
-                value.getLoc(), dstType, emptyValue, intermediateValue,
-                /* requirements = */ nullptr, /* encoding = */ encodingAttr
-            )
+        return torq_hl::ConvertOp::create(
+                   builder, value.getLoc(), dstType, emptyValue, intermediateValue,
+                   /* requirements = */ nullptr, /* encoding = */ encodingAttr
+        )
             .getResult(0);
     }
 }
@@ -552,13 +550,12 @@ Value convertTensorToType(
             convertTensorToEncoding(builder, value, intermediateEncoding, std::nullopt, initValue);
     }
 
-    Value emptyValue = builder.create<tensor::EmptyOp>(value.getLoc(), targetType, ValueRange{});
+    Value emptyValue = tensor::EmptyOp::create(builder, value.getLoc(), targetType, ValueRange{});
 
-    return builder
-        .create<torq_hl::ConvertOp>(
-            value.getLoc(), targetType, emptyValue, intermediateValue,
-            /* requirements = */ nullptr, /* encoding = */ targetEncoding
-        )
+    return torq_hl::ConvertOp::create(
+               builder, value.getLoc(), targetType, emptyValue, intermediateValue,
+               /* requirements = */ nullptr, /* encoding = */ targetEncoding
+    )
         .getResult(0);
 }
 

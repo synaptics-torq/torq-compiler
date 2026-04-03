@@ -19,7 +19,8 @@
 namespace mlir::syna::torq {
 
 #define GEN_PASS_DECL
-#define GEN_PASS_CLASSES
+#define GEN_PASS_DEF_CONVERTNSSPROGRAMTOTORQHW
+#define GEN_PASS_DEF_CONVERTSLICEPROGRAMTOTORQHW
 #include "torq/Conversions/TorqHLToTorqHW/Passes.h.inc"
 
 } // namespace mlir::syna::torq

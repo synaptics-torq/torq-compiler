@@ -28,25 +28,6 @@ IREE_BUILD_DIR=$(readlink -f $1)
 
 RUNTIMES_BUILD_DIR=$(readlink -f $2)
 
-echo "Configuring host build to build hdrgen"
-
-cd ${IREE_SOURCE_DIR}/third_party/llvm-project/llvm
-
-cmake -B ${RUNTIMES_BUILD_DIR}/host \
-      -G Ninja \
-      -DLLVM_ENABLE_PROJECTS="libc" \
-      -DCMAKE_C_COMPILER=${IREE_BUILD_DIR}/third_party/iree/llvm-project/bin/clang \
-      -DCMAKE_CXX_COMPILER=${IREE_BUILD_DIR}/third_party/iree/llvm-project/bin/clang++ \
-      -DLLVM_LIBC_FULL_BUILD=ON \
-      -DLLVM_INCLUDE_DOCS=OFF \
-      -DLLVM_INCLUDE_TESTS=OFF \
-      -DLIBC_HDRGEN_ONLY=ON \
-      -DCMAKE_BUILD_TYPE=Release
-
-echo "Build libc-hdrgen"
-
-cmake --build ${RUNTIMES_BUILD_DIR}/host --target libc-hdrgen
-
 echo "Configuring target build to build libc and compiler-rt"
 
 cd ${IREE_SOURCE_DIR}/third_party/llvm-project/runtimes
@@ -57,14 +38,13 @@ cmake -B ${RUNTIMES_BUILD_DIR}/target \
       -DCMAKE_TOOLCHAIN_FILE=${BASE_DIR}/scripts/toolchain.riscv.cmake \
       -DLLVM_ENABLE_RUNTIMES="libc;compiler-rt" \
       -DLLVM_LIBC_FULL_BUILD=ON \
-      -DTORQ_CSS=ON \
+      -DLIBC_CONF_THREAD_MODE=LIBC_THREAD_MODE_SINGLE \
       -DLLVM_INCLUDE_DOCS=OFF \
       -DCOMPILER_RT_BAREMETAL_BUILD=ON \
       -DTEST_COMPILE_ONLY=ON \
       -DLLVM_DEFAULT_TARGET_TRIPLE=riscv32-none-elf \
       -DLIBC_TARGET_TRIPLE=riscv32-none-elf \
       -DLLVM_INCLUDE_TESTS=OFF \
-      -DLIBC_HDRGEN_EXE=${RUNTIMES_BUILD_DIR}/host/bin/libc-hdrgen \
       -DCMAKE_BUILD_TYPE=Release
 
 cmake --build ${RUNTIMES_BUILD_DIR}/target

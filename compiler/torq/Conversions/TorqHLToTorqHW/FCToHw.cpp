@@ -77,9 +77,9 @@ static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewri
 
     // Pass weights first (IData) and input second (WData) so the runtime maps them
     // to the expected memories for FC lowering.
-    return rewriter.create<torq_hw::SliceTaskOp>(
-        op.getLoc(), slice.name(), op.getWeights(), op.getInput(), op.getScaleBias(), op.getInit(),
-        slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getWeights(), op.getInput(), op.getScaleBias(),
+        op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
     );
 }
 

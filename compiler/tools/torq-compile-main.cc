@@ -19,6 +19,9 @@ int main(int argc, char **argv) {
 
     allArgs.push_back("--iree-input-type=auto");
 
+    // FIXME: this is required until we fix our dispatch creation code
+    allArgs.push_back("--iree-opt-const-expr-hoisting=false");
+
     for (int i = 1; i < argc; ++i) {
         allArgs.push_back(argv[i]);
     }

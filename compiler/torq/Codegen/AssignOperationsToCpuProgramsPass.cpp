@@ -26,16 +26,18 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/LogicalResult.h"
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 
 #define DEBUG_TYPE "torq-assign-operations-to-cpu-programs"
 
-using namespace mlir::iree_compiler;
+using namespace ::mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
@@ -46,10 +48,27 @@ struct OutliningGroup {
     SmallVector<Operation *> toOutline;
     torq_hl::Executor executor;
     std::string name;
+    int programId;
+
+    InFlightDiagnostic emitError(Location loc, const Twine &message) {
+        auto diag = mlir::emitError(loc, message);
+
+        diag.attachNote(root->getLoc())
+            .append("Program root operation")
+            .appendOp(*root, OpPrintingFlags());
+
+        diag.attachNote(std::nullopt).append("Operations included in outlined program:");
+
+        for (auto op : toOutline) {
+            diag.attachNote(std::nullopt).appendOp(*op, OpPrintingFlags());
+        }
+
+        return diag;
+    }
 };
 
 class AssignOperationsToCpuProgramsPass
-    : public AssignOperationsToCpuProgramsBase<AssignOperationsToCpuProgramsPass> {
+    : public impl::AssignOperationsToCpuProgramsBase<AssignOperationsToCpuProgramsPass> {
   public:
     using AssignOperationsToCpuProgramsBase::AssignOperationsToCpuProgramsBase;
 
@@ -73,16 +92,18 @@ AssignOperationsToCpuProgramsPass::createOutliningGroups(Region *region, int nex
 
     for (auto &op : region->getOps()) {
 
-        if (isa<IREE::Flow::DispatchTensorLoadOp>(op)) {
+        if (isa<IREE::TensorExt::DispatchTensorLoadOp>(op)) {
 
             noOutlineOps.insert(&op);
 
             // exclude all operations that are used perform the load
             SetVector<Operation *> upstreamOps;
-            getBackwardSlice(&op, &upstreamOps);
+            if (failed(getBackwardSlice(&op, &upstreamOps))) {
+                return failure();
+            }
             noOutlineOps.insert(upstreamOps.begin(), upstreamOps.end());
         }
-        else if (auto storeOp = dyn_cast<IREE::Flow::DispatchTensorStoreOp>(op)) {
+        else if (auto storeOp = dyn_cast<IREE::TensorExt::DispatchTensorStoreOp>(op)) {
 
             noOutlineOps.insert(&op);
 
@@ -94,7 +115,9 @@ AssignOperationsToCpuProgramsPass::createOutliningGroups(Region *region, int nex
             // exclude all the operations that are used to compute the target of the store
             if (auto targetOp = storeOp.getTarget().getDefiningOp()) {
                 SetVector<Operation *> upstreamOps;
-                getBackwardSlice(targetOp, &upstreamOps);
+                if (failed(getBackwardSlice(targetOp, &upstreamOps))) {
+                    return failure();
+                }
                 noOutlineOps.insert(upstreamOps.begin(), upstreamOps.end());
                 noOutlineOps.insert(targetOp);
             }
@@ -178,7 +201,7 @@ AssignOperationsToCpuProgramsPass::createOutliningGroups(Region *region, int nex
                 "{0}_{1}_{2}", torq_hl::stringifyExecutor(executor), op.getName(), nextProgramId
             );
 
-            groups.push_back({&op, {&op}, executor, executableName});
+            groups.push_back({&op, {&op}, executor, executableName, nextProgramId});
 
             nextProgramId++;
         }
@@ -415,7 +438,7 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
             auto tensorType = RankedTensorType::get({}, scalarOutputType);
 
             auto emptyTensor =
-                rewriter.create<tensor::EmptyOp>(scalarOutput.getLoc(), tensorType, ValueRange{});
+                tensor::EmptyOp::create(rewriter, scalarOutput.getLoc(), tensorType, ValueRange{});
 
             // here we use insert op instead of from_elements to avoid
             // an error during compilation with LLVMCPU backend
@@ -488,8 +511,9 @@ static LogicalResult outlineGroup(OutliningGroup &group) {
         auto tensorInput = dyn_cast<TypedValue<RankedTensorType>>(input);
 
         if (!tensorInput) {
-            group.root->dump();
-            llvm::report_fatal_error("Unsupported non-tensor input during outlining");
+            return group.emitError(
+                input.getLoc(), "Failed to outline program due to non tensor input value"
+            );
         }
 
         // we need to convert the input to a *dense* encoding with the correct memory space so
@@ -519,10 +543,9 @@ static LogicalResult outlineGroup(OutliningGroup &group) {
         auto rankedTensorType = dyn_cast<RankedTensorType>(output.getType());
 
         if (!rankedTensorType) {
-            llvm::dbgs() << "In program:\n";
-            maybeOutlineResult->program.dump();
-
-            llvm::report_fatal_error("Unsupported tensor ouput during outlining");
+            return group.emitError(
+                output.getLoc(), "Failed to outline program due to non tensor output value"
+            );
         }
 
         Value initTensor;
@@ -539,7 +562,7 @@ static LogicalResult outlineGroup(OutliningGroup &group) {
             auto initEncoding = createDenseEncoding(rankedTensorType, executorMemorySpace);
             auto initType = createRankedTensorTypeWithEncoding(rankedTensorType, initEncoding);
             initTensor =
-                rewriter.create<tensor::EmptyOp>(group.root->getLoc(), initType, ValueRange{});
+                tensor::EmptyOp::create(rewriter, group.root->getLoc(), initType, ValueRange{});
         }
 
         executorInits.push_back(initTensor);
@@ -547,9 +570,9 @@ static LogicalResult outlineGroup(OutliningGroup &group) {
     }
 
     // call the program
-    auto callOp = rewriter.create<torq_hl::CallProgramOp>(
-        group.root->getLoc(), executorOutputTypes, maybeOutlineResult->program, executorInits,
-        executorInputs
+    auto callOp = torq_hl::CallProgramOp::create(
+        rewriter, group.root->getLoc(), executorOutputTypes, maybeOutlineResult->program,
+        executorInits, executorInputs
     );
 
     // we need to convert back the outputs to the original encoding
@@ -557,7 +580,9 @@ static LogicalResult outlineGroup(OutliningGroup &group) {
         auto rankedTensorType = dyn_cast<RankedTensorType>(output.getType());
 
         if (!rankedTensorType) {
-            llvm::report_fatal_error("Unsupported non-tensor output during outlining");
+            return group.emitError(
+                output.getLoc(), "Failed to convert back non-ranked tensor value"
+            );
         }
 
         Value origEncodingOutputValue = convertTensorToType(
@@ -577,6 +602,52 @@ static LogicalResult outlineGroup(OutliningGroup &group) {
     }
 
     return success();
+}
+
+static void fallbackGroupToExecutor(SmallVector<OutliningGroup> &groups, bool disableHost) {
+
+    for (auto &group : groups) {
+
+        // if the group contains any operation that uses floating point
+        // we fall back to Host as CSS does not support floating point
+        for (auto op : group.toOutline) {
+            auto ret = op->walk([&](Operation *nestedOp) {
+                for (auto operand : nestedOp->getOperands()) {
+                    if (isa<FloatType>(operand.getType())) {
+                        return WalkResult::interrupt();
+                    }
+                }
+
+                for (auto result : nestedOp->getResults()) {
+                    if (isa<FloatType>(result.getType())) {
+                        return WalkResult::interrupt();
+                    }
+                }
+
+                return WalkResult::advance();
+            });
+
+            if (ret.wasInterrupted() && group.executor != torq_hl::Executor::Host) {
+
+                if (disableHost) {
+                    group.emitError(
+                        group.root->getLoc(),
+                        "Group requires floating point operations but Host execution is disabled"
+                    );
+                    return;
+                }
+
+                group.executor = torq_hl::Executor::Host;
+
+                group.name = llvm::formatv(
+                    "{0}_{1}_{2}_fallback", torq_hl::stringifyExecutor(group.executor),
+                    group.root->getName(), group.programId
+                );
+
+                break;
+            }
+        }
+    }
 }
 
 void AssignOperationsToCpuProgramsPass::runOnOperation() {
@@ -602,6 +673,9 @@ void AssignOperationsToCpuProgramsPass::runOnOperation() {
         // transform any remaining scalar input / output to/from tensors
         // so that all program arguments are tensors
         convertScalarInOutsToTensors(*maybeGroups);
+
+        // change executor based on operations in the group
+        // fallbackGroupToExecutor(*maybeGroups, disableHost);
 
         // we do the actual outlining of each group
         for (auto &group : *maybeGroups) {

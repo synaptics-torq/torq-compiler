@@ -6,6 +6,9 @@
 
 #include "PassesDetail.h"
 
+#include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+#include "mlir/IR/Attributes.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -16,6 +19,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
 
@@ -33,7 +37,7 @@ namespace mlir::syna::torq {
 
 namespace {
 
-class OutlineCpuProgramsPass : public OutlineCpuProgramsBase<OutlineCpuProgramsPass> {
+class OutlineCpuProgramsPass : public impl::OutlineCpuProgramsBase<OutlineCpuProgramsPass> {
   public:
     using OutlineCpuProgramsBase<OutlineCpuProgramsPass>::OutlineCpuProgramsBase;
 
@@ -44,16 +48,17 @@ static ModuleOp
 createExecutable(IRRewriter &rewriter, Location loc, torq_hl::Executor executor, std::string name) {
 
     auto executorName = torq_hl::stringifyExecutor(executor);
-    auto executableOp = rewriter.create<IREE::HAL::ExecutableOp>(loc, name);
+    auto executableOp = IREE::HAL::ExecutableOp::create(rewriter, loc, name);
 
     rewriter.setInsertionPointToStart(&executableOp.getBody().front());
     auto targetAttr = IREE::HAL::ExecutableTargetAttr::get(
         rewriter.getContext(), rewriter.getStringAttr("llvm-" + executorName),
         rewriter.getStringAttr(executorName)
     );
-    auto variantOp = rewriter.create<IREE::HAL::ExecutableVariantOp>(loc, executorName, targetAttr);
+    auto variantOp =
+        IREE::HAL::ExecutableVariantOp::create(rewriter, loc, executorName, targetAttr);
     rewriter.setInsertionPointToStart(&variantOp.getBody().front());
-    auto moduleOp = rewriter.create<ModuleOp>(loc);
+    auto moduleOp = ModuleOp::create(rewriter, loc);
 
     return moduleOp;
 }
@@ -69,8 +74,8 @@ static Operation *outlineProgram(
     // create the function that will host the outlined operations
     // the function has no input/outputs and instead uses flow.dispatch.tensor.load and
     // flow.dispatch.tensor.store operations to interoperate with the IREE LLVM codegen pipeline
-    auto funcOp = rewriter.create<func::FuncOp>(
-        loc, name, rewriter.getFunctionType(TypeRange{}, TypeRange{})
+    auto funcOp = func::FuncOp::create(
+        rewriter, loc, name, rewriter.getFunctionType(TypeRange{}, TypeRange{})
     );
 
     // set the translation strategy of the function to the default CPU strategy
@@ -95,11 +100,23 @@ static Operation *outlineProgram(
     SmallVector<Value> outputSubspanOps;
     SmallVector<Value> inputSubspanOps;
 
+    SmallVector<IREE::HAL::PipelineBindingAttr> bindingAttrs;
+    for (int i = 0; i < programArgs.size(); ++i) {
+        bindingAttrs.push_back(IREE::HAL::PipelineBindingAttr::get(
+            rewriter.getContext(), IREE::HAL::DescriptorType::StorageBuffer,
+            (i < outputCount ? IREE::HAL::DescriptorFlags::None
+                             : IREE::HAL::DescriptorFlags::ReadOnly)
+        ));
+    }
+
+    auto layout =
+        IREE::HAL::PipelineLayoutAttr::get(rewriter.getContext(), bindingAttrs, 0, std::nullopt);
+
     // create subspans for all arguments (both inputs and inits)
     for (auto [idx, input] : llvm::enumerate(programArgs)) {
 
-        auto accessType = idx < outputCount ? IREE::Flow::TensorAccess::ReadWrite
-                                            : IREE::Flow::TensorAccess::ReadOnly;
+        auto accessType = idx < outputCount ? IREE::TensorExt::TensorAccess::ReadWrite
+                                            : IREE::TensorExt::TensorAccess::ReadOnly;
 
         auto inputType = cast<RankedTensorType>(input.getType());
 
@@ -116,12 +133,15 @@ static Operation *outlineProgram(
             bindingType = inputType;
         }
 
-        auto dispatchTensorType = IREE::Flow::DispatchTensorType::get(accessType, bindingType);
+        auto dispatchTensorType = IREE::TensorExt::DispatchTensorType::get(accessType, bindingType);
 
-        auto subspanOp = rewriter.create<IREE::HAL::InterfaceBindingSubspanOp>(
-            loc, dispatchTensorType, APInt(64, 0), APInt(64, idx),
-            IREE::HAL::DescriptorType::StorageBuffer, nullptr, ValueRange{},
-            rewriter.getIndexAttr(4)
+        auto subspanOp = IREE::HAL::InterfaceBindingSubspanOp::create(
+            rewriter, loc, dispatchTensorType, layout, APInt(64, idx), nullptr, ValueRange{},
+            rewriter.getIndexAttr(4),
+            IREE::HAL::DescriptorFlagsAttr::get(
+                rewriter.getContext(), idx < outputCount ? IREE::HAL::DescriptorFlags::None
+                                                         : IREE::HAL::DescriptorFlags::ReadOnly
+            )
         );
 
         if (idx < outputCount) {
@@ -147,21 +167,23 @@ static Operation *outlineProgram(
         if (inputType.getElementType().isInteger(1)) {
 
             auto boundType =
-                cast<IREE::Flow::DispatchTensorType>(inputSubspanOps[idx].getType()).getBoundType();
+                cast<IREE::TensorExt::DispatchTensorType>(inputSubspanOps[idx].getType())
+                    .getBoundType();
 
-            auto tensorLoadOp = rewriter.create<IREE::Flow::DispatchTensorLoadOp>(
-                loc, cast<RankedTensorType>(boundType), inputSubspanOps[idx], ValueRange{}
+            auto tensorLoadOp = IREE::TensorExt::DispatchTensorLoadOp::create(
+                rewriter, loc, cast<RankedTensorType>(boundType), inputSubspanOps[idx], ValueRange{}
             );
 
             auto tensorCastOp =
-                rewriter.create<arith::TruncIOp>(loc, inputType, tensorLoadOp.getResult());
+                arith::TruncIOp::create(rewriter, loc, inputType, tensorLoadOp.getResult());
 
             map.map(input, tensorCastOp.getResult());
         }
         else {
 
-            auto tensorLoadOp = rewriter.create<IREE::Flow::DispatchTensorLoadOp>(
-                loc, cast<RankedTensorType>(input.getType()), inputSubspanOps[idx], ValueRange{}
+            auto tensorLoadOp = IREE::TensorExt::DispatchTensorLoadOp::create(
+                rewriter, loc, cast<RankedTensorType>(input.getType()), inputSubspanOps[idx],
+                ValueRange{}
             );
 
             map.map(input, tensorLoadOp);
@@ -186,26 +208,27 @@ static Operation *outlineProgram(
         // if the output type is i1 we need to extend it to i8 before storing it
         if (outputType.getElementType().isInteger(1)) {
 
-            auto boundType = cast<IREE::Flow::DispatchTensorType>(outputSubspanOps[idx].getType())
-                                 .getBoundType();
+            auto boundType =
+                cast<IREE::TensorExt::DispatchTensorType>(outputSubspanOps[idx].getType())
+                    .getBoundType();
 
-            auto tensorCastOp = rewriter.create<arith::ExtUIOp>(
-                loc, cast<RankedTensorType>(boundType), map.lookup(output)
+            auto tensorCastOp = arith::ExtUIOp::create(
+                rewriter, loc, cast<RankedTensorType>(boundType), map.lookup(output)
             );
 
-            rewriter.create<IREE::Flow::DispatchTensorStoreOp>(
-                loc, tensorCastOp, outputSubspanOps[idx], ValueRange{}
+            IREE::TensorExt::DispatchTensorStoreOp::create(
+                rewriter, loc, tensorCastOp, outputSubspanOps[idx], ValueRange{}
             );
         }
         else {
-            rewriter.create<IREE::Flow::DispatchTensorStoreOp>(
-                loc, map.lookup(output), outputSubspanOps[idx], ValueRange{}
+            IREE::TensorExt::DispatchTensorStoreOp::create(
+                rewriter, loc, map.lookup(output), outputSubspanOps[idx], ValueRange{}
             );
         }
     }
 
     // add a return operation to finish the function
-    rewriter.create<func::ReturnOp>(loc, ValueRange{});
+    func::ReturnOp::create(rewriter, loc, ValueRange{});
 
     // replace the program operation with a import program operation that uses the original program
     rewriter.setInsertionPoint(programOp);

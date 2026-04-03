@@ -25,10 +25,8 @@ echo "Updating submodules of third_party/iree..."
 git "${USE_EXTRA_HEADER[@]}" submodule sync
 
 git "${USE_EXTRA_HEADER[@]}" submodule update --depth=1 --init third_party/benchmark \
-                                                        third_party/cpuinfo \
                                                         third_party/flatcc \
                                                         third_party/googletest \
                                                         third_party/llvm-project \
                                                         third_party/tracy \
-                                                        third_party/pybind11 \
                                                         third_party/torch-mlir

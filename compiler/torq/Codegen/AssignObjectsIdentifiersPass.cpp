@@ -12,6 +12,7 @@
 #include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -26,7 +27,7 @@ namespace mlir::syna::torq {
 namespace {
 
 class AssignObjectsIdentifiersPass
-    : public AssignObjectsIdentifiersBase<AssignObjectsIdentifiersPass> {
+    : public impl::AssignObjectsIdentifiersBase<AssignObjectsIdentifiersPass> {
   public:
     AssignObjectsIdentifiersPass() = default;
     AssignObjectsIdentifiersPass(const AssignObjectsIdentifiersPass &pass) {}
@@ -85,7 +86,7 @@ void AssignObjectsIdentifiersPass::runOnOperation() {
         if (isa<torq_hl::ProgramOp, torq_hl::CreateInvocationOp, torq_hl::DescriptorOp,
                 torq_hl::ConstOp, torq_hl::MapBindingOp, func::ReturnOp, torq_hl::ImportProgramOp,
                 torq_hl::GetBlockOp, torq_hw::DispatchProfilingOp, arith::ConstantOp,
-                bufferization::ToMemrefOp, memref::GetGlobalOp>(op)) {
+                bufferization::ToBufferOp, memref::GetGlobalOp>(op)) {
             continue; // skip these ops
         }
 

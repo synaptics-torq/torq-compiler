@@ -229,6 +229,11 @@ ScaleClampInfo foldForwardScaleClamp(
     Value &value, int scaleValuesCount, int shift8b, int shift16b, bool isElementWiseOp = false
 );
 
+// Deduce per-channel added biases followed by clamp by analyzing value forward
+std::optional<ScaleClampInfo> foldFusedForwardPerChannelAddClamp(
+    Value &value, int channelDim, VectorIntOrFloat &bias, std::string &failReason
+);
+
 // Deduce weights zero-point forward
 // return zero-point if success, 0 if no zero-point found
 int foldForwardWeightZp(Value &value);

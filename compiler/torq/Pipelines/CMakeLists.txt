@@ -19,6 +19,7 @@ iree_cc_library(
     iree::target::torq::Conversions::LinalgToTorqHL
     iree::target::torq::Conversions::TorqHLToTorqHW
     iree::target::torq::Transforms::Linalg::Transforms
+    iree::compiler::Preprocessing::Common::Transforms
     iree::compiler::plugins::input::Torch::InputConversion
     iree::compiler::plugins::input::Torch::torch-mlir::TorchConversionDialectIR
     iree::compiler::plugins::input::Torch::torch-mlir::TorchDialectIR

@@ -30,6 +30,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Support/LLVM.h"
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -401,11 +402,17 @@ LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &cr
 
     auto text = executableBinaryOp.getData();
 
-    LLVM_DEBUG({ llvm::dbgs() << "*** CSS text: size = " << text.getRawData().size() << " ***\n"; }
-    );
+    if (auto textAttr = dyn_cast<DenseIntOrFPElementsAttr>(text)) {
+        LLVM_DEBUG({
+            llvm::dbgs() << "*** CSS text: size = " << textAttr.getRawData().size() << " ***\n";
+        });
 
-    if (failed(addSegment(xramAddress.value(), text, true))) {
-        return failure();
+        if (failed(addSegment(xramAddress.value(), textAttr, true))) {
+            return failure();
+        }
+    }
+    else {
+        return createInvocationOp.emitError() << "CSS text is not a DenseElementsAttr";
     }
 
     // add a segment with the arguments of the CSS call
@@ -749,9 +756,17 @@ Serializer::serializeHostCode(mlir::FunctionOpInterface funcOp) {
         return hostCodeExecutableOp.emitError("Missing host_code binary in host_code executable");
     }
 
-    auto data = hostCodeExecutableBinaryOp.getData().getRawData();
+    auto data = hostCodeExecutableBinaryOp.getData();
+    if (!data) {
+        return hostCodeExecutableBinaryOp.emitError("Missing data in host_code binary");
+    }
+    auto denseAttr = dyn_cast<DenseIntOrFPElementsAttr>(data);
+    if (!denseAttr) {
+        return hostCodeExecutableBinaryOp.emitError("Expected DenseIntOrFPElementsAttr for data");
+    }
+    auto rawData = denseAttr.getRawData();
 
-    return flatbuffers_uint8_vec_create(_builder, (const uint8_t *)data.data(), data.size());
+    return flatbuffers_uint8_vec_create(_builder, (const uint8_t *)rawData.data(), rawData.size());
 }
 
 FailureOr<flatbuffers_vec_ref_t>
@@ -786,7 +801,7 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
             // Ignore constants with element type of IndexType
             continue;
         }
-        else if (auto toMemrefOp = dyn_cast<bufferization::ToMemrefOp>(op);
+        else if (auto toMemrefOp = dyn_cast<bufferization::ToBufferOp>(op);
                  toMemrefOp && isa<arith::ConstantOp>(toMemrefOp.getTensor().getDefiningOp())) {
             // Ignore ToMemrefOp whose source is an arith.constant
             continue;
@@ -969,8 +984,9 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
 
             auto maybeBufferIds = waitOp->getAttrOfType<DenseI64ArrayAttr>("torq-buffer-ids");
 
-            auto bufferIds =
-                createUI32Vector(maybeBufferIds ? maybeBufferIds.asArrayRef() : std::nullopt);
+            auto bufferIds = createUI32Vector(
+                maybeBufferIds ? maybeBufferIds.asArrayRef() : ArrayRef<int64_t>()
+            );
 
             if (waitOp.getInvocation().getType().getExecutor() == torq_hl::Executor::NSS) {
                 auto waitNssParams = iree_hal_torq_WaitNSSParams_create(_builder, bufferIds);

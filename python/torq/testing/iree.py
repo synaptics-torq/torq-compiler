@@ -537,10 +537,6 @@ def torq_compiler_options(request, case_config):
     if request.config.getoption("--trace-buffers"):
         cmds.append('--torq-enable-buffer-debug-info')
 
-    gdb_port = request.config.getoption('--debug-torq-compiler')
-    if gdb_port > 0:
-        cmds = ['gdbserver', 'localhost:' + str(gdb_port)] + cmds
-
     return cmds
 
 
@@ -568,6 +564,12 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     target = chip_config.get("target", "SL2610")
 
     cmds = [str(torq_compiler), str(mlir_model_file), '-o', str(model_file)]
+    
+    gdb_port = request.config.getoption('--debug-torq-compiler')
+
+    if gdb_port > 0:
+        cmds = ['gdbserver', 'localhost:' + str(gdb_port)] + cmds
+        torq_compiler_timeout = None # disable timeout when debugging
 
     if target == "custom":
         dma_tp = chip_config.get("dma_theoretical_bytes_per_cycle", "")
@@ -584,7 +586,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         else:
             dump_path = Path(request.config.rootdir) / enable_debug_ir
 
-        cmds.extend(['--mlir-print-ir-after-all', f'--mlir-print-ir-tree-dir={dump_path}'])
+        cmds.extend(['--mlir-print-ir-after-all', f'--mlir-print-ir-tree-dir={dump_path}', '--mlir-elide-elementsattrs-if-larger=50'])
 
     if enable_phases_dump:
         cmds.append(f'--dump-compilation-phases-to={versioned_dir}/phases')
@@ -949,6 +951,7 @@ def llvmcpu_compiled_model(versioned_file, llvmcpu_compiler, request, mlir_model
 
     cmd = [str(llvmcpu_compiler),
            '--iree-hal-target-backends=llvm-cpu',
+           '--iree-llvmcpu-target-cpu=host',
            str(mlir_model_file),
            *llvmcpu_compiler_options,
            '-o', str(versioned_file)]

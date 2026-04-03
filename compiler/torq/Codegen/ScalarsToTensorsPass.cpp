@@ -46,7 +46,7 @@ class TensorizeExtractInsertOp : public OpRewritePattern<tensor::InsertOp> {
     }
 };
 
-class ScalarsToTensorsPass : public ScalarsToTensorsBase<ScalarsToTensorsPass> {
+class ScalarsToTensorsPass : public impl::ScalarsToTensorsBase<ScalarsToTensorsPass> {
   public:
     using ScalarsToTensorsBase<ScalarsToTensorsPass>::ScalarsToTensorsBase;
     void runOnOperation() override;

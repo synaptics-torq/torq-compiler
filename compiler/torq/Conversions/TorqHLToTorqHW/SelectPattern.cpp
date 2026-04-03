@@ -86,8 +86,8 @@ LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &re
         }
     }
 
-    auto trueInputAddr = rewriter.create<GetAddressOp>(op.getLoc(), op.getInput2()).getAddress();
-    auto falseInputAddr = rewriter.create<GetAddressOp>(op.getLoc(), op.getInput3()).getAddress();
+    auto trueInputAddr = GetAddressOp::create(rewriter, op.getLoc(), op.getInput2()).getAddress();
+    auto falseInputAddr = GetAddressOp::create(rewriter, op.getLoc(), op.getInput3()).getAddress();
     rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
         op,                                         // Operation to replace
         "select",                                   // Task name

@@ -22,10 +22,9 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/TargetSelect.h"
 
-#include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -140,7 +139,7 @@ bool markOpFuseGroup(
     }
 
     if (isa<arith::ConstantOp, tensor::EmptyOp,
-            mlir::iree_compiler::IREE::Flow::DispatchTensorLoadOp,
+            mlir::iree_compiler::IREE::TensorExt::DispatchTensorLoadOp,
             mlir::iree_compiler::IREE::HAL::InterfaceBindingSubspanOp>(op)) {
         return true;
     }
@@ -706,6 +705,211 @@ static ScaleClampInfo foldForwardFloatTruncClamp(Value &value) {
     return sci;
 }
 
+// Checks that the operation is an element-wise operation with the given arity
+// An element-wise operation is defined as a linalg.generic op with:
+//  - all parallel loops
+// - arity inputs and one output
+// - all indexing maps are identity
+// - the init tensor is not used to compute the output
+static bool isElementwiseOperation(linalg::GenericOp op, int arity) {
+
+    // no reductions
+    if (!op.isAllParallelLoops() || op.getNumLoops() < 1)
+        return false;
+
+    // aryity inputs and one output and all indexing maps are identity
+    if (op.getNumDpsInputs() != arity || op.getNumDpsInits() != 1 ||
+        !llvm::all_of(op.getIndexingMapsArray(), [](AffineMap map) { return map.isIdentity(); }))
+        return false;
+
+    // the init tensor is not used to compute the output
+    if (op.payloadUsesValueFromOperand(op.getDpsInitOperand(0)))
+        return false;
+
+    return true;
+}
+
+//
+// Find a fused per-channel add followed by clamp like this
+//
+//  %9 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>,
+//  affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2,
+//  d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%in, %bias :
+//  tensor<1x32x112x112xf32>, tensor<1x32x112x112xf32>) outs(%8 : tensor<1x32x112x112xbf16>) {
+//   ^bb0(%in: f32, %in_4: f32, %out: bf16):
+//     %10 = arith.addf %in, %in_4 : f32
+//     %11 = arith.truncf %10 : f32 to bf16
+//     %12 = arith.cmpf ult, %11, %cst_1 : bf16
+//     %13 = arith.select %12, %cst_1, %11 : bf16
+//     %14 = arith.cmpf ugt, %13, %cst_3 : bf16
+//     %15 = arith.select %14, %cst_3, %13 : bf16
+//     linalg.yield %15 : bf16
+//   } -> tensor<1x32x112x112xbf16>
+//
+//
+struct FuseBiasMatcher {
+
+    Value bias;     // this corresponds to %bias
+    Value clampMin; // this corresponds to %cst_1
+    Value clampMax; // this corresponds to %cst_3
+
+    static std::optional<FuseBiasMatcher> match(Operation *op, std::string &failureReason) {
+
+        auto genericOp = dyn_cast<linalg::GenericOp>(op);
+
+        if (!genericOp) {
+            failureReason = "not a linalg.generic op";
+            return std::nullopt;
+        }
+
+        if (!isElementwiseOperation(genericOp, 2)) {
+            failureReason = "operation is not elementwise with 2 inputs";
+            return std::nullopt;
+        }
+
+        auto input0Type = dyn_cast<ShapedType>(genericOp.getDpsInputOperand(0)->get().getType());
+        auto input1Type = dyn_cast<ShapedType>(genericOp.getDpsInputOperand(1)->get().getType());
+        auto outputType = dyn_cast<ShapedType>(genericOp.getDpsInitOperand(0)->get().getType());
+
+        // ensure expected types
+        if (!input0Type || !input1Type || !outputType || !input0Type.getElementType().isF32() ||
+            !input1Type.getElementType().isF32() || !outputType.getElementType().isBF16()) {
+            failureReason = "expected F32 inputs and BF16 output, got different types";
+            return std::nullopt;
+        }
+
+        // linalg.yield %15 : bf16
+
+        auto returnOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
+
+        if (!returnOp) {
+            failureReason = "expected linalg.yield terminator";
+            return std::nullopt;
+        }
+
+        // %15 = arith.select %14, %cst_3, %13 : bf16
+
+        auto select2Op = returnOp.getValues()[0].getDefiningOp<arith::SelectOp>();
+
+        if (!select2Op) {
+            failureReason = "expected arith.select operation as final result";
+            return std::nullopt;
+        }
+
+        auto maxVal = select2Op.getTrueValue();
+
+        // ensure maxVal is not defined in the genericOp
+        if (maxVal.getParentRegion() == &genericOp.getBodyRegion()) {
+            failureReason = "maxVal should not be defined inside genericOp body";
+            return std::nullopt;
+        }
+
+        // %14 = arith.cmpf ugt, %13, %cst_3 : bf16
+
+        auto cmp2Op = select2Op.getCondition().getDefiningOp<arith::CmpFOp>();
+        if (!cmp2Op) {
+            failureReason = "expected arith.cmpf operation as select condition";
+            return std::nullopt;
+        }
+
+        if (cmp2Op.getPredicate() != arith::CmpFPredicate::UGT) {
+            failureReason = "expected UGT predicate in cmp2";
+            return std::nullopt;
+        }
+
+        if (cmp2Op.getLhs() != select2Op.getFalseValue()) {
+            failureReason = "cmp2 lhs must match select2 false value";
+            return std::nullopt;
+        }
+
+        if (cmp2Op.getRhs() != select2Op.getTrueValue()) {
+            failureReason = "cmp2 rhs must match select2 true value";
+            return std::nullopt;
+        }
+
+        // %13 = arith.select %12, %cst_1, %11 : bf16
+
+        auto select1Op = cmp2Op.getLhs().getDefiningOp<arith::SelectOp>();
+
+        if (!select1Op) {
+            failureReason = "expected arith.select operation for cmp2 lhs";
+            return std::nullopt;
+        }
+
+        auto minVal = select1Op.getTrueValue();
+
+        // ensure minVal is not defined inside genericOp
+        if (minVal.getParentRegion() == &genericOp.getBodyRegion()) {
+            failureReason = "minVal should not be defined inside genericOp body";
+            return std::nullopt;
+        }
+
+        // %12 = arith.cmpf ult, %11, %cst_1 : bf16
+
+        auto cmp1Op = select1Op.getCondition().getDefiningOp<arith::CmpFOp>();
+        if (!cmp1Op) {
+            failureReason = "expected arith.cmpf operation as select1 condition";
+            return std::nullopt;
+        }
+
+        if (cmp1Op.getPredicate() != arith::CmpFPredicate::ULT) {
+            failureReason = "expected ULT predicate in cmp1";
+            return std::nullopt;
+        }
+
+        if (cmp1Op.getLhs() != select1Op.getFalseValue()) {
+            failureReason = "cmp1 lhs must match select1 false value";
+            return std::nullopt;
+        }
+
+        if (cmp1Op.getRhs() != select1Op.getTrueValue()) {
+            failureReason = "cmp1 rhs must match select1 true value";
+            return std::nullopt;
+        }
+
+        // %11 = arith.truncf %10 : f32 to bf16
+
+        auto truncOp = cmp1Op.getLhs().getDefiningOp<arith::TruncFOp>();
+
+        if (!truncOp) {
+            failureReason = "expected arith.truncf operation";
+            return std::nullopt;
+        }
+
+        // %10 = arith.addf %in, %in_4 : f32
+
+        auto addOp = truncOp.getIn().getDefiningOp<arith::AddFOp>();
+
+        if (!addOp) {
+            failureReason = "expected arith.addf operation as truncf input";
+            return std::nullopt;
+        }
+
+        auto in1 = dyn_cast<BlockArgument>(addOp.getLhs());
+
+        if (!in1) {
+            failureReason = "addf lhs must be a block argument";
+            return std::nullopt;
+        }
+
+        if (in1.getArgNumber() != 0) {
+            failureReason = "addf lhs must be the first block argument (arg 0)";
+            return std::nullopt;
+        }
+
+        auto in2 = dyn_cast<BlockArgument>(addOp.getRhs());
+
+        if (!in2) {
+            failureReason = "addf rhs must be a block argument";
+            return std::nullopt;
+        }
+
+        auto bias = genericOp.getDpsInputOperand(1)->get();
+
+        return FuseBiasMatcher{bias, minVal, maxVal};
+    }
+};
+
 ScaleClampInfo foldForwardScaleClamp(
     Value &value, int scaleValuesCount, int shift8b, int shift16b, bool isElementWiseOp
 ) {
@@ -1214,9 +1418,9 @@ PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nc
             sizes[wDim] -= left;
             sizes[wDim] -= right;
 
-            tensor::ExtractSliceOp newExtractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
-                value.getLoc(), val, createVector(offsets, rewriter), createVector(sizes, rewriter),
-                createVector(strides, rewriter)
+            tensor::ExtractSliceOp newExtractSliceOp = tensor::ExtractSliceOp::create(
+                rewriter, value.getLoc(), val, createVector(offsets, rewriter),
+                createVector(sizes, rewriter), createVector(strides, rewriter)
             );
 
             val = newExtractSliceOp.getResult();
@@ -1293,6 +1497,70 @@ template <typename T> bool elementwiseAdd(std::vector<T> &result, const std::vec
     return true;
 }
 
+std::optional<ScaleClampInfo> foldFusedForwardPerChannelAddClamp(
+    Value &value, int channelDim, VectorIntOrFloat &bias, std::string &failReason
+) {
+
+    ScaleClampInfo sci;
+
+    auto genericOp = getSingleUser<linalg::GenericOp>(value);
+
+    if (!genericOp) {
+        failReason = "no single linalg.generic user";
+        return std::nullopt;
+    }
+
+    auto matcher = FuseBiasMatcher::match(genericOp.getOperation(), failReason);
+
+    if (!matcher) {
+        return std::nullopt;
+    }
+
+    auto max = getFloatValue(matcher->clampMax);
+
+    if (!max) {
+        failReason = "no max value";
+        return std::nullopt;
+    }
+
+    auto min = getFloatValue(matcher->clampMin);
+
+    if (!min) {
+        failReason = "no min value";
+        return std::nullopt;
+    }
+
+    sci.max = llvm::bit_cast<uint32_t>(*max);
+    sci.min = llvm::bit_cast<uint32_t>(*min);
+
+    if (!bias.floats.size()) {
+        failReason = "bias floats size is zero";
+        return std::nullopt;
+    }
+
+    matcher->clampMax.dump();
+    matcher->clampMin.dump();
+
+    auto broadcastedBiasConst = computeArithConst(matcher->bias, true);
+
+    if (failed(broadcastedBiasConst)) {
+        failReason = "no broadcasted bias constant attribute";
+        return std::nullopt;
+    }
+
+    const auto &perChannelBiasValues =
+        computePerChannelValuesFloat(broadcastedBiasConst.value(), channelDim);
+
+    if (!elementwiseAdd(bias.floats, perChannelBiasValues)) {
+        failReason = "elementwise add failed";
+        return std::nullopt;
+    }
+
+    value = genericOp.getResults()[0];
+
+    return sci;
+}
+
 bool foldForwardPerChannelAdd(
     Value &value, int channelDim, VectorIntOrFloat &bias, int32_t *input_zp, Value inValue,
     int32_t *w_zp
@@ -1325,6 +1593,19 @@ bool foldForwardPerChannelAdd(
     auto lastOp = yieldOp.getValues()[0].getDefiningOp();
     if (!lastOp) {
         return false;
+    }
+
+    // in case the addition has the form:
+    //
+    //     %10 = arith.addf %in, %in_3 : f32
+    //     %11 = arith.truncf %10 : f32 to bf16
+    //     linalg.yield %11 : bf16
+    //
+    // we find the addf op behind the truncf op
+    if (auto truncfOp = dyn_cast<arith::TruncFOp>(lastOp)) {
+        if (truncfOp.getIn().getType().isF32() && truncfOp.getType().isBF16()) {
+            lastOp = truncfOp.getIn().getDefiningOp();
+        }
     }
 
     if (bias.ints.size() && !dyn_cast<arith::AddIOp>(lastOp) && !dyn_cast<arith::SubIOp>(lastOp)) {
@@ -1937,8 +2218,9 @@ LogicalResult foldForwardDepthToSpace(
     auto d2s_enum_mode =
         d2s_mode == 1 ? torq_hl::DepthToSpaceModeEnum::DCR : torq_hl::DepthToSpaceModeEnum::CRD;
 
-    auto d2sOp = rewriter.create<torq_hl::DepthToSpaceOp>(
-        transposeOp.getLoc(), transposeType(collapseOp.getResult().getType(), d2s_input_type),
+    auto d2sOp = torq_hl::DepthToSpaceOp::create(
+        rewriter, transposeOp.getLoc(),
+        transposeType(collapseOp.getResult().getType(), d2s_input_type),
         createInitTensorNCHW(collapseOp, rewriter), blockSize, d2s_enum_mode,
         createI8Const(
             rewriter, transposeOp, d2s_weights, llvm::ArrayRef<int64_t>{wram_width * num_inputs}
@@ -2159,7 +2441,7 @@ Value create1DimTensorFromRescaleScalar(
         LLVM_DEBUG({ llvm::errs() << "only support 8/16/32 bit integer\n"; });
         return input;
     }
-    auto output = rewriter.create<arith::ConstantOp>(constOp.getLoc(), constType, value);
+    auto output = arith::ConstantOp::create(rewriter, constOp.getLoc(), constType, value);
     return output.getResult();
 }
 
@@ -2256,7 +2538,7 @@ Value makeRescale16(
     int8_t weight_data = 1;
     int32_t bias_data = -inputZp;
     std::vector<int8_t> weights = {weight_data};
-    const std::vector<int32_t> bias = {bias_data};
+    const std::vector<int32_t> bias = {bias_data, /*isSigned=*/true};
     const std::vector<int32_t> scale = {scaleFactor};
 
     // make the rescale

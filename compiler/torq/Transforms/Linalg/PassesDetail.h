@@ -17,7 +17,15 @@
 namespace mlir::syna::torq {
 
 #define GEN_PASS_DECL
-#define GEN_PASS_CLASSES
+
+#define GEN_PASS_DEF_FOLDCONSTANTS
+#define GEN_PASS_DEF_GENERALIZELINALGNAMEDOPS
+#define GEN_PASS_DEF_OPTIMIZELINALGFORTORQ
+#define GEN_PASS_DEF_OPTIMIZETRANSPOSELAYOUT
+#define GEN_PASS_DEF_TORQCONVERTF16TOBF16
+#define GEN_PASS_DEF_TORQDEMOTEF32TOBF16
+#define GEN_PASS_DEF_TORQDEMOTEI64TOI32
+
 #include "torq/Transforms/Linalg/Passes.h.inc"
 
 } // namespace mlir::syna::torq

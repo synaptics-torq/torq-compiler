@@ -20,7 +20,7 @@
 namespace mlir::syna::torq {
 
 #define GEN_PASS_DECL
-#define GEN_PASS_CLASSES
+#define GEN_PASS_DEF_TOSATOTORQHLCONVERSION
 #include "torq/Conversions/TosaToTorqHL/Passes.h.inc"
 
 } // namespace mlir::syna::torq

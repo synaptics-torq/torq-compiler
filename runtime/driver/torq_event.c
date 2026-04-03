@@ -22,7 +22,8 @@ static iree_hal_torq_event_t* iree_hal_torq_event_cast(
   return (iree_hal_torq_event_t*)base_value;
 }
 
-iree_status_t iree_hal_torq_event_create(iree_allocator_t host_allocator,
+iree_status_t iree_hal_torq_event_create(iree_hal_queue_affinity_t queue_affinity, iree_hal_event_flags_t flags,
+                                         iree_allocator_t host_allocator,
                                          iree_hal_event_t** out_event) {
   IREE_ASSERT_ARGUMENT(out_event);
   *out_event = NULL;

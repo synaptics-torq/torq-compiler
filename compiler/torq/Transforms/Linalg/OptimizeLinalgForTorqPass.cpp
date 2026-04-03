@@ -8,6 +8,7 @@
 #include "Patterns.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
@@ -17,7 +18,8 @@
 
 namespace mlir::syna::torq {
 
-class OptimizeLinalgForTorqPass : public OptimizeLinalgForTorqBase<OptimizeLinalgForTorqPass> {
+class OptimizeLinalgForTorqPass
+    : public impl::OptimizeLinalgForTorqBase<OptimizeLinalgForTorqPass> {
   public:
     void runOnOperation() override {
 
@@ -47,7 +49,7 @@ class OptimizeLinalgForTorqPass : public OptimizeLinalgForTorqBase<OptimizeLinal
         auto frozenPatterns =
             FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), frozenPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
             return signalPassFailure();
         }
 

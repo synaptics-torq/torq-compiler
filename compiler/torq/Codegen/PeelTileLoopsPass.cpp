@@ -58,9 +58,11 @@ static FailureOr<affine::AffineApplyOp> canonicalizeMinMaxOp(
 // Simplify each affine min/max op in forOp, using the loop bounds.
 static void rewriteAffineOpInLoop(RewriterBase &rewriter, scf::ForOp forOp) {
 
-    std::optional<int64_t> tripCount =
-        constantTripCount(forOp.getLowerBound(), forOp.getUpperBound(), forOp.getStep());
-    if (!tripCount || *tripCount < 2)
+    std::optional<APInt> tripCount = constantTripCount(
+        forOp.getLowerBound(), forOp.getUpperBound(), forOp.getStep(), /*isSigned=*/true,
+        scf::computeUbMinusLb
+    );
+    if (!tripCount || tripCount->getSExtValue() < 2)
         return;
 
     int64_t lb = *getConstIntValue(forOp.getLowerBound());
@@ -71,7 +73,7 @@ static void rewriteAffineOpInLoop(RewriterBase &rewriter, scf::ForOp forOp) {
     affine::FlatAffineValueConstraints constraints;
     constraints.appendDimVar({iv});
     // iv <= lb + step*(tripCount - 1) ==> -iv + (lb + step*(tripCount - 1)) >= 0
-    constraints.addInequality({-1, (lb + step * (*tripCount - 1))});
+    constraints.addInequality({-1, (lb + step * (tripCount->getSExtValue() - 1))});
     // iv >= lb ==> iv - lb >= 0
     constraints.addInequality({1, -lb});
 
@@ -98,8 +100,9 @@ bool peelLoop(IRRewriter &rewriter, mlir::scf::ForOp forOp) {
     Value ub = forOp.getUpperBound();
     Value step = forOp.getStep();
 
-    std::optional<int64_t> tripCount = constantTripCount(lb, ub, step);
-    if (!tripCount || tripCount < 2)
+    std::optional<APInt> tripCount =
+        constantTripCount(lb, ub, step, /*isSigned=*/true, scf::computeUbMinusLb);
+    if (!tripCount || tripCount->getSExtValue() < 2)
         return false;
 
     scf::ForOp lastIteration;
@@ -114,7 +117,7 @@ bool peelLoop(IRRewriter &rewriter, mlir::scf::ForOp forOp) {
         forOp->emitWarning("can not peel the first iteration of an scf.for with dynamic shapes.");
     }
 
-    if (tripCount > 2) {
+    if (tripCount->getSExtValue() > 2) {
         if (failed(mlir::scf::peelForLoopLastIteration(rewriter, forOp, lastIteration))) {
             forOp->emitWarning("can not peel an scf.for with dynamic shapes.");
         }
@@ -126,7 +129,7 @@ bool peelLoop(IRRewriter &rewriter, mlir::scf::ForOp forOp) {
     return true;
 }
 
-struct PeelTileLoopsPass : public PeelTileLoopsBase<PeelTileLoopsPass> {
+struct PeelTileLoopsPass : public impl::PeelTileLoopsBase<PeelTileLoopsPass> {
     mlir::OpPassManager localPm_;
 
     PeelTileLoopsPass() { localPm_.addPass(mlir::createCanonicalizerPass()); }

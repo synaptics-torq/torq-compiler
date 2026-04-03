@@ -185,8 +185,8 @@ static torq_hw::SliceTaskOp lowerToHw(
         }
     }
 
-    return rewriter.create<torq_hw::SliceTaskOp>(
-        op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
         taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
     );
 }

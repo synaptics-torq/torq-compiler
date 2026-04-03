@@ -38,7 +38,7 @@ namespace mlir::syna::torq {
 
 namespace {
 
-class OutlineNSSProgramsPass : public OutlineNSSProgramsBase<OutlineNSSProgramsPass> {
+class OutlineNSSProgramsPass : public impl::OutlineNSSProgramsBase<OutlineNSSProgramsPass> {
   public:
     OutlineNSSProgramsPass() = default;
     OutlineNSSProgramsPass(const OutlineNSSProgramsPass &pass) {}
@@ -208,8 +208,8 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
     auto programBlockType = MemRefType::get({HwInfo::nss_max_program_size}, builder.getI8Type());
 
     // create the invocation
-    auto createInvocationOp = builder.create<torq_hl::CreateInvocationOp>(
-        loc, TypeRange{invocationType, programBlockType}, programOp.getName(),
+    auto createInvocationOp = torq_hl::CreateInvocationOp::create(
+        builder, loc, TypeRange{invocationType, programBlockType}, programOp.getName(),
         programOp.getProgram(), nullptr, nullptr, nullptr, nullptr
     );
 
@@ -281,8 +281,8 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
         startInputs.push_back(input);
     }
 
-    auto startOp = builder.create<torq_hl::StartProgramOp>(
-        loc,
+    auto startOp = torq_hl::StartProgramOp::create(
+        builder, loc,
         /* invocation = */ createInvocationOp.getInvocation(),
         /* code_sections = */ ValueRange{lramProgramAlloc},
         /* args = */ startInputs

@@ -15,11 +15,13 @@
 
 #include "iree/base/internal/flatcc/parsing.h"
 
+#include "iree/hal/utils/executable_header.h"
+
 #include "torq_executable_def_reader.h"
 #include "torq_executable_def_verifier.h"
 #include "torq_device.h"
 
-#include "iree/hal/pipeline_layout.h"
+//#include "iree/hal/pipeline_layout.h"
 #include "iree/base/internal/flags.h"
 
 #include <unistd.h>
@@ -51,7 +53,6 @@ iree_status_t iree_hal_torq_native_executable_create(
   iree_status_t status = iree_allocator_malloc(
       host_allocator,
       sizeof(*executable) +
-      executable_params->pipeline_layout_count * sizeof(*executable->pipeline_layouts) +
       executable_params->constant_count * sizeof(*executable_params->constants),
       (void**)&executable);
 
@@ -59,25 +60,11 @@ iree_status_t iree_hal_torq_native_executable_create(
   executable->program = nullptr;
 
   executable->program = malloc(executable_params->executable_data.data_length);
-
-  if (executable->program == nullptr) {    
-    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
-  }
-  
   memcpy(executable->program, executable_params->executable_data.data, executable_params->executable_data.data_length);
-
-  executable->pipeline_layout_count = executable_params->pipeline_layout_count;
-
-  for (iree_host_size_t i = 0; i <  executable_params->pipeline_layout_count; ++i) {
-    executable->pipeline_layouts[i] = executable_params->pipeline_layouts[i];
-    iree_hal_pipeline_layout_retain(executable->pipeline_layouts[i]);
-  }
 
   if (executable_params->constant_count > 0) {
     uint32_t* target_constants =
-        (uint32_t*)((uint8_t*)executable + sizeof(*executable) +
-                    executable_params->pipeline_layout_count *
-                        sizeof(*executable->pipeline_layouts));
+        (uint32_t*)((uint8_t*)executable + sizeof(*executable));    
     memcpy(target_constants, executable_params->constants,
            executable_params->constant_count *
                sizeof(*executable_params->constants));
@@ -150,15 +137,42 @@ static void printDispatchInvocationInfo(iree_hal_torq_native_executable_t* execu
   
   LOGD << "Dispatch State:";
   LOGD << "  executable=" << executable;
-  LOGD << "  workgroup_count x=" << dispatch_state->workgroup_count_x << " y=" << dispatch_state->workgroup_count_y << " z=" << dispatch_state->workgroup_count_z;
-  LOGD << "  pipeline_layout_count=" << executable->pipeline_layout_count;
+  LOGD << "  workgroup_count x=" << dispatch_state->workgroup_count_x << " y=" << dispatch_state->workgroup_count_y << " z=" << dispatch_state->workgroup_count_z;  
   LOGD << "  binding count=" << std::to_string(dispatch_state->binding_count);
-  LOGD << "  constants count=" << dispatch_state->push_constant_count;
+  LOGD << "  constants count=" << dispatch_state->constant_count;
   
   for (iree_host_size_t i = 0; i < dispatch_state->binding_count; ++i) {
       LOGD << "  binding[" << i << "]: buffer=" << dispatch_state->binding_ptrs[i] << " length=" << dispatch_state->binding_lengths[i];
   }
 
+}
+
+iree_status_t iree_hal_torq_native_executable_infer_format(
+    iree_const_byte_span_t executable_data,
+    iree_host_size_t executable_format_capacity, char* executable_format,
+    iree_host_size_t* out_inferred_size) {
+        
+  // Read the header prefix (with unsafe inference if size is unknown).
+  const bool unsafe_infer_size = (executable_data.data_length == 0);
+  iree_const_byte_span_t flatbuffer_data = iree_const_byte_span_empty();
+  IREE_RETURN_IF_ERROR(iree_hal_read_executable_flatbuffer_header(
+      executable_data, unsafe_infer_size,
+      iree_hal_torq_ExecutableDef_file_identifier, &flatbuffer_data));
+
+  // Verify the flatbuffer structure.
+  if (!iree_hal_torq_ExecutableDef_verify_as_root(
+          flatbuffer_data.data, flatbuffer_data.data_length)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "failed to verify executable flatbuffer structure");
+  }
+
+  std::string torq_file_format = "torq-fb";
+  memcpy(executable_format, torq_file_format.c_str(), torq_file_format.length() + /*NUL*/ 1);
+
+  // Return the total size (header + flatbuffer).
+  *out_inferred_size =
+      sizeof(iree_flatbuffer_file_header_t) + flatbuffer_data.data_length;
+  return iree_ok_status();
 }
 
 iree_status_t iree_hal_torq_native_executable_run(iree_hal_executable_t* base_value, iree_hal_executable_dispatch_state_v0_t* dispatch_state) {

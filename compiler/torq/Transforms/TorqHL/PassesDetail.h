@@ -19,11 +19,10 @@
 
 namespace mlir::syna::torq_hl {
 
-#define GEN_PASS_CLASSES
 #define GEN_PASS_DECL
-// to get Pass Base class implement constructor with options and others automatically
-#define GEN_PASS_DEF_TORQHLOPTIMIZESEGMENTATION
 #define GEN_PASS_DEF_FORMDISPATCHREGIONS
+#define GEN_PASS_DEF_TORQHLOPTIMIZESEGMENTATION
+
 #include "torq/Transforms/TorqHL/Passes.h.inc"
 
 } // namespace mlir::syna::torq_hl

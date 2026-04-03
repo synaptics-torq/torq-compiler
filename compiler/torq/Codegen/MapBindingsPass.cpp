@@ -123,10 +123,16 @@ class HalInterfaceBindingSubspanPattern
                 }
             }
             else if (auto layout = llvm::dyn_cast<StridedLayoutAttr>(origType.getLayout())) {
+
                 auto elementSizeBytes = origType.getElementType().getIntOrFloatBitWidth() / 8;
-                if (layout.getOffset() * elementSizeBytes != byteOffset.getValue()) {
-                    return subspanOp.emitError("binding byte offset does not match layout");
+
+                // check if the offset is dynamic
+                if (layout.getOffset() != ShapedType::kDynamic) {
+                    if (layout.getOffset() * elementSizeBytes != byteOffset.getValue()) {
+                        return subspanOp.emitError("binding byte offset does not match layout");
+                    }
                 }
+
                 auto strides = layout.getStrides();
                 int lowerStride = 1;
                 for (int i = strides.size() - 1; i >= 0; i--) {
@@ -162,16 +168,17 @@ class HalInterfaceBindingSubspanPattern
     }
 };
 
-template <typename OpTy> struct ElideNoOp final : public OpRewritePattern<OpTy> {
-    using OpRewritePattern<OpTy>::OpRewritePattern;
+struct ElideNoOp final : public OpRewritePattern<memref::AssumeAlignmentOp> {
+    using OpRewritePattern<memref::AssumeAlignmentOp>::OpRewritePattern;
 
-    LogicalResult matchAndRewrite(OpTy op, PatternRewriter &rewriter) const override {
-        rewriter.eraseOp(op);
+    LogicalResult
+    matchAndRewrite(memref::AssumeAlignmentOp op, PatternRewriter &rewriter) const override {
+        rewriter.replaceOp(op, op.getMemref());
         return success();
     }
 };
 
-class MapBindingsPass : public MapBindingsBase<MapBindingsPass> {
+class MapBindingsPass : public impl::MapBindingsBase<MapBindingsPass> {
   public:
     MapBindingsPass() = default;
     MapBindingsPass(const MapBindingsPass &pass) {}
@@ -187,9 +194,9 @@ void MapBindingsPass::runOnOperation() {
     RewritePatternSet patterns(ctx);
 
     patterns.add<HalInterfaceBindingSubspanPattern>(ctx);
-    patterns.add<ElideNoOp<memref::AssumeAlignmentOp>>(ctx);
+    patterns.add<ElideNoOp>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
 }

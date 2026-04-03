@@ -49,8 +49,20 @@ struct Out {
 // which determines which positions get data vs zeros.
 static torq_hw::SliceTaskOp
 lowerToHw(torq_hl::InterleavedInsertOp op, PatternRewriter &rewriter, Value taskInitTensor) {
+
+    // Perform rank expansion if needed
+    auto rankDiff = op.getInit().getType().getRank() - op.getInput().getType().getRank();
+
+    assert(rankDiff >= 0 && "Input tensor rank cannot be greater than init tensor rank");
+
     // Define operands in LRAM
     LData input(op.getInput());
+
+    // Append leading singleton dimensions to input to match init tensor rank
+    for (int i = 0; i < rankDiff; i++) {
+        input.insertDim(0, 1);
+    }
+
     LData output(op.getInit());
     LData weight(op.getWeights());
 
@@ -111,9 +123,9 @@ lowerToHw(torq_hl::InterleavedInsertOp op, PatternRewriter &rewriter, Value task
         }
     }
 
-    return rewriter.create<torq_hw::SliceTaskOp>(
-        op.getLoc(), slice.name(), op.getInput(), op.getWeights(), Value(), taskInitTensor,
-        slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), Value(),
+        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
     );
 }
 

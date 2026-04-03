@@ -8,11 +8,14 @@ import tensorflow as tf
 import numpy as np
 
 
+from torq.testing.tensorflow import run_with_tflite
+
 # Import the direct TFLite layer extractor (preserves quantization)
-from torq.testing.tflite_layer_extractor import extract_all_layers
+from torq.testing.tflite_layer_extractor import extract_all_layers, TFLiteTensorOutputExporter
 
 from torq.testing.versioned_fixtures import (    
-    versioned_unhashable_object_fixture, versioned_hashable_object_fixture
+    versioned_unhashable_object_fixture, versioned_hashable_object_fixture, versioned_cached_data_fixture,
+    versioned_generated_file_fixture
 )
 
 
@@ -34,6 +37,7 @@ class TFLiteLayerCase:
     is_layer: bool = False
     extraction_failed: bool = False
     is_quantized: bool = False
+    input_tensors: List[int] = None
 
     @property
     def model_path(self) -> Optional[str]:
@@ -107,27 +111,17 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
                 return result
             except Exception as e:
                 print(f"Cache load failed for {model_name}: {e}")
-        
+
         # Use the new direct layer extractor that preserves quantization
         print(f"Processing {tflite_path.name} with quantization-preserving extractor...")
         
-        try:
-            extraction_results = extract_all_layers(
-                str(tflite_path),
-                str(layers_dir),
-                max_layers=max_layers,
-                force=force_extract
-            )
-        except Exception as e:
-            print(f"ERROR: Failed to extract layers from {tflite_path.name}: {e}")
-            # Return only the full-model case so test collection doesn't abort
-            cases.append(TFLiteLayerCase(
-                name=f"{model_name}_full_model",
-                full_model_path=str(tflite_path),
-                is_layer=False
-            ))
-            return cases
-        
+        extraction_results = extract_all_layers(
+            str(tflite_path),
+            str(layers_dir),
+            max_layers=max_layers,
+            force=force_extract
+        )        
+
         for result in extraction_results:
             op_name = result['op_name']
             op_index = result['layer_index']
@@ -148,13 +142,15 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
             
             layer_tflite = Path(result['layer_file'])
             
+            
             cases.append(TFLiteLayerCase(name=layer_name, 
                 full_model_path=str(tflite_path),
                 layer_model_path=str(layer_tflite),
                 op_name=op_name,
                 op_index=op_index,
                 is_layer=True,
-                is_quantized=result.get('is_quantized', False)
+                is_quantized=result.get('is_quantized', False),
+                input_tensors=[x['index'] for x in result.get('inputs', []) if not x['is_constant']]
             ))
         
         # Add full model case
@@ -273,6 +269,47 @@ def tflite_layer_model(request):
     """Fixture that provides the TFLite model for the current test case."""
 
     return request.param
+
+
+@versioned_generated_file_fixture("tflite")
+def tflite_layer_inputs_model(request, versioned_file, tflite_layer_model: TFLiteLayerCase):    
+    """
+    Creates a new TFLite model file that exposes the inputs of the layer under test as subgraph outputs, so we can
+    easily extract the reference inputs for the layer tests.
+    """
+    assert tflite_layer_model.is_layer, "This fixture should only be used for layer test cases"
+    extractor = TFLiteTensorOutputExporter(tflite_layer_model.full_model_path)    
+    extractor.export(versioned_file, tflite_layer_model.input_tensors)
+
+
+@pytest.fixture
+def full_model_input_data(request, case_config):
+    """
+    Fixture that provides the input data for the full model test case.
+
+    This will be used by the tflite_layer_inputs fixture to compute the reference inputs 
+    for the layer test cases, by running the full model and extracting the relevant tensors.
+    For full model test cases, the value is just passed through directly.
+    """
+    return request.getfixturevalue(case_config['full_model_input_data'])
+
+
+@versioned_cached_data_fixture
+def tflite_layer_inputs(request, tflite_layer_model: TFLiteLayerCase, full_model_input_data):    
+    """
+    Computes the reference inputs for a TFLite layer test case by running the full model 
+    and extracting the relevant tensors.
+    """
+
+    if not tflite_layer_model.is_layer:
+        return full_model_input_data
+    
+    tflite_layer_inputs_model = request.getfixturevalue("tflite_layer_inputs_model")
+    
+    results = run_with_tflite(tflite_layer_inputs_model.file_path, full_model_input_data)
+
+    # return the values for all the inputs
+    return [result[1] for result in results]
 
 
 @versioned_unhashable_object_fixture

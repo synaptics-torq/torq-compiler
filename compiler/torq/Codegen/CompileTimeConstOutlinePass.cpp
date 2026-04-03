@@ -14,8 +14,10 @@
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/MemoryUtils.h"
 
-#include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtDialect.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -67,7 +69,7 @@ LogicalResult walkDefChainContained(
             continue;
         }
         // the value depends on the input, we cannot compute this
-        if (isa<iree_compiler::IREE::Flow::DispatchTensorLoadOp,
+        if (isa<iree_compiler::IREE::TensorExt::DispatchTensorLoadOp,
                 iree_compiler::IREE::HAL::InterfaceBindingSubspanOp>(defOp)) {
             LLVM_DEBUG({ llvm::dbgs() << "Value depends on inputs, cannot compute statically\n"; });
 
@@ -123,12 +125,13 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
         auto lb = forOp.getLowerBound();
         auto ub = forOp.getUpperBound();
         auto step = forOp.getStep();
-        auto maybeUpperBound = constantTripCount(lb, ub, step);
+        auto maybeUpperBound =
+            constantTripCount(lb, ub, step, /*isSigned=*/true, scf::computeUbMinusLb);
         if (!maybeUpperBound) {
             LLVM_DEBUG(llvm::dbgs() << "Failed to compute upper bound for ForOp: "; forOp->dump(););
             return failure();
         }
-        int64_t upperBound = *maybeUpperBound;
+        int64_t upperBound = maybeUpperBound->getSExtValue();
 
         auto opTy = dyn_cast<RankedTensorType>(op->getResult(0).getType());
         auto shape = opTy.getShape();
@@ -260,7 +263,7 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
 // The pass looks for operations marked as compile-time-const and
 // replaces them with constant operations computed at compile time.
 class CompileTimeConstOutlinePass
-    : public CompileTimeConstOutlineBase<CompileTimeConstOutlinePass> {
+    : public impl::CompileTimeConstOutlineBase<CompileTimeConstOutlinePass> {
   public:
     using CompileTimeConstOutlineBase::CompileTimeConstOutlineBase;
 

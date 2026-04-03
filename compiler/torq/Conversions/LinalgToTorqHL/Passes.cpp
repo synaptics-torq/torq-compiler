@@ -54,7 +54,7 @@ void populateLinalgToTorqHLPrePatternsLowPrio(
 }
 
 class LinalgToTorqHLConversionPass
-    : public LinalgToTorqHLConversionBase<LinalgToTorqHLConversionPass> {
+    : public impl::LinalgToTorqHLConversionBase<LinalgToTorqHLConversionPass> {
   public:
     using LinalgToTorqHLConversionBase::LinalgToTorqHLConversionBase;
 
@@ -115,7 +115,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLConversi
 }
 
 class LinalgToTorqHLPreConversionPass
-    : public LinalgToTorqHLPreConversionBase<LinalgToTorqHLPreConversionPass> {
+    : public impl::LinalgToTorqHLPreConversionBase<LinalgToTorqHLPreConversionPass> {
   public:
     using LinalgToTorqHLPreConversionBase::LinalgToTorqHLPreConversionBase;
 
@@ -128,7 +128,7 @@ class LinalgToTorqHLPreConversionPass
         auto frozenPatterns =
             FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), frozenPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
             return signalPassFailure();
         }
 
@@ -138,7 +138,7 @@ class LinalgToTorqHLPreConversionPass
         auto lowPrioFrozenPatterns =
             FrozenRewritePatternSet(std::move(lowPrioPatterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), lowPrioFrozenPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), lowPrioFrozenPatterns))) {
             return signalPassFailure();
         }
     }
@@ -149,7 +149,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLPreConve
 }
 
 // DEADCODE:
-class TensorToLinalgPass : public TensorToLinalgBase<TensorToLinalgPass> {
+class TensorToLinalgPass : public impl::TensorToLinalgBase<TensorToLinalgPass> {
   public:
     using TensorToLinalgBase::TensorToLinalgBase;
 
@@ -163,7 +163,7 @@ class TensorToLinalgPass : public TensorToLinalgBase<TensorToLinalgPass> {
         auto frozenPatterns =
             FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), frozenPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
             return signalPassFailure();
         }
     }
@@ -175,7 +175,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToLinalgPass() {
 }
 
 class MarkPatternsForTileAndFusePass
-    : public MarkPatternsForTileAndFuseBase<MarkPatternsForTileAndFusePass> {
+    : public impl::MarkPatternsForTileAndFuseBase<MarkPatternsForTileAndFusePass> {
   public:
     using MarkPatternsForTileAndFuseBase::MarkPatternsForTileAndFuseBase;
 
@@ -196,7 +196,7 @@ class MarkPatternsForTileAndFusePass
         auto preFrozenPatterns =
             FrozenRewritePatternSet(std::move(prePatterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), preFrozenPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), preFrozenPatterns))) {
             return signalPassFailure();
         }
 
@@ -207,7 +207,7 @@ class MarkPatternsForTileAndFusePass
             std::move(preLowPrioPatterns), disabledPatterns, enabledPatterns
         );
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), preLowPrioFrozenPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), preLowPrioFrozenPatterns))) {
             return signalPassFailure();
         }
 
@@ -217,7 +217,7 @@ class MarkPatternsForTileAndFusePass
         auto linalgFrozenPatterns =
             FrozenRewritePatternSet(std::move(linalgPatterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), linalgFrozenPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), linalgFrozenPatterns))) {
             return signalPassFailure();
         }
     }
@@ -228,7 +228,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkPatternsForTileAnd
 }
 
 class ArithToTorqHLConversionPass
-    : public ArithToTorqHLConversionBase<ArithToTorqHLConversionPass> {
+    : public impl::ArithToTorqHLConversionBase<ArithToTorqHLConversionPass> {
   public:
     using ArithToTorqHLConversionBase::ArithToTorqHLConversionBase;
 
@@ -237,7 +237,7 @@ class ArithToTorqHLConversionPass
         auto *ctx = funcOp.getContext();
         RewritePatternSet patterns(ctx);
         populateArithToTorqHLPatterns(ctx, patterns);
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
             return signalPassFailure();
         }
     }

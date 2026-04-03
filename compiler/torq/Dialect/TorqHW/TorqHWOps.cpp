@@ -26,6 +26,7 @@
 #include "mlir/Support/LLVM.h"
 
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributeInterfaces.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -36,8 +37,8 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Casting.h"
-
 #include "llvm/Support/CommandLine.h"
+
 #include <numeric>
 
 #define GET_OP_CLASSES
@@ -361,7 +362,9 @@ LogicalResult SliceTaskOp::verify() {
         // Get the strides and offset of the memref.
         int64_t baseOffset;
         SmallVector<int64_t, 8> memrefStridesElements;
-        assert(!failed(getStridesAndOffset(qType, memrefStridesElements, baseOffset)));
+        if (failed(qType.getStridesAndOffset(memrefStridesElements, baseOffset))) {
+            return emitOpError("Failed to get strides and offset for Q memref type: ") << qType;
+        }
 
         // Get the shape of the memref.
         ArrayRef<int64_t> shape = qType.getShape();

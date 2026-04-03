@@ -14,7 +14,8 @@
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqHw.h"
 
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -430,8 +431,8 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
         rewriter.setInsertionPoint(extractOp);
 
         // create an extract slice on the input of the convert
-        auto preExtract = rewriter.create<tensor::ExtractSliceOp>(
-            extractOp.getLoc(), op.getInput(), extractOp.getMixedOffsets(),
+        auto preExtract = tensor::ExtractSliceOp::create(
+            rewriter, extractOp.getLoc(), op.getInput(), extractOp.getMixedOffsets(),
             extractOp.getMixedSizes(), extractOp.getMixedStrides()
         );
 
@@ -531,12 +532,11 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
 
         auto newDestEncoding = createDenseEncoding(destType, torq_hl::MemorySpace::Lram);
 
-        auto newDestValue =
-            rewriter
-                .create<tensor::EmptyOp>(
-                    rootOp.getLoc(), destType.getShape(), destType.getElementType(), newDestEncoding
-                )
-                .getResult();
+        auto newDestValue = tensor::EmptyOp::create(
+                                rewriter, rootOp.getLoc(), destType.getShape(),
+                                destType.getElementType(), newDestEncoding
+        )
+                                .getResult();
 
         for (auto insertOp : llvm::reverse(insertOps)) {
 
@@ -546,8 +546,8 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
             auto newSource = convertTensorToEncoding(rewriter, insertOp.getSource(), lramEncoding);
 
             // create a new insert slice op that works in LRAM
-            auto newInsertOp = rewriter.create<tensor::InsertSliceOp>(
-                insertOp.getLoc(), newSource, newDestValue, insertOp.getMixedOffsets(),
+            auto newInsertOp = tensor::InsertSliceOp::create(
+                rewriter, insertOp.getLoc(), newSource, newDestValue, insertOp.getMixedOffsets(),
                 insertOp.getMixedSizes(), insertOp.getMixedStrides()
             );
 
@@ -641,7 +641,7 @@ class FoldDuplicateConversion : public OpRewritePattern<torq_hl::ConvertOp> {
     }
 };
 
-class FoldConvertPass : public FoldConvertBase<FoldConvertPass> {
+class FoldConvertPass : public impl::FoldConvertBase<FoldConvertPass> {
   public:
     using FoldConvertBase<FoldConvertPass>::FoldConvertBase;
     void runOnOperation() override;
@@ -664,7 +664,7 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<SwapExtractAndConvert>(ctx);
 #endif
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
 }

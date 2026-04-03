@@ -1,5 +1,4 @@
 [submodule "third_party/iree"]
 	path = third_party/iree
 	url = ../iree.git
-	branch = torq-old
 	

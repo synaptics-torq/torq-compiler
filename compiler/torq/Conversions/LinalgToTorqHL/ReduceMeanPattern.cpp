@@ -296,8 +296,8 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             auto s = inputType.getShape();
             // [B, F] -> [B, 1, 1, F] where B is batch (dim 0) and F is features (dim 1)
             auto nchwType = RankedTensorType::get({s[0], 1, 1, s[1]}, inputType.getElementType());
-            inputNCHW = rewriter.create<tensor::ExpandShapeOp>(
-                loc, nchwType, input, SmallVector<ReassociationIndices>{{0}, {1, 2, 3}}
+            inputNCHW = tensor::ExpandShapeOp::create(
+                rewriter, loc, nchwType, input, SmallVector<ReassociationIndices>{{0}, {1, 2, 3}}
             );
         }
         else if (rank == 3) {
@@ -305,8 +305,8 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             // [B, H, W] -> [B, 1, H, W] where B is batch (dim 0)
             auto nchwType =
                 RankedTensorType::get({s[0], 1, s[1], s[2]}, inputType.getElementType());
-            inputNCHW = rewriter.create<tensor::ExpandShapeOp>(
-                loc, nchwType, input, SmallVector<ReassociationIndices>{{0}, {1, 2}, {3}}
+            inputNCHW = tensor::ExpandShapeOp::create(
+                rewriter, loc, nchwType, input, SmallVector<ReassociationIndices>{{0}, {1, 2}, {3}}
             );
         }
         else if (rank != 4)
@@ -374,9 +374,9 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         float max_f = std::numeric_limits<float>::max();
         int32_t output_max = *reinterpret_cast<int32_t *>(&max_f);
 
-        auto reduceMeanOp = rewriter.create<torq_hl::ReduceMeanOp>(
-            loc, reduceMeanOutType, createInitTensor(meanOp, rewriter, reduceMeanOutType), 0, 0,
-            output_min, output_max,                // input_zp=0, output_zp=0, min, max
+        auto reduceMeanOp = torq_hl::ReduceMeanOp::create(
+            rewriter, loc, reduceMeanOutType, createInitTensor(meanOp, rewriter, reduceMeanOutType),
+            0, 0, output_min, output_max,          // input_zp=0, output_zp=0, min, max
             0, weights, biasScale, reduceMeanInput // shift_factor=0 for bf16
         );
 
@@ -437,7 +437,7 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             }
         }
 
-        out = rewriter.create<tensor::CollapseShapeOp>(loc, resultType, out, collapseIndices);
+        out = tensor::CollapseShapeOp::create(rewriter, loc, resultType, out, collapseIndices);
 
         rewriter.replaceOp(meanOp, out);
         return success();

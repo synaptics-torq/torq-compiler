@@ -54,7 +54,7 @@ class EncodeKernel : public OpInterfaceRewritePattern<torq_hl::KernelInterface> 
     }
 };
 
-class EncodeTensorsPass : public EncodeTensorsBase<EncodeTensorsPass> {
+class EncodeTensorsPass : public impl::EncodeTensorsBase<EncodeTensorsPass> {
   public:
     using EncodeTensorsBase<EncodeTensorsPass>::EncodeTensorsBase;
     void runOnOperation() override;

@@ -39,6 +39,7 @@ namespace mlir::syna::torq {
 bool isTorqCastOp(Operation *op, std::string &opName, std::string &failReason, bool *isUnsigned) {
 
     auto srcOp = dyn_cast<linalg::GenericOp>(op);
+
     // Initialize isUnsigned to false
     if (isUnsigned) {
         *isUnsigned = false;
@@ -74,6 +75,11 @@ bool isTorqCastOp(Operation *op, std::string &opName, std::string &failReason, b
     }
 
     auto castOp = yieldOp.getValues()[0].getDefiningOp();
+
+    if (!castOp) {
+        failReason = "Expected a defining operation for yield operand";
+        return false;
+    }
 
     if (inputElementType.isF32() && outputElementType.isBF16()) {
         castOp = dyn_cast_or_null<arith::TruncFOp>(castOp);
@@ -650,8 +656,8 @@ struct TransposeOpConversionRewrite : public OpRewritePattern<linalg::TransposeO
             return success();
         }
 
-        auto trOp = rewriter.create<torq_hl::TransposeOp>(
-            srcOp.getLoc(), srcOp.getResult()[0].getType(), srcOp.getInit(),
+        auto trOp = torq_hl::TransposeOp::create(
+            rewriter, srcOp.getLoc(), srcOp.getResult()[0].getType(), srcOp.getInit(),
             srcOp.getPermutationAttr(), srcOp.getInput()
         );
         rewriter.replaceOp(srcOp, trOp.getOutput());
@@ -1067,7 +1073,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
             RankedTensorType constType = RankedTensorType::get({1}, elemType);
             DenseElementsAttr value = DenseElementsAttr::get(constType, data.getValue());
             input1 =
-                rewriter.create<arith::ConstantOp>(srcOp.getLoc(), constType, value).getResult();
+                arith::ConstantOp::create(rewriter, srcOp.getLoc(), constType, value).getResult();
 
             return success();
         }
@@ -1260,7 +1266,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 else {
                     return rewriter.notifyMatchFailure(srcOp, "Unsupported constant type");
                 }
-                input1 = rewriter.create<arith::ConstantOp>(srcOp.getLoc(), constType, value)
+                input1 = arith::ConstantOp::create(rewriter, srcOp.getLoc(), constType, value)
                              .getResult();
 
                 bias = {data * sign};
@@ -1527,6 +1533,7 @@ class CastOpPattern : public OpRewritePattern<linalg::GenericOp> {
         if (!isTorqCastOp(srcOp, opName, failReason, &isUnsignedOp)) {
             return rewriter.notifyMatchFailure(srcOp, failReason);
         }
+
         Value input = srcOp.getInputs()[0];
         auto inputType = dyn_cast<RankedTensorType>(input.getType());
         auto inputElementType = inputType.getElementType();
@@ -1572,8 +1579,8 @@ struct BroadcastOpConversion : public OpRewritePattern<linalg::BroadcastOp> {
 
         auto outputType = cast<RankedTensorType>(srcOp.getInit().getType());
 
-        auto op = rewriter.create<torq_hl::BroadcastOp>(
-            srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
+        auto op = torq_hl::BroadcastOp::create(
+            rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
             srcOp.getDimensionsAttr(), srcOp.getInput()
         );
         rewriter.replaceOp(srcOp, op.getOutput());
@@ -1863,9 +1870,9 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
                          << "weight_data: " << weight_data << ", bias_data: " << bias_data << "\n";
         });
 
-        auto fmaOp = rewriter.create<torq_hl::FMAOp>(
-            srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType), outputZp,
-            outputMin, outputMax, shiftFactor,
+        auto fmaOp = torq_hl::FMAOp::create(
+            rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
+            outputZp, outputMin, outputMax, shiftFactor,
             createI8Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
             createI32Const(rewriter, srcOp, interleave(bias, scale)), input
         );
@@ -1896,11 +1903,9 @@ struct GenericToBroadcastOpConversion : public OpRewritePattern<linalg::GenericO
     LogicalResult
     matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
 
-        // FIXME: Copied from
-        // https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/Linalg/IR/LinalgInterfaces.cpp#L141.
-        // Remove after upgrading to latest MLIR.
+        // FIXME (iree-upgrade): see if we can use standard isaBroadcastOpInterface() here
         std::optional<SmallVector<int64_t>> equivalentToBroadcast =
-            isaBroadcastOpInterface(genericOp);
+            torqIsaBroadcastOpInterface(genericOp);
         if (!equivalentToBroadcast) {
             return failure();
         }
@@ -1939,8 +1944,8 @@ struct GenericToBroadcastOpConversion : public OpRewritePattern<linalg::GenericO
             }
         }
 
-        auto op = rewriter.create<torq_hl::BroadcastOp>(
-            genericOp.getLoc(), dstTy,
+        auto op = torq_hl::BroadcastOp::create(
+            rewriter, genericOp.getLoc(), dstTy,
             createInitTensor(genericOp, rewriter, mlir::cast<RankedTensorType>(dstTy)), dims, input
         );
         rewriter.replaceOp(genericOp, op.getResults());
@@ -2047,7 +2052,8 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<CeilOpPattern>(context);
     patterns.insert<FloorOpPattern>(context);
 
-    patterns.insert<RescaleOpConversion>(context);
+    // FIXME (upgrade):
+    // patterns.insert<RescaleOpConversion>(context);
     populateLinalgToTorqHLExtractPatterns(context, patterns, markFuseGroups);
     patterns.insert<AddOpPattern>(context);
 

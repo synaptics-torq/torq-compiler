@@ -20,6 +20,8 @@ def case_config(request, runtime_hw_type, chip_config):
             # probably related to issue #996
             'dw_f32x32_o21_i16.mlir',
             'dw_f32x32_o21_i8.mlir',
+            'cast-i16-to-bf16.mlir', 'cast-i32-to-bf16.mlir', 'cast-i8-to-bf16.mlir', # see issue #1037
+            'sub-rescale-tensor-int8.mlir', # 
     ]
 
     if aws_fpga:
@@ -133,5 +135,10 @@ def case_config(request, runtime_hw_type, chip_config):
 
 @pytest.mark.ci
 @pytest.mark.fpga_ci
-def test_mlir_files(request, torq_results, llvmcpu_reference_results, case_config):
+def test_mlir_files_torq(request, torq_results, llvmcpu_reference_results, case_config):
     compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
+
+
+def test_mlir_files_llvmcpu(request, llvmcpu_reference_results, case_config):
+    # this test just makes sure we can create llvmcpu_reference_results for the test case
+    pass

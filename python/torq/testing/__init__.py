@@ -12,7 +12,8 @@ pytest_plugins = [
     "torq.testing.iree",
     "torq.testing.onnx",
     "torq.testing.comparison",
-    "torq.testing.reporting"
+    "torq.testing.reporting",
+    "torq.testing.issues"
 ]
 
 # Add tensorflow plugin only if the right tensorflow version is available

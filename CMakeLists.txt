@@ -35,8 +35,7 @@ set(IREE_EXTERNAL_HAL_DRIVERS torq)
 set(IREE_INPUT_STABLEHLO OFF)
 add_subdirectory(third_party/iree)
 
-# TODO change generate_embed_data to iree-c-embed-data after IREE upgrade
 add_custom_target(torq
-  DEPENDS torq_rt_cm iree-compile torq-compile torq-mlir-lsp-server iree-run-module torq-run-module generate_embed_data iree-flatcc-cli iree-opt third_party/iree/compiler/bindings/python/all third_party/iree/runtime/bindings/python/all
+  DEPENDS torq_rt_cm iree-compile torq-compile torq-mlir-lsp-server iree-run-module torq-run-module iree-c-embed-data iree-flatcc-cli iree-opt third_party/iree/compiler/bindings/python/all third_party/iree/runtime/bindings/python/all
   COMMENT "Building Torq project with IREE"
 )

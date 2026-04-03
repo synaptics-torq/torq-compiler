@@ -24,6 +24,7 @@
 using mlir::bufferization::AnalysisState;
 using mlir::bufferization::BufferizableOpInterface;
 using mlir::bufferization::BufferizationOptions;
+using mlir::bufferization::BufferizationState;
 using mlir::bufferization::BufferRelation;
 using mlir::bufferization::replaceOpWithBufferizedValues;
 
@@ -99,9 +100,9 @@ struct TorqHLGenericOpBufferizableOpInterface
 
     Value bufferizeInput(
         Value value, Location loc, RewriterBase &rewriter,
-        const bufferization::BufferizationOptions &options
+        const bufferization::BufferizationOptions &options, BufferizationState &state
     ) const {
-        FailureOr<Value> maybeBuffer = getBuffer(rewriter, value, options);
+        FailureOr<Value> maybeBuffer = getBuffer(rewriter, value, options, state);
 
         if (failed(maybeBuffer)) {
             return nullptr;
@@ -141,12 +142,12 @@ struct TorqHLGenericOpBufferizableOpInterface
 
     Value bufferizeInit(
         Value value, Location loc, RewriterBase &rewriter,
-        const bufferization::BufferizationOptions &options
+        const bufferization::BufferizationOptions &options, BufferizationState &state
     ) const {
 
         auto tensorType = mlir::cast<RankedTensorType>(value.getType());
 
-        FailureOr<Value> maybeBuffer = getBuffer(rewriter, value, options);
+        FailureOr<Value> maybeBuffer = getBuffer(rewriter, value, options, state);
 
         if (failed(maybeBuffer)) {
             return nullptr;
@@ -177,7 +178,8 @@ struct TorqHLGenericOpBufferizableOpInterface
     }
 
     LogicalResult bufferize(
-        Operation *op, RewriterBase &rewriter, const bufferization::BufferizationOptions &options
+        Operation *op, RewriterBase &rewriter, const bufferization::BufferizationOptions &options,
+        BufferizationState &state
     ) const {
 
         OpBuilder::InsertionGuard g(rewriter);
@@ -196,7 +198,7 @@ struct TorqHLGenericOpBufferizableOpInterface
 
         // FIXME: for the moment we bufferize P in XRAM, but it would be better represented as a
         // vector
-        FailureOr<Value> maybePBuffer = getBuffer(rewriter, genericOp.getP(), options);
+        FailureOr<Value> maybePBuffer = getBuffer(rewriter, genericOp.getP(), options, state);
 
         if (failed(maybePBuffer)) {
             return op->emitError("unable to bufferize P operand");
@@ -206,7 +208,8 @@ struct TorqHLGenericOpBufferizableOpInterface
         newOutputBuffers.push_back(*maybePBuffer);
 
         if (genericOp.getD()) {
-            auto dBuffer = bufferizeInput(genericOp.getD(), genericOp.getLoc(), rewriter, options);
+            auto dBuffer =
+                bufferizeInput(genericOp.getD(), genericOp.getLoc(), rewriter, options, state);
 
             if (!dBuffer) {
                 return op->emitError("unable to bufferize D operand");
@@ -216,7 +219,8 @@ struct TorqHLGenericOpBufferizableOpInterface
         }
 
         if (genericOp.getW()) {
-            auto wBuffer = bufferizeInput(genericOp.getW(), genericOp.getLoc(), rewriter, options);
+            auto wBuffer =
+                bufferizeInput(genericOp.getW(), genericOp.getLoc(), rewriter, options, state);
 
             if (!wBuffer) {
                 return op->emitError("unable to bufferize W operand");
@@ -227,7 +231,7 @@ struct TorqHLGenericOpBufferizableOpInterface
 
         if (genericOp.getScale()) {
             auto scaleBuffer =
-                bufferizeInput(genericOp.getScale(), genericOp.getLoc(), rewriter, options);
+                bufferizeInput(genericOp.getScale(), genericOp.getLoc(), rewriter, options, state);
 
             if (!scaleBuffer) {
                 return op->emitError("unable to bufferize W operand");
@@ -246,8 +250,9 @@ struct TorqHLGenericOpBufferizableOpInterface
                 config.bias = GenericOpParam(config.scale.value(), genericOp.getBiasMap().value());
             }
             else {
-                auto biasBuffer =
-                    bufferizeInput(genericOp.getBias(), genericOp.getLoc(), rewriter, options);
+                auto biasBuffer = bufferizeInput(
+                    genericOp.getBias(), genericOp.getLoc(), rewriter, options, state
+                );
 
                 if (!biasBuffer) {
                     return op->emitError("unable to bufferize Bias operand");
@@ -258,7 +263,8 @@ struct TorqHLGenericOpBufferizableOpInterface
         }
 
         if (genericOp.getQ()) {
-            auto qBuffer = bufferizeInit(genericOp.getQ(), genericOp.getLoc(), rewriter, options);
+            auto qBuffer =
+                bufferizeInit(genericOp.getQ(), genericOp.getLoc(), rewriter, options, state);
 
             if (!qBuffer) {
                 return op->emitError("unable to bufferize Q operand");
@@ -269,7 +275,7 @@ struct TorqHLGenericOpBufferizableOpInterface
             newOutputBuffers.push_back(qBuffer);
         }
 
-        rewriter.create<GenericOp>(op->getLoc(), config);
+        GenericOp::create(rewriter, op->getLoc(), config);
 
         bufferization::replaceOpWithBufferizedValues(rewriter, op, newOutputBuffers);
 

@@ -4,6 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "mlir/IR/Types.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
@@ -15,6 +16,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
+#include "mlir/Dialect/Tosa/Utils/ConversionUtils.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -22,9 +24,14 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Transforms/DialectConversion.h"
+
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/LogicalResult.h"
+#include "llvm/Support/raw_ostream.h"
 
+#include <cstdint>
 #include <numeric>
 #include <type_traits>
 
@@ -58,8 +65,27 @@ static LogicalResult getScaleFactor(tosa::RescaleOp &rescaleOp, double &scaleFac
     if (rescaleOp.getPerChannel()) {
         return failure();
     }
-    scaleFactor =
-        static_cast<double>(rescaleOp.getMultiplier()[0]) / (1l << rescaleOp.getShift()[0]);
+
+    auto shiftVal = rescaleOp.getShift();
+    DenseElementsAttr shiftElem;
+    if (!matchPattern(shiftVal, m_Constant(&shiftElem))) {
+        llvm::errs() << "shift value must be constant in RescaleOp\n";
+        return failure();
+    }
+    int32_t shift = shiftElem.getValues<IntegerAttr>()[0].getInt();
+
+    DenseElementsAttr multiplierElems;
+    if (!matchPattern(rescaleOp.getMultiplier(), m_Constant(&multiplierElems))) {
+        llvm::errs() << "multiplier value must be constant in RescaleOp\n";
+        return failure();
+    }
+
+    llvm::SmallVector<int32_t> multiplierValues = llvm::to_vector(llvm::map_range(
+        multiplierElems.getValues<IntegerAttr>(),
+        [](IntegerAttr attr) -> int32_t { return static_cast<int32_t>(attr.getInt()); }
+    ));
+
+    scaleFactor = static_cast<double>(multiplierValues[0]) / (1l << shift);
 
     return success();
 }
@@ -70,12 +96,12 @@ Value fuseInputRescaleIfPossible(
     if (auto rescaleOp = input.getDefiningOp<tosa::RescaleOp>()) {
         // The input is the output of a rescale operator
         // Extract the zero point
-        uint32_t in_zp = rescaleOp.getInputZp();
-        if (input_zp && in_zp) {
+        FailureOr<int64_t> in_zp = rescaleOp.getInputZeroPoint();
+        if (input_zp && succeeded(in_zp)) {
             if (*input_zp) {
                 return input;
             }
-            *input_zp = in_zp;
+            *input_zp = static_cast<int32_t>(*in_zp);
         }
 
         // Extract the scale
@@ -91,7 +117,7 @@ Value fuseInputRescaleIfPossible(
         }
 
         // let's try to fuse the rescale with the current operator
-        if (mlir::cast<RankedTensorType>(rescaleOp.getOperand().getType())
+        if (mlir::cast<RankedTensorType>(rescaleOp.getOperand(0).getType())
                     .getElementType()
                     .getIntOrFloatBitWidth() == 32 &&
             mlir::cast<RankedTensorType>(rescaleOp.getResult().getType())
@@ -99,13 +125,13 @@ Value fuseInputRescaleIfPossible(
                     .getIntOrFloatBitWidth() == 32) {
             // the rescale is a 32 to 32 bit operation, we can fuse it with its
             // parent rescale that hopefully is 8 to 32 bit
-            return fuseInputRescaleIfPossible(rescaleOp.getOperand(), input_zp, scale);
+            return fuseInputRescaleIfPossible(rescaleOp.getOperand(0), input_zp, scale);
         }
         else if (mlir::cast<RankedTensorType>(rescaleOp.getResult().getType())
                      .getElementType()
                      .getIntOrFloatBitWidth() == 32) {
             // always fuse if rescale 8 -> 32
-            return rescaleOp.getOperand();
+            return rescaleOp.getOperand(0);
         }
     }
 
@@ -118,7 +144,7 @@ LogicalResult getFromConst(Value value, ElementsAttr &attr) {
     if (!constOp) {
         return failure();
     }
-    attr = constOp.getValue();
+    attr = constOp.getValues();
 
     return success();
 }
@@ -130,7 +156,7 @@ LogicalResult getFromArithConst(Value value, ElementsAttr &attr) {
     }
     // Fall back to tosa.const
     if (auto tosaConstOp = mlir::dyn_cast<tosa::ConstOp>(value.getDefiningOp())) {
-        attr = tosaConstOp.getValue();
+        attr = tosaConstOp.getValues();
         return success();
     }
     return failure();
@@ -203,8 +229,9 @@ LogicalResult reverseTConvWeights(
                                               strideW,        wBlocks, outputShape[3]};
     auto expandType = mlir::RankedTensorType::get(modWeightShape, elementType);
 
-    auto expand = rewriter.create<tensor::ExpandShapeOp>(
-        loc, expandType, weights, llvm::ArrayRef<llvm::SmallVector<int64_t, 2>>(expandReassoc)
+    auto expand = tensor::ExpandShapeOp::create(
+        rewriter, loc, expandType, weights,
+        llvm::ArrayRef<llvm::SmallVector<int64_t, 2>>(expandReassoc)
     );
 
     // Transpose to [hBlocks, wBlocks, OC, sH, sW, IC]
@@ -215,7 +242,7 @@ LogicalResult reverseTConvWeights(
     auto transposeType = mlir::RankedTensorType::get(modTransposeShape, elementType);
     auto transposeOutput = createInitTensor(loc, transposeType, rewriter);
     auto transpose =
-        rewriter.create<linalg::TransposeOp>(loc, expand.getResult(), transposeOutput, perm);
+        linalg::TransposeOp::create(rewriter, loc, expand.getResult(), transposeOutput, perm);
 
     // Collapse [hBlocks, wBlocks, OC] -> [OC*hBlocks*wBlocks], keeping [sH, sW, IC]
     llvm::SmallVector<llvm::SmallVector<int64_t, 2>> collapseReassoc{{0, 1, 2}, {3}, {4}, {5}};
@@ -224,8 +251,8 @@ LogicalResult reverseTConvWeights(
     };
     auto collapseType = mlir::RankedTensorType::get(newWeightShape, elementType);
 
-    auto collapse = rewriter.create<tensor::CollapseShapeOp>(
-        loc, collapseType, *transpose.getResults().begin(),
+    auto collapse = tensor::CollapseShapeOp::create(
+        rewriter, loc, collapseType, *transpose.getResults().begin(),
         llvm::ArrayRef<llvm::SmallVector<int64_t, 2>>(collapseReassoc)
     );
 
@@ -253,11 +280,11 @@ LogicalResult reverseTConvWeights(
 
     auto newWeights = createInitTensor(loc, collapseType, rewriter);
 
-    auto genericOp = rewriter.create<linalg::GenericOp>(
-        loc, TypeRange{newWeights.getType()}, ValueRange{collapse.getResult()},
+    auto genericOp = linalg::GenericOp::create(
+        rewriter, loc, TypeRange{newWeights.getType()}, ValueRange{collapse.getResult()},
         ValueRange{newWeights}, indexingMaps, iteratorTypes,
         [&](OpBuilder &b, Location loc, ValueRange args) {
-            b.create<linalg::YieldOp>(loc, args[0]);
+            linalg::YieldOp::create(b, loc, args[0]);
         }
     );
 
@@ -268,7 +295,7 @@ LogicalResult reverseTConvWeights(
     auto oihwType = mlir::RankedTensorType::get(oihwShape, elementType);
     auto oihwOutput = createInitTensor(loc, oihwType, rewriter);
     auto oihwTransposeOp =
-        rewriter.create<linalg::TransposeOp>(loc, genericOp.getResult(0), oihwOutput, oihwPerm);
+        linalg::TransposeOp::create(rewriter, loc, genericOp.getResult(0), oihwOutput, oihwPerm);
     auto newWeightsOIHW = computeArithConst(*oihwTransposeOp.getResults().begin(), true, {});
     if (failed(newWeightsOIHW)) {
         return rewriter.notifyMatchFailure(oihwTransposeOp, "Weight computation failed");
@@ -299,6 +326,18 @@ std::vector<int32_t> convertAPIntRangeToInt64Vector(Iterator begin, Iterator end
     return result;
 }
 
+template <typename T> FailureOr<SmallVector<T>> getCst(Value val) {
+    auto cst = val.getDefiningOp<tosa::ConstOp>();
+    if (!cst) {
+        return failure();
+    }
+    auto cstValues = cst.getValues().getValues<IntegerAttr>();
+
+    return llvm::to_vector(llvm::map_range(cstValues, [](IntegerAttr attr) -> T {
+        return static_cast<T>(attr.getInt());
+    }));
+}
+
 // tosa.transpose_conv2d
 // Converts:
 // Conv + DepthToSpace
@@ -310,7 +349,7 @@ static LogicalResult fuseWithRescaleOp(
     auto elementType =
         mlir::cast<RankedTensorType>(rescaleOp.getResult().getType()).getElementType();
 
-    auto weights = tconvOp.getFilter();
+    auto weights = tconvOp.getWeight();
     llvm::ArrayRef<int64_t> weightShapeArr =
         mlir::cast<RankedTensorType>(weights.getType()).getShape();
     llvm::SmallVector<int64_t> weightShape(weightShapeArr.begin(), weightShapeArr.end());
@@ -350,8 +389,16 @@ static LogicalResult fuseWithRescaleOp(
     auto stride = rewriter.getDenseI64ArrayAttr({1, 1});
     auto dilation = rewriter.getDenseI64ArrayAttr({1, 1});
 
-    auto inputZp = tconvOp.getQuantizationInfo()->getInputZp();
-    auto outputZp = rescaleOp.getOutputZp();
+    FailureOr<int64_t> inputZp = tconvOp.getInputZeroPoint();
+    if (!succeeded(inputZp)) {
+        return rewriter.notifyMatchFailure(tconvOp, "TConv input zero point not found");
+    }
+
+    // get output zero point
+    FailureOr<int64_t> outputZp = rescaleOp.getOutputZeroPoint();
+    if (!succeeded(outputZp)) {
+        return rewriter.notifyMatchFailure(rescaleOp, "RescaleOp output zero point not found");
+    }
 
     auto tosaBias = tconvOp.getBias();
 
@@ -388,12 +435,19 @@ static LogicalResult fuseWithRescaleOp(
     auto tosaBiasCastI64 =
         convertAPIntRangeToInt64Vector(tosaBiasValues.begin(), tosaBiasValues.end());
     auto duplicated_bias = duplicateBiasRoundRobin(tosaBiasCastI64, newWeightShape[0]);
-    auto bias = computeCorrectedBiasRoundRobin(duplicated_bias, per_channel_weights_sum, inputZp);
+    auto bias = computeCorrectedBiasRoundRobin(duplicated_bias, per_channel_weights_sum, *inputZp);
 
-    auto shifts = rescaleOp.getShift();
-    int shiftFactor = *std::min_element(shifts.begin(), shifts.end());
-    auto tosaMultiplier = rescaleOp.getMultiplier();
-    auto scale = compute_scale(tosaMultiplier, shifts, shiftFactor);
+    auto maybeShift = getCst<int8_t>(rescaleOp.getShift());
+    if (!succeeded(maybeShift)) {
+        return rewriter.notifyMatchFailure(rescaleOp, "RescaleOp shifts not found");
+    }
+    auto shiftFactor = *std::min_element(maybeShift->begin(), maybeShift->end());
+    auto maybeMultiplier = getCst<int32_t>(rescaleOp.getMultiplier());
+    if (!succeeded(maybeMultiplier)) {
+        return rewriter.notifyMatchFailure(rescaleOp, "RescaleOp multipliers not found");
+    }
+
+    auto scale = compute_scale(*maybeMultiplier, *maybeShift, shiftFactor);
     if (scale.size() == 1) {
         scale = std::vector<int32_t>(newWeightShape[0], scale[0]);
     }
@@ -424,13 +478,13 @@ static LogicalResult fuseWithRescaleOp(
         rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(0),
         rewriter.getIndexAttr(0)
     };
-    Value zero = rewriter.create<arith::ConstantOp>(
-        rescaleOp.getLoc(), rewriter.getIntegerAttr(elementType, inputZp)
+    Value zero = arith::ConstantOp::create(
+        rewriter, rescaleOp.getLoc(), rewriter.getIntegerAttr(elementType, *inputZp)
     );
 
     // Conv2D
-    auto padOp = rewriter.create<tensor::PadOp>(
-        rescaleOp.getLoc(), padInitType, input, lowPad, highPad, zero
+    auto padOp = tensor::PadOp::create(
+        rewriter, rescaleOp.getLoc(), padInitType, input, lowPad, highPad, zero
     );
 
     auto padOut =
@@ -449,11 +503,11 @@ static LogicalResult fuseWithRescaleOp(
 
     auto convInitTensor = createInitTensor(rescaleOp.getLoc(), convInitType, rewriter);
 
-    auto conv2dOp = rewriter.create<syna::torq_hl::Conv2DOp>(
-        rescaleOp.getLoc(), convInitType, convInitTensor,
-        inputZp, // input_zp
-        0,       // weight_zp
-        outputZp, outMin, outMax, shiftFactor,
+    auto conv2dOp = syna::torq_hl::Conv2DOp::create(
+        rewriter, rescaleOp.getLoc(), convInitType, convInitTensor,
+        *inputZp, // input_zp
+        0,        // weight_zp
+        *outputZp, outMin, outMax, shiftFactor,
         1,        // groups
         pad,      // pad
         stride,   // stride
@@ -623,7 +677,13 @@ static LogicalResult fuseWithRescaleOp(
     int32_t input_zp = 0;
     double input_scale = 1.0;
     tosaOpInput = fuseInputRescaleIfPossible(tosaOpInput, &input_zp, &input_scale);
-    const int32_t output_zp = srcOp.getOutputZp();
+
+    FailureOr<int64_t> outputZp = srcOp.getOutputZeroPoint();
+    if (!succeeded(outputZp)) {
+        return rewriter.notifyMatchFailure(srcOp, "RescaleOp output zero point not found");
+    }
+    const int32_t output_zp = static_cast<int32_t>(*outputZp);
+
     double output_scale;
     if (failed(getScaleFactor(srcOp, output_scale))) {
         return failure();
@@ -670,8 +730,8 @@ static LogicalResult fuseWithRescaleOp(
 
     auto out_type = RankedTensorType::get(outShape, srcOp.getResult().getType().getElementType());
 
-    auto avgPool2DOp = rewriter.create<syna::torq_hl::AvgPool2DOp>(
-        srcOp.getLoc(), out_type, createInitTensor(srcOp, rewriter, out_type),
+    auto avgPool2DOp = syna::torq_hl::AvgPool2DOp::create(
+        rewriter, srcOp.getLoc(), out_type, createInitTensor(srcOp, rewriter, out_type),
         MakeI32Attr(srcOp, input_zp), MakeI32Attr(srcOp, output_zp), MakeI32Attr(srcOp, out_min),
         MakeI32Attr(srcOp, out_max), MakeI32Attr(srcOp, shift_factor),
         createI8Const(rewriter, srcOp, std::vector<int8_t>{1}, llvm::ArrayRef<int64_t>{1, 1, 1, 1}),
@@ -713,9 +773,9 @@ struct RescaleOpConversion : public OpConversionPattern<tosa::RescaleOp> {
 
         // fuse operation with operation that generates it, if supported
         auto ret = TypeSwitch<Operation *, LogicalResult>(inputOp)
-                       .Case<tosa::ReduceSumOp>([&](auto typedOp) {
-                           return fuseWithRescaleOp(typedOp, srcOp, rewriter);
-                       })
+                       //.Case<tosa::ReduceSumOp>([&](auto typedOp) {
+                       //    return fuseWithRescaleOp(typedOp, srcOp, rewriter);
+                       //})
                        .Case<tosa::TransposeConv2DOp>([&](auto typedOp) {
                            return fuseWithRescaleOp(typedOp, srcOp, rewriter);
                        })
@@ -774,7 +834,7 @@ struct TableOpConversion : public OpConversionPattern<tosa::TableOp> {
         }
 
         // Get input operands.
-        Value input = adaptor.getInput();
+        Value input = adaptor.getInput1();
 
         // Retrieve the op that defines the table tensor.
         Operation *definingOp = tableTensor.getDefiningOp();
@@ -784,7 +844,7 @@ struct TableOpConversion : public OpConversionPattern<tosa::TableOp> {
 
         DenseElementsAttr attr;
         if (auto constOp = mlir::dyn_cast<tosa::ConstOp>(definingOp)) {
-            attr = mlir::dyn_cast<DenseElementsAttr>(constOp.getValue());
+            attr = mlir::dyn_cast<DenseElementsAttr>(constOp.getValues());
         }
         else if (auto arithConst = mlir::dyn_cast<arith::ConstantOp>(definingOp)) {
             attr = mlir::dyn_cast<DenseElementsAttr>(arithConst.getValue());
@@ -870,8 +930,17 @@ struct AvgPool2DOpConversion : public OpConversionPattern<tosa::AvgPool2dOp> {
         tosa::AvgPool2dOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
     ) const override {
 
-        const int64_t input_zp = srcOp.getQuantizationInfo()->getInputZp();
-        const int64_t output_zp = srcOp.getQuantizationInfo()->getOutputZp();
+        FailureOr<int64_t> outputZp = srcOp.getOutputZeroPoint();
+        if (!succeeded(outputZp)) {
+            return rewriter.notifyMatchFailure(srcOp, "AvgPool2dOp output zero point not found");
+        }
+        const int64_t output_zp = *outputZp;
+
+        FailureOr<int64_t> inputZp = srcOp.getInputZeroPoint();
+        if (!succeeded(inputZp)) {
+            return rewriter.notifyMatchFailure(srcOp, "AvgPool2dOp input zero point not found");
+        }
+        const int64_t input_zp = *inputZp;
 
         int32_t out_min = -128;
         int32_t out_max = 127;
@@ -980,8 +1049,8 @@ struct ScatterOpConversion : public OpConversionPattern<tosa::ScatterOp> {
 
         auto outType = convertTypeNHCtoNCH(srcOp.getValuesIn().getType());
 
-        auto output = rewriter.create<torq_hl::ScatterOp>(
-            srcOp.getLoc(), outType, valuesIn, indices_value, input,
+        auto output = torq_hl::ScatterOp::create(
+            rewriter, srcOp.getLoc(), outType, valuesIn, indices_value, input,
             createI32Const(rewriter, srcOp, std::vector<int32_t>{0, 1})
         );
 
@@ -1035,11 +1104,15 @@ struct ResizeNearestNeighborOpConversion : public OpConversionPattern<tosa::Resi
     LogicalResult matchAndRewrite(
         tosa::ResizeOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
     ) const override {
-        auto scale = adaptor.getScale();
+
+        SmallVector<int64_t> scale;
+        if (!tosa::getConstShapeValues(srcOp.getScale().getDefiningOp(), scale)) {
+            return failure();
+        }
         auto mode = adaptor.getMode();
         // the code only supported for scale factor of 2
         bool isScaleFactor2 = (scale[0] == (scale[1] * 2));
-        if (mode != "NEAREST_NEIGHBOR" || !isScaleFactor2) {
+        if (mode != tosa::ResizeMode::NEAREST_NEIGHBOR || !isScaleFactor2) {
             return rewriter.notifyMatchFailure(
                 srcOp, "Current support only for NEAREST_NEIGHBOR with scale 2"
             );
@@ -1079,8 +1152,8 @@ struct ResizeNearestNeighborOpConversion : public OpConversionPattern<tosa::Resi
 void populateTOSAToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patterns) {
 
     patterns.insert<RescaleOpConversion>(context);
-    patterns.insert<AvgPool2DOpConversion>(context);
-    patterns.insert<TableOpConversion>(context);
+    // patterns.insert<AvgPool2DOpConversion>(context);
+    // patterns.insert<TableOpConversion>(context);
     patterns.insert<IdentityOpConversion>(context);
     patterns.insert<ArgMaxOpConversion>(context);
     patterns.insert<ScatterOpConversion>(context);

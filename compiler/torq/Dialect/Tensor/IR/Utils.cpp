@@ -20,7 +20,7 @@ std::optional<linalg::SliceParameters> computeCollapseSliceParameters(
     assert(
         ivs.size() == static_cast<size_t>(llvm::count_if(
                           llvm::make_range(tileSizes.begin(), tileSizes.end()),
-                          [](OpFoldResult v) { return !isZeroIndex(v); }
+                          [](OpFoldResult v) { return !isZeroInteger(v); }
                       )) &&
         "expected as many ivs as non-zero sizes"
     );
@@ -81,7 +81,7 @@ std::optional<linalg::SliceParameters> computeExpandSliceParameters(
     assert(
         ivs.size() == static_cast<size_t>(llvm::count_if(
                           llvm::make_range(tileSizes.begin(), tileSizes.end()),
-                          [](OpFoldResult v) { return !isZeroIndex(v); }
+                          [](OpFoldResult v) { return !isZeroInteger(v); }
                       )) &&
         "expected as many ivs as non-zero sizes"
     );

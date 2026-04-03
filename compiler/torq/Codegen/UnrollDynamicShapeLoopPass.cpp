@@ -22,7 +22,8 @@ namespace mlir::syna::torq {
 
 namespace {
 
-class UnrollDynamicShapeLoopPass : public UnrollDynamicShapeLoopBase<UnrollDynamicShapeLoopPass> {
+class UnrollDynamicShapeLoopPass
+    : public impl::UnrollDynamicShapeLoopBase<UnrollDynamicShapeLoopPass> {
   public:
     using UnrollDynamicShapeLoopBase<UnrollDynamicShapeLoopPass>::UnrollDynamicShapeLoopBase;
 
@@ -45,12 +46,14 @@ static void unrollLoop(scf::ForOp forOp) {
         return;
     }
 
-    std::optional<int64_t> tripCount = constantTripCount(lb->back(), ub->back(), step->back());
+    std::optional<llvm::APInt> tripCount = constantTripCount(
+        lb->back(), ub->back(), step->back(), /*isSigned=*/true, scf::computeUbMinusLb
+    );
     if (!tripCount) {
         forOp->emitWarning("scf.for with dynamic loop");
     }
 
-    (void)loopUnrollByFactor(forOp, *tripCount);
+    (void)loopUnrollByFactor(forOp, tripCount->getSExtValue());
 }
 
 void UnrollDynamicShapeLoopPass::runOnOperation() {

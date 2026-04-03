@@ -43,9 +43,9 @@ segmentToQuadrants(torq_hl::SegmentationOp op, PatternRewriter &rewriter) {
         }
     }
 
-    return rewriter.create<torq_hw::SliceTaskOp>(
-        op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(), op.getInit(),
-        slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
+        op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
     );
 }
 
@@ -86,9 +86,9 @@ segmentHDim(torq_hl::SegmentationOp op, PatternRewriter &rewriter, int hSegments
         }
     }
 
-    return rewriter.create<torq_hw::SliceTaskOp>(
-        op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(), op.getInit(),
-        slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
+        op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
     );
 }
 

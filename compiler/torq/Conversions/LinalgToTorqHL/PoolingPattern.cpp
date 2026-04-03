@@ -278,10 +278,10 @@ struct PoolingNhwcSumOpConversion : public OpRewritePattern<linalg::PoolingNhwcS
 
         // Generate torq_hl op with output in the expected format
         auto torqOutType = transposeType(output.getType(), dataPerm);
-        auto torqOp = rewriter.create<TorqOp>(
-            linalgOp.getLoc(), torqOutType, createInitTensor(linalgOp, rewriter, torqOutType),
-            scInfo.zp, scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift, weights, biasScale,
-            input0
+        auto torqOp = TorqOp::create(
+            rewriter, linalgOp.getLoc(), torqOutType,
+            createInitTensor(linalgOp, rewriter, torqOutType), scInfo.zp, scInfo.zp, scInfo.min,
+            scInfo.max, scInfo.scaleShift, weights, biasScale, input0
         );
         auto torqOut = transposeValue(torqOp.getOutput(), dataPerm.reverse(), loc, rewriter);
 

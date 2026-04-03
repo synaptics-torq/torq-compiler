@@ -164,7 +164,7 @@ static std::string toString(Location loc) {
     return locStr;
 }
 
-class ProfilingPass : public ProfilingBase<ProfilingPass> {
+class ProfilingPass : public impl::ProfilingBase<ProfilingPass> {
   public:
     using ProfilingBase<ProfilingPass>::ProfilingBase;
     void runOnOperation() override;
@@ -304,8 +304,8 @@ LogicalResult ProfilingPass::cycleProfiling(mlir::FunctionOpInterface funcOp) {
             }
         }
 
-        rewriter.create<torq_hw::SliceProfilingOp>(
-            sliceTaskOp.getLoc(), sliceMemSize, shapeSstr.str(), curMaxCycle, ndlCycles
+        torq_hw::SliceProfilingOp::create(
+            rewriter, sliceTaskOp.getLoc(), sliceMemSize, shapeSstr.str(), curMaxCycle, ndlCycles
         );
 
         if (!clTorqDisableNdlCycleCheck) {
@@ -775,7 +775,7 @@ void ProfilingPass::runOnOperation() {
     Block &funcBlock = funcOp->getRegion(0).front();
     rewriter.setInsertionPointToStart(&funcBlock);
 
-    rewriter.create<torq_hw::DispatchProfilingOp>(funcOp.getLoc(), totalMemSize, totalCycle);
+    torq_hw::DispatchProfilingOp::create(rewriter, funcOp.getLoc(), totalMemSize, totalCycle);
 }
 
 } // namespace

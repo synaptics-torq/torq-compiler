@@ -28,7 +28,7 @@ static llvm::cl::opt<int> clNssBlockSize(
 
 namespace {
 
-class SegmentNSSProgramsPass : public SegmentNSSProgramsBase<SegmentNSSProgramsPass> {
+class SegmentNSSProgramsPass : public impl::SegmentNSSProgramsBase<SegmentNSSProgramsPass> {
   public:
     using SegmentNSSProgramsBase::SegmentNSSProgramsBase;
     void runOnOperation() override;

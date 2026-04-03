@@ -6,6 +6,7 @@
 
 #include "PassesDetail.h"
 
+#include "mlir/IR/BuiltinAttributes.h"
 #include "torq/Codegen/BufferizationUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
@@ -68,7 +69,8 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
                 return callOp.emitError() << "Program not found in " << importProgramOp.getName();
             }
 
-            auto codeVectorType = dyn_cast<VectorType>(binaryOp.getDataAttr().getType());
+            auto binaryDataAttr = cast<DenseIntElementsAttr>(binaryOp.getDataAttr());
+            auto codeVectorType = dyn_cast<VectorType>(binaryDataAttr.getType());
             auto codeSectionType =
                 MemRefType::get(codeVectorType.getShape(), codeVectorType.getElementType());
             int64_t argsNumber = callOp.getInputs().size() + callOp.getInits().size();
@@ -79,9 +81,9 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
         }
 
         // create op to represent the invocation
-        auto createInvocationOp = rewriter.create<torq_hl::CreateInvocationOp>(
-            callOp.getLoc(), invocationResultsTypes, importProgramOp.getName(), callOp.getProgram(),
-            nullptr, nullptr, nullptr, nullptr
+        auto createInvocationOp = torq_hl::CreateInvocationOp::create(
+            rewriter, callOp.getLoc(), invocationResultsTypes, importProgramOp.getName(),
+            callOp.getProgram(), nullptr, nullptr, nullptr, nullptr
         );
 
         SmallVector<Value> startOpCodeSections;
@@ -91,8 +93,8 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
             // convert the code to a LRAM tensor and then to an ITCM tensor
             TypedValue<MemRefType> code =
                 cast<TypedValue<MemRefType>>(createInvocationOp.getCodeSections()[0]);
-            auto lramCode = rewriter.create<memref::AllocOp>(
-                callOp.getLoc(),
+            auto lramCode = memref::AllocOp::create(
+                rewriter, callOp.getLoc(),
                 createMemRefTypeWithMemorySpace(code.getType(), torq_hl::MemorySpace::Lram)
             );
 
@@ -100,8 +102,8 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
                 llvm::report_fatal_error("failed to create copy to LRAM");
             }
 
-            auto itcmCode = rewriter.create<memref::AllocOp>(
-                callOp.getLoc(),
+            auto itcmCode = memref::AllocOp::create(
+                rewriter, callOp.getLoc(),
                 createMemRefTypeWithMemorySpace(code.getType(), torq_hl::MemorySpace::Itcm)
             );
 
@@ -114,8 +116,8 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
             // convert the arguments adddresses section to a LRAM tensor and then to an ITCM tensor
             TypedValue<MemRefType> argsAddresses =
                 cast<TypedValue<MemRefType>>(createInvocationOp.getCodeSections()[1]);
-            auto lramArgsAddresses = rewriter.create<memref::AllocOp>(
-                callOp.getLoc(),
+            auto lramArgsAddresses = memref::AllocOp::create(
+                rewriter, callOp.getLoc(),
                 createMemRefTypeWithMemorySpace(argsAddresses.getType(), torq_hl::MemorySpace::Lram)
             );
 
@@ -124,8 +126,8 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
                 llvm::report_fatal_error("failed to create copy to LRAM");
             }
 
-            auto dtcmArgsAddresses = rewriter.create<memref::AllocOp>(
-                callOp.getLoc(),
+            auto dtcmArgsAddresses = memref::AllocOp::create(
+                rewriter, callOp.getLoc(),
                 createMemRefTypeWithMemorySpace(argsAddresses.getType(), torq_hl::MemorySpace::Dtcm)
             );
 
@@ -143,16 +145,16 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
         auto argValues = callOp.getOperands().slice(1, callOp.getOperands().size() - 1);
 
         // create a start_program op
-        auto startOp = rewriter.create<torq_hl::StartProgramOp>(
-            callOp.getLoc(),
+        auto startOp = torq_hl::StartProgramOp::create(
+            rewriter, callOp.getLoc(),
             /* invocation = */ createInvocationOp.getInvocation(),
             /* code_sections = */ startOpCodeSections,
             /* args = */ argValues
         );
 
         // create a wait_program op
-        rewriter.create<torq_hl::WaitProgramOp>(
-            callOp.getLoc(), TypeRange{}, startOp.getInvocation()
+        torq_hl::WaitProgramOp::create(
+            rewriter, callOp.getLoc(), TypeRange{}, startOp.getInvocation()
         );
 
         rewriter.eraseOp(callOp);
@@ -162,7 +164,7 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
 };
 
 class LowerCallProgramToStartWaitPass
-    : public LowerCallProgramToStartWaitBase<LowerCallProgramToStartWaitPass> {
+    : public impl::LowerCallProgramToStartWaitBase<LowerCallProgramToStartWaitPass> {
   public:
     LowerCallProgramToStartWaitPass() = default;
     LowerCallProgramToStartWaitPass(const LowerCallProgramToStartWaitPass &pass) {}
@@ -179,7 +181,7 @@ void LowerCallProgramToStartWaitPass::runOnOperation() {
 
     patterns.add<CallProgramPattern>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
 }

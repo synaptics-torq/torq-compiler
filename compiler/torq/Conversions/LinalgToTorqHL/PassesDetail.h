@@ -20,7 +20,11 @@
 namespace mlir::syna::torq {
 
 #define GEN_PASS_DECL
-#define GEN_PASS_CLASSES
+#define GEN_PASS_DEF_ARITHTOTORQHLCONVERSION
+#define GEN_PASS_DEF_LINALGTOTORQHLCONVERSION
+#define GEN_PASS_DEF_LINALGTOTORQHLPRECONVERSION
+#define GEN_PASS_DEF_MARKPATTERNSFORTILEANDFUSE
+#define GEN_PASS_DEF_TENSORTOLINALG
 #include "torq/Conversions/LinalgToTorqHL/Passes.h.inc"
 
 } // namespace mlir::syna::torq

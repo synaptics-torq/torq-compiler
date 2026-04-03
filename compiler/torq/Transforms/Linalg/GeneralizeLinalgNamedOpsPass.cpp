@@ -12,7 +12,7 @@
 namespace mlir::syna::torq {
 
 class GeneralizeLinalgNamedOpsPass
-    : public GeneralizeLinalgNamedOpsBase<GeneralizeLinalgNamedOpsPass> {
+    : public impl::GeneralizeLinalgNamedOpsBase<GeneralizeLinalgNamedOpsPass> {
   public:
     using GeneralizeLinalgNamedOpsBase::GeneralizeLinalgNamedOpsBase;
 

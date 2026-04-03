@@ -55,11 +55,11 @@ set(torq_deps
     iree::hal::local
     iree::hal::local::executable_environment
     iree::hal::utils::deferred_command_buffer
+    iree::hal::utils::executable_header
     iree::hal::utils::file_transfer
     iree::hal::utils::semaphore_base
     iree::tooling::numpy_io
     iree::io::stream
-    iree::io::stdio_stream
     schemas::torq_executable_def_c_fbs
     torq_hw::TorqHw
 )

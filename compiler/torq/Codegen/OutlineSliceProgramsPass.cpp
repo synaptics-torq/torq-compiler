@@ -56,9 +56,9 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
             "expected single static step size in forall op"
         );
 
-        std::optional<int64_t> unrollFactor = mlir::constantTripCount(
+        std::optional<APInt> unrollFactor = mlir::constantTripCount(
             forallOp.getLowerBound(rewriter)[0], forallOp.getUpperBound(rewriter)[0],
-            forallOp.getStep(rewriter)[0]
+            forallOp.getStep(rewriter)[0], /*isSigned=*/true, scf::computeUbMinusLb
         );
 
         assert(unrollFactor && "trip count is not a constant");
@@ -70,13 +70,14 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
         }
 
         // create an operand map for each unrolled iteration
-        SmallVector<IRMapping> operandMaps(*unrollFactor - 1);
+        SmallVector<IRMapping> operandMaps(unrollFactor->getZExtValue() - 1);
 
         // insert in the operand map the induction variable
         if (!forallOp.getInductionVar(0).use_empty()) {
-            for (unsigned i = 1; i < *unrollFactor; i++) {
-                Value ivUnroll =
-                    rewriter.create<arith::ConstantOp>(forallOp.getLoc(), rewriter.getIndexAttr(i));
+            for (unsigned i = 1; i < unrollFactor->getZExtValue(); i++) {
+                Value ivUnroll = arith::ConstantOp::create(
+                    rewriter, forallOp.getLoc(), rewriter.getIndexAttr(i)
+                );
                 operandMaps[i - 1].map(forallOp.getInductionVar(0), ivUnroll);
             }
         }
@@ -91,7 +92,7 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
             for (auto op : originalOps) {
                 if (isa<torq_hl::WaitProgramOp>(op) || op->getBlock()->getTerminator() == op) {
                     rewriter.setInsertionPoint(op);
-                    for (unsigned i = 1; i < *unrollFactor; i++) {
+                    for (unsigned i = 1; i < unrollFactor->getZExtValue(); i++) {
                         // Clone the original loop body operations
                         for (auto prevOp : operationsToClone) {
                             rewriter.clone(*prevOp, operandMaps[i - 1]);
@@ -150,14 +151,14 @@ static void outlineOp(int idx, Operation *op, OpBuilder builder) {
     builder.clone(*op, map);
 
     // add a return operation to the program body that returns nothing
-    builder.create<torq_hl::ReturnOp>(loc, ValueRange{});
+    torq_hl::ReturnOp::create(builder, loc, ValueRange{});
 
     // create the invocation
     builder.setInsertionPoint(op);
     auto invocationType = torq_hl::InvocationType::get(ctx, torq_hl::Executor::Slice);
     auto programSectionType = MemRefType::get({size}, builder.getI8Type());
-    auto createInvocationOp = builder.create<torq_hl::CreateInvocationOp>(
-        loc, TypeRange{invocationType, programSectionType}, programOp.getName(),
+    auto createInvocationOp = torq_hl::CreateInvocationOp::create(
+        builder, loc, TypeRange{invocationType, programSectionType}, programOp.getName(),
         programOp.getProgram(), nullptr, nullptr, nullptr, nullptr
     );
 
@@ -167,7 +168,7 @@ static void outlineOp(int idx, Operation *op, OpBuilder builder) {
         createDenseEncoding(programSectionType, torq_hl::MemorySpace::Lram)
     );
     auto lramCodeSection =
-        builder.create<memref::AllocOp>(loc, programSectionLramCodeType, nullptr);
+        memref::AllocOp::create(builder, loc, programSectionLramCodeType, nullptr);
 
     if (failed(
             createTorqCopy(builder, loc, createInvocationOp.getCodeSections()[0], lramCodeSection)
@@ -176,14 +177,14 @@ static void outlineOp(int idx, Operation *op, OpBuilder builder) {
     }
 
     // add the start and wait operations
-    auto startOp = builder.create<torq_hl::StartProgramOp>(
-        loc,
+    auto startOp = torq_hl::StartProgramOp::create(
+        builder, loc,
         /* bound_program = */ createInvocationOp.getInvocation(),
         /* code_sections = */ ValueRange{lramCodeSection},
         /* args = */ op->getOperands()
     );
 
-    builder.create<torq_hl::WaitProgramOp>(loc, TypeRange{}, startOp.getInvocation());
+    torq_hl::WaitProgramOp::create(builder, loc, TypeRange{}, startOp.getInvocation());
 
     op->erase();
 }
@@ -193,16 +194,7 @@ static void outlineSlicePrograms(Operation *op) {
     SmallVector<Operation *> toOutline;
 
     op->walk([&](Operation *op) {
-        if (isa<scf::ForallOp, func::FuncOp>(op)) {
-            return WalkResult::advance();
-        }
-
-        // FIXME: kernels should implement an interface to simplify this logic
-        // Only outline ops targeting Slice execution. Host and CSS ops are
-        // handled by AssignOperationsToCpuProgramsPass and must not be outlined
-        // into slice programs (which would incorrectly allocate LRAM for them).
-        if (isa<DestinationStyleOpInterface>(op) && !isa<torq_hl::CallProgramOp>(op) &&
-            getTargetExecutor(op) == torq_hl::Executor::Slice) {
+        if (isa<torq_hl::KernelInterface>(op)) {
             toOutline.push_back(op);
         }
 
@@ -223,7 +215,7 @@ static LogicalResult unrollLoops(Operation *op) {
 
     unrollPatterns.add<ForallOpPattern>(op->getContext());
 
-    return applyPatternsAndFoldGreedily(op, std::move(unrollPatterns));
+    return applyPatternsGreedily(op, std::move(unrollPatterns));
 }
 
 // assign an executor_id to each start_program operation
@@ -287,7 +279,7 @@ scheduleSliceTasks(Region &region, torq_hl::Executor executor, int executorCount
     return success();
 }
 
-class OutlineSliceTasksPass : public OutlineSliceTasksBase<OutlineSliceTasksPass> {
+class OutlineSliceTasksPass : public impl::OutlineSliceTasksBase<OutlineSliceTasksPass> {
   public:
     OutlineSliceTasksPass() = default;
     OutlineSliceTasksPass(const OutlineSliceTasksPass &pass) {}

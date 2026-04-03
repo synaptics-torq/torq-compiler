@@ -48,8 +48,7 @@ mkdir ${INSTALL_DIR}/scripts
 cp ${BUILD_DIR}/third_party/iree/tools/iree-run-module ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-compile ${INSTALL_DIR}/tools
-# TODO change generate_embed_data to iree-c-embed-data after IREE upgrade
-cp ${BUILD_DIR}/third_party/iree/tools/generate_embed_data ${INSTALL_DIR}/tools
+cp ${BUILD_DIR}/third_party/iree/tools/iree-c-embed-data ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-flatcc-cli ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/torq-compile ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-opt ${INSTALL_DIR}/tools

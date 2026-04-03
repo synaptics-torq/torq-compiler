@@ -70,7 +70,7 @@ def download_mobilenetv2_model(cache):
 # ============================================================================
 
 def mbv2_compile_options():
-    torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-css", "--torq-disable-host"]
+    torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-host"]
     
     # tile-and-fuse is less optimal because of the transpose ops which are tiled in incompatible ways
     # and cannot be folded.
@@ -88,39 +88,30 @@ def case_config(request, runtime_hw_type, chip_config):
         pytest.xfail(f"Known failure for chip {chip_config.data.get('chip_name', 'unknown')} on aws_fpga") # Mismatched elements: 1 / 1000 (0.1%)
 
     return {
+        "full_model_input_data": "mbv2_input_data",
         "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",
-        "input_data": "mbv2_input_data",
+        "input_data": "tflite_layer_inputs",
         "torq_compiler_options": mbv2_compile_options()
     }
 
 
 @versioned_cached_data_fixture
-def mbv2_input_data(request, tflite_layer_model: TFLiteLayerCase, tweaked_random_input_data, mlir_io_spec):
-
-    if tflite_layer_model.is_layer:
-        return tweaked_random_input_data
-
-    if not mlir_io_spec.inputs:
-        return tweaked_random_input_data
-
-    input_spec = mlir_io_spec.inputs[0]
-    if len(input_spec.shape) != 4:
-        return tweaked_random_input_data
-
+def mbv2_input_data(request):        
+    
     cache = request.getfixturevalue("cache")
+
     image_path = get_hf_dataset_file(cache, "Synaptics/TorqCompilerTestImages", "space_shuttle_224x224.jpg")
 
     with Image.open(image_path) as image:
         image = image.convert("RGB").resize((224, 224))
         image_array = np.array(image)
 
-    if input_spec.fmt in ("i8", "si8"):
-        input_tensor = (image_array.astype(np.float32) - 127).astype(np.int8)
-    elif input_spec.fmt == "ui8":
-        input_tensor = image_array.astype(np.uint8)
-    else:
-        return tweaked_random_input_data
+    # pre-processing valid for "i8" and "si8"
+    input_tensor = (image_array.astype(np.float32) - 127).astype(np.int8)
+
+    # pre-processing valid for "ui8"
+    # input_tensor = image_array.astype(np.uint8)    
 
     return [np.expand_dims(input_tensor, axis=0)]
 
@@ -169,7 +160,7 @@ def test_mbv2_tflite_torq(
     tflite_reference_results,
     torq_results,
     case_config,
-    tflite_layer_model,
+    tflite_layer_model
 ):
     """Compare MobileNetV2 results between TFLite and Torq backends."""
     _compare_results(request, tflite_reference_results, torq_results,

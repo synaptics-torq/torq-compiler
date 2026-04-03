@@ -256,7 +256,7 @@ class TransposePropagationAnalysis
         propagateIfChanged(lattice, ChangeResult::Change);
     }
 
-    void visitOperation(
+    LogicalResult visitOperation(
         Operation *op, ArrayRef<const TransposePropagationLattice *> operands,
         ArrayRef<TransposePropagationLattice *> results
     ) override {
@@ -272,25 +272,25 @@ class TransposePropagationAnalysis
         // Handle linalg.transpose - source of propagation
         if (auto transposeOp = dyn_cast<linalg::TransposeOp>(op)) {
             visitTranspose(transposeOp, operands, results);
-            return;
+            return success();
         }
 
         // Handle linalg.generic - check if layout-agnostic elementwise
         if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
             visitGeneric(genericOp, operands, results);
-            return;
+            return success();
         }
 
         // Handle tensor.extract_slice - can propagate with parameter adjustment
         if (auto sliceOp = dyn_cast<tensor::ExtractSliceOp>(op)) {
             visitExtractSlice(sliceOp, operands, results);
-            return;
+            return success();
         }
 
         // Handle tensor.insert_slice - can propagate with parameter adjustment
         if (auto insertOp = dyn_cast<tensor::InsertSliceOp>(op)) {
             visitInsertSlice(insertOp, operands, results);
-            return;
+            return success();
         }
 
         // Handle torq_hl.* operations - these block transpose propagation
@@ -300,7 +300,7 @@ class TransposePropagationAnalysis
                 propagateIfChanged(result, ChangeResult::Change);
             }
             LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (torq_hl operation)\n");
-            return;
+            return success();
         }
 
         // Handle tensor.collapse_shape - these block transpose propagation
@@ -310,7 +310,7 @@ class TransposePropagationAnalysis
                 propagateIfChanged(result, ChangeResult::Change);
             }
             LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (tensor.collapse_shape)\n");
-            return;
+            return success();
         }
 
         // Handle tensor.empty - keep as Unknown (flexible, can adapt to any layout)
@@ -319,7 +319,7 @@ class TransposePropagationAnalysis
             // If used in a transposed context, it can be created in that layout
             // If used in a normal context, it remains normal
             LLVM_DEBUG(llvm::dbgs() << "  -> tensor.empty: Keep Unknown (flexible)\n");
-            return;
+            return success();
         }
 
         // Default: All other operations can propagate transpose
@@ -334,6 +334,8 @@ class TransposePropagationAnalysis
                 propagateIfChanged(result, result->join(*operands[0]));
             }
         }
+
+        return success();
     }
 
   private:
@@ -895,7 +897,7 @@ struct ComposeTransposeOps : OpRewritePattern<linalg::TransposeOp> {
 /// Pass implementation that applies transpose optimization patterns:
 /// Also includes transpose canonicalization for back-to-back cancellation.
 class OptimizeTransposeLayoutPass
-    : public OptimizeTransposeLayoutBase<OptimizeTransposeLayoutPass> {
+    : public impl::OptimizeTransposeLayoutBase<OptimizeTransposeLayoutPass> {
   public:
     using OptimizeTransposeLayoutBase::OptimizeTransposeLayoutBase;
 

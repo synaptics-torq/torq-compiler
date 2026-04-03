@@ -264,7 +264,7 @@ void populateTorqConstantFoldLinalgOperations(
     patterns.insert<FoldInsertSlicePattern>(context, controlFn);
 }
 
-class FoldConstantsPass : public FoldConstantsBase<FoldConstantsPass> {
+class FoldConstantsPass : public impl::FoldConstantsBase<FoldConstantsPass> {
   public:
     using FoldConstantsBase::FoldConstantsBase;
 
@@ -497,7 +497,7 @@ class FoldConstantsPass : public FoldConstantsBase<FoldConstantsPass> {
 
         torq::populateTorqConstantFoldLinalgOperations(patterns, controlFn);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
             getOperation().emitError() << "pass failed";
             return signalPassFailure();
         }

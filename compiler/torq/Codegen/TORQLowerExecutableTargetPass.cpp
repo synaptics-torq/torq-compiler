@@ -21,6 +21,7 @@
 #include "iree/compiler/Codegen/Common/PassUtils.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
 
+#include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -101,7 +102,7 @@ namespace {
 /// - first lower to scalar/native-vector code,
 /// - then convert to TORQ dialect.
 class TORQLowerExecutableTargetPass
-    : public TORQLowerExecutableTargetBase<TORQLowerExecutableTargetPass> {
+    : public impl::TORQLowerExecutableTargetBase<TORQLowerExecutableTargetPass> {
   public:
     TORQLowerExecutableTargetPass() = default;
     TORQLowerExecutableTargetPass(const TORQLowerExecutableTargetPass &pass) {}

@@ -147,7 +147,8 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
         }
     }
 
-    auto sliceTaskOp = params.rewriter.create<SliceTaskOp>(
+    auto sliceTaskOp = SliceTaskOp::create(
+        params.rewriter,
         params.loc,                                     // Location
         params.op.getName(),                            // Operation to replace
         ValueRange{params.op.getInput1()},              // Input tensor
@@ -208,8 +209,8 @@ FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
         slice.store(output[ii], res);
     }
 
-    auto sliceTaskOp = params.rewriter.create<SliceTaskOp>(
-        params.loc,
+    auto sliceTaskOp = SliceTaskOp::create(
+        params.rewriter, params.loc,
         params.op.getName(),                            // Operation to replace
         ValueRange{params.op.getInput1()},              // Input tensor
         ValueRange{},                                   // Weights
@@ -279,9 +280,10 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
         }
     }
 
-    auto input1Addr = params.rewriter.create<GetAddressOp>(params.loc, params.input1).getAddress();
-    auto input2Addr = params.rewriter.create<GetAddressOp>(params.loc, params.input2).getAddress();
-    auto sliceTaskOp = params.rewriter.create<SliceTaskOp>(
+    auto input1Addr = GetAddressOp::create(params.rewriter, params.loc, params.input1).getAddress();
+    auto input2Addr = GetAddressOp::create(params.rewriter, params.loc, params.input2).getAddress();
+    auto sliceTaskOp = SliceTaskOp::create(
+        params.rewriter,
         params.loc,                               // Operation to replace
         slice.name(),                             // Task name
         ValueRange{params.input1, params.input2}, // Input tensor

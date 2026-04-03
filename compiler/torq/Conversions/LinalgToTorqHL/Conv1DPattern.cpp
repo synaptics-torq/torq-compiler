@@ -192,6 +192,13 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
         auto strideValue = stridesAttr.getValues<int64_t>()[1];
 
         auto inputType = mlir::cast<RankedTensorType>(input.getType());
+
+        if (!inputType.getElementType().isFloat()) {
+            return rewriter.notifyMatchFailure(
+                convOp, "Only floating point types are supported for Conv1D conversion"
+            );
+        }
+
         auto inputShape = inputType.getShape();
         auto outputType = cast<RankedTensorType>(output.getType());
         auto outElemType = outputType.getElementType();

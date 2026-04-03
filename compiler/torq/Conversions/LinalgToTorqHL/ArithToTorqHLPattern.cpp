@@ -397,12 +397,7 @@ class RoundingRightShiftPattern : public OpRewritePattern<linalg::GenericOp> {
                 RankedTensorType::get(resultType.getShape(), rewriter.getI32Type());
             auto value = DenseIntElementsAttr::get(input2Type, data);
             input2 =
-                rewriter
-                    .create<arith::ConstantOp>(
-                        op.getLoc(),
-                        RankedTensorType::get(resultType.getShape(), rewriter.getI32Type()), value
-                    )
-                    .getResult();
+                arith::ConstantOp::create(rewriter, op.getLoc(), input2Type, value).getResult();
         }
 
         rewriter.replaceOpWithNewOp<torq_hl::ElementWiseShiftOp>(
@@ -461,8 +456,9 @@ class ElementWiseShiftOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
             auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
             auto shiftConstValue = c1.getValue();
-            auto constTensor = rewriter.create<arith::ConstantOp>(
-                srcOp.getLoc(), input1Type, DenseElementsAttr::get(input1Type, shiftConstValue)
+            auto constTensor = arith::ConstantOp::create(
+                rewriter, srcOp.getLoc(), input1Type,
+                DenseElementsAttr::get(input1Type, shiftConstValue)
             );
             input2 = constTensor.getResult();
         }
@@ -507,8 +503,9 @@ class SelectOpPattern : public OpRewritePattern<linalg::GenericOp> {
             }
             else if (auto constOp = dyn_cast_or_null<arith::ConstantOp>(operand.getDefiningOp())) {
                 auto constAttr = constOp.getValue();
-                auto constTensor = rewriter.create<arith::ConstantOp>(
-                    srcOp.getLoc(), resultType, DenseElementsAttr::get(resultType, constAttr)
+                auto constTensor = arith::ConstantOp::create(
+                    rewriter, srcOp.getLoc(), resultType,
+                    DenseElementsAttr::get(resultType, constAttr)
                 );
                 selectInputs.push_back(constTensor.getResult());
             }
@@ -531,7 +528,9 @@ void populateArithToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patt
 
     patterns.insert<ElementwiseBinaryArithOpPattern>(context);
     patterns.insert<ElementwiseUnaryArithOpPattern>(context);
-    patterns.insert<ElementWiseShiftOpPattern>(context);
+
+    // FIXME (upgrade):
+    // patterns.insert<ElementWiseShiftOpPattern>(context);
 
     patterns.insert<RoundingRightShiftPattern>(context);
 

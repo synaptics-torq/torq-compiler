@@ -33,6 +33,7 @@ foreach(_SRC_FILE ${_TORQ_RUNTIME_PYTHON_SRCS})
 
   add_custom_command(
     TARGET torq_runtime_python_bindings
+    POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_DST_DIR}"
     COMMAND ${CMAKE_COMMAND} -E create_symlink "${_SRC_PATH}" "${_DST_PATH}"
     BYPRODUCTS "${_DST_PATH}"

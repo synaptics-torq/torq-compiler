@@ -30,7 +30,7 @@ namespace mlir::syna::torq {
 
 namespace {
 
-class CheckCssStackSizePass : public CheckCssStackSizeBase<CheckCssStackSizePass> {
+class CheckCssStackSizePass : public impl::CheckCssStackSizeBase<CheckCssStackSizePass> {
   public:
     using CheckCssStackSizeBase::CheckCssStackSizeBase;
 

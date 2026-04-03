@@ -73,7 +73,7 @@ FailureOr<bool> encodeKernelInputOutputs(
         // otherwise we can simply create a new empty tensor
         else {
             newInitValue =
-                rewriter.create<tensor::EmptyOp>(op->getLoc(), encodedOutType, ValueRange{});
+                tensor::EmptyOp::create(rewriter, op->getLoc(), encodedOutType, ValueRange{});
         }
 
         // replace the output type of the op with the encoded type and the input with the new init

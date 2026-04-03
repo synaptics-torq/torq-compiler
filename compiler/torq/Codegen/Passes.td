@@ -64,7 +64,8 @@ def TORQLowerExecutableTarget
         "bufferization::BufferizationDialect",
         "scf::SCFDialect",
         "syna::torq_hl::TorqHLDialect",
-        "syna::torq_hw::TorqHWDialect"
+        "syna::torq_hw::TorqHWDialect",
+        "mlir::tosa::TosaDialect"
     ];
 
 }

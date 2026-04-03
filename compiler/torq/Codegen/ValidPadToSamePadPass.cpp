@@ -384,8 +384,8 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvP
         rewriter.setInsertionPoint(op);
         auto loc = op.getLoc();
 
-        auto ConvInit = rewriter.create<tensor::EmptyOp>(
-            loc, new_output_shape, new_output_type.getElementType()
+        auto ConvInit = tensor::EmptyOp::create(
+            rewriter, loc, new_output_shape, new_output_type.getElementType()
         );
 
         TorqConvPoolOp samepadOp;
@@ -525,7 +525,7 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvPoo
         auto loc = op.getLoc();
 
         auto newInit =
-            rewriter.create<tensor::EmptyOp>(loc, newOutputShape, convOutputType.getElementType());
+            tensor::EmptyOp::create(rewriter, loc, newOutputShape, convOutputType.getElementType());
 
         TorqConvPoolOp newOp;
         if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
@@ -642,19 +642,18 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
 
         int32_t inputZp = op.getInputZp();
         TypedAttr fillAttr = rewriter.getIntegerAttr(elemType, inputZp);
-        auto fillConst = rewriter.create<arith::ConstantOp>(loc, fillAttr);
-        auto padTensor = rewriter.create<tensor::EmptyOp>(loc, paddedShape, elemType);
-        auto fillOp = rewriter.create<linalg::FillOp>(
-            loc, ValueRange{fillConst}, ValueRange{padTensor.getResult()}
+        auto fillConst = arith::ConstantOp::create(rewriter, loc, fillAttr);
+        auto padTensor = tensor::EmptyOp::create(rewriter, loc, paddedShape, elemType);
+        auto fillOp = linalg::FillOp::create(
+            rewriter, loc, ValueRange{fillConst}, ValueRange{padTensor.getResult()}
         );
-
         SmallVector<OpFoldResult> offsets(4, rewriter.getIndexAttr(0));
         SmallVector<OpFoldResult> sizes;
         for (int64_t dim : shape)
             sizes.push_back(rewriter.getIndexAttr(dim));
 
-        auto insertOp = rewriter.create<tensor::InsertSliceOp>(
-            loc, op.getInput(), fillOp.getResult(0), offsets, sizes,
+        auto insertOp = tensor::InsertSliceOp::create(
+            rewriter, loc, op.getInput(), fillOp.getResult(0), offsets, sizes,
             SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
         );
 
@@ -756,7 +755,7 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
     }
 };
 
-class ValidToSamePadPass : public ValidToSamePadPassBase<ValidToSamePadPass> {
+class ValidToSamePadPass : public impl::ValidToSamePadPassBase<ValidToSamePadPass> {
   public:
     using ValidToSamePadPassBase<ValidToSamePadPass>::ValidToSamePadPassBase;
     void runOnOperation() override;
@@ -796,7 +795,12 @@ void ValidToSamePadPass::runOnOperation() {
         patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::MaxPool2dOp>>(ctx);
         patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::MaxPool2dOp>>(ctx);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+        // Register patterns for MaxPool2dOp
+        patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::MaxPool2dOp>>(ctx);
+        patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::MaxPool2dOp>>(ctx);
+        patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::MaxPool2dOp>>(ctx);
+
+        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
             return signalPassFailure();
         }
     }

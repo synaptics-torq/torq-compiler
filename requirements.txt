@@ -14,6 +14,9 @@ streamlit==1.45.1
 # (iree has a >= dependency which is picking up 2.19.0 which is not compatible)
 tensorflow==2.18.1
 
+# for conversion from tflite to TOSA 1.0 compliant MLIR
+tosa-converter-for-tflite==2026.2.0
+
 # for TFLite layer extraction (tflite_layer_extractor.py)
 flatbuffers>=24.3.25
 

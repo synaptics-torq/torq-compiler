@@ -157,7 +157,7 @@ static void copyToProgramBody(
         returnValues.push_back(map.lookup(output));
     }
 
-    builder.create<torq_hl::ReturnOp>(programOp.getLoc(), returnValues);
+    torq_hl::ReturnOp::create(builder, programOp.getLoc(), returnValues);
 }
 
 static int64_t getProgramSize(torq_hl::ProgramOp programOp) {

@@ -13,6 +13,9 @@ iree_cc_binary(
         iree::target::torq::Dialect::TorqHL::Dialect
         iree::target::torq::Dialect::TorqHW::Dialect
         MLIRTosaDialect
+        iree::compiler::plugins::input::Torch::torch-mlir::TorchConversionDialectIR
+        iree::compiler::plugins::input::Torch::torch-mlir::TorchDialectIR
+        iree::compiler::plugins::input::Torch::torch-mlir-dialects::TMTensorDialectIR
     SETUP_INSTALL_RPATH
 )
 

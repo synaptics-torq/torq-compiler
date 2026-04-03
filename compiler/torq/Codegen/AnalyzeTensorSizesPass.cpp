@@ -36,7 +36,7 @@ namespace {
 //
 // The code doesn't try to detect operations that can be done at compile time so some of the
 // operations in list may not be really required to run at runtime.
-class AnalyzeTensorSizesPass : public AnalyzeTensorSizesBase<AnalyzeTensorSizesPass> {
+class AnalyzeTensorSizesPass : public impl::AnalyzeTensorSizesBase<AnalyzeTensorSizesPass> {
   public:
     AnalyzeTensorSizesPass() = default;
     AnalyzeTensorSizesPass(const AnalyzeTensorSizesPass &pass) {}

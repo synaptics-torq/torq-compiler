@@ -19,7 +19,7 @@ namespace mlir::syna {
 namespace torq {
 
 class Slice;
-class SlicePrivate;
+struct SlicePrivate;
 class Iterator;
 
 // A stride can be specified as either a constant value or an affine expression.

@@ -410,7 +410,6 @@ LogicalResult runFloatConversion(Operation *op, TypeConverter &tc) {
 template <typename SourceType, typename TargetType>
 struct FloatTypeConverter : public PrimitiveTypeConverter<SourceType, TargetType> {
     explicit FloatTypeConverter() {
-        this->addArgumentMaterialization(convertRankedFloat);
         this->addSourceMaterialization(convertRankedFloat);
         this->addTargetMaterialization(convertRankedFloat);
     }
@@ -419,7 +418,6 @@ struct FloatTypeConverter : public PrimitiveTypeConverter<SourceType, TargetType
 template <typename SourceType, typename TargetType>
 struct IntegerTypeConverter : public PrimitiveTypeConverter<SourceType, TargetType> {
     explicit IntegerTypeConverter() {
-        this->addArgumentMaterialization(convertRankedInteger);
         this->addSourceMaterialization(convertRankedInteger);
         this->addTargetMaterialization(convertRankedInteger);
     }
@@ -430,7 +428,7 @@ struct DemoteF32ToBF16Converter : public FloatTypeConverter<Float32Type, BFloat1
     Type getTargetType(Float32Type type) override { return BFloat16Type::get(type.getContext()); }
 };
 
-class TorqDemoteF32ToBF16Pass : public TorqDemoteF32ToBF16Base<TorqDemoteF32ToBF16Pass> {
+class TorqDemoteF32ToBF16Pass : public impl::TorqDemoteF32ToBF16Base<TorqDemoteF32ToBF16Pass> {
   public:
     using TorqDemoteF32ToBF16Base::TorqDemoteF32ToBF16Base;
 
@@ -448,7 +446,7 @@ struct ConvertF16ToBF16Converter : public FloatTypeConverter<Float16Type, BFloat
     Type getTargetType(Float16Type type) override { return BFloat16Type::get(type.getContext()); }
 };
 
-class TorqConvertF16ToBF16Pass : public TorqConvertF16ToBF16Base<TorqConvertF16ToBF16Pass> {
+class TorqConvertF16ToBF16Pass : public impl::TorqConvertF16ToBF16Base<TorqConvertF16ToBF16Pass> {
   public:
     using TorqConvertF16ToBF16Base::TorqConvertF16ToBF16Base;
 
@@ -469,7 +467,7 @@ struct DemoteI64ToI32Converter : public IntegerTypeConverter<IntegerType, Intege
     }
 };
 
-class TorqDemoteI64ToI32Pass : public TorqDemoteI64ToI32Base<TorqDemoteI64ToI32Pass> {
+class TorqDemoteI64ToI32Pass : public impl::TorqDemoteI64ToI32Base<TorqDemoteI64ToI32Pass> {
   public:
     using TorqDemoteI64ToI32Base::TorqDemoteI64ToI32Base;
 

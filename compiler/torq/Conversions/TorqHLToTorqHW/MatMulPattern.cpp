@@ -237,8 +237,8 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
         }
     }
 
-    auto newOp = rewriter.create<torq_hw::SliceTaskOp>(
-        op->getLoc(), "matmul",
+    auto newOp = torq_hw::SliceTaskOp::create(
+        rewriter, op->getLoc(), "matmul",
         op.getInput2(),                          // Input tensor
         op.getInput1(),                          // Weights
         op.getScaleBias(),                       // BiasScale tensor

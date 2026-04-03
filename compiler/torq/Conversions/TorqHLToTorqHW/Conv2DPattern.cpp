@@ -124,6 +124,13 @@ LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &re
     auto input_strides = getEncodedStridesElements(input_type);
     auto output_strides = getEncodedStridesElements(output_type);
 
+    // this is a special case we know that it doesn't work
+    // FIXME: if we don't support any F32 output we should refine this check
+    if (output_type.getElementType().isF32() && op.getStride().size() == 2 &&
+        op.getStride()[0] == 2 && op.getStride()[1] == 2) {
+        return op.emitError("strided convolution (2,2) with F32 output not supported");
+    }
+
     // input/output data layout is NCHW
     const uint32_t out_h = output_shape[2];
     const uint32_t out_w = output_shape[3];

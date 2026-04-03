@@ -1,7 +1,8 @@
 module {
-  func.func @main(%194: tensor<1x21x1xi32>) -> (tensor<1x21x1xi32>) {
-    %20 = "tosa.const"() <{value = dense<1> : tensor<1x1x1xi32>}> : () -> tensor<1x1x1xi32>
-    %195 = tosa.sub %194, %20 : (tensor<1x21x1xi32>, tensor<1x1x1xi32>) -> tensor<1x21x1xi32>
-    return %195 : tensor<1x21x1xi32>
+  func.func @main(%arg0: tensor<1x21x1xi32>) -> tensor<1x21x1xi32> {
+    %0 = "tosa.const"() <{values = dense<1> : tensor<1x1x1xi32>}> : () -> tensor<1x1x1xi32>
+    %1 = tosa.sub %arg0, %0 : (tensor<1x21x1xi32>, tensor<1x1x1xi32>) -> tensor<1x21x1xi32>
+    return %1 : tensor<1x21x1xi32>
   }
 }
+

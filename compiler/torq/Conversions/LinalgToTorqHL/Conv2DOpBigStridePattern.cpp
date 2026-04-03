@@ -45,8 +45,8 @@ Value getSpaceToDepth(Value input, int sh, int sw, PatternRewriter &rewriter) {
     // Map: [0]->[0], [1]->[1], [2]->[2,3], [3]->[4,5]
     SmallVector<int64_t, 6> expandedShape = {n, c, h / sh, sh, w / sw, sw};
     auto expandedType = RankedTensorType::get(expandedShape, elementType);
-    Value expanded = rewriter.create<tensor::ExpandShapeOp>(
-        loc, expandedType, input, ArrayRef<ReassociationIndices>{{0}, {1}, {2, 3}, {4, 5}}
+    Value expanded = tensor::ExpandShapeOp::create(
+        rewriter, loc, expandedType, input, ArrayRef<ReassociationIndices>{{0}, {1}, {2, 3}, {4, 5}}
     );
 
     // Transpose to [n, c, sh, sw, h/sh, w/sw]
@@ -55,8 +55,8 @@ Value getSpaceToDepth(Value input, int sh, int sw, PatternRewriter &rewriter) {
 
     // Collapse [n, c, sh, sw, h/sh, w/sw] to [n, c*sh*sw, h/sh, w/sw]
     auto outType = RankedTensorType::get({n, c * sh * sw, h / sh, w / sw}, elementType);
-    Value out = rewriter.create<tensor::CollapseShapeOp>(
-        loc, outType, transposed, ArrayRef<ReassociationIndices>{{0}, {1, 2, 3}, {4}, {5}}
+    Value out = tensor::CollapseShapeOp::create(
+        rewriter, loc, outType, transposed, ArrayRef<ReassociationIndices>{{0}, {1, 2, 3}, {4}, {5}}
     );
 
     return out;

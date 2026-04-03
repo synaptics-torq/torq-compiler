@@ -163,15 +163,22 @@ template <class LinalgOp> struct LinalgPattern : public OpRewritePattern<LinalgO
                           : scf::SCFTilingOptions::LoopType::ForallOp
         );
 
-        options.setFusionControlFn([fuseGroup](
-                                       mlir::tensor::ExtractSliceOp candidateSliceOp,
-                                       OpResult producerOpResult, bool isDestinationOperand
-                                   ) {
-            auto producerGroups =
-                producerOpResult.getOwner()->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-            bool shouldFuse = producerGroups && llvm::is_contained(producerGroups, fuseGroup);
-            return std::pair(shouldFuse, false);
-        });
+        options.setFusionControlFn(
+            [fuseGroup](
+                mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
+                bool isDestinationOperand
+            ) -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
+                auto producerGroups =
+                    producerOpResult.getOwner()->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+                bool shouldFuse = producerGroups && llvm::is_contained(producerGroups, fuseGroup);
+
+                if (shouldFuse) {
+                    return scf::SCFTileAndFuseOptions::ControlFnResult{false};
+                }
+
+                return std::nullopt;
+            }
+        );
 
         FailureOr<scf::SCFTileAndFuseResult> tiledResults =
             scf::tileConsumerAndFuseProducersUsingSCF(rewriter, rootTi, options);
@@ -198,7 +205,7 @@ template <class LinalgOp> struct LinalgPattern : public OpRewritePattern<LinalgO
     }
 }; // class LinalgPattern
 
-struct LinalgSlicingPass : public LinalgSlicingBase<LinalgSlicingPass> {
+struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
     using LinalgSlicingBase<LinalgSlicingPass>::LinalgSlicingBase;
 
     LinalgSlicingOptions options_;
@@ -228,10 +235,10 @@ struct LinalgSlicingPass : public LinalgSlicingBase<LinalgSlicingPass> {
 
         // patterns.add<FullyConnectedPattern>(ctx);
 
-        if (failed(applyPatternsAndFoldGreedily(
-                getOperation(), std::move(patterns),
-                {.strictMode = GreedyRewriteStrictness::ExistingOps}
-            ))) {
+        GreedyRewriteConfig config;
+        config.setStrictness(GreedyRewriteStrictness::ExistingOps);
+
+        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns), config))) {
             assert(false && "failed");
             return signalPassFailure();
         }

@@ -27,10 +27,13 @@
 #include "mlir/Dialect/SCF/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
+
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
 
@@ -400,21 +403,22 @@ static LogicalResult tileMatMulForSlices(
         ));
 
     // Avoid fusing operations that do not run on the slice
-    auto fusionControlFn = [](tensor::ExtractSliceOp, OpResult opResult, bool) {
+    auto fusionControlFn = [](tensor::ExtractSliceOp, OpResult opResult,
+                              bool) -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
         // If producer memory requirement is less than maxAllowedMemory, do not fuse
         // use 10kB as threshold for now but we should probably calculate it based on MatMul
         const uint32_t maxAllowedMemory = 10000;
         auto maybeMemoryRequirement = getMemoryRequirements(opResult);
         if (succeeded(maybeMemoryRequirement) && (*maybeMemoryRequirement < maxAllowedMemory)) {
-            return std::make_tuple(false, false);
+            return scf::SCFTileAndFuseOptions::ControlFnResult{false};
         }
         auto srcOp = opResult.getDefiningOp<linalg::LinalgOp>();
         if (!srcOp) {
-            return std::make_tuple(false, false);
+            return std::nullopt;
         }
-        bool fuse = getTargetExecutor(srcOp, torq_hl::Executor::Slice) == torq_hl::Executor::Slice;
-
-        return std::make_tuple(fuse, false);
+        if (getTargetExecutor(srcOp, torq_hl::Executor::Slice) != torq_hl::Executor::Slice)
+            return std::nullopt;
+        return scf::SCFTileAndFuseOptions::ControlFnResult{false};
     };
     options.setFusionControlFn(fusionControlFn);
 
@@ -751,7 +755,7 @@ template <typename OpTy> struct TensorOpConversion : public OpRewritePattern<OpT
     }
 };
 
-class LramTilePass : public LramTileBase<LramTilePass> {
+class LramTilePass : public impl::LramTileBase<LramTilePass> {
   public:
     using LramTileBase<LramTilePass>::LramTileBase;
 
@@ -773,8 +777,8 @@ class LramTilePass : public LramTileBase<LramTilePass> {
         tensor::populateFoldConstantExtractSlicePatterns(tilePatterns, controlFn);
 
         GreedyRewriteConfig config;
-        config.strictMode = GreedyRewriteStrictness::ExistingOps;
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(tilePatterns), config))) {
+        config.setStrictness(GreedyRewriteStrictness::ExistingOps);
+        if (failed(applyPatternsGreedily(getOperation(), std::move(tilePatterns), config))) {
             return signalPassFailure();
         }
 
@@ -782,7 +786,7 @@ class LramTilePass : public LramTileBase<LramTilePass> {
     }
 };
 
-class DtcmTilePass : public DtcmTileBase<DtcmTilePass> {
+class DtcmTilePass : public impl::DtcmTileBase<DtcmTilePass> {
   public:
     using DtcmTileBase<DtcmTilePass>::DtcmTileBase;
 
@@ -806,8 +810,8 @@ class DtcmTilePass : public DtcmTileBase<DtcmTilePass> {
         tensor::populateFoldConstantExtractSlicePatterns(tilePatterns, controlFn);
 
         GreedyRewriteConfig config;
-        config.strictMode = GreedyRewriteStrictness::ExistingAndNewOps;
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(tilePatterns), config))) {
+        config.setStrictness(GreedyRewriteStrictness::ExistingAndNewOps);
+        if (failed(applyPatternsGreedily(getOperation(), std::move(tilePatterns), config))) {
             return signalPassFailure();
         }
 

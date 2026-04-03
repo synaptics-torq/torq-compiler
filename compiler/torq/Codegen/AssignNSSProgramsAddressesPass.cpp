@@ -21,7 +21,7 @@ namespace mlir::syna::torq {
 namespace {
 
 class AssignNSSProgramsAddressesPass
-    : public AssignNSSProgramsAddressesBase<AssignNSSProgramsAddressesPass> {
+    : public impl::AssignNSSProgramsAddressesBase<AssignNSSProgramsAddressesPass> {
   public:
     using AssignNSSProgramsAddressesBase::AssignNSSProgramsAddressesBase;
     void runOnOperation() override;
