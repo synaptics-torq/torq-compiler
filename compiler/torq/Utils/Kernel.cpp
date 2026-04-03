@@ -1808,7 +1808,9 @@ PData SlicePrivate::aluProductAccumulate(
     LLVM_DEBUG(llvm::dbgs() << "aluProductAccumulate iShape: " << iShape.size() << "\n";);
 
     _cfg.alu_d_unsigned = dataType == DType::uint8 ? 0b1111 : 0;
-    _cfg.alu_w_unsigned = weightType == DType::int16 ? 0b101 : 0;
+    _cfg.alu_w_unsigned = weightType == DType::uint8   ? 0b1111
+                          : weightType == DType::int16 ? 0b101
+                                                       : 0;
     if (dataType == DType::int16 && weightType == DType::int16) {
         _cfg.alu_d_unsigned = 3;
         _cfg.alu_w_unsigned = 5;
@@ -1923,7 +1925,7 @@ QData SlicePrivate::actClamp(
             // We have 2 partials for each data
             // Each partial is processed with different left shifts
             _cfg.alu_d_unsigned = 5;
-            _cfg.alu_w_unsigned = 0;
+            _cfg.alu_w_unsigned = weightType == DType::uint8 ? 0b1111 : 0;
             _cfg.act_lsh = {0, 8, 0, 8};
             resultType = DType::int16;
             resultCount /= 2;
@@ -1938,7 +1940,7 @@ QData SlicePrivate::actClamp(
         }
         else if (dataSize == 4 && weightSize == 1) {
             _cfg.alu_d_unsigned = 7;
-            _cfg.alu_w_unsigned = 0;
+            _cfg.alu_w_unsigned = weightType == DType::uint8 ? 0b1111 : 0;
             _cfg.act_lsh = {0, 8, 16, 24};
             _cfg.act_sum_bits = 32;
             resultType = DType::int32;

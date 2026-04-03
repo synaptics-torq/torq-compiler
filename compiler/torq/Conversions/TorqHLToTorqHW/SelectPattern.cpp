@@ -30,6 +30,12 @@ LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &re
     input.broadcastAs(output);
     input2.broadcastAs(output);
 
+    // Keep i1 conditions unsigned as predicates travel through a byte-oriented path.
+    auto conditionType = llvm::cast<ShapedType>(op.getInput1().getType()).getElementType();
+    if (conditionType.isInteger(1)) {
+        weights.setElementType(DType::uint8);
+    }
+
     // SelectOp doesn’t involve computation, so there is no such concepts as floating point or
     // integer. we keep the element type as integer type for simplicity.
     if (input.elementType() == DType::bf16) {

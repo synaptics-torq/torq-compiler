@@ -184,10 +184,12 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
             auto predicate = cmpIOp.getPredicate();
             if (predicate == arith::CmpIPredicate::sge || predicate == arith::CmpIPredicate::uge) {
                 opType = torq_hl::ElementwiseOpEnum::GREATER_EQUAL;
+                isUnsigned = predicate == arith::CmpIPredicate::uge;
             }
             else if (predicate == arith::CmpIPredicate::sgt ||
                      predicate == arith::CmpIPredicate::ugt) {
                 opType = torq_hl::ElementwiseOpEnum::GREATER;
+                isUnsigned = predicate == arith::CmpIPredicate::ugt;
             }
             else if (predicate == arith::CmpIPredicate::eq) {
                 opType = torq_hl::ElementwiseOpEnum::EQUAL;
