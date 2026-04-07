@@ -180,7 +180,7 @@ llvm::FailureOr<int64_t> computeMinMaxAtZero(Operation *op) {
 
     affine::fullyComposeAffineMapAndOperands(&map, &operands);
     SmallVector<Attribute> zeros(
-        map.getNumDims(), getAsIndexOpFoldResult(op->getContext(), 0).template get<Attribute>()
+        map.getNumDims(), cast<Attribute>(getAsIndexOpFoldResult(op->getContext(), 0))
     );
     SmallVector<Attribute> results;
     if (failed(map.constantFold(zeros, results)))
@@ -210,9 +210,9 @@ llvm::FailureOr<int64_t> computeIntAtZero(OpFoldResult sizeFoldResult) {
     if (std::optional<int64_t> constSize = getConstantIntValue(sizeFoldResult))
         return *constSize;
 
-    assert(sizeFoldResult.is<Value>() && "expected a Value");
+    assert(isa<Value>(sizeFoldResult) && "expected a Value");
 
-    Value sizeValue = sizeFoldResult.get<Value>();
+    Value sizeValue = cast<Value>(sizeFoldResult);
 
     return llvm::TypeSwitch<Operation *, FailureOr<int64_t>>(sizeValue.getDefiningOp())
         .Case<affine::AffineMinOp, affine::AffineMaxOp>([&](auto minMaxOp) {
@@ -230,8 +230,7 @@ llvm::FailureOr<int64_t> computeIntAtZero(OpFoldResult sizeFoldResult) {
 
             affine::fullyComposeAffineMapAndOperands(&map, &operands);
             SmallVector<Attribute> zeros(
-                map.getNumDims(),
-                getAsIndexOpFoldResult(applyOp->getContext(), 0).template get<Attribute>()
+                map.getNumDims(), cast<Attribute>(getAsIndexOpFoldResult(applyOp->getContext(), 0))
             );
             SmallVector<Attribute> results;
             if (failed(map.constantFold(zeros, results)))
@@ -333,7 +332,7 @@ ModuleOp extractOpsForMemoryCheck(
 
     OpBuilder builder(context);
 
-    ModuleOp moduleOp = builder.create<ModuleOp>(loc, "extracted_for_memory_check");
+    ModuleOp moduleOp = ModuleOp::create(builder, loc, "extracted_for_memory_check");
     builder.setInsertionPointToStart(moduleOp.getBody());
 
     SmallVector<Operation *> ops;
@@ -351,7 +350,7 @@ ModuleOp extractOpsForMemoryCheck(
 
     FunctionType functionType = builder.getFunctionType(inputTypes, consumerOp->getResultTypes());
 
-    func::FuncOp funcOp = builder.create<func::FuncOp>(loc, "extracted_tile", functionType);
+    func::FuncOp funcOp = func::FuncOp::create(builder, loc, "extracted_tile", functionType);
     funcOp.addEntryBlock();
 
     IRMapping extractionMap;
@@ -381,7 +380,7 @@ ModuleOp extractOpsForMemoryCheck(
 
     // NB: tileModuleForMemoryCheck relies on this being the last op in the
     // block, and clonedConsumerOp being it's immediate source.
-    builder.create<func::ReturnOp>(loc, clonedConsumerOp->getResults());
+    func::ReturnOp::create(builder, loc, clonedConsumerOp->getResults());
 
     return moduleOp;
 }
@@ -581,8 +580,8 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
         if (failed(maybeSize))
             return llvm::failure();
 
-        Value size = builder.create<arith::ConstantOp>(
-            funcOp->getLoc(), builder.getIntegerAttr(builder.getIndexType(), *maybeSize)
+        Value size = arith::ConstantOp::create(
+            builder, funcOp->getLoc(), builder.getIntegerAttr(builder.getIndexType(), *maybeSize)
         );
 
         arg.replaceAllUsesWith(size);

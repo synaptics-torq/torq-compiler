@@ -238,7 +238,7 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
         GreedyRewriteConfig config;
         config.setStrictness(GreedyRewriteStrictness::ExistingOps);
 
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns), config))) {
+        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns), config))) {
             assert(false && "failed");
             return signalPassFailure();
         }
