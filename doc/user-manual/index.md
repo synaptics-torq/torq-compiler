@@ -15,5 +15,6 @@ debug_tips.md
 appendices.md
 release_notes.md
 tools.md
+torq-synap-integration.md
 ```
 
