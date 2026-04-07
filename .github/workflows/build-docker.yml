@@ -6,6 +6,7 @@ on:
     push:
         branches:
             - main
+            - v*
         paths:            
             - '.github/workflows/build-docker.yml'
             - 'scripts/Dockerfile.localdev'
@@ -47,8 +48,8 @@ jobs:
           with:
             context: .
             file: scripts/Dockerfile.localdev
-            push: ${{ github.ref == 'refs/heads/main' }}
-            tags: ghcr.io/${{ github.repository }}/builder:latest            
+            push: ${{ github.event_name == 'push' }}
+            tags: ghcr.io/${{ github.repository }}/builder:${{ ( github.event_name == 'push' && github.ref != 'refs/heads/main') && github.ref_name || 'latest' }}
             build-args: GITHUB_REPOSITORY=${{ github.repository }}
             secrets: |
                 "github_token=${{ secrets.GITHUB_TOKEN }}"

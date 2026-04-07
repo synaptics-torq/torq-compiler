@@ -99,7 +99,8 @@ runs:
         if [ "$status" = "200" ]; then
           echo "branch=$branch_name" >> $GITHUB_OUTPUT
         else
-          echo "branch=main" >> $GITHUB_OUTPUT
+          # use the base branch if we have a PR event, otherwise fallback to the branch being pushed (or tag)
+          echo "branch=${{ github.base_ref || github.ref_name }}" >> $GITHUB_OUTPUT
         fi
 
     - name: Checkout extras repository

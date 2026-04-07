@@ -6,6 +6,7 @@ on:
   push:
     branches:
        - main
+       - v*
   release:
     types: [published]
 
@@ -28,6 +29,7 @@ jobs:
 
     runs-on:
       - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+        image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
 
     env:
       SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
@@ -45,8 +47,8 @@ jobs:
         id: assume_role
         with:
           aws-region: ${{ vars.AWS_REGION }}
-          # only the main branch role has permissions to write to the cache
-          role-to-assume: ${{ github.ref == 'refs/heads/main' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
+          # only the main and version branches role has permissions to write to the cache
+          role-to-assume: ${{ github.event_name == 'push' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
 
       - name: Show active AWS identity
         run: |
@@ -141,7 +143,7 @@ jobs:
   test_cmodel:
     name: Test with C model
 
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || !contains(github.event.pull_request.labels.*.name || '', 'skip-test-cmodel') }}
+    if: ${{ github.event_name == 'push' || !contains(github.event.pull_request.labels.*.name || '', 'skip-test-cmodel') }}
 
     needs: [ build, user_doc_build ]
 
@@ -169,7 +171,7 @@ jobs:
         id: assume_role
         with:
           aws-region: ${{ vars.AWS_REGION }}
-          role-to-assume: ${{ github.ref == 'refs/heads/main' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
+          role-to-assume: ${{ github.event_name == 'push' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
 
       - name: Checkout repository
         if: ${{ vars.DISABLE_TESTS != 'true' }}
@@ -209,7 +211,7 @@ jobs:
 
     runs-on: ${{ vars.DISABLE_TESTS != 'true' && format('torq-fpga-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
 
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name || '', 'test-aws') }}
+    if: ${{ github.event_name == 'push'  || contains(github.event.pull_request.labels.*.name || '', 'test-aws') }}
 
     needs: [ test_cmodel ]
 
@@ -232,7 +234,7 @@ jobs:
         id: assume_role
         with:
           aws-region: ${{ vars.AWS_REGION }}
-          role-to-assume: ${{ github.ref == 'refs/heads/main' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
+          role-to-assume: ${{ github.event_name == 'push' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
 
       - name: Clear FPGA slot
         if: ${{ vars.DISABLE_TESTS != 'true' }}
@@ -305,7 +307,7 @@ jobs:
 
   docker_release:
     name: Release Docker image
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'release' && github.event.action == 'published') }}
+    if: ${{ github.event_name == 'push' || (github.event_name == 'release' && github.event.action == 'published') }}
     needs: test_aws_fpga
     runs-on: ubuntu-latest
     permissions:
@@ -334,7 +336,7 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=ref,event=branch,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=branch,enable=${{ github.event_name == 'push' }}
 
             type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' && github.event.action == 'published' }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.action == 'published' }}
@@ -390,16 +392,17 @@ jobs:
           rm -rf doc
 
       - name: Ensure snapshot release exists
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ github.event_name == 'push' }}
         env:
           GITHUB_TOKEN: ${{ secrets.github_token }}
         run: |
-          if gh release view snapshot >/dev/null 2>&1; then
+          SNAPSHOT_NAME=${{ github.ref == 'refs/heads/main' && 'snapshot' || github.ref_name }}
+          if gh release view $SNAPSHOT_NAME >/dev/null 2>&1; then
             echo "snapshot release exists"
           else
-            gh release create snapshot \
+            gh release create $SNAPSHOT_NAME \
               -t "Development Snapshot" \
-              -n "Latest build from main. Unstable. Replaced on each commit." \
+              -n "Latest build from ${{ github.ref_name }}. Unstable. Replaced on each commit." \
               --prerelease
           fi
 
@@ -415,7 +418,7 @@ jobs:
           if [[ "$EVENT_NAME" == "release" && "$EVENT_ACTION" == "published" ]]; then
             TAG="$RELEASE_TAG"
           else
-            TAG="snapshot"
+            TAG="${{ github.ref == 'refs/heads/main' && 'snapshot' || github.ref_name }}"
           fi
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
@@ -439,5 +442,6 @@ jobs:
           if [[ "$EVENT_NAME" == "release" && "$EVENT_ACTION" == "published" ]]; then
             gh release upload "$RELEASE_TAG" dist/* --clobber
           else
-            gh release upload snapshot dist/* --clobber
+            SNAPSHOT_NAME="${{ github.ref == 'refs/heads/main' && 'snapshot' || github.ref_name }}"
+            gh release upload "$SNAPSHOT_NAME" dist/* --clobber
           fi
