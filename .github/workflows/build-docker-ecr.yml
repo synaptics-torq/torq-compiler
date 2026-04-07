@@ -6,6 +6,7 @@ on:
     push:
         branches:
              - main
+             - v*
         paths:
             - 'scripts/Dockerfile.ci'
             - 'scripts/Dockerfile.ci-tests'
@@ -93,8 +94,8 @@ jobs:
             with:
               context: .
               file: scripts/Dockerfile.ci
-              push: ${{ github.ref == 'refs/heads/main' }}
-              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
+              push: ${{ github.event_name == 'push' }}
+              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ ( github.event_name == 'push' && github.ref != 'refs/heads/main') && github.ref_name || 'latest' }}
               build-args: GITHUB_REPOSITORY=${{ github.repository }}
               secrets: |
                 "github_token=${{ secrets.GITHUB_TOKEN }}"
@@ -104,8 +105,8 @@ jobs:
             with:
               context: .
               file: scripts/Dockerfile.ci-tests
-              push: ${{ github.ref == 'refs/heads/main' }}
-              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-tests
+              push: ${{ github.event_name == 'push' }}
+              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ ( github.event_name == 'push' && github.ref != 'refs/heads/main') && github.ref_name || 'latest' }}-tests
               build-args: GITHUB_REPOSITORY=${{ github.repository }}
               secrets: |
                 "github_token=${{ secrets.GITHUB_TOKEN }}"
@@ -115,8 +116,8 @@ jobs:
             with:
               context: .
               file: scripts/Dockerfile.ci-fpga-tests
-              push: ${{ github.ref == 'refs/heads/main' }}
-              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-fpga-tests
+              push: ${{ github.event_name == 'push' }}
+              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ ( github.event_name == 'push' && github.ref != 'refs/heads/main') && github.ref_name || 'latest' }}-fpga-tests
               build-args: GITHUB_REPOSITORY=${{ github.repository }}
               secrets: |
                 "github_token=${{ secrets.GITHUB_TOKEN }}"
