@@ -336,8 +336,6 @@ def case_config(request, runtime_hw_type, chip_config):
   if any(s in request.param.name for s in torq_tiling_tc):
       extra_args["torq_compiler_options"]  = ["--torq-enable-torq-hl-tiling"]
 
-  if "full_model_efficientnetb0" in request.param.name:
-     pytest.xfail("currently failing on v1.5, tracked in #1196")
 
   compile_timeout = 60 * 15
   runtime_timeout = 60 * 15
