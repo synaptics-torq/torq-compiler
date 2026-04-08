@@ -72,19 +72,15 @@ jobs:
             run: |
               bash scripts/checkout_submodules.sh
 
-          - name: Remove git-lfs hooks
-            run: |
-              set -x
-
-              # remove the hooks to make sure we can re-install them when we use the checkout in other workflows
-              rm -f .git/hooks/*
-
-          - name: Detach the tree
+          - name: Prepare checkout for use in other workflows
             run: |
               set -x
 
               # this speeds up the checkout action
               git checkout --detach
+              
+              # remove the hooks to make sure we can re-install them when we use the checkout in other workflows
+              rm -f .git/hooks/*
 
           - name: Build and push build Docker image
             uses: docker/build-push-action@v7
