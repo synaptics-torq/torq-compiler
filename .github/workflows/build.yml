@@ -1,7 +1,7 @@
 name: Build and Test
 
 on: 
-  workflow_dispatch:
+
   pull_request:    
   push:
     branches:
@@ -21,15 +21,55 @@ concurrency:
 
 jobs:
 
+  choose_runner_image:
+    name: Choose runner image
+    runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.set-runner-image.outputs.image_name }}
+    steps:
+      - name: Choose runner image
+        id: set-runner-image
+        run: |
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+
+            if [[ "${{ github.base_ref }}" == "main" ]]; then
+              echo "image_name=latest" >> $GITHUB_OUTPUT
+            else
+              echo "image_name=${{ github.base_ref }}" >> $GITHUB_OUTPUT
+            fi
+
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+
+            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              echo "image_name=latest" >> $GITHUB_OUTPUT
+            else
+              echo "image_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            fi
+
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+
+            TAG_NAME="${{ github.event.release.tag_name }}"
+            BRANCH_NAME=$(echo "$TAG_NAME" | sed -E 's/^(v[0-9]+.[0-9]+).*/\1/')
+
+            echo "image_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          else
+            echo "Unsupported event type: ${{ github.event_name }}"
+            exit 1
+          fi
+
   build:
 
     name: Build compiler and runtime
+
+    needs: choose_runner_image
 
     if: ${{ vars.CODEBUILD_PROJECT_CODEBASE != ''}}
 
     runs-on:
       - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-        image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
+        image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.choose_runner_image.outputs.image_name }}
 
     env:
       SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
@@ -43,7 +83,7 @@ jobs:
     steps:
 
       - name: Assume AWS role to access cache
-        uses: aws-actions/configure-aws-credentials@v5.1.0
+        uses: aws-actions/configure-aws-credentials@v6
         id: assume_role
         with:
           aws-region: ${{ vars.AWS_REGION }}
@@ -55,12 +95,19 @@ jobs:
           aws sts get-caller-identity
 
       - name: Make cached checkout visible to workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # actions/checkout and uses keyword can only access files within the current workflow workspace
           ln -s /workspace/code .
 
+          # ensure the github token is used by the checkout action for all operations (the action cannot handle this
+          # because it assumes the checkout is not a symlink in the way it sets up authentication)
+          AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git config --global "http.https://github.com/.extraheader" "AUTHORIZATION: basic $AUTH"
+
       - name: Update checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: code
           lfs: true
@@ -110,7 +157,7 @@ jobs:
           ./scripts/build_runtime_wheel.sh /workspace/build /workspace/build-astra-sl astra_machina poky
 
       - name: Upload runtime wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: runtime-wheel
           path: /workspace/code/dist/*.whl
@@ -134,7 +181,7 @@ jobs:
           tar -zcf release.tar.gz release
 
       - name: Upload release files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release
           path: release.tar.gz
@@ -145,7 +192,7 @@ jobs:
 
     if: ${{ github.event_name == 'push' || !contains(github.event.pull_request.labels.*.name || '', 'skip-test-cmodel') }}
 
-    needs: [ build, user_doc_build ]
+    needs: [ build, choose_runner_image ]
 
     permissions:
       contents: read
@@ -158,7 +205,7 @@ jobs:
 
     runs-on:
           - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-            image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest-tests
+            image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.choose_runner_image.outputs.image_name }}-tests
 
     outputs:
       s3_cache_path: ${{ steps.run_cmodel_tests.outputs.s3_cache_path }}
@@ -167,7 +214,7 @@ jobs:
 
       # this is required to be able to upload the artifacts to S3
       - name: Assume AWS role
-        uses: aws-actions/configure-aws-credentials@v5.1.0
+        uses: aws-actions/configure-aws-credentials@v6
         id: assume_role
         with:
           aws-region: ${{ vars.AWS_REGION }}
@@ -175,7 +222,7 @@ jobs:
 
       - name: Checkout repository
         if: ${{ vars.DISABLE_TESTS != 'true' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           lfs: false
           submodules: false
@@ -200,7 +247,7 @@ jobs:
           
       - name: Upload host test performance
         if: ${{ vars.DISABLE_TESTS != 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cmodel_test_performance_${{ matrix.chip_group }}
           path: ${{ github.workspace }}/host_test_performance_${{ matrix.chip_group }}.csv
@@ -230,7 +277,7 @@ jobs:
       
       # this is required to be able to download artifacts from S3
       - name: Assume AWS role
-        uses: aws-actions/configure-aws-credentials@v5.1.0
+        uses: aws-actions/configure-aws-credentials@v6
         id: assume_role
         with:
           aws-region: ${{ vars.AWS_REGION }}
@@ -245,7 +292,7 @@ jobs:
     
       - name: Checkout repository
         if: ${{ vars.DISABLE_TESTS != 'true' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           lfs: false
           submodules: false
@@ -268,7 +315,7 @@ jobs:
 
       - name: Upload AWS FPGA test performance
         if: ${{ vars.DISABLE_TESTS != 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aws_fpga_test_performance_${{ matrix.chip_group }}
           path: ${{ github.workspace }}/aws_fpga_test_performance_${{ matrix.chip_group }}.csv
@@ -276,7 +323,7 @@ jobs:
       
       - name: Upload AWS FPGA profiling logs
         if: ${{ vars.DISABLE_TESTS != 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aws_fpga_profiling_logs_${{ matrix.chip_group }}
           path: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
@@ -288,7 +335,7 @@ jobs:
       runs-on: ubuntu-latest
       steps:
           - name: Checkout repository              
-            uses: actions/checkout@v4
+            uses: actions/checkout@v6
             with:
               lfs: true
               submodules: false
@@ -299,7 +346,7 @@ jobs:
               doc_dir: doc/user-manual
 
           - name: Upload documentation artifact              
-            uses: actions/upload-artifact@v4
+            uses: actions/upload-artifact@v7
             with:
               name: user-manual
               path: _build/html     
@@ -318,7 +365,7 @@ jobs:
 
     steps:
       - name: Download the compiler and runtime
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release
           path: release
@@ -330,7 +377,7 @@ jobs:
 
       - name: Docker meta (generate tags & labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}/compiler
           flavor: |
@@ -342,14 +389,14 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.action == 'published' }}
 
       - name: Log in to Docker Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.github_token }}
       
       - name: Build and push release docker
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: release
           push: true
@@ -365,22 +412,22 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release
           path: dist
 
       - name: Download user documentation
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: user-manual
           path: dist/doc
 
       - name: Download runtime wheel
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: runtime-wheel
           path: dist
@@ -396,7 +443,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.github_token }}
         run: |
-          SNAPSHOT_NAME=${{ github.ref == 'refs/heads/main' && 'snapshot' || github.ref_name }}
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            SNAPSHOT_NAME="snapshot"
+          else
+            SNAPSHOT_NAME="snapshot-${{ github.ref_name }}"
+          fi
+
           if gh release view $SNAPSHOT_NAME >/dev/null 2>&1; then
             echo "snapshot release exists"
           else
@@ -418,7 +470,13 @@ jobs:
           if [[ "$EVENT_NAME" == "release" && "$EVENT_ACTION" == "published" ]]; then
             TAG="$RELEASE_TAG"
           else
-            TAG="${{ github.ref == 'refs/heads/main' && 'snapshot' || github.ref_name }}"
+
+            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              TAG="snapshot"
+            else
+              TAG="snapshot-${{ github.ref_name }}"
+            fi
+
           fi
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
@@ -442,6 +500,12 @@ jobs:
           if [[ "$EVENT_NAME" == "release" && "$EVENT_ACTION" == "published" ]]; then
             gh release upload "$RELEASE_TAG" dist/* --clobber
           else
-            SNAPSHOT_NAME="${{ github.ref == 'refs/heads/main' && 'snapshot' || github.ref_name }}"
+
+            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              SNAPSHOT_NAME="snapshot"
+            else
+              SNAPSHOT_NAME="snapshot-${{ github.ref_name }}"
+            fi
+
             gh release upload "$SNAPSHOT_NAME" dist/* --clobber
           fi

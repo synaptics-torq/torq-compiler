@@ -15,14 +15,14 @@ jobs:
     steps:
       - name: Generate GitHub token
         id: generate_token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ vars.PUBLISHING_APP_ID }}
           private-key: ${{ secrets.PUBLISHING_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
       
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           lfs: true
