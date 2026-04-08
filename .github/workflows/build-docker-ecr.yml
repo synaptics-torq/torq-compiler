@@ -47,7 +47,7 @@ jobs:
         steps:
 
           - name: Configure AWS Credentials
-            uses: aws-actions/configure-aws-credentials@v5.1.0
+            uses: aws-actions/configure-aws-credentials@v6
             if: ${{ github.event_name == 'push' }}
             with:
               aws-region: ${{ vars.AWS_REGION }}
@@ -63,7 +63,7 @@ jobs:
               aws ecr get-login-password --region ${{ vars.AWS_REGION }} | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
             
           - name: Checkout repository
-            uses: actions/checkout@v4
+            uses: actions/checkout@v6
             with:
               lfs: true
 
@@ -72,16 +72,6 @@ jobs:
             run: |
               bash scripts/checkout_submodules.sh
 
-          - name: Remove credentials from checkout
-            run: |
-              set -x
-
-              # remove the token from the main repository
-              git config --local --unset-all http.https://github.com/.extraheader
-
-              # remove the token from the submodules that have it
-              git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
-
           - name: Remove git-lfs hooks
             run: |
               set -x
@@ -89,8 +79,15 @@ jobs:
               # remove the hooks to make sure we can re-install them when we use the checkout in other workflows
               rm -f .git/hooks/*
 
+          - name: Detach the tree
+            run: |
+              set -x
+
+              # this speeds up the checkout action
+              git checkout --detach
+
           - name: Build and push build Docker image
-            uses: docker/build-push-action@v6
+            uses: docker/build-push-action@v7
             with:
               context: .
               file: scripts/Dockerfile.ci
@@ -101,7 +98,7 @@ jobs:
                 "github_token=${{ secrets.GITHUB_TOKEN }}"
 
           - name: Build and push tests Docker image
-            uses: docker/build-push-action@v6            
+            uses: docker/build-push-action@v7            
             with:
               context: .
               file: scripts/Dockerfile.ci-tests
@@ -112,7 +109,7 @@ jobs:
                 "github_token=${{ secrets.GITHUB_TOKEN }}"
 
           - name: Build and push FPGA tests Docker image
-            uses: docker/build-push-action@v6            
+            uses: docker/build-push-action@v7            
             with:
               context: .
               file: scripts/Dockerfile.ci-fpga-tests

@@ -38,7 +38,7 @@ jobs:
         steps:
 
           - name: Configure AWS Credentials
-            uses: aws-actions/configure-aws-credentials@v5.1.0
+            uses: aws-actions/configure-aws-credentials@v6
             with:
               aws-region: ${{ vars.DASHBOARD_AWS_REGION }}
               role-to-assume: ${{ vars.DASHBOARD_AWS_ROLE_ARN }}
@@ -55,12 +55,12 @@ jobs:
               aws ecr get-login-password --region ${{ vars.DASHBOARD_AWS_REGION }} | docker login --username AWS --password-stdin $REGISTRY_URL
             
           - name: Checkout repository
-            uses: actions/checkout@v4
+            uses: actions/checkout@v6
             with:
               lfs: true
 
           - name: Build and push build Docker image
-            uses: docker/build-push-action@v6
+            uses: docker/build-push-action@v7
             with:
               context: webapps/dashboard
               file: webapps/dashboard/Dockerfile

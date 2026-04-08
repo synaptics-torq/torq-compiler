@@ -76,7 +76,7 @@ runs:
 
     - name: Generate GitHub token
       id: generate_token
-      uses: actions/create-github-app-token@v1
+      uses: actions/create-github-app-token@v3
       if: ${{ inputs.app_id != '' }}
       with:
         app-id: ${{ inputs.app_id }}
@@ -104,7 +104,7 @@ runs:
         fi
 
     - name: Checkout extras repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       if: ${{ inputs.extra_repo != '' }}
       with:
         repository: ${{ inputs.extra_repo }}
@@ -113,7 +113,7 @@ runs:
         ref: ${{ steps.check_branch.outputs.branch }}
 
     - name: Download the compiler and runtime
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: release
         path: .
@@ -204,7 +204,7 @@ runs:
 
     - name: Upload test data cache to GitHub
       if: ${{ inputs.test_data_cache_artifact != '' }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.test_data_cache_artifact }}
         path: cache.tar.gz
