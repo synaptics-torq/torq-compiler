@@ -1,7 +1,9 @@
+from collections import defaultdict
+from collections.abc import Mapping
 import os
 import re
 import subprocess
-from typing import Dict, Any
+from typing import Any, AnyStr, Dict, Optional, Pattern
 from urllib.parse import urlparse
 
 import pytest
@@ -9,41 +11,63 @@ import requests
 import xdist
 
 
-_failures: Dict[str, Dict[str, Any]] = {}
-_reports: Dict[str, Dict[str, Any]] = {}
-_TASK_NODEID_RE = re.compile(r"^- \[[ xX]\]\s*(?:~~)?`([^`]+)`")
-_TITLE_COUNTS_RE = re.compile(r" \(pass \d+ / fail \d+ / error \d+\)$")
+_failures: Dict[str, Dict[str, Any]] = defaultdict(dict)
+_reports: Dict[str, Dict[str, Any]] = defaultdict(dict)
+
+_TASK_NODEID_RE = re.compile(r"^- \[([ xX])\]\s*(?:~~)?`([^`]+)`(?:\s*\(([^)]+)\))?")
+_MODULE_TITLE_COUNTS_RE = re.compile(r" \((?:pass \d+ / )fail \d+ / error \d+\)$")
+_ERROR_TITLE_COUNTS_RE = re.compile(r" \(\d+ tests\)$")
 _ISSUE_TYPE = "Bug"
 
+# Things that look like an error
+# re.MULTILINE makes $ match end of line.
+_ERROR_PATTERN = re.compile(r'(Assertion .*$|error: .*$)', re.MULTILINE)
 
-def pytest_addoption(parser):    
-    
+def pytest_addoption(parser):
+
     parser.addoption(
-        "--update-github-issue",        
+        "--update-github-issue",
         default=None,
         help="Update sub-issues of a GitHub issue at the end of the test session when tests fail",
     )
 
 
+def _normalize_error(report):
+    stderr =  getattr(report, "capstderr", None)
+
+    if stderr is None:
+        return None
+
+    error_match = _ERROR_PATTERN.search(stderr)
+    if error_match is None:
+        return None
+
+    # Normalize the error text:
+    # - remove the suffix tile and fuse adds
+    error = error_match.group(0).removesuffix(
+        " (encountered while running the pipeline to checking if a tile fits in memory)")
+    # - change fixed numbers to <N>
+    error = re.sub(r"[0-9]+", "<N>", error)
+
+    return error
+
 def pytest_runtest_logreport(report: pytest.TestReport):
-    test_report = _reports.setdefault(report.nodeid, {})
+    test_report = _reports[report.nodeid]
+
     test_report[report.when] = report.outcome
-    if getattr(report, "wasxfail", False):
-        test_report["wasxfail"] = True
+    test_report["wasxfail"] = bool(getattr(report, "wasxfail", False))
 
     # Track unexpected failures from setup/call/teardown phases.
     if report.outcome != "failed":
         return
-    if getattr(report, "wasxfail", False):
+
+    if test_report["wasxfail"]:
         return
 
-    _failures.setdefault(
-        report.nodeid,
-        {            
-            "nodeid": report.nodeid,
-            "phase": report.when
-        },
-    )
+    _failures[report.nodeid] = {
+        "phase": report.when,
+        "error": _normalize_error(report)
+    }
 
 
 def _classify_test_result(phases: Dict[str, Any]) -> str | None:
@@ -78,70 +102,137 @@ def _module_summary(module: str) -> Dict[str, int]:
     return counts
 
 
-def _extract_previous_task_nodeids(body: str) -> set[str]:
+def _extract_previous_task_nodeids(body: str) -> list[tuple[str, bool, Optional[str]]]:
     previous: set[str] = set()
     for line in body.splitlines():
         match = _TASK_NODEID_RE.match(line.strip())
         if match:
-            previous.add(match.group(1))
+            previous.add((match.group(2), match.group(1) != " ", match.group(3)))
     return previous
 
 
-def _build_issue_title(base_title: str, summary: Dict[str, int]) -> str:
+def _build_module_issue_title(base_title: str, summary: Dict[str, int]) -> str:
     return (
         f"{base_title} "
-        f"(pass {summary['success']} / fail {summary['fail']} / error {summary['error']})"
+        # f"(pass {summary['success']} / fail {summary['fail']} / error {summary['error']})"
+        f"(fail {summary['fail']} / error {summary['error']})"
     )
 
 
-def _title_matches_module_issue(issue_title: str, base_title: str) -> bool:
+def _title_matches_module_issue(issue_title: str, base_title: str, title_suffix_re: re.Pattern[AnyStr]) -> bool:
     if issue_title == base_title:
         return True
     if not issue_title.startswith(base_title):
         return False
-    suffix = issue_title[len(base_title):]
-    return bool(_TITLE_COUNTS_RE.fullmatch(suffix))
+    return bool(title_suffix_re.fullmatch(issue_title, len(base_title)))
 
 
-def _build_issue_body(
+def _build_module_issue(
+    module: str,
+    base_title: str,
     failures: Dict[str, Dict[str, Any]],
     previous_body: str | None = None,
-    summary: Dict[str, int] | None = None,
 ) -> str:
 
-    lines = []
-    summary = summary or {"fail": 0, "error": 0, "success": 0}
+    summary = _module_summary(module)
 
-    lines.extend([
-        "⚠️ Automatically generated, do not edit by hand or it will be overwritten.",
-        ""        
-        "### Summary",
-        f"- 🔴 Fail: **{summary['fail']}**",
-        f"- 🟠 Error: **{summary['error']}**",
-        f"- 🟢 Success: **{summary['success']}**",
-    ])
-        
-    lines.extend([
-        "",
-        "### Failing tests:",
-    ])
-
-    previous_failures = _extract_previous_task_nodeids(previous_body or "")
+    previous_failures = sorted(_extract_previous_task_nodeids(previous_body or ""))
     current_failures = set(failures.keys())
+
+    tests_list = []
 
     # Preserve history by marking done tests that were previously failing
     # but are not currently failing anymore.
-    for nodeid in sorted(previous_failures - current_failures):
-        lines.append(f"- [x] `{nodeid}`")
+    for nodeid, passed, phase in previous_failures:
+        if nodeid in current_failures:
+            continue
 
-    for nodeid in sorted(failures):
+        if nodeid not in _reports and not passed:
+            if phase in ["setup", "teardown"]:
+                summary["error"] += 1
+            else:
+                # phase == "call"
+                summary["fail"] += 1
+
+            failures[nodeid] = { "phase": phase }
+            continue
+
+        if nodeid not in _reports:
+            summary["success"] += 1
+
+        tests_list.append(f"- [x] `{nodeid}`")
+
+    # NB: at this point `failures` include tests that failed in the last run, and
+    # tests that failed in the runs before and did not run now.
+
+    for nodeid in sorted(failures.keys()):
         phase = failures[nodeid]["phase"]
-        lines.append(f"- [ ] `{nodeid}` ({phase})")
+        tests_list.append(f"- [ ] `{nodeid}` ({phase})")
 
-    return "\n".join(lines)
+    # TODO: dump failures.keys() into the module's xfail.py file.
+
+    lines = [
+        "⚠️ Automatically generated, do not edit by hand or it will be overwritten.",
+        "",
+        "### Summary",
+        f"- 🔴 Fail: **{summary['fail']}**",
+        f"- 🟠 Error: **{summary['error']}**",
+        # f"- 🟢 Success: **{summary['success']}**",
+        "",
+        "### Failing tests:",
+    ] + tests_list
+
+    body = "\n".join(lines)
+
+    title = _build_module_issue_title(base_title, summary)
+
+    return (title, body)
 
 
-def _find_existing_issue(repo: str, base_title: str, parent_issue: str | None, headers: Dict[str, str]) -> Dict[str, Any] | None:
+def _build_error_issue(
+    error: str,
+    base_title,
+    failures: list[str],
+    previous_body: Optional[str] = None
+) -> str:
+
+    previous_failures = sorted(_extract_previous_task_nodeids(previous_body)) if previous_body else []
+    current_failures = set(failures)
+
+    tests_list = []
+    # Preserve history by marking done tests that were previously failing
+    # but are not currently failing anymore.
+    for nodeid, passed, phase in previous_failures:
+        if nodeid in current_failures:
+            continue
+
+        if nodeid not in _reports and not passed:
+            failures.append(nodeid)
+            continue
+
+        tests_list.append(f"- [x] `{nodeid}`")
+
+    tests_list += [f"- [ ] `{nodeid}`" for nodeid in sorted(failures)]
+
+    lines = [
+        "⚠️ Automatically generated, do not edit by hand or it will be overwritten.",
+        "",
+        "### Summary",
+        f"{len(failures)} tests failed with the message:",
+        "```",
+        error,
+        "```",
+        "",
+        "### Failing tests:",
+    ] + tests_list
+
+    body = "\n".join(lines)
+    title = f"{base_title} ({len(failures)} tests)"
+
+    return (title, body)
+
+
+def _find_existing_issue(repo: str, base_title: str, title_suffix_re: Pattern[AnyStr], parent_issue: str | None, headers: Dict[str, str]) -> Dict[str, Any] | None:
     """Find an open issue with the same title among parent sub-issues only."""
 
     if not parent_issue:
@@ -160,7 +251,7 @@ def _find_existing_issue(repo: str, base_title: str, parent_issue: str | None, h
 
         issues = response.json()
         for issue in issues:
-            if _title_matches_module_issue(issue.get("title", ""), base_title):
+            if _title_matches_module_issue(issue.get("title", ""), base_title, title_suffix_re):
                 return issue
 
         next_url = None
@@ -212,10 +303,10 @@ def _find_repo():
 
 
 def _group_failures_by_module(failures: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    grouped = {}
+    grouped = defaultdict(dict)
     for nodeid, info in failures.items():
         module = nodeid.split("::")[0]
-        grouped.setdefault(module, {})[nodeid] = info
+        grouped[module][nodeid] = info
     return grouped
 
 
@@ -223,8 +314,8 @@ def _get_token():
     """
     Get a GitHub token with permissions to read releases from the given repo. This will first check for a token in the environment variable GITHUB_TOKEN, and if not found, will attempt to use the gh CLI to get a token.
     """
-                  
-    if os.environ.get("GITHUB_TOKEN", "") != "":        
+
+    if os.environ.get("GITHUB_TOKEN", "") != "":
         return os.environ.get("GITHUB_TOKEN")
 
     # not found, try to get a token from the gh CLI
@@ -237,16 +328,12 @@ def _get_token():
         raise RuntimeError(
             f"Failed to get GitHub token from environment or gh CLI: {e}"
         )
-        
+
     return token
 
-def _check_issue_exists(issue_number: str, repo: str, token: str):
+def _check_issue_exists(issue_number: str, repo: str, headers: Mapping[str, str]):
     url = f"https://api.github.com/repos/{repo}/issues/{issue_number}"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
-        "X-GitHub-Api-Version": "2026-03-10",
-    }
+
     response = requests.get(url, headers=headers, timeout=20)
     if response.status_code == 404:
         raise RuntimeError(f"Parent issue #{issue_number} not found in repository {repo}")
@@ -256,13 +343,9 @@ def _check_issue_exists(issue_number: str, repo: str, token: str):
         )
 
 
-def _add_sub_issue(parent_issue: str, sub_issue_id: int, repo: str, token: str):
+def _add_sub_issue(parent_issue: str, sub_issue_id: int, repo: str, headers: Mapping[str, str]):
     url = f"https://api.github.com/repos/{repo}/issues/{parent_issue}/sub_issues"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
-        "X-GitHub-Api-Version": "2026-03-10",
-    }
+
     response = requests.post(
         url,
         headers=headers,
@@ -275,6 +358,127 @@ def _add_sub_issue(parent_issue: str, sub_issue_id: int, repo: str, token: str):
             f"HTTP {response.status_code} {response.text}"
         )
 
+def _update_github_issue(repo, headers, existing_issue, title, body):
+    url = f"https://api.github.com/repos/{repo}/issues/{existing_issue['number']}"
+
+    update_payload = {
+        "title": title,
+        "body": body,
+        "type": _ISSUE_TYPE,
+    }
+
+    response = requests.patch(url, headers=headers, json=update_payload, timeout=20)
+
+    if response.status_code == 200:
+        issue_url = response.json().get("html_url", "")
+        print(f"[torq.testing.issues] Updated issue: {issue_url}")
+        return
+
+    print(
+        "[torq.testing.issues] Failed to update issue: "
+        f"HTTP {response.status_code} {response.text}"
+    )
+
+
+def _new_github_issue(repo, headers, title, body):
+    url = f"https://api.github.com/repos/{repo}/issues"
+
+    payload = {
+        "title": title,
+        "body": body,
+        "labels": ["compiler"],
+        "type": _ISSUE_TYPE,
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=20)
+    if response.status_code not in (200, 201):
+        print(
+            "[torq.testing.issues] Failed to create issue: "
+            f"HTTP {response.status_code} {response.text}"
+        )
+        return None
+
+    created_issue = response.json()
+    issue_url = created_issue.get("html_url", "")
+    created_issue_id = created_issue.get("id")
+    if created_issue_id is None:
+        print("[torq.testing.issues] Created issue but could not read issue id for linking")
+        return None
+
+    print(f"[torq.testing.issues] Created issue: {issue_url}")
+    return int(created_issue_id)
+
+
+
+def _update_issues_by_module(parent_issue, repo, headers):
+    for module, module_failures in _group_failures_by_module(_failures).items():
+
+        base_title = f"Test failures on module {module}"
+
+        try:
+            existing_issue = _find_existing_issue(repo, base_title, _MODULE_TITLE_COUNTS_RE, parent_issue, headers)
+
+            title, body = _build_module_issue(
+                module,
+                base_title,
+                module_failures,
+                previous_body=existing_issue.get("body", "") if existing_issue else None,
+            )
+
+            if existing_issue is not None:
+                _update_github_issue(repo, headers, existing_issue, title, body)
+                continue
+
+            created_issue_id = _new_github_issue(repo, headers, title, body)
+            if created_issue_id is None:
+                continue
+
+            _add_sub_issue(parent_issue, created_issue_id, repo, headers)
+
+        except requests.RequestException as exc:
+            print(f"[torq.testing.issues] Failed to create issue: {exc}")
+        except RuntimeError as exc:
+            print(f"[torq.testing.issues] Failed to check existing issues: {exc}")
+
+
+def _group_failures_by_error(failures: Mapping[str, Mapping[str, Any]]) -> dict[str, list[str]]:
+    grouped = defaultdict(list)
+    for nodeid, info in failures.items():
+        error = info.get("error", None)
+        if error is not None:
+            grouped[error].append(nodeid)
+    return grouped
+
+
+def _update_issues_by_error(parent_issue, repo, headers):
+    for error, failures in _group_failures_by_error(_failures).items():
+        base_title = f"Test failures with error '{error}'"
+
+        try:
+            existing_issue = _find_existing_issue(repo, base_title, _ERROR_TITLE_COUNTS_RE, parent_issue, headers)
+
+            title, body = _build_error_issue(
+                error,
+                base_title,
+                failures=failures,
+                previous_body= existing_issue.get("body", "") if existing_issue else None,
+            )
+            if existing_issue is not None:
+                _update_github_issue(repo, headers, existing_issue, title, body)
+                continue
+
+            created_issue_id = _new_github_issue(repo, headers, title, body)
+            if created_issue_id is None:
+                continue
+
+            _add_sub_issue(parent_issue, created_issue_id, repo, headers)
+
+        except requests.RequestException as exc:
+            print(f"[torq.testing.issues] Failed to create issue: {exc}")
+        except RuntimeError as exc:
+            print(f"[torq.testing.issues] Failed to check existing issues: {exc}")
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int):
     if xdist.is_xdist_worker(session):
@@ -283,97 +487,36 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int):
     config = session.config
 
     if not config.getoption("--update-github-issue"):
-        return    
+        return
 
     if not _failures:
         return
 
     token = _get_token()
-    
+
     if not token:
         print("[torq.testing.issues] Skipping issue creation: missing GITHUB_TOKEN or GH_TOKEN")
         return
-    
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2026-03-10",
+    }
+
     try:
         repo = _find_repo()
     except:
         print("[torq.testing.issues] Skipping issue creation: could not determine repository")
         return
-    
+
     parent_issue = config.getoption("--update-github-issue")
 
     try:
-        _check_issue_exists(parent_issue, repo, token)
+        _check_issue_exists(parent_issue, repo, headers)
     except RuntimeError as exc:
         print(f"[torq.testing.issues] Skipping issue creation: {exc}")
         return
 
-    failures_by_module = _group_failures_by_module(_failures)
-
-    for module, module_failures in failures_by_module.items():
-
-        base_title = f"Test failures on module {module}"
-        summary = _module_summary(module)
-        title = _build_issue_title(base_title, summary)
-        body = ""
-        payload = {}
-        
-        url = f"https://api.github.com/repos/{repo}/issues"
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "X-GitHub-Api-Version": "2026-03-10",
-        }
-
-        try:
-            existing_issue = _find_existing_issue(repo, base_title, parent_issue, headers)
-            if existing_issue is not None:
-                body = _build_issue_body(
-                    module_failures,
-                    previous_body=existing_issue.get("body") or "",
-                    summary=summary,
-                )
-                update_url = f"https://api.github.com/repos/{repo}/issues/{existing_issue['number']}"
-                update_payload = {
-                    "title": title,
-                    "body": body,
-                    "type": _ISSUE_TYPE,
-                }
-                response = requests.patch(update_url, headers=headers, json=update_payload, timeout=20)
-                if response.status_code == 200:
-                    issue_url = response.json().get("html_url", "")
-                    print(f"[torq.testing.issues] Updated issue: {issue_url}")
-                    continue
-                print(
-                    "[torq.testing.issues] Failed to update issue: "
-                    f"HTTP {response.status_code} {response.text}"
-                )
-                continue
-
-            body = _build_issue_body(module_failures, summary=summary)
-            payload = {
-                "title": title,
-                "body": body,
-                "labels": ["compiler"],
-                "type": _ISSUE_TYPE,
-            }
-            response = requests.post(url, headers=headers, json=payload, timeout=20)
-            if response.status_code in (200, 201):
-                created_issue = response.json()
-                issue_url = created_issue.get("html_url", "")
-                created_issue_id = created_issue.get("id")
-                if created_issue_id is None:
-                    print("[torq.testing.issues] Created issue but could not read issue id for linking")
-                    continue
-
-                _add_sub_issue(parent_issue, int(created_issue_id), repo, token)
-                print(f"[torq.testing.issues] Created issue: {issue_url}")
-                continue
-            print(
-                "[torq.testing.issues] Failed to create issue: "
-                f"HTTP {response.status_code} {response.text}"
-            )
-        except requests.RequestException as exc:
-            print(f"[torq.testing.issues] Failed to create issue: {exc}")
-        except RuntimeError as exc:
-            print(f"[torq.testing.issues] Failed to check existing issues: {exc}")
+    _update_issues_by_module(parent_issue, repo, headers)
+    _update_issues_by_error(parent_issue, repo, headers)
