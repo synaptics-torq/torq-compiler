@@ -48,7 +48,7 @@ jobs:
 
           - name: Configure AWS Credentials
             uses: aws-actions/configure-aws-credentials@v5.1.0
-            if: ${{ github.ref == 'refs/heads/main' }}
+            if: ${{ github.event_name == 'push' }}
             with:
               aws-region: ${{ vars.AWS_REGION }}
               role-to-assume: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
@@ -58,7 +58,7 @@ jobs:
               aws sts get-caller-identity
 
           - name: Log in to ECR
-            if: ${{ github.ref == 'refs/heads/main' }}
+            if: ${{ github.event_name == 'push' }}
             run:
               aws ecr get-login-password --region ${{ vars.AWS_REGION }} | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
             
