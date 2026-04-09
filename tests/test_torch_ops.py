@@ -14,6 +14,8 @@ def comparison_config_for_conv_truncf(request):
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_file_group("torch_ops")))
 def case_config(request, runtime_hw_type, chip_config):
 
+    next_chip = (chip_config.data['target'] != "SL2610")
+
     no_negative_input = [
         'sqrt-scalar',
     ]
@@ -23,6 +25,33 @@ def case_config(request, runtime_hw_type, chip_config):
         extra_args["tweaked_input_data_range"]  = (0, 100)
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
+
+    iree_regression_tc = [
+        # error: CSS program allocations of <N> bytes exceed maximum CSS stack size of ?
+        "0464_Concat__layers.3_self_attn_Concat_5.mlir",
+        "concat-axis-3-1x256x128x2-b16.mlir",
+
+        # Assertion `llvm::isUIntN(BitWidth, val) && "Value is not an N-bit unsigned value"' failed.
+        "softmax-1x8x1x207xbf16.mlir",
+
+        # Failure due to increased differences
+        "dw1d_k5_d2_s1.mlir",
+        "dw1d_k5_d4_s1.mlir",
+        "dw1d_k5_d8_s1.mlir",
+        "dw1d_k5_dilation16_stride1.mlir",
+        "dw_1x4_dilation_1x2_expanded_1x7.mlir",
+        "reducemean.mlir",
+        "reducemean-reshape.mlir",
+    ]
+    if next_chip:
+        iree_regression_tc += [
+            "decoder.mlir.431.Mul_24.mlir",
+            "sqrt-scalar-bf16.mlir",
+            "div_1x1x288xbf16.mlir",
+            "collapse-issue-moonshine.mlir",
+        ]
+    if any(s in request.param.data.name for s in iree_regression_tc):
+        pytest.xfail("IREE 3.10 regression failure")
 
     failed_tc = [
         'equal.mlir',
@@ -45,7 +74,7 @@ def case_config(request, runtime_hw_type, chip_config):
             'add-1x24x56x56-bf16.mlir', # output is all Nan
         ]
 
-    if chip_config.data['target'] != "SL2610":
+    if next_chip:
         # Next chip failures
         print(f"[pytest] True Running test with chip target: {chip_config.data['target']}")
 

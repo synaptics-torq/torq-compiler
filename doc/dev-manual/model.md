@@ -94,7 +94,7 @@ reference results (these are marked as FAIL).
 
 The two categories of problems need to be investigated differently.
 
-## Investigating ERORRs
+## Investigating ERRORs
 
 The first step to investigate an error is pinpoint which step in the testing procedure failed. This can be identified by
 looking the stack trace provided by PyTest. In the line that starts with ``kwargs`` it is possible to see the sub-request

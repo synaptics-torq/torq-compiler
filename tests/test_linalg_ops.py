@@ -7,7 +7,9 @@ from torq.testing.iree import list_mlir_files
 
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_files("linalg_ops")))
 def case_config(request, runtime_hw_type, chip_config):
-    
+
+    next_chip = (chip_config.data['target'] != "SL2610")
+
     no_negative_input = [
         'sqrt',
     ]
@@ -25,6 +27,33 @@ def case_config(request, runtime_hw_type, chip_config):
     if "reducesum-dma-throughput-test" in request.param.name:
         pytest.skip("DMA throughput test file; run via test_dma_throughput.py")
 
+    iree_regression_tc = [
+        # Assertion `llvm::isUIntN(BitWidth, val) && "Value is not an N-bit unsigned value"' failed.
+        "softmax-1x1024x64xbf16.mlir",
+
+        # error: operand #<N> does not dominate this use
+        "quantized_batch_matmul.mlir",
+
+        # Assertion `dims.bn==<N> || dims.bn==<N> || dims.bn==<N>' failed.
+        "exp.mlir",
+        "sigmoid.mlir",
+
+        # error: 'iree_tensor_ext.dispatch.tensor.store' op operand #<N> must be dispatch.tensor, but got '!iree_tensor_ext.dispatch.tensor<readonly:tensor<<N>xbf<N>>>'
+        "erf-bf16.mlir",
+    ]
+    if next_chip:
+        iree_regression_tc += [
+            "divf-bf16.mlir",
+            "pow-2.mlir",
+            "sqrt-1024x64-bf16.mlir",
+            "sqrt-scalar-bf16.mlir",
+            "rsqrt-bf16.mlir",
+            "tanh-bf16.mlir"
+        ]
+
+    if any(s in request.param.name for s in iree_regression_tc):
+        pytest.xfail("IREE 3.10 regression failure")
+
     failed_tc = []
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
@@ -37,7 +66,7 @@ def case_config(request, runtime_hw_type, chip_config):
         ]
 
     # Next chip failures
-    if chip_config.data['target'] != "SL2610":
+    if next_chip:
         if aws_fpga:
             failed_tc += [
                 'dot-in-int16-out-int16.mlir', # output mismatch

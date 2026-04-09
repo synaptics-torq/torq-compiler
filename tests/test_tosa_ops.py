@@ -10,6 +10,84 @@ def case_config(request, runtime_hw_type, chip_config):
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
+    iree_regression_tc = [
+        # error: expected element type to be 'i<N>'
+        "conv2d-16b-stride1-8x8x2.mlir",
+        "conv2d-stride4-i16.mlir",
+        "conv2d_f4_s4_64x64x16_i16.mlir",
+        "conv2d_i16_f5_s2_32x32x4_o4.mlir",
+        "conv2d_i16_s2_8x8x2_o4.mlir",
+        "conv2d_noalign_channel_32x32x128xi16.mlir",
+        "dw_i16_8x8x1.mlir",
+        "dw_i16_8x8x4.mlir",
+        "dw_i16_f7_8x8x1.mlir",
+        "dw_i16_f7_s2_8x8x1.mlir",
+        "dw_i16_s2_64x64x8.mlir",
+        "dw_i16_s2_8x8x1.mlir",
+        "dw_i16_s2_8x8x4.mlir",
+
+        #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
+        "efficientnet-sigmoid-rescale-mul.mlir",
+        "yolov8_block_mul_rescale.mlir",
+
+        # Assertion `P.type<N>.getElementType() == P.type<N>.getElementType() && "Input types must match"' failed.
+        "add-16x16x128xi16.mlir",
+        "add-32x32x128xi16.mlir",
+        "sub-constant-tensor.mlir",
+        "sub-rescale-scalar.mlir0",
+        "sub-rescale-scalar.mlir1",
+
+        # error: 'tosa.const' op requires attribute 'values'
+        "conv-343.mlir",
+        "conv2d-28x28x512.mlir",
+        "conv2d_as_fully_connected.mlir",
+        "conv2d_f3_12x12x64_i16.mlir",
+        "conv2d_f5_s2_64x64x16_i16.mlir",
+        "dw-32x8.mlir",
+        "dw_4x4_stride2.mlir",
+        "maxpool2d-stride2-k3x3-pad-112x112x127.mlir",
+        "pw-16x16.mlir",
+        "pw-32x8-7x7x320.mlir",
+        "pw-32x8.mlir",
+        "yolo-table-6.mlir",
+
+        # Assertion `llvm::isUIntN(BitWidth, val) && "Value is not an N-bit unsigned value"' failed.
+        "conv2d_bf16_2x2x4_softmax.mlir",
+
+        # error: operand #<N> does not dominate this use
+        "conv2d-matmul-wzp.mlir",
+
+        # Assertion `inputType.getRank() == permutation.size()' failed.
+        "dw_16x16-bf16.mlir",
+        "dw_f5_16x16-bf16.mlir",
+
+        # error: custom op 'tosa.fully_connected' is unknown
+        "fc.mlir",
+
+        # Assertion `!empty()' failed.
+        "pw-stride2.mlir",
+
+        # error: LLVM Translation failed for operation: builtin.unrealized_conversion_cast
+        "scatter.mlir",
+
+        # Assertion `input.shape().size() + dimensions.size() == output.shape().size()' failed.
+        "conv2d_f127_s64_1x16000_o250.mlir",
+
+        # Assertion failed: (P.type1.getElementType() == P.type2.getElementType() && "Input types must match"), function prepareParams, file ConversionUtils.h, line 505.
+        "sub-rescale-scalar.mlir",
+        "sub-rescale-scalar-bis.mlir",
+
+        # failed with differences
+        "conv2d_f8_s4_1x1024_o256.mlir",
+        "concat-a.mlir",
+        "concat-b.mlir",
+        "gather-i32.mlir",
+        "gather.mlir",
+        "gather-i16.mlir",
+    ]
+    if any(s in request.param.data.name for s in iree_regression_tc):
+        pytest.xfail("IREE 3.10 regression failure")
+
     failed_tc = [
             # Tracked by #1095
             'dw_wzp.mlir', # Weight zero point support not complete

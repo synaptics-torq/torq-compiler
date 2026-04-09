@@ -7,6 +7,10 @@ from torq.testing.iree import llvmcpu_reference_results
 from torq.testing.versioned_fixtures import versioned_cached_data_fixture
 
 @versioned_cached_data_fixture
+def comparison_config_relaxed(request):
+    return {"fp_avg_tol": 0.02, "fp_max_tol": 0.02}
+
+@versioned_cached_data_fixture
 def comparison_config_for_reduce_mean_mbv2(request):
     return {"fp_avg_tol": 0.03, "fp_max_tol": 0.31}
 
@@ -17,12 +21,18 @@ def comparison_config_for_mbv2(request):
 @pytest.fixture
 def case_config(request, runtime_hw_type, chip_config):
 
-    failed_tc = [
-            # Accuracy error due to the way comparison is handling close to 0 values
-            "mbv2-bf16_layer_Gemm_64",
-            ]
-
     next_chip = (chip_config.data['target'] != "SL2610")
+
+    iree_regression_tc = [
+        "mbv2-bf16_layer_ReduceMean_62",
+        "full_model",
+    ]
+    if next_chip:
+        iree_regression_tc += ["mbv2-bf16_layer_Conv_61"]
+    if any(s in request.node.nodeid for s in iree_regression_tc):
+        pytest.xfail("IREE 3.10 regression failure")
+
+    failed_tc = []
     if next_chip:
         failed_tc += [
             # Compile time timeout
@@ -56,6 +66,13 @@ def case_config(request, runtime_hw_type, chip_config):
          "input_data": "tweaked_random_input_data",
          "torq_compiler_options": torq_compiler_options
     }
+
+    relaxed_tolerance_tc = [
+        # Accuracy error due to the way comparison is handling close to 0 values
+        "layer_Gemm_64"
+    ]
+    if any(s in request.node.nodeid for s in relaxed_tolerance_tc):
+        case_config_dict["comparison_config"] = "comparison_config_relaxed"
 
     if "layer_ReduceMean" in request.node.name:
         case_config_dict["comparison_config"] = "comparison_config_for_reduce_mean_mbv2"

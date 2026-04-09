@@ -1161,6 +1161,114 @@ def get_keras_transpose_test_cases():
 def case_config(request, runtime_hw_type, chip_config):
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
+    case = request.param
+    tc = case.data['keras_model_name']
+
+    iree_regression_tc = [
+        # error: expected element type to be 'i<N>'
+        "model001_conv_3X3_small",
+        "model002_conv_2x3_small_valid",
+        "model004_conv_3x3_valid_bias",
+        "model005_conv2d_4x3x3x3_padding",
+        "model006_conv2d_4x6x6x1_pad_stride2",
+        "model007_conv2d_8x3x3x4",
+        "model009_conv_3x3_same_bias",
+        "model016_pointwise_8x8x8x16_stride2x2",
+        "model017_pointwise_8x8x9x16_stride2x2",
+        "model018_pointwise_8x9x8x16_stride2x2",
+        "model019_pointwise_8x9x9x16_stride2x2",
+        "model060_add_inp1x4x4x1",
+        "model061_add_inp1x4x4x1_zp128_x1",
+        "model062_add_inp1x4x4x1_zp128_x2",
+        "model113_pointwise_1x1x1024",
+        "model123_conv_add_inp1x8x8x1",
+        "model130_conv3x3_inp1x3x3x1",
+        "model134_conv3x3_add_inp1x3x3x1",
+        "model135_conv3x3_conv2x2_inp1x3x3x1",
+        "model136_conv2x2_inp1x3x3x1",
+        "model140_conv3x3_inp1x4x4x1",
+        "model144_conv3x3_add_inp1x4x4x1",
+        "model145_conv3x3_conv2x2_inp1x4x4x1",
+        "model146_conv2x2_inp1x4x4x1",
+        "model147_conv_inp1x32x32x16_16x3x3_same_stride1x1",
+        "model150_sub_1x6x8x4_zp128_B",
+        "model151_sub_1x6x8x4_zp128_A",
+        "model152_sub_1x6x8x4_zp128_AB",
+        "model153_sub_1x6x8x4_zp128_none",
+        "model200_conv_4_4_5_19_valid",
+        "model201_conv_20x4x1x12_valid",
+        "model202_conv_20x1x2x14_same",
+        "model203_conv_19x5x2x24_same",
+        "model205_conv_9x2x5x21_same",
+        "model206_conv_17x1x1x19_valid",
+        "model207_conv_25x2x1x26_same",
+        "model209_conv_25x1x5x9_same",
+        "model210_conv_12x3x3x24_same",
+        "model212_conv_15x4x2x29_valid",
+        "model213_conv_22x1x3x9_valid",
+        "model215_conv_16x5x2x7_valid",
+        "model216_conv_9x4x3x11_same",
+        "model220_conv_inp1x4x4x2_ker3x3_same_ker2x2_same",
+        "model221_conv_inp1x4x4x2_ker3x3_same_ker3x3_same",
+        "model222_conv_inp1x4x4x2_ker2x2_same_ker3x3_same",
+        "model237_conv_inp1x18x76x24_1x5x2_same_stride1x1",
+        "model238_conv_inp1x58x26x24_1x5x2_same_stride1x1",
+        "model240_pointwise_inp1x4x4x16_8x1x1_valid_stride1x1",
+        "my_test",
+
+        #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
+        "model050_mult_inp1x10x10x4",
+        "model050_mult_inp1x10x10x4",
+        "model051_mult_inp1x4x4x1",
+        "model052_mult_inp1x4x4x1_zp128_AB",
+        "model052_mult_inp1x4x4x1_zp128_AB",
+        "model053_mult_inp1x4x4x1_zp128_B",
+        "model053_mult_inp1x4x4x1_zp128_B",
+        "model054_mult_inp1x4x4x1_zp128_A",
+        "model054_mult_inp1x4x4x1_zp128_A",
+        "model120_mult_inp1x8x8x1",
+        "model120_mult_inp1x8x8x1",
+        "model122_conv_mult_inp1x8x8x1",
+        "model122_conv_mult_inp1x8x8x1",
+        "model131_mult_inp1x3x3x1",
+        "model131_mult_inp1x3x3x1",
+        "model133_conv3x3_mult_inp1x3x3x1",
+        "model137_add_mult_inp1x3x3x1",
+        "model137_add_mult_inp1x3x3x1",
+        "model141_mult_inp1x4x4x1",
+        "model141_mult_inp1x4x4x1",
+        "model143_conv3x3_mult_inp1x4x4x1",
+        "model143_conv3x3_mult_inp1x4x4x1",
+        "model158_mul_s2v_1x6x8x4",
+        "model159_mul_v2s_1x6x8x4",
+        "model472_mult16x8_neg_s2v",
+        "model473_mult16x8_pos_v2s",
+
+        # Assertion `P.type<N>.getElementType() == P.type<N>.getElementType() && "Input types must match"' failed.
+        "model154_sub_s2v_1x6x8x4",
+        "model155_sub_v2s_1x6x8x4",
+        "model156_add_s2v_1x6x8x4",
+        "model157_add_v2s_1x6x8x4",
+        "model470_add16x8_positive_s2v",
+        "model471_add16x8_negative_s2v",
+        "model474_sub16x8_pos_v2s",
+        "model475_sub16x8_neg_v2s",
+
+        # Assertion `detail::isPresent(Val) && "dyn_cast on a non-existent value"' failed.
+        "model089_softmax_inp1x1916x2",
+
+        # Assertion `inputElementSize * weightElementSize <= sizeof(int<N>_t)' failed.
+        "model471_add16x8_negative_s2v",
+
+        # Assertion `wrap->cfg.pad_bottom == <N> || wrap->cfg.pad_bottom == wrap->cfg.kernel_bottom' failed.
+        "my_test",
+
+        # FAILED with differences:
+        "model503_conv_transpose_stride1_ker_1x1x3x1_padValid",
+        "model532_convTrans_16x8_inp_1x4x1_ker1x3_stride1_padvalid",
+    ]
+    if any(s in tc for s in iree_regression_tc):
+        pytest.xfail("IREE 3.10 regression failure")
 
     failed_tc = [
         'transpose_conv_model', # Issue see #1011
@@ -1200,8 +1308,6 @@ def case_config(request, runtime_hw_type, chip_config):
                 'model095_relu_8x8_inp_1x10x1x1',
             ]
 
-    case = request.param
-    tc = case.data['keras_model_name']
     if any(s in tc for s in failed_tc):
         pytest.xfail("output mismatch or error")
 

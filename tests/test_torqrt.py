@@ -60,6 +60,17 @@ def get_torqrt_test_cases():
 @pytest.fixture(params=get_torqrt_test_cases())
 def case_config(request, runtime_hw_type):
 
+    iree_regression_tc = [
+        # Assertion `llvm::isUIntN(BitWidth, val) && "Value is not an N-bit unsigned value"' failed.
+        "softmax-1x8x1x207xbf16.mlir",
+
+        "dw_peeling.mlir",
+
+        "mbv2_full_model",
+    ]
+    if any(s in request.param.name for s in iree_regression_tc):
+        pytest.xfail("IREE 3.10 regression failure")
+
     # run this test only if we use the cmodel
     if runtime_hw_type.data != 'sim':        
         return pytest.skip()

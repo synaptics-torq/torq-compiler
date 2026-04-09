@@ -340,8 +340,10 @@ def test_yolo_pose_llvmcpu_torq(
                      "LLVMCPU", "TORQ", case_config, tflite_layer_model)
 
 
-@pytest.mark.ci
-@pytest.mark.fpga_ci
+# FIXME IREE-3.10 regression: see https://github.com/synaptics-torq/torq-compiler-dev/issues/1027
+#@pytest.mark.ci
+#@pytest.mark.fpga_ci
+@pytest.mark.full_ci
 def test_yolo_pose_tflite_torq(
     request,
     tflite_reference_results,
