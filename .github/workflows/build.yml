@@ -149,9 +149,14 @@ jobs:
       - name: Build runtime wheels
         working-directory: /workspace/code
         run: |
-          TIMESTAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
-          COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
-          export TORQ_WHEEL_VERSION="0.dev0+${TIMESTAMP}.g${COMMIT}"
+          if [[ "${{ github.event_name }}" == "release" && "${{ github.event.action }}" == "published" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+            export TORQ_WHEEL_VERSION="${TAG#v}"
+          else
+            TIMESTAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
+            COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+            export TORQ_WHEEL_VERSION="0.dev0+${TIMESTAMP}.g${COMMIT}"
+          fi
 
           ./scripts/build_runtime_wheel.sh /workspace/build
           ./scripts/build_runtime_wheel.sh /workspace/build /workspace/build-astra-sl astra_machina poky

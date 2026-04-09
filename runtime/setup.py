@@ -221,7 +221,20 @@ _ELF_MACHINE_TO_ARCH = {
     0xB7: "aarch64",
 }
 
+# minimum glibc version for the manylinux platform tag
+# we should be using GLIBC 2.39 but there are currently 
+# no stable x86 and aarch64 manylinux releases.
+_MANYLINUX_GLIBC = "2_28"
+
 WHEEL_PLAT = os.getenv("TORQ_WHEEL_PLAT")
+
+
+def _linux_to_manylinux(plat):
+    """Convert a linux_* platform tag to the PEP compatible manylinux tag."""
+    if plat.startswith("linux_"):
+        arch = plat[len("linux_"):]
+        return f"manylinux_{_MANYLINUX_GLIBC}_{arch}"
+    return plat
 
 
 def _detect_platform_from_so(search_dir):
@@ -239,7 +252,7 @@ def _detect_platform_from_so(search_dir):
     arch = _ELF_MACHINE_TO_ARCH.get(e_machine)
     if arch is None:
         return None
-    return f"linux_{arch}"
+    return f"manylinux_{_MANYLINUX_GLIBC}_{arch}"
 
 
 _RUNTIME_LIBS_DIR = os.path.join(
@@ -259,8 +272,10 @@ class PlatOverrideBdistWheel(_bdist_wheel):
             plat = WHEEL_PLAT
         else:
             detected = _detect_platform_from_so(_RUNTIME_LIBS_DIR)
-            if detected and detected != plat:
+            if detected:
                 plat = detected
+            else:
+                plat = _linux_to_manylinux(plat)
         return impl, abi, plat
 
 
