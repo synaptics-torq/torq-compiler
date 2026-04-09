@@ -9,6 +9,7 @@ from torq.testing.iree import list_mlir_files
 def case_config(request, runtime_hw_type, chip_config):
 
     next_chip = (chip_config.data['target'] != "SL2610")
+    aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
     no_negative_input = [
         'sqrt',
@@ -41,6 +42,13 @@ def case_config(request, runtime_hw_type, chip_config):
         # error: 'iree_tensor_ext.dispatch.tensor.store' op operand #<N> must be dispatch.tensor, but got '!iree_tensor_ext.dispatch.tensor<readonly:tensor<<N>xbf<N>>>'
         "erf-bf16.mlir",
     ]
+
+    if aws_fpga:
+        iree_regression_tc += [
+            # Runtime timeout (20s)
+            "extui-i8-to-i16.mlir",
+        ]
+
     if next_chip:
         iree_regression_tc += [
             "divf-bf16.mlir",
@@ -55,8 +63,6 @@ def case_config(request, runtime_hw_type, chip_config):
         pytest.xfail("IREE 3.10 regression failure")
 
     failed_tc = []
-
-    aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
     # SL2610 aws-fpga failures
     if aws_fpga:
