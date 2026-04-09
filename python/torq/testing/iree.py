@@ -52,7 +52,7 @@ def pytest_addoption(parser):
     parser.addoption("--debug-torq-compiler", type=int, default=0, help="Run torq compiler under gdb")
     parser.addoption("--trace-buffers", action="store_true", default=False, help="Enable tracing of buffers in the torq runtime")
     parser.addoption("--torq-runtime-hw-type", action="store", default="sim", help="Command separate list of target hw to use for torq tests (sim, aws_fpga)")
-    parser.addoption("--torq-chips", action="store", default="default", help="Command separate list of chips to compile models for")
+    parser.addoption("--torq-chips", action="store", default="default.group", help="Command separate list of chips to compile models for")
     parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
     parser.addoption("--torq-compiler-timeout", type=int, default=60*5, help="Timeout in seconds for torq compiler invocations")
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
@@ -144,13 +144,23 @@ def pytest_generate_tests(metafunc):
 
         metafunc.parametrize('runtime_hw_type', runtime_hw_type, indirect=True)
 
+        chips = set()
+
         if metafunc.config.getoption("torq_chips") == 'all':
-            chips = get_latest_chips()
+            chips.update(get_latest_chips())
         elif metafunc.config.getoption("torq_chips").endswith('.group'):
-            with open(Path(TOPDIR / 'extras' / 'chips' / metafunc.config.getoption("torq_chips")), 'r') as f:
-                chips = f.read().splitlines()
+            for root_dir in [TOPDIR / 'extras' / 'chips', TOPDIR / 'tests' / 'testdata' / 'chips']:
+                group_file = root_dir / metafunc.config.getoption("torq_chips")
+
+                if not group_file.exists():
+                    continue
+                
+                with open(group_file, 'r') as f:
+                    chips.update([x.strip() for x in f.read().splitlines() if x.strip() != ""])
         else:
-            chips = metafunc.config.getoption("torq_chips").split(",")
+            chips.update(metafunc.config.getoption("torq_chips").split(","))
+
+        chips = sorted(chips)
 
         if len(chips) == 0:
             raise ValueError("No chips found for torq tests")
@@ -159,37 +169,40 @@ def pytest_generate_tests(metafunc):
 
 
 def get_latest_chips():
-    configs_dir = TOPDIR / 'extras' / 'chips'
+    
+    chips = set()
 
-    return [ f.resolve().stem for f in configs_dir.iterdir() if f.stem.endswith('latest') ]
+    for confis_dir in [TOPDIR / 'extras' / 'chips', TOPDIR / 'tests' / 'testdata' / 'chips']:
+        
+        if not confis_dir.exists():
+            continue
+
+        chips.update([f.resolve().stem for f in confis_dir.iterdir() if f.stem.endswith('latest') ])
+
+    return sorted(chips)
 
 
 @versioned_hashable_object_fixture
 def chip_config(request):
 
+    config = {"chip_name": request.param, 
+              "target": request.param}
+    
     if request.param == 'default':
+        config["target"] = "SL2610"
 
-        return {
-            "chip_name": "default",
-            "target": "SL2610",
-            "lram_size": "512",
-            "dma_theoretical_bytes_per_cycle": 8,
-            "dma_factor": 0.65
-        }    
+    for root_dir in [TOPDIR / 'tests' / 'testdata' / 'chips', TOPDIR / 'extras' / 'chips']:
 
+        config_file = root_dir / f'{request.param}.json'
 
-    config_file = TOPDIR / 'extras' / 'chips' / f'{request.param}.json'
+        if not config_file.exists():
+            continue
 
-    if not config_file.exists():
-        return {
-            "chip_name": request.param,
-            "target": request.param
-        }
+        with open(config_file, 'r') as f:
+            file_config = json.load(f)
+            config.update(file_config)
 
-    with open(TOPDIR / 'extras' / 'chips' / f'{request.param}.json', 'r') as f:
-        config = json.load(f)
-        config["chip_name"] = request.param
-        return config
+    return config
 
 
 def _find_iree_tool(env_var, tool_name):
@@ -572,7 +585,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         torq_compiler_timeout = None # disable timeout when debugging
 
     if target == "custom":
-        dma_tp = chip_config.get("dma_theoretical_bytes_per_cycle", "")
+        dma_tp = chip_config.get("dma_theoretical_bytes_per_cycle", 8)
         dma_factor = chip_config.get("dma_factor", 1.0)
         cmds.append(f'--torq-hw={chip_config["lram_size"]}:{chip_config["slice_count"]}:{chip_config["tiling_memory"]}:'
                      f'{chip_config.get("css_features","")}:{chip_config.get("nss_features","")}:{dma_tp}:{dma_factor}:'
