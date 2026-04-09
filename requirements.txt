@@ -47,7 +47,7 @@ xlsxwriter==3.2.5
 
 # base image packages
 Sphinx==7.4.7
-pillow==10.4.0
+pillow==12.1.1
 
 # head of synaptics theme
 https://github.com/syna-astra-dev/synaptics-sphinx-theme/archive/refs/heads/main.zip
@@ -70,7 +70,7 @@ PyYAML>=5.4.1
 # these are from third_party/iree/integrations/tensorflow/test/requirements.txt
 tensorflow==2.18.1
 keras>=2.7.0
-Pillow>=9.2.0
+# removed Pillow as we already list it above 
 
 # these are from python/torq/requirements.txt
 packaging>=24.2
