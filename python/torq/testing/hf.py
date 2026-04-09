@@ -71,7 +71,7 @@ def generate_test_for_collection(metafunc, fixture_name, collection_id):
         )
 
 
-def get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model"):
+def get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model", revision=None):
     """
     Internal helper to download files from HuggingFace Hub with three-tier caching:
     1. Check local cache
@@ -86,17 +86,18 @@ def get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model"):
         url = hf_hub_url(
             repo_id=repo_id,
             filename=filename,
-            repo_type=repo_type
+            repo_type=repo_type,
+            revision=revision
         )
 
         metadata = get_hf_file_metadata(url=url)
         etag = metadata.etag
         revision = metadata.commit_hash
     except Exception:
-        raise RuntimeError(f"Failed to get metadata for {repo_id}/{filename}")
+        raise RuntimeError(f"Failed to get metadata for {repo_id}@{revision}/{filename}")
 
     # try to get the file from the S3 cache (either the local dir or the S3 bucket)
-    print("Trying to get file from S3 cache:", repo_id, filename, etag)
+    print("Trying to get file from S3 cache:", repo_id, revision, filename, etag)
 
     file_name = s3.get_file(
         cache=cache,
@@ -129,12 +130,12 @@ def get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model"):
     return str(file_name)
 
 
-def get_hf_model_file(cache, repo_id, filename):
-    return get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model")
+def get_hf_model_file(cache, repo_id, filename, revision=None):
+    return get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model", revision=revision)
 
 
-def get_hf_dataset_file(cache, repo_id, filename):
-    return get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="dataset")
+def get_hf_dataset_file(cache, repo_id, filename, revision=None):
+    return get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="dataset", revision=revision)
 
 
 @versioned_hashable_object_fixture
