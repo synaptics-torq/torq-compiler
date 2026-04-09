@@ -29,4 +29,5 @@ git "${USE_EXTRA_HEADER[@]}" submodule update --depth=1 --init third_party/bench
                                                         third_party/googletest \
                                                         third_party/llvm-project \
                                                         third_party/tracy \
-                                                        third_party/torch-mlir
+                                                        third_party/torch-mlir \
+                                                        third_party/stablehlo

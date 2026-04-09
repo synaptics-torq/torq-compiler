@@ -27,4 +27,5 @@ iree_cc_library(
     iree::compiler::plugins::input::Torch::torch-mlir::TorchOnnxToTorchPasses
     iree::compiler::plugins::input::Torch::torch-mlir::ConversionPasses
     iree::compiler::plugins::input::Torch::torch-mlir-dialects::TMTensorDialectIR
+    iree::compiler::plugins::input::StableHLO::Conversion
 )

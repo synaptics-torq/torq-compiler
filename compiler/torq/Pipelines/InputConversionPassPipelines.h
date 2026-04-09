@@ -25,4 +25,8 @@ void buildTorchToTorqHLOpsInputConversionPassPipeline(OpPassManager &passManager
 
 void buildLinalgToTorqHLOpsInputConversionPassPipeline(OpPassManager &passManager);
 
+void buildStableHLOToTorqHLOpsInputConversionPassPipeline(OpPassManager &passManager);
+
+void buildStableHLOXLAToTorqHLOpsInputConversionPassPipeline(OpPassManager &passManager);
+
 } // namespace mlir::syna::torq

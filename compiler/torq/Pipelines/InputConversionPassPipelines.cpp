@@ -11,6 +11,7 @@
 #include "torq/Transforms/Linalg/Passes.h"
 #include "torq/Transforms/TorqHL/Passes.h"
 
+#include "compiler/plugins/input/StableHLO/Conversion/Passes.h"
 #include "compiler/plugins/input/TOSA/InputConversion/Passes.h"
 #include "compiler/plugins/input/Torch/InputConversion/Passes.h"
 #include "iree/compiler/Preprocessing/Common/Passes.h"
@@ -117,6 +118,28 @@ void buildTorchToTorqHLOpsInputConversionPassPipeline(OpPassManager &passManager
 }
 
 void buildLinalgToTorqHLOpsInputConversionPassPipeline(OpPassManager &passManager) {
+    buildLinalgTransformPassPipeline(passManager);
+}
+
+void buildStableHLOToTorqHLOpsInputConversionPassPipeline(OpPassManager &passManager) {
+    // Lower StableHLO to linalg using IREE's built-in pipeline
+    mlir::iree_compiler::stablehlo::StableHloOptions stablehloOptions;
+    mlir::iree_compiler::stablehlo::buildStableHLOInputConversionPassPipeline(
+        passManager, stablehloOptions
+    );
+
+    // Then convert linalg to TorqHL
+    buildLinalgTransformPassPipeline(passManager);
+}
+
+void buildStableHLOXLAToTorqHLOpsInputConversionPassPipeline(OpPassManager &passManager) {
+    // Lower StableHLO (XLA variant) to linalg using IREE's built-in XLA pipeline
+    mlir::iree_compiler::stablehlo::StableHloOptions stablehloOptions;
+    mlir::iree_compiler::stablehlo::buildStableHLOXLAInputConversionPassPipeline(
+        passManager, stablehloOptions
+    );
+
+    // Then convert linalg to TorqHL
     buildLinalgTransformPassPipeline(passManager);
 }
 

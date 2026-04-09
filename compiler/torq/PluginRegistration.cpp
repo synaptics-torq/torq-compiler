@@ -94,6 +94,16 @@ struct TORQSession : public PluginSession<
             return true;
         }
 
+        if (typeMnemonic == "stablehlo-torq") {
+            buildStableHLOToTorqHLOpsInputConversionPassPipeline(passManager);
+            return true;
+        }
+
+        if (typeMnemonic == "stablehlo_xla-torq") {
+            buildStableHLOXLAToTorqHLOpsInputConversionPassPipeline(passManager);
+            return true;
+        }
+
         return false;
     }
 
@@ -102,6 +112,8 @@ struct TORQSession : public PluginSession<
         typeMnemonics.insert("torch-torq");
         typeMnemonics.insert("onnx-torq");
         typeMnemonics.insert("linalg-torq");
+        typeMnemonics.insert("stablehlo-torq");
+        typeMnemonics.insert("stablehlo_xla-torq");
     }
 
     void populateDetectedCustomInputConversionTypes(ModuleOp &module, StringSet<> &typeMnemonics)
@@ -128,20 +140,61 @@ struct TORQSession : public PluginSession<
         const Dialect *torchConversionDialect = ctx->getLoadedDialect("torch_c");
         const Dialect *linalgDialect = ctx->getLoadedDialect("linalg");
 
+        const Dialect *chloDialect = ctx->getLoadedDialect("chlo");
+        const Dialect *stablehloDialect = ctx->getLoadedDialect("stablehlo");
+        const Dialect *vhloDialect = ctx->getLoadedDialect("vhlo");
+
         bool hasTosa = false;
         bool hasTorch = false;
         bool hasLinalg = false;
+        bool hasStableHLO = false;
+        bool hasTuples = false;
 
         module.walk([&](Operation *op) {
             Dialect *d = op->getDialect();
             if (d == tosaDialect) {
                 hasTosa = true;
+                return WalkResult::interrupt();
             }
-            else if (d == torchDialect || d == torchConversionDialect) {
+            if (d == torchDialect || d == torchConversionDialect) {
                 hasTorch = true;
+                return WalkResult::interrupt();
             }
-            else if (d == linalgDialect) {
+            if (d == linalgDialect) {
                 hasLinalg = true;
+                return WalkResult::interrupt();
+            }
+            if (d == chloDialect || d == stablehloDialect || d == vhloDialect) {
+                hasStableHLO = true;
+                // Check for tuple types (distinguishes stablehlo from stablehlo_xla).
+                // Once tuples are found, we can stop immediately.
+                if (auto funcOp = dyn_cast<mlir::FunctionOpInterface>(op)) {
+                    for (auto t : funcOp.getArgumentTypes()) {
+                        if (isa<TupleType>(t)) {
+                            hasTuples = true;
+                            return WalkResult::interrupt();
+                        }
+                    }
+                    for (auto t : funcOp.getResultTypes()) {
+                        if (isa<TupleType>(t)) {
+                            hasTuples = true;
+                            return WalkResult::interrupt();
+                        }
+                    }
+                }
+                for (auto t : op->getOperandTypes()) {
+                    if (isa<TupleType>(t)) {
+                        hasTuples = true;
+                        return WalkResult::interrupt();
+                    }
+                }
+                for (auto t : op->getResultTypes()) {
+                    if (isa<TupleType>(t)) {
+                        hasTuples = true;
+                        return WalkResult::interrupt();
+                    }
+                }
+                // Keep scanning — a later op may have tuples.
             }
             return WalkResult::advance();
         });
@@ -166,6 +219,14 @@ struct TORQSession : public PluginSession<
         else if (hasLinalg) {
             typeMnemonics.insert("linalg-torq");
         }
+        else if (hasStableHLO) {
+            if (hasTuples) {
+                typeMnemonics.insert("stablehlo_xla-torq");
+            }
+            else {
+                typeMnemonics.insert("stablehlo-torq");
+            }
+        }
     }
 
     void resolveDetectedCustomInputConversionTypes(StringSet<> &typeMnemonics) override {
@@ -175,6 +236,8 @@ struct TORQSession : public PluginSession<
             {"tosa-torq", "tosa"},
             {"torch-torq", "torch"},
             {"onnx-torq", "onnx"},
+            {"stablehlo-torq", "stablehlo"},
+            {"stablehlo_xla-torq", "stablehlo_xla"},
         };
         for (auto &[torqType, baseType] : overrides) {
             if (typeMnemonics.contains(torqType)) {
