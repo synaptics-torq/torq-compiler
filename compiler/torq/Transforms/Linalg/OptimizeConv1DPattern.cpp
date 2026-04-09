@@ -102,7 +102,7 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         // Shape: [Ow, C*Kw] - each row contains a full patch for one output position
         SmallVector<int64_t> unfoldedShape = {Ow, C * Kw};
         auto unfoldedType = RankedTensorType::get(unfoldedShape, elemType);
-        auto unfoldedInit = rewriter.create<tensor::EmptyOp>(loc, unfoldedShape, elemType);
+        auto unfoldedInit = tensor::EmptyOp::create(rewriter, loc, unfoldedShape, elemType);
 
         // Create the im2col transformation using a linalg.generic
         SmallVector<AffineExpr> unfoldIndexExprs;
@@ -127,11 +127,11 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         // Create the generic op for unfolding with explicit iterator types
         SmallVector<utils::IteratorType> iteratorTypes(2, utils::IteratorType::parallel);
 
-        auto im2col = rewriter.create<linalg::GenericOp>(
-            loc, TypeRange{unfoldedType}, ValueRange{input}, ValueRange{unfoldedInit},
+        auto im2col = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{unfoldedType}, ValueRange{input}, ValueRange{unfoldedInit},
             ArrayRef<AffineMap>{unfoldIndexMap, outputIndexMap}, iteratorTypes,
             [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
-                nestedBuilder.create<linalg::YieldOp>(nestedLoc, blockArgs[0]);
+                linalg::YieldOp::create(nestedBuilder, nestedLoc, blockArgs[0]);
             }
         );
 
@@ -143,8 +143,8 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         SmallVector<int64_t> reshapedFilterShape = {F, C * Kw};
         auto reshapedFilterType =
             RankedTensorType::get(reshapedFilterShape, filterType.getElementType());
-        auto reshapedFilter = rewriter.create<tensor::CollapseShapeOp>(
-            loc, reshapedFilterType, filter, ArrayRef<ReassociationIndices>{{0}, {1, 2}}
+        auto reshapedFilter = tensor::CollapseShapeOp::create(
+            rewriter, loc, reshapedFilterType, filter, ArrayRef<ReassociationIndices>{{0}, {1, 2}}
         );
 
         // Step 3: Create the matmul operation
@@ -153,16 +153,16 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         SmallVector<int64_t> transposedUnfoldedShape = {C * Kw, Ow};
         // auto transposedUnfoldedType = RankedTensorType::get(transposedUnfoldedShape, elemType);
         auto transposedUnfoldedInit =
-            rewriter.create<tensor::EmptyOp>(loc, transposedUnfoldedShape, elemType);
+            tensor::EmptyOp::create(rewriter, loc, transposedUnfoldedShape, elemType);
 
-        auto transposedUnfolded = rewriter.create<linalg::TransposeOp>(
-            loc, unfoldedInput, transposedUnfoldedInit, ArrayRef<int64_t>{1, 0}
+        auto transposedUnfolded = linalg::TransposeOp::create(
+            rewriter, loc, unfoldedInput, transposedUnfoldedInit, ArrayRef<int64_t>{1, 0}
         );
 
         // Create the matmul output tensor [F, Ow]
         SmallVector<int64_t> matmulResultShape = {F, Ow};
         auto matmulResultType = RankedTensorType::get(matmulResultShape, outputElemType);
-        auto matmulInit = rewriter.create<tensor::EmptyOp>(loc, matmulResultShape, outputElemType);
+        auto matmulInit = tensor::EmptyOp::create(rewriter, loc, matmulResultShape, outputElemType);
 
         // Perform the actual matmul
         // Perform the actual matmul
@@ -174,13 +174,13 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         outputs.push_back(matmulInit.getResult());
 
         auto matmulOp =
-            rewriter.create<linalg::MatmulOp>(loc, TypeRange{matmulResultType}, inputs, outputs);
+            linalg::MatmulOp::create(rewriter, loc, TypeRange{matmulResultType}, inputs, outputs);
 
         // Step 4: Reshape the result back to [N, F, Ow]
         if (N == 1) {
             // Simply reshape to add the batch dimension
-            auto finalResult = rewriter.create<tensor::ExpandShapeOp>(
-                loc, matmulResultType, matmulOp.getResults()[0],
+            auto finalResult = tensor::ExpandShapeOp::create(
+                rewriter, loc, matmulResultType, matmulOp.getResults()[0],
                 ArrayRef<ReassociationIndices>{{0, 1}, {2}}
             );
 
@@ -222,7 +222,7 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
         );
 
         auto expandedInput =
-            rewriter.create<tensor::ExpandShapeOp>(loc, expandedInputType, input, inputReassoc);
+            tensor::ExpandShapeOp::create(rewriter, loc, expandedInputType, input, inputReassoc);
 
         // Add height dimension to filter: [F,C,W] -> [F,C,1,W]
         SmallVector<ReassociationIndices> filterReassoc = {{0}, {1}, {2, 3}};
@@ -232,7 +232,7 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
         );
 
         auto expandedFilter =
-            rewriter.create<tensor::ExpandShapeOp>(loc, expandedFilterType, filter, filterReassoc);
+            tensor::ExpandShapeOp::create(rewriter, loc, expandedFilterType, filter, filterReassoc);
 
         // Add height dimension to output: [N,F,W] -> [N,F,1,W]
         SmallVector<ReassociationIndices> outputReassoc = {{0}, {1}, {2, 3}};
@@ -242,7 +242,7 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
         );
 
         auto expandedOutput =
-            rewriter.create<tensor::ExpandShapeOp>(loc, expandedOutputType, output, outputReassoc);
+            tensor::ExpandShapeOp::create(rewriter, loc, expandedOutputType, output, outputReassoc);
 
         // Get attributes
         auto stridesAttr = convOp.getStrides();
@@ -258,8 +258,8 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
         auto stridesAttr2d = DenseIntElementsAttr::get(attrType, strides2d);
         auto dilationsAttr2d = DenseIntElementsAttr::get(attrType, dilations2d);
 
-        auto conv2d = rewriter.create<linalg::Conv2DNchwFchwOp>(
-            loc, expandedOutput.getType(), ValueRange{expandedInput, expandedFilter},
+        auto conv2d = linalg::Conv2DNchwFchwOp::create(
+            rewriter, loc, expandedOutput.getType(), ValueRange{expandedInput, expandedFilter},
             ValueRange{expandedOutput}, stridesAttr2d, dilationsAttr2d
         );
 
@@ -292,8 +292,8 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
                         cast<RankedTensorType>(conv2dResult.getType()).getShape(),
                         rewriter.getBF16Type()
                     );
-                    auto truncfInit = rewriter.create<tensor::EmptyOp>(
-                        loc, cast<RankedTensorType>(conv2dResult.getType()).getShape(),
+                    auto truncfInit = tensor::EmptyOp::create(
+                        rewriter, loc, cast<RankedTensorType>(conv2dResult.getType()).getShape(),
                         rewriter.getBF16Type()
                     );
 
@@ -308,15 +308,15 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
                         4, utils::IteratorType::parallel
                     );
 
-                    auto newTruncf = rewriter.create<linalg::GenericOp>(
-                        loc, TypeRange{truncfResultType}, ValueRange{conv2dResult},
+                    auto newTruncf = linalg::GenericOp::create(
+                        rewriter, loc, TypeRange{truncfResultType}, ValueRange{conv2dResult},
                         ValueRange{truncfInit},
                         ArrayRef<AffineMap>{newUnfoldIndexMap, newOutputIndexMap}, newIteratorTypes,
                         [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
-                            auto truncf = nestedBuilder.create<arith::TruncFOp>(
-                                nestedLoc, rewriter.getBF16Type(), blockArgs[0]
+                            auto truncf = arith::TruncFOp::create(
+                                nestedBuilder, nestedLoc, rewriter.getBF16Type(), blockArgs[0]
                             );
-                            nestedBuilder.create<linalg::YieldOp>(nestedLoc, truncf.getResult());
+                            linalg::YieldOp::create(nestedBuilder, nestedLoc, truncf.getResult());
                         }
                     );
 
@@ -336,8 +336,8 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
             cast<RankedTensorType>(currentResult.getType()).getElementType()
         );
 
-        auto collapsedResult = rewriter.create<tensor::CollapseShapeOp>(
-            loc, collapsedResultType, currentResult, collapseReassoc
+        auto collapsedResult = tensor::CollapseShapeOp::create(
+            rewriter, loc, collapsedResultType, currentResult, collapseReassoc
         );
 
         rewriter.replaceOp(convOp, collapsedResult.getResult());
@@ -425,14 +425,14 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         auto input4DType = RankedTensorType::get(input4DShape, inputType.getElementType());
         SmallVector<ReassociationIndices> inputReassoc = {{0}, {1}, {2, 3}};
         auto input4D =
-            rewriter.create<tensor::ExpandShapeOp>(loc, input4DType, input, inputReassoc);
+            tensor::ExpandShapeOp::create(rewriter, loc, input4DType, input, inputReassoc);
 
         // Expand filter from [F, C, Kw] to [F, C, 1, Kw] (add height dimension)
         SmallVector<int64_t> filter4DShape = {F, C, 1, Kw};
         auto filter4DType = RankedTensorType::get(filter4DShape, filterType.getElementType());
         SmallVector<ReassociationIndices> filterReassoc = {{0}, {1}, {2, 3}};
         auto filter4D =
-            rewriter.create<tensor::ExpandShapeOp>(loc, filter4DType, filter, filterReassoc);
+            tensor::ExpandShapeOp::create(rewriter, loc, filter4DType, filter, filterReassoc);
 
         // Get convolution parameters
         SmallVector<int64_t> strides = llvm::to_vector<4>(
@@ -526,17 +526,16 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         // Create output type (may be bf16 if truncf is fused)
         auto finalOutput5DType = RankedTensorType::get(output5DShape, resultElemType);
         auto finalOutput5DInit =
-            rewriter
-                .create<linalg::FillOp>(
-                    loc, ValueRange{createZeroConstant(rewriter, loc, resultElemType)},
-                    ValueRange{rewriter.create<tensor::EmptyOp>(loc, output5DShape, resultElemType)}
-                )
+            linalg::FillOp::create(
+                rewriter, loc, ValueRange{createZeroConstant(rewriter, loc, resultElemType)},
+                ValueRange{tensor::EmptyOp::create(rewriter, loc, output5DShape, resultElemType)}
+            )
                 .result();
 
         // Create the generic operation with f32 output for computation accuracy.
         // Truncf to bf16 will be inserted before reduce sum if needed.
-        auto generic = rewriter.create<linalg::GenericOp>(
-            loc, TypeRange{finalOutput5DType},
+        auto generic = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{finalOutput5DType},
             ValueRange{input4D.getResult(), filter4D.getResult()}, ValueRange{finalOutput5DInit},
             ArrayRef<AffineMap>{inputMap, filterMap, outputMap}, iteratorTypes,
             [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
@@ -547,25 +546,25 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
                 // Convert inputs to f32 for computation
                 if (inputVal.getType() != computeElemType) {
                     inputVal =
-                        nestedBuilder.create<arith::ExtFOp>(nestedLoc, computeElemType, inputVal);
+                        arith::ExtFOp::create(nestedBuilder, nestedLoc, computeElemType, inputVal);
                 }
                 if (filterVal.getType() != computeElemType) {
                     filterVal =
-                        nestedBuilder.create<arith::ExtFOp>(nestedLoc, computeElemType, filterVal);
+                        arith::ExtFOp::create(nestedBuilder, nestedLoc, computeElemType, filterVal);
                 }
                 // Accumulator is f32 (resultElemType = f32)
                 if (accum.getType() != computeElemType) {
-                    accum = nestedBuilder.create<arith::ExtFOp>(nestedLoc, computeElemType, accum);
+                    accum = arith::ExtFOp::create(nestedBuilder, nestedLoc, computeElemType, accum);
                 }
 
                 // Multiply input and filter
-                auto mul = nestedBuilder.create<arith::MulFOp>(nestedLoc, inputVal, filterVal);
+                auto mul = arith::MulFOp::create(nestedBuilder, nestedLoc, inputVal, filterVal);
 
                 // Accumulate
-                auto add = nestedBuilder.create<arith::AddFOp>(nestedLoc, mul, accum);
+                auto add = arith::AddFOp::create(nestedBuilder, nestedLoc, mul, accum);
 
                 // Output f32 - truncf to bf16 will be done before reduce sum if needed
-                nestedBuilder.create<linalg::YieldOp>(nestedLoc, add.getResult());
+                linalg::YieldOp::create(nestedBuilder, nestedLoc, add.getResult());
             }
         );
 
@@ -593,7 +592,7 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
             auto bf16Type = rewriter.getBF16Type();
             auto truncfShape = cast<RankedTensorType>(genericResult.getType()).getShape();
             auto truncfResultType = RankedTensorType::get(truncfShape, bf16Type);
-            auto truncfInit = rewriter.create<tensor::EmptyOp>(loc, truncfShape, bf16Type);
+            auto truncfInit = tensor::EmptyOp::create(rewriter, loc, truncfShape, bf16Type);
 
             SmallVector<AffineExpr> truncfExprs;
             for (unsigned i = 0; i < 5; i++) {
@@ -602,12 +601,12 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
             auto truncfMap = AffineMap::get(5, 0, truncfExprs, rewriter.getContext());
             SmallVector<utils::IteratorType> truncfIterators(5, utils::IteratorType::parallel);
 
-            auto truncfGeneric = rewriter.create<linalg::GenericOp>(
-                loc, TypeRange{truncfResultType}, ValueRange{genericResult}, ValueRange{truncfInit},
-                ArrayRef<AffineMap>{truncfMap, truncfMap}, truncfIterators,
+            auto truncfGeneric = linalg::GenericOp::create(
+                rewriter, loc, TypeRange{truncfResultType}, ValueRange{genericResult},
+                ValueRange{truncfInit}, ArrayRef<AffineMap>{truncfMap, truncfMap}, truncfIterators,
                 [&](OpBuilder &b, Location l, ValueRange args) {
-                    auto truncf = b.create<arith::TruncFOp>(l, bf16Type, args[0]);
-                    b.create<linalg::YieldOp>(l, truncf.getResult());
+                    auto truncf = arith::TruncFOp::create(b, l, bf16Type, args[0]);
+                    linalg::YieldOp::create(b, l, truncf.getResult());
                 }
             );
             reduceInput = truncfGeneric.getResult(0);
@@ -630,26 +629,26 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         // The reduce sum uses fp32 accumulation internally for accuracy.
         Type reduceOutputType = rewriter.getF32Type();
         Value zeroValue = createZeroConstant(rewriter, loc, reduceOutputType);
-        auto reduceInit = rewriter.create<tensor::EmptyOp>(loc, reducedShape, reduceOutputType);
+        auto reduceInit = tensor::EmptyOp::create(rewriter, loc, reducedShape, reduceOutputType);
         Value zeroTensor =
-            rewriter.create<linalg::FillOp>(loc, ValueRange{zeroValue}, ValueRange{reduceInit})
+            linalg::FillOp::create(rewriter, loc, ValueRange{zeroValue}, ValueRange{reduceInit})
                 .result();
 
         // Reduce over dimension 4 (Kw - the kernel width dimension)
-        auto reduceOp = rewriter.create<linalg::ReduceOp>(
-            loc, ValueRange{reduceInput}, ValueRange{zeroTensor}, 4,
+        auto reduceOp = linalg::ReduceOp::create(
+            rewriter, loc, ValueRange{reduceInput}, ValueRange{zeroTensor}, 4,
             [&](OpBuilder &b, Location l, ValueRange args) {
                 // Extend bf16 to f32 for accumulation if needed
                 Value lhs = args[0];
                 Value rhs = args[1];
                 if (lhs.getType() != reduceOutputType) {
-                    lhs = b.create<arith::ExtFOp>(l, reduceOutputType, lhs);
+                    lhs = arith::ExtFOp::create(b, l, reduceOutputType, lhs);
                 }
                 if (rhs.getType() != reduceOutputType) {
-                    rhs = b.create<arith::ExtFOp>(l, reduceOutputType, rhs);
+                    rhs = arith::ExtFOp::create(b, l, reduceOutputType, rhs);
                 }
-                auto sum = b.create<arith::AddFOp>(l, lhs, rhs);
-                b.create<linalg::YieldOp>(l, ValueRange{sum});
+                auto sum = arith::AddFOp::create(b, l, lhs, rhs);
+                linalg::YieldOp::create(b, l, ValueRange{sum});
             }
         );
 
@@ -660,10 +659,9 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         // Collapse dimension 2 (the height=1 dimension) into dimension 3 (width)
         SmallVector<ReassociationIndices> collapseReassoc = {{0}, {1}, {2, 3}};
         Value collapsedResult =
-            rewriter
-                .create<tensor::CollapseShapeOp>(
-                    loc, collapsedType, reduceOp.getResults()[0], collapseReassoc
-                )
+            tensor::CollapseShapeOp::create(
+                rewriter, loc, collapsedType, reduceOp.getResults()[0], collapseReassoc
+            )
                 .getResult();
 
         // If original output should be bf16, insert truncf after reduce
@@ -673,7 +671,7 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
             auto bf16Type = rewriter.getBF16Type();
             auto truncfShape = collapsedShape;
             auto truncfResultType = RankedTensorType::get(truncfShape, bf16Type);
-            auto truncfInit = rewriter.create<tensor::EmptyOp>(loc, truncfShape, bf16Type);
+            auto truncfInit = tensor::EmptyOp::create(rewriter, loc, truncfShape, bf16Type);
 
             SmallVector<AffineExpr> truncfExprs;
             for (unsigned i = 0; i < 3; i++) {
@@ -682,12 +680,12 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
             auto truncfMap = AffineMap::get(3, 0, truncfExprs, rewriter.getContext());
             SmallVector<utils::IteratorType> truncfIterators(3, utils::IteratorType::parallel);
 
-            auto truncfGeneric = rewriter.create<linalg::GenericOp>(
-                loc, TypeRange{truncfResultType}, ValueRange{collapsedResult},
+            auto truncfGeneric = linalg::GenericOp::create(
+                rewriter, loc, TypeRange{truncfResultType}, ValueRange{collapsedResult},
                 ValueRange{truncfInit}, ArrayRef<AffineMap>{truncfMap, truncfMap}, truncfIterators,
                 [&](OpBuilder &b, Location l, ValueRange args) {
-                    auto truncf = b.create<arith::TruncFOp>(l, bf16Type, args[0]);
-                    b.create<linalg::YieldOp>(l, truncf.getResult());
+                    auto truncf = arith::TruncFOp::create(b, l, bf16Type, args[0]);
+                    linalg::YieldOp::create(b, l, truncf.getResult());
                 }
             );
             finalResult = truncfGeneric.getResult(0);

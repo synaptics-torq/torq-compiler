@@ -127,7 +127,7 @@ class FuseActWithConvPass : public impl::FuseActWithConvBase<FuseActWithConvPass
         patterns.add<FuseClampActIntoProducer<torq_hl::Conv2DOp>>(ctx);
         patterns.add<FuseClampActIntoProducer<torq_hl::DepthwiseConv2DOp>>(ctx);
         patterns.add<FuseClampActIntoProducer<torq_hl::FullyConnectedOp>>(ctx);
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns))))
+        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
             return signalPassFailure();
     }
 };

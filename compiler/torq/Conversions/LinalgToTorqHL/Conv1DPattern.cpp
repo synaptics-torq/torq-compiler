@@ -107,8 +107,9 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
             llvm::SmallVector<int64_t> permVals = {1, 0};
             auto permAttr = mlir::DenseI64ArrayAttr::get(rewriter.getContext(), permVals);
 
-            auto transposeReshape = rewriter.create<torq_hl::TransposeReshapeOp>(
-                input.getLoc(), transposedType, createInitTensor(convOp, rewriter, transposedType),
+            auto transposeReshape = torq_hl::TransposeReshapeOp::create(
+                rewriter, input.getLoc(), transposedType,
+                createInitTensor(convOp, rewriter, transposedType),
                 attrValuesAsVec(convOp.getStrides()), weightType.getShape(), permAttr, input
             );
             input = transposeReshape.getOutput();
@@ -128,15 +129,15 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
             Value reduceInput = torqOut;
 
             Value zeroValue = createZeroConstant(rewriter, loc, reduceElemType);
-            auto cEmpty = rewriter.create<tensor::EmptyOp>(loc, reducedShape, reduceElemType);
+            auto cEmpty = tensor::EmptyOp::create(rewriter, loc, reducedShape, reduceElemType);
             Value zeroTensor =
-                rewriter.create<linalg::FillOp>(loc, ValueRange{zeroValue}, ValueRange{cEmpty})
+                linalg::FillOp::create(rewriter, loc, ValueRange{zeroValue}, ValueRange{cEmpty})
                     .result();
-            linalg::ReduceOp reduceOp = rewriter.create<linalg::ReduceOp>(
-                loc, ValueRange{reduceInput}, ValueRange{zeroTensor}, 4,
+            linalg::ReduceOp reduceOp = linalg::ReduceOp::create(
+                rewriter, loc, ValueRange{reduceInput}, ValueRange{zeroTensor}, 4,
                 [&](OpBuilder &b, Location l, ValueRange args) {
-                    b.create<linalg::YieldOp>(
-                        l, ValueRange{b.create<arith::AddFOp>(l, args[0], args[1])}
+                    linalg::YieldOp::create(
+                        b, l, ValueRange{arith::AddFOp::create(b, l, args[0], args[1])}
                     );
                 }
             );
@@ -147,7 +148,7 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
         // // Overwrite torqOut with init tensor for debugging
         // torqOut = createInitTensor(convOp, rewriter, cast<RankedTensorType>(torqOut.getType()));
         // // Fill input with 1s for debugging
-        // torqOut = rewriter.create<torq_hl::FillOp>(
+        // torqOut = torq_hl::FillOp::create(rewriter,
         //     loc, cast<RankedTensorType>(torqOut.getType()), torqOut,
         //     rewriter.getI32IntegerAttr(/*0x3f800000*//*0x00003f80*/0)
         // ).getOutput();
@@ -279,8 +280,8 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
             torqOutType = RankedTensorType::get(torqOutShape, torqOutType.getElementType());
         }
         else {
-            auto transposeReshape = rewriter.create<torq_hl::TransposeReshapeOp>(
-                loc, transposedType, createInitTensor(convOp, rewriter, transposedType),
+            auto transposeReshape = torq_hl::TransposeReshapeOp::create(
+                rewriter, loc, transposedType, createInitTensor(convOp, rewriter, transposedType),
                 attrValuesAsVec(convOp.getStrides()), weightType.getShape(), permAttr, input
             );
             input = transposeReshape.getOutput();
@@ -291,9 +292,9 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
         llvm::SmallVector<int64_t> zeroPad(4, 0);
         llvm::SmallVector<int64_t> stride = {strideValue};
 
-        auto torqConv1Op = rewriter.create<torq_hl::Conv1DOp>(
-            loc, torqOutType, createInitTensor(convOp, rewriter, torqOutType), 0, weightZp,
-            scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift, groups, zeroPad, stride,
+        auto torqConv1Op = torq_hl::Conv1DOp::create(
+            rewriter, loc, torqOutType, createInitTensor(convOp, rewriter, torqOutType), 0,
+            weightZp, scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift, groups, zeroPad, stride,
             attrValuesAsVec(convOp.getDilations()), torq_hl::VectorizationModeEnum::None,
             torqWeights, biasScale, input
         );
@@ -305,15 +306,15 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
             Type reduceElemType = elemType;
 
             Value zeroValue = createZeroConstant(rewriter, loc, reduceElemType);
-            auto cEmpty = rewriter.create<tensor::EmptyOp>(loc, reducedShape, reduceElemType);
+            auto cEmpty = tensor::EmptyOp::create(rewriter, loc, reducedShape, reduceElemType);
             Value zeroTensor =
-                rewriter.create<linalg::FillOp>(loc, ValueRange{zeroValue}, ValueRange{cEmpty})
+                linalg::FillOp::create(rewriter, loc, ValueRange{zeroValue}, ValueRange{cEmpty})
                     .result();
-            linalg::ReduceOp reduceOp = rewriter.create<linalg::ReduceOp>(
-                loc, ValueRange{torqOut}, ValueRange{zeroTensor}, 4,
+            linalg::ReduceOp reduceOp = linalg::ReduceOp::create(
+                rewriter, loc, ValueRange{torqOut}, ValueRange{zeroTensor}, 4,
                 [&](OpBuilder &b, Location l, ValueRange args) {
-                    b.create<linalg::YieldOp>(
-                        l, ValueRange{b.create<arith::AddFOp>(l, args[0], args[1])}
+                    linalg::YieldOp::create(
+                        b, l, ValueRange{arith::AddFOp::create(b, l, args[0], args[1])}
                     );
                 }
             );
@@ -546,7 +547,7 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
         SmallVector<int64_t> conv1dOutShape = {N, F, 1, Ow, Kw};
         auto conv1dOutType = RankedTensorType::get(conv1dOutShape, torqConv1dOutputType);
         auto conv1dOutInit =
-            rewriter.create<tensor::EmptyOp>(loc, conv1dOutShape, torqConv1dOutputType);
+            tensor::EmptyOp::create(rewriter, loc, conv1dOutShape, torqConv1dOutputType);
 
         // Fold forward bias from the output users
         bool isInt = torqConv1dOutputType.isInteger();
@@ -588,10 +589,10 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
         }
 
         // Create torq_hl.conv1d operation (outputs 5D [N, F, 1, Ow, Kw])
-        auto torqConv1dOp = rewriter.create<torq_hl::Conv1DOp>(
-            loc, conv1dOutType, conv1dOutInit, inputZp, weightZp, scInfo.zp, scInfo.min, scInfo.max,
-            scInfo.scaleShift, groups, pad, stride, dilation, torq_hl::VectorizationModeEnum::None,
-            filter, biasValue, input
+        auto torqConv1dOp = torq_hl::Conv1DOp::create(
+            rewriter, loc, conv1dOutType, conv1dOutInit, inputZp, weightZp, scInfo.zp, scInfo.min,
+            scInfo.max, scInfo.scaleShift, groups, pad, stride, dilation,
+            torq_hl::VectorizationModeEnum::None, filter, biasValue, input
         );
 
         // Replace the generic op with torq_hl.conv1d

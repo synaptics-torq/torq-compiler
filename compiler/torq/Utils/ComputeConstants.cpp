@@ -136,8 +136,8 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
         auto dispatchTensorType = IREE::TensorExt::DispatchTensorType::get(
             IREE::TensorExt::TensorAccess::WriteOnly, resultType
         );
-        auto subspanOp = builder.create<IREE::HAL::InterfaceBindingSubspanOp>(
-            loc, dispatchTensorType, layoutAttr, APInt(64, binding), nullptr, ValueRange{},
+        auto subspanOp = IREE::HAL::InterfaceBindingSubspanOp::create(
+            builder, loc, dispatchTensorType, layoutAttr, APInt(64, binding), nullptr, ValueRange{},
             builder.getIndexAttr(4)
         );
         subspanOps.push_back(subspanOp);
@@ -166,8 +166,8 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
 
     // Store each requested result to its dedicated output binding.
     for (auto [binding, value] : llvm::enumerate(values)) {
-        builder.create<IREE::TensorExt::DispatchTensorStoreOp>(
-            loc, map.lookup(value), subspanOps[binding], ValueRange{}
+        IREE::TensorExt::DispatchTensorStoreOp::create(
+            builder, loc, map.lookup(value), subspanOps[binding], ValueRange{}
         );
     }
 
@@ -286,7 +286,7 @@ static void insertDebugTrap(IREE::HAL::ExecutableVariantOp evOp) {
 
         OpBuilder builder(funcOp);
         builder.setInsertionPointToStart(&funcOp.getBody().front());
-        builder.create<LLVM::CallOp>(funcOp.getLoc(), debugTrapFunc, ValueRange{});
+        LLVM::CallOp::create(builder, funcOp.getLoc(), debugTrapFunc, ValueRange{});
         return WalkResult::interrupt();
     });
 }
@@ -802,7 +802,8 @@ FailureOr<SmallVector<Value>> computeAllArithConst(
         }
 
         OpBuilder builder(value.getDefiningOp());
-        constants.push_back(builder.create<arith::ConstantOp>(value.getLoc(), denseAttr).getResult()
+        constants.push_back(
+            arith::ConstantOp::create(builder, value.getLoc(), denseAttr).getResult()
         );
     }
 

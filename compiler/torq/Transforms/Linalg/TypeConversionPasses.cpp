@@ -69,11 +69,11 @@ Value convertRankedFloat(OpBuilder &builder, Type type, ValueRange inputs, Locat
     }
 
     if (inputElementType.getIntOrFloatBitWidth() > elementType.getIntOrFloatBitWidth()) {
-        return builder.create<arith::TruncFOp>(loc, type, inputs[0]);
+        return arith::TruncFOp::create(builder, loc, type, inputs[0]);
     }
 
     if (inputElementType.getIntOrFloatBitWidth() < elementType.getIntOrFloatBitWidth()) {
-        return builder.create<arith::ExtFOp>(loc, type, inputs[0]);
+        return arith::ExtFOp::create(builder, loc, type, inputs[0]);
     }
 
     /// MLIR does not have a direct way to cast f16 <-> bf16 so we use an f32 bridge
@@ -81,8 +81,8 @@ Value convertRankedFloat(OpBuilder &builder, Type type, ValueRange inputs, Locat
         (isa<BFloat16Type>(inputElementType) && isa<Float16Type>(elementType))) {
         Type f32ElementType = Float32Type::get(builder.getContext());
         Type f32Type = cloneTypeWithElementType(type, f32ElementType);
-        Value extended = builder.create<arith::ExtFOp>(loc, f32Type, inputs[0]);
-        return builder.create<arith::TruncFOp>(loc, type, extended);
+        Value extended = arith::ExtFOp::create(builder, loc, f32Type, inputs[0]);
+        return arith::TruncFOp::create(builder, loc, type, extended);
     }
 
     return nullptr;
@@ -100,13 +100,13 @@ Value convertRankedInteger(OpBuilder &builder, Type type, ValueRange inputs, Loc
     int64_t inWidth = cast<IntegerType>(inputElementType).getWidth();
     int64_t outWidth = cast<IntegerType>(elementType).getWidth();
     if (inWidth > outWidth) {
-        return builder.create<arith::TruncIOp>(loc, type, inputs[0]);
+        return arith::TruncIOp::create(builder, loc, type, inputs[0]);
     }
     if (inWidth < outWidth) {
         if (isUnsigned)
-            return builder.create<arith::ExtUIOp>(loc, type, inputs[0]);
+            return arith::ExtUIOp::create(builder, loc, type, inputs[0]);
         else
-            return builder.create<arith::ExtSIOp>(loc, type, inputs[0]);
+            return arith::ExtSIOp::create(builder, loc, type, inputs[0]);
     }
 
     return nullptr;

@@ -62,7 +62,7 @@ class OptimizeLinalgForTorqPass
         populateSwishActivationPatterns(ctx, SwishPatterns);
         auto frozenSwishPatterns =
             FrozenRewritePatternSet(std::move(SwishPatterns), disabledPatterns, enabledPatterns);
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), frozenSwishPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), frozenSwishPatterns))) {
             return signalPassFailure();
         }
 
@@ -74,7 +74,7 @@ class OptimizeLinalgForTorqPass
         populateMulPatterns(ctx, fusionPatterns);
         auto frozenFusionPatterns =
             FrozenRewritePatternSet(std::move(fusionPatterns), disabledPatterns, enabledPatterns);
-        if (failed(applyPatternsAndFoldGreedily(getOperation(), frozenFusionPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), frozenFusionPatterns))) {
             return signalPassFailure();
         }
     }

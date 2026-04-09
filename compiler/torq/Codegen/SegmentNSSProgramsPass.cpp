@@ -173,8 +173,8 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
         OpBuilder builder(programOp);
         builder.setInsertionPointToEnd(currentBlock);
 
-        auto nextBlockCode = builder.create<torq_hl::GetBlockOp>(
-            loc, programBlockType, currentInvocation, builder.getIndexAttr(idx + 1)
+        auto nextBlockCode = torq_hl::GetBlockOp::create(
+            builder, loc, programBlockType, currentInvocation, builder.getIndexAttr(idx + 1)
         );
 
         // Load the next block into the inactive LRAM area
@@ -183,7 +183,7 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
         }
 
         // Terminate the current block with a branch to the new block, passing live-ins.
-        builder.create<torq_hl::NextOp>(loc, blockArgs, inactiveLramCodeArea, nullptr, newBlock);
+        torq_hl::NextOp::create(builder, loc, blockArgs, inactiveLramCodeArea, nullptr, newBlock);
 
         // Advance to the newly created block and continue.
         currentBlock = newBlock;
@@ -210,8 +210,8 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
 
     builder.setInsertionPoint(createInvocationOp);
 
-    auto newCreateInvocationOp = builder.create<torq_hl::CreateInvocationOp>(
-        createInvocationOp.getLoc(), resultTypes, createInvocationOp->getOperands(),
+    auto newCreateInvocationOp = torq_hl::CreateInvocationOp::create(
+        builder, createInvocationOp.getLoc(), resultTypes, createInvocationOp->getOperands(),
         createInvocationOp->getAttrs()
     );
 

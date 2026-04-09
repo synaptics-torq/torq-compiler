@@ -151,7 +151,7 @@ void UnrollLoopPass::runOnOperation() {
         dialect->getCanonicalizationPatterns(patterns);
     for (mlir::RegisteredOperationName op : ctx.getRegisteredOperations())
         op.getCanonicalizationPatterns(patterns, &ctx);
-    (void)mlir::applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+    (void)mlir::applyPatternsGreedily(funcOp, std::move(patterns));
 
     // add post process
     propagateStaticOffsetToExpandShapeChain(funcOp);

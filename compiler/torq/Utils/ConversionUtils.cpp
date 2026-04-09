@@ -860,13 +860,13 @@ Value createClonedBlock(
 
     auto zeroAttr = builder.getZeroAttr(pResultTy.getElementType());
     auto zeroTensor =
-        builder.create<arith::ConstantOp>(parent->getLoc(), pResultTy.getElementType(), zeroAttr)
+        arith::ConstantOp::create(builder, parent->getLoc(), pResultTy.getElementType(), zeroAttr)
             .getResult();
     // Pass recovered runtime indices into tensor.empty when pResultTy has dynamic dims.
     auto emptyTensor =
-        builder.create<tensor::EmptyOp>(parent->getLoc(), pResultTy, indexV).getResult();
+        tensor::EmptyOp::create(builder, parent->getLoc(), pResultTy, indexV).getResult();
     zeroTensor =
-        builder.create<linalg::FillOp>(parent->getLoc(), pResultTy, zeroTensor, emptyTensor)
+        linalg::FillOp::create(builder, parent->getLoc(), pResultTy, zeroTensor, emptyTensor)
             .getResult(0);
 
     llvm::SmallVector<Operation *, 8> opsToMove;

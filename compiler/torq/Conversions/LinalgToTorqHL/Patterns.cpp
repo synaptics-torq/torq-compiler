@@ -1932,11 +1932,10 @@ struct GenericToBroadcastOpConversion : public OpRewritePattern<linalg::GenericO
                     currentShape[dim] = outType.getShape()[dim];
                     auto midType = RankedTensorType::get(currentShape, outType.getElementType());
                     auto init = createInitTensor(genericOp, rewriter, midType);
-                    current = rewriter
-                                  .create<torq_hl::BroadcastOp>(
-                                      genericOp.getLoc(), midType, init, SmallVector<int64_t>{dim},
-                                      current
-                                  )
+                    current = torq_hl::BroadcastOp::create(
+                                  rewriter, genericOp.getLoc(), midType, init,
+                                  SmallVector<int64_t>{dim}, current
+                    )
                                   .getResult(0);
                 }
                 rewriter.replaceOp(genericOp, current);
@@ -2000,8 +1999,8 @@ struct ResizeNearestNeighborOpConversion : public OpRewritePattern<linalg::Gener
         Value resizeInput = genericOp.getDpsInputs()[0];
         Value resizeInit =
             createInitTensor(genericOp, rewriter, mlir::cast<RankedTensorType>(resizeType));
-        auto resizeOp = rewriter.create<syna::torq_hl::ResizeNearestNeighborOp>(
-            genericOp.getLoc(), resizeType, resizeInit, 2, resizeInput
+        auto resizeOp = syna::torq_hl::ResizeNearestNeighborOp::create(
+            rewriter, genericOp.getLoc(), resizeType, resizeInit, 2, resizeInput
         );
 
         rewriter.replaceOp(genericOp, resizeOp.getOutput());

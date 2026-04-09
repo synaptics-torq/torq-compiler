@@ -764,7 +764,7 @@ class SwishActivationOpPattern : public OpRewritePattern<linalg::GenericOp> {
                     );
                 }
                 auto i16DenseAttr = DenseElementsAttr::get(i16TableType, llvm::ArrayRef(i16Values));
-                i16TableTensor = rewriter.create<arith::ConstantOp>(loc, i16DenseAttr);
+                i16TableTensor = arith::ConstantOp::create(rewriter, loc, i16DenseAttr);
                 LLVM_DEBUG(
                     llvm::dbgs() << "[SwishRewrite] Created i16 table constant "
                                  << "(each entry = original - " << tablePathZp << ")\n"
@@ -795,11 +795,11 @@ class SwishActivationOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         SmallVector<utils::IteratorType> tableIterTypes(rank, utils::IteratorType::parallel);
 
-        Value tableInit = rewriter.create<tensor::EmptyOp>(loc, shape, i16Type).getResult();
+        Value tableInit = tensor::EmptyOp::create(rewriter, loc, shape, i16Type).getResult();
 
-        auto tableNewOp = rewriter.create<linalg::GenericOp>(
-            loc, TypeRange{i16TensorType}, ValueRange{commonRescaleResult}, ValueRange{tableInit},
-            tableMaps, tableIterTypes
+        auto tableNewOp = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{i16TensorType}, ValueRange{commonRescaleResult},
+            ValueRange{tableInit}, tableMaps, tableIterTypes
         );
 
         {
@@ -824,7 +824,7 @@ class SwishActivationOpPattern : public OpRewritePattern<linalg::GenericOp> {
                         remappedIndices.push_back(mapping.lookupOrDefault(idx));
                     }
                     auto newExtract =
-                        rewriter.create<tensor::ExtractOp>(loc, i16TableTensor, remappedIndices);
+                        tensor::ExtractOp::create(rewriter, loc, i16TableTensor, remappedIndices);
                     mapping.map(extractOp.getResult(), newExtract.getResult());
                 }
                 else {
@@ -837,7 +837,7 @@ class SwishActivationOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
             // tensor.extract now returns i16 directly — yield it
             Value tableOut = mapping.lookupOrDefault(oldTableYield.getOperand(0));
-            rewriter.create<linalg::YieldOp>(loc, tableOut);
+            linalg::YieldOp::create(rewriter, loc, tableOut);
         }
 
         LLVM_DEBUG(

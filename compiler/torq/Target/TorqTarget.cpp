@@ -135,9 +135,9 @@ class TorqTargetBackend : public IREE::HAL::TargetBackend {
             return innerModuleOp.emitError("failed to serialize to torq binary");
         }
 
-        auto binaryOp = executableBuilder.create<IREE::HAL::ExecutableBinaryOp>(
-            variantOp.getLoc(), variantOp.getSymName(), variantOp.getTarget().getFormat(),
-            binaryAttr
+        auto binaryOp = IREE::HAL::ExecutableBinaryOp::create(
+            executableBuilder, variantOp.getLoc(), variantOp.getSymName(),
+            variantOp.getTarget().getFormat(), binaryAttr
         );
 
         binaryOp.setMimeTypeAttr(executableBuilder.getStringAttr("application/x-flatbuffers"));

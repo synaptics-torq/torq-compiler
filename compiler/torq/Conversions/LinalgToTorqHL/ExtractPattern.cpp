@@ -81,7 +81,7 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto i32IndicesAttr = DenseIntElementsAttr::get(i32IndicesType, i32IndicesValues);
         demotedIndices =
-            rewriter.create<arith::ConstantOp>(srcOp.getLoc(), i32IndicesType, i32IndicesAttr)
+            arith::ConstantOp::create(rewriter, srcOp.getLoc(), i32IndicesType, i32IndicesAttr)
                 .getResult();
         return success();
     }
@@ -173,8 +173,8 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 auto dataPerm = Permutation::nhc2nch();
                 auto outType = transposeType(resultType, dataPerm.reverse());
                 auto transposedValue = transposeValue(cst, dataPerm, srcOp.getLoc(), rewriter);
-                auto out = rewriter.create<syna::torq_hl::GatherOp>(
-                    srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
+                auto out = syna::torq_hl::GatherOp::create(
+                    rewriter, srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
                     transposedValue, input
                 );
                 auto resultTranspose =

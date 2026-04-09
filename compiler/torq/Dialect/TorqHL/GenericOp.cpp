@@ -110,68 +110,68 @@ static Value createAct(
 
     // setup the default values for a0, a1 and bias
     if (!a0) {
-        a0 = builder.create<arith::ConstantOp>(builder.getI32IntegerAttr(1));
+        a0 = arith::ConstantOp::create(builder, builder.getI32IntegerAttr(1));
     }
 
     if (!a1) {
-        a1 = builder.create<arith::ConstantOp>(builder.getI32IntegerAttr(1));
+        a1 = arith::ConstantOp::create(builder, builder.getI32IntegerAttr(1));
     }
 
     if (!b) {
-        b = builder.create<arith::ConstantOp>(builder.getI32IntegerAttr(0));
+        b = arith::ConstantOp::create(builder, builder.getI32IntegerAttr(0));
     }
 
-    auto zeroi32 = builder.create<arith::ConstantOp>(builder.getI32IntegerAttr(0));
-    auto onei64 = builder.create<arith::ConstantOp>(builder.getI64IntegerAttr(1));
+    auto zeroi32 = arith::ConstantOp::create(builder, builder.getI32IntegerAttr(0));
+    auto onei64 = arith::ConstantOp::create(builder, builder.getI64IntegerAttr(1));
     auto shiftFactorDiv4 =
-        builder.create<arith::ConstantOp>(builder.getI32IntegerAttr(actAttr.getShiftFactorDiv4()));
+        arith::ConstantOp::create(builder, builder.getI32IntegerAttr(actAttr.getShiftFactorDiv4()));
     auto zeroPoint =
-        builder.create<arith::ConstantOp>(builder.getI32IntegerAttr(actAttr.getOutputZeroPoint()));
+        arith::ConstantOp::create(builder, builder.getI32IntegerAttr(actAttr.getOutputZeroPoint()));
     auto outputMax =
-        builder.create<arith::ConstantOp>(builder.getI32IntegerAttr(actAttr.getOutputMax()));
+        arith::ConstantOp::create(builder, builder.getI32IntegerAttr(actAttr.getOutputMax()));
     auto outputMin =
-        builder.create<arith::ConstantOp>(builder.getI32IntegerAttr(actAttr.getOutputMin()));
+        arith::ConstantOp::create(builder, builder.getI32IntegerAttr(actAttr.getOutputMin()));
 
     // t0 = p + b;
-    auto t0 = builder.create<arith::AddIOp>(p, b);
+    auto t0 = arith::AddIOp::create(builder, p, b);
 
     // t1 = (t0<0) ? ((int64_t)t0)*a0 : ((int64_t)t0)*a1;
-    auto isT0Negative = builder.create<arith::CmpIOp>(arith::CmpIPredicate::slt, t0, zeroi32);
-    auto t0i64 = builder.create<arith::ExtSIOp>(builder.getI64Type(), t0);
+    auto isT0Negative = arith::CmpIOp::create(builder, arith::CmpIPredicate::slt, t0, zeroi32);
+    auto t0i64 = arith::ExtSIOp::create(builder, builder.getI64Type(), t0);
 
-    auto a0i64 = builder.create<arith::ExtSIOp>(builder.getI64Type(), a0);
-    auto a1i64 = builder.create<arith::ExtSIOp>(builder.getI64Type(), a1);
-    auto t1a0 = builder.create<arith::MulIOp>(a0i64, t0i64);
-    auto t1a1 = builder.create<arith::MulIOp>(a1i64, t0i64);
-    auto t1 = builder.create<arith::SelectOp>(isT0Negative, t1a0, t1a1);
+    auto a0i64 = arith::ExtSIOp::create(builder, builder.getI64Type(), a0);
+    auto a1i64 = arith::ExtSIOp::create(builder, builder.getI64Type(), a1);
+    auto t1a0 = arith::MulIOp::create(builder, a0i64, t0i64);
+    auto t1a1 = arith::MulIOp::create(builder, a1i64, t0i64);
+    auto t1 = arith::SelectOp::create(builder, isT0Negative, t1a0, t1a1);
 
     // t2 = t1 + (1LL << (shift * 4) >> 1);      // rounding
-    auto fouri32 = builder.create<arith::ConstantOp>(builder.getI32IntegerAttr(4));
-    auto shiftTimes4 = builder.create<arith::MulIOp>(shiftFactorDiv4, fouri32);
-    auto shiftTimes4i64 = builder.create<arith::ExtSIOp>(builder.getI64Type(), shiftTimes4);
-    auto shiftTimes4i64lshift = builder.create<arith::ShLIOp>(onei64, shiftTimes4i64);
-    auto shiftTimes4i64rshift = builder.create<arith::ShRSIOp>(shiftTimes4i64lshift, onei64);
-    auto t2 = builder.create<arith::AddIOp>(t1, shiftTimes4i64rshift);
+    auto fouri32 = arith::ConstantOp::create(builder, builder.getI32IntegerAttr(4));
+    auto shiftTimes4 = arith::MulIOp::create(builder, shiftFactorDiv4, fouri32);
+    auto shiftTimes4i64 = arith::ExtSIOp::create(builder, builder.getI64Type(), shiftTimes4);
+    auto shiftTimes4i64lshift = arith::ShLIOp::create(builder, onei64, shiftTimes4i64);
+    auto shiftTimes4i64rshift = arith::ShRSIOp::create(builder, shiftTimes4i64lshift, onei64);
+    auto t2 = arith::AddIOp::create(builder, t1, shiftTimes4i64rshift);
 
     // t3 = t2>>(4*shift);
-    auto t3 = builder.create<arith::ShRSIOp>(t2, shiftTimes4i64);
+    auto t3 = arith::ShRSIOp::create(builder, t2, shiftTimes4i64);
 
     // t4 = t3 + zp;
-    auto zpi64 = builder.create<arith::ExtSIOp>(builder.getI64Type(), zeroPoint);
-    auto t4 = builder.create<arith::AddIOp>(t3, zpi64);
+    auto zpi64 = arith::ExtSIOp::create(builder, builder.getI64Type(), zeroPoint);
+    auto t4 = arith::AddIOp::create(builder, t3, zpi64);
 
     // ((x_)<(min_)?(min_):(x_)>(max_)?(max_):(x_))
     // q = CLIP3(min, max, t4);
-    auto maxi64 = builder.create<arith::ExtSIOp>(builder.getI64Type(), outputMax);
-    auto mini64 = builder.create<arith::ExtSIOp>(builder.getI64Type(), outputMin);
-    auto minQ = builder.create<arith::MinSIOp>(t4, maxi64);
-    auto qi64 = builder.create<arith::MaxSIOp>(minQ, mini64);
+    auto maxi64 = arith::ExtSIOp::create(builder, builder.getI64Type(), outputMax);
+    auto mini64 = arith::ExtSIOp::create(builder, builder.getI64Type(), outputMin);
+    auto minQ = arith::MinSIOp::create(builder, t4, maxi64);
+    auto qi64 = arith::MaxSIOp::create(builder, minQ, mini64);
 
-    auto q = builder.create<arith::TruncIOp>(builder.getI32Type(), qi64);
+    auto q = arith::TruncIOp::create(builder, builder.getI32Type(), qi64);
 
     //  add a final i32 to i8 truncation if needed
     if (outputType == builder.getI8Type()) {
-        q = builder.create<arith::TruncIOp>(builder.getI8Type(), q);
+        q = arith::TruncIOp::create(builder, builder.getI8Type(), q);
     }
 
     return q;
@@ -257,7 +257,7 @@ void GenericOp::regionBuilder(
             assert(dArg && "Missing d argument for not ALUOp0Mode::WBYP");
 
             if (dArg.getType() == builder.getI8Type()) {
-                extD = builder.create<arith::ExtSIOp>(builder.getI32Type(), dArg);
+                extD = arith::ExtSIOp::create(builder, builder.getI32Type(), dArg);
             }
             else {
                 assert(
@@ -274,7 +274,7 @@ void GenericOp::regionBuilder(
             assert(dArg && "Missing w argument for not ALUOp0Mode::DBYP");
 
             if (wArg.getType() == builder.getI8Type()) {
-                extW = builder.create<arith::ExtSIOp>(builder.getI32Type(), wArg);
+                extW = arith::ExtSIOp::create(builder, builder.getI32Type(), wArg);
             }
             else {
                 assert(
@@ -287,10 +287,10 @@ void GenericOp::regionBuilder(
         Value combineDW;
 
         if (aluConfig.getOp0Mode() == ALUOp0Mode::ADD) {
-            combineDW = builder.create<arith::AddIOp>(extD, extW);
+            combineDW = arith::AddIOp::create(builder, extD, extW);
         }
         else if (aluConfig.getOp0Mode() == ALUOp0Mode::MUL) {
-            combineDW = builder.create<arith::MulIOp>(extD, extW);
+            combineDW = arith::MulIOp::create(builder, extD, extW);
         }
         else if (aluConfig.getOp0Mode() == ALUOp0Mode::DBYP) {
             combineDW = extD;
@@ -303,7 +303,7 @@ void GenericOp::regionBuilder(
         }
 
         if (aluConfig.getOp1Mode() == ALUOp1Mode::ACC) {
-            pOut = builder.create<arith::AddIOp>(combineDW, pArg);
+            pOut = arith::AddIOp::create(builder, combineDW, pArg);
         }
         else {
             assert(false && "Unsupported ALUOpMode1");
@@ -327,7 +327,7 @@ void GenericOp::regionBuilder(
     if (hasQ)
         yieldValues.push_back(actOut);
 
-    builder.create<linalg::YieldOp>(yieldValues);
+    linalg::YieldOp::create(builder, yieldValues);
 }
 
 std::string GenericOp::getLibraryCallName() {

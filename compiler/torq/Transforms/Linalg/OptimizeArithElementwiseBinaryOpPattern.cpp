@@ -148,40 +148,40 @@ class ArithElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericO
             [&](OpBuilder &b, Location innerLoc, ValueRange args) {
                 Value res;
                 if (auto cmpf = dyn_cast<arith::CmpFOp>(op)) {
-                    res = b.create<arith::CmpFOp>(innerLoc, cmpf.getPredicate(), args[0], args[1]);
+                    res = arith::CmpFOp::create(b, innerLoc, cmpf.getPredicate(), args[0], args[1]);
                 }
                 else if (auto cmpi = dyn_cast<arith::CmpIOp>(op)) {
-                    res = b.create<arith::CmpIOp>(innerLoc, cmpi.getPredicate(), args[0], args[1]);
+                    res = arith::CmpIOp::create(b, innerLoc, cmpi.getPredicate(), args[0], args[1]);
                 }
                 else if (auto andi = dyn_cast<arith::AndIOp>(op)) {
-                    res = b.create<arith::AndIOp>(innerLoc, args[0], args[1]);
+                    res = arith::AndIOp::create(b, innerLoc, args[0], args[1]);
                 }
                 else if (auto ori = dyn_cast<arith::OrIOp>(op)) {
-                    res = b.create<arith::OrIOp>(innerLoc, args[0], args[1]);
+                    res = arith::OrIOp::create(b, innerLoc, args[0], args[1]);
                 }
                 else if (auto xori = dyn_cast<arith::XOrIOp>(op)) {
-                    res = b.create<arith::XOrIOp>(innerLoc, args[0], args[1]);
+                    res = arith::XOrIOp::create(b, innerLoc, args[0], args[1]);
                 }
                 else if (auto minf = dyn_cast<arith::MinimumFOp>(op)) {
-                    res = b.create<arith::MinimumFOp>(innerLoc, args[0], args[1]);
+                    res = arith::MinimumFOp::create(b, innerLoc, args[0], args[1]);
                 }
                 else if (auto maxf = dyn_cast<arith::MinNumFOp>(op)) {
-                    res = b.create<arith::MinNumFOp>(innerLoc, args[0], args[1]);
+                    res = arith::MinNumFOp::create(b, innerLoc, args[0], args[1]);
                 }
                 else if (auto mini = dyn_cast<arith::MaxNumFOp>(op)) {
-                    res = b.create<arith::MaxNumFOp>(innerLoc, args[0], args[1]);
+                    res = arith::MaxNumFOp::create(b, innerLoc, args[0], args[1]);
                 }
                 else if (auto maxi = dyn_cast<arith::MaximumFOp>(op)) {
-                    res = b.create<arith::MaximumFOp>(innerLoc, args[0], args[1]);
+                    res = arith::MaximumFOp::create(b, innerLoc, args[0], args[1]);
                 }
                 else if (auto minsi = dyn_cast<arith::MinSIOp>(op)) {
-                    res = b.create<arith::MinSIOp>(innerLoc, args[0], args[1]);
+                    res = arith::MinSIOp::create(b, innerLoc, args[0], args[1]);
                 }
                 else if (auto maxsi = dyn_cast<arith::MaxSIOp>(op)) {
-                    res = b.create<arith::MaxSIOp>(innerLoc, args[0], args[1]);
+                    res = arith::MaxSIOp::create(b, innerLoc, args[0], args[1]);
                 }
 
-                b.create<linalg::YieldOp>(innerLoc, ValueRange{res});
+                linalg::YieldOp::create(b, innerLoc, ValueRange{res});
             }
         );
 

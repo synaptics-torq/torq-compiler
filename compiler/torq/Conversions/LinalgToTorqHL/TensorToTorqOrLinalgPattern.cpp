@@ -123,7 +123,7 @@ struct CollapseShapeOpToLinalgRewrite : public OpRewritePattern<tensor::Collapse
             /*iteratorTypes=*/iteratorTypes,
             [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
                 // The body of the linalg.generic: simply yield the input value.
-                nestedBuilder.create<linalg::YieldOp>(nestedLoc, blockArgs[0]);
+                linalg::YieldOp::create(nestedBuilder, nestedLoc, blockArgs[0]);
             },
             // It's important that we clone the torq-fuse-group attribute
             collapseOp->getAttrs()
@@ -221,7 +221,7 @@ struct ExpandShapeOpToLinalgRewrite : public OpRewritePattern<tensor::ExpandShap
             /*iteratorTypes=*/iteratorTypes,
             [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
                 // The body of the linalg.generic: simply yield the input value.
-                nestedBuilder.create<linalg::YieldOp>(nestedLoc, blockArgs[0]);
+                linalg::YieldOp::create(nestedBuilder, nestedLoc, blockArgs[0]);
             },
             // It's important that we clone the torq-fuse-group attribute
             expandOp->getAttrs()

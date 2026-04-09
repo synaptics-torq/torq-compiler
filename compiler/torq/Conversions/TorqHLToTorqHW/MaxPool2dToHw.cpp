@@ -88,8 +88,8 @@ static torq_hw::SliceTaskOp lowerMaxPool1DToHw(
         }
     }
 
-    return rewriter.create<torq_hw::SliceTaskOp>(
-        op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
         taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
     );
 }
@@ -161,8 +161,8 @@ static torq_hw::SliceTaskOp lowerMaxPool2DToHw(
         }
     }
 
-    return rewriter.create<torq_hw::SliceTaskOp>(
-        op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
         taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
     );
 }
@@ -263,8 +263,8 @@ static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
         dedr->offset = 0;
     }
 
-    return rewriter.create<torq_hw::SliceTaskOp>(
-        op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
         taskInitTensor, slice.getCfgAttr(rewriter.getContext()), ndls
     );
 }

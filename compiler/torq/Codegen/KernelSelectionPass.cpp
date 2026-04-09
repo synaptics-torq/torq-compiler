@@ -51,7 +51,7 @@ static void biasScale_inflate(Value &biases, int64_t inner_on, T biasValue, T sc
 
     OpBuilder builder(biases.getContext());
     auto inflatedBias =
-        builder.create<tensor::EmptyOp>(biases.getLoc(), shape, biasType.getElementType());
+        tensor::EmptyOp::create(builder, biases.getLoc(), shape, biasType.getElementType());
 
     // Inflate the biases tensor by padding biasValue and scaleValue at the end in interleaved
     // fashion
@@ -62,38 +62,35 @@ static void biasScale_inflate(Value &biases, int64_t inner_on, T biasValue, T sc
         llvm::SmallVector<T>(padCh, biasValue)
     );
     auto padBiasV =
-        builder.create<arith::ConstantOp>(biases.getLoc(), biasType.getElementType(), biasAttr);
+        arith::ConstantOp::create(builder, biases.getLoc(), biasType.getElementType(), biasAttr);
 
     DenseElementsAttr scaleAttr = DenseElementsAttr::get(
         RankedTensorType::get({padCh}, biasType.getElementType()),
         llvm::SmallVector<T>(padCh, scaleValue)
     );
     auto padScaleV =
-        builder.create<arith::ConstantOp>(biases.getLoc(), biasType.getElementType(), scaleAttr);
-    auto iOp = builder
-                   .create<tensor::InsertSliceOp>(
-                       biases.getLoc(), biases, inflatedBias,
-                       /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(0)},
-                       /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch)},
-                       /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(1)}
-                   )
+        arith::ConstantOp::create(builder, biases.getLoc(), biasType.getElementType(), scaleAttr);
+    auto iOp = tensor::InsertSliceOp::create(
+                   builder, biases.getLoc(), biases, inflatedBias,
+                   /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(0)},
+                   /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch)},
+                   /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(1)}
+    )
                    .getResult();
 
-    iOp = builder
-              .create<tensor::InsertSliceOp>(
-                  biases.getLoc(), padBiasV, iOp,
-                  /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch)},
-                  /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(padCh)},
-                  /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
-              )
+    iOp = tensor::InsertSliceOp::create(
+              builder, biases.getLoc(), padBiasV, iOp,
+              /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch)},
+              /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(padCh)},
+              /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+    )
               .getResult();
-    iOp = builder
-              .create<tensor::InsertSliceOp>(
-                  biases.getLoc(), padScaleV, iOp,
-                  /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch + 1)},
-                  /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(padCh)},
-                  /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
-              )
+    iOp = tensor::InsertSliceOp::create(
+              builder, biases.getLoc(), padScaleV, iOp,
+              /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch + 1)},
+              /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(padCh)},
+              /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+    )
               .getResult();
 
     biases = iOp;

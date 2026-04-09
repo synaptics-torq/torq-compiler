@@ -572,8 +572,8 @@ static LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp create
                 builder.setInsertionPoint(hostCopyOp);
 
                 // create a subview of the destination with the correct size where to copy the code
-                auto subviewOp = builder.create<memref::SubViewOp>(
-                    hostCopyOp.getLoc(), hostCopyOp.getOutput(), SmallVector<int64_t>{0},
+                auto subviewOp = memref::SubViewOp::create(
+                    builder, hostCopyOp.getLoc(), hostCopyOp.getOutput(), SmallVector<int64_t>{0},
                     SmallVector<int64_t>{blockSizes[blockIndex]}, SmallVector<int64_t>{1}
                 );
 
@@ -595,8 +595,8 @@ static LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp create
                 builder.setInsertionPoint(dmaInCfg->getParentOp());
 
                 // create a subview of the destination with the correct size where to copy the code
-                auto subviewOp = builder.create<memref::SubViewOp>(
-                    dmaInCfg.getLoc(), dmaInCfg.getWrite(), SmallVector<int64_t>{0},
+                auto subviewOp = memref::SubViewOp::create(
+                    builder, dmaInCfg.getLoc(), dmaInCfg.getWrite(), SmallVector<int64_t>{0},
                     SmallVector<int64_t>{blockSizes[blockIndex]}, SmallVector<int64_t>{1}
                 );
 

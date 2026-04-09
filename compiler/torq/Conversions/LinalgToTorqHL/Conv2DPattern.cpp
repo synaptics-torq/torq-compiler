@@ -102,7 +102,7 @@ static FailureOr<Value> expandWeightsForDilation(
         rewriter, loc, RankedTensorType::get(newShape, elemType), ValueRange{weights},
         ValueRange{filledTensor.getResult(0)}, indexingMaps, iteratorTypes,
         [&](OpBuilder &b, Location loc, ValueRange args) {
-            b.create<linalg::YieldOp>(loc, args[0]);
+            linalg::YieldOp::create(b, loc, args[0]);
         }
     );
 
@@ -416,8 +416,8 @@ static Value preConversionWeights(
         reassoc.push_back({2});    // KH
         reassoc.push_back({3});    // KW
         SmallVector<int64_t> newShape{tWeightShape[0], 1, tWeightShape[1], tWeightShape[2]};
-        transposedWeights = rewriter.create<tensor::ExpandShapeOp>(
-            weights.getLoc(), RankedTensorType::get(newShape, tWeightTy.getElementType()),
+        transposedWeights = tensor::ExpandShapeOp::create(
+            rewriter, weights.getLoc(), RankedTensorType::get(newShape, tWeightTy.getElementType()),
             transposedWeights, reassoc
         );
     }
@@ -625,27 +625,25 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             Value outV;
             if (isDepthwise) {
                 // Depthwise path (including optional DW1D-stride1 specialization).
-                outV = rewriter
-                           .create<torq_hl::DepthwiseConv2DOp>(
-                               loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
-                               scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
-                               attrValuesAsVec(convOp.getStrides()), finalDilationVec,
-                               torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input,
-                               isDW1DStride1, false, isDW1DStride1
-                           )
+                outV = torq_hl::DepthwiseConv2DOp::create(
+                           rewriter, loc, torqOutType, newConvOutput, padInfo.padValue, 0,
+                           scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift, groups,
+                           padInfo.lrtbPad, attrValuesAsVec(convOp.getStrides()), finalDilationVec,
+                           torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input,
+                           isDW1DStride1, false, isDW1DStride1
+                )
                            .getResult(0);
             }
             else {
                 // Standard Conv2D path.
-                outV = rewriter
-                           .create<torq_hl::Conv2DOp>(
-                               loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
-                               scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
-                               attrValuesAsVec(convOp.getStrides()), finalDilationVec,
-                               torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input,
-                               nhwcInput
-                           )
-                           .getResult(0);
+                outV =
+                    torq_hl::Conv2DOp::create(
+                        rewriter, loc, torqOutType, newConvOutput, padInfo.padValue, 0, scInfo.zp,
+                        scInfo.min, scInfo.max, scInfo.scaleShift, groups, padInfo.lrtbPad,
+                        attrValuesAsVec(convOp.getStrides()), finalDilationVec,
+                        torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input, nhwcInput
+                    )
+                        .getResult(0);
             }
             auto torqOut = postConversion(outV, _dataPerm, isNchw, isDW1DStride1, rewriter);
             rewriter.replaceOp(output.getDefiningOp(), torqOut);

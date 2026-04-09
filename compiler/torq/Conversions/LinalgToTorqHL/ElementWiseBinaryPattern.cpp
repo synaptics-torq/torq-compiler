@@ -196,7 +196,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                     },
                     /*iteratorTypes=*/maybeElemOp.getIteratorTypesArray(),
                     [&](OpBuilder &bBuilder, Location bLoc, ValueRange bArgs) {
-                        bBuilder.create<linalg::YieldOp>(bLoc, bArgs[0]);
+                        linalg::YieldOp::create(bBuilder, bLoc, bArgs[0]);
                     }
                 );
 

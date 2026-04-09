@@ -276,21 +276,22 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
         auto bf16 = cast<RankedTensorType>(srcOp.getType(0)).getElementType();
         float denom = cast<FloatAttr>(constant.getValueAttr()).getValue().convertToDouble();
         // denom = 0 is accepted by the hardware and results in inf output
-        auto recip = rewriter.create<arith::ConstantOp>(
-            srcOp.getLoc(), rewriter.getFloatAttr(bf16, 1 / denom)
+        auto recip = arith::ConstantOp::create(
+            rewriter, srcOp.getLoc(), rewriter.getFloatAttr(bf16, 1 / denom)
         );
 
         rewriter.replaceOp(
-            srcOp,
-            rewriter.create<linalg::GenericOp>(
-                srcOp.getLoc(), TypeRange{srcOp.getOutputs()[0].getType()}, srcOp.getInputs(),
-                srcOp.getOutputs(), srcOp.getIndexingMapsArray(), srcOp.getIteratorTypesArray(),
-                [&](OpBuilder &b, Location l, ValueRange args) {
-                    rewriter.create<linalg::YieldOp>(
-                        l, ValueRange{rewriter.create<arith::MulFOp>(l, args[0], recip)}
-                    );
-                }
-            )
+            srcOp, linalg::GenericOp::create(
+                       rewriter, srcOp.getLoc(), TypeRange{srcOp.getOutputs()[0].getType()},
+                       srcOp.getInputs(), srcOp.getOutputs(), srcOp.getIndexingMapsArray(),
+                       srcOp.getIteratorTypesArray(),
+                       [&](OpBuilder &b, Location l, ValueRange args) {
+                           linalg::YieldOp::create(
+                               rewriter, l,
+                               ValueRange{arith::MulFOp::create(rewriter, l, args[0], recip)}
+                           );
+                       }
+                   )
         );
         return success();
     }
@@ -418,7 +419,7 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
         // create variable names that survive the following if block
         Value rawX, xSign, x, isSubnormal, isNotBig;
         if (clEnableTorqReciprocalInf) {
-            rawX = rewriter.create<tensor::BitcastOp>(loc, tType(i16), op.getInputs()[0]);
+            rawX = tensor::BitcastOp::create(rewriter, loc, tType(i16), op.getInputs()[0]);
 
             // record sign bit
             xSign = andi(0b1000000000000000, rawX);
@@ -435,7 +436,7 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
         }
         else {
             // bitcast to i16
-            x = rewriter.create<tensor::BitcastOp>(loc, tType(i16), op.getInputs()[0]);
+            x = tensor::BitcastOp::create(rewriter, loc, tType(i16), op.getInputs()[0]);
         }
 
         // Our magic LUT values!  See
@@ -484,9 +485,9 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
         );
 
         // use mantissa as index to LUT
-        auto xMant8 = rewriter.create<arith::TruncIOp>(loc, tType(i8), x);
-        auto outputTens = rewriter.create<tensor::EmptyOp>(loc, tType(i8), ValueRange{});
-        auto indexOffset = rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(128));
+        auto xMant8 = arith::TruncIOp::create(rewriter, loc, tType(i8), x);
+        auto outputTens = tensor::EmptyOp::create(rewriter, loc, tType(i8), ValueRange{});
+        auto indexOffset = arith::ConstantOp::create(rewriter, loc, rewriter.getIndexAttr(128));
         auto lutVal =
             linalg::GenericOp::create(
                 rewriter, loc, TypeRange{tType(i8)}, ValueRange{xMant8}, ValueRange{outputTens},
@@ -501,14 +502,14 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
                 }
             ).getResult(0);
 
-        auto lutVal16 = rewriter.create<arith::ExtUIOp>(loc, tType(i16), lutVal);
+        auto lutVal16 = arith::ExtUIOp::create(rewriter, loc, tType(i16), lutVal);
 
         // combine computed exponent and mantissa
-        auto computed = rewriter.create<arith::AddIOp>(loc, lutVal16, computedExpo);
+        auto computed = arith::AddIOp::create(rewriter, loc, lutVal16, computedExpo);
         if (clEnableTorqReciprocalInf) {
             // There are a few possible inputs (big inputs) that must also
             // be sqashed to zero.
-            auto computed2 = rewriter.create<arith::MulIOp>(loc, computed, isNotBig);
+            auto computed2 = arith::MulIOp::create(rewriter, loc, computed, isNotBig);
 
             // conversely, we need a way to ensure all subnormals map to
             // infinity.
@@ -517,19 +518,19 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
             // We want to combine our computed maybeInf and our current
             // computed using bfloat addition.  Bitcast it real quick,
             // add, and bitcast back.
-            auto computedBfloat = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, computed2);
-            auto maybeInfBfloat = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, maybeInf);
+            auto computedBfloat = tensor::BitcastOp::create(rewriter, loc, bfTensorType, computed2);
+            auto maybeInfBfloat = tensor::BitcastOp::create(rewriter, loc, bfTensorType, maybeInf);
             auto realComputedBfloat =
-                rewriter.create<arith::AddFOp>(loc, computedBfloat, maybeInfBfloat);
+                arith::AddFOp::create(rewriter, loc, computedBfloat, maybeInfBfloat);
             auto realComputed =
-                rewriter.create<tensor::BitcastOp>(loc, tType(i16), realComputedBfloat);
+                tensor::BitcastOp::create(rewriter, loc, tType(i16), realComputedBfloat);
 
             // add back our sign bit we saved earlier
-            computed = rewriter.create<arith::AddIOp>(loc, xSign, realComputed);
+            computed = arith::AddIOp::create(rewriter, loc, xSign, realComputed);
         }
 
         // bitcast final value back to bfloat16
-        auto bfBitcast = rewriter.create<tensor::BitcastOp>(loc, bfTensorType, computed);
+        auto bfBitcast = tensor::BitcastOp::create(rewriter, loc, bfTensorType, computed);
 
         // done.
         rewriter.replaceOp(op, bfBitcast);

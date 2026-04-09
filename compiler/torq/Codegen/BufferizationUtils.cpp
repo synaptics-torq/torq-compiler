@@ -234,8 +234,8 @@ LogicalResult createHostCopyOp(OpBuilder &builder, Location loc, Value from, Val
         return failure();
     }
 
-    builder.create<torq_hl::HostCopyOp>(
-        loc, to, from,
+    torq_hl::HostCopyOp::create(
+        builder, loc, to, from,
         /*inputStridesBytes=*/fromStridesBytes,
         /*outputStridesBytes=*/toStridesBytes,
         /*shape=*/shape,

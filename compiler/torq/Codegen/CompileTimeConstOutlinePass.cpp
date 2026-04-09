@@ -164,11 +164,11 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
             OpBuilder::InsertionGuard g1(rewriter);
             rewriter.setInsertionPoint(forOp);
             Value fullConstResult =
-                rewriter.create<tensor::EmptyOp>(forOp.getLoc(), newShape, opTy.getElementType())
+                tensor::EmptyOp::create(rewriter, forOp.getLoc(), newShape, opTy.getElementType())
                     .getResult();
 
-            scf::ForOp cloneForOp = rewriter.create<scf::ForOp>(
-                forOp.getLoc(), lb, ub, step, llvm::ArrayRef<Value>{fullConstResult}
+            scf::ForOp cloneForOp = scf::ForOp::create(
+                rewriter, forOp.getLoc(), lb, ub, step, llvm::ArrayRef<Value>{fullConstResult}
             );
 
             {
@@ -188,7 +188,7 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
                 auto iv = cloneForOp.getInductionVar();
 
                 auto affineOp =
-                    rewriter.create<affine::AffineApplyOp>(op->getLoc(), newIvMap, ValueRange{iv});
+                    affine::AffineApplyOp::create(rewriter, op->getLoc(), newIvMap, ValueRange{iv});
                 SmallVector<OpFoldResult, 4> sliceOffsets;
                 SmallVector<OpFoldResult, 4> sliceSizes;
                 SmallVector<OpFoldResult, 4> sliceStrides;
@@ -202,17 +202,16 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
                     sliceStrides.push_back(rewriter.getIndexAttr(1));
                 }
                 auto expandV =
-                    rewriter
-                        .create<tensor::ExpandShapeOp>(
-                            op->getLoc(), RankedTensorType::get(expandShape, opTy.getElementType()),
-                            lastV, *reassoc
-                        )
+                    tensor::ExpandShapeOp::create(
+                        rewriter, op->getLoc(),
+                        RankedTensorType::get(expandShape, opTy.getElementType()), lastV, *reassoc
+                    )
                         .getResult();
-                auto iOp = rewriter.create<tensor::InsertSliceOp>(
-                    op->getLoc(), expandV, cloneForOp.getRegionIterArgs()[0], sliceOffsets,
-                    sliceSizes, sliceStrides
+                auto iOp = tensor::InsertSliceOp::create(
+                    rewriter, op->getLoc(), expandV, cloneForOp.getRegionIterArgs()[0],
+                    sliceOffsets, sliceSizes, sliceStrides
                 );
-                rewriter.create<scf::YieldOp>(op->getLoc(), iOp.getResult());
+                scf::YieldOp::create(rewriter, op->getLoc(), iOp.getResult());
             }
             setCompileTimeConstAttr(cloneForOp.getOperation());
             constV = cloneForOp.getResult(0);
@@ -229,7 +228,7 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
             SmallVector<OpFoldResult, 4> extractStrides;
 
             auto affineOp =
-                rewriter.create<affine::AffineApplyOp>(op->getLoc(), newIvMap, ValueRange{origIv});
+                affine::AffineApplyOp::create(rewriter, op->getLoc(), newIvMap, ValueRange{origIv});
             extractOffsets.push_back(affineOp.getResult());
             extractSizes.push_back(rewriter.getIndexAttr(1));
             extractStrides.push_back(rewriter.getIndexAttr(1));
@@ -238,13 +237,12 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
                 extractSizes.push_back(rewriter.getIndexAttr(shape[i]));
                 extractStrides.push_back(rewriter.getIndexAttr(1));
             }
-            auto extractOp = rewriter.create<tensor::ExtractSliceOp>(
-                op->getLoc(), constV, extractOffsets, extractSizes, extractStrides
+            auto extractOp = tensor::ExtractSliceOp::create(
+                rewriter, op->getLoc(), constV, extractOffsets, extractSizes, extractStrides
             );
-            auto collapseV = rewriter
-                                 .create<tensor::CollapseShapeOp>(
-                                     op->getLoc(), opTy, extractOp.getResult(), *reassoc
-                                 )
+            auto collapseV = tensor::CollapseShapeOp::create(
+                                 rewriter, op->getLoc(), opTy, extractOp.getResult(), *reassoc
+            )
                                  .getResult();
             LLVM_DEBUG(llvm::dbgs() << "Replacing op with computed const value\n";
                        llvm::dbgs() << "Original op:\n";
@@ -280,7 +278,7 @@ class CompileTimeConstOutlinePass
         RewritePatternSet patterns(&getContext());
         patterns.add<ConvertOpInsideForOpRewriter>(&getContext());
 
-        if (failed(applyOpPatternsAndFold(opsToProcess, std::move(patterns)))) {
+        if (failed(applyOpPatternsGreedily(opsToProcess, std::move(patterns)))) {
             return signalPassFailure();
         }
     }

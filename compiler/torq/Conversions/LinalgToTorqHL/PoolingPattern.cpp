@@ -165,7 +165,7 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
             auto weightType = RankedTensorType::get({1, 1, 1, 1}, bf16Type);
             auto bf16One = rewriter.getFloatAttr(bf16Type, 1.0);
             auto weightAttr = DenseElementsAttr::get(weightType, bf16One);
-            weightConst = rewriter.create<arith::ConstantOp>(loc, weightType, weightAttr);
+            weightConst = arith::ConstantOp::create(rewriter, loc, weightType, weightAttr);
         }
         else {
             outputMin = std::numeric_limits<int32_t>::min();
@@ -175,10 +175,10 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
                 createI8Const(rewriter, srcOp, weight, llvm::ArrayRef<int64_t>{1, 1, 1, 1});
         }
 
-        auto maxpoolOp = rewriter.create<torq_hl::MaxPool2dOp>(
-            loc, srcResultType, createInitTensor(srcOp, rewriter, srcResultType), padInfo.padValue,
-            outputMin, outputMax, attrStrides, padInfo.lrtbPad, kernels, weightConst,
-            createI32Const(rewriter, srcOp, interleave(bias, scale)), input,
+        auto maxpoolOp = torq_hl::MaxPool2dOp::create(
+            rewriter, loc, srcResultType, createInitTensor(srcOp, rewriter, srcResultType),
+            padInfo.padValue, outputMin, outputMax, attrStrides, padInfo.lrtbPad, kernels,
+            weightConst, createI32Const(rewriter, srcOp, interleave(bias, scale)), input,
             /*segment_output=*/false
         );
 

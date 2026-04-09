@@ -49,8 +49,8 @@ static void replaceAllocations(IRRewriter &rewriter, SmallVector<memref::AllocOp
             (llvm::Twine("__intermediate_") + llvm::Twine(globalCounter++)).str();
 
         // Create memref.global operation
-        auto globalOp = rewriter.create<memref::GlobalOp>(
-            allocOp.getLoc(),
+        auto globalOp = memref::GlobalOp::create(
+            rewriter, allocOp.getLoc(),
             /*sym_name=*/globalName,
             /*sym_visibility=*/rewriter.getStringAttr("private"),
             /*type=*/memrefType,
@@ -81,8 +81,8 @@ void addNssProgramSlots(IRRewriter &rewriter, Location loc) {
 
         std::string globalName = (llvm::Twine("__program_slot") + llvm::Twine(i)).str();
 
-        auto globalOp = rewriter.create<memref::GlobalOp>(
-            loc,
+        auto globalOp = memref::GlobalOp::create(
+            rewriter, loc,
             /*sym_name=*/globalName,
             /*sym_visibility=*/rewriter.getStringAttr("private"),
             /*type=*/lramProgramSectionType,

@@ -364,10 +364,9 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
             bool isIndex = isa<IndexType>(scalarInputType);
             if (isIndex) {
                 scalarInputType = rewriter.getI32Type();
-                insertionValue = rewriter
-                                     .create<arith::IndexCastOp>(
-                                         scalarInput.getLoc(), scalarInputType, scalarInput
-                                     )
+                insertionValue = arith::IndexCastOp::create(
+                                     rewriter, scalarInput.getLoc(), scalarInputType, scalarInput
+                )
                                      .getResult();
             }
 
@@ -375,14 +374,16 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
 
             // we use tensor.insert to be symmetric with the output conversion
             auto emptyOp =
-                rewriter.create<tensor::EmptyOp>(scalarInput.getLoc(), tensorType, ValueRange{});
+                tensor::EmptyOp::create(rewriter, scalarInput.getLoc(), tensorType, ValueRange{});
 
-            tensor::InsertOp toTensorOp = rewriter.create<tensor::InsertOp>(
-                scalarInput.getLoc(), tensorType, insertionValue, emptyOp.getResult(), ValueRange{}
+            tensor::InsertOp toTensorOp = tensor::InsertOp::create(
+                rewriter, scalarInput.getLoc(), tensorType, insertionValue, emptyOp.getResult(),
+                ValueRange{}
             );
 
-            Operation *toScalarOp = rewriter.create<tensor::ExtractOp>(
-                scalarInput.getLoc(), scalarInputType, toTensorOp.getResult(), ValueRange{}
+            Operation *toScalarOp = tensor::ExtractOp::create(
+                rewriter, scalarInput.getLoc(), scalarInputType, toTensorOp.getResult(),
+                ValueRange{}
             );
 
             // insert at the beginning of the group so that it is outlined before
@@ -390,8 +391,9 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
             group.toOutline.insert(group.toOutline.begin(), toScalarOp);
 
             if (isIndex) {
-                toScalarOp = rewriter.create<arith::IndexCastUIOp>(
-                    scalarInput.getLoc(), rewriter.getIndexType(), toScalarOp->getResult(0)
+                toScalarOp = arith::IndexCastUIOp::create(
+                    rewriter, scalarInput.getLoc(), rewriter.getIndexType(),
+                    toScalarOp->getResult(0)
                 );
 
                 group.toOutline.insert(group.toOutline.begin() + 1, toScalarOp);
@@ -422,8 +424,8 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
             if (isIndex) {
                 scalarOutputType = rewriter.getI32Type();
 
-                auto indexCastOp = rewriter.create<arith::IndexCastOp>(
-                    scalarOutput.getLoc(), scalarOutputType, scalarOutput
+                auto indexCastOp = arith::IndexCastOp::create(
+                    rewriter, scalarOutput.getLoc(), scalarOutputType, scalarOutput
                 );
 
                 // This will make sure we don't replace the input when we do scalarOutput.replace...
@@ -442,22 +444,24 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
 
             // here we use insert op instead of from_elements to avoid
             // an error during compilation with LLVMCPU backend
-            auto toTensorOp = rewriter.create<tensor::InsertOp>(
-                scalarOutput.getLoc(), tensorType, insertionValue, emptyTensor.getResult(),
-                ValueRange{}
+            auto toTensorOp = tensor::InsertOp::create(
+                rewriter, scalarOutput.getLoc(), tensorType, insertionValue,
+                emptyTensor.getResult(), ValueRange{}
             );
             // This will make sure we don't replace the input when we do scalarOutput.replace...
             // below.
             if (insertionValue == scalarOutput)
                 outlinedOps.insert(toTensorOp);
 
-            Operation *toScalarOp = rewriter.create<tensor::ExtractOp>(
-                scalarOutput.getLoc(), scalarOutputType, toTensorOp.getResult(), ValueRange{}
+            Operation *toScalarOp = tensor::ExtractOp::create(
+                rewriter, scalarOutput.getLoc(), scalarOutputType, toTensorOp.getResult(),
+                ValueRange{}
             );
 
             if (isIndex) {
-                toScalarOp = rewriter.create<arith::IndexCastUIOp>(
-                    scalarOutput.getLoc(), rewriter.getIndexType(), toScalarOp->getResult(0)
+                toScalarOp = arith::IndexCastUIOp::create(
+                    rewriter, scalarOutput.getLoc(), rewriter.getIndexType(),
+                    toScalarOp->getResult(0)
                 );
             }
 

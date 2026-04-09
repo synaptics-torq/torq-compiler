@@ -48,7 +48,7 @@ class XramToXramHostCopyPattern : public OpRewritePattern<torq_hl::HostCopyOp> {
             createDenseEncoding(inputType, torq_hl::MemorySpace::Lram)
         );
 
-        auto tempBuffer = rewriter.create<memref::AllocOp>(loc, tempBufferType, ValueRange{});
+        auto tempBuffer = memref::AllocOp::create(rewriter, loc, tempBufferType, ValueRange{});
 
         // create a torq copy to copy from the source buffer in XRAM to the temporary buffer in
         // LRAM this will be a torq_hl::LoadOp
@@ -143,16 +143,15 @@ class XramToXramHostCopyPattern : public OpRewritePattern<torq_hl::HostCopyOp> {
                 auto flatOutputType =
                     memref::CollapseShapeOp::computeCollapsedType(outputType, reassociation);
 
-                flatInput = rewriter
-                                .create<memref::CollapseShapeOp>(
-                                    copyOp.getLoc(), flatInputType, copyOp.getInput(), reassociation
-                                )
-                                .getResult();
+                flatInput =
+                    memref::CollapseShapeOp::create(
+                        rewriter, copyOp.getLoc(), flatInputType, copyOp.getInput(), reassociation
+                    )
+                        .getResult();
                 flatOutput =
-                    rewriter
-                        .create<memref::CollapseShapeOp>(
-                            copyOp.getLoc(), flatOutputType, copyOp.getOutput(), reassociation
-                        )
+                    memref::CollapseShapeOp::create(
+                        rewriter, copyOp.getLoc(), flatOutputType, copyOp.getOutput(), reassociation
+                    )
                         .getResult();
             }
 
@@ -163,11 +162,11 @@ class XramToXramHostCopyPattern : public OpRewritePattern<torq_hl::HostCopyOp> {
                 SmallVector<OpFoldResult> sizes{rewriter.getIndexAttr(currChunkElements)};
                 SmallVector<OpFoldResult> strides{rewriter.getIndexAttr(1)};
 
-                auto inputChunk = rewriter.create<memref::SubViewOp>(
-                    copyOp.getLoc(), flatInput, offsets, sizes, strides
+                auto inputChunk = memref::SubViewOp::create(
+                    rewriter, copyOp.getLoc(), flatInput, offsets, sizes, strides
                 );
-                auto outputChunk = rewriter.create<memref::SubViewOp>(
-                    copyOp.getLoc(), flatOutput, offsets, sizes, strides
+                auto outputChunk = memref::SubViewOp::create(
+                    rewriter, copyOp.getLoc(), flatOutput, offsets, sizes, strides
                 );
 
                 if (failed(lowerSingleCopy(rewriter, copyOp.getLoc(), inputChunk, outputChunk))) {
@@ -203,7 +202,7 @@ void LowerHostCopiesToNpuPass::runOnOperation() {
 
     patterns.add<XramToXramHostCopyPattern>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
         return signalPassFailure();
     }
 }

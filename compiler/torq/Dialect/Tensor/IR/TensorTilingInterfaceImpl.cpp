@@ -34,9 +34,9 @@ Value makeTiledCollapsedSrcShape(
         builder, collapseOp, ivs, tileSizes, sizeBounds, omitPartialTileCheck
     );
 
-    return sliceParams.has_value() ? builder.create<tensor::ExtractSliceOp>(
-                                         loc, valueToTile, sliceParams->offsets, sliceParams->sizes,
-                                         sliceParams->strides
+    return sliceParams.has_value() ? tensor::ExtractSliceOp::create(
+                                         builder, loc, valueToTile, sliceParams->offsets,
+                                         sliceParams->sizes, sliceParams->strides
                                      )
                                    : valueToTile;
 }
@@ -140,9 +140,9 @@ Value makeTiledExpandSrcShape(
         builder, expandOp, ivs, tileSizes, sizeBounds, omitPartialTileCheck
     );
 
-    return sliceParams.has_value() ? builder.create<tensor::ExtractSliceOp>(
-                                         loc, valueToTile, sliceParams->offsets, sliceParams->sizes,
-                                         sliceParams->strides
+    return sliceParams.has_value() ? tensor::ExtractSliceOp::create(
+                                         builder, loc, valueToTile, sliceParams->offsets,
+                                         sliceParams->sizes, sliceParams->strides
                                      )
                                    : valueToTile;
 }
@@ -194,8 +194,8 @@ struct ExpandShapeOpTilingInterface
         RankedTensorType resultTensor =
             RankedTensorType::get(tiledResultShape, tiledSrcTensor.getElementType());
 
-        tensor::ExpandShapeOp tiledOp = b.create<tensor::ExpandShapeOp>(
-            op->getLoc(), resultTensor, tiledSrc, expandOp.getReassociationIndices(), sizes
+        tensor::ExpandShapeOp tiledOp = tensor::ExpandShapeOp::create(
+            b, op->getLoc(), resultTensor, tiledSrc, expandOp.getReassociationIndices(), sizes
         );
         // linalg uses clone to create the tiled op, but for ExpandShapeOp it's
         // easier to use create (i.e. build), which will infer the

@@ -233,8 +233,8 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
         // load the entry block of the next program into the LRAM area
         auto prevInvocationNextProgramAreaArg = previousProgramBlock.getArgument(1);
 
-        auto nextInvocationBlock = builder.create<torq_hl::GetBlockOp>(
-            loc, programBlockType, nextInvocation, builder.getIndexAttr(0)
+        auto nextInvocationBlock = torq_hl::GetBlockOp::create(
+            builder, loc, programBlockType, nextInvocation, builder.getIndexAttr(0)
         );
 
         if (failed(
@@ -249,12 +249,13 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
     else {
         // create the invocation and the host copy operation
 
-        auto firstCodeBlock = builder.create<torq_hl::GetBlockOp>(
-            loc, programBlockType, createInvocationOp.getInvocation(), builder.getIndexAttr(0)
+        auto firstCodeBlock = torq_hl::GetBlockOp::create(
+            builder, loc, programBlockType, createInvocationOp.getInvocation(),
+            builder.getIndexAttr(0)
         );
 
-        builder.create<torq_hl::HostCopyOp>(
-            loc, lramProgramAlloc, firstCodeBlock,
+        torq_hl::HostCopyOp::create(
+            builder, loc, lramProgramAlloc, firstCodeBlock,
             /*inputStridesBytes=*/builder.getDenseI64ArrayAttr({}),
             /*outputStridesBytes=*/builder.getDenseI64ArrayAttr({}),
             /*shape=*/builder.getDenseI64ArrayAttr({}),
@@ -301,7 +302,7 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
     SmallVector<Value> waitOutputs;
 
     auto waitOp =
-        builder.create<torq_hl::WaitProgramOp>(loc, waitOutputTypes, startOp.getInvocation());
+        torq_hl::WaitProgramOp::create(builder, loc, waitOutputTypes, startOp.getInvocation());
 
     // update the next and current LRAM allocations for the next program
     lramProgramAlloc = waitOp.getOutputs()[0];
@@ -336,7 +337,7 @@ static SmallVector<Value> getLramCodeAreas(FunctionOpInterface funcOp, OpBuilder
         auto slotOp =
             SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(funcOp, globalNameAttr);
         auto getSlotOp =
-            builder.create<memref::GetGlobalOp>(funcOp.getLoc(), slotOp.getType(), globalNameAttr);
+            memref::GetGlobalOp::create(builder, funcOp.getLoc(), slotOp.getType(), globalNameAttr);
 
         values.push_back(getSlotOp.getResult());
     }

@@ -193,9 +193,9 @@ struct FuseReluClampWithTruncfPattern : public OpRewritePattern<linalg::GenericO
         double lowVal = cast<FloatAttr>(lowConst.getValue()).getValueAsDouble();
         double highVal = cast<FloatAttr>(highConst.getValue()).getValueAsDouble();
         Value f32LowConst =
-            rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(f32Type, lowVal));
+            arith::ConstantOp::create(rewriter, loc, rewriter.getFloatAttr(f32Type, lowVal));
         Value f32HighConst =
-            rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(f32Type, highVal));
+            arith::ConstantOp::create(rewriter, loc, rewriter.getFloatAttr(f32Type, highVal));
 
         // 5. Build fused indexing maps:
         //    - input maps from the truncf op (f32 operands)
@@ -217,20 +217,20 @@ struct FuseReluClampWithTruncfPattern : public OpRewritePattern<linalg::GenericO
         //
         // Note: f32LowConst / f32HighConst are outer-scope SSA values captured
         // by the body region (linalg.generic is not isolated from above).
-        auto fusedOp = rewriter.create<linalg::GenericOp>(
-            loc, clampOp.getResultTypes(), truncfOp.getInputs(), clampOp.getOutputs(), fusedMaps,
-            clampOp.getIteratorTypesArray(),
+        auto fusedOp = linalg::GenericOp::create(
+            rewriter, loc, clampOp.getResultTypes(), truncfOp.getInputs(), clampOp.getOutputs(),
+            fusedMaps, clampOp.getIteratorTypesArray(),
             [&](OpBuilder &b, Location innerLoc, ValueRange args) {
                 Value in = args[0]; // f32 element
                 Value cmp0 =
-                    b.create<arith::CmpFOp>(innerLoc, arith::CmpFPredicate::ULT, in, f32LowConst);
-                Value sel0 = b.create<arith::SelectOp>(innerLoc, cmp0, f32LowConst, in);
-                Value cmp1 = b.create<arith::CmpFOp>(
-                    innerLoc, arith::CmpFPredicate::UGT, sel0, f32HighConst
+                    arith::CmpFOp::create(b, innerLoc, arith::CmpFPredicate::ULT, in, f32LowConst);
+                Value sel0 = arith::SelectOp::create(b, innerLoc, cmp0, f32LowConst, in);
+                Value cmp1 = arith::CmpFOp::create(
+                    b, innerLoc, arith::CmpFPredicate::UGT, sel0, f32HighConst
                 );
-                Value sel1 = b.create<arith::SelectOp>(innerLoc, cmp1, f32HighConst, sel0);
-                Value truncated = b.create<arith::TruncFOp>(innerLoc, bf16Type, sel1);
-                b.create<linalg::YieldOp>(innerLoc, truncated);
+                Value sel1 = arith::SelectOp::create(b, innerLoc, cmp1, f32HighConst, sel0);
+                Value truncated = arith::TruncFOp::create(b, innerLoc, bf16Type, sel1);
+                linalg::YieldOp::create(b, innerLoc, truncated);
             }
         );
 

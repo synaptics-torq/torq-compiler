@@ -99,7 +99,8 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                 llvm::report_fatal_error("Failed to get reassociation indices for collapse", true);
             }
             auto reassoc = *maybeReassoc;
-            input = rewriter.create<tensor::ExpandShapeOp>(input.getLoc(), newType, input, reassoc);
+            input =
+                tensor::ExpandShapeOp::create(rewriter, input.getLoc(), newType, input, reassoc);
         }
         Permutation dataPerm = Permutation::nhwc2nchw();
         if (isFC || isNCHW) {
@@ -128,9 +129,9 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
             auto weightShape = weightTy.getShape();
             SmallVector<int64_t, 4> newShape = {weightShape[0], weightShape[1], 1, 1};
             SmallVector<ReassociationIndices> reassoc = {{0}, {1, 2, 3}};
-            auto expandShapeOp = rewriter.create<tensor::ExpandShapeOp>(
-                weights.getLoc(), RankedTensorType::get(newShape, weightTy.getElementType()),
-                weights, reassoc
+            auto expandShapeOp = tensor::ExpandShapeOp::create(
+                rewriter, weights.getLoc(),
+                RankedTensorType::get(newShape, weightTy.getElementType()), weights, reassoc
             );
             weights = expandShapeOp.getResult();
         }
@@ -365,8 +366,8 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
             Value torqOut;
             if (!isFC) {
                 // Non-2D outputs are treated as conv lowering.
-                auto conv2dOp = rewriter.create<syna::torq_hl::Conv2DOp>(
-                    loc, finalType, initTensor,
+                auto conv2dOp = syna::torq_hl::Conv2DOp::create(
+                    rewriter, loc, finalType, initTensor,
                     input_zp, // input_zp
                     0,        // weight_zp
                     scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift,
@@ -395,8 +396,8 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                     );
                     initTensor = createInitTensor(*output.getDefiningOp(), rewriter, fcType);
                 }
-                auto fcOp = rewriter.create<torq_hl::FullyConnectedOp>(
-                    loc, fcType, initTensor, input_zp,
+                auto fcOp = torq_hl::FullyConnectedOp::create(
+                    rewriter, loc, fcType, initTensor, input_zp,
                     0, // weight zp
                     scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift,
                     torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input
@@ -407,7 +408,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                         getReassociationIndicesForCollapse(finalType.getShape(), fcType.getShape());
                     assert(reassoc && "Failed to get reassociation for FC expand");
                     torqOut =
-                        rewriter.create<tensor::ExpandShapeOp>(loc, finalType, torqOut, *reassoc);
+                        tensor::ExpandShapeOp::create(rewriter, loc, finalType, torqOut, *reassoc);
                 }
             }
             rewriter.replaceOp(output.getDefiningOp(), torqOut);

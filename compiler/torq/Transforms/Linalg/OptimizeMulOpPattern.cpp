@@ -311,9 +311,9 @@ class FuseMulRescalePattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto resultType = cast<RankedTensorType>(rescaleOp.getResult(0).getType());
 
-        auto fusedOp = rewriter.create<linalg::GenericOp>(
-            loc, TypeRange{resultType}, ValueRange{mulLhs, mulRhs}, ValueRange{rescaleInit},
-            fusedMaps, iterTypes
+        auto fusedOp = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{resultType}, ValueRange{mulLhs, mulRhs},
+            ValueRange{rescaleInit}, fusedMaps, iterTypes
         );
 
         // Build the fused body
@@ -361,7 +361,7 @@ class FuseMulRescalePattern : public OpRewritePattern<linalg::GenericOp> {
             // Yield the rescale's final result (the trunci i8)
             auto rescaleYield = cast<linalg::YieldOp>(rescaleBlock.getTerminator());
             Value finalResult = rescaleMapping.lookupOrDefault(rescaleYield.getOperand(0));
-            rewriter.create<linalg::YieldOp>(loc, finalResult);
+            linalg::YieldOp::create(rewriter, loc, finalResult);
         }
 
         LLVM_DEBUG(llvm::dbgs() << "[FuseMulRescale] Created fused op: " << fusedOp << "\n");

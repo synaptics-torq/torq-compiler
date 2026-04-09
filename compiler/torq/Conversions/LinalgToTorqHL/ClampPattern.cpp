@@ -333,9 +333,9 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
         rewriter.setInsertionPoint(output.getDefiningOp());
         auto srcResultTy = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-        auto actOp = rewriter.create<torq_hl::ActOp>(
-            srcOp.getLoc(), srcResultTy, createInitTensor(srcOp, rewriter, srcResultTy), "clamp", 0,
-            scInfo.zp, clampInfo.minInt, clampInfo.maxInt,
+        auto actOp = torq_hl::ActOp::create(
+            rewriter, srcOp.getLoc(), srcResultTy, createInitTensor(srcOp, rewriter, srcResultTy),
+            "clamp", 0, scInfo.zp, clampInfo.minInt, clampInfo.maxInt,
             APFloat(llvm::APFloat::IEEEsingle(), std::to_string(clampInfo.minFloat)),
             APFloat(llvm::APFloat::IEEEsingle(), std::to_string(clampInfo.maxFloat)), input,
             /*weights=*/mlir::Value()

@@ -25,11 +25,10 @@ Value makeSelect(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value pred, Value ifTrue, Value ifFalse
 ) {
     auto resultType = dyn_cast<RankedTensorType>(ifTrue.getType());
-    return rewriter
-        .create<torq_hl::SelectOp>(
-            srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType), pred, ifTrue,
-            ifFalse
-        )
+    return torq_hl::SelectOp::create(
+               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
+               pred, ifTrue, ifFalse
+    )
         .getOutput();
 }
 
@@ -91,19 +90,19 @@ class SigmoidOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         /// FIXME: temporary board-side mitigation until the high-positive Sigmoid
         /// LUT path is fully debugged and fixed at the real source.
-        auto ones = rewriter.create<arith::ConstantOp>(
-            srcOp.getLoc(), bf16Threshold,
+        auto ones = arith::ConstantOp::create(
+            rewriter, srcOp.getLoc(), bf16Threshold,
             DenseElementsAttr::get(bf16Threshold, rewriter.getFloatAttr(eType, 1.0))
         );
-        auto positiveSaturationThreshold = rewriter.create<arith::ConstantOp>(
-            srcOp.getLoc(), bf16Threshold,
+        auto positiveSaturationThreshold = arith::ConstantOp::create(
+            rewriter, srcOp.getLoc(), bf16Threshold,
             DenseElementsAttr::get(bf16Threshold, rewriter.getFloatAttr(eType, 6.25))
         );
 
         auto x = makeBitcast(srcOp, rewriter, RankedTensorType::get(shape, i16), input);
 
-        auto msb = rewriter.create<arith::ConstantOp>(
-            x.getLoc(), RankedTensorType::get(shape, i16),
+        auto msb = arith::ConstantOp::create(
+            rewriter, x.getLoc(), RankedTensorType::get(shape, i16),
             DenseElementsAttr::get(
                 RankedTensorType::get(shape, i16),
                 {
@@ -111,14 +110,12 @@ class SigmoidOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 }
             )
         );
-        auto isNegative =
-            rewriter
-                .create<torq_hl::ElementWiseBinaryOp>(
-                    srcOp.getLoc(), RankedTensorType::get(shape, i1),
-                    createInitTensor(srcOp, rewriter, RankedTensorType::get(shape, i1)),
-                    torq_hl::ElementwiseOpEnum::GREATER, x, msb, /*isUnsigned=*/true
-                )
-                .getOutput();
+        auto isNegative = torq_hl::ElementWiseBinaryOp::create(
+                              rewriter, srcOp.getLoc(), RankedTensorType::get(shape, i1),
+                              createInitTensor(srcOp, rewriter, RankedTensorType::get(shape, i1)),
+                              torq_hl::ElementwiseOpEnum::GREATER, x, msb, /*isUnsigned=*/true
+        )
+                              .getOutput();
 
         auto sigmoidNegative = makeScaledLut(
             srcOp, rewriter, x, 16128, 16, -32768, 0,
@@ -278,13 +275,12 @@ class SigmoidOpPattern : public OpRewritePattern<linalg::GenericOp> {
         /// FIXME: remove this saturation guard once the underlying high-positive
         /// Sigmoid miscompute is fixed.
         auto isSaturatedPositive =
-            rewriter
-                .create<torq_hl::ElementWiseBinaryOp>(
-                    srcOp.getLoc(), RankedTensorType::get(shape, i1),
-                    createInitTensor(srcOp, rewriter, RankedTensorType::get(shape, i1)),
-                    torq_hl::ElementwiseOpEnum::GREATER_EQUAL, input, positiveSaturationThreshold,
-                    /*isUnsigned=*/false
-                )
+            torq_hl::ElementWiseBinaryOp::create(
+                rewriter, srcOp.getLoc(), RankedTensorType::get(shape, i1),
+                createInitTensor(srcOp, rewriter, RankedTensorType::get(shape, i1)),
+                torq_hl::ElementwiseOpEnum::GREATER_EQUAL, input, positiveSaturationThreshold,
+                /*isUnsigned=*/false
+            )
                 .getOutput();
         auto saturatedSigmoid = makeSelect(srcOp, rewriter, isSaturatedPositive, ones, sigmoid);
         rewriter.replaceOp(srcOp, saturatedSigmoid);

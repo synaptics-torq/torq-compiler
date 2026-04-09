@@ -51,7 +51,7 @@ static Value create1DimTensorFromScalar(
             return {};
         }
 
-        return rewriter.create<arith::ConstantOp>(constOp.getLoc(), constType, value).getResult();
+        return arith::ConstantOp::create(rewriter, constOp.getLoc(), constType, value).getResult();
     }
     else if (elementType.isBF16() || elementType.isF32()) {
 
@@ -79,7 +79,7 @@ static Value create1DimTensorFromScalar(
             return {};
         }
 
-        return rewriter.create<arith::ConstantOp>(constOp.getLoc(), constType, value).getResult();
+        return arith::ConstantOp::create(rewriter, constOp.getLoc(), constType, value).getResult();
     }
     else {
         return {};
@@ -177,12 +177,11 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
         );
 
         Value torqOut =
-            rewriter
-                .create<torq_hl::MulOp>(
-                    srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType), outZp,
-                    outMin, outMax, createI32Const(rewriter, srcOp, interleave({bias}, {scale})),
-                    shiftFactor, input1, input2
-                )
+            torq_hl::MulOp::create(
+                rewriter, srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
+                outZp, outMin, outMax, createI32Const(rewriter, srcOp, interleave({bias}, {scale})),
+                shiftFactor, input1, input2
+            )
                 .getResult(0);
 
         if (scInfo) {
@@ -343,12 +342,11 @@ class MulRescaleOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         // --- Create torq_hl::MulOp ---
         Value torqOut =
-            rewriter
-                .create<torq_hl::MulOp>(
-                    srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType), outZp,
-                    outMin, outMax, createI32Const(rewriter, srcOp, interleave({bias}, {scale})),
-                    shiftFactor, input1, input2
-                )
+            torq_hl::MulOp::create(
+                rewriter, srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
+                outZp, outMin, outMax, createI32Const(rewriter, srcOp, interleave({bias}, {scale})),
+                shiftFactor, input1, input2
+            )
                 .getResult(0);
 
         rewriter.replaceOp(srcOp, torqOut);

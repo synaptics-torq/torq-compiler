@@ -143,7 +143,7 @@ void MarkHostExecutorPass::runOnOperation() {
 
     patterns.add<LinalgOpPattern>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
 

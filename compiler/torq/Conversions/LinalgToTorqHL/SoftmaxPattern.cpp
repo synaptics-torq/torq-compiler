@@ -26,11 +26,10 @@ Value makeElementWiseBinary(
 ) {
     auto resultType = dyn_cast<RankedTensorType>(input0.getType());
 
-    return rewriter
-        .create<torq_hl::ElementWiseBinaryOp>(
-            srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType), opType,
-            input0, input1, /*isUnsigned=*/false
-        )
+    return torq_hl::ElementWiseBinaryOp::create(
+               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
+               opType, input0, input1, /*isUnsigned=*/false
+    )
         .getOutput();
 }
 
@@ -60,7 +59,7 @@ class SoftmaxOpPattern : public OpRewritePattern<linalg::SoftmaxOp> {
         auto softmaxDim = op.getDimension();
         auto expandDim = rewriter.getDenseI64ArrayAttr({(long)(softmaxDim)});
         auto emptyLike = [&](Value val) {
-            return rewriter.create<tensor::EmptyOp>(loc, val.getType(), ValueRange{});
+            return tensor::EmptyOp::create(rewriter, loc, val.getType(), ValueRange{});
         };
 
         SmallVector<AffineExpr> dims;
@@ -79,48 +78,44 @@ class SoftmaxOpPattern : public OpRewritePattern<linalg::SoftmaxOp> {
         auto reduceBfTType = RankedTensorType::get(reduceShape, bf16);
         auto reduceITType = RankedTensorType::get(reduceShape, i16);
 
-        auto negInf = rewriter.create<arith::ConstantOp>(
-            loc, rewriter.getFloatAttr(bf16, -std::numeric_limits<float>::infinity())
+        auto negInf = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getFloatAttr(bf16, -std::numeric_limits<float>::infinity())
         );
 
         // subtract off bias
         auto maxAlloc =
-            rewriter
-                .create<linalg::FillOp>(
-                    loc, ValueRange{negInf},
-                    ValueRange{rewriter.create<tensor::EmptyOp>(loc, reduceBfTType, ValueRange{})}
-                )
+            linalg::FillOp::create(
+                rewriter, loc, ValueRange{negInf},
+                ValueRange{tensor::EmptyOp::create(rewriter, loc, reduceBfTType, ValueRange{})}
+            )
                 .getResult(0);
-        auto max = rewriter
-                       .create<linalg::ReduceOp>(
-                           loc, input, maxAlloc, softmaxDim,
-                           [&](OpBuilder &b, Location l, ValueRange args) {
-                               b.create<linalg::YieldOp>(
-                                   l, ValueRange{b.create<arith::MaximumFOp>(l, args[0], args[1])}
-                               );
-                           }
-                       )
-                       .getResult(0);
-        auto broadcastMax = rewriter
-                                .create<torq_hl::BroadcastOp>(
-                                    op.getLoc(), bf16TType,
-                                    createInitTensor(op, rewriter, bf16TType), expandDim, max
-                                )
+        auto max = linalg::ReduceOp::create(
+                       rewriter, loc, input, maxAlloc, softmaxDim,
+                       [&](OpBuilder &b, Location l, ValueRange args) {
+                           linalg::YieldOp::create(
+                               b, l, ValueRange{arith::MaximumFOp::create(b, l, args[0], args[1])}
+                           );
+                       }
+        ).getResult(0);
+        auto broadcastMax = torq_hl::BroadcastOp::create(
+                                rewriter, op.getLoc(), bf16TType,
+                                createInitTensor(op, rewriter, bf16TType), expandDim, max
+        )
                                 .getOutput();
         auto identityMap = rewriter.getMultiDimIdentityMap(rank);
-        auto biasedX = rewriter.create<linalg::GenericOp>(
-            loc, TypeRange{bf16TType}, ValueRange{broadcastMax, input},
+        auto biasedX = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{bf16TType}, ValueRange{broadcastMax, input},
             ValueRange{emptyLike(input)},
             SmallVector<AffineMap>{identityMap, identityMap, identityMap},
             SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel),
             [&](OpBuilder &b, Location l, ValueRange args) {
-                auto biased = b.create<arith::SubFOp>(l, args[1], args[0]);
-                b.create<linalg::YieldOp>(l, ValueRange{biased});
+                auto biased = arith::SubFOp::create(b, l, args[1], args[0]);
+                linalg::YieldOp::create(b, l, ValueRange{biased});
             }
         );
 
         auto intBiasedX = makeBitcast(biasedX, rewriter, i16TType, biasedX.getResult(0));
-        // auto signBit = rewriter.create<arith::ConstantOp>(
+        // auto signBit = arith::ConstantOp::create(rewriter,
         //     input.getLoc(), RankedTensorType::get(ArrayRef<long>{1}, i16),
         //     DenseElementsAttr::get(
         //         RankedTensorType::get(ArrayRef<long>{1}, i16),
@@ -129,18 +124,17 @@ class SoftmaxOpPattern : public OpRewritePattern<linalg::SoftmaxOp> {
         //         }
         //     )
         // );
-        // auto signBit = rewriter.create<arith::ConstantOp>(
+        // auto signBit = arith::ConstantOp::create(rewriter,
         //     input.getLoc(), rewriter.getIntegerAttr(i16, -(1 << 15))
         // );
         auto signBit =
-            rewriter
-                .create<linalg::FillOp>(
-                    loc,
-                    ValueRange{rewriter.create<arith::ConstantOp>(
-                        loc, rewriter.getIntegerAttr(i16, -(1 << 15))
-                    )},
-                    ValueRange{rewriter.create<tensor::EmptyOp>(loc, i16TType, ValueRange{})}
-                )
+            linalg::FillOp::create(
+                rewriter, loc,
+                ValueRange{arith::ConstantOp::create(
+                    rewriter, loc, rewriter.getIntegerAttr(i16, -(1 << 15))
+                )},
+                ValueRange{tensor::EmptyOp::create(rewriter, loc, i16TType, ValueRange{})}
+            )
                 .getResult(0);
         auto adjustedBiasedX = makeElementWiseBinary(
             biasedX, rewriter, intBiasedX, signBit, torq_hl::ElementwiseOpEnum::BITWISE_OR
@@ -229,23 +223,20 @@ class SoftmaxOpPattern : public OpRewritePattern<linalg::SoftmaxOp> {
         );
         auto bfExp = makeBitcast(biasedX, rewriter, bf16TType, exp);
         auto denomAlloc =
-            rewriter
-                .create<linalg::FillOp>(
-                    loc,
-                    ValueRange{rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(bf16))},
-                    ValueRange{rewriter.create<tensor::EmptyOp>(loc, reduceBfTType, ValueRange{})}
-                )
+            linalg::FillOp::create(
+                rewriter, loc,
+                ValueRange{arith::ConstantOp::create(rewriter, loc, rewriter.getZeroAttr(bf16))},
+                ValueRange{tensor::EmptyOp::create(rewriter, loc, reduceBfTType, ValueRange{})}
+            )
                 .getResult(0);
-        auto denom = rewriter
-                         .create<linalg::ReduceOp>(
-                             loc, bfExp, denomAlloc, softmaxDim,
-                             [&](OpBuilder &b, Location l, ValueRange args) {
-                                 b.create<linalg::YieldOp>(
-                                     l, ValueRange{b.create<arith::AddFOp>(l, args[0], args[1])}
-                                 );
-                             }
-                         )
-                         .getResult(0);
+        auto denom = linalg::ReduceOp::create(
+                         rewriter, loc, bfExp, denomAlloc, softmaxDim,
+                         [&](OpBuilder &b, Location l, ValueRange args) {
+                             linalg::YieldOp::create(
+                                 b, l, ValueRange{arith::AddFOp::create(b, l, args[0], args[1])}
+                             );
+                         }
+        ).getResult(0);
         auto denomI16 = makeBitcast(biasedX, rewriter, reduceITType, denom);
         auto recip = makeScaledLut(
             biasedX, rewriter, denomI16, 24576, 20, -32768, 14720,
@@ -329,26 +320,21 @@ class SoftmaxOpPattern : public OpRewritePattern<linalg::SoftmaxOp> {
         );
         auto bfRecip = makeBitcast(biasedX, rewriter, reduceBfTType, recip);
         // inefficient
-        auto broadcastBfRecip =
-            rewriter
-                .create<torq_hl::BroadcastOp>(
-                    op.getLoc(), bf16TType, createInitTensor(op, rewriter, bf16TType), expandDim,
-                    bfRecip
-                )
-                .getOutput();
-        auto softmax =
-            rewriter
-                .create<linalg::GenericOp>(
-                    loc, TypeRange{bf16TType}, ValueRange{broadcastBfRecip, bfExp},
-                    ValueRange{emptyLike(bfExp)},
-                    SmallVector<AffineMap>{identityMap, identityMap, identityMap},
-                    SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel),
-                    [&](OpBuilder &b, Location l, ValueRange args) {
-                        auto result = b.create<arith::MulFOp>(l, args[0], args[1]);
-                        b.create<linalg::YieldOp>(l, ValueRange{result});
-                    }
-                )
-                .getResult(0);
+        auto broadcastBfRecip = torq_hl::BroadcastOp::create(
+                                    rewriter, op.getLoc(), bf16TType,
+                                    createInitTensor(op, rewriter, bf16TType), expandDim, bfRecip
+        )
+                                    .getOutput();
+        auto softmax = linalg::GenericOp::create(
+                           rewriter, loc, TypeRange{bf16TType}, ValueRange{broadcastBfRecip, bfExp},
+                           ValueRange{emptyLike(bfExp)},
+                           SmallVector<AffineMap>{identityMap, identityMap, identityMap},
+                           SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel),
+                           [&](OpBuilder &b, Location l, ValueRange args) {
+                               auto result = arith::MulFOp::create(b, l, args[0], args[1]);
+                               linalg::YieldOp::create(b, l, ValueRange{result});
+                           }
+        ).getResult(0);
         rewriter.replaceOp(op, softmax);
         return success();
     }

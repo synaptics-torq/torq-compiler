@@ -69,7 +69,7 @@ void EncodeTensorsPass::runOnOperation() {
 
     patterns.add<EncodeKernel>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
     }
 }

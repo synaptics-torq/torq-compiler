@@ -2522,10 +2522,10 @@ Value convertWeights(mlir::Value weights, PatternRewriter &rewriter) {
 Value makeBitcast(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
 ) {
-    return rewriter
-        .create<torq_hl::IdentityOp>(
-            srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType), input
-        )
+    return torq_hl::IdentityOp::create(
+               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
+               input
+    )
         .getOutput();
 }
 
@@ -2542,13 +2542,12 @@ Value makeRescale16(
     const std::vector<int32_t> scale = {scaleFactor};
 
     // make the rescale
-    return rewriter
-        .create<torq_hl::FMAOp>(
-            srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType), outputZp,
-            std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max(), shiftFactor,
-            createI8Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
-            createI32Const(rewriter, srcOp, interleave(bias, scale)), input
-        )
+    return torq_hl::FMAOp::create(
+               rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
+               outputZp, std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max(),
+               shiftFactor, createI8Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
+               createI32Const(rewriter, srcOp, interleave(bias, scale)), input
+    )
         .getResult(0);
 }
 
@@ -2557,13 +2556,12 @@ Value makeI16LUTFromVals(
 ) {
     const std::vector<APInt> bias = {APInt(32, 0, /*isSigned=*/true)};
     const std::vector<APInt> scale = {APInt(32, 1, /*isSigned=*/true)};
-    return rewriter
-        .create<syna::torq_hl::TableOp>(
-            srcOp.getLoc(), dyn_cast<RankedTensorType>(input.getType()),
-            createInitTensor(srcOp, rewriter, dyn_cast<RankedTensorType>(input.getType())),
-            createIConst(rewriter, srcOp, interleave(bias, scale)), input,
-            DenseI32ArrayAttr::get(rewriter.getContext(), values)
-        )
+    return syna::torq_hl::TableOp::create(
+               rewriter, srcOp.getLoc(), dyn_cast<RankedTensorType>(input.getType()),
+               createInitTensor(srcOp, rewriter, dyn_cast<RankedTensorType>(input.getType())),
+               createIConst(rewriter, srcOp, interleave(bias, scale)), input,
+               DenseI32ArrayAttr::get(rewriter.getContext(), values)
+    )
         .getResult(0);
 }
 
@@ -2880,13 +2878,12 @@ FailureOr<Value> getWeightZp(Value bias, OpBuilder &builder) {
             SmallVector<int64_t> newShape{1};
             auto newTy = RankedTensorType::get(newShape, builder.getIntegerType(ty.getWidth()));
             auto emTensor =
-                builder
-                    .create<tensor::EmptyOp>(
-                        biasOp.getLoc(), ArrayRef<int64_t>{newShape}, newTy.getElementType()
-                    )
+                tensor::EmptyOp::create(
+                    builder, biasOp.getLoc(), ArrayRef<int64_t>{newShape}, newTy.getElementType()
+                )
                     .getResult();
             auto zeroOp =
-                builder.create<linalg::FillOp>(bias.getLoc(), constOp.getResult(), emTensor);
+                linalg::FillOp::create(builder, bias.getLoc(), constOp.getResult(), emTensor);
             return zeroOp.getResult(0);
         }
     }
@@ -2915,7 +2912,7 @@ Value postProcessBias(Value bias, OpBuilder &builder) {
     auto opTy = mlir::dyn_cast<ShapedType>(operand.getType());
 
     auto zeroAttr = DenseElementsAttr::get(opTy, builder.getZeroAttr(opTy.getElementType()));
-    auto zeroConst = builder.create<arith::ConstantOp>(biasOp->getLoc(), opTy, zeroAttr);
+    auto zeroConst = arith::ConstantOp::create(builder, biasOp->getLoc(), opTy, zeroAttr);
 
     biasOp->setOperand(1, zeroConst);
 
@@ -2990,13 +2987,13 @@ FailureOr<Value> computeBias(
         builder.setInsertionPoint(firstOp);
         auto maybeBias = createNewBias(fusionPlan, builder, opsToDelete, optionalWeightZp);
         if (failed(maybeBias)) {
-            bias = builder
-                       .create<arith::ConstantOp>(
-                           firstOp->getLoc(), builder.getZeroAttr(RankedTensorType::get(
-                                                  {firstOpResultType.getShape()[biasChDim]},
-                                                  firstOpResultType.getElementType()
-                                              ))
-                       )
+            bias = arith::ConstantOp::create(
+                       builder, firstOp->getLoc(),
+                       builder.getZeroAttr(RankedTensorType::get(
+                           {firstOpResultType.getShape()[biasChDim]},
+                           firstOpResultType.getElementType()
+                       ))
+            )
                        .getResult();
             return bias;
         }
@@ -3018,52 +3015,45 @@ FailureOr<Value> computeBias(
             {firstOpResultType.getShape()[biasChDim]}, firstOpResultType.getElementType()
         );
         if (biasTy.getElementType().isBF16()) {
-            auto emTensor = builder
-                                .create<tensor::EmptyOp>(
-                                    firstOp->getLoc(), reduceTy.getShape(), builder.getF32Type()
-                                )
-                                .getResult();
-            bias = builder
-                       .create<linalg::ReduceOp>(
-                           firstOp->getLoc(), bias, emTensor, reduceD,
-                           [](OpBuilder &b, Location loc, ValueRange args) {
-                               Value y = b.create<arith::ExtFOp>(loc, b.getF32Type(), args[0]);
-                               b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
-                           }
-                       )
-                       .getResult(0);
+            auto emTensor =
+                tensor::EmptyOp::create(
+                    builder, firstOp->getLoc(), reduceTy.getShape(), builder.getF32Type()
+                )
+                    .getResult();
+            bias = linalg::ReduceOp::create(
+                       builder, firstOp->getLoc(), bias, emTensor, reduceD,
+                       [](OpBuilder &b, Location loc, ValueRange args) {
+                           Value y = arith::ExtFOp::create(b, loc, b.getF32Type(), args[0]);
+                           linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
+                       }
+            ).getResult(0);
         }
         else if (biasTy.getElementType().isInteger(8) || biasTy.getElementType().isInteger(16)) {
-            auto emTensor = builder
-                                .create<tensor::EmptyOp>(
-                                    firstOp->getLoc(), reduceTy.getShape(), builder.getI32Type()
-                                )
-                                .getResult();
-            bias = builder
-                       .create<linalg::ReduceOp>(
-                           firstOp->getLoc(), bias, emTensor, reduceD,
-                           [](OpBuilder &b, Location loc, ValueRange args) {
-                               Value y = b.create<arith::ExtSIOp>(loc, b.getI32Type(), args[0]);
-                               b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
-                           }
-                       )
-                       .getResult(0);
+            auto emTensor =
+                tensor::EmptyOp::create(
+                    builder, firstOp->getLoc(), reduceTy.getShape(), builder.getI32Type()
+                )
+                    .getResult();
+            bias = linalg::ReduceOp::create(
+                       builder, firstOp->getLoc(), bias, emTensor, reduceD,
+                       [](OpBuilder &b, Location loc, ValueRange args) {
+                           Value y = arith::ExtSIOp::create(b, loc, b.getI32Type(), args[0]);
+                           linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
+                       }
+            ).getResult(0);
         }
         else {
             auto emTensor =
-                builder
-                    .create<tensor::EmptyOp>(
-                        firstOp->getLoc(), reduceTy.getShape(), reduceTy.getElementType()
-                    )
+                tensor::EmptyOp::create(
+                    builder, firstOp->getLoc(), reduceTy.getShape(), reduceTy.getElementType()
+                )
                     .getResult();
-            bias = builder
-                       .create<linalg::ReduceOp>(
-                           firstOp->getLoc(), bias, emTensor, reduceD,
-                           [](OpBuilder &b, Location loc, ValueRange args) {
-                               b.create<linalg::YieldOp>(loc, ArrayRef<Value>{args[0]});
-                           }
-                       )
-                       .getResult(0);
+            bias = linalg::ReduceOp::create(
+                       builder, firstOp->getLoc(), bias, emTensor, reduceD,
+                       [](OpBuilder &b, Location loc, ValueRange args) {
+                           linalg::YieldOp::create(b, loc, ArrayRef<Value>{args[0]});
+                       }
+            ).getResult(0);
         }
     }
 
@@ -3084,13 +3074,13 @@ modifyMulValue(Value mul, Value biasScale, Operation *lastOp, OpBuilder &builder
         }
         // Otherwise, reshape it to match the bias scale shape
         auto newShape = bTy.getShape().back();
-        auto init = builder
-                        .create<tensor::EmptyOp>(
-                            lastOp->getLoc(), ArrayRef<int64_t>{newShape}, ty.getElementType()
-                        )
+        auto init = tensor::EmptyOp::create(
+                        builder, lastOp->getLoc(), ArrayRef<int64_t>{newShape}, ty.getElementType()
+        )
                         .getResult();
-        return builder
-            .create<linalg::BroadcastOp>(lastOp->getLoc(), mul, init, SmallVector<int64_t>{0})
+        return linalg::BroadcastOp::create(
+                   builder, lastOp->getLoc(), mul, init, SmallVector<int64_t>{0}
+        )
             .getResult()[0];
     }
 
@@ -3099,12 +3089,11 @@ modifyMulValue(Value mul, Value biasScale, Operation *lastOp, OpBuilder &builder
         auto newShape = bTy.getShape().back();
         auto newTy = RankedTensorType::get(newShape, builder.getIntegerType(ty.getWidth()));
         auto emTensor =
-            builder
-                .create<tensor::EmptyOp>(
-                    lastOp->getLoc(), ArrayRef<int64_t>{newShape}, newTy.getElementType()
-                )
+            tensor::EmptyOp::create(
+                builder, lastOp->getLoc(), ArrayRef<int64_t>{newShape}, newTy.getElementType()
+            )
                 .getResult();
-        return builder.create<linalg::FillOp>(lastOp->getLoc(), mul, emTensor).getResult(0);
+        return linalg::FillOp::create(builder, lastOp->getLoc(), mul, emTensor).getResult(0);
     }
 
     // If neither type, return failure
@@ -3126,16 +3115,16 @@ modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuild
         auto emTensor = createI8Const(
             builder, *lastOp, ArrayRef<int8_t>{std::numeric_limits<int8_t>::max()}, {}
         );
-        auto rOp = builder.create<linalg::ReduceOp>(
-            lastOp->getLoc(), origShiftV, emTensor.getResult(), ArrayRef<int64_t>{0},
+        auto rOp = linalg::ReduceOp::create(
+            builder, lastOp->getLoc(), origShiftV, emTensor.getResult(), ArrayRef<int64_t>{0},
             [](OpBuilder &b, Location loc, ValueRange args) {
-                auto min = b.create<arith::MinSIOp>(loc, args[0], args[1]);
-                b.create<linalg::YieldOp>(loc, ArrayRef<Value>{min});
+                auto min = arith::MinSIOp::create(b, loc, args[0], args[1]);
+                linalg::YieldOp::create(b, loc, ArrayRef<Value>{min});
             }
         );
 
         minShiftV =
-            builder.create<tensor::ExtractOp>(lastOp->getLoc(), rOp.getResult(0), ValueRange{})
+            tensor::ExtractOp::create(builder, lastOp->getLoc(), rOp.getResult(0), ValueRange{})
                 .getResult();
     }
     else if (auto intTy = mlir::dyn_cast<IntegerType>(shiftTy)) {
@@ -3147,12 +3136,11 @@ modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuild
         return failure();
     }
 
-    auto modShiftV = builder
-                         .create<tensor::EmptyOp>(
-                             lastOp->getLoc(), ArrayRef<int64_t>{1}, builder.getIntegerType(8)
-                         )
+    auto modShiftV = tensor::EmptyOp::create(
+                         builder, lastOp->getLoc(), ArrayRef<int64_t>{1}, builder.getIntegerType(8)
+    )
                          .getResult();
-    auto fillOp = builder.create<linalg::FillOp>(lastOp->getLoc(), minShiftV, modShiftV);
+    auto fillOp = linalg::FillOp::create(builder, lastOp->getLoc(), minShiftV, modShiftV);
     // ComputeArithConst works only on tensor so getting the shift value from ReduceOp
     // result
     auto maybeShiftFactor = computeArithConst(fillOp.getResult(0), true, {});
@@ -3344,11 +3332,11 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
     Value finalScaleV;
 
     auto biasScaleTy = dyn_cast<ShapedType>(biasScale.getType());
-    auto newScaleV = builder
-                         .create<tensor::EmptyOp>(
-                             lastOp->getLoc(), biasScaleTy.getShape().back(), builder.getI32Type()
-                         )
-                         .getResult();
+    auto newScaleV =
+        tensor::EmptyOp::create(
+            builder, lastOp->getLoc(), biasScaleTy.getShape().back(), builder.getI32Type()
+        )
+            .getResult();
 
     llvm::SmallVector<AffineMap, 4> rescaleMap;
     AffineMap mulVMap = builder.getDimIdentityMap();
@@ -3376,18 +3364,18 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
     rescaleMap.push_back(modScaleVMap);
     rescaleMap.push_back(builder.getDimIdentityMap());
 
-    auto rescaleLinalg = builder.create<linalg::GenericOp>(
-        lastOp->getLoc(), newScaleV.getType(), llvm::ArrayRef<Value>{mulV, shift, modShiftV},
-        llvm::ArrayRef<Value>{newScaleV}, rescaleMap,
+    auto rescaleLinalg = linalg::GenericOp::create(
+        builder, lastOp->getLoc(), newScaleV.getType(),
+        llvm::ArrayRef<Value>{mulV, shift, modShiftV}, llvm::ArrayRef<Value>{newScaleV}, rescaleMap,
         llvm::SmallVector<utils::IteratorType, 4>(1, utils::IteratorType::parallel),
         [&](OpBuilder &b, Location loc, ValueRange args) {
             // Effective multiplier := multiplier >> (orig_shift - normalized_shift).
             // This folds shift normalization into scale tensor generation.
-            auto arg1I32 = builder.create<arith::ExtSIOp>(loc, builder.getI32Type(), args[1]);
-            auto arg2I32 = builder.create<arith::ExtSIOp>(loc, builder.getI32Type(), args[2]);
-            auto shift = builder.create<arith::SubIOp>(loc, arg1I32, arg2I32);
-            auto multiplier = b.create<arith::ShRSIOp>(loc, args[0], shift);
-            b.create<linalg::YieldOp>(loc, ArrayRef<Value>{multiplier});
+            auto arg1I32 = arith::ExtSIOp::create(builder, loc, builder.getI32Type(), args[1]);
+            auto arg2I32 = arith::ExtSIOp::create(builder, loc, builder.getI32Type(), args[2]);
+            auto shift = arith::SubIOp::create(builder, loc, arg1I32, arg2I32);
+            auto multiplier = arith::ShRSIOp::create(b, loc, args[0], shift);
+            linalg::YieldOp::create(b, loc, ArrayRef<Value>{multiplier});
         }
     );
     finalScaleV = rescaleLinalg.getResult(0);
@@ -3405,30 +3393,28 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
     auto iTy = RankedTensorType::get(sh, biasScaleTy.getElementType());
 
     auto init =
-        builder.create<tensor::EmptyOp>(lastOp->getLoc(), iTy.getShape(), iTy.getElementType())
+        tensor::EmptyOp::create(builder, lastOp->getLoc(), iTy.getShape(), iTy.getElementType())
             .getResult();
 
-    auto iOp = builder
-                   .create<tensor::InsertSliceOp>(
-                       lastOp->getLoc(), biasScale, init,
-                       llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(0)},
-                       llvm::ArrayRef<OpFoldResult>{
-                           builder.getIndexAttr(biasScaleTy.getShape()[0]),
-                       },
-                       llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
-                   )
+    auto iOp = tensor::InsertSliceOp::create(
+                   builder, lastOp->getLoc(), biasScale, init,
+                   llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(0)},
+                   llvm::ArrayRef<OpFoldResult>{
+                       builder.getIndexAttr(biasScaleTy.getShape()[0]),
+                   },
+                   llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+    )
                    .getResult();
 
     // Insert scales at odd offsets with stride=2 to complete interleaving.
-    iOp = builder
-              .create<tensor::InsertSliceOp>(
-                  lastOp->getLoc(), finalScaleV, iOp,
-                  llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(1)},
-                  llvm::ArrayRef<OpFoldResult>{
-                      builder.getIndexAttr(biasScaleTy.getShape()[0]),
-                  },
-                  llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
-              )
+    iOp = tensor::InsertSliceOp::create(
+              builder, lastOp->getLoc(), finalScaleV, iOp,
+              llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(1)},
+              llvm::ArrayRef<OpFoldResult>{
+                  builder.getIndexAttr(biasScaleTy.getShape()[0]),
+              },
+              llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+    )
               .getResult();
 
     biasScale = iOp;
@@ -3452,7 +3438,7 @@ FailureOr<Value> computeBiasForMatmul(
         builder.setInsertionPoint(anchor);
         auto zeroBiasTy = RankedTensorType::get({biasDim}, anchorTy.getElementType());
         Value bias =
-            builder.create<arith::ConstantOp>(anchor->getLoc(), builder.getZeroAttr(zeroBiasTy));
+            arith::ConstantOp::create(builder, anchor->getLoc(), builder.getZeroAttr(zeroBiasTy));
         optionalWeightZp.reset();
         return bias;
     }
@@ -3489,20 +3475,18 @@ FailureOr<Value> buildWeightWithZp(Value weights, Value weightZp, PatternRewrite
         rewriter.getMultiDimIdentityMap(wTy.getRank())
     };
     auto rescaledWeights =
-        rewriter
-            .create<linalg::GenericOp>(
-                weights.getLoc(), rankedI16Type, ValueRange{weights, weightZp},
-                ValueRange{initTensor}, indexingMaps, iterTypes,
-                [](OpBuilder &b, Location loc, ValueRange args) {
-                    // Sign-extend weights to i16 first to avoid overflow/underflow on subtraction.
-                    auto w = b.create<arith::ExtSIOp>(loc, b.getIntegerType(16), args[0]);
-                    // Zero-point is narrowed to i16 so both operands share arithmetic type.
-                    auto zp = b.create<arith::TruncIOp>(loc, b.getIntegerType(16), args[1]);
-                    auto sub = b.create<arith::SubIOp>(loc, w, zp);
-                    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{sub});
-                }
-            )
-            .getResult(0);
+        linalg::GenericOp::create(
+            rewriter, weights.getLoc(), rankedI16Type, ValueRange{weights, weightZp},
+            ValueRange{initTensor}, indexingMaps, iterTypes,
+            [](OpBuilder &b, Location loc, ValueRange args) {
+                // Sign-extend weights to i16 first to avoid overflow/underflow on subtraction.
+                auto w = arith::ExtSIOp::create(b, loc, b.getIntegerType(16), args[0]);
+                // Zero-point is narrowed to i16 so both operands share arithmetic type.
+                auto zp = arith::TruncIOp::create(b, loc, b.getIntegerType(16), args[1]);
+                auto sub = arith::SubIOp::create(b, loc, w, zp);
+                linalg::YieldOp::create(b, loc, ArrayRef<Value>{sub});
+            }
+        ).getResult(0);
     weights = rescaledWeights;
     // Mark as compile-time-const so later passes can fold/use it as static data.
     setCompileTimeConstAttr(weights.getDefiningOp());

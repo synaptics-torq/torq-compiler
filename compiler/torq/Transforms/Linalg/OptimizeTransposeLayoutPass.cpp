@@ -468,7 +468,7 @@ static Value transformGenericOp(
                 newShape.push_back(origType.getDimSize(dim));
             }
             auto newEmpty =
-                rewriter.create<tensor::EmptyOp>(loc, newShape, origType.getElementType());
+                tensor::EmptyOp::create(rewriter, loc, newShape, origType.getElementType());
             newInputs.push_back(newEmpty.getResult());
 
             LLVM_DEBUG({
@@ -487,9 +487,9 @@ static Value transformGenericOp(
                 transposedShape.push_back(inputType.getDimSize(dim));
             }
             auto inverseInit =
-                rewriter.create<tensor::EmptyOp>(loc, transposedShape, inputType.getElementType());
+                tensor::EmptyOp::create(rewriter, loc, transposedShape, inputType.getElementType());
             auto inverseTranspose =
-                rewriter.create<linalg::TransposeOp>(loc, input, inverseInit, inversePerm);
+                linalg::TransposeOp::create(rewriter, loc, input, inverseInit, inversePerm);
             newInputs.push_back(inverseTranspose.getResult()[0]);
 
             LLVM_DEBUG({
@@ -514,14 +514,14 @@ static Value transformGenericOp(
     }
 
     auto newOutputType = RankedTensorType::get(newOutputShape, origOutputType.getElementType());
-    auto newInit = rewriter.create<tensor::EmptyOp>(
-        loc, newOutputType.getShape(), newOutputType.getElementType()
+    auto newInit = tensor::EmptyOp::create(
+        rewriter, loc, newOutputType.getShape(), newOutputType.getElementType()
     );
 
     // Create transformed generic op (same indexing maps - they're layout-agnostic)
-    auto newGenericOp = rewriter.create<linalg::GenericOp>(
-        loc, newOutputType, newInputs, ValueRange{newInit}, genericOp.getIndexingMapsArray(),
-        genericOp.getIteratorTypesArray()
+    auto newGenericOp = linalg::GenericOp::create(
+        rewriter, loc, newOutputType, newInputs, ValueRange{newInit},
+        genericOp.getIndexingMapsArray(), genericOp.getIteratorTypesArray()
     );
     // Clone computation body
     IRMapping mapper;
@@ -546,7 +546,7 @@ static Value transformExtractSliceOp(
         for (auto dim : inversePerm) {
             newShape.push_back(origType.getDimSize(dim));
         }
-        source = rewriter.create<tensor::EmptyOp>(loc, newShape, origType.getElementType());
+        source = tensor::EmptyOp::create(rewriter, loc, newShape, origType.getElementType());
         LLVM_DEBUG({
             llvm::dbgs() << "║     → Created permuted tensor.empty for source\n";
             llvm::dbgs() << "║        Shape: ";
@@ -576,9 +576,9 @@ static Value transformExtractSliceOp(
             transposedShape.push_back(sourceShape[dim]);
         }
         auto inverseInit =
-            rewriter.create<tensor::EmptyOp>(loc, transposedShape, sourceType.getElementType());
+            tensor::EmptyOp::create(rewriter, loc, transposedShape, sourceType.getElementType());
         auto inverseTranspose =
-            rewriter.create<linalg::TransposeOp>(loc, source, inverseInit, inversePerm);
+            linalg::TransposeOp::create(rewriter, loc, source, inverseInit, inversePerm);
         source = inverseTranspose.getResult()[0];
 
         LLVM_DEBUG({
@@ -609,7 +609,7 @@ static Value transformExtractSliceOp(
 
     // Create transformed extract_slice
     auto newSlice =
-        rewriter.create<tensor::ExtractSliceOp>(loc, source, newOffsets, newSizes, newStrides);
+        tensor::ExtractSliceOp::create(rewriter, loc, source, newOffsets, newSizes, newStrides);
 
     return newSlice.getResult();
 }
@@ -642,9 +642,9 @@ static Value transformInsertSliceOp(
         transposedShape.push_back(sourceShape[dim]);
     }
     auto inverseInit =
-        rewriter.create<tensor::EmptyOp>(loc, transposedShape, sourceType.getElementType());
+        tensor::EmptyOp::create(rewriter, loc, transposedShape, sourceType.getElementType());
     auto inverseTranspose =
-        rewriter.create<linalg::TransposeOp>(loc, source, inverseInit, inversePerm);
+        linalg::TransposeOp::create(rewriter, loc, source, inverseInit, inversePerm);
     source = inverseTranspose.getResult()[0];
 
     LLVM_DEBUG({
@@ -668,7 +668,7 @@ static Value transformInsertSliceOp(
         for (auto dim : inversePerm) {
             newDestShape.push_back(origDestType.getDimSize(dim));
         }
-        dest = rewriter.create<tensor::EmptyOp>(loc, newDestShape, origDestType.getElementType());
+        dest = tensor::EmptyOp::create(rewriter, loc, newDestShape, origDestType.getElementType());
         LLVM_DEBUG({
             llvm::dbgs() << "║     → Created permuted tensor.empty for dest\n";
             llvm::dbgs() << "║        Shape: ";
@@ -698,9 +698,9 @@ static Value transformInsertSliceOp(
             transposedDestShape.push_back(destShape[dim]);
         }
         auto destInverseInit =
-            rewriter.create<tensor::EmptyOp>(loc, transposedDestShape, destType.getElementType());
+            tensor::EmptyOp::create(rewriter, loc, transposedDestShape, destType.getElementType());
         auto destInverseTranspose =
-            rewriter.create<linalg::TransposeOp>(loc, dest, destInverseInit, inversePerm);
+            linalg::TransposeOp::create(rewriter, loc, dest, destInverseInit, inversePerm);
         dest = destInverseTranspose.getResult()[0];
 
         LLVM_DEBUG({
@@ -731,8 +731,9 @@ static Value transformInsertSliceOp(
     }
 
     // Create transformed insert_slice
-    auto newInsert =
-        rewriter.create<tensor::InsertSliceOp>(loc, source, dest, newOffsets, newSizes, newStrides);
+    auto newInsert = tensor::InsertSliceOp::create(
+        rewriter, loc, source, dest, newOffsets, newSizes, newStrides
+    );
 
     return newInsert.getResult();
 }
@@ -810,12 +811,12 @@ static void insertTransposePairsAroundPropagateOps(
         // The forward transpose should convert from transformed layout back to original layout
         // Use perm (transformedType is in inverse-permuted layout, apply perm to get back)
         // and the output shape should match the expanded original shape
-        auto forwardInit = rewriter.create<tensor::EmptyOp>(
-            op->getLoc(), expandedOriginalShape, originalType.getElementType()
+        auto forwardInit = tensor::EmptyOp::create(
+            rewriter, op->getLoc(), expandedOriginalShape, originalType.getElementType()
         );
 
-        auto forwardTranspose = rewriter.create<linalg::TransposeOp>(
-            op->getLoc(), transformedResult, forwardInit, perm
+        auto forwardTranspose = linalg::TransposeOp::create(
+            rewriter, op->getLoc(), transformedResult, forwardInit, perm
         );
 
         Value finalResult = forwardTranspose.getResult()[0];
@@ -879,8 +880,8 @@ struct ComposeTransposeOps : OpRewritePattern<linalg::TransposeOp> {
         for (int64_t p : foldedPerms)
             newInitShape.push_back(origType.getDimSize(p));
 
-        auto newInit = rewriter.create<tensor::EmptyOp>(
-            transposeOp.getLoc(), newInitShape, origType.getElementType()
+        auto newInit = tensor::EmptyOp::create(
+            rewriter, transposeOp.getLoc(), newInitShape, origType.getElementType()
         );
 
         rewriter.replaceOpWithNewOp<linalg::TransposeOp>(
@@ -934,7 +935,7 @@ class OptimizeTransposeLayoutPass
         SmallVector<Operation *> transposeOps;
         funcOp.walk([&](linalg::TransposeOp op) { transposeOps.push_back(op); });
 
-        if (failed(applyOpPatternsAndFold(transposeOps, frozenPatterns))) {
+        if (failed(applyOpPatternsGreedily(transposeOps, frozenPatterns))) {
             LLVM_DEBUG(llvm::dbgs() << "WARNING: Canonicalization failed\n");
         }
     }

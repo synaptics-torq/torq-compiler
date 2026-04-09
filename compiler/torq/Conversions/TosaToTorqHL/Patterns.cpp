@@ -215,7 +215,7 @@ LogicalResult reverseTConvWeights(
         llvm::SmallVector<int64_t> paddedShape{OC, paddedH, paddedW, IC};
         auto paddedType = RankedTensorType::get(paddedShape, elementType);
         auto paddedAttr = DenseElementsAttr::get(paddedType, ArrayRef<Attribute>(paddedData));
-        weights = rewriter.create<arith::ConstantOp>(loc, paddedAttr).getResult();
+        weights = arith::ConstantOp::create(rewriter, loc, paddedAttr).getResult();
         outputShape[1] = paddedH;
         outputShape[2] = paddedW;
     }
@@ -542,8 +542,8 @@ static LogicalResult fuseWithRescaleOp(
         RankedTensorType d2sInitType =
             RankedTensorType::get(llvm::ArrayRef<int64_t>(upsampledShape), elementType);
 
-        auto d2sOp = rewriter.create<torq_hl::DepthToSpaceOp>(
-            rescaleOp.getLoc(), d2sInitType,
+        auto d2sOp = torq_hl::DepthToSpaceOp::create(
+            rewriter, rescaleOp.getLoc(), d2sInitType,
             createInitTensor(rescaleOp.getLoc(), d2sInitType, rewriter), blockSize, d2s_enum_mode,
             createI8Const(
                 rewriter, rescaleOp, d2s_weights, llvm::ArrayRef<int64_t>{wram_width * num_inputs}
@@ -581,8 +581,8 @@ static LogicalResult fuseWithRescaleOp(
         llvm::SmallVector<int64_t> expandedShape{N, OC_orig, hBlocks, wBlocks, H, W};
         auto expandedType = RankedTensorType::get(expandedShape, elementType);
         llvm::SmallVector<llvm::SmallVector<int64_t, 2>> expandReassoc{{0}, {1, 2, 3}, {4}, {5}};
-        auto expandOp = rewriter.create<tensor::ExpandShapeOp>(
-            rescaleOp.getLoc(), expandedType, nchwConvOut,
+        auto expandOp = tensor::ExpandShapeOp::create(
+            rewriter, rescaleOp.getLoc(), expandedType, nchwConvOut,
             llvm::ArrayRef<llvm::SmallVector<int64_t, 2>>(expandReassoc)
         );
 
@@ -592,16 +592,16 @@ static LogicalResult fuseWithRescaleOp(
         llvm::SmallVector<int64_t> transposedShape{N, OC_orig, hBlocks, H, wBlocks, W};
         auto transposedType = RankedTensorType::get(transposedShape, elementType);
         auto transInitTensor = createInitTensor(rescaleOp.getLoc(), transposedType, rewriter);
-        auto transposeOp = rewriter.create<linalg::TransposeOp>(
-            rescaleOp.getLoc(), expandOp.getResult(), transInitTensor, d2sPerm
+        auto transposeOp = linalg::TransposeOp::create(
+            rewriter, rescaleOp.getLoc(), expandOp.getResult(), transInitTensor, d2sPerm
         );
 
         // Collapse: [N, OC, hBlocks*H, wBlocks*W]
         upsampledShape = {N, OC_orig, hBlocks * H, wBlocks * W};
         auto collapsedType = RankedTensorType::get(upsampledShape, elementType);
         llvm::SmallVector<llvm::SmallVector<int64_t, 2>> collapseReassoc{{0}, {1}, {2, 3}, {4, 5}};
-        auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
-            rescaleOp.getLoc(), collapsedType, *transposeOp.getResults().begin(),
+        auto collapseOp = tensor::CollapseShapeOp::create(
+            rewriter, rescaleOp.getLoc(), collapsedType, *transposeOp.getResults().begin(),
             llvm::ArrayRef<llvm::SmallVector<int64_t, 2>>(collapseReassoc)
         );
 
@@ -638,8 +638,8 @@ static LogicalResult fuseWithRescaleOp(
 
     Value extractInput =
         transposeValue(upsampledOut, Permutation::nhwc2nchw(), rescaleOp.getLoc(), rewriter);
-    auto extractSlice = rewriter.create<tensor::ExtractSliceOp>(
-        rescaleOp.getLoc(), extractInput, extractOffset, extractSize, extractStrides
+    auto extractSlice = tensor::ExtractSliceOp::create(
+        rewriter, rescaleOp.getLoc(), extractInput, extractOffset, extractSize, extractStrides
     );
     auto extractOut = transposeValue(
         extractSlice, Permutation::nhwc2nchw().reverse(), rescaleOp.getLoc(), rewriter
@@ -1131,11 +1131,11 @@ struct ResizeNearestNeighborOpConversion : public OpConversionPattern<tosa::Resi
             4, mlir::utils::IteratorType::parallel
         );
         auto input = convertNHWCtoNCHW(adaptor.getInput(), srcOp.getLoc(), rewriter);
-        auto output = rewriter.create<linalg::GenericOp>(
-            srcOp.getLoc(), resultTypeNCHW, input,
+        auto output = linalg::GenericOp::create(
+            rewriter, srcOp.getLoc(), resultTypeNCHW, input,
             createInitTensor(srcOp.getLoc(), resultTypeNCHW, rewriter), indexingMaps, iteratorTypes,
             [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
-                nestedBuilder.create<linalg::YieldOp>(nestedLoc, args[0]);
+                linalg::YieldOp::create(nestedBuilder, nestedLoc, args[0]);
             }
         );
         auto outputTransposed = convertNCHWtoNHWC(output.getResult(0), srcOp.getLoc(), rewriter);

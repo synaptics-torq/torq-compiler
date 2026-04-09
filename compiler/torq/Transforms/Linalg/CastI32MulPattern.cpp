@@ -203,14 +203,14 @@ static linalg::GenericOp convertRescaleToI16(linalg::GenericOp rescaleOp, IRRewr
     rewriter.setInsertionPoint(rescaleOp);
 
     // Create new init tensor
-    Value newInit = rewriter.create<tensor::EmptyOp>(
-        rescaleOp.getLoc(), newType.getShape(), newType.getElementType()
+    Value newInit = tensor::EmptyOp::create(
+        rewriter, rescaleOp.getLoc(), newType.getShape(), newType.getElementType()
     );
 
     // Create new generic op with i16 output
-    auto newRescaleOp = rewriter.create<linalg::GenericOp>(
-        rescaleOp.getLoc(), TypeRange{newType}, rescaleOp.getInputs(), ValueRange{newInit},
-        rescaleOp.getIndexingMapsArray(), rescaleOp.getIteratorTypesArray()
+    auto newRescaleOp = linalg::GenericOp::create(
+        rewriter, rescaleOp.getLoc(), TypeRange{newType}, rescaleOp.getInputs(),
+        ValueRange{newInit}, rescaleOp.getIndexingMapsArray(), rescaleOp.getIteratorTypesArray()
     );
 
     // Create block with correct argument types
@@ -248,8 +248,8 @@ static linalg::GenericOp convertRescaleToI16(linalg::GenericOp rescaleOp, IRRewr
                 newOperands.push_back(mapping.lookupOrDefault(operand));
 
             // Create apply_scale with i16 result type
-            auto newApplyScale = rewriter.create<tosa::ApplyScaleOp>(
-                op.getLoc(), rewriter.getIntegerType(16), newOperands, op.getAttrs()
+            auto newApplyScale = tosa::ApplyScaleOp::create(
+                rewriter, op.getLoc(), rewriter.getIntegerType(16), newOperands, op.getAttrs()
             );
             mapping.map(op.getResult(0), newApplyScale.getResult());
         }
@@ -264,7 +264,7 @@ static linalg::GenericOp convertRescaleToI16(linalg::GenericOp rescaleOp, IRRewr
     for (auto val : oldYield.getValues())
         newYields.push_back(mapping.lookup(val));
 
-    rewriter.create<linalg::YieldOp>(oldYield.getLoc(), newYields);
+    linalg::YieldOp::create(rewriter, oldYield.getLoc(), newYields);
 
     // Replace old op with new one
     rewriter.replaceOp(rescaleOp, newRescaleOp.getResult(0));
@@ -276,8 +276,8 @@ void updateMulToI16(linalg::GenericOp mulOp, IRRewriter &rewriter) {
     rewriter.setInsertionPoint(mulOp);
 
     // Create new mul op
-    auto newMulOp = rewriter.create<linalg::GenericOp>(
-        mulOp.getLoc(), mulOp.getResultTypes(), mulOp.getInputs(), mulOp.getOutputs(),
+    auto newMulOp = linalg::GenericOp::create(
+        rewriter, mulOp.getLoc(), mulOp.getResultTypes(), mulOp.getInputs(), mulOp.getOutputs(),
         mulOp.getIndexingMapsArray(), mulOp.getIteratorTypesArray()
     );
 
@@ -316,14 +316,15 @@ void updateMulToI16(linalg::GenericOp mulOp, IRRewriter &rewriter) {
 
             // If operands are now i16, create i16*i16->i16 multiply
             if (lhs.getType().isInteger(16) && rhs.getType().isInteger(16)) {
-                Value mul16 = rewriter.create<arith::MulIOp>(
-                    mulI.getLoc(), rewriter.getIntegerType(16), lhs, rhs, mulI.getOverflowFlags()
+                Value mul16 = arith::MulIOp::create(
+                    rewriter, mulI.getLoc(), rewriter.getIntegerType(16), lhs, rhs,
+                    mulI.getOverflowFlags()
                 );
 
                 // Extend to i32 if original result was i32
                 if (mulI.getType().isInteger(32)) {
-                    Value ext32 = rewriter.create<arith::ExtSIOp>(
-                        mulI.getLoc(), rewriter.getIntegerType(32), mul16
+                    Value ext32 = arith::ExtSIOp::create(
+                        rewriter, mulI.getLoc(), rewriter.getIntegerType(32), mul16
                     );
                     mapping.map(mulI.getResult(), ext32);
                 }
@@ -342,7 +343,7 @@ void updateMulToI16(linalg::GenericOp mulOp, IRRewriter &rewriter) {
     for (auto val : oldYield.getValues()) {
         mappedYields.push_back(mapping.lookup(val));
     }
-    rewriter.create<linalg::YieldOp>(oldYield.getLoc(), mappedYields);
+    linalg::YieldOp::create(rewriter, oldYield.getLoc(), mappedYields);
 
     rewriter.replaceOp(mulOp, newMulOp.getResults());
 }
@@ -370,8 +371,8 @@ void updateIntermediateOps(
                     RankedTensorType::get(resultType.getShape(), rewriter.getIntegerType(16));
 
                 rewriter.setInsertionPoint(collapseOp);
-                auto newCollapseOp = rewriter.create<tensor::CollapseShapeOp>(
-                    collapseOp.getLoc(), newResultType, collapseOp.getSrc(),
+                auto newCollapseOp = tensor::CollapseShapeOp::create(
+                    rewriter, collapseOp.getLoc(), newResultType, collapseOp.getSrc(),
                     collapseOp.getReassociationIndices()
                 );
                 rewriter.replaceOp(collapseOp, newCollapseOp.getResult());
@@ -387,8 +388,8 @@ void updateIntermediateOps(
                     RankedTensorType::get(resultType.getShape(), rewriter.getIntegerType(16));
 
                 rewriter.setInsertionPoint(expandOp);
-                auto newExpandOp = rewriter.create<tensor::ExpandShapeOp>(
-                    expandOp.getLoc(), newResultType, expandOp.getSrc(),
+                auto newExpandOp = tensor::ExpandShapeOp::create(
+                    rewriter, expandOp.getLoc(), newResultType, expandOp.getSrc(),
                     expandOp.getReassociationIndices()
                 );
                 rewriter.replaceOp(expandOp, newExpandOp.getResult());
@@ -418,14 +419,15 @@ void updateIntermediateOps(
                     rewriter.setInsertionPoint(genericOp);
 
                     // Create new output tensor
-                    Value newInit = rewriter.create<tensor::EmptyOp>(
-                        genericOp.getLoc(), newResultType.getShape(), newResultType.getElementType()
+                    Value newInit = tensor::EmptyOp::create(
+                        rewriter, genericOp.getLoc(), newResultType.getShape(),
+                        newResultType.getElementType()
                     );
 
-                    auto newGenericOp = rewriter.create<linalg::GenericOp>(
-                        genericOp.getLoc(), TypeRange{newResultType}, genericOp.getInputs(),
-                        ValueRange{newInit}, genericOp.getIndexingMapsArray(),
-                        genericOp.getIteratorTypesArray()
+                    auto newGenericOp = linalg::GenericOp::create(
+                        rewriter, genericOp.getLoc(), TypeRange{newResultType},
+                        genericOp.getInputs(), ValueRange{newInit},
+                        genericOp.getIndexingMapsArray(), genericOp.getIteratorTypesArray()
                     );
 
                     // Clone body with updated types
@@ -459,7 +461,7 @@ void updateIntermediateOps(
                     for (auto val : oldYield.getValues()) {
                         newYields.push_back(mapping.lookup(val));
                     }
-                    rewriter.create<linalg::YieldOp>(oldYield.getLoc(), newYields);
+                    linalg::YieldOp::create(rewriter, oldYield.getLoc(), newYields);
 
                     rewriter.replaceOp(genericOp, newGenericOp.getResult(0));
                     updateIntermediateOps(newGenericOp.getOperation(), rewriter, processed);

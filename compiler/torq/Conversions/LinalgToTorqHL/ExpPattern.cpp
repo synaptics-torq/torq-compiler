@@ -26,11 +26,10 @@ Value makeSelect(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value pred, Value ifTrue, Value ifFalse
 ) {
     auto resultType = dyn_cast<RankedTensorType>(ifTrue.getType());
-    return rewriter
-        .create<torq_hl::SelectOp>(
-            srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType), pred, ifTrue,
-            ifFalse
-        )
+    return torq_hl::SelectOp::create(
+               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
+               pred, ifTrue, ifFalse
+    )
         .getOutput();
 }
 
@@ -90,8 +89,8 @@ class ExpOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto x = makeBitcast(srcOp, rewriter, RankedTensorType::get(shape, i16), input);
 
-        auto msb = rewriter.create<arith::ConstantOp>(
-            x.getLoc(), RankedTensorType::get(shape, i16),
+        auto msb = arith::ConstantOp::create(
+            rewriter, x.getLoc(), RankedTensorType::get(shape, i16),
             DenseElementsAttr::get(
                 RankedTensorType::get(shape, i16),
                 {
@@ -99,14 +98,12 @@ class ExpOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 }
             )
         );
-        auto isNegative =
-            rewriter
-                .create<torq_hl::ElementWiseBinaryOp>(
-                    srcOp.getLoc(), RankedTensorType::get(shape, i1),
-                    createInitTensor(srcOp, rewriter, RankedTensorType::get(shape, i1)),
-                    torq_hl::ElementwiseOpEnum::GREATER, x, msb, /*isUnsigned=*/true
-                )
-                .getOutput();
+        auto isNegative = torq_hl::ElementWiseBinaryOp::create(
+                              rewriter, srcOp.getLoc(), RankedTensorType::get(shape, i1),
+                              createInitTensor(srcOp, rewriter, RankedTensorType::get(shape, i1)),
+                              torq_hl::ElementwiseOpEnum::GREATER, x, msb, /*isUnsigned=*/true
+        )
+                              .getOutput();
 
         auto expNegative = makeScaledLut(
             srcOp, rewriter, x, 16256, 16, -32768, 0,

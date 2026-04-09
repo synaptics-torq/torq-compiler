@@ -502,8 +502,8 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
         if (auto loadOp = dyn_cast<torq_hl::LoadOp>(use.getOwner())) {
             rewriter.setInsertionPoint(loadOp);
 
-            auto destSubview = rewriter.create<memref::SubViewOp>(
-                loadOp.getLoc(), loadOp.getOutput(), SmallVector<int64_t>{0},
+            auto destSubview = memref::SubViewOp::create(
+                rewriter, loadOp.getLoc(), loadOp.getOutput(), SmallVector<int64_t>{0},
                 SmallVector<int64_t>{static_cast<int64_t>(code.size())}, SmallVector<int64_t>{1}
             );
 

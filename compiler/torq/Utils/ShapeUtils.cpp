@@ -47,7 +47,7 @@ static void broadcastInput(
         std::vector<int64_t> shVec(newShape.begin(), newShape.end());
         Value shValue = createConst(shVec, rewriter, input.getLoc());
         auto reshapeOp =
-            rewriter.create<tensor::ReshapeOp>(input.getLoc(), outType, input, shValue);
+            tensor::ReshapeOp::create(rewriter, input.getLoc(), outType, input, shValue);
 
         return reshapeOp.getResult();
     };
@@ -58,8 +58,8 @@ static void broadcastInput(
         auto elementType = type.getElementType();
 
         auto outType = RankedTensorType::get(bcastShape, elementType);
-        auto bcastOp = rewriter.create<linalg::BroadcastOp>(
-            srcOp.getLoc(), input, createInitTensor(srcOp, rewriter, outType), dims
+        auto bcastOp = linalg::BroadcastOp::create(
+            rewriter, srcOp.getLoc(), input, createInitTensor(srcOp, rewriter, outType), dims
         );
         auto gOp = linalg::generalizeNamedOp(rewriter, bcastOp);
         if (failed(gOp)) {
@@ -106,11 +106,11 @@ static void broadcastInput(
         auto elementType = outputType.getElementType();
 
         auto emptyOp =
-            rewriter.create<tensor::EmptyOp>(rescaleOp.getLoc(), outputShape, elementType);
+            tensor::EmptyOp::create(rewriter, rescaleOp.getLoc(), outputShape, elementType);
 
-        linalg::GenericOp newOp = rewriter.create<linalg::GenericOp>(
-            rescaleOp.getLoc(), TypeRange{emptyOp.getResult().getType()}, ValueRange{input},
-            ValueRange{emptyOp.getResult()}, newIndexingMaps,
+        linalg::GenericOp newOp = linalg::GenericOp::create(
+            rewriter, rescaleOp.getLoc(), TypeRange{emptyOp.getResult().getType()},
+            ValueRange{input}, ValueRange{emptyOp.getResult()}, newIndexingMaps,
             SmallVector<utils::IteratorType>{outputShape.size(), utils::IteratorType::parallel}
         );
 
@@ -191,8 +191,8 @@ LogicalResult collapseShapeWithDim(Value &input, int dim, PatternRewriter &rewri
     }
 
     auto outType = RankedTensorType::get(squeezedShape, elementType);
-    auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
-        input.getLoc(), outType, input, ArrayRef<ReassociationIndices>{newShape}
+    auto collapseOp = tensor::CollapseShapeOp::create(
+        rewriter, input.getLoc(), outType, input, ArrayRef<ReassociationIndices>{newShape}
     );
 
     input = collapseOp.getResult();
@@ -376,7 +376,7 @@ LogicalResult promoteScalar(linalg::LinalgOp srcOp, Value &input, PatternRewrite
         std::vector<int64_t> shVec(newShape.begin(), newShape.end());
         Value shValue = createConst(shVec, rewriter, input.getLoc());
         auto reshapeOp =
-            rewriter.create<tensor::ReshapeOp>(input.getLoc(), outType, input, shValue);
+            tensor::ReshapeOp::create(rewriter, input.getLoc(), outType, input, shValue);
         return reshapeOp.getResult();
     };
 
@@ -542,13 +542,13 @@ ReshapeToCollapseExpand::matchAndRewrite(tensor::ReshapeOp op, PatternRewriter &
     if (auto direct = getReassociationIndicesForReshape(srcType, dstType)) {
         Value out;
         if (dstRank < srcRank) {
-            out = rewriter.create<tensor::CollapseShapeOp>(
-                op.getLoc(), dstType, op.getSource(), *direct
+            out = tensor::CollapseShapeOp::create(
+                rewriter, op.getLoc(), dstType, op.getSource(), *direct
             );
         }
         else if (dstRank > srcRank) {
-            out = rewriter.create<tensor::ExpandShapeOp>(
-                op.getLoc(), dstType, op.getSource(), *direct
+            out = tensor::ExpandShapeOp::create(
+                rewriter, op.getLoc(), dstType, op.getSource(), *direct
             );
         }
         /// same rank: fall through to mid-shape decomposition
@@ -574,11 +574,11 @@ ReshapeToCollapseExpand::matchAndRewrite(tensor::ReshapeOp op, PatternRewriter &
     }
 
     auto midType = RankedTensorType::get(collapseShape, srcType.getElementType());
-    Value collapsed = rewriter.create<tensor::CollapseShapeOp>(
-        op.getLoc(), midType, op.getSource(), *collapseSrc
+    Value collapsed = tensor::CollapseShapeOp::create(
+        rewriter, op.getLoc(), midType, op.getSource(), *collapseSrc
     );
     Value expanded =
-        rewriter.create<tensor::ExpandShapeOp>(op.getLoc(), dstType, collapsed, *collapseDst);
+        tensor::ExpandShapeOp::create(rewriter, op.getLoc(), dstType, collapsed, *collapseDst);
 
     rewriter.replaceOp(op, expanded);
     return success();
