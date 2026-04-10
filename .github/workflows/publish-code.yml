@@ -26,6 +26,7 @@ jobs:
         with:
           fetch-depth: 0
           lfs: true
+          persist-credentials: false
 
       - name: Push to other repository
         run: |
