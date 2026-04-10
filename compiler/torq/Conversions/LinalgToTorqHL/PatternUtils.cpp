@@ -2961,15 +2961,35 @@ FailureOr<Value> createNewBias(
     return bias;
 }
 
+static void reduceBodyYield(OpBuilder &b, Location loc, ValueRange args) {
+    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{args[0]});
+}
+
+static void reduceBodyExtYield(OpBuilder &b, Location loc, ValueRange args) {
+    Value y = b.create<arith::ExtSIOp>(loc, b.getI32Type(), args[0]);
+    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
+}
+
+static void reduceBodyTruncYield(OpBuilder &b, Location loc, ValueRange args) {
+    // Warning: the assumption is that even if the bias type is 64bits, the actual value fits 32bits
+    Value y = b.create<arith::TruncIOp>(loc, b.getI32Type(), args[0]);
+    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
+}
+
+static void reduceBodyExtFYield(OpBuilder &b, Location loc, ValueRange args) {
+    Value y = b.create<arith::ExtFOp>(loc, b.getF32Type(), args[0]);
+    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
+}
+
 FailureOr<Value> computeBias(
     FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp, int biasChDim
 ) {
-
-    biasChDim = biasChDim < 0 ? channelDim : biasChDim;
-
     auto firstOp = fusionPlan.anchor;
     auto firstOpResult = firstOp->getResult(0);
     auto firstOpResultType = dyn_cast<ShapedType>(firstOpResult.getType());
+    auto loc = firstOp->getLoc();
+    biasChDim = biasChDim < 0 ? channelDim : biasChDim;
+    SmallVector<int64_t> biasShape{firstOpResultType.getShape()[biasChDim]};
 
     if (!firstOpResultType) {
         LLVM_DEBUG({ llvm::dbgs() << "computeBias: first op result is not ShapedType\n"; });
@@ -2980,84 +3000,39 @@ FailureOr<Value> computeBias(
     auto owner = parentRegion->getParentOp();
     OpBuilder builder(owner->getContext());
     SmallVector<Operation *, 8> opsToDelete;
-    Value bias;
 
-    {
-        OpBuilder::InsertionGuard g(builder);
-        builder.setInsertionPoint(firstOp);
-        auto maybeBias = createNewBias(fusionPlan, builder, opsToDelete, optionalWeightZp);
-        if (failed(maybeBias)) {
-            bias = arith::ConstantOp::create(
-                       builder, firstOp->getLoc(),
-                       builder.getZeroAttr(RankedTensorType::get(
-                           {firstOpResultType.getShape()[biasChDim]},
-                           firstOpResultType.getElementType()
-                       ))
-            )
-                       .getResult();
-            return bias;
-        }
-        bias = *maybeBias;
-
-        auto biasTy = dyn_cast<ShapedType>(bias.getType());
-        if (biasTy.getRank() == 2) {
-            channelDim = biasChDim;
-        }
-        // Reduce across all non-channel dims to produce per-channel bias.
-        SmallVector<int64_t, 4> reduceD;
-        reduceD.reserve(biasTy.getRank() - 1);
-        for (int i = 0; i < biasTy.getRank(); ++i) {
-            if (i != channelDim)
-                reduceD.push_back(i);
-        }
-
-        auto reduceTy = RankedTensorType::get(
-            {firstOpResultType.getShape()[biasChDim]}, firstOpResultType.getElementType()
-        );
-        if (biasTy.getElementType().isBF16()) {
-            auto emTensor =
-                tensor::EmptyOp::create(
-                    builder, firstOp->getLoc(), reduceTy.getShape(), builder.getF32Type()
-                )
-                    .getResult();
-            bias = linalg::ReduceOp::create(
-                       builder, firstOp->getLoc(), bias, emTensor, reduceD,
-                       [](OpBuilder &b, Location loc, ValueRange args) {
-                           Value y = arith::ExtFOp::create(b, loc, b.getF32Type(), args[0]);
-                           linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
-                       }
-            ).getResult(0);
-        }
-        else if (biasTy.getElementType().isInteger(8) || biasTy.getElementType().isInteger(16)) {
-            auto emTensor =
-                tensor::EmptyOp::create(
-                    builder, firstOp->getLoc(), reduceTy.getShape(), builder.getI32Type()
-                )
-                    .getResult();
-            bias = linalg::ReduceOp::create(
-                       builder, firstOp->getLoc(), bias, emTensor, reduceD,
-                       [](OpBuilder &b, Location loc, ValueRange args) {
-                           Value y = arith::ExtSIOp::create(b, loc, b.getI32Type(), args[0]);
-                           linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
-                       }
-            ).getResult(0);
-        }
-        else {
-            auto emTensor =
-                tensor::EmptyOp::create(
-                    builder, firstOp->getLoc(), reduceTy.getShape(), reduceTy.getElementType()
-                )
-                    .getResult();
-            bias = linalg::ReduceOp::create(
-                       builder, firstOp->getLoc(), bias, emTensor, reduceD,
-                       [](OpBuilder &b, Location loc, ValueRange args) {
-                           linalg::YieldOp::create(b, loc, ArrayRef<Value>{args[0]});
-                       }
-            ).getResult(0);
-        }
+    OpBuilder::InsertionGuard g(builder);
+    builder.setInsertionPoint(firstOp);
+    auto maybeBias = createNewBias(fusionPlan, builder, opsToDelete, optionalWeightZp);
+    if (failed(maybeBias)) {
+        auto biasType = RankedTensorType::get(biasShape, firstOpResultType.getElementType());
+        return arith::ConstantOp::create(builder, loc, builder.getZeroAttr(biasType)).getResult();
     }
 
+    Value bias = *maybeBias;
+    auto biasTy = dyn_cast<ShapedType>(bias.getType());
+    if (biasTy.getRank() == 2) {
+        channelDim = biasChDim;
+    }
+    // Reduce across all non-channel dims to produce per-channel bias.
+    SmallVector<int64_t, 4> reduceD;
+    reduceD.reserve(biasTy.getRank() - 1);
+    for (int i = 0; i < biasTy.getRank(); ++i) {
+        if (i != channelDim)
+            reduceD.push_back(i);
+    }
+
+    Type biasElTy = biasTy.getElementType();
+    auto reduceBody = biasElTy.isFloat()       ? reduceBodyExtFYield
+                      : biasElTy.isInteger(32) ? reduceBodyYield
+                      : biasElTy.isInteger(64) ? reduceBodyTruncYield
+                                               : reduceBodyExtYield;
+
+    Type torqBiasTy = biasElTy.isFloat() ? (Type)builder.getF32Type() : (Type)builder.getI32Type();
+    Value empty = tensor::EmptyOp::create(builder, loc, biasShape, torqBiasTy).getResult();
+    bias = linalg::ReduceOp::create(builder, loc, bias, empty, reduceD, reduceBody).getResult(0);
     setCompileTimeConstAttr(bias.getDefiningOp());
+
     return bias;
 }
 
@@ -3390,7 +3365,8 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
 
     SmallVector<int64_t, 1> sh{biasScaleTy.getShape()[0] * 2};
 
-    auto iTy = RankedTensorType::get(sh, biasScaleTy.getElementType());
+    // HW expects biasScale tensor to be int32
+    auto iTy = RankedTensorType::get(sh, builder.getIntegerType(32));
 
     auto init =
         tensor::EmptyOp::create(builder, lastOp->getLoc(), iTy.getShape(), iTy.getElementType())
