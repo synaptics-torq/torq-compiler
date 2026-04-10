@@ -1,3 +1,4 @@
+import mmap as mmap_mod
 import os
 import logging
 import time
@@ -209,12 +210,15 @@ class VMFBInferenceRunner(InferenceRunner):
             instance = iree_rt.VmInstance()
             device = iree_rt.get_device(self._device_uri)
             hal_module = iree_rt.create_hal_module(instance, device)
-            with open(self._model_path, "rb") as f:
-                fb = f.read()
-            vm_module = iree_rt.VmModule.from_flatbuffer(instance, fb, warn_if_copy=False)
+            f = open(self._model_path, "rb")
+            self._mmap = mmap_mod.mmap(f.fileno(), 0, access=mmap_mod.ACCESS_READ)
+            f.close()
+            # Hint the kernel to start paging data in now, approximating preload behaviour.
+            self._mmap.madvise(mmap_mod.MADV_WILLNEED)
+            vm_module = iree_rt.VmModule.wrap_buffer(instance, self._mmap)
             _ctx = iree_rt.SystemContext(vm_modules=[hal_module, vm_module])
             module = _ctx.modules[vm_module.name]
-            self._logger.debug("'%s' loaded via memory copy", str(self._model_path))
+            self._logger.debug("'%s' preloaded via mmap + madvise", str(self._model_path))
 
         if self._function not in vm_module.function_names:
             raise ValueError(f"Function '{self._function}' not found in '{self._model_path}'")
