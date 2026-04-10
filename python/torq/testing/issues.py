@@ -127,17 +127,52 @@ def _title_matches_module_issue(issue_title: str, base_title: str, title_suffix_
     return bool(title_suffix_re.fullmatch(issue_title, len(base_title)))
 
 
+def _extract_test_name(test: str) -> Optional[str]:
+    return test.split("::", 1)[-1]
+
+
+def _write_xfail_file(module: str, failures: Dict[str, Dict[str, Any]]):
+    error_tests = []
+    fail_tests = []
+
+    for nodeid, info in failures.items():
+        test_name = _extract_test_name(nodeid)
+        if test_name is None:
+            continue
+        if info["phase"] in ["setup", "teardown"]:
+            error_tests.append(test_name)
+        else:
+            # info["phase"] == "call"
+            fail_tests.append(test_name)
+
+
+    xfail_file_name = os.path.splitext(module)[0] + "-xfails.txt"
+    with open(xfail_file_name, "wt", encoding="utf-8") as f:
+        f.write("# Automatically generated, do not edit by hand or it will be overwritten.\n\n")
+
+        if error_tests:
+            f.write("# Errors:\n")
+            f.write("\n".join(error_tests) + "\n\n")
+
+        if fail_tests:
+            f.write("# Fails:\n")
+            f.write("\n".join(fail_tests) + "\n")
+
+
 def _build_module_issue(
     module: str,
     base_title: str,
     failures: Dict[str, Dict[str, Any]],
     previous_body: str | None = None,
-) -> str:
+) -> Optional[str]:
 
     summary = _module_summary(module)
 
     previous_failures = sorted(_extract_previous_task_nodeids(previous_body or ""))
     current_failures = set(failures.keys())
+
+    previous_nodeids = {nodeid for nodeid, _, _ in previous_failures}
+    issue_changed = any(nodeid not in previous_nodeids for nodeid in failures)
 
     tests_list = []
 
@@ -145,6 +180,8 @@ def _build_module_issue(
     # but are not currently failing anymore.
     for nodeid, passed, phase in previous_failures:
         if nodeid in current_failures:
+            # a previous test used to pass and now it fails
+            issue_changed = passed or issue_changed
             continue
 
         if nodeid not in _reports and not passed:
@@ -160,16 +197,22 @@ def _build_module_issue(
         if nodeid not in _reports:
             summary["success"] += 1
 
+        # `not passed` is True only if a previous test used to fail and now it passes
+        issue_changed = (not passed) or issue_changed
+
         tests_list.append(f"- [x] `{nodeid}`")
 
     # NB: at this point `failures` include tests that failed in the last run, and
     # tests that failed in the runs before and did not run now.
 
+    _write_xfail_file(module, failures)
+
+    if not issue_changed:
+        return None
+
     for nodeid in sorted(failures.keys()):
         phase = failures[nodeid]["phase"]
         tests_list.append(f"- [ ] `{nodeid}` ({phase})")
-
-    # TODO: dump failures.keys() into the module's xfail.py file.
 
     lines = [
         "⚠️ Automatically generated, do not edit by hand or it will be overwritten.",
@@ -302,11 +345,18 @@ def _find_repo():
     return f"{parts[0]}/{parts[1]}"
 
 
-def _group_failures_by_module(failures: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    grouped = defaultdict(dict)
+def _extract_module_name(nodeid: str) -> str:
+    return nodeid.split("::", 1)[0]
+
+
+def _group_by_module(reports: Mapping[str, Any],
+                              failures: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    grouped = { _extract_module_name(nodeid): {} for nodeid in reports }
+
     for nodeid, info in failures.items():
-        module = nodeid.split("::")[0]
+        module = _extract_module_name(nodeid)
         grouped[module][nodeid] = info
+
     return grouped
 
 
@@ -411,19 +461,24 @@ def _new_github_issue(repo, headers, title, body):
 
 
 def _update_issues_by_module(parent_issue, repo, headers):
-    for module, module_failures in _group_failures_by_module(_failures).items():
+    for module, module_failures in _group_by_module(_reports, _failures).items():
 
         base_title = f"Test failures on module {module}"
 
         try:
             existing_issue = _find_existing_issue(repo, base_title, _MODULE_TITLE_COUNTS_RE, parent_issue, headers)
 
-            title, body = _build_module_issue(
+            issue = _build_module_issue(
                 module,
                 base_title,
                 module_failures,
                 previous_body=existing_issue.get("body", "") if existing_issue else None,
             )
+
+            if issue is None:
+                continue
+
+            title, body = issue
 
             if existing_issue is not None:
                 _update_github_issue(repo, headers, existing_issue, title, body)

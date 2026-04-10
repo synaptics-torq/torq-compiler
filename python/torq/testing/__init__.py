@@ -13,7 +13,8 @@ pytest_plugins = [
     "torq.testing.onnx",
     "torq.testing.comparison",
     "torq.testing.reporting",
-    "torq.testing.issues"
+    "torq.testing.issues",
+    "torq.testing.xfail"
 ]
 
 # Add tensorflow plugin only if the right tensorflow version is available
@@ -27,4 +28,3 @@ try:
         print("Warning: obsolete tensorflow version")
 except metadata.PackageNotFoundError:
     print("Warning: tensorflow not available")
-
