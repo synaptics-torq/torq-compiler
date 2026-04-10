@@ -96,11 +96,25 @@ table tr:hover {
                 <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.875rem; font-weight: 500; margin-top: 0.25rem;">{% widthratio num_failed num_total 100 %}%</div>
                 {% endif %}
             </div>
+            <div style="padding: 1.5rem 1.5rem; background: linear-gradient(135deg, #e07c3e 0%, #c96a2e 100%); border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(224, 124, 62, 0.4);">
+                <div style="font-size: 2.5rem; font-weight: bold; color: white; margin-bottom: 0.25rem;">{{ num_error }}</div>
+                <div style="color: rgba(255, 255, 255, 0.95); font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Error</div>
+                {% if num_total %}
+                <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.875rem; font-weight: 500; margin-top: 0.25rem;">{% widthratio num_error num_total 100 %}%</div>
+                {% endif %}
+            </div>
             <div style="padding: 1.5rem 1.5rem; background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(250, 112, 154, 0.4);">
                 <div style="font-size: 2.5rem; font-weight: bold; color: white; margin-bottom: 0.25rem;">{{ num_skipped }}</div>
                 <div style="color: rgba(255, 255, 255, 0.95); font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Skipped</div>
                 {% if num_total %}
                 <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.875rem; font-weight: 500; margin-top: 0.25rem;">{% widthratio num_skipped num_total 100 %}%</div>
+                {% endif %}
+            </div>
+            <div style="padding: 1.5rem 1.5rem; background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%); border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(161, 140, 209, 0.4);">
+                <div style="font-size: 2.5rem; font-weight: bold; color: white; margin-bottom: 0.25rem;">{{ num_xfail }}</div>
+                <div style="color: rgba(255, 255, 255, 0.95); font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">XFail</div>
+                {% if num_total %}
+                <div style="color: rgba(255, 255, 255, 0.9); font-size: 0.875rem; font-weight: 500; margin-top: 0.25rem;">{% widthratio num_xfail num_total 100 %}%</div>
                 {% endif %}
             </div>
         </div>
@@ -109,12 +123,11 @@ table tr:hover {
     <div class="test-runs" style="margin-bottom: 2rem;">
         <h2 style="color: white;">Test Runs</h2>
         {% if perfetto_viewer_html %}
-            <!-- Perfetto Viewer with Session Details -->
             <div style="margin-bottom: 2rem; padding: 1.5rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);">
                 {{ perfetto_viewer_html|safe }}
             </div>
         {% else %}
-            <p>No profiling data available for this session.</p>
+            <p>No test data available for this session.</p>
         {% endif %}
     </div>
 

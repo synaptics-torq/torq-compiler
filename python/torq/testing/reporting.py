@@ -92,19 +92,27 @@ def _upload_zip_bundle(zip_path: str) -> Dict[str, Any]:
         headers['Authorization'] = f'Bearer {token}'
 
     # retry up to 3 times
+    last_error = None
     for retry_id in range(3):
         if retry_id > 0:
             wait_time = (2 ** retry_id) * random.uniform(0.5, 1.5)
             time.sleep(wait_time)
 
-        with open(zip_path, 'rb') as f:
-            files = {'file': (os.path.basename(zip_path), f, 'application/zip')}
-            response = requests.post(f"{server}/api/test-sessions/upload_zip/", files=files, headers=headers)
+        try:
+            with open(zip_path, 'rb') as f:
+                files = {'file': (os.path.basename(zip_path), f, 'application/zip')}
+                response = requests.post(f"{server}/api/test-sessions/upload_zip/", files=files, headers=headers, timeout=60)
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            print(f"Upload attempt {retry_id + 1}/3 failed: {e}")
+            continue
 
         if response.status_code in [200, 201]:
             return f"/test-sessions/{response.json()['id']}/"
+        last_error = f"{response.status_code} - {response.text}"
+        print(f"Upload attempt {retry_id + 1}/3 failed: {last_error}")
 
-    raise RuntimeError(f"Failed to upload zip bundle: {response.status_code} - {response.text}")
+    raise RuntimeError(f"Failed to upload zip bundle after 3 attempts: {last_error}")
 
 
 def _build_workflow_url() -> str:
@@ -316,6 +324,8 @@ def pytest_sessionfinish(session):
 
         profiles_root = os.path.join(temp_dir, 'profiles')
         os.makedirs(profiles_root, exist_ok=True)
+        failure_logs_root = os.path.join(temp_dir, 'failure_logs')
+        os.makedirs(failure_logs_root, exist_ok=True)
 
         for node_id, report_phases in reports.items():
 
@@ -330,12 +340,56 @@ def pytest_sessionfinish(session):
                     if outcome != 'passed':
                         break
 
+            # Distinguish xfail from regular skip: both have outcome="skipped"
+            # but xfail reports carry a wasxfail attribute.
+            # Also detect nxpass (not-expected pass, i.e. xfail test that unexpectedly passes):
+            # - strict=False: outcome="passed" with wasxfail set
+            # - strict=True: outcome="failed" with wasxfail set
+            if outcome == 'skipped':
+                for phase_report in report_phases.values():
+                    if getattr(phase_report, 'wasxfail', None):
+                        outcome = 'xfail'
+                        break
+            elif outcome == 'passed':
+                for phase_report in report_phases.values():
+                    if getattr(phase_report, 'wasxfail', None):
+                        outcome = 'nxpass'
+                        break
+
             test_run = {
                 'module': module,
                 'name': name,
                 'parameters': parameters,
                 'outcome': outcome,
             }
+
+            # Capture failure log and failed phase for failed tests
+            # Classification is done server-side in processing.py
+            if outcome == 'failed':
+                failure_parts = []
+                failed_phase = 'call'
+                for phase in ['setup', 'call', 'teardown']:
+                    if phase in report_phases and report_phases[phase].outcome == 'failed':
+                        failed_phase = phase
+                        report = report_phases[phase]
+                        if hasattr(report, 'longreprtext') and report.longreprtext:
+                            failure_parts.append(report.longreprtext)
+                        # Include captured stdout/stderr for full context
+                        for section_name, section_content in report.sections:
+                            if section_content.strip():
+                                failure_parts.append(f"--- {section_name} ---\n{section_content}")
+                        break
+                test_run['failed_phase'] = failed_phase
+                if failure_parts:
+                    log_text = '\n'.join(failure_parts)
+                    # Use the same node_id-based naming as the manifest to stay consistent
+                    # with how test runs are identified across the pipeline.
+                    safe_node_id = node_id.replace('/', '_').replace('::', '_').replace('[', '_').replace(']', '_').replace(' ', '_')
+                    log_filename = f"{safe_node_id}.log"
+                    log_path = os.path.join(failure_logs_root, log_filename)
+                    with open(log_path, 'w', encoding='utf-8') as lf:
+                        lf.write(log_text)
+                    test_run['failure_log_file'] = os.path.join('failure_logs', log_filename)
 
             if 'call' in report_phases:
 
@@ -367,10 +421,19 @@ def pytest_sessionfinish(session):
                     fpath = os.path.join(profiles_root, fname)
                     if os.path.isfile(fpath):
                         zf.write(fpath, arcname=os.path.join('profiles', fname))
+            if os.path.isdir(failure_logs_root):
+                for fname in os.listdir(failure_logs_root):
+                    fpath = os.path.join(failure_logs_root, fname)
+                    if os.path.isfile(fpath):
+                        zf.write(fpath, arcname=os.path.join('failure_logs', fname))
 
         # Upload bundle        
         print("Uploading results bundle...")
-        session_path = _upload_zip_bundle(zip_path) + "#batch-" + manifest['batch_name']
+        try:
+            session_path = _upload_zip_bundle(zip_path) + "#batch-" + manifest['batch_name']
+        except Exception as e:
+            print(f"ERROR: Failed to upload results bundle: {e}")
+            return
         print("Upload complete.")
 
         log_url = server_url + session_path

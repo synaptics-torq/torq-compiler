@@ -26,8 +26,8 @@ class TestRunBatchAdmin(admin.ModelAdmin):
 
 @admin.register(TestRun)
 class TestRunAdmin(admin.ModelAdmin):
-    list_display = ('id', 'test_case', 'test_run_batch', 'outcome')
-    list_filter = ('outcome',)
+    list_display = ('id', 'test_case', 'test_run_batch', 'outcome', 'failure_type')
+    list_filter = ('outcome', 'failure_type')
     search_fields = ('test_case__module', 'test_case__name', 'test_case__parameters')
 
 

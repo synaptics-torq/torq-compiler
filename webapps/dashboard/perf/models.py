@@ -76,6 +76,16 @@ class TestSession(models.Model):
         self._num_total_cache = value
 
     @property
+    def num_xfail(self):
+        if hasattr(self, "_num_xfail_cache"):
+            return self._num_xfail_cache
+        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.XFAIL).count()
+
+    @num_xfail.setter
+    def num_xfail(self, value):
+        self._num_xfail_cache = value
+
+    @property
     def git_commit_url(self):
         """Generate GitHub commit URL from workflow_url if available, otherwise use default repo."""
         if self.git_commit:
@@ -122,11 +132,16 @@ class TestRun(models.Model):
         PASS = 1, 'Pass',
         FAIL = 2, 'Fail'
         SKIP = 3, 'Skip'
+        ERROR = 4, 'Error'
+        XFAIL = 5, 'XFail'
+        NXPASS = 6, 'NXPass'
 
     test_run_batch = models.ForeignKey(TestRunBatch, on_delete=models.CASCADE)
     test_case = models.ForeignKey(TestCase, on_delete=models.CASCADE)
     profiling_data = models.FileField(blank=True, null=True)
     outcome = models.IntegerField(choices=Outcome.choices)
+    failure_log = models.FileField(blank=True, null=True)
+    failure_type = models.CharField(max_length=50, blank=True, null=True)
 
     def __str__(self):
         return f"TestRun: {self.test_case} in Session #{self.test_run_batch.test_session.id} - {self.get_outcome_display()}"

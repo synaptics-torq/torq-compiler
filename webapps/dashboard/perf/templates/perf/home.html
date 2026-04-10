@@ -62,6 +62,13 @@
                         <div class="stat-percentage">{% widthratio main_branch_session.num_skipped main_branch_session.num_total 100 %}%</div>
                         {% endif %}
                     </div>
+                    <div class="stat-card xfail">
+                        <div class="stat-value">{{ main_branch_session.num_xfail }}</div>
+                        <div class="stat-label">XFail</div>
+                        {% if main_branch_session.num_total %}
+                        <div class="stat-percentage">{% widthratio main_branch_session.num_xfail main_branch_session.num_total 100 %}%</div>
+                        {% endif %}
+                    </div>
                 </div>
             </div>
 
@@ -93,6 +100,7 @@
                         <th class="text-center">Passed</th>
                         <th class="text-center">Failed</th>
                         <th class="text-center">Skipped</th>
+                        <th class="text-center">XFail</th>
                         <th class="text-center">Pass Rate</th>
                     </tr>
                 </thead>
@@ -107,6 +115,7 @@
                         <td class="text-center stat-passed">{{ session.num_passed }}</td>
                         <td class="text-center stat-failed">{{ session.num_failed }}</td>
                         <td class="text-center stat-skipped">{{ session.num_skipped }}</td>
+                        <td class="text-center stat-xfail">{{ session.num_xfail }}</td>
                         <td class="text-center">
                             {% if session.num_total %}
                                 {% widthratio session.num_passed session.num_total 100 %}%
@@ -263,6 +272,11 @@
 
 .stat-card.skipped {
     background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    color: white;
+}
+
+.stat-card.xfail {
+    background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%);
     color: white;
 }
 

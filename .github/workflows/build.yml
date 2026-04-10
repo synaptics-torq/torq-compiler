@@ -242,9 +242,9 @@ jobs:
           extra_repo: ${{ vars.EXTRAS_REPO }}
           hf_token: ${{ secrets.HF_TOKEN }}
           test_data_cache_artifact: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('test-cache-{0}', matrix.chip_group)) || '' }} # upload to github only on main branch 
-          pytest_args: -m ci -n auto -v --performance-report=${{ github.workspace }}/host_test_performance_${{ matrix.chip_group }}.csv --torq-chips ${{ matrix.chip_group }} --tflite-layer-test-generate-full-model-only  --show-capture=no --tb=short
+          pytest_args: -m ci -n auto -v --performance-report=${{ github.workspace }}/host_test_performance_${{ matrix.chip_group }}.csv --torq-chips ${{ matrix.chip_group }} --tflite-layer-test-generate-full-model-only  --show-capture=no --tb=short ${{ (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'enable-cmodel-profiling')) && format('--torq-compile-time-profiling-output-dir={0}/cmodel_compile_profiling_logs_{1}', github.workspace, matrix.chip_group) || '' }}
           s3_artifact_bucket: ${{ vars.ARTIFACT_BUCKET }}
-          #torq_perf_server: ${{ vars.TORQ_PERF_SERVER }}
+          torq_perf_server: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
           #torq_perf_server_token: ${{ secrets.TORQ_PERF_SERVER_TOKEN }}          
           batch_name: cmodel-${{ matrix.chip_group }}
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
@@ -256,6 +256,14 @@ jobs:
         with:
           name: cmodel_test_performance_${{ matrix.chip_group }}
           path: ${{ github.workspace }}/host_test_performance_${{ matrix.chip_group }}.csv
+          retention-days: 60
+
+      - name: Upload compile time profiling logs
+        if: ${{ vars.DISABLE_TESTS != 'true' && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'enable-cmodel-profiling')) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cmodel_compile_profiling_logs_${{ matrix.chip_group }}
+          path: ${{ github.workspace }}/cmodel_compile_profiling_logs_${{ matrix.chip_group }}
           retention-days: 60
 
   test_aws_fpga:    

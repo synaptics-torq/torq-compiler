@@ -46,7 +46,8 @@ def home(request):
         num_total=Count('testrunbatch__testrun'),
         num_passed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.PASS)),
         num_failed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.FAIL)),
-        num_skipped=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP))
+        num_skipped=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP)),
+        num_xfail=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL))
     ).only('id', 'timestamp', 'git_branch', 'git_commit').order_by('-timestamp').first()
     
     # Organize test runs by outcome for main branch
@@ -100,7 +101,9 @@ def home(request):
             num_total=Count('testrunbatch__testrun'),
             num_passed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.PASS)),
             num_failed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.FAIL)),
-            num_skipped=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP))
+            num_skipped=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP)),
+            num_error=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.ERROR)),
+            num_xfail=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL))
         ).only('id', 'timestamp', 'git_branch', 'git_commit').order_by('-timestamp').first()
         
         if session:
@@ -152,7 +155,7 @@ def test_session(request, session_id):
         Prefetch(
             'testrunbatch_set__testrun_set',
             queryset=TestRun.objects.select_related('test_case').only(
-                'id', 'outcome', 'profiling_data', 'test_run_batch_id', 'test_case_id',
+                'id', 'outcome', 'profiling_data', 'failure_log', 'failure_type', 'test_run_batch_id', 'test_case_id',
                 'test_case__name', 'test_case__parameters', 'test_case__module'
             )
         ),
@@ -168,12 +171,16 @@ def test_session(request, session_id):
     test_names_by_pb = {}  # Map pb file path to test case name for display
     test_run_ids_by_pb = {}  # Map pb file path to test_run.id for download URLs
     test_statuses_by_pb = {}  # Map pb file path to test status (Pass/Fail/Skip)
+    non_profiled_tests = []  # Tests without .pb profiling data
     
     # Organize all test runs by outcome
     all_test_runs = []
     passed_tests = []
     failed_tests = []
+    error_tests = []
     skipped_tests = []
+    xfail_tests = []
+    nxpass_tests = []
     
     # Cache outcome display strings to avoid repeated method calls (performance optimization)
     outcome_display_map = {choice[0]: choice[1] for choice in TestRun.Outcome.choices}
@@ -193,7 +200,10 @@ def test_session(request, session_id):
                 'outcome': outcome_display,
                 'outcome_class': test_run.outcome,
                 'has_profiling': bool(test_run.profiling_data),
-                'batch_name': batch_name
+                'batch_name': batch_name,
+                'has_failure_log': bool(test_run.failure_log) if test_run.outcome in (TestRun.Outcome.FAIL, TestRun.Outcome.ERROR) else False,
+                'failure_log_url': f'/download-failure-log/{test_run.id}/' if test_run.outcome in (TestRun.Outcome.FAIL, TestRun.Outcome.ERROR) and test_run.failure_log else None,
+                'failure_type': test_run.failure_type if test_run.outcome in (TestRun.Outcome.FAIL, TestRun.Outcome.ERROR) else None,
             }
             all_test_runs.append(test_info)
             
@@ -202,8 +212,14 @@ def test_session(request, session_id):
                 passed_tests.append(test_info)
             elif test_run.outcome == TestRun.Outcome.FAIL:
                 failed_tests.append(test_info)
+            elif test_run.outcome == TestRun.Outcome.ERROR:
+                error_tests.append(test_info)
             elif test_run.outcome == TestRun.Outcome.SKIP:
                 skipped_tests.append(test_info)
+            elif test_run.outcome == TestRun.Outcome.XFAIL:
+                xfail_tests.append(test_info)
+            elif test_run.outcome == TestRun.Outcome.NXPASS:
+                nxpass_tests.append(test_info)
             
             # Handle profiling data for Perfetto viewer
             if test_run.profiling_data:
@@ -219,8 +235,12 @@ def test_session(request, session_id):
                 # Store test status (using cached outcome display)
                 test_statuses_by_pb[pb_path] = {
                     'outcome': outcome_display,
-                    'outcome_value': test_run.outcome
+                    'outcome_value': test_run.outcome,
+                    'failure_log_url': f'/download-failure-log/{test_run.id}/' if test_run.outcome in (TestRun.Outcome.FAIL, TestRun.Outcome.ERROR) and test_run.failure_log else None,
+                    'failure_type': test_run.failure_type if test_run.outcome in (TestRun.Outcome.FAIL, TestRun.Outcome.ERROR) else None,
                 }
+            else:
+                non_profiled_tests.append(test_info)
     
     # Fetch metrics from database for all test runs in this session
     db_summaries = {}
@@ -272,7 +292,7 @@ def test_session(request, session_id):
     
     # Generate one combined HTML for all traces in the session
     perfetto_viewer_html = None
-    if pb_files:
+    if pb_files or non_profiled_tests:
         try:
             # Pass database summaries, test names, test_run_ids, test statuses, base_url, and session info for comparison
             perfetto_viewer_html = generate_perfetto_html(
@@ -284,7 +304,8 @@ def test_session(request, session_id):
                 base_url=base_url,
                 current_session_id=session_id,
                 available_sessions=available_sessions,
-                default_comparison_session_id=default_comparison_session_id
+                default_comparison_session_id=default_comparison_session_id,
+                non_profiled_tests=non_profiled_tests
             )
         except Exception as e:
             print(f'ERROR: Could not generate Perfetto viewer HTML: {e}', flush=True)
@@ -298,11 +319,17 @@ def test_session(request, session_id):
         'all_test_runs': all_test_runs,
         'passed_tests': passed_tests,
         'failed_tests': failed_tests,
+        'error_tests': error_tests,
         'skipped_tests': skipped_tests,
+        'xfail_tests': xfail_tests,
+        'nxpass_tests': nxpass_tests,
         'num_total': len(all_test_runs),
         'num_passed': len(passed_tests),
         'num_failed': len(failed_tests),
-        'num_skipped': len(skipped_tests)
+        'num_error': len(error_tests),
+        'num_skipped': len(skipped_tests),
+        'num_xfail': len(xfail_tests),
+        'num_nxpass': len(nxpass_tests),
     })
 
 
@@ -320,6 +347,21 @@ def download_trace(request, test_run_id):
     
     response = FileResponse(test_run.profiling_data.open('rb'), content_type='application/octet-stream')
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
+def download_failure_log(request, test_run_id):
+    """Download a failure log file for a specific test run."""
+    test_run = get_object_or_404(TestRun.objects.select_related('test_case'), id=test_run_id)
+
+    if not test_run.failure_log:
+        raise Http404("No failure log available for this test run")
+
+    test_case = test_run.test_case
+    filename = f"{test_case.name}_{test_case.parameters}.log".replace('[', '_').replace(']', '_').replace(' ', '_')
+
+    response = FileResponse(test_run.failure_log.open('rb'), content_type='text/plain')
+    response['Content-Disposition'] = f'inline; filename="{filename}"'
     return response
 
 
@@ -356,6 +398,14 @@ def get_session_metrics(request, session_id):
                 if test_metrics:
                     metrics_data[test_key] = {
                         'metrics': test_metrics,
+                        'test_run_id': test_run.id,
+                        'has_trace': bool(test_run.profiling_data),
+                        'outcome': test_run.get_outcome_display(),
+                        'outcome_code': test_run.outcome
+                    }
+                else:
+                    metrics_data[test_key] = {
+                        'metrics': {},
                         'test_run_id': test_run.id,
                         'has_trace': bool(test_run.profiling_data),
                         'outcome': test_run.get_outcome_display(),

@@ -630,6 +630,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     # Save compile time profiling data if requested
     if compile_time_profiling_output_dir:
+        record_property = request.getfixturevalue("record_property")
         compile_time_profiling_output_dir = Path(compile_time_profiling_output_dir)
         compile_time_profiling_output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -653,6 +654,8 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
             dest_pb = compile_time_profiling_output_dir / f'{request.node.name}_compile{suffix}.pb'
             shutil.move(str(pb_file), str(dest_pb))
             print(f"✓ Generated Perfetto trace: {dest_pb}")
+            if idx == 0:
+                record_property("profiling_output", str(dest_pb))
         
         # Remove temp directory
         if temp_pb_dir.exists():

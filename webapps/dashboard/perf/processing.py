@@ -18,6 +18,52 @@ from perf.models import TestCase, TestSession, TestRun, TestRunBatch, Metric, Me
 from perf.perfetto_report_generator import generate_html as generate_perfetto_html
 from perf.perfetto_report_generator import extract_perfetto_summary
 
+
+def _classify_failure(failed_phase, failure_log):
+    """Classify a test failure based on the phase and error content.
+
+    Returns a short failure type string:
+      - 'Compilation Error'  - compiler crashed or returned non-zero during setup
+      - 'Compilation Timeout' - compiler timed out
+      - 'Runtime Error'      - runtime binary crashed
+      - 'Runtime Timeout'    - runtime timed out
+      - 'Output Mismatch'    - numeric comparison failure
+      - 'Assertion Error'    - other assertion failures in the test body
+      - 'Error'              - anything else
+    """
+    if not failure_log:
+        if failed_phase == 'setup':
+            return 'Compilation Error'
+        return 'Error'
+
+    log = failure_log
+
+    # Timeout detection (independent of phase)
+    if 'TimeoutExpired' in log or 'timed out' in log.lower():
+        if failed_phase == 'setup':
+            return 'Compilation Timeout'
+        return 'Runtime Timeout'
+
+    # Setup phase failures are compilation errors
+    if failed_phase == 'setup':
+        return 'Compilation Error'
+
+    # Call phase: classify from error content
+    # Output mismatch patterns from comparison.py
+    if 'Number of differences:' in log or 'Nans differ' in log or 'Output is 0 always' in log or 'Number of outputs differ:' in log:
+        return 'Output Mismatch'
+
+    # Runtime crash (subprocess failure in the call phase, not an assertion)
+    if 'CalledProcessError' in log and 'AssertionError' not in log:
+        return 'Runtime Error'
+
+    # Generic assertion
+    if 'AssertionError' in log:
+        return 'Assertion Error'
+
+    return 'Error'
+
+
 @spool
 def process_uploaded_zip(args):
     """
@@ -92,6 +138,9 @@ def process_uploaded_zip(args):
                 'passed': TestRun.Outcome.PASS,
                 'failed': TestRun.Outcome.FAIL,
                 'skipped': TestRun.Outcome.SKIP,
+                'error': TestRun.Outcome.ERROR,
+                'xfail': TestRun.Outcome.XFAIL,
+                'nxpass': TestRun.Outcome.NXPASS,
             }
 
             test_runs = manifest.get('test_runs', [])
@@ -126,6 +175,43 @@ def process_uploaded_zip(args):
                         test_case=test_case,
                         outcome=outcome_map[outcome],
                     )
+
+                    # Handle failure log file and server-side classification for failed tests
+                    failure_log_rel = item.get('failure_log_file')  # relative path inside zip (optional)
+                    failed_phase = item.get('failed_phase', 'call')
+                    if outcome in ('failed', 'error') and failure_log_rel:
+                        failure_log_path = os.path.join(os.path.dirname(manifest_path), failure_log_rel)
+                        if os.path.exists(failure_log_path):
+                            # Read log content for classification
+                            try:
+                                with open(failure_log_path, 'r', encoding='utf-8') as fl:
+                                    log_content = fl.read()
+                            except Exception as e:
+                                print(f'Warning: Could not read failure log {failure_log_rel}: {e}')
+                                log_content = None
+
+                            # Save the failure log file to storage (same pattern as profiling_data)
+                            try:
+                                with open(failure_log_path, 'rb') as fl:
+                                    test_run.failure_log.save("failure.log", File(fl), save=False)
+                            except Exception as e:
+                                print(f'Warning: Could not upload failure log {failure_log_rel}: {e}')
+
+                            # Classify failure type server-side
+                            if log_content:
+                                test_run.failure_type = _classify_failure(failed_phase, log_content)
+                            else:
+                                test_run.failure_type = _classify_failure(failed_phase, None)
+                        else:
+                            test_run.failure_type = _classify_failure(failed_phase, None)
+                    elif outcome in ('failed', 'error'):
+                        test_run.failure_type = _classify_failure(failed_phase, None)
+
+                    # Determine final outcome: Output Mismatch stays as FAIL, everything else becomes ERROR
+                    if test_run.failure_type and test_run.failure_type != 'Output Mismatch':
+                        test_run.outcome = TestRun.Outcome.ERROR
+
+                    test_run.save()
 
                     if profiling_rel:
                         profiling_path = os.path.join(os.path.dirname(manifest_path), profiling_rel)

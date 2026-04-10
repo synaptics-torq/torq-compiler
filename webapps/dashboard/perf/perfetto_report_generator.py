@@ -7,6 +7,7 @@ Each model name is displayed with a clickable link that opens the trace in Perfe
 import re
 import base64
 import math
+import html as html_module
 from pathlib import Path
 
 
@@ -212,7 +213,7 @@ def get_pb_files():
     return pb_files
 
 
-def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=None, test_statuses=None, base_url=None, current_session_id=None, available_sessions=None, default_comparison_session_id=None):
+def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=None, test_statuses=None, base_url=None, current_session_id=None, available_sessions=None, default_comparison_session_id=None, non_profiled_tests=None):
     """
     Generate HTML content with all trace files
     
@@ -228,6 +229,8 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         current_session_id: Optional current session ID for comparison feature
         available_sessions: Optional list of available sessions for comparison dropdown
         default_comparison_session_id: Optional session ID to load by default for comparison
+        non_profiled_tests: Optional list of dicts with keys: name, outcome, outcome_class, batch_name
+                           These are tests without .pb profiling data that should appear in the same list
     """
     
     # Collect all model types for filter buttons
@@ -614,30 +617,44 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             outcome = status_info['outcome']
             outcome_value = status_info['outcome_value']
             
-            # Map outcome values: 1=Pass, 2=Fail, 3=Skip
+            # Map outcome values: 1=Pass, 2=Fail, 3=Skip, 4=Error
             if outcome_value == 1:
                 badge_class = 'status-pass'
             elif outcome_value == 2:
                 badge_class = 'status-fail'
             elif outcome_value == 3:
                 badge_class = 'status-skip'
+            elif outcome_value == 4:
+                badge_class = 'status-error'
             else:
                 badge_class = 'status-unknown'
             
             status_badge = f'<span class="status-badge {badge_class}">{outcome}</span>'
+
+            # Add failure type badge for failed/error tests
+            failure_type = status_info.get('failure_type')
+            if failure_type and outcome_value in (2, 4):
+                status_badge += f' <span class="status-badge status-failure-type">{html_module.escape(failure_type)}</span>'
         
         # Only include data-encoded if we have it (backward compatibility for standalone HTML)
         data_encoded_attr = f'data-encoded="{encoded_data}"' if encoded_data else ''
         
         # Create status filter data attribute
         status_filter_value = 'unknown'
+        failure_type_attr = ''
         if test_statuses and pb_file_str in test_statuses:
             outcome_val = test_statuses[pb_file_str]['outcome_value']
             if outcome_val == 1: status_filter_value = 'pass'
             elif outcome_val == 2: status_filter_value = 'fail'
             elif outcome_val == 3: status_filter_value = 'skip'
+            elif outcome_val == 4: status_filter_value = 'error'
+            elif outcome_val == 5: status_filter_value = 'xfail'
+            elif outcome_val == 6: status_filter_value = 'nxpass'
+            ft = test_statuses[pb_file_str].get('failure_type') or ''
+            if ft:
+                failure_type_attr = f'data-failure-type="{html_module.escape(ft)}"'
         
-        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" {data_encoded_attr} data-type="{model_type}" data-status="{status_filter_value}" data-original-index="{i}" data-test-name="{model_name}">
+        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" {data_encoded_attr} data-type="{model_type}" data-status="{status_filter_value}" {failure_type_attr} data-original-index="{i}" data-test-name="{model_name}">
             <div class="trace-header">
                 <div class="trace-name-wrapper">
                     <span class="expand-icon">▶</span>
@@ -653,10 +670,95 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 </div>
                 </div>
             </div>
-            {overview_html}
-        </div>'''
+            {overview_html}'''
+
+        # Add failure log container for failed profiled tests (loaded on-demand via URL)
+        if test_statuses and pb_file_str in test_statuses:
+            failure_log_url = test_statuses[pb_file_str].get('failure_log_url')
+            if failure_log_url:
+                trace_item += f'''
+            <div class="failure-log" style="display:none;" data-failure-log-url="{html_module.escape(failure_log_url)}">
+                <div class="failure-log-loading">Loading failure log...</div>
+            </div>'''
+
+        trace_item += '\n        </div>'
         trace_items.append(trace_item)
     
+    # Add non-profiled tests to the same list
+    if non_profiled_tests:
+        for j, test in enumerate(non_profiled_tests):
+            idx = len(pb_files) + j
+            test_name = f"{test['module']}::{test['name']}[{test['parameters']}]"
+            model_type = extract_model_type(test_name, '')
+            model_types.add(model_type)
+            type_display = model_type.upper() if model_type != 'other' else 'Other'
+            type_badge = f'<span class="type-badge type-badge-{model_type}">{type_display}</span>'
+
+            outcome_value = test['outcome_class']
+            outcome_display = test['outcome']
+            if outcome_value == 1:
+                badge_class = 'status-pass'
+                status_filter_value = 'pass'
+            elif outcome_value == 2:
+                badge_class = 'status-fail'
+                status_filter_value = 'fail'
+            elif outcome_value == 3:
+                badge_class = 'status-skip'
+                status_filter_value = 'skip'
+            elif outcome_value == 4:
+                badge_class = 'status-error'
+                status_filter_value = 'error'
+            elif outcome_value == 5:
+                badge_class = 'status-xfail'
+                status_filter_value = 'xfail'
+            elif outcome_value == 6:
+                badge_class = 'status-nxpass'
+                status_filter_value = 'nxpass'
+            else:
+                badge_class = 'status-unknown'
+                status_filter_value = 'unknown'
+            status_badge = f'<span class="status-badge {badge_class}">{outcome_display}</span>'
+
+            # Add failure type badge for failed/error non-profiled tests
+            failure_type = test.get('failure_type')
+            if failure_type and outcome_value in (2, 4):
+                status_badge += f' <span class="status-badge status-failure-type">{html_module.escape(failure_type)}</span>'
+
+            # Get failure log URL before building the trace item
+            failure_log_url = test.get('failure_log_url')
+
+            # Add onclick for failed tests with failure logs
+            onclick_attr = 'onclick="toggleExpand(this)"' if failure_log_url else ''
+            expand_icon = '<span class="expand-icon">▶</span>' if failure_log_url else ''
+
+            ft_attr = f'data-failure-type="{html_module.escape(failure_type)}"' if failure_type else ''
+
+            trace_item = f'''        <div class="trace-item" {onclick_attr} data-type="{model_type}" data-status="{status_filter_value}" {ft_attr} data-original-index="{idx}" data-test-name="{test_name}">
+            <div class="trace-header">
+                <div class="trace-name-wrapper">
+                    {expand_icon}
+                    <div class="trace-name">{test_name}</div>
+                </div>
+                <div class="trace-badges-and-summary">
+                    <div class="trace-badges">
+                        {type_badge}
+                        {status_badge}
+                    </div>
+                    <div class="trace-summary">
+                    </div>
+                </div>
+            </div>'''
+
+            # Add failure log container for failed non-profiled tests (loaded on-demand)
+            if failure_log_url:
+                trace_item += f'''
+            <div class="failure-log" style="display:none;" data-failure-log-url="{html_module.escape(failure_log_url)}">
+                <div class="failure-log-loading">Loading failure log...</div>
+            </div>'''
+
+            trace_item += '\n        </div>'
+            trace_items.append(trace_item)
+
     traces_html = '\n\n'.join(trace_items)
     
     # Generate filter buttons
@@ -671,11 +773,15 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
     status_filter_buttons.append('<button class="filter-btn active" onclick="filterByStatus(\'all\')" data-status-filter="all">All</button>')
     status_filter_buttons.append('<button class="filter-btn" onclick="filterByStatus(\'pass\')" data-status-filter="pass">Pass</button>')
     status_filter_buttons.append('<button class="filter-btn" onclick="filterByStatus(\'fail\')" data-status-filter="fail">Fail</button>')
+    status_filter_buttons.append('<button class="filter-btn" onclick="filterByStatus(\'error\')" data-status-filter="error">Error</button>')
     status_filter_buttons.append('<button class="filter-btn" onclick="filterByStatus(\'skip\')" data-status-filter="skip">Skip</button>')
+    status_filter_buttons.append('<button class="filter-btn" onclick="filterByStatus(\'xfail\')" data-status-filter="xfail">XFail</button>')
+    status_filter_buttons.append('<button class="filter-btn" onclick="filterByStatus(\'nxpass\')" data-status-filter="nxpass">NXPass</button>')
     
     # Comparison specific filters (initially hidden)
     status_filter_buttons.append('<button id="btn-pass-fail" class="filter-btn comparison-filter" onclick="filterByStatus(\'pass_fail\')" data-status-filter="pass_fail" style="display:none; border-color: #f56565; color: #c53030;">Pass → Fail</button>')
     status_filter_buttons.append('<button id="btn-fail-pass" class="filter-btn comparison-filter" onclick="filterByStatus(\'fail_pass\')" data-status-filter="fail_pass" style="display:none; border-color: #48bb78; color: #2f855a;">Fail → Pass</button>')
+    status_filter_buttons.append('<button id="btn-xfail-pass" class="filter-btn comparison-filter" onclick="filterByStatus(\'xfail_pass\')" data-status-filter="xfail_pass" style="display:none; border-color: #48bb78; color: #2f855a;">XFail → Pass</button>')
     
     filters_html = '\n                '.join(filter_buttons)
     status_filters_html = '\n                '.join(status_filter_buttons)
@@ -973,7 +1079,42 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         .trace-item.hidden {{
             display: none;
         }}
-        
+
+        .failure-log {{
+            padding: 0 24px 16px;
+        }}
+
+        .failure-log-loading {{
+            color: #a0aec0;
+            font-style: italic;
+            padding: 8px 0;
+        }}
+
+        .failure-log-pre {{
+            background: #1a1a2e;
+            color: #e2e8f0;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+            margin: 0;
+        }}
+
+        .failure-log-copy-btn {{
+            background: #e53e3e;
+            color: white;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            margin-bottom: 8px;
+        }}
+
         .trace-header {{
             padding: 20px 24px;
             display: flex;
@@ -1063,6 +1204,12 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             color: white;
             box-shadow: 0 2px 4px rgba(220, 53, 69, 0.3);
         }}
+
+        .status-error {{
+            background: linear-gradient(135deg, #e07c3e 0%, #c96a2e 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(224, 124, 62, 0.3);
+        }}
         
         .status-skip {{
             background: linear-gradient(135deg, #ffc107 0%, #e0a800 100%);
@@ -1070,10 +1217,29 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             box-shadow: 0 2px 4px rgba(255, 193, 7, 0.3);
         }}
         
+        .status-xfail {{
+            background: linear-gradient(135deg, #a18cd1 0%, #8e7cc3 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(161, 140, 209, 0.3);
+        }}
+        
+        .status-nxpass {{
+            background: linear-gradient(135deg, #17a2b8 0%, #138496 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(23, 162, 184, 0.3);
+        }}
+        
         .status-unknown {{
             background: linear-gradient(135deg, #6c757d 0%, #5a6268 100%);
             color: white;
             box-shadow: 0 2px 4px rgba(108, 117, 125, 0.3);
+        }}
+
+        .status-failure-type {{
+            background: linear-gradient(135deg, #e07c3e 0%, #c96a2e 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(224, 124, 62, 0.3);
+            font-size: 0.7rem;
         }}
         
         .type-badge-mlir {{
@@ -1528,11 +1694,57 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             allItems.forEach(item => {{
                 if (item !== element && item.classList.contains('expanded')) {{
                     item.classList.remove('expanded');
+                    const failLog = item.querySelector('.failure-log');
+                    if (failLog) failLog.style.display = 'none';
                 }}
             }});
             
             // Toggle this item
             element.classList.toggle('expanded');
+            const failLog = element.querySelector('.failure-log');
+            if (failLog) {{
+                const isExpanding = element.classList.contains('expanded');
+                failLog.style.display = isExpanding ? 'block' : 'none';
+
+                // Lazy-load failure log content from server on first expand
+                if (isExpanding && failLog.dataset.failureLogUrl && !failLog.dataset.loaded) {{
+                    failLog.dataset.loaded = 'true';
+                    fetch(failLog.dataset.failureLogUrl)
+                        .then(resp => {{
+                            if (!resp.ok) throw new Error('Failed to load');
+                            return resp.text();
+                        }})
+                        .then(text => {{
+                            failLog.innerHTML = '<button onclick="copyFailureLog(this, event)" class="failure-log-copy-btn">Copy</button>' +
+                                '<pre class="failure-log-pre">' + text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
+                        }})
+                        .catch(() => {{
+                            failLog.innerHTML = '<pre class="failure-log-pre" style="color:#999;">Could not load failure log.</pre>';
+                        }});
+                }}
+            }}
+        }}
+
+        function copyFailureLog(btn, event) {{
+            event.stopPropagation();
+            const pre = btn.parentElement.querySelector('pre');
+            navigator.clipboard.writeText(pre.textContent).then(() => {{
+                btn.textContent = 'Copied!';
+                btn.style.background = '#38a169';
+                setTimeout(() => {{ btn.textContent = 'Copy'; btn.style.background = '#e53e3e'; }}, 2000);
+            }}).catch(() => {{
+                // Fallback for non-HTTPS contexts
+                const range = document.createRange();
+                range.selectNodeContents(pre);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                document.execCommand('copy');
+                sel.removeAllRanges();
+                btn.textContent = 'Copied!';
+                btn.style.background = '#38a169';
+                setTimeout(() => {{ btn.textContent = 'Copy'; btn.style.background = '#e53e3e'; }}, 2000);
+            }});
         }}
         
         function openTrace(base64Data, fileName) {{
@@ -1813,7 +2025,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 let matchesStatus = false;
                 if (currentStatusFilter === 'all') {{
                     matchesStatus = true;
-                }} else if (currentStatusFilter === 'pass_fail' || currentStatusFilter === 'fail_pass') {{
+                }} else if (currentStatusFilter === 'pass_fail' || currentStatusFilter === 'fail_pass' || currentStatusFilter === 'xfail_pass') {{
                      const compStatus = item.getAttribute('data-comparison-status');
                      matchesStatus = (compStatus === currentStatusFilter);
                 }} else {{
@@ -2008,6 +2220,8 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 
                 const normalize = (s) => {{
                     const sl = s.toLowerCase();
+                    if (sl === 'xfail') return 'xfail';
+                    if (sl === 'nxpass') return 'nxpass';
                     if (sl.includes('pass')) return 'pass';
                     if (sl.includes('fail')) return 'fail';
                     if (sl.includes('skip')) return 'skip';
@@ -2020,6 +2234,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 let compStatus = 'same';
                 if (prevNorm === 'pass' && currNorm === 'fail') compStatus = 'pass_fail';
                 else if (prevNorm === 'fail' && currNorm === 'pass') compStatus = 'fail_pass';
+                else if (prevNorm === 'xfail' && (currNorm === 'pass' || currNorm === 'nxpass')) compStatus = 'xfail_pass';
                 else if (prevNorm !== currNorm) compStatus = 'changed';
                 
                 item.setAttribute('data-comparison-status', compStatus);
