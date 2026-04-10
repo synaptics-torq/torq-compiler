@@ -2538,7 +2538,7 @@ Value makeRescale16(
     int8_t weight_data = 1;
     int32_t bias_data = -inputZp;
     std::vector<int8_t> weights = {weight_data};
-    const std::vector<int32_t> bias = {bias_data, /*isSigned=*/true};
+    const std::vector<int32_t> bias = {bias_data};
     const std::vector<int32_t> scale = {scaleFactor};
 
     // make the rescale
