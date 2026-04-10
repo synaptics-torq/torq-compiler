@@ -416,12 +416,10 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
             // Clone original chain ops level-by-level into the new shell loops.
             for (auto [level, newCI] : llvm::zip_equal(llvm::reverse(loopLevels), newCloneLoops)) {
                 Block *origBody = &level.getLoopRegions()[0]->front();
+                Block &newBody = newCI.getLoopRegions()[0]->front();
 
                 OpBuilder::InsertionGuard gLevel(rewriter);
-                if (auto forallOp = dyn_cast<scf::ForallOp>(newCI.getOperation()))
-                    rewriter.setInsertionPoint(forallOp.getTerminator());
-                else
-                    rewriter.setInsertionPointToEnd(&newCI.getLoopRegions()[0]->front());
+                rewriter.setInsertionPointToStart(&newBody);
 
                 for (auto *chainOp : orderedChain) {
                     if (chainOp->getBlock() != origBody)
