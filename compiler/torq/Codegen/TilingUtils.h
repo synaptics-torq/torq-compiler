@@ -14,4 +14,9 @@ void applyTiledResults(
 // Earase `op` and all it's users recursively.
 void eraseForward(RewriterBase &rewriter, Operation *op);
 
+// Computes `val` in the first iteration of the surrounding loops.
+// `computedValues` is used to cache intermediate results.
+llvm::FailureOr<Attribute>
+computeValueAtFirstIteration(Value val, llvm::DenseMap<Value, Attribute> &computedValues);
+
 } // namespace mlir::syna::torq

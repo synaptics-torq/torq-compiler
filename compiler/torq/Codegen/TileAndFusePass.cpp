@@ -12,6 +12,7 @@
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
+#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -56,8 +57,9 @@
 
 #include <cassert>
 #include <cstdint>
-#include <mlir/Analysis/SliceAnalysis.h>
+#include <iomanip>
 #include <optional>
+#include <sstream>
 #include <tuple>
 #include <utility>
 
@@ -159,93 +161,27 @@ llvm::SmallSetVector<int64_t, 4> getTilingIterDomainsOrder(TilingInterface tilin
     return tilingIterDomsOrder;
 }
 
-// Compute the result of `op` fully composed with preceding AffineApplyOps, and
-// everything else set to 0.
-// `op` must be one of AffineMinOp/AffineMaxOp.
-llvm::FailureOr<int64_t> computeMinMaxAtZero(Operation *op) {
-    bool isMin;
-    AffineMap map;
-    SmallVector<Value> operands;
-    if (auto minOp = dyn_cast<affine::AffineMinOp>(op)) {
-        isMin = true;
-        map = minOp.getMap();
-        operands = minOp.getOperands();
-    }
-    else {
-        auto maxOp = cast<affine::AffineMaxOp>(op);
-        isMin = false;
-        map = maxOp.getMap();
-        operands = maxOp.getOperands();
-    }
-
-    affine::fullyComposeAffineMapAndOperands(&map, &operands);
-    SmallVector<Attribute> zeros(
-        map.getNumDims(), cast<Attribute>(getAsIndexOpFoldResult(op->getContext(), 0))
-    );
-    SmallVector<Attribute> results;
-    if (failed(map.constantFold(zeros, results)))
-        return llvm::failure();
-
-    Attribute *result;
-    if (isMin) {
-        result = llvm::min_element(results, [](mlir::Attribute a, mlir::Attribute b) {
-            return cast<mlir::IntegerAttr>(a).getInt() < cast<mlir::IntegerAttr>(b).getInt();
-        });
-    }
-    else {
-        result = llvm::max_element(results, [](mlir::Attribute a, mlir::Attribute b) {
-            return cast<mlir::IntegerAttr>(a).getInt() < cast<mlir::IntegerAttr>(b).getInt();
-        });
-    }
-    if (!result)
-        return llvm::failure();
-
-    return cast<mlir::IntegerAttr>(*result).getInt();
-}
-
-// Compute the result of `op` fully composed with preceding AffineApplyOps, and
-// everything else set to 0.
-// `op` must be one of AffineMinOp/AffineMaxOp.
-llvm::FailureOr<int64_t> computeIntAtZero(OpFoldResult sizeFoldResult) {
+// Try to compute the int value of sizeFoldResult. If the value is not a
+// constant, try to evaluate it at the first iteration of the surrounding loops.
+llvm::FailureOr<int64_t> computeSizeAtFirstIteration(OpFoldResult sizeFoldResult) {
     if (std::optional<int64_t> constSize = getConstantIntValue(sizeFoldResult))
         return *constSize;
 
     assert(isa<Value>(sizeFoldResult) && "expected a Value");
-
     Value sizeValue = cast<Value>(sizeFoldResult);
 
-    return llvm::TypeSwitch<Operation *, FailureOr<int64_t>>(sizeValue.getDefiningOp())
-        .Case<affine::AffineMinOp, affine::AffineMaxOp>([&](auto minMaxOp) {
-            // Evaluate the size at 0,0,...
-            // This is a bit of a hack, what we really want is a tight upper bound
-            // of size.
-            return computeMinMaxAtZero(minMaxOp);
-        })
-        .Case<affine::AffineApplyOp>([&](auto applyOp) -> FailureOr<int64_t> {
-            // Evaluate the size at 0,0,...
-            // This is a bit of a hack, what we really want is a tight upper bound
-            // of size.
-            AffineMap map = applyOp.getMap();
-            SmallVector<Value> operands = applyOp.getOperands();
+    llvm::DenseMap<Value, Attribute> computedValuse;
+    auto result = computeValueAtFirstIteration(sizeValue, computedValuse);
+    if (failed(result)) {
+        sizeValue.getDefiningOp()->emitWarning(
+            "can't compute producers tile size (unexpected operation type; "
+            "expected affine.min/max/apply)"
+        );
+        LLVM_DEBUG(assert(false && "unexpected operation"));
+        return llvm::failure();
+    }
 
-            affine::fullyComposeAffineMapAndOperands(&map, &operands);
-            SmallVector<Attribute> zeros(
-                map.getNumDims(), cast<Attribute>(getAsIndexOpFoldResult(applyOp->getContext(), 0))
-            );
-            SmallVector<Attribute> results;
-            if (failed(map.constantFold(zeros, results)))
-                return llvm::failure();
-
-            assert(results.size() == 1 && "AffineApplyOp should have exactly one reault");
-
-            return cast<mlir::IntegerAttr>(results[0]).getInt();
-        })
-        .Default([](Operation *op) {
-            op->emitWarning("can't compute producers tile size (unexpected operation type; "
-                            "expected affine.min/max/apply)");
-            LLVM_DEBUG(assert(false && "unexpected operation"));
-            return llvm::failure();
-        });
+    return cast<IntegerAttr>(*result).getInt();
 }
 
 // Add to `ops` all the ops that need to be cloned to support `op` and
@@ -324,15 +260,15 @@ void collectOpsForMemoryCheck(
 // This allows the function to be used when we initially check if an untiled op
 // requires tiling at all.
 ModuleOp extractOpsForMemoryCheck(
-    Operation *consumerOp, ArrayRef<int64_t> tilingIterDomsOrder = {},
-    const SetVector<Operation *> &producerOps = {}
+    const std::string &moduleName, Operation *consumerOp,
+    ArrayRef<int64_t> tilingIterDomsOrder = {}, const SetVector<Operation *> &producerOps = {}
 ) {
     MLIRContext *context = consumerOp->getContext();
     Location loc = consumerOp->getLoc();
 
     OpBuilder builder(context);
 
-    ModuleOp moduleOp = ModuleOp::create(builder, loc, "extracted_for_memory_check");
+    ModuleOp moduleOp = ModuleOp::create(builder, loc, moduleName);
     builder.setInsertionPointToStart(moduleOp.getBody());
 
     SmallVector<Operation *> ops;
@@ -350,7 +286,12 @@ ModuleOp extractOpsForMemoryCheck(
 
     FunctionType functionType = builder.getFunctionType(inputTypes, consumerOp->getResultTypes());
 
-    func::FuncOp funcOp = func::FuncOp::create(builder, loc, "extracted_tile", functionType);
+    // This counter is to give the dumps different names.
+    static unsigned instanceCount = 0;
+    std::ostringstream funcName;
+    funcName << "extracted_ops_" << std::setw(3) << std::setfill('0') << instanceCount++;
+
+    func::FuncOp funcOp = func::FuncOp::create(builder, loc, funcName.str(), functionType);
     funcOp.addEntryBlock();
 
     IRMapping extractionMap;
@@ -565,6 +506,13 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
     OpEraseGuard fixedModuleEraseGuard(fixedModuleOp);
 
     auto funcOp = cast<func::FuncOp>(&fixedModuleOp.getBody()->front());
+    // This counter is to give the dumps different names.
+    static unsigned instanceCount = 0;
+    std::ostringstream funcName;
+    funcName << funcOp.getName().str() << "_" << std::setw(3) << std::setfill('0')
+             << instanceCount++;
+    funcOp.setName(funcName.str());
+
     builder.setInsertionPointToStart(&funcOp.getFunctionBody().front());
     auto tileSizeArgs = llvm::make_range(
         funcOp.getFunctionBody().args_begin(),
@@ -576,9 +524,11 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
         // NB2: as far as I can tell, it is almost always an attribute, except
         // when called from fuseControlMaxSize/Producers, where it is an affine
         // op, in which case we will try to evaluate its value in the first tile (ignoring offsets).
-        llvm::FailureOr<int64_t> maybeSize = computeIntAtZero(sizes[domain]);
-        if (failed(maybeSize))
+        llvm::FailureOr<int64_t> maybeSize = computeSizeAtFirstIteration(sizes[domain]);
+        if (failed(maybeSize)) {
+            LLVM_DEBUG(assert(false));
             return llvm::failure();
+        }
 
         Value size = arith::ConstantOp::create(
             builder, funcOp->getLoc(), builder.getIntegerAttr(builder.getIndexType(), *maybeSize)
@@ -699,7 +649,7 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
     MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
 ) {
     ModuleOp moduleOp = extractOpsForMemoryCheck(
-        cast<TilingInterface>(consumerOp), tilingIterDomsOrder, producerOps
+        "fit_tile_to_memory", cast<TilingInterface>(consumerOp), tilingIterDomsOrder, producerOps
     );
     OpEraseGuard moduleEraseGuard(moduleOp);
 
@@ -821,7 +771,9 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder =
             getTilingIterDomainsOrder(producerTi);
 
-        ModuleOp moduleOp = extractOpsForMemoryCheck(producerTi, tilingIterDomsOrder.getArrayRef());
+        ModuleOp moduleOp = extractOpsForMemoryCheck(
+            "fuse_control_max_size_no_pattern", producerTi, tilingIterDomsOrder.getArrayRef()
+        );
         OpEraseGuard moduleEraseGuard(moduleOp);
         if (failed(tileModuleForMemoryCheck(
                 moduleOp, tilingIterDomsOrder.getArrayRef(), iterSizes.size()
@@ -863,7 +815,9 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         }
     }
 
-    ModuleOp moduleOp = extractOpsForMemoryCheck(producerTi, tilingIterDomsOrder.getArrayRef());
+    ModuleOp moduleOp = extractOpsForMemoryCheck(
+        "fuse_control_max_size_pattern_output", producerTi, tilingIterDomsOrder.getArrayRef()
+    );
     OpEraseGuard moduleEraseGuard(moduleOp);
     if (failed(
             tileModuleForMemoryCheck(moduleOp, tilingIterDomsOrder.getArrayRef(), iterSizes.size())
@@ -1039,7 +993,7 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
 
     // Check if tiOp already fits in memory.
     {
-        ModuleOp moduleOp = extractOpsForMemoryCheck(tiOp);
+        ModuleOp moduleOp = extractOpsForMemoryCheck("check_needs_tiling", tiOp);
         OpEraseGuard moduleEraseGuard(moduleOp);
         llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(moduleOp);
         if (failed(opFitsInMemory)) {
@@ -1195,7 +1149,7 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
         }
         assert(tiledOp);
 
-        ModuleOp moduleOp = extractOpsForMemoryCheck(tiledOp);
+        ModuleOp moduleOp = extractOpsForMemoryCheck("check_tiling_succeeded", tiledOp);
         OpEraseGuard moduleEraseGuard(moduleOp);
 
         llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(moduleOp);
