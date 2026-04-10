@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from torq.testing.hf import get_hf_model_file
@@ -25,6 +26,43 @@ from .versioned_fixtures import (versioned_generated_file_fixture,
 """
 This module provides fixtures and utilities for testing onnx models.
 """
+
+
+@dataclass
+class OnnxLayerCase(Case):
+    """Represents a generated ONNX layer test case plus source node name."""
+
+    node_name: str = ""
+    is_full_model: bool = False
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--onnx-print-layer-info",
+        action="store_true",
+        default=False,
+        help="Print original ONNX node names for generated ONNX layer tests during setup",
+    )
+
+
+def _source_node_name(node, node_index):
+    if node.name:
+        return node.name
+
+    outputs = [output_name for output_name in node.output if output_name]
+    if outputs:
+        return outputs[0]
+
+    return f"{node.op_type}@{node_index}"
+
+
+def _format_layer_node_name(case: OnnxLayerCase) -> str:
+    if not case.node_name:
+        return "ONNX node: <unknown>"
+
+    label = "nodes" if " -> " in case.node_name else "node"
+    return f"ONNX {label}: {case.node_name}"
+
 
 def _vi_dtype_shape(vi):
     try:
@@ -108,10 +146,19 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
         group_size = match_group(index)
         if group_size > 0:
             part_nodes = nodes[index:index + group_size]
+            part_node_indices = list(range(index, index + group_size))
             index += group_size
         else:
             part_nodes = [nodes[index]]
+            part_node_indices = [index]
             index += 1
+
+        source_node_names = [
+            _source_node_name(node, node_index)
+            for node_index, node in zip(part_node_indices, part_nodes)
+        ]
+        node_name = " -> ".join(source_node_names)
+
         # Determine tensors produced and used by the part
         produced = set()
         used = set()
@@ -303,22 +350,37 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
                 # print(f"Skipping duplicate model for layer {layer_name}")
                 continue
 
-        layer_configs[layer_name] = final_model
+        layer_configs[layer_name] = {
+            "model": final_model,
+            "node_name": node_name,
+        }
 
     return layer_configs
+
+
+def _build_onnx_layer_cases(model_prefix: str, model, layers):
+    cases = [
+        OnnxLayerCase(
+            name=f"{model_prefix}_{key}",
+            data=layer["model"],
+            node_name=layer["node_name"],
+        )
+        for key, layer in layers.items()
+    ]
+    cases.append(OnnxLayerCase(name=f"{model_prefix}_full_model", data=model, is_full_model=True))
+    return cases
 
 
 def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, dedup=True):
     model = get_full_model(get_hf_model_file(cache, repo_id, filename))
     layers = generate_onnx_layers_from_model(model, node_groups, dedup)
-    model_prefix = Path(filename).stem
-    return [Case(f"{model_prefix}_{key}", layer) for key, layer in layers.items()] + [ Case(f"{model_prefix}_full_model", model) ]
+    return _build_onnx_layer_cases(Path(filename).stem, model, layers)
 
 
 def generate_onnx_layer_from_file(filepath:Path, node_groups=None, dedup=True):
     model = get_full_model(str(filepath))
     layers = generate_onnx_layers_from_model(model, node_groups, dedup)
-    return [Case(f"{filepath.stem}_{key}", layer) for key, layer in layers.items()] + [ Case(f"{filepath.stem}_full_model", model) ]
+    return _build_onnx_layer_cases(filepath.stem, model, layers)
 
 
 @pytest.fixture
@@ -372,6 +434,10 @@ def onnx_layer_model(request):
     case_name = request.param.name
     model_data = request.param.data
     version = "onnx_layer_model_" + case_name
+
+    if isinstance(request.param, OnnxLayerCase):
+        if request.config.getoption("--onnx-print-layer-info") and not request.param.is_full_model:
+            print(_format_layer_node_name(request.param))
 
     return VersionedUncachedData(data=model_data, version=version)
 
