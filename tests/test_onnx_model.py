@@ -31,14 +31,6 @@ for example: pytest tests/test_onnx_model.py -v -s mbv2.quant_layer_DequantizeLi
 @pytest.fixture
 def case_config(request, chip_config):
 
-    iree_regression_tc = [
-        # error: 'iree_linalg_ext.map_scatter' op write affecting operations on global resources are restricted to workgroup distributed contexts.
-        "example-matmul_full_model",
-        "example-matmul_layer_MatMul_0",
-    ]
-    if any(s in request.node.nodeid for s in iree_regression_tc):
-        pytest.xfail("IREE 3.10 regression failure")
-
     next_chip = (chip_config.data['target'] != "SL2610")
     if next_chip:
         pytest.xfail("AssertionError: Nans differ")

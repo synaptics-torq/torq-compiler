@@ -399,6 +399,12 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
     {
         FunctionLikeNest functionPassManager(modulePassManager);
         addCommonTargetExecutablePreprocessingPasses(functionPassManager);
+        functionPassManager.addPass([]() {
+            return createDecomposePackUnPackOpsPass(DecomposePackUnPackOpsPassOptions{
+                /*tileOuterToOne=*/true,
+                /*useOnlyReshapes=*/true
+            });
+        });
     }
 
     buildLLVMCPUCodegenPassPipeline(pipeline, false);
