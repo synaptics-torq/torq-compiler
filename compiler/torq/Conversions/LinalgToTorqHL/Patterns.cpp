@@ -1014,8 +1014,37 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         }
         auto denseAttr = dyn_cast<DenseFPElementsAttr>(attr);
         assert(denseAttr && "Unsupported constant type");
+        // Only treat as scalar if all dimensions are 1
+        // e.g. tensor<1x1xbf16> is scalar, tensor<1x1000xbf16> is NOT
+        if (!llvm::all_of(denseAttr.getType().getShape(), [](int64_t dim) { return dim == 1; })) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "[fromConstScalar] Skipping non-scalar tensor: "
+                             << denseAttr.getType() << "\n";
+            });
+            return nullptr;
+        }
         return denseAttr.getValues<FloatAttr>()[0];
     }
+
+    // trace back to the defining arith.ConstantOp outside the linalg.generic.
+    static arith::ConstantOp traceToConstOp(linalg::GenericOp srcOp, Value val) {
+        // If direct defining op is a constant (scalar case), return it
+        if (auto constOp = val.getDefiningOp<arith::ConstantOp>()) {
+            return constOp;
+        }
+        // If it's a BlockArgument, trace back to the linalg.generic input
+        if (auto blockArg = dyn_cast<BlockArgument>(val)) {
+            unsigned argIdx = blockArg.getArgNumber();
+            // Block args: first N are inputs, last M are outputs (inits)
+            auto inputs = srcOp.getDpsInputs();
+            if (argIdx < inputs.size()) {
+                Value input = inputs[argIdx];
+                // Check if the input itself is defined by an arith.constant
+                return input.getDefiningOp<arith::ConstantOp>();
+            }
+        }
+        return nullptr;
+    };
 
     LogicalResult get2Inputs(
         linalg::GenericOp srcOp, Operation *binaryOp, Value &input0, Value &input1, float &newBias,
@@ -1046,9 +1075,9 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto lhs = binaryOp->getOperand(0);
         auto rhs = binaryOp->getOperand(1);
 
-        auto constOp = rhs.getDefiningOp<arith::ConstantOp>();
+        auto constOp = traceToConstOp(srcOp, rhs);
         if (!constOp) {
-            constOp = lhs.getDefiningOp<arith::ConstantOp>();
+            constOp = traceToConstOp(srcOp, lhs);
             if (constOp) {
                 needReverse = true;
             }
@@ -1221,20 +1250,20 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         Value input0 = srcOp.getOperand(0);
         Value input1 = srcOp.getInputs()[srcOp.getInputs().size() > 1 ? 1 : 0];
 
-        if (srcOpSize == 1 &&
-            (outType.getElementType().isInteger(16) || outType.getElementType().isInteger(32))) {
+        if (outType.getElementType().isInteger(16) || outType.getElementType().isInteger(32)) {
             // one input must be constant, the other is the input tensor
 
             bool inputNeedReverse = false;
             auto lhs = binaryOp->getOperand(0);
             auto rhs = binaryOp->getOperand(1);
 
-            auto constOp = lhs.getDefiningOp<arith::ConstantOp>();
+            auto constOp = traceToConstOp(srcOp, rhs);
             if (!constOp) {
-                constOp = rhs.getDefiningOp<arith::ConstantOp>();
-            }
-            else {
-                inputNeedReverse = true;
+                constOp = traceToConstOp(srcOp, lhs);
+                if (constOp) {
+                    input0 = input1;
+                    inputNeedReverse = true;
+                }
             }
             if (constOp) {
                 auto attr = constOp.getValue();
@@ -1768,8 +1797,8 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             // Handle the case where CastI32MulPattern has converted rescale to i16 output.
             // In this case rescale ops feeding multiply ops are optimized to output i16 directly
             // (instead of i32), so there's no truncOp here.
-            if (!truncOp && outputElementType.isInteger(16)) {
-                applyScaleOp = yieldValues[0].getDefiningOp<tosa::ApplyScaleOp>();
+            if (truncOp && outputElementType.isInteger(16)) {
+                applyScaleOp = truncOp.getIn().getDefiningOp<tosa::ApplyScaleOp>();
                 outputMin = std::numeric_limits<int32_t>::min();
                 outputMax = std::numeric_limits<int32_t>::max();
             }
@@ -2051,8 +2080,7 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<CeilOpPattern>(context);
     patterns.insert<FloorOpPattern>(context);
 
-    // FIXME (upgrade):
-    // patterns.insert<RescaleOpConversion>(context);
+    patterns.insert<RescaleOpConversion>(context);
     populateLinalgToTorqHLExtractPatterns(context, patterns, markFuseGroups);
     patterns.insert<AddOpPattern>(context);
 

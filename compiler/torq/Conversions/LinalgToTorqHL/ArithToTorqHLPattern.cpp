@@ -444,23 +444,46 @@ class ElementWiseShiftOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto input1 = srcOp.getOperand(0);
         auto input2 = srcOp.getOperand(1);
 
-        // for case #1, we need to get shift constant and create a constant tensor
-        if (srcOp.getNumDpsInputs() == 1) {
-            auto c1 = binaryOp->getOperand(1).getDefiningOp<arith::ConstantOp>();
-            if (!c1) {
+        // Find the shift constant by tracing back through the block argument to the
+        // linalg.generic input. Handles both:
+        //   case #1: single input, shift is an inline constant in the body (numDpsInputs == 1)
+        //   case #2: two inputs, shift comes from a constant tensor input (e.g. tensor<1x1xi32>)
+        auto traceToShiftConst = [&](Value val) -> arith::ConstantOp {
+            if (auto constOp = val.getDefiningOp<arith::ConstantOp>())
+                return constOp;
+            if (auto blockArg = dyn_cast<BlockArgument>(val)) {
+                unsigned argIdx = blockArg.getArgNumber();
+                auto inputs = srcOp.getDpsInputs();
+                if (argIdx < inputs.size())
+                    return inputs[argIdx].getDefiningOp<arith::ConstantOp>();
+            }
+            return nullptr;
+        };
+
+        auto shiftConst = traceToShiftConst(binaryOp->getOperand(1));
+        if (shiftConst) {
+            auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
+            auto shiftConstValue = shiftConst.getValue();
+            int64_t shiftVal = 0;
+            auto denseAttr = dyn_cast<DenseIntElementsAttr>(shiftConstValue);
+            if (!denseAttr) {
                 return rewriter.notifyMatchFailure(
-                    srcOp, "Expected defining operation for yield operand to be arith.constant for "
-                           "RoundingRightShiftPattern"
+                    srcOp, "Unsupported shift constant attribute type in ElementWiseShiftOpPattern"
                 );
             }
-
-            auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
-            auto shiftConstValue = c1.getValue();
-            auto constTensor = arith::ConstantOp::create(
-                rewriter, srcOp.getLoc(), input1Type,
-                DenseElementsAttr::get(input1Type, shiftConstValue)
-            );
-            input2 = constTensor.getResult();
+            if (llvm::all_of(denseAttr.getType().getShape(), [](int64_t dim) {
+                    return dim == 1;
+                })) {
+                shiftVal = (*denseAttr.begin()).getSExtValue();
+                SmallVector<int32_t> data(
+                    input1Type.getNumElements(), static_cast<int32_t>(shiftVal)
+                );
+                input2 = arith::ConstantOp::create(
+                             rewriter, srcOp.getLoc(), input1Type,
+                             DenseIntElementsAttr::get(input1Type, data)
+                )
+                             .getResult();
+            }
         }
 
         rewriter.replaceOpWithNewOp<torq_hl::ElementWiseShiftOp>(
@@ -529,8 +552,7 @@ void populateArithToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patt
     patterns.insert<ElementwiseBinaryArithOpPattern>(context);
     patterns.insert<ElementwiseUnaryArithOpPattern>(context);
 
-    // FIXME (upgrade):
-    // patterns.insert<ElementWiseShiftOpPattern>(context);
+    patterns.insert<ElementWiseShiftOpPattern>(context);
 
     patterns.insert<RoundingRightShiftPattern>(context);
 

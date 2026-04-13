@@ -46,7 +46,7 @@ static Value create1DimTensorFromScalar(
             value = DenseIntElementsAttr::get(constType, data);
         }
         else if (elementType.isInteger(8))
-            value = DenseIntElementsAttr::get(constType, static_cast<int16_t>(data));
+            value = DenseIntElementsAttr::get(constType, static_cast<int8_t>(data));
         else {
             return {};
         }
@@ -107,6 +107,13 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         if (input1ElementType.isF32() || input1ElementType.isF64()) {
             return rewriter.notifyMatchFailure(srcOp, "mul expects i8, i16, bf16 inputs\n");
+        }
+
+        auto input2Type = dyn_cast<RankedTensorType>(input2.getType());
+        auto input2ElementType = input2Type.getElementType();
+
+        if (input1ElementType.isInteger(32) && input2ElementType.isInteger(32)) {
+            return rewriter.notifyMatchFailure(srcOp, "mul with i32 inputs is not supported");
         }
 
         Operation *mulOp = getElementwiseBinaryOp(srcOp, /*allow constants*/ true);
@@ -360,9 +367,8 @@ class MulRescaleOpPattern : public OpRewritePattern<linalg::GenericOp> {
 void populateLinalgToTorqHLMulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-    // FIXME (upgrade):
-    // patterns.insert<MulOpPattern>(context);
-    // patterns.insert<MulRescaleOpPattern>(context);
+    patterns.insert<MulOpPattern>(context);
+    patterns.insert<MulRescaleOpPattern>(context);
 }
 
 } // namespace mlir::syna::torq

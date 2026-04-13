@@ -640,24 +640,8 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         auto loc = op.getLoc();
         auto elemType = inputType.getElementType();
 
-        int32_t inputZp = op.getInputZp();
-        TypedAttr fillAttr = rewriter.getIntegerAttr(elemType, inputZp);
-        auto fillConst = arith::ConstantOp::create(rewriter, loc, fillAttr);
-        auto padTensor = tensor::EmptyOp::create(rewriter, loc, paddedShape, elemType);
-        auto fillOp = linalg::FillOp::create(
-            rewriter, loc, ValueRange{fillConst}, ValueRange{padTensor.getResult()}
-        );
-        SmallVector<OpFoldResult> offsets(4, rewriter.getIndexAttr(0));
-        SmallVector<OpFoldResult> sizes;
-        for (int64_t dim : shape)
-            sizes.push_back(rewriter.getIndexAttr(dim));
-
-        auto insertOp = tensor::InsertSliceOp::create(
-            rewriter, loc, op.getInput(), fillOp.getResult(0), offsets, sizes,
-            SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
-        );
-
         int hack_offset_h = 1, hack_offset_w = 1;
+        int offsetH = 0;
         SmallVector<int64_t, 4> newPads(pads.begin(), pads.end());
         if (convertToSame) {
             if (validPadH) {
@@ -671,6 +655,15 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
                     hack_offset_h = 2;
                 }
                 newPads[3] = totalPadH - newPads[2];
+                // Stride-2 convolutions support two asymmetric padding configurations:
+                // top-left  and bottom-right
+                // when top-left padding swap updated top & bottom pads and set offsetH=1
+                if (pads[0] == 1) {
+                    // In TorqHL, padding is always specified in the order of left, right, top,
+                    // bottom.
+                    std::swap(newPads[2], newPads[3]);
+                    offsetH = 1;
+                }
             }
             if (validPadW) {
                 int64_t outw = (paddedShape[NCHW::W] + strides[1] - 1) / strides[1];
@@ -709,6 +702,26 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         else {
             convOutShape.assign(origOutShape.begin(), origOutShape.end());
         }
+
+        int32_t inputZp = op.getInputZp();
+        TypedAttr fillAttr = rewriter.getIntegerAttr(elemType, inputZp);
+
+        SmallVector<OpFoldResult> offsets(4, rewriter.getIndexAttr(0));
+        offsets[NCHW::H] = rewriter.getIndexAttr(offsetH);
+        SmallVector<OpFoldResult> sizes;
+        for (int64_t dim : shape)
+            sizes.push_back(rewriter.getIndexAttr(dim));
+        auto fillConst = arith::ConstantOp::create(rewriter, loc, fillAttr);
+        auto padTensor = tensor::EmptyOp::create(rewriter, loc, paddedShape, elemType);
+
+        auto fillOp = linalg::FillOp::create(
+            rewriter, loc, ValueRange{fillConst}, ValueRange{padTensor.getResult()}
+        );
+
+        auto insertOp = tensor::InsertSliceOp::create(
+            rewriter, loc, op.getInput(), fillOp.getResult(0), offsets, sizes,
+            SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
+        );
 
         auto outputElType = outputType.getElementType();
         auto newOutputType = RankedTensorType::get(convOutShape, outputElType);

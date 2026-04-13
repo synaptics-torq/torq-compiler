@@ -247,11 +247,15 @@ static linalg::GenericOp convertRescaleToI16(linalg::GenericOp rescaleOp, IRRewr
             for (auto operand : op.getOperands())
                 newOperands.push_back(mapping.lookupOrDefault(operand));
 
-            // Create apply_scale with i16 result type
+            // Create apply_scale with i32 result type (we'll truncate to i16 after)
             auto newApplyScale = tosa::ApplyScaleOp::create(
-                rewriter, op.getLoc(), rewriter.getIntegerType(16), newOperands, op.getAttrs()
+                rewriter, op.getLoc(), rewriter.getIntegerType(32), newOperands, op.getAttrs()
             );
-            mapping.map(op.getResult(0), newApplyScale.getResult());
+            // Truncate i32 -> i16 (safe because isRescaleSafeForI16 already validated range)
+            auto truncOp = arith::TruncIOp::create(
+                rewriter, op.getLoc(), rewriter.getIntegerType(16), newApplyScale.getResult()
+            );
+            mapping.map(op.getResult(0), truncOp.getResult());
         }
         else {
             rewriter.clone(op, mapping);

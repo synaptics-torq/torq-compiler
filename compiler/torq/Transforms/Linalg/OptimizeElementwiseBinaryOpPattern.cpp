@@ -178,7 +178,9 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
         };
 
         auto isScalarConstant = [&](Value val, ShapedType type) {
-            return isConstantValue(val) && type.getRank() == 1 && type.getShape()[0] == 1;
+            // return isConstantValue(val) && type.getRank() == 1 && type.getShape()[0] == 1;
+            return isConstantValue(val) &&
+                   llvm::all_of(type.getShape(), [](int64_t dim) { return dim == 1; });
         };
 
         auto rank1 = input1Type.getRank();
