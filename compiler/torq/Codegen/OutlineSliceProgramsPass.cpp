@@ -56,6 +56,9 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
             "expected single static step size in forall op"
         );
 
+        int64_t lb = forallOp.getStaticLowerBound()[0];
+        int64_t step = forallOp.getStaticStep()[0];
+
         std::optional<APInt> unrollFactor = mlir::constantTripCount(
             forallOp.getLowerBound(rewriter)[0], forallOp.getUpperBound(rewriter)[0],
             forallOp.getStep(rewriter)[0], /*isSigned=*/true, scf::computeUbMinusLb
@@ -76,7 +79,7 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
         if (!forallOp.getInductionVar(0).use_empty()) {
             for (unsigned i = 1; i < unrollFactor->getZExtValue(); i++) {
                 Value ivUnroll = arith::ConstantOp::create(
-                    rewriter, forallOp.getLoc(), rewriter.getIndexAttr(i)
+                    rewriter, forallOp.getLoc(), rewriter.getIndexAttr(lb + i * step)
                 );
                 operandMaps[i - 1].map(forallOp.getInductionVar(0), ivUnroll);
             }
@@ -105,7 +108,7 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
         } // distruct insertionGuard
 
         // Loop now has a single iteration so we can remove it
-        forallOp.setStaticUpperBound(1);
+        forallOp.setStaticUpperBound(lb + step);
         if (failed(forallOp.promoteIfSingleIteration(rewriter))) {
             assert(false && "Unrolling of scf.forall failed");
         }
