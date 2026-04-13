@@ -20,6 +20,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -128,6 +129,12 @@ AssignOperationsToCpuProgramsPass::createOutliningGroups(Region *region, int nex
                      tensor::ExtractSliceOp, func::ReturnOp, tensor::ParallelInsertSliceOp,
                      tensor::CollapseShapeOp, tensor::ExpandShapeOp, tensor::ReshapeOp,
                      affine::AffineApplyOp, affine::AffineMaxOp, affine::AffineMinOp>(op)) {
+            noOutlineOps.insert(&op);
+        }
+        // Leave concat on the default Slice/NSS path unless it was explicitly
+        // reassigned to CSS/Host. The later NSS lowering can handle these ops,
+        // while outlining them here forces an unnecessary CSS fallback.
+        else if (isa<tensor::ConcatOp>(op) && getTargetExecutor(&op) == torq_hl::Executor::Slice) {
             noOutlineOps.insert(&op);
         }
         else if (op.getDialect()->getNamespace() == torq_hl::TorqHLDialect::getDialectNamespace()) {
