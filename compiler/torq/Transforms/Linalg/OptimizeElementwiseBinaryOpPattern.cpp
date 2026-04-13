@@ -42,7 +42,18 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             input = expandOp.getSrc();
         }
 
+        bool foldedRescale = false;
         while (foldBackwardRescale(input, scaleInfo)) {
+            foldedRescale = true;
+        }
+
+        // If foldBackwardRescale traced through rescale(s) to a scalar constant, done.
+        if (foldedRescale) {
+            if (auto constOp = dyn_cast_if_present<arith::ConstantOp>(input.getDefiningOp())) {
+                auto tensorType = dyn_cast<RankedTensorType>(input.getType());
+                if (tensorType && tensorType.getNumElements() == 1)
+                    return true;
+            }
         }
 
         linalg::GenericOp rescaleOp = input.getDefiningOp<linalg::GenericOp>();
@@ -76,19 +87,14 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             return false;
         }
 
-        auto constOp = dyn_cast<arith::ConstantOp>(value.getDefiningOp());
-        if (!constOp) {
-            LLVM_DEBUG({ llvm::errs() << "defining op is not constant op\n"; });
-            return false;
+        if (auto constOp = dyn_cast_if_present<arith::ConstantOp>(value.getDefiningOp())) {
+            int32_t data = 0;
+            if (getIntegerConstantValue(constOp, &data))
+                return true;
         }
 
-        int32_t data = 0;
-        if (!getIntegerConstantValue(constOp, &data)) {
-            LLVM_DEBUG({ llvm::errs() << "cannot get integer constant value\n"; });
-            return false;
-        }
-
-        return true;
+        LLVM_DEBUG({ llvm::errs() << "apply_scale value is not from a scalar constant\n"; });
+        return false;
     }
 
     LogicalResult

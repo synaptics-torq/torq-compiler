@@ -546,7 +546,24 @@ bool foldBackwardRescale(Value &value, ScaleInfo &scaleInfo) {
         Operation *maybeBinary = getElementwiseBinaryOp(shiftGen, /*allowConstants*/ true);
         auto shliOp = dyn_cast_or_null<arith::ShLIOp>(maybeBinary);
         if (shliOp) {
-            if (auto maybeC = getConstIntValue(shliOp.getRhs())) {
+            // The shift constant may be an arith.constant directly, or it may
+            // be a BlockArgument of the enclosing linalg.generic (when the
+            // constant tensor is passed as an input operand).  Resolve through
+            // the block argument mapping so we can extract the value.
+            Value shiftVal = shliOp.getRhs();
+            if (auto blockArg = dyn_cast<BlockArgument>(shiftVal)) {
+                shiftVal = shiftGen.getDpsInputOperand(blockArg.getArgNumber())->get();
+            }
+            // Try scalar constant first, then dense splat tensor constant
+            // (e.g. arith.constant dense<15> : tensor<1x1x1x1xi32>).
+            std::optional<int64_t> maybeC = getConstIntValue(shiftVal);
+            if (!maybeC) {
+                if (auto denseAttr = returnDenseElementAttr(shiftVal)) {
+                    if (denseAttr.isSplat())
+                        maybeC = denseAttr.getSplatValue<APInt>().getSExtValue();
+                }
+            }
+            if (maybeC) {
                 shiftAmount = *maybeC;
                 input = shiftGen.getInputs()[0];
                 // Peel off its input tensor (the output of the extsi gen):

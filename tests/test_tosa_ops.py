@@ -30,13 +30,6 @@ def case_config(request, runtime_hw_type, chip_config):
         "efficientnet-sigmoid-rescale-mul.mlir",
         "yolov8_block_mul_rescale.mlir",
 
-        # Assertion `P.type<N>.getElementType() == P.type<N>.getElementType() && "Input types must match"' failed.
-        "add-16x16x128xi16.mlir",
-        "add-32x32x128xi16.mlir",
-        "sub-constant-tensor.mlir",
-        "sub-rescale-scalar.mlir0",
-        "sub-rescale-scalar.mlir1",
-
         # error: 'tosa.const' op requires attribute 'values'
         "conv-343.mlir",
         "conv2d-28x28x512.mlir",

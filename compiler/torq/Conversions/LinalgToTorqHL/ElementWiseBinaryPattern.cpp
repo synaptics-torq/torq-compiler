@@ -379,31 +379,47 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         }
 
         if (input0IsScalar) {
-            double scaleFactor = (1 << scInfo.scaleShift) + 0.5;
+            double scaleFactor = (1 << scInfo.scaleShift);
             weight0 = 0;
-            // sign applies to the second operand (input1), not the scalar in
-            // the first operand position.  For SUB: result = scalar - input,
-            // so bias0 (the scalar contribution) must stay positive.
-            bias0 = scalarValue0 * scaleFactor * outputScale;
+            // instead of using the ALU to perform the operation
+            // we use the ACT bias to perform the operation:
+            //
+            // original operation:
+            //
+            //   output = ( (input0 - zp0) * inputScale0 + sign * (input1 - zp1) * inputScale1 ) *
+            //   outputScale + outputZp
+            //
+            // rewritten operation:
+            //
+            //   output = (input1 * weight0 + input1 * weight1 + actBias) * actScale / ( 1 <<
+            //   actShift ) + actZp
+            //
+            // where:
+            //
+            //   weight0 = 0
+            //   weight1 = sign * inputScale1 * outputScale * ( 1 << actShift )
+            //   actBias = bias0 + bias1
+            //   bias0 = ( (input0 - zp0) * inputScale0 * outputScale * ( 1 << actShift ))
+            //   bias1 = - sign * zp1 * weight1
+            //   actScale = 1
+            //   actShift = outputScaleInfo.scaleShift
+            //   actZp = outputZp
+            bias0 = doubleToInt<int32_t>(
+                (scalarValue0 - scaleInput0.zp) * scaleInput0.scale * scaleFactor * outputScale
+            );
 
             input0 = input1;
         }
         else if (input1IsScalar) {
+            double scaleFactor = (1 << scInfo.scaleShift);
+            // force weight1 is 0, input0 * weight0 + input1 * 0
+            weight1 = 0;
 
-            scaleInput1.scale = 0;
-            scaleInput1.zp = 0;
-
-            // Compute scale and bias vectors
-            double scaleFactor = (1 << scInfo.scaleShift) + 0.5;
-
-            multiplier1 = outputScale * scaleInput1.scale;
-            weight1 = doubleToInt<int16_t>(multiplier1 * scaleFactor) * sign;
-
-            // should not use negative bias here as it compute from scale
-            // if later issue happens, please check if need to add minus sign here
-            bias1 = scalarValue1 * scaleFactor * sign * outputScale;
-
-            // force weigth1 is 0, input0 * weight0 + input1 * 0
+            // Read above comment for the detailed explanation of the formula
+            bias1 = doubleToInt<int32_t>(
+                (scalarValue1 - scaleInput1.zp) * scaleInput1.scale * scaleFactor * sign *
+                outputScale
+            );
             input1 = input0;
         }
         // Generate torq_hl op with input in the expected format

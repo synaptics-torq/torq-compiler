@@ -1207,16 +1207,6 @@ def case_config(request, runtime_hw_type, chip_config):
         "model472_mult16x8_neg_s2v",
         "model473_mult16x8_pos_v2s",
 
-        # Assertion `P.type<N>.getElementType() == P.type<N>.getElementType() && "Input types must match"' failed.
-        "model154_sub_s2v_1x6x8x4",
-        "model155_sub_v2s_1x6x8x4",
-        "model156_add_s2v_1x6x8x4",
-        "model157_add_v2s_1x6x8x4",
-        "model470_add16x8_positive_s2v",
-        "model471_add16x8_negative_s2v",
-        "model474_sub16x8_pos_v2s",
-        "model475_sub16x8_neg_v2s",
-
         # Assertion `detail::isPresent(Val) && "dyn_cast on a non-existent value"' failed.
         "model089_softmax_inp1x1916x2",
 
