@@ -14,7 +14,15 @@ FROM ubuntu:24.04
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip python3-setuptools python3-wheel \
-                                            python3-dev sqlite3 python3-venv wget curl git
+                                            python3-dev sqlite3 python3-venv wget curl git \
+                                            postgresql-common && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client-17 && \
+    rm -rf /var/lib/apt/lists/*
 
 ARG GIT_COMMIT=unknown
 ENV DASHBOARD_GIT_COMMIT=${GIT_COMMIT}

@@ -17,9 +17,12 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 
+import perf.backup
 import perf.views
 
 urlpatterns = [
+    path('admin/database/backup/', admin.site.admin_view(perf.backup.backup_database_view), name='admin_database_backup'),
+    path('admin/database/restore/', admin.site.admin_view(perf.backup.restore_database_view), name='admin_database_restore'),
     path('admin/', admin.site.urls),
     path('api/', include('perf.urls')),
     path('health/', perf.views.health, name='health'),

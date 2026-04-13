@@ -1,0 +1,42 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a>
+  &rsaquo; Restore Database
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  <p class="help">
+    Upload a <code>.sql.gz</code> file previously downloaded via the
+    <strong>Backup database</strong> action. This will replace the current contents of the
+    configured database schema before executing the SQL dump. <strong>This operation is irreversible — make a
+    backup first.</strong>
+  </p>
+
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <fieldset class="module aligned">
+      {% for field in form %}
+      <div class="form-row">
+        {{ field.label_tag }}
+        {{ field }}
+        {% if field.help_text %}
+        <p class="help">{{ field.help_text }}</p>
+        {% endif %}
+        {% for error in field.errors %}
+        <p class="errornote">{{ error }}</p>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </fieldset>
+    <div class="submit-row">
+      <input type="submit" value="Restore Database" class="default">
+      <a href="../" class="closelink">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

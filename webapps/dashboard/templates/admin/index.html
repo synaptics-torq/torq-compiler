@@ -1,0 +1,28 @@
+{% extends "admin/index.html" %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main" class="app-list">
+    {% include "admin/app_list.html" with app_list=app_list show_changelinks=True %}
+
+    <div class="app-perf module" id="app-database">
+    <table>
+        <caption>
+        <a href="#" class="section" title="Database management">Database</a>
+        </caption>
+        <tr class="model-row">
+        <th scope="row">
+            <a href="{% url 'admin_database_backup' %}">Backup</a>
+        </th>
+        <td class="nocounts">Download a full gzipped SQL snapshot of the database.</td>
+        </tr>
+        <tr class="model-row">
+        <th scope="row">
+            <a href="{% url 'admin_database_restore' %}">Restore</a>
+        </th>
+        <td class="nocounts">Replace the current database with a gzipped SQL backup file.</td>
+        </tr>
+    </table>
+    </div>
+</div>
+{% endblock %}
