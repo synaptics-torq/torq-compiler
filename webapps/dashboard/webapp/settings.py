@@ -29,9 +29,6 @@ DEBUG = True
 
 ALLOWED_HOSTS = []
 
-if os.environ.get("SPACE_HOST"):
-    ALLOWED_HOSTS.append(os.environ.get("SPACE_HOST"))    
-
 # Add extra allowed hosts from environment variable, comma separated
 extra_hosts = os.environ.get("EXTRA_ALLOWED_HOSTS")
 if extra_hosts:
@@ -78,9 +75,12 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',    
     'django.middleware.csp.ContentSecurityPolicyMiddleware'
 ]
+
+if os.getenv("DEBUG_MODE", "") != "":
+    MIDDLEWARE.append('perf.middleware.QueryDebugFooterMiddleware')
 
 ROOT_URLCONF = 'webapp.urls'
 
@@ -176,9 +176,5 @@ STATIC_ROOT = BASE_DIR / 'static'
 # Media files (User uploads)
 MEDIA_URL = 'media/'
 MEDIA_ROOT = '/data/media'
-
-# Allow embedding the app from huggingface spaces
-if os.environ.get("SPACE_HOST"):
-    SECURE_CONTENT_SECURITY_POLICY = "frame-ancestors 'self' https://huggingface.co"
 
 SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin-allow-popups"

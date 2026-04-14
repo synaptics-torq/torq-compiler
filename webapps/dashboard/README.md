@@ -1,17 +1,3 @@
----
-title: Torq Performance
-emoji: 📈
-colorFrom: blue
-colorTo: green
-sdk: docker
-app_port: 8080
-pinned: false
-suggested_storage: small
-base_path: /space
-short_description: Torq Performance Dashboard
-license: apache-2.0
----
-
 # Torq Performance Dashboard
 
 This is a web application that can receive test results from the torq-compiler test suite and display them.
@@ -45,37 +31,3 @@ To run locally this application:
     ```
     export TORQ_PERF_SERVER=http://localhost:8080
     ```
-
-## Deploy on HuggingFace
-
-This application can be deployed as a private HuggingFace space, to do so just push this folder to the space.
-
-Do not deploy it as a public application as it is not sufficiently secured (especially the REST API).
-
-The space needs a variables in its settings:
-
-- ``DJANGO_ALLOWED_HOSTS`` : organization_name-space_name.hf.space
-
-And a secret:
-
-- ``ADMIN_PASSWORD``: password for the admin user of the admin interface
-
-In order to persist the data across rebuilds of the space you need to enable persistent storage of the space.
-
-To use the deplyed application from pytest you first need to create a Token with read access to the space and then
-set two environment variables:
-
-```
-export TORQ_PERF_SERVER=https://organization_name-space_name.hf.space
-export TORQ_PERF_SERVER_TOKEN=hf_XXXXXXXXXXXXXXXXXXXXXX
-```
-
-Once the space is created to manually deploy the application you can use the following command line:
-
-```
-../../scripts/deploy-to-space.sh organization_name/space_name
-```
-
-The script creates a local repo in the current directory and force pushes it to the corresponding repo.
-
-The script expects ssh access to HF is already configured for the current user.

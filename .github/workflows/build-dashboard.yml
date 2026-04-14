@@ -23,7 +23,7 @@ jobs:
 
         environment:
           name: ${{ github.event_name == 'push' && 'dashboard-prod' || 'dashboard-stage' }}
-          url: ${{ vars.DASHBOARD_ENDPOINT_URL }}
+          url: ${{ github.event_name == 'push' && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE }}
 
         if: ${{ vars.DASHBOARD_DOCKER_REPOSITORY != '' }}
 

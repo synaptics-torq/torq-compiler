@@ -1,145 +1,33 @@
 from django.shortcuts import render, get_object_or_404
 from django.http import JsonResponse, FileResponse, Http404
-from django.db.models import Max, Count, Q, Case, When, IntegerField, Prefetch
+from django.db.models import Prefetch, Q
 from .models import TestSession, TestRun, TestRunBatch, Measurement
 import os
 from pathlib import Path
 from perf.perfetto_report_generator import generate_html as generate_perfetto_html
 
+from . import services
 
 def health(request):
     """Health check endpoint for Docker."""
     return JsonResponse({'status': 'healthy'}, status=200)
 
 
-def space(request):
-    # check if we are running inside a huggingface space
-    if os.environ.get("SPACE_HOST") is None:
-        return JsonResponse({'error': 'Not running inside a HuggingFace Space'}, status=400)
-    
-        
-    token = request.GET.get('__sign', None)
-
-    if token is None:                
-        return JsonResponse({'error': 'Missing authentication parameter'}, status=400) 
-    
-    next = request.GET.get('next', '/')
-    
-    if not next.startswith('/'):
-        return JsonResponse({'error': 'Invalid next parameter'}, status=400)
-    
-    redirected_url = f"{next}?__sign={token}"
-    
-    return render(request, 'perf/space.html', {'redirect_url': redirected_url})
-
-
 def home(request):
 
-    main_branch = 'refs/heads/main'
+    # Get the last session all the version branches
+    version_branch_sessions = services.get_latest_sessions_stats(Q(git_branch__startswith='refs/heads/v') | Q(git_branch='refs/heads/main'))
+        
+    # Get the latest session for each of the 10 most recent PR branches    
+    pr_branch_sessions = services.get_latest_sessions_stats(Q(git_branch__startswith='refs/pull'), limit=10)
 
-    # Get the latest session from the main branch (annotate counts to avoid N+1 queries)
-    main_branch_session = TestSession.objects.filter(
-        git_branch=main_branch
-    ).prefetch_related(
-        'testrunbatch_set__testrun_set__test_case'
-    ).annotate(
-        num_total=Count('testrunbatch__testrun'),
-        num_passed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.PASS)),
-        num_failed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.FAIL)),
-        num_skipped=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP)),
-        num_xfail=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL))
-    ).only('id', 'timestamp', 'git_branch', 'git_commit').order_by('-timestamp').first()
-    
-    # Organize test runs by outcome for main branch
-    main_branch_test_data = None
-    if main_branch_session:
-        passed_tests = []
-        failed_tests = []
-        skipped_tests = []
-        
-        for batch in main_branch_session.testrunbatch_set.all():
-            for test_run in batch.testrun_set.all():
-                test_info = {
-                    'name': test_run.test_case.name,
-                    'parameters': test_run.test_case.parameters,
-                    'module': test_run.test_case.module,
-                    'id': test_run.id
-                }
-                if test_run.outcome == TestRun.Outcome.PASS:
-                    passed_tests.append(test_info)
-                elif test_run.outcome == TestRun.Outcome.FAIL:
-                    failed_tests.append(test_info)
-                elif test_run.outcome == TestRun.Outcome.SKIP:
-                    skipped_tests.append(test_info)
-        
-        main_branch_test_data = {
-            'passed': passed_tests,
-            'failed': failed_tests,
-            'skipped': skipped_tests
-        }
-    
-    # Get the latest session for each of the 10 most recent non-main branches
-    # First, get all non-main branches ordered by their latest session timestamp
-    other_branches = TestSession.objects.exclude(
-        git_branch=main_branch
-    ).exclude(
-        git_branch=''
-    ).values('git_branch').annotate(
-        latest_timestamp=Max('timestamp')
-    ).order_by('-latest_timestamp')[:10]
-    
-    # Get the actual latest session for each of these branches (annotate counts and prefetch test data)
-    other_branch_sessions = []
-    other_branch_test_data = {}
-    
-    for branch_info in other_branches:
-        session = TestSession.objects.filter(
-            git_branch=branch_info['git_branch']
-        ).prefetch_related(
-            'testrunbatch_set__testrun_set__test_case'
-        ).annotate(
-            num_total=Count('testrunbatch__testrun'),
-            num_passed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.PASS)),
-            num_failed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.FAIL)),
-            num_skipped=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP)),
-            num_error=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.ERROR)),
-            num_xfail=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL))
-        ).only('id', 'timestamp', 'git_branch', 'git_commit').order_by('-timestamp').first()
-        
-        if session:
-            other_branch_sessions.append(session)
-            
-            # Organize test runs by outcome for this branch
-            passed_tests = []
-            failed_tests = []
-            skipped_tests = []
-            
-            for batch in session.testrunbatch_set.all():
-                for test_run in batch.testrun_set.all():
-                    test_info = {
-                        'name': test_run.test_case.name,
-                        'parameters': test_run.test_case.parameters,
-                        'module': test_run.test_case.module,
-                        'id': test_run.id
-                    }
-                    if test_run.outcome == TestRun.Outcome.PASS:
-                        passed_tests.append(test_info)
-                    elif test_run.outcome == TestRun.Outcome.FAIL:
-                        failed_tests.append(test_info)
-                    elif test_run.outcome == TestRun.Outcome.SKIP:
-                        skipped_tests.append(test_info)
-            
-            other_branch_test_data[session.id] = {
-                'passed': passed_tests,
-                'failed': failed_tests,
-                'skipped': skipped_tests
-            }
-
+    # Get the performance for each test case in the "home" group    
+    test_durations = services.get_reference_test_durations([s.id for s in version_branch_sessions])
+         
     return render(request, 'perf/home.html', {
-        'main_branch_session': main_branch_session,
-        'main_branch_test_data': main_branch_test_data,
-        'other_branch_sessions': other_branch_sessions,
-        'other_branch_test_data': other_branch_test_data,
+        'version_branch_sessions': version_branch_sessions,
+        'pr_branch_sessions': pr_branch_sessions,
+        'test_durations': test_durations,
         'dashboard_git_commit': os.environ.get('DASHBOARD_GIT_COMMIT', 'unknown')
     })
 

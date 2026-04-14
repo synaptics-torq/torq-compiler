@@ -31,5 +31,4 @@ urlpatterns = [
     path('download-trace/<int:test_run_id>/', perf.views.download_trace, name='download_trace'),
     path('download-failure-log/<int:test_run_id>/', perf.views.download_failure_log, name='download_failure_log'),
     path('', perf.views.home, name='home'),
-    path('space', perf.views.space, name='space')
 ]

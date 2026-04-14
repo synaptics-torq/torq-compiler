@@ -1,6 +1,9 @@
 from django.contrib import admin
+from django.contrib.admin.widgets import AutocompleteSelectMultiple
+from django import forms
 
-from .models import TestCase, TestSession, TestRun, TestRunBatch, Metric, Measurement
+from .models import TestCase, TestGroup, TestSession, TestRun, TestRunBatch, Metric, Measurement
+
 
 @admin.register(TestCase)
 class TestCaseAdmin(admin.ModelAdmin):
@@ -43,3 +46,25 @@ class MeasurementAdmin(admin.ModelAdmin):
     list_filter = ('metric',)
     search_fields = ('metric__name', 'test_run__test_case__name')
 
+
+class TestGroupAdminForm(forms.ModelForm):
+    class Meta:
+        model = TestGroup
+        fields = '__all__'
+
+        # we want an autocomplete widget that is wider because test names are very long
+        widgets = {
+            "test_cases": AutocompleteSelectMultiple (
+                TestGroup.test_cases.field,
+                admin.site,
+                attrs={"style": "width: 800px;"}
+            ),
+        }
+
+
+@admin.register(TestGroup)
+class TestGroupAdmin(admin.ModelAdmin):
+    form = TestGroupAdminForm
+    list_display = ('id', 'name')
+    search_fields = ('name',)
+    autocomplete_fields = ('test_cases',)

@@ -1,4 +1,3 @@
-import os
 from django.db import models
 
 
@@ -6,6 +5,13 @@ class TestCase(models.Model):
     module = models.TextField()
     name = models.TextField()
     parameters = models.TextField()
+
+    @property
+    def nodeid(self):
+        if self.parameters:
+            return f"{self.module}::{self.name}[{self.parameters}]"
+        else:
+            return f"{self.module}::{self.name}"
 
     class Meta:
         constraints = [
@@ -17,6 +23,14 @@ class TestCase(models.Model):
 
     def __str__(self):
         return f"{self.module}::{self.name}[{self.parameters}]"
+
+
+class TestGroup(models.Model):
+    name = models.TextField(unique=True)
+    test_cases = models.ManyToManyField(TestCase)
+
+    def __str__(self):
+        return f"TestGroup: {self.name}"
 
 
 class TestSession(models.Model):    
