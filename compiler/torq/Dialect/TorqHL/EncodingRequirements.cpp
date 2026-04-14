@@ -421,55 +421,7 @@ template <typename ActOp> static KernelEncoding getActLikeEncoding(ActOp op) {
 
 KernelEncoding MulOp::getKernelEncoding() { return getNoEncoding(); }
 
-KernelEncoding MatMulOp::getKernelEncoding() {
-
-    // matmul op [batch, m, k] x [batch, k, n] -> [batch, m, n]
-
-    // input1
-    ShapedType inputType = getInput1().getType();
-    int in1Rank = inputType.getRank();
-
-    KernelInputEncoding in1Enc;
-    in1Enc.opIndex = getInput1Mutable().getOperandNumber();
-    in1Enc.encoding.stridesAlign.resize(in1Rank, 0);
-    // if rank is 1, just make sure the overall tensor size is aligned
-    // otherwise make sure the last dimension(k need to align to wram_width=32) is aligned to
-    // get overall tensor size aligned
-    if (in1Rank == 1) {
-        in1Enc.encoding.paddingAlign = 32;
-    }
-    else {
-        in1Enc.encoding.stridesAlign[in1Rank - 2] = 32;
-    }
-
-    // output encoding
-    int in2Rank = getInput2().getType().getRank();
-
-    KernelTensorEncoding outEnc;
-    outEnc.stridesAlign.resize(in2Rank, 0);
-
-    // if rank is 1, just make sure the overall tensor size is aligned
-    // otherwise make sure the last dimension(n need to align to alu_group_width=64) is aligned
-    // to get overall tensor size aligned
-    if (in2Rank == 1) {
-        outEnc.paddingAlign = 64;
-    }
-    else {
-        outEnc.stridesAlign[in2Rank - 2] =
-            64 / (inputType.getElementType().getIntOrFloatBitWidth() / 8);
-    }
-
-    // output
-    auto resultType = getInit().getType();
-
-    int resultRank = resultType.getRank();
-    if (resultRank == 0) {
-        outEnc.stridesAlign.resize(0);
-        outEnc.paddingAlign = 1;
-    }
-
-    return {{in1Enc}, outEnc};
-}
+KernelEncoding MatMulOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding TransposeReshapeOp::getKernelEncoding() {
 
