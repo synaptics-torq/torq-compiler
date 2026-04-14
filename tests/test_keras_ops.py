@@ -1172,32 +1172,13 @@ def case_config(request, runtime_hw_type, chip_config):
 
         #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
         "model050_mult_inp1x10x10x4",
-        "model050_mult_inp1x10x10x4",
         "model051_mult_inp1x4x4x1",
         "model052_mult_inp1x4x4x1_zp128_AB",
-        "model052_mult_inp1x4x4x1_zp128_AB",
         "model053_mult_inp1x4x4x1_zp128_B",
-        "model053_mult_inp1x4x4x1_zp128_B",
-        "model054_mult_inp1x4x4x1_zp128_A",
-        "model054_mult_inp1x4x4x1_zp128_A",
-        "model120_mult_inp1x8x8x1",
-        "model120_mult_inp1x8x8x1",
-        "model122_conv_mult_inp1x8x8x1",
-        "model122_conv_mult_inp1x8x8x1",
-        "model131_mult_inp1x3x3x1",
-        "model131_mult_inp1x3x3x1",
-        "model133_conv3x3_mult_inp1x3x3x1",
-        "model137_add_mult_inp1x3x3x1",
-        "model137_add_mult_inp1x3x3x1",
-        "model141_mult_inp1x4x4x1",
-        "model141_mult_inp1x4x4x1",
-        "model143_conv3x3_mult_inp1x4x4x1",
-        "model143_conv3x3_mult_inp1x4x4x1",
-        "model158_mul_s2v_1x6x8x4",
-        "model159_mul_v2s_1x6x8x4",
-        "model472_mult16x8_neg_s2v",
-        "model473_mult16x8_pos_v2s",
-
+        "model054_mult_inp1x4x4x1_zp128_A",     
+        "model133_conv3x3_mult_inp1x3x3x1",     
+        "model143_conv3x3_mult_inp1x4x4x1", 
+        
         # Assertion `detail::isPresent(Val) && "dyn_cast on a non-existent value"' failed.
         "model089_softmax_inp1x1916x2",
 

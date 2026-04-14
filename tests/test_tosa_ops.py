@@ -28,7 +28,6 @@ def case_config(request, runtime_hw_type, chip_config):
 
         #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
         "efficientnet-sigmoid-rescale-mul.mlir",
-        "yolov8_block_mul_rescale.mlir",
 
         # error: 'tosa.const' op requires attribute 'values'
         "conv-343.mlir",

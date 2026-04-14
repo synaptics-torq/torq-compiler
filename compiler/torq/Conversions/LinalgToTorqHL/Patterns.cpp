@@ -1753,22 +1753,21 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         auto outputType = cast<RankedTensorType>(srcOp.getResults()[0].getType());
         auto outputElementType = outputType.getElementType();
 
-        // scalar input case
-        if (dpsInputCount == 0) {
-            applyScaleOp = yieldValues[0].getDefiningOp<tosa::ApplyScaleOp>();
-            if (!applyScaleOp) {
+        // Constant/scalar input: fold the rescale at compile time
+        if (dpsInputCount == 0 ||
+            (dpsInputCount == 1 && srcOp.getInputs()[0].getDefiningOp<arith::ConstantOp>())) {
+            tosa::ApplyScaleOp constApplyScaleOp;
+            srcOp.getBody()->walk([&](tosa::ApplyScaleOp op) { constApplyScaleOp = op; });
+            if (constApplyScaleOp) {
+                auto result = scalarProcessing(srcOp, constApplyScaleOp, rewriter);
+                if (succeeded(result))
+                    return result;
+            }
+            if (dpsInputCount == 0) {
                 return rewriter.notifyMatchFailure(
-                    srcOp, "Expected a defining operation for yield operand to be tosa.apply_scale"
+                    srcOp, "Failed to fold scalar rescale with no inputs"
                 );
             }
-            input = applyScaleOp.getValue();
-            if (!input) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Expected a defining operation for apply_scale operand to be a value"
-                );
-            }
-
-            return scalarProcessing(srcOp, applyScaleOp, rewriter);
         }
 
         input = srcOp.getInputs()[0];

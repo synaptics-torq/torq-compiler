@@ -2428,18 +2428,76 @@ Value create1DimTensorFromRescaleScalar(
         scaleFactor = scaleFactor * scaleInfo.scale;
     }
 
-    auto constOp = dyn_cast<arith::ConstantOp>(input.getDefiningOp());
-    if (!constOp) {
-        return input;
-    }
-
     int32_t data = 0;
-    if (!getIntegerConstantValue(constOp, &data)) {
-        LLVM_DEBUG({ llvm::errs() << "cannot get integer constant value\n"; });
-        return input;
+    auto constOp = dyn_cast_or_null<arith::ConstantOp>(input.getDefiningOp());
+    if (constOp) {
+        if (!getIntegerConstantValue(constOp, &data)) {
+            LLVM_DEBUG({ llvm::errs() << "cannot get integer constant value\n"; });
+            return input;
+        }
+        data = static_cast<int32_t>(std::round(data * scaleFactor));
     }
+    else {
+        // Handle the case where a constant tensor is passed as a DPS input to the
+        // linalg.generic (dpsInputCount == 1). Inside the body the constant appears
+        // as a block argument, not as an arith.constant, so we trace backwards:
+        //
+        //   linalg.generic ins(%cst : tensor<i16>) outs(...) {
+        //   ^bb0(%in: i16, %out: i32):
+        //     %ext  = arith.extsi %in : i16 to i32
+        //     %sub  = arith.subi %ext, %zp : i32          // optional zero-point
+        //     %res  = tosa.apply_scale %sub, %mult, %shift
+        //     linalg.yield %res
+        //   }
+        //
+        // We walk: apply_scale input -> subi (extract zp) -> extsi -> block_arg
+        //          -> DPS input operand -> arith.constant
+        // Then fold: result = round((constantValue - zeroPoint) * scaleFactor)
+        int32_t inputZp = 0;
+        Value traceVal = input;
 
-    data = static_cast<int32_t>(std::round(data * scaleFactor));
+        // Check for subi (zero-point subtraction)
+        if (auto subOp = traceVal.getDefiningOp<arith::SubIOp>()) {
+            auto maybeZp = getConstIntValue(subOp.getRhs());
+            if (maybeZp) {
+                inputZp = *maybeZp;
+            }
+            traceVal = subOp.getLhs();
+        }
+
+        // Check for extsi
+        if (auto extOp = traceVal.getDefiningOp<arith::ExtSIOp>()) {
+            traceVal = extOp.getIn();
+        }
+
+        // Should now be a block argument
+        auto blockArg = dyn_cast<BlockArgument>(traceVal);
+        if (!blockArg) {
+            return input;
+        }
+
+        // Resolve block arg to DPS input of the linalg.generic
+        unsigned argIdx = blockArg.getArgNumber();
+        if (argIdx >= srcOp.getNumDpsInputs()) {
+            return input;
+        }
+
+        Value dpsInput = srcOp.getInputs()[argIdx];
+        auto dpsConstOp = dpsInput.getDefiningOp<arith::ConstantOp>();
+        if (!dpsConstOp) {
+            return input;
+        }
+
+        int32_t inputData = 0;
+        if (!getIntegerConstantValue(dpsConstOp, &inputData)) {
+            LLVM_DEBUG({ llvm::errs() << "cannot get DPS input constant value\n"; });
+            return input;
+        }
+
+        // Compute the rescale: (inputData - inputZp) * scaleFactor
+        data = static_cast<int32_t>(std::round((inputData - inputZp) * scaleFactor));
+        constOp = dpsConstOp;
+    }
 
     auto outputType = cast<RankedTensorType>(srcOp.getResults()[0].getType());
     RankedTensorType constType = RankedTensorType::get(outputType.getShape(), elementType);
