@@ -38,13 +38,6 @@ def get_test_cases():
 @pytest.fixture(params=get_test_cases())
 def case_config(request):
 
-    iree_regression_tc = [
-        # died with <Signals.SIGSEGV: 11>
-        "keras_conv_act_model",
-    ]
-    if any(s in request.node.nodeid for s in iree_regression_tc):
-        pytest.xfail("IREE 3.10 regression failure")
-
     return {        
         "input_data": "tweaked_random_input_data",
         "torq_compiler_options": ["--torq-disable-slices"],

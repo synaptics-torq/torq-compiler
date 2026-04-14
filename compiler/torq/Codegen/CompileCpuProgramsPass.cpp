@@ -35,6 +35,7 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
+#include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
 #include "iree/compiler/Utils/ToolUtils.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqHw.h"
@@ -375,6 +376,8 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
     FunctionLikeNest(modulePassManager).addPass(createEraseHALDescriptorTypeFromMemRefPass);
 
     FunctionLikeNest(modulePassManager)
+        // LinalgExt -> SCF
+        .addPass(IREE::LinalgExt::createLinalgExtToLoopsPass)
         // Linalg -> SCF
         .addPass(createMemrefCopyToLinalgPass)
         .addPass(createConvertLinalgToLoopsPass)
