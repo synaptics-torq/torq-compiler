@@ -1166,18 +1166,9 @@ def case_config(request, runtime_hw_type, chip_config):
 
     iree_regression_tc = [
         # error: OpTy = mlir::syna::torq_hl::AddOp]:
-        # Assertion `P.type1.getElementType() == P.type2.getElementType() && "Input types must match"'
+        # error: 'linalg.generic' op expected as many non-induction variable region arguments as the number of input/output operands
         "model150_sub_1x6x8x4_zp128_B",
         "model151_sub_1x6x8x4_zp128_A",
-        "model152_sub_1x6x8x4_zp128_AB",
-        "model153_sub_1x6x8x4_zp128_none",
-        "model060_add_inp1x4x4x1",
-        "model061_add_inp1x4x4x1_zp128_x1",
-        "model062_add_inp1x4x4x1_zp128_x2",
-        "model123_conv_add_inp1x8x8x1",
-        "model134_conv3x3_add_inp1x3x3x1",
-        "model144_conv3x3_add_inp1x4x4x1",
-        "my_test",
 
         #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
         "model050_mult_inp1x10x10x4",
