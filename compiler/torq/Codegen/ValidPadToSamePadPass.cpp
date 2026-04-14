@@ -22,6 +22,7 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/ADT/bit.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-valid-pad"
@@ -704,7 +705,17 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         }
 
         int32_t inputZp = op.getInputZp();
-        TypedAttr fillAttr = rewriter.getIntegerAttr(elemType, inputZp);
+        TypedAttr fillAttr;
+        if (auto intType = llvm::dyn_cast<IntegerType>(elemType)) {
+            fillAttr = rewriter.getIntegerAttr(intType, inputZp);
+        }
+        else if (auto floatType = llvm::dyn_cast<FloatType>(elemType)) {
+            // Floating pad values are stored in input_zp as raw float32 bits.
+            fillAttr = rewriter.getFloatAttr(floatType, llvm::bit_cast<float>(inputZp));
+        }
+        else {
+            return failure();
+        }
 
         SmallVector<OpFoldResult> offsets(4, rewriter.getIndexAttr(0));
         offsets[NCHW::H] = rewriter.getIndexAttr(offsetH);
