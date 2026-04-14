@@ -33,17 +33,32 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
     auto input_strides = getEncodedStridesElements(input_type);
     auto indices_strides = getEncodedStridesElements(indices_type);
     auto input_shape = input_type.getShape();
-    int channelCount = input_shape.size() == 3 ? input_shape[1] : 1;
-    int channelStride = input_shape.size() == 3 ? input_strides[1] * entry_size : 0;
-    // FIXME: will work only for i8, not for i16 or bf16
-    // one should use getEncodedStridesBytes() instead
-    int outChannelStride =
-        input_shape.size() == 3 ? getEncodedStridesElements(output_type)[1] * entry_size : 0;
-
     auto output_strides = getEncodedStridesElements(output_type);
-    // FIXME: This will produce dense ouput but is less efficient than using group size 4
+    int channelCount = 1;
+    int channelStride = 0;
+    int outChannelStride = 0;
+
+    if (input_shape.size() == 3) {
+        channelCount = input_shape[1];
+        channelStride = input_strides[1] * entry_size;
+        outChannelStride = output_strides[1] * entry_size;
+    }
+    else if (input_shape.size() == 2) {
+        // Rank-2 gathers come from collapsing a trailing singleton/channel dimension.
+        // In that form, the last dim is the full contiguous slice we must copy for each index.
+        channelCount = input_shape.back();
+        channelStride = input_strides.back() * entry_size;
+        outChannelStride = output_strides.back() * entry_size;
+    }
+    int outputSliceStride =
+        channelCount > 0 && outChannelStride > 0 ? channelCount * outChannelStride : entry_size;
     int indicesCount = indices_type.getNumElements();
-    const uint32_t group_size = (indicesCount % 4 == 0) ? 4 : (indicesCount % 2 == 0) ? 2 : 1;
+    // Rank-2 gathers need group_size=1 to preserve full-slice writes for each index.
+    // For rank-1 and rank-3 the grouped path is safe and more efficient.
+    const uint32_t group_size = input_shape.size() == 2   ? 1
+                                : (indicesCount % 4 == 0) ? 4
+                                : (indicesCount % 2 == 0) ? 2
+                                                          : 1;
     LLVM_DEBUG({
         llvm::dbgs() << "\nindicesCount: " << indicesCount << " group_size: " << group_size << "\n";
     });
@@ -100,7 +115,7 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
     );
 
     Ndls ndls;
-    ndls.add(NdlType::REF, {{DimType::H, MemDimTag::X, group_size}});
+    ndls.add(NdlType::REF, {{DimType::H, MemDimTag::X, group_size * max_entries}});
 
     ndls.add(
         NdlType::DEDR,
@@ -145,7 +160,7 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
 
     for (int i = 0; i < num_splits; ++i) {
         auto s = dense_splits[i];
-        deqw_dims.push_back({DimType::H, MemDimTag::X, s.size, s.stride * entry_size});
+        deqw_dims.push_back({DimType::H, MemDimTag::X, s.size, s.stride * outputSliceStride});
     }
     deqw_dims.push_back({DimType::H, MemDimTag::O, channelCount, outChannelStride});
     ndls.add(NdlType::DEQW, deqw_dims);

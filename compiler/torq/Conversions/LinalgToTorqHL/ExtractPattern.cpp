@@ -86,6 +86,69 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         return success();
     }
 
+    // GatherOp treats indices as linear offsets into the flattened values buffer.
+    // For higher-rank source tensors, rescale constant outer-dim indices so they
+    // point at the start of each contiguous slice in that flattened layout.
+    LogicalResult scaleGatherIndicesForSlice(
+        linalg::GenericOp srcOp, Value values, Value indices, PatternRewriter &rewriter,
+        Value &scaledIndices
+    ) const {
+        scaledIndices = indices;
+
+        auto valuesType = dyn_cast<RankedTensorType>(values.getType());
+        if (!valuesType || valuesType.getRank() <= 1) {
+            return success();
+        }
+
+        int64_t sliceStride = 1;
+        for (int64_t dim : valuesType.getShape().drop_front()) {
+            if (dim == ShapedType::kDynamic) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Expected gather source slice stride to be static"
+                );
+            }
+            sliceStride *= dim;
+        }
+        if (sliceStride == 1) {
+            return success();
+        }
+
+        auto maybeConstAttr = computeConstAttr(indices, /*recursive=*/true);
+        if (failed(maybeConstAttr)) {
+            return success();
+        }
+
+        auto indicesAttr = dyn_cast<DenseIntElementsAttr>(*maybeConstAttr);
+        if (!indicesAttr) {
+            return success();
+        }
+
+        auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
+        auto elementType =
+            indicesType ? dyn_cast<IntegerType>(indicesType.getElementType()) : nullptr;
+        if (!indicesType || !elementType) {
+            return success();
+        }
+
+        SmallVector<APInt> scaledValues;
+        scaledValues.reserve(indicesAttr.getNumElements());
+        APInt scale(64, sliceStride, /*isSigned=*/true);
+        for (APInt idx : indicesAttr.getValues<APInt>()) {
+            APInt scaled = idx.sextOrTrunc(64) * scale;
+            if (!scaled.isSignedIntN(elementType.getWidth())) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Expected scaled gather indices to fit in the element type"
+                );
+            }
+            scaledValues.push_back(scaled.sextOrTrunc(elementType.getWidth()));
+        }
+
+        auto scaledAttr = DenseIntElementsAttr::get(indicesType, scaledValues);
+        scaledIndices = arith::ConstantOp::create(rewriter, srcOp.getLoc(), indicesType, scaledAttr)
+                            .getResult();
+        return success();
+    }
+
   public:
     using OpRewritePattern::OpRewritePattern;
 
@@ -167,6 +230,11 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             // tensor is input
             auto cstType = mlir::cast<RankedTensorType>(cst.getType());
             auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+            if (failed(scaleGatherIndicesForSlice(srcOp, cst, input, rewriter, input))) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Failed to scale constant gather indices for sliced gathers"
+                );
+            }
 
             if (cstType.getRank() == 3) {
                 // NHC->NCH transposition only applies to rank-3 tensors
@@ -233,6 +301,11 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
                // and extract tensor is indices
 
             auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+            if (failed(scaleGatherIndicesForSlice(srcOp, cst, input, rewriter, input))) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Failed to scale constant gather indices for sliced gathers"
+                );
+            }
 
             rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
                 srcOp, outType, createInitTensor(srcOp, rewriter, outType), *maybeCstData, input

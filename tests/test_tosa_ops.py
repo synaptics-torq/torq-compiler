@@ -74,9 +74,6 @@ def case_config(request, runtime_hw_type, chip_config):
         "conv2d_f8_s4_1x1024_o256.mlir",
         "concat-a.mlir",
         "concat-b.mlir",
-        "gather-i32.mlir",
-        "gather.mlir",
-        "gather-i16.mlir",
     ]
     if any(s in request.param.data.name for s in iree_regression_tc):
         pytest.xfail("IREE 3.10 regression failure")
