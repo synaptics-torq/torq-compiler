@@ -22,6 +22,10 @@ int main(int argc, char **argv) {
     // FIXME: this is required until we fix our dispatch creation code
     allArgs.push_back("--iree-opt-const-expr-hoisting=false");
 
+    // FIXME: this is a workaround until we can handle fused elementwise operations
+    allArgs.push_back("--iree-dispatch-creation-enable-elementwise-fusion=false");
+    allArgs.push_back("--iree-preprocessing-enable-elementwise-fusion=false");
+
     for (int i = 1; i < argc; ++i) {
         allArgs.push_back(argv[i]);
     }
