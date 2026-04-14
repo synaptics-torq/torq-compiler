@@ -7,13 +7,13 @@
 #include "PassesDetail.h"
 #include "TilingUtils.h"
 
-#include "mlir/IR/Attributes.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -93,7 +93,7 @@ static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFus
         ),
         clEnumValN(TileAndFuseProducersFuseMode::NoFuse, "no-fuse", "Do not fuse producers")
     ),
-    llvm::cl::init(TileAndFuseProducersFuseMode::MaxSize) // Default value
+    llvm::cl::init(TileAndFuseProducersFuseMode::MaxProducers) // Default value
 );
 
 torq_hl::Executor getExecutor(Operation *op) {
@@ -225,16 +225,18 @@ void collectOpsForMemoryCheck(
                 if (visitedOps.contains(operandOp))
                     continue;
 
-                if (!llvm::isa<TilingInterface>(operandOp) ||
-                    checkShareFuseGroup(currentOp, operandOp)) {
-                    visitedOps.insert(operandOp);
-                    queue.push_back(operandOp);
+                if ((llvm::isa<TilingInterface>(operandOp) &&
+                     !checkShareFuseGroup(currentOp, operandOp))
+                    // Don't collect tiled operations
+                    || llvm::isa<scf::ForOp>(operandOp)) {
+                    // the defining op of operand might still be in `ops`, so this
+                    // is a maybe input. We will check again at the end.
+                    maybeInputs.push_back(operand);
                     continue;
                 }
 
-                // the defining op of operand might still be in `ops`, so this
-                // is a maybeInput. We will check again at the end.
-                maybeInputs.push_back(operand);
+                visitedOps.insert(operandOp);
+                queue.push_back(operandOp);
             }
         });
     }
@@ -365,14 +367,24 @@ llvm::LogicalResult tileModuleForMemoryCheck(
 
     // Since we don't care about the computation here, only the memory
     // footprint, and assuming the first tile is a good approximation for that,
-    // we fix the tiling loops upper bound to their step, effectively resulting
-    // in a single itteration. Canonicalize should simplify this later.
+    // we fix the tiling loops upper bound to their lower bound + step,
+    // effectively resulting in a single iteration. Canonicalize will
+    // simplify this later.
     for (LoopLikeOpInterface loop : tiledResults->loops) {
         auto forOp = dyn_cast<scf::ForOp>(loop.getOperation());
         if (!forOp)
             return llvm::failure();
 
-        forOp.setUpperBound(forOp.getStep());
+        builder.setInsertionPoint(forOp);
+        AffineExpr d0 = builder.getAffineDimExpr(0);
+        AffineExpr d1 = builder.getAffineDimExpr(1);
+        AffineMap map = AffineMap::get(2, 0, d0 + d1, builder.getContext());
+        Value newUb =
+            affine::AffineApplyOp::create(
+                builder, forOp.getLoc(), map, ValueRange{forOp.getLowerBound(), forOp.getStep()}
+            )
+                .getResult();
+        forOp.setUpperBound(newUb);
     }
 
     return llvm::success();
@@ -445,6 +457,14 @@ llvm::LogicalResult TileAndFusePass::runAssignAddressesPipeline(ModuleOp moduleO
 
         addPassesPostTileAndFuseUpToAssignLramAddresses(*assignAddressesPipeline_);
     }
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "*** Running the pipeline for: " << moduleOp.getName() << "\n";
+        auto result = assignAddressesPipeline_->run(moduleOp);
+        llvm::dbgs() << "*** pipeline finished (" << (succeeded(result) ? "succeeded" : "failed")
+                     << ")\n";
+        return result;
+    });
 
     return assignAddressesPipeline_->run(moduleOp);
 }
@@ -729,16 +749,13 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
     bool isDestinationOperand
 ) {
-    static const std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> doNotFuse =
-        std::nullopt;
+    const std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> doNotFuse = std::nullopt;
+    const scf::SCFTileAndFuseOptions::ControlFnResult fuseAndDoNotYieldProducer{false};
 
     Operation *producerOp = producerOpResult.getOwner();
     auto producerTi = dyn_cast<TilingInterface>(producerOp);
     if (!producerTi)
         return doNotFuse;
-
-    // TODO: if producer has users outside of the tiling fuse group, maybe we should yield it?
-    bool yieldProducerReplacement = false;
 
     // FIXME: should we not fuse destination operands?
     // if (isDestinationOperand) {
@@ -796,13 +813,18 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
             return doNotFuse;
         }
 
-        return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
+        return fuseAndDoNotYieldProducer;
     }
 
-    if (!isFuseGroupOutput(producerOp)) {
-        // Is part of a pattern-fuse-group, but not the output operation (bottom most).
-        // We only check the output operation of such group.
-        return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
+    // This is an alternative check to `!isFuseGroupOutput(producerOp)`, which
+    // we can't use here because scf::tiling already added an extract_slice
+    // operation to the result of producerOp, which interferes with isFuseGroupOutput.
+    for (Operation *user : candidateSliceOp->getUsers()) {
+        if (checkShareFuseGroup(user, producerOp)) {
+            // Is part of a pattern-fuse-group, but not the output operation (bottom most).
+            // We only check the output operation of such group.
+            return fuseAndDoNotYieldProducer;
+        }
     }
 
     llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(producerTi);
@@ -835,7 +857,7 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     }
 
     // Fuse iff producer fits in the tile
-    return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
+    return fuseAndDoNotYieldProducer;
 }
 
 // an SCFTileAndFuseOptions::ControlFnTy for the max-producers fuse mode.
@@ -1010,8 +1032,7 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
 
     LLVM_DEBUG({
         llvm::dbgs() << tiOp->getName() << " needs to be tiled\n";
-        llvm::dbgs() << "  " << TorqHw::get().getAvailableMemoryForTiling()
-                     << " bytes of available memory for tiling\n";
+        llvm::dbgs() << "  " << TorqHw::get().getLramSize() << " bytes of LRAM\n";
 
         if (Attribute groupId = tiOp->getAttr(TORQ_FUSE_GROUP_ID)) {
             llvm::dbgs() << "  " << TORQ_FUSE_GROUP_ID << ": " << getConstantIntValue(groupId)
@@ -1103,6 +1124,10 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
             // fuseControlMaxProducers a check that the producer can be tiled to
             // a 1x1x.. tile (over all the domains in tilingIterDomsOrder) before
             // fusing it.
+            LLVM_DEBUG(
+                llvm::dbgs()
+                << "max-producers failed, falling back to max-size for the current consumer.\n"
+            );
             tiledResults = tileAndFuseToSize(
                 rewriter, tiOp, iterDomainSizes, tileSizes, TileAndFuseProducersFuseMode::MaxSize
             );
