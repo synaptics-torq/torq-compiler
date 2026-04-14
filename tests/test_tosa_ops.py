@@ -30,17 +30,7 @@ def case_config(request, runtime_hw_type, chip_config):
         "efficientnet-sigmoid-rescale-mul.mlir",
 
         # error: 'tosa.const' op requires attribute 'values'
-        "conv-343.mlir",
-        "conv2d-28x28x512.mlir",
-        "conv2d_as_fully_connected.mlir",
-        "conv2d_f3_12x12x64_i16.mlir",
-        "conv2d_f5_s2_64x64x16_i16.mlir",
-        "dw-32x8.mlir",
-        "dw_4x4_stride2.mlir",
         "maxpool2d-stride2-k3x3-pad-112x112x127.mlir",
-        "pw-16x16.mlir",
-        "pw-32x8-7x7x320.mlir",
-        "pw-32x8.mlir",
         "yolo-table-6.mlir",
 
         # Assertion `llvm::isUIntN(BitWidth, val) && "Value is not an N-bit unsigned value"' failed.
