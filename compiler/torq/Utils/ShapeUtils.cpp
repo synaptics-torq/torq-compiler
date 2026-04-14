@@ -32,45 +32,84 @@
 
 namespace mlir::syna::torq {
 
+// Materializes a reshape to the exact static shape expected by the broadcast path.
+static Value
+reshapeValueToShape(Value input, ArrayRef<int64_t> newShape, PatternRewriter &rewriter) {
+    auto type = dyn_cast<RankedTensorType>(input.getType());
+    auto elementType = type.getElementType();
+
+    auto outType = RankedTensorType::get(newShape, elementType);
+    std::vector<int64_t> shapeVector(newShape.begin(), newShape.end());
+    Value shapeValue = createConst(shapeVector, rewriter, input.getLoc());
+    auto reshapeOp =
+        tensor::ReshapeOp::create(rewriter, input.getLoc(), outType, input, shapeValue);
+
+    return reshapeOp.getResult();
+}
+
+// Creates the broadcast and uses the generalized form when MLIR can lower it.
+static Value broadcastValueToShape(
+    linalg::LinalgOp srcOp, Value input, ArrayRef<int64_t> outputShape,
+    ArrayRef<int64_t> broadcastDims, PatternRewriter &rewriter
+) {
+    auto type = dyn_cast<RankedTensorType>(input.getType());
+    auto elementType = type.getElementType();
+
+    auto outType = RankedTensorType::get(outputShape, elementType);
+    auto broadcastOp = linalg::BroadcastOp::create(
+        rewriter, srcOp.getLoc(), input, createInitTensor(srcOp, rewriter, outType), broadcastDims
+    );
+    auto generalizedOp = linalg::generalizeNamedOp(rewriter, broadcastOp);
+    if (failed(generalizedOp)) {
+        return broadcastOp.getResults()[0];
+    }
+
+    return generalizedOp->getResults()[0];
+}
+
+// Rebuilds scalar constants directly at the broadcasted shape to avoid creating
+// a reshape+broadcast chain for simple splat inputs.
+static Value materializeBroadcastedConstant(
+    Value input, ArrayRef<int64_t> outputShape, PatternRewriter &rewriter
+) {
+    // Look through reshape/expand/collapse chains to find the underlying constant.
+    for (bool changed = true; changed;) {
+        changed = false;
+        if (auto op = input.getDefiningOp<tensor::ReshapeOp>()) {
+            input = op.getSource();
+            changed = true;
+        }
+        else if (auto op = input.getDefiningOp<tensor::ExpandShapeOp>()) {
+            input = op.getSrc();
+            changed = true;
+        }
+        else if (auto op = input.getDefiningOp<tensor::CollapseShapeOp>()) {
+            input = op.getSrc();
+            changed = true;
+        }
+    }
+
+    auto constOp = input.getDefiningOp<arith::ConstantOp>();
+    if (!constOp) {
+        return {};
+    }
+
+    auto denseAttr = dyn_cast<DenseElementsAttr>(constOp.getValue());
+    if (!denseAttr || (!denseAttr.isSplat() && denseAttr.getNumElements() != 1)) {
+        return {};
+    }
+
+    Attribute scalarAttr = denseAttr.getValues<Attribute>()[0];
+    auto outputType = RankedTensorType::get(outputShape, denseAttr.getElementType());
+    auto splatAttr = SplatElementsAttr::get(outputType, scalarAttr);
+    return arith::ConstantOp::create(rewriter, input.getLoc(), splatAttr).getResult();
+}
+
 static void broadcastInput(
     linalg::LinalgOp srcOp, Value &input, SmallVector<int64_t> &dims,
     ArrayRef<int64_t> inputNewShape, ArrayRef<int64_t> outputShape,
     llvm::ArrayRef<AffineMap> newIndexingMaps, PatternRewriter &rewriter
 ) {
-    /////////Support Functions///////////
-
-    auto addReshapeOp = [](Value &input, ArrayRef<int64_t> newShape, PatternRewriter &rewriter) {
-        auto type = dyn_cast<RankedTensorType>(input.getType());
-        auto elementType = type.getElementType();
-
-        auto outType = RankedTensorType::get(newShape, elementType);
-        std::vector<int64_t> shVec(newShape.begin(), newShape.end());
-        Value shValue = createConst(shVec, rewriter, input.getLoc());
-        auto reshapeOp =
-            tensor::ReshapeOp::create(rewriter, input.getLoc(), outType, input, shValue);
-
-        return reshapeOp.getResult();
-    };
-
-    auto addBcastOp = [](linalg::LinalgOp srcOp, Value &input, llvm::ArrayRef<int64_t> bcastShape,
-                         SmallVector<int64_t> &dims, PatternRewriter &rewriter) {
-        auto type = dyn_cast<RankedTensorType>(input.getType());
-        auto elementType = type.getElementType();
-
-        auto outType = RankedTensorType::get(bcastShape, elementType);
-        auto bcastOp = linalg::BroadcastOp::create(
-            rewriter, srcOp.getLoc(), input, createInitTensor(srcOp, rewriter, outType), dims
-        );
-        auto gOp = linalg::generalizeNamedOp(rewriter, bcastOp);
-        if (failed(gOp)) {
-            return bcastOp.getResults()[0];
-        }
-
-        return gOp->getResults()[0];
-    };
-
-    //////////////End of Support Functions//////////////
-
     ScaleInfo scaleInfo;
     Value srcInput = input;
     while (foldBackwardRescale(input, scaleInfo)) {
@@ -87,13 +126,28 @@ static void broadcastInput(
     auto inputType = dyn_cast<RankedTensorType>(input.getType());
     auto inputShape = inputType.getShape();
     bool needReshape = !inputNewShape.empty() && !llvm::equal(inputNewShape, inputShape);
-    if (needReshape) {
-        input = addReshapeOp(input, inputNewShape, rewriter);
-    }
 
-    // Add a broadcast iff there are explicit bcast dims
+    // For splat constants with no intervening rescale ops, replace
+    // reshape+broadcast with a single splat of the target shape.
     if (!dims.empty()) {
-        input = addBcastOp(srcOp, input, outputShape, dims, rewriter);
+        if (rescaleOps.empty()) {
+            if (auto splatConst = materializeBroadcastedConstant(input, outputShape, rewriter)) {
+                input = splatConst;
+            }
+            else {
+                if (needReshape)
+                    input = reshapeValueToShape(input, inputNewShape, rewriter);
+                input = broadcastValueToShape(srcOp, input, outputShape, dims, rewriter);
+            }
+        }
+        else {
+            if (needReshape)
+                input = reshapeValueToShape(input, inputNewShape, rewriter);
+            input = broadcastValueToShape(srcOp, input, outputShape, dims, rewriter);
+        }
+    }
+    else if (needReshape) {
+        input = reshapeValueToShape(input, inputNewShape, rewriter);
     }
 
     // Propagate the reshape+broadcast through the rescale GenericOps
