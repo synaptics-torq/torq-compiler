@@ -87,6 +87,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createPeelTileLoopsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollDynamicShapeLoopPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createReplaceForLoopsWithFirstIterationPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLramTilePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createDtcmTilePass();
@@ -118,7 +120,14 @@ void addTorqComprehensiveBufferizePasses(
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkHostExecutorPass();
 
-void addPassesPostTileAndFuseUpToAssignLramAddresses(OpPassManager &pipeline);
+// When optimizeForTileAndFuse is true the pipeline is being executed inside
+// Tile & Fuse, to check if the extracted IR fits in LRAM. Hence, we don't care
+// so much about the result of the computation. For example, if all the
+// iterations of an scf::ForOp have the same memory requirements, we can reduce
+// it to a single iteration.
+void addPassesPostTileAndFuseUpToAssignLramAddresses(
+    OpPassManager &pipeline, bool optimizeForTileAndFuse = false
+);
 
 //----------------------------------------------------------------------------//
 // Registration

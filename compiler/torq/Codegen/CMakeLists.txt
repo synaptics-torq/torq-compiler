@@ -38,6 +38,7 @@ set(sources
     PeelTileLoopsPass.cpp
     Pool.cpp
     ProfilingPass.cpp
+    ReplaceForLoopsWithFirstIterationPass.cpp
     ResolveAddressesPass.cpp
     ResolveInvocationArgumentsPass.cpp
     ScalarsToTensorsPass.cpp

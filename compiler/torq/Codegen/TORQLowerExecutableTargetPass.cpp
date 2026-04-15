@@ -132,13 +132,16 @@ void addSlicePassesUpToTileAndFuse(OpPassManager &pm) {
     }
 }
 
-void addSlicePassesPostTileAndFuse(OpPassManager &pm) {
+void addSlicePassesPostTileAndFuse(OpPassManager &pm, bool optimizeForTileAndFuse) {
     if (!clFromPreBufferizedIR && !clDisableSlices) {
         auto &funcPm = pm.nest<func::FuncOp>();
 
         if (!clEnableTorqHLTiling) {
             funcPm.addPass(createCanonicalizerPass());
             funcPm.addPass(createPeelTileLoopsPass());
+
+            if (optimizeForTileAndFuse)
+                funcPm.addPass(createReplaceForLoopsWithFirstIterationPass());
         }
 
         if (!clDisableLinalgSlicing)
@@ -424,8 +427,10 @@ void TORQLowerExecutableTargetPass::runOnOperation() {
 
 } // namespace
 
-void addPassesPostTileAndFuseUpToAssignLramAddresses(OpPassManager &pipeline) {
-    addSlicePassesPostTileAndFuse(pipeline);
+void addPassesPostTileAndFuseUpToAssignLramAddresses(
+    OpPassManager &pipeline, bool optimizeForTileAndFuse
+) {
+    addSlicePassesPostTileAndFuse(pipeline, optimizeForTileAndFuse);
 
     if (!clDisableCSS || !clDisableHost) {
         addCpuPasses(pipeline);

@@ -365,28 +365,6 @@ llvm::LogicalResult tileModuleForMemoryCheck(
     }
     applyTiledResults(rewriter, clonedConsumerOp, *tiledResults);
 
-    // Since we don't care about the computation here, only the memory
-    // footprint, and assuming the first tile is a good approximation for that,
-    // we fix the tiling loops upper bound to their lower bound + step,
-    // effectively resulting in a single iteration. Canonicalize will
-    // simplify this later.
-    for (LoopLikeOpInterface loop : tiledResults->loops) {
-        auto forOp = dyn_cast<scf::ForOp>(loop.getOperation());
-        if (!forOp)
-            return llvm::failure();
-
-        builder.setInsertionPoint(forOp);
-        AffineExpr d0 = builder.getAffineDimExpr(0);
-        AffineExpr d1 = builder.getAffineDimExpr(1);
-        AffineMap map = AffineMap::get(2, 0, d0 + d1, builder.getContext());
-        Value newUb =
-            affine::AffineApplyOp::create(
-                builder, forOp.getLoc(), map, ValueRange{forOp.getLowerBound(), forOp.getStep()}
-            )
-                .getResult();
-        forOp.setUpperBound(newUb);
-    }
-
     return llvm::success();
 }
 
@@ -413,6 +391,8 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     void runOnOperation() override;
 
   private:
+    void initPipeline(MLIRContext *context);
+
     llvm::LogicalResult runAssignAddressesPipeline(ModuleOp moduleOp);
 
     llvm::FailureOr<bool> checkModuleFitsInMemory(ModuleOp moduleOp);
@@ -448,15 +428,19 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     );
 };
 
-llvm::LogicalResult TileAndFusePass::runAssignAddressesPipeline(ModuleOp moduleOp) {
+void TileAndFusePass::initPipeline(MLIRContext *context) {
     if (assignAddressesPipeline_ == nullptr) {
-        assignAddressesPipeline_ = std::make_unique<PassManager>(moduleOp->getContext());
+        assignAddressesPipeline_ = std::make_unique<PassManager>(context);
 
         if (failed(applyPassManagerCLOptions(*assignAddressesPipeline_)))
             assert(false);
 
-        addPassesPostTileAndFuseUpToAssignLramAddresses(*assignAddressesPipeline_);
+        addPassesPostTileAndFuseUpToAssignLramAddresses(*assignAddressesPipeline_, true);
     }
+}
+
+llvm::LogicalResult TileAndFusePass::runAssignAddressesPipeline(ModuleOp moduleOp) {
+    initPipeline(moduleOp->getContext());
 
     LLVM_DEBUG({
         llvm::dbgs() << "*** Running the pipeline for: " << moduleOp.getName() << "\n";
