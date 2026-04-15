@@ -98,7 +98,11 @@ struct CollapseShapeOpTilingInterface
 
         Operation *tiledOp = clone(b, op, resultTensor, tiledSrc);
 
-        return TilingResult{{tiledOp}, SmallVector<Value>(tiledOp->getResults())};
+        return TilingResult{
+            /*tiledOps =*/{tiledOp},
+            /*tiledValues =*/SmallVector<Value>(tiledOp->getResults()),
+            /*generatedSlices =*/{tiledSrc.getDefiningOp()}
+        };
     }
 
     LogicalResult getResultTilePosition(
@@ -204,7 +208,11 @@ struct ExpandShapeOpTilingInterface
         // attributes. As far as I know, nothing relies on this behavior.
         tiledOp->setDiscardableAttrs(op->getDiscardableAttrDictionary());
 
-        return TilingResult{{tiledOp}, SmallVector<Value>(tiledOp->getResults())};
+        return TilingResult{
+            /*tiledOps =*/{tiledOp},
+            /*tiledValues =*/SmallVector<Value>(tiledOp->getResults()),
+            /*generatedSlices =*/{tiledSrc.getDefiningOp()}
+        };
     }
 
     LogicalResult getResultTilePosition(
