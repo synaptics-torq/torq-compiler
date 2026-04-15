@@ -10,6 +10,27 @@
 
 - To generate the debugging info in a directory instead of stderr: ``--mlir-print-ir-tree-dir=<dirname>``
 
+  The directory structure in which the IR is dumped reflects the modules and functions the pipeline process. At the top level, you should see something like this:
+
+```
+builtin_module_check_needs_tiling/
+builtin_module_check_tiling_succeeded/
+builtin_module_fit_tile_to_memory/
+builtin_module_fuse_control_max_size_no_pattern/
+builtin_module_no-symbol-name/
+```
+
+The `builtin_module_no-symbol-name` is where the IR dumps from all the passes
+are. The other directories are intermediate runs of the pipeline by the Tile &
+Fuse pass. `check_needs_tiling` are runs where the pass checks if individual
+operations need to be tiled. `check_tiling_succeeded` are runs the pass does
+only when `--debug-only=torq-tile-and-fuse` is enabled, which check at the very
+end of tiling if it succeeded. `fit_tile_to_memory` are runs the pass does when
+searching for a fitting tile size. And, `fuse_control_max_size_no_pattern` are
+runs the pass does, only when
+`--torq-tile-and-fuse-producers-fuse-mode=max-size` is enabled, to determine if
+a producer fits in the current tile size.
+
 - To print line numbers (locations) in the source input when printing IRs use ``--mlir-print-debuginfo --mlir-pretty-debuginfo --mlir-print-local-scope``
 
 - To view more debug information during execution pass the parameter `--torq_debug` to `torq-run-module`
