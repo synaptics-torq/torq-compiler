@@ -80,6 +80,9 @@ jobs:
       contents: read
       id-token: write
 
+    # ensure build jobs fail before CodeBuild kills the runners
+    timeout-minutes: 50
+
     steps:
 
       - name: Assume AWS role to access cache
@@ -206,7 +209,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        chip_group: [ default.group , next.group ]
+        chip_group: ${{ vars.TEST_GROUPS && fromJSON(vars.TEST_GROUPS) || fromJSON('["default.group"]') }}
+
+    # ensure build jobs fail before CodeBuild kills the runners
+    timeout-minutes: 50
 
     runs-on:
           - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -284,7 +290,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        chip_group: [ default.group , next.group ]
+        chip_group: ${{ vars.TEST_GROUPS && fromJSON(vars.TEST_GROUPS) || fromJSON('["default.group"]') }}
 
     steps:
       
