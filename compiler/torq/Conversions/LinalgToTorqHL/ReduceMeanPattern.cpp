@@ -36,8 +36,15 @@ namespace mlir::syna::torq {
 struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
     using OpRewritePattern::OpRewritePattern;
 
+    ReduceMeanPattern(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern<linalg::GenericOp>(context), _markFuseGroups(markFuseGroups) {}
+
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (_markFuseGroups && isMarkedFuseGroup(srcOp)) {
+            return rewriter.notifyMatchFailure(srcOp, "Already marked");
+        }
+
         if (srcOp.getNumDpsInputs() != 1 || srcOp.getNumDpsInits() != 1) {
             return rewriter.notifyMatchFailure(srcOp, "ReducemeanPattern Expected 1 input/init");
         }
@@ -116,6 +123,14 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expected sum reduction");
         }
 
+        // The reduce-sum block must contain exactly two ops: addf + yield.
+        // Reject if there are extra ops in the block that we don't understand.
+        if (reducesumOp.getBody()->getOperations().size() != 2) {
+            return rewriter.notifyMatchFailure(
+                reducesumOp, "ReducesumPattern Expected exactly addf + yield in block"
+            );
+        }
+
         auto reducesumYield = dyn_cast<linalg::YieldOp>(reducesumOp.getBody()->getTerminator());
         if (!reducesumYield || !isa<arith::AddFOp>(reducesumYield.getValues()[0].getDefiningOp())) {
             return rewriter.notifyMatchFailure(
@@ -135,6 +150,14 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
         reducesumOp.getParallelDims(parallelDims);
 
         Value input = reducesumOp.getInputs()[0];
+
+        if (_markFuseGroups) {
+            markFuseGroupBackward(
+                output, {input}, rewriter,
+                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            );
+            return success();
+        }
 
         // reduceMean has batch and its iteratetype is parallel
         SmallVector<uint64_t, 4> permVec;
@@ -165,6 +188,9 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
 
         return success();
     }
+
+  private:
+    bool _markFuseGroups;
 };
 
 // ReduceMeanConvert: detects a pattern of sum-reduction along the last axis followed by
@@ -450,7 +476,7 @@ void populateLinalgToTorqHLReduceMeanPatterns(
     patterns.insert<ReduceMeanConvert>(context);
 
     // TODO: refactor with ReduceMeanConvert later soon
-    patterns.insert<ReduceMeanPattern>(context);
+    patterns.insert<ReduceMeanPattern>(context, markFuseGroups);
 }
 
 } // namespace mlir::syna::torq
