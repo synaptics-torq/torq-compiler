@@ -313,6 +313,21 @@ class TransposePropagationAnalysis
             return success();
         }
 
+        // FIXME: change the property from setBlocking to setProgated
+        // Handle tensor.expand_shape - block propagation.
+        // expand_shape changes the tensor rank (e.g. 4D → 5D), so the existing
+        // 4D permutation is no longer valid for the expanded result. Propagating
+        // a 4D permutation through expand_shape would cause transformExtractSliceOp
+        // to create a 4D transpose on a 5D tensor, which is incorrect.
+        if (isa<tensor::ExpandShapeOp>(op)) {
+            for (auto *result : results) {
+                result->setBlocking();
+                propagateIfChanged(result, ChangeResult::Change);
+            }
+            LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (tensor.expand_shape)\n");
+            return success();
+        }
+
         // Handle tensor.empty - keep as Unknown (flexible, can adapt to any layout)
         if (isa<tensor::EmptyOp>(op)) {
             // Keep in Unknown state - tensor.empty can adapt to whatever layout is needed

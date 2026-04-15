@@ -2473,25 +2473,25 @@ Value create1DimTensorFromRescaleScalar(
         // Should now be a block argument
         auto blockArg = dyn_cast<BlockArgument>(traceVal);
         if (!blockArg) {
-            return input;
+            return nullptr;
         }
 
         // Resolve block arg to DPS input of the linalg.generic
         unsigned argIdx = blockArg.getArgNumber();
         if (argIdx >= srcOp.getNumDpsInputs()) {
-            return input;
+            return nullptr;
         }
 
         Value dpsInput = srcOp.getInputs()[argIdx];
         auto dpsConstOp = dpsInput.getDefiningOp<arith::ConstantOp>();
         if (!dpsConstOp) {
-            return input;
+            return nullptr;
         }
 
         int32_t inputData = 0;
         if (!getIntegerConstantValue(dpsConstOp, &inputData)) {
             LLVM_DEBUG({ llvm::errs() << "cannot get DPS input constant value\n"; });
-            return input;
+            return nullptr;
         }
 
         // Compute the rescale: (inputData - inputZp) * scaleFactor

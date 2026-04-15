@@ -137,8 +137,12 @@ matchIdentityRescale(linalg::GenericOp op, int32_t &outZp, linalg::GenericOp &ou
         return false;
     }
 
-    // The yield value should be a tosa.apply_scale
-    auto applyScaleOp = yieldOp.getOperand(0).getDefiningOp<tosa::ApplyScaleOp>();
+    Value val = yieldOp.getOperand(0);
+    auto truncOp = dyn_cast_or_null<arith::TruncIOp>(val.getDefiningOp());
+    if (truncOp) {
+        val = truncOp.getIn();
+    }
+    auto applyScaleOp = dyn_cast_or_null<tosa::ApplyScaleOp>(val.getDefiningOp());
     if (!applyScaleOp) {
         LLVM_DEBUG(
             llvm::dbgs() << "[SwishMatch]   -> Not identity rescale: yield is not apply_scale\n"

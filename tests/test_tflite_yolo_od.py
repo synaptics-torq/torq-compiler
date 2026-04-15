@@ -208,7 +208,8 @@ def _compare_full_od_pair(left_results, right_results, left_name, right_name, mo
 def case_config(request, tflite_layer_model):
     """Configure test case settings."""
     _skip_next_group_full_model(request, tflite_layer_model)
-    torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-css", "--torq-disable-host"]
+    torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-css"]
+    torq_compiler_options += ["--torq-enable-torq-hl-tiling", "--torq-enable-transpose-optimization"]
 
     # Add a warning if neither tiling nor transpose optimization is enabled,
     # since that is required for correct results on some layers & to get max performance on the full model.
@@ -325,6 +326,8 @@ TORQ_COMPILE_ERROR_LAYERS = [
     'layer_pad_4',  # Only in next.group
     'layer_resize_nearest_neighbor_108',  # Only in next.group
     'layer_resize_nearest_neighbor_125',  # Only in next.group
+    #FIXME: these CONV_2D layers fail with unable to allocate space for result
+    'tflite_layer_CONV_2D_52',
 ]
 
 # Layer cases known to fail in LLVMCPU vs TFLite comparison
@@ -385,9 +388,8 @@ def test_yolo_od_llvmcpu_torq(
                      "LLVMCPU", "TORQ", case_config, tflite_layer_model)
 
 
-# FIXME IREE-3.10 regression: see https://github.com/synaptics-torq/torq-compiler-dev/issues/1026
-#@pytest.mark.ci
-#@pytest.mark.fpga_ci
+@pytest.mark.ci
+@pytest.mark.fpga_ci
 @pytest.mark.full_ci
 def test_yolo_od_tflite_torq(
     request,

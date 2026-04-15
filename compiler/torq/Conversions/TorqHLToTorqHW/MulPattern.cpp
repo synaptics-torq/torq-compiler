@@ -20,7 +20,10 @@ template <>
 LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter) const {
     Slice slice("mul");
 
-    using In = Vectorized;
+    struct In : Vectorized {
+        enum { NonDenseDims };
+    };
+
     LData input1(op.getInput1());
     LData input2(op.getInput2());
     LData biasScale(op.getScaleBias());
@@ -46,12 +49,15 @@ LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter
     output.fuse(denseDims);
 
     BData bdata = slice.bram.load(biasScale);
-    For(auto i = slice.iterate(input1.dims(0, In::Elements))) {
-        IData data1 = slice.iram.load(input1[i]);
-        WData data2 = slice.wram.load(input2[i]);
-        PData pdata = slice.alu.elementwiseProductAccumulate(data1, data2);
-        QData res = slice.act.rescaleClamp(pdata, bdata, shift, outZp, outMin, outMax);
-        slice.append(output, res);
+
+    For(auto ndd = slice.iterate(input1.dims(In::NonDenseDims, In::Vectors))) {
+        For(auto i = slice.iterate(input1.dim(In::Vectors))) {
+            IData data1 = slice.iram.load(input1[ndd][i]);
+            WData data2 = slice.wram.load(input2[ndd][i]);
+            PData pdata = slice.alu.elementwiseProductAccumulate(data1, data2);
+            QData res = slice.act.rescaleClamp(pdata, bdata, shift, outZp, outMin, outMax);
+            slice.append(output[ndd], res);
+        }
     }
 
     rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
