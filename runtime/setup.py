@@ -401,7 +401,7 @@ setup(
         ],
     },
     install_requires=[
-        "numpy<2.0.0",
+        "numpy>2.0.0b1",
         "PyYAML>=5.4.1",
         "ml-dtypes>=0.4.0",
     ],

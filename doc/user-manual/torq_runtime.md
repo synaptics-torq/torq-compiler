@@ -43,6 +43,7 @@ VMFBInferenceRunner(
     load_method="preload",
     load_model_to_mem=True,
     runtime_flags=None,
+    device_outputs=False,
 )
 ```
 
@@ -57,6 +58,7 @@ VMFBInferenceRunner(
 | `load_method` | `"preload" \| "mmap"` | `"preload"` | `"preload"` copies into memory; `"mmap"` memory-maps the file. |
 | `load_model_to_mem` | `bool` | `True` | Whether to load the model into memory during initialization. |
 | `runtime_flags` | `Iterable[str] \| None` | `None` | Extra IREE runtime flags. |
+| `device_outputs` | `bool` | `False` | If `True`, `infer()` returns on-device `DeviceArray` objects instead of NumPy arrays, avoiding device-to-host transfers. Useful for pipelines where outputs are fed back as inputs (e.g. KV-cache in autoregressive decoding). |
 
 **Properties:**
 
@@ -64,6 +66,7 @@ VMFBInferenceRunner(
 |----------|------|-------------|
 | `model_path` | `PathLike` | Path to the loaded model file. |
 | `infer_time_ms` | `float` | Elapsed time in milliseconds for the last call to `infer()`. |
+| `device` | `HalDevice` | The underlying IREE HAL device. |
 | `inputs_info` | `list[TensorInfo] \| None` | Input tensor metadata extracted from the model, or `None` if unavailable. |
 | `outputs_info` | `list[TensorInfo] \| None` | Output tensor metadata extracted from the model, or `None` if unavailable. |
 
@@ -73,8 +76,15 @@ VMFBInferenceRunner(
 
 Run inference and return the output arrays.
 
-- **inputs** — Either an iterable of NumPy arrays or a mapping of name to array.
-- **Returns** — A list of NumPy arrays containing the model outputs.
+- **inputs** — Either an iterable of NumPy arrays (or `DeviceArray` objects) or a mapping of name to array.
+- **Returns** — A list of NumPy arrays by default. When `device_outputs=True`, returns a list of on-device `DeviceArray` objects instead.
+
+#### `allocate_device_array(array)`
+
+Allocate a device buffer and copy a host NumPy array into it.
+
+- **array** — A NumPy array to upload to the device.
+- **Returns** — A `DeviceArray` that can be passed directly to `infer()` without further copies.
 
 ### `profile_vmfb_inference_time`
 
@@ -211,4 +221,29 @@ runner = VMFBInferenceRunner("model.vmfb", device_uri="torq")
 # Load preprocessed input from a .npy file
 input_data = np.load("preprocessed_input.npy")
 outputs = runner.infer([input_data])
+```
+
+### Zero-Copy Device Outputs
+
+When model outputs are fed back as inputs (e.g. KV-cache tensors in autoregressive decoding), use `device_outputs=True` to keep data on the device and avoid unnecessary host transfers:
+
+```python
+import numpy as np
+from torq.runtime import VMFBInferenceRunner
+
+runner = VMFBInferenceRunner("model.vmfb", device_uri="torq", device_outputs=True)
+
+# Allocate an initial on-device buffer (e.g. for a KV cache)
+kv_cache = runner.allocate_device_array(np.zeros((1, 8, 256, 64), dtype=np.float16))
+
+# Run inference — outputs stay on device as DeviceArray objects
+results = runner.infer([input_data, kv_cache])
+logits, new_kv = results[0], results[1]
+
+# Use the output DeviceArray directly as next step's input
+kv_cache = new_kv
+
+# Only bring the logits to host for sampling
+logits_np = logits.to_host()
+```
 ```

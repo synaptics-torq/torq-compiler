@@ -140,7 +140,8 @@ class VMFBInferenceRunner(InferenceRunner):
         n_threads: int | None = None,
         load_method: Literal["preload", "mmap"] = "preload",
         load_model_to_mem: bool = True,
-        runtime_flags: Iterable[str] | None = None
+        runtime_flags: Iterable[str] | None = None,
+        device_outputs: bool = False,
     ):
         """InferenceRunner backed by the IREE runtime for ``.vmfb`` modules.
 
@@ -152,6 +153,9 @@ class VMFBInferenceRunner(InferenceRunner):
             load_method: ``"preload"`` copies into memory; ``"mmap"`` memory-maps the file.
             load_model_to_mem: Load model into memory during initialization.
             runtime_flags: Extra IREE runtime flags.
+            device_outputs: If True, :meth:`infer` returns on-device
+                :class:`~iree.runtime.DeviceArray` objects instead of
+                NumPy arrays.
 
         Raises:
             RuntimeError: If the IREE Runtime python API is not installed.
@@ -160,6 +164,7 @@ class VMFBInferenceRunner(InferenceRunner):
             raise RuntimeError("IREE Runtime python API not available in environment")
 
         super().__init__(model_path)
+        self._device_outputs = device_outputs
         self._logger = logging.getLogger(__class__.__name__)
         self._function = function
         self._device_uri = device_uri
@@ -181,6 +186,7 @@ class VMFBInferenceRunner(InferenceRunner):
         if flags:
             iree_rt.flags.parse_flags(*flags)
 
+        self._device = iree_rt.get_device(self._device_uri)
         self._invoker = None
         self._inputs_info = None
         self._outputs_info = None
@@ -196,6 +202,13 @@ class VMFBInferenceRunner(InferenceRunner):
     def outputs_info(self) -> list[TensorInfo] | None:
         return self._outputs_info
 
+    @property
+    def device(self):
+        """The underlying IREE HAL device used by this runner."""
+        if self._invoker is None:
+            self._load_invoker()
+        return self._device
+
     def _load_invoker(self):
         """Load the VMFB module and resolve the target function invoker.
 
@@ -208,8 +221,7 @@ class VMFBInferenceRunner(InferenceRunner):
             self._logger.debug("'%s' loaded via mmap", str(self._model_path))
         else:
             instance = iree_rt.VmInstance()
-            device = iree_rt.get_device(self._device_uri)
-            hal_module = iree_rt.create_hal_module(instance, device)
+            hal_module = iree_rt.create_hal_module(instance, self._device)
             f = open(self._model_path, "rb")
             self._mmap = mmap_mod.mmap(f.fileno(), 0, access=mmap_mod.ACCESS_READ)
             f.close()
@@ -227,13 +239,38 @@ class VMFBInferenceRunner(InferenceRunner):
         if io_info:
             self._inputs_info, self._outputs_info = io_info
 
-    def _infer(self, inputs: Iterable[npt.NDArray] | Mapping[str, npt.NDArray]) -> list[npt.NDArray]:
-        """Run a single inference pass and return host-side output arrays."""
+    def _infer(self, inputs: Iterable[npt.NDArray | "iree_rt.DeviceArray"] | Mapping[str, npt.NDArray | "iree_rt.DeviceArray"]) -> list:
+        """Run a single inference pass.
+
+        *inputs* may contain NumPy arrays, :class:`~iree.runtime.DeviceArray`, or a mix of both.
+
+        Returns DeviceArray outputs when ``device_outputs`` is set,
+        otherwise transfers results to host and returns NumPy arrays.
+        """
         if isinstance(inputs, Mapping):
-            inputs = inputs.values()
+            inputs = list(inputs.values())
         if self._invoker is None:
             self._load_invoker()
-        result: iree_rt.DeviceArray | tuple[iree_rt.DeviceArray] = self._invoker(*inputs)
+        result = self._invoker(*inputs)
         if isinstance(result, tuple):
-            return [r.to_host() for r in result]
-        return [result.to_host()]
+            results = list(result)
+        else:
+            results = [result]
+        if self._device_outputs:
+            return results
+        return [r.to_host() for r in results]
+
+    def allocate_device_array(
+        self,
+        array: npt.NDArray,
+    ) -> "iree_rt.DeviceArray":
+        """Allocate a device buffer and copy *array* into it.
+
+        The returned :class:`~iree.runtime.DeviceArray` can be passed
+        directly to :meth:`infer` without further copies.
+        """
+        return iree_rt.asdevicearray(
+            self.device,
+            array,
+            implicit_host_transfer=True,
+        )

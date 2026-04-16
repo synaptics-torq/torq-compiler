@@ -30,10 +30,10 @@ class InferenceRunner(ABC):
         return self._infer_time_ms
 
     @abstractmethod
-    def _infer(self, inputs: Iterable[npt.NDArray] | Mapping[str, npt.NDArray]) -> Sequence[npt.NDArray]:
+    def _infer(self, inputs: Iterable[npt.NDArray] | Mapping[str, npt.NDArray]) -> Sequence:
         ...
 
-    def infer(self, inputs: Iterable[npt.NDArray] | Mapping[str, npt.NDArray]) -> Sequence[npt.NDArray]:
+    def infer(self, inputs: Iterable[npt.NDArray] | Mapping[str, npt.NDArray]) -> Sequence:
         """Run inference and record elapsed time in ``infer_time_ms``.
 
         Args:
