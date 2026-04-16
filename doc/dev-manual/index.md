@@ -8,7 +8,7 @@ design.md
 adding_ops.md
 kernel_dev.md
 add_pass.md
-super_tiling.md
+tile_and_fuse.md
 passes_optimizations.md
 contributing.md
 debug_tips.md
