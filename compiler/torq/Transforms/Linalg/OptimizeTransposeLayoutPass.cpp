@@ -150,6 +150,31 @@ static SmallVector<int64_t> getInversePermutation(ArrayRef<int64_t> perm) {
     return inverse;
 }
 
+/// Adapt a 4D layout permutation (e.g. NHWC→NCHW = [0,3,1,2]) to an
+/// arbitrary rank by keeping leading batch dimensions in place and applying
+/// the last-3-axis layout swap to the trailing dims.
+/// Examples:
+///   rank=3, perm4D=[0,3,1,2]  →  [2,0,1]   (HWC→CHW: last 3 of perm4D, rebase)
+///   rank=4, perm4D=[0,3,1,2]  →  [0,3,1,2] (identity, perm already 4D)
+///   rank=5, perm4D=[0,3,1,2]  →  [0,1,4,2,3] (BNHWC→BNCHW: 2 leading + last 3)
+static SmallVector<int64_t> adaptPermToRank(ArrayRef<int64_t> perm4D, int64_t rank) {
+    // perm4D encodes a layout swap over 4 dims. The last 3 elements encode
+    // the HWC↔CHW reordering relative to the batch dim.
+    // We extract those trailing 3 elements and re-base them onto the last 3
+    // dims of the target rank.
+    assert(perm4D.size() == 4 && "expected 4D permutation from lattice");
+    int64_t nLeading = rank - 3; // number of batch/extra leading dims
+    SmallVector<int64_t> result;
+    // Leading dimensions map to themselves.
+    for (int64_t i = 0; i < nLeading; ++i)
+        result.push_back(i);
+    // The last 3 dims of perm4D (indices 1,2,3) encode the HWC/CHW swap.
+    // Re-base each by (nLeading - 1) so they refer to the correct absolute dims.
+    for (int64_t i = 1; i < 4; ++i)
+        result.push_back(perm4D[i] - 1 + nLeading);
+    return result;
+}
+
 //===----------------------------------------------------------------------===//
 // Dataflow Lattice for Transpose Propagation
 //===----------------------------------------------------------------------===//
@@ -293,6 +318,11 @@ class TransposePropagationAnalysis
             return success();
         }
 
+        if (auto expandOp = dyn_cast<tensor::ExpandShapeOp>(op)) {
+            visitExpandShape(expandOp, operands, results);
+            return success();
+        }
+
         // Handle torq_hl.* operations - these block transpose propagation
         if (op->getDialect() && op->getDialect()->getNamespace() == "torq_hl") {
             for (auto *result : results) {
@@ -310,21 +340,6 @@ class TransposePropagationAnalysis
                 propagateIfChanged(result, ChangeResult::Change);
             }
             LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (tensor.collapse_shape)\n");
-            return success();
-        }
-
-        // FIXME: change the property from setBlocking to setProgated
-        // Handle tensor.expand_shape - block propagation.
-        // expand_shape changes the tensor rank (e.g. 4D → 5D), so the existing
-        // 4D permutation is no longer valid for the expanded result. Propagating
-        // a 4D permutation through expand_shape would cause transformExtractSliceOp
-        // to create a 4D transpose on a 5D tensor, which is incorrect.
-        if (isa<tensor::ExpandShapeOp>(op)) {
-            for (auto *result : results) {
-                result->setBlocking();
-                propagateIfChanged(result, ChangeResult::Change);
-            }
-            LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (tensor.expand_shape)\n");
             return success();
         }
 
@@ -459,6 +474,26 @@ class TransposePropagationAnalysis
             LLVM_DEBUG(llvm::dbgs() << "  -> Inherited from dest\n");
         }
     }
+
+    void visitExpandShape(
+        tensor::ExpandShapeOp expandOp, ArrayRef<const TransposePropagationLattice *> operands,
+        ArrayRef<TransposePropagationLattice *> results
+    ) {
+
+        const auto *sourceState = operands[0];
+        auto *result = results[0];
+
+        if (sourceState->canPropagate()) {
+            result->setPropagation(sourceState->getPermutation());
+            propagateIfChanged(result, ChangeResult::Change);
+            LLVM_DEBUG(llvm::dbgs() << "  -> CanPropagate (expand_shape)\n");
+        }
+        else {
+            auto change = result->join(*sourceState);
+            propagateIfChanged(result, change);
+            LLVM_DEBUG(llvm::dbgs() << "  -> Inherited state\n");
+        }
+    }
 };
 
 //===----------------------------------------------------------------------===//
@@ -547,55 +582,42 @@ static Value transformGenericOp(
 
 /// Helper: Transform extract_slice to work in permuted layout
 static Value transformExtractSliceOp(
-    tensor::ExtractSliceOp sliceOp, ArrayRef<int64_t> inversePerm, ArrayRef<int64_t> perm,
-    IRRewriter &rewriter
+    tensor::ExtractSliceOp sliceOp, ArrayRef<int64_t> perm4D, IRRewriter &rewriter
 ) {
     Location loc = sliceOp.getLoc();
 
-    // Handle source similar to transformGenericOp approach
+    auto sourceType = cast<RankedTensorType>(sliceOp.getSource().getType());
+    auto resultType = cast<RankedTensorType>(sliceOp.getType());
+    auto inversePerm4D = getInversePermutation(perm4D);
+
+    // Adapt inverse perm to the source rank (handles 3D/4D/5D sources)
+    auto srcInversePerm = adaptPermToRank(inversePerm4D, sourceType.getRank());
+    // Adapt inverse perm to the result rank for the new result type
+    auto resInversePerm = adaptPermToRank(inversePerm4D, resultType.getRank());
+
     Value source = sliceOp.getSource();
     if (auto emptyOp = source.getDefiningOp<tensor::EmptyOp>()) {
-        // Create tensor.empty with permuted shape
-        auto origType = cast<RankedTensorType>(source.getType());
         SmallVector<int64_t> newShape;
-        for (auto dim : inversePerm) {
-            newShape.push_back(origType.getDimSize(dim));
-        }
-        source = tensor::EmptyOp::create(rewriter, loc, newShape, origType.getElementType());
+        for (auto dim : srcInversePerm)
+            newShape.push_back(sourceType.getDimSize(dim));
+        source = tensor::EmptyOp::create(rewriter, loc, newShape, sourceType.getElementType());
         LLVM_DEBUG({
             llvm::dbgs() << "║     → Created permuted tensor.empty for source\n";
             llvm::dbgs() << "║        Shape: ";
             for (auto dim : newShape)
                 llvm::dbgs() << dim << "x";
-            llvm::dbgs() << origType.getElementType() << "\n";
+            llvm::dbgs() << sourceType.getElementType() << "\n";
         });
     }
     else {
-        // Always create fresh inverse transpose for source
-        auto sourceType = cast<RankedTensorType>(source.getType());
-
-        // Handle rank expansion if needed (3D→4D)
-        SmallVector<int64_t> sourceShape;
-        if (sourceType.getRank() < inversePerm.size()) {
-            // Expand shape by adding leading 1s
-            for (size_t i = 0; i < inversePerm.size() - sourceType.getRank(); ++i) {
-                sourceShape.push_back(1);
-            }
-        }
-        for (auto dim : sourceType.getShape()) {
-            sourceShape.push_back(dim);
-        }
-
         SmallVector<int64_t> transposedShape;
-        for (auto dim : inversePerm) {
-            transposedShape.push_back(sourceShape[dim]);
-        }
+        for (auto dim : srcInversePerm)
+            transposedShape.push_back(sourceType.getDimSize(dim));
         auto inverseInit =
             tensor::EmptyOp::create(rewriter, loc, transposedShape, sourceType.getElementType());
         auto inverseTranspose =
-            linalg::TransposeOp::create(rewriter, loc, source, inverseInit, inversePerm);
+            linalg::TransposeOp::create(rewriter, loc, source, inverseInit, srcInversePerm);
         source = inverseTranspose.getResult()[0];
-
         LLVM_DEBUG({
             llvm::dbgs() << "║     → Created fresh inverse transpose on extract_slice source\n";
             llvm::dbgs() << "║        From: ";
@@ -609,59 +631,49 @@ static Value transformExtractSliceOp(
         });
     }
 
-    // Get slice parameters
+    // Permute slice parameters using source-rank inverse perm
     auto offsets = sliceOp.getMixedOffsets();
     auto sizes = sliceOp.getMixedSizes();
     auto strides = sliceOp.getMixedStrides();
-
-    // Permute parameters according to inverse permutation
     SmallVector<OpFoldResult> newOffsets, newSizes, newStrides;
-    for (auto dim : inversePerm) {
+    for (auto dim : srcInversePerm) {
         newOffsets.push_back(offsets[dim]);
         newSizes.push_back(sizes[dim]);
         newStrides.push_back(strides[dim]);
     }
 
-    // Create transformed extract_slice
-    auto newSlice =
-        tensor::ExtractSliceOp::create(rewriter, loc, source, newOffsets, newSizes, newStrides);
+    // Compute new result type using result-rank inverse perm
+    SmallVector<int64_t> newResultShape;
+    for (auto dim : resInversePerm)
+        newResultShape.push_back(resultType.getDimSize(dim));
+    auto newResultType = RankedTensorType::get(newResultShape, resultType.getElementType());
 
+    auto newSlice = tensor::ExtractSliceOp::create(
+        rewriter, loc, newResultType, source, newOffsets, newSizes, newStrides
+    );
     return newSlice.getResult();
 }
 
 /// Helper: Transform insert_slice to work in permuted layout
 static Value transformInsertSliceOp(
-    tensor::InsertSliceOp insertOp, ArrayRef<int64_t> inversePerm, ArrayRef<int64_t> perm,
-    IRRewriter &rewriter
+    tensor::InsertSliceOp insertOp, ArrayRef<int64_t> perm4D, IRRewriter &rewriter
 ) {
     Location loc = insertOp.getLoc();
+    auto inversePerm4D = getInversePermutation(perm4D);
 
-    // Always create fresh inverse transpose for source
+    // Transpose source using source-rank adapted perm
     Value source = insertOp.getSource();
     auto sourceType = cast<RankedTensorType>(source.getType());
-
-    // Handle rank expansion if needed (3D→4D)
-    SmallVector<int64_t> sourceShape;
-    if (sourceType.getRank() < inversePerm.size()) {
-        // Expand shape by adding leading 1s
-        for (size_t i = 0; i < inversePerm.size() - sourceType.getRank(); ++i) {
-            sourceShape.push_back(1);
-        }
-    }
-    for (auto dim : sourceType.getShape()) {
-        sourceShape.push_back(dim);
-    }
+    auto srcInversePerm = adaptPermToRank(inversePerm4D, sourceType.getRank());
 
     SmallVector<int64_t> transposedShape;
-    for (auto dim : inversePerm) {
-        transposedShape.push_back(sourceShape[dim]);
-    }
+    for (auto dim : srcInversePerm)
+        transposedShape.push_back(sourceType.getDimSize(dim));
     auto inverseInit =
         tensor::EmptyOp::create(rewriter, loc, transposedShape, sourceType.getElementType());
     auto inverseTranspose =
-        linalg::TransposeOp::create(rewriter, loc, source, inverseInit, inversePerm);
+        linalg::TransposeOp::create(rewriter, loc, source, inverseInit, srcInversePerm);
     source = inverseTranspose.getResult()[0];
-
     LLVM_DEBUG({
         llvm::dbgs() << "║     → Created fresh inverse transpose on insert_slice source\n";
         llvm::dbgs() << "║        From: ";
@@ -674,50 +686,33 @@ static Value transformInsertSliceOp(
         llvm::dbgs() << sourceType.getElementType() << "\n";
     });
 
-    // Handle destination similar to transformGenericOp approach
+    // Transpose dest using dest-rank adapted perm; dest rank == result rank
     Value dest = insertOp.getDest();
+    auto destType = cast<RankedTensorType>(dest.getType());
+    auto destInversePerm = adaptPermToRank(inversePerm4D, destType.getRank());
+
     if (auto emptyOp = dest.getDefiningOp<tensor::EmptyOp>()) {
-        // Create tensor.empty with permuted shape
-        auto origDestType = cast<RankedTensorType>(dest.getType());
         SmallVector<int64_t> newDestShape;
-        for (auto dim : inversePerm) {
-            newDestShape.push_back(origDestType.getDimSize(dim));
-        }
-        dest = tensor::EmptyOp::create(rewriter, loc, newDestShape, origDestType.getElementType());
+        for (auto dim : destInversePerm)
+            newDestShape.push_back(destType.getDimSize(dim));
+        dest = tensor::EmptyOp::create(rewriter, loc, newDestShape, destType.getElementType());
         LLVM_DEBUG({
             llvm::dbgs() << "║     → Created permuted tensor.empty for dest\n";
             llvm::dbgs() << "║        Shape: ";
             for (auto dim : newDestShape)
                 llvm::dbgs() << dim << "x";
-            llvm::dbgs() << origDestType.getElementType() << "\n";
+            llvm::dbgs() << destType.getElementType() << "\n";
         });
     }
     else {
-        // Always create fresh inverse transpose for destination (maintains chain)
-        auto destType = cast<RankedTensorType>(dest.getType());
-
-        // Handle rank expansion if needed (3D→4D)
-        SmallVector<int64_t> destShape;
-        if (destType.getRank() < inversePerm.size()) {
-            // Expand shape by adding leading 1s
-            for (size_t i = 0; i < inversePerm.size() - destType.getRank(); ++i) {
-                destShape.push_back(1);
-            }
-        }
-        for (auto dim : destType.getShape()) {
-            destShape.push_back(dim);
-        }
-
         SmallVector<int64_t> transposedDestShape;
-        for (auto dim : inversePerm) {
-            transposedDestShape.push_back(destShape[dim]);
-        }
+        for (auto dim : destInversePerm)
+            transposedDestShape.push_back(destType.getDimSize(dim));
         auto destInverseInit =
             tensor::EmptyOp::create(rewriter, loc, transposedDestShape, destType.getElementType());
         auto destInverseTranspose =
-            linalg::TransposeOp::create(rewriter, loc, dest, destInverseInit, inversePerm);
+            linalg::TransposeOp::create(rewriter, loc, dest, destInverseInit, destInversePerm);
         dest = destInverseTranspose.getResult()[0];
-
         LLVM_DEBUG({
             llvm::dbgs(
             ) << "║     → Created fresh inverse transpose on dest (chain continuation)\n";
@@ -736,21 +731,51 @@ static Value transformInsertSliceOp(
     auto offsets = insertOp.getMixedOffsets();
     auto sizes = insertOp.getMixedSizes();
     auto strides = insertOp.getMixedStrides();
-
-    // Permute parameters according to inverse permutation
     SmallVector<OpFoldResult> newOffsets, newSizes, newStrides;
-    for (auto dim : inversePerm) {
+    for (auto dim : destInversePerm) {
         newOffsets.push_back(offsets[dim]);
         newSizes.push_back(sizes[dim]);
         newStrides.push_back(strides[dim]);
     }
 
-    // Create transformed insert_slice
     auto newInsert = tensor::InsertSliceOp::create(
         rewriter, loc, source, dest, newOffsets, newSizes, newStrides
     );
-
     return newInsert.getResult();
+}
+
+// Helper: Transform expand_shape to work in permuted layout
+static Value transformExpandShapeOp(
+    tensor::ExpandShapeOp expandOp, ArrayRef<int64_t> perm4D, IRRewriter &rewriter
+) {
+    Location loc = expandOp.getLoc();
+    Value source = expandOp.getSrc();
+    auto sourceType = cast<RankedTensorType>(source.getType());
+    auto resultType = cast<RankedTensorType>(expandOp.getResult().getType());
+    auto inversePerm4D = getInversePermutation(perm4D);
+
+    // Adapt inverse perm to source rank for the transpose on the source
+    auto srcInversePerm = adaptPermToRank(inversePerm4D, sourceType.getRank());
+    SmallVector<int64_t> transposedShape;
+    for (auto dim : srcInversePerm)
+        transposedShape.push_back(sourceType.getDimSize(dim));
+    auto inverseInit =
+        tensor::EmptyOp::create(rewriter, loc, transposedShape, sourceType.getElementType());
+    auto inverseTranspose =
+        linalg::TransposeOp::create(rewriter, loc, source, inverseInit, srcInversePerm);
+    source = inverseTranspose.getResult()[0];
+
+    // Adapt inverse perm to result rank for the new expand_shape output type
+    auto resInversePerm = adaptPermToRank(inversePerm4D, resultType.getRank());
+    SmallVector<int64_t> newOutputShape;
+    for (auto dim : resInversePerm)
+        newOutputShape.push_back(resultType.getDimSize(dim));
+
+    auto newResultType = RankedTensorType::get(newOutputShape, resultType.getElementType());
+    auto newExpand = tensor::ExpandShapeOp::create(
+        rewriter, loc, newResultType, source, expandOp.getReassociationIndices()
+    );
+    return newExpand.getResult();
 }
 
 /// Create transpose pairs around CanPropagate ops for eventual cancellation.
@@ -779,7 +804,12 @@ static void insertTransposePairsAroundPropagateOps(
         if (!lattice || !lattice->canPropagate())
             continue;
 
-        auto perm = lattice->getPermutation();
+        auto perm4D = lattice->getPermutation(); // always 4D from lattice
+
+        // For generic ops: adapt perm to result rank (all operands share rank for elementwise).
+        // extract/insert slice helpers compute their own rank-adapted perms per operand.
+        int64_t opRank = cast<RankedTensorType>(op->getResult(0).getType()).getRank();
+        auto perm = adaptPermToRank(perm4D, opRank);
         auto inversePerm = getInversePermutation(perm);
 
         // Step 1: Create transformed version of the operation with permuted shapes.
@@ -790,10 +820,13 @@ static void insertTransposePairsAroundPropagateOps(
             transformedResult = transformGenericOp(genericOp, inversePerm, perm, rewriter);
         }
         else if (auto sliceOp = dyn_cast<tensor::ExtractSliceOp>(op)) {
-            transformedResult = transformExtractSliceOp(sliceOp, inversePerm, perm, rewriter);
+            transformedResult = transformExtractSliceOp(sliceOp, perm4D, rewriter);
         }
         else if (auto insertOp = dyn_cast<tensor::InsertSliceOp>(op)) {
-            transformedResult = transformInsertSliceOp(insertOp, inversePerm, perm, rewriter);
+            transformedResult = transformInsertSliceOp(insertOp, perm4D, rewriter);
+        }
+        else if (auto expandOp = dyn_cast<tensor::ExpandShapeOp>(op)) {
+            transformedResult = transformExpandShapeOp(expandOp, perm4D, rewriter);
         }
         else {
             continue;
@@ -808,30 +841,16 @@ static void insertTransposePairsAroundPropagateOps(
         auto originalType = cast<RankedTensorType>(originalResult.getType());
         auto transformedType = cast<RankedTensorType>(transformedResult.getType());
 
-        // Handle rank mismatch by expanding original shape with leading 1s
-        // Example: 3D tensor<80x80x32> becomes 4D tensor<1x80x80x32>
-        SmallVector<int64_t> expandedOriginalShape;
-        if (originalType.getRank() < transformedType.getRank()) {
-            // Add leading 1s to match transformed rank
-            int64_t rankDiff = transformedType.getRank() - originalType.getRank();
-            for (int64_t i = 0; i < rankDiff; ++i) {
-                expandedOriginalShape.push_back(1);
-            }
-        }
-        // Add all original dimensions
-        for (auto dim : originalType.getShape()) {
-            expandedOriginalShape.push_back(dim);
-        }
+        auto forwardPerm = adaptPermToRank(perm4D, transformedType.getRank());
+        SmallVector<int64_t> forwardInitShape;
+        for (auto dim : forwardPerm)
+            forwardInitShape.push_back(transformedType.getDimSize(dim));
 
-        // The forward transpose should convert from transformed layout back to original layout
-        // Use perm (transformedType is in inverse-permuted layout, apply perm to get back)
-        // and the output shape should match the expanded original shape
         auto forwardInit = tensor::EmptyOp::create(
-            rewriter, op->getLoc(), expandedOriginalShape, originalType.getElementType()
+            rewriter, op->getLoc(), forwardInitShape, originalType.getElementType()
         );
-
         auto forwardTranspose = linalg::TransposeOp::create(
-            rewriter, op->getLoc(), transformedResult, forwardInit, perm
+            rewriter, op->getLoc(), transformedResult, forwardInit, forwardPerm
         );
 
         Value finalResult = forwardTranspose.getResult()[0];
