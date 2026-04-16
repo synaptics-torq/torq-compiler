@@ -3037,23 +3037,23 @@ FailureOr<Value> createNewBias(
 }
 
 static void reduceBodyYield(OpBuilder &b, Location loc, ValueRange args) {
-    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{args[0]});
+    linalg::YieldOp::create(b, loc, ArrayRef<Value>{args[0]});
 }
 
 static void reduceBodyExtYield(OpBuilder &b, Location loc, ValueRange args) {
-    Value y = b.create<arith::ExtSIOp>(loc, b.getI32Type(), args[0]);
-    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
+    Value y = arith::ExtSIOp::create(b, loc, b.getI32Type(), args[0]);
+    linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
 }
 
 static void reduceBodyTruncYield(OpBuilder &b, Location loc, ValueRange args) {
     // Warning: the assumption is that even if the bias type is 64bits, the actual value fits 32bits
-    Value y = b.create<arith::TruncIOp>(loc, b.getI32Type(), args[0]);
-    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
+    Value y = arith::TruncIOp::create(b, loc, b.getI32Type(), args[0]);
+    linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
 }
 
 static void reduceBodyExtFYield(OpBuilder &b, Location loc, ValueRange args) {
-    Value y = b.create<arith::ExtFOp>(loc, b.getF32Type(), args[0]);
-    b.create<linalg::YieldOp>(loc, ArrayRef<Value>{y});
+    Value y = arith::ExtFOp::create(b, loc, b.getF32Type(), args[0]);
+    linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
 }
 
 FailureOr<Value> computeBias(
