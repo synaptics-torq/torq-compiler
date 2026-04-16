@@ -33,7 +33,7 @@ jobs:
             attestations: write
             id-token: write
 
-        runs-on: ubuntu-latest
+        runs-on: codebuild-${{vars.CODEBUILD_PROJECT_DOCKER}}-${{ github.run_id }}-${{ github.run_attempt }}
 
         steps:
 

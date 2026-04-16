@@ -293,7 +293,6 @@ def _collect_profiling_data(report: pytest.TestReport, config):
         import traceback
         traceback.print_exc()
 
-
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session):
     
@@ -327,6 +326,7 @@ def pytest_sessionfinish(session):
         failure_logs_root = os.path.join(temp_dir, 'failure_logs')
         os.makedirs(failure_logs_root, exist_ok=True)
 
+        # Build manifest, attaching engines_compilation_time to torq test runs
         for node_id, report_phases in reports.items():
 
             # parse the node id of the report            
@@ -394,11 +394,14 @@ def pytest_sessionfinish(session):
             if 'call' in report_phases:
 
                 report = report_phases['call']
-
+                props = dict(report.user_properties)
                 profiling_output_file = dict(report.user_properties).get('profiling_output')
+                engine_compilation_time = props.get("engine_compilation_time")
+
+                if engine_compilation_time:
+                    test_run['engine_compilation_time'] = engine_compilation_time
 
                 if profiling_output_file:
-
                     # Copy profiling file into profiles/ and reference it relative to manifest
                     dst_name = os.path.basename(profiling_output_file)
                     dst_path = os.path.join(profiles_root, dst_name)
@@ -410,6 +413,7 @@ def pytest_sessionfinish(session):
 
         manifest_path = os.path.join(temp_dir, 'test_session.json')
         with open(manifest_path, 'w', encoding='utf-8') as f:
+            #print(json.dumps(manifest, indent=2))
             json.dump(manifest, f)
 
         # Create zip

@@ -42,7 +42,6 @@ def cycles_to_ns(cycles):
     """Convert cycles to nanoseconds assuming 800MHz clock."""
     return int(cycles * 1000 / CLOCK_FREQ_MHZ)
 
-
 def format_time_duration(ns):
     """
     Format nanosecond duration into human-readable string with appropriate unit.

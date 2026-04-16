@@ -5,6 +5,7 @@ from .models import TestSession, TestRun, TestRunBatch, Measurement
 import os
 from pathlib import Path
 from perf.perfetto_report_generator import generate_html as generate_perfetto_html
+from django.db.models import Max
 
 from . import services
 
@@ -31,6 +32,58 @@ def home(request):
         'dashboard_git_commit': os.environ.get('DASHBOARD_GIT_COMMIT', 'unknown')
     })
 
+def get_alternative_engines_results(layer):
+    # Fetch results of alternative engines for the current layer
+    latest_ids = (
+        Measurement.objects.filter(
+            test_run__test_case__name="test_alternative_engine",
+            test_run__test_case__parameters__icontains=layer + "-",
+            metric__name="total_duration",
+            metric__unit="ns",
+        )
+        .values(
+            "test_run__test_case__module",
+            "test_run__test_case__name",
+            "test_run__test_case__parameters",
+        )
+        .annotate(latest_id=Max("id"))
+        .values_list("latest_id", flat=True)
+    )
+
+    results = (
+        Measurement.objects.filter(id__in=latest_ids)
+        .select_related("test_run__test_case", "metric")
+        .order_by("-id")
+    )
+
+    return results
+
+def build_test_key(test_case):
+    return f"{test_case.module}_{test_case.name}_{test_case.parameters}"
+
+def build_test_display_name(test_case):
+    return f"{test_case.module}::{test_case.name}[{test_case.parameters}]"
+
+def format_measurement_value(measurement):
+    if measurement.metric.unit == '%':
+        return f"{measurement.value:.2f}"
+
+    ns = measurement.value
+    if ns >= 1_000_000_000:
+        return f"{ns / 1_000_000_000:.3f}s"
+    elif ns >= 1_000_000:
+        return f"{ns / 1_000_000:.3f}ms"
+    elif ns >= 1_000:
+        return f"{ns / 1_000:.3f}µs"
+    else:
+        return f"{ns:.3f}ns"
+
+def build_summary_for_test_run(test_run):
+    summary = {}
+    for measurement in test_run.measurement_set.all():
+        metric_key = measurement.metric.name
+        summary[metric_key] = format_measurement_value(measurement)
+    return summary
 
 def test_session(request, session_id):
     # Prefetch all related data including measurements to avoid N+1 queries
@@ -67,18 +120,38 @@ def test_session(request, session_id):
     failed_tests = []
     error_tests = []
     skipped_tests = []
+
+    reference_keys = []
+    reference_results_by_layer = {}
+    reference_test_runs_by_key = {}
     xfail_tests = []
     nxpass_tests = []
     
     # Cache outcome display strings to avoid repeated method calls (performance optimization)
     outcome_display_map = {choice[0]: choice[1] for choice in TestRun.Outcome.choices}
-    
+
     for batch in session.testrunbatch_set.all():
         batch_name = batch.name  # Cache batch name
         for test_run in batch.testrun_set.all():
             # Use cached outcome display instead of calling get_outcome_display() each time
             outcome_display = outcome_display_map.get(test_run.outcome, 'Unknown')
-            
+
+            # Getting the layer name assuming that the convention is [layer_name-engine]
+            layer_name = test_run.test_case.parameters.split('-')[0]
+
+            # Check if reference results are already in reference_results_by_layer to avoid re-fetching and register reference-results once per layer
+            if layer_name not in reference_results_by_layer:
+                # Query the database for the last test session reference-results for the given layer
+                reference_results_by_layer[layer_name] = get_alternative_engines_results(layer_name)
+
+                for reference in reference_results_by_layer[layer_name]:
+                    reference_key = build_test_key(reference.test_run.test_case)
+                    if reference_key not in reference_test_runs_by_key:
+
+                        reference_test_runs_by_key[reference_key] = reference.test_run
+                        reference_keys.append(Path(reference_key))
+                        test_names_by_pb[reference_key] = build_test_display_name(reference.test_run.test_case)
+
             # Create test run info for display
             test_info = {
                 'id': test_run.id,
@@ -111,13 +184,13 @@ def test_session(request, session_id):
             
             # Handle profiling data for Perfetto viewer
             if test_run.profiling_data:
-                pb_path = test_run.test_case.module + '_' + test_run.test_case.name + '_' + test_run.test_case.parameters + '.pb'
+                pb_path = build_test_key(test_run.test_case) + '.pb'
 
                 pb_files.append(Path(pb_path))
                 # Use str(Path) as key to match what's checked in generate_html()
                 test_run_by_pb[pb_path] = test_run
                 # Store the test case name for display (module::name[params] matches session-metrics key)
-                test_names_by_pb[pb_path] = f"{test_run.test_case.module}::{test_run.test_case.name}[{test_run.test_case.parameters}]"
+                test_names_by_pb[pb_path] = build_test_display_name(test_run.test_case)
                 # Store test_run.id for download URLs
                 test_run_ids_by_pb[pb_path] = test_run.id
                 # Store test status (using cached outcome display)
@@ -128,39 +201,21 @@ def test_session(request, session_id):
                     'failure_type': test_run.failure_type if test_run.outcome in (TestRun.Outcome.FAIL, TestRun.Outcome.ERROR) else None,
                 }
             else:
-                non_profiled_tests.append(test_info)
+                if test_info['name'] != 'test_alternative_engine':
+                    non_profiled_tests.append(test_info)
+
     
     # Fetch metrics from database for all test runs in this session
-    db_summaries = {}
-    if test_run_by_pb:
-        for pb_path, test_run in test_run_by_pb.items():
-            # Access prefetched measurements (no additional database query)
-            measurements = test_run.measurement_set.all()
-            
-            # Build summary dictionary matching extract_perfetto_summary() format
-            summary = {}
-            for measurement in measurements:
-                metric_key = measurement.metric.name
-                
-                # Handle different metric units
-                if measurement.metric.unit == '%':
-                    # Percentage metrics - format as string without '%' (will be added in template)
-                    formatted = f"{measurement.value:.2f}"
-                else:
-                    # Time metrics - convert nanoseconds to human-readable format
-                    ns = measurement.value
-                    if ns >= 1_000_000:
-                        formatted = f"{ns / 1_000_000:.3f}ms"
-                    elif ns >= 1_000:
-                        formatted = f"{ns / 1_000:.3f}µs"
-                    else:
-                        formatted = f"{ns:.3f}ns"
-                summary[metric_key] = formatted
-            
-            # Only add to db_summaries if we got metrics
-            if summary:
-                db_summaries[pb_path] = summary
-    
+    db_summaries = {
+        pb_path: build_summary_for_test_run(test_run)
+        for pb_path, test_run in test_run_by_pb.items()
+    }
+
+    reference_summaries = {
+        key: build_summary_for_test_run(test_run)
+        for key, test_run in reference_test_runs_by_key.items()
+    }
+
     # Get list of recent sessions for comparison (limit to 100 most recent)
     # Only fetch needed fields for performance with large session tables
     recent_sessions = TestSession.objects.only('id', 'timestamp', 'git_branch').order_by('-id')[:100]
@@ -185,7 +240,9 @@ def test_session(request, session_id):
             # Pass database summaries, test names, test_run_ids, test statuses, base_url, and session info for comparison
             perfetto_viewer_html = generate_perfetto_html(
                 pb_files, 
-                db_summaries=db_summaries, 
+                db_summaries=db_summaries,
+                reference_keys=reference_keys,
+                reference_summaries=reference_summaries,
                 test_names=test_names_by_pb, 
                 test_run_ids=test_run_ids_by_pb,
                 test_statuses=test_statuses_by_pb,

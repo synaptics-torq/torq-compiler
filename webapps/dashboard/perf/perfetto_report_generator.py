@@ -9,6 +9,7 @@ import base64
 import math
 import html as html_module
 from pathlib import Path
+import json
 
 
 def extract_model_name(filename):
@@ -92,7 +93,8 @@ def extract_perfetto_summary(pb_file_path):
             'overlap_percent': None,
             'idle_time': None,
             'idle_percent': None,
-            'available': False
+            'available': False,
+            'engine_compilation_time': None
         }
         # Note: time values stored as formatted strings (e.g., "47.545ms"), percent as strings (e.g., "99.94")
         
@@ -212,8 +214,7 @@ def get_pb_files():
     pb_files = sorted(current_dir.glob('*.pb'))
     return pb_files
 
-
-def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=None, test_statuses=None, base_url=None, current_session_id=None, available_sessions=None, default_comparison_session_id=None, non_profiled_tests=None):
+def generate_html(pb_files, db_summaries=None, reference_keys=None, reference_summaries=None, test_names=None, test_run_ids=None, test_statuses=None, base_url=None, current_session_id=None, available_sessions=None, default_comparison_session_id=None, non_profiled_tests=None):
     """
     Generate HTML content with all trace files
     
@@ -232,43 +233,103 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         non_profiled_tests: Optional list of dicts with keys: name, outcome, outcome_class, batch_name
                            These are tests without .pb profiling data that should appear in the same list
     """
-    
+
+    # layersByModel = { 'model': { 'layer': { 'engine1': total_duration, ... , 'engine_n': total_duration } } }
+    layersByModel = {}
+    models = []
+    engines = []
+        
     # Collect all model types for filter buttons
     model_types = set()
     
+    all_items = list(pb_files)
+    if reference_keys:
+        all_items.extend(reference_keys)
+
+    all_db_summaries = dict(db_summaries or {})
+    if reference_summaries:
+        all_db_summaries.update(reference_summaries)
+
+
     trace_items = []
-    for i, pb_file in enumerate(pb_files):
-        pb_file_str = str(pb_file)
+    for i, item in enumerate(all_items):
+        item_str = str(item)
         
         # Use test name from database if available, otherwise extract from filename
-        if test_names and pb_file_str in test_names:
-            model_name = test_names[pb_file_str]
+        if test_names and item_str in test_names:
+            model_name = test_names[item_str]
         else:
-            model_name = extract_model_name(pb_file.name)
+            model_name = extract_model_name(item.name)
+        model_type = extract_model_type(model_name, item.name)
+
+        isAlternativeEngine = "alternative_engine" in item_str
+
+        # Get model, layer and engine from the information inside of the brackets e.g. [mbv2_layer_CONV_2D_2-sim-default]
+        match = re.search(r"\[(.*?)\]", model_name)
+        content = match.group(1) if match else None
         
-        model_type = extract_model_type(model_name, pb_file.name)
-        model_types.add(model_type)
-        file_path = pb_file.name
-        
-        # Get download URL if test_run_id is available, otherwise use base64 (fallback)
-        if test_run_ids and pb_file_str in test_run_ids:
-            test_run_id = test_run_ids[pb_file_str]
-            # Use absolute URL if base_url provided (for viewing HTML outside server)
-            if base_url:
-                download_url = f"{base_url}/download-trace/{test_run_id}/"
+        test_file = model_name.split("::")[0].replace("tests/", "").removesuffix(".py")
+
+        if content:
+            if "_full_model" in content:
+                keyword = "_full_model"
+            elif '_layer_' in content:
+                keyword = '_layer_'
+            elif "mlir" in content:
+                keyword = ".mlir"
             else:
-                download_url = f"/download-trace/{test_run_id}/"
-            encoded_data = None  # Don't embed data when we have a download URL
-        else:
-            # Fallback: embed as base64 (for standalone HTML files)
-            with open(pb_file, 'rb') as f:
-                file_data = f.read()
-                encoded_data = base64.b64encode(file_data).decode('utf-8')
-            download_url = None
+                keyword = "-"
+
+            content = content.split(keyword, 1)
+
+            if keyword == '-':
+                engine = content[1]
+            else:
+                engine = "-".join(content[1].split('-')[1:])
+            
+            model = content[0]
+            layer = keyword[1:] + content[1].split('-')[0]
+
+            if "ops" in test_file:
+                layer = model
+            
+            if engine not in engines:
+                engines.append(engine)
+
+            if test_file not in layersByModel and test_file not in models:
+                models.append(test_file)
+                layersByModel[test_file] = {}
+            
+            if layer not in layersByModel[test_file]:
+                layersByModel[test_file][layer] = {}
+
+            layersByModel[test_file][layer][engine] = all_db_summaries[item_str]["total_duration"]
+        
+        model_types.add(model_type)
+        file_path = item.name
+
+        download_url = None
+        encoded_data = None
+        
+        if item.suffix == ".pb":
+            # Get download URL if test_run_id is available, otherwise use base64 (fallback)
+            if test_run_ids and item_str in test_run_ids:
+                test_run_id = test_run_ids[item_str]
+                # Use absolute URL if base_url provided (for viewing HTML outside server)
+                if base_url:
+                    download_url = f"{base_url}/download-trace/{test_run_id}/"
+                else:
+                    download_url = f"/download-trace/{test_run_id}/"
+                    # Don't embed data when we have a download URL
+            else:
+                # Fallback: embed as base64 (for standalone HTML files)
+                with open(item, 'rb') as f:
+                    file_data = f.read()
+                    encoded_data = base64.b64encode(file_data).decode('utf-8')
         
         # Get summary - use database if available, otherwise parse .pb file        
-        if db_summaries and pb_file_str in db_summaries:
-            summary = db_summaries[pb_file_str]
+        if all_db_summaries and item_str in all_db_summaries:
+            summary = all_db_summaries[item_str]
             # Ensure all expected keys exist with None defaults, then override with DB values
             full_summary = {
                 'total_duration': None,
@@ -300,13 +361,22 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 'overlap_percent': None,
                 'idle_time': None,
                 'idle_percent': None,
-                'available': True
+                'available': True,
+                'engine_compilation_time' : None
             }
+
+            # Set this values to '-' just to have a uniform render
+            if isAlternativeEngine:
+                full_summary['dma_time'] = '-'
+                full_summary['compute_time'] = '-'
+                full_summary['overlap_time'] = '-'
+                full_summary['idle_time'] = '-'
+                        
             # Update with values from database
             full_summary.update(summary)
             summary = full_summary
         else:
-            summary = extract_perfetto_summary(pb_file)
+            summary = extract_perfetto_summary(item)
         
         # Build overview HTML
         overview_html = ''
@@ -592,6 +662,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             if summary['dma_time'] is not None:
                 time_ns = parse_time_to_ns(summary['dma_time'])
                 summary_tiles.append(f"<div class='summary-tile' data-metric='dma_time' data-time-ns='{time_ns}'><div style='display:flex; flex-direction:column; gap:1px;'><span class='tile-label'>DMA+CDMA</span><span class='tile-compare' style='display:none;'></span></div><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['dma_time']}</span><span class='tile-percent'>{summary['dma_percent']}%</span></div></div>")
+            
             if summary['compute_time'] is not None:
                 time_ns = parse_time_to_ns(summary['compute_time'])
                 summary_tiles.append(f"<div class='summary-tile' data-metric='compute_time' data-time-ns='{time_ns}'><div style='display:flex; flex-direction:column; gap:1px;'><span class='tile-label'>SLICE+CSS</span><span class='tile-compare' style='display:none;'></span></div><div style='display:flex; flex-direction:column; align-items:flex-end;'><span class='tile-value'>{summary['compute_time']}</span><span class='tile-percent'>{summary['compute_percent']}%</span></div></div>")
@@ -612,8 +683,8 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         
         # Create status badge if available
         status_badge = ''
-        if test_statuses and pb_file_str in test_statuses:
-            status_info = test_statuses[pb_file_str]
+        if test_statuses and item_str in test_statuses:
+            status_info = test_statuses[item_str]
             outcome = status_info['outcome']
             outcome_value = status_info['outcome_value']
             
@@ -642,39 +713,50 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         # Create status filter data attribute
         status_filter_value = 'unknown'
         failure_type_attr = ''
-        if test_statuses and pb_file_str in test_statuses:
-            outcome_val = test_statuses[pb_file_str]['outcome_value']
+        if test_statuses and item_str in test_statuses:
+            outcome_val = test_statuses[item_str]['outcome_value']
             if outcome_val == 1: status_filter_value = 'pass'
             elif outcome_val == 2: status_filter_value = 'fail'
             elif outcome_val == 3: status_filter_value = 'skip'
             elif outcome_val == 4: status_filter_value = 'error'
             elif outcome_val == 5: status_filter_value = 'xfail'
             elif outcome_val == 6: status_filter_value = 'nxpass'
-            ft = test_statuses[pb_file_str].get('failure_type') or ''
+            ft = test_statuses[item_str].get('failure_type') or ''
             if ft:
                 failure_type_attr = f'data-failure-type="{html_module.escape(ft)}"'
+                
+        engine_html_class = ''
+        engine_html_id = ''
+
+        if isAlternativeEngine:
+            engine_html_class = 'engine'
+            engine_html_id = engine
         
-        trace_item = f'''        <div class="trace-item" onclick="toggleExpand(this)" data-filename="{file_path}" {data_encoded_attr} data-type="{model_type}" data-status="{status_filter_value}" {failure_type_attr} data-original-index="{i}" data-test-name="{model_name}">
+        trace_item = f'''        
+        <div class="trace-item {engine_html_class}" id="{engine_html_id}" onclick="toggleExpand(this)" data-filename="{file_path}" {data_encoded_attr} data-type="{model_type}" data-status="{status_filter_value}" {failure_type_attr} data-original-index="{i}" data-test-name="{model_name}">
             <div class="trace-header">
                 <div class="trace-name-wrapper">
                     <span class="expand-icon">▶</span>
-                    <div class="trace-name">{model_name}</div>
+                    <div class="trace-name">{model_name.replace('*','')}</div>
                 </div>
                 <div class="trace-badges-and-summary">
                     <div class="trace-badges">
                         {type_badge}
                         {status_badge}
                     </div>
-                    <div class="trace-summary">
-                    {collapsed_summary}
-                </div>
+
+                    <div class="trace-summary-container">
+                        <div class="trace-summary">
+                            {collapsed_summary}
+                        </div>
+                    </div>
                 </div>
             </div>
             {overview_html}'''
 
         # Add failure log container for failed profiled tests (loaded on-demand via URL)
-        if test_statuses and pb_file_str in test_statuses:
-            failure_log_url = test_statuses[pb_file_str].get('failure_log_url')
+        if test_statuses and item_str in test_statuses:
+            failure_log_url = test_statuses[item_str].get('failure_log_url')
             if failure_log_url:
                 trace_item += f'''
             <div class="failure-log" style="display:none;" data-failure-log-url="{html_module.escape(failure_log_url)}">
@@ -683,6 +765,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
 
         trace_item += '\n        </div>'
         trace_items.append(trace_item)
+    
     
     # Add non-profiled tests to the same list
     if non_profiled_tests:
@@ -760,7 +843,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             trace_items.append(trace_item)
 
     traces_html = '\n\n'.join(trace_items)
-    
+
     # Generate filter buttons
     filter_buttons = []
     filter_buttons.append('<button class="filter-btn active" onclick="filterByType(\'all\')" data-type="all">All</button>')
@@ -816,6 +899,27 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                     </div>
                     <div id="comparisonStatus" style="margin-top: 10px; font-size: 13px; color: #718096;"></div>
                 </div>'''
+            
+        engines_options = []
+        for engine in engines:
+            engines_options.append(f"<option value='{engine}' > {engine} </option>")
+
+        engines_comparison_html = ''
+        if engines:
+            # FIXME: 'All engines' option is not working when there are different test and you filter by test_name.
+            # When selecting 'All engines' only filtered tests should appear for all engines; instead all tests appear for all engines.
+            # engines_options.append(f"<option value='all_engines' > All engines </option>")
+            engines_comparison_html = f'''
+                <div class="filter-section" style="flex: 1 1 auto; margin-bottom: 0; padding-bottom: 0; border-bottom: none;">
+                    <div class="filter-label">Compare with other engines</div>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <select id="compareEngineSelect" class="compare-select" onchange="loadEnginesData()">
+                            <option value="">Select an engine</option>
+                            {"".join(engines_options)}
+                        </select>
+                    </div>
+                    <div id="comparisonStatus" style="margin-top: 10px; font-size: 13px; color: #718096;"></div>
+                </div>'''
     
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
@@ -823,6 +927,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Torq Profiling - Trace Viewer</title>
+    
     <style>
         * {{
             margin: 0;
@@ -841,6 +946,14 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             max-width: 95%;
             margin: 0 auto;
             font-size: 16px;
+        }}
+
+        .trace-item.engine {{
+            display: none;
+        }}
+
+        .trace-item.engine.selected {{
+            display: block;
         }}
         
         header {{
@@ -1015,7 +1128,15 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             color: #4a5568;
             background-color: #e2e8f0;
         }}
-                .search-box {{
+
+        .report-box {{
+            padding: 14px 0px 0px 0px;
+            display: flex;
+            justify-content: flex-end; /* pushes button to the right */
+            width: 100%;
+        }}
+        
+        .search-box {{
             position: relative;
             width: 100%;
         }}
@@ -1050,6 +1171,175 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             border-radius: 12px;
             padding: 30px;
             box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }}
+
+        /* MODAL TO GENERATE REPORT BEGINS */
+
+        .modal {{
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.45);
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            z-index: 1000;
+        }}
+
+        .modal.show {{
+            display: flex;
+        }}
+
+        .modal-content {{
+            width: min(720px, 100%);
+            max-height: 90vh;
+            overflow-y: auto;
+            position: relative;
+        }}
+
+        .close-btn {{
+            position: absolute;
+            top: 12px;
+            right: 14px;
+            border: none;
+            background: transparent;
+            font-size: 28px;
+            cursor: pointer;
+            line-height: 1;
+        }}
+
+        h2 {{
+            margin-top: 0;
+            margin-bottom: 24px;
+        }}
+
+        .form-section {{
+            margin-bottom: 24px;
+        }}
+
+        .form-section label {{
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }}
+
+        .form-section select {{
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            background: white;
+            font-size: 14px;
+        }}
+
+        .selected-box {{
+            margin-top: 12px;
+            background: #f7f7f7;
+            border-radius: 10px;
+            padding: 14px 16px;
+        }}
+
+        .selected-box ul {{
+            margin: 8px 0 0 18px;
+            padding: 0;
+        }}
+
+        .selected-box li {{
+            margin-bottom: 4px;
+        }}
+
+        .modal-actions {{
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 30px;
+        }}
+
+        .download-btn {{
+            border: none;
+            border-radius: 8px;
+            padding: 12px 18px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+        }}
+
+        .section-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }}
+
+        .clear-btn {{
+            border: none;
+            background: transparent;
+            font-size: 12px;
+            cursor: pointer;
+            opacity: 0.7;
+        }}
+
+        .clear-btn:hover {{
+            opacity: 1;
+            text-decoration: underline;
+        }}
+
+        .tag-container {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }}
+
+        .tag {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: #eef2f7;
+            border-radius: 999px;
+            padding: 6px 10px;
+            font-size: 13px;
+        }}
+
+        .tag-remove {{
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+            padding: 0;
+        }}
+
+        .empty-selection {{
+            color: #666;
+            font-size: 13px;
+        }}
+
+        .clear-btn {{
+            border: none;
+            background: transparent;
+            font-size: 12px;
+            cursor: pointer;
+            opacity: 0.75;
+        }}
+
+        .clear-btn:hover {{
+            opacity: 1;
+            text-decoration: underline;
+        }}
+
+        .clear-btn:disabled {{
+            opacity: 0.35;
+            cursor: default;
+            text-decoration: none;
+        }}
+
+        /* MODAL TO GENERATE REPORT ENDS*/
+
+
+        .grid-item {{
+            background: #f7f7f7;
+            border-radius: 10px;
+            padding: 20px;
         }}
         
         .trace-item {{
@@ -1147,6 +1437,12 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             align-items: center;
             gap: 8px;
             flex-shrink: 0;
+        }}
+
+        .trace-summary-container {{
+            display: flex;
+            flex-direction: column;
+            gap: 6px
         }}
         
         .expand-icon {{
@@ -1299,11 +1595,11 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
             flex: 0 0 auto;
             flex-shrink: 0;
         }}
-        
+
         .trace-item.expanded .trace-summary {{
             display: none;
         }}
-        
+
         .summary-tile {{
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -1657,6 +1953,7 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                         <option value="change_asc" disabled>Change % (Worst → Best)</option>
                     </select>
                 </div>
+                {engines_comparison_html}
             </div>
             <div class="search-box">
                 <input 
@@ -1668,15 +1965,53 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 >
                 <span class="search-icon">🔍</span>
             </div>
+
+            <div class="report-box">
+                <div class="filter-buttons">
+                    <button class="filter-btn active" onclick="generateReport()" data-type="all" id = "openModalBtn">Generate Report</button>
+                </div>
+            </div>
+
         </div>
         
         <div class="trace-grid">
-{traces_html}
+            {traces_html}
             
             <div class="no-results" id="noResults">
                 <div class="no-results-icon">🔍</div>
                 <h3>No matches found</h3>
                 <p>Try adjusting your search terms</p>
+            </div>
+        </div>
+
+        <div id="reportModal" class="modal">
+            <div class="modal-content trace-grid">
+                <button class="close-btn" id="closeModalBtn">&times;</button>
+
+                <h2>Generate Compilation Report</h2>
+
+                <div class="form-section">
+                    <div class="section-header">
+                        <label for="engineSelect">Available engines</label>
+                        <button type="button" class="clear-btn" id="clearEnginesBtn">Clear</button>
+                    </div>
+
+                    <select id="engineSelect"></select>
+
+                    <div class="selected-box">
+                        <strong>Selected engines:</strong>
+                        <div id="selectedEnginesList" class="tag-container"></div>
+                    </div>
+                </div>
+
+                <div class="form-section">
+                    <label for="modelSelect">Choose a model</label>
+                    <select id="modelSelect"></select>
+                </div>
+
+                <div class="modal-actions">
+                    <button id="downloadReportBtn" class="download-btn">Download report</button>
+                </div>
             </div>
         </div>
         
@@ -1688,6 +2023,24 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
     <div id="status" class="status"></div>
 
     <script>
+
+        let engineSelect;
+        let modelSelect;
+
+        let selectedEnginesList;
+        let downloadReportBtn;
+        let clearEnginesBtn;
+        let clearLayersBtn;
+
+        let engines = [];
+        let models = [];
+        let layersByModel = {{}};
+
+        let selectedEngines = [];
+        let currentModel = "";
+
+        let reportModalInitialized = false;
+
         function toggleExpand(element) {{
             // Close all other expanded items
             const allItems = document.querySelectorAll('.trace-item');
@@ -1745,6 +2098,298 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
                 btn.style.background = '#38a169';
                 setTimeout(() => {{ btn.textContent = 'Copy'; btn.style.background = '#e53e3e'; }}, 2000);
             }});
+        }}
+
+        function generateReport() {{
+            engineSelect = document.getElementById("engineSelect");
+            modelSelect = document.getElementById("modelSelect");
+            layerSelect = document.getElementById("layerSelect");
+
+            selectedEnginesList = document.getElementById("selectedEnginesList");
+            downloadReportBtn = document.getElementById("downloadReportBtn");
+            clearEnginesBtn = document.getElementById("clearEnginesBtn");
+            clearLayersBtn = document.getElementById("clearLayersBtn");
+
+            engines = {json.dumps(engines)};
+            models = {json.dumps(models)};
+
+            layersByModel = {json.dumps(layersByModel)}
+
+            selectedEngines = [];
+            currentModel = "";
+
+            openReportModal();
+            populateEngines(engines);
+            populateModels(models);
+
+            renderSelectedEngines(selectedEngines);
+            updateClearButtons();
+        }}
+
+        function openReportModal() {{
+            const modal = document.getElementById("reportModal");
+            const openBtn = document.getElementById("openModalBtn");
+            const closeBtn = document.getElementById("closeModalBtn");
+
+            if (!reportModalInitialized) {{
+                if (openBtn) {{
+                    openBtn.addEventListener("click", () => {{
+                        modal.classList.add("show");
+                    }});
+                }}
+
+                if (closeBtn) {{
+                    closeBtn.addEventListener("click", () => {{
+                        modal.classList.remove("show");
+                    }});
+                }}
+
+                if (modal) {{
+                    modal.addEventListener("click", (e) => {{
+                        if (e.target === modal) {{
+                            modal.classList.remove("show");
+                        }}
+                    }});
+                }}
+
+                reportModalInitialized = true;
+            }}
+
+            if (modal) {{
+                modal.classList.add("show");
+            }}
+        }}
+
+        function populateEngines(engines) {{
+            engineSelect.innerHTML = "";
+
+            if (engines.length === 0) {{
+                const option = document.createElement("option");
+                option.textContent = "no engines available";
+                option.disabled = true;
+                option.selected = true;
+                engineSelect.appendChild(option);
+                return;
+            }}
+
+            const placeholder = document.createElement("option");
+            placeholder.textContent = "Select engines";
+            placeholder.disabled = true;
+            placeholder.selected = true;
+            placeholder.value = "";
+            engineSelect.appendChild(placeholder);
+
+            if (engines.length > 1) {{
+                const allOption = document.createElement("option");
+                allOption.value = "__all__";
+                allOption.textContent = "All engines";
+                engineSelect.appendChild(allOption);
+            }}
+
+            engines.forEach((engine) => {{
+                const option = document.createElement("option");
+                option.value = engine;
+                option.textContent = engine;
+                engineSelect.appendChild(option);
+            }});
+        }}
+
+        function populateModels(models) {{
+            modelSelect.innerHTML = "";
+
+            if (models.length === 0) {{
+                const option = document.createElement("option");
+                option.textContent = "no models available";
+                option.disabled = true;
+                option.selected = true;
+                modelSelect.appendChild(option);
+                return;
+            }}
+
+            const placeholder = document.createElement("option");
+            placeholder.textContent = "Choose a model";
+            placeholder.disabled = true;
+            placeholder.selected = true;
+            placeholder.value = "";
+            modelSelect.appendChild(placeholder);
+
+            models.forEach((model) => {{
+                const option = document.createElement("option");
+                option.value = model;
+                option.textContent = model;
+                modelSelect.appendChild(option);
+            }});
+        }}
+
+        function createTag(text, onRemove) {{
+            const tag = document.createElement("span");
+            tag.className = "tag";
+
+            const label = document.createElement("span");
+            label.textContent = text;
+
+            const removeBtn = document.createElement("button");
+            removeBtn.type = "button";
+            removeBtn.className = "tag-remove";
+            removeBtn.setAttribute("aria-label", `Remove ${{text}}`);
+            removeBtn.textContent = "x";
+            removeBtn.addEventListener("click", onRemove);
+
+            tag.appendChild(label);
+            tag.appendChild(removeBtn);
+
+            return tag;
+        }}
+
+        function renderSelectedEngines() {{
+            selectedEnginesList.innerHTML = "";
+
+            if (selectedEngines.length === 0) {{
+                const empty = document.createElement("span");
+                empty.className = "empty-selection";
+                empty.textContent = "No engines selected";
+                selectedEnginesList.appendChild(empty);
+                updateClearButtons();
+                return;
+            }}
+
+            selectedEngines.forEach((engine) => {{
+                const tag = createTag(engine, () => {{
+                    selectedEngines = selectedEngines.filter((item) => item !== engine);
+                    renderSelectedEngines();
+                }});
+
+                selectedEnginesList.appendChild(tag);
+            }});
+
+            updateClearButtons();
+        }}
+
+        function updateClearButtons() {{
+            if (clearEnginesBtn) {{
+                clearEnginesBtn.disabled = selectedEngines.length === 0;
+            }}
+        }}
+
+        document.addEventListener("DOMContentLoaded", () => {{
+            engineSelect = document.getElementById("engineSelect");
+            modelSelect = document.getElementById("modelSelect");
+
+            selectedEnginesList = document.getElementById("selectedEnginesList");
+            downloadReportBtn = document.getElementById("downloadReportBtn");
+            clearEnginesBtn = document.getElementById("clearEnginesBtn");
+
+            if (engineSelect) {{
+                engineSelect.addEventListener("change", (e) => {{
+                    const value = e.target.value;
+
+                    if (!value) {{
+                        return;
+                    }}
+
+                    if (value === "__all__") {{
+                        selectedEngines = [...engines];
+                    }} else if (!selectedEngines.includes(value)) {{
+                        selectedEngines.push(value);
+                    }}
+
+                    renderSelectedEngines(selectedEngines);
+                    engineSelect.selectedIndex = 0;
+                }});
+            }}
+
+            if (modelSelect) {{
+                modelSelect.addEventListener("change", (e) => {{
+                    currentModel = e.target.value;
+                }});
+            }}
+
+            if (clearEnginesBtn) {{
+                clearEnginesBtn.addEventListener("click", () => {{
+                    selectedEngines = [];
+                    renderSelectedEngines(selectedEngines);
+                    if (engineSelect) {{
+                        engineSelect.selectedIndex = 0;
+                    }}
+                }});
+            }}
+
+            if (downloadReportBtn) {{
+                downloadReportBtn.addEventListener("click", () => {{
+                    const reportModelsAndEngines = {{
+                        engines: selectedEngines,
+                        model: currentModel,
+                    }};
+
+                    generateCsv(reportModelsAndEngines);
+                    console.log("Downloading report with:", reportModelsAndEngines);
+                }});
+            }}
+
+            updateClearButtons();
+        }});
+
+        function generateCsv(reportModelsAndEngines) {{
+            const allData = { json.dumps(layersByModel) };
+            const model = reportModelsAndEngines.model;
+            const selectedEngines = reportModelsAndEngines.engines;
+
+            const modelData = allData[model];
+            
+
+            if (!modelData) {{
+                alert("No data found for model: " + model);
+                return;
+            }}
+
+            const sortedEntries = Object.entries(modelData).sort(([a], [b]) => a.localeCompare(b));
+
+            const rows = [];
+
+            // Header row
+            rows.push(["LAYER", ...selectedEngines]);
+            rows.push([]);
+
+            // One row per layer
+            for (const [layer, layerData] of sortedEntries) {{
+                const row = [layer];
+
+                for (const engine of selectedEngines) {{
+                    const value = layerData[engine] ?? "";
+                    row.push(value);
+                }}
+
+                rows.push(row);
+            }}
+
+            const csv = rows
+                .map(row => row.map(escapeCsvValue).join(","))
+                .join("\\n");
+
+            downloadCsv(csv, `${{model}}_report.csv`);
+        }}
+
+        function escapeCsvValue(value) {{
+            if (value === null || value === undefined) {{
+                return "";
+            }}
+
+            const str = String(value);
+            return `"${{str.replace(/"/g, '""')}}"`;
+        }}
+
+        function downloadCsv(csvContent, filename) {{
+            const blob = new Blob([csvContent], {{ type: "text/csv;charset=utf-8;" }});
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+
+            URL.revokeObjectURL(url);
         }}
         
         function openTrace(base64Data, fileName) {{
@@ -2131,6 +2776,25 @@ def generate_html(pb_files, db_summaries=None, test_names=None, test_run_ids=Non
         // Comparison functionality
         const comparisonConfig = {comparison_data_json};
         let comparisonMetrics = null;
+
+        function loadEnginesData() {{
+            const selectedSessionId = document.getElementById('compareEngineSelect').value;
+
+            // reset
+            document.body.classList.remove("show-engines");
+            document.querySelectorAll(".trace-item.engine.selected")
+                .forEach(el => el.classList.remove("selected"));
+
+            if (selectedSessionId === "all_engines") {{
+                document.body.classList.add("show-engines");
+                return;
+            }}
+
+            const el = document.getElementById(selectedSessionId);
+            if (el) {{
+                el.classList.add("selected");
+            }}
+        }}
         
         async function loadComparisonData() {{
             const selectElement = document.getElementById('compareSessionSelect');
@@ -2380,7 +3044,7 @@ def main():
         return
     
     print(f"✓ Found {len(pb_files)} .pb file(s)")
-    
+
     # Generate HTML
     html_content = generate_html(pb_files)
     

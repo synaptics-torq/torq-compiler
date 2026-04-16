@@ -152,6 +152,7 @@ def process_uploaded_zip(args):
                     parameters = item.get('parameters', '')
                     outcome = item.get('outcome', '')
                     profiling_rel = item.get('profiling_file')  # relative path inside zip (optional)
+                    engine_compilation_time = item.get('engine_compilation_time')
 
                     if not module or not name or outcome not in outcome_map:
                         # Log error but continue processing other test runs
@@ -176,6 +177,26 @@ def process_uploaded_zip(args):
                         outcome=outcome_map[outcome],
                     )
 
+                    if engine_compilation_time is not None:
+                        try:
+                            engine_compilation_time *= 1_000_000 # Parse ms result to ns
+                            description = metric_descriptions.get('total_duration', '')
+
+                            metric, created = Metric.objects.get_or_create(
+                                name='total_duration',
+                                defaults={'unit': 'ns', 'description': description}
+                            )
+                            if not metric.description:
+                                metric.description = description
+                                metric.save()
+
+                            Measurement.objects.create(
+                                test_run=test_run,
+                                metric=metric,
+                                value=engine_compilation_time,
+                            )
+                        except Exception as e:
+                            print(f'Warning: Could not save total_duration for {module}::{name}: {e}')
                     # Handle failure log file and server-side classification for failed tests
                     failure_log_rel = item.get('failure_log_file')  # relative path inside zip (optional)
                     failed_phase = item.get('failed_phase', 'call')
@@ -294,7 +315,7 @@ def process_uploaded_zip(args):
                                         Measurement.objects.create(test_run=test_run, metric=metric, value=parsed_value)
                             except Exception as e:
                                 print(f'Warning: Could not extract metrics from {profiling_path}: {e}')
-                            
+
                             test_run.save()
                         else:
                             print(f'Warning: Profiling file {profiling_rel} not found in archive.')

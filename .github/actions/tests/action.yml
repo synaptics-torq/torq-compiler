@@ -65,6 +65,11 @@ inputs:
     required: false
     default: ''
 
+  setup_external_engine_requirements:
+    description: 'Requirements for external engines.'
+    required: false
+    default: "false"
+
 outputs:
   s3_cache_path:
     description: 'S3 path of the uploaded test data cache artifact'
@@ -111,6 +116,26 @@ runs:
         path: extras
         token: ${{ steps.generate_token.outputs.token }}
         ref: ${{ steps.check_branch.outputs.branch }}
+
+    - name: Install external engines requirements
+      if: ${{ inputs.setup_external_engine_requirements == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [ -z "${{ inputs.extra_repo }}" ]; then
+          echo "setup_external_engine_requirements=true but extra_repo was not provided"
+          exit 1
+        fi
+
+        REQ_FILE="extras/python/engines/requirements.txt"
+
+        if [ ! -f "$REQ_FILE" ]; then
+          echo "Requirements file not found: $REQ_FILE"
+          exit 1
+        fi
+
+        python -m pip install -r "$REQ_FILE"
 
     - name: Download the compiler and runtime
       uses: actions/download-artifact@v8
