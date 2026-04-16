@@ -162,9 +162,81 @@ static void broadcastInput(
         auto emptyOp =
             tensor::EmptyOp::create(rewriter, rescaleOp.getLoc(), outputShape, elementType);
 
+        // Build the full input list
+        SmallVector<Value> allInputs;
+        allInputs.push_back(input);
+
+        AffineMap identityMap =
+            AffineMap::getMultiDimIdentityMap(outputShape.size(), rewriter.getContext());
+        SmallVector<AffineMap> opIndexingMaps;
+        opIndexingMaps.push_back(identityMap);
+
+        for (unsigned i = 1; i < rescaleOp.getNumDpsInputs(); ++i) {
+            Value extraInput = rescaleOp.getDpsInputs()[i];
+            auto extraType = dyn_cast<RankedTensorType>(extraInput.getType());
+            if (extraType && llvm::equal(extraType.getShape(), outputShape)) {
+                // already the right shape: use as-is
+                allInputs.push_back(extraInput);
+            }
+            else if (auto splatVal =
+                         materializeBroadcastedConstant(extraInput, outputShape, rewriter)) {
+                // splat constant: rematerialize at the target shape
+                allInputs.push_back(splatVal);
+            }
+            else if (extraType) {
+                auto extraShape = extraType.getShape();
+
+                // Figure out which output dims are missing in the extra input
+                // by comparing shapes element-wise from the right.
+                // Dimensions of size 1 in the extra input that
+                // correspond to a larger output dimension are broadcast dims.
+                SmallVector<int64_t> bcastDims;
+                int64_t extraRank = extraShape.size();
+                int64_t outRank = outputShape.size();
+                for (int64_t d = 0; d < outRank; ++d) {
+                    int64_t extraIdx = d - (outRank - extraRank);
+                    if (extraIdx < 0 || extraShape[extraIdx] != outputShape[d]) {
+                        bcastDims.push_back(d);
+                    }
+                }
+
+                if (!bcastDims.empty()) {
+                    // compute the pre-broadcast reshape target: keep non-broadcast
+                    // output dims, drop broadcast dims (except size=1)
+                    SmallVector<int64_t> reshapeShape;
+                    for (int64_t d = 0; d < outRank; ++d) {
+                        if (outputShape[d] == 1) {
+                            reshapeShape.push_back(1);
+                            continue;
+                        }
+                        if (!llvm::is_contained(bcastDims, d)) {
+                            reshapeShape.push_back(outputShape[d]);
+                        }
+                    }
+
+                    if (!llvm::equal(reshapeShape, extraShape))
+                        extraInput = reshapeValueToShape(extraInput, reshapeShape, rewriter);
+                    extraInput =
+                        broadcastValueToShape(srcOp, extraInput, outputShape, bcastDims, rewriter);
+                }
+                else if (!llvm::equal(extraShape, outputShape)) {
+                    extraInput = reshapeValueToShape(extraInput, outputShape, rewriter);
+                }
+
+                allInputs.push_back(extraInput);
+            }
+            else {
+                // non-tensor operand: pass through unchanged
+                allInputs.push_back(extraInput);
+            }
+            opIndexingMaps.push_back(identityMap);
+        }
+
+        opIndexingMaps.push_back(identityMap);
+
         linalg::GenericOp newOp = linalg::GenericOp::create(
             rewriter, rescaleOp.getLoc(), TypeRange{emptyOp.getResult().getType()},
-            ValueRange{input}, ValueRange{emptyOp.getResult()}, newIndexingMaps,
+            ValueRange{allInputs}, ValueRange{emptyOp.getResult()}, opIndexingMaps,
             SmallVector<utils::IteratorType>{outputShape.size(), utils::IteratorType::parallel}
         );
 

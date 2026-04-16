@@ -1165,11 +1165,6 @@ def case_config(request, runtime_hw_type, chip_config):
     tc = case.data['keras_model_name']
 
     iree_regression_tc = [
-        # error: OpTy = mlir::syna::torq_hl::AddOp]:
-        # error: 'linalg.generic' op expected as many non-induction variable region arguments as the number of input/output operands
-        "model150_sub_1x6x8x4_zp128_B",
-        "model151_sub_1x6x8x4_zp128_A",
-
         #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
         "model050_mult_inp1x10x10x4",
         "model051_mult_inp1x4x4x1",
