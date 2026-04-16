@@ -1159,13 +1159,17 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
             biasScale[0] = newBias;
         }
         // Pattern: cst - %input
-        // Rewrite: (-1 * %input) + cst
-        // Action: flip weights to [-1, +1] and treat as "add"; the constant stays in the bias
+        // When the constant stays scalar and is folded into bias, keep the old scalar encoding:
+        // (-1 * %input) + cst. When the constant has already been broadcast into a non-scalar
+        // tensor, keep the default [1, -1] weight ordering. Flipping the weights there computes
+        // %input - cst after later broadcast/canonicalization.
         // (needReverse is set when the constant was the lhs of a subtraction)
-        // Note: scale not supported for bf16 operations so we have to take this approach
+        // Note: scale not supported for bf16 operations so we have to take this approach.
         if (needReverse && opName == "sub") {
-            weights[0] = llvm::APFloat(bf16, "-1.0");
-            weights[1] = llvm::APFloat(bf16, "1.0");
+            if (rhs_is_scalar) {
+                weights[0] = llvm::APFloat(bf16, "-1.0");
+                weights[1] = llvm::APFloat(bf16, "1.0");
+            }
             opName = "add";
         }
 
