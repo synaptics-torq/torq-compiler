@@ -79,23 +79,8 @@ def case_config(request, runtime_hw_type, chip_config):
   iree_regression_tc = [
     #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
     "full_model_efficientnetb0",
-    "layer_densenet121_conv2",
-    "layer_densenet121_conv3",
-    "layer_densenet121_conv4",
-    "layer_densenet121_conv5",
-    "layer_inceptionresnetv2_block17_1",
-    "layer_inceptionresnetv2_block35_1",
-    "layer_inceptionresnetv2_block8_1",
+
     "layer_inceptionresnetv2_custom_scale_layer",
-    "layer_inceptionresnetv2_custom_scale_layer_10",
-    "layer_inceptionresnetv2_custom_scale_layer_30",
-    "layer_inceptionresnetv2_mixed_5b",
-    "layer_inceptionresnetv2_mixed_6a",
-    "layer_inceptionresnetv2_mixed_7a",
-    "layer_inceptionv3_mixed",
-    "layer_nasnetmobile_concatenate",
-    "layer_nasnetmobile_normal_concat",
-    "layer_nasnetmobile_reduction_concat",
   ]
   if next:
     iree_regression_tc += [
