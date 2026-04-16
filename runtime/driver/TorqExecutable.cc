@@ -766,6 +766,12 @@ iree_status_t TorqExecutable::initialize() {
   LOGD << "xram_base " << xram_base << " xram_end " << (xram_base + xram_size)  << " xram_size " << xram_size;
   LOGD << "Running executable " << executableName();
 
+  // Skip hardware initialization entirely for executables with no XRAM footprint.
+  if (xram_size == 0) {
+    LOGD << "No XRAM footprint, skipping hardware initialization";
+    return iree_ok_status();
+  }
+
   torq_ = newTorqHw(FLAG_torq_hw_type, xram_base, xram_size);
 
   if (!torq_.get()) {
@@ -826,6 +832,9 @@ iree_status_t TorqExecutable::initialize() {
 iree_status_t TorqExecutable::writeInputs(iree_hal_executable_dispatch_state_v0_t* state) {
 
   if (!iree_hal_torq_ExecutableDef_bindings_is_present(executableDef())) {
+    if (!hasHardware()) {
+      return iree_ok_status();
+    }
     return iree_make_status(IREE_STATUS_INTERNAL, "bindings are missing");
   }
 
@@ -853,6 +862,10 @@ iree_status_t TorqExecutable::writeInputs(iree_hal_executable_dispatch_state_v0_
 // reads the outputs from XRAM to the user buffers
 iree_status_t TorqExecutable::readOutputs(iree_hal_executable_dispatch_state_v0_t* state) {
   
+  if (!iree_hal_torq_ExecutableDef_bindings_is_present(executableDef())) {
+    return iree_ok_status();
+  }
+
   auto bindings = ns(ExecutableDef_bindings_get(executableDef()));
   auto bindings_count = iree_hal_torq_Binding_vec_len(bindings);
 
@@ -1044,29 +1057,31 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
     return status;
   }
 
-  // acquire the hardware, this won't start execution on it yet
-  {
-    TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_ACQUIRE_HW_RESOURCES);
-    const bool ressourceAcquired = torq_->acquire();
-    TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_ACQUIRE_HW_RESOURCES);
-    if (!ressourceAcquired) {
-      return iree_make_status(IREE_STATUS_INTERNAL, "failed to acquire hardware");
+  if (hasHardware()) {
+    // acquire the hardware, this won't start execution on it yet
+    {
+      TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_ACQUIRE_HW_RESOURCES);
+      const bool ressourceAcquired = torq_->acquire();
+      TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_ACQUIRE_HW_RESOURCES);
+      if (!ressourceAcquired) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to acquire hardware");
+      }
     }
-  }
 
-  // run all host actions using the hardware if necessary
-  TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_EXECUTE_ACTIONS);
-  status = executeActions(eventLog.get());
-  TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_EXECUTE_ACTIONS);
+    // run all host actions using the hardware if necessary
+    TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_EXECUTE_ACTIONS);
+    status = executeActions(eventLog.get());
+    TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_EXECUTE_ACTIONS);
 
 
-  // release the hardware so that it can be used by another user
-  TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
-  torq_->release();
-  TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
+    // release the hardware so that it can be used by another user
+    TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
+    torq_->release();
+    TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
 
-  if (!iree_status_is_ok(status)) {
-    return status;
+    if (!iree_status_is_ok(status)) {
+      return status;
+    }
   }
 
   // read back all the outputs from XRAM

@@ -29,6 +29,9 @@ public:
 
   std::string executableName();  
 
+  // returns true if this executable requires hardware i.e. has XRAM footprint
+  bool hasHardware() const { return torq_ != nullptr; }
+
   // execute the dispatch using the input/output bindings in the specified state
   iree_status_t executeDispatch(iree_hal_executable_dispatch_state_v0_t* state);
 
