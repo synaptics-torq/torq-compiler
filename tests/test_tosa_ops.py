@@ -84,6 +84,7 @@ def case_config(request, runtime_hw_type, chip_config):
     if aws_fpga:
         # aws-fpga failures
         failed_tc += [
+            'gather', # DEDR producer/consumer hangs on FPGA
             'add-32x32x128xi16.mlir', # AssertionError: Number of differences: 110543 out of 131072 [84.34%]
             'add-bf16.mlir', # AssertionError: Nans differ
             'add-broadcast.mlir', # AssertionError: Number of differences: 10060 out of 21504 [46.78%]

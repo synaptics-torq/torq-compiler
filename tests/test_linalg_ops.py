@@ -67,6 +67,8 @@ def case_config(request, runtime_hw_type, chip_config):
     # SL2610 aws-fpga failures
     if aws_fpga:
         failed_tc += [
+            # DEDR producer/consumer hangs on FPGA
+            'gather',
             # output mistmatch, see https://github.com/synaptics-torq/torq-compiler-dev/issues/813
             'sigmoid.mlir'
         ]
