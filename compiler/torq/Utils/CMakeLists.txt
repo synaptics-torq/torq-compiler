@@ -33,6 +33,7 @@ iree_cc_library(
     ShapeUtils.h
   DEPS
     MLIRIR
+    iree::target::torq::Conversions::TorqHLToLinalg::TorqHLToLinalg
     iree::target::torq::Dialect::TorqHL::Dialect
     iree::target::torq::Dialect::TorqHW::Dialect
   PUBLIC

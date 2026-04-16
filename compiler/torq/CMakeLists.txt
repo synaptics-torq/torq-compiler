@@ -13,6 +13,7 @@ add_subdirectory(Utils)
 add_subdirectory(Transforms/Linalg)
 add_subdirectory(Transforms/TorqHL)
 add_subdirectory(Conversions/LinalgToTorqHL)
+add_subdirectory(Conversions/TorqHLToLinalg)
 add_subdirectory(Conversions/TorqHLToTorqHW)
 add_subdirectory(Conversions/TosaToTorqHL)
 add_subdirectory(Pipelines)
@@ -40,6 +41,7 @@ iree_cc_library(
     iree::target::torq::Transforms::Linalg::Transforms
     iree::target::torq::Codegen
     iree::target::torq::Pipelines
+    iree::target::torq::Conversions::TorqHLToLinalg::TorqHLToLinalg
     iree::target::torq::Dialect::Tensor::IR
   PUBLIC
 )

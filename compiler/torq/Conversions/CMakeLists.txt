@@ -1,3 +1,4 @@
 add_subdirectory(LinalgToTorqHL)
+add_subdirectory(TorqHLToLinalg)
 add_subdirectory(TorqHLToTorqHW)
 add_subdirectory(TosaToTorqHL)

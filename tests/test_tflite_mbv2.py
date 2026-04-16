@@ -71,7 +71,8 @@ def download_mobilenetv2_model(cache):
 # ============================================================================
 
 def mbv2_compile_options():
-    torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-host"]
+    torq_compiler_options = ["--torq-disable-host"]
+    # torq_compiler_options = []
     
     # tile-and-fuse is less optimal because of the transpose ops which are tiled in incompatible ways
     # and cannot be folded.

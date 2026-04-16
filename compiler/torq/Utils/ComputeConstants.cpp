@@ -7,6 +7,10 @@
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "iree/hal/local/executable_library.h"
 
+#include "torq/Conversions/TorqHLToLinalg/Passes.h"
+#include "torq/Dialect/TorqHL/TorqHLDialect.h"
+#include "torq/Dialect/TorqHL/TorqHLOps.h"
+
 #include "mlir/Dialect/LLVMIR/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/IR/Verifier.h"
@@ -205,6 +209,11 @@ static void setupPipeline(PassManager &pm) {
     FunctionLikeNest(modulePassManager).addPass(bufferization::createEmptyTensorToAllocTensorPass);
 
     FunctionLikeNest(modulePassManager).addPass(createLLVMCPULowerExecutableTargetPass);
+
+    // Lower any remaining TorqHL ops (e.g. transpose) to Linalg so the JIT
+    // pipeline can process them. This is needed because constant weight packs
+    // may depend on TorqHL ops created by earlier conversion passes.
+    FunctionLikeNest(modulePassManager).addPass(createTorqHLToLinalgConversionPass);
 
     FunctionLikeNest(modulePassManager).addPass(createEraseHALDescriptorTypeFromMemRefPass);
     // FIXME: we should limit the passes below to the minimum required to pre-compute

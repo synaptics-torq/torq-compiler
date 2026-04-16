@@ -1,0 +1,30 @@
+iree_tablegen_library(
+  NAME
+    PassesIncGen
+  TD_FILE
+    Passes.td
+  OUTS
+    --gen-pass-decls Passes.h.inc
+)
+
+iree_cc_library(
+  NAME
+    TorqHLToLinalg
+  HDRS
+    Passes.h
+    PassesDetail.h
+    Patterns.h
+    Passes.h.inc
+  SRCS
+    Passes.cpp
+    Patterns.cpp
+  DEPS
+    ::PassesIncGen
+    MLIRFunctionInterfaces
+    MLIRIR
+    MLIRLinalgDialect
+    MLIRPass
+    MLIRTransforms
+    iree::target::torq::Dialect::TorqHL::Dialect
+  PUBLIC
+)
