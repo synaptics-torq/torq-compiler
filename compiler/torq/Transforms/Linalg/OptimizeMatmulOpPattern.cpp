@@ -46,38 +46,30 @@ namespace mlir::syna::torq {
 ///       It performs no rewrites if the input is not produced by the expected operation patterns.
 ///
 static void foldInput(Value &input, PatternRewriter &rewriter) {
-    auto collapseOp = dyn_cast_or_null<tensor::CollapseShapeOp>(input.getDefiningOp());
-    if (collapseOp) {
-        input = input.getDefiningOp()->getOperand(0);
-    }
+    Value currentInput = input;
 
-    auto foldOp = dyn_cast_or_null<linalg::GenericOp>(input.getDefiningOp());
-    if (!foldOp) {
-        // Restore input to the collapse op result if we unwrapped one,
-        // otherwise the caller gets the pre-collapse (higher-rank) value.
-        if (collapseOp)
-            input = collapseOp.getResult();
+    auto collapseOp = dyn_cast_or_null<tensor::CollapseShapeOp>(currentInput.getDefiningOp());
+    if (collapseOp)
+        currentInput = collapseOp.getOperand();
+
+    auto foldOp = dyn_cast_or_null<linalg::GenericOp>(currentInput.getDefiningOp());
+    if (!foldOp)
         return;
-    }
-    if (foldOp.getNumDpsInputs() != 1 || foldOp.getNumResults() != 1) {
-        if (collapseOp)
-            input = collapseOp.getResult();
+
+    if (foldOp.getNumDpsInputs() != 1 || foldOp.getNumResults() != 1)
         return;
-    }
 
     auto resultType = dyn_cast<RankedTensorType>(foldOp.getResultTypes().front());
     auto inputType = dyn_cast<RankedTensorType>(foldOp.getInputs()[0].getType());
-    if (resultType != inputType) {
-        if (collapseOp)
-            input = collapseOp.getResult();
+    if (resultType != inputType)
         return;
-    }
-    input = foldOp.getInputs()[0];
 
     if (collapseOp) {
-        rewriter.modifyOpInPlace(collapseOp, [&]() { collapseOp->setOperand(0, input); });
-        input = collapseOp.getResult();
+        rewriter.modifyOpInPlace(collapseOp, [&]() { collapseOp->setOperand(0, currentInput); });
+        return;
     }
+
+    input = foldOp.getInputs()[0];
 }
 
 /// Checks if input is produced by a linalg::GenericOp with a constant input and expands it.
