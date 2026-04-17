@@ -1165,20 +1165,6 @@ def case_config(request, runtime_hw_type, chip_config):
     tc = case.data['keras_model_name']
 
     iree_regression_tc = [
-        #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
-        "model050_mult_inp1x10x10x4",
-        "model051_mult_inp1x4x4x1",
-        "model052_mult_inp1x4x4x1_zp128_AB",
-        "model053_mult_inp1x4x4x1_zp128_B",
-        "model054_mult_inp1x4x4x1_zp128_A",     
-        "model133_conv3x3_mult_inp1x3x3x1",     
-        "model143_conv3x3_mult_inp1x4x4x1", 
-        
-        # Assertion `detail::isPresent(Val) && "dyn_cast on a non-existent value"' failed.
-        "model089_softmax_inp1x1916x2",
-
-        # Assertion `inputElementSize * weightElementSize <= sizeof(int<N>_t)' failed.
-        "model471_add16x8_negative_s2v",
 
         # Assertion `wrap->cfg.pad_bottom == <N> || wrap->cfg.pad_bottom == wrap->cfg.kernel_bottom' failed.
         "my_test",
