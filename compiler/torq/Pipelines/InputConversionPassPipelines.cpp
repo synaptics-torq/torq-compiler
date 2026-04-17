@@ -39,6 +39,13 @@ static llvm::cl::opt<bool> clDisableDispatchFusion(
     llvm::cl::init(false)
 );
 
+static llvm::cl::opt<bool> clAnnotateTiedOperands(
+    "torq-annotate-tied-operands",
+    llvm::cl::desc("Annotate function results with iree.abi.tied for in-place buffer reuse "
+                   "(e.g. KV-cache in autoregressive decoding)"),
+    llvm::cl::init(false)
+);
+
 void buildTosaTransformPassPipeline(OpPassManager &passManager) {
 
     if (!clDisableSlices) {
@@ -54,6 +61,10 @@ void buildTosaTransformPassPipeline(OpPassManager &passManager) {
 
     // apply Torq-specific type conversion
     buildTorqTypeConversionPipeline(passManager);
+
+    // annotate tied operands for in-place buffer reuse
+    if (clAnnotateTiedOperands)
+        passManager.addPass(createAnnotateTiedOperandsPass());
 
     // divide operations into  dispatch into Flow::RegionOps
     if (!clDisableDispatchFusion) {
@@ -79,6 +90,10 @@ void buildTorchTransformPassPipeline(OpPassManager &passManager) {
     // apply Torq-specific type conversion
     buildTorqTypeConversionPipeline(passManager);
 
+    // annotate tied operands for in-place buffer reuse
+    if (clAnnotateTiedOperands)
+        passManager.addPass(createAnnotateTiedOperandsPass());
+
     if (!clDisableDispatchFusion) {
         passManager.addNestedPass<func::FuncOp>(
             iree_compiler::Preprocessing::createMakeSingleDispatchForFunctionPass()
@@ -90,6 +105,10 @@ void buildLinalgTransformPassPipeline(OpPassManager &passManager) {
 
     // apply Torq-specific type conversion
     buildTorqTypeConversionPipeline(passManager);
+
+    // annotate tied operands for in-place buffer reuse
+    if (clAnnotateTiedOperands)
+        passManager.addPass(createAnnotateTiedOperandsPass());
 
     if (!clDisableDispatchFusion) {
         passManager.addNestedPass<func::FuncOp>(

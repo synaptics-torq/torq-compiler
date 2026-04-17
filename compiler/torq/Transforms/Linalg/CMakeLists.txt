@@ -16,6 +16,7 @@ iree_cc_library(
     Passes.h.inc
   SRCS
     Passes.cpp
+    AnnotateTiedOperandsPass.cpp
     TypeConversionPasses.cpp
     FoldConstantsPass.cpp
     GeneralizeLinalgNamedOpsPass.cpp

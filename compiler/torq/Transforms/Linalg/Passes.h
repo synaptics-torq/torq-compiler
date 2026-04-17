@@ -28,6 +28,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeLinalgForTorqP
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeTransposeLayoutPass();
 
+std::unique_ptr<OperationPass<ModuleOp>> createAnnotateTiedOperandsPass();
+
 //----------------------------------------------------------------------------//
 // Registration
 //----------------------------------------------------------------------------//

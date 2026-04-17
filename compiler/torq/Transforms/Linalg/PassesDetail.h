@@ -25,6 +25,7 @@ namespace mlir::syna::torq {
 #define GEN_PASS_DEF_TORQCONVERTF16TOBF16
 #define GEN_PASS_DEF_TORQDEMOTEF32TOBF16
 #define GEN_PASS_DEF_TORQDEMOTEI64TOI32
+#define GEN_PASS_DEF_ANNOTATETIEDOPERANDS
 
 #include "torq/Transforms/Linalg/Passes.h.inc"
 

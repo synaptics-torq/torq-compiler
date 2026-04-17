@@ -131,4 +131,18 @@ def OptimizeTransposeLayout :
         "tensor::TensorDialect"
     ];
 }
+
+def AnnotateTiedOperands : Pass<"torq-annotate-tied-operands", "mlir::ModuleOp"> {
+  let summary = "Annotate function results with iree.abi.tied for in-place buffer reuse";
+  let description = [{
+    Identifies function outputs that are derived from function inputs with
+    matching tensor types and annotates them with `iree.abi.tied = N`, where N
+    is the index of the corresponding input operand.
+
+    NOTE: The analysis is conservative; Ambiguous cases (multiple candidate arguments
+    with the same type) are left unannotated.
+  }];
+  let constructor = "mlir::syna::torq::createAnnotateTiedOperandsPass()";
+}
+
 #endif // IREE_CODEGEN_SYNPHL_TO_HW_PASSES
