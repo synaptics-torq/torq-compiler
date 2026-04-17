@@ -592,13 +592,14 @@ struct BfloatErfPattern : public OpRewritePattern<math::ErfOp> {
             )
                 .getResult(0);
         };
-        // only works if x and y are tensor and z is a scalar constants.
+        // x and y are tensors and z is a scalar constant.
         auto fma = [&](Value x, Value y, Value z) {
             auto xy = arith::MulFOp::create(rewriter, loc, x, y);
             return broadcast(xy, [&](OpBuilder &b, Location l, ValueRange args) {
                 linalg::YieldOp::create(b, l, ValueRange{arith::AddFOp::create(b, l, args[0], z)});
             });
         };
+        // y is a tensor and x and z are scalar constants.
         auto fmaConstant = [&](Value x, Value y, Value z) {
             auto xy = broadcast(y, [&](OpBuilder &b, Location l, ValueRange args) {
                 linalg::YieldOp::create(b, l, ValueRange{arith::MulFOp::create(b, l, x, args[0])});
@@ -607,7 +608,7 @@ struct BfloatErfPattern : public OpRewritePattern<math::ErfOp> {
                 linalg::YieldOp::create(b, l, ValueRange{arith::AddFOp::create(b, l, args[0], z)});
             });
         };
-        // expects tenor x and contant scalar y
+        // tensor x and contant scalar y
         auto mul = [&](Value x, Value y) {
             return broadcast(x, [&](OpBuilder &b, Location l, ValueRange args) {
                 linalg::YieldOp::create(b, l, ValueRange{arith::MulFOp::create(b, l, args[0], y)});
@@ -802,247 +803,6 @@ struct BfloatTanhPattern : OpRewritePattern<linalg::TanhOp> {
     }
 };
 
-// This doesn't get its own rewriter because it only works with
-// negative inputs, which can't in general be inferred at compile
-// time.  Use this function in other algos when you know what you are
-// doing.
-Value bfloatNegExp(Value x, PatternRewriter &rewriter, Location loc) {
-
-    // useful meta variables
-    auto ctx = rewriter.getContext();
-    auto bf16TensorType = cast<RankedTensorType>(x.getType());
-    auto bf16 = bf16TensorType.getElementType();
-    auto shape = bf16TensorType.getShape();
-    auto rank = bf16TensorType.getRank();
-    auto i16 = IntegerType::get(ctx, 16);
-    auto i16TensorType = RankedTensorType::get(shape, i16);
-    auto i8 = IntegerType::get(ctx, 8);
-    auto i1 = IntegerType::get(ctx, 1);
-    auto indx = rewriter.getIndexType();
-
-    // helper funcs to create constants
-    auto tConst = [&](Type type, int constant) {
-        return arith::ConstantOp::create(rewriter, loc, rewriter.getIntegerAttr(type, constant));
-    };
-    auto i16Tens = [&](std::vector<uint16_t> data) {
-        return arith::ConstantOp::create(
-                   rewriter, loc,
-                   DenseIntElementsAttr::get(
-                       RankedTensorType::get(data.size(), i16), ArrayRef<uint16_t>(data)
-                   )
-        )
-            .getResult();
-    };
-
-    // helper functions to create linalg.generics
-    auto emptyLike = [&](Value val) {
-        return tensor::EmptyOp::create(rewriter, loc, val.getType(), ValueRange{});
-    };
-    auto broadcast = [&](Value v, Type t, auto func) {
-        return linalg::GenericOp::create(
-                   rewriter, loc, TypeRange{RankedTensorType::get(shape, t)}, ValueRange{v},
-                   ValueRange{tensor::EmptyOp::create(rewriter, loc, shape, t)},
-                   SmallVector<AffineMap>(2, AffineMap::getMultiDimIdentityMap(rank, ctx)),
-                   SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel),
-                   [&](OpBuilder &b, Location l, ValueRange args) {
-                       linalg::YieldOp::create(b, l, ValueRange{func(b, l, args)});
-                   }
-        ).getResult(0);
-    };
-
-    // create actual constants
-    SmallVector<Value> sgnfBitmask;
-    SmallVector<int> sgnfBitmaskData = {0b10000000, 0b1000000, 0b100000, 0b10000,
-                                        0b1000,     0b100,     0b10,     0b1};
-    SmallVector<Value> expoOffset;
-    SmallVector<int> expoOffsetData = {7, 6, 5, 4, 3, 2, 1, 0};
-    for (int i = 0; i < 8; i++) {
-        sgnfBitmask.push_back(tConst(i8, sgnfBitmaskData[i]));
-        expoOffset.push_back(tConst(i16, expoOffsetData[i]));
-    }
-    auto lutBits = i16Tens(
-        {0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80,
-         0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F7F, 0x3F7E, 0x3F7C, 0x3F78, 0x3F70, 0x3F62,
-         0x3F47, 0x3F1B, 0x3EBC, 0x3E0B, 0x3C96, 0x39B0, 0x33F2, 0x2864, 0x114B, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000}
-    );
-
-    // allocate output tensors
-    auto intX = tensor::BitcastOp::create(rewriter, loc, i16TensorType, x);
-
-    auto dirtyExpo = broadcast(intX, i16, [&](OpBuilder &b, Location l, ValueRange args) {
-        return arith::ShRUIOp::create(b, l, args[0], tConst(i16, 7));
-    });
-    // get rid of sign bit
-    auto expo = broadcast(dirtyExpo, i16, [&](OpBuilder &b, Location l, ValueRange args) {
-        return arith::AndIOp::create(b, l, args[0], tConst(i16, 0b0000000011111111));
-    });
-    auto mant = broadcast(intX, i8, [&](OpBuilder &b, Location l, ValueRange args) {
-        return arith::TruncIOp::create(b, l, i8, args[0]);
-    });
-    auto sgnf = broadcast(mant, i8, [&](OpBuilder &b, Location l, ValueRange args) {
-        return arith::OrIOp::create(b, l, args[0], tConst(i8, 0b10000000));
-    });
-    auto nanBoolMask = broadcast(intX, i1, [&](OpBuilder &b, Location l, ValueRange args) {
-        // Sign extending comming in clutch.
-        return arith::CmpIOp::create(
-            b, l, arith::CmpIPredicate::ugt, args[0], tConst(i16, 0b1111111110000000)
-        );
-    });
-    auto nanMask = broadcast(nanBoolMask, i16, [&](OpBuilder &b, Location l, ValueRange args) {
-        // Sign extending comming in clutch.
-        return arith::ExtSIOp::create(b, l, i16, args[0]);
-    });
-    auto outAlloc = broadcast(nanMask, i16, [&](OpBuilder &b, Location l, ValueRange args) {
-        return arith::OrIOp::create(b, l, args[0], tConst(i16, 0b0011111110000000));
-    });
-    auto bfAlloc = tensor::BitcastOp::create(rewriter, loc, bf16TensorType, outAlloc);
-
-    // calculate e^x from mantissa, exponent.  To do so, create 8
-    // value per input value and reduce mul over those values (M ->
-    // Mx8 -> M).  Ideally, we would do this in a loop to avoid
-    // creating any Mx8 tensors, but our lowering isn't yet smart
-    // enough to deal with that, so now we make some gigantic tensors.
-    SmallVector<AffineExpr> dims;
-    SmallVector<AffineExpr> expandedDims;
-    SmallVector<int64_t> bigShape;
-    AffineExpr d;
-    for (int i = 0; i < rank; i++) {
-        d = getAffineDimExpr(i, ctx);
-        dims.push_back(d);
-        expandedDims.push_back(d);
-        bigShape.push_back(shape[i]);
-    }
-    d = getAffineDimExpr(rank, ctx);
-    SmallVector<AffineExpr> trailDim = {d};
-    expandedDims.push_back(d);
-    bigShape.push_back(8);
-    auto expandBroadcast = [&](Value mTensor, SmallVector<Value> eightTensor, Type t, auto func) {
-        Value fullOutTens = tensor::EmptyOp::create(rewriter, loc, bigShape, t);
-        auto partialOutTens = tensor::EmptyOp::create(rewriter, loc, shape, t);
-        auto tType = RankedTensorType::get(shape, t);
-        SmallVector<OpFoldResult> offsets, sizes, strides(rank + 1, rewriter.getIndexAttr(1));
-        for (int64_t dim : shape)
-            sizes.push_back(rewriter.getIndexAttr(dim));
-        sizes.push_back(rewriter.getIndexAttr(1));
-        for (int i = 0; i < 8; i++) {
-            auto partialResult =
-                linalg::GenericOp::create(
-                    rewriter, loc, TypeRange{tType}, ValueRange{mTensor},
-                    ValueRange{partialOutTens},
-                    SmallVector<AffineMap>(2, AffineMap::getMultiDimIdentityMap(rank, ctx)),
-                    SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel),
-                    [&](OpBuilder &b, Location l, ValueRange args) {
-                        linalg::YieldOp::create(b, l, ValueRange{func(b, l, args, eightTensor[i])});
-                    }
-                ).getResult(0);
-            offsets = SmallVector<OpFoldResult>(rank, rewriter.getIndexAttr(0));
-            offsets.push_back(rewriter.getIndexAttr(i));
-            fullOutTens = tensor::InsertSliceOp::create(
-                rewriter, loc, partialResult, fullOutTens, offsets, sizes, strides
-            );
-        }
-        return fullOutTens;
-    };
-    auto unmaskedLutIndex = expandBroadcast(
-        expo, expoOffset, i16,
-        [&](OpBuilder &b, Location l, ValueRange args, Value c) {
-            return arith::AddIOp::create(b, l, args[0], c);
-        }
-    );
-    auto indexRawMask = expandBroadcast(
-        sgnf, sgnfBitmask, i8,
-        [&](OpBuilder &b, Location l, ValueRange args, Value c) {
-            return arith::AndIOp::create(b, l, args[0], c);
-        }
-    );
-    auto bigI16TensorType = RankedTensorType::get(bigShape, i16);
-    auto bigI8TensorType = RankedTensorType::get(bigShape, i8);
-    auto staticBroadcast = [&](Value m8Tensor, auto func, auto type) {
-        return linalg::GenericOp::create(
-                   rewriter, loc, TypeRange{type}, ValueRange{m8Tensor},
-                   ValueRange{tensor::EmptyOp::create(rewriter, loc, type, ValueRange{})},
-                   SmallVector<AffineMap>(2, AffineMap::get(rank + 1, 0, expandedDims, ctx)),
-                   SmallVector<utils::IteratorType>(rank + 1, utils::IteratorType::parallel),
-                   [&](OpBuilder &b, Location l, ValueRange args) {
-                       linalg::YieldOp::create(b, l, ValueRange{func(b, l, args)});
-                   }
-        ).getResult(0);
-    };
-    auto zero = tConst(i8, 0);
-    auto one = tConst(i8, 1);
-    auto index8Mask = staticBroadcast(
-        indexRawMask,
-        [&](OpBuilder &b, Location l, ValueRange args) {
-            auto tooLarge = arith::CmpIOp::create(b, l, arith::CmpIPredicate::ult, one, args[0]);
-            auto clampedAbove = arith::SelectOp::create(b, l, tooLarge, one, args[0]);
-            auto tooSmall =
-                arith::CmpIOp::create(b, l, arith::CmpIPredicate::ugt, zero, clampedAbove);
-            return arith::SelectOp::create(b, l, tooSmall, zero, clampedAbove);
-        },
-        bigI8TensorType
-    );
-    auto indexMask = staticBroadcast(
-        index8Mask,
-        [&](OpBuilder &b, Location l, ValueRange args) {
-            return arith::ExtSIOp::create(b, l, i16, args[0]);
-        },
-        bigI16TensorType
-    );
-    auto lutIndex = linalg::GenericOp::create(
-                        rewriter, loc, TypeRange{bigI16TensorType},
-                        ValueRange{indexMask, unmaskedLutIndex}, ValueRange{emptyLike(indexMask)},
-                        SmallVector<AffineMap>(3, AffineMap::get(rank + 1, 0, expandedDims, ctx)),
-                        SmallVector<utils::IteratorType>(rank + 1, utils::IteratorType::parallel),
-                        [&](OpBuilder &b, Location l, ValueRange args) {
-                            linalg::YieldOp::create(
-                                b, l, ValueRange{arith::MulIOp::create(b, l, args[0], args[1])}
-                            );
-                        }
-    ).getResult(0);
-
-    auto lutVal = staticBroadcast(
-        lutIndex,
-        [&](OpBuilder &b, Location l, ValueRange args) {
-            return tensor::ExtractOp::create(
-                b, l, lutBits, ValueRange{arith::IndexCastOp::create(b, l, indx, args[0])}
-            );
-        },
-        bigI16TensorType
-    );
-    auto bfVal =
-        tensor::BitcastOp::create(rewriter, loc, RankedTensorType::get(bigShape, bf16), lutVal);
-    // final reduce mul
-    return linalg::ReduceOp::create(
-               rewriter, loc, ValueRange{bfVal}, ValueRange{bfAlloc}, rank,
-               [&](OpBuilder &b, Location l, ValueRange args) {
-                   linalg::YieldOp::create(
-                       b, l, ValueRange{arith::MulFOp::create(b, l, args[0], args[1])}
-                   );
-               }
-    ).getResult(0);
-};
-
 // A pattern to lower linalg.quantized_batch_matmul to the following sequence:
 // 1) linalg.add i8, i8 -> i16 (to handle zero point)
 // 2) linalg.matmul i16, i16 -> i32
@@ -1177,8 +937,6 @@ class BfloatRsqrtPattern : public OpRewritePattern<linalg::GenericOp> {
         auto bf16 = bfTensorType.getElementType();
         auto i16 = rewriter.getIntegerType(16);
         auto i16TensorType = RankedTensorType::get(bfTensorType.getShape(), i16);
-        // auto i1 = rewriter.getIntegerType(1);
-        // auto i1TensorType = RankedTensorType::get(bfTensorType.getShape(), i1);
         auto rank = bfTensorType.getRank();
         auto ctx = rewriter.getContext();
 
@@ -1206,16 +964,6 @@ class BfloatRsqrtPattern : public OpRewritePattern<linalg::GenericOp> {
             return arith::MulFOp::create(b, l, oneHalf, args[0]);
         });
         auto i = tensor::BitcastOp::create(rewriter, loc, i16TensorType, number);
-        // // Any value (unsigned) greater than +inf is either a negative
-        // // number, or nan. In either case, rsqrt of this is NaN.
-        // const int16_t bf16Inf = 0x7f80;
-        // auto inf = arith::ConstantOp::create(rewriter, loc, rewriter.getIntegerAttr(i16,
-        // bf16Inf));
-        // // rsqrt(neg) -> nan
-        // auto nanBoolMask =
-        //     broadcast(i, i1TensorType, [&](OpBuilder &b, Location l, ValueRange args) {
-        //         return arith::CmpIOp::create(b, l, arith::CmpIPredicate::ugt, args[0], inf);
-        //     });
         auto one = arith::ConstantOp::create(rewriter, loc, rewriter.getIntegerAttr(i16, 1));
         auto i2 = broadcast(
             broadcast(
@@ -1229,13 +977,6 @@ class BfloatRsqrtPattern : public OpRewritePattern<linalg::GenericOp> {
                 return arith::SubIOp::create(b, loc, magic, args[0]);
             }
         );
-        // auto nanMask =
-        //     broadcast(nanBoolMask, i16TensorType, [&](OpBuilder &b, Location l, ValueRange args)
-        //     {
-        //         // Sign extending comming in clutch: (true) 0b1 -> 0b1111111111111111 (nan)
-        //         return arith::ExtSIOp::create(b, l, i16, args[0]);
-        //     });
-        // auto i3 = arith::OrIOp::create(rewriter, loc, nanMask, i2);
         auto y = tensor::BitcastOp::create(rewriter, loc, bfTensorType, i2);
         auto y2 = arith::MulFOp::create(
             rewriter, loc, y,
