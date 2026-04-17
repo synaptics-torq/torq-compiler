@@ -33,10 +33,18 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
     auto input_strides = getEncodedStridesElements(input_type);
     auto indices_strides = getEncodedStridesElements(indices_type);
     auto input_shape = input_type.getShape();
+    if (input_shape.empty() || input_shape.size() > 3) {
+        return rewriter.notifyMatchFailure(op, "Expected GatherOp values rank to be 1, 2, or 3");
+    }
     auto output_strides = getEncodedStridesElements(output_type);
     int channelCount = 1;
     int channelStride = 0;
     int outChannelStride = 0;
+    // DEQW inner indices-dim stride. Rank-1 and rank-3 walk single elements
+    // per index, so the stride is just `entry_size`; rank-2 writes a full
+    // per-index slice (`channelCount * outChannelStride`) and overrides this
+    // below.
+    int outputSliceStride = entry_size;
 
     if (input_shape.size() == 3) {
         channelCount = input_shape[1];
@@ -49,9 +57,8 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
         channelCount = input_shape.back();
         channelStride = input_strides.back() * entry_size;
         outChannelStride = output_strides.back() * entry_size;
+        outputSliceStride = channelCount * outChannelStride;
     }
-    int outputSliceStride =
-        channelCount > 0 && outChannelStride > 0 ? channelCount * outChannelStride : entry_size;
     int indicesCount = indices_type.getNumElements();
     // Rank-2 gathers need group_size=1 to preserve full-slice writes for each index.
     // For rank-1 and rank-3 the grouped path is safe and more efficient.
@@ -114,8 +121,16 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
 
     );
 
+    // Rank-2 collapsed gathers fold the per-index slice into the REF loop, so
+    // each REF iteration covers `group_size * max_entries` work units. Rank-1
+    // and rank-3 instead rely on the DEDR/DEQW indices-dim loop and only
+    // advance `group_size` per REF iteration; using the rank-2 count here
+    // caused the DEDR producer/consumer to hang on FPGA.
+    const int refSize = input_shape.size() == 2 ? static_cast<int>(group_size * max_entries)
+                                                : static_cast<int>(group_size);
+
     Ndls ndls;
-    ndls.add(NdlType::REF, {{DimType::H, MemDimTag::X, group_size * max_entries}});
+    ndls.add(NdlType::REF, {{DimType::H, MemDimTag::X, refSize}});
 
     ndls.add(
         NdlType::DEDR,

@@ -27,6 +27,27 @@ namespace mlir::syna::torq {
 // TODO: only support int8 for now in order to use generic tiling for table op
 class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
+    LogicalResult validateGatherValuesRank(
+        linalg::GenericOp srcOp, Value values, PatternRewriter &rewriter,
+        RankedTensorType &valuesType
+    ) const {
+        valuesType = dyn_cast<RankedTensorType>(values.getType());
+        if (!valuesType) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected gathered values to be a ranked tensor"
+            );
+        }
+
+        int64_t valuesRank = valuesType.getRank();
+        if (valuesRank < 1 || valuesRank > 3) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected gathered values rank to be 1, 2, or 3"
+            );
+        }
+
+        return success();
+    }
+
     LogicalResult demoteGatherIndicesToI32(
         linalg::GenericOp srcOp, Value indices, PatternRewriter &rewriter, Value &demotedIndices
     ) const {
@@ -87,8 +108,9 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
     }
 
     // GatherOp treats indices as linear offsets into the flattened values buffer.
-    // For higher-rank source tensors, rescale constant outer-dim indices so they
-    // point at the start of each contiguous slice in that flattened layout.
+    // For supported sliced gathers (rank > 1 within the rank-1/2/3 cases),
+    // rescale constant outer-dim indices so they point at the start of each
+    // contiguous slice in that flattened layout.
     LogicalResult scaleGatherIndicesForSlice(
         linalg::GenericOp srcOp, Value values, Value indices, PatternRewriter &rewriter,
         Value &scaledIndices
@@ -224,20 +246,20 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expected a arith.addi op");
         }
 
+        RankedTensorType cstType;
+        if (failed(validateGatherValuesRank(srcOp, cst, rewriter, cstType))) {
+            return failure();
+        }
+
         SmallVector<int32_t> convertedValues;
         auto maybeCstData = computeArithConst(cst);
         if (failed(maybeCstData)) {
             // tensor is input
-            auto cstType = mlir::cast<RankedTensorType>(cst.getType());
             auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-            if (failed(scaleGatherIndicesForSlice(srcOp, cst, input, rewriter, input))) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Failed to scale constant gather indices for sliced gathers"
-                );
-            }
 
             if (cstType.getRank() == 3) {
-                // NHC->NCH transposition only applies to rank-3 tensors
+                // Rank-3 gathers come from NHC values and need an NHC->NCH
+                // transpose before lowering to GatherOp.
                 auto dataPerm = Permutation::nhc2nch();
                 auto outType = transposeType(resultType, dataPerm.reverse());
                 auto transposedValue = transposeValue(cst, dataPerm, srcOp.getLoc(), rewriter);
@@ -250,7 +272,14 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 rewriter.replaceOp(srcOp, resultTranspose);
             }
             else {
-                // For non-rank-3 tensors, create GatherOp directly without transposition
+                // Rank-1 gathers are direct scalar lookups. Rank-2 gathers use
+                // GatherOp's flat linear-offset path and need their constant
+                // outer-dim indices rescaled by the trailing slice stride.
+                if (failed(scaleGatherIndicesForSlice(srcOp, cst, input, rewriter, input))) {
+                    return rewriter.notifyMatchFailure(
+                        srcOp, "Failed to scale constant gather indices for sliced gathers"
+                    );
+                }
                 rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
                     srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), cst, input
                 );
