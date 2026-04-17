@@ -1165,10 +1165,6 @@ def case_config(request, runtime_hw_type, chip_config):
     tc = case.data['keras_model_name']
 
     iree_regression_tc = [
-
-        # Assertion `wrap->cfg.pad_bottom == <N> || wrap->cfg.pad_bottom == wrap->cfg.kernel_bottom' failed.
-        "my_test",
-
         # FAILED with differences:
         "model503_conv_transpose_stride1_ker_1x1x3x1_padValid",
         "model532_convTrans_16x8_inp_1x4x1_ker1x3_stride1_padvalid",
