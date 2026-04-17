@@ -410,7 +410,7 @@ static LogicalResult tileMatMulForSlices(
         const uint32_t maxAllowedMemory = 10000;
         auto maybeMemoryRequirement = getMemoryRequirements(opResult);
         if (succeeded(maybeMemoryRequirement) && (*maybeMemoryRequirement < maxAllowedMemory)) {
-            return scf::SCFTileAndFuseOptions::ControlFnResult{false};
+            return std::nullopt;
         }
         auto srcOp = opResult.getDefiningOp<linalg::LinalgOp>();
         if (!srcOp) {

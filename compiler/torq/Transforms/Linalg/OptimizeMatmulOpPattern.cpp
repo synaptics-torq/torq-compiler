@@ -53,15 +53,23 @@ static void foldInput(Value &input, PatternRewriter &rewriter) {
 
     auto foldOp = dyn_cast_or_null<linalg::GenericOp>(input.getDefiningOp());
     if (!foldOp) {
+        // Restore input to the collapse op result if we unwrapped one,
+        // otherwise the caller gets the pre-collapse (higher-rank) value.
+        if (collapseOp)
+            input = collapseOp.getResult();
         return;
     }
     if (foldOp.getNumDpsInputs() != 1 || foldOp.getNumResults() != 1) {
+        if (collapseOp)
+            input = collapseOp.getResult();
         return;
     }
 
     auto resultType = dyn_cast<RankedTensorType>(foldOp.getResultTypes().front());
     auto inputType = dyn_cast<RankedTensorType>(foldOp.getInputs()[0].getType());
     if (resultType != inputType) {
+        if (collapseOp)
+            input = collapseOp.getResult();
         return;
     }
     input = foldOp.getInputs()[0];
