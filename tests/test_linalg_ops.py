@@ -29,15 +29,8 @@ def case_config(request, runtime_hw_type, chip_config):
         pytest.skip("DMA throughput test file; run via test_dma_throughput.py")
 
     iree_regression_tc = [
-        # Assertion `llvm::isUIntN(BitWidth, val) && "Value is not an N-bit unsigned value"' failed.
-        "softmax-1x1024x64xbf16.mlir",
-
         # error: operand #<N> does not dominate this use
         "quantized_batch_matmul.mlir",
-
-        # Assertion `dims.bn==<N> || dims.bn==<N> || dims.bn==<N>' failed.
-        "exp.mlir",
-        "sigmoid.mlir",
 
         # error: 'iree_tensor_ext.dispatch.tensor.store' op operand #<N> must be dispatch.tensor, but got '!iree_tensor_ext.dispatch.tensor<readonly:tensor<<N>xbf<N>>>'
         "erf-bf16.mlir",
