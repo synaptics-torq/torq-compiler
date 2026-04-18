@@ -234,6 +234,12 @@ class ADBCommandRunner(RemoteCommandRunner):
 
     def _adb_cmd_prefix(self) -> list[str]:
         prefix = ["adb"]
+        host = os.environ.get("ADB_SERVER_HOST")
+        port = os.environ.get("ADB_SERVER_PORT")
+        if host:
+            prefix += ["-H", host]
+        if port:
+            prefix += ["-P", port]
         if self._target:
             prefix += ["-s", self._target]
         return prefix

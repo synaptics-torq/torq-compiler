@@ -66,7 +66,7 @@ If you are using a different environment you can use a Docker image:
    In alternative you can customize the docker execution with an alias such as the one in the example here below:
 
    ```{code} shell
-   $ alias torq-dev='docker run -it --rm -u $(id -u):$(id -g) -v $MOUNT_PATH:$MOUNT_PATH -w $(pwd) -e PATH=$VENV_PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin -e CCACHE_DIR=$CCACHE_PATH -e HOME=$HOME_PATH -e IREE_BUILD_DIR=$BUILD_PATH -e ADB_SERVER_SOCKET=tcp:host.docker.internal:5037 ghcr.io/synaptics-torq/torq-compiler-dev/builder'
+   $ alias torq-dev='docker run -it --rm -u $(id -u):$(id -g) -v $MOUNT_PATH:$MOUNT_PATH -w $(pwd) -e PATH=$VENV_PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin -e CCACHE_DIR=$CCACHE_PATH -e HOME=$HOME_PATH -e IREE_BUILD_DIR=$BUILD_PATH -e ADB_SERVER_SOCKET=tcp:host.docker.internal:5037 ghcr.io/synaptics-torq/torq-compiler/builder'
    ```
 
    where the variables have the following meaning:

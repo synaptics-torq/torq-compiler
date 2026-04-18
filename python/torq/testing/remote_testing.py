@@ -569,7 +569,7 @@ class RemoteTestRunner:
             else:
                 # FPGA / legacy path: no locking, discover runner via PATH.
                 cmd = [
-                    "IREE_RUN_MODULE=iree-run-module ;  if [ -f /usr/local/bin/setup-test-environment ] ; then source /usr/local/bin/setup-test-environment ; fi ; $IREE_RUN_MODULE",
+                    "IREE_RUN_MODULE=torq-run-module ;  if [ -f /usr/local/bin/setup-test-environment ] ; then source /usr/local/bin/setup-test-environment ; fi ; $IREE_RUN_MODULE",
                     f"--module={remote_model_path}",
                     f"--function={self.function_name}",
                     *remote_runtime_opts,
