@@ -57,7 +57,7 @@ class TorqHw {
     TorqHw(
         std::string name, std::string description, size_t lramSize, size_t sliceCount,
         size_t availableMemoryForTiling, std::string cssConfigName, std::string nssConfigName,
-        double dmaTheoreticalBytesPerCycle, double dmaFactor = 1.0,
+        double dmaTheoreticalBytesPerCycle = 8.0, double dmaFactor = 1.0,
         std::string hostTriple = "native", std::string hostCpu = "host",
         std::string hostCpuFeatures = "host"
     )

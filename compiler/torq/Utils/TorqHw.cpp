@@ -17,9 +17,8 @@ llvm::SmallVector<TorqHw, 1> hwTypes = {TorqHw(
 )};
 
 #define TORQ_CUSTOM_FORMAT                                                                         \
-    "<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_features>:" \
-    "<dma_theoretical_throughput>"                                                                 \
-    "[:<dma_factor>:<host_triple>:<host_cpu>:<host_cpu_features>]"
+    "<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_features>"  \
+    "[:<dma_theoretical_throughput>[:<dma_factor>:<host_triple>:<host_cpu>:<host_cpu_features>]]"
 
 struct TorqHwParser : public llvm::cl::parser<TorqHw> {
 
@@ -56,6 +55,9 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
             );
         }
 
+        if (parts.size() == 5) {
+            parts.push_back("8"); // dma_theoretical_throughput default
+        }
         if (parts.size() == 6) {
             parts.push_back("1.0"); // dma_factor default
         }
