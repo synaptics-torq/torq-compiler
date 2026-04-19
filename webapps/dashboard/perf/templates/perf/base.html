@@ -1,42 +1,58 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Torq Performance{% endblock %}</title>
     {% load static %}
-    {% block extra_css %}{% endblock %}
-    
-    <style>
-    body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-        background-color: #f5f7fa;
-        color: #2c3e50;
-    }
-    </style>
-    
-</head>
-<body>
-    <header>
-        <nav>
-            {% block navigation %}
-            <!-- Navigation content -->
-            {% endblock %}
-        </nav>
-    </header>
 
-    <main>
-        {% block content %}
-        <!-- Main content goes here -->
-        {% endblock %}
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+    {% block extra_css %}{% endblock %}
+</head>
+<body class="d-flex flex-column min-vh-100 bg-body-tertiary">
+
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand fw-semibold" href="{% url 'home' %}">
+                <i class="bi bi-speedometer2 me-2"></i>Torq Performance
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarMain"
+                    aria-controls="navbarMain" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarMain">
+                <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.resolver_match.url_name == 'home' %} active" aria-current="page{% endif %}" href="{% url 'home' %}">
+                            <i class="bi bi-house me-1"></i>Home
+                        </a>
+                    </li>
+                </ul>
+                <div class="d-flex align-items-center gap-2">
+                    {% block nav_extra %}{% endblock %}
+                    <a class="btn btn-outline-light btn-sm" href="{% url 'admin:index' %}">
+                        <i class="bi bi-shield-lock me-1"></i>Admin
+                    </a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="flex-grow-1 py-4">
+        <div class="container-fluid px-4">
+            {% block content %}{% endblock %}
+        </div>
     </main>
 
-    <footer>
-        {% block footer %}
-        <!-- Footer content -->
-        {% endblock %}
+    <footer class="py-3 mt-auto border-top bg-dark text-secondary">
+        <div class="container-fluid px-4">
+            <small>{% block footer %}Torq Performance Dashboard{% endblock %}</small>
+        </div>
     </footer>
 
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
     {% block extra_js %}{% endblock %}
 </body>
 </html>

@@ -15,20 +15,13 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import path
 
 import perf.backup
-import perf.views
+import perf.urls
 
 urlpatterns = [
     path('admin/database/backup/', admin.site.admin_view(perf.backup.backup_database_view), name='admin_database_backup'),
     path('admin/database/restore/', admin.site.admin_view(perf.backup.restore_database_view), name='admin_database_restore'),
     path('admin/', admin.site.urls),
-    path('api/', include('perf.urls')),
-    path('health/', perf.views.health, name='health'),
-    path('test-sessions/<int:session_id>/', perf.views.test_session, name='test_session'),
-    path('api/session-metrics/<int:session_id>/', perf.views.get_session_metrics, name='get_session_metrics'),
-    path('download-trace/<int:test_run_id>/', perf.views.download_trace, name='download_trace'),
-    path('download-failure-log/<int:test_run_id>/', perf.views.download_failure_log, name='download_failure_log'),
-    path('', perf.views.home, name='home'),
-]
+] + perf.urls.urlpatterns

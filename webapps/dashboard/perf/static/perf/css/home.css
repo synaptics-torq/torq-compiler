@@ -1,0 +1,394 @@
+
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+.dashboard-header {
+    text-align: center;
+    margin-bottom: 3rem;
+}
+
+.subtitle {
+    font-size: 1.1rem;
+    color: #7f8c8d;
+    margin: 0;
+}
+
+/* Main Branch Section - Prominent Display */
+.main-branch-section {
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    margin-bottom: 3rem;
+}
+
+.session-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #ecf0f1;
+}
+
+.session-header h2 {
+    margin: 0;
+    font-size: 1.8rem;
+}
+
+.session-id {
+    color: #7f8c8d;
+    margin: 0;
+    font-size: 0.95rem;
+}
+
+.session-info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+
+.info-card {
+    padding: 1rem;
+    background-color: #f8f9fa;
+    border-radius: 6px;
+    border-left: 4px solid #3498db;
+}
+
+.info-card h4 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    color: #7f8c8d;
+    letter-spacing: 0.5px;
+}
+
+.info-value {
+    margin: 0;
+    font-size: 1.1rem;
+    color: #2c3e50;
+    font-weight: 500;
+}
+
+.info-value.monospace {
+    font-family: 'Courier New', monospace;
+    font-size: 0.95rem;
+}
+
+.stats-container h3 {
+    margin-top: 0;
+    margin-bottom: 1.5rem;
+    font-size: 1.3rem;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+}
+
+.stat-card {
+    padding: 1.5rem;
+    border-radius: 6px;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.stat-card.total {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.stat-card.passed {
+    background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+    color: white;
+}
+
+.stat-card.failed {
+    background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+    color: white;
+}
+
+.stat-card.skipped {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    color: white;
+}
+
+.stat-card.xfail {
+    background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%);
+    color: white;
+}
+
+.stat-value {
+    font-size: 2.5rem;
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+}
+
+.stat-label {
+    font-size: 0.95rem;
+    opacity: 0.95;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.stat-percentage {
+    font-size: 1rem;
+    margin-top: 0.5rem;
+    opacity: 0.85;
+}
+
+.action-buttons {
+    display: flex;
+    gap: 1rem;
+    margin-top: 2rem;
+    flex-wrap: wrap;
+}
+
+.btn {
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    text-decoration: none;
+    font-weight: 600;
+    transition: all 0.2s;
+    border: none;
+    cursor: pointer;
+    display: inline-block;
+    font-size: 1rem;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+}
+
+.btn-secondary {
+    background-color: #ecf0f1;
+    color: #2c3e50;
+    border: 2px solid #bdc3c7;
+}
+
+.btn-secondary:hover {
+    background-color: #bdc3c7;
+    transform: translateY(-2px);
+}
+
+/* Other Branches Section - Compact Table */
+.other-branches-section {
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    margin-bottom: 2rem;
+}
+
+.section-title {
+    margin: 0 0 1.5rem 0;
+    font-size: 1.6rem;
+    color: #1a252f;
+    border-bottom: 2px solid #ecf0f1;
+    padding-bottom: 1rem;
+}
+
+.table-container {
+    overflow-x: auto;
+}
+
+.branches-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+
+.branches-table thead {
+    background-color: #f8f9fa;
+}
+
+.branches-table th {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    font-weight: 600;
+    color: #2c3e50;
+    border-bottom: 2px solid #dee2e6;
+    white-space: nowrap;
+}
+
+.branches-table th.text-center {
+    text-align: center;
+}
+
+.branches-table tbody tr {
+    border-bottom: 1px solid #ecf0f1;
+    transition: background-color 0.2s;
+}
+
+.branches-table tbody tr:hover {
+    background-color: #f8f9fa;
+}
+
+.branches-table td {
+    padding: 0.75rem 1rem;
+    vertical-align: middle;
+}
+
+.branches-table td.text-center {
+    text-align: center;
+}
+
+.branch-name {
+    font-weight: 500;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.commit-hash {
+    font-family: 'Courier New', monospace;
+    font-size: 0.85rem;
+    color: #7f8c8d;
+}
+
+.stat-passed {
+    color: #27ae60;
+    font-weight: 600;
+}
+
+.stat-failed {
+    color: #e74c3c;
+    font-weight: 600;
+}
+
+.stat-skipped {
+    color: #f39c12;
+    font-weight: 600;
+}
+
+.duration-table .test-nodeid {
+    font-family: 'Courier New', monospace;
+    font-size: 0.85rem;
+    color: #2c3e50;
+    word-break: break-word;
+}
+
+.duration-table .duration-value {
+    font-weight: 600;
+}
+
+.btn-small {
+    padding: 0.4rem 0.8rem;
+    border-radius: 4px;
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 0.85rem;
+    background-color: #3498db;
+    color: white;
+    transition: all 0.2s;
+    display: inline-block;
+}
+
+.btn-small:hover {
+    background-color: #2980b9;
+    transform: translateY(-1px);
+}
+
+.no-data {
+    text-align: center;
+    padding: 3rem 1rem;
+}
+
+.no-data p {
+    margin: 0.5rem 0;
+    font-size: 1.1rem;
+}
+
+.text-muted {
+    color: #95a5a6;
+}
+
+.footer-links {
+    display: flex;
+    gap: 2rem;
+    justify-content: center;
+    margin-top: 3rem;
+}
+
+.link {
+    color: #3498db;
+    text-decoration: none;
+    font-weight: 500;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.link:hover {
+    background-color: rgba(52, 152, 219, 0.1);
+    color: #2980b9;
+}
+
+@media (max-width: 768px) {
+    .container {
+        padding: 1rem;
+    }
+
+    .dashboard-header h1 {
+        font-size: 1.8rem;
+    }
+
+    .main-branch-section {
+        padding: 1.5rem;
+    }
+
+    .session-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .action-buttons {
+        flex-direction: column;
+    }
+
+    .btn {
+        width: 100%;
+        text-align: center;
+    }
+
+    .other-branches-section {
+        padding: 1rem;
+    }
+
+    .branches-table {
+        font-size: 0.8rem;
+    }
+
+    .branches-table th,
+    .branches-table td {
+        padding: 0.5rem;
+    }
+
+    .footer-links {
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+}

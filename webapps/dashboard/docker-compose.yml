@@ -21,12 +21,14 @@ services:
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_REGION=us-east-1
       - DEBUG_MODE=1
+      - LOCAL_DEBUG=1
 
     volumes:
       - torq-dashboard-data:/data
       - ./perf:/app/perf:ro
       - ./webapp:/app/webapp:ro
       - ./templates:/app/templates:ro
+      - ./perf/static/perf:/app/static/perf:ro
 
     command: uwsgi --ini uwsgi.ini --py-autoreload 1
 

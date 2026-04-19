@@ -1,0 +1,177 @@
+{% extends "perf/base.html" %}
+
+{% load custom_tags %}
+
+{% block title %}Test Run - #{{ test_run.id }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-0">
+	<div class="row g-3 align-items-stretch mb-4">
+		<div class="col-12 col-lg-8">
+			<div class="card h-100">
+				<div class="card-body">
+					<div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+						<div class="d-flex flex-column me-2">
+							<span class="text-body-secondary small">{{ test_run.test_case.module }}</span>
+							<h1 class="h3 mb-0">
+                                {{ test_run.test_case.name }}{% if test_run.test_case.parameters %}<span class="text-body-secondary fw-normal fs-5 ms-1">[{{ test_run.test_case.parameters }}]</span>{% endif %}
+                                <span class="fs-6 align-middle">{{ test_run.outcome|outcome_badge }}</span>
+                            </h1>
+						</div>
+						<a href="{% url 'test_session' test_run.test_run_batch.test_session.id %}" class="btn btn-sm btn-outline-primary ms-auto">Back to session</a>
+					</div>
+					<p class="text-body-secondary mb-1">
+						Session #{{ test_run.test_run_batch.test_session.id }} - {{ test_run.test_run_batch.test_session.git_branch | default:"unknown" }}
+					</p>
+					
+				</div>
+			</div>
+		</div>
+
+		<div class="col-12 col-lg-2">
+			<div class="card h-100">
+				<div class="card-body">
+					<h2 class="h6 text-uppercase text-secondary mb-3">Profiling trace</h2>
+					<div class="d-grid gap-2">
+						{% if test_run.profiling_data %}
+						<a href="{% url 'download_trace' test_run.id %}" class="btn btn-primary" target="_blank">
+							<i class="bi bi-play-circle me-1"></i>View in Perfetto
+						</a>
+						<a href="{% url 'download_trace' test_run.id %}" class="btn btn-outline-secondary">
+							<i class="bi bi-download me-1"></i>Download trace
+						</a>
+						{% else %}
+						<button type="button" class="btn btn-outline-secondary" disabled>
+							<i class="bi bi-download me-1"></i>Download trace
+						</button>
+						{% endif %}
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="col-12 col-lg-2">
+			<div class="card h-100">
+				<div class="card-body">
+					<h2 class="h6 text-uppercase text-secondary mb-3">Failure log</h2>
+					<div class="d-grid gap-2">
+						{% if test_run.failure_log %}
+						<a href="{% url 'download_failure_log' test_run.id %}" class="btn btn-outline-danger">
+							<i class="bi bi-download me-1"></i>Download failure log
+						</a>
+						{% else %}
+						<button type="button" class="btn btn-outline-secondary" disabled>
+							<i class="bi bi-download me-1"></i>Download failure log
+						</button>
+						{% endif %}
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	{% if baseline_test_run %}
+	<div class="row row-cols-1 row-cols-md-2 row-cols-xl-4 g-3 mb-4">
+		{% if total_duration_row %}
+		<div class="col">
+			<div class="card h-100">
+				<div class="card-body">
+					<p class="text-body-secondary small mb-1">Current duration</p>
+					<p class="h4 mb-0">{{ total_duration_row.current_value|format_measurement:total_duration_row.unit }} <span class="h6 mb-0">{{ total_duration_row.change_percent|format_regression:"%" }}</span></p>
+				</div>
+			</div>
+		</div>
+		<div class="col">
+			<div class="card h-100">
+				<div class="card-body">
+					<p class="text-body-secondary small mb-1">Baseline duration</p>
+					<p class="h4 mb-0">{{ total_duration_row.baseline_value|format_measurement:total_duration_row.unit }}</p>
+				</div>
+			</div>
+		</div>		
+		{% endif %}
+	</div>
+	{% elif total_duration_row %}
+	<div class="row row-cols-1 row-cols-md-2 row-cols-xl-4 g-3 mb-4">
+		<div class="col">
+			<div class="card h-100">
+				<div class="card-body">
+					<p class="text-body-secondary small mb-1">Total duration</p>
+					<p class="h4 mb-0">{{ total_duration_row.current_value|format_measurement:total_duration_row.unit }}</p>
+				</div>
+			</div>
+		</div>
+	</div>
+	{% endif %}
+
+	<div class="accordion mb-4" id="testRunAccordion">
+		<div class="accordion-item">
+			<h2 class="accordion-header" id="testRunDetailsHeading">
+				<button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#testRunDetailsCollapse" aria-expanded="false" aria-controls="testRunDetailsCollapse">
+					Test Run Details
+				</button>
+			</h2>
+			<div id="testRunDetailsCollapse" class="accordion-collapse collapse" aria-labelledby="testRunDetailsHeading" data-bs-parent="#testRunAccordion">
+				<div class="accordion-body">
+					<dl class="row mb-0">
+						<dt class="col-sm-3">Module</dt>
+						<dd class="col-sm-9">{{ test_run.test_case.module }}</dd>
+						<dt class="col-sm-3">Name</dt>
+						<dd class="col-sm-9">{{ test_run.test_case.name }}</dd>
+						<dt class="col-sm-3">Parameters</dt>
+						<dd class="col-sm-9 text-break">{{ test_run.test_case.parameters|default:"-" }}</dd>
+						<dt class="col-sm-3">Session timestamp</dt>
+						<dd class="col-sm-9">{{ test_run.test_run_batch.test_session.timestamp }}</dd>
+						{% if baseline_test_run %}
+						<dt class="col-sm-3">Baseline run</dt>
+						<dd class="col-sm-9">#{{ baseline_test_run.id }} in session #{{ baseline_test_run.test_run_batch.test_session.id }}</dd>
+						{% endif %}
+					</dl>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="card mb-4">
+		<div class="card-header">
+			<h2 class="h6 mb-0">Measurements{% if baseline_test_run %} and Comparison{% endif %}</h2>
+		</div>
+		<div class="card-body">
+			{% if metrics_with_comparison %}
+			<div class="table-responsive">
+				<table class="table table-sm align-middle mb-0">
+					<thead class="table-light">
+						<tr>
+							<th>Metric</th>
+                            <th>Description</th>
+							<th>Current</th>
+							{% if baseline_test_run %}
+							<th>Baseline</th>
+							<th>Difference</th>
+							<th>Change (%)</th>
+							{% endif %}
+						</tr>
+					</thead>
+					<tbody>
+						{% for row in metrics_with_comparison %}
+						<tr>
+							<td>{{ row.metric_name }}</td>
+                            <td class="text-muted">{{ row.metric_description }}</td>
+							<td>{{ row.current_value|format_measurement:row.unit }}</td>
+							{% if baseline_test_run %}
+							<td>{{ row.baseline_value|format_measurement:row.unit }}</td>
+							<td>{{ row.difference|format_regression:row.unit }}</td>
+							<td>{{ row.change_percent|format_regression:"%" }}</td>
+							{% endif %}
+						</tr>
+						{% endfor %}
+					</tbody>
+				</table>
+			</div>
+			{% else %}
+			<p class="text-body-secondary mb-0">No measurement data available for this test run.</p>
+			{% endif %}
+		</div>
+	</div>
+</div>
+{% endblock %}

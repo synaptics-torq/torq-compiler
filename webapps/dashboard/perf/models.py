@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils.functional import cached_property
 
 
 class TestCase(models.Model):
@@ -12,6 +13,15 @@ class TestCase(models.Model):
             return f"{self.module}::{self.name}[{self.parameters}]"
         else:
             return f"{self.module}::{self.name}"
+
+    @property
+    def model_type(self):
+        parts = self.name.split('_', 3)
+
+        if len(parts) < 3:
+            return 'other'
+        
+        return parts[1]
 
     class Meta:
         constraints = [
@@ -50,54 +60,32 @@ class TestSession(models.Model):
         ]
 
     @property
-    def num_passed(self):
-        if hasattr(self, "_num_passed_cache"):
-            return self._num_passed_cache
+    def test_runs(self):
+        return TestRun.objects.filter(test_run_batch__test_session=self)
+
+    @cached_property
+    def num_passed(self):        
         return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.PASS).count()
 
-    @num_passed.setter
-    def num_passed(self, value):
-        self._num_passed_cache = value
-
-    @property
-    def num_skipped(self):
-        if hasattr(self, "_num_skipped_cache"):
-            return self._num_skipped_cache
+    @cached_property
+    def num_skipped(self):        
         return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.SKIP).count()
 
-    @num_skipped.setter
-    def num_skipped(self, value):
-        self._num_skipped_cache = value
-
-    @property
+    @cached_property
     def num_failed(self):
-        if hasattr(self, "_num_failed_cache"):
-            return self._num_failed_cache
         return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.FAIL).count()
 
-    @num_failed.setter
-    def num_failed(self, value):
-        self._num_failed_cache = value
+    @cached_property
+    def num_error(self):
+        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.ERROR).count()
 
-    @property
+    @cached_property
     def num_total(self):
-        if hasattr(self, "_num_total_cache"):
-            return self._num_total_cache
         return TestRun.objects.filter(test_run_batch__test_session=self).count()
 
-    @num_total.setter
-    def num_total(self, value):
-        self._num_total_cache = value
-
-    @property
+    @cached_property
     def num_xfail(self):
-        if hasattr(self, "_num_xfail_cache"):
-            return self._num_xfail_cache
         return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.XFAIL).count()
-
-    @num_xfail.setter
-    def num_xfail(self, value):
-        self._num_xfail_cache = value
 
     @property
     def git_commit_url(self):
@@ -136,6 +124,18 @@ class Metric(models.Model):
     description = models.TextField(blank=True, null=True)
     unit = models.TextField()
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['name'],
+                name='unique_metric_name'
+            )
+        ]
+
+    @property
+    def short_description(self):
+        return self.name.replace('_', ' ').capitalize()
+
     def __str__(self):
         return f"Metric: {self.name} [{self.unit}]"
 
@@ -143,7 +143,7 @@ class Metric(models.Model):
 class TestRun(models.Model):
 
     class Outcome(models.IntegerChoices):
-        PASS = 1, 'Pass',
+        PASS = 1, 'Pass'
         FAIL = 2, 'Fail'
         SKIP = 3, 'Skip'
         ERROR = 4, 'Error'

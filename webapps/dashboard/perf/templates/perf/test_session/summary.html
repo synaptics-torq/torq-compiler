@@ -1,0 +1,273 @@
+{% extends "perf/base.html" %}
+
+{% load static %}
+{% load custom_tags %}
+
+{% block title %}Test Session Summary - {{ session.git_branch | default:"unknown" }} - Test session #{{ session.id }}{% endblock %}
+
+{% block content %}
+
+<div class="container-fluid px-0">
+    <div class="row g-3 align-items-stretch mb-4">
+        <div class="col-12 col-lg-8">
+            <div class="card h-100">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                        <h1 class="h3 mb-0">Branch: {{ session.git_branch | default:"unknown" }}</h1>
+                        <span class="badge text-bg-secondary">Session #{{ session.id }}</span>                        
+                        <a href="{% url 'test_session_results' session.id %}" class="btn btn-sm btn-outline-primary ms-auto">Browse detailed test case results</a>
+                    </div>
+                    <p class="text-body-secondary mb-0">Timestamp: {{ session.timestamp }}</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12 col-lg-4">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h2 class="h6 mb-0">Baseline Session</h2>
+                </div>
+                <div class="card-body">
+                    <form method="get" class="mb-0">
+                        {% include "perf/partials/bootstrap_form.html" with form=form only %}
+                        <button type="submit" class="btn btn-primary">Switch baseline session</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+{% if baseline_session %}
+    <div class="row row-cols-1 row-cols-md-2 row-cols-xl-4 g-3 mb-4">
+        <div class="col">
+            <div class="card h-100">
+                <div class="card-body">
+                    <p class="text-body-secondary small mb-1">Change in # of failed tests</p>
+                    <p class="h4 mb-0">
+                        {{ statistics.new_test_failures_count | format_regression }}
+                        <p class="text-body-secondary small" style="font-size: 0.7rem;">Tests with Fail or Error outcome</p>
+                    </p>
+                </div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card h-100">
+                <div class="card-body">
+                    <p class="text-body-secondary small mb-1">Change in # of Expected failures</p>
+                    <p class="h4 mb-0">
+                        {{ statistics.new_xfail_failures_count | format_regression }}                         
+                        <p class="text-body-secondary small" style="font-size: 0.7rem;">Tests with XFail outcome</p>
+                    </p>
+                </div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card h-100">
+                <div class="card-body">
+                    <p class="text-body-secondary small mb-1">Average inference time change</p>
+                    <p class="h4 mb-0">
+                        {{ statistics.average_duration_change_percent|format_regression:"%" }}                        
+                        <p class="text-body-secondary small" style="font-size: 0.7rem;"> for tests with duration > 1 ms</p>
+                    </p>
+                </div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card h-100">
+                <div class="card-body">
+                    <p class="text-body-secondary small mb-1">Change in # of tests</p>
+                    <p class="h4 mb-0">{{ statistics.total_tests.difference | format_improvement }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="accordion mb-4" id="sessionMetadataAccordion">
+        <div class="accordion-item">
+            <h2 class="accordion-header" id="sessionMetadataHeading">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#sessionMetadataCollapse" aria-expanded="false" aria-controls="sessionMetadataCollapse">
+                    Session Details
+                </button>
+            </h2>
+            <div id="sessionMetadataCollapse" class="accordion-collapse collapse" aria-labelledby="sessionMetadataHeading" data-bs-parent="#sessionMetadataAccordion">
+                <div class="accordion-body">
+                    <dl class="row mb-0">
+                        <dt class="col-sm-3">Branch</dt>
+                        <dd class="col-sm-9">{{ session.git_branch | default:"unknown" }}</dd>
+                        <dt class="col-sm-3">Timestamp</dt>
+                        <dd class="col-sm-9">{{ session.timestamp }}</dd>
+                        <dt class="col-sm-3">Git commit</dt>
+                        <dd class="col-sm-9">{{ session.git_commit | default:"unknown" }}</dd>
+                        <dt class="col-sm-3">Owner</dt>
+                        <dd class="col-sm-9">{{ session.owner | default:"unknown" }}</dd>
+                        <dt class="col-sm-3">Workflow URL</dt>
+                        <dd class="col-sm-9">{% if session.workflow_url %}<a href="{{ session.workflow_url }}">{{ session.workflow_url }}</a>{% else %}unknown{% endif %}</dd>
+                    </dl>
+                </div>
+            </div>
+        </div>
+        <div class="accordion-item">
+            <h2 class="accordion-header" id="testOutcomesHeading">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#testOutcomesCollapse" aria-expanded="false" aria-controls="testOutcomesCollapse">
+                    Test Outcomes
+                </button>
+            </h2>
+            <div id="testOutcomesCollapse" class="accordion-collapse collapse" aria-labelledby="testOutcomesHeading" data-bs-parent="#sessionMetadataAccordion">
+                <div class="accordion-body">
+                    <div class="table-responsive">
+                        <table class="table table-sm mb-0 align-middle">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Outcome</th>
+                                    <th># of tests</th>
+                                    {% if baseline_session %}
+                                    <th># of tests in baseline</th>
+                                    <th>Difference</th>
+                                    {% endif %}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for outcome, count in statistics.outcome_counts.items %}
+                                <tr>
+                                    <td>{{ outcome | outcome_badge }}</td>
+                                    <td>{{ count.current }}</td>
+                                    {% if baseline_session %}
+                                    <td>{{ count.other }}</td>
+                                    <td>                                        
+                                        {% if outcome == 1 %} {# Passed tests #}
+                                            {{ count.difference | format_improvement }}
+                                        {% else %}
+                                            {{ count.difference | format_regression }}                                            
+                                        {% endif %}
+                                    </td>
+                                    {% endif %}
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="border-top p-3">
+                        <div class="row g-2">
+                            <div class="col-12 col-md-auto"><strong>Total current:</strong> {{ statistics.total_tests.current }}</div>
+                            {% if baseline_session %}
+                            <div class="col-12 col-md-auto"><strong>Total baseline:</strong> {{ statistics.total_tests.other }}</div>
+                            <div class="col-12 col-md-auto"><strong>Difference:</strong> {{ statistics.total_tests.difference | format_improvement }}</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if baseline_session %}
+    <div class="card mb-4">
+        <div class="card-header">
+            <h2 class="h6 mb-0">Inference Time Changes</h2>
+        </div>
+        <div class="card-body">
+            <ul class="nav nav-pills mb-3" id="inferenceChangesTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="distribution-tab" data-bs-toggle="pill" data-bs-target="#distribution-pane" type="button" role="tab" aria-controls="distribution-pane" aria-selected="true">Distribution</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="regressions-tab" data-bs-toggle="pill" data-bs-target="#regressions-pane" type="button" role="tab" aria-controls="regressions-pane" aria-selected="false">Top Slower</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="improvements-tab" data-bs-toggle="pill" data-bs-target="#improvements-pane" type="button" role="tab" aria-controls="improvements-pane" aria-selected="false">Top Faster</button>
+                </li>
+            </ul>
+
+            <p class="text-body-secondary mb-3">Only taking into account tests with total duration greater than 1ms.</p>
+
+            <div class="tab-content" id="inferenceChangesTabsContent">
+                <div class="tab-pane fade show active" id="distribution-pane" role="tabpanel" aria-labelledby="distribution-tab" tabindex="0">
+                    {% if statistics.duration_change_histogram %}
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                        <p class="text-body-secondary small mb-0">Distribution of test duration deltas (% vs baseline)</p>
+                    </div>
+                    <div class="d-flex justify-content-center">
+                        <figure class="figure mb-0">
+                            <canvas class="change-histogram-chart" data-histogram='{{ statistics.duration_change_histogram | safe }}' width="800" height="300"></canvas>
+                        </figure>
+                    </div>
+                    {% else %}
+                    <p class="text-body-secondary mb-0">No duration change data available.</p>
+                    {% endif %}
+                </div>
+
+                <div class="tab-pane fade" id="regressions-pane" role="tabpanel" aria-labelledby="regressions-tab" tabindex="0">
+                    {% if statistics.top_slower_tests %}
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>#</th>
+                                    <th>Test</th>
+                                    <th>Current duration</th>
+                                    <th>Baseline duration</th>
+                                    <th>% change</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for test in statistics.top_slower_tests %}
+                                <tr>
+                                    <td>{{ forloop.counter }}</td>
+                                    <td class="text-break">{{ test.module }}::{{ test.name }}[{{ test.parameters }}]}</td>
+                                    <td>{{ test.current_value|format_measurement:"ns" }}</td>
+                                    <td>{{ test.other_value|format_measurement:"ns" }}</td>
+                                    <td>{{ test.change_percent|format_regression:"%" }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-body-secondary mb-0">No slower tests identified.</p>
+                    {% endif %}
+                </div>
+
+                <div class="tab-pane fade" id="improvements-pane" role="tabpanel" aria-labelledby="improvements-tab" tabindex="0">
+                    {% if statistics.top_faster_tests %}
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>#</th>
+                                    <th>Test</th>
+                                    <th>Current duration</th>
+                                    <th>Baseline duration</th>
+                                    <th>% change</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for test in statistics.top_faster_tests %}
+                                <tr>
+                                    <td>{{ forloop.counter }}</td>
+                                    <td class="text-break">{{ test.module }}::{{ test.name }}[{{ test.parameters }}]</td>
+                                    <td>{{ test.current_value | format_measurement:"ns" }}</td>
+                                    <td>{{ test.other_value | format_measurement:"ns" }}</td>
+                                    <td>{{ test.change_percent|format_regression:"%" }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-body-secondary mb-0">No faster tests identified.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="{% static 'perf/js/test_session_summary.js' %}"></script>
+
+{% endblock %}

@@ -84,6 +84,15 @@ if os.getenv("DEBUG_MODE", "") != "":
 
 ROOT_URLCONF = 'webapp.urls'
 
+template_options = {
+    'context_processors': [
+        'django.template.context_processors.request',
+        'django.contrib.auth.context_processors.auth',
+        'django.contrib.messages.context_processors.messages',
+    ],
+}
+
+
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
@@ -98,6 +107,15 @@ TEMPLATES = [
         },
     },
 ]
+
+# In local debugging mode, bypass cached template loader to reflect edits immediately.
+if os.getenv("LOCAL_DEBUG", "") != "":    
+    TEMPLATES[0]['OPTIONS']['loaders'] = [
+        'django.template.loaders.filesystem.Loader',
+        'django.template.loaders.app_directories.Loader',
+    ]
+    TEMPLATES[0]['APP_DIRS'] = False
+
 
 WSGI_APPLICATION = 'webapp.wsgi.application'
 

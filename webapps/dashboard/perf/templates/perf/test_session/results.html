@@ -1,0 +1,156 @@
+{% extends "perf/base.html" %}
+
+{% load static %}
+{% load custom_tags %}
+
+{% block title %}Test Session Results - {{ session.git_branch | default:"unknown" }} - Test session #{{ session.id }}{% endblock %}
+
+{% block content %}
+<form method="get" class="mb-0">
+    {{ form.page }}
+    <div class="row g-3 align-items-stretch mb-4">
+        <div class="col-12 col-lg-8">
+            <div class="card h-100">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                        <h1 class="h3 mb-0">Branch: {{ session.git_branch | default:"unknown" }}</h1>
+                        <span class="badge text-bg-secondary">Session #{{ session.id }}</span>
+                        {% if baseline_session %}
+                        <span class="badge text-bg-info">Comparison mode</span>
+                        {% endif %}
+                        <a href="{% url 'test_session_summary' session.id %}" class="btn btn-sm btn-outline-primary ms-auto">To session summary</a>
+                    </div>
+                    <p class="text-body-secondary mb-0">Timestamp: {{ session.timestamp }}</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12 col-lg-4">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h2 class="h6 mb-0">Baseline Session</h2>
+                </div>
+                <div class="card-body">
+                        {% include "perf/partials/bootstrap_field.html" with field=form.baseline_session only %}
+                    <button type="submit" name="page" value="1" class="btn btn-primary">Switch baseline session</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+            <div class="card-header">
+                <h2 class="h6 mb-0">Search options</h2>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    
+                    <div class="col-12 col-md-4">
+                        {% include "perf/partials/bootstrap_field.html" with field=form.status only %}
+                    </div>
+                    <div class="col-12 col-md-4">
+                        {% include "perf/partials/bootstrap_field.html" with field=form.baseline_status only %}
+                    </div>
+                    <div class="col-12 col-md-4">
+                        {% include "perf/partials/bootstrap_field.html" with field=form.sort_by only %}
+                    </div>
+                    <div class="col-12">
+                        {% include "perf/partials/bootstrap_field.html" with field=form.nodeid only %}
+                    </div>
+                    <div class="col-12 d-flex justify-content-end">
+                        <button type="submit" name="page" value="1" class="btn btn-primary">Apply filters</button>
+                    </div>
+                </div>
+            </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            {% if results %}
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                <p class="text-body-secondary mb-0">
+                    Showing {{ results.start_index }}-{{ results.end_index }} of {{ results.paginator.count }} results
+                    (Page {{ results.number }} of {{ results.paginator.num_pages }})
+                </p>
+                <div class="btn-group" role="group" aria-label="Pagination controls">
+                    <button
+                        type="submit"
+                        class="btn btn-outline-secondary btn-sm"
+                        name="page"
+                        value="{% if results.has_previous %}{{ results.previous_page_number }}{% else %}1{% endif %}"
+                        {% if not results.has_previous %}disabled{% endif %}
+                    >
+                        Previous
+                    </button>
+                    <button
+                        type="submit"
+                        class="btn btn-outline-secondary btn-sm"
+                        name="page"
+                        value="{% if results.has_next %}{{ results.next_page_number }}{% else %}{{ results.number }}{% endif %}"
+                        {% if not results.has_next %}disabled{% endif %}
+                    >
+                        Next
+                    </button>
+                </div>
+            </div>
+            <table class="table table-sm table-striped align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th scope="col">Name</th>
+                        <th scope="col">Outcome</th>                        
+                        <th scope="col">Baseline Outcome</th>
+                        <th scope="col">Duration</th>
+                        <th scope="col">Baseline Duration</th>
+                        <th scope="col">Change</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for result in results %}                        
+                        <tr>
+                            {% if result.current_test_run %}
+                            {% if result.other_test_run %}
+                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_test_run %}?baseline_test_run={{ result.other_test_run }}">{{ result.nodeid }}</a></td>
+                            {% else %}
+                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_test_run %}">{{ result.nodeid }}</a></td>
+                            {% endif %}
+                            {% else %}
+                            <td class="fw-semibold">{{ result.nodeid }}</td>
+                            {% endif %}
+                            <td>{{ result.current_outcome|outcome_badge }}</td>
+                            <td>{{ result.other_outcome|outcome_badge }}</td>
+                            <td>{{ result.current_value|format_measurement:"ns" }}</td>
+                            <td>{{ result.other_value|format_measurement:"ns" }}</td>
+                            <td>{{ result.change_percent|format_regression:"%" }}</td>
+                        </tr>                        
+                    {% endfor %}
+                </tbody>
+            </table>
+            <div class="d-flex justify-content-end mt-3">
+                <div class="btn-group" role="group" aria-label="Pagination controls">
+                    <button
+                        type="submit"
+                        class="btn btn-outline-secondary btn-sm"
+                        name="page"
+                        value="{% if results.has_previous %}{{ results.previous_page_number }}{% else %}1{% endif %}"
+                        {% if not results.has_previous %}disabled{% endif %}
+                    >
+                        Previous
+                    </button>
+                    <button
+                        type="submit"
+                        class="btn btn-outline-secondary btn-sm"
+                        name="page"
+                        value="{% if results.has_next %}{{ results.next_page_number }}{% else %}{{ results.number }}{% endif %}"
+                        {% if not results.has_next %}disabled{% endif %}
+                    >
+                        Next
+                    </button>
+                </div>
+            </div>
+            {% else %}
+            <p class="text-muted mb-0">No results found.</p>            
+            {% endif %}
+        </div>
+    </div>
+</form>
+{% endblock %}

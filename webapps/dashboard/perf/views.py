@@ -1,7 +1,12 @@
-from django.shortcuts import render, get_object_or_404
+from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse, FileResponse, Http404
-from django.db.models import Prefetch, Q
-from .models import TestSession, TestRun, TestRunBatch, Measurement
+from django.db.models import OuterRef, Prefetch, Q, Max, Subquery, F
+from django.core.paginator import Paginator
+
+from .models import TestSession, TestRun, Measurement, TestRunBatch
+
+from . import forms
+    
 import os
 from pathlib import Path
 from perf.perfetto_report_generator import generate_html as generate_perfetto_html
@@ -31,6 +36,91 @@ def home(request):
         'test_durations': test_durations,
         'dashboard_git_commit': os.environ.get('DASHBOARD_GIT_COMMIT', 'unknown')
     })
+
+
+def test_session_summary(request, session_id):
+
+    session = get_object_or_404(TestSession, id=session_id)
+
+    if request.GET:
+        form = forms.TestSessionSummaryOptions(data=request.GET)
+
+        if not form.is_valid():                
+            return redirect('test_session_summary', session_id=session_id)
+
+        baseline_session = form.cleaned_data['baseline_session']
+    else:        
+        baseline_session = services.get_default_comparison_session(session_id)
+        form = forms.TestSessionSummaryOptions(initial={'baseline_session': baseline_session})
+
+    statistics = services.get_session_summary_statistics(session, baseline_session)
+
+    return render(request, 'perf/test_session/summary.html', {'session': session, 'baseline_session': baseline_session, 'statistics': statistics, 'form': form})
+
+
+def test_session_results(request, session_id):
+
+    session = get_object_or_404(TestSession, id=session_id)
+
+    options = {'baseline_session': None, 'nodeid': '', 'status': 'ALL', 'baseline_status': 'ALL', 'sort_by': 'nodeid', 'page': 1}
+
+    if request.GET:
+        form = forms.TestSessionResultsOptions(data=request.GET)
+
+        if not form.is_valid():                
+            return redirect('test_session_results', session_id=session_id)
+
+        baseline_session = form.cleaned_data['baseline_session']
+        options.update(form.cleaned_data)
+    else:        
+        baseline_session = services.get_default_comparison_session(session_id)
+        form = forms.TestSessionResultsOptions(initial={'baseline_session': baseline_session})
+
+    results = services.get_session_results(session, baseline_session, options['nodeid'], options['status'], options['baseline_status'], options['sort_by'])
+
+    # paginate the results
+    paginator = Paginator(results, 50)  # Show 50 results per page
+    page_number = options['page']
+    page_obj = paginator.get_page(page_number)
+
+    return render(request, 'perf/test_session/results.html', {'session': session, 'baseline_session': baseline_session, 'results': page_obj, 'form': form})
+
+
+def test_run(request, test_run_id):
+    test_run = get_object_or_404(
+        TestRun.objects.select_related('test_case', 'test_run_batch__test_session').prefetch_related('measurement_set__metric'),
+        id=test_run_id,
+    )
+
+    if request.GET:
+        form = forms.TestRunOptions(data=request.GET)
+
+        if not form.is_valid():
+            return redirect('test_run', test_run_id=test_run_id)
+
+        baseline_test_run = form.cleaned_data['baseline_test_run']
+
+    else:
+        form = forms.TestRunOptions()
+        baseline_test_run = None
+
+    metrics_with_comparison = services.get_test_run_comparison(test_run, baseline_test_run)
+
+    total_duration_row = next(
+        (row for row in metrics_with_comparison if row['metric_name'] == 'total_duration'),
+        None,
+    )
+
+    return render(request, 'perf/test_run.html',
+        {
+            'test_run': test_run,
+            'baseline_test_run': baseline_test_run,
+            'form': form,
+            'metrics_with_comparison': metrics_with_comparison,
+            'total_duration_row': total_duration_row,
+        },
+    )
+
 
 def get_alternative_engines_results(layer):
     # Fetch results of alternative engines for the current layer
