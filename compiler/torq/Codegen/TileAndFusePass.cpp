@@ -71,7 +71,13 @@ namespace mlir::syna::torq {
 
 namespace {
 
-enum class TileAndFuseProducersFuseMode { MaxSize, MaxProducers, OnlyPatterns, NoFuse };
+enum class TileAndFuseProducersFuseMode {
+    MaxSize,
+    MaxSizeAllDoms,
+    MaxProducers,
+    OnlyPatterns,
+    NoFuse
+};
 
 static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFuseMode(
     "torq-tile-and-fuse-producers-fuse-mode",
@@ -81,6 +87,11 @@ static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFus
             TileAndFuseProducersFuseMode::MaxSize, "max-size",
             "Prefer bigger tile over fusing more producers: tile size is set to make the consumer "
             "fit in memory; producers are fused only if they fit in the same tile size)"
+        ),
+        clEnumValN(
+            TileAndFuseProducersFuseMode::MaxSizeAllDoms, "internal-max-size-all-domains",
+            "Do not use this option! Calculate an intermidate value used by the max-producers "
+            "option internally"
         ),
         clEnumValN(
             TileAndFuseProducersFuseMode::MaxProducers, "max-producers",
@@ -417,14 +428,15 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     );
 
     std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxSize(
-        IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp,
+        IRRewriter &rewriter, bool allDomains, mlir::tensor::ExtractSliceOp candidateSliceOp,
         OpResult producerOpResult, bool isDestinationOperand
     );
 
     FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
         IRRewriter &rewriter, TilingInterface tilingInterfaceOp,
         llvm::ArrayRef<OpFoldResult> iterDomainSizes, SmallVector<OpFoldResult> tileSizes,
-        TileAndFuseProducersFuseMode fuseMode
+        TileAndFuseProducersFuseMode fuseMode,
+        std::optional<llvm::SetVector<Operation *> *> producerOps
     );
 };
 
@@ -678,7 +690,7 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
     for (tilingDomainIter = tilingIterDomsOrder.begin();
          tilingDomainIter != tilingIterDomsOrder.end(); ++tilingDomainIter) {
         int64_t domain = *tilingDomainIter;
-        if (*getConstantIntValue(sizes[domain]) == 1)
+        if (isOneInteger(sizes[domain]))
             continue;
 
         sizes[domain] = one;
@@ -730,8 +742,8 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
 
 // an SCFTileAndFuseOptions::ControlFnTy for the max-size fuse mode.
 std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuseControlMaxSize(
-    IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
-    bool isDestinationOperand
+    IRRewriter &rewriter, bool allDomains, mlir::tensor::ExtractSliceOp candidateSliceOp,
+    OpResult producerOpResult, bool isDestinationOperand
 ) {
     const std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> doNotFuse = std::nullopt;
     const scf::SCFTileAndFuseOptions::ControlFnResult fuseAndDoNotYieldProducer{false};
@@ -800,24 +812,21 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         return fuseAndDoNotYieldProducer;
     }
 
-    // This is an alternative check to `!isFuseGroupOutput(producerOp)`, which
-    // we can't use here because scf::tiling already added an extract_slice
-    // operation to the result of producerOp, which interferes with isFuseGroupOutput.
-    for (Operation *user : candidateSliceOp->getUsers()) {
-        if (checkShareFuseGroup(user, producerOp)) {
-            // Is part of a pattern-fuse-group, but not the output operation (bottom most).
-            // We only check the output operation of such group.
-            return fuseAndDoNotYieldProducer;
-        }
+    if (!isFuseGroupOutput(producerOp)) {
+        // Is part of a pattern-fuse-group, but not the output operation (bottom most).
+        // We only check the output operation of such group.
+        return fuseAndDoNotYieldProducer;
     }
 
     llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(producerTi);
 
     // The domains the producer can be tiled over
     // Don't fuse if we are tiling a domain the producer's fuse group can not be tiled over
-    for (size_t index = 0; index < iterSizes.size(); ++index) {
-        if (mappedSizes[index] != iterSizes[index] && !tilingIterDomsOrder.contains(index)) {
-            return doNotFuse;
+    if (!allDomains) {
+        for (size_t index = 0; index < iterSizes.size(); ++index) {
+            if (mappedSizes[index] != iterSizes[index] && !tilingIterDomsOrder.contains(index)) {
+                return doNotFuse;
+            }
         }
     }
 
@@ -839,6 +848,8 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         LLVM_DEBUG(assert(false));
         return doNotFuse;
     }
+    if (!*producerFuseGroupFits)
+        return doNotFuse;
 
     // Fuse iff producer fits in the tile
     return fuseAndDoNotYieldProducer;
@@ -846,18 +857,20 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
 
 // an SCFTileAndFuseOptions::ControlFnTy for the max-producers fuse mode.
 std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProducers(
-    IRRewriter &rewriter, mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
+    IRRewriter &rewriter, std::optional<llvm::SetVector<Operation *> *> producerOps,
+    mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
     bool isDestinationOperand
 ) {
-    const auto doNotFuse = std::nullopt;
+    const std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> doNotFuse = std::nullopt;
+    const scf::SCFTileAndFuseOptions::ControlFnResult fuseAndDoNotYieldProducer{false};
 
     Operation *producerOp = producerOpResult.getOwner();
     auto producerTi = dyn_cast<TilingInterface>(producerOp);
     if (!producerTi)
         return doNotFuse;
 
-    // TODO: if producer has users outside of the tiling fuse group, maybe we should yield it?
-    bool yieldProducerReplacement = false;
+    if (producerOps && !(*producerOps)->contains(producerOp))
+        return doNotFuse;
 
     // FIXME: should we not fuse destination operands?
     // if (isDestinationOperand) {
@@ -870,13 +883,13 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
 
     if (!isMarkedFuseGroup(producerOp)) {
         // Not part of a pattern-fuse-group; there are no restrictions on the domains.
-        return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
+        return fuseAndDoNotYieldProducer;
     }
 
     if (!isFuseGroupOutput(producerOp)) {
         // Is part of a pattern-fuse-group, but not the output operation (bottom most).
         // We only check the output operation of such group.
-        return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
+        return fuseAndDoNotYieldProducer;
     }
 
     // The domains the producer can be tiled over
@@ -915,13 +928,13 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
     }
 
     // Producer can be fused
-    return scf::SCFTileAndFuseOptions::ControlFnResult{yieldProducerReplacement};
+    return fuseAndDoNotYieldProducer;
 }
 
 FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
     IRRewriter &rewriter, TilingInterface tilingInterfaceOp,
     llvm::ArrayRef<OpFoldResult> iterDomainSizes, SmallVector<OpFoldResult> tileSizes,
-    TileAndFuseProducersFuseMode fuseMode
+    TileAndFuseProducersFuseMode fuseMode, std::optional<llvm::SetVector<Operation *> *> producerOps
 ) {
     // set domains that are not being tiled to 0
     OpFoldResult zero = getAsIndexOpFoldResult(&getContext(), 0);
@@ -947,7 +960,16 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
         fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                               OpResult producerOpResult, bool isDestinationOperand) {
             return fuseControlMaxSize(
-                rewriter, candidateSliceOp, producerOpResult, isDestinationOperand
+                rewriter, false, candidateSliceOp, producerOpResult, isDestinationOperand
+            );
+        };
+        break;
+
+    case TileAndFuseProducersFuseMode::MaxSizeAllDoms:
+        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
+                              OpResult producerOpResult, bool isDestinationOperand) {
+            return fuseControlMaxSize(
+                rewriter, true, candidateSliceOp, producerOpResult, isDestinationOperand
             );
         };
         break;
@@ -956,7 +978,7 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
         fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                               OpResult producerOpResult, bool isDestinationOperand) {
             return fuseControlMaxProducers(
-                rewriter, candidateSliceOp, producerOpResult, isDestinationOperand
+                rewriter, producerOps, candidateSliceOp, producerOpResult, isDestinationOperand
             );
         };
         break;
@@ -1053,10 +1075,42 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
     // Get the order in which we should tile the domains.
     llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(tiOp);
 
+    llvm::SetVector<Operation *> producerOps;
+    std::optional<llvm::SetVector<Operation *> *> restrictToProducerOps = std::nullopt;
+
+    // In MaxProducers mode, first find all the potential producers that fit in
+    // the smallest tile. As we don't know which domains will actually be tiled
+    // yet, we use the MaxSizeAllDoms option below, that ignores domain order
+    // constraints.
+    if (clTorqTileAndFuseProducersFuseMode.getValue() ==
+        TileAndFuseProducersFuseMode::MaxProducers) {
+
+        SmallVector<OpFoldResult> smallestTileSizes(iterDomainSizes);
+        auto one = getAsIndexOpFoldResult(&getContext(), 1);
+        for (auto dim : tilingIterDomsOrder) {
+            smallestTileSizes[dim] = one;
+        }
+
+        FailureOr<scf::SCFTileAndFuseResult> tiledResults = tileAndFuseToSize(
+            rewriter, tiOp, iterDomainSizes, smallestTileSizes,
+            TileAndFuseProducersFuseMode::MaxSizeAllDoms, std::nullopt
+        );
+        if (failed(tiledResults)) {
+            tiOp->emitWarning("tile-and-fuse: failed to tile operation, skipping it.");
+            LLVM_DEBUG(assert(false));
+            return;
+        }
+
+        producerOps = tiledResults->fusedProducers;
+        restrictToProducerOps = &producerOps;
+    }
+
     // Find a tile size that fits tiOp in memory (no producers, except for the
     // required pattern-fuse-group members)
+    llvm::SetVector<Operation *> empty;
     llvm::FailureOr<bool> tileChanged = fitTileToMemory(
-        tiOp, {}, tilingIterDomsOrder.getArrayRef(), *iterDomainConstSizes, tileOffsets, tileSizes
+        tiOp, producerOps, tilingIterDomsOrder.getArrayRef(), *iterDomainConstSizes, tileOffsets,
+        tileSizes
     );
     if (failed(tileChanged)) {
         tiOp->emitWarning("tile-and-fuse: failed to tile an operation, skipping it");
@@ -1064,7 +1118,16 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
         return;
     }
 
-    assert(*tileChanged && "untiled op does not fit in memory but tiling to a single tile does");
+    // FIXME: the following assert fails because Conv2dConvert calls
+    // foldBackwardPadding when convertToInterleaved fails, after marking has
+    // already returned. That should be fixed, this assert should be
+    // uncommented, and the follwing if should be removed.
+    // $ pytest
+    // tests/test_keras_app.py::test_keras_app_tflite_torq[layer_inceptionv3_conv2d_13-sim-sr250-v4]
+    // --torq-chips=next.group assert(*tileChanged && "untiled op does not fit in memory but tiling
+    // to a single tile does");
+    if (!*tileChanged)
+        return;
 
     LLVM_DEBUG({
         llvm::dbgs() << "  iteration sizes: ";
@@ -1077,63 +1140,15 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
     });
 
     // Do the actual tiling (might need to do it again later)!
+
     FailureOr<scf::SCFTileAndFuseResult> tiledResults = tileAndFuseToSize(
-        rewriter, tiOp, iterDomainSizes, tileSizes, clTorqTileAndFuseProducersFuseMode.getValue()
+        rewriter, tiOp, iterDomainSizes, tileSizes, clTorqTileAndFuseProducersFuseMode.getValue(),
+        restrictToProducerOps
     );
     if (failed(tiledResults)) {
         tiOp->emitWarning("tile-and-fuse: failed to tile operation, skipping it.");
         LLVM_DEBUG(assert(false));
         return;
-    }
-
-    // In MaxProducers mode, we readjust the tile sizes to fit all the producers.
-    if (clTorqTileAndFuseProducersFuseMode.getValue() ==
-        TileAndFuseProducersFuseMode::MaxProducers) {
-
-        // Will hold the new tile size
-        SmallVector<OpFoldResult> producersTileOffsets(tileOffsets), producersTileSizes(tileSizes);
-
-        // Now that we know which producers were fused, find a tile that fits them too.
-        llvm::FailureOr<bool> tileChanged = fitTileToMemory(
-            tiOp, tiledResults->fusedProducers, tilingIterDomsOrder.getArrayRef(),
-            *iterDomainConstSizes, producersTileOffsets, producersTileSizes
-        );
-        if (failed(tileChanged)) {
-            // Fall back to MaxSize
-            // This can happen if one of the producers does not tile well over
-            // the domains that the consumer dictates. A better solution will
-            // be to find the problematic producers and not fuse them, if
-            // possible, and only if that does not work fall back to MaxSize.
-            // The problem is to identify the culprits. We could add to
-            // fuseControlMaxProducers a check that the producer can be tiled to
-            // a 1x1x.. tile (over all the domains in tilingIterDomsOrder) before
-            // fusing it.
-            LLVM_DEBUG(
-                llvm::dbgs()
-                << "max-producers failed, falling back to max-size for the current consumer.\n"
-            );
-            tiledResults = tileAndFuseToSize(
-                rewriter, tiOp, iterDomainSizes, tileSizes, TileAndFuseProducersFuseMode::MaxSize
-            );
-            if (failed(tiledResults)) {
-                tiOp->emitWarning("tile-and-fuse: failed to tile operation, skipping it.");
-                LLVM_DEBUG(assert(false));
-                return;
-            }
-        }
-        else if (*tileChanged) {
-            // Producers required a smaller tile, do the actual tiling one more
-            // time (the previous one will be discarded by canonicalize).
-            tiledResults = tileAndFuseToSize(
-                rewriter, tiOp, iterDomainSizes, producersTileSizes,
-                clTorqTileAndFuseProducersFuseMode.getValue()
-            );
-            if (failed(tiledResults)) {
-                tiOp->emitError("tile-and-fuse: failed to tile operation, skipping it.");
-                LLVM_DEBUG(assert(false));
-                return;
-            }
-        }
     }
 
     LLVM_DEBUG({
@@ -1187,7 +1202,12 @@ void TileAndFusePass::runOnOperation() {
 
     untiledTiledOps_.reserve(orderTi.size());
 
-    for (TilingInterface tiOp : orderTi) {
+    for (auto [count, tiOp] : llvm::enumerate(orderTi)) {
+        LLVM_DEBUG({
+            if (orderTi.size() > 50)
+                llvm::dbgs() << "Processing TI op:" << count << "/" << orderTi.size() << "\n";
+        });
+
         tileAndFuse(tiOp);
     }
 
