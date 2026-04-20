@@ -34,13 +34,13 @@ namespace mlir::syna::torq {
 
 llvm::cl::opt<bool> clConv1dAsMatmul(
     "torq-convert-conv1d-to-matmul", llvm::cl::desc("Convert conv1d to imToCol + matmul"),
-    llvm::cl::init(false)
+    llvm::cl::init(true)
 );
 
 llvm::cl::opt<bool> clConv1dToGenericConv1D(
     "torq-convert-conv1d-to-generic",
     llvm::cl::desc("Convert conv1d to generic conv1d (5D output with preserved kernel dim)"),
-    llvm::cl::init(true)
+    llvm::cl::init(false)
 );
 
 llvm::cl::opt<bool> clConv1dTruncateForReduce(
@@ -94,33 +94,32 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         int64_t stride = strides[0];     // Stride value
         int64_t dilation = dilations[0]; // Dilation value
 
-        // Step 1: Unfold the input tensor using im2col approach
-        // Each position in the output corresponds to a patch of the input
+        // Step 1: im2col - unfold input patches into [Ow, C*Kw]
         auto elemType = inputType.getElementType();
         auto outputElemType = outputType.getElementType();
-        // Create a tensor to hold the unfolded input
-        // Shape: [Ow, C*Kw] - each row contains a full patch for one output position
+
+        // Collapse [N, C, W] -> [C, W] so the indexing map is rank-2 with no constant dims.
+        // Constant dims in linalg.generic indexing maps get folded by canonicalization,
+        // causing an operand-rank vs map-result-rank mismatch in downstream passes.
+        SmallVector<int64_t> collapsedInputShape = {C, inputShape[2]};
+        auto collapsedInputType = RankedTensorType::get(collapsedInputShape, elemType);
+        auto collapsedInput = tensor::CollapseShapeOp::create(
+            rewriter, loc, collapsedInputType, input, ArrayRef<ReassociationIndices>{{0, 1}, {2}}
+        );
+
         SmallVector<int64_t> unfoldedShape = {Ow, C * Kw};
         auto unfoldedType = RankedTensorType::get(unfoldedShape, elemType);
         auto unfoldedInit = tensor::EmptyOp::create(rewriter, loc, unfoldedShape, elemType);
 
-        // Create the im2col transformation using a linalg.generic
-        SmallVector<AffineExpr> unfoldIndexExprs;
-        auto dim0 = rewriter.getAffineDimExpr(0); // Output position (Ow dimension)
-        auto dim1 = rewriter.getAffineDimExpr(1); // Input channel and kernel position
-
-        // dim1 / Kw gives us the channel index
+        // (d0=Ow, d1=C*Kw) -> (d1/Kw, d0*stride + (d1%Kw)*dilation)
+        auto dim0 = rewriter.getAffineDimExpr(0);
+        auto dim1 = rewriter.getAffineDimExpr(1);
         auto channelIdx = dim1.floorDiv(rewriter.getAffineConstantExpr(Kw));
-        // dim1 % Kw gives us the kernel position
         auto kernelIdx = dim1 % rewriter.getAffineConstantExpr(Kw);
-        // Calculate input position: outputPos * stride + kernelIdx * dilation
         auto inputPosExpr = dim0 * rewriter.getAffineConstantExpr(stride) +
                             kernelIdx * rewriter.getAffineConstantExpr(dilation);
 
-        unfoldIndexExprs.push_back(rewriter.getAffineConstantExpr(0)); // N dimension (batch)
-        unfoldIndexExprs.push_back(channelIdx);                        // C dimension (channels)
-        unfoldIndexExprs.push_back(inputPosExpr);                      // W dimension (width)
-
+        SmallVector<AffineExpr> unfoldIndexExprs = {channelIdx, inputPosExpr};
         auto unfoldIndexMap = AffineMap::get(2, 0, unfoldIndexExprs, rewriter.getContext());
         auto outputIndexMap = AffineMap::getMultiDimIdentityMap(2, rewriter.getContext());
 
@@ -128,8 +127,9 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         SmallVector<utils::IteratorType> iteratorTypes(2, utils::IteratorType::parallel);
 
         auto im2col = linalg::GenericOp::create(
-            rewriter, loc, TypeRange{unfoldedType}, ValueRange{input}, ValueRange{unfoldedInit},
-            ArrayRef<AffineMap>{unfoldIndexMap, outputIndexMap}, iteratorTypes,
+            rewriter, loc, TypeRange{unfoldedType}, ValueRange{collapsedInput},
+            ValueRange{unfoldedInit}, ArrayRef<AffineMap>{unfoldIndexMap, outputIndexMap},
+            iteratorTypes,
             [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
                 linalg::YieldOp::create(nestedBuilder, nestedLoc, blockArgs[0]);
             }
@@ -148,27 +148,25 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         );
 
         // Step 3: Create the matmul operation
-        // We'll do: [F, C*Kw] @ [Ow, C*Kw]^T -> [F, Ow]
-        // First, we need to transpose the unfolded input
-        SmallVector<int64_t> transposedUnfoldedShape = {C * Kw, Ow};
-        // auto transposedUnfoldedType = RankedTensorType::get(transposedUnfoldedShape, elemType);
-        auto transposedUnfoldedInit =
-            tensor::EmptyOp::create(rewriter, loc, transposedUnfoldedShape, elemType);
-
-        auto transposedUnfolded = linalg::TransposeOp::create(
-            rewriter, loc, unfoldedInput, transposedUnfoldedInit, ArrayRef<int64_t>{1, 0}
+        // We'll do: [Ow, C*Kw] @ [C*Kw, F] -> [Ow, F]
+        // Transpose the filter [F, C*Kw] -> [C*Kw, F] instead of transposing im2col output
+        SmallVector<int64_t> transposedFilterShape = {C * Kw, F};
+        auto transposedFilterInit = tensor::EmptyOp::create(
+            rewriter, loc, transposedFilterShape, filterType.getElementType()
         );
 
-        // Create the matmul output tensor [F, Ow]
-        SmallVector<int64_t> matmulResultShape = {F, Ow};
+        auto transposedFilter = linalg::TransposeOp::create(
+            rewriter, loc, reshapedFilter.getResult(), transposedFilterInit, ArrayRef<int64_t>{1, 0}
+        );
+
+        // [Ow, C*Kw] x [C*Kw, F] -> [Ow, F]; accumulate into output element type (f32)
+        SmallVector<int64_t> matmulResultShape = {Ow, F};
         auto matmulResultType = RankedTensorType::get(matmulResultShape, outputElemType);
         auto matmulInit = tensor::EmptyOp::create(rewriter, loc, matmulResultShape, outputElemType);
 
-        // Perform the actual matmul
-        // Perform the actual matmul
         SmallVector<Value> inputs;
-        inputs.push_back(reshapedFilter.getResult());
-        inputs.push_back(transposedUnfolded.getResults()[0]);
+        inputs.push_back(unfoldedInput);
+        inputs.push_back(transposedFilter.getResults()[0]);
 
         SmallVector<Value> outputs;
         outputs.push_back(matmulInit.getResult());
@@ -176,15 +174,24 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         auto matmulOp =
             linalg::MatmulOp::create(rewriter, loc, TypeRange{matmulResultType}, inputs, outputs);
 
-        // Step 4: Reshape the result back to [N, F, Ow]
+        // Transpose result [Ow, F] -> [F, Ow]
+        SmallVector<int64_t> transposedResultShape = {F, Ow};
+        auto transposedResultInit =
+            tensor::EmptyOp::create(rewriter, loc, transposedResultShape, outputElemType);
+        auto transposedResult = linalg::TransposeOp::create(
+            rewriter, loc, matmulOp.getResults()[0], transposedResultInit, ArrayRef<int64_t>{1, 0}
+        );
+
+        // Step 4: expand [F, Ow] -> [N, F, Ow]
         if (N == 1) {
-            // Simply reshape to add the batch dimension
-            auto finalResult = tensor::ExpandShapeOp::create(
-                rewriter, loc, matmulResultType, matmulOp.getResults()[0],
+            SmallVector<int64_t> expandedShape = {N, F, Ow};
+            auto expandedType = RankedTensorType::get(expandedShape, outputElemType);
+            auto expandedResult = tensor::ExpandShapeOp::create(
+                rewriter, loc, expandedType, transposedResult.getResults()[0],
                 ArrayRef<ReassociationIndices>{{0, 1}, {2}}
             );
 
-            rewriter.replaceOp(convOp, finalResult);
+            rewriter.replaceOp(convOp, expandedResult.getResult());
         }
         else {
             return rewriter.notifyMatchFailure(
