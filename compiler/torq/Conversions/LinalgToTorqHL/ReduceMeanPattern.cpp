@@ -470,11 +470,15 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
+void populateLinalgToTorqHLReduceMeanPatternsBeforeMarking(
+    MLIRContext *context, RewritePatternSet &patterns
+) {
+    patterns.insert<ReduceMeanConvert>(context);
+}
+
 void populateLinalgToTorqHLReduceMeanPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-    patterns.insert<ReduceMeanConvert>(context);
-
     // TODO: refactor with ReduceMeanConvert later soon
     patterns.insert<ReduceMeanPattern>(context, markFuseGroups);
 }

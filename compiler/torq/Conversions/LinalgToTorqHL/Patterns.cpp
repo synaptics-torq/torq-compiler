@@ -609,7 +609,7 @@ struct TransposeOpConversion : public OpConversionPattern<linalg::TransposeOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expects 1 output");
         }
 
-        if (!failed(foldForwardDepthToSpace(srcOp, rewriter, std::nullopt))) {
+        if (succeeded(foldForwardDepthToSpace(srcOp, rewriter, std::nullopt))) {
             return success();
         }
 
@@ -650,19 +650,19 @@ struct TransposeOpConversionRewrite : public OpRewritePattern<linalg::TransposeO
             return rewriter.notifyMatchFailure(srcOp, "Expects 1 output");
         }
 
-        if (!failed(foldForwardDepthToSpace(srcOp, rewriter, maybeFuseGroupAttr)) ||
-            _markFuseGroups) {
+        if (succeeded(foldForwardDepthToSpace(srcOp, rewriter, maybeFuseGroupAttr))) {
+            // foldForwardDepthToSpace called markOpFuseGroup
+            return success();
+        }
+
+        if (_markFuseGroups) {
             markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr);
             return success();
         }
 
-        auto trOp = torq_hl::TransposeOp::create(
-            rewriter, srcOp.getLoc(), srcOp.getResult()[0].getType(), srcOp.getInit(),
-            srcOp.getPermutationAttr(), srcOp.getInput()
-        );
-        rewriter.replaceOp(srcOp, trOp.getOutput());
-
-        return success();
+        // This pattern should only be called for doing the marking; for the
+        // conversion TransposeOpConversion is called
+        assert(false);
     }
 };
 

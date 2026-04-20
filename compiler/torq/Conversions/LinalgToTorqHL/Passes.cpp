@@ -181,7 +181,25 @@ class MarkPatternsForTileAndFusePass
 
     void runOnOperation() override {
         auto funcOp = getOperation();
-        auto *ctx = funcOp.getContext();
+        auto *ctx = &getContext();
+
+        auto applyPatterns = [&](auto populateFn) -> LogicalResult {
+            RewritePatternSet patterns(ctx);
+            populateFn(patterns);
+            FrozenRewritePatternSet frozenPatterns(
+                std::move(patterns), disabledPatterns, enabledPatterns
+            );
+            return applyPatternsGreedily(funcOp, frozenPatterns);
+        };
+
+        // NB: Patterns that do transformations, instead of marking, must be
+        // called before we add the TORQ_FUSE_GROUP_ID attribute, otherwise the
+        // operations they generate will not be annotated.
+        if (failed(applyPatterns([&](RewritePatternSet &p) {
+                populateLinalgToTorqHLReduceMeanPatternsBeforeMarking(ctx, p);
+            }))) {
+            return signalPassFailure();
+        }
 
         // Assign UIDs to TilingInterface operations
         OpBuilder builder(funcOp);
@@ -190,34 +208,21 @@ class MarkPatternsForTileAndFusePass
             op->setAttr(mlir::syna::torq::TORQ_FUSE_GROUP_ID, builder.getI64IntegerAttr(nextId++));
         });
 
-        RewritePatternSet prePatterns(ctx);
-        populateLinalgToTorqHLPrePatterns(ctx, prePatterns, true);
-
-        auto preFrozenPatterns =
-            FrozenRewritePatternSet(std::move(prePatterns), disabledPatterns, enabledPatterns);
-
-        if (failed(applyPatternsGreedily(getOperation(), preFrozenPatterns))) {
+        if (failed(applyPatterns([&](RewritePatternSet &p) {
+                populateLinalgToTorqHLPrePatterns(ctx, p, true);
+            }))) {
             return signalPassFailure();
         }
 
-        RewritePatternSet preLowPrioPatterns(ctx);
-        populateLinalgToTorqHLPrePatternsLowPrio(ctx, preLowPrioPatterns, true);
-
-        auto preLowPrioFrozenPatterns = FrozenRewritePatternSet(
-            std::move(preLowPrioPatterns), disabledPatterns, enabledPatterns
-        );
-
-        if (failed(applyPatternsGreedily(getOperation(), preLowPrioFrozenPatterns))) {
+        if (failed(applyPatterns([&](RewritePatternSet &p) {
+                populateLinalgToTorqHLPrePatternsLowPrio(ctx, p, true);
+            }))) {
             return signalPassFailure();
         }
 
-        RewritePatternSet linalgPatterns(ctx);
-        populateLinalgToTorqHLPatterns(ctx, linalgPatterns, true);
-
-        auto linalgFrozenPatterns =
-            FrozenRewritePatternSet(std::move(linalgPatterns), disabledPatterns, enabledPatterns);
-
-        if (failed(applyPatternsGreedily(getOperation(), linalgFrozenPatterns))) {
+        if (failed(applyPatterns([&](RewritePatternSet &p) {
+                populateLinalgToTorqHLPatterns(ctx, p, true);
+            }))) {
             return signalPassFailure();
         }
     }

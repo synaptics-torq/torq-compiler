@@ -43,6 +43,9 @@ void populateLinalgToTorqHLPrePatternsLowPrio(
 void populateLinalgToTorqHLEWBinaryPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
+void populateLinalgToTorqHLReduceMeanPatternsBeforeMarking(
+    MLIRContext *context, RewritePatternSet &patterns
+);
 void populateLinalgToTorqHLReduceMeanPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

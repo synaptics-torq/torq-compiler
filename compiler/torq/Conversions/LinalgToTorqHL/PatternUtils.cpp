@@ -134,7 +134,7 @@ Operation *getSingleUser(Value value) {
 bool markOpFuseGroup(
     Operation *op, PatternRewriter &rewriter, const std::optional<IntegerAttr> &maybeFuseGroupAttr
 ) {
-    if (!maybeFuseGroupAttr.has_value()) {
+    if (!maybeFuseGroupAttr) {
         return false;
     }
 
@@ -145,28 +145,23 @@ bool markOpFuseGroup(
     }
 
     assert(op && "Trying to mark null op!");
-    if (!isa<
-            TilingInterface, tensor::CollapseShapeOp, tensor::ExpandShapeOp, tensor::InsertSliceOp>(
-            op
-        )) {
-        op->emitError("Trying to mark an op that does not implement TilingInterface");
-        op->dump();
-        assert(false && "Trying to mark an op that does not implement TilingInterface");
+    assert(
+        (isa<TilingInterface, tensor::InsertSliceOp>(op) &&
+         "Trying to mark an op that does not implement TilingInterface")
+    );
+    assert(*maybeFuseGroupAttr && "op does not have torq-fuse-group-id attribute");
+
+    SmallVector<Attribute> newAttr;
+    if (ArrayAttr oldAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
+        if (llvm::is_contained(oldAttr, *maybeFuseGroupAttr))
+            return true;
+
+        llvm::append_range(newAttr, oldAttr);
     }
+    newAttr.push_back(*maybeFuseGroupAttr);
+    ArrayAttr fuseGroupAttr = rewriter.getArrayAttr(newAttr);
 
-    rewriter.modifyOpInPlace(op, [&]() {
-        // op->setAttr(TORQ_FUSE_GROUP, fuseGroupAttr);
-        SmallVector<Attribute> newAttr;
-        if (auto oldAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
-            if (llvm::is_contained(oldAttr, *maybeFuseGroupAttr)) {
-                return;
-            }
-
-            newAttr.append(oldAttr.begin(), oldAttr.end());
-        }
-        newAttr.push_back(*maybeFuseGroupAttr);
-        op->setAttr(TORQ_FUSE_GROUP, rewriter.getArrayAttr(newAttr));
-    });
+    rewriter.modifyOpInPlace(op, [&]() { op->setAttr(TORQ_FUSE_GROUP, fuseGroupAttr); });
 
     return true;
 }
@@ -332,15 +327,6 @@ std::optional<int64_t> isFuseGroupOutput(Operation *op) {
     }
 
     for (auto attr : fuseGroupAttr) {
-        // TODO: check "torq-fuse-group" = [<<NULL ATTRIBUTE>>] NULL attribute coming like this and
-        // causing issues, need to investigate why it happens and if it can be prevented.
-        if (!attr) {
-            LLVM_DEBUG({
-                llvm::dbgs() << "Warning: found null attribute in " << TORQ_FUSE_GROUP
-                             << " of op: " << *op << "\n";
-            });
-            continue;
-        }
         auto intAttr = cast<IntegerAttr>(attr);
 
         bool foundUser = false;
