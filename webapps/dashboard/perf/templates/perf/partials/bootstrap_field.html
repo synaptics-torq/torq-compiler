@@ -1,4 +1,5 @@
-{% if field.field.widget.input_type == "checkbox" %}
+{% if field.field.widget.input_type == "hidden" %}
+{% elif field.field.widget.input_type == "checkbox" %}
     <div class="form-check mb-3">
     {{ field }}
     <label class="form-check-label" for="{{ field.id_for_label }}">

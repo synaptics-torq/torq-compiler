@@ -97,30 +97,38 @@
                 <thead class="table-light">
                     <tr>
                         <th scope="col">Name</th>
-                        <th scope="col">Outcome</th>                        
+                        <th scope="col">Outcome</th> 
+                        {% if baseline_session %}                       
                         <th scope="col">Baseline Outcome</th>
+                        {% endif %}
                         <th scope="col">Duration</th>
-                        <th scope="col">Baseline Duration</th>
+                        {% if baseline_session %}
+                        <th scope="col">Baseline Duration</th>                        
                         <th scope="col">Change</th>
+                        {% endif %}
                     </tr>
                 </thead>
                 <tbody>
                     {% for result in results %}                        
                         <tr>
-                            {% if result.current_test_run %}
-                            {% if result.other_test_run %}
-                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_test_run %}?baseline_test_run={{ result.other_test_run }}">{{ result.nodeid }}</a></td>
+                            {% if result.current_id %}
+                            {% if result.baseline_id %}
+                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_id %}?baseline_test_run={{ result.baseline_id }}">{{ result.nodeid }}</a></td>
                             {% else %}
-                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_test_run %}">{{ result.nodeid }}</a></td>
+                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_id %}">{{ result.nodeid }}</a></td>
                             {% endif %}
                             {% else %}
                             <td class="fw-semibold">{{ result.nodeid }}</td>
                             {% endif %}
-                            <td>{{ result.current_outcome|outcome_badge }}</td>
-                            <td>{{ result.other_outcome|outcome_badge }}</td>
-                            <td>{{ result.current_value|format_measurement:"ns" }}</td>
-                            <td>{{ result.other_value|format_measurement:"ns" }}</td>
+                            <td>{% outcome_badge result.current_outcome %}</td>
+                            {% if baseline_session %}
+                            <td>{% outcome_badge result.baseline_outcome %}</td>
+                            {% endif %}
+                            <td>{{ result.current_duration |format_measurement:"ns" }}</td>
+                            {% if baseline_session %}
+                            <td>{{ result.baseline_duration |format_measurement:"ns" }}</td>
                             <td>{{ result.change_percent|format_regression:"%" }}</td>
+                            {% endif %}
                         </tr>                        
                     {% endfor %}
                 </tbody>

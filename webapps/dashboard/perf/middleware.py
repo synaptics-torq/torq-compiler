@@ -23,8 +23,11 @@ class QueryDebugFooterMiddleware:
         for index, entry in enumerate(query_entries, start=1):
             query_time_s = float(entry.get('time', 0.0) or 0.0)
             query_time_ms = query_time_s * 1000.0
-            total_query_time_ms += query_time_ms
-            sql = html.escape(entry.get('sql', ''))
+            total_query_time_ms += query_time_ms   
+            
+            raw_sql = entry.get('sql', '') or ''
+            sql = html.escape(raw_sql)
+            
             lines.append(
                 '<div style="padding: 8px 0; border-bottom: 1px solid #1f2937;">'
                 f'<div style="font-size: 12px; color: #93c5fd; margin-bottom: 4px;">Query {index} - {query_time_ms:.3f} ms</div>'

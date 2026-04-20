@@ -46,6 +46,7 @@ STATUS_FILTER_CHOICES = [("ALL", "all")] + [(str(x), y) for x, y in TestRun.Outc
 
 class TestSessionSummaryOptions(BaseBootstrapForm):
     baseline_session = TestSessionChoiceField(required=False, label="Compare with session")
+    min_duration_ns = forms.FloatField(required=False, widget=forms.HiddenInput)
 
 
 class TestSessionResultsOptions(BaseBootstrapForm):
@@ -53,9 +54,9 @@ class TestSessionResultsOptions(BaseBootstrapForm):
     nodeid = forms.CharField(required=False, label="Filter by Test Name")    
     status = forms.ChoiceField(choices=STATUS_FILTER_CHOICES, required=False, label="Filter by status in current session")
     baseline_status = forms.ChoiceField(choices=STATUS_FILTER_CHOICES, required=False, label="Filter by status in comparison session")
-    sort_by = forms.ChoiceField(choices=[("nodeid", "Test Name"), ("current_value", "Duration ↑"), ("-current_value", "Duration ↓"), ("change_percent", "Change Percent ↑"), ("-change_percent", "Change Percent ↓")], required=False, label="Sort by")
+    sort_by = forms.ChoiceField(choices=[("nodeid", "Test Name"), ("current_duration", "Duration ↑"), ("-current_duration", "Duration ↓"), ("change_percent", "Change Percent ↑"), ("-change_percent", "Change Percent ↓")], required=False, label="Sort by")
     page = forms.IntegerField(required=False, min_value=1, initial=1, widget=forms.HiddenInput)
 
 
 class TestRunOptions(BaseBootstrapForm):
-    baseline_test_run = forms.ModelChoiceField(queryset=TestRun.objects.all(), required=False, empty_label="None", label="Compare with test run", widget=forms.HiddenInput)
+    baseline_test_run = forms.ModelChoiceField(queryset=TestRun.objects.all(), required=False, empty_label="None", widget=forms.HiddenInput)

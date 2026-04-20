@@ -1,5 +1,7 @@
 {% extends "perf/base.html" %}
 
+{% load custom_tags %}
+
 {% block title %}Performance Dashboard - Torq{% endblock %}
 
 {% partialdef session_table %}
@@ -12,16 +14,17 @@
         <div class="table-responsive">
             <table class="table table-hover table-sm align-middle mb-0" style="table-layout: fixed; width: 100%;">
                 <colgroup>
-                    <col style="width: 10%;">
-                    <col style="width: 9%;">
-                    <col style="width: 13%;">
-                    <col style="width: 25%;">
-                    <col style="width: 6.5%;">
-                    <col style="width: 6.5%;">
-                    <col style="width: 6.5%;">
-                    <col style="width: 6.5%;">
-                    <col style="width: 6.5%;">
+                    <col style="width: 12%;">
                     <col style="width: 8%;">
+                    <col style="width: 18%;">
+                    <col style="width: 18%;">
+                    <col style="width: 6%;">
+                    <col style="width: 6%;">
+                    <col style="width: 6%;">
+                    <col style="width: 6%;">
+                    <col style="width: 6%;">
+                    <col style="width: 6%;">
+                    <col style="width: 7%;">
                 </colgroup>
                 <thead class="table-light">
                     <tr>
@@ -32,8 +35,9 @@
                         <th scope="col" class="text-center text-nowrap">Total</th>
                         <th scope="col" class="text-center text-nowrap">Passed</th>
                         <th scope="col" class="text-center text-nowrap">Failed</th>
-                        <th scope="col" class="text-center text-nowrap">Skipped</th>
+                        <th scope="col" class="text-center text-nowrap">Error</th>                        
                         <th scope="col" class="text-center text-nowrap">XFail</th>
+                        <th scope="col" class="text-center text-nowrap">NXPass</th>
                         <th scope="col" class="text-center text-nowrap">Pass Rate</th>
                     </tr>
                 </thead>
@@ -53,10 +57,11 @@
                             {% endif %}
                         </td>
                         <td class="text-center">{{ session.num_total }}</td>
-                        <td class="text-center"><span class="badge text-bg-success">{{ session.num_passed }}</span></td>
-                        <td class="text-center"><span class="badge text-bg-danger">{{ session.num_failed }}</span></td>
-                        <td class="text-center"><span class="badge text-bg-warning">{{ session.num_skipped }}</span></td>
-                        <td class="text-center"><span class="badge text-bg-secondary">{{ session.num_xfail }}</span></td>
+                        <td class="text-center">{% outcome_badge "pass" session.num_passed %}</td>
+                        <td class="text-center">{% outcome_badge "fail" session.num_failed %}</td>
+                        <td class="text-center">{% outcome_badge "error" session.num_error %}</td>
+                        <td class="text-center">{% outcome_badge "xfail" session.num_xfail %}</td>
+                        <td class="text-center">{% outcome_badge "nxpass" session.num_nxpass %}</td>
                         <td class="text-center">
                             {% if session.num_total %}
                                 {% widthratio session.num_passed session.num_total 100 as pass_rate %}

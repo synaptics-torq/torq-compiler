@@ -1,13 +1,14 @@
 from django import template
 from django.utils.html import format_html
 from perf.models import TestRun
+import json
 
 register = template.Library()
 
 
 def _format_value(value, unit):
 
-    if value is None:
+    if value is None or value == "":
         return "N/A"
     if unit == 'ns':
         return f"{value / 1_000_000:.2f} ms"
@@ -28,7 +29,7 @@ def format_measurement(value, unit):
 
 def _format_difference(measurement, unit, is_regression=False):
 
-    if measurement is None:
+    if measurement is None or measurement == "":
         return "N/A"
     
     sign = ""
@@ -83,13 +84,21 @@ def outcomes():
     return TestRun.Outcome.choices
 
 
-@register.filter
+@register.simple_tag
 def outcome_badge(outcome, value=None):
 
-    if value is None and outcome is not None:        
+    if isinstance(outcome, str) and outcome != "":            
+        outcome = TestRun.Outcome[outcome.upper()]
+
+    if value is None and outcome is not None and outcome != "":            
         value = TestRun.Outcome(outcome).label
         
     if not value:
         value = "N/A"
 
     return format_html('<span class="badge {}">{}</span>', _outcome_class(outcome), value)
+
+
+@register.simple_tag
+def chart(data, class_name, width, height):
+    return format_html('<canvas class="{}" data-histogram=\'{}\' width="{}" height="{}"></canvas>', class_name, json.dumps(data), width, height)

@@ -1,8 +1,8 @@
 
-from .models import TestSession, TestRun, Measurement, TestGroup
+from .models import TestSession, TestRun, Measurement, TestGroup, TestRunBatch
 
 from django.db.models import (
-    Count, F, FloatField, Max, Avg,
+    Count, F, FloatField, IntegerField, Max, Avg, Count,
     ExpressionWrapper, Value, Q, TextField
 )
 from django.db.models.functions import Concat
@@ -14,13 +14,17 @@ import json
 def get_latest_sessions_stats(criterias: Q, limit=None):
     """Get the latest test session for the branches in the given pattern"""
 
-    # Get the ID of all the latest test session for any branch matching the pattern
-    ids = (TestSession.objects
+    # Get the latest test session per branch (DISTINCT ON requires ordering by branch first)
+    latest_per_branch = (TestSession.objects
             .filter(criterias)
             .order_by('git_branch', '-timestamp')
             .distinct('git_branch'))
 
-    # Keep only the latest N sessions if a limit is provided
+    # Re-order by recency and keep only the N most recently active branches
+    ids = (TestSession.objects
+            .filter(id__in=latest_per_branch)
+            .order_by('-timestamp'))
+
     if limit is not None:
         ids = ids[:limit]
 
@@ -28,12 +32,13 @@ def get_latest_sessions_stats(criterias: Q, limit=None):
     sessions_with_stats = (TestSession.objects
         .filter(id__in=ids)
         .annotate(
-            num_total=Count('testrunbatch__testrun'),
+            num_total=Count('testrunbatch__testrun', filter=~Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP)),
             num_passed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.PASS)),
             num_failed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.FAIL)),
-            num_skipped=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP)),
             num_error=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.ERROR)),
-            num_xfail=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL)))
+            num_xfail=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL)),
+            num_nxpass=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.NXPASS))
+        )
         .order_by('-timestamp')
     )
 
@@ -95,91 +100,128 @@ def get_default_comparison_session(session_id):
         return main_sessions[0]
 
 
-def get_metric_change_percent_qs(metric_name, session, other_session):
+def get_metric_changes_query():
     """
-    Get a queryset with the % change of the given metric for each test case between the current session and the other session.
+    Get a SQL query that returns test runs of a session with the change in the specified metric compared to corresponding
+    test runs in a baseline session.
 
-    Only tests that pass are included in the comparison, even if the metric is available.
+    The parameters of the query are:
 
-    The resulting query set has the following fields:
+    - baseline_session_id: the id of the baseline session to compare with
+    - metric_name: the name of the metric to compare
+    - current_session_id: the id of the current session to compare
 
-    - test_run__test_case_id: the id of the test case
-    - test_run__test_case__module: the module of the test case
-    - test_run__test_case__name: the name of the test case
-    - test_run__test_case__parameters: the parameters of the test case
-    - current_value: the value of the metric for the test case in the current session
-    - other_value: the value of the metric for the test case in the other session
-    - change_percent: the % change of the metric between the current session and the other session    
-    
     """
+
+    return f"""
     
-    if other_session is None:
-        return (Measurement.objects.filter(
-            metric__name=metric_name,
-            test_run__test_run_batch__test_session_id=session,
-        ).values('test_run__test_case_id')
-        .annotate(
-            current_value=Max("value"),
-            other_value=Value(None, output_field=FloatField()),
-            change_percent=Value(None, output_field=FloatField()))
+        /*
+            Get the highest id test run that is passing for each test case in the baseline session
+        */  
+
+        WITH baseline_testrun AS (
+            
+            SELECT
+                x.id,
+                x.outcome,
+                x.test_case_id
+            FROM 
+                (
+                    SELECT baseline_testrun_groups.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY baseline_testrun_groups.test_case_id
+                            ORDER BY baseline_testrun_groups.id DESC
+                        ) AS rn
+                    FROM
+                        perf_testrun AS baseline_testrun_groups
+                    INNER JOIN
+                        perf_testrunbatch AS baseline_testrunbatch ON baseline_testrun_groups.test_run_batch_id = baseline_testrunbatch.id
+                    WHERE
+                        baseline_testrunbatch.test_session_id = %(baseline_session_id)s AND baseline_testrun_groups.outcome = {TestRun.Outcome.PASS.value}
+                ) AS x
+            WHERE x.rn = 1
+        ),
+
+        /*
+            Get the measurement for the specified metric for each test run.
+        */
+
+        metric_value AS (
+            SELECT
+                test_run_id,
+                value
+            FROM
+                perf_measurement
+            INNER JOIN
+                perf_metric ON perf_measurement.metric_id = perf_metric.id
+            WHERE
+                perf_metric.name = %(metric_name)s
         )
 
-    change_percent_qs = (Measurement.objects
-        .filter(
-            metric__name=metric_name,
-            test_run__test_run_batch__test_session_id__in=[session, other_session],
-        )
-        .values('test_run__test_case_id')
-        .annotate(
-            current_value=Max(
-                "value",
-                filter=Q(test_run__test_run_batch__test_session_id=session),
-            ),
-            other_value=Max(
-                "value",
-                filter=Q(test_run__test_run_batch__test_session_id=other_session),
-            ),
-            current_outcome=Max(
-                "test_run__outcome",
-                filter=Q(test_run__test_run_batch__test_session_id=session),
-            ),
-            other_outcome=Max(
-                "test_run__outcome",
-                filter=Q(test_run__test_run_batch__test_session_id=other_session),
-            ),
-        )
-        .annotate(
-            change_percent=ExpressionWrapper(
-                (F("current_value") - F("other_value")) * Value(100.0) / F("other_value"),
-                output_field=FloatField(),
-            ),
-        )
-    )
-    
-    return change_percent_qs
+        /*
+            Select all test runs for the current session that have a given metric, are passing,
+            have a corresponding test run in the baseline session with a value for the metric.
+
+            For each of these pairs compute the change in the metric
+
+        */
+        
+        SELECT
+            c_testrun.id AS current_id,
+            b_testrun.id AS baseline_id,
+            CONCAT(testcase.module, '::', testcase.name, '[', testcase.parameters, ']') AS nodeid,
+            c_testrun.outcome AS current_outcome,
+            b_testrun.outcome AS baseline_outcome,
+            c_measurement.value AS current_value,
+            b_measurement.value AS baseline_value,
+            (c_measurement.value - b_measurement.value) * 100.0 / NULLIF(b_measurement.value, 0) AS change_percent        
+        FROM
+            perf_testrun as c_testrun
+        INNER JOIN
+            perf_testcase as testcase ON c_testrun.test_case_id = testcase.id
+        INNER JOIN
+            perf_testrunbatch AS c_testrunbatch ON c_testrun.test_run_batch_id = c_testrunbatch.id
+        INNER JOIN
+            perf_measurement AS c_measurement ON c_measurement.test_run_id = c_testrun.id
+        INNER JOIN
+            perf_metric AS c_metric ON c_metric.id = c_measurement.metric_id AND c_metric.name = 'total_duration'        
+        INNER JOIN
+            baseline_testrun as b_testrun ON c_testrun.test_case_id = b_testrun.test_case_id
+        INNER JOIN
+            perf_measurement AS b_measurement ON b_measurement.test_run_id = b_testrun.id
+        INNER JOIN
+            perf_metric AS b_metric ON b_metric.id = b_measurement.metric_id AND b_metric.name = 'total_duration'
+        WHERE 
+            c_testrunbatch.test_session_id = %(current_session_id)s 
+        AND
+            c_testrun.outcome = {TestRun.Outcome.PASS.value}
+    """, {}
 
 
-def get_histogram(qs, field, num_bins, min_value, max_value):
+def get_histogram(sql_query, field, fields, num_bins, min_value, max_value):
     """
     Compute a histogram of the given field for the given queryset using PostgreSQL's width_bucket function.
     """
     
     # Build histogram from the queryset SQL as a derived table:
     # SELECT width_bucket(subq.<field>, ...) ... FROM (<qs SQL>) AS subq
-    inner_qs = qs.values(field)
-    inner_sql, inner_params = inner_qs.query.sql_with_params()
+    
     histogram_sql = f"""
         SELECT
-            width_bucket(subq.\"{field}\"::double precision, %s, %s, %s) AS bucket,
+            width_bucket(subq.\"{field}\"::double precision, %(max_value)s, %(min_value)s, %(num_bins)s) AS bucket,
             COUNT(*) AS count
-        FROM ({inner_sql}) AS subq
+        FROM ({sql_query}) AS subq
         GROUP BY bucket
         ORDER BY bucket
     """
 
+    fields['num_bins'] = num_bins
+    fields['min_value'] = min_value
+    fields['max_value'] = max_value
+
     # we use inverted bins to make sure 0 ends up in the negative bin (which is the "good bin")
     with connection.cursor() as cursor:
-        cursor.execute(histogram_sql, [float(max_value), float(min_value), int(num_bins), *inner_params])
+        cursor.execute(histogram_sql, fields)
         rows = cursor.fetchall()
 
     count_per_bucket = {row[0]: row[1] for row in rows}
@@ -225,112 +267,305 @@ def get_histogram(qs, field, num_bins, min_value, max_value):
 
     return entries
 
-def get_average(qs, field):
+
+def get_average(sql_query, field, fields):
     """
     Compute the average of the given field for the given queryset.
     """
+
+    average_query = f"""
+        SELECT AVG(subq.\"{field}\"::double precision) AS average
+        FROM ({sql_query}) AS subq
+    """
+
+    with connection.cursor() as cursor:
+        cursor.execute(average_query, fields)
+        row = cursor.fetchone()
+
+    return row[0]
+
+
+def get_duration_changes_query():
+    sql, fields = get_metric_changes_query()
+
+    fields['metric_name'] = 'total_duration'
     
-    average_qs = qs.aggregate(average=Avg(field))
-    return average_qs['average']
+    return sql + ' AND b_measurement.value > %(min_duration)s', fields
 
 
-def get_session_summary_statistics(session, other_session):
+def get_duration_histogram(session, other_session, min_duration_ns):
+        
+    sql, fields = get_duration_changes_query()
+
+    fields['current_session_id'] = session.id
+    fields['baseline_session_id'] = other_session.id
+    fields['min_duration'] = min_duration_ns
+
+    return get_histogram(sql, 'change_percent', fields, num_bins=10, min_value=-10.0, max_value=10.0)
+
+
+def get_top_duration_changes(session, other_session, limit, desc, min_duration_ns):
+
+    sub_sql, fields = get_duration_changes_query()
+
+    fields['current_session_id'] = session.id
+    fields['baseline_session_id'] = other_session.id
+    fields['min_duration'] = min_duration_ns
+
+    order = "DESC" if desc else "ASC"
+
+    sql = f" SELECT * FROM ({sub_sql}) AS subq ORDER BY subq.change_percent {order} LIMIT {limit}"
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql, fields)
+        columns = [col[0] for col in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    return rows
+
+
+def get_average_duration_change_percent(session, other_session, min_duration_ns):
+
+    sql, fields = get_duration_changes_query()
+
+    fields['current_session_id'] = session.id
+    fields['baseline_session_id'] = other_session.id
+    fields['min_duration'] = min_duration_ns
+
+    return get_average(sql, 'change_percent', fields)
+
+
+def get_outcomes_statistics_comparison(session, baseline_session=None):
+    """
+    Get the count of each outcome for the given session and the baseline session, grouped by module, and the difference between them.
+    """
+
+    test_sessions = [session]
+    
+    if baseline_session:
+        test_sessions.append(baseline_session)
+
+    outcome_counts = (TestRun.objects
+        .filter(test_run_batch__test_session__in=test_sessions)
+        .exclude(outcome=TestRun.Outcome.SKIP) # we don't count skipped tests because each test run will skip the same
+        .values('test_case__module', 'outcome', 'test_run_batch__test_session')
+        .annotate(count=Count('id'))
+    )
+
+    result = {}
+    
+    for entry in outcome_counts:
+        module = entry['test_case__module']
+
+        outcome = TestRun.Outcome(entry['outcome']).name.lower()
+        session_id = entry['test_run_batch__test_session']
+        count = entry['count']
+
+        if module not in result:
+            empty_stats = {'current': 0, 'baseline': 0}
+            result[module] = {outcome.name.lower(): empty_stats.copy() for outcome in TestRun.Outcome}
+
+        if session_id == session.id:
+            result[module][outcome]['current'] = count
+
+        if baseline_session and session_id == baseline_session.id:
+            result[module][outcome]['baseline'] = count            
+    
+    # compute the totals
+    for module in result.values():
+        totals = {'current': 0, 'baseline': 0}
+        for outcome in module:            
+            totals['current'] += module[outcome]['current']
+            totals['baseline'] += module[outcome]['baseline']
+
+        module['total'] = totals
+
+    # compute the difference between the current session and the baseline session
+    for module in result:
+        for outcome in result[module]:
+            current_count = result[module][outcome]['current']
+            baseline_count = result[module][outcome]['baseline']
+            
+            difference = current_count - baseline_count
+
+            result[module][outcome]['difference'] = difference
+
+    # sort the modules by name
+    result = dict(sorted(result.items(), key=lambda item: item[0]))
+
+    # add totals per outcome across all modules
+    totals = {}
+    for module in result:
+        for outcome in result[module]:            
+            if outcome not in totals:
+                totals[outcome] = {'current': 0, 'baseline': 0, 'difference': 0}
+            totals[outcome]['current'] += result[module][outcome]['current']
+            totals[outcome]['baseline'] += result[module][outcome]['baseline']
+            totals[outcome]['difference'] += result[module][outcome]['difference']
+
+    return {'totals': totals, 'per_module': result}
+
+
+def get_session_summary_statistics(session, baseline_session, min_duration_ns):
     """
     Get a summary of the test session, including the count of each outcome and the histogram of duration changes.
     """
 
-    summary = {"outcome_counts": {}, 
-               "duration_change_histogram": None, 
-               "total_tests": {
-                   "current": 0,
-                   "other": None,
-                   "difference": None},
-               "top_slower_tests": None,
-               "top_faster_tests": None}
+    summary = {}
     
-    summary["total_tests"]["current"] = session.test_runs.count()
+    summary["outcomes"] = get_outcomes_statistics_comparison(session, baseline_session)
 
-    for outcome in TestRun.Outcome:
-        summary["outcome_counts"][outcome] = {'current': session.test_runs.filter(outcome=outcome).count(), 
-                                                    'other': None,
-                                                    'difference': None}
-
-    if other_session:
-        summary["total_tests"]["other"] = other_session.test_runs.count()
-        summary["total_tests"]["difference"] = summary["total_tests"]["current"] - summary["total_tests"]["other"]
-
-        for outcome in TestRun.Outcome:
-            summary["outcome_counts"][outcome]['other'] = other_session.test_runs.filter(outcome=outcome).count()
-            summary["outcome_counts"][outcome]['difference'] = summary["outcome_counts"][outcome]['current'] - summary["outcome_counts"][outcome]['other']
-        
-        # get a query set with the % change of the total_duration metric for each test case between the current session and the other session
-        # the results is stored in the "change_percent" annotation of the query set
-        duration_change_qs = get_metric_change_percent_qs('total_duration', session, other_session)
-
-        # we only consider "valid" tests for the statics
-        duration_change_qs = (duration_change_qs
-            .exclude(current_value__isnull=True)
-            .exclude(other_value__isnull=True)
-            .exclude(other_value=0.0)
-            .exclude(current_value__lt=1000*1000)            
-            .filter(current_outcome=TestRun.Outcome.PASS, other_outcome=TestRun.Outcome.PASS)
-        )
-
-        # return the histogram of the % change for all test cases in the session        
-        summary['duration_change_histogram'] = json.dumps(get_histogram(duration_change_qs, 'change_percent', 10, -10.0, 10.0))
-
-        duration_with_details_qs = (
-            duration_change_qs
-            .annotate(module=F('test_run__test_case__module'), 
-                      name=F('test_run__test_case__name'), 
-                      parameters=F('test_run__test_case__parameters'))
-        )
-
-        # get the top 5 slower tests        
-        summary['top_slower_tests'] = duration_with_details_qs.order_by('-change_percent')[:5]
-
-        # get the top 5 faster tests
-        summary['top_faster_tests'] = duration_with_details_qs.order_by('change_percent')[:5]
-
-        summary['average_duration_change_percent'] = get_average(duration_change_qs, 'change_percent')
-        summary['new_test_failures_count'] = summary["outcome_counts"][TestRun.Outcome.FAIL]['difference'] + summary["outcome_counts"][TestRun.Outcome.ERROR]['difference']
-        summary['new_xfail_failures_count'] = summary["outcome_counts"][TestRun.Outcome.XFAIL]['difference']
+    if baseline_session:
+        summary["duration_change_histogram"] = get_duration_histogram(session, baseline_session, min_duration_ns)
+        summary['top_slower_tests'] = get_top_duration_changes(session, baseline_session, 5, True, min_duration_ns)
+        summary['top_faster_tests'] = get_top_duration_changes(session, baseline_session, 5, False, min_duration_ns)               
+        summary['average_duration_change_percent'] = get_average_duration_change_percent(session, baseline_session, min_duration_ns)
+    else:
+        summary["duration_change_histogram"] = None
+        summary['top_slower_tests'] = []
+        summary['top_faster_tests'] = []
+        summary['average_duration_change_percent'] = None
+    
+    summary['batches'] = (TestRunBatch.objects
+                            .filter(test_session=session)
+                            .annotate(num_tests=Count('testrun'))
+                            .order_by('created_at'))
 
     return summary
 
 
-def get_session_results(session, baseline_session, nodeid, status, baseline_status, sort_by):
+def get_session_results(session, baseline_session, nodeid, status, baseline_status, sort_by, page_number, page_size):
     """
     Get the detailed results of a test session, including the status and duration of each test case, and the comparison with another session if provided.
     """
 
-    duration_qs = get_metric_change_percent_qs('total_duration', session, baseline_session)
+    # Get the test runs for the current session, excluding skipped tests, and their metric value for the specified metric (if any).
+    results_query = f"""
+        SELECT DISTINCT ON (x.id)
+            x.id,
+            x.outcome,
+            x.test_case_id,
+            CONCAT(testcase.module, '::', testcase.name, '[', testcase.parameters, ']') AS nodeid,
+            measurement.value AS value
+        FROM
+            perf_testrun AS x
+        INNER JOIN
+            perf_testrunbatch AS testrunbatch ON x.test_run_batch_id = testrunbatch.id            
+        INNER JOIN
+            perf_testcase as testcase ON x.test_case_id = testcase.id
+        LEFT JOIN
+            perf_measurement AS measurement ON measurement.test_run_id = x.id AND measurement.metric_id = (SELECT id FROM perf_metric WHERE name = 'total_duration')        
+        WHERE
+            testrunbatch.test_session_id = %s AND x.outcome != {TestRun.Outcome.SKIP.value}
+    """
 
-    duration_qs = (duration_qs
-                   .annotate(
-                        nodeid=Concat(F('test_run__test_case__module'), Value('::'), 
-                                    F('test_run__test_case__name'), Value('['), 
-                                    F('test_run__test_case__parameters'), Value(']'), output_field=TextField()),                
-                        current_test_run=Max("test_run__id", filter=Q(test_run__test_run_batch__test_session_id=session)),
-                        other_test_run=Max("test_run__id", filter=Q(test_run__test_run_batch__test_session_id=baseline_session)),
-                    )
-                    .exclude(current_outcome__isnull=True)
-    )
+    if baseline_session:
 
-    duration_qs = duration_qs.order_by(sort_by)
+        # Get one test run per test case from the baseline session, preferring passing runs if multiple runs exist 
+        # for the same test case. Exclude tests that where skipped as they don't bring any useful information.
+        # Add the metric value for the specified metric (if any) for these test runs.       
+
+        baseline_query = f"""     
+            SELECT DISTINCT ON (x.id)
+                x.id,
+                x.outcome,
+                x.test_case_id,
+                measurement.value AS value
+            FROM 
+                (
+                    SELECT baseline_testrun_groups.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY baseline_testrun_groups.test_case_id
+                            ORDER BY baseline_testrun_groups.outcome = {TestRun.Outcome.PASS.value} DESC, baseline_testrun_groups.id DESC
+                        ) AS rn
+                    FROM
+                        perf_testrun AS baseline_testrun_groups
+                    INNER JOIN
+                        perf_testrunbatch AS baseline_testrunbatch ON baseline_testrun_groups.test_run_batch_id = baseline_testrunbatch.id
+                    WHERE
+                        baseline_testrunbatch.test_session_id = %s and baseline_testrun_groups.outcome != {TestRun.Outcome.SKIP.value}
+                ) AS x
+            LEFT JOIN
+                perf_measurement AS measurement ON measurement.test_run_id = x.id AND measurement.metric_id = (SELECT id FROM perf_metric WHERE name = 'total_duration')            
+            WHERE x.rn = 1        
+        """        
+
+        # Join the current session test runs with the baseline test runs based on the test case, and compute the change in duration between them (if available for both runs).    
+
+        joined_results = f"""
+            WITH baseline_testrun AS ({baseline_query}), testrun AS ({results_query})
+                    
+            SELECT
+                c_testrun.id AS current_id,
+                b_testrun.id AS baseline_id,
+                c_testrun.nodeid AS nodeid,
+                c_testrun.outcome AS current_outcome,
+                b_testrun.outcome AS baseline_outcome,
+                c_testrun.value AS current_duration,
+                b_testrun.value AS baseline_duration,
+                (c_testrun.value - b_testrun.value) * 100.0 / NULLIF(b_testrun.value, 0) AS change_percent
+            FROM
+                testrun as c_testrun
+            LEFT JOIN
+                baseline_testrun as b_testrun ON c_testrun.test_case_id = b_testrun.test_case_id
+        """
+        query_params = [baseline_session.id, session.id]
+    else:
+        joined_results = f"""
+            WITH testrun AS ({results_query})
+                    
+            SELECT
+                c_testrun.id AS current_id,
+                NULL AS baseline_id,
+                c_testrun.nodeid AS nodeid,
+                c_testrun.outcome AS current_outcome,
+                NULL AS baseline_outcome,
+                c_testrun.value AS current_duration,
+                NULL AS baseline_duration,
+                NULL AS change_percent
+            FROM
+                testrun as c_testrun            
+        """
+        query_params = [session.id]
+
+    # filter and order the results based on the parameters    
+    query = f"SELECT * FROM ({joined_results}) AS subquery WHERE TRUE"
 
     if nodeid != '':
-
         for token in nodeid.split():
-            duration_qs = duration_qs.filter(nodeid__icontains=token)
+            query += " AND nodeid ILIKE %s"
+            query_params.append(f"%{token}%")   
 
     if status != 'ALL':
-        duration_qs = duration_qs.filter(current_outcome=TestRun.Outcome(int(status)))
-    
-    if baseline_status != 'ALL':
-        duration_qs = duration_qs.filter(other_outcome=TestRun.Outcome(int(baseline_status)))
+        query += " AND current_outcome = %s"
+        query_params.append(int(status))
 
-    return duration_qs
+    if baseline_status != 'ALL':
+        query += " AND baseline_outcome = %s"
+        query_params.append(int(baseline_status))
+
+    if sort_by:
+        query += f" ORDER BY {sort_by}"
+    else:
+        query += " ORDER BY nodeid"
+
+    # Get the total number of results without the pagination
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT COUNT(*) FROM ({query})", query_params)
+        total = cursor.fetchone()[0]
+
+    # Apply pagination to the query
+    if page_number is not None and page_size is not None:
+        offset = (page_number - 1) * page_size
+        query += f" LIMIT {page_size} OFFSET {offset}"
+
+    # Get the paginated results
+    with connection.cursor() as cursor:
+        cursor.execute(query, query_params)
+        columns = [col[0] for col in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    return rows, total
 
 
 def get_test_run_comparison(test_run, baseline_test_run):

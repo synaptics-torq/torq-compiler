@@ -1,4 +1,5 @@
-FROM ubuntu:24.04 AS build
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE} AS build
 
 RUN apt-get update  && \
     apt-get install -y --no-install-recommends python3 python3-pip python3-setuptools python3-wheel \
@@ -10,7 +11,7 @@ WORKDIR /wheels
 COPY requirements.txt requirements.txt
 RUN pip3 wheel -r requirements.txt
 
-FROM ubuntu:24.04
+FROM ${BASE_IMAGE}
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip python3-setuptools python3-wheel \

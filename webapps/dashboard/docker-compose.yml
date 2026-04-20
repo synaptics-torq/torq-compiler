@@ -41,6 +41,9 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: torqdb
 
+    ports:
+      - "5432:5432"
+
     volumes:
       - torq-db-data:/var/lib/postgresql/data
 

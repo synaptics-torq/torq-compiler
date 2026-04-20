@@ -1,6 +1,6 @@
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse, FileResponse, Http404
-from django.db.models import OuterRef, Prefetch, Q, Max, Subquery, F
+from django.db.models import Prefetch, Q, Max
 from django.core.paginator import Paginator
 
 from .models import TestSession, TestRun, Measurement, TestRunBatch
@@ -25,7 +25,7 @@ def home(request):
     version_branch_sessions = services.get_latest_sessions_stats(Q(git_branch__startswith='refs/heads/v') | Q(git_branch='refs/heads/main'))
         
     # Get the latest session for each of the 10 most recent PR branches    
-    pr_branch_sessions = services.get_latest_sessions_stats(Q(git_branch__startswith='refs/pull'), limit=10)
+    pr_branch_sessions = services.get_latest_sessions_stats(Q(git_branch__startswith='refs/pull') | Q(git_branch__isnull=True), limit=10)
 
     # Get the performance for each test case in the "home" group    
     test_durations = services.get_reference_test_durations([s.id for s in version_branch_sessions])
@@ -42,6 +42,8 @@ def test_session_summary(request, session_id):
 
     session = get_object_or_404(TestSession, id=session_id)
 
+    options = {'baseline_session': None, 'min_duration_ns': 1000 * 1000}
+
     if request.GET:
         form = forms.TestSessionSummaryOptions(data=request.GET)
 
@@ -49,17 +51,20 @@ def test_session_summary(request, session_id):
             return redirect('test_session_summary', session_id=session_id)
 
         baseline_session = form.cleaned_data['baseline_session']
+        
+        if min_duration_ns := form.cleaned_data['min_duration_ns']:
+            options['min_duration_ns'] = min_duration_ns
+
     else:        
         baseline_session = services.get_default_comparison_session(session_id)
-        form = forms.TestSessionSummaryOptions(initial={'baseline_session': baseline_session})
-
-    statistics = services.get_session_summary_statistics(session, baseline_session)
+        form = forms.TestSessionSummaryOptions(initial={'baseline_session': baseline_session, 'min_duration_ns': options['min_duration_ns']})
+    
+    statistics = services.get_session_summary_statistics(session, baseline_session, options['min_duration_ns'])
 
     return render(request, 'perf/test_session/summary.html', {'session': session, 'baseline_session': baseline_session, 'statistics': statistics, 'form': form})
 
 
 def test_session_results(request, session_id):
-
     session = get_object_or_404(TestSession, id=session_id)
 
     options = {'baseline_session': None, 'nodeid': '', 'status': 'ALL', 'baseline_status': 'ALL', 'sort_by': 'nodeid', 'page': 1}
@@ -75,13 +80,16 @@ def test_session_results(request, session_id):
     else:        
         baseline_session = services.get_default_comparison_session(session_id)
         form = forms.TestSessionResultsOptions(initial={'baseline_session': baseline_session})
+    
 
-    results = services.get_session_results(session, baseline_session, options['nodeid'], options['status'], options['baseline_status'], options['sort_by'])
+    results_page, total = services.get_session_results(session, baseline_session, 
+                                           options['nodeid'], options['status'], options['baseline_status'], options['sort_by'],
+                                           options['page'], 50)  # Pass page number and page size for pagination
 
     # paginate the results
-    paginator = Paginator(results, 50)  # Show 50 results per page
-    page_number = options['page']
-    page_obj = paginator.get_page(page_number)
+    paginator = Paginator(range(total), 50)
+    page_obj = paginator.get_page(options['page'])
+    page_obj.object_list = results_page # Attach the actual results to the page object for rendering
 
     return render(request, 'perf/test_session/results.html', {'session': session, 'baseline_session': baseline_session, 'results': page_obj, 'form': form})
 
@@ -176,6 +184,11 @@ def build_summary_for_test_run(test_run):
     return summary
 
 def test_session(request, session_id):
+
+    # redirect to the summary page for now since the code here is too slow
+    if True:
+        return redirect('test_session_summary', session_id=session_id)
+
     # Prefetch all related data including measurements to avoid N+1 queries
     # Use Prefetch objects for more control and only fetch needed fields
     session = TestSession.objects.prefetch_related(
