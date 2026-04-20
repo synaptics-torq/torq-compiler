@@ -35,4 +35,6 @@ void populateMulPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateFuseReluClampWithTruncfPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+void populateAbsorbDecomposedWzpCorrectionPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 } // namespace mlir::syna::torq

@@ -36,9 +36,6 @@ def case_config(request, runtime_hw_type, chip_config):
         # Assertion `llvm::isUIntN(BitWidth, val) && "Value is not an N-bit unsigned value"' failed.
         "conv2d_bf16_2x2x4_softmax.mlir",
 
-        # error: operand #<N> does not dominate this use
-        "conv2d-matmul-wzp.mlir",
-
         # Assertion `inputType.getRank() == permutation.size()' failed.
         "dw_16x16-bf16.mlir",
         "dw_f5_16x16-bf16.mlir",
