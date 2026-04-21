@@ -37,6 +37,15 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
             return failure();
         }
 
+        // If the defining op has any user that is NOT a SegmentationOp,
+        // we cannot set segment_output because that user expects
+        // non-segmented output.
+        for (auto *user : op->getResult(0).getUsers()) {
+            if (!isa<torq_hl::SegmentationOp>(user)) {
+                return failure();
+            }
+        }
+
         bool segment_output =
             TypeSwitch<Operation *, bool>(op)
                 .Case<torq_hl::Conv2DOp, torq_hl::DepthwiseConv2DOp, torq_hl::AddOp>([&](auto op) {
