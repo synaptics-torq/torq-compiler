@@ -10,7 +10,7 @@ function renderChangeHistograms(canvas) {
 
     const ctx = canvas.getContext('2d');
 
-    const histogramData = JSON.parse(canvas.dataset.histogram);
+    const histogramData = JSON.parse(canvas.dataset.chart);
     
     const data = {
         labels: histogramData.map(bucket => bucket.label),

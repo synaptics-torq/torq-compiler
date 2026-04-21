@@ -101,4 +101,4 @@ def outcome_badge(outcome, value=None):
 
 @register.simple_tag
 def chart(data, class_name, width, height):
-    return format_html('<canvas class="{}" data-histogram=\'{}\' width="{}" height="{}"></canvas>', class_name, json.dumps(data), width, height)
+    return format_html('<canvas class="{}" data-chart=\'{}\' width="{}" height="{}"></canvas>', class_name, json.dumps(data), width, height)

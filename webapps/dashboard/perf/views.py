@@ -39,6 +39,36 @@ def home(request):
     })
 
 
+def main_branch_test_trends(request):
+    """Top-level view showing total and xfail counts over time for main sessions."""
+
+    sessions = queries.test_session_statistics.get_main_branch_test_counts_over_time()
+    latest_session = sessions[-1] if sessions else None
+    chart_data = {
+        'labels': [session.timestamp.isoformat() for session in sessions],
+        'datasets': [
+            {
+                'label': 'Total tests',
+                'data': [session.num_total for session in sessions],
+                'borderColor': 'rgb(13, 110, 253)',
+                'backgroundColor': 'rgba(13, 110, 253, 0.12)',
+            },
+            {
+                'label': 'XFail tests',
+                'data': [session.num_xfail for session in sessions],
+                'borderColor': 'rgb(255, 193, 7)',
+                'backgroundColor': 'rgba(255, 193, 7, 0.16)',
+            },
+        ],
+    }
+
+    return render(request, 'perf/main_branch_test_trends.html', {
+        'sessions': sessions,
+        'latest_session': latest_session,
+        'chart_data': chart_data,
+    })
+
+
 def test_session_summary(request, session_id):
     """Summary page for a test session showing overall statistics."""
 

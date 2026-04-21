@@ -1,0 +1,110 @@
+{% extends "perf/base.html" %}
+
+{% load static %}
+{% load custom_tags %}
+
+{% block title %}Main Branch Test Trends - Torq{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-0">
+    <section class="mb-4">
+        <div class="row g-3 align-items-stretch">
+            <div class="col-12 col-xl-8">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <span class="text-uppercase text-secondary small">Main Branch</span>
+                        <h1 class="h3 mt-2 mb-2">Test Count Trends</h1>
+                        <p class="text-secondary mb-0">Track how total executed tests and expected failures move over time for main branch sessions.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-xl-4">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <h2 class="h6 text-uppercase text-secondary mb-3">Snapshot</h2>
+                        <div class="d-flex flex-column gap-2">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span class="text-secondary">Sessions</span>
+                                <span class="badge text-bg-dark">{{ sessions|length }}</span>
+                            </div>
+                            {% if latest_session %}
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span class="text-secondary">Latest total tests</span>
+                                <span class="badge text-bg-primary">{{ latest_session.num_total }}</span>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span class="text-secondary">Latest xfails</span>
+                                <span class="badge text-bg-warning">{{ latest_session.num_xfail }}</span>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="card mb-4">
+        <div class="card-header bg-body d-flex align-items-center justify-content-between">
+            <h2 class="h6 mb-0">Total Tests vs XFail Tests</h2>
+            <span class="text-secondary small">Main branch sessions ordered by time</span>
+        </div>
+        <div class="card-body">
+            {% if sessions %}
+                {% chart chart_data class_name="main-branch-test-trends-chart" width=1200 height=320 %}
+            {% else %}
+                <p class="text-muted mb-0">No main branch sessions are available.</p>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="card-header bg-body">
+            <h2 class="h6 mb-0">Session History</h2>
+        </div>
+        <div class="card-body">
+            {% if sessions %}
+            <div class="table-responsive">
+                <table class="table table-hover table-sm align-middle mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th scope="col">Session</th>
+                            <th scope="col">Timestamp</th>
+                            <th scope="col">Commit</th>
+                            <th scope="col" class="text-center">Total Tests</th>
+                            <th scope="col" class="text-center">XFail Tests</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for session in sessions %}
+                        <tr>
+                            <td>
+                                <a class="link-primary text-decoration-none fw-semibold" href="{% url 'test_session_summary' session.id %}">#{{ session.id }}</a>
+                            </td>
+                            <td class="text-nowrap">{{ session.timestamp|date:"Y-m-d H:i" }}</td>
+                            <td>
+                                {% if session.git_commit %}
+                                    <a class="link-secondary" href="{{ session.git_commit_url }}" target="_blank" rel="noopener noreferrer">{{ session.git_commit|truncatechars:12 }}</a>
+                                {% else %}
+                                    <span class="text-muted">—</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-center"><span class="badge text-bg-primary">{{ session.num_total }}</span></td>
+                            <td class="text-center">{% outcome_badge "xfail" session.num_xfail %}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+                <p class="text-muted mb-0">No main branch sessions are available.</p>
+            {% endif %}
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="{% static 'perf/js/main_branch_test_trends.js' %}"></script>
+{% endblock %}

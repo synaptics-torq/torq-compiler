@@ -11,6 +11,7 @@ router.register(r'test-runs', TestRunViewSet)
 urlpatterns = [
     path('api/', include(router.urls)),
     path('health/', views.health, name='health'),
+    path('main-branch-test-trends/', views.main_branch_test_trends, name='main_branch_test_trends'),
     path('test-sessions/<int:session_id>/', views.test_session, name='test_session'),
     path('test-sessions/<int:session_id>/summary', views.test_session_summary, name='test_session_summary'),    
     path('test-sessions/<int:session_id>/results', views.test_session_results, name='test_session_results'),    

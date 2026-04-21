@@ -25,8 +25,13 @@
             <div class="collapse navbar-collapse" id="navbarMain">
                 <ul class="navbar-nav me-auto mb-2 mb-lg-0">
                     <li class="nav-item">
-                        <a class="nav-link{% if request.resolver_match.url_name == 'home' %} active" aria-current="page{% endif %}" href="{% url 'home' %}">
+                        <a class="nav-link{% if request.resolver_match.url_name == 'home' %} active{% endif %}"{% if request.resolver_match.url_name == 'home' %} aria-current="page"{% endif %} href="{% url 'home' %}">
                             <i class="bi bi-house me-1"></i>Home
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.resolver_match.url_name == 'main_branch_test_trends' %} active{% endif %}"{% if request.resolver_match.url_name == 'main_branch_test_trends' %} aria-current="page"{% endif %} href="{% url 'main_branch_test_trends' %}">
+                            <i class="bi bi-graph-up-arrow me-1"></i>Main Branch Trends
                         </a>
                     </li>
                 </ul>

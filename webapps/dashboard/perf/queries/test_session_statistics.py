@@ -7,6 +7,31 @@ from .utils import get_histogram, get_average
 from django.db import connection
 
 
+def get_main_branch_test_counts_over_time(limit=None):
+    """Get total and xfail counts over time for sessions on the main branch."""
+
+    sessions = (
+        TestSession.objects
+        .filter(git_branch='refs/heads/main')
+        .annotate(
+            num_total=Count(
+                'testrunbatch__testrun',
+                filter=~Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP),
+            ),
+            num_xfail=Count(
+                'testrunbatch__testrun',
+                filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL),
+            ),
+        )
+        .order_by('-timestamp', '-id')
+    )
+
+    if limit is not None:
+        sessions = sessions[:limit]
+
+    return list(reversed(sessions))
+
+
 def get_latest_sessions_stats(criterias: Q, limit=None):
     """
     Get the latest test session for the branches in the given pattern
