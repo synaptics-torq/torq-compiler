@@ -84,7 +84,7 @@ runs:
       uses: actions/create-github-app-token@v3
       if: ${{ inputs.app_id != '' }}
       with:
-        app-id: ${{ inputs.app_id }}
+        client-id: ${{ inputs.app_id }}
         private-key: ${{ inputs.app_private_key }}
         owner: ${{ github.repository_owner }}
 

@@ -65,5 +65,7 @@ jobs:
               context: webapps/dashboard
               file: webapps/dashboard/Dockerfile
               push: true
-              build-args: GIT_COMMIT=${{ github.sha }} BASE_IMAGE=public.ecr.aws/ubuntu/ubuntu:24.04
+              build-args: |
+                GIT_COMMIT=${{ github.sha }}
+                BASE_IMAGE=public.ecr.aws/ubuntu/ubuntu:24.04
               tags: ${{ vars.DASHBOARD_DOCKER_REPOSITORY }}:latest
