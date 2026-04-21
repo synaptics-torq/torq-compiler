@@ -15,7 +15,6 @@ urlpatterns = [
     path('test-sessions/<int:session_id>/summary', views.test_session_summary, name='test_session_summary'),    
     path('test-sessions/<int:session_id>/results', views.test_session_results, name='test_session_results'),    
     path('test-runs/<int:test_run_id>/', views.test_run, name='test_run'),
-    path('api/session-metrics/<int:session_id>/', views.get_session_metrics, name='get_session_metrics'),
     path('download-trace/<int:test_run_id>/', views.download_trace, name='download_trace'),
     path('download-failure-log/<int:test_run_id>/', views.download_failure_log, name='download_failure_log'),
     path('', views.home, name='home'),

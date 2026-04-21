@@ -157,6 +157,14 @@ class TestRun(models.Model):
     failure_log = models.FileField(blank=True, null=True)
     failure_type = models.CharField(max_length=50, blank=True, null=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['test_run_batch', 'test_case'],
+                name='unique_test_run_per_batch_and_case'
+            )
+        ]
+
     def __str__(self):
         return f"TestRun: {self.test_case} in Session #{self.test_run_batch.test_session.id} - {self.get_outcome_display()}"
 
@@ -166,6 +174,11 @@ class Measurement(models.Model):
     metric = models.ForeignKey(Metric, on_delete=models.CASCADE)
     value = models.FloatField()
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['test_run', 'metric'], 
+                                    name='unique_measurement_per_test_run_and_metric')
+        ]
+
     def __str__(self):
         return f"Measurement: {self.metric.name} = {self.value} for {self.test_run}"
-

@@ -6,6 +6,9 @@
 {% block title %}Test Run - #{{ test_run.id }}{% endblock %}
 
 {% block content %}
+
+{% with metrics_with_comparison=data.comparison_rows total_duration_row=data.total_duration %}
+
 <div class="container-fluid px-0">
     <div class="row g-3 align-items-stretch mb-4">
         <div class="col-12 col-lg-8">
@@ -175,6 +178,8 @@
         </div>
     </div>
 </div>
+
+{% endwith %}
 {% endblock %}
 
 {% block extra_js %}

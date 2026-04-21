@@ -14,8 +14,7 @@ except ImportError:
     def spool(pass_arguments):
         return lambda x: x
     
-from perf.models import TestCase, TestSession, TestRun, TestRunBatch, Metric, Measurement
-from perf.perfetto_report_generator import generate_html as generate_perfetto_html
+from perf.models import TestCase, TestRun, TestRunBatch, Metric, Measurement
 from perf.perfetto_report_generator import extract_perfetto_summary
 
 
