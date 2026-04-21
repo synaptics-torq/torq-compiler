@@ -155,6 +155,37 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
             slice.store(output[a], res);
         }
     }
+    else if (IDENTITY_TEST_MODE == 6) {
+        // This example implements memcopy with weight bypass
+        struct In : Vectorized {
+            enum { NonDenseDims };
+        };
+
+        LData input(op.getInput());
+        LData output(op.getInit());
+        // FIXME: In some cases this op is also used as a bit-cast bf16 -> i16 or i16 -> bf16.
+        // For now, we can handle this case as i16 since it's just a bypass.
+        if (input.elementType() == DType::bf16 || output.elementType() == DType::bf16) {
+            input.setElementType(DType::int16);
+            output.setElementType(DType::int16);
+        }
+        // wram.load() doesn't support float32
+        if (input.elementType() == DType::fp32) {
+            input.setElementType(DType::int32);
+            output.setElementType(DType::int32);
+        }
+        int vectorSize = slice.act.width(DType::none, input.elementType());
+        input.fuse(std::min(input.denseDims(), output.denseDims())).vectorize(vectorSize);
+
+        For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
+            For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+                WData wdata = slice.wram.load(input[ndd][iv]);
+                PData pdata = slice.alu.load(wdata);
+                QData res = slice.act.load(pdata);
+                slice.append(output[ndd], res);
+            }
+        }
+    }
     else {
         struct In : Vectorized {
             enum { NonDenseDims };
@@ -182,9 +213,14 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
 
     rewriter.replaceOpWithNewOp<SliceTaskOp>(
         op,
-        slice.name(),                            // Operation to replace
-        ValueRange{op.getInput()},               // Input tensor
-        ValueRange{},                            // Weights
+        slice.name(), // Operation to replace
+#if IDENTITY_TEST_MODE == 6
+        ValueRange{},              // Input tensor
+        ValueRange{op.getInput()}, // Weights
+#else
+        ValueRange{op.getInput()}, // Input tensor
+        ValueRange{},              // Weights
+#endif
         ValueRange{},                            // BiasScale tensor,
         ValueRange{op.getInit()},                // Output tensor initializer
         ValueRange{},                            // Symbols

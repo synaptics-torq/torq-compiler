@@ -858,7 +858,9 @@ struct SlicePrivate {
     void aluSetMode(torq_hw::ALUOp0Mode op0, torq_hw::ALUOp1Mode op1);
     void aluSetNumberFormat(DType dtype);
     DType aluGetWeightType() const;
+    PData aluPData(int blockSize, DType dataType, bool isMulAcc);
     PData aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc);
+    PData aluWAccumulate(const WData &wdata);
     PData aluProductAccumulate(
         const IData &idata, const WData &wdata, ALUOp1Mode acc, bool outer, bool repeatWeight
     );
@@ -1635,7 +1637,9 @@ void SlicePrivate::cepr(const PData &pdata) {
     // These counters are not really used, but we set them to consistent values to avoid confusion
     int ceprCount = iterationCount(ceprDims);
     if (auto cedr = _ndls.getRegNdl(NdlType::CEDR)) {
-        cedr->dims.back().count = div_ceil(ceprCount, iterationCount(cedr->dims));
+        int cedrT = div_ceil(ceprCount, iterationCount(cedr->dims));
+        // If elementType is none we are in weight-bypass mode, so use a dummy T of 0
+        cedr->dims.back().count = _iram.elementType == DType::none ? 0 : cedrT;
         ndlToStr(NdlType::CEDR, _ndls.getRegNdl(NdlType::CEDR));
     }
     if (auto cewr = _ndls.getRegNdl(NdlType::CEWR)) {
@@ -1662,7 +1666,6 @@ void SlicePrivate::debr(const LData &data) { memNdl(NdlType::DEBR, data); }
 
 void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
     memNdl(NdlType::DEQW, output, appendBlockSize);
-    LLVM_DEBUG(llvm::dbgs() << _cfg << "\n");
 }
 
 void SlicePrivate::ref(const LData &data) {
@@ -1674,11 +1677,12 @@ void SlicePrivate::ref(const LData &data) {
 
     _ndls.add(NdlType::REF, refNdlDims);
     ndlToStr(NdlType::REF, _ndls.getMemNdl(NdlType::REF));
+    LLVM_DEBUG(llvm::dbgs() << _cfg << "\n");
 }
 
 void SlicePrivate::acpw(DType dataType, const uint32_t weightSize) {
     const uint32_t dataSize = sizeofType(_iram.elementType);
-    if (isInt(dataType) && ((weightSize == 2) || (dataSize > 1 && weightSize == 1))) {
+    if (isInt(dataType) && (weightSize > 1 || (dataSize > 1 && weightSize > 0))) {
         auto actIterationCount = outerIterCount(_forStack, _forStack.size());
         RegNdlDimsData acpwDims;
         acpwDims.push_back({DimType::L, RegDimTag::B, HwInfo::pdat_width, 1});
@@ -1705,6 +1709,28 @@ DType SlicePrivate::aluGetWeightType() const {
     return weightType;
 }
 
+// Infer the shape of the pram (partial result) data.
+PData SlicePrivate::aluPData(int blockSize, DType dataType, bool isMulAcc) {
+    int actWidth = isFloat(dataType) && !isMulAcc ? HwInfo::act_width / 2 : HwInfo::act_width;
+    int actBlockCount = div_ceil(blockSize, actWidth);
+    int actBlockSize = actBlockCount > 1 ? actWidth : blockSize;
+    DType pDataType = isInt(dataType) ? DType::int32 : isMulAcc ? DType::fp32 : dataType;
+
+    if (isFloat(pDataType) && !isMulAcc && actBlockCount > 1 && !supportACPRs32()) {
+        // This pdata will generate ACPR with multiple transfers of width 8*4 which in non-MAC mode
+        // are not supported by some HW (only 16*4 is supported).
+        // Try to put the slice in hybrid mode so that we can use transfers of full act_width,
+        _useHybridMode = true;
+        actBlockSize *= 2;
+        actBlockCount /= 2;
+    }
+
+    Shape pramShape = {actBlockCount, {actBlockSize, (HwInfo::pdat_width / sizeofType(pDataType))}};
+    PData pdata(pramShape, pDataType);
+    debugData(pdata);
+    return pdata;
+}
+
 PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     // Configure the ALU in bypass mode with the specified accumulate operation.
     aluSetMode(ALUOp0Mode::DBYP, acc);
@@ -1725,7 +1751,6 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
         _cfg.alu_d_unsigned = 0b0111;
     }
     _cfg.alu_w_unsigned = 0;
-    _cfg.alu_format = isFloat(dataType) ? torq_hw::NumberFormat::BF : torq_hw::NumberFormat::I;
 
     // Some accumulate ops are actually implemented as multiply-accumulate with implicit weights
     // These must be handled as we do in aluProductAccumulate
@@ -1761,26 +1786,58 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     // Will be overwritten if we are inside a for loop
     _pram.loadNesting = _forStack.size();
 
-    // Automatically infer the shape of the pram (partial result) data.
+    return aluPData(blockSize, dataType, isMulAcc);
+    ;
+}
 
-    int actWidth = isFloat(dataType) && !isMulAcc ? HwInfo::act_width / 2 : HwInfo::act_width;
-    int actBlockCount = div_ceil(blockSize, actWidth);
-    int actBlockSize = actBlockCount > 1 ? actWidth : blockSize;
-    DType pDataType = isInt(dataType) ? DType::int32 : isMulAcc ? DType::fp32 : dataType;
+PData SlicePrivate::aluWAccumulate(const WData &wdata) {
+    // Configure the ALU in MUL mode with the specified accumulate operation.
+    aluSetMode(ALUOp0Mode::MUL, ALUOp1Mode::ACC);
+    const DType weightType = wdata.elementType();
 
-    if (isFloat(pDataType) && !isMulAcc && actBlockCount > 1 && !supportACPRs32()) {
-        // This pdata will generate ACPR with multiple transfers of width 8*4 which in non-MAC mode
-        // are not supported by some HW (only 16*4 is supported).
-        // Try to put the slice in hybrid mode so that we can use transfers of full act_width,
-        _useHybridMode = true;
-        actBlockSize *= 2;
-        actBlockCount /= 2;
+    // Input data are not used in w-bypass mode generate cewr only to handle implicit weights
+    _wram.elementType = weightType;
+    _iram.elementType = isFloat(weightType) ? DType::bf16 : DType::int8;
+    _cfg.alu_d_unsigned = 0xf;
+    _cfg.alu_w_unsigned = weightType == DType::uint8   ? 0b1111
+                          : weightType == DType::int16 ? 0b101
+                                                       : 0;
+
+    // This op is actually implemented as multiply-accumulate with implicit data
+    // These must be handled as we do in aluProductAccumulate
+    // In some cases multiple partials are required to store the ALU result
+    int partialElWidth = isFloat(weightType) ? 2 : sizeofType(weightType);
+
+    // Multiply-accumulate doesn't work with float32 weights. We might maybe be able to support
+    // this in some hybrid mode but this would be tricky and not really helpful.
+    assert(weightType != DType::fp32 && "fp32 not supported");
+
+    // Check the weight data
+    auto wShape = wdata.subShape();
+    // TODO: check that wShape[rank - 1] is dense
+    const int blockSize = elementCount(wShape) * partialElWidth;
+    if (blockSize > HwInfo::wram_seg_width) {
+        llvm::errs() << "Actual block size: " << blockSize << ">" << HwInfo::wram_seg_width << "\n";
+        assert(false && "Block size too big");
     }
 
-    Shape pramShape = {actBlockCount, {actBlockSize, (HwInfo::pdat_width / sizeofType(pDataType))}};
-    PData pdata(pramShape, pDataType);
-    debugData(pdata);
-    return pdata;
+    // The HW has auto-generated (implicit) input that we need to load to the ALU.
+    // The implicit value is taken from the padding value and must be 1
+    _cfg.pad_value = isFloat(weightType) ? llvm::bit_cast<int32_t>(1.0f) : 1;
+    aluSetNumberFormat(weightType);
+    IData idata = IData({}, _iram.elementType);
+    _iram.loadNesting = 0;
+    cedr(idata, 0);
+    cewr(wdata, false, false);
+
+    // Save a copy of current stack, will be needed later to add N and T dimensions
+    _stackCopy = _forStack;
+
+    // Remember stack nesting level when pram is loaded
+    // Will be overwritten if we are inside a for loop
+    _pram.loadNesting = _forStack.size();
+
+    return aluPData(blockSize, weightType, true);
 }
 
 PData SlicePrivate::aluProductAccumulate(
@@ -1946,12 +2003,24 @@ QData SlicePrivate::actClamp(
             resultType = DType::int32;
             resultCount /= 4;
         }
+        else if (dataSize == 1 && weightSize == 4) {
+            _cfg.alu_w_unsigned = 7;
+            _cfg.alu_d_unsigned = dataType == DType::uint8 ? 0b1111 : 0;
+            _cfg.act_lsh = {0, 8, 16, 24};
+            _cfg.act_sum_bits = 32;
+            resultType = DType::int32;
+            resultCount /= 4;
+        }
         else if (dataSize == 1 && weightSize == 1) {
             _cfg.act_lsh = {0, 0, 0, 0};
             resultType = DType::int8;
         }
         else if (weightSize == 0) {
             // No weight applied, keep original data type
+        }
+        else if (dataSize == 0) {
+            // No input (weight-bypass mode), use weight type
+            resultType = weightType;
         }
         else {
             llvm::errs() << "Unsupported data and weight size combination: dataSize=" << dataSize
@@ -1965,6 +2034,10 @@ QData SlicePrivate::actClamp(
             // ALU floating point results use 2 partials each
             assert(resultCount % 2 == 0);
             resultCount /= 2;
+        }
+        if (dataType == DType::none) {
+            // No input (weight-bypass mode), use weight type
+            resultType = weightType;
         }
     }
     else {
@@ -1990,6 +2063,10 @@ QData SlicePrivate::actRescaleClamp(
 }
 
 int SlicePrivate::actWidth(DType iType, DType wType, bool biasScalePerItem) {
+    if (iType == DType::none && wType != DType::none) {
+        // We are in weight-bypass mode, which is implemented as a MAC-mode with implicit data of 1
+        iType = isFloat(wType) ? DType::bf16 : DType::int8;
+    }
     if (biasScalePerItem) {
         _biasScalePerItem = true;
         // Floating-point values have no scale, so we can double the max number of biases
@@ -2107,6 +2184,7 @@ void Slice::append(const LData &output, const QData &data) {
     assert(data.shape().size() == 1 && "Unexpected QData rank during append");
     checkTypeCompatibility(output, data);
     d->deqw(output, backDimCount(data.subShape()));
+    d->ref(output);
 }
 
 void Slice::store(const LData &output, const QData &data) {
@@ -2114,6 +2192,7 @@ void Slice::store(const LData &output, const QData &data) {
     assert(data.shape().size() == 1 && "Unexpected QData rank during store");
     checkCompatibility(output, data);
     d->deqw(output);
+    d->ref(output);
 }
 
 void Slice::store(const LData &output, int value) {
@@ -2125,17 +2204,15 @@ void Slice::store(const LData &output, int value) {
     const Shape subShape = output.subShape();
     assert(subShape.size() == 0 && "output must be a scalar");
 
-    // Create here mandatory REF NDL
-    d->ref(output);
-
     // Be sure ALU and ACT are completely disabled
     d->_cfg.alu_disable = 0xFFFF;
     d->_cfg.act_disable = 0xF;
     d->aluSetMode(torq_hw::ALUOp0Mode::DBYP, torq_hw::ALUOp1Mode::BXOR);
 
     // Configure the value to be stored as pad value
-    setPadding({}, value);
+    d->_cfg.pad_value = value;
     d->deqw(output);
+    d->ref(output);
 }
 int Slice::scatter() const { return getBusScatterGather(NdlType::DEQW); }
 
@@ -2252,8 +2329,6 @@ const char *IRam::name() const { return "IRam"; }
 int IRam::size() const { return HwInfo::iram_seg_width * HwInfo::iram_seg; }
 
 IData IRam::load(const LData &data) {
-    // Create here mandatory REF NDL
-    d->ref(data);
     d->dedr(data);
 
     d->_iram.loadNesting = d->_forStack.size();
@@ -2341,6 +2416,14 @@ PData Alu::accumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
 
 PData Alu::load(const IData &idata) {
     PData pData = d->aluAccumulate(idata, ALUOp1Mode::BOR);
+    assert(pData.dim(0) == 1 && "ALU load can't exceed ACT width");
+    // Make PData 1D
+    return PData({pData.shape()[1]}, pData.elementType());
+}
+
+PData Alu::load(const WData &wdata) {
+    assert(wdata.elementType() != DType::fp32 && "float32 not supported");
+    PData pData = d->aluWAccumulate(wdata);
     assert(pData.dim(0) == 1 && "ALU load can't exceed ACT width");
     // Make PData 1D
     return PData({pData.shape()[1]}, pData.elementType());

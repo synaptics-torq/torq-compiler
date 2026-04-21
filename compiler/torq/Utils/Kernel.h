@@ -51,6 +51,10 @@ struct ShapeItem {
         : count(int(count)), stride(stride), tag(tag) {}
     ShapeItem(const ShapeItem &) = default;
     ShapeItem &operator=(const ShapeItem &) = default;
+    bool operator==(const ShapeItem &other) const {
+        return count == other.count && stride.intVal == other.stride.intVal &&
+               stride.exprVal == other.stride.exprVal && tag == other.tag;
+    }
 
     int count;
     Stride stride;
@@ -427,6 +431,7 @@ class WRam : public SliceRam {
 
   public:
     // Load the WRAM with (weights) data
+    // Weight type fp32 is not supported.
     WData load(const LData &data);
 
     const char *name() const override;
@@ -459,6 +464,13 @@ class Alu : SliceComponent {
     // return: pram data of shape {N}:pType
     // where pType is int32 for integer input, iType for float input
     PData load(const IData &idata);
+
+    // Load weight data of shape {N} to PRam
+    // N can be any value up to act.width(wType)
+    // wdata: weight tensor data in wram
+    // return: pram data of shape {N}:pType
+    // where pType is int32 for integer weight, wType for float weight
+    PData load(const WData &wdata);
 
     // Accumulate an input of shape {N}
     // N can be any value up to act.width(iType)
