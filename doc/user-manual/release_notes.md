@@ -2,6 +2,12 @@
 
 ## Version 1.5.1 (2026-04-20)
 
+* various fixes to Github CI
+* Update torq-runtime wheel name
+* Update model preload logic in python runtime helper script
+* Doc updates and runtime fixes
+
+
 ## Version 1.5.0 (2026-04-03)
 
 This is the second public release of the Torq Compiler.
