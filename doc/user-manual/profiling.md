@@ -44,7 +44,7 @@ Profiling helps you understand the performance characteristics of your models on
 
 - Run the model using torq-run-module with the profiling flag:
     ```shell
-    $ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1" --torq_profile_host=./runtime.csv 
+    $ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1" --torq_profile_host=./runtime.csv
     ```
 - Understanding `runtime.csv` Output
 

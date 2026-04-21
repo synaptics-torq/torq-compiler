@@ -749,7 +749,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         all_runtime_opts = (
             list(torq_runtime_options)
             + list(extra_runtime_opts)
-            + ['--device=torq', '--torq_hw_type='+runtime_hw_type]
+            + ['--torq_hw_type='+runtime_hw_type]
         )
         print("Running for TORQ remotely with iree-run-module at " + remote_addr + ":" + str(remote_port))
         runner = RemoteTestRunner(
@@ -778,8 +778,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             wall_time_file.write_text(f"{wall_time:.3f}")
     else:
         
-        cmds = ['--device=torq',
-                '--module=' + str(torq_compiled_model),
+        cmds = ['--module=' + str(torq_compiled_model),
                 '--function=' + torq_mlir_func_name,
                 *output_args,
                 '--torq_hw_type=' + runtime_hw_type,

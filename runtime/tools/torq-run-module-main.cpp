@@ -33,6 +33,8 @@ int main(int argc, char** argv) {
   for (auto& arg : allArgs) {
       argPtrs.push_back(const_cast<char*>(arg.c_str()));
   }
+  int newArgc = static_cast<int>(argPtrs.size());
+  char** newArgv = argPtrs.data();
 
   // Parse command line flags.
   iree_flags_set_usage(
@@ -42,7 +44,7 @@ int main(int argc, char** argv) {
       "can be provided by file path (`--module=file.vmfb`) or read from stdin\n"
       "(`--module=-`) and the function to execute matches the original name\n"
       "provided to the compiler (`--function=foo` for `func.func @foo`).\n");
-  iree_flags_parse_checked(IREE_FLAGS_PARSE_MODE_DEFAULT, &argc, &argv);
+  iree_flags_parse_checked(IREE_FLAGS_PARSE_MODE_DEFAULT, &newArgc, &newArgv);
 
   // Hosting applications can provide their own allocators to pool resources or
   // track allocation statistics related to IREE code.
