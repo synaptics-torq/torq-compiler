@@ -85,8 +85,10 @@ def profile_vmfb_inference_time(
     function: str = "main",
     device: str = "torq",
     n_threads: int | None = None,
+    load_method: Literal["preload", "mmap"] = "preload",
     load_model_to_mem: bool = True,
     runtime_flags: Iterable[str] = None,
+    device_io: bool = False,
 ):
     """Load a VMFB model and run inference ``n_iters`` times for profiling.
 
@@ -97,9 +99,11 @@ def profile_vmfb_inference_time(
         do_warmup: If True, run one untimed warmup pass first.
         function: Exported function name inside the module.
         device: IREE device URI.
+        load_method: ``"preload"`` copies into memory; ``"mmap"`` memory-maps the file.
         n_threads: Worker thread count.
         load_model_to_mem: Load model into memory during initialization.
         runtime_flags: Extra IREE runtime flags.
+        device_io: Pass inputs and outputs as :class:`~iree.runtime.DeviceArray` objects instead of NumPy arrays.
 
     Returns:
         Average wall-clock inference time in milliseconds.
@@ -112,13 +116,18 @@ def profile_vmfb_inference_time(
         function=function,
         device_uri=device,
         n_threads=n_threads,
+        load_method=load_method,
         load_model_to_mem=load_model_to_mem,
-        runtime_flags=runtime_flags
+        runtime_flags=runtime_flags,
+        device_outputs=device_io,
     )
     if not inputs:
         if runner.inputs_info is None:
             raise ValueError("Input tensor info unavailable from model reflection data; please provide inputs explicitly")
         inputs = random_inputs_from_info(runner.inputs_info)
+    if device_io:
+        inputs = list(inputs.values()) if isinstance(inputs, Mapping) else inputs
+        inputs = [runner.allocate_device_array(inp) for inp in inputs]
     if do_warmup:
         runner.infer(inputs)
     total_time_ms: float = 0.0
@@ -239,7 +248,7 @@ class VMFBInferenceRunner(InferenceRunner):
         if io_info:
             self._inputs_info, self._outputs_info = io_info
 
-    def _infer(self, inputs: Iterable[npt.NDArray | "iree_rt.DeviceArray"] | Mapping[str, npt.NDArray | "iree_rt.DeviceArray"]) -> list:
+    def _infer(self, inputs: Iterable[npt.NDArray | iree_rt.DeviceArray] | Mapping[str, npt.NDArray | iree_rt.DeviceArray]) -> list:
         """Run a single inference pass.
 
         *inputs* may contain NumPy arrays, :class:`~iree.runtime.DeviceArray`, or a mix of both.
@@ -263,7 +272,7 @@ class VMFBInferenceRunner(InferenceRunner):
     def allocate_device_array(
         self,
         array: npt.NDArray,
-    ) -> "iree_rt.DeviceArray":
+    ) -> iree_rt.DeviceArray:
         """Allocate a device buffer and copy *array* into it.
 
         The returned :class:`~iree.runtime.DeviceArray` can be passed

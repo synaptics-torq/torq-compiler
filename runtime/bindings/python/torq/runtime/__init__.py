@@ -13,6 +13,7 @@ __all__ = [
     "InferenceRunner",
     "run_vmfb",
     "profile_vmfb_inference_time",
+    "profile_vmfb_resources",
     "VMFBInferenceRunner",
 ]
 
@@ -22,3 +23,4 @@ from .vmfb import (
     profile_vmfb_inference_time,
     VMFBInferenceRunner,
 )
+from .profiling import profile_vmfb_resources

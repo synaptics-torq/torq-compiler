@@ -27,6 +27,94 @@ outputs = runner.infer([input_data])
 print(f"Inference took {runner.infer_time_ms:.2f} ms")
 ```
 
+## Examples
+
+### Inspecting Model Inputs and Outputs
+
+```python
+from torq.runtime import VMFBInferenceRunner
+
+runner = VMFBInferenceRunner("model.vmfb", device_uri="torq")
+
+if runner.inputs_info:
+    for i, info in enumerate(runner.inputs_info):
+        print(f"Input {i}: dtype={info.dtype}, shape={info.shape}")
+
+if runner.outputs_info:
+    for i, info in enumerate(runner.outputs_info):
+        print(f"Output {i}: dtype={info.dtype}, shape={info.shape}")
+```
+
+### Profiling Inference Latency
+
+```python
+from torq.runtime import profile_vmfb_inference_time
+
+avg_ms = profile_vmfb_inference_time(
+    "model.vmfb",
+    n_iters=10,
+    do_warmup=True,
+    device="torq",
+)
+print(f"Average inference time: {avg_ms:.2f} ms")
+```
+
+### Profiling System Resources
+
+```python
+from torq.runtime import profile_vmfb_resources
+
+stats = profile_vmfb_resources(
+    "model.vmfb",
+    n_iters=10,
+    do_warmup=True,
+    device="torq",
+)
+print(f"Average inference time: {stats.avg_inference_time_ms:.2f} ms")
+print(f"Average DRAM footprint: {stats.avg_dram_footprint_bytes / 1024 / 1024:.1f} MB")
+print(f"Peak DRAM footprint: {stats.peak_dram_footprint_bytes / 1024 / 1024:.1f} MB")
+print(f"Average memory usage: {stats.avg_anon_mem_bytes / 1024 / 1024:.1f} MB")
+print(f"Peak memory usage: {stats.peak_anon_mem_bytes / 1024 / 1024:.1f} MB")
+print(f"Average CPU usage: {stats.avg_cpu_percent:.1f}%")
+```
+
+### Running with Custom Inputs
+
+```python
+import numpy as np
+from torq.runtime import VMFBInferenceRunner
+
+runner = VMFBInferenceRunner("model.vmfb", device_uri="torq")
+
+# Load preprocessed input from a .npy file
+input_data = np.load("preprocessed_input.npy")
+outputs = runner.infer([input_data])
+```
+
+### Zero-Copy Device Outputs
+
+When model outputs are fed back as inputs (e.g. KV-cache tensors in autoregressive decoding), use `device_outputs=True` to keep data on the device and avoid unnecessary host transfers:
+
+```python
+import numpy as np
+from torq.runtime import VMFBInferenceRunner
+
+runner = VMFBInferenceRunner("model.vmfb", device_uri="torq", device_outputs=True)
+
+# Allocate an initial on-device buffer (e.g. for a KV cache)
+kv_cache = runner.allocate_device_array(np.zeros((1, 8, 256, 64), dtype=np.float16))
+
+# Run inference — outputs stay on device as DeviceArray objects
+results = runner.infer([input_data, kv_cache])
+logits, new_kv = results[0], results[1]
+
+# Use the output DeviceArray directly as next step's input
+kv_cache = new_kv
+
+# Only bring the logits to host for sampling
+logits_np = logits.to_host()
+```
+
 ## API Reference
 
 ### `VMFBInferenceRunner`
@@ -102,6 +190,7 @@ profile_vmfb_inference_time(
     n_threads=None,
     load_model_to_mem=True,
     runtime_flags=None,
+    device_io=False,
 )
 ```
 
@@ -116,10 +205,112 @@ profile_vmfb_inference_time(
 | `function` | `str` | `"main"` | Exported function name inside the module. |
 | `device` | `str` | `"torq"` | IREE device URI. |
 | `n_threads` | `int \| None` | `None` | Worker thread count (only for llvm-cpu device). |
+| `load_method` | `"preload" \| "mmap"` | `"preload"` | `"preload"` copies into memory; `"mmap"` memory-maps the file. |
 | `load_model_to_mem` | `bool` | `True` | Whether to load the model into memory during initialization. |
 | `runtime_flags` | `Iterable[str] \| None` | `None` | Extra IREE runtime flags. |
+| `device_io` | `bool` | `False` | Exclude some host copies from profiling by using iree DeviceArray objects for I/O. |
 
 **Returns:** Average wall-clock inference time in milliseconds.
+
+### `profile_vmfb_resources`
+
+Load a `.vmfb` model and run inference multiple times, collecting DRAM and CPU statistics alongside timing. Requires a Linux target (reads from `/proc`).
+
+```python
+from torq.runtime import profile_vmfb_resources
+
+profile_vmfb_resources(
+    model_path,
+    inputs=None,
+    *,
+    n_iters=5,
+    do_warmup=True,
+    function="main",
+    device="torq",
+    n_threads=None,
+    load_method="preload",
+    load_model_to_mem=True,
+    runtime_flags=None,
+    device_io=False,
+)
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model_path` | `str \| PathLike` | *(required)* | Path to the `.vmfb` file. |
+| `inputs` | `Iterable[NDArray] \| None` | `None` | Input arrays. Generated randomly from model metadata when `None`. |
+| `n_iters` | `int` | `5` | Number of timed inference iterations. |
+| `do_warmup` | `bool` | `True` | Whether to run one untimed warmup pass first. |
+| `function` | `str` | `"main"` | Exported function name inside the module. |
+| `device` | `str` | `"torq"` | IREE device URI. |
+| `n_threads` | `int \| None` | `None` | Worker thread count (only for llvm-cpu device). |
+| `load_method` | `"preload" \| "mmap"` | `"preload"` | `"preload"` copies into memory; `"mmap"` memory-maps the file. |
+| `load_model_to_mem` | `bool` | `True` | Whether to load the model into memory during initialization. |
+| `runtime_flags` | `Iterable[str] \| None` | `None` | Extra IREE runtime flags. |
+| `device_io` | `bool` | `False` | Exclude some host copies from profiling by using iree DeviceArray objects for I/O. |
+
+**Returns:** A `ProfileStats` dataclass (see below).
+
+### `ProfileStats`
+
+Dataclass returned by `profile_vmfb_resources` containing profiling results. All resource metrics are **process-wide** and include overhead from the Python interpreter, the sampling thread, and any other activity in the process.
+
+```python
+from torq.runtime.profiling import ProfileStats
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `avg_inference_time_ms` | `float` | Average wall-clock inference time in milliseconds. |
+| `avg_dram_footprint_bytes` | `int` | Average total DRAM footprint in bytes, including file-backed pages (e.g. mmap'd model data). |
+| `peak_dram_footprint_bytes` | `int` | Peak total DRAM footprint in bytes. |
+| `avg_anon_mem_bytes` | `int` | Average anonymous memory (heap/stack) in bytes, excluding file-backed pages. |
+| `peak_anon_mem_bytes` | `int` | Peak anonymous memory in bytes. |
+| `avg_cpu_percent` | `float` | Average CPU utilisation as a percentage (across all cores) during timed iterations. |
+
+**Methods:**
+
+#### `summary()`
+
+Return a human-readable summary string with formatted values (times in ms, memory in MB, CPU as a percentage).
+
+```python
+stats = profile_vmfb_resources("model.vmfb")
+print(stats.summary())
+# Avg inference time:  12.345 ms
+#
+# Process-wide resource usage (includes Python overhead):
+#   Avg DRAM footprint:  85.2 MB  (includes mmap'd model file)
+#   Peak DRAM footprint: 91.7 MB
+#   Avg memory usage:    23.4 MB  (heap/stack only, excludes model file)
+#   Peak memory usage:   28.1 MB
+#   Avg CPU usage:       47.3%
+```
+
+### `ResourceSampler`
+
+A reusable background sampler for collecting process-wide DRAM and CPU metrics around arbitrary workloads. Used internally by `profile_vmfb_resources` but available for custom profiling scenarios.
+
+```python
+from torq.runtime.profiling import ResourceSampler
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pid` | `int` | *(required)* | Process ID to monitor. |
+| `interval` | `float` | `0.01` | Sampling interval in seconds. |
+
+**Properties (available after `stop()`):**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `avg_rss` | `int` | Average total RSS (DRAM footprint) in bytes. |
+| `peak_rss` | `int` | Peak total RSS in bytes. |
+| `avg_anon_rss` | `int` | Average anonymous RSS in bytes. |
+| `peak_anon_rss` | `int` | Peak anonymous RSS in bytes. |
+| `avg_cpu_percent` | `float` | Average CPU utilisation percentage. |
 
 ### `run_vmfb`
 
@@ -177,73 +368,3 @@ Generate random NumPy arrays matching the given tensor metadata. Useful for test
 
 - **inputs_info** — Iterable of `TensorInfo`.
 - **Returns** — List of NumPy arrays with appropriate shapes and dtypes.
-
-## Examples
-
-### Inspecting Model Inputs and Outputs
-
-```python
-from torq.runtime import VMFBInferenceRunner
-
-runner = VMFBInferenceRunner("model.vmfb", device_uri="torq")
-
-if runner.inputs_info:
-    for i, info in enumerate(runner.inputs_info):
-        print(f"Input {i}: dtype={info.dtype}, shape={info.shape}")
-
-if runner.outputs_info:
-    for i, info in enumerate(runner.outputs_info):
-        print(f"Output {i}: dtype={info.dtype}, shape={info.shape}")
-```
-
-### Profiling Inference Latency
-
-```python
-from torq.runtime import profile_vmfb_inference_time
-
-avg_ms = profile_vmfb_inference_time(
-    "model.vmfb",
-    n_iters=10,
-    do_warmup=True,
-    device="torq",
-)
-print(f"Average inference time: {avg_ms:.2f} ms")
-```
-
-### Running with Custom Inputs
-
-```python
-import numpy as np
-from torq.runtime import VMFBInferenceRunner
-
-runner = VMFBInferenceRunner("model.vmfb", device_uri="torq")
-
-# Load preprocessed input from a .npy file
-input_data = np.load("preprocessed_input.npy")
-outputs = runner.infer([input_data])
-```
-
-### Zero-Copy Device Outputs
-
-When model outputs are fed back as inputs (e.g. KV-cache tensors in autoregressive decoding), use `device_outputs=True` to keep data on the device and avoid unnecessary host transfers:
-
-```python
-import numpy as np
-from torq.runtime import VMFBInferenceRunner
-
-runner = VMFBInferenceRunner("model.vmfb", device_uri="torq", device_outputs=True)
-
-# Allocate an initial on-device buffer (e.g. for a KV cache)
-kv_cache = runner.allocate_device_array(np.zeros((1, 8, 256, 64), dtype=np.float16))
-
-# Run inference — outputs stay on device as DeviceArray objects
-results = runner.infer([input_data, kv_cache])
-logits, new_kv = results[0], results[1]
-
-# Use the output DeviceArray directly as next step's input
-kv_cache = new_kv
-
-# Only bring the logits to host for sampling
-logits_np = logits.to_host()
-```
-```
