@@ -764,6 +764,20 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
     return true;
 }
 
+bool shouldFuseMultiUsersOp(Operation *op) {
+    if (std::distance(op->getUsers().begin(), op->getUsers().end()) <= 2)
+        return true;
+
+    if (llvm::all_of(op->getOperands(), [](Value operand) {
+            return llvm::isa_and_nonnull<
+                arith::ConstantOp, arith::ConstantIndexOp, arith::ConstantIntOp,
+                arith::ConstantFloatOp>(operand.getDefiningOp());
+        }))
+        return true;
+
+    return false;
+}
+
 // an SCFTileAndFuseOptions::ControlFnTy for the max-size fuse mode.
 std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuseControlMaxSize(
     IRRewriter &rewriter, bool allDomains, mlir::tensor::ExtractSliceOp candidateSliceOp,
@@ -809,6 +823,10 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     if (!isMarkedFuseGroup(producerOp)) {
         // Not part of a pattern-fuse-group; there are no restrictions on the domains.
 
+        if (!shouldFuseMultiUsersOp(producerOp)) {
+            return doNotFuse;
+        }
+
         if (distance && *distance <= 0)
             return doNotFuse;
         setSourcesDistance(producerOp, distance);
@@ -853,6 +871,10 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         setSourcesDistance(producerOp, distance);
 
         return fuseAndDoNotYieldProducer;
+    }
+
+    if (!shouldFuseMultiUsersOp(producerOp)) {
+        return doNotFuse;
     }
 
     if (distance && *distance <= 0)
