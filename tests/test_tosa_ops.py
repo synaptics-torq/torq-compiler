@@ -11,30 +11,6 @@ def case_config(request, runtime_hw_type, chip_config):
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
 
     iree_regression_tc = [
-        # error: expected element type to be 'i<N>'
-        "conv2d-16b-stride1-8x8x2.mlir",
-        "conv2d-stride4-i16.mlir",
-        "conv2d_f4_s4_64x64x16_i16.mlir",
-        "conv2d_i16_f5_s2_32x32x4_o4.mlir",
-        "conv2d_i16_s2_8x8x2_o4.mlir",
-        "conv2d_noalign_channel_32x32x128xi16.mlir",
-        "dw_i16_8x8x1.mlir",
-        "dw_i16_8x8x4.mlir",
-        "dw_i16_f7_8x8x1.mlir",
-        "dw_i16_f7_s2_8x8x1.mlir",
-        "dw_i16_s2_64x64x8.mlir",
-        "dw_i16_s2_8x8x1.mlir",
-        "dw_i16_s2_8x8x4.mlir",
-
-        #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
-        "efficientnet-sigmoid-rescale-mul.mlir",
-
-        # error: 'tosa.const' op requires attribute 'values'
-        "maxpool2d-stride2-k3x3-pad-112x112x127.mlir",
-        "yolo-table-6.mlir",
-
-        # Assertion `llvm::isUIntN(BitWidth, val) && "Value is not an N-bit unsigned value"' failed.
-        "conv2d_bf16_2x2x4_softmax.mlir",
 
         # Assertion `inputType.getRank() == permutation.size()' failed.
         "dw_16x16-bf16.mlir",
@@ -53,8 +29,8 @@ def case_config(request, runtime_hw_type, chip_config):
         "conv2d_f127_s64_1x16000_o250.mlir",
 
         # Assertion failed: (P.type1.getElementType() == P.type2.getElementType() && "Input types must match"), function prepareParams, file ConversionUtils.h, line 505.
-        "sub-rescale-scalar.mlir",
-        "sub-rescale-scalar-bis.mlir",
+        # "sub-rescale-scalar.mlir",
+        # "sub-rescale-scalar-bis.mlir",
 
         # failed with differences
         "conv2d_f8_s4_1x1024_o256.mlir",

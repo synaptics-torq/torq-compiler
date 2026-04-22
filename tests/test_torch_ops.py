@@ -40,8 +40,6 @@ def case_config(request, runtime_hw_type, chip_config):
         "dw1d_k5_d8_s1.mlir",
         "dw1d_k5_dilation16_stride1.mlir",
         "dw_1x4_dilation_1x2_expanded_1x7.mlir",
-        "reducemean.mlir",
-        "reducemean-reshape.mlir",
     ]
     if next_chip:
         iree_regression_tc += [
