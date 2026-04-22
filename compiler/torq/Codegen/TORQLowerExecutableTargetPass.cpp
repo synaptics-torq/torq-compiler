@@ -110,107 +110,159 @@ class TORQLowerExecutableTargetPass
     void runOnOperation() override;
 };
 
-void addSlicePassesUpToTileAndFuse(OpPassManager &pm) {
-    if (!clFromPreBufferizedIR && !clDisableSlices) {
-        auto &funcPm = pm.nest<func::FuncOp>();
+void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm) {
+    if (!clDisableLinalgSlicing)
+        addLinalgSlicingPasses(funcPm);
 
-        // optimize linalg ops for torq
-        // this pass use some tags from tile-and-fuse mark pass
-        funcPm.addPass(createOptimizeLinalgForTorqPass());
-        funcPm.addPass(createCanonicalizerPass());
+    // lower the linalg operators to torq_hl before tiling
+    funcPm.addPass(createLinalgToTorqHLPreConversionPass());
 
-        // Convert tensor-level elementwise arith ops (e.g. addi, subi, andi) into
-        // explicit linalg.generic form. This makes all elementwise math uniform
-        // in Linalg, so later passes like createLinalgTilePass and pattern matching can
-        // handle them consistently.
-        funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
+    // Handles valid pad operations
+    funcPm.addPass(createValidToSamePadPass());
 
-        if (!clEnableTorqHLTiling) {
-            funcPm.addPass(createMarkPatternsForTileAndFusePass());
-            funcPm.addPass(createTileAndFusePass());
-        }
+    funcPm.addPass(createCanonicalizerPass());
+    funcPm.addPass(createKernelSelectionPass());
+    funcPm.addPass(createCompileTimeConstOutlinePass());
+
+    funcPm.addPass(createCompileTimeConstComputePass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    // Move layout transposes through elementwise chains to enable cancellation
+    if (clEnableTransposeOptimization) {
+        funcPm.addPass(createOptimizeTransposeLayoutPass());
     }
+
+    funcPm.addPass(createMarkHostExecutorPass());
+
+    // tile the linalg ops or tilingInterface ops
+    funcPm.addPass(createLramTilePass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    // lower arith ops to torq_hl
+    funcPm.addPass(createArithToTorqHLConversionPass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    // lower the linalg operators to torq_hl
+    funcPm.addPass(createLinalgToTorqHLConversionPass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    // fuse torq_hl.act (clamp) into the preceding torq_hl.conv2d by transferring
+    // output_min/output_max from the act op into the conv2d and removing the act
+    funcPm.addPass(createFuseActWithConvPass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    // op segment output feature enabled by default, disabled it for cross-check
+    if (!clDisableSeg) {
+        funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
+    }
+    funcPm.addPass(createEncodeTensorsPass());
+
+    // Note: slicing should be done *before* kernel selection, but kernel selection is doing
+    // weight reorganinzation and this can't operate on a subview of the weights.
+    const auto sliceCount = TorqHw::get().getSliceCount();
+    LLVM_DEBUG({
+        llvm::dbgs() << "Slicing " << (clDisableSlicing ? "disabled" : "enabled")
+                     << " slice count: " << sliceCount << "\n";
+    });
+    if (!clDisableSlicing && sliceCount > 1) {
+        funcPm.addPass(createSlicingPass());
+    }
+
+    funcPm.addPass(createFoldConvertPass());
+    funcPm.addPass(createCanonicalizerPass());
 }
 
-void addSlicePassesPostTileAndFuse(OpPassManager &pm, bool optimizeForTileAndFuse) {
-    if (!clFromPreBufferizedIR && !clDisableSlices) {
-        auto &funcPm = pm.nest<func::FuncOp>();
+void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
+    auto &funcPm = pm.nest<func::FuncOp>();
 
-        if (!clEnableTorqHLTiling) {
-            funcPm.addPass(createCanonicalizerPass());
-            funcPm.addPass(createPeelTileLoopsPass());
+    // optimize linalg ops for torq
+    // this pass use some tags from tile-and-fuse mark pass
+    funcPm.addPass(createOptimizeLinalgForTorqPass());
+    funcPm.addPass(createCanonicalizerPass());
 
-            if (optimizeForTileAndFuse)
-                funcPm.addPass(createReplaceForLoopsWithFirstIterationPass());
-        }
+    // Convert tensor-level elementwise arith ops (e.g. addi, subi, andi) into
+    // explicit linalg.generic form. This makes all elementwise math uniform
+    // in Linalg, so later passes like createLinalgTilePass and pattern matching can
+    // handle them consistently.
+    funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
 
-        if (!clDisableLinalgSlicing)
-            addLinalgSlicingPasses(funcPm);
+    funcPm.addPass(createMarkPatternsForTileAndFusePass());
+    funcPm.addPass(createTileAndFusePass());
 
-        // lower the linalg operators to torq_hl before tiling
-        funcPm.addPass(createLinalgToTorqHLPreConversionPass());
+    funcPm.addPass(createCanonicalizerPass());
+    funcPm.addPass(createPeelTileLoopsPass());
 
-        // Handles valid pad operations
-        funcPm.addPass(createValidToSamePadPass());
+    addPostTileAndFuseLoweringPasses(funcPm);
+}
 
-        if (!clEnableTorqHLTiling) {
-            funcPm.addPass(createCanonicalizerPass());
-            funcPm.addPass(createKernelSelectionPass());
-            funcPm.addPass(createCompileTimeConstOutlinePass());
-        }
+void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
+    auto &funcPm = pm.nest<func::FuncOp>();
 
-        funcPm.addPass(createCompileTimeConstComputePass());
-        funcPm.addPass(createCanonicalizerPass());
+    // optimize linalg ops for torq
+    funcPm.addPass(createOptimizeLinalgForTorqPass());
+    funcPm.addPass(createCanonicalizerPass());
 
-        // Move layout transposes through elementwise chains to enable cancellation
-        if (clEnableTransposeOptimization) {
-            funcPm.addPass(createOptimizeTransposeLayoutPass());
-        }
+    // Convert tensor-level elementwise arith ops into explicit linalg.generic form.
+    funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
 
-        funcPm.addPass(createMarkHostExecutorPass());
+    if (!clDisableLinalgSlicing)
+        addLinalgSlicingPasses(funcPm);
 
-        // tile the linalg ops or tilingInterface ops
-        funcPm.addPass(createLramTilePass());
-        funcPm.addPass(createCanonicalizerPass());
+    // lower the linalg operators to torq_hl before tiling
+    funcPm.addPass(createLinalgToTorqHLPreConversionPass());
 
-        // lower arith ops to torq_hl
-        funcPm.addPass(createArithToTorqHLConversionPass());
-        funcPm.addPass(createCanonicalizerPass());
+    // Handles valid pad operations
+    funcPm.addPass(createValidToSamePadPass());
 
-        // lower the linalg operators to torq_hl
-        funcPm.addPass(createLinalgToTorqHLConversionPass());
-        funcPm.addPass(createCanonicalizerPass());
+    funcPm.addPass(createCompileTimeConstComputePass());
+    funcPm.addPass(createCanonicalizerPass());
 
-        // fuse torq_hl.act (clamp) into the preceding torq_hl.conv2d by transferring
-        // output_min/output_max from the act op into the conv2d and removing the act
-        funcPm.addPass(createFuseActWithConvPass());
-        funcPm.addPass(createCanonicalizerPass());
-
-        if (clEnableTorqHLTiling || clForceTorqHLTiling) {
-            funcPm.addPass(createTorqHlTilePass());
-            funcPm.addPass(createKernelSelectionPass());
-            funcPm.addPass(createCompileTimeConstComputePass());
-        }
-        // op segment output feature enabled by default, diabled it for cross-check
-        if (!clDisableSeg) {
-            funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
-        }
-        funcPm.addPass(createEncodeTensorsPass());
-
-        // Note: slicing should be done *before* kernel selection, but kernel selection is doing
-        // weight reorganinzation and this can't operate on a subview of the weights.
-        const auto sliceCount = TorqHw::get().getSliceCount();
-        LLVM_DEBUG({
-            llvm::dbgs() << "Slicing " << (clDisableSlicing ? "disabled" : "enabled")
-                         << " slice count: " << sliceCount << "\n";
-        });
-        if (!clDisableSlicing && sliceCount > 1) {
-            funcPm.addPass(createSlicingPass());
-        }
-
-        funcPm.addPass(createFoldConvertPass());
-        funcPm.addPass(createCanonicalizerPass());
+    // Move layout transposes through elementwise chains to enable cancellation
+    if (clEnableTransposeOptimization) {
+        funcPm.addPass(createOptimizeTransposeLayoutPass());
     }
+
+    funcPm.addPass(createMarkHostExecutorPass());
+
+    // tile the linalg ops or tilingInterface ops
+    funcPm.addPass(createLramTilePass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    // lower arith ops to torq_hl
+    funcPm.addPass(createArithToTorqHLConversionPass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    // lower the linalg operators to torq_hl
+    funcPm.addPass(createLinalgToTorqHLConversionPass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    // fuse torq_hl.act (clamp) into the preceding torq_hl.conv2d
+    funcPm.addPass(createFuseActWithConvPass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    if (clEnableTorqHLTiling || clForceTorqHLTiling) {
+        funcPm.addPass(createTorqHlTilePass());
+        funcPm.addPass(createKernelSelectionPass());
+        funcPm.addPass(createCompileTimeConstComputePass());
+    }
+
+    // op segment output feature enabled by default, disabled it for cross-check
+    if (!clDisableSeg) {
+        funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
+    }
+    funcPm.addPass(createEncodeTensorsPass());
+
+    const auto sliceCount = TorqHw::get().getSliceCount();
+    LLVM_DEBUG({
+        llvm::dbgs() << "Slicing " << (clDisableSlicing ? "disabled" : "enabled")
+                     << " slice count: " << sliceCount << "\n";
+    });
+    if (!clDisableSlicing && sliceCount > 1) {
+        funcPm.addPass(createSlicingPass());
+    }
+
+    funcPm.addPass(createFoldConvertPass());
+    funcPm.addPass(createCanonicalizerPass());
 }
 
 void addCpuPasses(OpPassManager &pm) {
@@ -250,7 +302,7 @@ void addCpuPasses(OpPassManager &pm) {
     funcPm.addPass(createCanonicalizerPass());
 }
 
-void addNssUpToAssignLramAddressesPasses(OpPassManager &pm) {
+void addNssUpToAssignLramAddresses(OpPassManager &pm) {
     auto &funcPm = pm.nest<func::FuncOp>();
 
     if (!clFromPreBufferizedIR) {
@@ -288,11 +340,13 @@ void addNssUpToAssignLramAddressesPasses(OpPassManager &pm) {
     funcPm.addPass(createAssignLramAddressesPass());
 }
 
-void addNssPassesPostAssignAddresses(OpPassManager &pm) {
+void addNssPasses(OpPassManager &pm) {
+    addNssUpToAssignLramAddresses(pm);
+
     {
         auto &funcPm = pm.nest<func::FuncOp>();
 
-        // assign addresses to all allocations
+        // assign addresses to DTCM, ITCM, and XRAM
         funcPm.addPass(createAssignDtcmItcmXramAddressesPass());
 
         // lower torq_hl operation inside torq_hl::ProgramOp to torq_hw operations
@@ -378,17 +432,19 @@ LogicalResult saveDebugInfo(FunctionOpInterface op, const std::string &outputPat
 }
 
 void addAllPasses(OpPassManager &pipeline) {
-    // NB: TileAndFuse needs to be able to run the same pipeline up to, and
-    // including, NSS assign LRAM addresses. If you make any changes here, make
-    // sure TileAndFuse is not affected.
-
     pipeline.addPass(createAnalyzeTensorSizesPass());
-    addSlicePassesUpToTileAndFuse(pipeline);
-    addPassesPostTileAndFuseUpToAssignLramAddresses(pipeline); // TileAndFuse calls
-                                                               // this function to
-                                                               // populate its
-                                                               // pipeline.
-    addNssPassesPostAssignAddresses(pipeline);
+
+    if (!clFromPreBufferizedIR && !clDisableSlices) {
+        if (clEnableTorqHLTiling)
+            addSlicePassesWithTorqHLTiling(pipeline);
+        else
+            addSlicePassesWithTileAndFuse(pipeline);
+    }
+
+    if (!clDisableCSS || !clDisableHost)
+        addCpuPasses(pipeline);
+
+    addNssPasses(pipeline);
 }
 
 void TORQLowerExecutableTargetPass::runOnOperation() {
@@ -430,13 +486,24 @@ void TORQLowerExecutableTargetPass::runOnOperation() {
 void addPassesPostTileAndFuseUpToAssignLramAddresses(
     OpPassManager &pipeline, bool optimizeForTileAndFuse
 ) {
-    addSlicePassesPostTileAndFuse(pipeline, optimizeForTileAndFuse);
+    // NB: This is the post-tiling pipeline used by TileAndFusePass for its memory-fit
+    // simulation. It must match exactly what happens after TileAndFuse in the real
+    // addSlicePassesWithTileAndFuse pipeline, up to and including LRAM address assignment.
+    auto &funcPm = pipeline.nest<func::FuncOp>();
+
+    funcPm.addPass(createCanonicalizerPass());
+    funcPm.addPass(createPeelTileLoopsPass());
+    if (optimizeForTileAndFuse) {
+        funcPm.addPass(createReplaceForLoopsWithFirstIterationPass());
+    }
+
+    addPostTileAndFuseLoweringPasses(funcPm);
 
     if (!clDisableCSS || !clDisableHost) {
         addCpuPasses(pipeline);
     }
 
-    addNssUpToAssignLramAddressesPasses(pipeline);
+    addNssUpToAssignLramAddresses(pipeline);
 }
 
 std::unique_ptr<OperationPass<ModuleOp>> createTORQLowerExecutableTargetPass() {
