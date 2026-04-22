@@ -299,6 +299,146 @@ class Conv1DPattern : public OpRewritePattern<torq_hl::Conv1DOp> {
     }
 };
 
+// --------------------------------------------------------------------------
+// Conv2D tiling helpers
+// --------------------------------------------------------------------------
+
+// Per-stripe geometry for one row stripe of a Conv2D tile.
+struct ConvStripeInfo {
+    int currentOutStripeHeight;
+    int currentInStripeHeight;
+    int inPadTop, inPadBottom;
+    int outPadTop, outPadBottom;
+};
+
+// Computes the padded height and halo sizes for row-stripe `s` out of `totalStripes`.
+static ConvStripeInfo computeConvStripeInfo(
+    int s, int totalStripes, int fixedOutStripeHeight, int remainingOutStripes,
+    int fixedInStripeHeight, int remainingInStripes, int inPaddingLines, int outPaddingLines
+) {
+    ConvStripeInfo info;
+    bool isLast = (s == totalStripes - 1);
+    info.currentOutStripeHeight =
+        (isLast && remainingOutStripes > 0) ? remainingOutStripes : fixedOutStripeHeight;
+    info.currentInStripeHeight =
+        (isLast && remainingOutStripes > 0) ? remainingInStripes : fixedInStripeHeight;
+    info.inPadTop = s > 0 ? inPaddingLines : 0;
+    info.inPadBottom = isLast ? 0 : inPaddingLines;
+    info.outPadTop = s > 0 ? outPaddingLines : 0;
+    info.outPadBottom = isLast ? 0 : outPaddingLines;
+    info.currentOutStripeHeight += info.outPadTop + info.outPadBottom;
+    info.currentInStripeHeight += info.inPadTop + info.inPadBottom;
+    return info;
+}
+
+// Weight and scale-bias slices for a single channel tile.
+struct Conv2DWeightTile {
+    Value weights;
+    Value scaleBias;
+};
+
+// Extracts weight and scale-bias tensors for output channels [channelOffset,
+// channelOffset+channelCount).
+static Conv2DWeightTile extractConv2DWeightTile(
+    torq_hl::Conv2DOp convOp, ShapedType weightsType, int channelOffset, int channelCount,
+    PatternRewriter &rewriter
+) {
+    auto weightsShape = weightsType.getShape();
+    int scaleBiasItems = convOp.getOutput().getType().getElementType().isInteger() ? 2 : 1;
+    Value weights =
+        tensor::ExtractSliceOp::create(
+            rewriter, convOp.getLoc(), convOp.getWeights(),
+            createVector({channelOffset, 0, 0, 0}, rewriter),
+            createVector(
+                {channelCount, weightsShape[1], weightsShape[2], weightsShape[3]}, rewriter
+            ),
+            createVector({1, 1, 1, 1}, rewriter)
+        )
+            .getResult();
+    Value scaleBias =
+        tensor::ExtractSliceOp::create(
+            rewriter, convOp.getLoc(), convOp.getScaleBias(),
+            createVector({scaleBiasItems * channelOffset}, rewriter),
+            createVector({channelCount * scaleBiasItems}, rewriter), createVector({1}, rewriter)
+        )
+            .getResult();
+    return {weights, scaleBias};
+}
+
+// Extracts an input tile, inserting a SegmentationOp tile if one was fused with the conv.
+static Value extractConv2DInputTile(
+    torq_hl::Conv2DOp convOp, torq_hl::SegmentationOp segmentationOp,
+    ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes, ArrayRef<OpFoldResult> strides,
+    PatternRewriter &rewriter
+) {
+    if (segmentationOp) {
+        auto segInput = tensor::ExtractSliceOp::create(
+            rewriter, convOp.getLoc(), segmentationOp.getInput(), offsets, sizes, strides
+        );
+        auto segSliceType = segInput.getType();
+        auto segInit = tensor::EmptyOp::create(
+            rewriter, convOp.getLoc(), segSliceType.getShape(), segSliceType.getElementType()
+        );
+        return torq_hl::SegmentationOp::create(
+                   rewriter, segmentationOp.getLoc(), segInput.getType(), segInit.getResult(),
+                   segmentationOp.getHSegments(), segmentationOp.getWSegments(),
+                   segmentationOp.getWeights(), segmentationOp.getScaleBias(), segInput
+        )
+            .getOutput();
+    }
+    return tensor::ExtractSliceOp::create(
+               rewriter, convOp.getLoc(), convOp.getInput(), offsets, sizes, strides
+    )
+        .getResult();
+}
+
+// Emits a Conv2DOp tile, strips the overlap halo from the result, and inserts it into
+// `outputTensor` at the correct (channelOffset, stripeRow) position.  Returns the
+// updated outputTensor.
+static Value emitConv2DTileAndInsert(
+    torq_hl::Conv2DOp convOp, Value inputTile, Value tiledWeights, Value tiledScaleBias,
+    Value outputTensor, ArrayRef<int64_t> outShape, int channelOffset, int channelCount,
+    int stripeRow, int currentOutStripeHeight, int outPadTop, int outPadBottom,
+    PatternRewriter &rewriter
+) {
+    auto outType = convOp.getOutput().getType();
+    auto tileType = RankedTensorType::get(
+        {outShape[0], channelCount, currentOutStripeHeight, outShape[3]}, outType.getElementType()
+    );
+    auto initTile = tensor::EmptyOp::create(
+        rewriter, convOp.getLoc(), tileType.getShape(), tileType.getElementType()
+    );
+    const int32_t groups = 1;
+    auto outputTileWithPad = torq_hl::Conv2DOp::create(
+        rewriter, convOp.getLoc(), tileType, initTile.getResult(), convOp.getInputZp(),
+        convOp.getWeightZp(), convOp.getOutputZp(), convOp.getOutputMin(), convOp.getOutputMax(),
+        convOp.getShiftFactor(), groups, convOp.getPad(), convOp.getStride(), convOp.getDilation(),
+        convOp.getVectorizationMode(), tiledWeights, tiledScaleBias, inputTile
+    );
+    if (convOp.getSegmentOutput()) {
+        outputTileWithPad->setAttr(
+            convOp.getSegmentOutputAttrName(), BoolAttr::get(convOp.getContext(), true)
+        );
+    }
+    const auto tileStrides = createVector({1, 1, 1, 1}, rewriter);
+    int croppedHeight = currentOutStripeHeight - outPadTop - outPadBottom;
+    auto lramOffsets = createVector({0, 0, outPadTop, 0}, rewriter);
+    auto lramSizes =
+        createVector({outShape[0], channelCount, croppedHeight, outShape[3]}, rewriter);
+    auto outputTile = tensor::ExtractSliceOp::create(
+        rewriter, convOp.getLoc(), outputTileWithPad.getOutput(), lramOffsets, lramSizes,
+        tileStrides
+    );
+    auto insertOffsets = createVector({0, channelOffset, stripeRow, 0}, rewriter);
+    auto insertSizes =
+        createVector({outShape[0], channelCount, croppedHeight, outShape[3]}, rewriter);
+    return tensor::InsertSliceOp::create(
+               rewriter, convOp.getLoc(), outputTile.getResult(), outputTensor, insertOffsets,
+               insertSizes, tileStrides
+    )
+        .getResult();
+}
+
 class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -506,153 +646,87 @@ class Conv2DPattern : public OpRewritePattern<torq_hl::Conv2DOp> {
         Value outputTensor =
             tensor::EmptyOp::create(rewriter, convOp.getLoc(), outShape, outType.getElementType());
 
-        const int outPadTop = (kernelHeight - 1) / 2;
-        const int outPadBottom = kernelHeight - outPadTop - 1;
-        const int inPadTop = isStride2conv ? align_ceil(outPadTop, 2) : outPadTop;
-        const int inPadBottom = isStride2conv ? align_ceil(outPadBottom, 2) : outPadBottom;
-
+        int outPaddingLines = (kernelHeight - 1) / 2;
+        int inPaddingLines = outPaddingLines;
+        if (isStride2conv) {
+            // Make number of padding lines even to avoid misalignment with stride
+            inPaddingLines = align_ceil(inPaddingLines, 2);
+        }
         const auto tileStrides = createVector({1, 1, 1, 1}, rewriter);
 
-        for (int i = 0; i < totalTiles; i++) {
-            int channelCount = maxChannelsPerTile;
+        // Precompute stripe layout once, hoisted out of the channel loop.
+        int strideH = convOp.getStride()[0];
+        int remainingOutStripes = outShape[2] % outStripesCount;
+        int fixedOutStripeHeight = outShape[2] / outStripesCount;
+        int fixedInStripeHeight = fixedOutStripeHeight * strideH;
+        int remainingInStripes = remainingOutStripes * strideH;
+        if (remainingOutStripes > 0)
+            outStripesCount += 1;
 
-            if (i == totalTiles - 1 && remainingChannels > 0) {
-                channelCount = remainingChannels;
-            }
+        // When the input tensor dominates memory (large spatial dims), reorder the loops
+        // so each input row stripe is loaded once and all output channel tiles are computed
+        // for it before moving on.  When weights dominate, keep channel-first order so each
+        // weight tile is loaded once across all row stripes.
+        const bool inputDominates = inputSize > getTensorSize(weightsType);
 
-            auto inTileOffsets = createVector({0, 0, 0, 0}, rewriter);
-            auto outTileOffsets = createVector({0, i * maxChannelsPerTile, 0, 0}, rewriter);
-            auto outTileSizes =
-                createVector({outShape[0], channelCount, outShape[2], outShape[3]}, rewriter);
-
-            auto tiledWeights = tensor::ExtractSliceOp::create(
-                rewriter, convOp.getLoc(), convOp.getWeights(),
-                createVector({i * maxChannelsPerTile, 0, 0, 0}, rewriter),
-                createVector(
-                    {channelCount, weightsShape[1], weightsShape[2], weightsShape[3]}, rewriter
-                ),
-                createVector({1, 1, 1, 1}, rewriter)
+        // Emits a single (channel-tile i, row-stripe s) Conv2D tile given a pre-extracted
+        // inputTile, and accumulates the cropped result into outputTensor.
+        auto emitTileWithInput = [&](int i, int s, const ConvStripeInfo &stripe, Value inputTile) {
+            int channelOffset = i * maxChannelsPerTile;
+            int channelCount = (i == totalTiles - 1 && remainingChannels > 0) ? remainingChannels
+                                                                              : maxChannelsPerTile;
+            auto wt =
+                extractConv2DWeightTile(convOp, weightsType, channelOffset, channelCount, rewriter);
+            outputTensor = emitConv2DTileAndInsert(
+                convOp, inputTile, wt.weights, wt.scaleBias, outputTensor, outShape, channelOffset,
+                channelCount, s * fixedOutStripeHeight, stripe.currentOutStripeHeight,
+                stripe.outPadTop, stripe.outPadBottom, rewriter
             );
+        };
 
-            int scaleBiasItems = outType.getElementType().isInteger() ? 2 : 1;
-            auto tiledScaleBias = tensor::ExtractSliceOp::create(
-                rewriter, convOp.getLoc(), convOp.getScaleBias(),
-                createVector({scaleBiasItems * i * maxChannelsPerTile}, rewriter),
-                createVector({channelCount * scaleBiasItems}, rewriter), createVector({1}, rewriter)
+        // Emits a single (channel-tile i, row-stripe s) Conv2D tile, extracting the input
+        // internally.  Used in the channel-first path where the input differs per stripe.
+        auto emitTile = [&](int i, int s) {
+            auto stripe = computeConvStripeInfo(
+                s, outStripesCount, fixedOutStripeHeight, remainingOutStripes, fixedInStripeHeight,
+                remainingInStripes, inPaddingLines, outPaddingLines
             );
+            auto inStripeOffsets =
+                createVector({0, 0, s * fixedInStripeHeight - stripe.inPadTop, 0}, rewriter);
+            auto inStripeSizes = inTileSizes;
+            inStripeSizes[2] = rewriter.getIndexAttr(stripe.currentInStripeHeight);
+            Value inputTile = extractConv2DInputTile(
+                convOp, segmentationOp, inStripeOffsets, inStripeSizes, tileStrides, rewriter
+            );
+            emitTileWithInput(i, s, stripe, inputTile);
+        };
 
-            int remainingOutStripes = outShape[2] % outStripesCount;
-            int fixedOutStripeHeight = outShape[2] / outStripesCount;
-
-            int strideH = convOp.getStride()[0];
-            int fixedInStripeHeight = fixedOutStripeHeight * strideH;
-            int remainingInStripes = remainingOutStripes * strideH;
-
-            if (remainingOutStripes > 0) {
-                outStripesCount += 1;
-            }
-
-            for (int s = 0; s < outStripesCount; s++) {
-
-                int currentOutStripeHeight = fixedOutStripeHeight;
-                int currentInStripeHeight = fixedInStripeHeight;
-
-                if (s == outStripesCount - 1 && remainingOutStripes > 0) {
-                    currentOutStripeHeight = remainingOutStripes;
-                    currentInStripeHeight = remainingInStripes;
-                }
-
-                const int inpadtop = s > 0 ? inPadTop : 0;
-                const int inpadbottom = s < outStripesCount - 1 ? inPadBottom : 0;
-                const int outpadtop = s > 0 ? outPadTop : 0;
-                const int outpadbottom = s < outStripesCount - 1 ? outPadBottom : 0;
-
-                currentOutStripeHeight += outpadtop + outpadbottom;
-                currentInStripeHeight += inpadtop + inpadbottom;
-
-                auto inStripeOffsets = inTileOffsets;
-                inStripeOffsets[2] = rewriter.getIndexAttr(s * fixedInStripeHeight - inpadtop);
-                auto outStripeOffsets = outTileOffsets;
-                outStripeOffsets[2] = rewriter.getIndexAttr(s * fixedOutStripeHeight - outpadtop);
+        if (inputDominates) {
+            // Row-first: extract each input stripe once, then compute all channel tiles for it.
+            // This amortises the cost of the input extraction (including segmentation) across
+            // all output channel tiles that share the same spatial region.
+            for (int s = 0; s < outStripesCount; ++s) {
+                auto stripe = computeConvStripeInfo(
+                    s, outStripesCount, fixedOutStripeHeight, remainingOutStripes,
+                    fixedInStripeHeight, remainingInStripes, inPaddingLines, outPaddingLines
+                );
+                auto inStripeOffsets =
+                    createVector({0, 0, s * fixedInStripeHeight - stripe.inPadTop, 0}, rewriter);
                 auto inStripeSizes = inTileSizes;
-                inStripeSizes[2] = rewriter.getIndexAttr(currentInStripeHeight);
-                auto outStripeSizes = outTileSizes;
-                outStripeSizes[2] = rewriter.getIndexAttr(currentOutStripeHeight);
-
-                Value inputTile;
-                if (segmentationOp) {
-                    auto segmentationInputTile = tensor::ExtractSliceOp::create(
-                        rewriter, convOp.getLoc(), segmentationOp.getInput(), inStripeOffsets,
-                        inStripeSizes, tileStrides
-                    );
-                    auto segmentedType = segmentationInputTile.getType();
-
-                    auto segmentationInitTile = tensor::EmptyOp::create(
-                        rewriter, convOp.getLoc(), segmentedType.getShape(),
-                        segmentedType.getElementType()
-                    );
-
-                    auto inputTileOp = torq_hl::SegmentationOp::create(
-                        rewriter, segmentationOp.getLoc(), segmentationInputTile.getType(),
-                        segmentationInitTile.getResult(), segmentationOp.getHSegments(),
-                        segmentationOp.getWSegments(), segmentationOp.getWeights(),
-                        segmentationOp.getScaleBias(), segmentationInputTile
-                    );
-                    inputTile = inputTileOp.getOutput();
-                }
-                else {
-                    auto inputTileOp = tensor::ExtractSliceOp::create(
-                        rewriter, convOp.getLoc(), convOp.getInput(), inStripeOffsets,
-                        inStripeSizes, tileStrides
-                    );
-                    inputTile = inputTileOp.getResult();
-                }
-
-                auto tileType = RankedTensorType::get(
-                    {outShape[0], channelCount, currentOutStripeHeight, outShape[3]},
-                    outType.getElementType()
+                inStripeSizes[2] = rewriter.getIndexAttr(stripe.currentInStripeHeight);
+                // Extract (and optionally segment) the input stripe once for this row.
+                Value inputTile = extractConv2DInputTile(
+                    convOp, segmentationOp, inStripeOffsets, inStripeSizes, tileStrides, rewriter
                 );
-
-                // Create the init vector as empty tensor.
-                // This generates a simpler dependency graph than taking a subview of the original
-                // init tensor and allows the optimization steps to remove redundand copyOp
-                auto initTile = tensor::EmptyOp::create(
-                    rewriter, convOp.getLoc(), tileType.getShape(), tileType.getElementType()
-                );
-
-                const int32_t groups = 1;
-                auto outputTileWithPad = torq_hl::Conv2DOp::create(
-                    rewriter, convOp.getLoc(), tileType, initTile.getResult(), convOp.getInputZp(),
-                    convOp.getWeightZp(), convOp.getOutputZp(), convOp.getOutputMin(),
-                    convOp.getOutputMax(), convOp.getShiftFactor(), groups, convOp.getPad(),
-                    convOp.getStride(), convOp.getDilation(), convOp.getVectorizationMode(),
-                    tiledWeights.getResult(), tiledScaleBias.getResult(), inputTile
-                );
-
-                if (convOp.getSegmentOutput()) {
-                    outputTileWithPad->setAttr(
-                        convOp.getSegmentOutputAttrName(), BoolAttr::get(convOp.getContext(), true)
-                    );
-                }
-
-                auto lramOutStripeOffsets = createVector({0, 0, outpadtop, 0}, rewriter);
-                auto lramOutStripeSizes = outStripeSizes;
-                lramOutStripeSizes[2] =
-                    rewriter.getIndexAttr(currentOutStripeHeight - outpadtop - outpadbottom);
-                auto outputTile = tensor::ExtractSliceOp::create(
-                    rewriter, convOp.getLoc(), outputTileWithPad.getOutput(), lramOutStripeOffsets,
-                    lramOutStripeSizes, tileStrides
-                );
-
-                outStripeOffsets[2] = rewriter.getIndexAttr(s * fixedOutStripeHeight);
-                outStripeSizes[2] =
-                    rewriter.getIndexAttr(currentOutStripeHeight - outpadtop - outpadbottom);
-                outputTensor = tensor::InsertSliceOp::create(
-                                   rewriter, convOp.getLoc(), outputTile.getResult(), outputTensor,
-                                   outStripeOffsets, outStripeSizes, tileStrides
-                )
-                                   .getResult();
+                for (int i = 0; i < totalTiles; ++i)
+                    emitTileWithInput(i, s, stripe, inputTile);
             }
+        }
+        else {
+            // Channel-first: each weight tile is loaded once, covering all row stripes.
+            for (int i = 0; i < totalTiles; ++i)
+                for (int s = 0; s < outStripesCount; ++s)
+                    emitTile(i, s);
         }
 
         rewriter.replaceOp(convOp, outputTensor);
