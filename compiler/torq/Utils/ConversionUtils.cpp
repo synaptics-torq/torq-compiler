@@ -881,7 +881,7 @@ Value createClonedBlock(
         opsToMove.push_back(op);
 
         // We are moving linalg.generic and support ops till that point to produces the bias
-        if (auto gOp = dyn_cast<linalg::GenericOp>(op)) {
+        if (isa<linalg::GenericOp, linalg::BroadcastOp>(op)) {
             lastV = cloneAndReplaceToBody(builder, opsToMove, mapping);
             opsToDelete.insert(opsToDelete.end(), opsToMove.begin(), opsToMove.end());
             opsToMove.clear();
