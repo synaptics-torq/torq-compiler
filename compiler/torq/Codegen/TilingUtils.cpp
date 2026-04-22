@@ -8,8 +8,10 @@
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 
@@ -137,6 +139,14 @@ void applyTiledResults(
     // Here we replace the untiled producers with the yielded result.
     for (Operation *prodOp : tiledResults.fusedProducers) {
         replaceTiledOp(rewriter, prodOp, tiledResults);
+
+        // Erase the extract_slice tiling add, so we can see if the producer has
+        // no users (and not tile it again).
+        for (Operation *user : llvm::make_early_inc_range(prodOp->getUsers())) {
+            if (isa<tensor::ExtractSliceOp>(user) && user->use_empty()) {
+                rewriter.eraseOp(user);
+            }
+        }
     }
 }
 

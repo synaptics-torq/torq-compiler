@@ -1010,10 +1010,6 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
 }
 
 void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
-    // Check if we already tiled tiOp (as producer)
-    if (untiledTiledOps_.contains(tiOp))
-        return;
-
     // For pattern-fuse-groups, we only tile from the bottom most op, to make
     // sure the whole group is tiled together.
     if (isMarkedFuseGroup(tiOp) && !isFuseGroupOutput(tiOp))
@@ -1181,8 +1177,9 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
         assert(*opFitsInMemory);
     });
 
-    untiledTiledOps_.insert(tiOp);
-    llvm::set_union(untiledTiledOps_, tiledResults->fusedProducers);
+    // Erase the untiled op, so its producers will have use_empty (and not tiled
+    // again) if this is their only user.
+    assert(tiOp->use_empty() && "tiled operation still has users");
 }
 
 void TileAndFusePass::runOnOperation() {
@@ -1205,10 +1202,19 @@ void TileAndFusePass::runOnOperation() {
     for (auto [count, tiOp] : llvm::enumerate(orderTi)) {
         LLVM_DEBUG({
             if (orderTi.size() > 50)
-                llvm::dbgs() << "Processing TI op:" << count << "/" << orderTi.size() << "\n";
+                llvm::dbgs() << "Processing TI op: " << count << "/" << orderTi.size() << "\n";
         });
 
-        tileAndFuse(tiOp);
+        if (!tiOp->use_empty())
+            tileAndFuse(tiOp);
+
+        if (tiOp->use_empty()) {
+            if (auto fuseGroup = isFuseGroupOutput(tiOp)) {
+                removeFuseGroupMarkingBackwards(tiOp, *fuseGroup);
+            }
+
+            tiOp->erase();
+        }
     }
 
     LLVM_DEBUG(llvm::dbgs() << "Tile and Fuse - DONE\n");

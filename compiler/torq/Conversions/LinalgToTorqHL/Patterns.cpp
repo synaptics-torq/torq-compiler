@@ -2043,13 +2043,27 @@ struct ResizeNearestNeighborOpConversion : public OpRewritePattern<linalg::Gener
 void populateLinalgToTorqHLPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
+    // Place patterns that run only in the marking pass inside this if.
     if (markFuseGroups) {
+        // This pattern does the marking for TransposeOpConversion
         patterns.insert<TransposeOpConversionRewrite>(context, markFuseGroups);
+    }
+
+    // Patterns that have a marking mode:
+    populateLinalgToTorqHLClampPatterns(context, patterns, markFuseGroups);
+    populateLinalgToTorqHLMulPatterns(context, patterns, markFuseGroups);
+
+    if (markFuseGroups) {
         // NB: FillOpConversionRewrite must be the last markFuseGroups pattern (see comment inline
         // in the fuse case).
+        // This pattern does the marking for FillOpConversion
         patterns.insert<FillOpConversionRewrite>(context, markFuseGroups);
         return;
     }
+    // IMPORTANT: patterns below this line (see the return above) should not
+    // involve more than a single operation! If they do, tile and fuse will
+    // break them. To prevent that, the pattern should be refactored to take
+    // markFuseGroups, and have a marking mode.
 
     // IMPORTANT: Since sigmoid op contains exp in its body Exp pattern must be called after Sigmoid
     // pattern in order to make sure that exp pattern doesn't match sigmoid op, see:
@@ -2072,8 +2086,6 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<MatmulOpConversion<linalg::MatvecOp>>(context);
 
     patterns.insert<ReduceOpConversion>(context);
-    populateLinalgToTorqHLClampPatterns(context, patterns, markFuseGroups);
-    populateLinalgToTorqHLMulPatterns(context, patterns, markFuseGroups);
     patterns.insert<CastOpPattern>(context);
     patterns.insert<BroadcastOpConversion>(context);
 
@@ -2084,7 +2096,12 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<FloorOpPattern>(context);
 
     patterns.insert<RescaleOpConversion>(context);
+
+    // FIXME: these patterns ignore the markFuseGroups argument! They use
+    // computeArithConst, which is difficult to refactor to use markFuseGroups.
+    // Maybe it should be separated from the pattern, and run before the marking.
     populateLinalgToTorqHLExtractPatterns(context, patterns, markFuseGroups);
+
     patterns.insert<AddOpPattern>(context);
 
     patterns.insert<ReinterpretCastOpPattern>(context);

@@ -118,6 +118,9 @@ void markFuseGroupBackward(
     const IntegerAttr &fuseGroupAttr
 );
 
+// Starting from outputOp, walk upwards and remove the fuseGroup marking from all operations.
+void removeFuseGroupMarkingBackwards(Operation *outputOp, int64_t fuseGroup);
+
 // Return all the values that feed the fuse group from outside the group (with no duplicates).
 // root - the bottom most operation in the fuse group.
 SmallVector<Value> getFuseGroupOperands(Operation *root, const IntegerAttr &fuseGroupAttr);

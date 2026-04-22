@@ -195,6 +195,42 @@ void markFuseGroupBackward(
     }
 }
 
+void removeFuseGroupMarkingBackwards(Operation *outputOp, int64_t fuseGroup) {
+    MLIRContext *context = outputOp->getContext();
+    IntegerAttr fuseGroupAttr = IntegerAttr::get(IntegerType::get(context, 64), fuseGroup);
+
+    std::deque<Operation *> stack = {outputOp};
+    while (!stack.empty()) {
+        Operation *op = stack.front();
+        stack.pop_front();
+
+        ArrayAttr oldAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+        if (!oldAttr)
+            continue;
+
+        if (!llvm::is_contained(oldAttr, fuseGroupAttr))
+            continue;
+
+        SmallVector<Attribute> newAttr;
+        for (Attribute attr : oldAttr) {
+            if (attr != fuseGroupAttr)
+                newAttr.push_back(attr);
+        }
+
+        if (newAttr.empty()) {
+            op->removeAttr(TORQ_FUSE_GROUP);
+        }
+        else {
+            op->setAttr(TORQ_FUSE_GROUP, ArrayAttr::get(context, newAttr));
+        }
+
+        for (Value operand : op->getOperands()) {
+            if (Operation *srcOp = operand.getDefiningOp())
+                stack.push_back(srcOp);
+        }
+    }
+}
+
 SmallVector<Value> getFuseGroupOperands(Operation *root, const IntegerAttr &fuseGroupAttr) {
     SmallVector<Value> inputs;
 
@@ -378,19 +414,10 @@ MultiplierShiftInfo getMultiplierAndShift(
     auto tosaMultiplierArg = dyn_cast<BlockArgument>(tosaMultiplier);
     auto tosaShiftArg = dyn_cast<BlockArgument>(tosaShift);
 
-    auto tosaMultiplierOpOperand =
-        tosaMultiplierArg ? genericOp.getMatchingOpOperand(tosaMultiplierArg) : nullptr;
-    auto tosaShiftOpOperand = tosaShiftArg ? genericOp.getMatchingOpOperand(tosaShiftArg) : nullptr;
-
-    // TODO is this correct ?
-    auto adaptor = genericOp;
-
-    auto tosaMultiplierValue =
-        tosaMultiplierOpOperand ? adaptor.getOperands()[tosaMultiplierOpOperand->getOperandNumber()]
-                                : nullptr;
-    auto tosaShiftValue = tosaShiftOpOperand
-                              ? adaptor.getOperands()[tosaShiftOpOperand->getOperandNumber()]
-                              : nullptr;
+    Value tosaMultiplierValue =
+        tosaMultiplierArg ? genericOp.getMatchingOpOperand(tosaMultiplierArg)->get() : nullptr;
+    Value tosaShiftValue =
+        tosaShiftArg ? genericOp.getMatchingOpOperand(tosaShiftArg)->get() : nullptr;
 
     auto tosaMultiplierType =
         tosaMultiplierValue ? cast<RankedTensorType>(tosaMultiplierValue.getType()) : nullptr;

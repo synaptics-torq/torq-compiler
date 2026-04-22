@@ -11,6 +11,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -88,19 +89,28 @@ static Value create1DimTensorFromScalar(
 }
 
 class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
+  private:
+    const bool _markFuseGroups;
+
   public:
-    using OpRewritePattern::OpRewritePattern;
+    MulOpPattern(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern(context), _markFuseGroups(markFuseGroups) {}
+
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (_markFuseGroups && isMarkedFuseGroup(srcOp)) {
+            return rewriter.notifyMatchFailure(srcOp, "Already marked");
+        }
+
         if (srcOp.getInputs().empty() || srcOp.getInputs().size() > 2) {
             return rewriter.notifyMatchFailure(
                 srcOp, "mul expects generic op with 2 (or 1) inputs\n"
             );
         }
 
-        Value input1 = srcOp.getInputs()[0];
+        Value input1 = srcOp.getInputs().front();
         // Binary ops can actually have only one input if both operands are the same
-        Value input2 = srcOp.getInputs()[srcOp.getInputs().size() > 1 ? 1 : 0];
+        Value input2 = srcOp.getInputs().back();
 
         auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
         auto input1ElementType = input1Type.getElementType();
@@ -121,6 +131,22 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Not an elementwise binary op");
         }
 
+        if (!isa<arith::MulIOp>(mulOp) && !isa<arith::MulFOp>(mulOp)) {
+            return rewriter.notifyMatchFailure(srcOp, "Expected arith.muli or arith.mulf");
+        }
+
+        Value output = srcOp.getResult(0);
+        const int outChannelCount = 1; // No channels here, only one single scale
+        ScaleClampInfo scInfo = foldForwardScaleClamp(output, outChannelCount, 12, 12, false);
+
+        if (_markFuseGroups) {
+            markFuseGroupBackward(
+                output, {input1, input2}, rewriter,
+                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            );
+            return success();
+        }
+
         auto lhs = mulOp->getOperand(0);
         auto rhs = mulOp->getOperand(1);
 
@@ -137,7 +163,6 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
         }
 
         if (constOp) {
-
             Value v = create1DimTensorFromScalar(constOp, input1ElementType, rewriter);
             if (!v) {
                 return rewriter.notifyMatchFailure(srcOp, "");
@@ -150,15 +175,8 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
             }
         }
 
-        if (!isa<arith::MulIOp>(mulOp) && !isa<arith::MulFOp>(mulOp)) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected arith.muli or arith.mulf");
-        }
-
         int32_t bias = 0;
         int32_t scale = 1;
-        Value output = srcOp.getResult(0);
-        const int outChannelCount = 1; // No channels here, only one single scale
-        ScaleClampInfo scInfo = foldForwardScaleClamp(output, outChannelCount, 12, 12, false);
         auto outType = cast<RankedTensorType>(output.getType());
         auto [outMin, outMax] = getDTypeRange(outType.getElementType());
         int32_t outZp = 0;
@@ -367,7 +385,12 @@ class MulRescaleOpPattern : public OpRewritePattern<linalg::GenericOp> {
 void populateLinalgToTorqHLMulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-    patterns.insert<MulOpPattern>(context);
+    patterns.insert<MulOpPattern>(context, markFuseGroups);
+    if (markFuseGroups)
+        return;
+
+    // FIXME: this pattern should be refactor to take markFuseGroups and have a
+    // marking mode.
     patterns.insert<MulRescaleOpPattern>(context);
 }
 

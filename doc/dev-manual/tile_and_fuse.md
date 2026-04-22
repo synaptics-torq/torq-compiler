@@ -23,22 +23,6 @@ when we tile an operation, we have already considered all its users. An
 operation is tiled if it hasn't already been fused, and it does not fit in
 memory.
 
-:::{attention} TODO
-What if an operation feeds multiple consumers? Once an operation was
-fused, it will not be considered for tiling.
-
-      [a]
-      / \
-    [b] [c]
-
-If _a_ and _b_ implement `TilingInterface`, and both need to be tiled to fit in
-memory, we will tile _b_ first, and fuse _a_ with it. _a_ still needs to be
-tiled in order to drive _c_, but currently we will not tile _a_ again, which
-will cause the compiler to fail later due to memory overflow. Note that if _c_
-also implements `TilingInterface` and is too big to fit in memory, we will tile
-_c_ and fuse _a_ with it, avoiding the overflow. The problem is only when _a_
-derives an operation that is not going to be tiled. :::
-
 ## Fuse groups
 
 Later in the pipeline, the passes that do the lowering from linalg to TorqHL use
