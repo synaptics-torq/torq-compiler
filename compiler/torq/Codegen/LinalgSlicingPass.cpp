@@ -38,7 +38,7 @@ namespace {
 template <class LinalgOp> struct LinalgPattern : public OpRewritePattern<LinalgOp> {
     bool peelGrouping_;
     int64_t grouping_;
-    size_t slicingIter_;
+    mutable size_t slicingIter_;
 
     LinalgPattern(MLIRContext *context, bool peelGrouping, int64_t grouping, size_t slicingIter)
         : OpRewritePattern<LinalgOp>(context), peelGrouping_(peelGrouping), grouping_(grouping),
@@ -205,6 +205,34 @@ template <class LinalgOp> struct LinalgPattern : public OpRewritePattern<LinalgO
     }
 }; // class LinalgPattern
 
+// Elementwise pattern for linalg.generic ops. Picks the leftmost non-unit
+// dimension to slice on, keeping inner dimensions contiguous in memory.
+// Reuses LinalgPattern's tiling logic by resolving the slicing dimension
+// at match time and delegating to the base class.
+struct ElementwisePattern : public LinalgPattern<linalg::GenericOp> {
+    ElementwisePattern(MLIRContext *context, bool peelGrouping, int64_t grouping)
+        : LinalgPattern<linalg::GenericOp>(context, peelGrouping, grouping, /*slicingIter=*/0) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
+        // Only operate on elementwise (all-parallel) generic ops.
+        if (!llvm::all_of(genericOp.getIteratorTypesArray(), [](mlir::utils::IteratorType t) {
+                return t == mlir::utils::IteratorType::parallel;
+            }))
+            return failure();
+
+        // Resolve the slicing dimension: leftmost non-unit.
+        ArrayRef<int64_t> shape = cast<ShapedType>(genericOp->getResultTypes()[0]).getShape();
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (shape[i] != 1) {
+                slicingIter_ = i;
+                return LinalgPattern<linalg::GenericOp>::matchAndRewrite(genericOp, rewriter);
+            }
+        }
+        return failure();
+    }
+}; // class ElementwisePattern
+
 struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
     using LinalgSlicingBase<LinalgSlicingPass>::LinalgSlicingBase;
 
@@ -232,6 +260,9 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
         patterns.add<LinalgPattern<linalg::DepthwiseConv2DNchwChwOp>>(
             context, options_.peelGrouping, 4, 1
         );
+
+        // Elementwise generic ops: dynamically slice on leftmost non-unit dim
+        patterns.add<ElementwisePattern>(context, options_.peelGrouping, 4);
 
         // patterns.add<FullyConnectedPattern>(ctx);
 
