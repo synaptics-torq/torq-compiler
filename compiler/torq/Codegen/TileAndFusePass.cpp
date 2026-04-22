@@ -107,6 +107,30 @@ static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFus
     llvm::cl::init(TileAndFuseProducersFuseMode::MaxProducers) // Default value
 );
 
+static llvm::cl::opt<unsigned> clTorqTileAndFuseDistanceLimit(
+    "torq-tile-and-fuse-distance-limit",
+    llvm::cl::desc("Limit the (linalg) distance of producers that are fused (use 0 for no limit)."),
+    llvm::cl::init(0) // Default value
+);
+
+const std::string TORQ_TNF_DISTANCE = "torq-tnf-distance";
+
+void setSourcesDistance(Operation *op, std::optional<int64_t> distance) {
+    if (!distance)
+        return;
+
+    for (auto operand : op->getOperands()) {
+        if (auto srcOp = operand.getDefiningOp()) {
+            srcOp->setAttr(
+                TORQ_TNF_DISTANCE,
+                IntegerAttr::get(
+                    IntegerType::get(op->getContext(), 64, IntegerType::Signed), *distance - 1
+                )
+            );
+        }
+    }
+}
+
 torq_hl::Executor getExecutor(Operation *op) {
     return isMarkedFuseGroup(op) ? torq_hl::Executor::Slice : torq_hl::Executor::CSS;
 }
@@ -758,6 +782,10 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     //     return doNotFuse;
     // }
 
+    std::optional<int64_t> distance;
+    if (auto distanceAttr = producerOp->getAttrOfType<mlir::IntegerAttr>(TORQ_TNF_DISTANCE))
+        distance = distanceAttr.getSInt();
+
     // Get the producer's operand tiles
     SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
     if (failed(producerTi.getIterationDomainTileFromResultTile(
@@ -780,6 +808,10 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
 
     if (!isMarkedFuseGroup(producerOp)) {
         // Not part of a pattern-fuse-group; there are no restrictions on the domains.
+
+        if (distance && *distance <= 0)
+            return doNotFuse;
+        setSourcesDistance(producerOp, distance);
 
         llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder =
             getTilingIterDomainsOrder(producerTi);
@@ -815,8 +847,17 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     if (!isFuseGroupOutput(producerOp)) {
         // Is part of a pattern-fuse-group, but not the output operation (bottom most).
         // We only check the output operation of such group.
+
+        // We can't break fuse groups, so we don't check if distance has reached
+        // 0, but we still propagate it to the sources.
+        setSourcesDistance(producerOp, distance);
+
         return fuseAndDoNotYieldProducer;
     }
+
+    if (distance && *distance <= 0)
+        return doNotFuse;
+    setSourcesDistance(producerOp, distance);
 
     llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(producerTi);
 
@@ -881,16 +922,34 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
     // are being tiled. The first element in the return tuple indicates if the
     // producer should be fused (true) or not (false).
 
+    std::optional<int64_t> distance;
+    if (auto distanceAttr = producerOp->getAttrOfType<mlir::IntegerAttr>(TORQ_TNF_DISTANCE))
+        distance = distanceAttr.getSInt();
+
     if (!isMarkedFuseGroup(producerOp)) {
         // Not part of a pattern-fuse-group; there are no restrictions on the domains.
+
+        if (distance && *distance <= 0)
+            return doNotFuse;
+        setSourcesDistance(producerOp, distance);
+
         return fuseAndDoNotYieldProducer;
     }
 
     if (!isFuseGroupOutput(producerOp)) {
         // Is part of a pattern-fuse-group, but not the output operation (bottom most).
         // We only check the output operation of such group.
+
+        // We can't break fuse groups, so we don't check if distance has reached
+        // 0, but we still propagate it to the sources.
+        setSourcesDistance(producerOp, distance);
+
         return fuseAndDoNotYieldProducer;
     }
+
+    if (distance && *distance <= 0)
+        return doNotFuse;
+    setSourcesDistance(producerOp, distance);
 
     // The domains the producer can be tiled over
     llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(producerTi);
@@ -1005,6 +1064,10 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
     }
 
     options.setFusionControlFn(fusionControlFn);
+
+    if (clTorqTileAndFuseDistanceLimit.getValue() != 0) {
+        setSourcesDistance(tilingInterfaceOp, clTorqTileAndFuseDistanceLimit.getValue());
+    }
 
     return scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp, options);
 }
