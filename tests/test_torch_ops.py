@@ -76,22 +76,6 @@ def case_config(request, runtime_hw_type, chip_config):
         # Next chip failures
         print(f"[pytest] True Running test with chip target: {chip_config.data['target']}")
 
-        failed_tc += [
-            # Max relative difference: 1.0
-            # Max absolute difference: 40.0
-            # Number of differences: 18432 out of 622592 [2.96%]
-            'maxpool_bf16_batch19_4x1_stride4x1',
-
-            # Max relative difference: 0.9999998211860657
-            # Max absolute difference: 6.0
-            # Number of differences: 1914 out of 401408 [0.48%]
-            'conv2d-nchw-clip-bf16.mlir',
-
-            # Max relative difference: 0.012047598138451576
-            # Max absolute difference: 0.0009765625
-            # Number of differences: 3 out of 59616 [0.01%]
-            'gemm_bf16'
-        ]
         if aws_fpga:
             # aws-fpga failures
             failed_tc += [
@@ -110,21 +94,6 @@ def case_config(request, runtime_hw_type, chip_config):
 
     if any(s in request.param.name for s in failed_tc):
         pytest.xfail("output mismatch or error")
-
-    torq_tiling_tc = [
-        # <unknown>:0: error: expected integer or index type
-        # Assertion failed: (succeeded(ConcreteT::verify(getDefaultDiagnosticEmitFn(ctx), args...))), 
-        #    function get, file StorageUniquerSupport.h, line 180.
-        # Triggered from ConvertOddDimensionStrideConvPattern<mlir::syna::torq_hl::Conv2DOp>::matchAndRewrite()
-        'conv2d-nchw-clip-bf16.mlir',
-
-        'Conv2d_bf16_1x1x64x8192',
-        'reducemean-reshape',
-        'reducemean.mlir',
-    ]
-
-    if any(s in request.param.data.name for s in torq_tiling_tc):
-        extra_args["torq_compiler_options"]  = ["--torq-enable-torq-hl-tiling"]
 
     # Option Test for conv1d with truncf before reduce (memory-optimized mode) to maintain easily
     # This enables --torq-conv1d-truncate-for-reduce to test bf16 reduce input

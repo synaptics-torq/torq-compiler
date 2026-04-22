@@ -28,14 +28,8 @@ def case_config(request, runtime_hw_type, chip_config):
         # Assertion `input.shape().size() + dimensions.size() == output.shape().size()' failed.
         "conv2d_f127_s64_1x16000_o250.mlir",
 
-        # Assertion failed: (P.type1.getElementType() == P.type2.getElementType() && "Input types must match"), function prepareParams, file ConversionUtils.h, line 505.
-        # "sub-rescale-scalar.mlir",
-        # "sub-rescale-scalar-bis.mlir",
-
         # failed with differences
         "conv2d_f8_s4_1x1024_o256.mlir",
-        "concat-a.mlir",
-        "concat-b.mlir",
     ]
     if any(s in request.param.data.name for s in iree_regression_tc):
         pytest.xfail("IREE 3.10 regression failure")
@@ -73,24 +67,10 @@ def case_config(request, runtime_hw_type, chip_config):
     if chip_config.data['target'] != "SL2610":
         # Next chip failures
         failed_tc += [
-            # failed: output mismatch
-            'conv-343.mlir',
+            # # failed: output mismatch
             'conv2d_f5_s2_64x64x16_i16.mlir',
-            'rescale-', # instable results, accuracy issues on some value (less than 1%, to be investigated)
-            # error
-            'asr-1x21x1024xi32',
-            'matmul-in-bf16-out-fp32_207x207.mlir',
-            'conv2d-f4.mlir',
-            'resize-31x31x33xi8.mlir', # error: unable to free enough space for results and operand
-            'conv2d-stride4-i16', # Too long to compile on next, will timeout
-
-            # Tracked by issue #996
-            'conv2d_noalign_channel_32x32x128xi8.mlir',
-            'pw-16x16.mlir',
-            'pw-32x8.mlir',
-
-            # Tracked by issue #1092
-            'pw-stride2.mlir',
+            'sub-rescale-scalar.mlir',
+            'sub-rescale-scalar-bis.mlir',
         ]
         if aws_fpga:
             failed_tc += [
@@ -131,26 +111,7 @@ def case_config(request, runtime_hw_type, chip_config):
         if request.param.data.name.startswith('Elementwise_'):
             pytest.xfail("Elementwise ops not supported on next chip FPGA")
 
-    torq_tiling_tc = [
-        # Channels 0 to 9 are correct, channels 10 to 18 are wrong
-        'conv-343',
-
-        # error: unable to free enough space for results and operands
-        'conv2d-f4',
-    ]
-
-    if chip_config.data['target'] != "SL2610":
-        torq_tiling_tc += [
-            # error: unable to free enough space for results and operands
-            'add-rescaled-constant',
-
-            # Channels 0 to 55 are wrong, channels 56 to 111 are correct
-            'conv-stride2',
-        ]
-
     extra_args["torq_compiler_options"] = []
-    if any(s in request.param.data.name for s in torq_tiling_tc):
-        extra_args["torq_compiler_options"].append("--torq-enable-torq-hl-tiling")
     if any(s in request.param.data.name for s in need_input_type_tc):
         extra_args["torq_compiler_options"].append("--iree-input-type=tosa-torq")
 
