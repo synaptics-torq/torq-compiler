@@ -139,6 +139,7 @@ runs:
 
     - name: Download the compiler and runtime
       uses: actions/download-artifact@v8
+      if: ${{ inputs.release_run_id != 'none' }}
       with:
         name: release
         path: .
@@ -146,12 +147,14 @@ runs:
         github-token: ${{ steps.generate_token.outputs.token }}
 
     - name: Extract the compiler and runtime
+      if: ${{ inputs.release_run_id != 'none' }}
       shell: bash
       run: |
         tar -zxf release.tar.gz
 
     - name: Setup python virtualenv with on release files
       shell: bash
+      if: ${{ inputs.release_run_id != 'none' }}
       run: |
         pip install -r ${{github.workspace}}/release/python/requirements.txt
 
@@ -166,6 +169,17 @@ runs:
         # add development libraries which are not included in the release
         cat > $(python -c "import site; print(site.getsitepackages()[0])")/torq.pth << EOF
         ${{github.workspace}}/python
+        EOF
+
+    - name: Setup python virtualenv using checkout files
+      shell: bash
+      if: ${{ inputs.release_run_id == 'none' }}
+      run: |
+        pip install -r ${{github.workspace}}/requirements.txt
+        
+        cat > $(python -c "import site; print(site.getsitepackages()[0])")/torq.pth << EOF
+        ${{github.workspace}}/python
+        ${{github.workspace}}/extras/python
         EOF
 
     - name: Install boto3
@@ -219,7 +233,7 @@ runs:
       run: |            
         # run pytest with ignoring binary mtime changes to generate a cache that can be used in other environments,
         # also disable phases dump to reduce size of the cache
-        pytest --ignore-binary-mtime -v ${{ inputs.pytest_args }}
+        pytest -v ${{ inputs.pytest_args }}
 
     - name: Create compressed test data cache artifact
       if: ${{ inputs.test_data_cache_artifact != '' || inputs.s3_artifact_bucket != '' }}

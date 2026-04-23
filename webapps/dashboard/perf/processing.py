@@ -1,4 +1,5 @@
 import os
+import traceback
 import zipfile
 import json
 from pathlib import Path
@@ -146,19 +147,6 @@ def process_uploaded_zip(args):
                         outcome=outcome_map[outcome],
                     )
 
-                    engine_compilation_time = item.get('engine_compilation_time')
-                    if engine_compilation_time is not None:
-                        try:
-                            engine_compilation_time *= 1_000_000 # Parse ms result to ns                            
-
-                            Measurement.objects.create(
-                                test_run=test_run,
-                                metric=metric['total_duration'],
-                                value=engine_compilation_time,
-                            )
-                        except Exception as e:
-                            print(f'Warning: Could not save total_duration for {module}::{name}: {e}')
-
                     # Handle failure log file and server-side classification for failed tests
                     failure_log_rel = item.get('failure_log_file')  # relative path inside zip (optional)
                     failed_phase = item.get('failed_phase', 'call')
@@ -197,6 +185,9 @@ def process_uploaded_zip(args):
                     test_run.save()
 
                     measurements = item.get('measurements', [])
+
+                    if measurements is None:
+                        measurements = []
                     
                     for measurement in measurements:
                         metric_name = measurement.get('metric')
@@ -224,6 +215,10 @@ def process_uploaded_zip(args):
                             print(f'Warning: Profiling file {profiling_rel} not found in archive.')
 
                 except Exception as e:
+                    # print stack trace 
+                    import traceback
+                    traceback.print_exc()
+
                     print(f'Error processing test run {module}::{name}: {e}')
 
             # Mark the batch as processed after all test runs have been created

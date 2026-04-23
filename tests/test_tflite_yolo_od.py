@@ -24,10 +24,10 @@ import numpy as np
 import cv2
 from pathlib import Path
 
-from torq.testing.engines import engines
 from torq.testing.comparison import compare_test_results
 from torq.testing.hf import get_hf_model_file
 from torq.testing.versioned_fixtures import versioned_cached_data_fixture
+from torq.testing.engines import compile_with_engine
 
 from torq.testing.tflite_layer_tests import generate_parametrized_tests, TFLiteLayerCase, get_quant_params
 
@@ -278,10 +278,6 @@ def yolo_od_input_data(request, tflite_layer_model: TFLiteLayerCase, tweaked_ran
 
     return [input_tensor]
 
-@pytest.fixture
-def alternative_engine(request):
-    return request.param
-
 # ============================================================================
 # Test Generation
 # ============================================================================
@@ -394,19 +390,10 @@ def test_yolo_od_llvmcpu_torq(
 @pytest.mark.alternative_engines
 def test_alternative_engine(
     request, 
-    tmp_path,
     tflite_model_path,
     alternative_engine,
 ):
-    model_path = Path(tflite_model_path.data)
-    out_dir = tmp_path / model_path.stem
-
-    # Compile with the current engine
-    engines.compile(alternative_engine, str(model_path), str(out_dir))
-    
-    # Get compilation time
-    engine_compilation_time = engines.get_compilation_time(alternative_engine, str(model_path), str(out_dir))
-    request.node.user_properties.append(("engine_compilation_time", engine_compilation_time))
+    compile_with_engine(request, tflite_model_path, alternative_engine)
 
 
 @pytest.mark.ci

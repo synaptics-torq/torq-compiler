@@ -5,8 +5,6 @@ import numpy as np
 import subprocess
 import json
 
-import iree.compiler.tflite as iree_tflite_compile
-
 from .versioned_fixtures import versioned_generated_file_fixture, versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture
 
 """

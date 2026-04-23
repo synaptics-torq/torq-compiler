@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
-import torq.performance
+import torq.testing.performance
 import argparse
 from collections import defaultdict
 
 
-def compute_durations(log: torq.performance.PerformanceLog):
+def compute_durations(log: torq.testing.performance.PerformanceLog):
     durations = defaultdict(lambda: defaultdict(list))
 
     for scenario in log.scenarios:
@@ -25,8 +25,8 @@ def main():
 
     args = parser.parse_args()
 
-    reference_performance = torq.performance.load_performance(args.reference)
-    new_performance = torq.performance.load_performance(args.new)
+    reference_performance = torq.testing.performance.load_performance(args.reference)
+    new_performance = torq.testing.performance.load_performance(args.new)
 
     all_reference_durations = compute_durations(reference_performance)
     all_new_durations = compute_durations(new_performance)

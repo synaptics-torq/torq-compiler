@@ -1,7 +1,7 @@
 
 import numpy as np
-from .iree import TOPDIR
 from torq.testing.versioned_fixtures import VersionedData
+from pathlib import Path
 
 """
 
@@ -11,6 +11,8 @@ Comparisons use some criterias to determine if two outputs are equivalent
 tweaked to account for inaccuracies due to floating point and quantization.
 
 """
+
+TOPDIR = Path(__file__).parent.parent.parent.parent
 
 def check_nans(arr1, arr2):
     nan1 = np.isnan(arr1)

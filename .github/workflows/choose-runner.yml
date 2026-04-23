@@ -1,0 +1,39 @@
+name: Choose Runner Image
+
+on:
+  workflow_call:
+    outputs:
+      image_name:
+        description: The image name to use for the runner
+        value: ${{ jobs.choose-runner.outputs.image_name }}
+
+jobs:
+  choose-runner:
+    runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.set-runner-image.outputs.image_name }}
+    steps:
+      - name: Choose runner image
+        id: set-runner-image
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "${{ github.base_ref }}" == "main" ]]; then
+              echo "image_name=latest" >> $GITHUB_OUTPUT
+            else
+              echo "image_name=${{ github.base_ref }}" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              echo "image_name=latest" >> $GITHUB_OUTPUT
+            else
+              echo "image_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG_NAME="${{ github.event.release.tag_name }}"
+            BRANCH_NAME=$(echo "$TAG_NAME" | sed -E 's/^(v[0-9]+.[0-9]+).*/\1/')
+            echo "image_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          else
+            echo "Unsupported event type: ${{ github.event_name }}"
+            exit 1
+          fi

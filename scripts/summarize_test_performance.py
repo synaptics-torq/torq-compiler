@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import torq.performance
+import torq.testing.performance
 import argparse
 from collections import defaultdict
 
@@ -12,7 +12,7 @@ def main():
 
     args = parser.parse_args()
 
-    performance = torq.performance.load_performance(args.input)
+    performance = torq.testing.performance.load_performance(args.input)
 
     def split_namespace(scenario_name):
         parts = scenario_name.split("::")

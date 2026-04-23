@@ -1,176 +1,68 @@
 name: Evaluate External Compilation Engines
 
 on: 
+
+  # workflow_dispatch is used on main and vX.Y branches to generate official data
   workflow_dispatch:
 
-concurrency:
-  # from iree CI:
-  # A PR number if a pull request and otherwise the commit hash. This cancels
-  # queued and in-progress runs for the same PR (presubmit) or commit
-  # (postsubmit). The workflow name is prepended to avoid conflicts between
-  # different workflows.
+  # pull_request is used to test changes to the external engine support
+  pull_request:
+    
+
+concurrency:  
   group: ${{ github.workflow }}-${{ github.event.number || github.sha }}
   cancel-in-progress: true  
 
 jobs:
 
-  build:
-    name: Build compiler and runtime
-    if: ${{ vars.CODEBUILD_PROJECT_CODEBASE != '' }}
+  choose_runner_image:
+    name: Choose runner image
+    uses: ./.github/workflows/choose-runner.yml
+    if: contains(github.event.pull_request.labels.*.name, 'test-alt-engines')
+
+  test:    
+    name: Test with external engines
+
+    timeout-minutes: 50
+
+    needs: [choose_runner_image]
 
     runs-on:
-      - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-
-    env:
-      SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
-      SCCACHE_REGION: ${{ vars.AWS_REGION }}
-      SCCACHE_S3_KEY_PREFIX: clang-build
+          - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+            image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.choose_runner_image.outputs.image_name }}-tests
 
     permissions:
       contents: read
       id-token: write
 
     steps:
-      - name: Assume AWS role to access cache
-        uses: aws-actions/configure-aws-credentials@v5.1.0
-        with:
-          aws-region: ${{ vars.AWS_REGION }}
-          role-to-assume: ${{ github.ref == 'refs/heads/main' && vars.MAIN_BRANCH_ROLE_ARN || vars.PULL_REQUEST_ROLE_ARN }}
-
-      - name: Make cached checkout visible to workflow
-        run: |
-          ln -s /workspace/code .
-
-      - name: Update checkout
-        uses: actions/checkout@v4
-        with:
-          path: code
-          lfs: true
-
-      - name: Update required submodules
-        working-directory: /workspace/code
-        run: |
-          bash scripts/checkout_submodules.sh
-
-      - name: Configure python venv for host build and test
-        working-directory: /workspace/code
-        run: |
-          ./scripts/configure_python.sh /workspace/venv /workspace/build
-
-      - name: Configure build for host
-        working-directory: /workspace/code
-        run: |
-          ./scripts/configure_build.sh /workspace/build
-
-      - name: Build for host
-        working-directory: /workspace/build
-        env:
-          SCCACHE_SERVER_UDS: ${{ github.workspace }}/sccache.sock
-        run: |
-          sccache --start-server
-          cmake --build .
-          sccache --show-stats
-
-      - name: Configure build for Astra machina
-        working-directory: /workspace/code
-        run: |
-          ./scripts/configure_soc_build.sh /workspace/build-astra-sl /workspace/build astra_machina poky
-
-      - name: Build for Astra machina
-        working-directory: /workspace/build-astra-sl
-        run: |
-          cmake --build . --target torq-run-module
-
-      - name: Gather release files
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          /workspace/code/scripts/assemble_release_docker.sh /workspace/build /workspace/build-astra-sl release
-          tar -zcf release.tar.gz release
-
-      - name: Upload release files
-        uses: actions/upload-artifact@v4
-        with:
-          name: release
-          path: release.tar.gz
-          retention-days: 30
-
-  test_aws_fpga:    
-    name: Test with AWS FPGA on ${{ matrix.chip_group }}
-
-    needs: [ build ]
-
-    runs-on: ${{ vars.DISABLE_TESTS != 'true' && format('torq-fpga-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
-
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || contains(github.event.pull_request.labels.*.name || '', 'test-aws') }}
-
-    permissions:
-      contents: read
-      id-token: write  # this is required to assume the AWS role
-
-    timeout-minutes: 50
-
-    strategy:
-      fail-fast: false
-      matrix:
-        # FIXME next chip fails
-        #chip_group: [ default.group , next.group ]
-        chip_group: [ default.group]
-
-    steps:
       
       # this is required to be able to download artifacts from S3
       - name: Assume AWS role
-        uses: aws-actions/configure-aws-credentials@v5.1.0
+        uses: aws-actions/configure-aws-credentials@v6
         id: assume_role
         with:
           aws-region: ${{ vars.AWS_REGION }}
           role-to-assume: ${{ github.ref == 'refs/heads/main' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
 
       - name: Checkout repository
-        if: ${{ vars.DISABLE_TESTS != 'true' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           lfs: false
           submodules: false
-
-      - name: Clear FPGA slot
-        if: ${{ vars.DISABLE_TESTS != 'true' }}
-        run: |
-          # the instance on which this is running may have already served another shell
-          # so we need to clear the slot before running our tests to ensure a clean state
-          fpga-clear-local-image -S 0
     
-      - name: Run AWS FPGA model tests
-        if: ${{ vars.DISABLE_TESTS != 'true' }}
+      - name: Run tests with alternative engines
         uses: ./.github/actions/tests
         with:
           app_id: ${{ vars.CI_APP_ID }}
           app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           extra_repo: ${{ vars.EXTRAS_REPO }}
+          release_run_id: none # we run the tests without a release package
           setup_external_engine_requirements: true
           hf_token: ${{ secrets.HF_TOKEN }}
-          pytest_args: -m "fpga_ci or alternative_engines" -n auto --performance-report=${{ github.workspace }}/aws_fpga_test_performance_${{ matrix.chip_group }}.csv --torq-runtime-hw-type aws_fpga --torq-runtime-timeout=20 --torq-chips ${{ matrix.chip_group }} --torq-runtime-profiling-output-dir=${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }} --tflite-layer-test-generate-full-model-only
+          pytest_args: -m alternative_engines -n auto --tflite-layer-test-generate-full-model-only
           torq_perf_server: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
-          #torq_perf_server_token: ${{ secrets.TORQ_PERF_SERVER_TOKEN }}
-          batch_name: fpga-${{ matrix.chip_group }}
+          batch_name: alternative-engines
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
           s3_hf_cache_dir: hf_cache
-
-      - name: Upload AWS FPGA test performance
-        if: ${{ vars.DISABLE_TESTS != 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: aws_fpga_test_performance_${{ matrix.chip_group }}
-          path: ${{ github.workspace }}/aws_fpga_test_performance_${{ matrix.chip_group }}.csv
-          retention-days: 60
-      
-      - name: Upload AWS FPGA profiling logs
-        if: ${{ vars.DISABLE_TESTS != 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: aws_fpga_profiling_logs_${{ matrix.chip_group }}
-          path: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
-          retention-days: 60
-          
 

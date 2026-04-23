@@ -15,7 +15,10 @@ import shutil
 import pytest
 import json
 
-from iree.compiler.ir import Context, Module
+try:
+    from iree.compiler.ir import Context, Module
+except ImportError:
+    pytest.skip("iree package not available, skipping iree based tests", allow_module_level=True)
 
 from .aws_fpga import FpgaSession, RemoteFpgaSession
 from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock
@@ -63,7 +66,7 @@ def pytest_addoption(parser):
     parser.addoption("--torq-benchmark-output-dir", default=None, help="Directory to save run time benchmarks outputs")
     parser.addoption("--update-astra-runtime", action="store_true", default=False, help="Enable runtime update: auto-deploy torq-run-module to the board (hash-based), session-level board lock for exclusive access, and per-user runner paths")
     parser.addoption("--torq-ko-path", default=None, help="Path to a local NPU kernel module (.ko) to deploy to the board when --update-astra-runtime is active (if omitted, the default on-board module is used)")
-    parser.addoption("--torq-test-alternative-engines", action="store", default="", help="Comma-separated list of alternative engines to test.")
+    
 
 
 def pytest_sessionstart(session):
@@ -167,26 +170,6 @@ def pytest_generate_tests(metafunc):
             raise ValueError("No chips found for torq tests")
 
         metafunc.parametrize('chip_config', chips, indirect=True)
-
-    if "alternative_engine" in metafunc.fixturenames:
-        from .engines import engines
-        all_engines = engines.list_engines()
-        selected = metafunc.config.getoption("torq_test_alternative_engines")
-
-        if selected:
-            selected = [e.strip() for e in selected.split(",") if e.strip()]
-
-            unknown = [e for e in selected if e not in all_engines]
-            if unknown:
-                raise pytest.UsageError(
-                    f"Unknown engine(s): {', '.join(unknown)}"
-                )
-            values = selected
-        else:
-            values = all_engines
-
-        metafunc.parametrize("alternative_engine", values)
-
 
 def get_latest_chips():
     

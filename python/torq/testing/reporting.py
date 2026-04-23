@@ -1,4 +1,3 @@
-from urllib.parse import urlencode
 import requests
 import os
 import pytest
@@ -17,8 +16,13 @@ from typing import Dict, Any, List, Optional
 
 import random
 
-from torq.model_profiler.generate_perfetto_combined_report import extract_perfetto_summary, extract_model_name
-from torq.model_profiler.perfetto_logger import get_dashboard_metrics
+try:
+    from torq.model_profiler.perfetto_logger import get_dashboard_metrics
+except ImportError:
+
+    # FIXME: we should untagle dashboard metrics from IREE
+    def get_dashboard_metrics():
+        return [{'name': 'total_duration', 'description': 'Total execution duration of the workload', 'unit': 'ns'}]
 
 logger = logging.getLogger("torq.testing.reporting")
 
@@ -413,11 +417,11 @@ def pytest_sessionfinish(session):
 
                 report = report_phases['call']
                 props = dict(report.user_properties)
-                profiling_output_file = dict(report.user_properties).get('profiling_output')
+                profiling_output_file = props.get('profiling_output')
                 engine_compilation_time = props.get("engine_compilation_time")
 
                 if engine_compilation_time:
-                    test_run['engine_compilation_time'] = engine_compilation_time
+                    test_run['measurements'] = [{"metric": "total_duration", "value": engine_compilation_time * 1_000_000}]
 
                 if profiling_output_file:
                     # Copy profiling file into profiles/ and reference it relative to manifest
@@ -589,6 +593,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     """
     if not config.getoption("--update-astra-runtime", default=False):
         return
+
+    # FIXME: we now have measurements directly in the report so we don't need to extract them from the pb file anymore
+    from torq.model_profiler.generate_perfetto_combined_report import extract_perfetto_summary, extract_model_name
 
     profiling_output_dir = config.getoption("--torq-runtime-profiling-output-dir", default=None)
     if not profiling_output_dir:
