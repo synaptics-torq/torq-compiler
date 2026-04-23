@@ -105,6 +105,9 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm) {
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
 
+    // In-dialect rewrite on torq_hl ops (e.g. big-stride conv2d via space-to-depth)
+    funcPm.addPass(torq_hl::createTorqHlOpTransformPass());
+
     // Handles valid pad operations
     funcPm.addPass(createValidToSamePadPass());
 
@@ -307,6 +310,9 @@ void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
 
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
+
+    // In-dialect rewrite on torq_hl ops (e.g. big-stride conv2d via space-to-depth)
+    funcPm.addPass(torq_hl::createTorqHlOpTransformPass());
 
     // Handles valid pad operations
     funcPm.addPass(createValidToSamePadPass());

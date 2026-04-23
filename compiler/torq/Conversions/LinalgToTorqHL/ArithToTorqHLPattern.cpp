@@ -24,6 +24,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OperationSupport.h"
+#include "mlir/Transforms/DialectConversion.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "arith-to-torq-pattern"
@@ -465,23 +466,29 @@ class ElementWiseShiftOpPattern : public OpRewritePattern<linalg::GenericOp> {
             auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
             auto shiftConstValue = shiftConst.getValue();
             int64_t shiftVal = 0;
-            auto denseAttr = dyn_cast<DenseIntElementsAttr>(shiftConstValue);
-            if (!denseAttr) {
+            bool foundShiftVal = false;
+            if (auto denseAttr = dyn_cast<DenseIntElementsAttr>(shiftConstValue)) {
+                if (llvm::all_of(denseAttr.getType().getShape(), [](int64_t dim) {
+                        return dim == 1;
+                    })) {
+                    shiftVal = (*denseAttr.begin()).getSExtValue();
+                    foundShiftVal = true;
+                }
+            }
+            else if (auto intAttr = dyn_cast<IntegerAttr>(shiftConstValue)) {
+                shiftVal = intAttr.getInt();
+                foundShiftVal = true;
+            }
+            else {
                 return rewriter.notifyMatchFailure(
                     srcOp, "Unsupported shift constant attribute type in ElementWiseShiftOpPattern"
                 );
             }
-            if (llvm::all_of(denseAttr.getType().getShape(), [](int64_t dim) {
-                    return dim == 1;
-                })) {
-                shiftVal = (*denseAttr.begin()).getSExtValue();
-                SmallVector<int32_t> data(
-                    input1Type.getNumElements(), static_cast<int32_t>(shiftVal)
+            if (foundShiftVal) {
+                auto value = DenseElementsAttr::get(
+                    input1Type, IntegerAttr::get(input1Type.getElementType(), shiftVal)
                 );
-                input2 = arith::ConstantOp::create(
-                             rewriter, srcOp.getLoc(), input1Type,
-                             DenseIntElementsAttr::get(input1Type, data)
-                )
+                input2 = arith::ConstantOp::create(rewriter, srcOp.getLoc(), input1Type, value)
                              .getResult();
             }
         }

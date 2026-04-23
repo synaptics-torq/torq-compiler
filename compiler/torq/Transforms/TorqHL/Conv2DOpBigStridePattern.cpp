@@ -4,16 +4,14 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "OpPatternOptions.h"
+#include "Patterns.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
-#include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
-#include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -27,12 +25,11 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Transforms/DialectConversion.h"
-#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-conv2d-big-stride-pattern"
 
-namespace mlir::syna::torq {
+namespace mlir::syna::torq_hl {
 
 Value getSpaceToDepth(Value input, int sh, int sw, PatternRewriter &rewriter) {
     auto loc = input.getLoc();
@@ -51,7 +48,7 @@ Value getSpaceToDepth(Value input, int sh, int sw, PatternRewriter &rewriter) {
 
     // Transpose to [n, c, sh, sw, h/sh, w/sw]
     const SmallVector<int64_t, 6> perm = {0, 1, 3, 5, 2, 4};
-    Value transposed = transposeValue(expanded, perm, input.getLoc(), rewriter);
+    Value transposed = torq::transposeValue(expanded, perm, input.getLoc(), rewriter);
 
     // Collapse [n, c, sh, sw, h/sh, w/sw] to [n, c*sh*sw, h/sh, w/sw]
     auto outType = RankedTensorType::get({n, c * sh * sw, h / sh, w / sw}, elementType);
@@ -74,7 +71,7 @@ struct Conv2DOpBigStride : public OpRewritePattern<syna::torq_hl::Conv2DOp> {
         : OpRewritePattern<ConvOp>(context), _markFuseGroups(markFuseGroups) {}
 
     LogicalResult matchAndRewrite(ConvOp op, PatternRewriter &rewriter) const override {
-        if (_markFuseGroups && isMarkedFuseGroup(op)) {
+        if (_markFuseGroups && torq::isMarkedFuseGroup(op)) {
             return rewriter.notifyMatchFailure(op, "Already marked");
         }
 
@@ -103,8 +100,8 @@ struct Conv2DOpBigStride : public OpRewritePattern<syna::torq_hl::Conv2DOp> {
         auto sw = strides[1];
 
         if (_markFuseGroups) {
-            markOpFuseGroup(
-                op, rewriter, op->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            torq::markOpFuseGroup(
+                op, rewriter, op->template getAttrOfType<IntegerAttr>(torq::TORQ_FUSE_GROUP_ID)
             );
             return success();
         }
@@ -114,7 +111,7 @@ struct Conv2DOpBigStride : public OpRewritePattern<syna::torq_hl::Conv2DOp> {
         // Reshape weights from [OIHW] to [O,I*h*w,H/sh,W/sw]
         Value torqWeights = getSpaceToDepth(weights, sh, sw, rewriter);
 
-        setCompileTimeConstAttr(torqWeights.getDefiningOp());
+        torq::setCompileTimeConstAttr(torqWeights.getDefiningOp());
         // Update conv2d
         rewriter.modifyOpInPlace(op, [&]() {
             op.setOperand(op.getInputMutable().getOperandNumber(), inToDepth);
@@ -132,4 +129,4 @@ void populateTorqHLConv2DBigStridePatterns(
     patterns.insert<Conv2DOpBigStride>(context, markFuseGroups);
 }
 
-} // namespace mlir::syna::torq
+} // namespace mlir::syna::torq_hl

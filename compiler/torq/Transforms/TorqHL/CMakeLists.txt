@@ -1,4 +1,5 @@
 set(sources
+    Conv2DOpBigStridePattern.cpp
     FormDispatchRegionsPass.cpp
     Passes.cpp
     TorqHLOptimizeSegmentationPass.cpp
@@ -32,9 +33,9 @@ set(deps
     iree::compiler::Dialect::Util::IR
     iree::compiler::Dialect::Util::Transforms
     iree::compiler::Utils
+    iree::target::torq::Conversions::LinalgToTorqHL::LinalgToTorqHL
     iree::target::torq::Conversions::TorqHLToTorqHW
     iree::target::torq::Conversions::TosaToTorqHL
-    iree::target::torq::Conversions::LinalgToTorqHL
 )
 
 if(TORQ_ENABLE_TORQ_GENERIC)
@@ -67,10 +68,10 @@ iree_cc_library(
     Transforms
   HDRS
     "Passes.h"
+    "Patterns.h"
   SRCS
     ${sources}
   DEPS
     ${deps}
   PUBLIC
 )
-

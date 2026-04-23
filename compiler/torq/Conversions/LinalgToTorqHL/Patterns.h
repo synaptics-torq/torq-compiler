@@ -49,10 +49,6 @@ void populateLinalgToTorqHLReduceMeanPatternsBeforeMarking(
 void populateLinalgToTorqHLReduceMeanPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
-void populateTorqHLConv2DBigStridePatterns(
-    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
-);
-
 void populateLinalgToTorqHLPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

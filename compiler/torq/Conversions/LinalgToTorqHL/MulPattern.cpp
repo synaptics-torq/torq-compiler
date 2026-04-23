@@ -211,7 +211,6 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         if (scInfo) {
             rewriter.replaceOp(output.getDefiningOp(), torqOut);
-            rewriter.eraseOp(srcOp);
         }
         else {
             rewriter.replaceOp(srcOp, torqOut);

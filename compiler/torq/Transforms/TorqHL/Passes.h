@@ -18,6 +18,8 @@ namespace mlir::syna::torq_hl {
 // Conversion
 //===----------------------------------------------------------------------===//
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHlOpTransformPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHLOptimizeSegmentationPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createSimplifyGenericPass();

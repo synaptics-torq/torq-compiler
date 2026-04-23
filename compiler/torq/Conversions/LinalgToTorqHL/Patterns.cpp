@@ -708,9 +708,7 @@ struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
                             [&](auto typedOp) {
                                 if (typedOp.getOutputs()[0] == srcOp.getResults()[0]) {
 
-                                    srcOp.getResults()[0].replaceAllUsesWith(srcOp.getOutputs()[0]);
-                                    rewriter.eraseOp(srcOp);
-
+                                    rewriter.replaceOp(srcOp, srcOp.getOutputs()[0]);
                                     return true;
                                 }
                                 return false;
@@ -824,9 +822,7 @@ struct FillOpConversionRewrite : public OpRewritePattern<linalg::FillOp> {
                                         return true;
                                     }
 
-                                    srcOp.getResults()[0].replaceAllUsesWith(srcOp.getOutputs()[0]);
-                                    rewriter.eraseOp(srcOp);
-
+                                    rewriter.replaceOp(srcOp, srcOp.getOutputs()[0]);
                                     return true;
                                 }
                                 return false;
@@ -1710,8 +1706,7 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         );
 
         if (output) {
-            srcOp.getResults()[0].replaceAllUsesWith(output);
-            rewriter.eraseOp(srcOp);
+            rewriter.replaceOp(srcOp, output);
             return success();
         }
 
@@ -1916,6 +1911,8 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
 struct TensorPadOpConversion : public OpRewritePattern<tensor::PadOp> {
     using OpRewritePattern<tensor::PadOp>::OpRewritePattern;
+
+    TensorPadOpConversion(MLIRContext *context) : OpRewritePattern(context) {}
 
     LogicalResult
     matchAndRewrite(tensor::PadOp padTensorOp, PatternRewriter &rewriter) const override {

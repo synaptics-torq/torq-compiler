@@ -97,13 +97,10 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
         if (constOp && getIntegerConstantValue(constOp, scalarValue)) {
             // Only now commit the destructive IR changes
-            if (candidateElOp) {
-                input = candidateInput;
-                candidateElOp->getResult(0).replaceAllUsesWith(candidateInput);
-                rewriter.eraseOp(candidateElOp);
-            }
-            else {
-                input = candidateInput;
+            input = candidateInput;
+            if (candidateElOp &&
+                candidateElOp->getResult(0).getType() == candidateInput.getType()) {
+                rewriter.replaceOp(candidateElOp, candidateInput);
             }
             scaleInfo = probeScaleInfo;
             return true;
@@ -205,8 +202,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
             auto newOp = createElOp(rewriter, maybeElemOp.getLoc(), inputElementType);
 
-            maybeElemOp.getResult(0).replaceAllUsesWith(newOp->getResult(0));
-            rewriter.eraseOp(maybeElemOp);
+            rewriter.replaceOp(maybeElemOp, newOp->getResults());
             input = newOp->getResult(0);
         }
 
@@ -219,8 +215,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                 rewriter, collapseOp.getLoc(), newOutputType, input,
                 collapseOp.getReassociationIndices()
             );
-            collapseOp->getResult(0).replaceAllUsesWith(newCollapseOp.getResult());
-            rewriter.eraseOp(collapseOp);
+            rewriter.replaceOp(collapseOp, newCollapseOp.getResult());
             input = newCollapseOp.getResult();
         }
 
@@ -233,8 +228,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                 rewriter, expandOp.getLoc(), newOutputType, input,
                 expandOp.getReassociationIndices()
             );
-            expandOp->getResult(0).replaceAllUsesWith(newExpandOp.getResult());
-            rewriter.eraseOp(expandOp);
+            rewriter.replaceOp(expandOp, newExpandOp.getResult());
             input = newExpandOp.getResult();
         }
 
@@ -468,7 +462,6 @@ void populateLinalgToTorqHLEWBinaryPatterns(
     // before the remaining patterns (eg addition)
     // Note: using benefit to control the order of application is not enough since this
     // only works for patterns that are applied to the same op
-
     int sh8b = 12;
     int sh16b = 12; // FIXME 16b shift?
     patterns.insert<EltwiseBinaryConvert>(

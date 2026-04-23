@@ -8,10 +8,34 @@
 #define IREE_COMPILER_DIALECT_TORQHL_TRANSFORMS_PASSES_TD_
 
 include "mlir/Pass/PassBase.td"
+include "mlir/Rewrite/PassUtil.td"
 
 //===---------------------------------------------------------------------===//
 // TORQ passes (keep alphabetical)
 //===---------------------------------------------------------------------===//
+
+def TorqHlOpTransform :
+    InterfacePass<"torq-hl-op-transform",
+      "mlir::FunctionOpInterface"> {
+
+    let summary = "Transformation between TorqHL ops after lowering";
+
+    let description = [{
+        Runs post-lowering patterns on the TorqHL dialect, such as rewriting
+        big-stride conv2d via space-to-depth.
+    }];
+
+    let constructor =
+        "mlir::syna::torq_hl::createTorqHlOpTransformPass()";
+
+    let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect",
+        "::mlir::tensor::TensorDialect",
+        "::mlir::linalg::LinalgDialect"
+    ];
+
+    let options = RewritePassUtils.options;
+}
 
 def TorqHLOptimizeSegmentation :
     InterfacePass<"torq-torqhl-optimize-segmentation",
