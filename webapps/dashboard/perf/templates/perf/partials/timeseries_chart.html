@@ -1,0 +1,88 @@
+{% load custom_tags %}
+
+<div class="card mb-4 js-timeseries-root" data-timeseries-root data-timeseries-json-id="{{ json_script_id }}">
+    <div class="card-header d-flex flex-column flex-lg-row gap-3 justify-content-between align-items-lg-center bg-body">
+        <div>
+            <h2 class="h6 mb-0">{{ title }}</h2>
+        </div>
+        {% if form and timeseries.kind == 'single_metric' %}
+        <form id="{{ chart_id }}-form" method="get" class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center mb-0 js-timeseries-form">
+            {{ form.baseline_session }}
+            {{ form.baseline_test_run }}
+            {{ form.metric }}
+            {{ form.start_date }}
+            {{ form.end_date }}
+            {% if timeseries.metrics|length > 1 %}
+            <div class="d-flex align-items-center gap-2">
+                <label for="{{ chart_id }}-metric" class="small text-body-secondary mb-0">Metric</label>
+                <select id="{{ chart_id }}-metric" class="form-select form-select-sm js-timeseries-metric-select">
+                    {% for metric in timeseries.metrics %}
+                    <option value="{{ metric.name }}"{% if metric.name == timeseries.selected_metric_name %} selected{% endif %}>{{ metric.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+            {% if timeseries.session_options|length > 1 and timeseries.metrics %}
+            <div class="d-flex align-items-center gap-2">
+                <label for="{{ chart_id }}-start-session" class="small text-body-secondary mb-0">Start</label>
+                <select id="{{ chart_id }}-start-session" class="form-select form-select-sm timeseries-session-select js-timeseries-start-session">
+                    {% for session_option in timeseries.session_options %}
+                    <option value="{{ session_option.session_id }}" data-timestamp="{{ session_option.timestamp }}"{% if session_option.session_id == timeseries.selected_start_session_id %} selected{% endif %}>#{{ session_option.session_id }} · {{ session_option.timestamp_label }}{% if session_option.is_current %} · current{% elif session_option.is_baseline %} · baseline{% endif %}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <label for="{{ chart_id }}-end-session" class="small text-body-secondary mb-0">End</label>
+                <select id="{{ chart_id }}-end-session" class="form-select form-select-sm timeseries-session-select js-timeseries-end-session">
+                    {% for session_option in timeseries.session_options %}
+                    <option value="{{ session_option.session_id }}" data-timestamp="{{ session_option.timestamp }}"{% if session_option.session_id == timeseries.selected_end_session_id %} selected{% endif %}>#{{ session_option.session_id }} · {{ session_option.timestamp_label }}{% if session_option.is_current %} · current{% elif session_option.is_baseline %} · baseline{% endif %}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+            <div class="btn-group btn-group-sm flex-wrap" role="group" aria-label="History range selection">
+                <button type="button" class="btn {% if timeseries.active_range == '7' %}btn-primary active{% else %}btn-outline-secondary{% endif %}" data-history-range="7" aria-pressed="{% if timeseries.active_range == '7' %}true{% else %}false{% endif %}">1W</button>
+                <button type="button" class="btn {% if timeseries.active_range == '30' %}btn-primary active{% else %}btn-outline-secondary{% endif %}" data-history-range="30" aria-pressed="{% if timeseries.active_range == '30' %}true{% else %}false{% endif %}">1M</button>
+                <button type="button" class="btn {% if timeseries.active_range == '90' %}btn-primary active{% else %}btn-outline-secondary{% endif %}" data-history-range="90" aria-pressed="{% if timeseries.active_range == '90' %}true{% else %}false{% endif %}">3M</button>
+                <button type="button" class="btn {% if timeseries.active_range == '180' %}btn-primary active{% else %}btn-outline-secondary{% endif %}" data-history-range="180" aria-pressed="{% if timeseries.active_range == '180' %}true{% else %}false{% endif %}">6M</button>
+                <button type="button" class="btn {% if timeseries.active_range == '365' %}btn-primary active{% else %}btn-outline-secondary{% endif %}" data-history-range="365" aria-pressed="{% if timeseries.active_range == '365' %}true{% else %}false{% endif %}">1Y</button>
+                <button type="button" class="btn {% if timeseries.active_range == 'all' %}btn-primary active{% else %}btn-outline-secondary{% endif %}" data-history-range="all" aria-pressed="{% if timeseries.active_range == 'all' %}true{% else %}false{% endif %}">All</button>
+            </div>
+        </form>
+        {% elif header_note %}
+        <span class="text-body-secondary small">{{ header_note }}</span>
+        {% endif %}
+    </div>
+    <div class="card-body">
+        {% if timeseries.kind == 'single_metric' %}
+            {% if timeseries.points and timeseries.selected_metric %}
+            <div class="row g-3 align-items-center mb-3">
+                <div class="col-12 col-lg-4">
+                    <p class="text-body-secondary small mb-1 js-timeseries-range-label">{{ timeseries.range_label }}</p>
+                    <p class="h5 mb-0 js-timeseries-range-change">Loading history…</p>
+                </div>
+                <div class="col-12 col-lg-8">
+                    <p class="text-body-secondary small mb-0 js-timeseries-range-meta">{{ meta_text }}</p>
+                </div>
+            </div>
+            {{ timeseries|json_script:json_script_id }}
+            <div class="timeseries-chart-frame">
+                <canvas id="{{ canvas_id }}" class="js-timeseries-canvas"></canvas>
+            </div>
+            {% elif timeseries.points and not timeseries.metrics %}
+            <p class="text-body-secondary mb-0">No time-based metrics are available for this test run, so there is nothing to chart historically.</p>
+            {% elif timeseries.points %}
+            <p class="text-body-secondary mb-0">Only one historical point is available for this test so far, so there is not enough data to draw a trend line.</p>
+            {% else %}
+            <p class="text-body-secondary mb-0">No current-session or main-branch history is available yet for this test case.</p>
+            {% endif %}
+        {% elif timeseries.points %}
+            {{ timeseries|json_script:json_script_id }}
+            <div class="timeseries-chart-frame">
+                <canvas id="{{ canvas_id }}" class="js-timeseries-canvas"></canvas>
+            </div>
+        {% else %}
+            <p class="text-body-secondary mb-0">No time series data is available.</p>
+        {% endif %}
+    </div>
+</div>

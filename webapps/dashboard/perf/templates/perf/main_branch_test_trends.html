@@ -5,6 +5,10 @@
 
 {% block title %}Main Branch Test Trends - Torq{% endblock %}
 
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'perf/css/timeseries_chart.css' %}">
+{% endblock %}
+
 {% block content %}
 <div class="container-fluid px-0">
     <section class="mb-4">
@@ -44,19 +48,7 @@
         </div>
     </section>
 
-    <section class="card mb-4">
-        <div class="card-header bg-body d-flex align-items-center justify-content-between">
-            <h2 class="h6 mb-0">Total Tests vs XFail Tests</h2>
-            <span class="text-secondary small">Main branch sessions ordered by time</span>
-        </div>
-        <div class="card-body">
-            {% if sessions %}
-                {% chart chart_data class_name="main-branch-test-trends-chart" width=1200 height=320 %}
-            {% else %}
-                <p class="text-muted mb-0">No main branch sessions are available.</p>
-            {% endif %}
-        </div>
-    </section>
+    {% timeseries_chart chart_data chart_id="main-branch-test-trends" title="Total Tests vs XFail Tests" header_note="Main branch sessions ordered by time" %}
 
     <section class="card">
         <div class="card-header bg-body">
@@ -106,5 +98,5 @@
 
 {% block extra_js %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="{% static 'perf/js/main_branch_test_trends.js' %}"></script>
+<script src="{% static 'perf/js/timeseries_chart.js' %}"></script>
 {% endblock %}

@@ -45,21 +45,39 @@ def main_branch_test_trends(request):
     sessions = queries.test_session_statistics.get_main_branch_test_counts_over_time()
     latest_session = sessions[-1] if sessions else None
     chart_data = {
-        'labels': [session.timestamp.isoformat() for session in sessions],
+        'kind': 'multi_series',
         'datasets': [
             {
+                'name': 'num_total',
                 'label': 'Total tests',
-                'data': [session.num_total for session in sessions],
+                'unit': 'unitless',
                 'borderColor': 'rgb(13, 110, 253)',
                 'backgroundColor': 'rgba(13, 110, 253, 0.12)',
             },
             {
+                'name': 'num_xfail',
                 'label': 'XFail tests',
-                'data': [session.num_xfail for session in sessions],
+                'unit': 'unitless',
                 'borderColor': 'rgb(255, 193, 7)',
                 'backgroundColor': 'rgba(255, 193, 7, 0.16)',
             },
         ],
+        'points': [
+            {
+                'session_id': session.id,
+                'timestamp': session.timestamp.isoformat(),
+                'git_branch': session.git_branch or '',
+                'git_commit': session.git_commit or '',
+                'workflow_url': session.workflow_url or '',
+                'values': {
+                    'num_total': session.num_total,
+                    'num_xfail': session.num_xfail,
+                },
+            }
+            for session in sessions
+        ],
+        'x_axis_label': 'Session timestamp',
+        'y_axis_label': 'Number of tests',
     }
 
     return render(request, 'perf/main_branch_test_trends.html', {
@@ -87,7 +105,7 @@ def test_session_summary(request, session_id):
         if min_duration_ns := form.cleaned_data['min_duration_ns']:
             options['min_duration_ns'] = min_duration_ns
 
-    else:        
+    else:
         baseline_session = queries.test_session_comparison.get_default_comparison_session(session_id)
         form = forms.TestSessionSummaryOptions(initial={'baseline_session': baseline_session, 'min_duration_ns': options['min_duration_ns']})
     
@@ -101,7 +119,7 @@ def test_session_results(request, session_id):
 
     session = get_object_or_404(TestSession, id=session_id)
 
-    options = {'baseline_session': None, 'nodeid': '', 'status': 'ALL', 'baseline_status': 'ALL', 'sort_by': 'nodeid', 'page': 1}
+    options = {'baseline_session': None, 'nodeid': '', 'status': 'ALL', 'comparison_transition': 'ALL', 'sort_by': 'nodeid', 'page': 1}
 
     if request.GET:
         form = forms.TestSessionResultsOptions(data=request.GET)
@@ -111,14 +129,21 @@ def test_session_results(request, session_id):
 
         baseline_session = form.cleaned_data['baseline_session']
         options.update(form.cleaned_data)
-    else:        
+    else:
         baseline_session = queries.test_session_comparison.get_default_comparison_session(session_id)
         form = forms.TestSessionResultsOptions(initial={'baseline_session': baseline_session})
     
 
-    results_page, total = queries.test_session_results.get_session_results(session, baseline_session, 
-                                           options['nodeid'], options['status'], options['baseline_status'], options['sort_by'],
-                                           options['page'], 50)  # Pass page number and page size for pagination
+    results_page, total = queries.test_session_results.get_session_results(
+        session,
+        baseline_session,
+        options['nodeid'],
+        options['status'],
+        options['comparison_transition'],
+        options['sort_by'],
+        options['page'],
+        50,
+    )
 
     # paginate the results
     paginator = Paginator(range(total), 50) # since this view uses raw SQL we don't directly pass a queryset to the paginator
@@ -148,21 +173,53 @@ def test_run(request, test_run_id):
         if not form.is_valid():
             return redirect('test_run', test_run_id=test_run_id)
 
+        baseline_session = form.cleaned_data['baseline_session']
         baseline_test_run = form.cleaned_data['baseline_test_run']
+        history_options = {
+            'metric': form.cleaned_data['metric'] or None,
+            'start_date': form.cleaned_data['start_date'],
+            'end_date': form.cleaned_data['end_date'],
+        }
 
     else:
         form = forms.TestRunOptions()
+        baseline_session = None
         baseline_test_run = None
+        history_options = {}
 
-    data = queries.test_run_comparison.get_test_run_comparison(test_run, baseline_test_run)
+    if baseline_session is not None and baseline_test_run is None:
+        baseline_test_run = queries.test_run_comparison.get_corresponding_test_run(test_run, baseline_session)
+
+    metrics_with_comparison = queries.test_run_comparison.get_test_run_comparison(test_run, baseline_test_run)
+    grouped_metrics_with_comparison = queries.test_run_comparison.group_metrics_with_comparison(metrics_with_comparison)
+    test_run_history = queries.test_run_comparison.get_test_run_history(
+        test_run,
+        baseline_test_run,
+        history_options=history_options,
+    )
+
+    total_duration_row = next(
+        (row for row in metrics_with_comparison if row['metric_name'] == 'total_duration'),
+        None,
+    )
+
+    data = {
+        'comparison_rows': metrics_with_comparison,
+        'total_duration': total_duration_row,
+    }
 
     return render(request, 'perf/test_run.html',
         {
             'test_run': test_run,
             'baseline_test_run': baseline_test_run,
+            'baseline_session': baseline_session,
             'form': form,
-            'data': data
-        }
+            'data': data,
+            'metrics_with_comparison': metrics_with_comparison,
+            'grouped_metrics_with_comparison': grouped_metrics_with_comparison,
+            'test_run_history': test_run_history,
+            'total_duration_row': total_duration_row,
+        },
     )
 
 

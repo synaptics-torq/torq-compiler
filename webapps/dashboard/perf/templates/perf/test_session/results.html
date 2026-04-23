@@ -18,7 +18,7 @@
                         {% if baseline_session %}
                         <span class="badge text-bg-info">Comparison mode</span>
                         {% endif %}
-                        <a href="{% url 'test_session_summary' session.id %}" class="btn btn-sm btn-outline-primary ms-auto">To session summary</a>
+                        <a href="{% url 'test_session_summary' session.id %}{% if baseline_session %}?baseline_session={{ baseline_session.id }}{% endif %}" class="btn btn-sm btn-outline-primary ms-auto">To session summary</a>
                     </div>
                     <p class="text-body-secondary mb-0">Timestamp: {{ session.timestamp }}</p>
                 </div>
@@ -49,11 +49,13 @@
                         {% include "perf/partials/bootstrap_field.html" with field=form.status only %}
                     </div>
                     <div class="col-12 col-md-4">
-                        {% include "perf/partials/bootstrap_field.html" with field=form.baseline_status only %}
-                    </div>
-                    <div class="col-12 col-md-4">
                         {% include "perf/partials/bootstrap_field.html" with field=form.sort_by only %}
                     </div>
+                    {% if baseline_session %}
+                    <div class="col-12 col-md-4">
+                        {% include "perf/partials/bootstrap_field.html" with field=form.comparison_transition only %}
+                    </div>
+                    {% endif %}
                     <div class="col-12">
                         {% include "perf/partials/bootstrap_field.html" with field=form.nodeid only %}
                     </div>
@@ -112,8 +114,8 @@
                     {% for result in results %}                        
                         <tr>
                             {% if result.current_id %}
-                            {% if result.baseline_id %}
-                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_id %}?baseline_test_run={{ result.baseline_id }}">{{ result.nodeid }}</a></td>
+                            {% if baseline_session %}
+                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_id %}?baseline_session={{ baseline_session.id }}{% if result.baseline_id %}&baseline_test_run={{ result.baseline_id }}{% endif %}">{{ result.nodeid }}</a></td>
                             {% else %}
                             <td class="fw-semibold"><a href="{% url 'test_run' result.current_id %}">{{ result.nodeid }}</a></td>
                             {% endif %}

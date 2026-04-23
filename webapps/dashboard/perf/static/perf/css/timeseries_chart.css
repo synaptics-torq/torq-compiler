@@ -1,0 +1,14 @@
+.timeseries-chart-frame {
+    height: clamp(220px, 24vw, 320px);
+    max-width: 960px;
+    margin: 0 auto;
+}
+
+.timeseries-chart-frame canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.timeseries-session-select {
+    min-width: 12rem;
+}

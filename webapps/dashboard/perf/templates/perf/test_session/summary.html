@@ -15,7 +15,7 @@
                     <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
                         <h1 class="h3 mb-0">Branch: {{ session.git_branch | default:"unknown" }}</h1>
                         <span class="badge text-bg-secondary">Session #{{ session.id }}</span>                        
-                        <a href="{% url 'test_session_results' session.id %}" class="btn btn-sm btn-outline-primary ms-auto">Browse detailed test case results</a>
+                        <a href="{% url 'test_session_results' session.id %}{% if baseline_session %}?baseline_session={{ baseline_session.id }}{% endif %}" class="btn btn-sm btn-outline-primary ms-auto">Browse detailed test case results</a>
                     </div>
                     <p class="text-body-secondary mb-0">Timestamp: {{ session.timestamp }}</p>
                 </div>
@@ -32,7 +32,7 @@
                         {% include "perf/partials/bootstrap_form.html" with form=form only %}
                         <button type="submit" class="btn btn-primary">Switch baseline session</button>
                         {% if baseline_session %}
-                        <a href="{% url 'test_session_summary' baseline_session.id %}?compare_with=" class="btn btn-outline-secondary" target="_blank" rel="noopener noreferrer">
+                        <a href="{% url 'test_session_summary' baseline_session.id %}" class="btn btn-outline-secondary" target="_blank" rel="noopener noreferrer">
                             <i class="bi bi-box-arrow-up-right me-1"></i>Go to baseline session
                         </a>
                         {% endif %}

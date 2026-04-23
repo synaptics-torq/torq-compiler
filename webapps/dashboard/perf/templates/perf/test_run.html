@@ -5,6 +5,10 @@
 
 {% block title %}Test Run - #{{ test_run.id }}{% endblock %}
 
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'perf/css/timeseries_chart.css' %}">
+{% endblock %}
+
 {% block content %}
 
 {% with metrics_with_comparison=data.comparison_rows total_duration_row=data.total_duration %}
@@ -22,7 +26,7 @@
                                 <span class="fs-6 align-middle">{% outcome_badge test_run.outcome %}</span>
                             </h1>
                         </div>
-                        <a href="{% url 'test_session_results' test_run.test_run_batch.test_session.id %}" class="btn btn-sm btn-outline-primary ms-auto">Back to session</a>
+                        <a href="{% url 'test_session_results' test_run.test_run_batch.test_session.id %}{% if baseline_session %}?baseline_session={{ baseline_session.id }}{% endif %}" class="btn btn-sm btn-outline-primary ms-auto">Back to session</a>
                     </div>
                     <p class="text-body-secondary mb-1">
                         Session #{{ test_run.test_run_batch.test_session.id }} - {{ test_run.test_run_batch.test_session.git_branch | default:"unknown" }}
@@ -41,19 +45,44 @@
         <div class="col-12 col-lg-2">
             <div class="card h-100">
                 <div class="card-body">
-                    <h2 class="h6 text-uppercase text-secondary mb-3">Profiling trace</h2>
-                    <div class="d-grid gap-2">
-                        {% if test_run.profiling_data %}
-                        <button type="button" class="btn btn-primary js-open-trace" data-trace-url="{% url 'download_trace' test_run.id %}" data-trace-name="test-run-{{ test_run.id }}.pb">
-                            <i class="bi bi-play-circle me-1"></i>View in Perfetto
-                        </button>
-                        <a href="{% url 'download_trace' test_run.id %}" class="btn btn-outline-secondary">
-                            <i class="bi bi-download me-1"></i>Download trace
-                        </a>
-                        {% else %}
-                        <button type="button" class="btn btn-outline-secondary" disabled>
-                            <i class="bi bi-download me-1"></i>Download trace
-                        </button>
+                    <h2 class="h6 text-uppercase text-secondary mb-3">Profiling traces</h2>
+                    <div class="d-grid gap-3">
+                        <div>
+                            <p class="text-body-secondary small mb-2">Current{% if test_run.profiling_data %} trace{% endif %}</p>
+                            <div class="d-grid gap-2">
+                                {% if test_run.profiling_data %}
+                                <button type="button" class="btn btn-primary js-open-trace" data-trace-url="{% url 'download_trace' test_run.id %}" data-trace-name="test-run-{{ test_run.id }}.pb">
+                                    <i class="bi bi-play-circle me-1"></i>View in Perfetto
+                                </button>
+                                <a href="{% url 'download_trace' test_run.id %}" class="btn btn-outline-secondary">
+                                    <i class="bi bi-download me-1"></i>Download trace
+                                </a>
+                                {% else %}
+                                <button type="button" class="btn btn-outline-secondary" disabled>
+                                    <i class="bi bi-download me-1"></i>Trace unavailable
+                                </button>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        {% if baseline_test_run %}
+                        <div>
+                            <p class="text-body-secondary small mb-2">Baseline trace</p>
+                            <div class="d-grid gap-2">
+                                {% if baseline_test_run.profiling_data %}
+                                <button type="button" class="btn btn-outline-primary js-open-trace" data-trace-url="{% url 'download_trace' baseline_test_run.id %}" data-trace-name="baseline-test-run-{{ baseline_test_run.id }}.pb">
+                                    <i class="bi bi-play-circle me-1"></i>View in Perfetto
+                                </button>
+                                <a href="{% url 'download_trace' baseline_test_run.id %}" class="btn btn-outline-secondary">
+                                    <i class="bi bi-download me-1"></i>Download trace
+                                </a>
+                                {% else %}
+                                <button type="button" class="btn btn-outline-secondary" disabled>
+                                    <i class="bi bi-download me-1"></i>Baseline trace unavailable
+                                </button>
+                                {% endif %}
+                            </div>
+                        </div>
                         {% endif %}
                     </div>
                 </div>
@@ -80,6 +109,12 @@
         </div>
     </div>
 
+    {% if baseline_session and not baseline_test_run %}
+    <div class="alert alert-warning mb-4" role="alert">
+        No comparable baseline run was found in session #{{ baseline_session.id }} for this test case.
+    </div>
+    {% endif %}
+
     {% if baseline_test_run %}
     <div class="row row-cols-1 row-cols-md-2 row-cols-xl-4 g-3 mb-4">
         {% if total_duration_row %}
@@ -87,7 +122,7 @@
             <div class="card h-100">
                 <div class="card-body">
                     <p class="text-body-secondary small mb-1">Current duration</p>
-                    <p class="h4 mb-0">{{ total_duration_row.current_value|format_measurement:total_duration_row.unit }} <span class="h6 mb-0">{{ total_duration_row.change_percent|format_regression:"%" }}</span></p>
+                    <p class="h4 mb-0">{{ total_duration_row.current_value|format_measurement:total_duration_row.unit }} <span class="h6 mb-0">{{ total_duration_row.metric_change_percent|format_regression:"%" }}</span></p>
                 </div>
             </div>
         </div>
@@ -132,9 +167,11 @@
                         <dd class="col-sm-9 text-break">{{ test_run.test_case.parameters|default:"-" }}</dd>
                         <dt class="col-sm-3">Session timestamp</dt>
                         <dd class="col-sm-9">{{ test_run.test_run_batch.test_session.timestamp }}</dd>
-                        {% if baseline_test_run %}
+                        {% if baseline_session %}
+                        <dt class="col-sm-3">Baseline session</dt>
+                        <dd class="col-sm-9">#{{ baseline_session.id }}</dd>
                         <dt class="col-sm-3">Baseline run</dt>
-                        <dd class="col-sm-9">#{{ baseline_test_run.id }} in session #{{ baseline_test_run.test_run_batch.test_session.id }}</dd>
+                        <dd class="col-sm-9">{% if baseline_test_run %}#{{ baseline_test_run.id }} in session #{{ baseline_test_run.test_run_batch.test_session.id }}{% else %}No matching baseline run found{% endif %}</dd>
                         {% endif %}
                     </dl>
                 </div>
@@ -157,21 +194,49 @@
                             <th>Current</th>
                             {% if baseline_test_run %}
                             <th>Baseline</th>
-                            <th>Difference</th>
-                            <th>Change (%)</th>
+                            <th>Metric comparison</th>
+                            <th>
+                                Potential impact
+                                <button
+                                    type="button"
+                                    class="btn btn-link btn-sm p-0 ms-1 align-baseline text-body-secondary text-decoration-none"
+                                    data-bs-toggle="tooltip"
+                                    data-bs-trigger="hover focus click"
+                                    data-bs-placement="top"
+                                    data-bs-title="Estimated contribution of this metric deviation to the total duration of the model. If work overlaps with other operations or runs in parallel, the full impact may not be realized in total duration of the model."
+                                    aria-label="Explain potential impact"
+                                >
+                                    <i class="bi bi-info-circle"></i>
+                                </button>
+                            </th>
                             {% endif %}
                         </tr>
                     </thead>
                     <tbody>
                         {% for row in metrics_with_comparison %}
                         <tr>
-                            <td>{{ row.metric_name }}</td>
+                            <td>{{ row.metric_label }}</td>
                             <td class="text-muted">{{ row.metric_description }}</td>
-                            <td>{{ row.current_value|format_measurement:row.unit }}</td>
+                            <td>
+                                {{ row.current_value|format_measurement:row.unit }}
+                                {% if row.current_percent_available %}
+                                <span class="text-body-secondary">({{ row.current_percent_value|format_measurement:"%" }})</span>
+                                {% endif %}
+                            </td>
                             {% if baseline_test_run %}
-                            <td>{{ row.baseline_value|format_measurement:row.unit }}</td>
-                            <td>{{ row.difference|format_regression:row.unit }}</td>
-                            <td>{{ row.change_percent|format_regression:"%" }}</td>
+                            <td>
+                                {{ row.baseline_value|format_measurement:row.unit }}
+                                {% if row.baseline_percent_available %}
+                                <span class="text-body-secondary">({{ row.baseline_percent_value|format_measurement:"%" }})</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {{ row.difference|format_regression_inline:row.unit }}
+                                <span class="text-body-secondary">({{ row.metric_change_percent|format_regression_inline:"%" }})</span>
+                            </td>
+                            <td>
+                                {{ row.potential_impact_percent|format_regression_inline:"%" }}
+                            </td>
                             {% endif %}
                         </tr>
                         {% endfor %}
@@ -183,11 +248,15 @@
             {% endif %}
         </div>
     </div>
+
+    {% timeseries_chart test_run_history chart_id="test-run-history" title="Historical Trend" meta_text=test_run_history.meta_text form=form %}
 </div>
 
 {% endwith %}
 {% endblock %}
 
 {% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="{% static 'perf/js/timeseries_chart.js' %}"></script>
 <script src="{% static 'perf/js/test_run.js' %}"></script>
 {% endblock %}

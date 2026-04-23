@@ -2,9 +2,21 @@ from ..models import TestRun
 
 from django.db import connection
 
-def get_session_results(session, baseline_session, nodeid, status, baseline_status, sort_by, page_number, page_size):
+
+def get_session_results(session, baseline_session, nodeid, status, comparison_transition, sort_by, page_number, page_size):
     """
     Get the detailed results of a test session, including the status and duration of each test case, and the comparison with another session if provided.
+    """
+
+    outcome_rank_sql = f"""
+        CASE
+            WHEN {{alias}} = {TestRun.Outcome.PASS.value} THEN 1
+            WHEN {{alias}} = {TestRun.Outcome.NXPASS.value} THEN 1
+            WHEN {{alias}} = {TestRun.Outcome.XFAIL.value} THEN 2
+            WHEN {{alias}} = {TestRun.Outcome.FAIL.value} THEN 3
+            WHEN {{alias}} = {TestRun.Outcome.ERROR.value} THEN 4
+            ELSE 5
+        END
     """
 
     # Get the test runs for the current session, excluding skipped tests, and their metric value for the specified metric (if any).
@@ -104,13 +116,31 @@ def get_session_results(session, baseline_session, nodeid, status, baseline_stat
             query += " AND nodeid ILIKE %s"
             query_params.append(f"%{token}%")   
 
-    if status != 'ALL':
+    if status and status != 'ALL':
         query += " AND current_outcome = %s"
         query_params.append(int(status))
 
-    if baseline_status != 'ALL':
-        query += " AND baseline_outcome = %s"
-        query_params.append(int(baseline_status))
+    if baseline_session and comparison_transition == 'FAIL_TO_PASS':
+        query += " AND baseline_outcome = %s AND current_outcome = %s"
+        query_params.extend([TestRun.Outcome.FAIL.value, TestRun.Outcome.PASS.value])
+
+    if baseline_session and comparison_transition == 'PASS_TO_FAIL':
+        query += " AND baseline_outcome = %s AND current_outcome = %s"
+        query_params.extend([TestRun.Outcome.PASS.value, TestRun.Outcome.FAIL.value])
+
+    if baseline_session and comparison_transition == 'ERROR_TO_PASS':
+        query += " AND baseline_outcome = %s AND current_outcome = %s"
+        query_params.extend([TestRun.Outcome.ERROR.value, TestRun.Outcome.PASS.value])
+
+    if baseline_session and comparison_transition == 'PASS_TO_XFAIL':
+        query += " AND baseline_outcome = %s AND current_outcome = %s"
+        query_params.extend([TestRun.Outcome.PASS.value, TestRun.Outcome.XFAIL.value])
+
+    if baseline_session and comparison_transition == 'ANY_REGRESSION':
+        query += f" AND ({outcome_rank_sql.format(alias='current_outcome')}) > ({outcome_rank_sql.format(alias='baseline_outcome')})"
+
+    if baseline_session and comparison_transition == 'ANY_IMPROVEMENT':
+        query += f" AND ({outcome_rank_sql.format(alias='current_outcome')}) < ({outcome_rank_sql.format(alias='baseline_outcome')})"
 
     if sort_by:
         query += f" ORDER BY {sort_by}"

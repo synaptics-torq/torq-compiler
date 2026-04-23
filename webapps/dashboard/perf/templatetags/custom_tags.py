@@ -11,7 +11,14 @@ def _format_value(value, unit):
     if value is None or value == "":
         return "N/A"
     if unit == 'ns':
-        return f"{value / 1_000_000:.2f} ms"
+        absolute_value = abs(value)
+        if absolute_value >= 1_000_000:
+            return f"{value / 1_000_000:.2f} ms"
+        if absolute_value >= 1_000:
+            return f"{value / 1_000:.2f} us"
+        if float(value).is_integer():
+            return f"{int(value)} ns"
+        return f"{value:.2f} ns"
     elif unit == '%':
         return f"{value:.2f} %"
     elif unit == 'unitless':
@@ -23,15 +30,11 @@ def _format_value(value, unit):
         return f"{value:.2f} {unit}"
 
 
-@register.filter
-def format_measurement(value, unit):
-    return _format_value(value, unit)
-
-def _format_difference(measurement, unit, is_regression=False):
+def _difference_parts(measurement, unit, is_regression=False):
 
     if measurement is None or measurement == "":
-        return "N/A"
-    
+        return None
+
     sign = ""
     if measurement > 0:
         sign = "+"
@@ -40,26 +43,69 @@ def _format_difference(measurement, unit, is_regression=False):
         symbol = "▼"
     else:
         symbol = "•"
-    
-    if (is_regression and measurement > 0) or (not is_regression and measurement < 0):                
-        format_class = "text-bg-danger"
-    elif (is_regression and measurement < 0) or (not is_regression and measurement > 0):        
-        format_class = "text-bg-success"
-    else:        
-        format_class = "text-bg-secondary"
+
+    if (is_regression and measurement > 0) or (not is_regression and measurement < 0):
+        badge_class = "text-bg-danger"
+        text_class = "text-danger"
+    elif (is_regression and measurement < 0) or (not is_regression and measurement > 0):
+        badge_class = "text-bg-success"
+        text_class = "text-success"
+    else:
+        badge_class = "text-bg-secondary"
+        text_class = "text-body-secondary"
+
+    return {
+        "badge_class": badge_class,
+        "text_class": text_class,
+        "symbol": symbol,
+        "sign": sign,
+        "formatted_value": _format_value(measurement, unit),
+    }
+
+
+@register.filter
+def format_measurement(value, unit):
+    return _format_value(value, unit)
+
+def _format_difference(measurement, unit, is_regression=False):
+
+    parts = _difference_parts(measurement, unit, is_regression=is_regression)
+
+    if parts is None:
+        return "N/A"
 
     return format_html(
         '<span class="badge rounded-pill {}">{} {}{}</span>',
-        format_class,
-        symbol,
-        sign,
-        _format_value(measurement, unit),
+        parts["badge_class"],
+        parts["symbol"],
+        parts["sign"],
+        parts["formatted_value"],
+    )
+
+
+def _format_difference_inline(measurement, unit, is_regression=False):
+    parts = _difference_parts(measurement, unit, is_regression=is_regression)
+
+    if parts is None:
+        return format_html('<span class="text-body-secondary">{}</span>', 'N/A')
+
+    return format_html(
+        '<span class="fw-semibold {}">{} {}{}</span>',
+        parts["text_class"],
+        parts["symbol"],
+        parts["sign"],
+        parts["formatted_value"],
     )
 
 
 @register.filter
 def format_regression(measurement, unit="unitless"):
     return _format_difference(measurement, unit, is_regression=True)
+
+
+@register.filter
+def format_regression_inline(measurement, unit="unitless"):
+    return _format_difference_inline(measurement, unit, is_regression=True)
 
 
 @register.filter
@@ -102,6 +148,20 @@ def outcome_badge(outcome, value=None):
 @register.simple_tag
 def chart(data, class_name, width, height):
     return format_html('<canvas class="{}" data-chart=\'{}\' width="{}" height="{}"></canvas>', class_name, json.dumps(data), width, height)
+
+
+@register.inclusion_tag('perf/partials/timeseries_chart.html')
+def timeseries_chart(timeseries, chart_id, title, header_note='', meta_text='', form=None):
+    return {
+        'chart_id': chart_id,
+        'canvas_id': f'{chart_id}-canvas',
+        'form': form,
+        'header_note': header_note,
+        'json_script_id': f'{chart_id}-data',
+        'meta_text': meta_text,
+        'timeseries': timeseries,
+        'title': title,
+    }
 
 
 @register.simple_tag

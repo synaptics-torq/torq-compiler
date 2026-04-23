@@ -58,6 +58,9 @@ class TestSession(models.Model):
                 name='unique_workflow_url'
             )
         ]
+        indexes = [
+            models.Index(fields=['git_branch', '-timestamp'], name='perf_session_branch_ts_idx'),
+        ]
 
     @property
     def test_runs(self):

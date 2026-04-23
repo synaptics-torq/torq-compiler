@@ -20,6 +20,14 @@ function showStatus(message, type) {
     statusDiv.style.display = 'block';
 }
 
+function initializeTooltips() {
+    document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(element => {
+        new bootstrap.Tooltip(element, {
+            container: 'body'
+        });
+    });
+}
+
 function openTraceFromUrl(downloadUrl, fileName) {
     const statusDiv = document.getElementById('status');
     statusDiv.style.display = 'none';
@@ -128,6 +136,8 @@ function openTraceFromUrl(downloadUrl, fileName) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    initializeTooltips();
+
     document.querySelectorAll('.js-open-trace').forEach(button => {
         button.addEventListener('click', () => {
             openTraceFromUrl(button.dataset.traceUrl, button.dataset.traceName);
