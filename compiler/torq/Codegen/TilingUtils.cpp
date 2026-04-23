@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
@@ -54,7 +55,7 @@ llvm::FailureOr<SmallVector<Attribute>> computeAffineMapAtFirstIteration(
     AffineMap &map, SmallVector<Value> &operands, llvm::DenseMap<Value, Attribute> &computedValues
 ) {
     affine::fullyComposeAffineMapAndOperands(&map, &operands);
-    assert(map.getNumDims() == operands.size());
+    assert(map.getNumInputs() == operands.size());
 
     SmallVector<Attribute> computedOperands;
     computedOperands.reserve(operands.size());
@@ -150,10 +151,22 @@ void applyTiledResults(
     }
 }
 
-void eraseForward(RewriterBase &rewriter, Operation *op) {
-    while (!op->getUsers().empty())
-        eraseForward(rewriter, *op->getUsers().begin());
-    rewriter.eraseOp(op);
+void eraseBackward(RewriterBase &rewriter, Operation *op) {
+    llvm::DenseSet<Operation *> workset{op};
+    while (!workset.empty()) {
+        auto iter = workset.begin();
+        Operation *op = *iter;
+        workset.erase(iter);
+
+        if (!op->use_empty())
+            continue;
+
+        for (Value operand : op->getOperands()) {
+            if (Operation *defOp = operand.getDefiningOp())
+                workset.insert(defOp);
+        }
+        rewriter.eraseOp(op);
+    }
 }
 
 llvm::FailureOr<Attribute>

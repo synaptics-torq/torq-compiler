@@ -11,8 +11,9 @@ void applyTiledResults(
     RewriterBase &rewriter, Operation *op, scf::SCFTileAndFuseResult &tiledResults
 );
 
-// Earase `op` and all it's users recursively.
-void eraseForward(RewriterBase &rewriter, Operation *op);
+// Earase `op` and its sources recursively, as long as they don't have other
+// users.
+void eraseBackward(RewriterBase &rewriter, Operation *op);
 
 // Computes `val` in the first iteration of the surrounding loops.
 // `computedValues` is used to cache intermediate results.
