@@ -15,7 +15,6 @@ except ImportError:
         return lambda x: x
     
 from perf.models import TestCase, TestRun, TestRunBatch, Metric, Measurement
-from perf.perfetto_report_generator import extract_perfetto_summary
 
 
 def _classify_failure(failed_phase, failure_log):
@@ -63,6 +62,17 @@ def _classify_failure(failed_phase, failure_log):
     return 'Error'
 
 
+def create_metrics(metric_names):
+    """Create Metric objects for the given list of metric names, if they don't already exist."""
+    metrics = {}
+
+    for metric in metric_names:                
+        metric, _ = Metric.objects.get_or_create(name=metric['name'], defaults={'unit': metric['unit'], 'description': metric['description']})                
+        metrics[metric.name] = metric
+
+    return metrics
+
+
 @spool
 def process_uploaded_zip(args):
     """
@@ -79,41 +89,7 @@ def process_uploaded_zip(args):
     zip_path = args['zip_path']
     test_run_batch_id = int(args['test_run_batch_id'])
     
-    # Metric descriptions dictionary (moved outside loop for reuse)
-    metric_descriptions = {
-        'total_duration': 'Total execution duration of the workload',
-        'dma_time': 'Combined time for DMA and CDMA operations (union)',
-        'dma_percent': 'Percentage of dma_time over total duration',
-        'dma_only_time': 'Time spent exclusively on DMA/CDMA without compute overlap',
-        'dma_only_percent': 'Percentage of dma_only_time over total duration',
-        'dma_total_time': 'Total DMA operation time (doesnt include CDMA)',
-        'dma_total_percent': 'Percentage of dma_total_time over total duration',
-        'cdma_time': 'Total CDMA (Constant DMA) operation time',
-        'cdma_percent': 'Percentage of cdma_time over total duration',
-        'dma_in_time': 'Time spent on DMA input transfers',
-        'dma_in_percent': 'Percentage of dma_in_time over total duration',
-        'dma_out_time': 'Time spent on DMA output transfers',
-        'dma_out_percent': 'Percentage of dma_out_time over total duration',
-        'compute_time': 'Combined compute time for SLICE and CSS operations (union)',
-        'compute_percent': 'Percentage of compute_time over total duration',
-        'compute_only_time': 'Time spent exclusively on compute without DMA overlap',
-        'compute_only_percent': 'Percentage of compute_only_time over total duration',
-        'slice_time': 'Total time spent on SLICE 0 and 1 compute operations (union)',
-        'slice_percent': 'Percentage of slice_time over total duration',
-        'slice_0_time': 'Time spent on SLICE 0 compute operations (exclusive)',
-        'slice_0_percent': 'Percentage of slice_0_time over total duration',
-        'slice_1_time': 'Time spent on SLICE 1 compute operations (exclusive)',
-        'slice_1_percent': 'Percentage of slice_1_time over total duration',
-        'css_time': 'Total time spent on CSS (Compute Subsystem) operations',
-        'css_percent': 'Percentage of css_time over total duration',
-        'overlap_time': 'Time where DMA/CDMA and compute operations overlap',
-        'overlap_percent': 'Percentage of overlap_time over total duration',
-        'idle_time': 'Time when hardware is idle (no DMA or compute, it could be host operation as well)',
-        'idle_percent': 'Percentage of idle_time over total duration',
-    }
-    
-    # Cache for metric objects to avoid repeated database queries
-    metrics_cache = {}
+    metrics = {}
     
     try:
         # Get the test run batch
@@ -133,6 +109,8 @@ def process_uploaded_zip(args):
             with open(manifest_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
 
+            metrics = create_metrics(manifest.get('metrics', []))
+
             outcome_map = {
                 'passed': TestRun.Outcome.PASS,
                 'failed': TestRun.Outcome.FAIL,
@@ -150,25 +128,17 @@ def process_uploaded_zip(args):
                     name = item.get('name', '')
                     parameters = item.get('parameters', '')
                     outcome = item.get('outcome', '')
+                    linked_issue = item.get('linked_issue', None)  # optional linked issue
                     profiling_rel = item.get('profiling_file')  # relative path inside zip (optional)
-                    engine_compilation_time = item.get('engine_compilation_time')
-
+                    
                     if not module or not name or outcome not in outcome_map:
                         # Log error but continue processing other test runs
                         print(f'Invalid run entry in manifest: module={module}, name={name}, outcome={outcome}')
                         continue
                     
-                    try:
-                        with transaction.atomic():
-                            test_case, _ = TestCase.objects.get_or_create(
-                                module=str(module), name=str(name), parameters=str(parameters)
-                            )
-                    except IntegrityError:
-                        # Race condition: another worker inserted the same TestCase concurrently.
-                        # The UniqueConstraint fired; simply fetch the existing row.
-                        test_case = TestCase.objects.get(
-                            module=str(module), name=str(name), parameters=str(parameters)
-                        )
+                    test_case, _ = TestCase.objects.get_or_create(
+                        module=str(module), name=str(name), parameters=str(parameters)
+                    )
 
                     test_run = TestRun.objects.create(
                         test_run_batch=test_run_batch,
@@ -176,26 +146,19 @@ def process_uploaded_zip(args):
                         outcome=outcome_map[outcome],
                     )
 
+                    engine_compilation_time = item.get('engine_compilation_time')
                     if engine_compilation_time is not None:
                         try:
-                            engine_compilation_time *= 1_000_000 # Parse ms result to ns
-                            description = metric_descriptions.get('total_duration', '')
-
-                            metric, created = Metric.objects.get_or_create(
-                                name='total_duration',
-                                defaults={'unit': 'ns', 'description': description}
-                            )
-                            if not metric.description:
-                                metric.description = description
-                                metric.save()
+                            engine_compilation_time *= 1_000_000 # Parse ms result to ns                            
 
                             Measurement.objects.create(
                                 test_run=test_run,
-                                metric=metric,
+                                metric=metric['total_duration'],
                                 value=engine_compilation_time,
                             )
                         except Exception as e:
                             print(f'Warning: Could not save total_duration for {module}::{name}: {e}')
+
                     # Handle failure log file and server-side classification for failed tests
                     failure_log_rel = item.get('failure_log_file')  # relative path inside zip (optional)
                     failed_phase = item.get('failed_phase', 'call')
@@ -233,6 +196,18 @@ def process_uploaded_zip(args):
 
                     test_run.save()
 
+                    measurements = item.get('measurements', [])
+                    
+                    for measurement in measurements:
+                        metric_name = measurement.get('metric')
+                        value = measurement.get('value')
+
+                        if metric_name not in metrics:
+                            print(f'Warning: Metric {metric_name} not found for {module}::{name}')
+                            continue
+                        
+                        Measurement.objects.create(test_run=test_run, metric=metrics[metric_name], value=value)
+                        
                     if profiling_rel:
                         profiling_path = os.path.join(os.path.dirname(manifest_path), profiling_rel)
 
@@ -243,78 +218,7 @@ def process_uploaded_zip(args):
                                     test_run.profiling_data.save("trace.pb", File(pf), save=False)
                             except Exception as e:
                                 print(f'Warning: Could not upload profiling file {profiling_rel}: {e}')
-                            
-                            # Extract and save metrics from the .pb file
-                            try:
-                                summary = extract_perfetto_summary(profiling_path)
-                                if summary and summary.get('available'):
-                                    for key, value in summary.items():
-                                        if key == 'available' or not value:
-                                            continue
-
-                                        # Parse and normalize value
-                                        parsed_value = None
-                                        unit = ""
-
-                                        if isinstance(value, str):
-                                            if key.endswith('_percent'):
-                                                try:
-                                                    parsed_value = float(value.replace('%', '').strip())
-                                                    unit = '%'
-                                                except ValueError:
-                                                    continue
-                                            elif 'ms' in value:
-                                                try:
-                                                    num = float(value.replace('ms', '').strip())
-                                                    parsed_value = num * 1_000_000
-                                                    unit = 'ns'
-                                                except ValueError:
-                                                    continue
-                                            elif 'µs' in value or 'μs' in value:
-                                                try:
-                                                    num = float(value.replace('µs', '').replace('μs', '').strip())
-                                                    parsed_value = num * 1_000
-                                                    unit = 'ns'
-                                                except ValueError:
-                                                    continue
-                                            elif 'ns' in value:
-                                                try:
-                                                    num = float(value.replace('ns', '').strip())
-                                                    parsed_value = num
-                                                    unit = 'ns'
-                                                except ValueError:
-                                                    continue
-                                            elif value.endswith('s'):
-                                                try:
-                                                    num = float(value.replace('s', '').strip())
-                                                    parsed_value = num * 1_000_000_000
-                                                    unit = 'ns'
-                                                except ValueError:
-                                                    continue
-                                            else:
-                                                continue
-                                        else:
-                                            continue
-
-                                        if parsed_value is None:
-                                            continue
-
-                                        metric = metrics_cache.get(key)
-                                        if not metric:
-                                            description = metric_descriptions.get(key, '')
-                                            metric, created = Metric.objects.get_or_create(
-                                                name=key,
-                                                defaults={'unit': unit, 'description': description}
-                                            )
-                                            if not created and not metric.description:
-                                                metric.description = description
-                                                metric.save()
-                                            metrics_cache[key] = metric
-
-                                        Measurement.objects.create(test_run=test_run, metric=metric, value=parsed_value)
-                            except Exception as e:
-                                print(f'Warning: Could not extract metrics from {profiling_path}: {e}')
-
+                                                                
                             test_run.save()
                         else:
                             print(f'Warning: Profiling file {profiling_rel} not found in archive.')

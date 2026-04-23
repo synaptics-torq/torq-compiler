@@ -18,6 +18,7 @@ from typing import Dict, Any, List, Optional
 import random
 
 from torq.model_profiler.generate_perfetto_combined_report import extract_perfetto_summary, extract_model_name
+from torq.model_profiler.perfetto_logger import get_dashboard_metrics
 
 logger = logging.getLogger("torq.testing.reporting")
 
@@ -293,9 +294,10 @@ def _collect_profiling_data(report: pytest.TestReport, config):
         import traceback
         traceback.print_exc()
 
+
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session):
-    
+
     if xdist.is_xdist_worker(session):
         return
 
@@ -310,7 +312,7 @@ def pytest_sessionfinish(session):
         return
 
     with TemporaryDirectory() as temp_dir:
-    
+
         print("\nCreating results bundle...")
 
         manifest = {
@@ -319,6 +321,7 @@ def pytest_sessionfinish(session):
             'workflow_url': _build_workflow_url(),
             'test_runs': [],
             'batch_name': os.environ.get("TORQ_PERF_BATCH_NAME", "default"),
+            'metrics': get_dashboard_metrics()
         }
 
         profiles_root = os.path.join(temp_dir, 'profiles')
@@ -356,11 +359,26 @@ def pytest_sessionfinish(session):
                         outcome = 'nxpass'
                         break
 
+            issue = None
+            measurements = None
+            for phase in ['call', 'setup', 'teardown']:
+                if phase not in report_phases:
+                    continue
+
+                properties = dict(report_phases[phase].user_properties)                
+                issue = properties.get('issue', issue)
+
+                # runtime measurements have priority
+                measurements = properties.get('compile_time_measurements', measurements)                
+                measurements = properties.get('runtime_measurements', measurements)
+
             test_run = {
                 'module': module,
                 'name': name,
                 'parameters': parameters,
                 'outcome': outcome,
+                'linked_issue': issue,
+                'measurements': measurements
             }
 
             # Capture failure log and failed phase for failed tests

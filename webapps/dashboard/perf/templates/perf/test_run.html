@@ -27,6 +27,12 @@
                     <p class="text-body-secondary mb-1">
                         Session #{{ test_run.test_run_batch.test_session.id }} - {{ test_run.test_run_batch.test_session.git_branch | default:"unknown" }}
                     </p>
+                    {% if test_run.linked_issue %}
+                    <p class="mb-1">
+                        <span class="text-body-secondary small me-1">Linked issue:</span>
+                        {% issue_link test_run.linked_issue %}
+                    </p>
+                    {% endif %}
                     <div id="status" class="alert" style="display: none;" role="alert"></div>
                 </div>
             </div>

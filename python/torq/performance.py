@@ -170,6 +170,8 @@ def _write_perfetto_trace(debug_info: BaseDispatchDebugInfo, perfetto_file: str)
     trace_writer.close()
     logger.debug(f"Perfetto trace complete: {perfetto_file}")
 
+    return perfetto_logger.get_measurements(metrics_result)
+
 
 def _write_host_annotated_csv(debug_info: BaseDispatchDebugInfo, output_file: str):
     """
@@ -197,15 +199,22 @@ def _write_host_annotated_xlsx(debug_info: BaseDispatchDebugInfo, output_file: s
 
 
 def _write_dispatch_outputs(dispatch_debug_info, output_files):
+
+    measurements = []
+
     for output_file in output_files:
         if output_file.endswith(".xlsx"):
             _write_host_annotated_xlsx(dispatch_debug_info, output_file)
         elif output_file.endswith(".csv"):
             _write_host_annotated_csv(dispatch_debug_info, output_file)
         elif output_file.endswith(".pb"):
-            _write_perfetto_trace(dispatch_debug_info, output_file)
+            dispatch_measurements = _write_perfetto_trace(dispatch_debug_info, output_file)
+            measurements.append(dispatch_measurements)
         else:
             raise ValueError(f"Unsupported output file format: {output_file}")
+
+    return measurements
+
 
 def annotate_host_profile_from_files(debug_info, profile_file, output_files):
     """
@@ -235,4 +244,12 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files):
     if has_hal_events:
         combined_dispatch_debug_info.add_dispatch(hal_dispatch_debug_info)
 
-    _write_dispatch_outputs(combined_dispatch_debug_info, output_files)
+    
+    measurements = _write_dispatch_outputs(combined_dispatch_debug_info, output_files)
+
+    if len(measurements) == 1:
+        return measurements[0]
+    else:
+        print("Warning: Multiple measurement sets found, but only one can be returned.")
+        print(measurements)
+        return None

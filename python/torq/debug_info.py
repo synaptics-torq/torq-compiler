@@ -429,6 +429,24 @@ class SliceProgramWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
 
 class CdmaWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
 
+    def is_from_dtcm(self) -> bool:
+        input_operand = self.start_operation.operands[0]        
+        return "mem_space = dtcm" in str(input_operand.type.memory_space)
+
+
+    def is_from_itcm(self) -> bool:
+        input_operand = self.start_operation.operands[0]        
+        return "mem_space = itcm" in str(input_operand.type.memory_space)
+
+
+    def is_to_dtcm(self) -> bool:
+        output_operand = self.start_operation.operands[1]        
+        return "mem_space = dtcm" in str(output_operand.type.memory_space)
+
+    def is_to_itcm(self) -> bool:
+        output_operand = self.start_operation.operands[1]        
+        return "mem_space = itcm" in str(output_operand.type.memory_space)
+
     @property
     def executor(self) -> Executor:
         return Executor.CDMA

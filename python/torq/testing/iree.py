@@ -665,7 +665,9 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         
         # Use a temp directory for pb generation, then move files to parent with _compile suffix
         temp_pb_dir = compile_time_profiling_output_dir / f'{request.node.name}_compile_temp'
-        convert_to_perfetto(str(debug_info_dir), str(temp_pb_dir))
+        measurements = convert_to_perfetto(str(debug_info_dir), str(temp_pb_dir))
+
+        record_property("compile_time_measurements", measurements)
         
         # Move .pb files from temp folder to parent with _compile suffix
         pb_files = list(temp_pb_dir.glob('*.pb'))
@@ -873,11 +875,13 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
     # Check if profile annotation should be skipped (can be configured via case_config)
     if enable_profiling and not skip_profile_annotation:
         logger.debug("Starting profile annotation...")        
-        annotate_host_profile_from_files(
+        measurements = annotate_host_profile_from_files(
             torq_compiled_model_debug_info,
             str(versioned_dir / 'host_profile.csv'),
             [str(versioned_dir / 'annotated_profile.xlsx'), str(versioned_dir / 'trace.pb')]
         )
+        record_property = request.getfixturevalue("record_property")
+        record_property("runtime_measurements", measurements)
         logger.debug("Profile annotation completed")
 
 

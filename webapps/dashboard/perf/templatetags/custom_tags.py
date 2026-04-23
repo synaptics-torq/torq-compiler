@@ -102,3 +102,13 @@ def outcome_badge(outcome, value=None):
 @register.simple_tag
 def chart(data, class_name, width, height):
     return format_html('<canvas class="{}" data-chart=\'{}\' width="{}" height="{}"></canvas>', class_name, json.dumps(data), width, height)
+
+
+@register.simple_tag
+def issue_link(issue_name):
+    if not issue_name:
+        return ""
+    
+    repo, id = issue_name.split("#")
+
+    return format_html('<a href="https://github.com/{}/issues/{}" target="_blank" rel="noopener noreferrer">{}</a>', repo, id, issue_name)

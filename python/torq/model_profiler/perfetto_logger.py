@@ -13,11 +13,9 @@ try:
 except ImportError:
     import perfetto_api as perfetto
 
-import csv
 import argparse
 from collections import OrderedDict
 import os
-import re
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
@@ -324,6 +322,55 @@ def add_numeric_prefix(log_dict, start_index=1, width=2):
 # METRICS CALCULATION
 # =============================================================================
 
+
+@dataclass
+class MetricDescription:
+    perfetto_name: tuple
+    perfetto_thread_name: str
+    perfetto_label: str
+    dashboard_name: str
+    dashboard_description: str
+    dashboard_unit: str
+
+_METRICS = [
+    MetricDescription(('OVERALL', 'time'), '15 OVERALL', 'OVERALL', 'total_duration', 'Total execution duration of the workload', 'ns'),
+    MetricDescription(('DMA', 'time'), '02 OVERVIEW DMA', 'DMA total', 'dma_time', 'Combined time for DMA and CDMA operations (union)', 'ns'),
+    MetricDescription(('DMA', 'percent'), None, None, 'dma_percent', 'Percentage of dma_time over total duration', '%'),
+    MetricDescription(('DMA_ONLY', 'time'), '08 OVERVIEW DMA ONLY', 'DMA/CDMA ONLY (no compute)', 'dma_only_time', 'Time spent exclusively on DMA/CDMA without compute overlap', 'ns'),
+    MetricDescription(('DMA_ONLY', 'percent'), None, None, 'dma_only_percent', 'Percentage of dma_only_time over total duration', '%'),
+    MetricDescription(('DMA_COMBINED', 'time'), '00 OVERVIEW DMA COMBINED', 'DMA+CDMA union', 'dma_total_time', 'Total DMA operation time (doesnt include CDMA)', 'ns'),
+    MetricDescription(('DMA_COMBINED', 'percent'), None, None, 'dma_total_percent', 'Percentage of dma_total_time over total duration', '%'),
+    MetricDescription(('CDMA', 'time'), '03 OVERVIEW CDMA', 'CDMA total', 'cdma_time', 'Total CDMA (Constant DMA) operation time', 'ns'),
+    MetricDescription(('CDMA', 'percent'), None, None, 'cdma_percent', 'Percentage of cdma_time over total duration', '%'),
+    MetricDescription(('DMA_IN', 'time'), None, None, 'dma_in_time', 'Time spent on DMA input transfers', 'ns'),
+    MetricDescription(('DMA_IN', 'percent'), None, None, 'dma_in_percent', 'Percentage of dma_in_time over total duration', '%'),
+    MetricDescription(('DMA_OUT', 'time'), None, None, 'dma_out_time', 'Time spent on DMA output transfers', 'ns'),
+    MetricDescription(('DMA_OUT', 'percent'), None, None, 'dma_out_percent', 'Percentage of dma_out_time over total duration', '%'),
+    MetricDescription(('COMPUTE_COMBINED', 'time'), '01 OVERVIEW COMPUTE COMBINED', 'SLICE+CSS union', 'compute_time', 'Combined compute time for SLICE and CSS operations (union)', 'ns'),
+    MetricDescription(('COMPUTE_COMBINED', 'percent'), None, None, 'compute_percent', 'Percentage of compute_time over total duration', '%'),
+    MetricDescription(('COMPUTE_ONLY', 'time'), '09 OVERVIEW COMPUTE ONLY', 'COMPUTE ONLY (no DMA/CDMA)', 'compute_only_time', 'Time spent exclusively on compute without DMA overlap', 'ns'),
+    MetricDescription(('COMPUTE_ONLY', 'percent'), None, None, 'compute_only_percent', 'Percentage of compute_only_time over total duration', '%'),
+    MetricDescription(('SLICE', 'time'), '04 OVERVIEW SLICE', 'SLICE 0 + 1 union', 'slice_time', 'Total time spent on SLICE 0 and 1 compute operations (union)', 'ns'),
+    MetricDescription(('SLICE', 'percent'), None, None, 'slice_percent', 'Percentage of slice_time over total duration', '%'),
+    MetricDescription(('SLICE_0', 'time'), '05 OVERVIEW SLICE 0', 'SLICE 0', 'slice_0_time', 'Time spent on SLICE 0 compute operations (exclusive)', 'ns'),
+    MetricDescription(('SLICE_0', 'percent'), None, None, 'slice_0_percent', 'Percentage of slice_0_time over total duration', '%'),
+    MetricDescription(('SLICE_1', 'time'), '06 OVERVIEW SLICE 1', 'SLICE 1', 'slice_1_time', 'Time spent on SLICE 1 compute operations (exclusive)', 'ns'),
+    MetricDescription(('SLICE_1', 'percent'), None, None, 'slice_1_percent', 'Percentage of slice_1_time over total duration', '%'),
+    MetricDescription(('CSS', 'time'), '07 OVERVIEW CSS', 'CSS', 'css_time', 'Total time spent on CSS (Compute Subsystem) operations', 'ns'),
+    MetricDescription(('CSS', 'percent'), None, None, 'css_percent', 'Percentage of css_time over total duration', '%'),
+    MetricDescription(('DMA_COMPUTE_OVERLAP', 'time'), '10 OVERVIEW DMA COMPUTE OVERLAP', 'DMA/CDMA<->COMPUTE overlap', 'overlap_time', 'Time where DMA/CDMA and compute operations overlap', 'ns'),
+    MetricDescription(('DMA_COMPUTE_OVERLAP', 'percent'), None, None, 'overlap_percent', 'Percentage of overlap_time over total duration', '%'),
+    MetricDescription(('IDLE', 'time'), '14 OVERVIEW IDLE', 'IDLE', 'idle_time', 'Time when hardware is idle (no DMA or compute, it could be host operation as well)', 'ns'),
+    MetricDescription(('IDLE', 'percent'), None, None, 'idle_percent', 'Percentage of idle_time over total duration', '%'),
+    MetricDescription(('HAL', 'time'), '11 OVERVIEW HAL', 'HAL total', 'hal_time', 'Total time spent on HAL operations', 'ns'),
+    MetricDescription(('HAL', 'percent'), None, None, 'hal_percent', 'Percentage of hal_time over total duration', '%'),
+    MetricDescription(('HOST', 'time'), '12 OVERVIEW HOST', 'HOST total', 'host_time', 'Total time spent on HOST operations', 'ns'),
+    MetricDescription(('HOST', 'percent'), None, None, 'host_percent', 'Percentage of host_time over total duration', '%'),
+    MetricDescription(('HOST_COPY', 'time'), '13 OVERVIEW HOST COPY', 'HOST COPY total', 'host_copy_time', 'Total time spent on HOST COPY operations', 'ns'),
+    MetricDescription(('HOST_COPY', 'percent'), None, None, 'host_copy_percent', 'Percentage of host_copy_time over total duration', '%'),
+]
+
+
 def compute_compile_metrics(dispatch: DispatchDebugInfo):
     """
     Compute hardware utilization metrics from parsed compile profile intervals.
@@ -345,6 +392,8 @@ def compute_compile_metrics(dispatch: DispatchDebugInfo):
     overall_start = dispatch.start_time_ns
 
     dma_intervals = []
+    dma_in_intervals = []
+    dma_out_intervals = []
     cdma_dtcm_intervals = []
     cdma_itcm_intervals = []
     slice_intervals = []
@@ -362,6 +411,11 @@ def compute_compile_metrics(dispatch: DispatchDebugInfo):
               isinstance(workunit, DmaInWorkUnitDebugInfo):
             dma_intervals.append((start_time_ns, end_time_ns))
 
+            if isinstance(workunit, DmaInWorkUnitDebugInfo):
+                dma_in_intervals.append((start_time_ns, end_time_ns))
+            else:
+                dma_out_intervals.append((start_time_ns, end_time_ns))
+
         elif isinstance(workunit, SliceProgramWorkUnitDebugInfo):
             slice_intervals.append((start_time_ns, end_time_ns))
         
@@ -376,6 +430,8 @@ def compute_compile_metrics(dispatch: DispatchDebugInfo):
 
     # Merge overlapping intervals
     merged_dma = merge_intervals(dma_intervals)
+    merged_dma_in = merge_intervals(dma_in_intervals)
+    merged_dma_out = merge_intervals(dma_out_intervals)
     merged_slice = merge_intervals(slice_intervals)
     merged_cdma_dtcm = merge_intervals(cdma_dtcm_intervals)
     merged_cdma_itcm = merge_intervals(cdma_itcm_intervals)
@@ -406,6 +462,8 @@ def compute_compile_metrics(dispatch: DispatchDebugInfo):
     
     # Calculate totals
     total_dma = sum(end - start for start, end in merged_dma)
+    total_dma_in = sum(end - start for start, end in merged_dma_in)
+    total_dma_out = sum(end - start for start, end in merged_dma_out)
     total_slice = sum(end - start for start, end in merged_slice)
     total_cdma_dtcm = sum(end - start for start, end in merged_cdma_dtcm)
     total_cdma_itcm = sum(end - start for start, end in merged_cdma_itcm)
@@ -430,6 +488,8 @@ def compute_compile_metrics(dispatch: DispatchDebugInfo):
     
     metrics = {
         'DMA': {'time': total_dma, 'percent': calc_percent(total_dma)},
+        'DMA_IN': {'time': total_dma_in, 'percent': calc_percent(total_dma_in)},
+        'DMA_OUT': {'time': total_dma_out, 'percent': calc_percent(total_dma_out)},
         'SLICE': {'time': total_slice, 'percent': calc_percent(total_slice)},
         'CDMA_DTCM': {'time': total_cdma_dtcm, 'percent': calc_percent(total_cdma_dtcm)},
         'CDMA_ITCM': {'time': total_cdma_itcm, 'percent': calc_percent(total_cdma_itcm)},
@@ -469,6 +529,8 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     overall_end = dispatch.end_time_ns
 
     dma_intervals = []
+    dma_in_intervals = []
+    dma_out_intervals = []
     slice_intervals = []
     slice_0_intervals = []
     slice_1_intervals = []
@@ -485,7 +547,7 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
 
         if start_time_ns is None or end_time_ns is None:
             continue
-            
+        
         if isinstance(workunit, NssProgramWorkUnitDebugInfo):
 
             if start_time_ns is None or end_time_ns is None:
@@ -493,6 +555,12 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
 
             if workunit.dma_in_used or workunit.dma_out_used:
                 dma_intervals.append((start_time_ns, end_time_ns))
+
+                if workunit.dma_in_used:
+                    dma_in_intervals.append((start_time_ns, end_time_ns))
+
+                if workunit.dma_out_used:
+                    dma_out_intervals.append((start_time_ns, end_time_ns))
 
             if workunit.cdma_used:
                 cdma_intervals.append((start_time_ns, end_time_ns))
@@ -529,9 +597,11 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
                 raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
 
             hal_intervals.append((start_time_ns, end_time_ns))
-            
+    
     # Merge overlapping intervals
     merged_dma = merge_intervals(dma_intervals)
+    merged_dma_in = merge_intervals(dma_in_intervals)
+    merged_dma_out = merge_intervals(dma_out_intervals)
     merged_cdma = merge_intervals(cdma_intervals)
     merged_slice = merge_intervals(slice_intervals)
     merged_slice_0 = merge_intervals(slice_0_intervals)
@@ -553,6 +623,8 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     
     # Calculate totals
     total_dma = sum(end - start for start, end in merged_dma)
+    total_dma_in = sum(end - start for start, end in merged_dma_in)
+    total_dma_out = sum(end - start for start, end in merged_dma_out)
     total_cdma = sum(end - start for start, end in merged_cdma)
     total_slice = sum(end - start for start, end in merged_slice)
     total_slice_0 = sum(end - start for start, end in merged_slice_0)
@@ -581,6 +653,8 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     
     metrics = {
         'DMA': {'time': total_dma, 'percent': calc_percent(total_dma)},
+        'DMA_IN': {'time': total_dma_in, 'percent': calc_percent(total_dma_in)},
+        'DMA_OUT': {'time': total_dma_out, 'percent': calc_percent(total_dma_out)},
         'SLICE': {'time': total_slice, 'percent': calc_percent(total_slice)},
         'SLICE_0': {'time': total_slice_0, 'percent': calc_percent(total_slice_0)},
         'SLICE_1': {'time': total_slice_1, 'percent': calc_percent(total_slice_1)},
@@ -812,27 +886,12 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
     process_uuid= trace_writer.add_process_descriptor(f"{view_name} Overview")
 
     base_start = overall_start if overall_start is not None else 0
+        
+    overview_tracks = [(m.perfetto_thread_name, m.perfetto_label, metrics.get(m.perfetto_name[0], {m.perfetto_name[1]: 0})) 
+                        for m in _METRICS if m.perfetto_thread_name is not None]
     
-    # Define track order (using numeric prefix for lexicographic sorting)
-    overview_tracks = [
-        ("00 OVERVIEW DMA COMBINED", "DMA+CDMA union", metrics.get('DMA_COMBINED', metrics.get('DMA', {'time': 0}))),
-        ("01 OVERVIEW COMPUTE COMBINED", "SLICE+CSS union", metrics.get('COMPUTE_COMBINED', metrics.get('SLICE', {'time': 0}))),
-        ("02 OVERVIEW DMA", "DMA total", metrics.get('DMA', {'time': 0})),
-        ("03 OVERVIEW CDMA", "CDMA total", metrics.get('CDMA', {'time': 0})),
-        ("04 OVERVIEW SLICE", "SLICE 0 + 1 union", metrics.get('SLICE', {'time': 0})),
-        ("05 OVERVIEW SLICE 0", "SLICE 0 total", metrics.get('SLICE_0', {'time': 0})),
-        ("06 OVERVIEW SLICE 1", "SLICE 1 total", metrics.get('SLICE_1', {'time': 0})),
-        ("07 OVERVIEW CSS", "CSS total", metrics.get('CSS', {'time': 0})),
-        ("08 OVERVIEW DMA ONLY", "DMA/CDMA ONLY (no compute)", metrics.get('DMA_ONLY', {'time': 0})),
-        ("09 OVERVIEW COMPUTE ONLY", "COMPUTE ONLY (no DMA/CDMA)", metrics.get('COMPUTE_ONLY', {'time': 0})),
-        ("10 OVERVIEW DMA COMPUTE OVERLAP", "DMA/CDMA<->COMPUTE overlap", metrics.get('DMA_COMPUTE_OVERLAP', {'time': 0})),
-        ("11 OVERVIEW HAL", "HAL total", metrics.get('HAL', {'time': 0})),
-        ("12 OVERVIEW HOST", "HOST total", metrics.get('HOST', {'time': 0})),
-        ("13 OVERVIEW HOST COPY", "HOST COPY total", metrics.get('HOST_COPY', {'time': 0})),
-        ("14 OVERVIEW IDLE", "IDLE", metrics['IDLE']),
-        ("15 OVERALL", "OVERALL", metrics['OVERALL']),
-    ]
-    
+    overview_tracks = sorted(overview_tracks, key=lambda x: x[0])
+
     for thread_name, label, metric in overview_tracks:
         tuuid = trace_writer.add_thread_descriptor(process_uuid, thread_name)
         perfetto_event = create_overview_event(tuuid, label, metric, base_start)
@@ -840,11 +899,25 @@ def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
             trace_writer.add_event(perfetto_event)
 
 
+def get_dashboard_metrics():
+    return [{'name': desc.dashboard_name, 'description': desc.dashboard_description, 'unit': desc.dashboard_unit} for desc in _METRICS]
+
+
+def get_measurements(overview_data):
+    results = []
+    for desc in _METRICS:
+        metric_value = overview_data['metrics'].get(desc.perfetto_name[0], {}).get(desc.perfetto_name[1])
+        if metric_value is not None:
+            results.append({'metric': desc.dashboard_name, 'value': metric_value})
+
+    return results
+
+
 # =============================================================================
 # MAIN CONVERSION LOGIC
 # =============================================================================
 
-def convert_to_perfetto(debug_dir, pb_path, overview_data=None, view_name="Compile Profile"):
+def convert_to_perfetto(debug_dir, pb_path, view_name="Compile Profile"):
     """
     Convert a single compile profile CSV to Perfetto trace format.
     
@@ -879,7 +952,7 @@ def convert_to_perfetto(debug_dir, pb_path, overview_data=None, view_name="Compi
         try:
             log_runtime_profile_data(trace_writer, dispatch)
 
-            overview_data = compute_runtime_metrics(dispatch)
+            overview_data = compute_compile_metrics(dispatch)
             
             render_overview_tracks(view_name, overview_data['overall_start'], 
                                 overview_data['metrics'], trace_writer)
@@ -887,7 +960,7 @@ def convert_to_perfetto(debug_dir, pb_path, overview_data=None, view_name="Compi
         finally:        
             trace_writer.close()
     
-    return pb_path
+    return get_measurements(overview_data)
 
 
 # =============================================================================
@@ -935,13 +1008,13 @@ def main():
         new_overview_map = overview_map
     
     # Generate Perfetto trace
-    output_path = convert_to_perfetto(
+    convert_to_perfetto(
         debug_dir=args.debug_dir[0],
         pb_path=args.pb#,
         #overview_map=new_overview_map
     )
     
-    print(f"\n✓ Perfetto trace generated: {output_path}")
+    print(f"\n✓ Perfetto trace generated: {args.pb}")
 
 
 if __name__ == "__main__":
