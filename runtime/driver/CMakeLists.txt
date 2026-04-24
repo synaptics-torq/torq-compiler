@@ -28,6 +28,7 @@ set(torq_hdrs
     torq_device.h
     torq_driver.h
     torq_event.h
+    torq_allocator.h
     torq_profile_scope.h
     torq_semaphore.h
     TorqExecutable.h
@@ -37,6 +38,7 @@ set(torq_srcs
     nop_executable_cache.cc
     TestVectorWriter.cc
     torq_command_buffer.c
+    torq_allocator.c
     torq_device.c
     torq_driver.c
     torq_event.c

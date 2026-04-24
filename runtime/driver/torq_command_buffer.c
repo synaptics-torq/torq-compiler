@@ -6,6 +6,7 @@
 
 #include "torq_command_buffer.h"
 #include "native_executable.h"
+#include "torq_allocator.h"
 #include "torq_profile_scope.h"
 
 #include <stddef.h>
@@ -18,6 +19,7 @@
 #include "iree/base/internal/math.h"
 #include "iree/hal/local/executable_library.h"
 #include "iree/hal/local/local_executable.h"
+#include "torq_executable_def_reader.h"
 
 //===----------------------------------------------------------------------===//
 // iree_hal_torq_command_buffer_t
@@ -29,14 +31,7 @@ typedef struct iree_hal_torq_command_buffer_t {
   iree_allocator_t host_allocator;
 
   struct {
-    // Cached and initialized dispatch state reused for all dispatches.
-    // Individual dispatches must populate the dynamically changing fields like
-    // constant_count and binding_count.
-    iree_alignas(64) iree_hal_executable_dispatch_state_v0_t dispatch_state;
-    // Persistent storage for binding pointers used by dispatch_state.
-    void* binding_ptr_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
-    // Persistent storage for binding lengths used by dispatch_state.
-    size_t binding_length_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
+    iree_hal_torq_dispatch_state_v0_t dispatch_state;
 
     // An opaque tag used to reduce the cost of processor ID queries.
     iree_cpu_processor_tag_t processor_tag;
@@ -60,10 +55,10 @@ static void iree_hal_torq_command_buffer_reset(
 
   // Setup the cached dispatch state pointers that don't change.
   iree_hal_executable_dispatch_state_v0_t* dispatch_state =
-      &command_buffer->state.dispatch_state;
-  dispatch_state->binding_ptrs = command_buffer->state.binding_ptr_storage;
+      &command_buffer->state.dispatch_state.dispatch_state;
+  dispatch_state->binding_ptrs = command_buffer->state.dispatch_state.binding_ptr_storage;
   dispatch_state->binding_lengths =
-      command_buffer->state.binding_length_storage;
+      command_buffer->state.dispatch_state.binding_length_storage;
 }
 
 iree_host_size_t iree_hal_torq_command_buffer_size(
@@ -190,6 +185,37 @@ static void iree_hal_torq_command_buffer_update_processor_id(
     iree_hal_torq_command_buffer_t* command_buffer) {
   iree_cpu_requery_processor_id(&command_buffer->state.processor_tag,
                                 &command_buffer->state.processor_id);
+}
+
+static bool iree_hal_torq_command_buffer_is_zero_copy_binding(
+    iree_hal_executable_t* executable, iree_host_size_t binding_index,
+    iree_hal_buffer_t* binding_buffer, iree_device_size_t effective_offset) {
+  const iree_hal_torq_native_executable_t* native_executable =
+      iree_hal_torq_native_executable_cast(executable);
+  const torq_hw_device_buffer_t* device_buffer =
+      iree_hal_torq_buffer_device_buffer(iree_hal_buffer_allocated_buffer(binding_buffer));
+  if (!device_buffer || !torq_hw_device_buffer_is_dmabuf(device_buffer)) {
+    return false;
+  }
+
+  iree_hal_torq_ExecutableDef_table_t executable_def =
+      iree_hal_torq_ExecutableDef_as_root(native_executable->program);
+  if (!iree_hal_torq_ExecutableDef_bindings_is_present(executable_def)) {
+    return false;
+  }
+
+  iree_hal_torq_Binding_vec_t bindings =
+      iree_hal_torq_ExecutableDef_bindings_get(executable_def);
+  if (binding_index >= iree_hal_torq_Binding_vec_len(bindings)) {
+    return false;
+  }
+
+  iree_hal_torq_Binding_table_t binding =
+      iree_hal_torq_Binding_vec_at(bindings, binding_index);
+  uint32_t xram_addr = iree_hal_torq_Binding_address_get(binding);
+  iree_device_size_t final_offset =
+      effective_offset + iree_hal_torq_Binding_offset_get(binding);
+  return ((xram_addr & 0xFFFu) == 0) && ((final_offset & 0xFFFu) == 0);
 }
 
 static iree_status_t iree_hal_torq_command_buffer_begin(
@@ -395,7 +421,7 @@ static iree_status_t iree_hal_torq_command_buffer_dispatch(
     iree_hal_torq_command_buffer_update_processor_id(command_buffer);
 
     iree_hal_executable_dispatch_state_v0_t* dispatch_state =
-        &command_buffer->state.dispatch_state;
+        &command_buffer->state.dispatch_state.dispatch_state;
 
       // TODO(benvanik): expose on API or keep fixed on executable.
     dispatch_state->workgroup_size_x =
@@ -447,6 +473,18 @@ static iree_status_t iree_hal_torq_command_buffer_dispatch(
             bindings.values[i].buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
             IREE_HAL_MEMORY_ACCESS_ANY, bindings.values[i].offset,
             bindings.values[i].length, &buffer_mapping));
+        command_buffer->state.dispatch_state.binding_buffer_storage[i] =
+            bindings.values[i].buffer;
+        command_buffer->state.dispatch_state.binding_offset_storage[i] =
+            iree_hal_buffer_byte_offset(bindings.values[i].buffer) + bindings.values[i].offset;
+        command_buffer->state.dispatch_state.binding_range_storage[i] =
+            bindings.values[i].length;
+        if (iree_hal_torq_command_buffer_is_zero_copy_binding(
+                executable, i, bindings.values[i].buffer,
+                command_buffer->state.dispatch_state.binding_offset_storage[i])) {
+          command_buffer->state.dispatch_state.binding_flags_storage[i] |=
+              IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ELIGIBLE;
+        }
       } else {
         status = iree_make_status(
             IREE_STATUS_FAILED_PRECONDITION,
@@ -455,8 +493,8 @@ static iree_status_t iree_hal_torq_command_buffer_dispatch(
             i);
         break;
       }
-      command_buffer->state.binding_ptr_storage[i] = buffer_mapping.contents.data;
-      command_buffer->state.binding_length_storage[i] =
+      command_buffer->state.dispatch_state.binding_ptr_storage[i] = buffer_mapping.contents.data;
+      command_buffer->state.dispatch_state.binding_length_storage[i] =
           buffer_mapping.contents.data_length;
     }
 

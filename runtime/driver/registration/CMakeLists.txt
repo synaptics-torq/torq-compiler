@@ -14,6 +14,7 @@ iree_cc_library(
   DEPS
     iree::base
     iree::hal
+    iree::hal::utils::caching_allocator
     driver::torq
     iree::hal::local::loaders::registration
     iree::hal::local::plugins::registration

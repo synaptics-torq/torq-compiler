@@ -10,7 +10,7 @@
 #-------------------------------------------------------------------------------
 
 set(torq_deps iree::base::internal)
-set(torq_srcs src/TorqUtils.cpp src/TorqHw.cpp src/TorqEventLog.cpp)
+set(torq_srcs src/TorqUtils.cpp src/TorqHw.cpp src/TorqEventLog.cpp src/TorqDeviceBufferAPI.cpp)
 set(torq_defs)
 set(include_dirs
     ${TORQ_HW_DIR}
@@ -77,6 +77,7 @@ iree_cc_library(
     TorqHw
   HDRS
     inc/TorqHw.h
+    inc/TorqDeviceBufferAPI.h
     inc/TorqUtils.h
   INCLUDES
     ${include_dirs}

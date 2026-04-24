@@ -8,10 +8,38 @@
 
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
+#include "iree/hal/local/executable_library.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif  // __cplusplus
+
+typedef struct iree_hal_torq_dispatch_state_v0_t {
+    // Keep the standard IREE dispatch state first so executable entry points can
+    // continue treating this as iree_hal_executable_dispatch_state_v0_t.
+    iree_alignas(64) iree_hal_executable_dispatch_state_v0_t dispatch_state;
+    void *binding_ptr_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
+    size_t binding_length_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
+    iree_hal_buffer_t *binding_buffer_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
+    iree_device_size_t binding_offset_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
+    iree_device_size_t binding_range_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
+    uint8_t binding_flags_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
+} iree_hal_torq_dispatch_state_v0_t;
+
+#define IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ELIGIBLE 0x1u
+#define IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ATTACHED 0x2u
+
+static inline iree_hal_torq_dispatch_state_v0_t *iree_hal_torq_dispatch_state_cast(
+    iree_hal_executable_dispatch_state_v0_t *state
+) {
+    return (iree_hal_torq_dispatch_state_v0_t *)state;
+}
+
+static inline const iree_hal_torq_dispatch_state_v0_t *iree_hal_torq_dispatch_state_const_cast(
+    const iree_hal_executable_dispatch_state_v0_t *state
+) {
+    return (const iree_hal_torq_dispatch_state_v0_t *)state;
+}
 
 // Creates an inline synchronous one-shot single-threaded command "buffer".
 // This is designed for ultra-low latency situations where we know the command

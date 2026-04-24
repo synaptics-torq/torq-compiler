@@ -2,6 +2,7 @@
 #include "TorqUtils.h"
 #include "TorqEventLog.h"
 #include "TestVectorWriter.h"
+#include "torq_allocator.h"
 
 #include "iree/base/internal/flags.h"
 
@@ -211,8 +212,86 @@ typedef struct fake_npu_top_t
     uint8_t*            xram;
 } fake_npu_top_t;
 
+static bool isZeroCopyDebugModeEnabled() {
+    return FLAG_torq_dump_io_data_dir[0] || FLAG_torq_dump_test_vectors_dir[0];
+}
+
+static const torq_hw_device_buffer_t* getZeroCopyDeviceBuffer(
+    const iree_hal_torq_dispatch_state_v0_t* torqState,
+    iree_hal_torq_Binding_table_t binding, size_t* effectiveOffset) {
+    if (isZeroCopyDebugModeEnabled()) {
+      return nullptr;
+    }
+    auto bindingId = ns(Binding_id(binding));
+    if (bindingId >= torqState->dispatch_state.binding_count) {
+      return nullptr;
+    }
+    if (!(torqState->binding_flags_storage[bindingId] &
+          IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ELIGIBLE)) {
+      return nullptr;
+    }
+    auto* rawBuffer = torqState->binding_buffer_storage[bindingId];
+    if (!rawBuffer) {
+      return nullptr;
+    }
+    auto* deviceBuffer =
+        iree_hal_torq_buffer_device_buffer(iree_hal_buffer_allocated_buffer(rawBuffer));
+    if (!deviceBuffer) {
+      return nullptr;
+    }
+    *effectiveOffset = torqState->binding_offset_storage[bindingId] + ns(Binding_offset(binding));
+    return deviceBuffer;
+}
+
+static iree_status_t cleanupZeroCopyBindings(
+    TorqHw* torq, ns(ExecutableDef_table_t) executableDef,
+    iree_hal_executable_dispatch_state_v0_t* state) {
+    auto* torqState = iree_hal_torq_dispatch_state_cast(state);
+    if (!iree_hal_torq_ExecutableDef_bindings_is_present(executableDef)) {
+      return iree_ok_status();
+    }
+
+    auto bindings = ns(ExecutableDef_bindings_get(executableDef));
+    auto bindings_count = iree_hal_torq_Binding_vec_len(bindings);
+    for (size_t i = 0; i < bindings_count; ++i) {
+      auto binding = iree_hal_torq_Binding_vec_at(bindings, i);
+      auto bindingId = ns(Binding_id(binding));
+      if (bindingId >= torqState->dispatch_state.binding_count) {
+        continue;
+      }
+      if (!(torqState->binding_flags_storage[bindingId] &
+            IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ATTACHED)) {
+        continue;
+      }
+
+      size_t effectiveOffset = 0;
+      const torq_hw_device_buffer_t* deviceBuffer =
+          getZeroCopyDeviceBuffer(torqState, binding, &effectiveOffset);
+      if (!deviceBuffer) {
+        torqState->binding_flags_storage[bindingId] &=
+            ~IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ATTACHED;
+        continue;
+      }
+
+      auto bindingAddress = ns(Binding_address(binding));
+      auto bindingSize = ns(Binding_size(binding));
+      if (!torq->detachBinding(*deviceBuffer, bindingAddress, effectiveOffset, bindingSize)) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to detach zero-copy binding %d", bindingId);
+      }
+      torqState->binding_flags_storage[bindingId] &=
+          ~IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ATTACHED;
+      if (!ns(Binding_is_read_only(binding))) {
+        IREE_RETURN_IF_ERROR(torq_hw_device_buffer_invalidate_range(
+            const_cast<torq_hw_device_buffer_t*>(deviceBuffer), effectiveOffset, bindingSize));
+      }
+    }
+
+    return iree_ok_status();
+}
+
 
 iree_status_t TorqExecutable::syncBinding(int binding_id, iree_hal_torq_Binding_table_t binding, iree_hal_executable_dispatch_state_v0_t *state, bool from_host) {
+    auto *torqState = iree_hal_torq_dispatch_state_cast(state);
 
     auto isReadOnly = ns(Binding_is_read_only(binding));
 
@@ -228,24 +307,28 @@ iree_status_t TorqExecutable::syncBinding(int binding_id, iree_hal_torq_Binding_
 
     auto bindingId = ns(Binding_id(binding));
 
-    if (bindingId >= state->binding_count) {
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "binding id %d out of range [0, %d)", bindingId, state->binding_count);
+    if (bindingId >= torqState->dispatch_state.binding_count) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "binding id %d out of range [0, %d)", bindingId, torqState->dispatch_state.binding_count);
     }
 
     auto bindingOffset = ns(Binding_offset(binding));
     auto bindingSize = ns(Binding_size(binding));
 
-    if (bindingOffset >= state->binding_lengths[bindingId]) {
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "binding offset %d out of range [0, %zu)", bindingOffset, state->binding_lengths[bindingId]);
+    if (bindingOffset >= torqState->binding_range_storage[bindingId]) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "binding offset %d out of range [0, %zu)", bindingOffset, torqState->binding_range_storage[bindingId]);
     }
 
-    if (bindingOffset + bindingSize > state->binding_lengths[bindingId]) {
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "binding size %d with offset %d out of range [0, %zu)", bindingSize, bindingOffset, state->binding_lengths[bindingId]);
+    if (bindingOffset + bindingSize > torqState->binding_range_storage[bindingId]) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "binding size %d with offset %d out of range [0, %zu)", bindingSize, bindingOffset, torqState->binding_range_storage[bindingId]);
     }
 
     auto bindingAddress = ns(Binding_address(binding));
 
-    uint8_t *hostAddress = (uint8_t *)state->binding_ptrs[bindingId] + bindingOffset;
+    if (!torqState->binding_ptr_storage[bindingId]) {
+      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION, "binding %d has no mapped host pointer", bindingId);
+    }
+
+    uint8_t *hostAddress = (uint8_t *)torqState->binding_ptr_storage[bindingId] + bindingOffset;
 
 
     if (from_host) {
@@ -830,6 +913,7 @@ iree_status_t TorqExecutable::initialize() {
 
 
 iree_status_t TorqExecutable::writeInputs(iree_hal_executable_dispatch_state_v0_t* state) {
+  auto *torqState = iree_hal_torq_dispatch_state_cast(state);
 
   if (!iree_hal_torq_ExecutableDef_bindings_is_present(executableDef())) {
     if (!hasHardware()) {
@@ -848,6 +932,23 @@ iree_status_t TorqExecutable::writeInputs(iree_hal_executable_dispatch_state_v0_
 
     LOGD << "Loading binding " << binding_id << " index " << i;
 
+    size_t effectiveOffset = 0;
+    const torq_hw_device_buffer_t *deviceBuffer =
+        getZeroCopyDeviceBuffer(torqState, binding, &effectiveOffset);
+    if (deviceBuffer && !ns(Binding_is_write_only(binding))) {
+      auto bindingAddress = ns(Binding_address(binding));
+      auto bindingSize = ns(Binding_size(binding));
+      iree_status_t cacheStatus = torq_hw_device_buffer_flush_range(
+          const_cast<torq_hw_device_buffer_t *>(deviceBuffer), effectiveOffset, bindingSize);
+      if (iree_status_is_ok(cacheStatus) &&
+          torq_->attachBinding(*deviceBuffer, bindingAddress, effectiveOffset, bindingSize)) {
+        torqState->binding_flags_storage[binding_id] |=
+            IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ATTACHED;
+        continue;
+      }
+      iree_status_ignore(cacheStatus);
+    }
+
     iree_status_t ret = syncBinding(i, binding, state, true);
 
     if (!iree_status_is_ok(ret)) {
@@ -861,6 +962,7 @@ iree_status_t TorqExecutable::writeInputs(iree_hal_executable_dispatch_state_v0_
 
 // reads the outputs from XRAM to the user buffers
 iree_status_t TorqExecutable::readOutputs(iree_hal_executable_dispatch_state_v0_t* state) {
+  auto *torqState = iree_hal_torq_dispatch_state_cast(state);
   
   if (!iree_hal_torq_ExecutableDef_bindings_is_present(executableDef())) {
     return iree_ok_status();
@@ -878,6 +980,24 @@ iree_status_t TorqExecutable::readOutputs(iree_hal_executable_dispatch_state_v0_
     uint32_t binding_id = ns(Binding_id(binding));
 
     LOGD << "Reading binding " << binding_id << " index " << i;
+
+    size_t effectiveOffset = 0;
+    const torq_hw_device_buffer_t *deviceBuffer =
+        getZeroCopyDeviceBuffer(torqState, binding, &effectiveOffset);
+    if (deviceBuffer && !ns(Binding_is_read_only(binding)) &&
+        (torqState->binding_flags_storage[binding_id] &
+         IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ATTACHED)) {
+      auto bindingAddress = ns(Binding_address(binding));
+      auto bindingSize = ns(Binding_size(binding));
+      if (!torq_->detachBinding(*deviceBuffer, bindingAddress, effectiveOffset, bindingSize)) {
+        return iree_make_status(IREE_STATUS_INTERNAL, "failed to detach zero-copy binding %d", binding_id);
+      }
+      torqState->binding_flags_storage[binding_id] &=
+          ~IREE_HAL_TORQ_BINDING_FLAG_ZERO_COPY_ATTACHED;
+      IREE_RETURN_IF_ERROR(torq_hw_device_buffer_invalidate_range(
+          const_cast<torq_hw_device_buffer_t *>(deviceBuffer), effectiveOffset, bindingSize));
+      continue;
+    }
 
     ret = syncBinding(i, binding, state, false);
 
@@ -1048,15 +1168,6 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
     writeInitialStateToTestVector();
   }
   
-  // load all the inputs to XRAM
-  TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_SYNC_BINDINGS_IN);
-  status = writeInputs(state);
-  TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_SYNC_BINDINGS_IN);
-
-  if (!iree_status_is_ok(status)) {            
-    return status;
-  }
-
   if (hasHardware()) {
     // acquire the hardware, this won't start execution on it yet
     {
@@ -1068,27 +1179,51 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
       }
     }
 
+    TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_SYNC_BINDINGS_IN);
+    status = writeInputs(state);
+    TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_SYNC_BINDINGS_IN);
+
+    if (!iree_status_is_ok(status)) {
+      torq_->release();
+      return status;
+    }
+
     // run all host actions using the hardware if necessary
     TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_EXECUTE_ACTIONS);
     status = executeActions(eventLog.get());
     TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_EXECUTE_ACTIONS);
 
+    if (iree_status_is_ok(status)) {
+      TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_SYNC_BINDINGS_OUT);
+      status = readOutputs(state);
+      TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_SYNC_BINDINGS_OUT);
+    }
+
+    iree_status_t cleanupStatus = cleanupZeroCopyBindings(torq_.get(), executableDef(), state);
 
     // release the hardware so that it can be used by another user
     TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
     torq_->release();
     TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
 
+    if (!iree_status_is_ok(status) || !iree_status_is_ok(cleanupStatus)) {
+      return iree_status_join(status, cleanupStatus);
+    }
+  } else {
+    TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_SYNC_BINDINGS_IN);
+    status = writeInputs(state);
+    TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_SYNC_BINDINGS_IN);
+
     if (!iree_status_is_ok(status)) {
       return status;
     }
+    TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_SYNC_BINDINGS_OUT);
+    status = readOutputs(state);
+    TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_SYNC_BINDINGS_OUT);
+    return status;
   }
 
-  // read back all the outputs from XRAM
-  TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_SYNC_BINDINGS_OUT);
-  status = readOutputs(state);    
-  TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_SYNC_BINDINGS_OUT);
-  return status;
+  return iree_ok_status();
 
 }
 

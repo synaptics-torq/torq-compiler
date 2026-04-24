@@ -7,10 +7,12 @@
 #pragma once
 
 #include "Timer.h"
+#include "TorqDeviceBufferAPI.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <atomic>
 
@@ -21,6 +23,8 @@
 #endif
 
 namespace synaptics {
+
+using TorqDeviceBuffer = torq_hw_device_buffer_t;
 
 /// Virtual interface to lowest-level Torq driver
 class TorqHw {
@@ -95,6 +99,20 @@ class TorqHw {
     virtual bool writeXram(uint32_t addr, size_t size, const void *dataIn) = 0;
     /// read data from XRAM
     virtual bool readXram(uint32_t addr, size_t size, void *dataOut) const = 0;
+
+    /// allocate a device buffer of the given size, must be freed with freeDeviceBuffer()
+    /// @return allocated device buffer struct or ``std::nullopt`` on failure
+    virtual std::optional<TorqDeviceBuffer> allocateDeviceBuffer(size_t size);
+    /// free allocated device buffer
+    virtual void freeDeviceBuffer(TorqDeviceBuffer &buffer);
+    /// attach a device buffer binding into the active XRAM address space
+    virtual bool attachBinding(
+        const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
+    );
+    /// detach a previously attached binding from the active XRAM address space
+    virtual bool detachBinding(
+        const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
+    );
 
     // Get elapsed time since last start()
     /// @return duration in microseconds

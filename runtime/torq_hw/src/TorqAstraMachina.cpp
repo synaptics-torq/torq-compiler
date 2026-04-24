@@ -9,7 +9,6 @@
 #include "reg/torq_regs_host_view.h"
 #include "reg/torq_nss_regs.h"
 #include "reg/torq_css_regs.h"
-#include <linux/dma-heap.h>
 #include <linux/dma-buf.h>
 
 #include <iostream>
@@ -29,11 +28,6 @@ using namespace std;
 #define TORQ_NODE "/dev/torq"
 
 #define DMABUF_USE_UNCACHED
-#if defined (DMABUF_USE_UNCACHED)
-#define DMABUF_NODE "/dev/dma_heap/system-cust-uncached"
-#else
-#define DMABUF_NODE "/dev/dma_heap/system"
-#endif
 
 namespace synaptics {
 
@@ -73,6 +67,16 @@ bool TorqAstraMachina::open() {
         return false;
     }
 
+    iree_status_t node_status = torq_hw_dma_heap_node_acquire();
+    if (!iree_status_is_ok(node_status)) {
+        cerr << "failed to acquire dma heap nodes: "
+             << iree_status_code_string(iree_status_code(node_status)) << endl;
+        iree_status_ignore(node_status);
+        close();
+        return false;
+    }
+    _dmaHeapNodeAcquired = true;
+
     if (!setupXramSpace()) {
         cerr << "Failed to configure xram memory" << endl;
         close();
@@ -98,17 +102,12 @@ bool TorqAstraMachina::close() {
     if (_networkId != kInvalidNetworkId) {
         destroyNetwork();
     }
-    if ((_xramVBase != MAP_FAILED) && (_xramVBase != NULL)) {
-        munmap(_xramVBase, _xramSizeAligned);
-        _xramVBase = NULL;
-    }
-    if (_dmabufHandle != kInvalidFd) {
-        ::close(_dmabufHandle);
-        _dmabufHandle = kInvalidFd;
-    }
-    if (_dmabufDevNode != kInvalidFd) {
-        ::close(_dmabufDevNode);
-        _dmabufDevNode = kInvalidFd;
+    TorqHw::freeDeviceBuffer(_xramBuffer);
+    _dmabufHandle = kInvalidFd;
+    _xramVBase = nullptr;
+    if (_dmaHeapNodeAcquired) {
+        torq_hw_dma_heap_node_release();
+        _dmaHeapNodeAcquired = false;
     }
     if (_torqDevNode != kInvalidFd) {
         ::close(_torqDevNode);
@@ -290,30 +289,66 @@ bool TorqAstraMachina::readLram(uint32_t addr, size_t size, void *dataOut) const
 }
 
 bool TorqAstraMachina::setupXramSpace() {
-    _dmabufDevNode = ::open(DMABUF_NODE, O_RDWR);
-    if (_dmabufDevNode == kInvalidFd) {
-        cerr << "dmabuf node not available for xram buffer" << endl;
+    // don't *need* a temp copy, defensive move in-case `torq_hw_device_buffer_allocate() fails
+    TorqDeviceBuffer xramBuffer{};
+    iree_status_t status = torq_hw_device_buffer_allocate(
+        TORQ_HW_DEVICE_BUFFER_MODE_DMA_HEAP_UNCACHED, _xramSizeAligned, &xramBuffer
+    );
+    if (!iree_status_is_ok(status)) {
+        cerr << "error allocating buffer from heap " << DMABUF_NODE_UNCACHED
+             << ", check kernel config\n";
+        iree_status_ignore(status);
         return false;
     }
-
-    struct dma_heap_allocation_data bufferReq = {0};
-    bufferReq.len = _xramSizeAligned;
-    bufferReq.fd_flags = O_RDWR;
-
-    if (ioctl(_dmabufDevNode, DMA_HEAP_IOCTL_ALLOC, &bufferReq) < 0) {
-        cerr << "error allocating buffer from heap " << DMABUF_NODE << ", check kernel config\n";
-        return false;
-    }
-
-    _dmabufHandle = bufferReq.fd;
-    LOGD << "(xram) dmabuf fd " << _dmabufHandle << ": heap " << DMABUF_NODE << ": size "<< _xramSize << "\n";
-
-    _xramVBase = (uint8_t *)mmap(NULL, _xramSizeAligned, PROT_READ | PROT_WRITE, MAP_SHARED, _dmabufHandle, 0);
-    if (_xramVBase == MAP_FAILED) {
-        cerr << "error mapping ddr region" << endl;
-        return false;
-    }
+    _xramBuffer = xramBuffer;
+    _dmabufHandle = _xramBuffer.handle;
+    _xramVBase = (uint8_t *)_xramBuffer.mapped;
+    LOGD << "(xram) dmabuf fd " << _dmabufHandle << ": size " << _xramSize << "\n";
     return true;
+}
+
+std::optional<TorqDeviceBuffer> TorqAstraMachina::allocateDeviceBuffer(size_t size) {
+    TorqDeviceBuffer buffer{};
+    iree_status_t status = torq_hw_device_buffer_allocate(
+        TORQ_HW_DEVICE_BUFFER_MODE_DMA_HEAP, size, &buffer);
+    if (!iree_status_is_ok(status)) {
+        LOGE << "Failed to allocate device buffer: "
+             << iree_status_code_string(iree_status_code(status));
+        iree_status_ignore(status);
+        return std::nullopt;
+    }
+    return buffer;
+}
+
+bool TorqAstraMachina::attachBinding(
+    const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
+) {
+    if (!_networkActive || _networkId == kInvalidNetworkId || buffer.handle == kInvalidFd) {
+        return TorqHw::attachBinding(buffer, xramAddr, dataOffset, size);
+    }
+
+    struct torq_attach_binding_req req = {};
+    req.network_id = _networkId;
+    req.dmabuf_fd = buffer.handle;
+    req.xram_addr = xramAddr;
+    req.data_offset = dataOffset;
+    req.binding_size = size;
+    return ioctl(_torqDevNode, TORQ_IOCTL_ATTACH_BINDING, &req) == 0;
+}
+
+bool TorqAstraMachina::detachBinding(
+    const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
+) {
+    if (!_networkActive || _networkId == kInvalidNetworkId || buffer.handle == kInvalidFd) {
+        return TorqHw::detachBinding(buffer, xramAddr, dataOffset, size);
+    }
+
+    struct torq_detach_binding_req req = {};
+    req.network_id = _networkId;
+    req.xram_addr = xramAddr;
+    req.data_offset = dataOffset;
+    req.binding_size = size;
+    return ioctl(_torqDevNode, TORQ_IOCTL_DETACH_BINDING, &req) == 0;
 }
 
 bool TorqAstraMachina::createNetwork() {

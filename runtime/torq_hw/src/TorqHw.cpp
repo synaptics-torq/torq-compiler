@@ -30,6 +30,7 @@
 #include <cstring>
 #include <iostream>
 #include <thread>
+#include <cstdint>
 
 using namespace std;
 
@@ -107,6 +108,20 @@ std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr,
     assert(false && "Unsupported TorqHw type");
     cerr << hw_type << ": Torq Hardware not supported" << endl;
     return nullptr;
+}
+
+bool TorqHw::attachBinding(
+    const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
+) {
+    auto *data = static_cast<const uint8_t *>(buffer.mapped) + dataOffset;
+    return writeXram(xramAddr, size, data);
+}
+
+bool TorqHw::detachBinding(
+    const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
+) {
+    auto *data = static_cast<uint8_t *>(buffer.mapped) + dataOffset;
+    return readXram(xramAddr, size, data);
 }
 
 bool TorqHw::start(uint32_t lramAddr) {
@@ -321,6 +336,28 @@ bool TorqHw::readDtcm(uint32_t addr, size_t size, void *dataOut) const {
 bool TorqHw::readItcm(uint32_t addr, size_t size, void *dataOut) const {
     assert(addr + size <= REG_SIZE__TORQ_HV_ITCM && "ITCM address out of range");
     return readLram(REG_ADDR__TORQ_HV_ITCM + addr, size, dataOut);
+}
+
+std::optional<TorqDeviceBuffer> TorqHw::allocateDeviceBuffer(size_t size) {
+    TorqDeviceBuffer buffer{};
+    iree_status_t status =
+        torq_hw_device_buffer_allocate(TORQ_HW_DEVICE_BUFFER_MODE_MALLOC, size, &buffer);
+    if (!iree_status_is_ok(status)) {
+        LOGE << "Failed to allocate device buffer: "
+             << iree_status_code_string(iree_status_code(status));
+        iree_status_ignore(status);
+        return std::nullopt;
+    }
+    return buffer;
+}
+
+void TorqHw::freeDeviceBuffer(TorqDeviceBuffer &buffer) {
+    iree_status_t status = torq_hw_device_buffer_free(&buffer);
+    if (!iree_status_is_ok(status)) {
+        LOGE << "Failed to free device buffer: "
+             << iree_status_code_string(iree_status_code(status));
+        iree_status_ignore(status);
+    }
 }
 
 }  // synaptics namespace

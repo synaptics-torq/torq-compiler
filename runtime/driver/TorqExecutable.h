@@ -1,4 +1,5 @@
 #include "native_executable.h"
+#include "torq_command_buffer.h"
 #include "TorqHw.h"
 #include "TestVectorWriter.h"
 

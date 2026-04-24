@@ -48,6 +48,18 @@ union torq_ioctl_arg {
     struct torq_destroy_network_req destroy_network_request;
     struct torq_write_lram_req lram_write_request;
     struct torq_read_lram_req lram_read_request;
+    struct torq_attach_binding_req attach_binding_request;
+    struct torq_detach_binding_req detach_binding_request;
+};
+
+struct torq_binding_entry {
+    struct list_head list;
+    struct dma_buf *dmabuf;
+    struct dma_buf_attachment *attachment;
+    struct sg_table *sgt;
+    unsigned int xram_addr;
+    unsigned int data_offset;
+    size_t mapped_size;
 };
 
 struct torq_module {
@@ -100,6 +112,8 @@ struct torq_network {
     struct iommu_domain *domain;
     /* lram segments for the network, committed to shared LRAM when network loaded*/
     struct list_head lram_segments;
+    /* zero-copy bindings temporarily remapped into the network domain */
+    struct list_head binding_list;
     /* check if xram region is mapped in networks domain */
     bool iova_mapped;
 };

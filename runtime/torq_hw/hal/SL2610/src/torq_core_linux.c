@@ -5,16 +5,21 @@
 #include "torq_kernel_log.h"
 #include "torq_reg_define.h"
 
-#define REQUIRE_DEVICE_LOCK(cmd)  ((cmd == TORQ_IOCTL_START_NETWORK) || \
-               (cmd == TORQ_IOCTL_RUN_NETWORK) || \
-               (cmd == TORQ_IOCTL_WAIT_NETWORK) || \
-               (cmd == TORQ_IOCTL_STOP_NETWORK) || \
-               (cmd == TORQ_IOCTL_DESTROY_NETWORK))
-
 #define SYNA_NPU_DEV_NAME "torq"
 #define IOVA_ALIGN 4096
 #define NPU_RESET_INTERVAL 10
 #define TORQ_IRQ_TIMEOUT_MS 5000
+
+static int torq_attach_binding(struct torq_file_inst *inst, struct torq_attach_binding_req *req);
+static int torq_detach_binding(struct torq_file_inst *inst, struct torq_detach_binding_req *req);
+
+#define REQUIRE_DEVICE_LOCK(cmd)  ((cmd == TORQ_IOCTL_START_NETWORK) || \
+               (cmd == TORQ_IOCTL_RUN_NETWORK) || \
+               (cmd == TORQ_IOCTL_WAIT_NETWORK) || \
+               (cmd == TORQ_IOCTL_STOP_NETWORK) || \
+               (cmd == TORQ_IOCTL_DESTROY_NETWORK) || \
+               (cmd == TORQ_IOCTL_ATTACH_BINDING) || \
+               (cmd == TORQ_IOCTL_DETACH_BINDING))
 
 static int torq_power_on(struct torq_module *torq_dev)
 {
@@ -80,7 +85,24 @@ static int torq_detach_network_domain(struct torq_module *torq_dev, struct torq_
 
 static void torq_cleanup_network_resources(struct torq_module *torq_dev, struct torq_network *net)
 {
+    struct torq_binding_entry *binding, *binding_tmp;
     struct torq_lram_segment *segment, *tmp;
+
+    list_for_each_entry_safe(binding, binding_tmp, &net->binding_list, list) {
+        list_del(&binding->list);
+        if (net->domain && binding->xram_addr && binding->mapped_size) {
+            iommu_unmap(net->domain, binding->xram_addr, binding->mapped_size);
+        }
+        if (binding->attachment && binding->sgt) {
+            dma_buf_unmap_attachment(binding->attachment, binding->sgt, DMA_BIDIRECTIONAL);
+            dma_buf_detach(binding->dmabuf, binding->attachment);
+        }
+        if (binding->dmabuf) {
+            dma_buf_put(binding->dmabuf);
+        }
+        kfree(binding);
+    }
+
     list_for_each_entry_safe(segment, tmp, &net->lram_segments, list) {
         list_del(&segment->list);
         kfree(segment->data);
@@ -286,6 +308,7 @@ static int torq_create_network(struct torq_file_inst *inst, struct torq_create_n
     net->xram_start = req->xram_start;
     net->size = dmabuf->size;
     INIT_LIST_HEAD(&net->lram_segments);
+    INIT_LIST_HEAD(&net->binding_list);
 
     /* store instance in xarry and use allocated id to refer network*/
     ret = xa_alloc(&inst->networks_xa, &network_id, net, XA_LIMIT(1, UINT_MAX), GFP_KERNEL);
@@ -624,6 +647,237 @@ static int torq_read_lram(struct torq_file_inst *inst, struct torq_read_lram_req
     return 0;
 }
 
+static int torq_iommu_map_sg_at_offset(struct iommu_domain *domain, dma_addr_t iova,
+                                       struct sg_table *sgt, size_t byte_offset,
+                                       size_t map_size)
+{
+    struct scatterlist *sg;
+    size_t remaining_skip = byte_offset;
+    size_t mapped = 0;
+    int i;
+    int ret;
+
+    for_each_sg(sgt->sgl, sg, sgt->orig_nents, i) {
+        phys_addr_t sg_phys_addr = sg_phys(sg);
+        size_t sg_len = sg->length;
+
+        if (remaining_skip >= sg_len) {
+            remaining_skip -= sg_len;
+            continue;
+        }
+
+        sg_phys_addr += remaining_skip;
+        sg_len -= remaining_skip;
+        remaining_skip = 0;
+
+        if (sg_len > map_size - mapped) {
+            sg_len = map_size - mapped;
+        }
+
+        ret = iommu_map(domain, iova + mapped, sg_phys_addr, sg_len, IOMMU_READ | IOMMU_WRITE,
+                        GFP_KERNEL);
+        if (ret) {
+            if (mapped) {
+                iommu_unmap(domain, iova, mapped);
+            }
+            return ret;
+        }
+
+        mapped += sg_len;
+        if (mapped == map_size) {
+            return 0;
+        }
+    }
+
+    if (mapped) {
+        iommu_unmap(domain, iova, mapped);
+    }
+    return -EINVAL;
+}
+
+static int torq_remap_net_xram_range(struct torq_network *net, unsigned int xram_addr, size_t size)
+{
+    size_t xram_offset;
+
+    if (!net || !net->domain || !net->sgt) {
+        return -EINVAL;
+    }
+    if (xram_addr < net->xram_start) {
+        return -EINVAL;
+    }
+
+    xram_offset = xram_addr - net->xram_start;
+    if (xram_offset > net->size || size > net->size - xram_offset) {
+        return -ERANGE;
+    }
+
+    return torq_iommu_map_sg_at_offset(net->domain, xram_addr, net->sgt, xram_offset, size);
+}
+
+static int torq_attach_binding(struct torq_file_inst *inst, struct torq_attach_binding_req *req)
+{
+    struct torq_module *torq_dev;
+    struct torq_network *net;
+    struct torq_binding_entry *entry;
+    struct torq_binding_entry *iter;
+    struct dma_buf *dmabuf;
+    struct dma_buf_attachment *attachment;
+    struct sg_table *sgt;
+    size_t map_size;
+    size_t xram_offset;
+    size_t unmapped;
+    int ret;
+
+    if (!inst || !req) {
+        return -EINVAL;
+    }
+    if (req->dmabuf_fd < 0 || !req->binding_size) {
+        return -EINVAL;
+    }
+    if ((req->xram_addr & (IOVA_ALIGN - 1)) || (req->data_offset & (IOVA_ALIGN - 1))) {
+        return -EINVAL;
+    }
+
+    torq_dev = inst->torq_device;
+    net = torq_find_network_in_instance(inst, req->network_id);
+    if (!net) {
+        return -ENOENT;
+    }
+    if (torq_dev->active_network != net) {
+        return -ENODEV;
+    }
+
+    map_size = ALIGN(req->binding_size, IOVA_ALIGN);
+    if (req->xram_addr < net->xram_start) {
+        return -ERANGE;
+    }
+    xram_offset = req->xram_addr - net->xram_start;
+    if (xram_offset > net->size || map_size > net->size - xram_offset) {
+        return -ERANGE;
+    }
+
+    list_for_each_entry(iter, &net->binding_list, list) {
+        unsigned int iter_end = iter->xram_addr + iter->mapped_size;
+        unsigned int req_end = req->xram_addr + map_size;
+        if (req->xram_addr < iter_end && iter->xram_addr < req_end) {
+            return -EBUSY;
+        }
+    }
+
+    dmabuf = dma_buf_get(req->dmabuf_fd);
+    if (IS_ERR(dmabuf)) {
+        return PTR_ERR(dmabuf);
+    }
+    if (req->data_offset > dmabuf->size || map_size > dmabuf->size - req->data_offset) {
+        ret = -ERANGE;
+        goto fail_put_dmabuf;
+    }
+
+    attachment = dma_buf_attach(dmabuf, torq_dev->iommu_device);
+    if (IS_ERR(attachment)) {
+        ret = PTR_ERR(attachment);
+        goto fail_put_dmabuf;
+    }
+
+    sgt = dma_buf_map_attachment(attachment, DMA_BIDIRECTIONAL);
+    if (IS_ERR(sgt)) {
+        ret = PTR_ERR(sgt);
+        goto fail_detach_dmabuf;
+    }
+
+    entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+    if (!entry) {
+        ret = -ENOMEM;
+        goto fail_unmap_attachment;
+    }
+
+    unmapped = iommu_unmap(net->domain, req->xram_addr, map_size);
+    if (unmapped != map_size) {
+        ret = -EFAULT;
+        goto fail_free_entry;
+    }
+
+    ret = torq_iommu_map_sg_at_offset(net->domain, req->xram_addr, sgt, req->data_offset,
+                                      map_size);
+    if (ret) {
+        torq_remap_net_xram_range(net, req->xram_addr, map_size);
+        goto fail_free_entry;
+    }
+
+    entry->dmabuf = dmabuf;
+    entry->attachment = attachment;
+    entry->sgt = sgt;
+    entry->xram_addr = req->xram_addr;
+    entry->data_offset = req->data_offset;
+    entry->mapped_size = map_size;
+    list_add_tail(&entry->list, &net->binding_list);
+    return 0;
+
+fail_free_entry:
+    kfree(entry);
+fail_unmap_attachment:
+    dma_buf_unmap_attachment(attachment, sgt, DMA_BIDIRECTIONAL);
+fail_detach_dmabuf:
+    dma_buf_detach(dmabuf, attachment);
+fail_put_dmabuf:
+    dma_buf_put(dmabuf);
+    return ret;
+}
+
+static int torq_detach_binding(struct torq_file_inst *inst, struct torq_detach_binding_req *req)
+{
+    struct torq_module *torq_dev;
+    struct torq_network *net;
+    struct torq_binding_entry *entry;
+    size_t map_size;
+    size_t unmapped;
+    int ret;
+
+    if (!inst || !req) {
+        return -EINVAL;
+    }
+    if (!req->binding_size) {
+        return -EINVAL;
+    }
+    if ((req->xram_addr & (IOVA_ALIGN - 1)) || (req->data_offset & (IOVA_ALIGN - 1))) {
+        return -EINVAL;
+    }
+
+    torq_dev = inst->torq_device;
+    net = torq_find_network_in_instance(inst, req->network_id);
+    if (!net) {
+        return -ENOENT;
+    }
+    if (torq_dev->active_network != net) {
+        return -ENODEV;
+    }
+
+    map_size = ALIGN(req->binding_size, IOVA_ALIGN);
+    entry = NULL;
+    list_for_each_entry(entry, &net->binding_list, list) {
+        if (entry->xram_addr == req->xram_addr && entry->data_offset == req->data_offset &&
+            entry->mapped_size == map_size) {
+            break;
+        }
+    }
+    if (!entry || &entry->list == &net->binding_list) {
+        return -ENOENT;
+    }
+
+    list_del(&entry->list);
+    unmapped = iommu_unmap(net->domain, entry->xram_addr, entry->mapped_size);
+    ret = (unmapped == entry->mapped_size) ? 0 : -EFAULT;
+    if (!ret) {
+        ret = torq_remap_net_xram_range(net, entry->xram_addr, entry->mapped_size);
+    }
+
+    dma_buf_unmap_attachment(entry->attachment, entry->sgt, DMA_BIDIRECTIONAL);
+    dma_buf_detach(entry->dmabuf, entry->attachment);
+    dma_buf_put(entry->dmabuf);
+    kfree(entry);
+    return ret;
+}
+
 static long torq_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
     unsigned int dir;
@@ -702,6 +956,16 @@ static long torq_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
         case TORQ_IOCTL_READ_LRAM:
             KLOGD("torq_ioctl read lram:%d", inst->pid);
             ret = torq_read_lram(inst, &data.lram_read_request);
+        break;
+
+        case TORQ_IOCTL_ATTACH_BINDING:
+            KLOGD("torq_ioctl attach binding:(pid:%d)", inst->pid);
+            ret = torq_attach_binding(inst, &data.attach_binding_request);
+        break;
+
+        case TORQ_IOCTL_DETACH_BINDING:
+            KLOGD("torq_ioctl detach binding:(pid:%d)", inst->pid);
+            ret = torq_detach_binding(inst, &data.detach_binding_request);
         break;
 
         default:

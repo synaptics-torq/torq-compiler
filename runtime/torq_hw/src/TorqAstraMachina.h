@@ -42,12 +42,20 @@ class TorqAstraMachina: public TorqHw {
     bool wait(bool nssCfg = true, bool slice1Cfg = false, bool slice2Cfg = false, bool dmaInCfg = false, bool dmaOutCfg = false) override;
     bool end() override;
 
+    std::optional<TorqDeviceBuffer> allocateDeviceBuffer(size_t size) override;
+    bool attachBinding(
+        const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
+    ) override;
+    bool detachBinding(
+        const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
+    ) override;
+
   private:
-    static constexpr int kInvalidFd = -1;
+    static constexpr int kInvalidFd = TORQ_HW_INVALID_FD;
     static constexpr uint32_t kInvalidNetworkId = 0;
 
     int _torqDevNode{kInvalidFd};
-    int _dmabufDevNode{kInvalidFd};
+    bool _dmaHeapNodeAcquired{false};
     mutable bool _xramAccessActive{false};
     const uint32_t _xramStartAddr;
     const size_t _xramSize;
@@ -57,6 +65,7 @@ class TorqAstraMachina: public TorqHw {
     size_t _xramSizeAligned;
     int _dmabufHandle{kInvalidFd};
     uint8_t *_xramVBase{};
+    TorqDeviceBuffer _xramBuffer{};
 
     uint32_t _networkId{kInvalidNetworkId};
     bool _networkActive{false};

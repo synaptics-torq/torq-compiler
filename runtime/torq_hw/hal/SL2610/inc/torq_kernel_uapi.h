@@ -25,6 +25,8 @@ extern "C" {
 #define TORQ_IOCTL_DESTROY_NETWORK _IOWR(TORQ_IOCTL_MAGIC, 6, struct torq_destroy_network_req)
 #define TORQ_IOCTL_WRITE_LRAM      _IOWR(TORQ_IOCTL_MAGIC, 7, struct torq_write_lram_req)
 #define TORQ_IOCTL_READ_LRAM       _IOWR(TORQ_IOCTL_MAGIC, 8, struct torq_read_lram_req)
+#define TORQ_IOCTL_ATTACH_BINDING  _IOWR(TORQ_IOCTL_MAGIC, 9, struct torq_attach_binding_req)
+#define TORQ_IOCTL_DETACH_BINDING  _IOWR(TORQ_IOCTL_MAGIC, 10, struct torq_detach_binding_req)
 
 /* 32bit compact IOCTL commands */
 #define TORQ_IOCTL_WRITE_LRAM_32   _IOWR(TORQ_IOCTL_MAGIC, 7, struct torq_write_lram_req_32compat)
@@ -71,6 +73,21 @@ struct torq_read_lram_req {
     unsigned int addr;             /* LRAM address offset */
     unsigned int size;             /* Data size */
     void *data;                    /* Data pointer */
+};
+
+struct torq_attach_binding_req {
+    unsigned int network_id;       /* Network owning the XRAM address space */
+    int dmabuf_fd;                 /* DMA-BUF file descriptor to attach */
+    unsigned int xram_addr;        /* Page-aligned XRAM/IOMMU address */
+    unsigned int data_offset;      /* Page-aligned offset within the DMA-BUF */
+    unsigned int binding_size;     /* Logical binding size in bytes */
+};
+
+struct torq_detach_binding_req {
+    unsigned int network_id;       /* Network owning the XRAM address space */
+    unsigned int xram_addr;        /* XRAM/IOMMU address used at attach time */
+    unsigned int data_offset;      /* Offset used at attach time */
+    unsigned int binding_size;     /* Binding size used at attach time */
 };
 
 struct torq_write_lram_req_32compat {
