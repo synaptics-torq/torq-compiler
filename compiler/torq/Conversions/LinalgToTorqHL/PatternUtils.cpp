@@ -2769,24 +2769,31 @@ bool shouldInclude(Operation *op, Value value) {
         if (linalg::isElementwise(linalgOp)) {
             return true;
         }
-        else if (isSingleTensorReductionOp(linalgOp)) {
+
+        if (isSingleTensorReductionOp(linalgOp)) {
             return true;
         }
+
+        if (isa<linalg::TransposeOp, linalg::FillOp>(op)) {
+            return true;
+        }
+
+        return false;
     }
-    else if (isa<tensor::ExtractSliceOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
-                 tensor::EmptyOp>(op)) {
-        return true;
-    }
-    else if (isa<linalg::TransposeOp, linalg::FillOp>(op)) {
-        return true;
-    }
-    else if (isa<arith::ConstantOp>(op)) {
+
+    if (isa<tensor::ExtractSliceOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
+            tensor::EmptyOp>(op)) {
         return true;
     }
 
-    else if (isa<affine::AffineApplyOp>(op)) {
+    if (isa<arith::ConstantOp>(op)) {
         return true;
     }
+
+    if (isa<affine::AffineApplyOp>(op)) {
+        return true;
+    }
+
     return false;
 }
 
