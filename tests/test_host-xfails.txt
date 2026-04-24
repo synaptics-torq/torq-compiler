@@ -1,2 +1,2 @@
-# Automatically generated, do not edit by hand or it will be overwritten.
-
+test_mlir_files[torch_ops_instancenorm-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1393
+test_mlir_files[keras_conv_act-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1417

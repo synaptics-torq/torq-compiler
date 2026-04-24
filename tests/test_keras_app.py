@@ -76,20 +76,6 @@ def case_config(request, runtime_hw_type, chip_config):
 
   next = chip_config.data['target'] != "SL2610"
 
-  iree_regression_tc = [
-    #error: failed to legalize unresolved materialization from ('i<N>') to ('i<N>') that remained live after conversion
-    "full_model_efficientnetb0",
-
-    "layer_inceptionresnetv2_custom_scale_layer",
-  ]
-  if next:
-    iree_regression_tc += [
-      "layer_inceptionresnetv2_conv_7b",
-      "layer_densenet121_pool4_conv",
-    ]
-  if any(s in request.param.name.lower() for s in iree_regression_tc):
-    pytest.xfail("IREE 3.10 regression failure")
-
   failed_str = [
     # resnet50
     # skip cases that will be fused with other ops

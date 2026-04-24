@@ -19,6 +19,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.number || github.sha }}
   cancel-in-progress: true  
 
+env:
+
+  # perform cmodel profiling on pushes and on PRs that have the label "enable-cmodel-profiling"
+  ENABLE_CMODEL_PROFILING: ${{ (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'enable-cmodel-profiling')) && 'true' || 'false' }}
+  
+  # generate test status report on PRs that have the label "generate-test-status-report"
+  GENERATE_STATUS_REPORT: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') && 'true' || 'false' }}
+
+  # use production dashboard for all PRs except those that have the label "test-stage-dashboard"
+  DASHBOARD_SERVER: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}  
+
 jobs:
 
   choose_runner_image:
@@ -187,6 +198,11 @@ jobs:
     outputs:
       s3_cache_path: ${{ steps.run_cmodel_tests.outputs.s3_cache_path }}
 
+    env:
+      PERFORMANCE_REPORT_PATH: ${{ github.workspace }}/host_test_performance_${{ matrix.chip_group }}.csv
+      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/host_test_status_${{ matrix.chip_group }}.json
+      CMODEL_PROFILING_LOGS_PATH: ${{ github.workspace }}/cmodel_compile_profiling_logs_${{ matrix.chip_group }}
+
     steps:
 
       # this is required to be able to upload the artifacts to S3
@@ -208,16 +224,23 @@ jobs:
         id: run_cmodel_tests
         if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: ./.github/actions/tests
+
         with:
           app_id: ${{ vars.CI_APP_ID }}
           app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           extra_repo: ${{ vars.EXTRAS_REPO }}
           hf_token: ${{ secrets.HF_TOKEN }}
           test_data_cache_artifact: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('test-cache-{0}', matrix.chip_group)) || '' }} # upload to github only on main branch 
-          pytest_args: -m ci -n auto -v --performance-report=${{ github.workspace }}/host_test_performance_${{ matrix.chip_group }}.csv --torq-chips ${{ matrix.chip_group }} --tflite-layer-test-generate-full-model-only  --show-capture=no --tb=short ${{ (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'enable-cmodel-profiling')) && format('--torq-compile-time-profiling-output-dir={0}/cmodel_compile_profiling_logs_{1}', github.workspace, matrix.chip_group) || '' }} --ignore-binary-mtime
+          pytest_args: >
+            -m ci -n auto -v --show-capture=no --tb=short
+            --performance-report=${{ env.PERFORMANCE_REPORT_PATH }}
+            --torq-chips ${{ matrix.chip_group }}
+            --tflite-layer-test-generate-full-model-only
+            --ignore-binary-mtime
+            ${{ env.ENABLE_CMODEL_PROFILING == 'true' && format('--torq-compile-time-profiling-output-dir={0}', env.CMODEL_PROFILING_LOGS_PATH) || '' }}
+            ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to={0}', env.TEST_STATUS_REPORT_PATH) || '' }}
           s3_artifact_bucket: ${{ vars.ARTIFACT_BUCKET }}
-          torq_perf_server: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
-          #torq_perf_server_token: ${{ secrets.TORQ_PERF_SERVER_TOKEN }}          
+          torq_perf_server: ${{ env.DASHBOARD_SERVER }}
           batch_name: cmodel-${{ matrix.chip_group }}
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
           s3_hf_cache_dir: hf_cache
@@ -227,15 +250,23 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: cmodel_test_performance_${{ matrix.chip_group }}
-          path: ${{ github.workspace }}/host_test_performance_${{ matrix.chip_group }}.csv
+          path: ${{ env.PERFORMANCE_REPORT_PATH }}
+          retention-days: 60
+
+      - name: Upload host test status report
+        if: ${{ vars.DISABLE_TESTS != 'true' && env.GENERATE_STATUS_REPORT == 'true' && !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cmodel_test_status_${{ matrix.chip_group }}
+          path: ${{ env.TEST_STATUS_REPORT_PATH }}
           retention-days: 60
 
       - name: Upload compile time profiling logs
-        if: ${{ vars.DISABLE_TESTS != 'true' && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'enable-cmodel-profiling')) }}
+        if: ${{ vars.DISABLE_TESTS != 'true' && env.ENABLE_CMODEL_PROFILING == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: cmodel_compile_profiling_logs_${{ matrix.chip_group }}
-          path: ${{ github.workspace }}/cmodel_compile_profiling_logs_${{ matrix.chip_group }}
+          path: ${{ env.CMODEL_PROFILING_LOGS_PATH }}
           retention-days: 60
 
   test_aws_fpga:    
@@ -243,9 +274,10 @@ jobs:
 
     runs-on: ${{ vars.DISABLE_TESTS != 'true' && format('torq-fpga-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
 
-    if: ${{ github.event_name == 'push'  || contains(github.event.pull_request.labels.*.name || '', 'test-aws') }}
-
-    needs: [ test_cmodel ]
+    # run on push (main/version branches), when label test-aws is present on PR and always when label generate-test-status-report is present on PR
+    if: ${{ ( github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'test-aws')) && 'true' || (contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') && always() || 'false') }}
+    
+    needs: [test_cmodel]
 
     permissions:
       contents: read
@@ -257,6 +289,11 @@ jobs:
       fail-fast: false
       matrix:
         chip_group: ${{ vars.TEST_GROUPS && fromJSON(vars.TEST_GROUPS) || fromJSON('["default.group"]') }}
+
+    env:
+      PERFORMANCE_REPORT_PATH: ${{ github.workspace }}/aws_fpga_test_performance_${{ matrix.chip_group }}.csv
+      RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
+      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/aws_fpga_test_status_${{ matrix.chip_group }}.json
 
     steps:
       
@@ -290,10 +327,22 @@ jobs:
           app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           extra_repo: ${{ vars.EXTRAS_REPO }}
           hf_token: ${{ secrets.HF_TOKEN }}
-          precomputed_cache: ${{ needs.test_cmodel.outputs.s3_cache_path }}  # download from s3 the test cache generated by the cmodel tests, this gets the cache from the latest completed job in the cmodel matrix, it is ok for the moment
-          pytest_args: -m fpga_ci -n auto --performance-report=${{ github.workspace }}/aws_fpga_test_performance_${{ matrix.chip_group }}.csv --torq-runtime-hw-type aws_fpga --torq-runtime-timeout=20 --torq-chips ${{ matrix.chip_group }} --torq-runtime-profiling-output-dir=${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }} --tflite-layer-test-generate-full-model-only --ignore-binary-mtime
-          torq_perf_server: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
-          #torq_perf_server_token: ${{ secrets.TORQ_PERF_SERVER_TOKEN }}
+
+          # download from s3 the test cache generated by the cmodel tests, this gets the cache from the latest completed job in the cmodel matrix, it is ok for the moment
+          # we don't download the cache when we are generating status reports because we run FPGA tests in parallel with Cmodel ones
+          precomputed_cache: ${{ env.GENERATE_STATUS_REPORT == 'true' && '' || needs.test_cmodel.outputs.s3_cache_path }}
+
+          pytest_args: >
+            -m fpga_ci -n auto 
+            --performance-report=${{ env.PERFORMANCE_REPORT_PATH }} 
+            --torq-runtime-hw-type aws_fpga
+            --torq-runtime-timeout=20
+            --torq-chips ${{ matrix.chip_group }}
+            --torq-runtime-profiling-output-dir=${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
+            --tflite-layer-test-generate-full-model-only
+            --ignore-binary-mtime
+            ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to {0}', env.TEST_STATUS_REPORT_PATH) || '' }}
+          torq_perf_server: ${{ env.DASHBOARD_SERVER }}
           batch_name: fpga-${{ matrix.chip_group }}
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
           s3_hf_cache_dir: hf_cache
@@ -303,7 +352,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: aws_fpga_test_performance_${{ matrix.chip_group }}
-          path: ${{ github.workspace }}/aws_fpga_test_performance_${{ matrix.chip_group }}.csv
+          path: ${{ env.PERFORMANCE_REPORT_PATH }}
           retention-days: 60
       
       - name: Upload AWS FPGA profiling logs
@@ -311,9 +360,17 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: aws_fpga_profiling_logs_${{ matrix.chip_group }}
-          path: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
+          path: ${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
           retention-days: 60
           
+      - name: Upload AWS FPGA test status report
+        if: ${{ vars.DISABLE_TESTS != 'true' && env.GENERATE_STATUS_REPORT == 'true' && !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: aws_fpga_test_status_${{ matrix.chip_group }}
+          path: ${{ env.TEST_STATUS_REPORT_PATH }}
+          retention-days: 60
+
   # build the user part of the docs only
   user_doc_build:
       name : Build user guide

@@ -145,6 +145,7 @@ def process_uploaded_zip(args):
                         test_run_batch=test_run_batch,
                         test_case=test_case,
                         outcome=outcome_map[outcome],
+                        linked_issue=linked_issue
                     )
 
                     # Handle failure log file and server-side classification for failed tests

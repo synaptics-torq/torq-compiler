@@ -1,0 +1,2 @@
+test_onnx_model_llvmcpu_torq[mbv2-bf16_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_llvmcpu_torq[mbv2-bf16_full_model-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1404

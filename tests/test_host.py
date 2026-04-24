@@ -57,8 +57,6 @@ def case_config(request):
         # error: 'iree_linalg_ext.map_scatter' op write affecting operations on global resources are restricted to workgroup distributed contexts.
         "keras_conv_act",
     ]
-    if any(s in request.param.name for s in iree_regression_tc):
-        pytest.xfail("IREE 3.10 regression failure")
 
     if request.param.name == "torch_ops_instancenorm":
         pytest.xfail("not implemented yet")

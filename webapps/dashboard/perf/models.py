@@ -159,6 +159,7 @@ class TestRun(models.Model):
     outcome = models.IntegerField(choices=Outcome.choices)
     failure_log = models.FileField(blank=True, null=True)
     failure_type = models.CharField(max_length=50, blank=True, null=True)
+    linked_issue = models.TextField(blank=True, null=True)
 
     class Meta:
         constraints = [

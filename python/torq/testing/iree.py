@@ -152,17 +152,22 @@ def pytest_generate_tests(metafunc):
 
         if metafunc.config.getoption("torq_chips") == 'all':
             chips.update(get_latest_chips())
-        elif metafunc.config.getoption("torq_chips").endswith('.group'):
-            for root_dir in [TOPDIR / 'extras' / 'chips', TOPDIR / 'tests' / 'testdata' / 'chips']:
-                group_file = root_dir / metafunc.config.getoption("torq_chips")
-
-                if not group_file.exists():
-                    continue
-                
-                with open(group_file, 'r') as f:
-                    chips.update([x.strip() for x in f.read().splitlines() if x.strip() != ""])
         else:
-            chips.update(metafunc.config.getoption("torq_chips").split(","))
+
+            all_chips = metafunc.config.getoption("torq_chips").split(",")
+
+            for chip in all_chips:
+                if chip.endswith(".group"):
+                    for root_dir in [TOPDIR / 'extras' / 'chips', TOPDIR / 'tests' / 'testdata' / 'chips']:
+                        group_file = root_dir / chip
+
+                        if not group_file.exists():
+                            continue
+                        
+                        with open(group_file, 'r') as f:
+                            chips.update([x.strip() for x in f.read().splitlines() if x.strip() != ""])
+                else:                    
+                    chips.append(chip)
 
         chips = sorted(chips)
 
@@ -204,6 +209,9 @@ def chip_config(request):
         with open(config_file, 'r') as f:
             file_config = json.load(f)
             config.update(file_config)
+
+    record_property = request.getfixturevalue("record_property")    
+    record_property("chip_config", request.param)
 
     return config
 

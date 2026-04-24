@@ -23,15 +23,6 @@ def case_config(request, runtime_hw_type, chip_config):
 
     next_chip = (chip_config.data['target'] != "SL2610")
 
-    iree_regression_tc = [
-        "mbv2-bf16_layer_ReduceMean_62",
-        "full_model",
-    ]
-    if next_chip:
-        iree_regression_tc += ["mbv2-bf16_layer_Conv_61"]
-    if any(s in request.node.nodeid for s in iree_regression_tc):
-        pytest.xfail("IREE 3.10 regression failure")
-
     failed_tc = []
     if next_chip:
         failed_tc += [

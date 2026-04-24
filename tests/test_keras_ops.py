@@ -1164,14 +1164,6 @@ def case_config(request, runtime_hw_type, chip_config):
     case = request.param
     tc = case.data['keras_model_name']
 
-    iree_regression_tc = [
-        # FAILED with differences:
-        "model503_conv_transpose_stride1_ker_1x1x3x1_padValid",
-        "model532_convTrans_16x8_inp_1x4x1_ker1x3_stride1_padvalid",
-    ]
-    if any(s in tc for s in iree_regression_tc):
-        pytest.xfail("IREE 3.10 regression failure")
-
     failed_tc = [
         'transpose_conv_model', # Issue see #1011
         'model029_fc_1000x1000' # Issue see #1011

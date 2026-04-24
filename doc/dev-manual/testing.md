@@ -61,6 +61,92 @@ $ pytest --torq-profiling-output-dir SOME/DIR
 
 A profile log is going to be generated for each test run in the corresponding directory.
 
+## Managing XFAIL tests
+
+In order to track expected failures (XFAIL) intead of directly marking tests as such in pytest
+or using the `pytest.xfail` function we declare the tests in a dedicated file 
+``${TEST_NAME}-xfail.txt``. This file has one line per expected failure and has the following
+format:
+
+```
+test_function[test_parameters] owner/repo#issue_id
+```
+
+When the corresponding test cases will be automatically markes as XFAIL.
+
+In order to store XFAIL for test configurations that depend on a chip defined in
+ ``extras/chips`` it is possible to create a file in ``extras/xfail`` with the same name.
+
+Once a tests are marked as XFAIL it is possible to force their execution with the following
+command line:
+
+```
+pytest test_module::test_function[test_parameters] --runxfail --recompute-cache
+```
+
+If the test is still failing the framework will report error.
+
+It is also possible to request execution of XFAIL tests without causing an error:
+
+```
+pytest test_module::est_function[test_parameters] --try-xfails --recompute-cache
+```
+
+If the test failes it will be counted as XFAIL, if it passed it will be counted as XPASS.
+
+It is also possible to run all tests associated with a issue:
+
+```
+pytest --issue synaptics-torq/torq-compiler#1387  --recompute-cache
+``` 
+
+It is possible to automatically update the xfail files based
+on the results of tests. To do so you can first create a report of the 
+execution of tests with the following command:
+
+```
+pytest --try-xfails --save-test-status-report-to=report.json  --recompute-cache
+```
+
+This command will try all tests (it is also possible to restrict to executing
+a subset of tests using standard pytest functions). The command will genearte
+a report in ``report.json`` with the state of each test it runs and information
+about the failure (if any).
+
+It is then possible to update the xfail files with the following command:
+
+```
+python3 -m torq.testing.issues update --dry-run --report-path report.json --parent-issue ${PARENT_ISSUE}
+```
+
+This command will read the report, all the existing xfail files and figures out
+which lines in the xfail files need to be removed because the corresponding test
+passes and add which lines need to be added because some new tests fail. The command
+also inspects the issues linked to xfails and if they are missing checks which
+if there exist already a child of the issue ´${PARENT_ISSUE}´ for this kind of 
+error or if a new issue should be created.
+
+By running the following command: 
+
+```
+python3 -m torq.testing.issues update --report-path report.json --parent-issue ${PARENT_ISSUE}
+```
+
+The files are modified and the issues created.
+
+It is also possible to ask CI to perform all tests by tagging a PR with the label
+`generate-test-status-report`. CI will append status reports for each test configuration
+as assets to the CI run. The reports can then be used to update local xfail files
+as follows:
+
+```
+python3 -m torq.testing.issues update --dry-run --run-id ${RUN_ID} --parent-issue ${PARENT_ISSUE}
+```
+
+where ´${RUN_ID}´ is id of the workflow run (it can be found by inspecting the URL of the workflow
+run).
+
+
 ## How test code works
 
 A Pytest test invocation works in two phases: in the first phase called collection pytest finds all

@@ -28,33 +28,6 @@ def case_config(request, runtime_hw_type, chip_config):
     if "reducesum-dma-throughput-test" in request.param.name:
         pytest.skip("DMA throughput test file; run via test_dma_throughput.py")
 
-    iree_regression_tc = [
-        # error: operand #<N> does not dominate this use
-        "quantized_batch_matmul.mlir",
-
-        # error: 'iree_tensor_ext.dispatch.tensor.store' op operand #<N> must be dispatch.tensor, but got '!iree_tensor_ext.dispatch.tensor<readonly:tensor<<N>xbf<N>>>'
-        "erf-bf16.mlir",
-    ]
-
-    if aws_fpga:
-        iree_regression_tc += [
-            # Runtime timeout (20s)
-            "extui-i8-to-i16.mlir",
-        ]
-
-    if next_chip:
-        iree_regression_tc += [
-            "divf-bf16.mlir",
-            "pow-2.mlir",
-            "sqrt-1024x64-bf16.mlir",
-            "sqrt-scalar-bf16.mlir",
-            "rsqrt-bf16.mlir",
-            "tanh-bf16.mlir"
-        ]
-
-    if any(s in request.param.name for s in iree_regression_tc):
-        pytest.xfail("IREE 3.10 regression failure")
-
     failed_tc = []
 
     # SL2610 aws-fpga failures
