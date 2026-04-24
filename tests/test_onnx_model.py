@@ -7,7 +7,7 @@ import onnx
 from onnx import shape_inference
 
 from torq.testing.comparison import compare_test_results
-from torq.testing.onnx import generate_onnx_layer_from_file, _has_bf16_matmul, _has_bf16_einsum
+from torq.testing.onnx import generate_onnx_layers_from_file, _has_bf16_matmul, _has_bf16_einsum
 from torq.testing.iree import llvmcpu_reference_results
 from torq.testing.iree import  list_files
 
@@ -30,6 +30,13 @@ for example: pytest tests/test_onnx_model.py -v -s mbv2.quant_layer_DequantizeLi
 
 @pytest.fixture
 def case_config(request, chip_config):
+
+    example_tc = [
+        # unnecessary to run, only for executor discovery test
+        "example_executor_discovery",
+    ]
+    if any(s in request.node.nodeid for s in example_tc):
+        pytest.xfail("Skipped Example Cases")
 
     next_chip = (chip_config.data['target'] != "SL2610")
     if next_chip:
@@ -54,7 +61,7 @@ def pytest_generate_tests(metafunc):
         ]
 
     for f in files:
-        cases += generate_onnx_layer_from_file(f, node_groups)
+        cases += generate_onnx_layers_from_file(f, node_groups)
 
     metafunc.parametrize("onnx_layer_model", cases, indirect=True, ids=[c.name for c in cases])
 

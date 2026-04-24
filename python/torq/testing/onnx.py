@@ -1,31 +1,51 @@
-import pytest
-
-import onnx
-from onnx import helper, TensorProto, numpy_helper, shape_inference
-import numpy as np
-import onnxruntime
-import subprocess
-import sys
+"""
+Fixtures and utilities for testing ONNX models.
+"""
 
 import json
 from dataclasses import dataclass
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
-from torq.testing.hf import get_hf_model_file
+import numpy as np
+import onnx
+import onnxruntime
+import pytest
+from onnx import helper, numpy_helper, shape_inference, TensorProto
+
 from torq.testing.cases import Case
+from torq.testing.hf import get_hf_model_file
 
-from .versioned_fixtures import (versioned_generated_file_fixture,
-  versioned_cached_data_fixture,
-  versioned_hashable_object_fixture,
-  versioned_unhashable_object_fixture,
-  versioned_static_file_fixture,
-  VersionedUncachedData
- )
+from .versioned_fixtures import (
+    versioned_cached_data_fixture,
+    versioned_generated_file_fixture,
+    versioned_hashable_object_fixture,
+    versioned_static_file_fixture,
+    versioned_unhashable_object_fixture,
+    VersionedUncachedData,
+)
 
 
-"""
-This module provides fixtures and utilities for testing onnx models.
-"""
+class ModelWithMetadata:
+    """Wrapper for ONNX model with metadata like node_index.
+
+    ONNX protobuf objects don't allow setting arbitrary attributes,
+    so we use this wrapper to store additional metadata.
+    """
+
+    def __init__(self, model: Any, node_index: int = None):
+        self.model = model
+        self.node_index = node_index
+
+    def __getattr__(self, name):
+        # Delegate attribute access to wrapped model
+        return getattr(self.model, name)
+
+    def __getitem__(self, key):
+        # Support dict-style access (e.g. layer["model"]) for backward compatibility
+        return getattr(self, key)
 
 
 @dataclass
@@ -117,6 +137,181 @@ def model_signature(model):
     return [inputs, outputs, len(list(graph.node)), [n.op_type for n in graph.node], inits]
 
 
+def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
+                                   init_name_fn, log_prefix=""):
+    """Build a standalone ONNX model from a subset of nodes.
+
+    Shared logic between layer extraction and subgraph extraction.
+
+    Args:
+        nodes_subset: List of nodes to include in the new model.
+        all_nodes: Full list of nodes from the original model (for determining
+                   which outputs are consumed outside the subset).
+        model: Original ONNX model (ModelProto or ModelWithMetadata).
+        graph_name: Name for the new graph.
+        init_name_fn: Callable(base_name, idx_init) -> str for renaming
+                      initializers to avoid collisions.
+        log_prefix: Prefix string for error messages.
+
+    Returns:
+        The inferred/checked ONNX model, or a deep copy of the raw model if
+        inference fails.
+    """
+    import copy as _copy
+
+    # Unwrap ModelWithMetadata if needed
+    if hasattr(model, 'model'):
+        model = model.model
+
+    graph = model.graph
+
+    # Determine tensors produced and used by the subset
+    produced = set()
+    used = set()
+    for n in nodes_subset:
+        for o in n.output:
+            produced.add(o)
+        for inp in n.input:
+            if inp:
+                used.add(inp)
+
+    external_inputs = used - produced
+
+    # External outputs: produced names consumed by nodes outside the subset
+    # or that are original model outputs
+    external_outputs = set()
+    orig_output_names = {o.name for o in graph.output}
+    for name in produced:
+        consumed_outside = False
+        for other in all_nodes:
+            if other in nodes_subset:
+                continue
+            if name in other.input:
+                consumed_outside = True
+                break
+        if consumed_outside or (name in orig_output_names):
+            external_outputs.add(name)
+
+    # Build metadata maps
+    orig_inputs = {vi.name: vi for vi in graph.input}
+    orig_value_info = {vi.name: vi for vi in graph.value_info}
+    orig_initializers = {init.name: init for init in graph.initializer}
+
+    # Helper to synthesize a simple value_info from an initializer
+    def _value_info_from_initializer(init):
+        try:
+            arr = numpy_helper.to_array(init)
+            shape = list(arr.shape)
+            return helper.make_tensor_value_info(init.name, init.data_type, shape)
+        except Exception:
+            return helper.make_tensor_value_info(init.name, TensorProto.FLOAT, [])
+
+    # Build new inputs/outputs/initializers/value_info
+    new_inputs = []
+    new_outputs = []
+    new_initializers = []
+    added_initializer_names = set()
+
+    for name in sorted(external_inputs):
+        if name in orig_inputs:
+            new_inputs.append(_copy.deepcopy(orig_inputs[name]))
+        elif name in orig_value_info:
+            new_inputs.append(_copy.deepcopy(orig_value_info[name]))
+        elif name in orig_initializers:
+            init = orig_initializers[name]
+            new_initializers.append(_copy.deepcopy(init))
+            added_initializer_names.add(name)
+            new_inputs.append(_value_info_from_initializer(init))
+        else:
+            new_inputs.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, []))
+
+    for name in sorted((external_inputs | used)):
+        if name in orig_initializers and name not in added_initializer_names:
+            new_initializers.append(_copy.deepcopy(orig_initializers[name]))
+
+    for name in sorted(external_outputs):
+        matched = False
+        for out in graph.output:
+            if out.name == name:
+                new_outputs.append(_copy.deepcopy(out))
+                matched = True
+                break
+        if not matched and name in orig_value_info:
+            new_outputs.append(_copy.deepcopy(orig_value_info[name]))
+        elif not matched and name in orig_initializers:
+            new_outputs.append(_value_info_from_initializer(orig_initializers[name]))
+        elif not matched:
+            new_outputs.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, []))
+
+    new_value_info = []
+    for name in sorted(produced | used):
+        if name in orig_value_info:
+            new_value_info.append(_copy.deepcopy(orig_value_info[name]))
+
+    # Deep-copy nodes
+    nodes_copy = [_copy.deepcopy(n) for n in nodes_subset]
+
+    # Ensure initializer names are unique
+    name_map = {}
+    existing_names = set()
+    for n in nodes_copy:
+        existing_names.update([s for s in n.input if s])
+        existing_names.update([s for s in n.output if s])
+    existing_names.update([vi.name for vi in new_inputs])
+    existing_names.update([vi.name for vi in new_outputs])
+    existing_names.update([vi.name for vi in new_value_info])
+
+    for idx_init, init in enumerate(new_initializers):
+        base = init.name
+        candidate = init_name_fn(base, idx_init)
+        i = 0
+        while candidate in existing_names:
+            i += 1
+            candidate = f"{candidate}_{i}"
+        name_map[base] = candidate
+        existing_names.add(candidate)
+        init.name = candidate
+
+    if name_map:
+        for n in nodes_copy:
+            for ii, v in enumerate(list(n.input)):
+                if v in name_map:
+                    n.input[ii] = name_map[v]
+        for vi in new_inputs:
+            if vi.name in name_map:
+                vi.name = name_map[vi.name]
+        for vi in new_outputs:
+            if vi.name in name_map:
+                vi.name = name_map[vi.name]
+        for vi in new_value_info:
+            if vi.name in name_map:
+                vi.name = name_map[vi.name]
+
+    # Create new graph and model
+    new_graph = helper.make_graph(
+        nodes_copy,
+        graph_name,
+        inputs=new_inputs,
+        outputs=new_outputs,
+        initializer=new_initializers
+    )
+    if new_value_info:
+        new_graph.value_info.extend(new_value_info)
+
+    new_model = helper.make_model(new_graph)
+    new_model.ir_version = model.ir_version
+    new_model.opset_import.extend(model.opset_import)
+
+    try:
+        inferred = shape_inference.infer_shapes(new_model)
+        onnx.checker.check_model(inferred)
+        return inferred
+    except Exception as e:
+        if log_prefix:
+            print(f'{log_prefix}: inference/check failed: {e}; using raw model')
+        return _copy.deepcopy(new_model)
+
+
 def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
 
     existing_cases = set()
@@ -137,21 +332,29 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
 
     index = 0
     part_num = 0
+    # Track the original node index for matching with full model MLIR.
+    # This counts only non-Constant nodes since those are what torch-mlir converts.
+    original_node_index = 0
     while index < node_count:
 
         if (nodes[index].op_type.lower() == 'constant'):
             index += 1
             continue
 
+        # Record the original index BEFORE incrementing for this layer
+        start_node_index = original_node_index
+
         group_size = match_group(index)
         if group_size > 0:
             part_nodes = nodes[index:index + group_size]
             part_node_indices = list(range(index, index + group_size))
             index += group_size
+            original_node_index += group_size
         else:
             part_nodes = [nodes[index]]
             part_node_indices = [index]
             index += 1
+            original_node_index += 1
 
         source_node_names = [
             _source_node_name(node, node_index)
@@ -159,181 +362,17 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
         ]
         node_name = " -> ".join(source_node_names)
 
-        # Determine tensors produced and used by the part
-        produced = set()
-        used = set()
-        for n in part_nodes:
-            for o in n.output:
-                produced.add(o)
-            for inp in n.input:
-                if inp:
-                    used.add(inp)
-
-        external_inputs = used - produced
-
-        # external outputs: produced names that are consumed by nodes outside
-        external_outputs = set()
-        orig_output_names = {o.name for o in graph.output}
-        for name in produced:
-            consumed_outside = False
-            for idx_node, other in enumerate(nodes):
-                # if this other node is part of the part_nodes, skip
-                # compare by identity of node object index ranges
-                # simpler: check if other is in part_nodes
-                if other in part_nodes:
-                    continue
-                if name in other.input:
-                    consumed_outside = True
-                    break
-            if consumed_outside or (name in orig_output_names):
-                external_outputs.add(name)
-
-        # Build maps for metadata; prefer inferred_model when available
-        meta = model
-
-        orig_inputs = {vi.name: vi for vi in meta.graph.input}
-        orig_value_info = {vi.name: vi for vi in meta.graph.value_info}
-        orig_initializers = {init.name: init for init in graph.initializer}
-
-        # Build new input/value_info/initializer lists for the part
-        new_inputs = []
-        new_outputs = []
-        new_initializers = []
-        added_initializer_names = set()
-
-        import copy as _copy
-
-        # Helper to synthesize a simple value_info from an initializer
-        def _value_info_from_initializer(init):
-            try:
-                arr = numpy_helper.to_array(init)
-                shape = list(arr.shape)
-                return helper.make_tensor_value_info(init.name, init.data_type, shape)
-            except Exception:
-                # fallback to scalar unknown-shape float
-                return helper.make_tensor_value_info(init.name, TensorProto.FLOAT, [])
-
-        # Populate inputs
-        for name in sorted(external_inputs):
-            if name in orig_inputs:
-                new_inputs.append(_copy.deepcopy(orig_inputs[name]))
-            elif name in orig_value_info:
-                # convert value_info entry into an input
-                new_inputs.append(_copy.deepcopy(orig_value_info[name]))
-            elif name in orig_initializers:
-                init = orig_initializers[name]
-                new_initializers.append(_copy.deepcopy(init))
-                added_initializer_names.add(name)
-                new_inputs.append(_value_info_from_initializer(init))
-            else:
-                # unknown; synthesize a placeholder value_info (float, scalar)
-                new_inputs.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, []))
-
-        # Include initializers referenced by used names
-        for name in sorted((external_inputs | used)):
-            if name in orig_initializers and name not in added_initializer_names:
-                new_initializers.append(_copy.deepcopy(orig_initializers[name]))
-
-        # Populate outputs
-        for name in sorted(external_outputs):
-            matched = False
-            for out in graph.output:
-                if out.name == name:
-                    new_outputs.append(_copy.deepcopy(out))
-                    matched = True
-                    break
-            if not matched and name in orig_value_info:
-                new_outputs.append(_copy.deepcopy(orig_value_info[name]))
-            elif not matched and name in orig_initializers:
-                new_outputs.append(_value_info_from_initializer(orig_initializers[name]))
-            elif not matched:
-                new_outputs.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, []))
-
-        # Also add any value_info for produced/used tensors to aid shape inference
-        new_value_info = []
-        for name in sorted(produced | used):
-            if name in orig_value_info:
-                new_value_info.append(_copy.deepcopy(orig_value_info[name]))
-
-        # Deep-copy nodes so we don't mutate original model
-        part_nodes_copy = [_copy.deepcopy(n) for n in part_nodes]
-
-        # Ensure initializer names are unique for this part and update
-        # references in nodes and value infos accordingly.
-        name_map = {}
-        # collect existing names used in this part to avoid collisions
-        existing_names = set()
-        for n in part_nodes_copy:
-            existing_names.update([s for s in n.input if s])
-            existing_names.update([s for s in n.output if s])
-        existing_names.update([vi.name for vi in new_inputs])
-        existing_names.update([vi.name for vi in new_outputs])
-        existing_names.update([vi.name for vi in new_value_info])
-
-        for idx_init, init in enumerate(new_initializers):
-            base = init.name
-            # generate a candidate new name
-            candidate = f"{base}_part{part_num}_init{idx_init}"
-            # avoid accidental collisions
-            i = 0
-            while candidate in existing_names:
-                i += 1
-                candidate = f"{base}_part{part_num}_init{idx_init}_{i}"
-            # record mapping and update the initializer name
-            name_map[base] = candidate
-            existing_names.add(candidate)
-            init.name = candidate
-
-        # apply renaming to node inputs
-        if name_map:
-            for n in part_nodes_copy:
-                for ii, v in enumerate(list(n.input)):
-                    if v in name_map:
-                        n.input[ii] = name_map[v]
-
-            # update new_inputs / new_outputs / new_value_info names where they reference initializers
-            for vi in new_inputs:
-                if vi.name in name_map:
-                    vi.name = name_map[vi.name]
-            for vi in new_outputs:
-                if vi.name in name_map:
-                    vi.name = name_map[vi.name]
-            for vi in new_value_info:
-                if vi.name in name_map:
-                    vi.name = name_map[vi.name]
-
-        # Create new graph for the part using the synthesized inputs/outputs
-        part_graph = helper.make_graph(
-            part_nodes_copy,
-            f'part{part_num}_graph',
-            inputs=new_inputs,
-            outputs=new_outputs,
-            initializer=new_initializers
-        )
-
-        # attach value_info entries if present
-        if new_value_info:
-            part_graph.value_info.extend(new_value_info)
-
-        part_model = helper.make_model(part_graph)
-        part_model.ir_version = model.ir_version
-        part_model.opset_import.extend(model.opset_import)
-
         layer_name = f"layer_{part_nodes[0].op_type}_{part_num}"
-
-        final_model = part_model
-
-        # to trace exact layer_number in model
         part_num += 1
 
-        # Try to run shape inference and checker on the part. If inference
-        # succeeds, save the inferred model; otherwise try checker on raw model.
-        try:
-            inferred_part = shape_inference.infer_shapes(part_model)
-            onnx.checker.check_model(inferred_part)
-            final_model = inferred_part
-        except Exception as e:
-            print(f'layer {layer_name}: inference/check failed: {e}; saving raw part for debugging')
+        final_model = _build_model_from_node_subset(
+            part_nodes,
+            nodes,
+            model,
+            graph_name=f'part{part_num - 1}_graph',
+            init_name_fn=lambda base, idx, pn=part_num - 1: f"{base}_part{pn}_init{idx}",
+            log_prefix=f'layer {layer_name}',
+        )
 
         # check duplication: too heavy to compare model, just compare signature
         if dedup:
@@ -347,23 +386,80 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
             if not found_existing:
                 existing_cases.add(m_signature_json)
             else:
-                # print(f"Skipping duplicate model for layer {layer_name}")
                 continue
 
-        layer_configs[layer_name] = {
-            "model": final_model,
-            "node_name": node_name,
-        }
+        # Wrap model with metadata (node_index for matching with full model MLIR)
+        layer_configs[layer_name] = ModelWithMetadata(final_model, start_node_index)
 
     return layer_configs
+
+
+def extract_onnx_subgraph(model, from_index, to_index):
+    """
+    Extract a subgraph from an ONNX model given start and end node indices.
+
+    The indices refer to non-Constant nodes in the model graph (same indexing
+    as used in executor discovery JSON's _node_index field).
+
+    Args:
+        model: ONNX model (ModelProto or ModelWithMetadata)
+        from_index: Start node index (inclusive, refers to non-Constant nodes)
+        to_index: End node index (inclusive, refers to non-Constant nodes)
+
+    Returns:
+        ModelWithMetadata containing the extracted subgraph
+    """
+    import copy as _copy
+
+    # Unwrap ModelWithMetadata if needed
+    if hasattr(model, 'model'):
+        model = model.model
+
+    graph = model.graph
+    nodes = list(graph.node)
+
+    # Filter out Constant nodes to get the same indexing as layer extraction
+    non_constant_nodes = []
+    non_constant_indices = []  # Maps from filtered index -> original index
+    for i, node in enumerate(nodes):
+        if node.op_type.lower() != 'constant':
+            non_constant_nodes.append(node)
+            non_constant_indices.append(i)
+
+    total_non_constant = len(non_constant_nodes)
+
+    # Validate indices
+    if from_index < 0 or from_index >= total_non_constant:
+        raise ValueError(f"from_index {from_index} out of range [0, {total_non_constant})")
+    if to_index < 0 or to_index >= total_non_constant:
+        raise ValueError(f"to_index {to_index} out of range [0, {total_non_constant})")
+    if from_index > to_index:
+        raise ValueError(f"from_index {from_index} must be <= to_index {to_index}")
+
+    # Map to original node indices
+    original_from_idx = non_constant_indices[from_index]
+    original_to_idx = non_constant_indices[to_index]
+
+    # Get all nodes in range (including any Constant nodes between them)
+    subgraph_nodes = nodes[original_from_idx:original_to_idx + 1]
+
+    final_model = _build_model_from_node_subset(
+        subgraph_nodes,
+        nodes,
+        model,
+        graph_name=f"subgraph_{from_index}_to_{to_index}",
+        init_name_fn=lambda base, idx: f"{base}_subgraph_init{idx}",
+        log_prefix="[Subgraph]",
+    )
+
+    return ModelWithMetadata(final_model, from_index)
 
 
 def _build_onnx_layer_cases(model_prefix: str, model, layers):
     cases = [
         OnnxLayerCase(
             name=f"{model_prefix}_{key}",
-            data=layer["model"],
-            node_name=layer["node_name"],
+            data=layer,
         )
         for key, layer in layers.items()
     ]
@@ -377,7 +473,7 @@ def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, ded
     return _build_onnx_layer_cases(Path(filename).stem, model, layers)
 
 
-def generate_onnx_layer_from_file(filepath:Path, node_groups=None, dedup=True):
+def generate_onnx_layers_from_file(filepath:Path, node_groups=None, dedup=False):
     model = get_full_model(str(filepath))
     layers = generate_onnx_layers_from_model(model, node_groups, dedup)
     return _build_onnx_layer_cases(filepath.stem, model, layers)
@@ -394,11 +490,81 @@ def onnx_model_file(request, versioned_file, onnx_model):
     onnx.save(onnx_model, versioned_file)
 
 
+def is_model_bf16(model: onnx.ModelProto) -> bool:
+    """Check if model is already in BF16 format."""
+    return any(
+        init.data_type == TensorProto.BFLOAT16
+        for init in model.graph.initializer
+    )
+
+
+@versioned_hashable_object_fixture
+def onnx_bf16_config(request):
+    """Return BF16 conversion config for version hashing.
+
+    This ensures cache invalidation when --auto-convert-bf16 flag changes.
+    """
+    return {
+        "auto_convert_bf16": request.config.getoption("--auto-convert-bf16", default=False)
+    }
+
+
+@versioned_generated_file_fixture("onnx_bf16")
+def onnx_bf16_model_file(request, versioned_file, onnx_model_file, onnx_bf16_config):
+    """Convert FP32 ONNX to BF16 if --auto-convert-bf16 is enabled.
+
+    Always saves to versioned_file location (the decorator always returns versioned_file).
+
+    Note: onnx_model_file is a Path (versioned_generated_file_fixture unwraps VersionedFile).
+    """
+    import shutil
+    use_bf16 = request.config.getoption("--auto-convert-bf16", default=False)
+
+    if not use_bf16:
+        # No conversion - copy original model to versioned location
+        print(f"[BF16] Conversion disabled, copying original model to {versioned_file}")
+        shutil.copy(str(onnx_model_file), str(versioned_file))
+        return versioned_file
+
+    # Load the model
+    model = onnx.load(str(onnx_model_file))
+
+    # Check if already BF16
+    if is_model_bf16(model):
+        print(f"[BF16] Model already in BF16 format, copying to {versioned_file}")
+        shutil.copy(str(onnx_model_file), str(versioned_file))
+        return versioned_file
+
+    # Convert to BF16
+    print(f"[BF16] Converting {onnx_model_file.name} to BF16...")
+    converted_model = convert_fp32_to_bf16(model)
+
+    # Save converted model
+    onnx.save(converted_model, str(versioned_file))
+    print(f"[BF16] Saved to: {versioned_file}")
+
+    return versioned_file
+
+
 @versioned_generated_file_fixture("mlir")
-def onnx_mlir_model_file(request, versioned_file, onnx_model_file):
+def onnx_mlir_model_file(request, versioned_file, onnx_model_file, onnx_bf16_model_file, onnx_bf16_config):
+    """Convert ONNX model to MLIR.
+
+    Uses BF16 model if --auto-convert-bf16 is enabled, otherwise uses original model.
+    This ensures the compiler receives the correctly converted model based on user options.
+
+    Note: Both onnx_model_file and onnx_bf16_model_file are Path objects
+    (versioned_generated_file_fixture unwraps VersionedFile to Path).
+    """
+    use_bf16 = request.config.getoption("--auto-convert-bf16", default=False)
+    model_path = onnx_bf16_model_file if use_bf16 else onnx_model_file
+
+    if use_bf16:
+        print(f"[BF16] Using BF16 model for MLIR conversion: {model_path}")
+
     subprocess.check_output(
         [sys.executable, "-m", "iree.compiler.tools.import_onnx",
-          str(onnx_model_file), "-o", str(versioned_file), "--data-prop"])
+          str(model_path), "-o", str(versioned_file), "--data-prop"])
 
 
 @versioned_hashable_object_fixture
@@ -429,6 +595,92 @@ def get_full_model(model_file):
     return inferred_model
 
 
+def _float32_to_bfloat16(arr: np.ndarray) -> np.ndarray:
+    """Convert float32 numpy array to bfloat16 (stored as uint16)."""
+    arr_uint32 = arr.view(np.uint32)
+    arr_bf16 = (arr_uint32 >> 16).astype(np.uint16)
+    return arr_bf16
+
+
+def _fix_batch_dimension_to_one(model: onnx.ModelProto) -> int:
+    """Fix dynamic batch dimensions (?, -1) to 1 for all inputs."""
+    modified_count = 0
+    for input_tensor in model.graph.input:
+        tensor_type = input_tensor.type.tensor_type
+        if tensor_type.HasField('shape') and len(tensor_type.shape.dim) > 0:
+            first_dim = tensor_type.shape.dim[0]
+            if first_dim.HasField('dim_param'):
+                first_dim.ClearField('dim_param')
+                first_dim.dim_value = 1
+                modified_count += 1
+            elif not first_dim.HasField('dim_value'):
+                first_dim.dim_value = 1
+                modified_count += 1
+    return modified_count
+
+
+def convert_fp32_to_bf16(model: onnx.ModelProto) -> onnx.ModelProto:
+    """Convert FP32 ONNX model to BF16 format.
+
+    Returns the converted model and prints accuracy metrics.
+    """
+    import copy
+    model = copy.deepcopy(model)  # Don't modify original
+
+    # Fix batch dimension
+    batch_fixed = _fix_batch_dimension_to_one(model)
+    if batch_fixed > 0:
+        print(f"[BF16] Fixed {batch_fixed} input(s) to have batch=1")
+
+    total_count = 0
+    max_error = 0.0
+
+    # Convert initializers (weights)
+    for init in model.graph.initializer:
+        if init.data_type != TensorProto.FLOAT:
+            continue
+
+        # Get FP32 data
+        if init.raw_data:
+            fp32_data = np.frombuffer(init.raw_data, dtype=np.float32).copy()
+        elif init.float_data:
+            fp32_data = np.array(init.float_data, dtype=np.float32)
+        else:
+            continue
+
+        # Convert to BF16
+        bf16_data = _float32_to_bfloat16(fp32_data)
+
+        # Track error
+        total_count += len(fp32_data)
+        fp32_back = (bf16_data.astype(np.uint32) << 16).view(np.float32)
+        max_error = max(max_error, np.max(np.abs(fp32_data - fp32_back)))
+
+        # Replace data
+        init.raw_data = bf16_data.tobytes()
+        init.float_data[:] = []
+        init.data_type = TensorProto.BFLOAT16
+
+    # Run shape inference
+    try:
+        model = onnx.shape_inference.infer_shapes(model)
+    except Exception:
+        pass
+
+    # Update input/output types
+    for value_info in list(model.graph.input) + list(model.graph.output):
+        if value_info.type.tensor_type.elem_type == TensorProto.FLOAT:
+            value_info.type.tensor_type.elem_type = TensorProto.BFLOAT16
+
+    # Update intermediate value_info types
+    for value_info in model.graph.value_info:
+        if value_info.type.tensor_type.elem_type == TensorProto.FLOAT:
+            value_info.type.tensor_type.elem_type = TensorProto.BFLOAT16
+
+    print(f"[BF16] Converted {total_count} weight values, max error: {max_error:.6f}")
+    return model
+
+
 @pytest.fixture
 def onnx_layer_model(request):
     case_name = request.param.name
@@ -445,7 +697,7 @@ def onnx_layer_model(request):
 def _has_bf16_matmul(model):
     """Check if model contains MatMul with bf16."""
     graph = model.graph
-    value_info = {vi.name: vi.type.tensor_type.elem_type 
+    value_info = {vi.name: vi.type.tensor_type.elem_type
                   for vi in list(graph.value_info) + list(graph.input) + list(graph.output)
                   if hasattr(vi.type, 'tensor_type')}
     for node in graph.node:
@@ -454,7 +706,7 @@ def _has_bf16_matmul(model):
             node_outputs = list(node.output)
             if any(value_info.get(name) == TensorProto.BFLOAT16 for name in node_inputs + node_outputs):
                 return True
-            if any(init.data_type == TensorProto.BFLOAT16 for init in graph.initializer 
+            if any(init.data_type == TensorProto.BFLOAT16 for init in graph.initializer
                    if init.name in node_inputs):
                 return True
     return False
@@ -462,7 +714,7 @@ def _has_bf16_matmul(model):
 def _has_bf16_einsum(model):
     """Check if model contains Einsum with bf16."""
     graph = model.graph
-    value_info = {vi.name: vi.type.tensor_type.elem_type 
+    value_info = {vi.name: vi.type.tensor_type.elem_type
                   for vi in list(graph.value_info) + list(graph.input) + list(graph.output)
                   if hasattr(vi.type, 'tensor_type')}
     for node in graph.node:
@@ -471,7 +723,7 @@ def _has_bf16_einsum(model):
             node_outputs = list(node.output)
             if any(value_info.get(name) == TensorProto.BFLOAT16 for name in node_inputs + node_outputs):
                 return True
-            if any(init.data_type == TensorProto.BFLOAT16 for init in graph.initializer 
+            if any(init.data_type == TensorProto.BFLOAT16 for init in graph.initializer
                    if init.name in node_inputs):
                 return True
     return False
@@ -484,28 +736,28 @@ def _execute_onnx_model_numpy(model, input_data):
     for MatMul and onnxruntime for other operations.
     """
     graph = model.graph
-    
+
     # Build value info map
     value_info_map = {vi.name: vi for vi in list(graph.value_info) + list(graph.input) + list(graph.output)}
-    
+
     # Initialize tensor values
     tensor_values = {}
-    
+
     # Load initializers
     for init in graph.initializer:
         arr = numpy_helper.to_array(init)
         tensor_values[init.name] = arr
-    
+
     # Set input values
     input_names = [inp.name for inp in graph.input]
     for i, inp_name in enumerate(input_names):
         if i < len(input_data):
             tensor_values[inp_name] = input_data[i]
-    
+
     # Execute nodes in order
     for node in graph.node:
         inputs = [tensor_values.get(inp) for inp in node.input if inp and inp in tensor_values]
-        
+
         if node.op_type == 'MatMul' and len(inputs) >= 2:
             result = np.matmul(inputs[0], inputs[1])
             # Convert to bf16 if output type requires it
@@ -514,7 +766,7 @@ def _execute_onnx_model_numpy(model, input_data):
                 if hasattr(vi.type, 'tensor_type') and vi.type.tensor_type.elem_type == TensorProto.BFLOAT16:
                     result = result.astype('bfloat16')
             tensor_values[node.output[0]] = result
-          
+
         elif node.op_type == "Einsum":
             # Get equation attribute
             eq = next((attr.s.decode("utf-8") if isinstance(attr.s, (bytes, bytearray)) else attr.s)
@@ -529,17 +781,17 @@ def _execute_onnx_model_numpy(model, input_data):
             else:
                 result = np.einsum(eq, a, b)
             tensor_values[node.output[0]] = result
-          
+
         else:
             # For other operations, try to use onnxruntime
             try:
                 # Create a temporary model with just this node and required inputs/outputs
-                node_inputs = [helper.make_tensor_value_info(inp, TensorProto.FLOAT, []) 
+                node_inputs = [helper.make_tensor_value_info(inp, TensorProto.FLOAT, [])
                                for inp in node.input if inp in tensor_values]
-                node_outputs = [helper.make_tensor_value_info(out, TensorProto.FLOAT, []) 
+                node_outputs = [helper.make_tensor_value_info(out, TensorProto.FLOAT, [])
                                 for out in node.output]
                 node_inits = [init for init in graph.initializer if init.name in node.input]
-                
+
                 temp_graph = helper.make_graph([node], 'temp_graph', node_inputs, node_outputs, node_inits)
                 temp_model = helper.make_model(temp_graph)
                 ort_session = onnxruntime.InferenceSession(temp_model.SerializeToString())
@@ -551,13 +803,13 @@ def _execute_onnx_model_numpy(model, input_data):
                 # If onnxruntime fails, raise to fall back to llvmcpu
                 print(f"Warning: Could not execute {node.op_type} with onnxruntime: {e}")
                 raise
-    
+
     # Collect output values
     outputs = []
     for output in graph.output:
         if output.name in tensor_values:
             outputs.append(tensor_values[output.name])
-    
+
     return outputs
 
 

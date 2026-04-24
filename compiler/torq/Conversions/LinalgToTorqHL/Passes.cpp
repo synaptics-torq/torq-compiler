@@ -76,6 +76,11 @@ static bool isPoolingNhwcSumLegal(Operation *op) {
     return kernelShape[0] != inputShape[1] || kernelShape[1] != inputShape[2];
 }
 
+static bool isHostOrCssExecutor(Operation *op) {
+    auto executor = getTargetExecutor(op, torq_hl::Executor::Slice);
+    return executor == torq_hl::Executor::Host || executor == torq_hl::Executor::CSS;
+}
+
 class LinalgToTorqHLConversionPass
     : public impl::LinalgToTorqHLConversionBase<LinalgToTorqHLConversionPass> {
   public:
@@ -97,10 +102,9 @@ class LinalgToTorqHLConversionPass
                 if (isa<linalg::YieldOp>(op))
                     return true;
 
-                // we do not need to legalize operations that will be executed on the host
-                if (getTargetExecutor(op, torq_hl::Executor::Slice) == torq_hl::Executor::Host) {
+                // we do not need to legalize operations that will be executed on the host or css
+                if (isHostOrCssExecutor(op))
                     return true;
-                }
 
                 // for other operations we don't say anything, so that if a pattern matches we
                 // convert, if it doesn't we leave it as is
@@ -114,10 +118,7 @@ class LinalgToTorqHLConversionPass
         // Host execution so they stay in the tensor dialect and can be included
         // in the Host CPU program by AssignOperationsToCpuProgramsPass.
         conversionTargetLinalg.addDynamicallyLegalOp<tensor::PadOp>(
-            [](tensor::PadOp padOp) -> bool {
-                return getTargetExecutor(padOp, torq_hl::Executor::Slice) ==
-                       torq_hl::Executor::Host;
-            }
+            [](tensor::PadOp padOp) -> bool { return isHostOrCssExecutor(padOp); }
         );
 
         RewritePatternSet patternsLinalg(&getContext());
@@ -156,8 +157,8 @@ class LinalgToTorqHLPreConversionPass
                 if (isa<linalg::YieldOp, linalg::IndexOp>(op))
                     return true;
 
-                // we do not need to legalize operations that will be executed on the host
-                if (getTargetExecutor(op, torq_hl::Executor::Slice) == torq_hl::Executor::Host)
+                // we do not need to legalize operations that will be executed on the host or css
+                if (isHostOrCssExecutor(op))
                     return true;
 
                 return std::nullopt;

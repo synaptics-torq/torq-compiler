@@ -9,7 +9,9 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace mlir::syna::torq {
 
@@ -28,6 +30,9 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createValidToSamePadPass();
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCheckCssStackSizePass();
 
 std::unique_ptr<OperationPass<ModuleOp>> createTORQLowerExecutableTargetPass();
+
+std::unique_ptr<OperationPass<func::FuncOp>>
+createExecutorAssignmentPass(StringRef executorMapPath = "");
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createMapBindingsPass();
 
@@ -95,6 +100,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignObjectsIdentifie
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createFuseActWithConvPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createStripTorqExecutorAttrPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createEncodeTensorsPass();
 

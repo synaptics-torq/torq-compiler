@@ -10,6 +10,7 @@ set(sources
     AssignAddressesPass.cpp
     AssignObjectsIdentifiersPass.cpp
     AssignOperationsToCpuProgramsPass.cpp
+    ExecutorAssignmentPass.cpp
     BufferizationUtils.cpp
     CheckCssStackSizePass.cpp
     CompileCpuProgramsPass.cpp
@@ -44,6 +45,7 @@ set(sources
     ScalarsToTensorsPass.cpp
     SegmentNSSProgramsPass.cpp
     SlicingPass.cpp
+    StripTorqExecutorAttrPass.cpp
     TORQLowerExecutableTargetPass.cpp
     TorqComprehensiveBufferizePass.cpp
     TorqHlTilePass.cpp

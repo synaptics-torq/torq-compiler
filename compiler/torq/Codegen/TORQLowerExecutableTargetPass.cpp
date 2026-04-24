@@ -91,6 +91,11 @@ static llvm::cl::opt<bool> clDisableSlicing(
     "torq-disable-slicing", llvm::cl::desc("disable slicing"), llvm::cl::init(false)
 );
 
+static llvm::cl::opt<std::string> clExecutorMap(
+    "torq-executor-map",
+    llvm::cl::desc("Path to executor assignment JSON from capability profiler"), llvm::cl::init("")
+);
+
 static llvm::cl::opt<bool> clEnableTransposeOptimization(
     "torq-enable-transpose-optimization",
     llvm::cl::desc("enable transpose layout optimization pass"), llvm::cl::init(false)
@@ -305,6 +310,14 @@ void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
     // Convert tensor-level elementwise arith ops into explicit linalg.generic form.
     funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
 
+    // Apply executor assignments from JSON analysis (if provided).
+    // Run this AFTER all linalg optimization passes so that new linalg ops
+    // created by decomposition patterns also get their executors assigned.
+    if (!clExecutorMap.empty()) {
+        funcPm.addPass(createExecutorAssignmentPass(clExecutorMap));
+        funcPm.addPass(createCanonicalizerPass());
+    }
+
     if (!clDisableLinalgSlicing)
         funcPm.addPass(createLinalgSlicingPass());
 
@@ -366,6 +379,11 @@ void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
 
     funcPm.addPass(createFoldConvertPass());
     funcPm.addPass(createCanonicalizerPass());
+
+    // Strip any torq-executor attributes from torq_hl operations.
+    // After lowering to torq_hl, the executor is implicitly NSS/CSS/Host based on context,
+    // so the explicit executor attribute should not be present on torq_hl ops.
+    funcPm.addPass(createStripTorqExecutorAttrPass());
 }
 
 void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
@@ -384,6 +402,7 @@ void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
 
     funcPm.addPass(createMarkPatternsForTileAndFusePass());
     funcPm.addPass(createTileAndFusePass());
+
     // NB: do not add passes after Tile and Fuse here, place them in
     // addPassesPostTileAndFuseUpToAssignLramAddresses, so T&F can use them too.
     addPassesPostTileAndFuseUpToAssignLramAddresses(pm, false);

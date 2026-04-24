@@ -6,14 +6,15 @@ of the torq compiler and runtime.
 # this registers the hooks and fixtures defined in the modules listed below
 
 pytest_plugins = [
-    "torq.testing.versioned_fixtures",    
-    "torq.testing.cases",    
+    "torq.testing.versioned_fixtures",
+    "torq.testing.cases",
     "torq.testing.onnx",
     "torq.testing.comparison",
     "torq.testing.reporting",
     "torq.testing.issues",
     "torq.testing.xfail",
-    "torq.testing.engines"
+    "torq.testing.engines",
+    "torq.executor_discovery.pytest_plugin",
 ]
 
 # Add tensorflow plugin only if the right tensorflow version is available

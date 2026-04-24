@@ -768,6 +768,7 @@ class LramTilePass : public impl::LramTileBase<LramTilePass> {
 
         const uint32_t lramSize = TorqHw::get().getAvailableMemoryForTiling();
 
+        // Add tiling patterns for the Slice executor
         tilePatterns.add<TileLinalgOpOperation>(ctx, lramSize, torq_hl::Executor::Slice);
         tilePatterns.add<TileSoftmaxOperation>(ctx, lramSize, torq_hl::Executor::Slice);
 

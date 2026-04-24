@@ -16,9 +16,9 @@ iree_cc_library(
     ComputeConstants.cpp
     InvocationUtils.cpp
     TorqHw.cpp
-    ExecutorAssignment.cpp
     EncodingUtils.cpp
     ShapeUtils.cpp
+    ExecutorAssignment.cpp
   HDRS
     MemoryUtils.h
     TorqUtils.h
