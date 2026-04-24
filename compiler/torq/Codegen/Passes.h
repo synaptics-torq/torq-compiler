@@ -66,12 +66,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHlTilePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createSlicingPass();
 
-struct LinalgSlicingOptions;
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>>
-createLinalgSlicingPass(const LinalgSlicingOptions &options);
-
-void addLinalgSlicingPasses(OpPassManager &funcPm);
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgSlicingPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAddDeallocationPass();
 

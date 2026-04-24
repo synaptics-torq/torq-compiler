@@ -337,7 +337,7 @@ getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, Value result) 
 bool isMarkedFuseGroup(Operation *op) {
     // We don't check if the array attribute is not empty, because we always add
     // something to it when we created it.
-    return (bool)op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+    return op->hasAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
 }
 
 bool checkShareFuseGroup(Operation *op1, Operation *op2) {

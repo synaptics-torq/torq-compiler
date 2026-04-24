@@ -20,4 +20,7 @@ void eraseBackward(RewriterBase &rewriter, Operation *op);
 llvm::FailureOr<Attribute>
 computeValueAtFirstIteration(Value val, llvm::DenseMap<Value, Attribute> &computedValues);
 
+// Simplify each affine min/max op in loopOp, using the loop bounds.
+void rewriteAffineOpInLoop(RewriterBase &rewriter, LoopLikeOpInterface loopOp);
+
 } // namespace mlir::syna::torq

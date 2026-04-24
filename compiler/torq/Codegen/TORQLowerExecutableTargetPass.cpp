@@ -100,7 +100,7 @@ namespace {
 
 void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm) {
     if (!clDisableLinalgSlicing)
-        addLinalgSlicingPasses(funcPm);
+        funcPm.addPass(createLinalgSlicingPass());
 
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
@@ -306,7 +306,7 @@ void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
     funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
 
     if (!clDisableLinalgSlicing)
-        addLinalgSlicingPasses(funcPm);
+        funcPm.addPass(createLinalgSlicingPass());
 
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());

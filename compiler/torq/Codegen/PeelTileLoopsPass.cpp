@@ -5,8 +5,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "PassesDetail.h"
+#include "TilingUtils.h"
 
-#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/ShapeUtils.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
@@ -37,53 +37,6 @@ using namespace mlir::iree_compiler;
 namespace mlir::syna::torq {
 
 namespace {
-
-// Taken from mlir/lib/Dialect/SCF/Utils/AffineCanonicalizationUtils.cpp, as it
-// is not publicly visible there.
-// Given some affine constraints, simplify the min/max op, or return failure.
-static FailureOr<affine::AffineApplyOp> canonicalizeMinMaxOp(
-    RewriterBase &rewriter, Operation *op, affine::FlatAffineValueConstraints constraints
-) {
-    RewriterBase::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPoint(op);
-    FailureOr<affine::AffineValueMap> simplified =
-        affine::simplifyConstrainedMinMaxOp(op, std::move(constraints));
-    if (failed(simplified))
-        return failure();
-    return rewriter.replaceOpWithNewOp<affine::AffineApplyOp>(
-        op, simplified->getAffineMap(), simplified->getOperands()
-    );
-}
-
-// Simplify each affine min/max op in forOp, using the loop bounds.
-static void rewriteAffineOpInLoop(RewriterBase &rewriter, scf::ForOp forOp) {
-
-    std::optional<APInt> tripCount = constantTripCount(
-        forOp.getLowerBound(), forOp.getUpperBound(), forOp.getStep(), /*isSigned=*/true,
-        scf::computeUbMinusLb
-    );
-    if (!tripCount || tripCount->getSExtValue() < 2)
-        return;
-
-    int64_t lb = *getConstIntValue(forOp.getLowerBound());
-    int64_t step = *getConstIntValue(forOp.getStep());
-
-    Value iv = forOp.getInductionVar();
-
-    affine::FlatAffineValueConstraints constraints;
-    constraints.appendDimVar({iv});
-    // iv <= lb + step*(tripCount - 1) ==> -iv + (lb + step*(tripCount - 1)) >= 0
-    constraints.addInequality({-1, (lb + step * (tripCount->getSExtValue() - 1))});
-    // iv >= lb ==> iv - lb >= 0
-    constraints.addInequality({1, -lb});
-
-    forOp.walk([&](Operation *affineOp) {
-        if (!isa<affine::AffineMinOp, affine::AffineMaxOp>(affineOp))
-            return;
-
-        (void)canonicalizeMinMaxOp(rewriter, affineOp, constraints);
-    });
-}
 
 // If forOp has dynamic shapes:
 // - if the upper bound is not aligned with step, peel the last iteration;

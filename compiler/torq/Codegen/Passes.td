@@ -396,16 +396,10 @@ def Slicing :
 def LinalgSlicing :
            InterfacePass<"torq-linalg-slicing",
                          "mlir::FunctionOpInterface"> {
-    let summary = "Slice pattern-fuse-groups so that they can be parallelized. This pass needs to be run 3 times, with canonicalize between each run. The first two runs should be called with the peel-grouping option set to true.";
+    let summary = "Slice pattern-fuse-groups so that they can be parallelized.";
 
     let constructor =
-        "mlir::syna::torq::createLinalgSlicingPass({ .peelGrouping = false})";
-
-    let options = [
-        Option<"peelGrouping", "peel-grouping", "bool",
-              /*default=*/"false",
-             "when true, peel iterations that don't align with grouping; when false, slice the iterations so they can be parallelized.">
-    ];
+        "mlir::syna::torq::createLinalgSlicingPass()";
 
     let dependentDialects = [
         "linalg::LinalgDialect",

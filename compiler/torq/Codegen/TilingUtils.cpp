@@ -6,10 +6,13 @@
 
 #include "TilingUtils.h"
 
+#include "mlir/Dialect/Affine/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/IR/AffineValueMap.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -128,7 +131,55 @@ llvm::FailureOr<Attribute> computeAffineApplyAtFirstIteration(
     return results->front();
 }
 
+// Taken from mlir/lib/Dialect/SCF/Utils/AffineCanonicalizationUtils.cpp, as it
+// is not publicly visible there.
+// Given some affine constraints, simplify the min/max op, or return failure.
+FailureOr<affine::AffineApplyOp> canonicalizeMinMaxOp(
+    RewriterBase &rewriter, Operation *op, affine::FlatAffineValueConstraints constraints
+) {
+    RewriterBase::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(op);
+    FailureOr<affine::AffineValueMap> simplified =
+        affine::simplifyConstrainedMinMaxOp(op, std::move(constraints));
+    if (failed(simplified))
+        return failure();
+    return rewriter.replaceOpWithNewOp<affine::AffineApplyOp>(
+        op, simplified->getAffineMap(), simplified->getOperands()
+    );
+}
+
 } // namespace
+
+void rewriteAffineOpInLoop(RewriterBase &rewriter, LoopLikeOpInterface loopOp) {
+    affine::FlatAffineValueConstraints constraints;
+
+    // Assuming LoopLikeOpInterface or helpers provide these methods for all dimensions
+    auto ivs = *loopOp.getLoopInductionVars();
+    auto lbs = *loopOp.getLoopLowerBounds();
+    auto ubs = *loopOp.getLoopUpperBounds();
+    auto steps = *loopOp.getLoopSteps();
+
+    for (auto [iv, lb, ub, step] : llvm::zip_equal(ivs, lbs, ubs, steps)) {
+        std::optional<APInt> tripCount =
+            constantTripCount(lb, ub, step, /*isSigned=*/true, scf::computeUbMinusLb);
+        if (!tripCount || tripCount->getSExtValue() < 2)
+            continue;
+
+        int64_t lbVal = *getConstantIntValue(lb);
+        int64_t stepVal = *getConstantIntValue(step);
+
+        constraints.appendDimVar({iv});
+        constraints.addInequality({-1, (lbVal + stepVal * (tripCount->getSExtValue() - 1))});
+        constraints.addInequality({1, -lbVal});
+    }
+
+    loopOp.getOperation()->walk([&](Operation *affineOp) {
+        if (!isa<affine::AffineMinOp, affine::AffineMaxOp>(affineOp))
+            return;
+
+        (void)canonicalizeMinMaxOp(rewriter, affineOp, constraints);
+    });
+}
 
 void applyTiledResults(
     RewriterBase &rewriter, Operation *op, scf::SCFTileAndFuseResult &tiledResults
