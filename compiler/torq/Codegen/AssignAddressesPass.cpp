@@ -310,9 +310,8 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
 
     startAddress = align_ceil(startAddress, HwInfo::xram_page_size);
 
-    // for the moment we just assign increasing addresses to operations (because the pool
-    // will try to allocate large buffers at the end)
-
+    // body pass: pack CreateInvocationOp code sections, AllocOp and ConstOp at
+    // 4-byte alignment so the whole region can later be mapped as a single SG
     for (auto &op : funcOp.getFunctionBody().getOps()) {
 
         if (auto createInvocationOp = dyn_cast<syna::torq_hl::CreateInvocationOp>(op)) {
@@ -338,7 +337,7 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
 
             createInvocationOp.setXramCodeAddresses(addresses);
         }
-        else if (isa<memref::AllocOp, syna::torq_hl::MapBindingOp, syna::torq_hl::ConstOp>(op)) {
+        else if (isa<memref::AllocOp, syna::torq_hl::ConstOp>(op)) {
 
             assert(op.getNumResults() == 1 && "Expected a single result for alloc-like operations");
 
@@ -356,22 +355,60 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
                 return op.emitError("XRAM size exceeded while assigning addresses");
             }
         }
-        else if (isDerivedMemRefOperation(&op)) {
+    }
 
-            auto type = mlir::cast<MemRefType>(op.getResult(0).getType());
+    // binding pass: place each MapBindingOp on its own page(s) after the body
+    // so that each binding can be IOMMU-mapped independently without sharing a
+    // page with the body or any other binding
+    int64_t bindingBase = align_ceil(startAddress, HwInfo::xram_page_size);
 
-            if (getEncodingMemorySpace(type) != torq_hl::MemorySpace::Xram) {
-                continue;
-            }
+    for (auto &op : funcOp.getFunctionBody().getOps()) {
 
-            if (failed(setDerivedMemrefAddress(&op))) {
-                return failure();
-            }
+        if (!isa<syna::torq_hl::MapBindingOp>(op)) {
+            continue;
+        }
+
+        assert(op.getNumResults() == 1 && "Expected a single result for MapBindingOp");
+
+        auto type = mlir::cast<MemRefType>(op.getResult(0).getType());
+
+        if (getEncodingMemorySpace(type) != torq_hl::MemorySpace::Xram) {
+            continue;
+        }
+
+        int64_t addr = align_ceil(bindingBase, HwInfo::xram_page_size);
+
+        setXramAddress(&op, addr);
+
+        // round the size up to a page so the next allocation starts on a fresh page
+        bindingBase = addr + align_ceil(getEncodedTotalSizeBytes(type), HwInfo::xram_page_size);
+
+        if (bindingBase > HwInfo::xram_size) {
+            return op.emitError("XRAM size exceeded while assigning binding addresses");
         }
     }
 
-    // mark the area used by the operations as reserved for later passes
-    reserveXramArea(funcOp, startAddress);
+    // derived memref pass: subview/reinterpret_cast/reshape etc. inherit their
+    // address from their source, so run this after the body and binding passes
+    // have assigned addresses to all possible sources
+    for (auto &op : funcOp.getFunctionBody().getOps()) {
+
+        if (!isDerivedMemRefOperation(&op)) {
+            continue;
+        }
+
+        auto type = mlir::cast<MemRefType>(op.getResult(0).getType());
+
+        if (getEncodingMemorySpace(type) != torq_hl::MemorySpace::Xram) {
+            continue;
+        }
+
+        if (failed(setDerivedMemrefAddress(&op))) {
+            return failure();
+        }
+    }
+
+    reserveXramArea(funcOp, bindingBase);
 
     return success();
 }
