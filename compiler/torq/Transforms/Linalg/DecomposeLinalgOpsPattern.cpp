@@ -564,7 +564,8 @@ struct BfloatErfPattern : public OpRewritePattern<math::ErfOp> {
     LogicalResult matchAndRewrite(math::ErfOp op, PatternRewriter &rewriter) const override {
 
         // checks
-        if (!cast<RankedTensorType>(op.getType()).getElementType().isBF16()) {
+        auto bfTensorType = dyn_cast<RankedTensorType>(op.getType());
+        if (!bfTensorType || !bfTensorType.getElementType().isBF16()) {
             return rewriter.notifyMatchFailure(op, "Expected bf16 output");
         }
         auto [isForced, forced] = setTargetExecutorIfForced(op, rewriter, "erf");
@@ -575,7 +576,6 @@ struct BfloatErfPattern : public OpRewritePattern<math::ErfOp> {
         // useful meta-values.
         auto loc = op.getLoc();
         auto ctx = rewriter.getContext();
-        auto bfTensorType = cast<RankedTensorType>(op.getType());
         auto bf16 = bfTensorType.getElementType();
         auto rank = (size_t)bfTensorType.getRank();
 

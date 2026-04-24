@@ -31,6 +31,10 @@ namespace mlir::syna::torq {
 
 namespace {
 
+static float decodeEncodedFloatPadValue(int32_t encodedPadValue) {
+    return llvm::bit_cast<float>(static_cast<uint32_t>(encodedPadValue));
+}
+
 template <class TorqConvPoolOp>
 class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPoolOp> {
   public:
@@ -704,14 +708,16 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
             convOutShape.assign(origOutShape.begin(), origOutShape.end());
         }
 
-        int32_t inputZp = op.getInputZp();
+        // TorqHL exposes this attribute as input_zp, but it is the value used to fill explicit
+        // padding for every conv/pool op. Floating-point fills are stored as raw f32 bits.
+        const int32_t encodedPadValue = op.getInputZp();
         TypedAttr fillAttr;
         if (auto intType = llvm::dyn_cast<IntegerType>(elemType)) {
-            fillAttr = rewriter.getIntegerAttr(intType, inputZp);
+            fillAttr = rewriter.getIntegerAttr(intType, encodedPadValue);
         }
         else if (auto floatType = llvm::dyn_cast<FloatType>(elemType)) {
-            // Floating pad values are stored in input_zp as raw float32 bits.
-            fillAttr = rewriter.getFloatAttr(floatType, llvm::bit_cast<float>(inputZp));
+            fillAttr =
+                rewriter.getFloatAttr(floatType, decodeEncodedFloatPadValue(encodedPadValue));
         }
         else {
             return failure();
@@ -813,11 +819,6 @@ void ValidToSamePadPass::runOnOperation() {
         patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
         patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
         patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
-
-        // Register patterns for MaxPool2dOp
-        patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::MaxPool2dOp>>(ctx);
-        patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::MaxPool2dOp>>(ctx);
-        patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::MaxPool2dOp>>(ctx);
 
         // Register patterns for MaxPool2dOp
         patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::MaxPool2dOp>>(ctx);

@@ -30,7 +30,7 @@ static torq_hw::SliceTaskOp lowerMaxPool1DToHw(
     int chCount
 ) {
     // Layout of the in/out tensors for processing
-    struct In1D : Vectorized {
+    struct In : Vectorized {
         enum { N, C, H, KernelH };
     };
     LData input(op.getInput());
@@ -47,32 +47,20 @@ static torq_hw::SliceTaskOp lowerMaxPool1DToHw(
 
     Slice slice("MaxPool1D");
 
-    int inputWidth = input.dim(Dim::W);
-    int inputHeight = input.dim(Dim::H);
-
-    HWDim kernelDim(kh, kw);
-    LRTBDim pad(op.getPad());
-
-    // For 1D maxpool, set kernel top and bottom to 0
-    LRTBDim kernelBorder;
-    slice.setKernel(kernelBorder);
-    slice.setPadding(pad, op.getInputZp());
-    slice.setInputChannelShape(inputHeight, inputWidth);
-
-    // Vectorize width dimension
-    input.vectorize(inputWidth);
+    int vectSize = slice.alu.iWidth(input.elementType());
+    input.vectorize(vectSize);
 
     auto stride = op.getStride();
     assert(kh == stride[0] && "Kernel height (kh) must be equal to stride[0] for MaxPool1D");
 
     input.reshapeDim(Dim::H, {-1, kh});
 
-    int in_ch = input.dim(In1D::C);
+    int in_ch = input.dim(In::C);
 
-    For(auto batch = slice.iterate(input.dim(In1D::N))) {
+    For(auto batch = slice.iterate(input.dim(In::N))) {
         For(auto ch_block = slice.iterate(in_ch)) {
-            For(auto op_row = slice.iterate(input.dim(In1D::H))) {
-                For(auto ip_vec = slice.iterate(input.dim(In1D::Vectors))) {
+            For(auto op_row = slice.iterate(input.dim(In::H))) {
+                For(auto ip_vec = slice.iterate(input.dim(In::Vectors))) {
                     PData pdata;
                     For(auto kh_idx = slice.iterate(kh)) {
                         IData idata =
@@ -90,6 +78,62 @@ static torq_hw::SliceTaskOp lowerMaxPool1DToHw(
 
     return torq_hw::SliceTaskOp::create(
         rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
+        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+    );
+}
+
+// Pool along W only (kh==1, kw>1) by splitting the dense W dimension into [outputWidth, kw].
+static torq_hw::SliceTaskOp lowerMaxPool1DHorizontalToHw(
+    torq_hl::MaxPool2dOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
+    int chCount
+) {
+    using In = NCHW;
+    LData input(op.getInput());
+    LData output(op.getInit());
+
+    auto kernel = op.getKernel();
+    int kh = kernel[0];
+    int kw = kernel[1];
+
+    assert(kh == 1 && kw != 1 && "Expected kh=1 and kw!=1 for horizontal 1D maxpool");
+
+    input.subviewDim(Dim::C, chOffset, chCount);
+    output.subviewDim(Dim::C, chOffset, chCount);
+
+    Slice slice("MaxPool1DHorizontal");
+
+    auto stride = op.getStride();
+    assert(
+        kw == stride[1] && "Kernel width (kw) must be equal to stride[1] for horizontal MaxPool1D"
+    );
+
+    // kh==1 and strideH==1, so each output row maps directly to the corresponding input row.
+    // Keep the native N,C,H,W layout and only split W into [outputWidth, kw] tiles.
+    // TODO: This path reduces along the innermost W dimension, so it cannot leverage vectorized
+    // reduction like the vertical 1D case. For larger tensors, consider swapping H/W first and
+    // reusing the faster H-reduction path.
+    input.reshapeDim(Dim::W, {-1, kw});
+
+    int in_ch = input.dim(In::C);
+
+    For(auto batch = slice.iterate(input.dim(In::N))) {
+        For(auto ch_block = slice.iterate(in_ch)) {
+            For(auto op_row = slice.iterate(input.dim(In::H))) {
+                For(auto op_col = slice.iterate(input.dim(In::W))) {
+                    PData pdata;
+                    IData idata = slice.iram.load(input[batch][ch_block][op_row][op_col]);
+                    For(auto kw_idx = slice.iterate(kw)) {
+                        pdata = slice.alu.accumulate(idata[kw_idx], torq_hw::ALUOp1Mode::MAX);
+                    }
+                    QData res = slice.act.load(pdata);
+                    slice.store(output[batch][ch_block][op_row][op_col], res);
+                }
+            }
+        }
+    }
+
+    return rewriter.create<torq_hw::SliceTaskOp>(
+        op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
         taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
     );
 }
@@ -270,11 +314,20 @@ static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
 }
 
 LogicalResult convertToHw(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) {
+    LData inputData(op.getInput());
     auto kernel = op.getKernel();
     auto stride = op.getStride();
-    // Detect 1D pooling from kernel/stride directly — no need for an explicit flag.
-    // 1D pooling occurs when one spatial dimension has kernel==1 and stride==1.
-    bool is1D = (kernel[0] == 1 && stride[0] == 1) || (kernel[1] == 1 && stride[1] == 1);
+    auto pad = op.getPad();
+
+    // The reshape-based 1D lowerings only handle exact non-overlapping, unpadded windows.
+    // Leave padded or tail-dropping cases to the generic fallback path.
+    bool hasNoPadding = pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0;
+    bool isVertical1D = kernel[1] == 1 && stride[1] == 1 && kernel[0] != 1 &&
+                        stride[0] == kernel[0] && hasNoPadding &&
+                        inputData.dim(Dim::H) % kernel[0] == 0;
+    bool isHorizontal1D = kernel[0] == 1 && stride[0] == 1 && kernel[1] != 1 &&
+                          stride[1] == kernel[1] && hasNoPadding &&
+                          inputData.dim(Dim::W) % kernel[1] == 0;
 
     Value initValue = op.getInit();
     LData outputData(op.getInit());
@@ -283,14 +336,19 @@ LogicalResult convertToHw(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) {
 
     torq_hw::SliceTaskOp hwOp;
 
-    if (is1D) {
-        LLVM_DEBUG(llvm::dbgs() << "Lowering MaxPool 1D case\n");
+    if (isVertical1D) {
+        LLVM_DEBUG(llvm::dbgs() << "Lowering MaxPool 1D (vertical) case\n");
         if (!(hwOp = lowerMaxPool1DToHw(op, rewriter, initValue, 0, outChCount))) {
             return failure();
         }
     }
+    else if (isHorizontal1D) {
+        LLVM_DEBUG(llvm::dbgs() << "Lowering MaxPool 1D (horizontal) case\n");
+        if (!(hwOp = lowerMaxPool1DHorizontalToHw(op, rewriter, initValue, 0, outChCount))) {
+            return failure();
+        }
+    }
     else {
-        auto stride = op.getStride();
         int strideH = stride[0];
         int strideW = stride[1];
         if (strideH == 2 || strideW == 2) {
