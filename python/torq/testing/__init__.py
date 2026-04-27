@@ -8,7 +8,9 @@ of the torq compiler and runtime.
 pytest_plugins = [
     "torq.testing.versioned_fixtures",
     "torq.testing.cases",
+    "torq.testing.numpy",
     "torq.testing.onnx",
+    "torq.testing.torch",
     "torq.testing.comparison",
     "torq.testing.reporting",
     "torq.testing.issues",

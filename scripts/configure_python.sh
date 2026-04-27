@@ -46,7 +46,10 @@ cd $BASE_DIR
 
 # install requirements
 # these following lines must be in sync with the contents of assemble_release_docker.sh
-pip install -r requirements.txt
+pip install -r requirements.txt || {
+    echo "Dependency resolution failed. Check requirements.txt for version conflicts."
+    exit 1
+}
 pip install third_party/iree/integrations/tensorflow/python_projects/iree_tf
 pip install third_party/iree/integrations/tensorflow/python_projects/iree_tflite
 

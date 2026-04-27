@@ -1019,7 +1019,7 @@ def pytest_generate_tests(metafunc):
 
 @pytest.fixture
 def reference_results(request, onnx_layer_model):
-    return request.getfixturevalue("numpy_reference_results")
+    return request.getfixturevalue("composite_reference_results")
 
 
 @pytest.fixture
