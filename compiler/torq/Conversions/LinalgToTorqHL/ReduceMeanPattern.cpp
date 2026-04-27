@@ -27,6 +27,7 @@
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "linalg-torq-reducemean-pattern"
@@ -34,8 +35,6 @@
 namespace mlir::syna::torq {
 
 struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
-    using OpRewritePattern::OpRewritePattern;
-
     ReduceMeanPattern(MLIRContext *context, bool markFuseGroups)
         : OpRewritePattern<linalg::GenericOp>(context), _markFuseGroups(markFuseGroups) {}
 
@@ -203,16 +202,21 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
 //            ins(%sum: tensor<Nxt>) outs(%out: tensor<Nxt>) { %q = arith.divf %in, %cst_M; yield %q
 //            }
 struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
-    using OpRewritePattern::OpRewritePattern;
+    bool _markFuseGroups;
+
+    ReduceMeanConvert(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern(context, /*benefit=*/2), _markFuseGroups(markFuseGroups) {}
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp meanOp, PatternRewriter &rewriter) const override {
+        if (_markFuseGroups && isMarkedFuseGroup(meanOp)) {
+            return rewriter.notifyMatchFailure(meanOp, "Already marked");
+        }
+
         if (meanOp.getNumDpsInputs() != 1 || meanOp.getNumDpsInits() != 1)
             return rewriter.notifyMatchFailure(meanOp, "Expected 1 input/init");
 
-        auto iters = meanOp.getIteratorTypesArray();
-        if (iters.empty() ||
-            llvm::any_of(iters, [](auto t) { return t != mlir::utils::IteratorType::parallel; }))
+        if (meanOp.getNumParallelLoops() == 0 || meanOp.getNumReductionLoops() != 0)
             return rewriter.notifyMatchFailure(meanOp, "Expected parallel iterators");
 
         auto yieldOp = dyn_cast<linalg::YieldOp>(meanOp.getBody()->getTerminator());
@@ -224,96 +228,79 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(meanOp, "Expected div op");
 
         // Only bf16 (DivFOp) is supported
-        auto divFOp = dyn_cast_or_null<arith::DivFOp>(divOp);
-        auto mulFOp = dyn_cast_or_null<arith::MulFOp>(divOp);
-        float meanValue;
-        if (divFOp) {
-            if (!isa<BlockArgument>(divFOp.getLhs())) {
-                return rewriter.notifyMatchFailure(meanOp, "Div lhs must be block arg");
-            }
+        if (!isa<arith::DivFOp, arith::MulFOp>(divOp))
+            return rewriter.notifyMatchFailure(meanOp, "Expected div or mul op");
 
-            auto divRhs = divFOp.getRhs().getDefiningOp<arith::ConstantOp>();
-            if (!divRhs) {
-                return rewriter.notifyMatchFailure(meanOp, "Div rhs must be constant");
-            }
+        if (divOp->getNumOperands() != 2)
+            return rewriter.notifyMatchFailure(meanOp, "Expected two operands");
 
-            auto divConstAttr = dyn_cast_or_null<FloatAttr>(divRhs.getValue());
-            if (!divConstAttr) {
-                return rewriter.notifyMatchFailure(meanOp, "Div constant must be float");
-            }
+        if (!llvm::isa_and_nonnull<BlockArgument>(divOp->getOperand(0))) {
+            return rewriter.notifyMatchFailure(meanOp, "lhs must be block arg");
+        }
 
-            double divConst = divConstAttr.getValueAsDouble();
-            if (divConst <= 0.0) {
+        auto divRhs = divOp->getOperand(1).getDefiningOp<arith::ConstantOp>();
+        if (!divRhs) {
+            return rewriter.notifyMatchFailure(meanOp, "rhs must be constant");
+        }
+
+        auto divConstAttr = dyn_cast<FloatAttr>(divRhs.getValue());
+        if (!divConstAttr) {
+            return rewriter.notifyMatchFailure(meanOp, "constant must be float");
+        }
+
+        double meanValue = divConstAttr.getValueAsDouble();
+        if (isa<arith::DivFOp>(divOp)) {
+            if (meanValue <= 0.0) {
                 return rewriter.notifyMatchFailure(meanOp, "Div constant must be positive");
             }
 
             // Scale = 1 / meanConst for mean calculation
-            meanValue = 1.0f / divConst;
+            meanValue = 1.0 / meanValue;
         }
-        else if (mulFOp) {
-            if (!isa<BlockArgument>(mulFOp.getLhs())) {
-                return rewriter.notifyMatchFailure(meanOp, "Mul lhs must be block arg");
-            }
-
-            auto mulRhs = mulFOp.getRhs().getDefiningOp<arith::ConstantOp>();
-            if (!mulRhs) {
-                return rewriter.notifyMatchFailure(meanOp, "Mul rhs must be constant");
-            }
-
-            auto mulConstAttr = dyn_cast_or_null<FloatAttr>(mulRhs.getValue());
-            if (!mulConstAttr) {
-                return rewriter.notifyMatchFailure(meanOp, "Mul constant must be float");
-            }
-
-            meanValue = mulConstAttr.getValueAsDouble();
-        }
-        else
-            return rewriter.notifyMatchFailure(meanOp, "Expected div or mul op");
 
         auto sumOp = meanOp.getInputs()[0].getDefiningOp<linalg::GenericOp>();
         if (!sumOp)
             return rewriter.notifyMatchFailure(meanOp, "Expected sum reduction");
 
-        auto sumIters = sumOp.getIteratorTypesArray();
-        if (llvm::count_if(sumIters, [](auto t) {
-                return t == mlir::utils::IteratorType::reduction;
-            }) != 1)
+        if (sumOp.getNumReductionLoops() != 1)
             return rewriter.notifyMatchFailure(sumOp, "Expected one reduction");
 
         // Find the index of the reduction loop in the loop nest
-        int reductionLoopIdx = -1;
-        for (size_t i = 0; i < sumIters.size(); ++i)
-            if (sumIters[i] == mlir::utils::IteratorType::reduction)
-                reductionLoopIdx = i;
-
-        if (reductionLoopIdx == -1)
-            return rewriter.notifyMatchFailure(sumOp, "No reduction loop found");
+        SmallVector<unsigned> reductionDims;
+        sumOp.getReductionDims(reductionDims);
+        assert(reductionDims.size() == 1);
+        unsigned reductionLoopIdx = reductionDims[0];
 
         // Map the reduction loop index to the actual input dimension index
-        auto inMap = sumOp.getIndexingMapsArray()[0];
-        int reductionAxis = -1;
-        for (unsigned i = 0; i < inMap.getNumResults(); ++i) {
-            if (auto dimExpr = dyn_cast<AffineDimExpr>(inMap.getResult(i))) {
-                if (dimExpr.getPosition() == static_cast<unsigned>(reductionLoopIdx)) {
-                    reductionAxis = i;
-                    break;
-                }
-            }
-        }
+        AffineMap inMap = sumOp.getIndexingMapsArray()[0];
+        inMap.getDimPosition(reductionLoopIdx);
+        // jetski: don't change anything except for the next line. Fix it to do the right thing
+        std::optional<unsigned int> reductionAxis =
+            inMap.getResultPosition(rewriter.getAffineDimExpr(reductionLoopIdx));
 
-        if (reductionAxis == -1)
+        if (!reductionAxis) {
             return rewriter.notifyMatchFailure(
                 sumOp, "Could not map reduction loop to input dimension"
             );
+        }
 
         auto sumYield = dyn_cast<linalg::YieldOp>(sumOp.getBody()->getTerminator());
-        if (!sumYield || !isa<arith::AddFOp>(sumYield.getValues()[0].getDefiningOp()))
+        if (!sumYield ||
+            !llvm::isa_and_nonnull<arith::AddFOp>(sumYield.getValues()[0].getDefiningOp()))
             return rewriter.notifyMatchFailure(sumOp, "Expected AddFOp reduction");
 
         auto loc = meanOp.getLoc();
         Value input = sumOp.getInputs()[0];
         auto inputType = cast<RankedTensorType>(input.getType());
         auto resultType = cast<RankedTensorType>(meanOp.getResult(0).getType());
+
+        if (_markFuseGroups) {
+            markFuseGroupBackward(
+                meanOp.getResult(0), {input}, rewriter,
+                meanOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            );
+            return success();
+        }
 
         // Reshape to NCHW rank-4
         Value inputNCHW = input;
@@ -341,7 +328,7 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         // Map reduction axis to NCHW and apply transpose to bring reduction axis to H position
         // ReduceMeanOp always reduces along dimension 2 (H), so we need to permute the input
         // to bring the target axis to position 2, then permute back after the reduction
-        int nchwAxis = reductionAxis;
+        unsigned nchwAxis = *reductionAxis;
         if (rank == 2) {
             // [B, F] -> [B, 1, 1, F].
             // reductionAxis 0 (batch) -> nchwAxis 0 (N)
@@ -356,7 +343,7 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         else if (rank == 3) {
             // [B, H, W] -> [B, 1, H, W]. 0->0, 1->2, 2->3
             if (reductionAxis > 0)
-                nchwAxis = reductionAxis + 1;
+                nchwAxis = *reductionAxis + 1;
         }
 
         // Determine the transpose permutation to bring nchwAxis to position 2
@@ -470,15 +457,11 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
-void populateLinalgToTorqHLReduceMeanPatternsBeforeMarking(
-    MLIRContext *context, RewritePatternSet &patterns
-) {
-    patterns.insert<ReduceMeanConvert>(context);
-}
-
 void populateLinalgToTorqHLReduceMeanPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
+    patterns.insert<ReduceMeanConvert>(context, markFuseGroups);
+
     // TODO: refactor with ReduceMeanConvert later soon
     patterns.insert<ReduceMeanPattern>(context, markFuseGroups);
 }

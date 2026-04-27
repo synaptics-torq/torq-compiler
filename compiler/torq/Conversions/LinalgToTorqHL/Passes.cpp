@@ -254,24 +254,6 @@ class MarkPatternsForTileAndFusePass
         auto funcOp = getOperation();
         auto *ctx = &getContext();
 
-        auto applyPatterns = [&](auto populateFn) -> LogicalResult {
-            RewritePatternSet patterns(ctx);
-            populateFn(patterns);
-            FrozenRewritePatternSet frozenPatterns(
-                std::move(patterns), disabledPatterns, enabledPatterns
-            );
-            return applyPatternsGreedily(funcOp, frozenPatterns);
-        };
-
-        // NB: Patterns that do transformations, instead of marking, must be
-        // called before we add the TORQ_FUSE_GROUP_ID attribute, otherwise the
-        // operations they generate will not be annotated.
-        if (failed(applyPatterns([&](RewritePatternSet &p) {
-                populateLinalgToTorqHLReduceMeanPatternsBeforeMarking(ctx, p);
-            }))) {
-            return signalPassFailure();
-        }
-
         // Assign UIDs to TilingInterface operations
         OpBuilder builder(funcOp);
         int64_t nextId = 0;
