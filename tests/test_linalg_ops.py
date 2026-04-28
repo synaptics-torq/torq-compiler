@@ -28,40 +28,10 @@ def case_config(request, runtime_hw_type, chip_config):
     if "reducesum-dma-throughput-test" in request.param.name:
         pytest.skip("DMA throughput test file; run via test_dma_throughput.py")
 
-    failed_tc = []
-
-    # SL2610 aws-fpga failures
-    if aws_fpga:
-        failed_tc += [
-            # output mistmatch, see https://github.com/synaptics-torq/torq-compiler-dev/issues/813
-            'sigmoid.mlir'
-        ]
-
-    # Next chip failures
-    if next_chip:
-        if aws_fpga:
-            failed_tc += [
-                'dot-in-int16-out-int16.mlir', # output mismatch
-                'dot-in-int8-out-int16.mlir', # AssertionError: Output is 0 always
-                'matvec-in-int8-out-int16-1.mlir', # AssertionError: Number of differences: 1 out of 1 [100.00%]
-                'matvec-in-int8-out-int16.mlir', # runtime timeout
-                'matvec-in-int16-out-int16.mlir', # runtime timeout
-                'cmpf-bf16-to-fp32.mlir', # AssertionError: Number of differences: 21 out of 256 [8.20%]
-                'batch-matmul-in-int8-out-int16.mlir', # Number of differences: 8190 out of 16384 [49.99%]
-                'matmul-in-int8-out-int16.mlir', # output mismatch
-                'asr-i8-scalar.mlir', # output mismatch
-                'reduceproduct-a3-bf16.mlir',
-                'softmax-1x1024x64xbf16.mlir',
-                'Elementwise-less-than-equal-u16.mlir', # 0.02% mismatch
-            ]
-
     # Prevent torq-run-module timing out on aws_fpga with specific testcases
     need_input_type_tc = []
     if aws_fpga:
         need_input_type_tc += ["reshape-collapse-expand.mlir"]
-
-    if any(s in request.param.name for s in failed_tc):
-        pytest.xfail("output mismatch or error")
 
     extra_args["torq_compiler_options"] = []
     if "exp.mlir" in request.param.name:
