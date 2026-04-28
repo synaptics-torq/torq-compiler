@@ -142,6 +142,7 @@
                                 <th scope="col" class="text-center small">Target</th>                                
                                 <th scope="col" class="text-center small">Frequency</th>
                                 <th scope="col" class="text-center small">Cache</th>
+                                <th scope="col" class="text-center small">Memory Bandwidth</th>
                                 <th scope="col" class="text-center small">Branch</th>
                                 <th scope="col" class="text-center small">Effective Inference time</th>                                
                                 <th scope="col" class="text-center small">Normalized inference time (@ 1 GHz)</th>
@@ -174,6 +175,13 @@
                                 <td class="text-center">
                                     {% if test_data.cache_size %}
                                         {{ test_data.cache_size | filesizeformat }}
+                                    {% else %}
+                                        <span class="text-muted">—</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-center">
+                                    {% if test_data.memory_bandwidth %}
+                                        {{ test_data.memory_bandwidth | format_measurement:"bps" }}
                                     {% else %}
                                         <span class="text-muted">—</span>
                                     {% endif %}

@@ -341,7 +341,7 @@ class RuntimeTarget(models.Model):
     """
 
     """ Identifier of the runtime target (e.g. "sl2610", etc.)"""
-    name = models.TextField(unique=True)
+    name = models.TextField(null=False)
 
     """ Type of hardware used for execution (e.g. simulation, FPGA, eval board, etc.)"""
     hw_type = models.TextField(blank=True, null=True)
@@ -349,11 +349,19 @@ class RuntimeTarget(models.Model):
     """ Human readable description of the runtime target."""
     description = models.TextField(blank=True, null=True)
 
-    """ Inference Frequency """
-    inference_frequency = models.IntegerField(blank=True, null=True)
+    """ Inference Frequency in Hz """
+    inference_frequency = models.BigIntegerField(blank=True, null=True)
 
-    """ Cache size in MB """
-    cache_size = models.IntegerField(blank=True, null=True)
+    """ Cache size in bytes """
+    cache_size = models.BigIntegerField(blank=True, null=True)
+
+    """ Memory bandwidth in bits per second """
+    memory_bandwidth = models.BigIntegerField(blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['name', 'hw_type'], name='unique_runtime_target_name_hw_type')
+        ]
 
     def __str__(self):
         return f"RuntimeTarget: {self.name} ({self.hw_type})"

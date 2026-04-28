@@ -47,12 +47,13 @@ def get_reference_test_durations(session_ids):
         runtime_target = metadata.runtime_target if metadata else None
         runtime_hw_type = metadata.runtime_hw_type if metadata else None
         runtime_target_model = runtime_target_by_key.get((runtime_target, runtime_hw_type)) if runtime_target else None
+        
         if runtime_target and runtime_target_model is None:
             runtime_target_model = runtime_target_by_name.get(runtime_target)
         nodeid = measurement.test_run.test_case.nodeid
         total_duration = measurement.value
         run_id = measurement.test_run.id
-        git_branch = measurement.test_run.test_run_batch.test_session.git_branch
+        git_branch = measurement.test_run.test_run_batch.test_session.git_branch        
 
         if runtime_target_model and runtime_target_model.inference_frequency:            
             scaling_factor = runtime_target_model.inference_frequency / 1_000_000_000.0
@@ -68,6 +69,7 @@ def get_reference_test_durations(session_ids):
                                        'runtime_target': runtime_target, 'git_branch': git_branch,
                                        'runtime_hw_type': runtime_hw_type,                                    
                                        'inference_frequency': runtime_target_model.inference_frequency if runtime_target_model else None,
+                                       'memory_bandwidth': runtime_target_model.memory_bandwidth if runtime_target_model else None,
                                        'normalized_duration': normalized_duration,
                                        'cache_size': runtime_target_model.cache_size if runtime_target_model else None
                                        })

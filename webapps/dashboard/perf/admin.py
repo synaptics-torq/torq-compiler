@@ -1,6 +1,4 @@
 from django.contrib import admin
-from django.contrib.admin.widgets import AutocompleteSelectMultiple
-from django import forms
 
 from .models import RuntimeTarget, TestCase, TestGroup, TestMetadata, TestSession, TestRun, TestRunBatch, Metric, Measurement
 
@@ -47,27 +45,29 @@ class MeasurementAdmin(admin.ModelAdmin):
     search_fields = ('metric__name', 'test_run__test_case__name')
 
 
-class TestGroupAdminForm(forms.ModelForm):
-    class Meta:
-        model = TestGroup
-        fields = '__all__'
+class TestGroupTestCaseInline(admin.TabularInline):
+    model = TestGroup.test_cases.through
+    autocomplete_fields = ('testcase',)
+    extra = 1
+    verbose_name = 'Test case'
+    verbose_name_plural = 'Test cases'
 
-        # we want an autocomplete widget that is wider because test names are very long
-        widgets = {
-            "test_cases": AutocompleteSelectMultiple (
-                TestGroup.test_cases.field,
-                admin.site,
-                attrs={"style": "width: 800px;"}
-            ),
-        }
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_foreignkey(db_field, request, **kwargs)
+        if db_field.name == 'testcase':
+            formfield.widget.attrs.update({
+                'style': 'width: 1000px;',
+                'data-dropdown-auto-width': 'true',
+            })
+        return formfield
 
 
 @admin.register(TestGroup)
 class TestGroupAdmin(admin.ModelAdmin):
-    form = TestGroupAdminForm
+    inlines = (TestGroupTestCaseInline,)
     list_display = ('id', 'name')
     search_fields = ('name',)
-    autocomplete_fields = ('test_cases',)
+    exclude = ('test_cases',)
 
 
 @admin.register(TestMetadata)
@@ -78,6 +78,6 @@ class TestMetadataAdmin(admin.ModelAdmin):
 
 @admin.register(RuntimeTarget)
 class RuntimeTargetAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name', 'hw_type', 'inference_frequency', 'cache_size')
+    list_display = ('id', 'name', 'hw_type', 'inference_frequency', 'cache_size', 'memory_bandwidth')
     list_filter = ('hw_type',)
     search_fields = ('name', 'hw_type')
