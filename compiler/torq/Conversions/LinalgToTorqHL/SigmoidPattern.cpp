@@ -21,17 +21,6 @@ namespace mlir::syna::torq {
 
 namespace {
 
-Value makeSelect(
-    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value pred, Value ifTrue, Value ifFalse
-) {
-    auto resultType = dyn_cast<RankedTensorType>(ifTrue.getType());
-    return torq_hl::SelectOp::create(
-               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
-               pred, ifTrue, ifFalse
-    )
-        .getOutput();
-}
-
 class SigmoidOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     SigmoidOpPattern(MLIRContext *context)

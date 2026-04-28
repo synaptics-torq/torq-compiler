@@ -313,4 +313,13 @@ Value makeScaledLut(
     int32_t cScaleFactor, int cShiftFactor, int32_t cInputZp, int32_t cOutputZp
 );
 
+Value makeSelect(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value pred, Value ifTrue, Value ifFalse
+);
+
+Value makeElementWiseBinary(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input0, Value input1,
+    torq_hl::ElementwiseOpEnum opType
+);
+
 } // namespace mlir::syna::torq

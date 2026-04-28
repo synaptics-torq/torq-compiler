@@ -60,6 +60,8 @@ void populateSigmoidPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateExpPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+void populateGeluPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 void populateLinalgToTorqHLMulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

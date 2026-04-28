@@ -22,17 +22,6 @@ namespace mlir::syna::torq {
 
 namespace {
 
-Value makeSelect(
-    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value pred, Value ifTrue, Value ifFalse
-) {
-    auto resultType = dyn_cast<RankedTensorType>(ifTrue.getType());
-    return torq_hl::SelectOp::create(
-               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
-               pred, ifTrue, ifFalse
-    )
-        .getOutput();
-}
-
 static llvm::cl::opt<bool> clEnableTorqGeneralExp(
     "torq-enable-general-exp",
     llvm::cl::desc("enable torq support for general exp in case no other component matches"),

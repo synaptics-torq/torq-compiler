@@ -20,19 +20,6 @@ namespace mlir::syna::torq {
 
 namespace {
 
-Value makeElementWiseBinary(
-    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input0, Value input1,
-    torq_hl::ElementwiseOpEnum opType
-) {
-    auto resultType = dyn_cast<RankedTensorType>(input0.getType());
-
-    return torq_hl::ElementWiseBinaryOp::create(
-               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
-               opType, input0, input1, /*isUnsigned=*/false
-    )
-        .getOutput();
-}
-
 class SoftmaxOpPattern : public OpRewritePattern<linalg::SoftmaxOp> {
   public:
     SoftmaxOpPattern(MLIRContext *context)

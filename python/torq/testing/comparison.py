@@ -46,6 +46,7 @@ def compare_test_results(request, observed_result, reference_results, case_confi
                         "fp_max_tol": 1e-2,
                         "epsilon": 1e-6,
                         "allow_all_zero": False,
+                        "allowed_wrong": 0,
                         "skip_nan_check": False }
 
     if 'comparison_config' in case_config:
@@ -122,4 +123,5 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
             if (np.issubdtype(expected_output.dtype, np.integer) or np.issubdtype(expected_output.dtype, bool)):
                 assert (np.max(abs_diff) <= comparison_config['int_thld']) and not (abs_diff != 0).sum(), difference_summary
             else:
-                assert np.max(rel_diff) <= comparison_config['fp_max_tol'], difference_summary
+                wrong = (rel_diff > comparison_config['fp_max_tol']).sum()
+                assert wrong / rel_diff.size <= comparison_config['allowed_wrong'], difference_summary

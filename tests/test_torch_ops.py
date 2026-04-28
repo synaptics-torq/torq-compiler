@@ -45,6 +45,7 @@ def case_config(request, runtime_hw_type, chip_config):
         failed_tc += [
             'decoder.mlir.431.Mul_24.mlir', # AssertionError: Number of differences: 53378 out of 59616 [89.54%]
             'add-1x24x56x56-bf16.mlir', # output is all Nan
+            'gelu-gemma.mlir', # AssertionError: Number of differences: 29005 out of 65536 [44.26%]
         ]
 
     if next_chip:

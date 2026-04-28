@@ -165,7 +165,7 @@ def fudge_index(domain_start, domain_end):
     return int(rescale(domain_end) != INT_MAX)
 
 
-def approximate_function(f, negative, domain=None):
+def approximate_function(f, negative, domain=None, extend_end=0):
     if domain is None:
         # negative integers are negative bfloat16 values
         if negative:
@@ -182,6 +182,7 @@ def approximate_function(f, negative, domain=None):
     image_start, image_end = image[[0, -1]]
     index_start = argmin((image == image_start).int()) - 1
     index_end = len(image) - argmin((image.flip(0) == image_end).int())
+    index_end += extend_end
     fudge = fudge_index(*domain[[int(index_start), int(index_end)]])
     index_end += fudge
     image = image[index_start:index_end + 1]
@@ -190,6 +191,7 @@ def approximate_function(f, negative, domain=None):
     # note that the domain is ordered/increasing, but the image need not be.
     domain_start, domain_end = domain[[0, -1]]
     range_start, range_end = image.min(), image.max()
+    print('domain', index_end - index_start + 1)
 
     # approximate f(x) = {a(b(c([x])))} where b is a lookup table, a
     # and c are rescales that maximize the utility of b, '[]'
@@ -275,6 +277,10 @@ def approximate_function(f, negative, domain=None):
     print()
 
 
+def bf16(i):
+    return tensor(i, dtype=uint16).view(bfloat16).item()
+
+
 if __name__ == "__main__":
 
     # comment as appropriate.
@@ -298,3 +304,55 @@ if __name__ == "__main__":
         x[x > (2**12)] = 2**12
         return 1 / x
     approximate_function(limited_reciprocal, negative=False)
+
+    print("gelu neg")
+    from torch.nn.functional import gelu
+    def gelu_neg(x):
+        x = x.clone()
+        # allowing 0 bit error in x/2
+        end = bf16(0b1_01110110_1001011)
+        # allowing 1 bit error in x/2
+        end = bf16(0b1_01111000_0110000)
+        # allowing 2 bit error in x/2
+        end = bf16(0b1_01111001_0100001)
+        x[x > end] = end
+        # clip out gelu(-inf) = nan.  gelu saturates well before -1000
+        x[x < -1000] = -1000
+        return gelu(x)
+    # actually fill the most negative table with negative zero: extend_end=2
+    approximate_function(gelu_neg, negative=True, extend_end=2)
+    print("gelu pos")
+    def gelu_pos(x):
+        x = x.clone()
+        # allowing 0 bit error in x/2
+        start, end = bf16(0b0_01110110_1001011), bf16(0b0_10000000_0110001)
+        x[x < start] = start
+        x[x > end] = end
+        return gelu(x)
+    approximate_function(gelu_pos, negative=False)
+
+    print("gelu tan neg")
+    from torch.nn.functional import gelu
+    def gelu_neg(x):
+        x = x.clone()
+        # allowing 0 bit error in x/2
+        end = bf16(0b1_01110110_1001011)
+        # allowing 1 bit error in x/2
+        end = bf16(0b1_01111000_0110000)
+        # allowing 2 bit error in x/2
+        end = bf16(0b1_01111000_1100011)
+        x[x > end] = end
+        # clip out gelu(-inf) = nan.  gelu saturates well before -1000
+        x[x < -1000] = -1000
+        return gelu(x, approximate='tanh')
+    # actually fill the most negative table with negative zero: extend_end=2
+    approximate_function(gelu_neg, negative=True, extend_end=2)
+    print("gelu tan pos")
+    def gelu_pos(x):
+        x = x.clone()
+        # allowing 0 bit error in x/2
+        start, end = bf16(0b0_01110110_1001011), bf16(0b0_10000000_0101111)
+        x[x < start] = start
+        x[x > end] = end
+        return gelu(x, approximate='tanh')
+    approximate_function(gelu_pos, negative=False)

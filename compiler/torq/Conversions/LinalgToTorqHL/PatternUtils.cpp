@@ -2667,6 +2667,32 @@ Value makeScaledLut(
     );
 }
 
+Value makeSelect(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value pred, Value ifTrue, Value ifFalse
+) {
+    auto resultType = dyn_cast<RankedTensorType>(ifTrue.getType());
+    return torq_hl::SelectOp::create(
+               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
+               pred, ifTrue, ifFalse
+    )
+        .getOutput();
+}
+
+Value makeElementWiseBinary(
+    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input0, Value input1,
+    torq_hl::ElementwiseOpEnum opType
+) {
+    auto resultType = dyn_cast<RankedTensorType>(input0.getType());
+    if (opType == torq_hl::ElementwiseOpEnum::GREATER)
+        resultType = RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
+
+    return torq_hl::ElementWiseBinaryOp::create(
+               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
+               opType, input0, input1, /*isUnsigned=*/false
+    )
+        .getOutput();
+}
+
 FailureOr<Value> pickGroupResultInt8(Value value) {
     // Follow single-use chain forward until we hit an int rescale/clamp boundary,
     // which defines the terminal value for fusion planning.
