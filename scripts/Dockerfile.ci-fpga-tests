@@ -20,8 +20,8 @@ RUN git clone --depth=1 https://github.com/aws/aws-fpga.git && \
     rm -rf aws-fpga
 
 # this is taken from the "Create new action runner screen in GitHub organization settings" page
-ARG GH_RUNNER_VERSION=2.331.0
-ARG GH_RUNNER_HASH=5fcc01bd546ba5c3f1291c2803658ebd3cedb3836489eda3be357d41bfcf28a7
+ARG GH_RUNNER_VERSION=2.334.0
+ARG GH_RUNNER_HASH=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
 
 RUN mkdir /actions-runner && cd /actions-runner && \
     curl -o actions-runner-linux-x64-${GH_RUNNER_VERSION}.tar.gz -L https://github.com/actions/runner/releases/download/v${GH_RUNNER_VERSION}/actions-runner-linux-x64-${GH_RUNNER_VERSION}.tar.gz && \
