@@ -59,6 +59,10 @@ jobs:
             with:
               lfs: true
 
+          - name: Add comment to the workflow with the commit id
+            run: |
+              echo "Dashboard Commit ID: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+
           - name: Build and push build Docker image
             uses: docker/build-push-action@v7
             with:

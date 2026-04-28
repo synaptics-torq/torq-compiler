@@ -1,11 +1,8 @@
 import os
-import traceback
 import zipfile
 import json
-from pathlib import Path
 from tempfile import TemporaryDirectory
 from django.core.files.base import File
-from django.db import IntegrityError, transaction
 
 # conditionally import uwsgi spool decorator to make sure this module can be imported also in manage.py
 try:
@@ -15,7 +12,7 @@ except ImportError:
     def spool(pass_arguments):
         return lambda x: x
     
-from perf.models import TestCase, TestRun, TestRunBatch, Metric, Measurement
+from perf.models import TestCase, TestRun, TestRunBatch, TestMetadata, Metric, Measurement
 
 
 def _classify_failure(failed_phase, failure_log):
@@ -141,9 +138,22 @@ def process_uploaded_zip(args):
                         module=str(module), name=str(name), parameters=str(parameters)
                     )
 
+                    test_metadata, _ = TestMetadata.objects.get_or_create(
+                        compiler=item.get('metadata', {}).get('compiler'),
+                        compiler_input=item.get('metadata', {}).get('compiler_input'),
+                        compiler_target=item.get('metadata', {}).get('compiler_target'),
+                        compiler_options=item.get('metadata', {}).get('compiler_options'),
+                        runtime=item.get('metadata', {}).get('runtime'),
+                        runtime_target=item.get('metadata', {}).get('runtime_target'),
+                        runtime_hw_type=item.get('metadata', {}).get('runtime_hw_type'),
+                        runtime_options=item.get('metadata', {}).get('runtime_options'),
+                        runtime_input=item.get('metadata', {}).get('runtime_input'),
+                    )
+
                     test_run = TestRun.objects.create(
                         test_run_batch=test_run_batch,
                         test_case=test_case,
+                        test_metadata=test_metadata,
                         outcome=outcome_map[outcome],
                         linked_issue=linked_issue
                     )
@@ -185,14 +195,12 @@ def process_uploaded_zip(args):
 
                     test_run.save()
 
-                    measurements = item.get('measurements', [])
+                    measurements = item.get('measurements', {})
 
                     if measurements is None:
-                        measurements = []
+                        measurements = {}
                     
-                    for measurement in measurements:
-                        metric_name = measurement.get('metric')
-                        value = measurement.get('value')
+                    for metric_name, value in measurements.items():
 
                         if metric_name not in metrics:
                             print(f'Warning: Metric {metric_name} not found for {module}::{name}')

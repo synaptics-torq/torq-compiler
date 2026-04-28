@@ -1,0 +1,18 @@
+name: Mark Workflow Complete on Dashboard
+
+on:
+  workflow_call:
+
+jobs:
+  mark-complete:
+    name: Mark workflow complete
+    runs-on: codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Notify dashboard
+        env:
+          DASHBOARD_URL: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          curl -sf -X POST \
+            -F "workflow_url=${WORKFLOW_URL}" \
+            "${DASHBOARD_URL}/api/test-sessions/mark_complete/" || true # we ignore errors

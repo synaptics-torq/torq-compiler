@@ -2,6 +2,7 @@ import tensorflow as tf
 
 from dataclasses import dataclass
 from torq.testing.versioned_fixtures import versioned_hashable_object_fixture, versioned_unhashable_object_fixture
+from torq.testing.tensorflow import keras_model_fixture
 
 
 @dataclass
@@ -24,8 +25,8 @@ def keras_model_params(case_config):
     return case_config['keras_model_params']
 
 
-@versioned_unhashable_object_fixture
-def conv_model(keras_model_params):
+@keras_model_fixture
+def conv_model(request, keras_model_params):
 
     # make sure tests use reproducible weights
     tf.keras.utils.set_random_seed(21321)
@@ -36,8 +37,8 @@ def conv_model(keras_model_params):
     ])
 
 
-@versioned_unhashable_object_fixture
-def conv_act_model():
+@keras_model_fixture
+def conv_act_model(request):
 
     # make sure tests use reproducible weights
     tf.keras.utils.set_random_seed(21321)
@@ -49,8 +50,8 @@ def conv_act_model():
     ])
 
 
-@versioned_unhashable_object_fixture
-def transpose_conv_model():
+@keras_model_fixture
+def transpose_conv_model(request):
 
     # make sure tests use reproducible weights
     tf.keras.utils.set_random_seed(21321)
@@ -60,8 +61,8 @@ def transpose_conv_model():
         tf.keras.layers.Conv2DTranspose(filters=4, kernel_size=4, strides=2, padding='same')
     ])
 
-@versioned_unhashable_object_fixture
-def model001_conv_3X3_small():
+@keras_model_fixture
+def model001_conv_3X3_small(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -91,8 +92,8 @@ def model001_conv_3X3_small():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model002_conv_2x3_small_valid():
+@keras_model_fixture
+def model002_conv_2x3_small_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -124,8 +125,8 @@ def model002_conv_2x3_small_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model003_hello_world():
+@keras_model_fixture
+def model003_hello_world(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -150,8 +151,8 @@ def model003_hello_world():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model004_conv_3x3_valid_bias():
+@keras_model_fixture
+def model004_conv_3x3_valid_bias(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -182,8 +183,8 @@ def model004_conv_3x3_valid_bias():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model005_conv2d_4x3x3x3_padding():
+@keras_model_fixture
+def model005_conv2d_4x3x3x3_padding(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -214,8 +215,8 @@ def model005_conv2d_4x3x3x3_padding():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model006_conv2d_4x6x6x1_pad_stride2():
+@keras_model_fixture
+def model006_conv2d_4x6x6x1_pad_stride2(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -245,8 +246,8 @@ def model006_conv2d_4x6x6x1_pad_stride2():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model007_conv2d_8x3x3x4():
+@keras_model_fixture
+def model007_conv2d_8x3x3x4(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -269,8 +270,8 @@ def model007_conv2d_8x3x3x4():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model008_conv2d_4x4x4x4():
+@keras_model_fixture
+def model008_conv2d_4x4x4x4(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -293,8 +294,8 @@ def model008_conv2d_4x4x4x4():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model009_conv_3x3_same_bias():
+@keras_model_fixture
+def model009_conv_3x3_same_bias(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -320,8 +321,8 @@ def model009_conv_3x3_same_bias():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model010_depthwise_1x3x3x16_valid():
+@keras_model_fixture
+def model010_depthwise_1x3x3x16_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -347,8 +348,8 @@ def model010_depthwise_1x3x3x16_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model011_depthwise_1x3x3x16_valid():
+@keras_model_fixture
+def model011_depthwise_1x3x3x16_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -378,8 +379,8 @@ def model011_depthwise_1x3x3x16_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model012_depthwise_1x3x3x2_valid():
+@keras_model_fixture
+def model012_depthwise_1x3x3x2_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -402,8 +403,8 @@ def model012_depthwise_1x3x3x2_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model013_depthwise_1x3x3x2_same():
+@keras_model_fixture
+def model013_depthwise_1x3x3x2_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -426,8 +427,8 @@ def model013_depthwise_1x3x3x2_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model014_depthwise_1x3x3x8_valid():
+@keras_model_fixture
+def model014_depthwise_1x3x3x8_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -457,8 +458,8 @@ def model014_depthwise_1x3x3x8_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model016_pointwise_8x8x8x16_stride2x2():
+@keras_model_fixture
+def model016_pointwise_8x8x8x16_stride2x2(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -488,8 +489,8 @@ def model016_pointwise_8x8x8x16_stride2x2():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model017_pointwise_8x8x9x16_stride2x2():
+@keras_model_fixture
+def model017_pointwise_8x8x9x16_stride2x2(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -514,8 +515,8 @@ def model017_pointwise_8x8x9x16_stride2x2():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model018_pointwise_8x9x8x16_stride2x2():
+@keras_model_fixture
+def model018_pointwise_8x9x8x16_stride2x2(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -537,8 +538,8 @@ def model018_pointwise_8x9x8x16_stride2x2():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model019_pointwise_8x9x9x16_stride2x2():
+@keras_model_fixture
+def model019_pointwise_8x9x9x16_stride2x2(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -560,8 +561,8 @@ def model019_pointwise_8x9x9x16_stride2x2():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model020_fc_1x1():
+@keras_model_fixture
+def model020_fc_1x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -592,8 +593,8 @@ def model020_fc_1x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model022_fc_1024x1024():
+@keras_model_fixture
+def model022_fc_1024x1024(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -613,8 +614,8 @@ def model022_fc_1024x1024():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model023_fc_512x1000():
+@keras_model_fixture
+def model023_fc_512x1000(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -634,8 +635,8 @@ def model023_fc_512x1000():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model024_fc_97x2000():
+@keras_model_fixture
+def model024_fc_97x2000(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -652,8 +653,8 @@ def model024_fc_97x2000():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model026_fc_1991x61():
+@keras_model_fixture
+def model026_fc_1991x61(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -673,8 +674,8 @@ def model026_fc_1991x61():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model027_fc_500x700():
+@keras_model_fixture
+def model027_fc_500x700(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -692,8 +693,8 @@ def model027_fc_500x700():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model029_fc_1000x1000():
+@keras_model_fixture
+def model029_fc_1000x1000(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -712,8 +713,8 @@ def model029_fc_1000x1000():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model030_avgpool_inp1x10x10x4_pool3x3_stride3x3_valid():
+@keras_model_fixture
+def model030_avgpool_inp1x10x10x4_pool3x3_stride3x3_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -736,8 +737,8 @@ def model030_avgpool_inp1x10x10x4_pool3x3_stride3x3_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model031_avgpool_inp1x10x10x4_pool4x4_stride4x4_valid():
+@keras_model_fixture
+def model031_avgpool_inp1x10x10x4_pool4x4_stride4x4_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -763,8 +764,8 @@ def model031_avgpool_inp1x10x10x4_pool4x4_stride4x4_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model032_avgpool_inp1x10x10x4_pool5x5_stride5x5_valid():
+@keras_model_fixture
+def model032_avgpool_inp1x10x10x4_pool5x5_stride5x5_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -791,8 +792,8 @@ def model032_avgpool_inp1x10x10x4_pool5x5_stride5x5_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model033_avgpool_inp1x10x10x4_pool5x5_stride1x1_valid():
+@keras_model_fixture
+def model033_avgpool_inp1x10x10x4_pool5x5_stride1x1_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -815,8 +816,8 @@ def model033_avgpool_inp1x10x10x4_pool5x5_stride1x1_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model035_avgpool_inp1x10x10x4_pool3x3_stride3x3_same():
+@keras_model_fixture
+def model035_avgpool_inp1x10x10x4_pool3x3_stride3x3_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -843,8 +844,8 @@ def model035_avgpool_inp1x10x10x4_pool3x3_stride3x3_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model036_avgpool_inp1x10x10x4_pool4x4_stride4x4_same():
+@keras_model_fixture
+def model036_avgpool_inp1x10x10x4_pool4x4_stride4x4_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -871,8 +872,8 @@ def model036_avgpool_inp1x10x10x4_pool4x4_stride4x4_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model037_avgpool_inp1x10x10x4_pool5x5_stride5x5_same():
+@keras_model_fixture
+def model037_avgpool_inp1x10x10x4_pool5x5_stride5x5_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -893,8 +894,8 @@ def model037_avgpool_inp1x10x10x4_pool5x5_stride5x5_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model039_avgpool_inp1x10x10x4_pool1x3_stride1x1_same():
+@keras_model_fixture
+def model039_avgpool_inp1x10x10x4_pool1x3_stride1x1_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -922,8 +923,8 @@ def model039_avgpool_inp1x10x10x4_pool1x3_stride1x1_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model044_maxpool_inp1x10x10x4_pool1x3_stride1x3_valid():
+@keras_model_fixture
+def model044_maxpool_inp1x10x10x4_pool1x3_stride1x3_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -951,8 +952,8 @@ def model044_maxpool_inp1x10x10x4_pool1x3_stride1x3_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model045_maxpool_inp1x10x10x4_pool3x3_stride3x3_same():
+@keras_model_fixture
+def model045_maxpool_inp1x10x10x4_pool3x3_stride3x3_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -973,8 +974,8 @@ def model045_maxpool_inp1x10x10x4_pool3x3_stride3x3_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model046_maxpool_inp1x10x10x4_pool4x4_stride4x4_same():
+@keras_model_fixture
+def model046_maxpool_inp1x10x10x4_pool4x4_stride4x4_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -991,8 +992,8 @@ def model046_maxpool_inp1x10x10x4_pool4x4_stride4x4_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model047_maxpool_inp1x10x10x4_pool5x5_stride5x5_same():
+@keras_model_fixture
+def model047_maxpool_inp1x10x10x4_pool5x5_stride5x5_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1019,8 +1020,8 @@ def model047_maxpool_inp1x10x10x4_pool5x5_stride5x5_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model048_maxpool_inp1x10x10x4_pool5x5_stride1x1_same():
+@keras_model_fixture
+def model048_maxpool_inp1x10x10x4_pool5x5_stride1x1_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1041,8 +1042,8 @@ def model048_maxpool_inp1x10x10x4_pool5x5_stride1x1_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model049_maxpool_inp1x10x10x4_pool1x3_stride1x1_same():
+@keras_model_fixture
+def model049_maxpool_inp1x10x10x4_pool1x3_stride1x1_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1065,8 +1066,8 @@ def model049_maxpool_inp1x10x10x4_pool1x3_stride1x1_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model051_mult_inp1x4x4x1():
+@keras_model_fixture
+def model051_mult_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1101,8 +1102,8 @@ def model051_mult_inp1x4x4x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model053_mult_inp1x4x4x1_zp128_B():
+@keras_model_fixture
+def model053_mult_inp1x4x4x1_zp128_B(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1133,8 +1134,8 @@ def model053_mult_inp1x4x4x1_zp128_B():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model054_mult_inp1x4x4x1_zp128_A():
+@keras_model_fixture
+def model054_mult_inp1x4x4x1_zp128_A(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1161,8 +1162,8 @@ def model054_mult_inp1x4x4x1_zp128_A():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model055_avgpool_inp1x10x10x4_pool2x2_stride2x2_valid():
+@keras_model_fixture
+def model055_avgpool_inp1x10x10x4_pool2x2_stride2x2_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1190,8 +1191,8 @@ def model055_avgpool_inp1x10x10x4_pool2x2_stride2x2_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model056_avgpool_inp1x100x100x1_pool2x2_stride2x2_valid():
+@keras_model_fixture
+def model056_avgpool_inp1x100x100x1_pool2x2_stride2x2_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1218,8 +1219,8 @@ def model056_avgpool_inp1x100x100x1_pool2x2_stride2x2_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model057_avgpool_inp1x100x100x4_pool2x2_stride2x2_valid():
+@keras_model_fixture
+def model057_avgpool_inp1x100x100x4_pool2x2_stride2x2_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1246,8 +1247,8 @@ def model057_avgpool_inp1x100x100x4_pool2x2_stride2x2_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model058_avgpool_inp1x134x158x5_pool2x2_stride2x2_valid():
+@keras_model_fixture
+def model058_avgpool_inp1x134x158x5_pool2x2_stride2x2_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1268,8 +1269,8 @@ def model058_avgpool_inp1x134x158x5_pool2x2_stride2x2_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model061_add_inp1x4x4x1_zp128_x1():
+@keras_model_fixture
+def model061_add_inp1x4x4x1_zp128_x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1296,8 +1297,8 @@ def model061_add_inp1x4x4x1_zp128_x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model062_add_inp1x4x4x1_zp128_x2():
+@keras_model_fixture
+def model062_add_inp1x4x4x1_zp128_x2(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1330,8 +1331,8 @@ def model062_add_inp1x4x4x1_zp128_x2():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model065_SmartAve_1x25x5x4():
+@keras_model_fixture
+def model065_SmartAve_1x25x5x4(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1347,8 +1348,8 @@ def model065_SmartAve_1x25x5x4():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model066_SmartAve_1x5x25x4():
+@keras_model_fixture
+def model066_SmartAve_1x5x25x4(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1375,8 +1376,8 @@ def model066_SmartAve_1x5x25x4():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model077_tanh_zpm26():
+@keras_model_fixture
+def model077_tanh_zpm26(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1396,8 +1397,8 @@ def model077_tanh_zpm26():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model078_tanh_zpm115():
+@keras_model_fixture
+def model078_tanh_zpm115(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1417,8 +1418,8 @@ def model078_tanh_zpm115():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model079_tanh_zpm128():
+@keras_model_fixture
+def model079_tanh_zpm128(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1435,8 +1436,8 @@ def model079_tanh_zpm128():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model080_tanh_zp76():
+@keras_model_fixture
+def model080_tanh_zp76(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1455,8 +1456,8 @@ def model080_tanh_zp76():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model081_tanh_zp127():
+@keras_model_fixture
+def model081_tanh_zp127(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1475,8 +1476,8 @@ def model081_tanh_zp127():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model082_tanh_1x4x6x8():
+@keras_model_fixture
+def model082_tanh_1x4x6x8(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1493,8 +1494,8 @@ def model082_tanh_1x4x6x8():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model083_sigmoid_1x4x6x8():
+@keras_model_fixture
+def model083_sigmoid_1x4x6x8(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1511,8 +1512,8 @@ def model083_sigmoid_1x4x6x8():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model084_sigmoid_1x1x16x128():
+@keras_model_fixture
+def model084_sigmoid_1x1x16x128(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1529,8 +1530,8 @@ def model084_sigmoid_1x1x16x128():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model085_softmax_inp1x1916x2():
+@keras_model_fixture
+def model085_softmax_inp1x1916x2(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1550,8 +1551,8 @@ def model085_softmax_inp1x1916x2():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model086_sigmoid_zp26():
+@keras_model_fixture
+def model086_sigmoid_zp26(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1570,8 +1571,8 @@ def model086_sigmoid_zp26():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model087_sigmoid_zp128():
+@keras_model_fixture
+def model087_sigmoid_zp128(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1588,8 +1589,8 @@ def model087_sigmoid_zp128():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model088_sigmoid_zpm76():
+@keras_model_fixture
+def model088_sigmoid_zpm76(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1608,8 +1609,8 @@ def model088_sigmoid_zpm76():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model089_sigmoid_zp128():
+@keras_model_fixture
+def model089_sigmoid_zp128(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1626,8 +1627,8 @@ def model089_sigmoid_zp128():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model090_sigmoid_zp16():
+@keras_model_fixture
+def model090_sigmoid_zp16(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1645,8 +1646,8 @@ def model090_sigmoid_zp16():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model091_relu_8x8_inp_1x10x1x1():
+@keras_model_fixture
+def model091_relu_8x8_inp_1x10x1x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1665,8 +1666,8 @@ def model091_relu_8x8_inp_1x10x1x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model092_relu_zp26_8x8_inp_1x10x1x1():
+@keras_model_fixture
+def model092_relu_zp26_8x8_inp_1x10x1x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1686,8 +1687,8 @@ def model092_relu_zp26_8x8_inp_1x10x1x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model097_conv_transpose_1x3_1x1():
+@keras_model_fixture
+def model097_conv_transpose_1x3_1x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1713,8 +1714,8 @@ def model097_conv_transpose_1x3_1x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model105_pointwise_1x1x1024():
+@keras_model_fixture
+def model105_pointwise_1x1x1024(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1739,8 +1740,8 @@ def model105_pointwise_1x1x1024():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model109_avgpool_valid_model70_L1():
+@keras_model_fixture
+def model109_avgpool_valid_model70_L1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1760,8 +1761,8 @@ def model109_avgpool_valid_model70_L1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model110_avgpool_valid_model70_L3():
+@keras_model_fixture
+def model110_avgpool_valid_model70_L3(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1782,8 +1783,8 @@ def model110_avgpool_valid_model70_L3():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model111_avgpool_valid_model70_L6():
+@keras_model_fixture
+def model111_avgpool_valid_model70_L6(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1804,8 +1805,8 @@ def model111_avgpool_valid_model70_L6():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model112_mult_inp1x8x8x1():
+@keras_model_fixture
+def model112_mult_inp1x8x8x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1824,8 +1825,8 @@ def model112_mult_inp1x8x8x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model113_add_inp1x8x8x1():
+@keras_model_fixture
+def model113_add_inp1x8x8x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1844,8 +1845,8 @@ def model113_add_inp1x8x8x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model114_conv_mult_inp1x8x8x1():
+@keras_model_fixture
+def model114_conv_mult_inp1x8x8x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1863,8 +1864,8 @@ def model114_conv_mult_inp1x8x8x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model117_mult_inp1x3x3x1():
+@keras_model_fixture
+def model117_mult_inp1x3x3x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1881,8 +1882,8 @@ def model117_mult_inp1x3x3x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model118_add_inp1x3x3x1():
+@keras_model_fixture
+def model118_add_inp1x3x3x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1901,8 +1902,8 @@ def model118_add_inp1x3x3x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model121_conv3x3_conv2x2_inp1x3x3x1():
+@keras_model_fixture
+def model121_conv3x3_conv2x2_inp1x3x3x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1937,8 +1938,8 @@ def model121_conv3x3_conv2x2_inp1x3x3x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model122_conv2x2_inp1x3x3x1():
+@keras_model_fixture
+def model122_conv2x2_inp1x3x3x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1971,8 +1972,8 @@ def model122_conv2x2_inp1x3x3x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model123_add_mult_inp1x3x3x1():
+@keras_model_fixture
+def model123_add_mult_inp1x3x3x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -1993,8 +1994,8 @@ def model123_add_mult_inp1x3x3x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model124_mult_mult_inp1x3x3x1():
+@keras_model_fixture
+def model124_mult_mult_inp1x3x3x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2014,8 +2015,8 @@ def model124_mult_mult_inp1x3x3x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model125_conv3x3_inp1x4x4x1():
+@keras_model_fixture
+def model125_conv3x3_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2047,8 +2048,8 @@ def model125_conv3x3_inp1x4x4x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model126_mult_inp1x4x4x1():
+@keras_model_fixture
+def model126_mult_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2065,8 +2066,8 @@ def model126_mult_inp1x4x4x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model127_add3x3_inp1x4x4x1():
+@keras_model_fixture
+def model127_add3x3_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2083,8 +2084,8 @@ def model127_add3x3_inp1x4x4x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model128_conv3x3_mult_inp1x4x4x1():
+@keras_model_fixture
+def model128_conv3x3_mult_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2114,8 +2115,8 @@ def model128_conv3x3_mult_inp1x4x4x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model130_conv3x3_conv2x2_inp1x4x4x1():
+@keras_model_fixture
+def model130_conv3x3_conv2x2_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2148,8 +2149,8 @@ def model130_conv3x3_conv2x2_inp1x4x4x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model131_conv2x2_inp1x4x4x1():
+@keras_model_fixture
+def model131_conv2x2_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2181,8 +2182,8 @@ def model131_conv2x2_inp1x4x4x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model132_conv_inp1x32x32x16_16x3x3_same_stride1x1():
+@keras_model_fixture
+def model132_conv_inp1x32x32x16_16x3x3_same_stride1x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2214,8 +2215,8 @@ def model132_conv_inp1x32x32x16_16x3x3_same_stride1x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model143_transpose_ChLastToFirst_1x8x10x4():
+@keras_model_fixture
+def model143_transpose_ChLastToFirst_1x8x10x4(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2235,8 +2236,8 @@ def model143_transpose_ChLastToFirst_1x8x10x4():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model144_transpose_ChFirstToLast_1x8x10x4():
+@keras_model_fixture
+def model144_transpose_ChFirstToLast_1x8x10x4(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2257,8 +2258,8 @@ def model144_transpose_ChFirstToLast_1x8x10x4():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model145_transpose_2d_matrix_1x4x6x2():
+@keras_model_fixture
+def model145_transpose_2d_matrix_1x4x6x2(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2273,8 +2274,8 @@ def model145_transpose_2d_matrix_1x4x6x2():
         tf.keras.layers.Lambda(lambda x: tf.transpose(x, perm=[0, 2, 1, 3]))
     ])
 
-@versioned_unhashable_object_fixture
-def model034_avgpool_inp1x10x10x4_pool1x3_stride1x3_valid():
+@keras_model_fixture
+def model034_avgpool_inp1x10x10x4_pool1x3_stride1x3_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2302,8 +2303,8 @@ def model034_avgpool_inp1x10x10x4_pool1x3_stride1x3_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model040_maxpool_inp1x10x10x4_pool3x3_stride3x3_valid():
+@keras_model_fixture
+def model040_maxpool_inp1x10x10x4_pool3x3_stride3x3_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2323,8 +2324,8 @@ def model040_maxpool_inp1x10x10x4_pool3x3_stride3x3_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model041_maxpool_inp1x10x10x4_pool4x4_stride4x4_valid():
+@keras_model_fixture
+def model041_maxpool_inp1x10x10x4_pool4x4_stride4x4_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2344,8 +2345,8 @@ def model041_maxpool_inp1x10x10x4_pool4x4_stride4x4_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model042_maxpool_inp1x10x10x4_pool5x5_stride5x5_valid():
+@keras_model_fixture
+def model042_maxpool_inp1x10x10x4_pool5x5_stride5x5_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2368,8 +2369,8 @@ def model042_maxpool_inp1x10x10x4_pool5x5_stride5x5_valid():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model043_maxpool_inp1x10x10x4_pool5x5_stride1x1_valid():
+@keras_model_fixture
+def model043_maxpool_inp1x10x10x4_pool5x5_stride1x1_valid(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2387,8 +2388,8 @@ def model043_maxpool_inp1x10x10x4_pool5x5_stride1x1_valid():
         )
     ])
 
-@versioned_unhashable_object_fixture
-def model021_fc_1991x61():
+@keras_model_fixture
+def model021_fc_1991x61(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2409,8 +2410,8 @@ def model021_fc_1991x61():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model038_avgpool_inp1x10x10x4_pool5x5_stride1x1_same():
+@keras_model_fixture
+def model038_avgpool_inp1x10x10x4_pool5x5_stride1x1_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2432,8 +2433,8 @@ def model038_avgpool_inp1x10x10x4_pool5x5_stride1x1_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model050_mult_inp1x10x10x4():
+@keras_model_fixture
+def model050_mult_inp1x10x10x4(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2461,8 +2462,8 @@ def model050_mult_inp1x10x10x4():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model052_mult_inp1x4x4x1_zp128_AB():
+@keras_model_fixture
+def model052_mult_inp1x4x4x1_zp128_AB(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2486,8 +2487,8 @@ def model052_mult_inp1x4x4x1_zp128_AB():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model060_add_inp1x4x4x1():
+@keras_model_fixture
+def model060_add_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2513,8 +2514,8 @@ def model060_add_inp1x4x4x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model073_relu_second_verifier_light_int():
+@keras_model_fixture
+def model073_relu_second_verifier_light_int(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2663,8 +2664,8 @@ def model073_relu_second_verifier_light_int():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model076_fc_7x3():
+@keras_model_fixture
+def model076_fc_7x3(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2688,8 +2689,8 @@ def model076_fc_7x3():
         tf.keras.layers.ReLU()
     ])
 
-@versioned_unhashable_object_fixture
-def model021_fc_1991x61():
+@keras_model_fixture
+def model021_fc_1991x61(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2710,8 +2711,8 @@ def model021_fc_1991x61():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model038_avgpool_inp1x10x10x4_pool5x5_stride1x1_same():
+@keras_model_fixture
+def model038_avgpool_inp1x10x10x4_pool5x5_stride1x1_same(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2738,8 +2739,8 @@ def model038_avgpool_inp1x10x10x4_pool5x5_stride1x1_same():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model050_mult_inp1x10x10x4():
+@keras_model_fixture
+def model050_mult_inp1x10x10x4(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2762,8 +2763,8 @@ def model050_mult_inp1x10x10x4():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model052_mult_inp1x4x4x1_zp128_AB():
+@keras_model_fixture
+def model052_mult_inp1x4x4x1_zp128_AB(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2793,8 +2794,8 @@ def model052_mult_inp1x4x4x1_zp128_AB():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model060_add_inp1x4x4x1():
+@keras_model_fixture
+def model060_add_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2820,8 +2821,8 @@ def model060_add_inp1x4x4x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model064_model():
+@keras_model_fixture
+def model064_model(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2838,8 +2839,8 @@ def model064_model():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model069_model():
+@keras_model_fixture
+def model069_model(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2868,8 +2869,8 @@ def model069_model():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model071_HM11B1_relu_proposer_2_int():
+@keras_model_fixture
+def model071_HM11B1_relu_proposer_2_int(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -2983,8 +2984,8 @@ def model071_HM11B1_relu_proposer_2_int():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model073_relu_second_verifier_light_int():
+@keras_model_fixture
+def model073_relu_second_verifier_light_int(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -3129,8 +3130,8 @@ def model073_relu_second_verifier_light_int():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model076_fc_7x3():
+@keras_model_fixture
+def model076_fc_7x3(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -3152,8 +3153,8 @@ def model076_fc_7x3():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model103_transpose_first2last():
+@keras_model_fixture
+def model103_transpose_first2last(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -3172,8 +3173,8 @@ def model103_transpose_first2last():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model115_conv_add_inp1x8x8x1():
+@keras_model_fixture
+def model115_conv_add_inp1x8x8x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -3200,8 +3201,8 @@ def model115_conv_add_inp1x8x8x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model116_conv3x3_inp1x3x3x1():
+@keras_model_fixture
+def model116_conv3x3_inp1x3x3x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -3236,8 +3237,8 @@ def model116_conv3x3_inp1x3x3x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model119_conv3x3_mult_inp1x3x3x1():
+@keras_model_fixture
+def model119_conv3x3_mult_inp1x3x3x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -3270,8 +3271,8 @@ def model119_conv3x3_mult_inp1x3x3x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model120_conv3x3_add_inp1x3x3x1():
+@keras_model_fixture
+def model120_conv3x3_add_inp1x3x3x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.
@@ -3295,8 +3296,8 @@ def model120_conv3x3_add_inp1x3x3x1():
 # --- BUILD AND INITIALIZE MODEL ---
 
 
-@versioned_unhashable_object_fixture
-def model129_conv3x3_add_inp1x4x4x1():
+@keras_model_fixture
+def model129_conv3x3_add_inp1x4x4x1(request):
     """
     Reconstructed model based on TFLite analysis.
     Uses reproducible weights for deterministic quantization.

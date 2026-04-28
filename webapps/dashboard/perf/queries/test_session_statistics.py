@@ -12,7 +12,7 @@ def get_main_branch_test_counts_over_time(limit=None):
 
     sessions = (
         TestSession.objects
-        .filter(git_branch='refs/heads/main')
+        .filter(git_branch='refs/heads/main', test_plan='torq')
         .annotate(
             num_total=Count(
                 'testrunbatch__testrun',
@@ -128,6 +128,8 @@ def get_outcomes_statistics_comparison(session, baseline_session=None):
         .annotate(count=Count('id'))
     )
 
+    outcomes = [outcome.name.lower() for outcome in TestRun.Outcome]
+
     result = {}
     
     for entry in outcome_counts:
@@ -139,7 +141,7 @@ def get_outcomes_statistics_comparison(session, baseline_session=None):
 
         if module not in result:
             empty_stats = {'current': 0, 'baseline': 0}
-            result[module] = {outcome.name.lower(): empty_stats.copy() for outcome in TestRun.Outcome}
+            result[module] = {outcome: empty_stats.copy() for outcome in outcomes}
 
         if session_id == session.id:
             result[module][outcome]['current'] = count
@@ -171,10 +173,12 @@ def get_outcomes_statistics_comparison(session, baseline_session=None):
 
     # add totals per outcome across all modules
     totals = {}
+
+    for outcome in outcomes:
+        totals[outcome] = {'current': 0, 'baseline': 0, 'difference': 0}        
+
     for module in result:
-        for outcome in result[module]:            
-            if outcome not in totals:
-                totals[outcome] = {'current': 0, 'baseline': 0, 'difference': 0}
+        for outcome in outcomes:            
             totals[outcome]['current'] += result[module][outcome]['current']
             totals[outcome]['baseline'] += result[module][outcome]['baseline']
             totals[outcome]['difference'] += result[module][outcome]['difference']

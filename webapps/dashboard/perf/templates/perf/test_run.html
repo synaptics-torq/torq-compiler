@@ -174,6 +174,57 @@
                         <dd class="col-sm-9">{% if baseline_test_run %}#{{ baseline_test_run.id }} in session #{{ baseline_test_run.test_run_batch.test_session.id }}{% else %}No matching baseline run found{% endif %}</dd>
                         {% endif %}
                     </dl>
+                    {% if test_run.test_metadata %}
+                    <hr>                    
+                    <div class="row g-2">
+                        <div class="col-12 col-md-6 col-xl-3">
+                            <div class="border rounded p-2 h-100">
+                                <p class="text-body-secondary small text-uppercase fw-semibold mb-2">Compiler input</p>
+                                <dl class="row row-cols-1 g-0 mb-0 small">
+                                    <dt class="text-body-secondary mb-0">Input</dt>
+                                    <dd class="text-break mb-0">{% if test_run.test_metadata.compiler_input %}<code>{{ test_run.test_metadata.compiler_input }}</code>{% else %}<span class="text-body-secondary fst-italic">N/A</span>{% endif %}</dd>
+                                </dl>
+                            </div>
+                        </div>
+                        <div class="col-12 col-md-6 col-xl-3">
+                            <div class="border rounded p-2 h-100">
+                                <p class="text-body-secondary small text-uppercase fw-semibold mb-2">Compiler configuration</p>
+                                <dl class="row row-cols-1 g-0 mb-0 small">
+                                    <dt class="text-body-secondary mb-0">Compiler</dt>
+                                    <dd class="text-break mb-1">{% if test_run.test_metadata.compiler %}<code>{{ test_run.test_metadata.compiler }}</code>{% else %}<span class="text-body-secondary fst-italic">N/A</span>{% endif %}</dd>
+                                    <dt class="text-body-secondary mb-0">Target</dt>
+                                    <dd class="text-break mb-1">{% if test_run.test_metadata.compiler_target %}<code>{{ test_run.test_metadata.compiler_target }}</code>{% else %}<span class="text-body-secondary fst-italic">N/A</span>{% endif %}</dd>
+                                    <dt class="text-body-secondary mb-0">Options</dt>
+                                    <dd class="text-break mb-0">{% if test_run.test_metadata.compiler_options %}<code>{{ test_run.test_metadata.compiler_options }}</code>{% else %}<span class="text-body-secondary fst-italic">N/A</span>{% endif %}</dd>
+                                </dl>
+                            </div>
+                        </div>
+                        <div class="col-12 col-md-6 col-xl-3">
+                            <div class="border rounded p-2 h-100">
+                                <p class="text-body-secondary small text-uppercase fw-semibold mb-2">Runtime input</p>
+                                <dl class="row row-cols-1 g-0 mb-0 small">
+                                    <dt class="text-body-secondary mb-0">Input</dt>
+                                    <dd class="text-break mb-0">{% if test_run.test_metadata.runtime_input %}<code>{{ test_run.test_metadata.runtime_input }}</code>{% else %}<span class="text-body-secondary fst-italic">N/A</span>{% endif %}</dd>
+                                </dl>
+                            </div>
+                        </div>
+                        <div class="col-12 col-md-6 col-xl-3">
+                            <div class="border rounded p-2 h-100">
+                                <p class="text-body-secondary small text-uppercase fw-semibold mb-2">Runtime configuration</p>
+                                <dl class="row row-cols-1 g-0 mb-0 small">
+                                    <dt class="text-body-secondary mb-0">Runtime</dt>
+                                    <dd class="text-break mb-1">{% if test_run.test_metadata.runtime %}<code>{{ test_run.test_metadata.runtime }}</code>{% else %}<span class="text-body-secondary fst-italic">N/A</span>{% endif %}</dd>
+                                    <dt class="text-body-secondary mb-0">Target</dt>
+                                    <dd class="text-break mb-1">{% if test_run.test_metadata.runtime_target %}<code>{{ test_run.test_metadata.runtime_target }}</code>{% else %}<span class="text-body-secondary fst-italic">N/A</span>{% endif %}</dd>
+                                    <dt class="text-body-secondary mb-0">HW type</dt>
+                                    <dd class="text-break mb-1">{% if test_run.test_metadata.runtime_hw_type %}<code>{{ test_run.test_metadata.runtime_hw_type }}</code>{% else %}<span class="text-body-secondary fst-italic">N/A</span>{% endif %}</dd>
+                                    <dt class="text-body-secondary mb-0">Options</dt>
+                                    <dd class="text-break mb-0">{% if test_run.test_metadata.runtime_options %}<code>{{ test_run.test_metadata.runtime_options }}</code>{% else %}<span class="text-body-secondary fst-italic">N/A</span>{% endif %}</dd>
+                                </dl>
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
         </div>

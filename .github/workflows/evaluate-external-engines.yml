@@ -60,9 +60,15 @@ jobs:
           release_run_id: none # we run the tests without a release package
           setup_external_engine_requirements: true
           hf_token: ${{ secrets.HF_TOKEN }}
-          pytest_args: -m alternative_engines -n auto --tflite-layer-test-generate-full-model-only
+          pytest_args: -m alternative_engines -n auto --tflite-layer-test-generate-full-model-only --test-plan alt
           torq_perf_server: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
           batch_name: alternative-engines
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
           s3_hf_cache_dir: hf_cache
+
+  mark_complete:
+    name: Mark workflow complete
+    if: contains(github.event.pull_request.labels.*.name, 'test-alt-engines') && always()
+    needs: [test]
+    uses: ./.github/workflows/mark-workflow-complete.yml
 

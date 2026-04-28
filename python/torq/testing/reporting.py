@@ -2,7 +2,6 @@ import requests
 import os
 import pytest
 import xdist
-import uuid
 import time
 import json
 import zipfile
@@ -77,6 +76,13 @@ def pytest_addoption(parser):
         help="Parameter to group by (bars/colors) on plot (default: variant)"
     )
 
+    group.addoption(
+        "--test-plan",
+        action="store",
+        default=os.environ.get("TORQ_PERF_TEST_PLAN", "torq"),
+        help="Test plan name to include in uploaded test_session manifest (default: TORQ_PERF_TEST_PLAN or 'torq')"
+    )
+
 
 def _upload_zip_bundle(zip_path: str) -> Dict[str, Any]:
     """Uploads a ZIP bundle to the bulk endpoint.
@@ -121,15 +127,17 @@ def _upload_zip_bundle(zip_path: str) -> Dict[str, Any]:
 
 
 def _build_workflow_url() -> str:
-    # inside github actions
-    if "GITHUB_RUN_ID" in os.environ:
-        github_server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-        github_repo = os.environ.get("GITHUB_REPOSITORY")
-        github_run_id = os.environ.get("GITHUB_RUN_ID")
-        github_run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
-        return f"{github_server}/{github_repo}/actions/runs/{github_run_id}/attempts/{github_run_attempt}"
-    # local run: use session uuid
-    return uuid.uuid4().hex
+    
+    # local build
+    if "GITHUB_RUN_ID" not in os.environ:
+        return None
+    
+    github_server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    github_repo = os.environ.get("GITHUB_REPOSITORY")
+    github_run_id = os.environ.get("GITHUB_RUN_ID")
+    github_run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+
+    return f"{github_server}/{github_repo}/actions/runs/{github_run_id}/attempts/{github_run_attempt}"    
 
 
 def _parse_from_nodeid(nodeid: str) -> tuple[str, str, str]:
@@ -323,6 +331,7 @@ def pytest_sessionfinish(session):
             'git_commit': os.environ.get("GITHUB_SHA"),
             'git_branch': os.environ.get("GITHUB_REF"),
             'workflow_url': _build_workflow_url(),
+            'test_plan': session.config.getoption("--test-plan"),
             'test_runs': [],
             'batch_name': os.environ.get("TORQ_PERF_BATCH_NAME", "default"),
             'metrics': get_dashboard_metrics()
@@ -363,26 +372,55 @@ def pytest_sessionfinish(session):
                         outcome = 'nxpass'
                         break
 
-            issue = None
-            measurements = None
-            for phase in ['call', 'setup', 'teardown']:
+            if outcome == "skipped":
+                continue  # Do not report about skipped tests
+
+            # find all the properties on the test reports            
+            test_metadata = [
+                'compiler_input',
+                'compiler',                
+                'compiler_target',                
+                'compiler_options',
+                'runtime',
+                'runtime_target',
+                'runtime_hw_type',
+                'runtime_options',
+                'runtime_input'
+            ]
+
+            prop_names = [
+                'compile_time_measurements',
+                'runtime_measurements',
+                'issue',
+                *test_metadata
+            ]
+
+            props = {name: None for name in prop_names}
+
+            for phase in ['setup', 'call', 'teardown']:
                 if phase not in report_phases:
                     continue
 
-                properties = dict(report_phases[phase].user_properties)                
-                issue = properties.get('issue', issue)
+                for prop_value in report_phases[phase].user_properties:
+                    if prop_value[0] in prop_names:
+                        props[prop_value[0]] = prop_value[1]
 
-                # runtime measurements have priority
-                measurements = properties.get('compile_time_measurements', measurements)                
-                measurements = properties.get('runtime_measurements', measurements)
+            # runtime measurements have priority
+            if props['runtime_measurements'] is not None:
+                measurements = props['runtime_measurements']
+            elif props['compile_time_measurements'] is not None:
+                measurements = props['compile_time_measurements']
+            else:
+                measurements = None
 
             test_run = {
                 'module': module,
                 'name': name,
                 'parameters': parameters,
                 'outcome': outcome,
-                'linked_issue': issue,
-                'measurements': measurements
+                'linked_issue': props['issue'],
+                'measurements': measurements,
+                'metadata': {detail: props.get(detail) for detail in test_metadata}
             }
 
             # Capture failure log and failed phase for failed tests
@@ -417,11 +455,7 @@ def pytest_sessionfinish(session):
 
                 report = report_phases['call']
                 props = dict(report.user_properties)
-                profiling_output_file = props.get('profiling_output')
-                engine_compilation_time = props.get("engine_compilation_time")
-
-                if engine_compilation_time:
-                    test_run['measurements'] = [{"metric": "total_duration", "value": engine_compilation_time * 1_000_000}]
+                profiling_output_file = props.get('profiling_output')                
 
                 if profiling_output_file:
                     # Copy profiling file into profiles/ and reference it relative to manifest
@@ -435,7 +469,6 @@ def pytest_sessionfinish(session):
 
         manifest_path = os.path.join(temp_dir, 'test_session.json')
         with open(manifest_path, 'w', encoding='utf-8') as f:
-            #print(json.dumps(manifest, indent=2))
             json.dump(manifest, f)
 
         # Create zip

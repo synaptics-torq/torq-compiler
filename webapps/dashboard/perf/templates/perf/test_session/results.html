@@ -3,7 +3,7 @@
 {% load static %}
 {% load custom_tags %}
 
-{% block title %}Test Session Results - {{ session.git_branch | default:"unknown" }} - Test session #{{ session.id }}{% endblock %}
+{% block title %}Test Session Results - {{ session.git_branch | default:"local tree" }} - Test session #{{ session.id }}{% endblock %}
 
 {% block content %}
 <form method="get" class="mb-0">
@@ -13,7 +13,7 @@
             <div class="card h-100">
                 <div class="card-body">
                     <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-                        <h1 class="h3 mb-0">Branch: {{ session.git_branch | default:"unknown" }}</h1>
+                        <h1 class="h3 mb-0">Branch: {{ session.git_branch | default:"local tree" }}</h1>
                         <span class="badge text-bg-secondary">Session #{{ session.id }}</span>
                         {% if baseline_session %}
                         <span class="badge text-bg-info">Comparison mode</span>
@@ -21,6 +21,7 @@
                         <a href="{% url 'test_session_summary' session.id %}{% if baseline_session %}?baseline_session={{ baseline_session.id }}{% endif %}" class="btn btn-sm btn-outline-primary ms-auto">To session summary</a>
                     </div>
                     <p class="text-body-secondary mb-0">Timestamp: {{ session.timestamp }}</p>
+                    <p class="text-body-secondary mb-0">Test plan: <code>{{ session.test_plan }}</code></p>
                 </div>
             </div>
         </div>

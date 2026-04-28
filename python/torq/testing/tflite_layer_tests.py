@@ -313,8 +313,11 @@ def tflite_layer_inputs(request, tflite_layer_model: TFLiteLayerCase, full_model
 
 
 @versioned_unhashable_object_fixture
-def tflite_model_path(tflite_layer_model: TFLiteLayerCase):
+def tflite_model_path(request, tflite_layer_model: TFLiteLayerCase):
     """Fixture that provides the model path for the test case"""
+
+    record_property = request.getfixturevalue("record_property")
+    record_property("compiler_input", f"tflite:{tflite_layer_model.name}")
 
     return tflite_layer_model.model_path
 

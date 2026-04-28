@@ -553,3 +553,9 @@ jobs:
 
             gh release upload "$SNAPSHOT_NAME" dist/* --clobber
           fi
+
+  mark_complete:
+    name: Mark workflow complete
+    if: always()
+    needs: [test_cmodel, test_aws_fpga]
+    uses: ./.github/workflows/mark-workflow-complete.yml

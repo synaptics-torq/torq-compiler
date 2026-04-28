@@ -691,6 +691,9 @@ def onnx_layer_model(request):
         if request.config.getoption("--onnx-print-layer-info") and not request.param.is_full_model:
             print(_format_layer_node_name(request.param))
 
+    record_property = request.getfixturevalue("record_property")
+    record_property("compiler_input", f"onnx:{case_name}")
+
     return VersionedUncachedData(data=model_data, version=version)
 
 

@@ -21,16 +21,20 @@ def home(request):
     """Home page showing recent performance sessions and test cases."""
 
     # Get the last session all the version branches
-    head_or_versions = Q(git_branch__startswith='refs/heads/v') | Q(git_branch='refs/heads/main')
+    head_or_versions = (Q(git_branch__startswith='refs/heads/v') | Q(git_branch='refs/heads/main')) & Q(test_plan='torq')
     version_branch_sessions = queries.test_session_statistics.get_latest_sessions_stats(head_or_versions)
         
     # Get the latest session for each of the 10 most recent PR branches    
     pull_or_local = Q(git_branch__startswith='refs/pull') | Q(git_branch__isnull=True)
     pr_branch_sessions = queries.test_session_statistics.get_latest_sessions_stats(pull_or_local, limit=10)
 
-    # Get the performance for each test case in the "home" group    
-    test_durations = queries.test_case_summary.get_reference_test_durations([s.id for s in version_branch_sessions])
-         
+    # Get the latest sessions with "alt" test plan for main to use as reference for the "home" group of tests
+    head_or_versions_alt = (Q(git_branch='refs/heads/main')) & Q(test_plan='alt')
+    alt_sessions = queries.test_session_statistics.get_latest_sessions_stats(head_or_versions_alt)
+
+    # Get the performance for each test case in the "home" group
+    test_durations = queries.test_case_summary.get_reference_test_durations([s.id for s in version_branch_sessions] + [s.id for s in alt_sessions])
+
     return render(request, 'perf/home.html', {
         'version_branch_sessions': version_branch_sessions,
         'pr_branch_sessions': pr_branch_sessions,
@@ -106,7 +110,7 @@ def test_session_summary(request, session_id):
             options['min_duration_ns'] = min_duration_ns
 
     else:
-        baseline_session = queries.test_session_comparison.get_default_comparison_session(session_id)
+        baseline_session = queries.test_session_comparison.get_default_comparison_session(session)
         form = forms.TestSessionSummaryOptions(initial={'baseline_session': baseline_session, 'min_duration_ns': options['min_duration_ns']})
     
     statistics = queries.test_session_statistics.get_session_summary_statistics(session, baseline_session, options['min_duration_ns'])
@@ -130,7 +134,7 @@ def test_session_results(request, session_id):
         baseline_session = form.cleaned_data['baseline_session']
         options.update(form.cleaned_data)
     else:
-        baseline_session = queries.test_session_comparison.get_default_comparison_session(session_id)
+        baseline_session = queries.test_session_comparison.get_default_comparison_session(session)
         form = forms.TestSessionResultsOptions(initial={'baseline_session': baseline_session})
     
 
@@ -163,7 +167,7 @@ def test_run(request, test_run_id):
     """Detailed page for a specific test run showing its metrics and comparison with a baseline test run."""
 
     test_run = get_object_or_404(
-        TestRun.objects.select_related('test_case', 'test_run_batch__test_session').prefetch_related('measurement_set__metric'),
+        TestRun.objects.select_related('test_case', 'test_run_batch__test_session', 'test_metadata').prefetch_related('measurement_set__metric'),
         id=test_run_id,
     )
 

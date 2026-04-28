@@ -3,7 +3,7 @@
 {% load static %}
 {% load custom_tags %}
 
-{% block title %}Test Session Summary - {{ session.git_branch | default:"unknown" }} - Test session #{{ session.id }}{% endblock %}
+{% block title %}Test Session Summary - {{ session.git_branch | default:"local tree" }} - Test session #{{ session.id }}{% endblock %}
 
 {% block content %}
 
@@ -13,11 +13,12 @@
             <div class="card h-100">
                 <div class="card-body">
                     <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-                        <h1 class="h3 mb-0">Branch: {{ session.git_branch | default:"unknown" }}</h1>
+                        <h1 class="h3 mb-0">Branch: {{ session.git_branch | default:"local tree" }}</h1>
                         <span class="badge text-bg-secondary">Session #{{ session.id }}</span>                        
                         <a href="{% url 'test_session_results' session.id %}{% if baseline_session %}?baseline_session={{ baseline_session.id }}{% endif %}" class="btn btn-sm btn-outline-primary ms-auto">Browse detailed test case results</a>
                     </div>
-                    <p class="text-body-secondary mb-0">Timestamp: {{ session.timestamp }}</p>
+                    <p class="text-body-secondary mb-0">Timestamp: {{ session.timestamp }}</p>                    
+                    <p class="text-body-secondary mb-0">Test plan: <code>{{ session.test_plan }}</code></p>
                 </div>
             </div>
         </div>
@@ -41,6 +42,19 @@
             </div>
         </div>
     </div>
+    
+    {% if not session.completed %}
+    <div class="alert alert-warning d-flex align-items-center gap-3 mb-4" role="alert">
+        <div class="spinner-border spinner-border-sm flex-shrink-0" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+        <div class="flex-grow-1">
+            <strong>Test session in progress</strong>
+            <p class="mb-0 small text-body-secondary">This test session is still running. Data shown here is incomplete and will be updated as results arrive.</p>
+        </div>
+    </div>
+    {% endif %}
+
 {% if baseline_session %}
     <div class="row row-cols-1 row-cols-md-2 row-cols-xl-4 g-3 mb-4">
         <div class="col">
@@ -106,7 +120,7 @@
                         <dt class="col-sm-3">Owner</dt>
                         <dd class="col-sm-9">{{ session.owner | default:"unknown" }}</dd>
                         <dt class="col-sm-3">Workflow URL</dt>
-                        <dd class="col-sm-9">{% if session.workflow_url %}<a href="{{ session.workflow_url }}">{{ session.workflow_url }}</a>{% else %}unknown{% endif %}</dd>
+                        <dd class="col-sm-9">{% if session.workflow_url %}<a href="{{ session.workflow_url }}">{{ session.workflow_url }}</a>{% else %}N/A{% endif %}</dd>
                     </dl>
                 </div>
             </div>

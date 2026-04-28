@@ -19,6 +19,16 @@ def _format_value(value, unit):
         if float(value).is_integer():
             return f"{int(value)} ns"
         return f"{value:.2f} ns"
+    elif unit == 'Hz':
+        if value >= 1_000_000_000:
+            return f"{value / 1_000_000_000:.2f} GHz"
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.2f} MHz"
+        if value >= 1_000:
+            return f"{value / 1_000:.2f} kHz"
+        if float(value).is_integer():
+            return f"{int(value)} Hz"
+        return f"{value:.2f} Hz"
     elif unit == '%':
         return f"{value:.2f} %"
     elif unit == 'unitless':
@@ -139,7 +149,7 @@ def outcome_badge(outcome, value=None):
     if value is None and outcome is not None and outcome != "":            
         value = TestRun.Outcome(outcome).label
         
-    if not value:
+    if value is None or value == "":
         value = "N/A"
 
     return format_html('<span class="badge {}">{}</span>', _outcome_class(outcome), value)

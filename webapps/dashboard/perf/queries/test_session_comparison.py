@@ -113,20 +113,20 @@ def get_duration_changes_query():
     return sql + ' AND b_measurement.value > %(min_duration)s', fields
 
 
-def get_default_comparison_session(session_id):
+def get_default_comparison_session(session):
     """
     Get the default session to compare against for a given session. The logic is as follows:
     """
 
     # find the last two session on the main branch
-    main_sessions = TestSession.objects.filter(git_branch='refs/heads/main').order_by('git_branch', '-timestamp')[:2]
+    main_sessions = TestSession.objects.filter(git_branch=session.git_branch, test_plan=session.test_plan).order_by('git_branch', '-timestamp')[:2]
 
     # there are no session on the main branch, return None
     if len(main_sessions) == 0:
         return None
 
     # if the current session is the latest on main, return the previous one, otherwise return the latest one
-    if main_sessions[0].id == session_id:
+    if main_sessions[0].id == session.id:
         if len(main_sessions) > 1:
             return main_sessions[1]
         else:

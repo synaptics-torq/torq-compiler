@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib.admin.widgets import AutocompleteSelectMultiple
 from django import forms
 
-from .models import TestCase, TestGroup, TestSession, TestRun, TestRunBatch, Metric, Measurement
+from .models import RuntimeTarget, TestCase, TestGroup, TestMetadata, TestSession, TestRun, TestRunBatch, Metric, Measurement
 
 
 @admin.register(TestCase)
@@ -68,3 +68,16 @@ class TestGroupAdmin(admin.ModelAdmin):
     list_display = ('id', 'name')
     search_fields = ('name',)
     autocomplete_fields = ('test_cases',)
+
+
+@admin.register(TestMetadata)
+class TestMetadataAdmin(admin.ModelAdmin):
+    list_display = ('id', 'compiler_input', 'runtime', 'runtime_target', 'runtime_hw_type')
+    search_fields = ('compiler_input', 'runtime', 'runtime_target')
+
+
+@admin.register(RuntimeTarget)
+class RuntimeTargetAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'hw_type', 'inference_frequency', 'cache_size')
+    list_filter = ('hw_type',)
+    search_fields = ('name', 'hw_type')

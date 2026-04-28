@@ -11,7 +11,7 @@ except ImportError:
     class _DummyEngines:
         @staticmethod
         def compile(*args, **kwargs):
-            pass
+            return {}
 
         @staticmethod
         def get_compilation_time(*args, **kwargs):
@@ -57,13 +57,18 @@ def pytest_generate_tests(metafunc):
 def compile_with_engine(request, tflite_model_path, alternative_engine):
 
     tmp_path = request.getfixturevalue("tmp_path")
+    record_property = request.getfixturevalue("record_property")
 
     model_path = Path(tflite_model_path.data)
     out_dir = tmp_path / model_path.stem
 
     # Compile with the current engine
-    engines.compile(alternative_engine, str(model_path), str(out_dir))
+    metadata = engines.compile(alternative_engine, str(model_path), str(out_dir))
     
     # Get compilation time
     engine_compilation_time = engines.get_compilation_time(alternative_engine, str(model_path), str(out_dir))
-    request.node.user_properties.append(("engine_compilation_time", engine_compilation_time))
+
+    for key, value in metadata.items():
+        record_property(key, value)
+
+    record_property("compile_time_measurements", {'total_duration': engine_compilation_time * 1_000_000})

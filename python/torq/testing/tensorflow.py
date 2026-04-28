@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import wraps
 import pytest
 import tensorflow as tf
 import numpy as np
@@ -187,3 +188,19 @@ def keras_layer_data(case_config):
 @versioned_unhashable_object_fixture
 def layer_model(request, keras_layer_data):
     return tf.keras.Model.from_config(keras_layer_data)
+
+
+def keras_model_fixture(fun):
+    @versioned_unhashable_object_fixture
+    @wraps(fun)
+    def wrapper(**kwargs):
+        request = kwargs.get("request")
+        if request is None:
+            raise ValueError("versioned_compiler_input_fixture requires a request fixture")
+
+        record_property = request.getfixturevalue("record_property")
+        record_property("compiler_input", f"keras:{fun.__module__}.{fun.__qualname__}")
+
+        return fun(**kwargs)
+
+    return wrapper

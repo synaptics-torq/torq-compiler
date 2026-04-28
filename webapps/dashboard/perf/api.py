@@ -49,6 +49,29 @@ class TestSessionViewSet(viewsets.ModelViewSet):
     ordering = ['-timestamp']
 
     @action(detail=False, methods=['post'], parser_classes=[MultiPartParser])
+    def mark_complete(self, request):
+        """
+        Marks a test session as complete, indicating that all batches have been uploaded and processed.
+
+        Expects a multipart/form-data body with the following field:
+            workflow_url: https://ci.example.com/workflow/12345
+
+        The workflow_url is used to identify the test session to mark as complete.
+        """
+        workflow_url = request.data.get('workflow_url')
+        if not workflow_url:
+            return Response({'detail': 'workflow_url is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            test_session = TestSession.objects.get(workflow_url=workflow_url)
+            test_session.completed = True
+            test_session.save()
+            return Response({'detail': f'Test session with workflow_url {workflow_url} marked as complete.'}, status=status.HTTP_200_OK)
+        except TestSession.DoesNotExist:
+            return Response({'detail': f'No test session found with workflow_url {workflow_url}.'}, status=status.HTTP_404_NOT_FOUND)
+
+
+    @action(detail=False, methods=['post'], parser_classes=[MultiPartParser])
     def upload_zip(self, request):
         if 'file' not in request.FILES:
             return Response({'detail': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -73,6 +96,7 @@ class TestSessionViewSet(viewsets.ModelViewSet):
         git_commit = manifest.get('git_commit')
         git_branch = manifest.get('git_branch')
         workflow_url = manifest.get('workflow_url')
+        test_plan = manifest.get('test_plan', 'torq')
         owner = manifest.get('owner')
 
         # Reuse get_or_create logic for consistency with unique workflow_url
@@ -83,6 +107,7 @@ class TestSessionViewSet(viewsets.ModelViewSet):
                     'owner': owner,
                     'git_commit': git_commit,
                     'git_branch': git_branch,
+                    'test_plan': test_plan
                 },
             )
         else:
@@ -91,6 +116,8 @@ class TestSessionViewSet(viewsets.ModelViewSet):
                 git_commit=git_commit,
                 git_branch=git_branch,
                 workflow_url=None,
+                test_plan=test_plan,
+                completed=True # Mark as complete immediately since these tests have a single batch
             )
 
         # Create a TestRunBatch for this upload

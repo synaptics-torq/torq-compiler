@@ -581,8 +581,8 @@ def enable_phases_dump(request):
 
 @versioned_generated_directory_fixture
 def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_model_file, torq_compiler, chip_config, 
-                            torq_compiler_timeout, enable_debug_ir, enable_hw_test_vectors, enable_phases_dump, runtime_hw_type):
-    
+                            torq_compiler_timeout, enable_debug_ir, enable_phases_dump, runtime_hw_type):
+        
     model_file = versioned_dir / 'model.vmfb'
 
     target = chip_config.get("target", "SL2610")
@@ -640,8 +640,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         subprocess.check_call(cmds, cwd=str(versioned_dir), timeout=torq_compiler_timeout)
 
     # Save compile time profiling data if requested
-    if compile_time_profiling_output_dir:
-        record_property = request.getfixturevalue("record_property")
+    if compile_time_profiling_output_dir:        
         compile_time_profiling_output_dir = Path(compile_time_profiling_output_dir)
         compile_time_profiling_output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -658,7 +657,8 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         temp_pb_dir = compile_time_profiling_output_dir / f'{request.node.name}_compile_temp'
         measurements = convert_to_perfetto(str(debug_info_dir), str(temp_pb_dir))
 
-        record_property("compile_time_measurements", measurements)
+        with open(versioned_dir / 'compile_time_measurements.json', 'w') as f:
+            json.dump(measurements, f, indent=4)        
         
         # Move .pb files from temp folder to parent with _compile suffix
         pb_files = list(temp_pb_dir.glob('*.pb'))
@@ -668,7 +668,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
             shutil.move(str(pb_file), str(dest_pb))
             print(f"✓ Generated Perfetto trace: {dest_pb}")
             if idx == 0:
-                record_property("profiling_output", str(dest_pb))
+                shutil.copy(dest_pb, versioned_dir / f'profile.pb')
         
         # Remove temp directory
         if temp_pb_dir.exists():
@@ -676,7 +676,26 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         
 
 @versioned_unhashable_object_fixture
-def torq_compiled_model(torq_compiled_model_dir):
+def torq_compiled_model(request, torq_compiled_model_dir, torq_compiler_options, chip_config):
+
+    record_property = request.getfixturevalue("record_property")    
+    record_property("compiler", "torq")
+    record_property("compiler_options", torq_compiler_options)
+    record_property("compiler_target", chip_config.get("chip_name"))    
+
+    measurements_path = torq_compiled_model_dir / 'compile_time_measurements.json'
+    
+    if measurements_path.exists():
+        with open(measurements_path, 'r') as f:
+            measurements = json.load(f)
+
+        record_property("compile_time_measurements", measurements)
+
+    profile_path = torq_compiled_model_dir / f'profile.pb'
+
+    if profile_path.exists():
+        record_property("compile_time_profile", str(profile_path))
+    
     return torq_compiled_model_dir / 'model.vmfb'
 
 
@@ -871,8 +890,8 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             str(versioned_dir / 'host_profile.csv'),
             [str(versioned_dir / 'annotated_profile.xlsx'), str(versioned_dir / 'trace.pb')]
         )
-        record_property = request.getfixturevalue("record_property")
-        record_property("runtime_measurements", measurements)
+        with open(versioned_dir / 'measurements.json', 'w') as f:
+            json.dump(measurements, f, indent=4)        
         logger.debug("Profile annotation completed")
 
 
@@ -886,9 +905,22 @@ def torq_test_vectors(request, torq_results_dir, enable_hw_test_vectors):
 
 
 @versioned_unhashable_object_fixture
-def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir):
+def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir, 
+                 runtime_hw_type, torq_runtime_options, chip_config):
+
+    record_property = request.getfixturevalue("record_property")    
+    record_property("runtime", "torq")
+    record_property("runtime_hw_type", runtime_hw_type)
+    record_property("runtime_options", torq_runtime_options)
+    record_property("runtime_target", chip_config.get("chip_name"))
 
     unique_name = _nodeid_to_filename(request.node.nodeid)
+
+    measurements_path = torq_results_dir / 'measurements.json'
+    if measurements_path.exists():
+        with open(measurements_path, 'r') as f:
+            measurements = json.load(f)
+            record_property("measurements", measurements)
 
     if benchmark_output_dir:
         benchmark_file = torq_results_dir / 'benchmark.json'        
@@ -905,8 +937,7 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir):
 
     profiling_output_dir = request.config.getoption("--torq-runtime-profiling-output-dir")
     
-    if profiling_output_dir is not None:
-        record_property = request.getfixturevalue("record_property")
+    if profiling_output_dir is not None:        
         profiling_output_dir = Path(profiling_output_dir)
         profiling_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1173,7 +1204,15 @@ def list_mlir_file_group(group_name):
 
 @versioned_static_file_fixture
 def static_mlir_model_file(request, case_config):
-    return case_config["static_mlir_model_file"]    
+
+    file_path = case_config["static_mlir_model_file"]    
+
+    record_property = request.getfixturevalue("record_property")
+
+    rel_path = os.path.relpath(file_path, start=TOPDIR)    
+    record_property("compiler_input", f"mlir:{rel_path}")
+
+    return file_path   
 
 
 @versioned_cached_data_fixture

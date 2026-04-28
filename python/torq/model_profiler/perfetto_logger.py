@@ -904,11 +904,11 @@ def get_dashboard_metrics():
 
 
 def get_measurements(overview_data):
-    results = []
+    results = {}
     for desc in _METRICS:
         metric_value = overview_data['metrics'].get(desc.perfetto_name[0], {}).get(desc.perfetto_name[1])
         if metric_value is not None:
-            results.append({'metric': desc.dashboard_name, 'value': metric_value})
+            results[desc.dashboard_name] = metric_value
 
     return results
 
