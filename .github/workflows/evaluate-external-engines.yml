@@ -18,7 +18,7 @@ jobs:
   choose_runner_image:
     name: Choose runner image
     uses: ./.github/workflows/choose-runner.yml
-    if: contains(github.event.pull_request.labels.*.name, 'test-alt-engines')
+    if: contains(github.event.pull_request.labels.*.name, 'test-alt-engines') || github.event == 'workflow_dispatch'
 
   test:    
     name: Test with external engines
@@ -68,7 +68,7 @@ jobs:
 
   mark_complete:
     name: Mark workflow complete
-    if: contains(github.event.pull_request.labels.*.name, 'test-alt-engines') && always()
+    if: needs.test.result != 'skipped' && always()
     needs: [test]
     uses: ./.github/workflows/mark-workflow-complete.yml
 
