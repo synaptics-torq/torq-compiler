@@ -1,10 +1,13 @@
 #include "torq/Utils/InvocationUtils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/OperationSupport.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
+#include <deque>
 
 #define DEBUG_TYPE "torq-invocation-utils"
 
@@ -134,64 +137,68 @@ struct ProgramExecutor {
 
     FailureOr<SmallVector<Value>>
     processBlock(Block *block, InvocationValue currentInvocation, IRMapping &mapping) {
-
+        std::deque<Operation *> blockOps;
         for (auto &op : block->getOperations()) {
+            blockOps.push_back(&op);
+        }
+        while (!blockOps.empty()) {
+            auto op = blockOps.front();
+            blockOps.pop_front();
 
             LLVM_DEBUG({
                 llvm::dbgs() << "Processing operation:\n";
-                op.dump();
+                op->dump();
             });
 
             if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(op)) {
                 if (failed(processStartProgramOp(startOp, mapping))) {
                     return failure();
                 }
+                continue;
             }
-            else if (auto waitOp = dyn_cast<torq_hl::WaitProgramOp>(op)) {
+
+            if (auto waitOp = dyn_cast<torq_hl::WaitProgramOp>(op)) {
                 if (failed(processWaitProgramOp(waitOp, mapping))) {
                     return failure();
                 }
+                continue;
             }
-            else if (auto returnOp = dyn_cast<torq_hl::ReturnOp>(op)) {
-                SmallVector<Value> returnedValues;
 
+            if (auto returnOp = dyn_cast<torq_hl::ReturnOp>(op)) {
+                SmallVector<Value> returnedValues;
                 for (auto returnValue : returnOp.getOutputs()) {
                     returnedValues.push_back(mapping.lookup(returnValue));
                 }
 
                 return returnedValues;
             }
-            else if (auto nextOp = dyn_cast<torq_hl::NextOp>(op)) {
 
+            if (auto nextOp = dyn_cast<torq_hl::NextOp>(op)) {
                 Block *targetBlock = nextOp.getDest();
 
                 IRMapping nextMapping;
-
-                for (int i = 0; i < targetBlock->getNumArguments(); ++i) {
-                    nextMapping.map(
-                        targetBlock->getArgument(i), mapping.lookup(nextOp.getArguments()[i])
-                    );
+                for (auto [arg, nextArg] :
+                     llvm::zip_equal(targetBlock->getArguments(), nextOp.getArguments())) {
+                    nextMapping.map(arg, mapping.lookup(nextArg));
                 }
 
-                auto maybeReturnedValues =
-                    processBlock(targetBlock, currentInvocation, nextMapping);
+                mapping = nextMapping;
 
-                if (failed(maybeReturnedValues)) {
+                blockOps.clear();
+                for (auto &op : targetBlock->getOperations()) {
+                    blockOps.push_back(&op);
+                }
+                continue;
+            }
+
+            if (options.onExecute) {
+                if (failed(options.onExecute(op, currentInvocation, mapping))) {
                     return failure();
                 }
-
-                return *maybeReturnedValues;
             }
-            else {
-                if (options.onExecute) {
-                    if (failed(options.onExecute(&op, currentInvocation, mapping))) {
-                        return failure();
-                    }
-                }
 
-                for (auto result : op.getResults()) {
-                    mapping.map(result, result);
-                }
+            for (auto result : op->getResults()) {
+                mapping.map(result, result);
             }
         }
 
