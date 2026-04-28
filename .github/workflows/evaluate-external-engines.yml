@@ -18,7 +18,7 @@ jobs:
   choose_runner_image:
     name: Choose runner image
     uses: ./.github/workflows/choose-runner.yml
-    if: contains(github.event.pull_request.labels.*.name, 'test-alt-engines') || github.event == 'workflow_dispatch'
+    if: contains(github.event.pull_request.labels.*.name, 'test-alt-engines') || github.event_name == 'workflow_dispatch'
 
   test:    
     name: Test with external engines
