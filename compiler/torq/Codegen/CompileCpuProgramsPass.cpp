@@ -19,6 +19,7 @@
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/IR/DialectRegistry.h"
@@ -441,6 +442,11 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
             });
         });
     }
+
+    // Convert tensor.pad to linalg ops before IREE's LLVMCPU pipeline.
+    // IREE cannot compile tensor.pad in isolation (it lowers to
+    // iree_linalg_ext.map_scatter which is rejected outside workgroups).
+    modulePassManager.addNestedPass<func::FuncOp>(createConvertTensorPadToLinalgPass());
 
     buildLLVMCPUCodegenPassPipeline(pipeline, false);
 

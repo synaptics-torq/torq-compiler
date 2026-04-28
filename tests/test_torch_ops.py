@@ -75,6 +75,9 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'encoder.mlir.230.Conv_0_small.mlir' in request.param.data.name:
         extra_args["torq_compiler_options"] = ["--torq-conv1d-truncate-for-reduce=true"]
         extra_args["comparison_config"] = "comparison_config_for_conv_truncf"
+    
+    if 'conv2d-host.mlir' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-slices", "--torq-disable-css"]
 
     return {
         "mlir_model_file": "static_mlir_model_file",

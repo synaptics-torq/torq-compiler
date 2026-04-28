@@ -14,6 +14,7 @@ set(sources
     BufferizationUtils.cpp
     CheckCssStackSizePass.cpp
     CompileCpuProgramsPass.cpp
+    ConvertTensorPadToLinalgPass.cpp
     CompileNSSInvocationsPass.cpp
     CompileSliceInvocationsPass.cpp
     CompileTimeConstComputePass.cpp

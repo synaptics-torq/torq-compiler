@@ -25,6 +25,8 @@ extern const std::string OUT_OF_MEMORY_MESSAGE;
 
 std::unique_ptr<OperationPass<ModuleOp>> createAnalyzeTensorSizesPass();
 
+std::unique_ptr<OperationPass<func::FuncOp>> createConvertTensorPadToLinalgPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createValidToSamePadPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCheckCssStackSizePass();

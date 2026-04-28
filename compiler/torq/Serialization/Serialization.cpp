@@ -796,9 +796,9 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
             continue; // skip these ops
         }
 
-        if (auto constOp = dyn_cast<arith::ConstantOp>(op);
-            constOp && isa<IndexType>(cast<ShapedType>(constOp.getType()).getElementType())) {
-            // Ignore constants with element type of IndexType
+        if (isa<arith::ConstantOp>(op)) {
+            // Ignore all constants in the runtime program - they are values used
+            // by actions, not actions themselves.
             continue;
         }
         else if (auto toMemrefOp = dyn_cast<bufferization::ToBufferOp>(op);

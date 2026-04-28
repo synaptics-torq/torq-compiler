@@ -25,6 +25,24 @@ def AnalyzeTensorSizes
   ];
 }
 
+def ConvertTensorPadToLinalg
+    : Pass<"torq-convert-tensor-pad-to-linalg", "func::FuncOp"> {
+
+  let summary = "Convert tensor.pad ops to linalg.generic + tensor.insert_slice";
+
+  let description = [{
+    Convert tensor.pad ops to linalg.generic + tensor.insert_slice so that
+    IREE's LLVMCPU backend can compile them in standalone CPU programs.
+  }];
+
+  let constructor = "mlir::syna::torq::createConvertTensorPadToLinalgPass()";
+
+  let dependentDialects = [
+    "linalg::LinalgDialect",
+    "tensor::TensorDialect"
+  ];
+}
+
 def ValidToSamePadPass
     : InterfacePass<"torq-convert-conv-valid-to-same", "mlir::FunctionOpInterface"> {
 
