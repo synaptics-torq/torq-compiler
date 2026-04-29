@@ -42,6 +42,7 @@ namespace {
 const std::string TORQ_LINALG_SLICING = "torq-linalg-slicing";
 
 const int64_t kGrouping = 4;
+const int64_t kMinElementsForSlicing = 2000;
 
 // Return tile size for peeling.
 int64_t getPeelingTileSize(int64_t domainSize, int64_t grouping) {
@@ -292,7 +293,10 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
-        if (!isFuseGroupPrincipalOp(genericOp)) {
+        // If this op is part of a fuse group but is NOT the principal op, skip
+        // it — the principal op drives tiling for the whole group.
+        // Standalone elementwise ops (no fuse-group attr) are allowed through.
+        if (isMarkedFuseGroup(genericOp) && !isFuseGroupPrincipalOp(genericOp)) {
             return rewriter.notifyMatchFailure(genericOp, "not the principal operation");
         }
 
@@ -312,6 +316,15 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
         }
         if (!slicingIter)
             return rewriter.notifyMatchFailure(genericOp, "no dimension to slice");
+
+        // Skip tiny tensors where slicing overhead outweighs the benefit.
+        int64_t totalElements = 1;
+        for (int64_t s : shape)
+            totalElements *= s;
+        if (totalElements < kMinElementsForSlicing)
+            return rewriter.notifyMatchFailure(
+                genericOp, "tensor too small to benefit from slicing"
+            );
 
         return peelAndSlice(rewriter, genericOp, *slicingIter, kGrouping);
     }

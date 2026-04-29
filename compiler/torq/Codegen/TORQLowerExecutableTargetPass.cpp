@@ -104,7 +104,7 @@ static llvm::cl::opt<bool> clEnableTransposeOptimization(
 namespace {
 
 void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm) {
-    if (!clDisableLinalgSlicing)
+    if (!clDisableLinalgSlicing && !clEnableTorqHLTiling)
         funcPm.addPass(createLinalgSlicingPass());
 
     // lower the linalg operators to torq_hl before tiling
@@ -318,7 +318,7 @@ void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
         funcPm.addPass(createCanonicalizerPass());
     }
 
-    if (!clDisableLinalgSlicing)
+    if (!clDisableLinalgSlicing && !clEnableTorqHLTiling)
         funcPm.addPass(createLinalgSlicingPass());
 
     // lower the linalg operators to torq_hl before tiling
