@@ -35,21 +35,21 @@ def get_reference_test_durations(session_ids):
         (target.name, target.hw_type): target
         for target in runtime_targets
     }
-
-    runtime_target_by_name = {target.name: target for target in runtime_targets}
-
     result = {}
 
     for measurement in measurements:
         metadata = measurement.test_run.test_metadata
-        compiler_input = metadata.compiler_input if metadata else None
-        runtime = metadata.runtime if metadata else None
-        runtime_target = metadata.runtime_target if metadata else None
-        runtime_hw_type = metadata.runtime_hw_type if metadata else None
-        runtime_target_model = runtime_target_by_key.get((runtime_target, runtime_hw_type)) if runtime_target else None
+
+        if metadata is None:
+            continue
+
+        compiler_input = metadata.compiler_input
+        runtime = metadata.runtime
+        runtime_target = metadata.runtime_target
+        runtime_hw_type = metadata.runtime_hw_type
+
+        runtime_target_model = runtime_target_by_key.get((runtime_target, runtime_hw_type))        
         
-        if runtime_target and runtime_target_model is None:
-            runtime_target_model = runtime_target_by_name.get(runtime_target)
         nodeid = measurement.test_run.test_case.nodeid
         total_duration = measurement.value
         run_id = measurement.test_run.id
@@ -64,15 +64,21 @@ def get_reference_test_durations(session_ids):
         if compiler_input not in result:
             result[compiler_input] = []
 
-        result[compiler_input].append({'node_id': nodeid, 'total_duration': total_duration, 
+        result[compiler_input].append({'node_id': nodeid,
+                                       'total_duration': total_duration,
+                                       'normalized_duration': normalized_duration,
                                        'test_run_id': run_id, 'runtime': runtime,
                                        'runtime_target': runtime_target, 'git_branch': git_branch,
                                        'runtime_hw_type': runtime_hw_type,                                    
                                        'inference_frequency': runtime_target_model.inference_frequency if runtime_target_model else None,
                                        'memory_bandwidth': runtime_target_model.memory_bandwidth if runtime_target_model else None,
-                                       'normalized_duration': normalized_duration,
                                        'cache_size': runtime_target_model.cache_size if runtime_target_model else None
                                        })
+    
+    for compiler_input in result:
+        result[compiler_input].sort(key=lambda x: (x['runtime'] or '', x['node_id']))
+
+    result = dict(sorted(result.items(), key=lambda item: item[0] or ''))    
 
     return result
 
