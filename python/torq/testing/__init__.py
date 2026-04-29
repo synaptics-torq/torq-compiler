@@ -37,11 +37,7 @@ try:
     import iree
     pytest_plugins.append("torq.testing.performance")
     pytest_plugins.append("torq.testing.iree")
-
-    # disabling for the moment as it makes xdist workers to die at the moment
-    import os    
-    if os.environ.get("TORQ_ENABLE_EXECUTOR_DISCOVERY_PLUGIN"):
-        pytest_plugins.append("torq.executor_discovery.pytest_plugin")
+    pytest_plugins.append("torq.executor_discovery.pytest_plugin")
 
 except ImportError:
     print("Warning: iree not available, skipping iree test support")

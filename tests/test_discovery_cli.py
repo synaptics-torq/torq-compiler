@@ -8,9 +8,10 @@ from pathlib import Path
 
 import pytest
 
-# disabling for the moment as it makes xdist workers to die at the moment
-if not os.environ.get("TORQ_ENABLE_EXECUTOR_DISCOVERY_PLUGIN"):
-    pytest.skip("Test not enabled with TORQ_ENABLE_EXECUTOR_DISCOVERY_PLUGIN environment variable set", allow_module_level=True)
+try:
+    import iree.compiler
+except ImportError:
+    pytest.skip("iree package not available", allow_module_level=True)
 
 
 """Integration tests for executor discovery CLI options.
@@ -121,8 +122,6 @@ def _validate_timing_fields(test_name: str, data: dict, should_exist: bool = Tru
                     f"{test_name}: Unexpected timing for {op_name}/{exec_name}"
                 )
 
-
-@pytest.mark.ci
 @pytest.mark.skipif(not TEST_MODEL.exists(), reason=f"Test model not found: {TEST_MODEL}")
 class TestExecutorDiscoveryIntegration:
     """Integration tests for all executor discovery CLI options."""
