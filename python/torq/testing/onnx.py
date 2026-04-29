@@ -709,7 +709,7 @@ from .numpy import (
 
 
 @versioned_unhashable_object_fixture
-def composite_reference_results(request, onnx_model_file, input_data):
+def composite_reference_results(request, input_data):
     """
     Generate reference using a chained fallback strategy:
     1. ONNXRuntime (fastest, most accurate for f32)
@@ -717,20 +717,25 @@ def composite_reference_results(request, onnx_model_file, input_data):
     3. llvmcpu fallback (IREE reference compilation)
     4. torch fallback (last resort for bf16 models with unsupported ops)
     """
-    onnx_model = onnx.load(str(onnx_model_file))
+    # Try ONNX-based paths first if an ONNX model is available.
+    try:
+        onnx_model_file = request.getfixturevalue("onnx_model_file")
+        onnx_model = onnx.load(str(onnx_model_file))
 
-    # 1. Try ONNXRuntime first
-    if not _has_bf16_matmul(onnx_model) or not _has_bf16_einsum(onnx_model):
+        # 1. Try ONNXRuntime first
+        if not _has_bf16_matmul(onnx_model) or not _has_bf16_einsum(onnx_model):
+            try:
+                ort_session = onnxruntime.InferenceSession(str(onnx_model_file))
+                ort_inputs = {inp.name: input_data[i] for i, inp in enumerate(ort_session.get_inputs())}
+                return ort_session.run(None, ort_inputs)
+            except Exception:
+                pass
+
+        # 2. Try numpy fallback
         try:
-            ort_session = onnxruntime.InferenceSession(str(onnx_model_file))
-            ort_inputs = {inp.name: input_data[i] for i, inp in enumerate(ort_session.get_inputs())}
-            return ort_session.run(None, ort_inputs)
+            return _execute_onnx_model_numpy(onnx_model, input_data)
         except Exception:
             pass
-
-    # 2. Try numpy fallback
-    try:
-        return _execute_onnx_model_numpy(onnx_model, input_data)
     except Exception:
         pass
 

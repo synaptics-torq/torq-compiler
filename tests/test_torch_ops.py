@@ -77,7 +77,7 @@ def case_config(request, runtime_hw_type, chip_config):
         extra_args["torq_compiler_options"] = ["--torq-conv1d-truncate-for-reduce=true"]
         extra_args["comparison_config"] = "comparison_config_for_conv_truncf"
     
-    if 'conv2d-host.mlir' in request.param.data.name:
+    if any(host_mlir in request.param.data.name for host_mlir in ['conv2d-host.mlir']):
         extra_args["torq_compiler_options"] = ["--torq-disable-slices", "--torq-disable-css"]
 
     return {
@@ -88,7 +88,14 @@ def case_config(request, runtime_hw_type, chip_config):
         **extra_args
     }
 
+@pytest.fixture
+def reference_results(request):
+    try:
+        return request.getfixturevalue("llvmcpu_reference_results")
+    except Exception:
+        return request.getfixturevalue("torch_reference_results")
+
 @pytest.mark.ci
 @pytest.mark.fpga_ci
-def test_mlir_files(request, torq_results, llvmcpu_reference_results, case_config):    
-    compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
+def test_mlir_files(request, torq_results, reference_results, case_config):
+    compare_test_results(request, torq_results, reference_results, case_config)

@@ -1,9 +1,91 @@
 import numpy as np
 import onnx
 import onnxruntime
+import re
+from pathlib import Path
 from onnx import helper, numpy_helper, TensorProto
 
 from .versioned_fixtures import versioned_unhashable_object_fixture
+
+
+def _parse_torch_mlir_op(mlir_path: Path):
+    """Parse a torch MLIR file containing torch.operator 'onnx.*' ops.
+
+    Returns (op_type, attrs, input_count) where attrs is a dict of
+    ONNX-style attribute names to Python values.
+    """
+    content = mlir_path.read_text()
+
+    # Find torch.operator "onnx.*" ops
+    op_pattern = r'torch\.operator\s+"onnx\.([^"]+)"\s*\(([^)]+)\)\s*\{([^}]+)\}'
+    op_matches = re.findall(op_pattern, content, re.DOTALL)
+    if not op_matches:
+        raise ValueError("No torch.operator onnx ops found in MLIR")
+
+    onnx_op_type = op_matches[0][0]
+    attr_text = op_matches[0][2]
+
+    # Parse attributes
+    attrs = {}
+    # Arrays may contain commas, so match brackets as a group.
+    attr_pattern = r'torch\.onnx\.([\w_]+)\s*=\s*(\[[^\]]*\]|[^,\n]+)'
+    for match in re.finditer(attr_pattern, attr_text):
+        name = match.group(1)
+        value_str = match.group(2).strip()
+        if value_str.startswith('[') and value_str.endswith(']'):
+            items = re.findall(r'([-\d]+)\s*:\s*\w+', value_str)
+            attrs[name] = [int(x) for x in items]
+        else:
+            m = re.match(r'([-\d]+)\s*:\s*\w+', value_str)
+            if m:
+                attrs[name] = int(m.group(1))
+            else:
+                attrs[name] = value_str
+
+    # Count inputs from the operand list
+    input_count = len([x for x in op_matches[0][1].split(',') if x.strip()])
+
+    return onnx_op_type, attrs, input_count
+
+
+def _execute_torch_mlir(mlir_path: Path, input_data):
+    """Execute a torch MLIR file directly using PyTorch.
+
+    Parses torch.operator 'onnx.*' ops and dispatches to the corresponding PyTorch function
+    """
+    op_type, attrs, input_count = _parse_torch_mlir_op(mlir_path)
+
+    if op_type == 'MaxPool':
+        import torch.nn.functional as F
+        x = _np_array_to_torch(input_data[0])
+        kernel_shape = attrs.get('kernel_shape', [2, 2])
+        strides = attrs.get('strides', kernel_shape)
+        pads = attrs.get('pads', [0] * (2 * len(kernel_shape)))
+        ceil_mode = attrs.get('ceil_mode', 0)
+        ndim = len(kernel_shape)
+
+        # Handle padding manually because ONNX supports asymmetric padding
+        if any(p != 0 for p in pads):
+            pad_begin = pads[:ndim]
+            pad_end = pads[ndim:]
+            torch_pad = []
+            for i in range(ndim - 1, -1, -1):
+                torch_pad.extend([pad_begin[i], pad_end[i]])
+            x = F.pad(x, torch_pad, value=-float('inf'))
+
+        pool_kwargs = dict(kernel_size=kernel_shape, stride=strides, padding=0, ceil_mode=bool(ceil_mode))
+        if ndim == 1:
+            result = F.max_pool1d(x, **pool_kwargs)
+        elif ndim == 2:
+            result = F.max_pool2d(x, **pool_kwargs)
+        elif ndim == 3:
+            result = F.max_pool3d(x, **pool_kwargs)
+        else:
+            raise ValueError(f"Unsupported MaxPool spatial rank: {ndim}")
+        return [_torch_tensor_to_np(result)]
+
+    else:
+        raise ValueError(f"torch MLIR direct execution not yet implemented for op: {op_type}")
 
 
 def _np_array_to_torch(arr):
@@ -207,7 +289,22 @@ def _execute_onnx_model_torch(model, input_data):
 
 
 @versioned_unhashable_object_fixture
-def torch_reference_results(request, onnx_model_file, input_data):
-    """Generate reference using PyTorch for ops that numpy/ONNXRuntime can't handle."""
-    onnx_model = onnx.load(str(onnx_model_file))
-    return _execute_onnx_model_torch(onnx_model, input_data)
+def torch_reference_results(request, input_data):
+    """Generate reference using PyTorch for ops that numpy/ONNXRuntime can't handle.
+
+    For ONNX-based tests, an onnx_model_file fixture is used directly.
+    For torch-mlir tests without an ONNX model, the torch MLIR file is parsed
+    to construct a minimal ONNX model on the fly.
+    """
+    try:
+        onnx_model_file = request.getfixturevalue("onnx_model_file")
+        onnx_model = onnx.load(str(onnx_model_file))
+        return _execute_onnx_model_torch(onnx_model, input_data)
+    except Exception:
+        pass
+
+    # Fallback: execute torch MLIR directly with PyTorch
+    mlir_model_file = request.getfixturevalue("mlir_model_file")
+    # mlir_model_file is a VersionedFile with .file_path attribute
+    mlir_path = mlir_model_file.file_path if hasattr(mlir_model_file, 'file_path') else Path(str(mlir_model_file))
+    return _execute_torch_mlir(mlir_path, input_data)
