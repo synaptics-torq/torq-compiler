@@ -920,7 +920,7 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir,
     if measurements_path.exists():
         with open(measurements_path, 'r') as f:
             measurements = json.load(f)
-            record_property("measurements", measurements)
+            record_property("runtime_measurements", measurements)
 
     if benchmark_output_dir:
         benchmark_file = torq_results_dir / 'benchmark.json'        
