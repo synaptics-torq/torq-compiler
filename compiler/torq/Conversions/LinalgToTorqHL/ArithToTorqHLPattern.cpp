@@ -9,6 +9,7 @@
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 
+#include "torq/Dialect/TorqHL/TorqHLAttrs.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/TorqUtils.h"
@@ -97,6 +98,7 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         }
 
         torq_hl::ElementwiseOpEnum opType;
+        bool isNegated = false;
         bool isUnsigned = false;
         auto input0 = srcOp.getInputs()[0];
         auto input1 = srcOp.getInputs()[srcOp.getInputs().size() > 1 ? 1 : 0];
@@ -180,8 +182,6 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         else if (isa<arith::CmpIOp>(op)) {
             auto cmpIOp = dyn_cast<arith::CmpIOp>(op);
 
-            // TODO: add ne
-
             auto predicate = cmpIOp.getPredicate();
             if (predicate == arith::CmpIPredicate::sge || predicate == arith::CmpIPredicate::uge) {
                 opType = torq_hl::ElementwiseOpEnum::GREATER_EQUAL;
@@ -217,6 +217,10 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
                 swapInputs = true;
                 isUnsigned = true;
             }
+            else if (predicate == arith::CmpIPredicate::ne) {
+                opType = torq_hl::ElementwiseOpEnum::EQUAL;
+                isNegated = true;
+            }
             else {
                 return rewriter.notifyMatchFailure(
                     srcOp, "Unsupported comparison operation in linalg.generic"
@@ -232,10 +236,19 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         if (swapInputs) {
             std::swap(input0, input1);
         }
-        rewriter.replaceOpWithNewOp<torq_hl::ElementWiseBinaryOp>(
-            srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), opType, input0,
-            input1, isUnsigned
+        auto newElementWiseOp = torq_hl::ElementWiseBinaryOp::create(
+            rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
+            opType, input0, input1, isUnsigned
         );
+        if (!isNegated) {
+            rewriter.replaceOp(srcOp, newElementWiseOp);
+        }
+        else {
+            rewriter.replaceOpWithNewOp<torq_hl::ElementWiseUnaryOp>(
+                srcOp, resultType, createInitTensor(srcOp, rewriter, resultType),
+                torq_hl::ElementwiseOpEnum::LOGICAL_NOT, newElementWiseOp->getResult(0)
+            );
+        }
 
         return success();
     }
