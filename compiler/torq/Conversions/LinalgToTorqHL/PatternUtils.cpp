@@ -3200,8 +3200,8 @@ mlir::FailureOr<Value>
 modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuilder &builder) {
     Value minShiftV;
     Value origShiftV = shift;
-    if (shift.getDefiningOp<tensor::ExtractSliceOp>()) {
-        origShiftV = shift.getDefiningOp<tensor::ExtractSliceOp>().getSource();
+    while (auto tShiftV = origShiftV.getDefiningOp<tensor::ExtractSliceOp>()) {
+        origShiftV = tShiftV.getSource();
     }
     auto shiftTy = origShiftV.getType();
 
