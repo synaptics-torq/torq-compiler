@@ -2047,7 +2047,6 @@ void populateLinalgToTorqHLPatterns(
     }
 
     // Patterns that have a marking mode:
-    populateLinalgToTorqHLClampPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLMulPatterns(context, patterns, markFuseGroups);
 
     if (markFuseGroups) {

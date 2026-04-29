@@ -90,13 +90,13 @@ class LinalgToTorqHLConversionPass
 
         auto *context = &getContext();
 
-        ConversionTarget conversionTargetLinalg(getContext());
+        ConversionTarget conversionTarget(getContext());
 
-        conversionTargetLinalg.addLegalDialect<
+        conversionTarget.addLegalDialect<
             torq_hl::TorqHLDialect, func::FuncDialect, tensor::TensorDialect, arith::ArithDialect>(
         );
 
-        conversionTargetLinalg.addDynamicallyLegalDialect<linalg::LinalgDialect>(
+        conversionTarget.addDynamicallyLegalDialect<linalg::LinalgDialect>(
             [](Operation *op) -> std::optional<bool> {
                 // Linalg will add linalg::YieldOp before doing linalg::TransposeOp
                 if (isa<linalg::YieldOp>(op))
@@ -117,16 +117,25 @@ class LinalgToTorqHLConversionPass
         // Convert tensor::PadOp to torq_hl::FillOp, but keep pads marked for
         // Host execution so they stay in the tensor dialect and can be included
         // in the Host CPU program by AssignOperationsToCpuProgramsPass.
-        conversionTargetLinalg.addDynamicallyLegalOp<tensor::PadOp>(
-            [](tensor::PadOp padOp) -> bool { return isHostOrCssExecutor(padOp); }
-        );
+        conversionTarget.addDynamicallyLegalOp<tensor::PadOp>([](tensor::PadOp padOp) -> bool {
+            return isHostOrCssExecutor(padOp);
+        });
 
-        RewritePatternSet patternsLinalg(&getContext());
+        RewritePatternSet patterns(&getContext());
 
-        populateLinalgToTorqHLPatterns(context, patternsLinalg, false);
+        populateLinalgToTorqHLPatterns(context, patterns, false);
+
+        if (failed(applyPartialConversion(getOperation(), conversionTarget, std::move(patterns)))) {
+            getOperation().emitError() << "conversion failed";
+            return signalPassFailure();
+        }
+
+        RewritePatternSet patternsEpilogue(&getContext());
+
+        populateLinalgToTorqHLClampPatterns(context, patternsEpilogue, false);
 
         if (failed(applyPartialConversion(
-                getOperation(), conversionTargetLinalg, std::move(patternsLinalg)
+                getOperation(), conversionTarget, std::move(patternsEpilogue)
             ))) {
             getOperation().emitError() << "conversion failed";
             return signalPassFailure();
@@ -285,10 +294,14 @@ class MarkPatternsForTileAndFusePass
         RewritePatternSet linalgPatterns(ctx);
         populateLinalgToTorqHLPatterns(ctx, linalgPatterns, true);
 
-        auto linalgFrozenPatterns =
-            FrozenRewritePatternSet(std::move(linalgPatterns), disabledPatterns, enabledPatterns);
+        if (failed(applyPatternsGreedily(getOperation(), std::move(linalgPatterns)))) {
+            return signalPassFailure();
+        }
 
-        if (failed(applyPatternsGreedily(getOperation(), linalgFrozenPatterns))) {
+        RewritePatternSet linalgPatternsEpilogue(&getContext());
+        populateLinalgToTorqHLClampPatterns(ctx, linalgPatternsEpilogue, true);
+
+        if (failed(applyPatternsGreedily(getOperation(), std::move(linalgPatternsEpilogue)))) {
             return signalPassFailure();
         }
     }
