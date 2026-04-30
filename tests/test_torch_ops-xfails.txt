@@ -1,7 +1,5 @@
 test_mlir_files[0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
 test_mlir_files[0135_ReduceMean__layers.0_post_attention_layernorm_ReduceMean.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
-test_mlir_files[ConvTranspose_bf16_1x1x512x512.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1091
-test_mlir_files[ConvTranspose_bf16_1x1x512x512.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1091
 test_mlir_files[add-1x24x56x56-bf16.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
 test_mlir_files[decoder.mlir.431.Mul_24.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
 test_mlir_files[dynamicquantize.mlir0-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
