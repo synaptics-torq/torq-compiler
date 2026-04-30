@@ -163,23 +163,24 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
 
         LData input(op.getInput());
         LData output(op.getInit());
-        // FIXME: In some cases this op is also used as a bit-cast bf16 -> i16 or i16 -> bf16.
-        // For now, we can handle this case as i16 since it's just a bypass.
-        if (input.elementType() == DType::bf16 || output.elementType() == DType::bf16) {
-            input.setElementType(DType::int16);
-            output.setElementType(DType::int16);
-        }
+
         // wram.load() doesn't support float32
         if (input.elementType() == DType::fp32) {
             input.setElementType(DType::int32);
             output.setElementType(DType::int32);
         }
-        int vectorSize = slice.act.width(DType::none, input.elementType());
+
+        // View the input as bit fields
+        input.setElementType(DType::int1);
+        llvm::errs() << "Input: " << input << "\n";
+
+        DType dataType = output.elementType();
+        int vectorSize = slice.act.width(DType::none, dataType);
         input.fuse(std::min(input.denseDims(), output.denseDims())).vectorize(vectorSize);
 
         For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
             For(auto iv = slice.iterate(input.dim(In::Vectors))) {
-                WData wdata = slice.wram.load(input[ndd][iv]);
+                WData wdata = slice.wram.load(input[ndd][iv], dataType);
                 PData pdata = slice.alu.load(wdata);
                 QData res = slice.act.load(pdata);
                 slice.append(output[ndd], res);
@@ -198,6 +199,7 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
             input.setElementType(DType::int16);
             output.setElementType(DType::int16);
         }
+
         int vectorSize = slice.act.width(input.elementType());
         input.fuse(std::min(input.denseDims(), output.denseDims())).vectorize(vectorSize);
 

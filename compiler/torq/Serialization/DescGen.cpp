@@ -218,9 +218,8 @@ static uint32_t toChars(torq_hw::ALUOp0Mode hwOp) {
         return 'MUL';
     case torq_hw::ALUOp0Mode::DBYP:
         return 'DBYP';
-    default:
-        return 'MUL';
     }
+    return 'MUL';
 }
 
 static uint32_t toChars(torq_hw::ALUOp1Mode hwOp) {
@@ -265,9 +264,8 @@ static uint32_t toChars(torq_hw::ALUOp1Mode hwOp) {
         return 'MUL';
     case torq_hw::ALUOp1Mode::SEL:
         return 'SEL';
-    default:
-        return 'ACC';
     }
+    return 'ACC';
 }
 
 static uint32_t toChars(torq_hw::RoundingMode roundingMode) {
@@ -288,26 +286,33 @@ static uint32_t toChars(torq_hw::RoundingMode roundingMode) {
         return 'NTZ';
     case torq_hw::RoundingMode::DBL:
         return 'DBL';
-    default:
-        return 'NTP';
     }
+    return 'NTP';
 }
 
 static uint32_t toChars(torq_hw::WeightFormat weightFormat) {
     switch (weightFormat) {
+    case torq_hw::WeightFormat::NONE:
+        return 0;
     case torq_hw::WeightFormat::SI:
         return 'SI';
     case torq_hw::WeightFormat::UI:
         return 'UI';
-    case torq_hw::WeightFormat::FP:
-        return 'FP';
-    case torq_hw::WeightFormat::BF:
-        return 'BF';
-    case torq_hw::WeightFormat::NF:
-        return 'NF';
-    default:
-        return 'SI';
+    case torq_hw::WeightFormat::BFSI:
+        return 'BFSI';
+    case torq_hw::WeightFormat::BFUI:
+        return 'BFUI';
+    case torq_hw::WeightFormat::NF4:
+        return 'NF4';
+    case torq_hw::WeightFormat::E2M1:
+        return 'E2M1';
+    case torq_hw::WeightFormat::E4M3:
+        return 'E4M3';
+    case torq_hw::WeightFormat::E5M2:
+        return 'E5M2';
     }
+    assert(false && "Invalid weight format");
+    return 0;
 }
 
 static uint32_t toChars(torq_hw::NumberFormat numberFormat) {
@@ -316,13 +321,14 @@ static uint32_t toChars(torq_hw::NumberFormat numberFormat) {
         return 'I';
     case torq_hw::NumberFormat::BF:
         return 'BF';
-    default:
-        return 'I';
     }
+    return 'I';
 }
 
 static uint32_t toChars(torq_hw::ACTMode actMode) {
     switch (actMode) {
+    case torq_hw::ACTMode::ACT:
+        return 'ACT';
     case torq_hw::ACTMode::ABS:
         return 'ABS';
     case torq_hw::ACTMode::NEG:
@@ -343,9 +349,8 @@ static uint32_t toChars(torq_hw::ACTMode actMode) {
         return 'LSR';
     case torq_hw::ACTMode::ASR:
         return 'ASR';
-    default:
-        return 'ACT';
     }
+    return 'ACT';
 }
 
 SliceTask::SliceTask(AluMode m) : aluMode(m) { d->cfg.stride = 1; }
@@ -544,7 +549,13 @@ Ndl::Ndl(Ndl &&c) : d(std::move(c.d)) {}
 
 bool Ndl::empty() const { return d->cmd.nld + d->cmd.nhd + d->cmd.nsd == 0; }
 
-void Ndl::setBaseAddress(uint32_t addr) { d->cmd.base_addr = addr; }
+void Ndl::setBaseAddress(uint32_t addr) {
+    d->cmd.base_addr = addr;
+    if (d->cmd.nld > 0 && d->cmd.t[0] == 'b') {
+        // Address is expressed in bits as well
+        d->cmd.base_addr *= 8;
+    }
+}
 
 void Ndl::setSyncMode(uint8_t sync_mode, uint8_t sync_nhd) {
     d->cmd.sync_mode = sync_mode;
@@ -581,6 +592,8 @@ static char toChar(torq_hw::MemDimTag tag) {
         return 'B';
     case torq_hw::MemDimTag::D:
         return 'D';
+    case torq_hw::MemDimTag::b:
+        return 'b';
     }
 }
 

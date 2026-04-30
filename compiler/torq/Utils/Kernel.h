@@ -112,7 +112,30 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const IterVar &iv);
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Indexes &indexes);
 
 // Data types for tensor elements
-enum class DType { none, uint8, uint16, uint32, int8, int16, int32, bf16, fp32 };
+enum class DType {
+    none,
+    uint8,
+    uint16,
+    uint32,
+    int8,
+    int16,
+    int32,
+    bf16,
+    fp32,
+    // Compressed types, can't be directly used for computation
+    uint1,
+    uint2,
+    uint4,
+    uint6,
+    int1,
+    int2,
+    int4,
+    int6,
+    nf4,
+    fp4,
+    fp8e4m3fn,
+    fp8e5m2
+};
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype);
 
 // Dimension indicators for vectorized data
@@ -432,7 +455,11 @@ class WRam : public SliceRam {
   public:
     // Load the WRAM with (weights) data
     // Weight type fp32 is not supported.
-    WData load(const LData &data);
+    // Optionally the data can be converted to the specified type (int8, uint8 or bf16)
+    // If type not specified, compressed data are automatically expanded to be compatible with
+    // the input type (eg bf16 if input is bf16, int8 if input is int) or to its default
+    // uncompressed type if the input not used.
+    WData load(const LData &data, DType type = DType::none);
 
     const char *name() const override;
     int size() const override;
@@ -755,19 +782,35 @@ DType getDType(mlir::Type mlirType);
 // return size in bytes of the given type
 int sizeofType(DType type);
 
-// return true if the given type is a floating point type
+// return size in bits of the given type
+int sizeofTypeBits(DType type);
+
+// return true if the given type is an uncompressed floating point type
 bool isFloat(DType type);
 
-// return true if the given type is an integer type
+// return true if the given type is a compressed floating point type
+bool isCompressedFloat(DType type);
+
+// return true if the given type is an uncompressed integer type
 bool isInt(DType type);
 
-// return true if the given type is an unsigned type
+// return true if the given type is a compressed integer type
+bool isCompressedInt(DType type);
+
+// return true if the given type is an unsigned type (compressed or not)
 bool isUnsigned(DType type);
+
+// return true if the given type is compressed (can't be used directly for computation)
+bool isCompressed(DType type);
 
 // convert signed integer types to their corresponding unsigned type
 // (int8 -> uint8, int16 -> uint16, int32 -> uint32). Already-unsigned
 // integer types are returned unchanged. Non-integer types will assert.
 DType toUnsigned(DType type);
+
+// Convert compressed types to their corresponding uncompressed type, eg uint4 -> uint8, nf4-> fp16
+// If the type was not compressed, return the type itself
+DType toUncompressed(DType type);
 
 // Return the max value for the given DType as an integer constant
 int32_t maxVal(DType type);

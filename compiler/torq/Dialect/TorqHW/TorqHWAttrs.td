@@ -104,7 +104,8 @@ def TorqHW_MemDimTagAttr : I32EnumAttr<"MemDimTag",
       I32EnumAttrCaseWithDoc<"G", 7, "Channel group index of both input and output tensors">,
       I32EnumAttrCaseWithDoc<"O", 8, "Other index">,
       I32EnumAttrCaseWithDoc<"B", 9, "Byte loop">,
-      I32EnumAttrCaseWithDoc<"D", 10, "Data loop">
+      I32EnumAttrCaseWithDoc<"D", 10, "Data loop">,
+      I32EnumAttrCaseWithDoc<"b", 11, "Bit loop">
     ]> {
   let cppNamespace = "::mlir::syna::torq_hw";
 }
@@ -137,11 +138,15 @@ def TorqHW_RoundingModeAttr : I32EnumAttr<"RoundingMode",
 def TorqHW_WeightFormatAttr : I32EnumAttr<"WeightFormat",
     "The weight format, for weight decompression only, NOT for ALU",
     [
-      I32EnumAttrCaseWithDoc<"SI", 1, "Signed integer for 2,4,6-bit integer">,
-      I32EnumAttrCaseWithDoc<"UI", 2, "Unsigned integer for 2,4,6-bit integer">,
-      I32EnumAttrCaseWithDoc<"FP", 3, "Reserved for future FP4, FP8 support">,
-      I32EnumAttrCaseWithDoc<"BF", 4, "Reserved">,
-      I32EnumAttrCaseWithDoc<"NF", 5, "Reserved for future NF4 support">,
+      I32EnumAttrCaseWithDoc<"NONE", 0, "No decompression">,
+      I32EnumAttrCaseWithDoc<"SI", 1, "u/i1, u/i2, u/i4, u/i6 -> int8">, // ?? how to tell if input is signed or unsigned?
+      I32EnumAttrCaseWithDoc<"UI", 2, "u1, u2, u4, u6 -> uint8">,
+      I32EnumAttrCaseWithDoc<"BFSI", 3, "i1, i2, i4, i6 -> bf16">,
+      I32EnumAttrCaseWithDoc<"BFUI", 4, "u1, u2, u4, u6 -> bf16">,
+      I32EnumAttrCaseWithDoc<"NF4", 5, "nf4 -> bf16">,
+      I32EnumAttrCaseWithDoc<"E2M1", 6, "fp4 -> bf16">,
+      I32EnumAttrCaseWithDoc<"E4M3", 7, "fp8-e4m3fn -> bf16">,
+      I32EnumAttrCaseWithDoc<"E5M2", 8, "fp8-e5m2 -> bf16">,
     ]> {
     let cppNamespace = "::mlir::syna::torq_hw";
 }

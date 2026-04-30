@@ -383,25 +383,45 @@ static int backDimCount(const Shape &shape) {
     return shape.back().count;
 }
 
-int sizeofType(DType type) {
+int sizeofTypeBits(DType type) {
     switch (type) {
     case DType::uint8:
     case DType::int8:
-        return 1;
+    case DType::fp8e4m3fn:
+    case DType::fp8e5m2:
+        return 8;
     case DType::uint16:
     case DType::int16:
-        return 2;
+    case DType::bf16:
+        return 16;
     case DType::uint32:
     case DType::int32:
-        return 4;
-    case DType::bf16:
-        return 2;
     case DType::fp32:
+        return 32;
+    case DType::uint1:
+    case DType::int1:
+        return 1;
+    case DType::uint2:
+    case DType::int2:
+        return 2;
+    case DType::uint4:
+    case DType::int4:
+    case DType::nf4:
+    case DType::fp4:
         return 4;
+    case DType::uint6:
+    case DType::int6:
+        return 6;
     case DType::none:
         return 0;
     }
     assert(false && "Unknown data type");
+}
+
+int sizeofType(DType type) {
+    // For types that have sub-byte size, just return 1 for now
+    // This helps when generating NDL strides
+    return div_ceil(sizeofTypeBits(type), 8);
 }
 
 DType getDType(mlir::Type mlirType) {
@@ -426,16 +446,36 @@ DType getDType(mlir::Type mlirType) {
 
 bool isFloat(DType type) { return type == DType::bf16 || type == DType::fp32; }
 
-bool isInt(DType type) { return type != DType::none && !isFloat(type); }
+bool isInt(DType type) { return type != DType::none && !isFloat(type) && !isCompressed(type); }
 
-bool isUnsigned(DType type) {
-    return type == DType::uint8 || type == DType::uint16 || type == DType::uint32;
+bool isUnsigned(DType dt) {
+    return dt == DType::uint8 || dt == DType::uint16 || dt == DType::uint32 || dt == DType::uint1 ||
+           dt == DType::uint2 || dt == DType::uint4 || dt == DType::uint6;
 }
 
-DType toUnsigned(DType type) {
-    assert(isInt(type) && "toUnsigned expects integer types");
+bool isCompressedInt(DType type) {
+    return type == DType::int1 || type == DType::int2 || type == DType::int4 ||
+           type == DType::int6 || type == DType::uint1 || type == DType::uint2 ||
+           type == DType::uint4 || type == DType::uint6;
+}
 
+bool isCompressedFloat(DType type) {
+    return type == DType::nf4 || type == DType::fp4 || type == DType::fp8e4m3fn ||
+           type == DType::fp8e5m2;
+}
+
+bool isCompressed(DType type) { return isCompressedInt(type) || isCompressedFloat(type); }
+
+DType toUnsigned(DType type) {
     switch (type) {
+    case DType::int1:
+        return DType::uint1;
+    case DType::int2:
+        return DType::uint2;
+    case DType::int4:
+        return DType::uint4;
+    case DType::int6:
+        return DType::uint6;
     case DType::int8:
         return DType::uint8;
     case DType::int16:
@@ -443,8 +483,20 @@ DType toUnsigned(DType type) {
     case DType::int32:
         return DType::uint32;
     default:
-        return type;
+        assert(isInt(type) && "toUnsigned expects integer types");
+        return DType::none;
     }
+}
+
+DType toUncompressed(DType type) {
+    DType uncompressedType = type;
+    if (isCompressedInt(type)) {
+        uncompressedType = isUnsigned(type) ? DType::uint8 : DType::int8;
+    }
+    else if (isCompressedFloat(type)) {
+        uncompressedType = DType::bf16;
+    }
+    return uncompressedType;
 }
 
 int32_t maxVal(DType type) {
@@ -489,6 +541,43 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
         break;
     case DType::none:
         os << "none";
+        break;
+    case DType::int1:
+        os << "int1";
+        break;
+    case DType::int2:
+        os << "int2";
+        break;
+    case DType::int4:
+        os << "int4";
+        break;
+    case DType::int6:
+        os << "int6";
+        break;
+    case DType::uint1:
+        os << "uint1";
+        break;
+    case DType::uint2:
+        os << "uint2";
+        break;
+
+    case DType::uint4:
+        os << "uint4";
+        break;
+    case DType::uint6:
+        os << "uint6";
+        break;
+    case DType::nf4:
+        os << "nf4";
+        break;
+    case DType::fp4:
+        os << "fp4";
+        break;
+    case DType::fp8e4m3fn:
+        os << "fp8e4m3fn";
+        break;
+    case DType::fp8e5m2:
+        os << "fp8e5m2";
         break;
     }
     return os;
@@ -1654,6 +1743,26 @@ void SlicePrivate::cepr(const PData &pdata) {
 void SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSize) {
     MemNdlDimsData ndlDims;
     int offset = addMemNdlDims(ndlType, ndlDims, data, appendBlockSize);
+    if (isCompressed(data.elementType())) {
+        assert(ndlType == NdlType::DEWR && "Compressed types only supported for DEWR");
+        int bitWidth = sizeofTypeBits(data.elementType());
+        // For compressed source types, all the strides are expressed in bits
+        // Adjust the strides to be in bits instead of bytes
+        bool isBdim = true;
+        for (auto &dim : ndlDims) {
+            assert(!dim.getExprStride().has_value());
+            assert(dim.getIntStride().has_value());
+            if (isBdim) {
+                isBdim = false;
+                dim.count = bitWidth;
+                dim.tag = MemDimTag::b;
+            }
+            else {
+                dim.setIntStride(dim.getIntStride().value() * bitWidth);
+            }
+        }
+    }
+
     _ndls.add(ndlType, ndlDims, offset);
     ndlToStr(ndlType, _ndls.getMemNdl(ndlType));
 }
@@ -2368,13 +2477,78 @@ int WRam::size() const {
     return HwInfo::wram_seg_width + 4;
 }
 
-WData WRam::load(const LData &data) {
+// Determine the required weight format conversion based on source and destination types
+static std::optional<WeightFormat> getWeightFormatConversion(DType srcType, DType dstType) {
+    if (srcType == dstType) {
+        // Nothing to do
+        return WeightFormat::NONE;
+    }
+
+    std::optional<WeightFormat> cvt;
+    switch (dstType) {
+    case DType::uint8:
+        if (!isUnsigned(srcType))
+            break;
+        LLVM_FALLTHROUGH;
+    case DType::int8:
+        if (isCompressedInt(srcType)) {
+            cvt = isUnsigned(srcType) ? WeightFormat::UI : WeightFormat::SI;
+        }
+        break;
+    case DType::bf16:
+        switch (srcType) {
+        case DType::bf16:
+            cvt = WeightFormat::NONE;
+            break;
+        case DType::nf4:
+            cvt = WeightFormat::NF4;
+            break;
+        case DType::fp4:
+            cvt = WeightFormat::E2M1;
+            break;
+        case DType::fp8e4m3fn:
+            cvt = WeightFormat::E4M3;
+            break;
+        case DType::fp8e5m2:
+            cvt = WeightFormat::E5M2;
+            break;
+        default:
+            if (isCompressedInt(srcType) || srcType == DType::int8) {
+                cvt = isUnsigned(srcType) ? WeightFormat::BFUI : WeightFormat::BFSI;
+            }
+            break;
+        }
+        break;
+    default:
+        llvm::errs() << "Unsupported WRam load destination type: " << dstType << "\n";
+        assert(false);
+        break;
+    }
+    return cvt;
+}
+
+WData WRam::load(const LData &data, DType dstType) {
+    DType srcType = data.elementType();
+    if (dstType == DType::none) {
+        // Use deduced destination type if any, or deduce it from the source type
+        DType deducedWeightType = d->_wram.elementType;
+        dstType = deducedWeightType != DType::none ? deducedWeightType : toUncompressed(srcType);
+    }
+    auto cvt = getWeightFormatConversion(srcType, dstType);
+    if (!cvt.has_value()) {
+        llvm::errs() << "Can't decompress weight from " << srcType << " to " << dstType << "\n";
+        assert(false && "Error: invalid weight decompression");
+    }
+    d->_cfg.weight_format = cvt.value();
+
     d->dewr(data);
 
     d->_wram.loadNesting = d->_forStack.size();
-    d->_wram.elementType = data.elementType();
+    d->_wram.elementType = dstType;
 
-    auto wdata = WData(data.subShape(), data.elementType());
+    assert(!isCompressed(dstType) && "Compressed weights must be expanded on load");
+
+    auto wdata = WData(data.subShape(), dstType);
     d->ceww(wdata);
 
     checkLoadSize(wdata);
@@ -2471,6 +2645,13 @@ PData Alu::elementwiseProductAccumulate(const IData &idata, const WData &wdata, 
 }
 
 int Alu::iWidth(DType iType, DType wType, int weightWidth) const {
+    assert(!isCompressed(iType) && "Compressed iType not supported here");
+    if (isCompressed(wType)) {
+        // Deduce and remember the uncompressed weight type (compatible with the input type)
+        // This will be used to automatically uncompress the weight to the right type on load
+        wType = isFloat(iType) ? DType::bf16 : toUncompressed(wType);
+        d->_wram.elementType = wType;
+    }
     if (isFloat(iType)) {
         assert(!isInt(wType) && "Weight type can't be int for float input");
         if (weightWidth <= 0) {
@@ -2515,6 +2696,7 @@ int Alu::iWidthForAccumulateClamp(DType iType, torq_hw::ALUOp1Mode accMode) cons
 }
 
 int Alu::wWidth(DType wType) const {
+    wType = toUncompressed(wType);
     int weightSize = wType == DType::none ? 1 : sizeofType(wType);
     return HwInfo::wram_seg_width / weightSize;
 }
@@ -2541,7 +2723,8 @@ QData Act::rescaleClamp(
 }
 
 int Act::width(DType iType, DType wType, bool biasScalePerItem) const {
-    return d->actWidth(iType, wType, biasScalePerItem);
+    assert(!isCompressed(iType) && "Compressed iType not supported here");
+    return d->actWidth(iType, toUncompressed(wType), biasScalePerItem);
 }
 
 //
@@ -2690,6 +2873,7 @@ static void fuse(LData &data, int count) {
 }
 
 static void vectorize(LData &data, int vectorSize, int vectorStride) {
+    assert(vectorSize > 0 && "Vector size must be positive");
     if (data.denseDims() == 0) {
         // This is a scalar tensor or a tensor where even the innermost dimension is not dense
         // Add a placeholder dense dimension of size 1 to be able to vectorize
