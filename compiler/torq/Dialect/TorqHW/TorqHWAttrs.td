@@ -12,7 +12,9 @@ include "torq/Dialect/TorqHW/TorqHWBase.td"
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/EnumAttr.td"
 
-class I32EnumAttrCaseWithDoc<string sym, int val, string doc> : I32EnumAttrCase<sym, val>;
+class I32EnumAttrCaseWithDoc<string sym, int val, string doc> : I32EnumAttrCase<sym, val> {
+  string _doc = doc;
+}
 
 
 def TorqHW_ACTModeAttr: I32EnumAttr<"ACTMode",
