@@ -359,10 +359,10 @@ int _css_dma_start(torq_wrap_t *wrap)
                                                | RF_BMSK_LSH(CDMA,DMACH0_CH_XSIZE_DESXSIZE, wrap->cfg.cdma_len));
     CFG_WR_N(3, RA_(CDMA,DMACH0_CH_SRCTRANSCFG), RF_LSH(CDMA,DMACH0_CH_SRCTRANSCFG_SRCMEMATTRLO,    4)
                                                | RF_LSH(CDMA,DMACH0_CH_SRCTRANSCFG_SRCMEMATTRHI,    4)
-                                               | RF_LSH(CDMA,DMACH0_CH_SRCTRANSCFG_SRCMAXBURSTLEN, 15));
+                                               | RF_LSH(CDMA,DMACH0_CH_SRCTRANSCFG_SRCMAXBURSTLEN,  0));
     CFG_WR_C(   RA_(CDMA,DMACH0_CH_DESTRANSCFG), RF_LSH(CDMA,DMACH0_CH_DESTRANSCFG_DESMEMATTRLO,    4)
                                                | RF_LSH(CDMA,DMACH0_CH_DESTRANSCFG_DESMEMATTRHI,    4)
-                                               | RF_LSH(CDMA,DMACH0_CH_DESTRANSCFG_DESMAXBURSTLEN, 15));
+                                               | RF_LSH(CDMA,DMACH0_CH_DESTRANSCFG_DESMAXBURSTLEN,  0));
     CFG_WR_C(   RA_(CDMA,DMACH0_CH_XADDRINC   ), RF_LSH(CDMA,DMACH0_CH_XADDRINC_SRCXADDRINC,        1)
                                                | RF_LSH(CDMA,DMACH0_CH_XADDRINC_DESXADDRINC,        1));
     //CFG_WR_S(   RA_(CDMA,DMACH0_CH_ISSUECAP   ), RF_LSH(CDMA,DMACH0_CH_ISSUECAP_ISSUECAP,  0));
@@ -530,9 +530,6 @@ static int _slc_cfg_desc_gen(torq_wrap_t *wrap)
 {
     int a, n;
     uint32_t u32;
-
-    assert(wrap->cfg.w_format == 0 || wrap->cfg.de_w_unsigned == 0); //only one of them can be speficied
-    assert(wrap->cfg.w_format == 0 || wrap->cfg.w_format == 'SI' || wrap->cfg.w_format == 'UI');
 
     switch (wrap->cfg.act_format) {
     case 0:
@@ -843,7 +840,7 @@ static int _slc_cfg_desc_gen(torq_wrap_t *wrap)
     wrap->regs.SLC0.CE_REGS.AL_MODE.unsigned_w = wrap->cfg.alu_w_unsigned & 15;
     wrap->regs.SLC0.CE_REGS.AL_MODE.unsigned_d = wrap->cfg.alu_d_unsigned & 15;
     wrap->regs.SLC0.CE_REGS.AL_MODE_C1.unsigned_w = (wrap->cfg.alu_w_unsigned>>4) & 15;
-    wrap->regs.SLC0.CE_REGS.AL_MODE_C1.unsigned_d = (wrap->cfg.alu_w_unsigned>>4) & 15;
+    wrap->regs.SLC0.CE_REGS.AL_MODE_C1.unsigned_d = (wrap->cfg.alu_d_unsigned>>4) & 15;
 
     wrap->regs.SLC0.DE_REGS.CTRL.pri_dr = 1;
     wrap->regs.SLC0.DE_REGS.CTRL.pri_wr = 1;
@@ -1407,6 +1404,7 @@ static int _reg_ndl_desc_gen(torq_wrap_t *wrap, uint32_t tag, int set_id, torq_n
             wrap->regs.SLC0.CE_REGS.CTRL_C1.cedr_l_size = dims.ln==4?0:dims.ln;
             assert(n>=1 && n<=(1<<8));
             wrap->regs.SLC0.CE_REGS.CTRL_C1.cedr_n_size = n==(1<<8)?0:n;
+            wrap->regs.SLC0.CE_REGS.CTRL_C1.cedr_b_size = dims.bn==4?0:dims.bn;
             break;
         }
     case 'CEWR':
@@ -1605,7 +1603,28 @@ static int _mem_ndl_desc_gen(torq_wrap_t* wrap, uint32_t tag, int set_id, uint32
         assert(s>=-(1<<23) && s<(1<<23));
         desc_buf[len++] = (s&((1<<24)-1))|(p<<28);
     }
-    assert(len >= 2);
+    //TODO: may no longer be necessary for newer hardware versions
+    if (tag == 'DEDR' && set_id == 0 && wrap->cfg.stride == 2)
+    {
+        if (wrap->regs.SLC0.DE_REGS.DE_D_R.ndss_idx == wrap->regs.SLC0.DE_REGS.DE_D_R.ndss_idx1)
+        {
+            i = wrap->regs.SLC0.DE_REGS.DE_D_R.ndss_size;
+            j = wrap->regs.SLC0.DE_REGS.DE_D_R.ndss_size1;
+            assert(i == 0 || j == 0);   // at least one of them is zero
+            if (i || j)
+            {
+                if (i == 0)
+                {
+                    wrap->regs.SLC0.DE_REGS.DE_D_R.ndss_idx++;
+                }
+                else if (j == 0)
+                {
+                    wrap->regs.SLC0.DE_REGS.DE_D_R.ndss_idx1++;
+                }
+                assert(wrap->regs.SLC0.DE_REGS.DE_D_R.ndss_idx != wrap->regs.SLC0.DE_REGS.DE_D_R.ndss_idx1);
+            }
+        }
+    }
     desc_buf[len-2] |= (1u<<31); //last_dim
     return (int)len;
 }
@@ -1614,7 +1633,7 @@ static int _proc_mem_ndl_cmd(torq_wrap_t *wrap, uint32_t tag, int set_id, torq_n
 {
     int i, idx;
     int32_t s=0, a_adj;
-    uint32_t n, len, w_unsigned;
+    uint32_t n, len, wmem_format, wbus_format;
     uint32_t *desc_buf;
     _mem_bdg_ldims_t ldims;
     int32_t in_even, kernel_left_even, kernel_left_odd;
@@ -1657,9 +1676,6 @@ static int _proc_mem_ndl_cmd(torq_wrap_t *wrap, uint32_t tag, int set_id, torq_n
     assert(wrap->xn); //'REF' must be the first NDL descriptor
     assert(cmd->nhd);
     assert(wrap->ndl_desc_len[idx]+cmd->nhd*2+1 < NDL_DESC_MAX_LEN_PER_TASK);
-
-    if (wrap->cfg.w_format == 0) w_unsigned = wrap->cfg.de_w_unsigned; //TODO: obsolete
-    else                         w_unsigned = (wrap->cfg.w_format == 'UI'); //TODO: floating point formats below 16-bit  not supported yet
 
     if (wrap->ndl_desc_len[idx] == 0) {
         assert(ndl_desc_addr  != TORQ_LADDR_APPEND);
@@ -1782,8 +1798,11 @@ static int _proc_mem_ndl_cmd(torq_wrap_t *wrap, uint32_t tag, int set_id, torq_n
                 wrap->regs.SLC0.DE_REGS.DE_D_R.ypad_min = MAX((int32_t)(yj_min * wrap->xn + kernel_left_even), 0);
                 wrap->regs.SLC0.DE_REGS.DE_D_R.stride = 1;
                 wrap->regs.SLC0.DE_REGS.DE_D_R.xi_dist = kernel_left_even - kernel_left_odd;
-                wrap->regs.SLC0.DE_REGS.DE_D_R.yi_dist = kernel_top_odd - kernel_top_even;
-                wrap->regs.SLC0.DE_REGS.DE_D_R.ye_dist = jn_odd - jn_even - (wrap->cfg.pad_bottom > 0 ?  kernel_bottom_odd - kernel_bottom_even : 0);
+                if (jn_odd > 0)
+                {
+                    wrap->regs.SLC0.DE_REGS.DE_D_R.yi_dist = kernel_top_odd - kernel_top_even;
+                    wrap->regs.SLC0.DE_REGS.DE_D_R.ye_dist = jn_odd - jn_even - (wrap->cfg.pad_bottom > 0 ? kernel_bottom_odd - kernel_bottom_even : 0);
+                }
             }
         }
         break;
@@ -1806,14 +1825,43 @@ static int _proc_mem_ndl_cmd(torq_wrap_t *wrap, uint32_t tag, int set_id, torq_n
     }
     case 'DEWR':
         assert(set_id==0);
+        wmem_format = wrap->cfg.wmem_format ? wrap->cfg.wmem_format : 'SI';
+        wbus_format = wrap->cfg.wbus_format ? wrap->cfg.wbus_format : 'I';
+        assert(wbus_format == 'I' || wbus_format == 'BF');
         if (ldims.au_is_bit) { // address unit is bit
             assert(ldims.bn==1 || ldims.bn==2 || ldims.bn==4 || ldims.bn==6); // only b1,b2,b4,b6 are supported
-            wrap->regs.SLC0.DE_REGS.DE_W_R.d_cfmt = (ldims.bn>>1) | (w_unsigned<<2);
+            switch (wmem_format) {
+            case 'SI': wrap->regs.SLC0.DE_REGS.DE_W_R.d_cfmt = (ldims.bn>>1);          break;
+            case 'UI': wrap->regs.SLC0.DE_REGS.DE_W_R.d_cfmt = (ldims.bn>>1) | 4;      break;
+            case 'NF': assert(ldims.bn==4); wrap->regs.SLC0.DE_REGS.DE_W_R.d_cfmt = 8; break;
+            case 'FP': assert(ldims.bn==4); wrap->regs.SLC0.DE_REGS.DE_W_R.d_cfmt = 9; break; 
+            default:   assert(!"ERROR: invalid wmem_format");
+            }
             wrap->regs.SLC0.DE_REGS.DE_W_R.d_comp = 1;
-            n /= ldims.bn; // weights are zero- or sign-extended to 8-bit
+            n /= ldims.bn; // to 8-bit
+            if (wbus_format =='BF') {
+                wrap->regs.SLC0.DE_REGS.DE_W_R.d_type = 2;
+                n *= 2; // to 16-bit
+            }
         }
         else { // address unit is byte
             assert(ldims.bn==1 || ldims.bn==2 || ldims.bn==4); // only B1,B2,B4 are supported
+            if (((wmem_format == 'SI' || wmem_format == 'UI') && (wbus_format == 'I'))
+                || (ldims.bn==2 && wmem_format == 'BF' && wbus_format == 'BF')) {
+                // passthrough without conversion
+            }
+            else {
+                assert(ldims.bn==1 && wbus_format == 'BF');
+                switch (wmem_format) {
+                case 'SI': wrap->regs.SLC0.DE_REGS.DE_W_R.d_cfmt = 15; break;
+                case 'FP': wrap->regs.SLC0.DE_REGS.DE_W_R.d_cfmt = 11; break;
+                case 'FN': wrap->regs.SLC0.DE_REGS.DE_W_R.d_cfmt = 10; break;
+                default:   assert(!"ERROR: invalid wmem_format");
+                }
+                wrap->regs.SLC0.DE_REGS.DE_W_R.d_comp = 1;
+                wrap->regs.SLC0.DE_REGS.DE_W_R.d_type = 2;
+                n *= 2; // to 16-bit
+            }
         }
         assert(ldims.d_is_mergeable); // D must be contiguous
         assert(ldims.gn==1); // G is not supported
@@ -1906,10 +1954,15 @@ static int _proc_mem_ndl_cmd(torq_wrap_t *wrap, uint32_t tag, int set_id, torq_n
             if ((sdims.xn[0] == 1 || sdims.xs[0] == sdims.bn) && sdims.xn[1] == 1) { // 1 address, no split
                 s = 0;
             }
-            else if (sdims.xn[0] == 2 && sdims.xn[1] >= 1 && (sdims.xs[1] == sdims.bn || sdims.xn[1]==1)) { // 2 addresses, even/odd split
+            else if (sdims.xn[0] == 2 && (sdims.xn[1] == 1 || sdims.xs[1] == sdims.bn)) { // 2 addresses, even/odd split
                 wrap->regs.SLC0.DE_REGS.DE_Q_W.split_en = 1;
                 wrap->regs.SLC0.DE_REGS.DE_Q_W.split_type = 0;
                 s = sdims.xs[0];
+            }
+            else if (sdims.xn[0] == 1 && sdims.xn[1] == 2) { // 2 addresses, even/odd split //TODO: redandunt in the future if x0 can be merged in _parse*()
+                wrap->regs.SLC0.DE_REGS.DE_Q_W.split_en = 1;
+                wrap->regs.SLC0.DE_REGS.DE_Q_W.split_type = 0;
+                s = sdims.xs[1];
             }
             else assert(!"ERROR: invalid DEQW SDIM: X");
             wrap->regs.SLC0.DE_REGS.DE_Q_W.x_size = sdims.xn[0]*sdims.xn[1]; //TODO: h/w supports x0n==2 && x_size is odd (early termination)

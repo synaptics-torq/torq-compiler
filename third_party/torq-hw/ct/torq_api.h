@@ -62,14 +62,17 @@ typedef union torq_cfg_t
 {
     // for slice (slc_id>=0) configuration only:
     struct {
-        uint32_t    w_format;                // See Weight Format List; Only for weight decompression. NOT for ALU.
+        union {
+        uint32_t    wmem_format;             // W number format in LRAM (before decompression). See Weight Format List.
+        uint32_t    w_format;                // Obsolete. Will be removed. Renamed to wmem_format.
+        };
+        uint32_t    wbus_format;             // W number format on W-bus (after decompression). See Number Format List.
         uint32_t    alu_format;              // ALU number format; See Number Format List
         uint32_t    alu_op0_mode[2*4];       // See ALU Op0 Mode List; [0] for set 0, [4]: for set 1, [1..3, 5..7]: reserved, must be 0.
         uint32_t    alu_op1_mode[2*4];       // See ALU Op1 Mode List; [0] for set 0, [4]: for set 1, [1..3, 5..7]: reserved, must be 0.
-        uint32_t    alu_d_unsigned : 8;      // bit 0..3: s0a0, s0a1, s0a2, s0a3; bit 4..7: s1a0, s1a1, s1a2, s1a3; s: set index, a: alu index % 4
-        uint32_t    alu_w_unsigned : 4;      // bit 0..3: a0, a1, a2, a3; a: alu index % 4
-        uint32_t    de_w_unsigned : 1;       // Obsolete. May be removed in the next version. Must set to 0 when non-zero w_format is specified.
-        uint32_t    alu_disable : 16;        // Each bit controls 16 ALUs; 1: disable the 16-ALU group.
+        uint32_t    alu_d_unsigned  : 8;     // bit 0..3: s0a0, s0a1, s0a2, s0a3; bit 4..7: s1a0, s1a1, s1a2, s1a3; s: set index, a: alu index % 4
+        uint32_t    alu_w_unsigned  : 8;     // bit 0..3: s0a0, s0a1, s0a2, s0a3; bit 4..7: s1a0, s1a1, s1a2, s1a3; s: set index, a: alu index % 4
+        uint32_t    alu_disable     : 16;    // Each bit controls 16 ALUs; 1: disable the 16-ALU group.
         uint32_t    act_disable : 4;         // Each bit controls 4 ACTs; 1: disable the 4-ACT group.
 
         uint32_t    act_format;              // ACT number format; See Number Format List
@@ -199,7 +202,7 @@ int   torq_run(void *self);
 
 //   'X'      Horizontal index in output tensor
 //   'Y'      Vertical index in output tensor
-//   'A'      Linear index on flattened X-Y plane of output tensor (a = y*yn+x)
+//   'A'      Linear index on flattened X-Y plane of output tensor (a = y*xn+x)
 //   'I'      Horizontal index in kernel
 //   'J'      Vertical index in kernel
 //   'U'      Channel index within a channel group of input tensor 
@@ -322,19 +325,20 @@ int   torq_run(void *self);
 // 'BNOT'     P=P^x; (P0=~0)
 // 'BYP'      P=x (for P_INIT and TRANSPOSE)
 
-// Number Format List (for ALU and ACT):
-// 0          Same as 'INT'
+// Number Format List (for W-bus, ALU, and ACT):
+// 0          Same as 'I'
 // 'I'        Integer
-// 'BF'       Bfloat (experimental, subject to changes)
+// 'BF'       Bfloat
 
-// Weight Format List (for weight decompression only, NOT for ALU):
+// Weight Format List (for W-mem):
 
-// 0          Same as 'SI' for 2,4,6-bit integer
-// 'SI'       Signged integer for 2,4,6-bit integer
-// 'UI'       Unsigned integer for 2,4,6-bit integer
-// 'FP'       Reserved (for future FP4, FP8 support)
-// 'BF'       Reserved
-// 'NF'       Reserved (for future NF4 support)
+// 0          Same as 'SI'
+// 'SI'       Signged integer
+// 'UI'       Unsigned integer
+// 'NF'       NF4
+// 'FP'       FP8-E5M2, FP4-E2M1
+// 'FN'       FP8-E4M3FN
+// 'BF'       Bfloat16
 
 
 #ifdef __cplusplus
