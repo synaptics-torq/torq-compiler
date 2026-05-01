@@ -702,8 +702,10 @@ def onnx_layer_model(request):
 from .numpy import (
     _has_bf16_matmul,
     _has_bf16_einsum,
+    _has_gelu,
     _numpy_maxpool,
     _execute_onnx_model_numpy,
+    numpy_gelu_reference_results,
     numpy_reference_results,
 )
 

@@ -91,15 +91,16 @@ class GeluOpPattern : public OpRewritePattern<linalg::GenericOp> {
         };
         auto i16Bitcast = [&](Value x) { return makeBitcast(srcOp, rewriter, i16TType, x); };
         auto bf16Bitcast = [&](Value x) { return makeBitcast(srcOp, rewriter, bf16TType, x); };
+        auto fillScalar = [&](Value scalar) {
+            auto emptyTensor =
+                tensor::EmptyOp::create(rewriter, srcOp.getLoc(), bf16TType, ValueRange{});
+            return linalg::FillOp::create(
+                       rewriter, srcOp.getLoc(), ValueRange{scalar}, ValueRange{emptyTensor}
+            )
+                .getResult(0);
+        };
         auto gt = [&](Value tensor, Value scalar) {
-            auto expanded =
-                linalg::FillOp::create(
-                    rewriter, srcOp.getLoc(), ValueRange{scalar},
-                    ValueRange{
-                        tensor::EmptyOp::create(rewriter, srcOp.getLoc(), bf16TType, ValueRange{})
-                    }
-                )
-                    .getResult(0);
+            auto expanded = fillScalar(scalar);
             return makeElementWiseBinary(
                 srcOp, rewriter, tensor, expanded, torq_hl::ElementwiseOpEnum::GREATER
             );
@@ -130,6 +131,7 @@ class GeluOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto smallPosCutoff = fpConst(0.0030975342);
         auto largePosCutoff = fpConst(2.7343750000);
+        auto farNegCutoff = fpConst(-5.03125);
 
         auto x = i16Bitcast(input);
 
@@ -289,7 +291,21 @@ class GeluOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto neg = max(geluNegative, halfInput);
         auto isLarge = gt(input, largePosCutoff);
         auto isSmall = gt(input, smallPosCutoff);
-        auto gelu = select(isLarge, input, select(isSmall, geluPositive, neg));
+
+        /// FIXME: This is a *temporary* workaround. Much like sigmoid, the underlying HW issue
+        /// should be fixed.
+        ///
+        /// PyTorch tanh GELU is effectively zero in the far negative tail. The negative LUT is
+        /// generated with that same zero tail, but the final 9.7 table bucket reached by bf16
+        /// inputs below about -5.0625 can produce the GELU minimum on board/FPGA instead of the
+        /// table endpoint. Clamp that tail explicitly before consuming the LUT result;
+        /// the strict -5.03125 cutoff keeps the last non-endpoint bucket on the LUT path.
+        auto isFarNegative = makeElementWiseBinary(
+            srcOp, rewriter, fillScalar(farNegCutoff), input, torq_hl::ElementwiseOpEnum::GREATER
+        );
+        auto negativeZero = fillScalar(fpConst(-0.0f));
+        auto negWithTailClamp = select(isFarNegative, negativeZero, neg);
+        auto gelu = select(isLarge, input, select(isSmall, geluPositive, negWithTailClamp));
 
         rewriter.replaceOp(srcOp, gelu);
         return success();

@@ -6,6 +6,34 @@ from onnx import helper, numpy_helper, TensorProto
 from .versioned_fixtures import versioned_unhashable_object_fixture
 
 
+def torch_tanh_gelu_numpy(x, output_dtype=None):
+    """Approximate PyTorch GELU(approximate="tanh") and round back to input dtype."""
+    input_dtype = x.dtype
+    x = x.astype(np.float32, copy=False)
+    half = np.float32(0.5)
+    one = np.float32(1.0)
+    tanh_scale = np.float32(np.sqrt(2.0 / np.pi))
+    cubic_scale = np.float32(0.044715)
+    y = half * x * (
+        one + np.tanh(tanh_scale * (x + cubic_scale * x * x * x)).astype(np.float32)
+    )
+    y = y.astype(input_dtype, copy=False)
+    if output_dtype is not None:
+        y = y.astype(output_dtype, copy=False)
+    return y
+
+
+@versioned_unhashable_object_fixture
+def numpy_gelu_reference_results(input_data, mlir_io_spec):
+    assert len(input_data) == 1
+    assert len(mlir_io_spec.outputs) == 1
+
+    from .iree import get_dtype
+
+    output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
+    return [torch_tanh_gelu_numpy(input_data[0], output_dtype)]
+
+
 def _has_bf16_matmul(model):
     """Check if model contains MatMul with bf16."""
     graph = model.graph
@@ -40,6 +68,11 @@ def _has_bf16_einsum(model):
                    if init.name in node_inputs):
                 return True
     return False
+
+
+def _has_gelu(model):
+    """Check if model contains GELU."""
+    return any(node.op_type == "Gelu" for node in model.graph.node)
 
 
 def _numpy_maxpool(x, kernel_shape, strides, pads, ceil_mode=0):
@@ -142,6 +175,24 @@ def _execute_onnx_model_numpy(model, input_data):
             ceil_mode = next((attr.i for attr in node.attribute if attr.name == "ceil_mode"), 0)
             result = _numpy_maxpool(x, kernel_shape, strides, pads, ceil_mode)
             tensor_values[node.output[0]] = result
+
+        elif node.op_type == "Gelu":
+            approximate = next(
+                (
+                    attr.s.decode("utf-8")
+                    if isinstance(attr.s, (bytes, bytearray))
+                    else attr.s
+                    for attr in node.attribute
+                    if attr.name == "approximate"
+                ),
+                "none",
+            )
+            if approximate != "tanh":
+                raise NotImplementedError(f"Unsupported Gelu approximate={approximate!r}")
+
+            tensor_values[node.output[0]] = torch_tanh_gelu_numpy(
+                tensor_values[node.input[0]]
+            )
 
         else:
             # For other operations, try to use onnxruntime
