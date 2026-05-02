@@ -310,7 +310,7 @@ bool TorqAstraMachina::setupXramSpace() {
 std::optional<TorqDeviceBuffer> TorqAstraMachina::allocateDeviceBuffer(size_t size) {
     TorqDeviceBuffer buffer{};
     iree_status_t status = torq_hw_device_buffer_allocate(
-        TORQ_HW_DEVICE_BUFFER_MODE_DMA_HEAP, size, &buffer);
+        TORQ_HW_DEVICE_BUFFER_MODE_DMA_HEAP_UNCACHED, size, &buffer);
     if (!iree_status_is_ok(status)) {
         LOGE << "Failed to allocate device buffer: "
              << iree_status_code_string(iree_status_code(status));

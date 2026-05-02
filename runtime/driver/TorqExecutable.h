@@ -3,6 +3,8 @@
 #include "TorqHw.h"
 #include "TestVectorWriter.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <vector>
 #include <string>
@@ -53,11 +55,33 @@ private:
   // because there is one XRAM per executable so we can only load one state at a time
   std::mutex mutex_;
 
+  struct PersistentInputCopy {
+    bool valid{false};
+    iree_hal_buffer_t* buffer{nullptr};
+    iree_device_size_t effectiveOffset{0};
+    // Part of cache identity so a changed HAL binding view cannot bypass range validation.
+    iree_device_size_t bindingRange{0};
+    uint32_t xramAddress{0};
+    uint32_t bindingSize{0};
+  };
+
+  struct PersistentInputCopyXramIndexEntry {
+    uint32_t xramAddress{0};
+    uint64_t xramEnd{0};
+    size_t copyIndex{0};
+    uint64_t prefixMaxEnd{0};
+  };
+
+  std::vector<PersistentInputCopy> persistentInputCopies_;
+  std::vector<PersistentInputCopyXramIndexEntry> persistentInputCopiesByXramAddress_;
+
   // writes the inputs to XRAM from the user buffers
-  iree_status_t writeInputs(iree_hal_executable_dispatch_state_v0_t* state);
+  iree_status_t writeInputs(iree_hal_executable_dispatch_state_v0_t* state,
+                            std::vector<uint8_t>& zeroCopyAttached);
 
   // reads the outputs from XRAM to the user buffers
-  iree_status_t readOutputs(iree_hal_executable_dispatch_state_v0_t* state);
+  iree_status_t readOutputs(iree_hal_executable_dispatch_state_v0_t* state,
+                            std::vector<uint8_t>& zeroCopyAttached);
 
   iree_status_t loadNpuCode();
   iree_status_t loadHostCode();
@@ -93,6 +117,18 @@ private:
 
   // writes out the initial XRAM and LRAM state to the test vector dump
   void writeInitialStateToTestVector();
+
+  void clearPersistentInputCopies();
+
+  void addPersistentInputCopyToXramIndex(size_t copyIndex);
+
+  void removePersistentInputCopyFromXramIndex(size_t copyIndex);
+
+  void refreshPersistentInputCopyXramIndexPrefix(size_t firstEntry);
+
+  void invalidatePersistentInputCopy(size_t copyIndex);
+
+  void invalidatePersistentInputCopiesForXramRange(uint32_t xramAddress, uint64_t size);
   
 };
 

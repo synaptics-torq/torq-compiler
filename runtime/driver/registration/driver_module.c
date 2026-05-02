@@ -18,7 +18,7 @@
 #include <stddef.h>
 
 IREE_FLAG(
-    string, torq_device_allocator, "cpu",
+    string, torq_device_allocator, "dmabuf",
     "Allocator backing Torq device buffers: ['cpu', 'dmabuf']"
 );
 
