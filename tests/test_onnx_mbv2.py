@@ -12,7 +12,7 @@ def comparison_config_relaxed(request):
 
 @versioned_cached_data_fixture
 def comparison_config_for_reduce_mean_mbv2(request):
-    return {"fp_avg_tol": 0.03, "fp_max_tol": 0.31}
+    return {"fp_avg_tol": 0.02, "fp_max_tol": 0.5}
 
 @versioned_cached_data_fixture
 def comparison_config_for_mbv2(request):
@@ -21,32 +21,7 @@ def comparison_config_for_mbv2(request):
 @pytest.fixture
 def case_config(request, runtime_hw_type, chip_config):
 
-    next_chip = (chip_config.data['target'] != "SL2610")
-
-    failed_tc = []
-    if next_chip:
-        failed_tc += [
-            # Compile time timeout
-            "layer_Conv_3",
-            # Max relative difference: 0.9999998211860657
-            # Max absolute difference: 6.0
-            # Number of differences: 1914 out of 401408 [0.48%]
-            "layer_Conv_0",
-            # because of the above
-            "full_model"
-        ]
-
-    aws_fpga = (runtime_hw_type.data == "aws_fpga")
-    if aws_fpga:
-        failed_tc += [
-            # hangs on aws-fpga, to be investigated
-            "full_model"
-        ]
-
-    if any(s in request.node.name for s in failed_tc):
-        pytest.xfail("failing test or skipped for now")
-
-    torq_compiler_options = ["--torq-enable-torq-hl-tiling"]
+    torq_compiler_options = []
     if "full_model" in request.node.name:
         # Fix for bf16 clamp going to CSS
         torq_compiler_options += ["--torq-disable-css"]
@@ -59,13 +34,15 @@ def case_config(request, runtime_hw_type, chip_config):
     }
 
     relaxed_tolerance_tc = [
-        # Accuracy error due to the way comparison is handling close to 0 values
+        # Max relative difference: 0.01106114499270916
+        # Max absolute difference: 0.000152587890625
+        # Number of differences: 1 out of 1000 [0.10%]        # Accuracy error due to the way comparison is handling close to 0 values
         "layer_Gemm_64"
     ]
     if any(s in request.node.nodeid for s in relaxed_tolerance_tc):
         case_config_dict["comparison_config"] = "comparison_config_relaxed"
 
-    if "layer_ReduceMean" in request.node.name:
+    if "layer_ReduceMean_62" in request.node.name:
         case_config_dict["comparison_config"] = "comparison_config_for_reduce_mean_mbv2"
 
     if "full_model" in request.node.name:

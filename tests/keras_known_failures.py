@@ -1,55 +1,9 @@
 """
 Configuration for known failing Keras tests.
 
-This file defines which test cases are expected to fail. These tests will be
-marked with pytest.mark.xfail, allowing them to run without breaking CI/CD.
-
 When a test starts passing, remove it from the appropriate list.
 When adding new expected failures, add them to the appropriate list with a reason.
 """
-
-# Known failures for int8 quantization
-KNOWN_FAILURES_INT8 = {
-    # Format: "test_name": "reason for failure"
-    # Conv2D failures
-    "model218_conv_23x5x4x10_valid_stride2_int8": "Conv assertion failure",
-}
-
-# Known failures for int16 quantization
-KNOWN_FAILURES_INT16 = {
-    # Format: "test_name": "reason for failure"
-    # Add/Sub operations
-    "model470_add16x8_positive_s2v_int16": "Add operation assertion failure",
-    "model156_add_s2v_1x6x8x4_int16": "Add operation assertion failure",
-    "model157_add_v2s_1x6x8x4_int16": "Add operation assertion failure",
-    "model474_sub16x8_pos_v2s_int16": "Sub operation assertion failure",
-    "model475_sub16x8_neg_v2s_int16": "Sub operation assertion failure",
-    
-    # Conv2D failures
-    "conv_model_w100_h100_f5_k6_c4_int16": "Conv2D assertion failure",
-    "model008_conv2d_4x4x4x4_int16": "Conv2D assertion failure",
-    "model218_conv_23x5x4x10_valid_stride2_int16": "Conv assertion failure",
-    
-    # Activation functions
-    "model082_tanh_zpm115_int16": "Tanh assertion failure",
-    "model083_tanh_zpm128_int16": "Tanh assertion failure",
-    "model084_tanh_zp76_int16": "Tanh assertion failure",
-    "model085_tanh_zp127_int16": "Tanh assertion failure",
-    "model086_tanh_1x4x6x8_int16": "Tanh assertion failure",
-    "model087_sigmoid_1x4x6x8_int16": "Sigmoid assertion failure",
-    "model088_sigmoid_1x1x16x128_int16": "Sigmoid assertion failure",
-    "model090_sigmoid_zp26_int16": "Sigmoid assertion failure",
-    "model091_sigmoid_zp128_int16": "Sigmoid assertion failure",
-    "model092_sigmoid_zpm76_int16": "Sigmoid assertion failure",
-    "model093_sigmoid_zp128_int16": "Sigmoid assertion failure",
-    "model094_sigmoid_zp16_int16": "Sigmoid assertion failure",
-}
-
-# Known failures for specific operations (regardless of quantization)
-KNOWN_FAILURES_BY_OPERATION = {
-    # "conv_transpose": ["Issue with stride > 1"],
-    # "softmax": ["Precision issues with large input ranges"],
-}
 
 # Test cases that should be completely skipped (not run at all)
 SKIP_TESTS = {
@@ -236,35 +190,6 @@ SKIP_TESTS = {
     "model013_depthwise_1x3x3x2_same_int16": "Test ERROR - depthwise conv int16 failure",
     "model014_depthwise_1x3x3x8_valid_int16": "Test ERROR - depthwise conv int16 failure",
 }
-
-
-def should_xfail(test_name, markers=None):
-    """
-    Determine if a test should be marked as xfail.
-    
-    Args:
-        test_name: Name of the test case
-        markers: List of marker names applied to the test
-        
-    Returns:
-        Tuple of (should_xfail: bool, reason: str)
-    """
-    # Check if test is in known failures
-    if test_name in KNOWN_FAILURES_INT8:
-        return True, KNOWN_FAILURES_INT8[test_name]
-    
-    if test_name in KNOWN_FAILURES_INT16:
-        return True, KNOWN_FAILURES_INT16[test_name]
-    
-    # Check operation-based failures
-    if markers:
-        for marker in markers:
-            marker_name = marker if isinstance(marker, str) else marker.name
-            if marker_name in KNOWN_FAILURES_BY_OPERATION:
-                return True, KNOWN_FAILURES_BY_OPERATION[marker_name]
-    
-    return False, None
-
 
 def should_skip(test_name):
     """

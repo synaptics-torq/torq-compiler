@@ -14,7 +14,7 @@ from .models.keras_softmax import *
 from .models.keras_transpose import *
 from torq.testing.comparison import compare_test_results
 from torq.testing.cases import Case
-from .keras_known_failures import should_xfail, should_skip
+from .keras_known_failures import should_skip
 
 
 
@@ -39,14 +39,10 @@ def _add_quantization_and_markers(cases, marker_name):
             test_name = case.name + quant_suffix
             
             # Check for skip first
+            # FIXME: get rid of should_skip and just use xfail list in test_keras_ops-xfails.txt
             skip, skip_reason = should_skip(test_name)
             if skip:
                 marks.append(pytest.mark.skip(reason=skip_reason))
-            else:
-                # Check for xfail
-                xfail, xfail_reason = should_xfail(test_name, [marker_name, quant_mark.name])
-                if xfail:
-                    marks.append(pytest.mark.xfail(reason=xfail_reason, strict=False))
             
             result.append(pytest.param(new_case, marks=marks))
     
@@ -1163,47 +1159,6 @@ def case_config(request, runtime_hw_type, chip_config):
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
     case = request.param
     tc = case.data['keras_model_name']
-
-    failed_tc = [
-        'transpose_conv_model', # Issue see #1011
-        'model029_fc_1000x1000' # Issue see #1011
-    ]
-
-    if chip_config.data['target'] != "SL2610":
-        # Next chip failures
-        failed_tc += [
-            # FIXME: it should be model024_fc_97x2000_int8
-            'model024_fc_97x2000', #'Failed to allocate LRAM addresses"
-            'model035_avgpool_inp1x10x10x4_pool3x3_stride3x3_same',
-            'model036_avgpool_inp1x10x10x4_pool4x4_stride4x4_same',
-            'model039_avgpool_inp1x10x10x4_pool1x3_stride1x1_same',
-            # error: unable to free enough space for results and operands
-            'model089_softmax_inp1x1916x2',
-            'model021_fc_1991x61',
-            'model026_fc_1991x61'
-        ]
-        # Next chip fpga failures
-        if aws_fpga:
-            failed_tc += [
-                # # FIXME: how to distinguish between int8 and int16 ?
-                # For int8: Output is [127,127,127], expected is [11,9,31] 
-                # For int16:Output is [0,0,0], expected is [-32768, -32768, -32768]
-                'model471_add16x8_negative_s2v',  
-
-                # Assertion Error
-                'model131_mult_inp1x3x3x1',
-                'model053_mult_inp1x4x4x1_zp128_B',
-                'model143_conv3x3_mult_inp1x4x4x1',
-                'model137_add_mult_inp1x3x3x1',
-                'model052_mult_inp1x4x4x1_zp128_AB',
-                'model096_relu_zp26_8x8_inp_1x10x1x1',
-                'model130_conv3x3_inp1x3x3x1',
-                'model141_mult_inp1x4x4x1',
-                'model095_relu_8x8_inp_1x10x1x1',
-            ]
-
-    if any(s in tc for s in failed_tc):
-        pytest.xfail("output mismatch or error")
 
     extra_args = {}
     # Sotfmax needs to be converted to bf16 in order to allow pattern matching to use Slice execution

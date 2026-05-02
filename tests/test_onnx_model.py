@@ -37,10 +37,6 @@ def case_config(request, chip_config):
     ]
     if any(s in request.node.nodeid for s in example_tc):
         pytest.xfail("Skipped Example Cases")
-
-    next_chip = (chip_config.data['target'] != "SL2610")
-    if next_chip:
-        pytest.xfail("AssertionError: Nans differ")
     
     return {
          "onnx_model": "onnx_layer_model",

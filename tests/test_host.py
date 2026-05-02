@@ -58,9 +58,6 @@ def case_config(request):
         "keras_conv_act",
     ]
 
-    if request.param.name == "torch_ops_instancenorm":
-        pytest.xfail("not implemented yet")
-
     return {
         "input_data": "tweaked_random_input_data",
         "torq_compiler_options": ["--torq-disable-slices", "--torq-disable-css"],

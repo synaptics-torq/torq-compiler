@@ -8,11 +8,6 @@ from torq.testing.cases import get_test_cases_from_files
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_files("stablehlo_ops")))
 def case_config(request, runtime_hw_type, chip_config):
 
-    failed_tc = []
-
-    if any(s in request.param.name for s in failed_tc):
-        pytest.xfail("output mismatch or error")
-
     return {
         "mlir_model_file": "static_mlir_model_file",
         "static_mlir_model_file": request.param.data,

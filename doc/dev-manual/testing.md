@@ -72,7 +72,7 @@ format:
 test_function[test_parameters] owner/repo#issue_id
 ```
 
-When the corresponding test cases will be automatically markes as XFAIL.
+Then the corresponding test cases will be automatically marked as XFAIL.
 
 In order to store XFAIL for test configurations that depend on a chip defined in
  ``extras/chips`` it is possible to create a file in ``extras/xfail`` with the same name.
@@ -109,7 +109,7 @@ pytest --try-xfails --save-test-status-report-to=report.json  --recompute-cache
 ```
 
 This command will try all tests (it is also possible to restrict to executing
-a subset of tests using standard pytest functions). The command will genearte
+a subset of tests using standard pytest functions). The command will generate
 a report in ``report.json`` with the state of each test it runs and information
 about the failure (if any).
 
@@ -119,20 +119,17 @@ It is then possible to update the xfail files with the following command:
 python3 -m torq.testing.issues update --dry-run --report-path report.json --parent-issue ${PARENT_ISSUE}
 ```
 
-This command will read the report, all the existing xfail files and figures out
-which lines in the xfail files need to be removed because the corresponding test
-passes and add which lines need to be added because some new tests fail. The command
-also inspects the issues linked to xfails and if they are missing checks which
-if there exist already a child of the issue ´${PARENT_ISSUE}´ for this kind of 
-error or if a new issue should be created.
+This command reads the report and existing xfail files, then updates them accordingly.
+It removes lines from xfail files for newly passing tests and adds lines for new failing 
+tests. The command also checks the issues linked to xfails. If an issue is missing, it 
+determines whether a child issue of `${PARENT_ISSUE}` already exists for this error type,
+or creates a new one.
 
-By running the following command: 
+If you run the following command the files are modified and the issues created:
 
 ```
 python3 -m torq.testing.issues update --report-path report.json --parent-issue ${PARENT_ISSUE}
 ```
-
-The files are modified and the issues created.
 
 It is also possible to ask CI to perform all tests by tagging a PR with the label
 `generate-test-status-report`. CI will append status reports for each test configuration
