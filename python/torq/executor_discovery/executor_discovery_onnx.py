@@ -1040,6 +1040,27 @@ def layer_executor_case(request):
 @pytest.fixture
 def onnx_layer_model(request, layer_executor_case):
     """Provide the layer model."""
+    # Early skip for duplicate layers: if the source layer has already been
+    # tested on this executor, copy its result and skip all expensive fixture
+    # setup (compilation, reference generation, runtime).
+    source_layer_id = layer_executor_case.get("source_layer_id")
+    if source_layer_id:
+        layer_id = layer_executor_case["layer_id"]
+        executor = layer_executor_case["executor"]
+        source_results = _discovery_state.results.get(source_layer_id, {})
+        if executor in source_results:
+            _copy_result_from_source_layer(layer_id, executor, source_layer_id)
+            node_index = layer_executor_case.get("node_index")
+            full_mlir_location = layer_executor_case.get("full_mlir_location")
+            _discovery_state.record_metadata(
+                layer_id,
+                node_index=node_index,
+                full_mlir_location=full_mlir_location,
+            )
+            pytest.skip(
+                f"Duplicate of {source_layer_id}, result copied"
+            )
+
     case = layer_executor_case["case"]
     version = "onnx_layer_" + case.name
     return VersionedUncachedData(data=case.data, version=version)
@@ -1506,7 +1527,8 @@ def executor_discovery(
             raise
         return
 
-    # Layer mode: record results to JSON (either main model or subgraph-specific)
+    # Layer mode: record metadata first so duplicates also get correct
+    # node_index and mlir_location in the JSON output.
     _discovery_state.record_metadata(
         layer_id=layer_id,
         node_index=node_index,
