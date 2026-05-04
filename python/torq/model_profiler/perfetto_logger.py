@@ -849,6 +849,79 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
 
     original_lines_process = trace_writer.add_process_descriptor("Compiler Input Locations")
 
+    # Compute total time per original location as the union of contributing intervals
+    location_total_times = {}
+    location_union_metrics = {}
+    operator_total_times = {}
+
+    for original_loc_info in dispatch.original_locations:
+        intervals = []
+        dma_intervals = []
+        dma_in_intervals = []
+        dma_out_intervals = []
+        cdma_intervals = []
+        slice_intervals = []
+        css_intervals = []
+
+        for workunit in original_loc_info.workunits:
+            # Skip NssProgramWorkUnitDebugInfo as its not needed for the location time calculation
+            if isinstance(workunit, NssProgramWorkUnitDebugInfo):
+                continue
+            start_time_ns = workunit.start_time_ns
+            end_time_ns = workunit.end_time_ns
+            if start_time_ns is None or end_time_ns is None:
+                continue
+            if end_time_ns < start_time_ns:
+                continue
+
+            interval = (start_time_ns, end_time_ns)
+            intervals.append(interval)
+
+            if isinstance(workunit, DmaOutWorkUnitDebugInfo) or isinstance(workunit, DmaInWorkUnitDebugInfo):
+                dma_intervals.append(interval)
+                if isinstance(workunit, DmaInWorkUnitDebugInfo):
+                    dma_in_intervals.append(interval)
+                else:
+                    dma_out_intervals.append(interval)
+            elif isinstance(workunit, SliceProgramWorkUnitDebugInfo):
+                slice_intervals.append(interval)
+            elif isinstance(workunit, CdmaWorkUnitDebugInfo):
+                cdma_intervals.append(interval)
+            elif isinstance(workunit, CssProgramWorkUnitDebugInfo):
+                css_intervals.append(interval)
+
+        merged_intervals = merge_intervals(intervals)
+        total_ns = sum(end_time_ns - start_time_ns for start_time_ns, end_time_ns in merged_intervals)
+
+        merged_dma = merge_intervals(dma_intervals)
+        merged_dma_in = merge_intervals(dma_in_intervals)
+        merged_dma_out = merge_intervals(dma_out_intervals)
+        merged_cdma = merge_intervals(cdma_intervals)
+        merged_slice = merge_intervals(slice_intervals)
+        merged_css = merge_intervals(css_intervals)
+        merged_dma_combined = merge_intervals(dma_intervals + cdma_intervals)
+        merged_compute_combined = merge_intervals(slice_intervals + css_intervals)
+        dma_only_intervals = subtract_intervals(merged_dma_combined, merged_compute_combined)
+        compute_only_intervals = subtract_intervals(merged_compute_combined, merged_dma_combined)
+        overlap_intervals = intersect_intervals(merged_dma_combined, merged_compute_combined)
+
+        loc_key = f"{original_loc_info.location.file}:{original_loc_info.location.line}:{original_loc_info.location.col}"
+        location_total_times[loc_key] = total_ns
+        location_union_metrics[loc_key] = {
+            'TOTAL': total_ns,
+            'DMA': sum(end - start for start, end in merged_dma),
+            'DMA_IN': sum(end - start for start, end in merged_dma_in),
+            'DMA_OUT': sum(end - start for start, end in merged_dma_out),
+            'CDMA': sum(end - start for start, end in merged_cdma),
+            'SLICE': sum(end - start for start, end in merged_slice),
+            'CSS': sum(end - start for start, end in merged_css),
+            'DMA_COMBINED': sum(end - start for start, end in merged_dma_combined),
+            'COMPUTE_COMBINED': sum(end - start for start, end in merged_compute_combined),
+            'DMA_ONLY': sum(end - start for start, end in dma_only_intervals),
+            'COMPUTE_ONLY': sum(end - start for start, end in compute_only_intervals),
+            'DMA_COMPUTE_OVERLAP': sum(end - start for start, end in overlap_intervals),
+        }
+
     for original_loc_info in dispatch.original_locations:
 
         original_line_desc = f"{original_loc_info.location.file}:{original_loc_info.location.line}:{original_loc_info.location.col}"        
@@ -857,7 +930,59 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
         # slices. Perfetto will group all these tracks that have the same name.
         workunits_tracks = {}
 
+        # Extract the operator name from the original MLIR source file at the given line
+        op_name = None
+        raw_file = original_loc_info.location.file.strip('"') if original_loc_info.location.file else ""
+        if raw_file and os.path.isfile(raw_file):
+            try:
+                line_no = int(original_loc_info.location.line)
+                with open(raw_file, "r") as src_f:
+                    lines = src_f.readlines()
+                if 0 < line_no <= len(lines):
+                    op_name = dispatch.debug_info._extract_operator(line_no, lines[line_no - 1])
+            except Exception:
+                pass
+        if op_name is not None:
+            # If op name has func.func then ignore that one and continue next loop
+            if "func.func" in op_name:
+                continue
+
+        # Use op_name as the track label if available, otherwise fall back to file:line:col
+        track_label = op_name if op_name is not None else original_line_desc
+
+        # Append total time for this original location to the track label for easier identification in Perfetto UI
+        total_time_ns = location_total_times.get(original_line_desc)
+        if total_time_ns is not None:
+            track_label += f" - {format_time_duration(total_time_ns)}"
+            if op_name is not None:
+                operator_type = op_name.split("@L", 1)[0]
+                operator_total_times[operator_type] = operator_total_times.get(operator_type, 0) + total_time_ns
+
+        location_metrics = location_union_metrics.get(original_line_desc)
+        if location_metrics is not None:
+            metric_parts = []
+            for metric_name in (
+                "SLICE",
+                "DMA",
+                "DMA_IN",
+                "DMA_OUT",
+                "CDMA",
+                "CSS",
+                "DMA_COMBINED",
+                "COMPUTE_COMBINED",
+                "DMA_ONLY",
+                "COMPUTE_ONLY",
+                "DMA_COMPUTE_OVERLAP",
+            ):
+                metric_value = location_metrics.get(metric_name, 0)
+                if metric_value > 0:
+                    metric_parts.append(f"{metric_name}: {format_time_duration(metric_value)}")
+            if metric_parts:
+                track_label += " \n " + " \n ".join(metric_parts)
+
         for workunit in original_loc_info.workunits:
+            if isinstance(workunit, NssProgramWorkUnitDebugInfo):
+                continue
 
             details = workunit.pretty_print
             start_time_ns = workunit.start_time_ns
@@ -869,10 +994,31 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
             workunit_track = workunits_tracks.get(type(workunit))
 
             if workunit_track is None:
-                workunit_track = trace_writer.add_thread_descriptor(original_lines_process, original_line_desc)
+                workunit_track = trace_writer.add_thread_descriptor(original_lines_process, track_label)
                 workunits_tracks[type(workunit)] = workunit_track
             
             event = PerfettoEvent(workunit_track, details, start_time_ns, end_time_ns, correlation_id=type(workunit).__name__)            
+            trace_writer.add_event(event)
+
+    if operator_total_times:
+        process_uuid = trace_writer.add_process_descriptor("Operator Type Totals")
+        base_start = dispatch.start_time_ns if dispatch.start_time_ns is not None else 0
+        sorted_operator_totals = sorted(operator_total_times.items(), key=lambda item: (-item[1], item[0]))
+        width = max(2, len(str(len(sorted_operator_totals))))
+
+        for index, (operator_type, total_time_ns) in enumerate(sorted_operator_totals, start=1):
+            if total_time_ns <= 0:
+                continue
+
+            thread_name = f"{index:0{width}d} {operator_type}"
+            tuuid = trace_writer.add_thread_descriptor(process_uuid, thread_name)
+            event = PerfettoEvent(
+                tuuid,
+                f"{operator_type}: {format_time_duration(total_time_ns)}",
+                base_start,
+                base_start + total_time_ns,
+                "overview",
+            )
             trace_writer.add_event(event)
         
 
