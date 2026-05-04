@@ -76,7 +76,6 @@ enum class TileAndFuseProducersFuseMode {
     MaxSizeAllDoms,
     MaxProducers,
     OnlyPatterns,
-    NoFuse
 };
 
 static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFuseMode(
@@ -101,8 +100,7 @@ static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFus
         clEnumValN(
             TileAndFuseProducersFuseMode::OnlyPatterns, "only-patterns",
             "Fuse producers only whene required to preserve patterns"
-        ),
-        clEnumValN(TileAndFuseProducersFuseMode::NoFuse, "no-fuse", "Do not fuse producers")
+        )
     ),
     llvm::cl::init(TileAndFuseProducersFuseMode::MaxProducers) // Default value
 );
@@ -437,7 +435,7 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
         ArrayRef<OpFoldResult> sizes
     );
 
-    void tileAndFuse(TilingInterface tiOp);
+    void tileAndFuse(TilingInterface tiOp, const DenseSet<TilingInterface> &toTileOps);
 
     LogicalResult searchTileSizeForDim(
         IRRewriter &rewriter, ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder,
@@ -452,15 +450,17 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     );
 
     std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxSize(
-        IRRewriter &rewriter, bool allDomains, mlir::tensor::ExtractSliceOp candidateSliceOp,
-        OpResult producerOpResult, bool isDestinationOperand
+        IRRewriter &rewriter, bool allDomains, const DenseSet<TilingInterface> &toTileOps,
+        mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
+        bool isDestinationOperand
     );
 
     FailureOr<scf::SCFTileAndFuseResult> tileAndFuseToSize(
         IRRewriter &rewriter, TilingInterface tilingInterfaceOp,
         llvm::ArrayRef<OpFoldResult> iterDomainSizes, SmallVector<OpFoldResult> tileSizes,
         TileAndFuseProducersFuseMode fuseMode,
-        std::optional<llvm::SetVector<Operation *> *> producerOps
+        std::optional<llvm::SetVector<Operation *> *> producerOps,
+        const DenseSet<TilingInterface> &toTileOps
     );
 };
 
@@ -780,8 +780,9 @@ bool shouldFuseMultiUsersOp(Operation *op) {
 
 // an SCFTileAndFuseOptions::ControlFnTy for the max-size fuse mode.
 std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuseControlMaxSize(
-    IRRewriter &rewriter, bool allDomains, mlir::tensor::ExtractSliceOp candidateSliceOp,
-    OpResult producerOpResult, bool isDestinationOperand
+    IRRewriter &rewriter, bool allDomains, const DenseSet<TilingInterface> &toTileOps,
+    mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
+    bool isDestinationOperand
 ) {
     const std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> doNotFuse = std::nullopt;
     const scf::SCFTileAndFuseOptions::ControlFnResult fuseAndDoNotYieldProducer{false};
@@ -822,6 +823,10 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
 
     if (!isMarkedFuseGroup(producerOp)) {
         // Not part of a pattern-fuse-group; there are no restrictions on the domains.
+
+        if (!toTileOps.contains(producerTi)) {
+            return doNotFuse;
+        }
 
         if (!shouldFuseMultiUsersOp(producerOp)) {
             return doNotFuse;
@@ -871,6 +876,10 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         setSourcesDistance(producerOp, distance);
 
         return fuseAndDoNotYieldProducer;
+    }
+
+    if (!toTileOps.contains(producerTi)) {
+        return doNotFuse;
     }
 
     if (!shouldFuseMultiUsersOp(producerOp)) {
@@ -1015,7 +1024,9 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
 FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
     IRRewriter &rewriter, TilingInterface tilingInterfaceOp,
     llvm::ArrayRef<OpFoldResult> iterDomainSizes, SmallVector<OpFoldResult> tileSizes,
-    TileAndFuseProducersFuseMode fuseMode, std::optional<llvm::SetVector<Operation *> *> producerOps
+    TileAndFuseProducersFuseMode fuseMode,
+    std::optional<llvm::SetVector<Operation *> *> producerOps,
+    const DenseSet<TilingInterface> &toTileOps
 ) {
     // set domains that are not being tiled to 0
     OpFoldResult zero = getAsIndexOpFoldResult(&getContext(), 0);
@@ -1039,7 +1050,7 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
         fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                               OpResult producerOpResult, bool isDestinationOperand) {
             return fuseControlMaxSize(
-                rewriter, false, candidateSliceOp, producerOpResult, isDestinationOperand
+                rewriter, false, toTileOps, candidateSliceOp, producerOpResult, isDestinationOperand
             );
         };
         break;
@@ -1048,7 +1059,7 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
         fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                               OpResult producerOpResult, bool isDestinationOperand) {
             return fuseControlMaxSize(
-                rewriter, true, candidateSliceOp, producerOpResult, isDestinationOperand
+                rewriter, true, toTileOps, candidateSliceOp, producerOpResult, isDestinationOperand
             );
         };
         break;
@@ -1075,11 +1086,6 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
             return scf::SCFTileAndFuseOptions::ControlFnResult{false};
         };
         break;
-
-    case TileAndFuseProducersFuseMode::NoFuse:
-        fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
-                              OpResult producerOpResult,
-                              bool isDestinationOperand) { return std::nullopt; };
     }
 
     options.setFusionControlFn(fusionControlFn);
@@ -1091,29 +1097,9 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
     return scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp, options);
 }
 
-void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
-    // For pattern-fuse-groups, we only tile from the bottom most op, to make
-    // sure the whole group is tiled together.
-    if (isMarkedFuseGroup(tiOp) && !isFuseGroupOutput(tiOp))
-        return;
-
-    // Check if tiOp already fits in memory.
-    {
-        ModuleOp moduleOp = extractOpsForMemoryCheck("check_needs_tiling", tiOp);
-        OpEraseGuard moduleEraseGuard(moduleOp);
-        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(moduleOp);
-        if (failed(opFitsInMemory)) {
-            tiOp->emitWarning(
-                "tile-and-fuse: initial memory overflow check failed, skipping this operation."
-            );
-            LLVM_DEBUG(assert(false));
-            return;
-        }
-
-        if (*opFitsInMemory)
-            return;
-    }
-
+void TileAndFusePass::tileAndFuse(
+    TilingInterface tiOp, const DenseSet<TilingInterface> &toTileOps
+) {
     LLVM_DEBUG({
         llvm::dbgs() << tiOp->getName() << " needs to be tiled\n";
         llvm::dbgs() << "  " << TorqHw::get().getLramSize() << " bytes of LRAM\n";
@@ -1171,7 +1157,7 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
 
         FailureOr<scf::SCFTileAndFuseResult> tiledResults = tileAndFuseToSize(
             rewriter, tiOp, iterDomainSizes, smallestTileSizes,
-            TileAndFuseProducersFuseMode::MaxSizeAllDoms, std::nullopt
+            TileAndFuseProducersFuseMode::MaxSizeAllDoms, std::nullopt, toTileOps
         );
         if (failed(tiledResults)) {
             tiOp->emitWarning("tile-and-fuse: failed to tile operation, skipping it.");
@@ -1221,7 +1207,7 @@ void TileAndFusePass::tileAndFuse(TilingInterface tiOp) {
 
     FailureOr<scf::SCFTileAndFuseResult> tiledResults = tileAndFuseToSize(
         rewriter, tiOp, iterDomainSizes, tileSizes, clTorqTileAndFuseProducersFuseMode.getValue(),
-        restrictToProducerOps
+        restrictToProducerOps, toTileOps
     );
     if (failed(tiledResults)) {
         tiOp->emitWarning("tile-and-fuse: failed to tile operation, skipping it.");
@@ -1276,8 +1262,30 @@ void TileAndFusePass::runOnOperation() {
     // walk. We first construct a queue, and than iterate over it.
     SmallVector<TilingInterface> orderTi;
     funcOp.walk<WalkOrder::PostOrder, ReverseIterator>([&](TilingInterface tiOp) {
+        // For pattern-fuse-groups, we only tile from the bottom most op, to make
+        // sure the whole group is tiled together.
+        if (isMarkedFuseGroup(tiOp) && !isFuseGroupOutput(tiOp))
+            return;
+
+        // Check if tiOp already fits in memory.
+        ModuleOp moduleOp = extractOpsForMemoryCheck("check_needs_tiling", tiOp);
+        OpEraseGuard moduleEraseGuard(moduleOp);
+        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(moduleOp);
+        if (failed(opFitsInMemory)) {
+            tiOp->emitWarning(
+                "tile-and-fuse: initial memory overflow check failed, skipping this operation."
+            );
+            LLVM_DEBUG(assert(false));
+            return;
+        }
+
+        if (*opFitsInMemory)
+            return;
+
         orderTi.push_back(tiOp);
     });
+
+    DenseSet<TilingInterface> toTileOps(orderTi.begin(), orderTi.end());
 
     untiledTiledOps_.reserve(orderTi.size());
 
@@ -1288,7 +1296,7 @@ void TileAndFusePass::runOnOperation() {
         });
 
         if (!tiOp->use_empty())
-            tileAndFuse(tiOp);
+            tileAndFuse(tiOp, toTileOps);
 
         if (tiOp->use_empty()) {
             if (auto fuseGroup = isFuseGroupOutput(tiOp)) {
