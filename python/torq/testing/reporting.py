@@ -391,6 +391,8 @@ def pytest_sessionfinish(session):
             prop_names = [
                 'compile_time_measurements',
                 'runtime_measurements',
+                'compile_time_profile',
+                'profiling_output',
                 'issue',
                 *test_metadata
             ]
@@ -451,19 +453,17 @@ def pytest_sessionfinish(session):
                         lf.write(log_text)
                     test_run['failure_log_file'] = os.path.join('failure_logs', log_filename)
 
-            if 'call' in report_phases:
+            profiling_output_file = props['profiling_output'] or props['compile_time_profile']
 
-                report = report_phases['call']
-                props = dict(report.user_properties)
-                profiling_output_file = props.get('profiling_output')                
 
-                if profiling_output_file:
-                    # Copy profiling file into profiles/ and reference it relative to manifest
-                    dst_name = os.path.basename(profiling_output_file)
-                    dst_path = os.path.join(profiles_root, dst_name)
-                    
-                    shutil.copy2(profiling_output_file, dst_path)
-                    test_run['profiling_file'] = os.path.join('profiles', dst_name)
+            if profiling_output_file:
+                # Prefer runtime traces when available, but fall back to compile-time traces
+                # recorded during setup so simulator sessions also upload a Perfetto artifact.
+                dst_name = os.path.basename(profiling_output_file)
+                dst_path = os.path.join(profiles_root, dst_name)
+
+                shutil.copy2(profiling_output_file, dst_path)
+                test_run['profiling_file'] = os.path.join('profiles', dst_name)
                 
             manifest['test_runs'].append(test_run)
 
