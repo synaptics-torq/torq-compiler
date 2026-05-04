@@ -141,7 +141,7 @@ bool markOpFuseGroup(
     if (isa<arith::ConstantOp, tensor::EmptyOp,
             mlir::iree_compiler::IREE::TensorExt::DispatchTensorLoadOp,
             mlir::iree_compiler::IREE::HAL::InterfaceBindingSubspanOp>(op)) {
-        return true;
+        return false;
     }
 
     assert(op && "Trying to mark null op!");
@@ -154,7 +154,7 @@ bool markOpFuseGroup(
     SmallVector<Attribute> newAttr;
     if (ArrayAttr oldAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
         if (llvm::is_contained(oldAttr, *maybeFuseGroupAttr))
-            return true;
+            return false;
 
         llvm::append_range(newAttr, oldAttr);
     }
@@ -179,15 +179,15 @@ void markFuseGroupBackward(
             continue;
         }
 
-        Operation *op = output.getDefiningOp();
-        assert(op != nullptr && "Expected an op");
-
-        // If we already visited this op, no need to do it again.
-        if (auto attr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-            attr && llvm::is_contained(attr, fuseGroupAttr)) {
+        TilingInterface op = output.getDefiningOp<TilingInterface>();
+        if (!op) {
             continue;
         }
-        markOpFuseGroup(op, rewriter, fuseGroupAttr);
+
+        // If we already visited this op, no need to do it again.
+        if (!markOpFuseGroup(op, rewriter, fuseGroupAttr)) {
+            continue;
+        }
 
         for (auto operand : op->getOperands()) {
             stack.push_back(operand);
@@ -229,30 +229,6 @@ void removeFuseGroupMarkingBackwards(Operation *outputOp, int64_t fuseGroup) {
                 stack.push_back(srcOp);
         }
     }
-}
-
-SmallVector<Value> getFuseGroupOperands(Operation *root, const IntegerAttr &fuseGroupAttr) {
-    SmallVector<Value> inputs;
-
-    SmallVector<Value, 2> stack = root->getOperands();
-    while (!stack.empty()) {
-        auto output = stack.pop_back_val();
-
-        Operation *op = output.getDefiningOp();
-        assert(op != nullptr && "Expected an op");
-
-        if (auto attr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-            !attr || !llvm::is_contained(attr, fuseGroupAttr)) {
-            if (!llvm::is_contained(inputs, output)) {
-                inputs.push_back(output);
-            }
-            continue;
-        }
-
-        stack.append(op->getOperands().begin(), op->getOperands().end());
-    }
-
-    return inputs;
 }
 
 bool isFuseGroupPrincipalOp(Operation *op, IntegerAttr fuseGroupAttr) {
@@ -300,38 +276,6 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp) {
     }
 
     return nullptr;
-}
-
-SmallVector<OpOperand *>
-getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, Value result) {
-    SmallVector<OpOperand *> principalOperands;
-
-    std::deque<OpOperand *> queue;
-    for (auto &next : result.getUses())
-        queue.push_back(&next);
-
-    while (!queue.empty()) {
-        OpOperand *operand = queue.front();
-        queue.pop_front();
-
-        Operation *op = operand->getOwner();
-
-        if (auto arrayAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-            arrayAttr && llvm::is_contained(arrayAttr, fuseGroupAttr)) {
-
-            if (auto idAttr = op->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
-                idAttr && idAttr == fuseGroupAttr) {
-
-                principalOperands.push_back(operand);
-                continue;
-            }
-
-            for (auto &next : op->getUses())
-                queue.push_back(&next);
-        }
-    }
-
-    return principalOperands;
 }
 
 bool isMarkedFuseGroup(Operation *op) {

@@ -104,9 +104,12 @@ template <class OpT> OpT getSingleUser(Value value) {
 
 // If maybeFuseGroupAttr is not std::nullopt and op implements TilingInterface,
 // add maybeFuseGroupAttr to the TORQ_FUSE_GROUP array attribute of op. If op
-// does not implement TilingInterface, it must be one of: arith::ConstantOp, or
-// tensor::EmptyOp.
-// Return true iff maybeFuseGroupAttr is not std::nullopt.
+// does not implement TilingInterface, it must be one of:
+// - arith::ConstantOp
+// - tensor::EmptyOp
+// - IREE::TensorExt::DispatchTensorLoadOp
+// - IREE::HAL::InterfaceBindingSubspanOp
+// Return true iff a mark was added.
 bool markOpFuseGroup(
     Operation *op, PatternRewriter &rewriter, const std::optional<IntegerAttr> &maybeFuseGroupAttr
 );
@@ -120,10 +123,6 @@ void markFuseGroupBackward(
 
 // Starting from outputOp, walk upwards and remove the fuseGroup marking from all operations.
 void removeFuseGroupMarkingBackwards(Operation *outputOp, int64_t fuseGroup);
-
-// Return all the values that feed the fuse group from outside the group (with no duplicates).
-// root - the bottom most operation in the fuse group.
-SmallVector<Value> getFuseGroupOperands(Operation *root, const IntegerAttr &fuseGroupAttr);
 
 // Return true iff op is the principal Operation of the the fuse group fuseGroupAttr (i.e. the
 // operation from which the pattern matching started).
@@ -139,12 +138,6 @@ IntegerAttr isFuseGroupPrincipalOp(Operation *op);
 // outputOp - an Operation in the output of the principal Operation (it must have
 // exactly one source that is in the same fuse group);
 Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp);
-
-// Walks forward from result, over operations that belong to fuseGroupAttr, and
-// return all the OpOperands that are owned by the principal operation of
-// fuseGroupAttr, and reachable by the walk.
-SmallVector<OpOperand *>
-getFuseGroupPrincipalOpOperandsForward(IntegerAttr fuseGroupAttr, Value result);
 
 // Return true iff op is already marked as part of a fuse group.
 bool isMarkedFuseGroup(Operation *op);

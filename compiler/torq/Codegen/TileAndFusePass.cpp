@@ -1033,8 +1033,6 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
     scf::SCFTileAndFuseOptions options{};
     options.tilingOptions.setTileSizes(tileSizes);
 
-    std::optional<int64_t> maybePatternFuseGroup = isFuseGroupOutput(tilingInterfaceOp);
-
     scf::SCFTileAndFuseOptions::ControlFnTy fusionControlFn;
     switch (fuseMode) {
     case TileAndFuseProducersFuseMode::MaxSize:
@@ -1068,8 +1066,7 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
         fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                               OpResult producerOpResult, bool isDestinationOperand
                           ) -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
-            bool shouldFuse =
-                maybePatternFuseGroup && isMarkedFuseGroup(producerOpResult.getOwner());
+            bool shouldFuse = checkShareFuseGroup(tilingInterfaceOp, producerOpResult.getOwner());
 
             if (!shouldFuse) {
                 return std::nullopt;
