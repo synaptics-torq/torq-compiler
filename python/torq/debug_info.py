@@ -496,7 +496,8 @@ class BlockDebugInfo:
         try:
             arg = BlockArgument(value)
             arg_index = arg.arg_number
-            return self.args[arg_index]
+
+            return self.dispatch.nss_blocks_info[arg.owner].args[arg_index]
         except ValueError:
             return value
 
@@ -573,10 +574,13 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
         else:
             raise ValueError("Dispatch function not found in module")                
 
+        # maps (block, arg_num) where block is a block of an NSS program to the value
+        # that is passed to it when the program is executed
+        self.block_arg_to_value = {}
         self.actions = self._load_actions()                        
         self.nss_blocks_info = self._load_nss_blocks_info()
         self.workunits = self._load_host_workunits()
-        self.original_locations = self._load_original_locations()        
+        self.original_locations = self._load_original_locations()
 
     def _load_actions(self) -> OrderedDict[int, ActionDebugInfo]:
         actions = []                
@@ -608,7 +612,11 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
             while not finished:
                 for op in block_info.block.operations:                    
                     if op.name == "torq_hl.next":
-                        next_block_args = [block_info.get_argument(operand) for operand in op.operation.operands]        
+                        next_block_args = []
+
+                        for num_arg in range(len(op.operation.operands) - 1): # the last operand is the area where to execute from
+                            next_block_args.append(block_info.get_argument(op.operation.operands[num_arg]))
+
                         block_info = BlockDebugInfo(self, op.successors[0], next_block_args)
                         blocks[op.successors[0]] = block_info
                     elif op.name == "torq_hl.return":

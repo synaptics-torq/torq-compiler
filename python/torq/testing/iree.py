@@ -167,7 +167,7 @@ def pytest_generate_tests(metafunc):
                         with open(group_file, 'r') as f:
                             chips.update([x.strip() for x in f.read().splitlines() if x.strip() != ""])
                 else:                    
-                    chips.append(chip)
+                    chips.add(chip)
 
         chips = sorted(chips)
 

@@ -98,6 +98,36 @@ static int64_t getBlockSize(Block *blk) {
     return HwInfo::nss_max_program_size;
 }
 
+static FailureOr<torq_hl::LoadOp>
+getloadOfNextProgramOp(torq_hl::ProgramOp programOp, Value inactiveLramCodeArea) {
+    torq_hl::LoadOp loadNextProgramOp = nullptr;
+
+    // we don't know how to handle multiple uses of the active LRAM area
+    // at this point we expect at most one use of this slot to pre-load the next program
+    if (inactiveLramCodeArea.hasNUsesOrMore(3)) {
+        return programOp.emitOpError("expected inactive LRAM code area to have at most 2 uses");
+    }
+
+    for (auto user : inactiveLramCodeArea.getUsers()) {
+        if (auto loadOp = dyn_cast<torq_hl::LoadOp>(user)) {
+
+            if (loadNextProgramOp) {
+                return programOp.emitOpError(
+                    "expected inactive LRAM code area to be used by at most one LoadOp"
+                );
+            }
+
+            loadNextProgramOp = loadOp;
+        }
+        else if (!isa<torq_hl::ReturnOp>(user)) {
+            return programOp.emitOpError("expected inactive LRAM code area to be used by at most "
+                                         "one LoadOp and/or a ReturnOp");
+        }
+    }
+
+    return loadNextProgramOp;
+}
+
 static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
 
     // Do not re-split an already splitted program
@@ -135,40 +165,19 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
     OpBuilder builder(programOp);
     auto programBlockType = MemRefType::get({HwInfo::nss_max_program_size}, builder.getI8Type());
 
+    // keep track of the load op that loads the next program (if present)
+    auto maybeLoadNextProgramOp = getloadOfNextProgramOp(programOp, inactiveLramCodeArea);
+
+    if (failed(maybeLoadNextProgramOp)) {
+        return failure();
+    }
+    auto loadNextProgramOp = *maybeLoadNextProgramOp;
+
     for (auto [idx, splitPoint] : llvm::enumerate(splitPoints)) {
 
         // Split the current block at the boundary; trailing ops (including terminator if present)
         // move to the new block.
         Block *newBlock = currentBlock->splitBlock(Block::iterator(splitPoint));
-
-        // Compute the arguments needed by the new block.
-        SmallVector<Value> blockArgs;
-
-        // first live-ins are always the LRAM code areas
-        blockArgs.push_back(inactiveLramCodeArea);
-        blockArgs.push_back(activeLramCodeArea);
-        blockArgs.push_back(currentInvocation);
-
-        appendLiveIns(newBlock, blockArgs);
-
-        // create a mapping to replace values in the previous block with the new block arguments
-        IRMapping mapping;
-        for (Value v : blockArgs) {
-            auto arg = newBlock->addArgument(v.getType(), loc);
-            mapping.map(v, arg);
-        }
-
-        // swap inactive and active LRAM code area for the new block (when we enter the block we
-        // will be using the previously inactive area as active)
-        mapping.map(activeLramCodeArea, newBlock->getArgument(0));
-        mapping.map(inactiveLramCodeArea, newBlock->getArgument(1));
-
-        // replace all uses in the new block with the corresponding block arguments
-        for (Value v : blockArgs) {
-            v.replaceUsesWithIf(mapping.lookup(v), [&](OpOperand &useOp) {
-                return useOp.getOwner()->getBlock() == newBlock;
-            });
-        }
 
         OpBuilder builder(programOp);
         builder.setInsertionPointToEnd(currentBlock);
@@ -182,17 +191,32 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
             return programOp.emitOpError("failed to create copy to LRAM");
         }
 
-        // Terminate the current block with a branch to the new block, passing live-ins.
-        torq_hl::NextOp::create(builder, loc, blockArgs, inactiveLramCodeArea, nullptr, newBlock);
+        // Terminate the current block with a branch to the new block
+        torq_hl::NextOp::create(
+            builder, loc, ValueRange{}, inactiveLramCodeArea, nullptr, newBlock
+        );
 
         // Advance to the newly created block and continue.
         currentBlock = newBlock;
 
         // Update the active/inactive LRAM code area arguments for the next block
-        activeLramCodeArea = newBlock->getArgument(0);
-        inactiveLramCodeArea = newBlock->getArgument(1);
-        currentInvocation = newBlock->getArgument(2);
+        std::swap(activeLramCodeArea, inactiveLramCodeArea);
     }
+
+    // change the load of the next program (if present) to load use the currently
+    // inactive LRAM area (this may have changed depending on the number of splits)
+    if (loadNextProgramOp) {
+        if (loadNextProgramOp->getBlock() != currentBlock) {
+            return programOp.emitOpError("expected load of next program to be in the last block");
+        }
+
+        loadNextProgramOp.getOutputMutable().set(inactiveLramCodeArea);
+    }
+
+    // change the returned active/inactive LRAM areas to match the new block structure
+    auto returnOp = cast<torq_hl::ReturnOp>(currentBlock->getTerminator());
+    returnOp.setOperand(0, inactiveLramCodeArea);
+    returnOp.setOperand(1, activeLramCodeArea);
 
     // change the output of the create_invocation to return all the sections of the code
     auto createInvocationOp =

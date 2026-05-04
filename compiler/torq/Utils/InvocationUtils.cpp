@@ -176,13 +176,12 @@ struct ProgramExecutor {
             if (auto nextOp = dyn_cast<torq_hl::NextOp>(op)) {
                 Block *targetBlock = nextOp.getDest();
 
-                IRMapping nextMapping;
+                // add arguments to the block, we re-use mapping because of dominance
+                // we can access all the values currently mapped in the current block
                 for (auto [arg, nextArg] :
                      llvm::zip_equal(targetBlock->getArguments(), nextOp.getArguments())) {
-                    nextMapping.map(arg, mapping.lookup(nextArg));
+                    mapping.map(arg, mapping.lookup(nextArg));
                 }
-
-                mapping = nextMapping;
 
                 blockOps.clear();
                 for (auto &op : targetBlock->getOperations()) {

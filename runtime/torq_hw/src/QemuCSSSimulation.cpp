@@ -231,9 +231,19 @@ static void prepare_data_and_registers(void *cpu, char *memory_file) {
 
     int args_offset_in_dtcm = (mbox_values[0] + qemu_ram_start) - qemu_dtcm_base_addr;
 
+    if (args_offset_in_dtcm < 0 || args_offset_in_dtcm + sizeof(uint32_t) > dtcm_size) {
+        fprintf(stderr, "Invalid argument address: 0x%08x\n", mbox_values[0]);
+        abort();
+    }
+
     uint32_t* args = (uint32_t *) &(dtcm_data[args_offset_in_dtcm]);
 
     uint32_t args_count = args[0];
+
+    if (args_offset_in_dtcm + sizeof(uint32_t) + (args_count + 1) * sizeof(uint32_t) > dtcm_size) {
+        fprintf(stderr, "Invalid argument count: %d\n", args_count);
+        abort();
+    }
 
     LOG("extra args count is %d\n", args_count);
 
