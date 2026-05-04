@@ -112,17 +112,40 @@ def LowerArithConstants
     ];
 }
 
-def OutlineSliceTasks :
-    InterfacePass<"torq-outline-slice-tasks",
+def OutlineSlicePrograms :
+    InterfacePass<"torq-outline-slice-programs",
          "mlir::FunctionOpInterface"> {
-  let summary = "Wrap all operators that run on slices into a TaskOp";
+  let summary = "Wrap all operators that run on slices into slice programs";
   let constructor =
       "mlir::syna::torq::createOutlineSliceProgramsPass()";
 
   let dependentDialects = [
         "syna::torq_hl::TorqHLDialect"
     ];
+}
 
+def UnrollForallLoops :
+    InterfacePass<"torq-unroll-forall-loops",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Unroll scf.forall loops used for slice parallelism";
+  let constructor =
+      "mlir::syna::torq::createUnrollForallLoopsPass()";
+
+  let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect"
+    ];
+}
+
+def ScheduleSlicePrograms :
+    InterfacePass<"torq-schedule-slice-programs",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Assign executor IDs to slice start_program operations";
+  let constructor =
+      "mlir::syna::torq::createScheduleSliceProgramsPass()";
+
+  let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect"
+    ];
 }
 
 def AssignOperationsToCpuPrograms : Pass<"torq-assign-operations-to-cpu-programs", "ModuleOp"> {

@@ -231,6 +231,8 @@ void addNssUpToAssignLramAddresses(OpPassManager &pm) {
     funcPm.addPass(createUnrollLoopPass());
 
     funcPm.addPass(createOutlineSliceProgramsPass());
+    funcPm.addPass(createUnrollForallLoopsPass());
+    funcPm.addPass(createScheduleSliceProgramsPass());
 
     // Canonicalize to fold constants and types after the loop unrolling in the previous pass
     funcPm.addPass(createCanonicalizerPass());

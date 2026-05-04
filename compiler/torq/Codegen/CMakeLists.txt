@@ -47,11 +47,13 @@ set(sources
     SegmentNSSProgramsPass.cpp
     SlicingPass.cpp
     StripTorqExecutorAttrPass.cpp
+    ScheduleSliceProgramsPass.cpp
     TORQLowerExecutableTargetPass.cpp
     TorqComprehensiveBufferizePass.cpp
     TorqHlTilePass.cpp
     TileAndFusePass.cpp
     TilingUtils.cpp
+    UnrollForallLoopsPass.cpp
     UnrollLoopPass.cpp
     UnrollDynamicShapeLoopPass.cpp
     ValidPadToSamePadPass.cpp

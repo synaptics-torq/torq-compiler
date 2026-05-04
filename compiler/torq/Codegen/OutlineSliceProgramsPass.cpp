@@ -17,105 +17,16 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/Debug.h"
 
-#define DEBUG_TYPE "torq-outline-slice-tasks"
+#define DEBUG_TYPE "torq-outline-slice-programs"
 
 using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
 namespace {
-
-// This pattern unrolls a scf.forall operation by replicating the loop body n-1 times.
-// The forall loop is used to parallelize the execution of an operation on multiple HW slices
-// so its body will be terminated by single Wait and a single Store operation, in order.
-// Since by definition all the iterations are independent, it is safe to move all the Wait and Store
-// operations to the end of the unrolled loop to parallelize execution without further analysis.
-// Code derived from generateUnrolledLoop in mlir/lib/Dialect/SCF/Utils/Utils.cpp
-class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
-  public:
-    using OpRewritePattern::OpRewritePattern;
-
-    LogicalResult
-    matchAndRewrite(scf::ForallOp forallOp, PatternRewriter &rewriter) const override {
-
-        assert(
-            forallOp.getStaticLowerBound().size() == 1 && forallOp.getDynamicLowerBound().empty() &&
-            "expected single static lower bound in forall op"
-        );
-        assert(
-            forallOp.getStaticUpperBound().size() == 1 && forallOp.getDynamicUpperBound().empty() &&
-            "expected single static upper bound in forall op"
-        );
-        assert(
-            forallOp.getStaticStep().size() == 1 && forallOp.getDynamicStep().empty() &&
-            "expected single static step size in forall op"
-        );
-
-        int64_t lb = forallOp.getStaticLowerBound()[0];
-        int64_t step = forallOp.getStaticStep()[0];
-
-        std::optional<APInt> unrollFactor = mlir::constantTripCount(
-            forallOp.getLowerBound(rewriter)[0], forallOp.getUpperBound(rewriter)[0],
-            forallOp.getStep(rewriter)[0], /*isSigned=*/true, scf::computeUbMinusLb
-        );
-
-        assert(unrollFactor && "trip count is not a constant");
-
-        // track the original operations in the body loop
-        SmallVector<Operation *> originalOps;
-        for (auto &op : forallOp.getBody()->getOperations()) {
-            originalOps.push_back(&op);
-        }
-
-        // create an operand map for each unrolled iteration
-        SmallVector<IRMapping> operandMaps(unrollFactor->getZExtValue() - 1);
-
-        // insert in the operand map the induction variable
-        if (!forallOp.getInductionVar(0).use_empty()) {
-            for (unsigned i = 1; i < unrollFactor->getZExtValue(); i++) {
-                Value ivUnroll = arith::ConstantOp::create(
-                    rewriter, forallOp.getLoc(), rewriter.getIndexAttr(lb + i * step)
-                );
-                operandMaps[i - 1].map(forallOp.getInductionVar(0), ivUnroll);
-            }
-        }
-
-        SmallVector<Operation *> operationsToClone;
-
-        // scan the original operations and accumulate operations until a wait,
-        // when a wait is found create unrollFactor - 1 copies of the accumulated operations
-        // and continue
-        {
-            PatternRewriter::InsertionGuard insertionGuard(rewriter);
-            for (auto op : originalOps) {
-                if (isa<torq_hl::WaitProgramOp>(op) || op->getBlock()->getTerminator() == op) {
-                    rewriter.setInsertionPoint(op);
-                    for (unsigned i = 1; i < unrollFactor->getZExtValue(); i++) {
-                        // Clone the original loop body operations
-                        for (auto prevOp : operationsToClone) {
-                            rewriter.clone(*prevOp, operandMaps[i - 1]);
-                        }
-                    }
-                    operationsToClone.clear();
-                }
-                operationsToClone.push_back(op);
-            }
-        } // distruct insertionGuard
-
-        // Loop now has a single iteration so we can remove it
-        forallOp.setStaticUpperBound(lb + step);
-        if (failed(forallOp.promoteIfSingleIteration(rewriter))) {
-            assert(false && "Unrolling of scf.forall failed");
-        }
-
-        return success();
-    }
-};
 
 // creates a program containing the specified operation and substitute the operation with a call to
 // the program
@@ -212,105 +123,20 @@ static void outlineSlicePrograms(Operation *op) {
     }
 }
 
-static LogicalResult unrollLoops(Operation *op) {
-
-    RewritePatternSet unrollPatterns(op->getContext());
-
-    unrollPatterns.add<ForallOpPattern>(op->getContext());
-
-    return applyPatternsGreedily(op, std::move(unrollPatterns));
-}
-
-// assign an executor_id to each start_program operation
-static LogicalResult
-scheduleSliceTasks(Region &region, torq_hl::Executor executor, int executorCount) {
-
-    SmallVector<bool> sliceBusy(executorCount, false);
-
-    for (auto &op : region.getOps()) {
-
-        if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(op)) {
-
-            auto invocationOp =
-                startOp.getInvocation().getDefiningOp<torq_hl::CreateInvocationOp>();
-
-            if (!invocationOp) {
-                return op.emitError() << "must use an invocation created by a create_invocation op";
-            }
-
-            if (!invocationOp.getExecutorId()) {
-
-                // schedule the program on the first available slice
-
-                auto it = llvm::find(sliceBusy, false);
-
-                if (it == sliceBusy.end()) {
-                    return op.emitError() << "all slices busy, cannot allocate a executor_id";
-                }
-
-                int availableSlice = std::distance(sliceBusy.begin(), it);
-
-                invocationOp.setExecutorId(APInt(64, availableSlice));
-                sliceBusy[availableSlice] = true;
-            }
-            else {
-
-                // mark the executor being used as busy
-                auto executorId = invocationOp.getExecutorId()->getZExtValue();
-
-                if (sliceBusy[executorId]) {
-                    return op.emitError() << "executor is already busy";
-                }
-
-                sliceBusy[executorId] = true;
-            }
-        }
-
-        else if (auto sliceWaitOp = dyn_cast<torq_hl::WaitProgramOp>(op)) {
-
-            auto invocationOp =
-                sliceWaitOp.getInvocation().getDefiningOp<torq_hl::CreateInvocationOp>();
-
-            if (!invocationOp) {
-                return op.emitError() << "must use an invocation created by a create_invocation op";
-            }
-
-            sliceBusy[invocationOp.getExecutorId()->getZExtValue()] = false;
-        }
-    }
-
-    return success();
-}
-
-class OutlineSliceTasksPass : public impl::OutlineSliceTasksBase<OutlineSliceTasksPass> {
+class OutlineSliceProgramsPass : public impl::OutlineSliceProgramsBase<OutlineSliceProgramsPass> {
   public:
-    OutlineSliceTasksPass() = default;
-    OutlineSliceTasksPass(const OutlineSliceTasksPass &pass) {}
+    OutlineSliceProgramsPass() = default;
+    OutlineSliceProgramsPass(const OutlineSliceProgramsPass &pass) {}
 
     void runOnOperation() override;
 };
 
-void OutlineSliceTasksPass::runOnOperation() {
-
-    // TODO: we should divide this in three passes
-
-    outlineSlicePrograms(getOperation());
-
-    if (failed(unrollLoops(getOperation()))) {
-        return signalPassFailure();
-    }
-
-    if (failed(scheduleSliceTasks(
-            getOperation().getFunctionBody(), torq_hl::Executor::Slice, HwInfo::slice_count
-        ))) {
-        return signalPassFailure();
-    }
-}
+void OutlineSliceProgramsPass::runOnOperation() { outlineSlicePrograms(getOperation()); }
 
 } // namespace
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOutlineSliceProgramsPass() {
-    return std::make_unique<OutlineSliceTasksPass>();
+    return std::make_unique<OutlineSliceProgramsPass>();
 }
 
 } // namespace mlir::syna::torq

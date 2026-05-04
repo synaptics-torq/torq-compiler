@@ -46,6 +46,10 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignDtcmItcmXramAddr
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOutlineSliceProgramsPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollForallLoopsPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createScheduleSliceProgramsPass();
+
 std::unique_ptr<OperationPass<ModuleOp>>
 createAssignOperationsToCpuProgramsPass(bool disableCss = false, bool disableHost = false);
 
