@@ -2,10 +2,10 @@
 #include "torq_command_buffer.h"
 #include "TorqHw.h"
 #include "TestVectorWriter.h"
+#include "TorqIO.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <vector>
 #include <string>
 
@@ -53,7 +53,7 @@ private:
 
   // this mutex is used to ensure we only run one dispatch at a time, this is important
   // because there is one XRAM per executable so we can only load one state at a time
-  std::mutex mutex_;
+  io::TorqMutex mutex_;
 
   struct PersistentInputCopy {
     bool valid{false};

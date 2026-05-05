@@ -28,7 +28,6 @@
 
 #include <atomic>
 #include <cstring>
-#include <iostream>
 #include <thread>
 #include <cstdint>
 
@@ -106,7 +105,7 @@ std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr,
     }
 #endif
     assert(false && "Unsupported TorqHw type");
-    cerr << hw_type << ": Torq Hardware not supported" << endl;
+    LOGE << hw_type << ": Torq Hardware not supported";
     return nullptr;
 }
 
@@ -149,7 +148,7 @@ bool TorqHw::start(uint32_t lramAddr) {
     writeReg32(RA_(NSS,START), RF_LSH(NSS,START_NSS, 1));  // kick off NSS CFG agent
     // Ensure the device has started before continuing
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    LOGD << "TorqHw::start OK" << endl;
+    LOGD << "TorqHw::start OK";
     return true;
 }
 

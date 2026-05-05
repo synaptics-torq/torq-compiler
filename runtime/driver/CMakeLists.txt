@@ -32,6 +32,8 @@ set(torq_hdrs
     torq_profile_scope.h
     torq_semaphore.h
     TorqExecutable.h
+    TorqIO.h
+    TorqDump.h
 )
 set(torq_srcs
     native_executable.cc
@@ -45,6 +47,8 @@ set(torq_srcs
     torq_profile_scope.cc
     torq_semaphore.c
     TorqExecutable.cc
+    TorqIO.cc
+    TorqDump.cc
 )
 set(torq_deps
     iree::base
@@ -66,6 +70,14 @@ set(torq_deps
     torq_hw::TorqHw
 )
 set(torq_defs)
+
+if(DEFINED IREE_FILE_IO_ENABLE)
+  if(IREE_FILE_IO_ENABLE)
+    list(APPEND torq_defs "IREE_FILE_IO_ENABLE=1")
+  else()
+    list(APPEND torq_defs "IREE_FILE_IO_ENABLE=0")
+  endif()
+endif()
 
 iree_cc_library(
   NAME

@@ -12,6 +12,15 @@
 set(torq_deps iree::base::internal)
 set(torq_srcs src/TorqUtils.cpp src/TorqHw.cpp src/TorqEventLog.cpp src/TorqDeviceBufferAPI.cpp)
 set(torq_defs)
+
+if(DEFINED IREE_FILE_IO_ENABLE)
+  if(IREE_FILE_IO_ENABLE)
+    list(APPEND torq_defs "IREE_FILE_IO_ENABLE=1")
+  else()
+    list(APPEND torq_defs "IREE_FILE_IO_ENABLE=0")
+  endif()
+endif()
+
 set(include_dirs
     ${TORQ_HW_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/inc

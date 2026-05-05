@@ -1,10 +1,10 @@
 #include "TestVectorWriter.h"
+#include "TorqIO.h"
 
 #include <cstdio>
 #include <cstdint>
-#include <fstream>
 #include <iomanip>
-#include <filesystem>
+#include <sstream>
 #include "iree/base/api.h"
 
 namespace synaptics {
@@ -13,35 +13,17 @@ namespace {
 
 // Helper function to create a directory
 iree_status_t createDirectory(const std::string& dir_name) {
-  std::error_code ec;
-  std::filesystem::create_directory(dir_name, ec);
-  if (ec && ec != std::errc::file_exists) {
-    return iree_make_status(IREE_STATUS_INTERNAL, 
-                            "failed to create directory %s: %s", 
-                            dir_name.c_str(), ec.message().c_str());
-  }
-  return iree_ok_status();
+  return io::createDirectory(dir_name);
 }
 
 // Helper function to write binary data to a file
 bool writeBinaryFile(const std::string& file_name, const void* data, size_t size) {
-  std::ofstream wf;
-  wf.open(file_name, std::ios::out | std::ios::binary);
-  if (!wf.good()) {
-    return false;
-  }
-
-  if (data) {
-    wf.write(static_cast<const char*>(data), size);
-  }
-  wf.close();
-  return wf.good();
+  return io::writeFile(file_name, data, size);
 }
 
 // Helper function to create empty file
 bool createEmptyFile(const std::string& file_name) {
-  std::ofstream f(file_name);
-  return f.good();
+  return io::writeTextFile(file_name, "");
 }
 
 }  // namespace
@@ -54,7 +36,7 @@ iree_status_t TestVectorWriter::ensureJobDirectory(int job_id) {
   std::string job_dir = invocation_dir_ + "/job" + std::to_string(job_id);
   
   // Check if job directory already exists
-  if (std::filesystem::exists(job_dir)) {
+  if (io::pathExists(job_dir)) {
     return iree_ok_status();
   }
   
@@ -82,11 +64,7 @@ iree_status_t TestVectorWriter::beginInvocation(int invocation_id) {
   invocation_dir_ = base_dir_ + "/" + executable_name_ + "/invocation" + std::to_string(invocation_id);
   
   // Remove existing invocation directory to start fresh
-  std::error_code ec;
-  std::filesystem::remove_all(invocation_dir_, ec);
-  if (ec) {
-    // Ignore errors if directory doesn't exist
-  }
+  io::removeDirectoryTree(invocation_dir_);
   
   auto status = createDirectory(base_dir_);
   if (!iree_status_is_ok(status)) return status;
@@ -111,15 +89,10 @@ iree_status_t TestVectorWriter::writeCdescAddr(int job_id, uint32_t addr) {
   
   std::string job_dir = invocation_dir_ + "/job" + std::to_string(job_id);
   std::string path = job_dir + "/tv.cdesc_addr.txt";
-  std::ofstream fp(path);
-  if (!fp.is_open()) {
-    return iree_make_status(IREE_STATUS_INTERNAL, "failed to open %s", path.c_str());
-  }
-  
-  fp << "0x" << std::hex << std::setw(8) << std::setfill('0') << addr << "\n";
-  fp.close();
-  
-  if (!fp.good()) {
+
+  std::ostringstream ss;
+  ss << "0x" << std::hex << std::setw(8) << std::setfill('0') << addr << "\n";
+  if (!io::writeTextFile(path, ss.str())) {
     return iree_make_status(IREE_STATUS_INTERNAL, "failed to write %s", path.c_str());
   }
   
@@ -153,10 +126,7 @@ iree_status_t TestVectorWriter::writeMemEntry(int job_id, const std::string& cmd
   
   if (fmt == "hex") {
 
-    std::ofstream fp(data_path);
-    if (!fp.is_open()) {
-      return iree_make_status(IREE_STATUS_INTERNAL, "failed to open %s", data_path.c_str());
-    }
+    std::ostringstream ss;
     
     if (data) {
       const unsigned char* bytes = static_cast<const unsigned char*>(data);
@@ -167,15 +137,14 @@ iree_status_t TestVectorWriter::writeMemEntry(int job_id, const std::string& cmd
         size_t word_offset = word * word_width;
         // Write bytes of this word in reverse order (little endian)
         for (size_t byte = 0; byte < word_width; byte++) {
-          fp << std::hex << std::setw(2) << std::setfill('0') 
+          ss << std::hex << std::setw(2) << std::setfill('0')
              << (int)bytes[word_offset + (word_width - 1 - byte)];
         }
-        fp << '\n';
+        ss << '\n';
       }
     }
-    fp.close();
     
-    if (!fp.good()) {
+    if (!io::writeTextFile(data_path, ss.str())) {
       return iree_make_status(IREE_STATUS_INTERNAL, "failed to write %s", data_path.c_str());
     }
   } else if (fmt == "raw") {
@@ -189,14 +158,13 @@ iree_status_t TestVectorWriter::writeMemEntry(int job_id, const std::string& cmd
   
   // Append entry to the appropriate .lst file
   std::string lst_path = getMemListPath(job_id, is_init);
-  FILE* fp = fopen(lst_path.c_str(), "a");
-  if (!fp) {
-    return iree_make_status(IREE_STATUS_INTERNAL, "failed to open %s", lst_path.c_str());
-  }
-  
-  fprintf(fp, "%s  0x%08x %10zu %3d  %s  %s\n", 
+  char buf[512];
+  std::snprintf(buf, sizeof(buf), "%s  0x%08x %10zu %3d  %s  %s\n",
           cmd.c_str(), addr, size, word_width, fmt.c_str(), filename.c_str());
-  fclose(fp);
+
+  if (!io::appendTextFile(lst_path, buf)) {
+    return iree_make_status(IREE_STATUS_INTERNAL, "failed to append to %s", lst_path.c_str());
+  }
   
   return iree_ok_status();
 }

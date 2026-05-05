@@ -1,39 +1,25 @@
 #include "TorqExecutable.h"
 #include "TorqUtils.h"
 #include "TorqEventLog.h"
-#include "TestVectorWriter.h"
+#include "TorqIO.h"
+#include "TorqDump.h"
 #include "torq_allocator.h"
-
-#include "iree/base/internal/flags.h"
-
-#include <unistd.h>
-#include <dlfcn.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
-#include <iostream>
-#include <filesystem>
 #include <limits>
 #include <functional>
 #include <map>
 #include <utility>
 
-#include "iree/tooling/numpy_io.h"
-#include "iree/io/stdio_stream.h"
-
-
-IREE_FLAG(string, torq_hw_type, DEF_HW_TYPE, "Hardware type [sim, aws_fpga, soc_fpga, astra_machina]")
-IREE_FLAG(string, torq_dump_io_data_dir, "", "Dump input output buffers in binary form to the specified directory");
-IREE_FLAG(bool, torq_step_by_step, false, "Enable step_by_step debug mode")
-IREE_FLAG(string, torq_dump_buffers_dir, "", "Enable dumping intermediate buffers during execution to the specified directory")
-IREE_FLAG(bool, torq_clear_memory, false, "Force clearing XRAM and LRAM before starting execution")
-IREE_FLAG(string, torq_dump_test_vectors_dir, "", "Dump a test vectors compatible with torq_rt to the specified directory")
-IREE_FLAG(bool, torq_dump_bus_logs, false, "Dump NPU internal bus logs when executing creating test vectors")
-IREE_FLAG(bool, torq_explicit_dmabuf_sync, false, "Explicitly sync cached zero-copy DMA-BUF bindings in userspace instead of relying on kernel attach/detach")
+using synaptics::io::FLAG_torq_hw_type;
+using synaptics::io::FLAG_torq_step_by_step;
+using synaptics::io::FLAG_torq_clear_memory;
+using synaptics::dump::FLAG_torq_dump_bus_logs;
+using synaptics::io::FLAG_torq_explicit_dmabuf_sync;
 
 
 namespace synaptics {
@@ -64,37 +50,7 @@ static EventType toEventType(ns(HostActionParams_union_type_t) paramsType) {
   }
 }
 
-static bool binary_file_write(const std::string& file_name, const void* data, size_t size)
-{
-    std::ofstream wf;
-    wf.open(file_name, std::ios::out | std::ios::binary);
-    if (!wf.good()) {
-        printf("Failed to open file: %s\n", file_name.c_str());
-        return false;
-    }
 
-    if (data) {
-        wf.write(static_cast<const char*>(data), size);
-    }
-    wf.close();
-    return wf.good();
-}
-
-static std::string get_io_dump_data_dir(std::string executable_name) {
-    if (!FLAG_torq_dump_io_data_dir[0]) {
-        return "";
-    } else {
-      return std::string(FLAG_torq_dump_io_data_dir) + "/" + executable_name + "/";
-    }
-}
-
-static std::string get_buffer_dump_dir(std::string executable_name, int job_id) {
-    if (!FLAG_torq_dump_buffers_dir[0]) {
-        return "";
-    } else {
-      return std::string(FLAG_torq_dump_buffers_dir) + "/" + executable_name + "/action" + std::to_string(job_id) + "/";
-    }
-}
 
 
 static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable_def, uint32_t* xram_base, uint32_t* xram_size) {
@@ -215,7 +171,7 @@ typedef struct fake_npu_top_t
 } fake_npu_top_t;
 
 static bool isZeroCopyDebugModeEnabled() {
-    return FLAG_torq_dump_io_data_dir[0] || FLAG_torq_dump_test_vectors_dir[0];
+  return dump::FLAG_torq_dump_io_data_dir[0] || dump::FLAG_torq_dump_test_vectors_dir[0];
 }
 
 // adding helper in case strategy complexity exceeds a single flag
@@ -584,21 +540,11 @@ iree_status_t TorqExecutable::syncBinding(int binding_id, iree_hal_torq_Binding_
 
     }
 
-    // dump the whole binding data
-    // only dump the valid input/output binding data
-    std::string io_str;
+    // dump the whole binding data (input or output)
     if (from_host && !isWriteOnly) {
-      io_str = ".in";
+      dump::dumpBinding(executableName(), bindingId, hostAddress, bindingSize, true);
     } else if (!from_host && !isReadOnly) {
-      io_str = ".out";
-    }
-
-    if (FLAG_torq_dump_io_data_dir[0] && !io_str.empty()) {
-        std::string data_file = "npu" + io_str + ".host_binding." + std::to_string(bindingId) + ".torq_binding." + std::to_string(bindingId) + ".bin";
-
-        LOGD << "Writing binary dump of binding " << bindingId << " to " << get_io_dump_data_dir(executableName()) << "/" << data_file;
-
-        binary_file_write(get_io_dump_data_dir(executableName()) + data_file, hostAddress, bindingSize);
+      dump::dumpBinding(executableName(), bindingId, hostAddress, bindingSize, false);
     }
     
     if (testVectorWriter_) {
@@ -612,118 +558,7 @@ iree_status_t TorqExecutable::syncBinding(int binding_id, iree_hal_torq_Binding_
     return iree_ok_status();
 }
 
-static iree_status_t create_buffers_index(iree_hal_torq_native_executable_t* executable) {
 
-  auto torq_executable = get_torq_executable(executable);
-
-  auto executable_def = torq_executable->executableDef();
-
-  auto buffers = ns(ExecutableDef_buffers_debug_info(executable_def));
-
-  // check if debug info is present
-  if (!buffers) {
-    LOGD << "No buffer debug info found in model";
-    return iree_ok_status();
-  }
-
-  std::string executable_name = torq_executable->executableName();
-
-  auto path = std::string(FLAG_torq_dump_buffers_dir) + "/" + executable_name + "/buffers.csv";
-
-  std::ofstream fp;
-  fp.open(path, std::ios::out);
-
-  if (!fp.is_open()) {
-    return iree_make_status(IREE_STATUS_INTERNAL, "failed to open file %s", path.c_str());
-  }
-
-
-  auto actions = ns(ExecutableDef_actions(executable_def));
-
-  fp << "id;type;shape;strides;address;size;allocation_action;last_use_action;deallocation_action;allocation_location;last_use_location;deallocation_location\n";
-
-  for (int i = 0; i < ns(BufferDebugInfo_vec_len(buffers)); i++) {
-
-    auto buffer = ns(BufferDebugInfo_vec_at(buffers, i));
-  
-    fp << ns(BufferDebugInfo_id(buffer)) << ";";
-    fp << ns(BufferType_name(ns(BufferDebugInfo_buffer_type(buffer)))) << ";";
-    
-    auto shape = ns(BufferDebugInfo_shape_get(buffer));
-    auto rank = flatbuffers_uint32_vec_len(shape);
-
-    for (int j = 0; j < rank; j++) {
-      fp << flatbuffers_uint32_vec_at(shape, j);      
-      fp << "x";      
-    }
-
-    std::string element_type_str = ns(ElementType_name(ns(BufferDebugInfo_element_type(buffer))));
-    std::transform(element_type_str.begin(), element_type_str.end(), element_type_str.begin(), ::tolower);
-    fp << element_type_str << ";";
-
-    auto strides = ns(BufferDebugInfo_strides_get(buffer));
-    rank = flatbuffers_uint32_vec_len(strides);
-    for (int j = 0; j < rank; j++) {
-      fp << flatbuffers_uint32_vec_at(strides, j);
-      if (j < rank - 1) {
-        fp << ",";
-      }    
-    }
-
-    auto allocationId = ns(BufferDebugInfo_allocation_action(buffer));
-
-    auto deallocationId = ns(BufferDebugInfo_deallocation_action(buffer));
-    if (deallocationId < 0) {
-      deallocationId = ns(HostAction_vec_len(actions)) - 1;
-    }
-
-    auto lastUseId = ns(BufferDebugInfo_last_use_action(buffer));
-
-    fp << ";";
-
-    fp << ns(BufferDebugInfo_address(buffer)) << ";";
-
-    fp << ns(BufferDebugInfo_size(buffer)) << ";";
-
-    fp << allocationId << ";";
-
-    fp << lastUseId << ";";
-
-    fp << deallocationId << ";";
-
-    fp << "\n";
-  }
-
-  fp.close();
-
-  return iree_ok_status();
-  
-}
-
-iree_status_t create_dir(std::string dir_name) {
-  std::error_code ec;
-  std::filesystem::create_directory(dir_name, ec);
-  if (ec && ec != std::errc::file_exists) {
-    return iree_make_status(IREE_STATUS_INTERNAL, "failed to create directory %s: %s", dir_name.c_str(), ec.message().c_str());
-  }
-  return iree_ok_status();
-}
-
-iree_status_t create_job_directory(std::string executable_name, int job_id) {
-
-  if (FLAG_torq_dump_buffers_dir[0]) {
-    auto status = create_dir(std::string(FLAG_torq_dump_buffers_dir));
-    if (!iree_status_is_ok(status)) {
-      return status;
-    }
-    status = create_dir(std::string(FLAG_torq_dump_buffers_dir) + "/" + executable_name);
-    if (!iree_status_is_ok(status)) {
-      return status;
-    }
-  }
-
-  return iree_ok_status();
-}
 
 static iree_status_t torq_execute_step_by_step(TorqHw *torq, int32_t code_entry, int32_t job_id) {
 
@@ -807,265 +642,7 @@ static iree_status_t torq_execute_step_by_step(TorqHw *torq, int32_t code_entry,
   return iree_ok_status();
 }
 
-static iree_status_t copy_to_hal_buffer(const std::vector<uint8_t>& src, iree_hal_allocator_t *allocator,               
-              const std::vector<iree_device_size_t>& shape, const std::vector<iree_device_size_t>& strides,
-              iree_hal_element_type_t element_type, iree_hal_buffer_t **dst) {
-  
 
-  size_t element_size_bits = iree_hal_element_bit_count(element_type);
-
-  assert(element_size_bits % 8 == 0 && "Element size must be a multiple of 8");
-
-  size_t element_size_bytes = element_size_bits / 8;
-
-  size_t total_elements = 1;
-
-  for (size_t i = 0; i < shape.size(); ++i) {
-    total_elements *= shape[i];
-  }
-
-  iree_hal_buffer_t *hal_buffer;
-  iree_hal_buffer_params_t params = {0};
-
-  params.type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL;
-  params.access = IREE_HAL_MEMORY_ACCESS_ALL;
-  params.usage = IREE_HAL_BUFFER_USAGE_DEFAULT;
-
-  iree_status_t status = iree_hal_allocator_allocate_buffer(allocator, params, total_elements * element_size_bytes, &hal_buffer);
-
-  if (!iree_status_is_ok(status)) {
-    LOGD << "Failed to allocate buffer";
-    iree_status_fprint(stderr, status);
-    return status;
-  }
-
-  for (size_t i = 0; i < total_elements; i++) {
-    size_t src_offset = 0;
-    size_t remaining = i;
-
-    for (size_t j = shape.size(); j > 0; j--) {
-      size_t index = remaining % shape[j - 1];
-      remaining /= shape[j - 1];
-      src_offset += index * strides[j - 1] * element_size_bytes;
-    }
-    
-    status = iree_hal_buffer_map_write(hal_buffer, i * element_size_bytes, src.data() + src_offset, element_size_bytes);
-   
-    if (!iree_status_is_ok(status)) {
-      LOGD << "Failed to write to buffer";
-      iree_status_fprint(stderr, status);
-      return status;
-    }
-
-  }
-
-  *dst = hal_buffer;
-
-  return iree_ok_status();
-  
-}
-
-
-static iree_status_t dump_to_numpy(std::string filePath, iree_hal_torq_native_executable_t* executable,                            
-                            iree_hal_element_type_t element_type, const std::vector<uint8_t>& data,
-                            const std::vector<iree_device_size_t>& shape, const std::vector<iree_device_size_t>& strides) {
-
-  iree_status_t status = iree_ok_status();
-  iree_io_stream_t* stream = NULL;
-  iree_io_stdio_stream_mode_t mode = IREE_IO_STDIO_STREAM_MODE_WRITE | IREE_IO_STDIO_STREAM_MODE_DISCARD;
-
-  iree_hal_allocator_t* allocator = iree_hal_device_allocator(executable->device);
-
-  iree_hal_buffer_t *hal_buffer = NULL;
-
-  status = copy_to_hal_buffer(data, allocator, shape, strides, element_type, &hal_buffer);
-
-  if (!iree_status_is_ok(status)) {    
-    return status;
-  }    
-
-  iree_string_view_t filePathStringView = iree_make_cstring_view(filePath.c_str());
-  
-  status = iree_io_stdio_stream_open(mode, filePathStringView, executable->allocator, &stream);
-
-  if (!iree_status_is_ok(status)) {
-    iree_hal_buffer_release(hal_buffer);
-    iree_status_fprint(stderr, status);
-    return status;
-  }    
-
-  iree_hal_buffer_view_t* buffer_view = NULL;
-
-  status = iree_hal_buffer_view_create(hal_buffer, shape.size(), shape.data(), element_type, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, executable->allocator, &buffer_view);
-
-  if (!iree_status_is_ok(status)) {
-    iree_status_fprint(stderr, status);    
-    iree_io_stream_release(stream);
-    iree_hal_buffer_release(hal_buffer);
-    return status;
-  }
-
-  status = iree_numpy_npy_save_ndarray(stream, IREE_NUMPY_NPY_SAVE_OPTION_DEFAULT, buffer_view, executable->allocator);
-
-  if (!iree_status_is_ok(status)) {
-    iree_status_fprint(stderr, status);    
-  }
-
-  iree_hal_buffer_view_release(buffer_view);
-  iree_hal_buffer_release(hal_buffer);
-  iree_io_stream_release(stream);
-  
-  return status;    
-  
-}
-
-std::vector<iree_device_size_t> to_vector(flatbuffers_uint32_vec_t vec) {
-  std::vector<iree_device_size_t> result;
-  for (size_t i = 0; i < flatbuffers_uint32_vec_len(vec); i++) {
-    result.push_back(flatbuffers_uint32_vec_at(vec, i));
-  }
-  return result;
-}
-
-
-iree_hal_element_type_t to_iree_hal_element_type(iree_hal_torq_ElementType_enum_t element_type) {
-  switch (element_type) {
-    case iree_hal_torq_ElementType_I8:
-      return IREE_HAL_ELEMENT_TYPE_INT_8;
-    case iree_hal_torq_ElementType_I16:
-      return IREE_HAL_ELEMENT_TYPE_INT_16;
-    case iree_hal_torq_ElementType_I32:
-      return IREE_HAL_ELEMENT_TYPE_INT_32;
-    case iree_hal_torq_ElementType_F32:
-      return IREE_HAL_ELEMENT_TYPE_FLOAT_32;
-    case iree_hal_torq_ElementType_BF16:
-      return IREE_HAL_ELEMENT_TYPE_BFLOAT_16;
-    default:
-      return IREE_HAL_ELEMENT_TYPE_NONE;
-  }
-}
-
-static void dump_buffers(TorqHw *torq, int32_t action_id, iree_hal_torq_native_executable_t* executable) {  
-
-  auto torq_executable = get_torq_executable(executable);
-  auto executable_def = torq_executable->executableDef();
-  auto executable_name = torq_executable->executableName();
-
-  auto buffers = ns(ExecutableDef_buffers_debug_info(executable_def));
-  if (!buffers) {
-    LOGD << "No buffer debug info";
-    return;
-  }
-
-  auto dump_dir = get_buffer_dump_dir(executable_name, action_id);
-
-  if (!std::filesystem::exists(dump_dir)) {
-    std::filesystem::create_directory(dump_dir);
-  }
-
-  auto actions = ns(ExecutableDef_actions(executable_def));
-  auto action = ns(HostAction_vec_at(actions, action_id));
-
-  if (ns(HostAction_params_type(action)) == ns(HostActionParams_StartNSSParams)) {
-    LOGD << "Waiting for NPU components to finish before dumping buffers";
-
-    auto params = ns(StartNSSParams_table_t) (ns(HostAction_params(action)));
-    
-    // wait for all components of the NPU that were started, we should not wait
-    // for blocks that were not started as this will lead to an hang
-    if (!torq->wait(true,
-                      ns(StartNSSParams_starts_slice1(params)),
-                      ns(StartNSSParams_starts_slice2(params)),
-                      ns(StartNSSParams_starts_dma_in(params)),
-                      ns(StartNSSParams_starts_dma_out(params)))) {
-
-      LOGD << "Buffer dump may be incorrect due to NPU wait failed!";
-    }
-  }
-
-  if (action_id == 0) {
-      create_buffers_index(executable);
-  }
-  
-  size_t buffer_count = ns(BufferDebugInfo_vec_len(buffers));
-
-  for (size_t i = 0; i < buffer_count; i++) {
-
-    auto buffer = ns(BufferDebugInfo_vec_at(buffers, i));
-
-    if ( action_id < ns(BufferDebugInfo_allocation_action(buffer)) ||
-         action_id > ns(BufferDebugInfo_last_use_action(buffer))) {
-      continue;
-    }
-
-    auto elementType = to_iree_hal_element_type(ns(BufferDebugInfo_element_type_get(buffer)));
-
-    // FIXME: we currently dump BF16 as UINT16 because iree doesn't support it
-    if (elementType == IREE_HAL_ELEMENT_TYPE_BFLOAT_16) {
-      elementType = IREE_HAL_ELEMENT_TYPE_UINT_16;
-    }
-
-    if (elementType == IREE_HAL_ELEMENT_TYPE_NONE) {
-      LOGD << "Unsupported element type";
-      continue;
-    }
-
-    auto bufferIndex = ns(BufferDebugInfo_id(buffer));
-    uint32_t address = ns(BufferDebugInfo_address_get(buffer));
-    uint32_t size = ns(BufferDebugInfo_size_get(buffer));
-
-    // compute the effective size of the data, this is required because
-    // subviews may have a total size (i.e. stride[0] * shape[0]) that
-    // is larger than the actual data size and therefore reading the 
-    // full size would result in reading out-of-bounds memory (that may
-    // not be mappped)
-
-    auto shape = to_vector(ns(BufferDebugInfo_shape(buffer)));
-    auto strides = to_vector(ns(BufferDebugInfo_strides(buffer)));
-    auto elementSizeBytes = iree_hal_element_dense_byte_count(elementType);
-    
-    // compute the address just after the last element in the buffer
-    auto bufferDataLengthElements = 1;
-    for (int dim = 0; dim < shape.size(); dim++) {
-      bufferDataLengthElements += (shape[dim] - 1) * strides[dim];
-    }    
-    auto bufferDataLengthBytes = bufferDataLengthElements * elementSizeBytes;
-
-    LOGD << "Dumping buffer " << bufferIndex << " at address " << address << " size " << size << " (data size " << bufferDataLengthBytes << ")";
-
-    std::vector<uint8_t> stridedData(bufferDataLengthBytes);
-
-    switch (ns(BufferDebugInfo_buffer_type_get(buffer))) {
-      case ns(BufferType_XRAM):
-        torq->readXram(address, bufferDataLengthBytes, stridedData.data());
-        break;
-      case ns(BufferType_LRAM):
-        torq->readLram(address, bufferDataLengthBytes, stridedData.data());
-        break;
-      case ns(BufferType_DTCM):
-        torq->readDtcm(address, bufferDataLengthBytes, stridedData.data());
-        break;
-      case ns(BufferType_ITCM):
-        torq->readItcm(address, bufferDataLengthBytes, stridedData.data());
-        break;
-      default:
-        LOGD << "Unsupported buffer type";
-        continue;
-    }
-
-    auto file_path = dump_dir + "buffer_" + std::to_string(bufferIndex) + ".npy";
-
-    iree_status_t status = dump_to_numpy(file_path, executable, elementType, stridedData, shape, strides);
-
-    if (!iree_status_is_ok(status)) {
-      LOGD << "Failed to dump buffer " << bufferIndex << " to file " << file_path;
-      assert(false);
-    }
-
-  }
-
-
-}
 
 iree_status_t TorqExecutable::initialize() {  
   
@@ -1119,9 +696,7 @@ iree_status_t TorqExecutable::initialize() {
     TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::INIT_CLEAR_MEMORY);
   }
 
-  if (FLAG_torq_dump_test_vectors_dir[0]) {
-    testVectorWriter_.reset(new TestVectorWriter(executableName(), FLAG_torq_dump_test_vectors_dir));
-  }
+  testVectorWriter_ = dump::createTestVectorWriter(executableName());
 
   {
     TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_LOAD_CODE_SEGMENTS);
@@ -1357,9 +932,7 @@ iree_status_t TorqExecutable::executeActions(TorqDispatchEventLog* eventLog) {
     
     LOGD << "Completed action " << actionIndex_;
 
-    if (FLAG_torq_dump_buffers_dir[0]) {
-      dump_buffers(torq_.get(), actionIndex_, nativeExecutable_);
-    }
+    dump::dumpBuffers(torq_.get(), actionIndex_, nativeExecutable_);
 
     actionIndex_++;
   }
@@ -1369,31 +942,10 @@ iree_status_t TorqExecutable::executeActions(TorqDispatchEventLog* eventLog) {
 }
 
 iree_status_t TorqExecutable::setupDumpDirectories() {
-  
-  iree_status_t status;
+  iree_status_t status = dump::setupIODumpDirs(executableName());
+  if (!iree_status_is_ok(status)) return status;
 
-  if (FLAG_torq_dump_io_data_dir[0]) {
-    status = create_dir(FLAG_torq_dump_io_data_dir);
-
-    if (status != iree_ok_status()) {
-      return status;
-    }
-
-    status = create_dir(get_io_dump_data_dir(executableName()));
-    
-    if (status != iree_ok_status()) {
-      return status;
-    }
-  }
-  
-  status = create_job_directory(executableName(), 0);
-
-  if (!iree_status_is_ok(status)) {
-    return status;
-  }
-
-  return iree_ok_status();
-
+  return dump::createJobDirectory(executableName(), 0);
 }
 
 void TorqExecutable::writeInitialStateToTestVector() {
@@ -1464,7 +1016,7 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
 
   // acquire the mutex to ensure only one execution is running, we will be changing
   // the XRAM contents with the inputs
-  std::lock_guard<std::mutex> lock(mutex_);
+  io::TorqMutex::ScopedLock lock(mutex_);
 
   // increment the invocation count id  
   nextInvocationId_++;
@@ -1549,9 +1101,7 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
 TorqExecutable::~TorqExecutable() {
   clearPersistentInputCopies();
 
-  if (hostCodeLibHandle_) {
-    dlclose(hostCodeLibHandle_);
-  }
+  io::unloadLibrary(hostCodeLibHandle_);
 
   if (torq_) {
     torq_->close();
@@ -1612,25 +1162,9 @@ iree_status_t TorqExecutable::loadHostCode() {
     return iree_ok_status();
   }
 
-  // write hostCodeLib to the temporary file
-  std::string tempFileName = "/tmp/host_code.so.XXXXXX";
-  int fd = mkstemp(&tempFileName[0]);
-  if (fd == -1) {
-    return iree_make_status(IREE_STATUS_INTERNAL, "Failed to create temporary file");
-  }
-  
-  std::ofstream ofs(tempFileName, std::ios::binary);
-  if (!ofs.good()) {
-    close(fd);
-    return iree_make_status(IREE_STATUS_INTERNAL, "Failed to open temporary file for writing");
-  }
-  ofs.write(reinterpret_cast<const char*>(hostCodeData), hostCodeLen);
-  ofs.close();
-  close(fd);
-
-  hostCodeLibHandle_ = dlopen(tempFileName.c_str(), RTLD_NOW | RTLD_LOCAL);
-
-  return iree_ok_status();
+  return io::loadLibraryFromMemory(
+      reinterpret_cast<const uint8_t*>(hostCodeData), hostCodeLen,
+      &hostCodeLibHandle_);
 }
 
 // Compute the dense (contiguous) strides in bytes from shape and element size.
@@ -1775,11 +1309,17 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
 
   LOGD << "action: Starting host with function " << functionName;
 
-  auto hostFunction = (void(*)(iree_hal_executable_environment_v0_t*, iree_hal_executable_dispatch_state_v0_t*, iree_hal_executable_workgroup_state_v0_t*)) dlsym(hostCodeLibHandle_, functionName.c_str());
+  using HostFn = void(*)(iree_hal_executable_environment_v0_t*,
+                         iree_hal_executable_dispatch_state_v0_t*,
+                         iree_hal_executable_workgroup_state_v0_t*);
+  auto hostFunction = reinterpret_cast<HostFn>(
+      io::resolveSymbol(hostCodeLibHandle_, functionName));
 
   if (!hostFunction) {
-    return iree_make_status(IREE_STATUS_INTERNAL, "Failed to find host function %s", functionName.c_str());
-  }        
+    return iree_make_status(IREE_STATUS_INTERNAL,
+                            "Failed to find host function %s",
+                            functionName.c_str());
+  }
 
   auto args = ns(StartHostParams_args(params));
   auto sizes = ns(StartHostParams_sizes(params));
@@ -1861,7 +1401,9 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
   dispatch_state.binding_ptrs = argumentAddresses.data();
 
   for (int i = 0; i < dispatch_state.binding_count; i++) {
-      LOGD << "Argument " << i << ": " << std::hex << "0x" << (uintptr_t)dispatch_state.binding_ptrs[i] << " xram: 0x" << flatbuffers_uint64_vec_at(args, i) << std::dec << " size: " << flatbuffers_uint64_vec_at(sizes, i);
+      LOGD << "Argument " << i << ": 0x" << (uintptr_t)dispatch_state.binding_ptrs[i]
+           << " xram: 0x" << flatbuffers_uint64_vec_at(args, i)
+           << " size: " << flatbuffers_uint64_vec_at(sizes, i);
   }
 
   // call the code
@@ -1917,12 +1459,11 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
       LOGD << "action: Starting NPU with entry point at " << code_entry;
 
       if (nextJobId_ > 0) {
-        auto status = create_job_directory(executableName(), nextJobId_);
-        
+        auto status = dump::createJobDirectory(executableName(), nextJobId_);
+
         if (status != iree_ok_status()) {
           return status;
         }
-        
       }
 
       if (FLAG_torq_step_by_step) {

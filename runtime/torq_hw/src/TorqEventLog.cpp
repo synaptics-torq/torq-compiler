@@ -18,6 +18,8 @@ using namespace std;
 
 namespace synaptics {
 
+#if IREE_FILE_IO_ENABLE
+
 IREE_FLAG(string, torq_profile_host, "", "Create host profiling log in the specified file");
 
 TorqEventLog& TorqEventLog::get() {
@@ -174,6 +176,17 @@ TorqDispatchEventLog* TorqEventLog::startDispatch(
     return new TorqDispatchEventLog(*this, dispatchName, nextDispatchIndex_++, eventType);
 }
 
+#else // !IREE_FILE_IO_ENABLE
 
+bool TorqEventLog::isProfilingEnabled() { return false; }
+
+TorqEventLog& TorqEventLog::get() { static TorqEventLog instance; return instance; }
+
+TorqDispatchEventLog* TorqEventLog::startDispatch(const std::string&, EventType) { return nullptr; }
+
+void TorqDispatchEventLog::addEvent(EventType, Event::TimeTag, int) {}
+void TorqDispatchEventLog::close() {}
+
+#endif // IREE_FILE_IO_ENABLE
 
 } // namespace synaptics

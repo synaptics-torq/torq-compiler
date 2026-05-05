@@ -1,13 +1,18 @@
 #pragma once
 
+#include "iree/base/config.h"
+
+#include <string>
+#include <cassert>
+
+#if IREE_FILE_IO_ENABLE
 #include <mutex>
 #include <deque>
 #include <vector>
-#include <string>
 #include <chrono>
 #include <fstream>
 #include <optional>
-#include <cassert>
+#endif  // IREE_FILE_IO_ENABLE
 
 namespace synaptics {
 
@@ -100,6 +105,8 @@ inline std::string eventTypeToString(EventType type) {
     }
     assert(false && "unknown event type");
 }
+
+#if IREE_FILE_IO_ENABLE
 
 struct Event {
     std::chrono::steady_clock::time_point timestamp;
@@ -196,5 +203,30 @@ private:
   TORQ_ADD_PROFILING_EVENT_BEGIN(event_log, event);        \
   (status) = (expr);                                       \
   TORQ_ADD_PROFILING_EVENT_END(event_log, event);          \
+
+#else  // !IREE_FILE_IO_ENABLE
+
+struct Event {
+    enum TimeTag { BEGIN, END };
+};
+
+class TorqDispatchEventLog {
+public:
+    void addEvent(EventType, Event::TimeTag, int);
+    void close();
+};
+
+class TorqEventLog {
+public:
+    static bool isProfilingEnabled();
+    static TorqEventLog& get();
+    TorqDispatchEventLog* startDispatch(const std::string&, EventType);
+};
+
+#define TORQ_ADD_PROFILING_EVENT_BEGIN(event_log, event)
+#define TORQ_ADD_PROFILING_EVENT_END(event_log, event)
+#define TORQ_PROFILE_EVENT(event_log, event, status, expr) (status) = (expr);
+
+#endif  // IREE_FILE_IO_ENABLE
 
 } // namespace synaptics

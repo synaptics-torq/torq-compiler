@@ -33,7 +33,6 @@ iree_status_t parse_debug_level_callback(iree_string_view_t flag_name, void* sto
 }
 
 void print_debug_level_callback(iree_string_view_t flag_name, void* storage, FILE* file) {
-    
     if (iree_string_view_equal(flag_name, iree_make_cstring_view("torq_debug"))) {
         if (TorqLogger::request_log_level == TORQ_LOG_DEBUG) {
             fprintf(file, "--torq_debug=true\n");
@@ -46,11 +45,13 @@ void print_debug_level_callback(iree_string_view_t flag_name, void* storage, FIL
         } else {
             fprintf(file, "--torq_verbose=false\n");
         }
-    }    
+    }
 }
 
+#if IREE_FILE_IO_ENABLE
 IREE_FLAG_CALLBACK(parse_debug_level_callback, print_debug_level_callback, nullptr, torq_debug, "Enable debug logs");
 IREE_FLAG_CALLBACK(parse_debug_level_callback, print_debug_level_callback, nullptr, torq_verbose, "Enable verbose logs (more than debug logs)");
+#endif
 
 using namespace std;
 
@@ -186,6 +187,7 @@ std::string printRegisterAddress(uint32_t address) {
 }
 
 void CfgCmd::print() const {
+#if IREE_FILE_IO_ENABLE
     std::cout << "CfgCmd {"
                 << " ra: 0x" << std::hex << ra
                 << ", rn: 0x" << values.size()
@@ -202,6 +204,7 @@ void CfgCmd::print() const {
         std::cout << "  " << std::hex << std::setw(8) << std::setfill('0') << address << " = 0x" << std::setw(8) << std::setfill('0') << values[i] << std::dec << ", " << std::endl;
     }
     std::cout << "  } }" << std::endl;
+#endif
 }
 
 void SynCmd::loadFromVector(const std::vector<uint8_t>& src) {
@@ -261,7 +264,7 @@ std::string synMskToString(uint32_t msk) {
 }
 
 void SynCmd::print() const {
-        
+#if IREE_FILE_IO_ENABLE
     std::cout << "SynCmd {"
                 << " msk: " << msk << "( " << synMskToString(msk) << ")"
                 << ", rsvd: " << rsvd
@@ -269,6 +272,7 @@ void SynCmd::print() const {
                 << ", id: " << id()
                 << ", lastCmd: " << isLastCmd
                 << " }" << std::endl;
+#endif
 }
 
 int NxtCmd::id() const {
@@ -288,12 +292,14 @@ int NxtCmd::serializedSize() const {
 }
 
 void NxtCmd::print() const {
+#if IREE_FILE_IO_ENABLE
     std::cout << "NxtCmd {"
                 << " nxt: 0x" << std::hex << nxt
                 << ", rsvd: " << rsvd
                 << ", id: " << id()
                 << ", lastCmd: " << isLastCmd
                 << " }" << std::endl;
+#endif
 }
 
 
@@ -347,11 +353,13 @@ Cmds parseCommandsUntilUnknown(const std::vector<uint8_t>& src) {
 }
 
 void printCommands(const Cmds& cmds) {
+#if IREE_FILE_IO_ENABLE
     std::cout << "Commands {" << std::endl;    
     for (const auto& cmd : cmds) {
         cmd->print();
     }
     std::cout << "}" << std::endl;
+#endif
 }
 
 std::vector<uint8_t> serializeCommands(const Cmds& cmds) {
