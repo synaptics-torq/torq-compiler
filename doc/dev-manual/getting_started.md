@@ -165,3 +165,30 @@ In order to cross-compile the runtime for an embedded target use the following c
     ```
 
 The statically linked ``torq-run-module`` is available in ``../iree-build-soc/third_party/iree/tools/torq-run-module``.
+
+## Build the kernel module
+
+ You can build the kernel module required for the NPU as follows:
+
+1. Prepare the kernel build dependencies (from GitHub by default):
+
+   ```shell
+   $ scripts/setup_soc_ko_build_deps.sh
+   ```
+
+   To use the internal Gerrit repositories instead of GitHub, add the `--use-gerrit` flag:
+
+   ```shell
+   $ scripts/setup_soc_ko_build_deps.sh --use-gerrit
+   ```
+
+2. Build the kernel module:
+
+   ```shell
+   $ cmake --build ../iree-build-soc/ --target torq_kernel_module
+   ```
+
+The resulting kernel module (`.ko`) file will be available in ```../iree-build-soc/third_party/iree/runtime/plugins/TORQ/torq_hw/hal/SL2610```
+
+> **Note:** To force a rebuild of the kernel artifacts, run:
+> `rm ../third_party/runtimes-prebuilt/soc-kernel/syna-kernel-artifacts.tgz`
