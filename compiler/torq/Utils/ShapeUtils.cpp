@@ -515,6 +515,20 @@ LogicalResult promoteScalar(linalg::LinalgOp srcOp, Value &input, PatternRewrite
     return success();
 }
 
+// True for a rank-1 single-element input with source map `(d...) -> (0)`,
+// as emitted by upstream's `tosa-to-linalg-named` lowering.
+static bool isUnitConstSrcInput(linalg::GenericOp op, OpOperand &input) {
+    assert(input.getOwner() == op.getOperation() && "input must be an operand of op");
+    auto rtt = dyn_cast<RankedTensorType>(input.get().getType());
+    if (!rtt || rtt.getRank() != 1 || !rtt.hasStaticShape() || rtt.getDimSize(0) != 1)
+        return false;
+    AffineMap srcMap = op.getMatchingIndexingMap(&input);
+    if (srcMap.getNumResults() != 1)
+        return false;
+    auto cst = dyn_cast<AffineConstantExpr>(srcMap.getResult(0));
+    return cst && cst.getValue() == 0;
+}
+
 static bool isElementwiseNIn1Out(linalg::GenericOp srcOp) {
     if (srcOp.getNumResults() != 1) {
         return false;
@@ -538,6 +552,9 @@ static bool isElementwiseNIn1Out(linalg::GenericOp srcOp) {
             return false;
         }
         if (rtt.getRank() == 0) {
+            continue;
+        }
+        if (isUnitConstSrcInput(srcOp, *inputOperand)) {
             continue;
         }
         if (srcOp.getMatchingIndexingMap(inputOperand) != outMap) {
@@ -576,44 +593,68 @@ PromoteScalarsTo1D::matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &re
 
     SmallVector<AffineMap> indexingMaps = srcOp.getIndexingMapsArray();
     SmallVector<Value> newOperands(srcOp->getOperands().begin(), srcOp->getOperands().end());
-    SmallVector<unsigned> scalarInputIdxs;
+    // Collect inputs to rewrite: rank-0 (needs rank promotion + map rewrite),
+    // or rank-1 unit-extent with const-0 source map (needs only map rewrite).
+    SmallVector<unsigned> inputIdxs;
+    SmallVector<bool> needsRankPromotion;
     for (auto it : llvm::enumerate(srcOp.getDpsInputs())) {
         auto rtt = dyn_cast<RankedTensorType>(it.value().getType());
         if (!rtt)
             return rewriter.notifyMatchFailure(srcOp, "non-ranked input\n");
-        if (rtt.getRank() == 0)
-            scalarInputIdxs.push_back(it.index());
+        if (rtt.getRank() == 0) {
+            inputIdxs.push_back(it.index());
+            needsRankPromotion.push_back(true);
+            continue;
+        }
+        if (isUnitConstSrcInput(srcOp, *srcOp.getDpsInputOperand(it.index()))) {
+            inputIdxs.push_back(it.index());
+            needsRankPromotion.push_back(false);
+        }
     }
-    if (scalarInputIdxs.empty()) {
-        return rewriter.notifyMatchFailure(srcOp, "no rank-0 input to promote\n");
+    if (inputIdxs.empty()) {
+        return rewriter.notifyMatchFailure(srcOp, "no input to rewrite\n");
     }
 
-    for (unsigned dpsIdx : scalarInputIdxs) {
-        Value input = srcOp.getDpsInputs()[dpsIdx];
-        auto inputType = dyn_cast<RankedTensorType>(input.getType());
-        if (!inputType) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "expected ranked tensor type for input " + Twine(dpsIdx) + "\n"
-            );
+    // Pick a unit output dim to pair with the size-1 source dim. Without one,
+    // the rank-1 source can't be expressed as a `linalg.broadcast` source.
+    int64_t unitDim = -1;
+    for (int64_t d = 0, e = resultType.getRank(); d < e; ++d) {
+        if (!resultType.isDynamicDim(d) && resultType.getDimSize(d) == 1) {
+            unitDim = d;
+            break;
         }
+    }
+    if (unitDim < 0) {
+        return rewriter.notifyMatchFailure(
+            srcOp, "no unit output dim to pair with the rank-1 source\n"
+        );
+    }
+
+    const int64_t numLoops = srcOp.getNumLoops();
+    auto unitDimMap = AffineMap::get(
+        /*dimCount=*/numLoops,
+        /*symbolCount=*/0,
+        /*results=*/ArrayRef<AffineExpr>{rewriter.getAffineDimExpr(unitDim)}, rewriter.getContext()
+    );
+
+    for (auto [dpsIdx, promote] : llvm::zip(inputIdxs, needsRankPromotion)) {
+        unsigned operandNumber = srcOp.getDpsInputOperand(dpsIdx)->getOperandNumber();
+        indexingMaps[operandNumber] = unitDimMap;
+        if (!promote)
+            continue;
+        Value input = srcOp.getDpsInputs()[dpsIdx];
         if (failed(promoteScalar(srcOp, input, rewriter))) {
             return rewriter.notifyMatchFailure(
                 srcOp, "failed to promote input " + Twine(dpsIdx) + "\n"
             );
         }
-        const int64_t numLoops = srcOp.getNumLoops();
-        auto c0 = rewriter.getAffineConstantExpr(0);
-        unsigned operandNumber = srcOp.getDpsInputOperand(dpsIdx)->getOperandNumber();
         newOperands[operandNumber] = input;
-        indexingMaps[operandNumber] = AffineMap::get(
-            /*dimCount=*/numLoops,
-            /*symbolCount=*/0,
-            /*results=*/ArrayRef<AffineExpr>{c0}, rewriter.getContext()
-        );
     }
 
     rewriter.modifyOpInPlace(srcOp, [&]() {
-        for (unsigned dpsIdx : scalarInputIdxs) {
+        for (auto [dpsIdx, promote] : llvm::zip(inputIdxs, needsRankPromotion)) {
+            if (!promote)
+                continue;
             unsigned operandNumber = srcOp.getDpsInputOperand(dpsIdx)->getOperandNumber();
             srcOp->setOperand(operandNumber, newOperands[operandNumber]);
         }
