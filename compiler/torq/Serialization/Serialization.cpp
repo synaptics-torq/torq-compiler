@@ -274,6 +274,11 @@ LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
                     return failure();
                 }
             }
+            else if (bitWidth == 64) {
+                if (createISegment<uint64_t>(data, _builder, dataRef, xramAddress).failed()) {
+                    return failure();
+                }
+            }
             else {
                 llvm::errs() << "Unsupported bit width: " << bitWidth << "\n";
                 return failure();
@@ -626,6 +631,9 @@ iree_hal_torq_BufferDebugInfo_ref_t Serializer::createBufferDebugInfo(
     }
     else if (buffer.getType().getElementType().isInteger(32)) {
         elementType = iree_hal_torq_ElementType_I32;
+    }
+    else if (buffer.getType().getElementType().isInteger(64)) {
+        elementType = iree_hal_torq_ElementType_I64;
     }
     else if (buffer.getType().getElementType().isBF16()) {
         elementType = iree_hal_torq_ElementType_BF16;

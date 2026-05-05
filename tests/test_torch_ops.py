@@ -46,7 +46,7 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'gelu' in request.param.data.name:
         extra_args["comparison_config"] = "comparison_config_for_gelu"
     
-    if any(host_mlir in request.param.data.name for host_mlir in ['conv2d-host.mlir']):
+    if any(host_mlir in request.param.data.name for host_mlir in ['conv2d-host.mlir', 'mul-i64-scalar.mlir']):
         extra_args["torq_compiler_options"] = ["--torq-disable-slices", "--torq-disable-css"]
 
     return {
