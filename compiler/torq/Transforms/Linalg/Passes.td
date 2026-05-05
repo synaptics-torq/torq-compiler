@@ -145,4 +145,31 @@ def AnnotateTiedOperands : Pass<"torq-annotate-tied-operands", "mlir::ModuleOp">
   let constructor = "mlir::syna::torq::createAnnotateTiedOperandsPass()";
 }
 
+def UnrollStaticScfForLoops :
+    InterfacePass<"torq-unroll-static-scf-for-loops",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Fully unroll scf.for loops with statically known bounds";
+
+    let description = [{
+        Runs at the linalg-on-tensors level, before IREE's dispatch creation.
+
+        IREE otherwise turns an scf.for whose body is a single dispatch into a
+        host-side loop that re-dispatches the same executable with different
+        workload ordinal values. The torq backend does not support dispatches
+        parameterised on a runtime workload ordinal, so we pre-unroll static
+        loops (notably the per-timestep loop produced by torch-mlir for
+        onnx.GRU / onnx.LSTM / onnx.RNN) and let each iteration become an
+        independent dispatch with all offsets baked in as constants.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createUnrollStaticScfForLoopsPass()";
+
+    let dependentDialects = [
+        "arith::ArithDialect",
+        "scf::SCFDialect"
+    ];
+}
+
 #endif // IREE_CODEGEN_SYNPHL_TO_HW_PASSES

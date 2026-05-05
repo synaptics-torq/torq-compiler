@@ -87,6 +87,15 @@ void buildTorchTransformPassPipeline(OpPassManager &passManager) {
     );
     mlir::torch::TorchConversion::createTorchBackendToLinalgOnTensorsBackendPipeline(passManager);
 
+    // Fully unroll static-bounded scf.for loops introduced by torch-mlir (notably
+    // the per-timestep loop from onnx.GRU / onnx.LSTM) before dispatch creation.
+    // If we don't, each iteration turns into a dispatch parameterised by a
+    // runtime workload ordinal which the torq backend can't lower. After
+    // unrolling we canonicalize to fold the per-iteration constants.
+    passManager.addNestedPass<func::FuncOp>(createUnrollStaticScfForLoopsPass());
+    passManager.addPass(mlir::createCanonicalizerPass());
+    passManager.addPass(mlir::createCSEPass());
+
     // apply Torq-specific type conversion
     buildTorqTypeConversionPipeline(passManager);
 

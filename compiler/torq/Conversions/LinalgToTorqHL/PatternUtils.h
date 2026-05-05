@@ -114,8 +114,10 @@ bool markOpFuseGroup(
     Operation *op, PatternRewriter &rewriter, const std::optional<IntegerAttr> &maybeFuseGroupAttr
 );
 
-// Starting from output, walk upwards until until any of the inputs are
-// encountered. Mark all the operations on the way with the fuseGroupattr.
+// Starting from output, walk upwards until any of the inputs are encountered.
+// Each visited op that implements TilingInterface is passed to markOpFuseGroup
+// to set TORQ_FUSE_GROUP; ops that don't (e.g. tensor.extract_slice) terminate
+// the walk along that path.
 void markFuseGroupBackward(
     const Value &output, const llvm::SmallVector<Value> &inputs, PatternRewriter &rewriter,
     const IntegerAttr &fuseGroupAttr

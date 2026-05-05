@@ -10,6 +10,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
@@ -26,6 +27,7 @@ namespace mlir::syna::torq {
 #define GEN_PASS_DEF_TORQDEMOTEF32TOBF16
 #define GEN_PASS_DEF_TORQDEMOTEI64TOI32
 #define GEN_PASS_DEF_ANNOTATETIEDOPERANDS
+#define GEN_PASS_DEF_UNROLLSTATICSCFFORLOOPS
 
 #include "torq/Transforms/Linalg/Passes.h.inc"
 

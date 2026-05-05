@@ -146,8 +146,7 @@ bool markOpFuseGroup(
 
     assert(op && "Trying to mark null op!");
     assert(
-        (isa<TilingInterface, tensor::InsertSliceOp>(op) &&
-         "Trying to mark an op that does not implement TilingInterface")
+        (isa<TilingInterface>(op) && "Trying to mark an op that does not implement TilingInterface")
     );
     assert(*maybeFuseGroupAttr && "op does not have torq-fuse-group-id attribute");
 

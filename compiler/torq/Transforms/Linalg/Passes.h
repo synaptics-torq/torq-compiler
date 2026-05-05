@@ -30,6 +30,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeTransposeLayou
 
 std::unique_ptr<OperationPass<ModuleOp>> createAnnotateTiedOperandsPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollStaticScfForLoopsPass();
+
 //----------------------------------------------------------------------------//
 // Registration
 //----------------------------------------------------------------------------//
