@@ -136,23 +136,20 @@ def TorqHW_RoundingModeAttr : I32EnumAttr<"RoundingMode",
 }
 
 def TorqHW_WeightFormatAttr : I32EnumAttr<"WeightFormat",
-    "The weight format, for weight decompression only, NOT for ALU",
+    "Weight format in memory",
     [
-      I32EnumAttrCaseWithDoc<"NONE", 0, "No decompression">,
-      I32EnumAttrCaseWithDoc<"SI", 1, "u/i1, u/i2, u/i4, u/i6 -> int8">, // ?? how to tell if input is signed or unsigned?
-      I32EnumAttrCaseWithDoc<"UI", 2, "u1, u2, u4, u6 -> uint8">,
-      I32EnumAttrCaseWithDoc<"BFSI", 3, "i1, i2, i4, i6 -> bf16">,
-      I32EnumAttrCaseWithDoc<"BFUI", 4, "u1, u2, u4, u6 -> bf16">,
-      I32EnumAttrCaseWithDoc<"NF4", 5, "nf4 -> bf16">,
-      I32EnumAttrCaseWithDoc<"E2M1", 6, "fp4 -> bf16">,
-      I32EnumAttrCaseWithDoc<"E4M3", 7, "fp8-e4m3fn -> bf16">,
-      I32EnumAttrCaseWithDoc<"E5M2", 8, "fp8-e5m2 -> bf16">,
+      I32EnumAttrCaseWithDoc<"SI", 1, "s1, s2, s4, s6">,
+      I32EnumAttrCaseWithDoc<"UI", 2, "u1, u2, u4, u6">,
+      I32EnumAttrCaseWithDoc<"BF", 3, "bf16">,
+      I32EnumAttrCaseWithDoc<"FP", 4, "fp4-e2m1, fp8-e5m2">,
+      I32EnumAttrCaseWithDoc<"NF", 5, "nf4">,
+      I32EnumAttrCaseWithDoc<"FN", 6, "fp8-e4m3fn">,
     ]> {
     let cppNamespace = "::mlir::syna::torq_hw";
 }
 
 def TorqHW_NumberFormatAttr : I32EnumAttr<"NumberFormat",
-    "For ALU and ACT",
+    "For WBUS, ALU and ACT",
     [
       I32EnumAttrCaseWithDoc<"I", 1, "Integer">,
       I32EnumAttrCaseWithDoc<"BF", 2, "BFloat">,

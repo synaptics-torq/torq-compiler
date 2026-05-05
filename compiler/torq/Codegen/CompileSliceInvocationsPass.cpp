@@ -202,7 +202,9 @@ static SliceTask toSliceTask(syna::torq_hw::SliceTaskOp op, IRMapping &mapping) 
     task.setActRoundingMode(sliceCfg.getActRoundMode());
     task.setAluActDisable(sliceCfg.getAluDisable(), sliceCfg.getActDisable());
     task.setWeightFormat(sliceCfg.getWeightFormat());
-    task.setAluActNumberFormat(sliceCfg.getAluFormat(), sliceCfg.getActFormat());
+    task.setWBusNumberFormat(sliceCfg.getAluFormat()); // Keep wbus format consistent with Alu
+    task.setAluNumberFormat(sliceCfg.getAluFormat());
+    task.setActNumberFormat(sliceCfg.getActFormat());
     task.setActSumBits(sliceCfg.getActSumBits());
 
     // find all symbol values used in the ndls

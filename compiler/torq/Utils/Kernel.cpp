@@ -270,7 +270,7 @@ struct SliceCfg {
     int32_t stride;
     int32_t stride_offset;
     torq_hw::RoundingMode act_round_mode;
-    torq_hw::WeightFormat weight_format;
+    torq_hw::WeightFormat weight_format; // Weight format in memory
 
     // aluDisable: use 16bit to control 256 ALUs, each bit controls 16 ALUs
     // bit is 1 to disable the 16-ALU group
@@ -497,6 +497,15 @@ DType toUncompressed(DType type) {
         uncompressedType = DType::bf16;
     }
     return uncompressedType;
+}
+
+// Deduce the uncompressed weight type to be used according to input and [compressed] weight types
+// This will be used to automatically uncompress the weight to the right type on load
+static DType deduceUncompressedWType(DType iType, DType wType) {
+    if (wType != DType::none) {
+        wType = isFloat(iType) ? DType::bf16 : toUncompressed(wType);
+    }
+    return wType;
 }
 
 int32_t maxVal(DType type) {
@@ -1743,7 +1752,7 @@ void SlicePrivate::cepr(const PData &pdata) {
 void SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSize) {
     MemNdlDimsData ndlDims;
     int offset = addMemNdlDims(ndlType, ndlDims, data, appendBlockSize);
-    if (isCompressed(data.elementType())) {
+    if (sizeofTypeBits(data.elementType()) < 8) {
         assert(ndlType == NdlType::DEWR && "Compressed types only supported for DEWR");
         int bitWidth = sizeofTypeBits(data.elementType());
         // For compressed source types, all the strides are expressed in bits
@@ -2172,6 +2181,9 @@ QData SlicePrivate::actRescaleClamp(
 }
 
 int SlicePrivate::actWidth(DType iType, DType wType, bool biasScalePerItem) {
+    // Remember the expected uncompressed weight type to automatically uncompress the weight on load
+    _wram.elementType = wType = deduceUncompressedWType(iType, wType);
+
     if (iType == DType::none && wType != DType::none) {
         // We are in weight-bypass mode, which is implemented as a MAC-mode with implicit data of 1
         iType = isFloat(wType) ? DType::bf16 : DType::int8;
@@ -2477,69 +2489,58 @@ int WRam::size() const {
     return HwInfo::wram_seg_width + 4;
 }
 
-// Determine the required weight format conversion based on source and destination types
-static std::optional<WeightFormat> getWeightFormatConversion(DType srcType, DType dstType) {
-    if (srcType == dstType) {
-        // Nothing to do
-        return WeightFormat::NONE;
+// Determine the weight memory format
+// Asserts if in-memory weight type not compatible with the destination (wbus) weight type
+static WeightFormat getWeightMemoryFormat(DType memType, DType dstType) {
+    // Check the conversion is supported
+    bool validCvt = memType == dstType;
+    bool i8Dst = dstType == DType::int8 || dstType == DType::uint8;
+    if (memType == DType::bf16 || isCompressedFloat(memType)) {
+        validCvt = dstType == DType::bf16;
+    }
+    else if (isCompressedInt(memType)) {
+        validCvt = dstType == DType::bf16 || i8Dst;
+    }
+    else if (memType == DType::int8 || memType == DType::uint8) {
+        validCvt = (dstType == DType::bf16 && memType == DType::int8) || i8Dst;
+    }
+    if (!validCvt) {
+        llvm::errs() << "Invalid weight conversion from " << memType << " to " << dstType << "\n";
+        assert(false && "Invalid weight memory format conversion");
     }
 
-    std::optional<WeightFormat> cvt;
-    switch (dstType) {
-    case DType::uint8:
-        if (!isUnsigned(srcType))
-            break;
-        LLVM_FALLTHROUGH;
-    case DType::int8:
-        if (isCompressedInt(srcType)) {
-            cvt = isUnsigned(srcType) ? WeightFormat::UI : WeightFormat::SI;
-        }
-        break;
-    case DType::bf16:
-        switch (srcType) {
-        case DType::bf16:
-            cvt = WeightFormat::NONE;
-            break;
-        case DType::nf4:
-            cvt = WeightFormat::NF4;
-            break;
-        case DType::fp4:
-            cvt = WeightFormat::E2M1;
-            break;
-        case DType::fp8e4m3fn:
-            cvt = WeightFormat::E4M3;
-            break;
-        case DType::fp8e5m2:
-            cvt = WeightFormat::E5M2;
-            break;
-        default:
-            if (isCompressedInt(srcType) || srcType == DType::int8) {
-                cvt = isUnsigned(srcType) ? WeightFormat::BFUI : WeightFormat::BFSI;
-            }
-            break;
-        }
-        break;
-    default:
-        llvm::errs() << "Unsupported WRam load destination type: " << dstType << "\n";
-        assert(false);
-        break;
+    // Determine the weight memory format
+    WeightFormat wMemFmt;
+    if (isInt(memType) || isCompressedInt(memType)) {
+        wMemFmt = isUnsigned(memType) ? WeightFormat::UI : WeightFormat::SI;
     }
-    return cvt;
+    else if (memType == DType::bf16) {
+        wMemFmt = WeightFormat::BF;
+    }
+    else if (memType == DType::fp32 || memType == DType::fp8e5m2 || memType == DType::fp4) {
+        wMemFmt = WeightFormat::FP;
+    }
+    else if (memType == DType::nf4) {
+        wMemFmt = WeightFormat::NF;
+    }
+    else if (memType == DType::fp8e4m3fn) {
+        wMemFmt = WeightFormat::FN;
+    }
+    else {
+        assert(false && "Invalid weight type");
+    }
+
+    return wMemFmt;
 }
 
 WData WRam::load(const LData &data, DType dstType) {
-    DType srcType = data.elementType();
+    DType inMemWType = data.elementType();
     if (dstType == DType::none) {
-        // Use deduced destination type if any, or deduce it from the source type
+        // Use deduced weight type if any, or use default deduction from the in-memory type
         DType deducedWeightType = d->_wram.elementType;
-        dstType = deducedWeightType != DType::none ? deducedWeightType : toUncompressed(srcType);
+        dstType = deducedWeightType != DType::none ? deducedWeightType : toUncompressed(inMemWType);
     }
-    auto cvt = getWeightFormatConversion(srcType, dstType);
-    if (!cvt.has_value()) {
-        llvm::errs() << "Can't decompress weight from " << srcType << " to " << dstType << "\n";
-        assert(false && "Error: invalid weight decompression");
-    }
-    d->_cfg.weight_format = cvt.value();
+    d->_cfg.weight_format = getWeightMemoryFormat(inMemWType, dstType);
 
     d->dewr(data);
 
@@ -2646,12 +2647,9 @@ PData Alu::elementwiseProductAccumulate(const IData &idata, const WData &wdata, 
 
 int Alu::iWidth(DType iType, DType wType, int weightWidth) const {
     assert(!isCompressed(iType) && "Compressed iType not supported here");
-    if (isCompressed(wType)) {
-        // Deduce and remember the uncompressed weight type (compatible with the input type)
-        // This will be used to automatically uncompress the weight to the right type on load
-        wType = isFloat(iType) ? DType::bf16 : toUncompressed(wType);
-        d->_wram.elementType = wType;
-    }
+    // Remember the expected uncompressed weight type to automatically uncompress the weight on load
+    d->_wram.elementType = wType = deduceUncompressedWType(iType, wType);
+
     if (isFloat(iType)) {
         assert(!isInt(wType) && "Weight type can't be int for float input");
         if (weightWidth <= 0) {

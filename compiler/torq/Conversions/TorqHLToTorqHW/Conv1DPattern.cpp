@@ -266,7 +266,7 @@ LogicalResult transformWithTransposeReshape(torq_hl::Conv1DOp op, PatternRewrite
         stride,                                               // stride
         stride_offset,                                        // stride_offset
         rounding_mode,                                        // rounding_mode
-        WeightFormat::SI,                                     // weight_format
+        isBF16 ? WeightFormat::BF : WeightFormat::SI,         // weight_format
         0, 0,                                                 // alu_disable, act_disable
         alu_format,                                           // alu_format
         act_format,                                           // act_format

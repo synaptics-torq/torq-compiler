@@ -292,26 +292,19 @@ static uint32_t toChars(torq_hw::RoundingMode roundingMode) {
 
 static uint32_t toChars(torq_hw::WeightFormat weightFormat) {
     switch (weightFormat) {
-    case torq_hw::WeightFormat::NONE:
-        return 0;
     case torq_hw::WeightFormat::SI:
         return 'SI';
     case torq_hw::WeightFormat::UI:
         return 'UI';
-    case torq_hw::WeightFormat::BFSI:
-        return 'BFSI';
-    case torq_hw::WeightFormat::BFUI:
-        return 'BFUI';
-    case torq_hw::WeightFormat::NF4:
-        return 'NF4';
-    case torq_hw::WeightFormat::E2M1:
-        return 'E2M1';
-    case torq_hw::WeightFormat::E4M3:
-        return 'E4M3';
-    case torq_hw::WeightFormat::E5M2:
-        return 'E5M2';
+    case torq_hw::WeightFormat::BF:
+        return 'BF';
+    case torq_hw::WeightFormat::FP:
+        return 'FP';
+    case torq_hw::WeightFormat::NF:
+        return 'NF';
+    case torq_hw::WeightFormat::FN:
+        return 'FN';
     }
-    assert(false && "Invalid weight format");
     return 0;
 }
 
@@ -465,13 +458,20 @@ void SliceTask::setAluActDisable(uint32_t alu_disable, uint32_t act_disable) {
     d->cfg.act_disable = act_disable;
 }
 
-void SliceTask::setWeightFormat(torq_hw::WeightFormat format) { d->cfg.w_format = toChars(format); }
+void SliceTask::setWeightFormat(torq_hw::WeightFormat format) {
+    d->cfg.wmem_format = toChars(format);
+}
 
-void SliceTask::setAluActNumberFormat(
-    torq_hw::NumberFormat aluFormat, torq_hw::NumberFormat actFormat
-) {
-    d->cfg.act_format = toChars(actFormat);
-    d->cfg.alu_format = toChars(aluFormat);
+void SliceTask::setWBusNumberFormat(torq_hw::NumberFormat format) {
+    d->cfg.wbus_format = toChars(format);
+}
+
+void SliceTask::setAluNumberFormat(torq_hw::NumberFormat format) {
+    d->cfg.alu_format = toChars(format);
+}
+
+void SliceTask::setActNumberFormat(torq_hw::NumberFormat format) {
+    d->cfg.act_format = toChars(format);
 }
 
 void SliceTask::setActSumBits(uint32_t actSumBits) { d->cfg.act_sum_bits = actSumBits; }

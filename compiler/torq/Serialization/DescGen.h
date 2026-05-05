@@ -293,7 +293,9 @@ class SliceTask : public TorqCfg {
     void setActRoundingMode(torq_hw::RoundingMode mode);
     void setAluActDisable(uint32_t alu_disable, uint32_t act_disable);
     void setWeightFormat(torq_hw::WeightFormat format);
-    void setAluActNumberFormat(torq_hw::NumberFormat aluFormat, torq_hw::NumberFormat actFormat);
+    void setWBusNumberFormat(torq_hw::NumberFormat format);
+    void setAluNumberFormat(torq_hw::NumberFormat format);
+    void setActNumberFormat(torq_hw::NumberFormat format);
     void setActSumBits(uint32_t actSumBits);
 
     /// Write a Torq task
