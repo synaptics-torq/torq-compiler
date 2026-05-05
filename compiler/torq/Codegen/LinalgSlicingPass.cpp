@@ -156,12 +156,15 @@ void sliceToSize(
     size_t slicingIter, int64_t grouping
 ) {
     int64_t tileSize = getSlicingTileSize(domainSize, grouping);
-    if (tileSize == domainSize) {
+    if (tileSize == domainSize)
+        return;
+
+    if (failed(tileAndFuse(
+            rewriter, op, tileSize, slicingIter, scf::SCFTilingOptions::LoopType::ForallOp
+        ))) {
+        op->emitError("failed to slice op to size");
         return;
     }
-
-    (void
-    )tileAndFuse(rewriter, op, tileSize, slicingIter, scf::SCFTilingOptions::LoopType::ForallOp);
 }
 
 void peelAndSliceToSize(
@@ -183,6 +186,7 @@ void peelAndSliceToSize(
     auto tiledResults =
         tileAndFuse(rewriter, op, tileSize, slicingIter, scf::SCFTilingOptions::LoopType::ForOp);
     if (failed(tiledResults)) {
+        op->emitError("failed to peel op");
         return;
     }
     assert(tiledResults->loops.size() == 1);
@@ -218,9 +222,8 @@ void peelAndSliceToSize(
 LogicalResult
 peelAndSlice(PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64_t grouping) {
     // Do nothing if the containing operation is a forall (already sliced)
-    if (op->getParentOfType<scf::ForallOp>()) {
+    if (op->getParentOfType<scf::ForallOp>())
         return rewriter.notifyMatchFailure(op, "already sliced");
-    }
 
     // If fuseGroup is not nullptr, fuse all the members of the pattern fuse group
     // (op is assumed to be the principal op of the group); otherwise, tile op only.
@@ -241,9 +244,17 @@ peelAndSlice(PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64
     TilingInterface rootTi = dyn_cast<TilingInterface>(rootOp);
     assert(rootTi && "pattern fuse group ops are expected to be TilingInterface");
 
-    if (!cast<ShapedType>(rootOp->getResult(0).getType()).hasStaticShape()) {
+    if (!cast<ShapedType>(rootOp->getResult(0).getType()).hasStaticShape())
         return rewriter.notifyMatchFailure(op, "output shape is not static");
-    }
+
+    // Skip ops where all operands are too small to benefit from slicing.
+    bool anyLargeOperand = llvm::any_of(op->getOperandTypes(), [](Type t) {
+        auto shaped = dyn_cast<ShapedType>(t);
+        return shaped && shaped.hasStaticShape() &&
+               shaped.getNumElements() >= kMinElementsForSlicing;
+    });
+    if (!anyLargeOperand)
+        return rewriter.notifyMatchFailure(op, "tensor too small to benefit from slicing");
 
     // The untiled domain sizes
     auto [iterDomainOffsets, iterDomainSizes, iterDomainStrides] =
@@ -286,6 +297,46 @@ template <class Conv2DOp> struct Conv2DPattern : public OpRewritePattern<Conv2DO
     }
 }; // class Conv2DPattern
 
+// BatchMatmul pattern. Slices on the N dimension (last dim of input B /
+// output columns), distributing rows of the second input across hardware slices.
+// For batch_matmul A[batch, M, K] x B[batch, K, N] -> C[batch, M, N],
+// we slice B along N (and correspondingly C along N).
+struct BatchMatmulPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
+    using OpRewritePattern<linalg::BatchMatmulOp>::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::BatchMatmulOp matmulOp, PatternRewriter &rewriter) const override {
+        if (isMarkedFuseGroup(matmulOp) && !isFuseGroupPrincipalOp(matmulOp))
+            return rewriter.notifyMatchFailure(matmulOp, "not the principal operation");
+
+        // Check that the output shape is fully static before calling getIterationDomain;
+        // that call mutates the IR and would cause the rewrite driver to spin if invoked
+        // on a dynamic-shaped op.
+        if (!cast<ShapedType>(matmulOp->getResult(0).getType()).hasStaticShape())
+            return rewriter.notifyMatchFailure(matmulOp, "output shape is not static");
+
+        // Scan the output shape to find the slicing dimension. Using the output
+        // shape (parallel dims only) avoids accidentally picking a reduction dim,
+        // which must not be sliced. Output shape indices map directly to
+        // iteration-domain indices because linalg orders parallel dims first.
+        ArrayRef<int64_t> outputShape =
+            cast<ShapedType>(matmulOp->getResult(0).getType()).getShape();
+
+        std::optional<size_t> slicingIter;
+        for (auto [i, size] : llvm::enumerate(outputShape)) {
+            if (size > 1 && size >= 2 * kGrouping) {
+                slicingIter = i;
+                break;
+            }
+        }
+
+        if (!slicingIter)
+            return rewriter.notifyMatchFailure(matmulOp, "no suitable output dimension to slice");
+
+        return peelAndSlice(rewriter, matmulOp, *slicingIter, kGrouping);
+    }
+}; // class BatchMatmulPattern
+
 // Elementwise pattern for linalg.generic ops. Picks the leftmost non-unit
 // dimension to slice on, keeping inner dimensions contiguous in memory.
 struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
@@ -317,15 +368,6 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
         if (!slicingIter)
             return rewriter.notifyMatchFailure(genericOp, "no dimension to slice");
 
-        // Skip tiny tensors where slicing overhead outweighs the benefit.
-        int64_t totalElements = 1;
-        for (int64_t s : shape)
-            totalElements *= s;
-        if (totalElements < kMinElementsForSlicing)
-            return rewriter.notifyMatchFailure(
-                genericOp, "tensor too small to benefit from slicing"
-            );
-
         return peelAndSlice(rewriter, genericOp, *slicingIter, kGrouping);
     }
 }; // class ElementwisePattern
@@ -351,6 +393,9 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
 
         patterns.add<Conv2DPattern<linalg::DepthwiseConv2DNhwcHwcOp>>(context, 3);
         patterns.add<Conv2DPattern<linalg::DepthwiseConv2DNchwChwOp>>(context, 1);
+
+        // Batch matmul: slice on the largest parallel output dimension
+        patterns.add<BatchMatmulPattern>(context);
 
         // Elementwise generic ops: dynamically slice on leftmost non-unit dim
         patterns.add<ElementwisePattern>(context);
