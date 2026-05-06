@@ -70,7 +70,13 @@ bool        FLAG_torq_explicit_dmabuf_sync = false;
 struct TorqMutex::Impl { std::mutex m; };
 TorqMutex::TorqMutex()  : impl_(new Impl{}) {}
 TorqMutex::~TorqMutex() { delete impl_; }
+#if defined(__clang__)
+[[clang::no_thread_safety_analysis]]
+#endif
 void TorqMutex::lock()   { impl_->m.lock(); }
+#if defined(__clang__)
+[[clang::no_thread_safety_analysis]]
+#endif
 void TorqMutex::unlock() { impl_->m.unlock(); }
 #else
 struct TorqMutex::Impl {};
