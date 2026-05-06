@@ -39,10 +39,6 @@ from torq.executor_discovery.executor_discovery_onnx import (
 def case_config(request, tmp_path, layer_executor_case, chip_config):
     """Generate case config with executor assignments and tolerances."""
 
-    next_chip = (chip_config.data['target'] != "SL2610")
-    if next_chip:
-        pytest.xfail("AssertionError: Nans differ")
-
     layer_id = layer_executor_case["layer_id"]
     executor = layer_executor_case["executor"]
     is_subgraph = layer_executor_case.get("is_subgraph", False)

@@ -25,6 +25,9 @@ _TASK_NODEID_RE = re.compile(r"^- \[([ xX])\]\s*(?:~~)?`([^`]+)`(?:\s*\(([^)]+)\
 _MODULE_TITLE_COUNTS_RE = re.compile(r" \((?:pass \d+ / )fail \d+ / error \d+\)$")
 _ERROR_TITLE_COUNTS_RE = re.compile(r" \(\d+ tests\)$")
 _ISSUE_TYPE = "Bug"
+_MAX_ISSUE_TITLE_LEN = 256
+_MODULE_TITLE_SUFFIX_BUDGET = 48
+_ERROR_TITLE_SUFFIX_BUDGET = 32
 
 # Things that look like an error
 # re.MULTILINE makes $ match end of line.
@@ -201,6 +204,23 @@ def _extract_previous_task_nodeids(body: str) -> list[tuple[str, bool, Optional[
         if match:
             previous.add((match.group(2), match.group(1) != " ", match.group(3)))
     return previous
+
+
+def _truncate_title_base(base_title: str, suffix_budget: int) -> str:
+    max_base_len = _MAX_ISSUE_TITLE_LEN - max(0, suffix_budget)
+    if len(base_title) <= max_base_len:
+        return base_title
+    if max_base_len <= 3:
+        return base_title[:max(0, max_base_len)]
+    return f"{base_title[:max_base_len - 3]}..."
+
+
+def _cap_issue_title(title: str) -> str:
+    if len(title) <= _MAX_ISSUE_TITLE_LEN:
+        return title
+    if _MAX_ISSUE_TITLE_LEN <= 3:
+        return title[:max(0, _MAX_ISSUE_TITLE_LEN)]
+    return f"{title[:_MAX_ISSUE_TITLE_LEN - 3]}..."
 
 
 def _build_module_issue_title(base_title: str, summary: Dict[str, int]) -> str:
@@ -502,6 +522,7 @@ def _add_sub_issue(parent_issue: str, sub_issue_id: int, repo: str, headers: Map
 
 def _update_github_issue(repo, headers, existing_issue, title, body):
     url = f"https://api.github.com/repos/{repo}/issues/{existing_issue['number']}"
+    title = _cap_issue_title(title)
 
     update_payload = {
         "title": title,
@@ -524,6 +545,7 @@ def _update_github_issue(repo, headers, existing_issue, title, body):
 
 def _new_github_issue(repo, headers, title, body):
     url = f"https://api.github.com/repos/{repo}/issues"
+    title = _cap_issue_title(title)
 
     payload = {
         "title": title,
@@ -549,7 +571,10 @@ def _new_github_issue(repo, headers, title, body):
 def _update_issues_by_module(parent_issue, repo, headers):
     for module, module_failures in _group_by_module(_reports, _failures).items():
 
-        base_title = f"Test failures on module {module}"
+        base_title = _truncate_title_base(
+            f"Test failures on module {module}",
+            _MODULE_TITLE_SUFFIX_BUDGET,
+        )
 
         try:
             existing_issue = _find_existing_issue(repo, base_title, _MODULE_TITLE_COUNTS_RE, parent_issue, headers)
@@ -593,7 +618,10 @@ def _group_failures_by_error(failures: Mapping[str, Mapping[str, Any]]) -> dict[
 
 def _update_issues_by_error(parent_issue, repo, headers):
     for error, failures in _group_failures_by_error(_failures).items():
-        base_title = _TEST_ERROR_BASE_TITLE.format(error=error)
+        base_title = _truncate_title_base(
+            _TEST_ERROR_BASE_TITLE.format(error=error),
+            _ERROR_TITLE_SUFFIX_BUDGET,
+        )
 
         try:
             existing_issue = _find_existing_issue(repo, base_title, _ERROR_TITLE_COUNTS_RE, parent_issue, headers)

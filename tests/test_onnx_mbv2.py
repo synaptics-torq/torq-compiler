@@ -64,7 +64,6 @@ def pytest_generate_tests(metafunc):
     metafunc.parametrize("onnx_layer_model", cases, indirect=True)
 
 
-# Not ready for that (Nan differs)
 @pytest.mark.fpga_ci
 @pytest.mark.ci
 def test_onnx_model_llvmcpu_torq(request, llvmcpu_reference_results, torq_results, case_config, onnx_layer_model):

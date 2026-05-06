@@ -28,22 +28,6 @@ def case_config(request, chip_config):
     if any(s in request.node.name for s in no_negative_input):
         extra_args["tweaked_input_data_range"]  = (0, 100)
 
-    next_chip = (chip_config.data['target'] != "SL2610")
-    if next_chip:
-        pytest.xfail("AssertionError: Nans differ")
-
-    failed_str = [
-        # llvm-cpu compile error on certain x86 systems
-        "attn_block_layer_Cast_11",
-
-        # False positive accuracy failures (llvm-cpu output is inaccurate)
-        # AssertionError: Number of differences: 1 out of 4 [25.00%]
-        "attn_block_layer_ReduceMean_32",
-    ]
-
-    if any(s in request.node.name for s in failed_str):
-        pytest.xfail("failing test or skipped for now")
-
     comp_config = {
          "onnx_model": "onnx_layer_model",
          "mlir_model_file": "onnx_mlir_model_file",

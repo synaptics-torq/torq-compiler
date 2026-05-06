@@ -249,44 +249,14 @@ def yolo_pose_input_data(request, tflite_layer_model: TFLiteLayerCase, tweaked_r
 
 def pytest_generate_tests(metafunc):
     """Generate test cases for yolov8s-pose model."""
-
-    # Mark compile-error layers as xfail(run=False) for torq tests
-    def mark_xfail(name):
-        name_lower = name.lower()
-        test_name = metafunc.function.__name__
-
-        is_torq_test = 'torq' in test_name.lower()
         
-        if is_torq_test and any(s in name_lower for s in TORQ_COMPILE_ERROR_LAYERS):
-            return [pytest.mark.xfail(reason="compiler error", run=False)]
-        else:
-            return ()
-
     model_path = download_yolo_pose_model(metafunc.config.cache)
-    generate_parametrized_tests(metafunc, ["yolo_pose"], [model_path], mark_xfail)
+    generate_parametrized_tests(metafunc, ["yolo_pose"], [model_path])
 
 
 # ============================================================================
 # Tests
 # ============================================================================
-
-# Layer cases known to fail with TORQ backend (wrong results)
-TORQ_FAILED_LAYERS = [
-    'layer_quantize_126',
-    'layer_resize_nearest_neighbor_109',
-    'layer_resize_nearest_neighbor_127',
-    'layer_softmax_277',
-    'layer_mul_280',
-    'layer_mul_287',
-]
-
-# Layer cases that error during compilation (setup errors) with TORQ backend
-TORQ_COMPILE_ERROR_LAYERS = [
-    'layer_pad_0',  # Only in next.group
-    'layer_pad_4',
-    'layer_pad_24',  # Only in next.group
-    'layer_resize_nearest_neighbor_127',  # Only in next.group
-]
 
 # Layer cases known to fail in LLVMCPU vs TFLite comparison
 LLVMCPU_TFLITE_FAILED_LAYERS = [
@@ -294,13 +264,6 @@ LLVMCPU_TFLITE_FAILED_LAYERS = [
     'layer_resize_nearest_neighbor_127',
     'layer_softmax_277',
 ]
-
-
-def _check_xfail_torq(request):
-    """Mark known-failing TORQ layer tests as xfail."""
-    name = request.node.callspec.id.lower() if hasattr(request.node, 'callspec') else ''
-    if any(s in name for s in TORQ_FAILED_LAYERS):
-        pytest.xfail("failing test or skipped for now")
 
 
 def _check_xfail_llvmcpu_tflite(request):
@@ -336,7 +299,6 @@ def test_yolo_pose_llvmcpu_torq(
     Full model: dequantize outputs, run pose post-processing, compare detections.
     Individual layers: numerical comparison via compare_test_results.
     """
-    _check_xfail_torq(request)
     _compare_results(request, llvmcpu_reference_results, torq_results,
                      "LLVMCPU", "TORQ", case_config, tflite_layer_model)
 
@@ -350,10 +312,8 @@ def test_alternative_engine(
     compile_with_engine(request, tflite_model_path, alternative_engine)    
 
 
-# FIXME IREE-3.10 regression: see https://github.com/synaptics-torq/torq-compiler-dev/issues/1027
-#@pytest.mark.ci
-#@pytest.mark.fpga_ci
-@pytest.mark.full_ci
+@pytest.mark.ci
+@pytest.mark.fpga_ci
 def test_yolo_pose_tflite_torq(
     request,
     tflite_reference_results,
@@ -362,7 +322,6 @@ def test_yolo_pose_tflite_torq(
     tflite_layer_model,
 ):
     """Compare YOLOv8s-pose results between TFLite and Torq backends."""
-    _check_xfail_torq(request)
     _compare_results(request, tflite_reference_results, torq_results,
                      "TFLite", "TORQ", case_config, tflite_layer_model)
 

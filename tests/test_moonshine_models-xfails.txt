@@ -1,0 +1,8 @@
+test_onnx_model_torq[decoder_with_past_bf16_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_torq[decoder_with_past_bf16_full_model-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_torq[decoder_with_past_bf16_layer_Cast_47-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_torq[decoder_with_past_bf16_layer_Cast_47-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_torq[encoder_bf16_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_torq[encoder_bf16_full_model-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_torq[encoder_bf16_layer_InstanceNormalization_5-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_torq[encoder_bf16_layer_InstanceNormalization_5-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1408

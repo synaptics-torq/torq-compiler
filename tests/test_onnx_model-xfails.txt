@@ -1,0 +1,4 @@
+test_onnx_model_llvmcpu_torq[example_executor_discovery_full_model-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1504
+test_onnx_model_llvmcpu_torq[example_executor_discovery_layer_Add_2-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1504
+test_onnx_model_llvmcpu_torq[example_executor_discovery_layer_Conv_0-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1504
+test_onnx_model_llvmcpu_torq[example_executor_discovery_layer_Relu_1-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1504

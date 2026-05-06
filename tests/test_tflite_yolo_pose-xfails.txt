@@ -1,0 +1,2 @@
+test_yolo_pose_tflite_torq[yolo_pose_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1508
+test_yolo_pose_tflite_torq[yolo_pose_full_model-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1508

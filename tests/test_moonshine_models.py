@@ -17,11 +17,6 @@ def comparison_config_relaxed(request):
 def comparison_config_for_tanh(request):
     return {"fp_avg_tol": 0.033, "fp_max_tol": 0.063}
 
-@versioned_cached_data_fixture
-def comparison_config_for_decoder_with_past_MatMul_669(request):
-    return {"fp_avg_tol": 0.1, "fp_max_tol": 0.1}
-
-
 @pytest.fixture
 def case_config(request, chip_config):
 
@@ -32,25 +27,6 @@ def case_config(request, chip_config):
     extra_args = {}
     if any(s in request.node.name for s in no_negative_input):
         extra_args["tweaked_input_data_range"]  = (0, 100)
-
-    next_chip = (chip_config.data['target'] != "SL2610")
-    if next_chip:
-        pytest.xfail("AssertionError: Nans differ")
-
-    failed_str = [
-        # torq_hl.reduce_mean tiling issue
-        "encoder_bf16_layer_InstanceNormalization_5",
-        
-        # because of the above
-        "encoder_bf16_full_model",
-
-        # onnxruntime error, see https://github.com/synaptics-torq/torq-compiler-dev/issues/1485
-        "decoder_with_past_bf16_full_model",
-        "decoder_with_past_bf16_layer_Cast_47",
-    ]
-
-    if any(s in request.node.name for s in failed_str):
-        pytest.xfail("failing test or skipped for now")
     
     comp_config = {
          "onnx_model": "onnx_layer_model",
@@ -72,9 +48,6 @@ def case_config(request, chip_config):
     # Number of differences: 9651 out of 359712 [2.68%]        # Max relative difference: 0.0322580486536026
     if "encoder_bf16_layer_Tanh_3-" in request.node.name:
         comp_config["comparison_config"] = "comparison_config_for_tanh"
-
-    if "decoder_with_past_bf16_layer_MatMul_669" in request.node.name:
-        comp_config["comparison_config"] = "comparison_config_for_decoder_with_past_MatMul_669"
 
     relaxed_tolerance_cases = [
         # Works fine on MacOs but fails on x86 in CI:

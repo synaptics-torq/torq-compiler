@@ -80,10 +80,6 @@ def mbv2_compile_options():
 def case_config(request, runtime_hw_type, chip_config):
     """Configure test case settings."""
 
-    # xfail non-SL2610 chips on aws_fpga (known mismatch)
-    if chip_config.data.get("target", "SL2610") != "SL2610" and runtime_hw_type.data == "aws_fpga":
-        pytest.xfail(f"Known failure for chip {chip_config.data.get('chip_name', 'unknown')} on aws_fpga") # Mismatched elements: 1 / 1000 (0.1%)
-
     return {
         "full_model_input_data": "mbv2_input_data",
         "tflite_model_file": "tflite_model_path",
@@ -91,7 +87,6 @@ def case_config(request, runtime_hw_type, chip_config):
         "input_data": "tflite_layer_inputs",
         "torq_compiler_options": mbv2_compile_options()
     }
-
 
 @versioned_cached_data_fixture
 def mbv2_input_data(request):        
