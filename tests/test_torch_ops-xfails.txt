@@ -8,11 +8,3 @@ test_mlir_files[equal.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#
 test_mlir_files[equal.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
 test_mlir_files[instancenorm.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
 test_mlir_files[instancenorm.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
-test_mlir_files[dw1d_k5_d2_s1.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1404
-test_mlir_files[dw1d_k5_d2_s1.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1404
-test_mlir_files[dw1d_k5_d4_s1.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1404
-test_mlir_files[dw1d_k5_d4_s1.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1404
-test_mlir_files[dw1d_k5_d8_s1.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1404
-test_mlir_files[dw1d_k5_d8_s1.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1404
-test_mlir_files[dw1d_k5_dilation16_stride1.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1404
-test_mlir_files[dw1d_k5_dilation16_stride1.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1404

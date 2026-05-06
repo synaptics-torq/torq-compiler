@@ -110,7 +110,7 @@ static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
     // Reshape tensors to split channels into [Ch_outer, outChVectSize]
     input.reshapeDim(channelDim, {-1, outChVectSize}, true);
     output.reshapeDim(channelDim, {-1, outChVectSize}, true);
-    biasScale.reshapeDim(0, {-1, outChVectSize, sbWidth}, true);
+    biasScale.reshapeDim(0, {-1, actBlockCount, actBlockSize, sbWidth}, true);
 
     int chOuterCount = weight.dim(0);
 
@@ -118,7 +118,6 @@ static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
     For(auto batch = slice.iterate(input.dim(0))) {
         For(auto ch_block = slice.iterate(chOuterCount)) {
             PData pdata;
-            BData bdata = slice.bram.load(biasScale[ch_block][0]);
 
             // Accumulate across kernel width
             For(auto kw_pos = slice.iterate(kw)) {
@@ -129,6 +128,7 @@ static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
 
             // Process through activation in blocks
             For(auto a = slice.iterate(actBlockCount)) {
+                BData bdata = slice.bram.load(biasScale[ch_block][a]);
                 QData res = slice.act.rescaleClamp(
                     pdata[a], bdata, op.getShiftFactor(), op.getOutputZp(), op.getOutputMin(),
                     op.getOutputMax()
