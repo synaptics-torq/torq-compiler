@@ -875,13 +875,15 @@ struct TableOpConversion : public OpConversionPattern<tosa::TableOp> {
             bias = {APInt(32, -128, /*isSigned=*/true)};
             scale = {APInt(32, 128, /*isSigned=*/true)};
         }
-        DenseI32ArrayAttr intArrayAttr =
-            DenseI32ArrayAttr::get(rewriter.getContext(), convertedValues);
+        Value packedTable = createI32Const(
+            rewriter, srcOp, convertedValues,
+            llvm::ArrayRef<int64_t>{static_cast<int64_t>(convertedValues.size())}
+        );
         Value initTensor = createInitTensor(srcOp, rewriter);
 
         rewriter.replaceOpWithNewOp<syna::torq_hl::TableOp>(
             srcOp, srcOp.getOutput().getType(), initTensor,
-            createIConst(rewriter, srcOp, interleave(bias, scale)), input, intArrayAttr
+            createIConst(rewriter, srcOp, interleave(bias, scale)), input, packedTable, nullptr
         );
 
         return success();

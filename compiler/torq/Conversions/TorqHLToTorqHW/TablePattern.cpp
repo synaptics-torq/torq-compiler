@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "Patterns.h"
+#include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "llvm/Support/Debug.h"
@@ -43,7 +44,8 @@ LogicalResult TablePattern::transform(torq_hl::TableOp op, PatternRewriter &rewr
     }
 
     const int32_t total_px_block = div_ceil(total_px, HwInfo::table_lookup_count);
-    ArrayRef<int32_t> table = op.getTableAttr().asArrayRef();
+
+    ArrayRef<int32_t> table = op.getStaticTableAttr().asArrayRef();
 
     uint32_t act_sum_bits = 0;
     SmallVector<uint32_t> act_lsh = {0, 0, 0, 0};

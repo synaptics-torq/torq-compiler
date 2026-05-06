@@ -9,6 +9,8 @@
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ComputeConstants.h"
+#include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/ExecutorAssignment.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -23,6 +25,38 @@
 #define DEBUG_TYPE "linalg-torq-extract-pattern"
 
 namespace mlir::syna::torq {
+
+// Builds packed_table: tensor<N×i32> from an i8 or i16 source tensor.
+// For i8 (signExtend=true):  packed[i] = sext(i8) << 8   (slope=0, base-only encoding)
+// For i16 (signExtend=false): packed[i] = zext(i16)        (base-only: 0<<16 | (tb & 0xFFFF))
+static Value buildPackedTable(OpBuilder &builder, Location loc, Value src, bool signExtend) {
+    auto srcType = cast<RankedTensorType>(src.getType());
+    auto i32Type = builder.getI32Type();
+    auto outType = RankedTensorType::get(srcType.getShape(), i32Type);
+    Value empty = tensor::EmptyOp::create(builder, loc, outType.getShape(), i32Type).getResult();
+    SmallVector<AffineMap> maps{2, AffineMap::getMultiDimIdentityMap(1, builder.getContext())};
+    SmallVector<utils::IteratorType> iterTypes{utils::IteratorType::parallel};
+    return linalg::GenericOp::create(
+               builder, loc, outType, src, empty, maps, iterTypes, "", "",
+               [signExtend, i32Type](OpBuilder &b, Location loc, ValueRange args) {
+                   Value ext = signExtend ? (Value)arith::ExtSIOp::create(b, loc, i32Type, args[0])
+                                          : (Value)arith::ExtUIOp::create(b, loc, i32Type, args[0]);
+                   if (signExtend) {
+                       Value shift8 = arith::ConstantOp::create(b, loc, b.getI32IntegerAttr(8));
+                       ext = arith::ShLIOp::create(b, loc, ext, shift8);
+                   }
+                   linalg::YieldOp::create(b, loc, ext);
+               }
+    ).getResult(0);
+}
+
+// Builds the interleaved (bias, scale) constant for TableOp's scale_bias operand.
+// Both i8 and i16 table variants use the same fixed encoding: bias=-128, scale=128.
+static Value buildTableScaleBias(linalg::GenericOp srcOp, PatternRewriter &rewriter) {
+    const std::vector<APInt> bias = {APInt(32, -128, /*isSigned=*/true)};
+    const std::vector<APInt> scale = {APInt(32, 128, /*isSigned=*/true)};
+    return createIConst(rewriter, srcOp, interleave(bias, scale));
+}
 
 // TODO: only support int8 for now in order to use generic tiling for table op
 class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
@@ -44,6 +78,55 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 srcOp, "Expected gathered values rank to be 1, 2, or 3"
             );
         }
+
+        return success();
+    }
+
+    // Detect whether `tensorExtractOp` is a table-lookup (LUT) op by checking
+    // that the extract index is produced by an addi whose one operand is the
+    // result of the index_cast at the top of the block (the +128 bias pattern).
+    // Sets `isTableOp` to true when the pattern is recognised and validates:
+    //   - input element type is i8,
+    //   - the LUT tensor element type is i8 (non-i8 defers to I16ExtractTableOpPattern),
+    //   - the first body op is an index_cast whose result feeds the addi.
+    // Returns failure() if the pattern is partially recognised but invalid.
+    // Returns success() with isTableOp=false when the pattern is absent.
+    LogicalResult detectTableOp(
+        linalg::GenericOp srcOp, tensor::ExtractOp tensorExtractOp, Type inputElementType,
+        Operation &firstOp, PatternRewriter &rewriter, bool &isTableOp
+    ) const {
+        isTableOp = false;
+
+        auto indices = tensorExtractOp.getIndices();
+        if (indices.empty())
+            return success();
+
+        auto addOp = indices[0].getDefiningOp<arith::AddIOp>();
+        if (!addOp)
+            return success();
+
+        isTableOp = true;
+
+        if (!inputElementType.isInteger(8))
+            return rewriter.notifyMatchFailure(srcOp, "Only i8 TableOp supported");
+
+        // If the LUT is i16 (from swish table fusion), defer to I16ExtractTableOpPattern.
+        auto tableType = dyn_cast<RankedTensorType>(tensorExtractOp.getTensor().getType());
+        if (tableType && !tableType.getElementType().isInteger(8))
+            return rewriter.notifyMatchFailure(
+                srcOp, "Table tensor is not i8; deferring to I16ExtractTableOpPattern"
+            );
+
+        auto indexCastOp = dyn_cast<arith::IndexCastOp>(firstOp);
+        if (!indexCastOp)
+            return rewriter.notifyMatchFailure(srcOp, "Expected firstOp is a arith.indexCast op");
+
+        // One operand of addOp must be the indexCastOp result.
+        Value indexCastResult = indexCastOp.getResult();
+        if (indexCastResult != addOp.getLhs() && indexCastResult != addOp.getRhs())
+            return rewriter.notifyMatchFailure(
+                srcOp, "we expect one addOp operand from indexCastOp"
+            );
 
         return success();
     }
@@ -75,35 +158,27 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             indicesType.getShape(), rewriter.getI32Type(), indicesType.getEncoding()
         );
 
-        auto maybeConstAttr = computeConstAttr(indices, /*recursive=*/true);
-        if (failed(maybeConstAttr)) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Expected gather indices i64 tensor to be constant or constant-foldable"
-            );
-        }
-
-        auto indicesConstAttr = dyn_cast<DenseIntElementsAttr>(*maybeConstAttr);
-        if (!indicesConstAttr) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Expected gather indices constant to be DenseIntElementsAttr"
-            );
-        }
-
-        SmallVector<APInt> i32IndicesValues;
-        i32IndicesValues.reserve(indicesConstAttr.getNumElements());
-        for (APInt idx : indicesConstAttr.getValues<APInt>()) {
-            if (!idx.isSignedIntN(32)) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Expected gather indices constant values to fit in i32"
-                );
-            }
-            i32IndicesValues.push_back(idx.sextOrTrunc(32));
-        }
-
-        auto i32IndicesAttr = DenseIntElementsAttr::get(i32IndicesType, i32IndicesValues);
-        demotedIndices =
-            arith::ConstantOp::create(rewriter, srcOp.getLoc(), i32IndicesType, i32IndicesAttr)
+        // Demote i64 → i32 via a linalg.generic { arith.trunci }.
+        // FIXME: arith.trunci silently drops the high bits. If gather indices can ever
+        // exceed [INT32_MIN, INT32_MAX] in practice, we need a compile time or runtime check to
+        // ensure safety.
+        Location loc = srcOp.getLoc();
+        Value emptyDemoted =
+            tensor::EmptyOp::create(rewriter, loc, i32IndicesType.getShape(), rewriter.getI32Type())
                 .getResult();
+        int64_t rank = indicesType.getRank();
+        SmallVector<AffineMap> maps{
+            2, AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext())
+        };
+        SmallVector<utils::IteratorType> iterTypes(rank, utils::IteratorType::parallel);
+        demotedIndices =
+            linalg::GenericOp::create(
+                rewriter, loc, i32IndicesType, indices, emptyDemoted, maps, iterTypes, "", "",
+                [](OpBuilder &b, Location loc, ValueRange args) {
+                    Value trunc = arith::TruncIOp::create(b, loc, b.getI32Type(), args[0]);
+                    linalg::YieldOp::create(b, loc, trunc);
+                }
+            ).getResult(0);
         return success();
     }
 
@@ -122,26 +197,13 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return success();
         }
 
-        int64_t sliceStride = 1;
-        for (int64_t dim : valuesType.getShape().drop_front()) {
-            if (dim == ShapedType::kDynamic) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Expected gather source slice stride to be static"
-                );
-            }
-            sliceStride *= dim;
-        }
+        auto trailingDims = valuesType.getShape().drop_front();
+        if (llvm::any_of(trailingDims, ShapedType::isDynamic))
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected gather source slice stride to be static"
+            );
+        int64_t sliceStride = ShapedType::getNumElements(trailingDims);
         if (sliceStride == 1) {
-            return success();
-        }
-
-        auto maybeConstAttr = computeConstAttr(indices, /*recursive=*/true);
-        if (failed(maybeConstAttr)) {
-            return success();
-        }
-
-        auto indicesAttr = dyn_cast<DenseIntElementsAttr>(*maybeConstAttr);
-        if (!indicesAttr) {
             return success();
         }
 
@@ -152,22 +214,144 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return success();
         }
 
-        SmallVector<APInt> scaledValues;
-        scaledValues.reserve(indicesAttr.getNumElements());
-        APInt scale(64, sliceStride, /*isSigned=*/true);
-        for (APInt idx : indicesAttr.getValues<APInt>()) {
-            APInt scaled = idx.sextOrTrunc(64) * scale;
-            if (!scaled.isSignedIntN(elementType.getWidth())) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Expected scaled gather indices to fit in the element type"
-                );
-            }
-            scaledValues.push_back(scaled.sextOrTrunc(elementType.getWidth()));
-        }
+        // Emit scaledIndices[i] = indices[i] * sliceStride as IR ops so both
+        // constant and dynamic index tensors are handled uniformly.
+        Location loc = srcOp.getLoc();
+        Value emptyScaled =
+            tensor::EmptyOp::create(rewriter, loc, indicesType.getShape(), elementType).getResult();
+        int64_t rank = indicesType.getRank();
+        SmallVector<AffineMap> maps{
+            2, AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext())
+        };
+        SmallVector<utils::IteratorType> iterTypes(rank, utils::IteratorType::parallel);
+        scaledIndices =
+            linalg::GenericOp::create(
+                rewriter, loc, indicesType, indices, emptyScaled, maps, iterTypes, "", "",
+                [&, sliceStride](OpBuilder &b, Location loc, ValueRange args) {
+                    Value stride = arith::ConstantOp::create(
+                        b, loc, b.getIntegerAttr(args[0].getType(), sliceStride)
+                    );
+                    Value scaled = arith::MulIOp::create(b, loc, args[0], stride);
+                    linalg::YieldOp::create(b, loc, scaled);
+                }
+            ).getResult(0);
+        setCompileTimeConstAttr(scaledIndices.getDefiningOp());
+        return success();
+    }
 
-        auto scaledAttr = DenseIntElementsAttr::get(indicesType, scaledValues);
-        scaledIndices = arith::ConstantOp::create(rewriter, srcOp.getLoc(), indicesType, scaledAttr)
-                            .getResult();
+    // Lower a dynamic (non-constant) values tensor to GatherOp.
+    // Rank-3 values are in NHC layout and need a transpose to NCH around the gather.
+    // Rank-1/2 values use GatherOp's flat-offset path; rank-2 outer-dim indices
+    // are rescaled by the trailing slice stride before lowering.
+    LogicalResult rewriteAsDynamicGather(
+        linalg::GenericOp srcOp, Value valuesTensor, RankedTensorType valuesTensorType, Value input,
+        PatternRewriter &rewriter
+    ) const {
+        auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+
+        if (valuesTensorType.getRank() == 3) {
+            // Rank-3 gathers come from NHC values and need an NHC->NCH
+            // transpose before lowering to GatherOp.
+            auto dataPerm = Permutation::nhc2nch();
+            auto outType = transposeType(resultType, dataPerm.reverse());
+            auto transposedValue = transposeValue(valuesTensor, dataPerm, srcOp.getLoc(), rewriter);
+            auto out = syna::torq_hl::GatherOp::create(
+                rewriter, srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
+                transposedValue, input
+            );
+            auto resultTranspose =
+                transposeValue(out.getResult(0), dataPerm.reverse(), srcOp.getLoc(), rewriter);
+            rewriter.replaceOp(srcOp, resultTranspose);
+        }
+        else {
+            // Rank-1 gathers are direct scalar lookups. Rank-2 gathers use
+            // GatherOp's flat linear-offset path and need their constant
+            // outer-dim indices rescaled by the trailing slice stride.
+            if (failed(scaleGatherIndicesForSlice(srcOp, valuesTensor, input, rewriter, input)))
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Failed to scale constant gather indices for sliced gathers"
+                );
+            rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
+                srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), valuesTensor,
+                input
+            );
+        }
+        return success();
+    }
+
+    // Lower a constant i8 LUT to TableOp. Each i8 entry is packed as `value << 8`
+    // into an i32 word (slope=0, base-only piecewise-linear encoding).
+    void rewriteAsTableOp(
+        linalg::GenericOp srcOp, Value input, Value cstData, PatternRewriter &rewriter
+    ) const {
+        Location loc = srcOp.getLoc();
+        Value packedTable = buildPackedTable(rewriter, loc, cstData, /*signExtend=*/true);
+        setCompileTimeConstAttr(packedTable.getDefiningOp());
+        auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+        rewriter.replaceOpWithNewOp<syna::torq_hl::TableOp>(
+            srcOp, resultType, createInitTensor(srcOp, rewriter, resultType),
+            buildTableScaleBias(srcOp, rewriter), input, packedTable, nullptr
+        );
+    }
+
+    // Lower a constant i8 LUT to GatherOp when `clTableAsGather` is set.
+    // Rotates the table by 128 positions so that signed i8 indices [-128,127]
+    // map to unsigned GatherOp indices [0,255].
+    void rewriteTableAsGather(
+        linalg::GenericOp srcOp, Value input, Value cstData, PatternRewriter &rewriter
+    ) const {
+        // Rotate by 128: move entries [128,255] to the front, [0,127] to the back,
+        // so signed i8 indices [-128,127] map to unsigned [0,255].
+        Location loc = srcOp.getLoc();
+        auto cstType = cast<RankedTensorType>(cstData.getType());
+        Type elemTy = cstType.getElementType();
+        constexpr int64_t half = 128;
+        auto halfType = RankedTensorType::get({half}, elemTy);
+        auto mkIdx = [&](int64_t v) -> OpFoldResult { return rewriter.getIndexAttr(v); };
+
+        Value upperHalf = tensor::ExtractSliceOp::create(
+                              rewriter, loc, halfType, cstData, ArrayRef<OpFoldResult>{mkIdx(half)},
+                              ArrayRef<OpFoldResult>{mkIdx(half)}, ArrayRef<OpFoldResult>{mkIdx(1)}
+        )
+                              .getResult();
+        Value lowerHalf = tensor::ExtractSliceOp::create(
+                              rewriter, loc, halfType, cstData, ArrayRef<OpFoldResult>{mkIdx(0)},
+                              ArrayRef<OpFoldResult>{mkIdx(half)}, ArrayRef<OpFoldResult>{mkIdx(1)}
+        )
+                              .getResult();
+        Value rotated =
+            tensor::EmptyOp::create(rewriter, loc, cstType.getShape(), elemTy).getResult();
+        rotated = tensor::InsertSliceOp::create(
+                      rewriter, loc, upperHalf, rotated, ArrayRef<OpFoldResult>{mkIdx(0)},
+                      ArrayRef<OpFoldResult>{mkIdx(half)}, ArrayRef<OpFoldResult>{mkIdx(1)}
+        )
+                      .getResult();
+        rotated = tensor::InsertSliceOp::create(
+                      rewriter, loc, lowerHalf, rotated, ArrayRef<OpFoldResult>{mkIdx(half)},
+                      ArrayRef<OpFoldResult>{mkIdx(half)}, ArrayRef<OpFoldResult>{mkIdx(1)}
+        )
+                      .getResult();
+
+        setCompileTimeConstAttr(rotated.getDefiningOp());
+        auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+        rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
+            srcOp, outType, createInitTensor(srcOp, rewriter, outType), rotated, input
+        );
+    }
+
+    // Lower a plain constant values tensor to GatherOp.
+    // Rank-2 outer-dim indices are rescaled by the trailing slice stride.
+    LogicalResult rewriteAsConstantGather(
+        linalg::GenericOp srcOp, Value valuesTensor, Value input, PatternRewriter &rewriter
+    ) const {
+        auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+        if (failed(scaleGatherIndicesForSlice(srcOp, valuesTensor, input, rewriter, input)))
+            return rewriter.notifyMatchFailure(
+                srcOp, "Failed to scale constant gather indices for sliced gathers"
+            );
+        rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
+            srcOp, outType, createInitTensor(srcOp, rewriter, outType), valuesTensor, input
+        );
         return success();
     }
 
@@ -183,10 +367,7 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         Value input = srcOp.getInputs()[0];
 
-        auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
-        if (!yieldOp) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected a linalg.yield terminator");
-        }
+        auto yieldOp = cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
 
         auto tensorExtractOp = yieldOp.getValues()[0].getDefiningOp<tensor::ExtractOp>();
         if (!tensorExtractOp) {
@@ -204,144 +385,36 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto &block = srcOp.getRegion().front();
         auto &firstOp = block.front();
 
-        auto indices = tensorExtractOp.getIndices();
         bool isTableOp = false;
-        if (!indices.empty()) {
-            Value idx = indices[0];
-
-            auto addOp = dyn_cast<arith::AddIOp>(idx.getDefiningOp());
-            if (addOp) {
-                isTableOp = true;
-                if (!inputElementType.isInteger(8)) {
-                    return rewriter.notifyMatchFailure(srcOp, "Only i8 TableOp supported");
-                }
-
-                // Check the table tensor element type. If the LUT is i16
-                // (from swish table fusion), defer to I16ExtractTableOpPattern.
-                auto tableType = dyn_cast<RankedTensorType>(tensorExtractOp.getTensor().getType());
-                if (tableType && !tableType.getElementType().isInteger(8)) {
-                    return rewriter.notifyMatchFailure(
-                        srcOp, "Table tensor is not i8; deferring to I16ExtractTableOpPattern"
-                    );
-                }
-
-                auto indexCastOp = dyn_cast<arith::IndexCastOp>(firstOp);
-                if (!indexCastOp) {
-                    return rewriter.notifyMatchFailure(
-                        srcOp, "Expected firstOp is a arith.indexCast op"
-                    );
-                }
-                // one operands of addOp is indexCastOp result
-                Value indexCastResult = indexCastOp.getResult();
-                if (indexCastResult != addOp.getLhs() && indexCastResult != addOp.getRhs()) {
-                    return rewriter.notifyMatchFailure(
-                        srcOp, "we expect one addOp operand from indexCastOp"
-                    );
-                }
-            }
-        }
-
-        Value cst = tensorExtractOp.getTensor();
-        if (!cst) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected a arith.addi op");
-        }
-
-        RankedTensorType cstType;
-        if (failed(validateGatherValuesRank(srcOp, cst, rewriter, cstType))) {
+        if (failed(detectTableOp(
+                srcOp, tensorExtractOp, inputElementType, firstOp, rewriter, isTableOp
+            )))
             return failure();
+
+        Value valuesTensor = tensorExtractOp.getTensor();
+
+        RankedTensorType valuesTensorType;
+        if (failed(validateGatherValuesRank(srcOp, valuesTensor, rewriter, valuesTensorType)))
+            return failure();
+
+        auto maybeConst = outlineAndReturnOps(valuesTensor);
+        bool valuesAreConstant = succeeded(maybeConst);
+
+        if (valuesAreConstant) {
+            setCompileTimeConstAttr(valuesTensor.getDefiningOp());
         }
+        if (!valuesAreConstant)
+            return rewriteAsDynamicGather(srcOp, valuesTensor, valuesTensorType, input, rewriter);
 
-        SmallVector<int32_t> convertedValues;
-        auto maybeCstData = computeArithConst(cst);
-        if (failed(maybeCstData)) {
-            // tensor is input
-            auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-
-            if (cstType.getRank() == 3) {
-                // Rank-3 gathers come from NHC values and need an NHC->NCH
-                // transpose before lowering to GatherOp.
-                auto dataPerm = Permutation::nhc2nch();
-                auto outType = transposeType(resultType, dataPerm.reverse());
-                auto transposedValue = transposeValue(cst, dataPerm, srcOp.getLoc(), rewriter);
-                auto out = syna::torq_hl::GatherOp::create(
-                    rewriter, srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
-                    transposedValue, input
-                );
-                auto resultTranspose =
-                    transposeValue(out.getResult(0), dataPerm.reverse(), srcOp.getLoc(), rewriter);
-                rewriter.replaceOp(srcOp, resultTranspose);
-            }
-            else {
-                // Rank-1 gathers are direct scalar lookups. Rank-2 gathers use
-                // GatherOp's flat linear-offset path and need their constant
-                // outer-dim indices rescaled by the trailing slice stride.
-                if (failed(scaleGatherIndicesForSlice(srcOp, cst, input, rewriter, input))) {
-                    return rewriter.notifyMatchFailure(
-                        srcOp, "Failed to scale constant gather indices for sliced gathers"
-                    );
-                }
-                rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
-                    srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), cst, input
-                );
-            }
+        if (isTableOp && !clTableAsGather) {
+            rewriteAsTableOp(srcOp, input, valuesTensor, rewriter);
+            return success();
         }
-
-        else if (!clTableAsGather && isTableOp) {
-            auto values = attrValuesAsVec<int8_t>(*maybeCstData);
-            for (size_t i = 0; i < 256; i++) {
-                int32_t shiftedValue = static_cast<int32_t>(values[i]) << 8;
-                convertedValues.push_back(shiftedValue);
-            }
-
-            DenseI32ArrayAttr intArrayAttr =
-                DenseI32ArrayAttr::get(rewriter.getContext(), convertedValues);
-
-            const std::vector<APInt> bias = {APInt(32, -128, /*isSigned=*/true)};
-            const std::vector<APInt> scale = {APInt(32, 128, /*isSigned=*/true)};
-
-            auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-            rewriter.replaceOpWithNewOp<syna::torq_hl::TableOp>(
-                srcOp, resultType, createInitTensor(srcOp, rewriter, resultType),
-                createIConst(rewriter, srcOp, interleave(bias, scale)), input, intArrayAttr
-            );
+        if (isTableOp) { // clTableAsGather == true: emit the LUT as a rotated GatherOp
+            rewriteTableAsGather(srcOp, input, valuesTensor, rewriter);
+            return success();
         }
-        else if (isTableOp) { // If a table converted Gather then the const values are input(table)
-                              // and extract tensor is indices
-            std::vector<APInt> tableValues;
-            auto values = attrValuesAsVec<APInt>(*maybeCstData);
-            tableValues.insert(tableValues.end(), values.begin(), values.end());
-            int tableSize = tableValues.size();
-            std::vector<APInt> modifiedTable;
-            modifiedTable.reserve(tableSize);
-            modifiedTable.insert(modifiedTable.end(), tableValues.begin() + 128, tableValues.end());
-            modifiedTable.insert(
-                modifiedTable.end(), tableValues.begin(), tableValues.begin() + 128
-            );
-            tableValues = modifiedTable;
-
-            auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-            rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
-                srcOp, outType, createInitTensor(srcOp, rewriter, outType),
-                createIConst(rewriter, srcOp, tableValues), input
-            );
-        }
-        else { // If not a table converted Gather and the const values are
-               // input(table)
-               // and extract tensor is indices
-
-            auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-            if (failed(scaleGatherIndicesForSlice(srcOp, cst, input, rewriter, input))) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Failed to scale constant gather indices for sliced gathers"
-                );
-            }
-
-            rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
-                srcOp, outType, createInitTensor(srcOp, rewriter, outType), *maybeCstData, input
-            );
-        }
-
-        return success();
+        return rewriteAsConstantGather(srcOp, valuesTensor, input, rewriter);
     }
 };
 
@@ -375,9 +448,7 @@ class I16ExtractTableOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "i16Table: input must be i8 or i16");
 
         // Check yield.
-        auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
-        if (!yieldOp)
-            return rewriter.notifyMatchFailure(srcOp, "i16Table: expected linalg.yield");
+        auto yieldOp = cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
 
         // The yielded value must come from tensor.extract.
         auto extractOp = yieldOp.getValues()[0].getDefiningOp<tensor::ExtractOp>();
@@ -416,7 +487,7 @@ class I16ExtractTableOpPattern : public OpRewritePattern<linalg::GenericOp> {
         if (indices.empty())
             return rewriter.notifyMatchFailure(srcOp, "i16Table: extract has no indices");
 
-        auto addOp = dyn_cast<arith::AddIOp>(indices[0].getDefiningOp());
+        auto addOp = indices[0].getDefiningOp<arith::AddIOp>();
         if (!addOp)
             return rewriter.notifyMatchFailure(srcOp, "i16Table: index must come from arith.addi");
 
@@ -431,32 +502,17 @@ class I16ExtractTableOpPattern : public OpRewritePattern<linalg::GenericOp> {
             !tableType.getElementType().isInteger(16))
             return rewriter.notifyMatchFailure(srcOp, "i16Table: table must be tensor<256xi16>");
 
-        // Fold the table constant.
-        auto maybeCstData = computeArithConst(tableTensor);
-        if (failed(maybeCstData))
+        // Guard: table must be a compile-time constant so TablePattern can fold it.
+        if (failed(outlineAndReturnOps(tableTensor, /*recursive=*/true)))
             return rewriter.notifyMatchFailure(srcOp, "i16Table: table tensor is not constant");
 
-        // Pack 256 i16 values into 256 i32 entries: (slope << 16) | (base & 0xFFFF).
-        // Slope is set to 0 for now.
-        auto values = attrValuesAsVec<int16_t>(*maybeCstData);
-        SmallVector<int32_t> convertedValues;
-        convertedValues.reserve(256);
-        for (size_t i = 0; i < 256; i++) {
-            int16_t tb = values[i];         // base value
-            int32_t packed = (tb & 0xFFFF); // slope=0, base only
-            convertedValues.push_back(packed);
-        }
-
-        DenseI32ArrayAttr intArrayAttr =
-            DenseI32ArrayAttr::get(rewriter.getContext(), convertedValues);
-
-        const std::vector<APInt> bias = {APInt(32, -128, /*isSigned=*/true)};
-        const std::vector<APInt> scale = {APInt(32, 128, /*isSigned=*/true)};
-
+        setCompileTimeConstAttr(tableTensor.getDefiningOp());
+        Location loc = srcOp.getLoc();
+        Value packedTable = buildPackedTable(rewriter, loc, tableTensor, /*signExtend=*/false);
         auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
         rewriter.replaceOpWithNewOp<syna::torq_hl::TableOp>(
             srcOp, resultType, createInitTensor(srcOp, rewriter, resultType),
-            createIConst(rewriter, srcOp, interleave(bias, scale)), input, intArrayAttr
+            buildTableScaleBias(srcOp, rewriter), input, packedTable, nullptr
         );
 
         return success();

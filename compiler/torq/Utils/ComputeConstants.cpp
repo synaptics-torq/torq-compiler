@@ -557,7 +557,7 @@ FailureOr<SmallVector<DenseElementsAttr>> computeValueFromOps(
     return invokeExecution(**maybeEngine, outputBindings);
 }
 
-SmallVector<Operation *>
+FailureOr<SmallVector<Operation *>>
 outlineAndReturnOps(Value value, bool recursive, llvm::ArrayRef<Value> assumeZero) {
 
     LLVM_DEBUG({
@@ -569,12 +569,12 @@ outlineAndReturnOps(Value value, bool recursive, llvm::ArrayRef<Value> assumeZer
 
     // we don't support computing constants for non-ranked tensor types
     if (!outputType) {
-        return {};
+        return failure();
     }
 
     // we cannot compute the constant value of an argument
     if (!value.getDefiningOp()) {
-        return {};
+        return failure();
     }
 
     // set of all ops we already visited (including operations within operations)
@@ -704,7 +704,7 @@ outlineAndReturnOps(Value value, bool recursive, llvm::ArrayRef<Value> assumeZer
 
         if (ret == WalkResult::interrupt()) {
             LLVM_DEBUG({ llvm::dbgs() << "Cannot build constant IR to compute value\n"; });
-            return {};
+            return failure();
         }
     }
 
@@ -743,13 +743,13 @@ FailureOr<SmallVector<Attribute>> computeAllConstAttr(
     SmallVector<Value> constValues;
     constValues.reserve(values.size());
     for (auto value : values) {
-        SmallVector<Operation *> ops = outlineAndReturnOps(value, recursive, assumeZero);
-        if (ops.empty()) {
+        auto maybeConst = outlineAndReturnOps(value, recursive, assumeZero);
+        if (failed(maybeConst)) {
             LLVM_DEBUG({ llvm::errs() << "Failed to outline ops to compute value\n"; });
             continue;
         }
         constValues.push_back(value);
-        opsSets.push_back(std::move(ops));
+        opsSets.push_back(std::move(*maybeConst));
     }
     if (constValues.empty()) {
         return failure();

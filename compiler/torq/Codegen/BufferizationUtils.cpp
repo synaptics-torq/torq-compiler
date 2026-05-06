@@ -14,7 +14,7 @@
 
 namespace mlir::syna::torq {
 
-static LogicalResult computeStrides(
+LogicalResult computeStrides(
     MemRefType fromType, MemRefType toType, SmallVector<int64_t> &fromStridesBytes,
     SmallVector<int64_t> &toStridesBytes, SmallVector<int64_t> &shape,
     int64_t &contiguousElementSizeBytes
@@ -142,7 +142,7 @@ static LogicalResult createStoreOp(OpBuilder &builder, Location loc, Value from,
     return success();
 }
 
-static LogicalResult createLoadOp(OpBuilder &builder, Location loc, Value from, Value to) {
+LogicalResult createLoadOp(OpBuilder &builder, Location loc, Value from, Value to) {
 
     auto fromType = mlir::cast<MemRefType>(from.getType());
     auto toType = mlir::cast<MemRefType>(to.getType());

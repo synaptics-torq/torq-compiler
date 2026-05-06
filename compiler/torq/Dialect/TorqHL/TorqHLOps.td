@@ -311,13 +311,17 @@ def TorqHL_TableOp : TorqHL_LayerOp<"table"> {
   let summary = "Table lookup op";
 
   let description = [{
-    Table lookup operation using a precomputed lookup table
+    Table lookup operation using a precomputed lookup table.
+    $packed_table is a tensor<256xi32> where each entry encodes a piecewise-linear
+    segment word: (slope << 16) | (base & 0xFFFF). For i8 LUTs the slope is 0 and
+    the base is the original value shifted left by 8.
   }];
 
   let arguments = !con(commonArgs, (ins
     TensorOrMemref:$scale_bias,
     TensorOrMemref:$input,
-    DenseI32ArrayAttr:$table
+    Optional<TensorOrMemref>:$dynamic_table,
+    OptionalAttr<DenseI32ArrayAttr>:$static_table
   ));
 }
 

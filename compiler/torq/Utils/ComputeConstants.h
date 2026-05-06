@@ -46,4 +46,7 @@ FailureOr<SmallVector<Value>> computeAllArithConst(
     llvm::ArrayRef<Value> assumeZero = {}
 );
 
+FailureOr<SmallVector<Operation *>>
+outlineAndReturnOps(Value value, bool recursive = true, llvm::ArrayRef<Value> assumeZero = {});
+
 } // namespace mlir::syna::torq

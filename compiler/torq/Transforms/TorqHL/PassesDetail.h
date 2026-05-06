@@ -23,6 +23,7 @@ namespace mlir::syna::torq_hl {
 #define GEN_PASS_DEF_TORQHLOPTRANSFORM
 #define GEN_PASS_DEF_FORMDISPATCHREGIONS
 #define GEN_PASS_DEF_TORQHLOPTIMIZESEGMENTATION
+#define GEN_PASS_DEF_TORQHLFOLDTABLECONSTANT
 
 #include "torq/Transforms/TorqHL/Passes.h.inc"
 

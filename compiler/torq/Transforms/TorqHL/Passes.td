@@ -74,4 +74,21 @@ def FormDispatchRegions :
   ];
 }
 
+def TorqHLFoldTableConstant :
+    InterfacePass<"torq-hl-fold-table-constant",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Fold constant dynamic_table into static_table on TorqHL TableOp";
+  let description = [{
+    Walks every torq_hl.table op.  When the dynamic_table operand is backed by
+    a compile-time constant (torq_hl.const loaded via torq_hl.load), the
+    DenseI32ArrayAttr is materialised as static_table so that downstream
+    patterns can lower without runtime memory traffic.
+  }];
+  let constructor =
+      "mlir::syna::torq_hl::createTorqHLFoldTableConstantPass()";
+  let dependentDialects = [
+      "syna::torq_hl::TorqHLDialect",
+  ];
+}
+
 #endif // IREE_COMPILER_DIALECT_TORQHL_TRANSFORMS_PASSES_TD_

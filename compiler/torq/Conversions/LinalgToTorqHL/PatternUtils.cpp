@@ -2587,11 +2587,13 @@ Value makeI16LUTFromVals(
 ) {
     const std::vector<APInt> bias = {APInt(32, 0, /*isSigned=*/true)};
     const std::vector<APInt> scale = {APInt(32, 1, /*isSigned=*/true)};
+    Value packedTable = createI32Const(
+        rewriter, srcOp, values, llvm::ArrayRef<int64_t>{static_cast<int64_t>(values.size())}
+    );
     return syna::torq_hl::TableOp::create(
                rewriter, srcOp.getLoc(), dyn_cast<RankedTensorType>(input.getType()),
                createInitTensor(srcOp, rewriter, dyn_cast<RankedTensorType>(input.getType())),
-               createIConst(rewriter, srcOp, interleave(bias, scale)), input,
-               DenseI32ArrayAttr::get(rewriter.getContext(), values)
+               createIConst(rewriter, srcOp, interleave(bias, scale)), input, packedTable, nullptr
     )
         .getResult(0);
 }

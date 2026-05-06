@@ -118,9 +118,7 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm) {
 
     funcPm.addPass(createCanonicalizerPass());
     funcPm.addPass(createKernelSelectionPass());
-    funcPm.addPass(createCompileTimeConstOutlinePass());
 
-    funcPm.addPass(createCompileTimeConstComputePass());
     funcPm.addPass(createCanonicalizerPass());
 
     // Move layout transposes through elementwise chains to enable cancellation
@@ -151,6 +149,9 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm) {
     if (!clDisableSeg) {
         funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
     }
+    funcPm.addPass(createCompileTimeConstOutlinePass());
+    funcPm.addPass(createCompileTimeConstComputePass());
+    funcPm.addPass(createCanonicalizerPass());
     funcPm.addPass(createEncodeTensorsPass());
 
     // Note: slicing should be done *before* kernel selection, but kernel selection is doing
@@ -229,6 +230,7 @@ void addNssUpToAssignLramAddresses(OpPassManager &pm) {
 
     // unroll all loops since NSS cannot deal with them
     funcPm.addPass(createUnrollLoopPass());
+    funcPm.addPass(torq_hl::createTorqHLFoldTableConstantPass());
 
     funcPm.addPass(createOutlineSliceProgramsPass());
     funcPm.addPass(createUnrollForallLoopsPass());
