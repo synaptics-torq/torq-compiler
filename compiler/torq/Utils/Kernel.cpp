@@ -167,16 +167,29 @@ static SGBlockInfo sgElementCount(const Shape &dims, int busWidthItems, int sgMa
         blockInfo.outerStride = dims[0].stride;
     }
     else if (blockInfo.size > busWidthItems) {
-        if (blockInfo.size % busWidthItems != 0) {
-            // To be verified if there are cases where we can accept this
-            llvm::errs() << "Error block size " << blockInfo.size
-                         << " must be a multiple of bus width " << busWidthItems << "\n";
-            assert(false && "Block size must be a multiple of bus width");
+        int transferSize = std::min(blockInfo.size, busWidthItems);
+        while (blockInfo.size % transferSize != 0) {
+            --transferSize;
         }
-        // Divide by bus width to get number of bus transfers
-        blockInfo.outerGroups = div_ceil(blockInfo.size, busWidthItems);
-        blockInfo.outerStride = Stride(busWidthItems);
-        blockInfo.size = busWidthItems;
+        assert(transferSize > 0 && "Expected at least scalar block transfer");
+
+        // Flag sub-bus-width transfers: bus utilization is below 100% per
+        // transfer and the total transfer count grows accordingly. Acceptable
+        // for unaligned shapes, but worth surfacing during perf investigation.
+        LLVM_DEBUG({
+            if (transferSize < busWidthItems) {
+                llvm::dbgs() << "sgElementCount: non bus-aligned dense block of size "
+                             << blockInfo.size << " split into " << (blockInfo.size / transferSize)
+                             << " transfers of " << transferSize << " items (bus width "
+                             << busWidthItems << ")\n";
+            }
+        });
+
+        // Split dense blocks into equal transfers. Prefer full-bus transfers,
+        // but use a smaller divisor when the total block is not bus-aligned.
+        blockInfo.outerGroups = blockInfo.size / transferSize;
+        blockInfo.outerStride = Stride(transferSize);
+        blockInfo.size = transferSize;
     }
 
     return blockInfo;
