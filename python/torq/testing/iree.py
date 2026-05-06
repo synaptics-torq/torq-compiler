@@ -374,7 +374,9 @@ def mlir_io_spec(request, mlir_model_file):
         if match and match.group(1) == '':
             shape = []
         else:
-            shape = [int(x) for x in match.group(1).split(',')] if match else None
+            def parse_dim(d):
+                return 1 if d == '?' else int(d)
+            shape = [parse_dim(x) for x in match.group(1).split(',')] if match else None
 
         if match:
             dtype = match.group(2)

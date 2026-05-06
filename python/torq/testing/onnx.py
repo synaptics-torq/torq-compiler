@@ -195,6 +195,7 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
     # Build metadata maps
     orig_inputs = {vi.name: vi for vi in graph.input}
     orig_value_info = {vi.name: vi for vi in graph.value_info}
+    orig_outputs = {vi.name: vi for vi in graph.output}
     orig_initializers = {init.name: init for init in graph.initializer}
 
     # Helper to synthesize a simple value_info from an initializer
@@ -222,6 +223,8 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
             new_initializers.append(_copy.deepcopy(init))
             added_initializer_names.add(name)
             new_inputs.append(_value_info_from_initializer(init))
+        elif name in orig_outputs:
+            new_inputs.append(_copy.deepcopy(orig_outputs[name]))
         else:
             new_inputs.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, []))
 
@@ -374,6 +377,9 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
             log_prefix=f'layer {layer_name}',
         )
 
+        # Fix dynamic batch dimensions to static 1 for layer testing
+        _fix_batch_dimension_to_one(final_model)
+
         # check duplication: too heavy to compare model, just compare signature
         if dedup:
             m_signature_json = json.dumps(model_signature(final_model))
@@ -451,6 +457,9 @@ def extract_onnx_subgraph(model, from_index, to_index):
         init_name_fn=lambda base, idx: f"{base}_subgraph_init{idx}",
         log_prefix="[Subgraph]",
     )
+
+    # Fix dynamic batch dimensions to static 1 for subgraph testing
+    _fix_batch_dimension_to_one(final_model)
 
     return ModelWithMetadata(final_model, from_index)
 
@@ -603,10 +612,10 @@ def _float32_to_bfloat16(arr: np.ndarray) -> np.ndarray:
 
 
 def _fix_batch_dimension_to_one(model: onnx.ModelProto) -> int:
-    """Fix dynamic batch dimensions (?, -1) to 1 for all inputs."""
+    """Fix dynamic batch dimensions (?, -1) to 1 for all inputs, outputs, and value_info."""
     modified_count = 0
-    for input_tensor in model.graph.input:
-        tensor_type = input_tensor.type.tensor_type
+    for value_info in list(model.graph.input) + list(model.graph.output) + list(model.graph.value_info):
+        tensor_type = value_info.type.tensor_type
         if tensor_type.HasField('shape') and len(tensor_type.shape.dim) > 0:
             first_dim = tensor_type.shape.dim[0]
             if first_dim.HasField('dim_param'):

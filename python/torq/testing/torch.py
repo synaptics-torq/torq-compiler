@@ -84,6 +84,65 @@ def _execute_torch_mlir(mlir_path: Path, input_data):
             raise ValueError(f"Unsupported MaxPool spatial rank: {ndim}")
         return [_torch_tensor_to_np(result)]
 
+    elif op_type == 'Conv':
+        import torch.nn.functional as F
+        x = _np_array_to_torch(input_data[0])
+        weight = _np_array_to_torch(input_data[1])
+        bias = _np_array_to_torch(input_data[2]) if len(input_data) > 2 else None
+
+        # Determine spatial rank from weight shape: [M, C/group, *kernel_shape]
+        ndim = weight.ndim - 2
+        if ndim < 1 or ndim > 3:
+            raise ValueError(f"Unsupported Conv spatial rank: {ndim}")
+
+        kernel_shape = attrs.get('kernel_shape', list(weight.shape[2:]))
+        strides = attrs.get('strides', [1] * ndim)
+        dilations = attrs.get('dilations', [1] * ndim)
+        groups = attrs.get('group', 1)
+        pads = attrs.get('pads', [0] * (2 * ndim))
+
+        # ONNX pads are [begin1, begin2, ..., end1, end2, ...]
+        # PyTorch only supports symmetric padding for conv, so handle asymmetric manually.
+        pad_begin = pads[:ndim]
+        pad_end = pads[ndim:]
+        symmetric_pads = [(b, e) for b, e in zip(pad_begin, pad_end)]
+        needs_explicit_pad = any(b != e for b, e in symmetric_pads)
+
+        if needs_explicit_pad:
+            torch_pad = []
+            for i in range(ndim - 1, -1, -1):
+                torch_pad.extend([pad_begin[i], pad_end[i]])
+            x = F.pad(x, torch_pad)
+            padding = [0] * ndim
+        else:
+            padding = pad_begin
+
+        conv_kwargs = dict(
+            stride=strides,
+            padding=padding,
+            dilation=dilations,
+            groups=groups,
+            bias=bias is not None,
+        )
+        if bias is not None:
+            conv_kwargs['bias'] = bias
+
+        if ndim == 1:
+            result = F.conv1d(x, weight, **conv_kwargs)
+        elif ndim == 2:
+            result = F.conv2d(x, weight, **conv_kwargs)
+        elif ndim == 3:
+            result = F.conv3d(x, weight, **conv_kwargs)
+
+        return [_torch_tensor_to_np(result)]
+
+    elif op_type == 'Cast':
+        import torch
+        x = _np_array_to_torch(input_data[0])
+        to_dtype = attrs.get('to', 1)
+        result = x.to(_onnx_dtype_to_torch(to_dtype))
+        return [_torch_tensor_to_np(result)]
+
     else:
         raise ValueError(f"torch MLIR direct execution not yet implemented for op: {op_type}")
 
@@ -107,6 +166,28 @@ def _torch_tensor_to_np(tensor):
             import ml_dtypes
             return arr.view(ml_dtypes.bfloat16)
     return tensor.numpy()
+
+
+# ONNX TensorProto data type -> torch dtype mapping for Cast support
+_ONNX_TO_TORCH_DTYPE = {
+    1: 'float32',    # TensorProto.FLOAT
+    2: 'uint8',      # TensorProto.UINT8
+    3: 'int8',       # TensorProto.INT8
+    5: 'int16',      # TensorProto.INT16
+    6: 'int32',      # TensorProto.INT32
+    7: 'int64',      # TensorProto.INT64
+    9: 'bool',       # TensorProto.BOOL
+    10: 'float16',   # TensorProto.FLOAT16
+    11: 'float64',   # TensorProto.DOUBLE
+    16: 'bfloat16',  # TensorProto.BFLOAT16
+}
+
+
+def _onnx_dtype_to_torch(to_dtype: int):
+    """Map ONNX TensorProto dtype integer to torch dtype."""
+    import torch
+    dtype_name = _ONNX_TO_TORCH_DTYPE.get(to_dtype, 'float32')
+    return getattr(torch, dtype_name)
 
 
 def _execute_onnx_model_torch(model, input_data):
@@ -225,6 +306,13 @@ def _execute_onnx_model_torch(model, input_data):
                 raise ValueError(f"Unsupported Conv kernel rank: {len(kernel_shape)}")
             tensor_values[node.output[0]] = _torch_tensor_to_np(result)
 
+        elif node.op_type == "Cast":
+            import torch
+            x = _np_array_to_torch(inputs[0])
+            to_dtype = next((attr.i for attr in node.attribute if attr.name == "to"), 1)
+            result = x.to(_onnx_dtype_to_torch(to_dtype))
+            tensor_values[node.output[0]] = _torch_tensor_to_np(result)
+
         elif node.op_type == "Relu":
             import torch.nn.functional as F
             x = _np_array_to_torch(inputs[0])
@@ -298,7 +386,8 @@ def torch_reference_results(request, input_data):
     """
     try:
         onnx_model_file = request.getfixturevalue("onnx_model_file")
-        onnx_model = onnx.load(str(onnx_model_file))
+        onnx_path = onnx_model_file.file_path if hasattr(onnx_model_file, 'file_path') else Path(str(onnx_model_file))
+        onnx_model = onnx.load(str(onnx_path))
         return _execute_onnx_model_torch(onnx_model, input_data)
     except Exception:
         pass
