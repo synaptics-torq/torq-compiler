@@ -204,6 +204,11 @@ AssignOperationsToCpuProgramsPass::createOutliningGroups(Region *region, int nex
                 return op.emitError("Unable to find executor for op");
             }
 
+            // Skip outlining for non-CPU executors (Slice/NSS have their own lowering)
+            if (executor != torq_hl::Executor::CSS && executor != torq_hl::Executor::Host) {
+                continue;
+            }
+
             std::string executableName = llvm::formatv(
                 "{0}_{1}_{2}", torq_hl::stringifyExecutor(executor), op.getName(), nextProgramId
             );
