@@ -40,7 +40,7 @@ static llvm::cl::opt<bool> clDisableDispatchFusion(
 );
 
 static llvm::cl::opt<bool> clAnnotateTiedOperands(
-    "torq-annotate-tied-operands",
+    "torq-enable-annotate-tied-operands",
     llvm::cl::desc("Annotate function results with iree.abi.tied for in-place buffer reuse "
                    "(e.g. KV-cache in autoregressive decoding)"),
     llvm::cl::init(false)

@@ -21,12 +21,7 @@ namespace {
 #include "torq/Transforms/Linalg/Passes.h.inc"
 } // namespace
 
-void registerOptimizeLinalgForTorqPasses() {
-    // Generated.
-    registerPasses();
-}
-
-void registerTorqTypeConversionPasses() {
+void registerLinalgForTorqPasses() {
     // Generated.
     registerPasses();
 }

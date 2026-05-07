@@ -36,8 +36,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollStaticScfForLoop
 // Registration
 //----------------------------------------------------------------------------//
 
-void registerOptimizeLinalgForTorqPasses();
-void registerTorqTypeConversionPasses();
+void registerLinalgForTorqPasses();
 void buildTorqTypeConversionPipeline(OpPassManager &passManager);
 
 } // namespace mlir::syna::torq
