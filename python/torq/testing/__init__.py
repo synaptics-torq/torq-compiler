@@ -41,3 +41,10 @@ try:
 
 except ImportError:
     print("Warning: iree not available, skipping iree test support")
+
+
+try:
+    import jax
+    pytest_plugins.append("torq.testing.jax")    
+except ImportError:
+    print("Warning: jax not available, skipping jax test support")

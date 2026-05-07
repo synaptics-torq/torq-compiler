@@ -350,6 +350,9 @@ def versioned_generated_file_fixture(suffix):
     options, as this would break the caching mechanism.
     """
 
+    if not isinstance(suffix, str):
+        raise ValueError("versioned_generated_file_fixture requires a suffix argument of type str that will be used as file extension for the generated file")
+
     def decorator(fun):
 
         # we cannot easily request this fixture here because either

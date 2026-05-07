@@ -77,3 +77,6 @@ keras>=2.7.0
 
 # these are from python/torq/requirements.txt
 packaging>=24.2
+
+# JAX frontend 
+jax[cpu]==0.10.0
