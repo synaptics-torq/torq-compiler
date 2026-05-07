@@ -13,6 +13,7 @@
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -657,6 +658,95 @@ class TileSoftmaxOperation : public OpRewritePattern<linalg::SoftmaxOp> {
     std::optional<torq_hl::Executor> targetExecutor;
 };
 
+// mlir::iree_compiler::IREE::LinalgExt::SortOp implements TilingInterface,
+// but tiling the sort dimension produces independently sorted sub-arrays, not a
+// globally sorted result. There is no merge step to combine tiles. So we
+// cannot use tiling to split a large sort into smaller CSS pieces.
+// Instead, we check if the op fits in CSS memory (accounting for unused outputs
+// that create memref.allocas) and fall back to Host execution when it doesn't.
+class CheckSortOpMemory : public OpRewritePattern<mlir::iree_compiler::IREE::LinalgExt::SortOp> {
+  public:
+    CheckSortOpMemory(
+        MLIRContext *context, int maxSize,
+        std::optional<torq_hl::Executor> targetExecutor = std::nullopt
+    )
+        : OpRewritePattern<mlir::iree_compiler::IREE::LinalgExt::SortOp>(context), maxSize(maxSize),
+          targetExecutor(targetExecutor) {}
+
+    LogicalResult matchAndRewrite(
+        mlir::iree_compiler::IREE::LinalgExt::SortOp sortOp, PatternRewriter &rewriter
+    ) const override {
+
+        if (targetExecutor.has_value() &&
+            getTargetExecutor(sortOp, *targetExecutor) != *targetExecutor) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "CheckSortOpMemory: skipping sort op with executor "
+                             << stringifyExecutor(getTargetExecutor(sortOp)) << "\n";
+            });
+            return failure();
+        }
+
+        int totalSize = 0;
+        int unusedAllocaSize = 0;
+        for (auto result : sortOp.getResults()) {
+            auto rankedType = dyn_cast<RankedTensorType>(result.getType());
+            if (!rankedType || !rankedType.hasStaticShape()) {
+                LLVM_DEBUG({
+                    llvm::dbgs() << "CheckSortOpMemory: dynamic shape, falling back to Host\n";
+                });
+                // Cannot estimate memory: fall back to Host
+                rewriter.modifyOpInPlace(sortOp, [&]() {
+                    setTargetExecutorAttr(sortOp, torq_hl::Executor::Host);
+                });
+                return success();
+            }
+            int64_t resultSize =
+                rankedType.getNumElements() * div_ceil(rankedType.getElementTypeBitWidth(), 8);
+            totalSize += resultSize;
+            if (result.use_empty()) {
+                unusedAllocaSize += resultSize;
+            }
+        }
+
+        LLVM_DEBUG({
+            llvm::dbgs() << "CheckSortOpMemory: sort op total size=" << totalSize
+                         << " unusedAllocaSize=" << unusedAllocaSize << " maxSize=" << maxSize
+                         << " cssStackSize=" << HwInfo::css_stack_size << "\n";
+        });
+
+        // Unused outputs of DPS sort ops create memref.allocas on the CSS stack.
+        // If any unused output exceeds the CSS stack size, the op cannot run on CSS.
+        if (unusedAllocaSize > HwInfo::css_stack_size) {
+            LLVM_DEBUG({
+                llvm::dbgs(
+                ) << "CheckSortOpMemory: unused outputs exceed CSS stack, falling back to Host\n";
+            });
+            rewriter.modifyOpInPlace(sortOp, [&]() {
+                setTargetExecutorAttr(sortOp, torq_hl::Executor::Host);
+            });
+            return success();
+        }
+
+        // Also check total DTCM budget
+        if (totalSize <= maxSize) {
+            return rewriter.notifyMatchFailure(sortOp, "Sort op fits in CSS memory");
+        }
+
+        // Exceeds CSS DTCM budget: fall back to Host
+        LLVM_DEBUG({
+            llvm::dbgs() << "CheckSortOpMemory: exceeds CSS DTCM memory, falling back to Host\n";
+        });
+        rewriter.modifyOpInPlace(sortOp, [&]() {
+            setTargetExecutorAttr(sortOp, torq_hl::Executor::Host);
+        });
+        return success();
+    }
+
+  private:
+    int maxSize;
+    std::optional<torq_hl::Executor> targetExecutor;
+};
+
 class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp> {
   public:
     TileLinalgOpOperation(
@@ -804,6 +894,7 @@ class DtcmTilePass : public impl::DtcmTileBase<DtcmTilePass> {
 
         const uint32_t cssMem = HwInfo::dtcm_size - HwInfo::css_stack_size;
         tilePatterns.add<TileLinalgOpOperation>(ctx, cssMem, torq_hl::Executor::CSS);
+        tilePatterns.add<CheckSortOpMemory>(ctx, cssMem, torq_hl::Executor::CSS);
 
         tensor::ControlConstantExtractSliceFusionFn controlFn = [](tensor::ExtractSliceOp op) {
             return true;

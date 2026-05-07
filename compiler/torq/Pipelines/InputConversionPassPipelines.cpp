@@ -96,6 +96,13 @@ void buildTorchTransformPassPipeline(OpPassManager &passManager) {
     passManager.addPass(mlir::createCanonicalizerPass());
     passManager.addPass(mlir::createCSEPass());
 
+    // Convert tm_tensor ops (e.g. sort from ONNX TopK) to iree_linalg_ext.
+    // This ensures they form dispatches and can be outlined to Host/CSS
+    // instead of being rejected as unknown ops during HAL conversion.
+    passManager.addNestedPass<func::FuncOp>(
+        mlir::iree_compiler::TorchInput::createConvertTMTensorToLinalgExtPass()
+    );
+
     // apply Torq-specific type conversion
     buildTorqTypeConversionPipeline(passManager);
 

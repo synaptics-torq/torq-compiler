@@ -121,6 +121,16 @@ class LinalgToTorqHLConversionPass
             return isHostOrCssExecutor(padOp);
         });
 
+        // Keep any op routed to Host/CSS legal in this conversion. These ops
+        // will be outlined to CPU programs and don't need TorqHL lowering.
+        conversionTarget.markUnknownOpDynamicallyLegal([](Operation *op) -> std::optional<bool> {
+            if (!op->hasAttr("torq-executor"))
+                return std::nullopt;
+            if (isHostOrCssExecutor(op))
+                return true;
+            return std::nullopt;
+        });
+
         RewritePatternSet patterns(&getContext());
 
         populateLinalgToTorqHLPatterns(context, patterns, false);
