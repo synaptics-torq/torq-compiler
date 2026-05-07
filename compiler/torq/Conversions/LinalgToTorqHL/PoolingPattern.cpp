@@ -107,15 +107,16 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
 
         PaddingInfo padInfo = foldBackwardPadding(input, rewriter, IsNCHW);
 
-        auto kernels = mlir::cast<RankedTensorType>(srcOp.getInputs()[1].getType()).getShape();
-        if (kernels.size() != 2) {
+        auto kernel = srcOp.getInputs()[1];
+        auto kernelsShape = mlir::cast<RankedTensorType>(kernel.getType()).getShape();
+        if (kernelsShape.size() != 2) {
             return rewriter.notifyMatchFailure(
                 srcOp, "Expected exactly two kernel sizes for PoolingMaxOp"
             );
         }
 
         // Check stride constraints after determining if 1D pooling
-        bool is1D = is1DPooling(kernels, attrStrides);
+        bool is1D = is1DPooling(kernelsShape, attrStrides);
         if (!is1D) {
             // For 2D pooling, enforce stride limits
             constexpr int64_t maxStride = IsNCHW ? 4 : 2;
@@ -129,7 +130,7 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
 
         if (_markFuseGroups) {
             markFuseGroupBackward(
-                output, {input}, rewriter,
+                output, {input, kernel}, rewriter,
                 srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();
@@ -177,7 +178,7 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
 
         auto maxpoolOp = torq_hl::MaxPool2dOp::create(
             rewriter, loc, srcResultType, createInitTensor(srcOp, rewriter, srcResultType),
-            padInfo.padValue, outputMin, outputMax, attrStrides, padInfo.lrtbPad, kernels,
+            padInfo.padValue, outputMin, outputMax, attrStrides, padInfo.lrtbPad, kernelsShape,
             weightConst, createI32Const(rewriter, srcOp, interleave(bias, scale)), input,
             /*segment_output=*/false
         );

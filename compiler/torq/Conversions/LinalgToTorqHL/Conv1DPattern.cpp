@@ -242,7 +242,7 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
 
         if (_markFuseGroups) {
             markFuseGroupBackward(
-                output, {input}, rewriter,
+                output, {input, weights}, rewriter,
                 convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();
@@ -577,7 +577,7 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
         // Mark fuse group if requested
         if (_markFuseGroups) {
             markFuseGroupBackward(
-                outputValue, {input}, rewriter,
+                outputValue, {input, filter}, rewriter,
                 genericOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();

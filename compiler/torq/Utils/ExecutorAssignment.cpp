@@ -37,6 +37,9 @@ void setTargetExecutorAttr(Operation *op, torq_hl::Executor executor) {
 }
 
 void setCompileTimeConstAttr(Operation *op) {
+    if (!op)
+        return;
+
     op->setAttr(COMPILE_TIME_CONST_ATTR_NAME, BoolAttr::get(op->getContext(), true));
     setTargetExecutorAttr(op, torq_hl::Executor::Host);
     SmallVector<Operation *, 4> worklist{op};
@@ -49,15 +52,22 @@ void setCompileTimeConstAttr(Operation *op) {
             Operation *defOp = operand.getDefiningOp();
             if (!defOp) {
                 auto bArg = dyn_cast<BlockArgument>(operand);
-                if (bArg) {
-                    auto parentOp = bArg.getParentBlock()->getParentOp();
-                    if (parentOp->getNumOperands() > bArg.getArgNumber()) {
-                        auto arg = parentOp->getOperand(bArg.getArgNumber());
-                        defOp = arg.getDefiningOp();
-                    }
-                }
+                if (!bArg)
+                    continue;
+
+                auto parentOp = bArg.getParentBlock()->getParentOp();
+                // This can happen when tile and fuse extracts operations
+                if (parentOp->getNumOperands() <= bArg.getArgNumber())
+                    continue;
+
+                auto arg = parentOp->getOperand(bArg.getArgNumber());
+                defOp = arg.getDefiningOp();
+
+                if (!defOp)
+                    continue;
             }
-            if (!defOp || !visited.insert(defOp).second)
+
+            if (!visited.insert(defOp).second)
                 continue;
 
             opsOfInterest.push_back(defOp);
@@ -65,7 +75,7 @@ void setCompileTimeConstAttr(Operation *op) {
         }
     }
     for (Operation *op : opsOfInterest) {
-        if (op->hasAttr(COMPILE_TIME_CONST_ATTR_NAME)) {
+        if (op->hasAttr(COMPILE_TIME_CONST_ATTR_NAME) && op->hasOneUse()) {
             op->removeAttr(COMPILE_TIME_CONST_ATTR_NAME);
         }
         setTargetExecutorAttr(op, torq_hl::Executor::Host);

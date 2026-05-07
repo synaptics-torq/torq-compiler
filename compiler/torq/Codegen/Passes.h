@@ -117,6 +117,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileTimeConstComput
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileTimeConstOutlinePass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileTimeConstStubsPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollLoopPass();
 
 void addTorqComprehensiveBufferizePasses(

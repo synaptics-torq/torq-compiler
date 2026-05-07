@@ -559,6 +559,16 @@ def CompileTimeConstOutline :
         ];
 }
 
+def CompileTimeConstStubs :
+    InterfacePass<"torq-compile-time-const-stubs", "mlir::FunctionOpInterface"> {
+        let summary = "Replace operations marked as compile-time-const with fake values";
+        let constructor = "mlir::syna::torq::createCompileTimeConstStubsPass()";
+        let dependentDialects = [
+            "syna::torq_hl::TorqHLDialect",
+            "tensor::TensorDialect"
+        ];
+}
+
 def CreateGlobals :
     Pass<"torq-create-globals", "ModuleOp"> {
         let summary = "Replace all memref.alloc used in a dispatch with memref.global objects";

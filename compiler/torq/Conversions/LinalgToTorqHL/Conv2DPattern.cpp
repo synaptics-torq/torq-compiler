@@ -564,7 +564,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         if (_markFuseGroups) {
             // Discovery mode: only annotate fusible chain; do not rewrite yet.
             markFuseGroupBackward(
-                output, {input}, rewriter,
+                output, {input, weights}, rewriter,
                 convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();

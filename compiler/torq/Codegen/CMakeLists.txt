@@ -20,6 +20,7 @@ set(sources
     CompileTimeConstComputePass.cpp
     CompileInvocationUtils.cpp
     CompileTimeConstOutlinePass.cpp
+    CompileTimeConstStubsPass.cpp
     CreateGlobalsPass.cpp
     EncodeTensorsPass.cpp
     FoldConvertPass.cpp

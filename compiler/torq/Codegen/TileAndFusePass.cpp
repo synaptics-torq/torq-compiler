@@ -258,12 +258,14 @@ void collectOpsForMemoryCheck(
                 if (visitedOps.contains(operandOp))
                     continue;
 
-                if ((llvm::isa<TilingInterface>(operandOp) &&
-                     !checkShareFuseGroup(currentOp, operandOp))
-                    // Don't collect tiled operations
-                    || llvm::isa<scf::ForOp>(operandOp)) {
-                    // the defining op of operand might still be in `ops`, so this
-                    // is a maybe input. We will check again at the end.
+                // Don't collect tiled operations
+                if (llvm::isa<scf::ForOp>(operandOp)) {
+                    maybeInputs.push_back(operand);
+                    continue;
+                }
+
+                if (llvm::isa<TilingInterface>(operandOp) &&
+                    !checkShareFuseGroup(currentOp, operandOp)) {
                     maybeInputs.push_back(operand);
                     continue;
                 }

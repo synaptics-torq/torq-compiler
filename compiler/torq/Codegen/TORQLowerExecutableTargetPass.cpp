@@ -103,7 +103,7 @@ static llvm::cl::opt<bool> clEnableTransposeOptimization(
 
 namespace {
 
-void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm) {
+void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTileAndFuse) {
     if (!clDisableLinalgSlicing && !clEnableTorqHLTiling)
         funcPm.addPass(createLinalgSlicingPass());
 
@@ -149,9 +149,17 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm) {
     if (!clDisableSeg) {
         funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
     }
-    funcPm.addPass(createCompileTimeConstOutlinePass());
-    funcPm.addPass(createCompileTimeConstComputePass());
-    funcPm.addPass(createCanonicalizerPass());
+
+    if (optimizeForTileAndFuse) {
+        funcPm.addPass(createCompileTimeConstStubsPass());
+        funcPm.addPass(createCanonicalizerPass());
+    }
+    else {
+        funcPm.addPass(createCompileTimeConstOutlinePass());
+        funcPm.addPass(createCompileTimeConstComputePass());
+        funcPm.addPass(createCanonicalizerPass());
+    }
+
     funcPm.addPass(createEncodeTensorsPass());
 
     // Note: slicing should be done *before* kernel selection, but kernel selection is doing
@@ -525,7 +533,7 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
         funcPm.addPass(createReplaceForLoopsWithFirstIterationPass());
     }
 
-    addPostTileAndFuseLoweringPasses(funcPm);
+    addPostTileAndFuseLoweringPasses(funcPm, optimizeForTileAndFuse);
 
     if (!clDisableCSS || !clDisableHost) {
         addCpuPasses(pipeline);

@@ -77,8 +77,7 @@ struct Conv2DOpBigStride : public OpRewritePattern<syna::torq_hl::Conv2DOp> {
 
         auto strides = op.getStride();
         Value weights = op.getWeights();
-        Operation *weightsOp = weights.getDefiningOp();
-        auto weightType = llvm::cast<RankedTensorType>(weightsOp->getResult(0).getType());
+        auto weightType = llvm::cast<RankedTensorType>(weights.getType());
         auto weightShape = weightType.getShape().vec();
         bool supportedStrides = strides.size() == 2 && ((strides[0] == 1 && strides[1] == 1) ||
                                                         (strides[0] == 2 && strides[1] == 2));
