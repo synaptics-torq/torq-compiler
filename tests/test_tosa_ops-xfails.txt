@@ -22,5 +22,3 @@ test_mlir_files_torq[fc.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-de
 test_mlir_files_torq[fc.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1413
 test_mlir_files_torq[pw-stride2.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1414
 test_mlir_files_torq[pw-stride2.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1414
-test_mlir_files_torq[scatter.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1415
-test_mlir_files_torq[scatter.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1415

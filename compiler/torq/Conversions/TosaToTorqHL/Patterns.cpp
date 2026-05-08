@@ -1038,7 +1038,7 @@ struct ScatterOpConversion : public OpConversionPattern<tosa::ScatterOp> {
 
         ElementsAttr valuesAttr;
 
-        if (failed(getFromConst(indices, valuesAttr))) {
+        if (failed(getFromArithConst(indices, valuesAttr))) {
             return failure();
         }
 
