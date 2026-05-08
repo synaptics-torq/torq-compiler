@@ -331,7 +331,8 @@ class RaiseSoftmaxOnnx : public OpRewritePattern<linalg::GenericOp> {
 
         auto truncInput = findElementwiseOpInputs<arith::TruncFOp>(op.getResult(0));
         if (truncInput.size() != 1) {
-            return failure();
+            // with --torq-convert-dtypes, there is no truncf.  Fine to ignore
+            truncInput = {op.getResult(0)};
         }
         auto divInputs = findElementwiseOpInputs<arith::DivFOp>(truncInput[0]);
         if (divInputs.size() != 2) {
@@ -343,7 +344,17 @@ class RaiseSoftmaxOnnx : public OpRewritePattern<linalg::GenericOp> {
         }
         auto addInputs = findReductionOpInputs<arith::AddFOp>(divInputs[1], 3);
         if (addInputs.size() != 1) {
-            return failure();
+            // with --torq-convert-dtypes, the pattern here looks a bit
+            // different.  Check for that case
+            auto emptyGeneric = divInputs[1].getDefiningOp<linalg::GenericOp>();
+            if (!emptyGeneric)
+                return failure();
+            auto reshape = emptyGeneric.getInputs()[0].getDefiningOp<tensor::ReshapeOp>();
+            if (!reshape)
+                return failure();
+            addInputs = findReductionOpInputs<arith::AddFOp>(reshape.getOperands()[0], 3);
+            if (addInputs.size() != 1)
+                return failure();
         }
         if (addInputs[0] != divInputs[0]) {
             return failure();
@@ -365,7 +376,8 @@ class RaiseSoftmaxOnnx : public OpRewritePattern<linalg::GenericOp> {
         }
         auto extInputs = findElementwiseOpInputs<arith::ExtFOp>(subInputs[0]);
         if (extInputs.size() != 1) {
-            return failure();
+            // with --torq-convert-dtypes, there is no extf.  Fine to ignore.
+            extInputs = maxInputs;
         }
 
         rewriter.replaceOpWithNewOp<linalg::SoftmaxOp>(
