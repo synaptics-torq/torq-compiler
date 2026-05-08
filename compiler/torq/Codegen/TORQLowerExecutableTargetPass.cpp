@@ -101,6 +101,11 @@ static llvm::cl::opt<bool> clEnableTransposeOptimization(
     llvm::cl::desc("enable transpose layout optimization pass"), llvm::cl::init(false)
 );
 
+static llvm::cl::opt<bool> clEnableSplitConstantsOptimization(
+    "torq-enable-split-constants-optimization",
+    llvm::cl::desc("reduce constants to the actual slice that is being used"), llvm::cl::init(false)
+);
+
 namespace {
 
 void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTileAndFuse) {
@@ -238,6 +243,11 @@ void addNssUpToAssignLramAddresses(OpPassManager &pm) {
 
     // unroll all loops since NSS cannot deal with them
     funcPm.addPass(createUnrollLoopPass());
+    funcPm.addPass(createCanonicalizerPass());
+
+    if (clEnableSplitConstantsOptimization)
+        funcPm.addPass(createSplitConstantsPass());
+
     funcPm.addPass(torq_hl::createTorqHLFoldTableConstantPass());
 
     funcPm.addPass(createOutlineSliceProgramsPass());

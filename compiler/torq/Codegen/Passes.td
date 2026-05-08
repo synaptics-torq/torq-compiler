@@ -539,6 +539,16 @@ def ScalarsToTensors :
         ];
 }
 
+def SplitConstants :
+    InterfacePass<"torq-split-constants", "mlir::FunctionOpInterface"> {
+  let summary = "Split large tensor constants at their extract_slice users";
+  let constructor = "mlir::syna::torq::createSplitConstantsPass()";
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def CompileTimeConstCompute : 
     InterfacePass<"torq-compile-time-const-compute", "mlir::FunctionOpInterface"> {
         let summary = "Compute values at compile time for operations marked as compile-time-const";

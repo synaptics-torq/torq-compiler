@@ -121,6 +121,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileTimeConstStubsP
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollLoopPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createSplitConstantsPass();
+
 void addTorqComprehensiveBufferizePasses(
     OpPassManager &funcPassManager,
     std::optional<bufferization::BufferizationOptions::AllocationFn> allocationFn,

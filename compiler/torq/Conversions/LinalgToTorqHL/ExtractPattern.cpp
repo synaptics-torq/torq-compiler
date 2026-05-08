@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "OpPatternOptions.h"
+#include "mlir/Interfaces/SubsetOpInterface.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
@@ -30,6 +31,8 @@ namespace mlir::syna::torq {
 // For i8 (signExtend=true):  packed[i] = sext(i8) << 8   (slope=0, base-only encoding)
 // For i16 (signExtend=false): packed[i] = zext(i16)        (base-only: 0<<16 | (tb & 0xFFFF))
 static Value buildPackedTable(OpBuilder &builder, Location loc, Value src, bool signExtend) {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointAfterValue(src);
     auto srcType = cast<RankedTensorType>(src.getType());
     auto i32Type = builder.getI32Type();
     auto outType = RankedTensorType::get(srcType.getShape(), i32Type);
