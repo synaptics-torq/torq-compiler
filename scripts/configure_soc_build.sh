@@ -37,6 +37,28 @@ if [[ "$TARGET" == "astra_machina" ]]; then
         PYVER_NODOT="${PYVER//./}"
         TARGET_ARCH="${OECORE_TARGET_ARCH}"
         PYTHON_EXT_SUFFIX=".cpython-${PYVER_NODOT}-${TARGET_ARCH}-linux-gnu.so"
+
+        # Detect NumPy path (support both NumPy 2.x with _core and NumPy 1.x with core)
+        # Check for actual header files, not just directory existence
+        NUMPY_BASE="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/lib/python${PYVER}/site-packages/numpy"
+
+        for layout in "_core" "core"; do
+            HEADER="${NUMPY_BASE}/${layout}/include/numpy/arrayobject.h"
+
+            if [[ -f "${HEADER}" ]]; then
+                NUMPY_INCLUDE_PATH="${NUMPY_BASE}/${layout}/include"
+                echo "Detected NumPy layout: ${layout}"
+                echo "Using NumPy include path: ${NUMPY_INCLUDE_PATH}"
+                break
+            fi
+        done
+
+        if [[ -z "${NUMPY_INCLUDE_PATH}" ]]; then
+            echo "ERROR: NumPy headers not found in ${NUMPY_BASE}"
+            echo "  Checked: _core/include/numpy/arrayobject.h"
+            echo "  Checked: core/include/numpy/arrayobject.h"
+            exit 1
+        fi
     else
         # Default to aarch64 toolchain
         TOOLCHAIN_FILE=${BASE_DIR}/scripts/toolchain.aarch64.cmake
@@ -71,8 +93,8 @@ if [[ "$TARGET" == "astra_machina" && "$4" == "poky" ]]; then
     -DPython3_EXECUTABLE="${PYTHON3}"
     -DPython3_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/include/python${PYVER}"
     -DPython_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/include/python${PYVER}"
-    -DPython_NumPy_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/lib/python${PYVER}/site-packages/numpy/core/include"
-    -DPython3_NumPy_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/lib/python${PYVER}/site-packages/numpy/core/include"
+    -DPython_NumPy_INCLUDE_DIR="${NUMPY_INCLUDE_PATH}"
+    -DPython3_NumPy_INCLUDE_DIR="${NUMPY_INCLUDE_PATH}"
     -DPYTHON_MODULE_EXTENSION="${PYTHON_EXT_SUFFIX}"
   )
 elif [[ "$TARGET" == "astra_machina" ]]; then
