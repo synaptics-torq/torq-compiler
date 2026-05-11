@@ -427,6 +427,8 @@ def pytest_sessionfinish(session):
 
             # Capture failure log and failed phase for failed tests
             # Classification is done server-side in processing.py
+            safe_node_id = node_id.replace('/', '_').replace('::', '_').replace('[', '_').replace(']', '_').replace(' ', '_')
+
             if outcome == 'failed':
                 failure_parts = []
                 failed_phase = 'call'
@@ -444,9 +446,6 @@ def pytest_sessionfinish(session):
                 test_run['failed_phase'] = failed_phase
                 if failure_parts:
                     log_text = '\n'.join(failure_parts)
-                    # Use the same node_id-based naming as the manifest to stay consistent
-                    # with how test runs are identified across the pipeline.
-                    safe_node_id = node_id.replace('/', '_').replace('::', '_').replace('[', '_').replace(']', '_').replace(' ', '_')
                     log_filename = f"{safe_node_id}.log"
                     log_path = os.path.join(failure_logs_root, log_filename)
                     with open(log_path, 'w', encoding='utf-8') as lf:
@@ -459,7 +458,10 @@ def pytest_sessionfinish(session):
             if profiling_output_file:
                 # Prefer runtime traces when available, but fall back to compile-time traces
                 # recorded during setup so simulator sessions also upload a Perfetto artifact.
-                dst_name = os.path.basename(profiling_output_file)
+                # Use a unique name per test to prevent collisions in the profiles/ directory
+                # (compile_time_profile files all share the generic basename "profile.pb").
+                ext = os.path.splitext(profiling_output_file)[1]
+                dst_name = f"{safe_node_id}{ext}"
                 dst_path = os.path.join(profiles_root, dst_name)
 
                 shutil.copy2(profiling_output_file, dst_path)

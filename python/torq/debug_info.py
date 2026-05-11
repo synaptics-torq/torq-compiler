@@ -578,6 +578,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
         # that is passed to it when the program is executed
         self.block_arg_to_value = {}
         self.actions = self._load_actions()                        
+        self.nss_blocks_info = {}
         self.nss_blocks_info = self._load_nss_blocks_info()
         self.workunits = self._load_host_workunits()
         self.original_locations = self._load_original_locations()
@@ -595,7 +596,6 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
 
 
     def _load_nss_blocks_info(self) -> Dict[Block, BlockDebugInfo]:
-        blocks = {}
 
         for action in self.actions.values():
             
@@ -605,7 +605,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
             program = action.nss_program
 
             block_info = BlockDebugInfo(self, program.regions[0].blocks[0], action.nss_invocation_args)
-            blocks[block_info.block] = block_info
+            self.nss_blocks_info[block_info.block] = block_info
 
             finished = False
 
@@ -618,12 +618,12 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
                             next_block_args.append(block_info.get_argument(op.operation.operands[num_arg]))
 
                         block_info = BlockDebugInfo(self, op.successors[0], next_block_args)
-                        blocks[op.successors[0]] = block_info
+                        self.nss_blocks_info[op.successors[0]] = block_info
                     elif op.name == "torq_hl.return":
                         finished = True
                         break
 
-        return blocks
+        return self.nss_blocks_info
 
     def _load_host_workunits(self) -> List[WorkUnitDebugInfo]:
 
@@ -1051,7 +1051,7 @@ class DebugInfo:
 
     @property
     def dispatch_names(self):
-        return [f[:-6] for f in os.listdir(self.path) if f.endswith(".mlirb")]
+        return sorted([f[:-6] for f in os.listdir(self.path) if f.endswith(".mlirb")])
 
     def pretty_print_location(self, loc: Location):
         loc_str = str(loc)

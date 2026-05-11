@@ -663,7 +663,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
             json.dump(measurements, f, indent=4)        
         
         # Move .pb files from temp folder to parent with _compile suffix
-        pb_files = list(temp_pb_dir.glob('*.pb'))
+        pb_files = sorted(temp_pb_dir.glob('*.pb'))
         for idx, pb_file in enumerate(pb_files):
             suffix = f'_{idx}' if len(pb_files) > 1 else ''
             dest_pb = compile_time_profiling_output_dir / f'{request.node.name}_compile{suffix}.pb'
@@ -956,14 +956,14 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir,
             record_property("host_profile_csv", str(host_csv_dest))
         
         # Find all annotated_profile*.xlsx files (could be annotated_profile.xlsx or annotated_profile_0_dispatch_name.xlsx)
-        xlsx_files = list(torq_results_dir.glob('annotated_profile*.xlsx'))
+        xlsx_files = sorted(torq_results_dir.glob('annotated_profile*.xlsx'))
         for idx, xlsx_file in enumerate(xlsx_files):
             suffix = f'_{idx}' if len(xlsx_files) > 1 else ''
             dest_path = profiling_output_dir / f'{unique_name}{suffix}.xlsx'
             shutil.copy(xlsx_file, dest_path)
         
         # Find all trace*.pb files (could be trace.pb or trace_0_dispatch_name.pb)
-        pb_files_in_results = list(torq_results_dir.glob('trace*.pb'))
+        pb_files_in_results = sorted(torq_results_dir.glob('trace*.pb'))
         for idx, pb_file in enumerate(pb_files_in_results):
             suffix = f'_{idx}' if len(pb_files_in_results) > 1 else ''
             pb_output_path = profiling_output_dir / f'{unique_name}{suffix}.pb'

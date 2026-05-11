@@ -1087,7 +1087,6 @@ def convert_to_perfetto(debug_dir, pb_path, view_name="Compile Profile"):
 
         trace_writer = PerfettoTraceWriter(pb_path / (dispatch_name + ".pb"))
     
-        dispatch_name = debug_info.dispatch_names[0]
         dispatch = debug_info.get_dispatch(dispatch_name)
 
         # print(f"Processing dispatch: {dispatch_name} with {len(dispatch.workunits)} workunits")
