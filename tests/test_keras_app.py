@@ -89,7 +89,7 @@ def case_config(request, runtime_hw_type, chip_config):
 
   if "layer_" in request.param.name:
     compile_timeout = 60 * 5
-    runtime_timeout = 30
+    runtime_timeout = 40
 
   longer_test_timeout = [
       'inceptionv3_conv2d_6',

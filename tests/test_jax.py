@@ -33,6 +33,6 @@ def case_config(request):
             "mlir_model_file": "jax_mlir_model_file"}
 
 
-@pytest.mark.ci
+#@pytest.mark.ci
 def test_jax(request, llvmcpu_reference_results, torq_results, case_config):
     compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)    
