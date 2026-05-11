@@ -56,13 +56,9 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
     }
     assert(matA.dim(MatA::K) == matB.dim(MatB::K));
 
-    // Broadcast batch dimension in matA or matB if needed
-    if (rankA == 3 && rankB == 2) {
-        matB.getShape()[MatB::Batch].stride = 0;
-    }
-    else if (rankA == 2 && rankB == 3) {
-        matA.getShape()[MatA::Batch].stride = 0;
-    }
+    // Broadcast batch dimension in matA or matB to match output.
+    matA.broadcastAs(output, 1);
+    matB.broadcastAs(output, 1);
 
     Slice slice("matmul");
     matB.vectorize(slice.alu.iWidth(matB.elementType(), matA.elementType()));

@@ -12,6 +12,7 @@
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
@@ -150,6 +151,141 @@ static void expandConstantInput(Value &input, PatternRewriter &rewriter) {
     input = expandOp.getResult();
 }
 
+/// Check if a batch_matmul input comes from a broadcast-batch pattern:
+///   collapse_shape(linalg.generic(broadcast original [1,K,N] → [1,B,K,N]))
+/// Returns the broadcast input index (0 or 1), or -1 if no match.
+/// Also returns the original un-broadcast source via `broadcastSource`.
+static int detectBroadcastBatchInput(linalg::BatchMatmulOp srcOp, Value &broadcastSource) {
+    for (int i : {0, 1}) {
+        Value input = srcOp.getInputs()[i];
+        auto collapseOp = input.getDefiningOp<tensor::CollapseShapeOp>();
+        if (!collapseOp)
+            continue;
+        // first reassociation group must combine exactly two dims [[0,1],...]
+        auto reassoc = collapseOp.getReassociationIndices();
+        if (reassoc.size() < 2 || reassoc[0].size() != 2)
+            continue;
+        // pre-collapse dim 0 should be 1 (the original batch-1 dim before broadcast)
+        auto srcType = collapseOp.getSrcType();
+        if (srcType.getDimSize(0) != 1)
+            continue;
+        // source of collapse_shape should be a broadcast linalg.generic
+        auto genericOp = collapseOp.getSrc().getDefiningOp<linalg::GenericOp>();
+        if (!genericOp || genericOp.getNumDpsInputs() != 1 || genericOp.getNumResults() != 1)
+            continue;
+        // identity body: only a yield op
+        if (genericOp.getBody()->getOperations().size() != 1)
+            continue;
+        // verify indexing maps are projected permutations (no transpose or shuffle)
+        auto maps = genericOp.getIndexingMapsArray();
+        bool validMaps = true;
+        for (auto &map : maps) {
+            if (!map.isProjectedPermutation()) {
+                validMaps = false;
+                break;
+            }
+        }
+        if (!validMaps)
+            continue;
+        // verify it's actually a broadcast (output has more elements than input)
+        auto inputType = cast<RankedTensorType>(genericOp.getInputs()[0].getType());
+        auto outputType = cast<RankedTensorType>(genericOp.getResultTypes()[0]);
+        if (inputType.getNumElements() >= outputType.getNumElements())
+            continue;
+
+        broadcastSource = genericOp.getInputs()[0];
+        return i;
+    }
+    return -1;
+}
+
+/// Replace a batch_matmul with a broadcast-batch input by a linalg.generic that
+/// performs the matmul with broadcast expressed via indexing maps. This avoids
+/// materializing the broadcast buffer entirely.
+///
+/// batch_matmul([B,M,K], collapse([1,B,K,N])) where rhs came from broadcasting [1,K,N]
+/// becomes:
+///   linalg.generic {
+///     indexing_maps = [(b,m,n,k)->(b,m,k), (b,m,n,k)->(0,k,n), (b,m,n,k)->(b,m,n)]
+///     iterator_types = ["parallel","parallel","parallel","reduction"]
+///   } ins(A:[B,M,K], B_orig:[1,K,N]) outs(C:[B,M,N]) { mulf + addf }
+///
+static LogicalResult replaceBatchMatmulWithBroadcastGeneric(
+    linalg::BatchMatmulOp srcOp, Value broadcastSource, int broadcastIdx, PatternRewriter &rewriter
+) {
+    Location loc = srcOp.getLoc();
+
+    // Determine which input is broadcast and which is the "real" batched input
+    Value batchedInput = srcOp.getInputs()[1 - broadcastIdx];
+    Value output = srcOp.getResults()[0];
+    auto outputType = cast<RankedTensorType>(output.getType());
+    auto batchedType = cast<RankedTensorType>(batchedInput.getType());
+
+    int64_t batchSize = batchedType.getDimSize(0);
+    (void)batchSize;
+
+    // Build indexing maps for broadcast batch matmul:
+    //   A[b,m,k] * B[0,k,n] -> C[b,m,n]  (if broadcastIdx == 1)
+    //   A[0,m,k] * B[b,k,n] -> C[b,m,n]  (if broadcastIdx == 0)
+    MLIRContext *ctx = rewriter.getContext();
+    // dims: (b=d0, m=d1, n=d2, k=d3)
+    AffineMap lhsMap, rhsMap, outMap;
+    if (broadcastIdx == 1) {
+        // lhs = A[b,m,k], rhs = B[0,k,n]
+        lhsMap = AffineMap::get(
+            4, 0, {getAffineDimExpr(0, ctx), getAffineDimExpr(1, ctx), getAffineDimExpr(3, ctx)},
+            ctx
+        );
+        rhsMap = AffineMap::get(
+            4, 0,
+            {getAffineConstantExpr(0, ctx), getAffineDimExpr(3, ctx), getAffineDimExpr(2, ctx)}, ctx
+        );
+    }
+    else {
+        // lhs = A[0,m,k], rhs = B[b,k,n]
+        lhsMap = AffineMap::get(
+            4, 0,
+            {getAffineConstantExpr(0, ctx), getAffineDimExpr(1, ctx), getAffineDimExpr(3, ctx)}, ctx
+        );
+        rhsMap = AffineMap::get(
+            4, 0, {getAffineDimExpr(0, ctx), getAffineDimExpr(3, ctx), getAffineDimExpr(2, ctx)},
+            ctx
+        );
+    }
+    outMap = AffineMap::get(
+        4, 0, {getAffineDimExpr(0, ctx), getAffineDimExpr(1, ctx), getAffineDimExpr(2, ctx)}, ctx
+    );
+
+    SmallVector<AffineMap> indexingMaps = {lhsMap, rhsMap, outMap};
+    SmallVector<utils::IteratorType> iteratorTypes = {
+        utils::IteratorType::parallel, // batch
+        utils::IteratorType::parallel, // M
+        utils::IteratorType::parallel, // N
+        utils::IteratorType::reduction // K
+    };
+
+    // Use the existing output (from linalg.fill) as the init
+    Value init = srcOp.getDpsInits()[0];
+
+    // Order inputs as [lhs, rhs] matching the maps above
+    Value lhs = (broadcastIdx == 1) ? batchedInput : broadcastSource;
+    Value rhs = (broadcastIdx == 1) ? broadcastSource : batchedInput;
+
+    auto genericOp = linalg::GenericOp::create(
+        rewriter, loc, outputType, ValueRange{lhs, rhs}, ValueRange{init}, indexingMaps,
+        iteratorTypes,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+            // args[0] = lhs element, args[1] = rhs element, args[2] = accumulator
+            Value mul = arith::MulFOp::create(b, loc, args[0], args[1]);
+            Value add = arith::AddFOp::create(b, loc, args[2], mul);
+            linalg::YieldOp::create(b, loc, add);
+        }
+    );
+
+    rewriter.replaceOp(srcOp, genericOp.getResults());
+    return success();
+}
+
 /// Optimization pattern for batch matrix multiplication operations.
 ///
 /// This pattern optimizes linalg::BatchMatmulOp by folding unnecessary operations
@@ -161,8 +297,11 @@ static void expandConstantInput(Value &input, PatternRewriter &rewriter) {
 /// The pattern applies the following optimizations in sequence:
 /// 1. Folds input operations by removing unnecessary collapse shape wrappers
 /// 2. Expands constant inputs that were wrapped in generic operations
-/// 3. Updates the matmul operation's operands to point to the optimized inputs
-/// 4. Marks the operation as optimized to prevent redundant passes
+/// 3. Detects broadcast-batch inputs and replaces the batch_matmul with a
+///    linalg.generic that expresses the broadcast via indexing maps, avoiding
+///    materialization of the broadcast buffer
+/// 4. Updates the matmul operation's operands to point to the optimized inputs
+/// 5. Marks the operation as optimized to prevent redundant passes
 ///
 class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
   public:
@@ -188,6 +327,17 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
 
         expandConstantInput(input0, rewriter);
         expandConstantInput(input1, rewriter);
+
+        // Detect broadcast-batch pattern and replace with a linalg.generic that
+        // expresses the broadcast via indexing maps. This avoids materializing
+        // the broadcast buffer and lets tile-and-fuse handle it naturally.
+        Value broadcastSource;
+        int broadcastIdx = detectBroadcastBatchInput(srcOp, broadcastSource);
+        if (broadcastIdx >= 0) {
+            return replaceBatchMatmulWithBroadcastGeneric(
+                srcOp, broadcastSource, broadcastIdx, rewriter
+            );
+        }
 
         // modify in-place the two inputs of the matmulOp
         rewriter.modifyOpInPlace(srcOp, [&]() {

@@ -867,7 +867,7 @@ LData &LData::reshapeDim(int dimIndex, const std::vector<int> &newDims, bool all
     return *this;
 }
 
-LData &LData::broadcastAs(const LData &other) {
+LData &LData::broadcastAs(const LData &other, int numDims) {
     if (shape().empty() || (shape().size() == 1 && shape()[0].count == 1)) {
         // Broadcasting from scalar or single-element vector
         // Expand shape to match other rank
@@ -892,7 +892,9 @@ LData &LData::broadcastAs(const LData &other) {
             assert(false && "Rank mismatch for broadcasting");
         }
     }
-    for (int i = 0; i < other.shape().size(); ++i) {
+    int dimsToCheck =
+        (numDims < 0) ? other.shape().size() : std::min(numDims, (int)other.shape().size());
+    for (int i = 0; i < dimsToCheck; ++i) {
         auto &shapeItem = getShape()[i];
         const auto &otherItem = other.shape()[i];
         if (shapeItem.count == otherItem.count) {

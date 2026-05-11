@@ -49,7 +49,18 @@ def case_config(request, runtime_hw_type, chip_config):
         **extra_args
     }
 
+def _is_bf16_matmul_case(case_config):
+    mlir_file = case_config.get("static_mlir_model_file")
+    return mlir_file is not None and "matmul" in mlir_file.name.lower() and "bf16" in mlir_file.name.lower()
+
+
+@pytest.fixture
+def reference_results(request, case_config):
+    if _is_bf16_matmul_case(case_config):
+        return request.getfixturevalue("numpy_matmul_reference_results")
+    return request.getfixturevalue("llvmcpu_reference_results")
+
 @pytest.mark.ci
 @pytest.mark.fpga_ci
-def test_mlir_files(request, torq_results, llvmcpu_reference_results, case_config):
-    compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
+def test_mlir_files(request, torq_results, reference_results, case_config):
+    compare_test_results(request, torq_results, reference_results, case_config)

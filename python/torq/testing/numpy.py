@@ -34,6 +34,19 @@ def numpy_gelu_reference_results(input_data, mlir_io_spec):
     return [torch_tanh_gelu_numpy(input_data[0], output_dtype)]
 
 
+@versioned_unhashable_object_fixture
+def numpy_matmul_reference_results(input_data, mlir_io_spec):
+    """Compute matmul reference in float32 then cast back to output dtype."""
+    assert len(input_data) == 2
+    assert len(mlir_io_spec.outputs) == 1
+
+    from .iree import get_dtype
+
+    output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
+    result = np.matmul(input_data[0], input_data[1])
+    return [result.astype(output_dtype)]
+
+
 def _has_bf16_matmul(model):
     """Check if model contains MatMul with bf16."""
     graph = model.graph

@@ -329,8 +329,9 @@ class LData : public DataT<LData> {
     // The current shape must have the same rank as 'other' or be a scalar or 1D tensor with 1 value
     // All dimensions with size 1 are expanded to match the corresponding dimension in 'other'
     // but with stride 0, so that no data duplication occours.
+    // If numDims >= 0, only the first numDims dimensions are broadcast.
     // Asserts if the shapes are not compatible for broadcasting
-    LData &broadcastAs(const LData &other);
+    LData &broadcastAs(const LData &other, int numDims = -1);
 
     // Reorganize the last dimension into two sub-blocks containing elements
     // with even and odd indexes respectively

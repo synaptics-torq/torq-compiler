@@ -666,6 +666,95 @@ struct TransposeOpConversionRewrite : public OpRewritePattern<linalg::TransposeO
     }
 };
 
+/// Check if a linalg.generic represents a broadcasted batch matmul:
+///   C[b,m,n] += A[b,m,k] * B[0,k,n]  (or A[0,m,k] * B[b,k,n])
+/// Returns the broadcast input index (0 or 1), or -1 if no match.
+static int findBatchMatmulBcastIdx(linalg::GenericOp op) {
+    // Must have 2 inputs, 1 output, 4 iteration dims
+    if (op.getNumDpsInputs() != 2 || op.getNumResults() != 1)
+        return -1;
+
+    auto iterTypes = op.getIteratorTypesArray();
+    if (iterTypes.size() != 4)
+        return -1;
+
+    // Iterator types: [parallel, parallel, parallel, reduction]
+    if (iterTypes[0] != utils::IteratorType::parallel ||
+        iterTypes[1] != utils::IteratorType::parallel ||
+        iterTypes[2] != utils::IteratorType::parallel ||
+        iterTypes[3] != utils::IteratorType::reduction)
+        return -1;
+
+    // Check body: mulf + addf (or muli + addi for integer)
+    auto &body = op.getBody()->getOperations();
+    if (body.size() != 3) // mul, add, yield
+        return -1;
+
+    auto it = body.begin();
+    Operation *firstOp = &*it++;
+    Operation *secondOp = &*it++;
+    if (!isa<arith::MulFOp, arith::MulIOp>(firstOp) || !isa<arith::AddFOp, arith::AddIOp>(secondOp))
+        return -1;
+
+    // Check indexing maps for broadcast pattern:
+    // One input has constant 0 in its batch dim expression
+    auto maps = op.getIndexingMapsArray();
+    // Output map: (d0, d1, d2, d3) -> (d0, d1, d2)
+    auto outMap = maps[2];
+    if (outMap.getNumResults() != 3 ||
+        outMap.getResult(0) != getAffineDimExpr(0, op.getContext()) ||
+        outMap.getResult(1) != getAffineDimExpr(1, op.getContext()) ||
+        outMap.getResult(2) != getAffineDimExpr(2, op.getContext()))
+        return -1;
+
+    // Check which input has constant-0 batch dim
+    for (int i : {0, 1}) {
+        auto map = maps[i];
+        if (map.getNumResults() != 3)
+            return -1;
+        if (mlir::isa<AffineConstantExpr>(map.getResult(0)) &&
+            mlir::cast<AffineConstantExpr>(map.getResult(0)).getValue() == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/// Trace a batch_matmul input back through the broadcast-batch pattern to find
+/// the original un-broadcast source. The pattern (after tile-and-fuse) is:
+///   extract_slice -> collapse_shape -> scf.for(broadcast_generic) -> original
+/// Convert a broadcast-batch-matmul linalg.generic to torq_hl::MatMulOp.
+/// The generic has indexing maps with constant-0 on one input's batch dim.
+struct BroadcastBatchMatmulGenericConversion : public OpConversionPattern<linalg::GenericOp> {
+    using OpConversionPattern::OpConversionPattern;
+
+    LogicalResult matchAndRewrite(
+        linalg::GenericOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
+    ) const override {
+        int broadcastIdx = findBatchMatmulBcastIdx(srcOp);
+        if (broadcastIdx < 0)
+            return failure();
+
+        const std::vector<int32_t> bias = {0};
+        const std::vector<int32_t> scale = {1};
+
+        auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+        auto [outMin, outMax] = getDTypeRange(srcResultType.getElementType());
+
+        // Input order in the generic: [lhs, rhs]
+        Value input1 = srcOp.getInputs()[0]; // lhs
+        Value input2 = srcOp.getInputs()[1]; // rhs
+
+        rewriter.replaceOpWithNewOp<torq_hl::MatMulOp>(
+            srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
+            0, outMin, outMax, 0, createI32Const(rewriter, srcOp, interleave(bias, scale)), input1,
+            input2
+        );
+
+        return success();
+    }
+};
+
 template <typename OpTy> struct MatmulOpConversion final : public OpConversionPattern<OpTy> {
     using OpConversionPattern<OpTy>::OpConversionPattern;
 
@@ -2078,6 +2167,7 @@ void populateLinalgToTorqHLPatterns(
 
     // Make sure to add the new class to isTorqMatmulOp function if here
     // is changed
+    patterns.insert<BroadcastBatchMatmulGenericConversion>(context);
     patterns.insert<MatmulOpConversion<linalg::BatchMatmulOp>>(context);
     patterns.insert<MatmulOpConversion<linalg::DotOp>>(context);
     patterns.insert<MatmulOpConversion<linalg::MatvecOp>>(context);
