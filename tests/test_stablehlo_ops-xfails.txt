@@ -1,3 +1,3 @@
 test_stablehlo_ops[dot_general.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1534
-test_stablehlo_ops[consecutive_dot_general.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1535
+test_stablehlo_ops[consecutive_dot_general.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1534
 test_stablehlo_ops[multiple_fuse_groups.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1539

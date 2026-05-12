@@ -3077,6 +3077,13 @@ FailureOr<Value> computeBias(
 
     Value bias = *maybeBias;
     auto biasTy = dyn_cast<ShapedType>(bias.getType());
+    // All non-channel dims will be reduced
+    SmallVector<int64_t> outputShape{biasTy.getShape()[channelDim]};
+    if (outputShape != biasShape) {
+        LLVM_DEBUG({ llvm::dbgs() << "computeBias: init and output shape mismatch\n"; });
+        return failure();
+    }
+
     if (biasTy.getRank() == 2) {
         channelDim = biasChDim;
     }
