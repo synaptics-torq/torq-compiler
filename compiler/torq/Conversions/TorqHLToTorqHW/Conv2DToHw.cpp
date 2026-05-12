@@ -59,7 +59,7 @@ void convAdjustPadding(LData &input, const LRTBDim &pad, const LRTBDim &kernelBo
 
 // Get subview of output, weight and biasScale tensors for the given output channel offset and count
 static void getSubview(LData &output, LData &weight, LData &biasScale, int chOffs, int chCount) {
-    int sbWidth = scaleBiasWidth(output.elementType());
+    int sbWidth = biasScaleWidth(output.elementType());
     auto wDims = weight.dims();
     int outChVectSize = wDims.size() > Weight::OCVectorItems ? wDims[Weight::OCVectorItems] : 1;
     assert(chOffs % outChVectSize == 0);
@@ -118,7 +118,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     convAdjustPadding(input, pad, kernelBorder);
     slice.setKernel(kernelBorder);
     slice.setPadding(pad, op.getInputZp());
-    slice.setInputChannelShape(input.dim(Dim::H), input.dim(Dim::W));
+    slice.setOutputChannelShape(input.dim(Dim::H), input.dim(Dim::W));
 
     // Get out ch vector size from weight tensor (or less to handle peeled channels without padding)
     int outChVectSize = std::min(weight.dim(Weight::OCVectorItems), chCount);
@@ -145,7 +145,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     }
 
     // Reshape biasScale to match the processing layout
-    biasScale.reshapeDim(0, {-1, outChVectSize, scaleBiasWidth(input.elementType())}, true);
+    biasScale.reshapeDim(0, {-1, outChVectSize, biasScaleWidth(input.elementType())}, true);
 
     For(auto batch = slice.iterate(input.dim(In::N))) {
         For(auto ocv = slice.iterate(output.dim(Out::CVectors))) {

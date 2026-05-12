@@ -167,6 +167,12 @@ static SGBlockInfo sgElementCount(const Shape &dims, int busWidthItems, int sgMa
         blockInfo.outerStride = dims[0].stride;
     }
     else if (blockInfo.size > busWidthItems) {
+        // TODO: actually the 1st target here is to limit the number of transfers
+        // the 2nd target (lower priority) is to limit the number of bytes read.
+        // It should be ok if the last block goes beyond the actual data count (except for DEQW).
+        // So for example if blockInfo.size == 37 and busWidthItems == 36, we should ideally
+        // split this in 2 transfers of 19 since this minimizes both the number of transfers and
+        // the number of bytes read.
         int transferSize = std::min(blockInfo.size, busWidthItems);
         while (blockInfo.size % transferSize != 0) {
             --transferSize;
@@ -177,7 +183,7 @@ static SGBlockInfo sgElementCount(const Shape &dims, int busWidthItems, int sgMa
         // transfer and the total transfer count grows accordingly. Acceptable
         // for unaligned shapes, but worth surfacing during perf investigation.
         LLVM_DEBUG({
-            if (transferSize < busWidthItems) {
+            if (blockInfo.size > busWidthItems && transferSize < busWidthItems) {
                 llvm::dbgs() << "sgElementCount: non bus-aligned dense block of size "
                              << blockInfo.size << " split into " << (blockInfo.size / transferSize)
                              << " transfers of " << transferSize << " items (bus width "
@@ -533,7 +539,7 @@ int32_t minVal(DType type) {
 
 bool hasScale(DType type) { return isInt(type); }
 
-int scaleBiasWidth(DType type) { return hasScale(type) ? 2 : 1; }
+int biasScaleWidth(DType type) { return hasScale(type) ? 2 : 1; }
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
     switch (dtype) {
@@ -721,13 +727,20 @@ Data::Data(
 const Indexes &Data::indexes() const { return _ix; }
 const Shape &Data::shape() const { return _shape; }
 Shape &Data::getShape() { return _shape; }
-int Data::dim(int i) const {
+int Data::normalizeIndex(int i, bool iCanBeRank) const {
+    int rank = _shape.size();
+    int normalizedIndex = i;
     if (i < 0) {
-        i = _shape.size() + i;
+        normalizedIndex = rank + i;
     }
-    assert(i >= 0 && i < _shape.size() && "Index out of bounds");
-    return _shape[i].count;
+    if (normalizedIndex < 0 || normalizedIndex >= rank + iCanBeRank) {
+        llvm::errs() << "Error: Index " << i << " out of bounds for shape of rank " << rank << "\n";
+        assert(false && "Index out of bounds");
+    }
+    return normalizedIndex;
 }
+
+int Data::dim(int i) const { return _shape.at(normalizeIndex(i)).count; }
 std::vector<int> Data::dims() const {
     std::vector<int> dims;
     for (const auto &dim : _shape) {
@@ -736,13 +749,10 @@ std::vector<int> Data::dims() const {
     return dims;
 }
 std::vector<int> Data::dims(int begin, int end) const {
-    if (begin < 0) {
-        begin = _shape.size() + begin;
-    }
-    if (end < 0) {
-        end = _shape.size() + end;
-    }
-    if (!(begin >= 0 && end <= _shape.size() && begin <= end)) {
+    begin = normalizeIndex(begin, true);
+    end = normalizeIndex(end, true);
+    if (begin > end) {
+        llvm::errs() << "Error: begin=" << begin << " > end=" << end << "\n";
         llvm::errs() << "Error: begin=" << begin << ", end=" << end << " invalid for shape "
                      << _shape << " of rank " << _shape.size() << "\n";
         assert(false && "Invalid begin end specified");
@@ -797,12 +807,14 @@ LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
 }
 
 LData &LData::insertDim(int pos, const ShapeItem &item) {
+    pos = normalizeIndex(pos, true);
     auto &shape = getShape();
     shape.insert(shape.begin() + pos, item);
     return *this;
 }
 
 IData &IData::insertDim(int pos, const ShapeItem &item) {
+    pos = normalizeIndex(pos, true);
     auto &shape = getShape();
     shape.insert(shape.begin() + pos, item);
     return *this;
@@ -810,6 +822,7 @@ IData &IData::insertDim(int pos, const ShapeItem &item) {
 
 IData &IData::repeat(int count) {
     assert(count > 0);
+    assert(sizeofType(elementType()) == 1 && "Only supported for element type of size 1");
     this->repeatFactor = count;
     if (!this->getShape().empty())
         this->getShape().back().count *= count;
@@ -817,15 +830,16 @@ IData &IData::repeat(int count) {
 }
 
 LData &LData::eraseDim(int pos) {
+    pos = normalizeIndex(pos);
     auto &shape = getShape();
     shape.erase(shape.begin() + pos);
     return *this;
 }
 
 LData &LData::moveDim(int fromDimIndex, int toDimIndex) {
+    fromDimIndex = normalizeIndex(fromDimIndex, false);
+    toDimIndex = normalizeIndex(toDimIndex, true);
     auto &shape = getShape();
-    assert(fromDimIndex >= 0 && fromDimIndex < shape.size());
-    assert(toDimIndex >= 0 && toDimIndex < shape.size());
     ShapeItem dim = shape[fromDimIndex];
     assert(dim.stride.intVal.has_value() && "Only dims with explicit int stride can be moved");
     if (fromDimIndex > 0 && !shape[fromDimIndex - 1].stride.hasVal()) {
@@ -858,11 +872,13 @@ LData &LData::vectorize(int vectorSize, int vectorStride) {
 }
 
 LData &LData::subviewDim(int dimIndex, int offset, int count) {
+    dimIndex = normalizeIndex(dimIndex);
     torq::subviewDim(*this, dimIndex, offset, count);
     return *this;
 }
 
 LData &LData::reshapeDim(int dimIndex, const std::vector<int> &newDims, bool allowNonMultiple) {
+    dimIndex = normalizeIndex(dimIndex);
     torq::reshapeDim(*this, dimIndex, newDims, allowNonMultiple);
     return *this;
 }
@@ -1030,8 +1046,8 @@ struct SlicePrivate {
     torq_hw::Ndls _ndls{};
 
     // Height and width of an input channel (used for convolutions)
-    int _inputChannelHeight{};
-    int _inputChannelWidth{};
+    int _outputChannelHeight{};
+    int _outputChannelWidth{};
 
     // Use hybrid mode: ALU in NumberFormat::BF and ACT in NumberFormat::I
     bool _useHybridMode{};
@@ -1803,9 +1819,9 @@ void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
 
 void SlicePrivate::ref(const LData &data) {
     MemNdlDimsData refNdlDims;
-    if (_inputChannelHeight || _inputChannelWidth) {
-        refNdlDims.push_back({DimType::H, MemDimTag::X, _inputChannelWidth, 0});
-        refNdlDims.push_back({DimType::H, MemDimTag::Y, _inputChannelHeight, 0});
+    if (_outputChannelHeight || _outputChannelWidth) {
+        refNdlDims.push_back({DimType::H, MemDimTag::X, _outputChannelWidth, 0});
+        refNdlDims.push_back({DimType::H, MemDimTag::Y, _outputChannelHeight, 0});
     }
 
     _ndls.add(NdlType::REF, refNdlDims);
@@ -2369,11 +2385,11 @@ void Slice::setPadding(const LRTBDim &lrtb, int padValue) {
     d->_cfg.pad_value = padValue;
 }
 
-void Slice::setInputChannelShape(int height, int width) {
+void Slice::setOutputChannelShape(int height, int width) {
     auto refNdl = d->_ndls.getMemNdl(NdlType::REF);
-    assert(!refNdl && "Must be called before loading the input");
-    d->_inputChannelHeight = height;
-    d->_inputChannelWidth = width;
+    assert(!refNdl && "Must be called before storing the output");
+    d->_outputChannelHeight = height;
+    d->_outputChannelWidth = width;
 }
 
 void Slice::segment(const std::vector<int> &nchw, int channelStride) {
@@ -2581,13 +2597,18 @@ int BRam::width() const {
 }
 
 BData BRam::load(const LData &data) {
+    DType elType = data.elementType();
+    assert(elType == DType::fp32 || elType == DType::int32 || elType == DType::uint32);
+
+    // Last dim must be 1 for float (bias), 2 for ints (bias:scale)
+    // We could automatically reshape here as needed but better for the user to be explicit
+    // in case in the future we can support scale also for floating point values.
+    int backCnt = backDimCount(data.subShape());
+    assert(elType == DType::fp32 && backCnt == 1 || isInt(elType) && backCnt == 2);
     d->debr(data);
 
     d->_bram.loadNesting = d->_forStack.size();
-    d->_bram.elementType = data.elementType();
-
-    // TODO add extra iterations to load the data size between specified indexes and dataShape[1]
-    // /!\ not clear how this would affect iterationCount(ndlDims)
+    d->_bram.elementType = elType;
 
     auto bdata = BData(data.subShape(), data.elementType());
     d->acbw(bdata);

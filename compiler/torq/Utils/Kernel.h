@@ -243,6 +243,8 @@ class Data {
     Data(const std::string &, const Shape &, const Indexes &ix, DType, int offs);
     Data(const std::string &, const Shape &, const Indexes &ix, DType, int offs, IterVar);
     Data(const std::string &, const Shape &, const Indexes &ix, DType, int offs, const Indexes &);
+    // Normalize an index to be non-negative and relative to the end of the shape if negative
+    int normalizeIndex(int i, bool iCanBeRank = false) const;
 
   private:
     std::string _name;
@@ -305,23 +307,24 @@ class LData : public DataT<LData> {
     LData &vectorize(int vectorSize, int vectorStride = 0);
 
     // Create a sub-view of the specified dimension.
+    // if dimIndex is negative it is intended relative to the end as numpy
     LData &subviewDim(int dimIndex, int offset, int count);
 
     // Reshape the specified dimension.
-    // dimIndex: index of the dimension to reshape
+    // dimIndex: index of the dimension to reshape (if negative it is intended relative to the end)
     // newDims: new dimensions that will replace the specified one, if one of them is -1
     // its size is inferred from the size of the original dimension and the other new dimensions
     // asserts if the product of the new dimensions is not equal to the size of the original one
     // unless allowNonMultiple is true
     LData &reshapeDim(int dimIndex, const std::vector<int> &newDims, bool allowNonMultiple = false);
 
-    // Insert a new dimension at the specified index
+    // Insert a new dimension at the specified index (negative is intended relative to the end)
     LData &insertDim(int dimIndex, const ShapeItem &item);
 
-    // Erase the dimension at the specified index
+    // Erase the dimension at the specified index (negative is intended relative to the end)
     LData &eraseDim(int dimIndex);
 
-    // Move a dimension from fromDimIndex to toDimIndex
+    // Move a dimension from fromDimIndex to toDimIndex (negative is intended relative to the end)
     // the 'toDimIndex' is the index after removing the dimension at 'fromDimIndex'
     LData &moveDim(int fromDimIndex, int toDimIndex);
 
@@ -357,6 +360,7 @@ class IData : public DataT<IData> {
     IData &insertDim(int dimIndex, const ShapeItem &item);
 
     // Repeat the data along the last dimension count times
+    // Only supported for element type of size 1 byte.
     IData &repeat(int count);
 
     // Get the repeat factor count
@@ -471,7 +475,9 @@ class BRam : public SliceRam {
     using SliceRam::SliceRam;
 
   public:
-    // Load the BRAM with bias and scale
+    // Load the BRAM with bias and scale.
+    // The last dim must be 2, where the first element is the bias and the second the scale.
+    // In case of floating point data the last dim must be 1 (bias only, scale not supported)
     BData load(const LData &data);
 
     const char *name() const override;
@@ -685,9 +691,9 @@ class Slice {
     // Scattering indicates the max number of different addresses that can be generated in parallel
     int scatter() const;
 
-    // Configure the height and width of each input channel
+    // Configure the height and width of each output channel
     // Mandatory for convolutions
-    void setInputChannelShape(int height, int width);
+    void setOutputChannelShape(int height, int width);
 
     // Configure the kernel size on each side, for example a 5x5 kernel will have {2, 2, 2, 2}
     // Mandatory for convolutions
@@ -822,9 +828,9 @@ int32_t minVal(DType type);
 // Return true if the given type supports scale in the activation unit
 bool hasScale(DType type);
 
-// Return the number of values in each entry of the scale/bias vector for the given type
+// Return the number of values in each entry of the bias:scale vector for the given type
 // (some types don't have scale but just bias)
-int scaleBiasWidth(DType type);
+int biasScaleWidth(DType type);
 
 // Total number of elements in the shape TODO: make this a method
 int elementCount(const Shape &shape);

@@ -171,7 +171,7 @@ static torq_hw::SliceTaskOp lowerMaxPool2DToHw(
     LRTBDim kernelBorder = LRTBDim::symmetric(kernelDim);
     slice.setKernel(kernelBorder);
     slice.setPadding(pad, op.getInputZp());
-    slice.setInputChannelShape(inputHeight, inputWidth);
+    slice.setOutputChannelShape(inputHeight, inputWidth);
 
     const int alukw = slice.alu.kerWidth();
     int vectStride = slice.alu.iWidth(input.elementType());
@@ -257,9 +257,7 @@ static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
     slice.setStrideOffset(strideOffset);
     slice.setPadding(pad, op.getInputZp());
 
-    int outputWidth = output.dim(Dim::W);
-    int outputHeight = output.dim(Dim::H);
-    slice.setInputChannelShape(outputHeight, outputWidth);
+    slice.setOutputChannelShape(output.dim(Dim::H), output.dim(Dim::W));
     slice.setStride(2);
 
     const int alukw = slice.alu.kerWidth();

@@ -48,7 +48,7 @@ static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewri
     const int weightVectSize = weight.dim(Weight::OCElement);
     const int actVectSize = std::min(weightVectSize, slice.act.width(wType, inType, true));
     biasScale.reshapeDim(
-        0, {-1, (int)div_ceil(weightVectSize, actVectSize), actVectSize, scaleBiasWidth(inType)},
+        0, {-1, (int)div_ceil(weightVectSize, actVectSize), actVectSize, biasScaleWidth(inType)},
         true
     );
 
