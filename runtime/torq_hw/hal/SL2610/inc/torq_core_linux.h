@@ -60,6 +60,7 @@ struct torq_binding_entry {
     unsigned int xram_addr;
     unsigned int data_offset;
     size_t mapped_size;
+    bool replaced_net_mapping;
 };
 
 struct torq_module {
@@ -116,6 +117,8 @@ struct torq_network {
     struct list_head binding_list;
     /* check if xram region is mapped in networks domain */
     bool iova_mapped;
+    /* track if LRAM has been written for this network (prevent duplicate caching) */
+    bool lram_cached;
 };
 
 struct torq_file_inst {

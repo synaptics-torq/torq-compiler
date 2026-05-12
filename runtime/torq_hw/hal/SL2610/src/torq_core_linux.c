@@ -307,6 +307,7 @@ static int torq_create_network(struct torq_file_inst *inst, struct torq_create_n
     net->domain = domain;
     net->xram_start = req->xram_start;
     net->size = dmabuf->size;
+    net->lram_cached = false;
     INIT_LIST_HEAD(&net->lram_segments);
     INIT_LIST_HEAD(&net->binding_list);
 
@@ -400,6 +401,7 @@ static int torq_start_network(struct torq_file_inst *inst, struct torq_start_net
     torq_dev->active_network = net;
 
     /* write the network specific LRAM space, LRAM updates for network expected to be serialized */
+    net->lram_cached = true;
     torq_commit_network_lram(torq_dev, net);
 
     /* reset the module before starting new network */
@@ -602,7 +604,16 @@ static int torq_write_lram(struct torq_file_inst *inst, struct torq_write_lram_r
         return -ENOENT;
     }
 
-    ret = torq_add_lram_segment(net, req->addr, req->size, lram_data);
+    /* Skip duplicates to prevent list from growing unnecessarily */
+    if (!net->lram_cached) {
+        ret = torq_add_lram_segment(net, req->addr, req->size, lram_data);
+        if (ret == 0) {
+            KLOGI("[LRAM_CACHE] Network %d: LRAM added (first write)", req->network_id);
+        }
+    } else {
+        KLOGI("[LRAM_CACHE] Network %d: LRAM already cached (skipping duplicate write)", req->network_id);
+        ret = 0;
+    }
 
     /* commit to HW if the network is already loaded */
     if (torq_dev->active_network == net) {
@@ -723,10 +734,15 @@ static int torq_attach_binding(struct torq_file_inst *inst, struct torq_attach_b
     struct dma_buf *dmabuf;
     struct dma_buf_attachment *attachment;
     struct sg_table *sgt;
+    dma_addr_t net_start;
+    dma_addr_t net_end;
+    dma_addr_t bind_start;
+    dma_addr_t bind_end;
+    bool overlaps_net;
     size_t map_size;
-    size_t xram_offset;
     size_t unmapped;
     int ret;
+
 
     if (!inst || !req) {
         return -EINVAL;
@@ -751,10 +767,12 @@ static int torq_attach_binding(struct torq_file_inst *inst, struct torq_attach_b
     if (req->xram_addr < net->xram_start) {
         return -ERANGE;
     }
-    xram_offset = req->xram_addr - net->xram_start;
-    if (xram_offset > net->size || map_size > net->size - xram_offset) {
-        return -ERANGE;
-    }
+
+    net_start   = net->xram_start;
+    net_end     = net->xram_start + net->size;
+    bind_start  = req->xram_addr;
+    bind_end    = req->xram_addr + map_size;
+    overlaps_net = bind_start < net_end && net_start < bind_end;
 
     list_for_each_entry(iter, &net->binding_list, list) {
         unsigned int iter_end = iter->xram_addr + iter->mapped_size;
@@ -768,6 +786,7 @@ static int torq_attach_binding(struct torq_file_inst *inst, struct torq_attach_b
     if (IS_ERR(dmabuf)) {
         return PTR_ERR(dmabuf);
     }
+
     if (req->data_offset > dmabuf->size || map_size > dmabuf->size - req->data_offset) {
         ret = -ERANGE;
         goto fail_put_dmabuf;
@@ -791,13 +810,15 @@ static int torq_attach_binding(struct torq_file_inst *inst, struct torq_attach_b
         goto fail_unmap_attachment;
     }
 
-    unmapped = iommu_unmap(net->domain, req->xram_addr, map_size);
-    if (unmapped != map_size) {
+    if (overlaps_net) {
+      unmapped = iommu_unmap(net->domain, req->xram_addr, map_size);
+      if (unmapped != map_size) {
         ret = -EFAULT;
         goto fail_free_entry;
+      }
     }
 
-    ret = torq_iommu_map_sg_at_offset(net->domain, req->xram_addr, sgt, req->data_offset,
+    ret = torq_iommu_map_sg_at_offset(net->domain, bind_start, sgt, req->data_offset,
                                       map_size);
     if (ret) {
         torq_remap_net_xram_range(net, req->xram_addr, map_size);
@@ -810,6 +831,7 @@ static int torq_attach_binding(struct torq_file_inst *inst, struct torq_attach_b
     entry->xram_addr = req->xram_addr;
     entry->data_offset = req->data_offset;
     entry->mapped_size = map_size;
+    entry->replaced_net_mapping = overlaps_net;
     list_add_tail(&entry->list, &net->binding_list);
     return 0;
 
@@ -868,7 +890,8 @@ static int torq_detach_binding(struct torq_file_inst *inst, struct torq_detach_b
     unmapped = iommu_unmap(net->domain, entry->xram_addr, entry->mapped_size);
     ret = (unmapped == entry->mapped_size) ? 0 : -EFAULT;
     if (!ret) {
-        ret = torq_remap_net_xram_range(net, entry->xram_addr, entry->mapped_size);
+        if (entry->replaced_net_mapping)
+          ret = torq_remap_net_xram_range(net, entry->xram_addr, entry->mapped_size);
     }
 
     dma_buf_unmap_attachment(entry->attachment, entry->sgt, DMA_BIDIRECTIONAL);
