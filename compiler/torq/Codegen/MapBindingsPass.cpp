@@ -106,8 +106,39 @@ class HalInterfaceBindingSubspanPattern
 
         auto origType = mlir::cast<MemRefType>(subspanOp.getResult().getType());
 
+        SmallVector<int64_t> outputShape;
+
+        if (origType.hasStaticShape()) {
+            outputShape.append(origType.getShape().begin(), origType.getShape().end());
+        }
+        else if (!origType.hasStaticShape()) {
+
+            for (auto [idx, dim] : llvm::enumerate(origType.getShape())) {
+                if (dim == ShapedType::kDynamic) {
+                    auto dynamicDim = subspanOp.getDynamicDims()[idx];
+                    if (auto constOp = dynamicDim.getDefiningOp<arith::ConstantOp>()) {
+                        if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValueAttr())) {
+                            outputShape.push_back(intAttr.getInt());
+                            continue;
+                        }
+                        else {
+                            subspanOp.emitError("dynamic dimension must be a constant integer");
+                            return failure();
+                        }
+                    }
+                    else {
+                        subspanOp.emitError("dynamic dimension must be a constant");
+                        return failure();
+                    }
+                }
+                else {
+                    outputShape.push_back(dim);
+                }
+            }
+        }
+
         // remove unused information from the output type
-        auto outputType = MemRefType::get(origType.getShape(), origType.getElementType());
+        auto outputType = MemRefType::get(outputShape, origType.getElementType());
 
         LLVM_DEBUG({ subspanOp.dump(); });
 
