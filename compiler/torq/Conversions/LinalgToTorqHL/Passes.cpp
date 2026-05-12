@@ -57,13 +57,20 @@ void populateLinalgToTorqHLPrePatternsLowPrio(
     populateLinalgToTorqHLEWBinaryPatterns(context, patterns, markFuseGroups);
 }
 
-static bool isPoolingNhwcSumLegal(Operation *op) {
-    auto poolOp = dyn_cast<linalg::PoolingNhwcSumOp>(op);
+// TODO: When PoolingNhwcSumOp supports BF16, the AllowBF16 template parameter
+// can be removed and BF16 can always be allowed.
+template <typename PoolingOpT, bool AllowBF16> static bool isPoolingSumLegal(Operation *op) {
+    auto poolOp = dyn_cast<PoolingOpT>(op);
     if (!poolOp)
         return true;
 
     auto outType = dyn_cast<RankedTensorType>(poolOp.getResultTensors()[0].getType());
-    if (!outType || !outType.getElementType().isInteger())
+    if (!outType)
+        return true;
+    bool typeOk = outType.getElementType().isInteger();
+    if constexpr (AllowBF16)
+        typeOk = typeOk || outType.getElementType().isBF16();
+    if (!typeOk)
         return true;
 
     auto inputType = dyn_cast<RankedTensorType>(poolOp.getInputs()[0].getType());
@@ -73,7 +80,20 @@ static bool isPoolingNhwcSumLegal(Operation *op) {
 
     auto inputShape = inputType.getShape();
     auto kernelShape = kernelType.getShape();
-    return kernelShape[0] != inputShape[1] || kernelShape[1] != inputShape[2];
+
+    // NHWC: [N, H, W, C] : 1, 2
+    // NCHW: [N, C, H, W] : 2, 3
+    size_t hIdx, wIdx;
+    if constexpr (std::is_same_v<PoolingOpT, linalg::PoolingNhwcSumOp>) {
+        hIdx = 1;
+        wIdx = 2;
+    }
+    else {
+        hIdx = 2;
+        wIdx = 3;
+    }
+
+    return kernelShape[0] != inputShape[hIdx] || kernelShape[1] != inputShape[wIdx];
 }
 
 static bool isHostOrCssExecutor(Operation *op) {
@@ -173,21 +193,23 @@ class LinalgToTorqHLPreConversionPass
         target.addLegalOp<linalg::TransposeOp>();
         target.addDynamicallyLegalDialect<linalg::LinalgDialect>(
             [](Operation *op) -> std::optional<bool> {
-                if (isa<linalg::YieldOp, linalg::IndexOp>(op))
-                    return true;
-
                 // we do not need to legalize operations that will be executed on the host or css
                 if (isHostOrCssExecutor(op))
                     return true;
 
-                return std::nullopt;
-            }
-        );
-        target.addDynamicallyLegalOp<linalg::PoolingNhwcSumOp>(
-            [](Operation *op) -> std::optional<bool> {
-                if (isPoolingNhwcSumLegal(op))
-                    return true;
-                return std::nullopt;
+                return llvm::TypeSwitch<Operation *, std::optional<bool>>(op)
+                    .Case<linalg::YieldOp, linalg::IndexOp>([](auto) { return true; })
+                    .Case<linalg::PoolingNhwcSumOp>([&](auto) -> std::optional<bool> {
+                        if (isPoolingSumLegal<linalg::PoolingNhwcSumOp, false>(op))
+                            return true;
+                        return std::nullopt;
+                    })
+                    .Case<linalg::PoolingNchwSumOp>([&](auto) -> std::optional<bool> {
+                        if (isPoolingSumLegal<linalg::PoolingNchwSumOp, true>(op))
+                            return true;
+                        return std::nullopt;
+                    })
+                    .Default([](Operation *) { return std::nullopt; });
             }
         );
 

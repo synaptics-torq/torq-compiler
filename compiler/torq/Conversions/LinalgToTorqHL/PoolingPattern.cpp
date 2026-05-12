@@ -73,6 +73,58 @@ static Value applyOutputTranspose(
 static bool is1DPooling(llvm::ArrayRef<int64_t> kernels, llvm::ArrayRef<int64_t> strides) {
     return (kernels[0] == 1 && strides[0] == 1) || (kernels[1] == 1 && strides[1] == 1);
 }
+
+/// Look for a downstream linalg.generic that performs an elementwise mulf or divf
+/// by a constant. If found, return the constant scale value and the generic op.
+/// For divf, the scale is the reciprocal of the divisor.
+static std::pair<float, linalg::GenericOp> tryExtractFusedScale(Value output) {
+    if (!output.hasOneUse())
+        return {1.0f, nullptr};
+
+    auto genericOp = dyn_cast<linalg::GenericOp>(*output.getUsers().begin());
+    if (!genericOp || genericOp.getNumDpsInputs() != 1 || genericOp.getNumDpsInits() != 1 ||
+        genericOp.getNumReductionLoops() != 0)
+        return {1.0f, nullptr};
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+        return {1.0f, nullptr};
+
+    auto mulOp = dyn_cast<arith::MulFOp>(yieldOp.getOperand(0).getDefiningOp());
+    auto divOp = dyn_cast<arith::DivFOp>(yieldOp.getOperand(0).getDefiningOp());
+    if (!mulOp && !divOp)
+        return {1.0f, nullptr};
+
+    Value lhs = mulOp ? mulOp.getLhs() : divOp.getLhs();
+    Value rhs = mulOp ? mulOp.getRhs() : divOp.getRhs();
+
+    bool lhsIsBlockArg =
+        isa<BlockArgument>(lhs) && cast<BlockArgument>(lhs).getOwner() == genericOp.getBody();
+    bool rhsIsBlockArg =
+        isa<BlockArgument>(rhs) && cast<BlockArgument>(rhs).getOwner() == genericOp.getBody();
+
+    arith::ConstantOp constOp = nullptr;
+    if (lhsIsBlockArg && !rhsIsBlockArg)
+        constOp = rhs.getDefiningOp<arith::ConstantOp>();
+    else if (rhsIsBlockArg && !lhsIsBlockArg)
+        constOp = lhs.getDefiningOp<arith::ConstantOp>();
+
+    if (!constOp)
+        return {1.0f, nullptr};
+
+    auto floatAttr = dyn_cast<FloatAttr>(constOp.getValue());
+    if (!floatAttr)
+        return {1.0f, nullptr};
+
+    float value = floatAttr.getValueAsDouble();
+    if (divOp) {
+        if (value == 0.0f)
+            return {1.0f, nullptr};
+        value = 1.0f / value;
+    }
+    return {value, genericOp};
+}
+
 template <typename PoolingOpType, bool IsNCHW>
 struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
   private:
@@ -296,12 +348,140 @@ struct PoolingNhwcSumOpConversion : public OpRewritePattern<linalg::PoolingNhwcS
     const bool _markFuseGroups; // When true, mark the TI operations, don't convert.
 };
 
+struct PoolingNchwSumOpConversion : public OpRewritePattern<linalg::PoolingNchwSumOp> {
+  public:
+    using LinalgOpT = linalg::PoolingNchwSumOp;
+    using TorqOp = torq_hl::AvgPool2DOp;
+    using OpRewritePattern<LinalgOpT>::OpRewritePattern;
+
+    PoolingNchwSumOpConversion(MLIRContext *context, int shift8b, int shift16b, bool markFuseGroups)
+        : OpRewritePattern<LinalgOpT>(context), _shift8b(shift8b), _shift16b(shift16b),
+          _markFuseGroups(markFuseGroups) {}
+
+    LogicalResult matchAndRewrite(LinalgOpT linalgOp, PatternRewriter &rewriter) const override {
+        if (_markFuseGroups && isMarkedFuseGroup(linalgOp)) {
+            return rewriter.notifyMatchFailure(linalgOp, "Already marked");
+        }
+
+        const auto loc = linalgOp.getLoc();
+
+        Value input0 = linalgOp.getInputs()[0];
+        Value kernel = linalgOp.getInputs()[1];
+        Value output = linalgOp.getResultTensors()[0];
+        const auto outType = mlir::cast<RankedTensorType>(output.getType());
+        RankedTensorType input_type = mlir::cast<RankedTensorType>(input0.getType());
+        auto in_s = input_type.getShape();
+        auto kernelType = mlir::cast<RankedTensorType>(kernel.getType());
+        auto kernelShape = kernelType.getShape();
+        if (kernelShape.size() != 2 || kernelShape[0] != in_s[2] || kernelShape[1] != in_s[3]) {
+            return rewriter.notifyMatchFailure(linalgOp, "Only kernel == whole frame supported");
+        }
+        int itemsPerChannel = in_s[2] * in_s[3];
+
+        // AvgPool2DOp expects NHWC input; transpose NCHW -> NHWC
+        auto dataPerm = Permutation::nhwc2nchw().reverse();
+
+        bool isInt = outType.getElementType().isInteger();
+        bool isBF16 = outType.getElementType().isBF16();
+        if (!isInt && !isBF16) {
+            return rewriter.notifyMatchFailure(linalgOp, "Only integer or bf16 pooling supported");
+        }
+
+        const int channelDimension = 1;
+        int32_t channelCount = in_s[channelDimension];
+
+        // Try to fold a downstream elementwise mulf/divf generic op into the avgpool weight.
+        auto [scaleValue, fusedGenericOp] = tryExtractFusedScale(output);
+
+        if (_markFuseGroups) {
+            // If we found a downstream fused generic, update output so that
+            // markFuseGroupBackward walks through it and marks it in the same group.
+            if (fusedGenericOp) {
+                output = fusedGenericOp.getResult(0);
+            }
+            markFuseGroupBackward(
+                output, {input0, kernel}, rewriter,
+                linalgOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            );
+            return success();
+        }
+
+        // Transpose input NCHW -> NHWC
+        input0 = transposeValue(input0, dataPerm, loc, rewriter);
+
+        Value weights;
+        Value biasScale;
+        int32_t inputZp = 0;
+        int32_t outputZp = 0;
+        int32_t outputMin = 0;
+        int32_t outputMax = 0;
+        int32_t shiftFactor = 0;
+
+        if (isInt) {
+            ScaleClampInfo scInfo =
+                foldForwardScaleClamp(output, channelCount, _shift8b, _shift16b, true);
+            if (!scInfo) {
+                return rewriter.notifyMatchFailure(linalgOp, "Cannot fold forward scale/clamp");
+            }
+            ScaleInfo scaleInput0;
+            const std::vector<int32_t> scale(
+                channelCount,
+                int32_t(scaleInput0.scale * (1 << scInfo.scaleShift) / itemsPerChannel)
+            );
+            const std::vector<int32_t> bias(channelCount, -scInfo.bias);
+            biasScale = createConst(interleave(bias, scale), rewriter, loc);
+            weights = createI8Const(
+                rewriter, linalgOp, std::vector<int8_t>{1}, llvm::ArrayRef<int64_t>{1, 1, 1, 1}
+            );
+            inputZp = scInfo.zp;
+            outputZp = scInfo.zp;
+            outputMin = scInfo.min;
+            outputMax = scInfo.max;
+            shiftFactor = scInfo.scaleShift;
+        }
+        else {
+            const llvm::fltSemantics &bf16sem = APFloat::BFloat();
+            std::vector<llvm::APFloat> weightsData(
+                1, llvm::APFloat(bf16sem, std::to_string(scaleValue))
+            );
+            weights = createConst(weightsData, rewriter, loc);
+            std::vector<float> biasScaleData{0.0f};
+            biasScale = createConst(biasScaleData, rewriter, loc);
+            outputMin = 0xff800000;
+            outputMax = 0x7f800000;
+        }
+
+        auto torqOutType = transposeType(output.getType(), dataPerm);
+        auto torqOp = TorqOp::create(
+            rewriter, linalgOp.getLoc(), torqOutType,
+            createInitTensor(linalgOp, rewriter, torqOutType), inputZp, outputZp, outputMin,
+            outputMax, shiftFactor, weights, biasScale, input0
+        );
+        auto torqOut = transposeValue(torqOp.getOutput(), dataPerm.reverse(), loc, rewriter);
+
+        if (fusedGenericOp) {
+            rewriter.replaceOp(fusedGenericOp, torqOut);
+            rewriter.eraseOp(linalgOp);
+        }
+        else {
+            rewriter.replaceOp(linalgOp, torqOut);
+        }
+        return success();
+    }
+
+  private:
+    const int _shift8b;         // Scale shift for 8-bit integer operations
+    const int _shift16b;        // Scale shift for 16-bit integer operations
+    const bool _markFuseGroups; // When true, mark the TI operations, don't convert.
+};
+
 void populateLinalgToTorqHLPoolingPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
     patterns.insert<PoolingNhwcMaxOpConversion>(context, markFuseGroups);
     patterns.insert<PoolingNchwMaxOpConversion>(context, markFuseGroups);
     patterns.insert<PoolingNhwcSumOpConversion>(context, 20, 20 /* FIXME */, markFuseGroups);
+    patterns.insert<PoolingNchwSumOpConversion>(context, 20, 20 /* FIXME */, markFuseGroups);
 }
 
 } // namespace mlir::syna::torq

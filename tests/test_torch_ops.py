@@ -63,10 +63,18 @@ def _is_gelu_case(case_config):
     return mlir_file is not None and "gelu" in mlir_file.name.lower()
 
 
+def _is_global_average_pool_case(case_config):
+    mlir_file = case_config.get("static_mlir_model_file")
+    return mlir_file is not None and "globalaveragepool" in mlir_file.name.lower()
+
+
 @pytest.fixture
 def reference_results(request, case_config):
     if _is_gelu_case(case_config):
         return request.getfixturevalue("numpy_gelu_reference_results")
+
+    if _is_global_average_pool_case(case_config):
+        return request.getfixturevalue("numpy_global_average_pool_reference_results")
 
     try:
         return request.getfixturevalue("llvmcpu_reference_results")

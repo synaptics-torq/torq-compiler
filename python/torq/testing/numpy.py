@@ -126,6 +126,22 @@ def _numpy_maxpool(x, kernel_shape, strides, pads, ceil_mode=0):
     return np.max(windows, axis=(4, 5))
 
 
+def _numpy_global_average_pool(x):
+    """Execute GlobalAveragePool using numpy (NCHW format).
+
+    Computes mean over spatial dimensions H and W. For bf16 inputs,
+    numpy promotes to float32 for accumulation (matching np.matmul behavior),
+    then we convert back to the original dtype.
+    """
+    original_dtype = x.dtype
+    # Use float32 accumulator for bf16, matching TORQ NPU behavior
+    result = np.mean(x, axis=(2, 3), keepdims=True, dtype=np.float32)
+    # Convert back to original dtype if needed
+    if original_dtype != np.float32:
+        result = result.astype(original_dtype, copy=False)
+    return result
+
+
 def _execute_onnx_model_numpy(model, input_data):
     """
     Execute ONNX model using numpy, with special handling for bf16 MatMul operations.
@@ -189,6 +205,11 @@ def _execute_onnx_model_numpy(model, input_data):
             result = _numpy_maxpool(x, kernel_shape, strides, pads, ceil_mode)
             tensor_values[node.output[0]] = result
 
+        elif node.op_type == "GlobalAveragePool":
+            x = tensor_values[node.input[0]]
+            result = _numpy_global_average_pool(x)
+            tensor_values[node.output[0]] = result
+
         elif node.op_type == "Gelu":
             approximate = next(
                 (
@@ -240,6 +261,18 @@ def _execute_onnx_model_numpy(model, input_data):
             outputs.append(tensor_values[output.name])
 
     return outputs
+
+
+@versioned_unhashable_object_fixture
+def numpy_global_average_pool_reference_results(input_data):
+    """Compute GlobalAveragePool reference in numpy with FP32 accumulation.
+
+    For bf16 inputs, numpy promotes to float32 for accumulation
+    (same as np.matmul behavior), matching the TORQ NPU.
+    """
+    data = input_data.data if hasattr(input_data, 'data') else input_data
+    assert len(data) == 1
+    return [_numpy_global_average_pool(data[0])]
 
 
 @versioned_unhashable_object_fixture
