@@ -504,6 +504,8 @@ KernelEncoding ElementWiseUnaryOp::getKernelEncoding() { return getActLikeEncodi
 
 KernelEncoding FMAOp::getKernelEncoding() { return getNoEncoding(); }
 
+KernelEncoding ExpandWeightsOp::getKernelEncoding() { return getNoEncoding(); }
+
 KernelEncoding BroadcastOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ResizeNearestNeighborOp::getKernelEncoding() { return getNoEncoding(); }

@@ -19,6 +19,7 @@ iree_cc_library(
     EncodingUtils.cpp
     ShapeUtils.cpp
     ExecutorAssignment.cpp
+    StorageUtils.cpp
   HDRS
     MemoryUtils.h
     TorqUtils.h
@@ -31,6 +32,7 @@ iree_cc_library(
     ExecutorAssignment.h
     EncodingUtils.h
     ShapeUtils.h
+    StorageUtils.h
   DEPS
     MLIRIR
     iree::target::torq::Conversions::TorqHLToLinalg::TorqHLToLinalg

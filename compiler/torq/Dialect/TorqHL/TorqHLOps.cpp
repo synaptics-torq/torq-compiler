@@ -8,6 +8,7 @@
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "torq/Utils/StorageUtils.h"
 
 #include "mlir/Dialect/CommonFolders.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
@@ -368,8 +369,9 @@ OpFoldResult ImportProgramOp::fold(FoldAdaptor adaptor) { return getNameAttr(); 
 } // namespace mlir::syna::torq_hl
 
 static int64_t computeTotalByteSizeElements(MemRefType memrefType) {
-    auto inputElementSizeBytes = (memrefType.getElementTypeBitWidth() + 7) / 8;
-    return inputElementSizeBytes * memrefType.getNumElements();
+    return mlir::syna::getStorageSizeBytes(
+        memrefType.getNumElements(), memrefType.getElementTypeBitWidth()
+    );
 }
 
 static int64_t computeTransferredDataSize(ArrayRef<int64_t> shape, int64_t elementSizeBytes) {

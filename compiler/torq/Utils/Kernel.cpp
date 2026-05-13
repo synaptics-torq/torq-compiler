@@ -11,6 +11,7 @@
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
+#include "mlir/IR/BuiltinTypes.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-easy-kernel"
@@ -444,14 +445,29 @@ int sizeofType(DType type) {
 }
 
 DType getDType(mlir::Type mlirType) {
-    if (mlirType.isInteger(8) || mlirType.isInteger(1)) {
+    if (mlirType.isUnsignedInteger(4)) {
+        return DType::uint4;
+    }
+    else if (mlirType.isInteger(4)) {
+        return DType::int4;
+    }
+    else if (mlirType.isInteger(8) || mlirType.isInteger(1)) {
         return DType::int8;
+    }
+    else if (mlirType.isUnsignedInteger(8)) {
+        return DType::uint8;
     }
     else if (mlirType.isInteger(16)) {
         return DType::int16;
     }
+    else if (mlirType.isUnsignedInteger(16)) {
+        return DType::uint16;
+    }
     else if (mlirType.isInteger(32)) {
         return DType::int32;
+    }
+    else if (mlirType.isUnsignedInteger(32)) {
+        return DType::uint32;
     }
     else if (mlirType.isBF16()) {
         return DType::bf16;
@@ -459,7 +475,13 @@ DType getDType(mlir::Type mlirType) {
     else if (mlirType.isF32()) {
         return DType::fp32;
     }
-    // TODO, should we assert here? assert(false && "Unsupported  data type");
+    else if (isa<Float8E4M3FNType>(mlirType)) {
+        return DType::fp8e4m3fn;
+    }
+    else if (isa<Float8E5M2Type>(mlirType)) {
+        return DType::fp8e5m2;
+    }
+    // TODO: assert(false && "Unsupported data type");
     return DType::none;
 }
 
@@ -529,12 +551,22 @@ static DType deduceUncompressedWType(DType iType, DType wType) {
 
 int32_t maxVal(DType type) {
     constexpr int32_t plusInf = 0x7f800000;
-    return isFloat(type) ? plusInf : int32_t((1 << (sizeofType(type) * 8 - 1)) - 1);
+    if (isFloat(type)) {
+        return plusInf;
+    }
+    int bitWidth = sizeofTypeBits(type);
+    assert(bitWidth > 0 && "Invalid data type");
+    return static_cast<int32_t>((int64_t{1} << (bitWidth - 1)) - 1);
 }
 
 int32_t minVal(DType type) {
     constexpr int32_t minusInf = 0xff800000;
-    return isFloat(type) ? minusInf : int32_t(-1 << (sizeofType(type) * 8 - 1));
+    if (isFloat(type)) {
+        return minusInf;
+    }
+    int bitWidth = sizeofTypeBits(type);
+    assert(bitWidth > 0 && "Invalid data type");
+    return static_cast<int32_t>(-(int64_t{1} << (bitWidth - 1)));
 }
 
 bool hasScale(DType type) { return isInt(type); }

@@ -30,6 +30,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Support/LLVM.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/CommandLine.h"
@@ -64,6 +65,32 @@ static llvm::cl::opt<bool> clEnableBufferDebugInfo(
     "torq-enable-buffer-debug-info", llvm::cl::desc("Add buffer debug information to the model"),
     llvm::cl::init(false)
 );
+
+// Keep this in sync with TorqHL storage-size calculation: i4 is packed, while
+// the other sub-byte integer types are not routed through this bit-packed path.
+static bool shouldPackSubByteIntegerBitWidth(int64_t bitWidth) { return bitWidth == 4; }
+
+static int64_t computePackedSubByteIntegerSize(int64_t elementCount, int64_t bitWidth) {
+    return (elementCount * bitWidth + 7) / 8;
+}
+
+static void packSubByteIntegerValue(
+    uint64_t value, int64_t elementIndex, int64_t bitWidth, SmallVectorImpl<uint8_t> &dataVec
+) {
+    // Keep only the low bits that belong to this element type.
+    value &= (uint64_t{1} << bitWidth) - 1;
+
+    // Pack elements consecutively in little-bit order. For i4, element 0 uses
+    // bits [0..3], element 1 uses bits [4..7], element 2 starts the next byte.
+    int64_t bitOffset = elementIndex * bitWidth;
+    for (int64_t bit = 0; bit < bitWidth; ++bit) {
+        if ((value >> bit) & 1) {
+            // Convert the packed bit position into a byte index and bit index.
+            int64_t packedBitOffset = bitOffset + bit;
+            dataVec[packedBitOffset / 8] |= static_cast<uint8_t>(1u << (packedBitOffset % 8));
+        }
+    }
+}
 
 /// TorqHW serialization class
 class Serializer {
@@ -142,6 +169,60 @@ class Serializer {
         if (!succeeded(dumpSegmentDescriptor(
                 0, true, xramAddress, dataVec.data(), dataVec.size_in_bytes(), false
             ))) {
+            return failure();
+        }
+        return success();
+    }
+
+    LogicalResult createPackedSubByteIntegerSegment(
+        DenseIntOrFPElementsAttr &data, iree_compiler::FlatbufferBuilder &builder,
+        flatbuffers_uint8_vec_ref_t &dataRef, int32_t xramAddress
+    ) {
+        auto numElements = data.getNumElements();
+        auto bitWidth = data.getType().getElementTypeBitWidth();
+        if (bitWidth <= 0 || bitWidth >= 8) {
+            return failure();
+        }
+
+        auto dataSize = computePackedSubByteIntegerSize(numElements, bitWidth);
+
+        SmallVector<uint8_t> dataVec(dataSize, 0);
+
+        if (data.isSplat()) {
+            auto value = data.getSplatValue<IntegerAttr>().getValue().getZExtValue();
+            for (int64_t i = 0; i < numElements; ++i) {
+                packSubByteIntegerValue(value, i, bitWidth, dataVec);
+            }
+        }
+        else if (auto resourceAttr =
+                     dyn_cast<detail::DenseResourceElementsAttrBase<int8_t>>(data)) {
+            auto maybeValues = resourceAttr.tryGetAsArrayRef();
+            if (!maybeValues || static_cast<int64_t>(maybeValues->size()) != numElements) {
+                return failure();
+            }
+
+            int64_t i = 0;
+            for (int8_t value : *maybeValues) {
+                packSubByteIntegerValue(static_cast<uint8_t>(value), i++, bitWidth, dataVec);
+            }
+        }
+        else {
+            int64_t i = 0;
+            for (APInt value : data.getValues<APInt>()) {
+                if (i >= numElements) {
+                    return failure();
+                }
+                packSubByteIntegerValue(value.getZExtValue(), i++, bitWidth, dataVec);
+            }
+            if (i != numElements) {
+                return failure();
+            }
+        }
+
+        dataRef = flatbuffers_uint8_vec_create(builder, dataVec.data(), dataVec.size());
+        if (!succeeded(
+                dumpSegmentDescriptor(0, true, xramAddress, dataVec.data(), dataVec.size(), false)
+            )) {
             return failure();
         }
         return success();
@@ -259,7 +340,13 @@ LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
         auto elementType = data.getElementType();
         auto bitWidth = data.getType().getElementTypeBitWidth();
         if (elementType.isInteger()) {
-            if (bitWidth == 8) {
+            if (shouldPackSubByteIntegerBitWidth(bitWidth)) {
+                if (createPackedSubByteIntegerSegment(data, _builder, dataRef, xramAddress)
+                        .failed()) {
+                    return failure();
+                }
+            }
+            else if (bitWidth == 8) {
                 if (createISegment<uint8_t>(data, _builder, dataRef, xramAddress).failed()) {
                     return failure();
                 }
@@ -305,12 +392,13 @@ LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
             llvm::dbgs() << "*** Constant from splat: size = " << data.getNumElements() << " ***\n";
         });
 
-        auto dataSize = bitWidth / 8 * data.getNumElements();
+        auto dataSize = shouldPackSubByteIntegerBitWidth(bitWidth)
+                            ? computePackedSubByteIntegerSize(data.getNumElements(), bitWidth)
+                            : bitWidth / 8 * data.getNumElements();
 
         _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, dataSize, dataRef));
     }
     else {
-
         LLVM_DEBUG({
             llvm::dbgs() << "*** Constant: size = " << data.getRawData().size() << " ***\n";
         });
@@ -335,6 +423,19 @@ LogicalResult Serializer::serializeInvocation(torq_hl::CreateInvocationOp &creat
 
 LogicalResult
 Serializer::addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data, bool isCode) {
+
+    auto bitWidth = data.getType().getElementTypeBitWidth();
+    if (!isCode && data.getElementType().isInteger() &&
+        shouldPackSubByteIntegerBitWidth(bitWidth)) {
+        flatbuffers_uint8_vec_ref_t dataRef;
+        if (failed(createPackedSubByteIntegerSegment(data, _builder, dataRef, xramAddress))) {
+            return failure();
+        }
+
+        auto size = computePackedSubByteIntegerSize(data.getNumElements(), bitWidth);
+        _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, size, dataRef));
+        return success();
+    }
 
     auto size = data.getRawData().size();
 

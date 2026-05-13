@@ -4,6 +4,7 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Dialect/TorqHW/TorqHWOps.h"
+#include "torq/Utils/StorageUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -285,11 +286,13 @@ SmallVector<int64_t> getEncodedStridesBytes(ShapedType type) {
 }
 
 int64_t getEncodedTotalSizeBytes(ShapedType type) {
-    return getEncodedTotalSizeElements(type) * getElementSizeBytes(type);
+    auto elementBitWidth = type.getElementType().getIntOrFloatBitWidth();
+    return getStorageSizeBytes(getEncodedTotalSizeElements(type), elementBitWidth);
 }
 
 int64_t getEncodedDataSizeBytes(ShapedType type) {
-    return getEncodedDataSizeElements(type) * getElementSizeBytes(type);
+    auto elementBitWidth = type.getElementType().getIntOrFloatBitWidth();
+    return getStorageSizeBytes(getEncodedDataSizeElements(type), elementBitWidth);
 }
 
 bool checkTypeMatchesEncodingRequirements(

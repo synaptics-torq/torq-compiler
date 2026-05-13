@@ -229,6 +229,8 @@ void registerBufferizationInterfaceExternalModels(DialectRegistry &registry) {
         syna::torq_hl::FMAOp::attachInterface<TorqHLBufferizableOpInterface<syna::torq_hl::FMAOp>>(
             *context
         );
+        syna::torq_hl::ExpandWeightsOp::attachInterface<
+            TorqHLBufferizableOpInterface<syna::torq_hl::ExpandWeightsOp>>(*context);
         syna::torq_hl::MulOp::attachInterface<TorqHLBufferizableOpInterface<syna::torq_hl::MulOp>>(
             *context
         );

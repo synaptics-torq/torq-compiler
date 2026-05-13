@@ -70,4 +70,6 @@ void populateLinalgToTorqHLExtractPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
 
+void populateLinalgToTorqHLExpandWeightsPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 } // namespace mlir::syna::torq

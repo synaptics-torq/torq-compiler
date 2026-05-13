@@ -2195,6 +2195,7 @@ void populateLinalgToTorqHLPatterns(
 
     patterns.insert<GenericToBroadcastOpConversion>(context);
     patterns.insert<ResizeNearestNeighborOpConversion>(context);
+    populateLinalgToTorqHLExpandWeightsPatterns(context, patterns);
 }
 
 } // namespace mlir::syna::torq

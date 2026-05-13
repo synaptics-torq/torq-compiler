@@ -21,6 +21,7 @@ set(sources
     FMAPattern.cpp
     GatherPattern.cpp
     IdentityPattern.cpp
+    ExpandWeightsPattern.cpp
     MatMulPattern.cpp
     MaxPool2dPattern.cpp
     MaxPool2dToHw.cpp

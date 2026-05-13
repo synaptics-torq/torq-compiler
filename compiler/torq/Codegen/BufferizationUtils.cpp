@@ -4,6 +4,7 @@
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "torq/Utils/StorageUtils.h"
 #include "torq/Utils/TorqHw.h"
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -13,6 +14,16 @@
 #define DEBUG_TYPE "iree-torq-bufferization-utils"
 
 namespace mlir::syna::torq {
+
+static FailureOr<int64_t> computeByteStride(int64_t elementStride, int64_t elementBitWidth) {
+    int64_t strideBits = elementStride * getStorageBitWidth(elementBitWidth);
+    // Load/store stride attributes are byte-based, so packed sub-byte strides
+    // must still land on a byte boundary.
+    if (strideBits % 8 != 0) {
+        return failure();
+    }
+    return strideBits / 8;
+}
 
 LogicalResult computeStrides(
     MemRefType fromType, MemRefType toType, SmallVector<int64_t> &fromStridesBytes,
@@ -28,8 +39,10 @@ LogicalResult computeStrides(
         return failure();
     }
 
+    int64_t elementBitWidth = fromType.getElementType().getIntOrFloatBitWidth();
+
     if (fromType.getRank() == 0) {
-        contiguousElementSizeBytes = (fromType.getElementType().getIntOrFloatBitWidth() + 7) / 8;
+        contiguousElementSizeBytes = getStorageSizeBytes(1, elementBitWidth);
         return success();
     }
 
@@ -37,16 +50,16 @@ LogicalResult computeStrides(
     auto toStrides = getEncodedStridesElements(toType);
     auto fromShape = fromType.getShape();
 
-    int accShape = 1;
-    int accFromStride = 1;
-    int accToStride = 1;
+    int64_t accShape = 1;
+    int64_t accFromStride = 1;
+    int64_t accToStride = 1;
+    SmallVector<int64_t> fromStridesElements, toStridesElements;
 
-    int elementSize = (fromType.getElementType().getIntOrFloatBitWidth() + 7) / 8;
     for (int i = fromType.getRank() - 1; i >= 0; --i) {
         if (fromStrides[i] != accShape * accFromStride || toStrides[i] != accShape * accToStride) {
             shape.push_back(accShape);
-            fromStridesBytes.push_back(accFromStride * elementSize);
-            toStridesBytes.push_back(accToStride * elementSize);
+            fromStridesElements.push_back(accFromStride);
+            toStridesElements.push_back(accToStride);
             accShape = fromShape[i];
             accFromStride = fromStrides[i];
             accToStride = toStrides[i];
@@ -55,14 +68,25 @@ LogicalResult computeStrides(
         accShape *= fromShape[i];
     }
     shape.push_back(accShape);
-    fromStridesBytes.push_back(accFromStride * elementSize);
-    toStridesBytes.push_back(accToStride * elementSize);
+    fromStridesElements.push_back(accFromStride);
+    toStridesElements.push_back(accToStride);
     shape = SmallVector<int64_t>(shape.rbegin(), shape.rend());
-    fromStridesBytes = SmallVector<int64_t>(fromStridesBytes.rbegin(), fromStridesBytes.rend() - 1);
-    toStridesBytes = SmallVector<int64_t>(toStridesBytes.rbegin(), toStridesBytes.rend() - 1);
 
-    int contiguousSizeElements = shape.pop_back_val();
-    contiguousElementSizeBytes = contiguousSizeElements * elementSize;
+    fromStridesBytes.clear();
+    toStridesBytes.clear();
+    for (int64_t i = static_cast<int64_t>(fromStridesElements.size()) - 1; i > 0; --i) {
+        FailureOr<int64_t> fromStrideBytes =
+            computeByteStride(fromStridesElements[i], elementBitWidth);
+        FailureOr<int64_t> toStrideBytes = computeByteStride(toStridesElements[i], elementBitWidth);
+        if (failed(fromStrideBytes) || failed(toStrideBytes)) {
+            return failure();
+        }
+        fromStridesBytes.push_back(*fromStrideBytes);
+        toStridesBytes.push_back(*toStrideBytes);
+    }
+
+    int64_t contiguousSizeElements = shape.pop_back_val();
+    contiguousElementSizeBytes = getStorageSizeBytes(contiguousSizeElements, elementBitWidth);
 
     return success();
 }

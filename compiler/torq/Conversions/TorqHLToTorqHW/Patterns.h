@@ -57,6 +57,7 @@ typedef OpPattern<torq_hl::TransposeReshapeOp> TransposeReshapePattern;
 typedef OpPattern<torq_hl::Conv1DOp> Conv1DPattern;
 
 typedef OpPattern<torq_hl::FMAOp> FMAPattern;
+typedef OpPattern<torq_hl::ExpandWeightsOp> ExpandWeightsPattern;
 typedef OpPattern<torq_hl::FillOp> FillPattern;
 typedef OpPattern<torq_hl::ReduceOp> ReducePattern;
 typedef OpPattern<torq_hl::ScatterOp> ScatterPattern;
