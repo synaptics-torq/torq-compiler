@@ -1066,7 +1066,7 @@ SlicePrivate::SlicePrivate(const string &name) : _name(name) {
     LLVM_DEBUG(llvm::dbgs() << "- Kernel " << _name << " ----------------------------\n");
 }
 
-// Decompose number into two factors a, b both <= 0x7fff.
+// Decompose number into two factors a, b both <= kMaxFactor.
 // Returns {-1, -1} if no such factorization exists.
 std::pair<int64_t, int64_t> decomposeIntoTwoFactors(int64_t number) {
     const int64_t kMaxFactor = 0x7fff;
@@ -1076,8 +1076,7 @@ std::pair<int64_t, int64_t> decomposeIntoTwoFactors(int64_t number) {
     // number = i * j must have at least one factor less than or equal to sqrt(number).
     // Also, since kMaxFactor < number <= kMaxFactor * kMaxFactor, we know
     // sqrt(number) <= kMaxFactor.
-    for (int64_t i = div_ceil(number, kMaxFactor); i <= (int64_t)std::sqrt((double)number) + 1;
-         ++i) {
+    for (int64_t i = div_ceil(number, kMaxFactor); i <= std::sqrt((double)number) + 1; ++i) {
         if (number % i == 0) {
             int64_t j = number / i;
             if (j <= kMaxFactor) {
@@ -1287,16 +1286,14 @@ int SlicePrivate::addMemNdlDims(
             }
 
             // Sequential write to a dense subtensor
-            if (denseCnt > 0x7fff) {
-                auto cntPair = decomposeIntoTwoFactors(denseCnt);
-                assert(cntPair.first != -1 && "SDIM dense count is a prime number too large");
-                ndlDims.push_back({DimType::S, MemDimTag::X, cntPair.first, elementSize});
+            auto cntPair = decomposeIntoTwoFactors(denseCnt);
+            assert(cntPair.first != -1 && "SDIM dense count is a prime number too large");
+            // For optimal performance put the bigger factor in the X dimension
+            ndlDims.push_back({DimType::S, MemDimTag::X, cntPair.second, elementSize});
+            if (cntPair.first > 1) {
                 ndlDims.push_back(
-                    {DimType::S, MemDimTag::Y, cntPair.second, elementSize * cntPair.first}
+                    {DimType::S, MemDimTag::Y, cntPair.first, elementSize * cntPair.second}
                 );
-            }
-            else {
-                ndlDims.push_back({DimType::S, MemDimTag::X, denseCnt, elementSize});
             }
         }
         else if (sdimsShape.size() == 2 || sdimsShape.size() == 4) {
