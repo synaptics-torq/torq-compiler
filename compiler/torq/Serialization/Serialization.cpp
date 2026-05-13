@@ -13,6 +13,7 @@
 #include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqHw.h"
+#include "torq/Utils/TorqUtils.h"
 
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq_executable_def_builder.h"
@@ -162,13 +163,13 @@ class Serializer {
 
         auto bitWidth = data.getType().getElementTypeBitWidth();
         auto value = data.getSplatValue<IntegerAttr>();
-        int byteWidth = bitWidth / 8;
+        int byteWidth = torq::div_ceil(bitWidth, 8);
         SmallVector<T> dataVec(data.getNumElements(), value.getInt());
         dataRef = flatbuffers_uint8_vec_create(
-            builder, (const uint8_t *)dataVec.data(), data.size() * byteWidth
+            builder, (const uint8_t *)dataVec.data(), data.getNumElements() * byteWidth
         );
         if (!succeeded(dumpSegmentDescriptor(
-                0, true, xramAddress, dataVec.data(), dataVec.size_in_bytes(), false
+                0, true, xramAddress, dataVec.data(), data.getNumElements() * byteWidth, false
             ))) {
             return failure();
         }
@@ -341,13 +342,15 @@ LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
         auto elementType = data.getElementType();
         auto bitWidth = data.getType().getElementTypeBitWidth();
         if (elementType.isInteger()) {
+            // This only triggers for i4
             if (shouldPackSubByteIntegerBitWidth(bitWidth)) {
                 if (createPackedSubByteIntegerSegment(data, _builder, dataRef, xramAddress)
                         .failed()) {
                     return failure();
                 }
             }
-            else if (bitWidth == 8) {
+            // Todo: integrate i1 into previous case.
+            else if (bitWidth == 1 || bitWidth == 8) {
                 if (createISegment<uint8_t>(data, _builder, dataRef, xramAddress).failed()) {
                     return failure();
                 }
@@ -393,9 +396,11 @@ LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
             llvm::dbgs() << "*** Constant from splat: size = " << data.getNumElements() << " ***\n";
         });
 
+        // NOTE: torq::div_ceil() returns int32_t type which might overflow when we have a huge
+        // tensor. We should switch to llvm::divideCeil() which returns int64_t
         auto dataSize = shouldPackSubByteIntegerBitWidth(bitWidth)
                             ? computePackedSubByteIntegerSize(data.getNumElements(), bitWidth)
-                            : bitWidth / 8 * data.getNumElements();
+                            : torq::div_ceil(bitWidth, 8) * data.getNumElements();
 
         _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, dataSize, dataRef));
     }
@@ -725,7 +730,10 @@ iree_hal_torq_BufferDebugInfo_ref_t Serializer::createBufferDebugInfo(
 
     iree_hal_torq_ElementType_enum_t elementType;
 
-    if (buffer.getType().getElementType().isInteger(8)) {
+    if (buffer.getType().getElementType().isInteger(1)) {
+        elementType = iree_hal_torq_ElementType_I1;
+    }
+    else if (buffer.getType().getElementType().isInteger(8)) {
         elementType = iree_hal_torq_ElementType_I8;
     }
     else if (buffer.getType().getElementType().isInteger(16)) {

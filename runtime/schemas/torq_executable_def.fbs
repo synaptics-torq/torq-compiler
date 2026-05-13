@@ -61,7 +61,8 @@ enum ElementType : uint32 {
   F32 = 3,
   BF16 = 4,
   OTHER = 5,
-  I64 = 6
+  I64 = 6,
+  I1 = 7
 }
 
 // Debug information about buffers used in the program
