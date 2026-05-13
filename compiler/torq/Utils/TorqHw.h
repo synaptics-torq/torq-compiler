@@ -14,6 +14,9 @@ class TorqHw {
     // Get the hardware name
     std::string getName() const { return _name; }
 
+    // Get the hardware ID
+    uint32_t getHwId() const { return _hw_id; }
+
     // Get the hardware information as a string
     std::string getDescription() const { return _description; }
 
@@ -55,22 +58,23 @@ class TorqHw {
     double getDmaFactor() const { return _dmaFactor; }
 
     TorqHw(
-        std::string name, std::string description, size_t lramSize, size_t sliceCount,
-        size_t availableMemoryForTiling, std::string cssConfigName, std::string nssConfigName,
-        double dmaTheoreticalBytesPerCycle = 8.0, double dmaFactor = 1.0,
+        std::string name, uint32_t hw_id, std::string description, size_t lramSize,
+        size_t sliceCount, size_t availableMemoryForTiling, std::string cssConfigName,
+        std::string nssConfigName, double dmaTheoreticalBytesPerCycle = 8.0, double dmaFactor = 1.0,
         std::string hostTriple = "native", std::string hostCpu = "host",
         std::string hostCpuFeatures = "host"
     )
-        : _name(name), _description(description), _lramSize(lramSize), _sliceCount(sliceCount),
-          _availableMemoryForTiling(availableMemoryForTiling), _cssConfigName(cssConfigName),
-          _nssConfigName(nssConfigName), _hostTriple(hostTriple), _hostCpu(hostCpu),
-          _hostCpuFeatures(hostCpuFeatures),
+        : _name(name), _hw_id(hw_id), _description(description), _lramSize(lramSize),
+          _sliceCount(sliceCount), _availableMemoryForTiling(availableMemoryForTiling),
+          _cssConfigName(cssConfigName), _nssConfigName(nssConfigName), _hostTriple(hostTriple),
+          _hostCpu(hostCpu), _hostCpuFeatures(hostCpuFeatures),
           _dmaTheoreticalBytesPerCycle(dmaTheoreticalBytesPerCycle), _dmaFactor(dmaFactor) {}
 
     TorqHw() = default;
 
   private:
     std::string _name{};
+    uint32_t _hw_id{0};
     std::string _description{};
     std::string _version{};
     size_t _lramSize = 0;

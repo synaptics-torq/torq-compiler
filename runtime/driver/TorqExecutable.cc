@@ -650,12 +650,20 @@ iree_status_t TorqExecutable::initialize() {
   iree_status_t ret = iree_ok_status();
   std::unique_ptr<TorqDispatchEventLog> eventLog{nullptr};
 
+  auto executableDef = this->executableDef();
+  
+  auto runtimeVersion = ns(ExecutableDef_runtime_version_get(executableDef));
+
+  if (runtimeVersion != 1) {
+    return iree_make_status(IREE_STATUS_UNAVAILABLE, "executable runtime version %d does not match expected version %d", runtimeVersion, 1);
+  }
+
   if (TorqEventLog::isProfilingEnabled()) {
     eventLog.reset(TorqEventLog::get().startDispatch(executableName(), EventType::INIT));
   }
 
   TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
-  ret = compute_xram_footprint(executableDef(), &xram_base, &xram_size);
+  ret = compute_xram_footprint(executableDef, &xram_base, &xram_size);
   TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
 
   if (!iree_status_is_ok(ret)) {
@@ -677,6 +685,12 @@ iree_status_t TorqExecutable::initialize() {
       return iree_make_status(IREE_STATUS_INTERNAL, "failed to instantiate TorqHw");
   }
 
+  auto hwId = ns(ExecutableDef_hw_id_get(executableDef));
+
+  if (!torq_->isHwCompatible(hwId)) {
+      return iree_make_status(IREE_STATUS_UNAVAILABLE, "incompatible hardware, executable requires hw id %d", hwId);
+  }
+
   TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_HW_OPEN);
   bool opened = torq_->open();
   TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::INIT_HW_OPEN);
@@ -684,7 +698,6 @@ iree_status_t TorqExecutable::initialize() {
   if (!opened) {
       return iree_make_status(IREE_STATUS_INTERNAL, "failed to open TorqHw");
   }
-
 
   if (FLAG_torq_clear_memory) {
     TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_CLEAR_MEMORY);

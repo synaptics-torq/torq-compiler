@@ -69,6 +69,8 @@ class TorqHw {
     /// returns true if the hardware is currently acquired
     virtual bool isAcquired() const { return _isAcquired; }
 
+    virtual bool isHwCompatible(int32_t hwId) const { return true; }
+
     /// start device execution
     virtual bool start(uint32_t lramAddr);
     /// wait device to complete

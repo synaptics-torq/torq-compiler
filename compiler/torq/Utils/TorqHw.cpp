@@ -12,12 +12,14 @@ using namespace std;
 namespace mlir::syna::torq {
 
 llvm::SmallVector<TorqHw, 1> hwTypes = {TorqHw(
-    "SL2610", "Synaptics SL2610 SoC family", 512 * 1024, 2, 498 * 1024, "coral_v1", "nss_v1", 8,
-    0.65, "aarch64-unknown-linux-gnu", "generic", "+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse,+sve"
+    "SL2610", 0x0, "Synaptics SL2610 SoC family", 512 * 1024, 2, 498 * 1024, "coral_v1", "nss_v1",
+    8, 0.65, "aarch64-unknown-linux-gnu", "generic",
+    "+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse,+sve"
 )};
 
 #define TORQ_CUSTOM_FORMAT                                                                         \
-    "<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_features>"  \
+    "<hw_id>:<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_"   \
+    "features>"                                                                                    \
     "[:<dma_theoretical_throughput>[:<dma_factor>:<host_triple>:<host_cpu>:<host_cpu_features>]]"
 
 struct TorqHwParser : public llvm::cl::parser<TorqHw> {
@@ -55,22 +57,22 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
             );
         }
 
-        if (parts.size() == 5) {
+        if (parts.size() == 6) {
             parts.push_back("8"); // dma_theoretical_throughput default
         }
-        if (parts.size() == 6) {
+        if (parts.size() == 7) {
             parts.push_back("1.0"); // dma_factor default
         }
-        if (parts.size() == 7) {
+        if (parts.size() == 8) {
             parts.push_back("native"); // host triple default
         }
-        if (parts.size() == 8) {
+        if (parts.size() == 9) {
             parts.push_back("host"); // host cpu default
         }
-        if (parts.size() == 9) {
+        if (parts.size() == 10) {
             parts.push_back("host"); // host cpu features default
         }
-        if (parts.size() != 10) {
+        if (parts.size() != 11) {
             return O.error(ArgName, " custom hardware specification format: " TORQ_CUSTOM_FORMAT);
         }
 
@@ -79,8 +81,14 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
 
         size_t lram_size_kb = 0;
 
+        // check that hw_id is a valid number
+        uint32_t hw_id = 0;
+        if (parts[0].getAsInteger(0, hw_id)) {
+            return O.error(ArgName, " HW ID must be a valid number\n");
+        }
+
         // check that lram_size is a valid number
-        if (parts[0].getAsInteger(10, lram_size_kb)) {
+        if (parts[1].getAsInteger(10, lram_size_kb)) {
             return O.error(ArgName, " LRAM size must be a valid number\n");
         }
 
@@ -88,34 +96,35 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
 
         size_t slice_count;
 
-        if (parts[1].getAsInteger(10, slice_count)) {
+        if (parts[2].getAsInteger(10, slice_count)) {
             return O.error(ArgName, " Slice count must be a valid number\n");
         }
 
         size_t available_memory_for_tiling_kb;
 
-        if (parts[2].getAsInteger(10, available_memory_for_tiling_kb)) {
+        if (parts[3].getAsInteger(10, available_memory_for_tiling_kb)) {
             return O.error(ArgName, " Available memory for tiling must be a valid number\n");
         }
 
         size_t available_memory_for_tiling = available_memory_for_tiling_kb * 1024;
 
-        std::string cpu_config = parts[3].str();
-        std::string nss_config = parts[4].str();
+        std::string cpu_config = parts[4].str();
+        std::string nss_config = parts[5].str();
 
         double dma_theoretical_throughput;
-        if (parts[5].getAsDouble(dma_theoretical_throughput)) {
+        if (parts[6].getAsDouble(dma_theoretical_throughput)) {
             return O.error(ArgName, " DMA theoretical throughput must be a valid number\n");
         }
         double dma_factor;
-        if (parts[6].getAsDouble(dma_factor)) {
+        if (parts[7].getAsDouble(dma_factor)) {
             return O.error(ArgName, " DMA factor must be a valid number\n");
         }
-        std::string host_triple = parts[7].str();
-        std::string host_cpu = parts[8].str();
-        std::string host_cpu_features = parts[9].str();
+        std::string host_triple = parts[8].str();
+        std::string host_cpu = parts[9].str();
+        std::string host_cpu_features = parts[10].str();
 
         llvm::outs() << "Custom Torq Hardware Configuration:\n";
+        llvm::outs() << "  HW ID: " << hw_id << "\n";
         llvm::outs() << "  LRAM Size: " << lram_size << " bytes\n";
         llvm::outs() << "  Slice Count: " << slice_count << "\n";
         llvm::outs() << "  Available Memory for Tiling: " << available_memory_for_tiling
@@ -130,8 +139,8 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
         llvm::outs() << "  DMA Factor: " << dma_factor << "\n";
 
         Val = TorqHw(
-            name, description, lram_size, slice_count, available_memory_for_tiling, cpu_config,
-            nss_config, dma_theoretical_throughput, dma_factor, host_triple, host_cpu,
+            name, hw_id, description, lram_size, slice_count, available_memory_for_tiling,
+            cpu_config, nss_config, dma_theoretical_throughput, dma_factor, host_triple, host_cpu,
             host_cpu_features
         );
 
@@ -159,10 +168,11 @@ const TorqHw &TorqHw::get() {
 
         if (clEnableCSSForQemu) {
             instance = TorqHw(
-                clTorqHw.getName(), clTorqHw.getDescription(), clTorqHw.getLramSize(),
-                clTorqHw.getSliceCount(), clTorqHw.getAvailableMemoryForTiling(),
-                clTorqHw.getCSSConfigName() + "_qemu", clTorqHw.getNSSConfigName(),
-                clTorqHw.getDmaTheoreticalBytesPerCycle(), clTorqHw.getDmaFactor()
+                clTorqHw.getName(), clTorqHw.getHwId(), clTorqHw.getDescription(),
+                clTorqHw.getLramSize(), clTorqHw.getSliceCount(),
+                clTorqHw.getAvailableMemoryForTiling(), clTorqHw.getCSSConfigName() + "_qemu",
+                clTorqHw.getNSSConfigName(), clTorqHw.getDmaTheoreticalBytesPerCycle(),
+                clTorqHw.getDmaFactor()
             );
         }
         else {

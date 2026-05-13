@@ -12,6 +12,7 @@
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "torq/Utils/TorqHw.h"
 
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq_executable_def_builder.h"
@@ -1264,9 +1265,15 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
         return failure();
     }
 
+    auto hwId = TorqHw::get().getHwId();
+
+    // mark the file to ensure that models are not the same as v1.5 models even if
+    // that runtime doesn't check the version number
+    int32_t runtimeVersion = 1;
+
     iree_hal_torq_ExecutableDef_create_as_root(
         _builder, executableName, codeRef, bindingRef, *maybeRuntimeProgram, bufferDebugInfo,
-        *maybeHostCode
+        *maybeHostCode, runtimeVersion, hwId
     );
 
     return success();
