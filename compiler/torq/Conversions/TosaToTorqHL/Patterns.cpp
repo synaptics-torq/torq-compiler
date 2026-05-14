@@ -61,32 +61,47 @@ static bool checkOpIsInt8(Operation *op) {
     return true;
 }
 
-static LogicalResult getScaleFactor(tosa::RescaleOp &rescaleOp, double &scaleFactor) {
+LogicalResult getFromConst(Value value, ElementsAttr &attr) {
+    if (auto tosaConstOp = value.getDefiningOp<tosa::ConstOp>()) {
+        attr = tosaConstOp.getValues();
+        return success();
+    }
+    // Fall back to arith.constant
+    if (auto arithConstOp = value.getDefiningOp<arith::ConstantOp>()) {
+        attr = mlir::cast<mlir::ElementsAttr>(arithConstOp.getValue());
+        return success();
+    }
+    return failure();
+}
+
+template <typename T> FailureOr<SmallVector<T>> getCst(Value val) {
+    ElementsAttr attr;
+    if (failed(getFromConst(val, attr))) {
+        return failure();
+    }
+    return llvm::to_vector(llvm::map_range(attr.getValues<IntegerAttr>(), [](IntegerAttr a) -> T {
+        return static_cast<T>(a.getInt());
+    }));
+}
+
+static LogicalResult getScaleFactor(tosa::RescaleOp rescaleOp, double &scaleFactor) {
     if (rescaleOp.getPerChannel()) {
         return failure();
     }
 
-    auto shiftVal = rescaleOp.getShift();
-    DenseElementsAttr shiftElem;
-    if (!matchPattern(shiftVal, m_Constant(&shiftElem))) {
+    auto maybeShift = getCst<int32_t>(rescaleOp.getShift());
+    if (failed(maybeShift)) {
         llvm::errs() << "shift value must be constant in RescaleOp\n";
         return failure();
     }
-    int32_t shift = shiftElem.getValues<IntegerAttr>()[0].getInt();
 
-    DenseElementsAttr multiplierElems;
-    if (!matchPattern(rescaleOp.getMultiplier(), m_Constant(&multiplierElems))) {
+    auto maybeMultiplier = getCst<int32_t>(rescaleOp.getMultiplier());
+    if (failed(maybeMultiplier)) {
         llvm::errs() << "multiplier value must be constant in RescaleOp\n";
         return failure();
     }
 
-    llvm::SmallVector<int32_t> multiplierValues = llvm::to_vector(llvm::map_range(
-        multiplierElems.getValues<IntegerAttr>(),
-        [](IntegerAttr attr) -> int32_t { return static_cast<int32_t>(attr.getInt()); }
-    ));
-
-    scaleFactor = static_cast<double>(multiplierValues[0]) / (1l << shift);
-
+    scaleFactor = static_cast<double>((*maybeMultiplier)[0]) / (1l << (*maybeShift)[0]);
     return success();
 }
 
@@ -139,29 +154,6 @@ Value fuseInputRescaleIfPossible(
     return input;
 }
 
-LogicalResult getFromConst(Value value, ElementsAttr &attr) {
-    tosa::ConstOp constOp = mlir::dyn_cast<tosa::ConstOp>(value.getDefiningOp());
-    if (!constOp) {
-        return failure();
-    }
-    attr = constOp.getValues();
-
-    return success();
-}
-
-LogicalResult getFromArithConst(Value value, ElementsAttr &attr) {
-    if (auto arithConstOp = mlir::dyn_cast<arith::ConstantOp>(value.getDefiningOp())) {
-        attr = mlir::cast<mlir::ElementsAttr>(arithConstOp.getValue());
-        return success();
-    }
-    // Fall back to tosa.const
-    if (auto tosaConstOp = mlir::dyn_cast<tosa::ConstOp>(value.getDefiningOp())) {
-        attr = tosaConstOp.getValues();
-        return success();
-    }
-    return failure();
-}
-
 // Weights converted to
 // Example 32x4x4x32 with stride=[2,2]
 // Expand 32x2x2x2x2x32
@@ -192,7 +184,7 @@ LogicalResult reverseTConvWeights(
         // (int8, int16, bf16, etc.).  Produces a pre-computed arith.constant
         // so downstream passes never see a tensor.pad operation.
         ElementsAttr weightAttr;
-        if (failed(getFromArithConst(weights, weightAttr))) {
+        if (failed(getFromConst(weights, weightAttr))) {
             return rewriter.notifyMatchFailure(srcOp, "Cannot pad non-constant weights");
         }
         auto weightValues = weightAttr.getValues<Attribute>();
@@ -326,18 +318,6 @@ std::vector<int32_t> convertAPIntRangeToInt64Vector(Iterator begin, Iterator end
     return result;
 }
 
-template <typename T> FailureOr<SmallVector<T>> getCst(Value val) {
-    auto cst = val.getDefiningOp<tosa::ConstOp>();
-    if (!cst) {
-        return failure();
-    }
-    auto cstValues = cst.getValues().getValues<IntegerAttr>();
-
-    return llvm::to_vector(llvm::map_range(cstValues, [](IntegerAttr attr) -> T {
-        return static_cast<T>(attr.getInt());
-    }));
-}
-
 // tosa.transpose_conv2d
 // Converts:
 // Conv + DepthToSpace
@@ -410,7 +390,7 @@ static LogicalResult fuseWithRescaleOp(
     }
 
     ElementsAttr weightValues;
-    if (failed(getFromArithConst(weights, weightValues))) {
+    if (failed(getFromConst(weights, weightValues))) {
         return rewriter.notifyMatchFailure(tconvOp, "TConv weights not found");
     }
     std::vector<int8_t> weightVec(
@@ -836,27 +816,17 @@ struct TableOpConversion : public OpConversionPattern<tosa::TableOp> {
         // Get input operands.
         Value input = adaptor.getInput1();
 
-        // Retrieve the op that defines the table tensor.
-        Operation *definingOp = tableTensor.getDefiningOp();
-        if (!definingOp) {
-            return failure();
+        ElementsAttr attr;
+
+        if (failed(getFromConst(tableTensor, attr))) {
+            return rewriter.notifyMatchFailure(srcOp, "Cannot lower non-constant table");
         }
 
-        DenseElementsAttr attr;
-        if (auto constOp = mlir::dyn_cast<tosa::ConstOp>(definingOp)) {
-            attr = mlir::dyn_cast<DenseElementsAttr>(constOp.getValues());
-        }
-        else if (auto arithConst = mlir::dyn_cast<arith::ConstantOp>(definingOp)) {
-            attr = mlir::dyn_cast<DenseElementsAttr>(arithConst.getValue());
-        }
-        else {
-            return failure();
-        }
         std::vector<APInt> bias = {APInt(32, 0, /*isSigned=*/true)};
         std::vector<APInt> scale = {APInt(32, 1, /*isSigned=*/true)};
 
         SmallVector<int32_t> convertedValues;
-        auto elementType = attr.getType().getElementType();
+        auto elementType = attr.getElementType();
         if (elementType.isInteger(16)) {
             auto values = attr.getValues<int16_t>();
             for (size_t i = 0; i < 512; i++) {
@@ -1038,8 +1008,8 @@ struct ScatterOpConversion : public OpConversionPattern<tosa::ScatterOp> {
 
         ElementsAttr valuesAttr;
 
-        if (failed(getFromArithConst(indices, valuesAttr))) {
-            return failure();
+        if (failed(getFromConst(indices, valuesAttr))) {
+            return rewriter.notifyMatchFailure(srcOp, "Cannot scatter non-constant indices");
         }
 
         auto values = valuesAttr.getValues<int32_t>();
