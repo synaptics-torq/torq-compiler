@@ -8,6 +8,7 @@
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/TorqMatcherBase.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -30,59 +31,23 @@ class GeluOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
-
-        auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
-        if (!yieldOp) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Expected a linalg.yield terminator for GeluOpPattern"
-            );
+        auto isBF16 = [](Type t) { return t.isBF16(); };
+        // GELU body: yield(mul(mul(add(tanh(...), _), mul(add(mul(pow(x,3), _), x), _)), _))
+        TorqStructuredOpMatcher<> matcher;
+        if (!matcher.numInputs(1)
+                 .numOutputs(1)
+                 .inputElementType(0, isBF16)
+                 .yieldChain<
+                     arith::MulFOp, arith::MulFOp, arith::AddFOp, math::TanhOp, arith::MulFOp,
+                     arith::AddFOp, arith::MulFOp, math::FPowIOp>()
+                 .match(srcOp)) {
+            return rewriter.notifyMatchFailure(srcOp, "not a GELU pattern");
         }
-
-        auto yieldValues = yieldOp.getValues();
-        if (yieldValues.size() != 1) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Expected exactly one yield value for GeluOpPattern"
-            );
-        }
-
-        auto err = [&]() {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Expected defining operations for yield operand to be ."
-            );
-        };
-        auto mulf4 = yieldValues[0].getDefiningOp<arith::MulFOp>();
-        if (!mulf4)
-            return err();
-        auto mulf3 = mulf4.getRhs().getDefiningOp<arith::MulFOp>();
-        if (!mulf3)
-            return err();
-        auto addf2 = mulf3.getLhs().getDefiningOp<arith::AddFOp>();
-        if (!addf2)
-            return err();
-        auto tanh = addf2.getLhs().getDefiningOp<math::TanhOp>();
-        if (!tanh)
-            return err();
-        auto mulf2 = tanh.getOperand().getDefiningOp<arith::MulFOp>();
-        if (!mulf2)
-            return err();
-        auto addf1 = mulf2.getLhs().getDefiningOp<arith::AddFOp>();
-        if (!addf1)
-            return err();
-        auto mulf1 = addf1.getRhs().getDefiningOp<arith::MulFOp>();
-        if (!mulf1)
-            return err();
-        auto fpowi = mulf1.getLhs().getDefiningOp<math::FPowIOp>();
-        if (!fpowi)
-            return err();
 
         auto input = srcOp.getInputs()[0];
-        auto bf16TType = dyn_cast<RankedTensorType>(input.getType());
+        auto bf16TType = cast<RankedTensorType>(input.getType());
         auto i16TType = RankedTensorType::get(bf16TType.getShape(), rewriter.getIntegerType(16));
         auto rank = bf16TType.getRank();
-
-        if (!bf16TType.getElementType().isBF16()) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected bf16 output");
-        }
 
         auto fpConst = [&](float fp) {
             return arith::ConstantOp::create(

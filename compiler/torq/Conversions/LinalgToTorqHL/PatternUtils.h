@@ -144,6 +144,13 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp);
 // Return true iff op is already marked as part of a fuse group.
 bool isMarkedFuseGroup(Operation *op);
 
+// `TorqStructuredOpMatcher::addPredicate` helper: reject ops already marked
+// as part of a fuse group when `active` is true (typically `_markFuseGroups`).
+// Used to gate discovery-mode patterns from re-marking already-marked ops.
+inline auto notMarkedFuseGroupIf(bool active) {
+    return [active](auto op) { return !(active && isMarkedFuseGroup(op.getOperation())); };
+}
+
 // Return true iff op1 and op2 share at least one fuse group.
 bool checkShareFuseGroup(Operation *op1, Operation *op2);
 

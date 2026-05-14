@@ -11,6 +11,7 @@
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
+#include "torq/Utils/TorqMatcherBase.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
@@ -447,6 +448,47 @@ static bool isLinalgDW(Operation *op) {
     return llvm::isa<linalg::DepthwiseConv2DNhwcHwcOp, linalg::DepthwiseConv2DNchwChwOp>(op);
 }
 
+namespace {
+
+// Dilation is intentionally not checked here: dilations > 1 are folded into
+// the weight tensor by `getDilatedWts` later in the rewrite phase.
+static auto depthwiseStridesCapable() {
+    return [](auto op) {
+        if (!isLinalgDW(op.getOperation())) {
+            return true;
+        }
+        auto strides = op.getStrides().template getValues<int64_t>();
+        return !(strides[1] != 1 && (strides[0] > 2 || strides[0] != strides[1]));
+    };
+}
+
+// FIXME: float Conv2D with height=1 + non-depthwise is currently dispatched
+// to Conv1DPattern by rejecting the match here. Remove this guard once Conv2D
+// pattern handles the height=1 case directly.
+static auto notConv1DNonDepthwise(int channelDim) {
+    return [channelDim](auto op) {
+        auto inTy = llvm::cast<RankedTensorType>(op.image().getType());
+        if (!inTy.getElementType().isFloat() || inTy.getRank() != 4) {
+            return true;
+        }
+        const int heightDim = (channelDim == 3) ? 1 : 2;
+        return !(inTy.getShape()[heightDim] == 1 && !isLinalgDW(op.getOperation()));
+    };
+}
+
+template <typename MatchFn> static auto shapeMatchOrPass(MatchFn matchFn) {
+    return [matchFn](auto op) {
+        if (!matchFn) {
+            return true;
+        }
+        auto inShape = llvm::cast<RankedTensorType>(op.image().getType()).getShape();
+        auto wShape = llvm::cast<RankedTensorType>(op.filter().getType()).getShape();
+        return matchFn(inShape, wShape);
+    };
+}
+
+} // namespace
+
 template <class LinalgConvOp, class TorqConvOp>
 struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
   private:
@@ -480,42 +522,29 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         // 2) build fusion plan and extract bias/scale/zp metadata,
         // 3) normalize input/weights/layout and emit Torq Conv2D/DepthwiseConv2D.
 
-        if (_markFuseGroups && isMarkedFuseGroup(convOp)) {
-            return rewriter.notifyMatchFailure(convOp, "Already marked");
+        TorqStructuredOpMatcher<LinalgConvOp> matcher;
+        if (!matcher.addPredicate(notMarkedFuseGroupIf(_markFuseGroups))
+                 .addPredicate(depthwiseStridesCapable())
+                 .addPredicate(notConv1DNonDepthwise(_channelDim))
+                 .addPredicate(shapeMatchOrPass(_matchFn))
+                 .match(convOp)) {
+            return rewriter.notifyMatchFailure(convOp, "Conv2D match failed");
         }
 
+        // Recover values used by the rewrite half.
         bool isDepthwise = isLinalgDW(convOp.getOperation());
-        // Todo: Capability check for depthwise conv should be moved to a helper function
-        // Check for depthwise conv specific constraints
-        if (isDepthwise) {
-
-            auto strides = convOp.getStrides().template getValues<int64_t>();
-            // hk kernel
-            if (strides[1] != 1 && (strides[0] > 2 || strides[0] != strides[1])) {
-                return rewriter.notifyMatchFailure(
-                    convOp, "asymmetric strides or stride > 2 not supported by DW"
-                );
-            }
-            // Dilation check removed - now handled by weight expansion below
-            // (dilations > 1 will be converted to dilation = 1 via weight expansion)
-        }
-
-        // Get the input, weights, and output of the original operation
         Value input = convOp.image();
         Value weights = convOp.filter();
         Value output = convOp.getResultTensors()[0];
 
         auto inputType = llvm::cast<RankedTensorType>(input.getType());
         auto shape = inputType.getShape();
-        auto weightType = llvm::cast<RankedTensorType>(weights.getType());
-        auto weightShape = weightType.getShape();
         // Layout: NHWC → height is dim 1,  NCHW → height is dim 2
         const int heightDim = (_channelDim == 3) ? 1 : 2;
         bool isConv1D = inputType.getElementType().isFloat() &&
                         (inputType.getRank() == 4 && shape[heightDim] == 1);
 
         bool isDW1DStride1 = false;
-        // Check if this is a depthwise 1D case
         if (isConv1D && isDepthwise) {
             isDW1DStride1 = checkDW1DStride1(convOp, weights, _channelDim);
             LLVM_DEBUG(
@@ -523,28 +552,15 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             );
         }
 
-        if (isConv1D && !isDepthwise) {
-            // FIXME : Handle non-depthwise Conv1D case separately for now
-            LLVM_DEBUG(llvm::dbgs() << "Rewriting Conv2D (1D) to Conv1D\n");
-            return rewriter.notifyMatchFailure(convOp, "Conv2D with height=1 ");
-        }
         int groups = isDW1DStride1 ? inputType.getShape()[_channelDim] : 1;
         const auto loc = convOp.getLoc();
 
-        // First, check if input has strided insert_slice pattern (but don't convert yet)
         bool hasStridedInsertSlice = isStridedInsertSlice(input, isDW1DStride1);
         LLVM_DEBUG({
             if (hasStridedInsertSlice) {
                 llvm::dbgs() << "Input has strided insert_slice pattern\n";
             }
         });
-
-        // Check if we can support this layer
-        if (_matchFn && !_matchFn(shape, weightShape)) {
-            return rewriter.notifyMatchFailure(
-                convOp, "Conv does not match expected kernel dimension or padding"
-            );
-        }
 
         DominanceInfo dom(convOp->template getParentOfType<FunctionOpInterface>());
         FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output);

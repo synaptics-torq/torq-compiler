@@ -8,6 +8,7 @@
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/TorqMatcherBase.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -30,47 +31,20 @@ class SigmoidOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
-
-        auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
-        if (!yieldOp) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Expected a linalg.yield terminator for SigmoidOpPattern"
-            );
+        auto isBF16 = [](Type t) { return t.isBF16(); };
+        // Sigmoid body: yield(div(_, add(exp(neg(x)), _)))
+        TorqStructuredOpMatcher<> matcher;
+        if (!matcher.numInputs(1)
+                 .numOutputs(1)
+                 .inputElementType(0, isBF16)
+                 .yieldChain<arith::DivFOp, arith::AddFOp, math::ExpOp, arith::NegFOp>()
+                 .match(srcOp)) {
+            return rewriter.notifyMatchFailure(srcOp, "not a sigmoid pattern");
         }
-
-        auto yieldValues = yieldOp.getValues();
-        if (yieldValues.size() != 1) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Expected exactly one yield value for SigmoidOpPattern"
-            );
-        }
-
-        auto errMsg = "Expected defining operations for yield operand to be arith.negf, math.exp, "
-                      "arith.addf, and arith.divf.";
-
-        auto divfOp = yieldValues[0].getDefiningOp<arith::DivFOp>();
-        if (!divfOp)
-            return rewriter.notifyMatchFailure(srcOp, errMsg);
-
-        auto addfOp = divfOp.getRhs().getDefiningOp<arith::AddFOp>();
-        if (!addfOp)
-            return rewriter.notifyMatchFailure(srcOp, errMsg);
-
-        auto expOp = addfOp.getLhs().getDefiningOp<math::ExpOp>();
-        if (!expOp)
-            return rewriter.notifyMatchFailure(srcOp, errMsg);
-
-        auto negfOp = expOp.getOperand().getDefiningOp<arith::NegFOp>();
-        if (!negfOp)
-            return rewriter.notifyMatchFailure(srcOp, errMsg);
 
         auto input = srcOp.getInputs()[0];
-        auto tType = dyn_cast<RankedTensorType>(input.getType());
+        auto tType = cast<RankedTensorType>(input.getType());
         auto eType = tType.getElementType();
-
-        if (!eType.isBF16()) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected bf16 output");
-        }
 
         auto shape = tType.getShape();
         auto i16 = rewriter.getIntegerType(16);

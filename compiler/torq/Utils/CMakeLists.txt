@@ -32,9 +32,10 @@ iree_cc_library(
     ExecutorAssignment.h
     EncodingUtils.h
     ShapeUtils.h
-    StorageUtils.h
+    TorqMatcherBase.h
   DEPS
     MLIRIR
+    IREEDialectsTransforms
     iree::target::torq::Conversions::TorqHLToLinalg::TorqHLToLinalg
     iree::target::torq::Dialect::TorqHL::Dialect
     iree::target::torq::Dialect::TorqHW::Dialect

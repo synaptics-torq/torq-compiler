@@ -11,6 +11,7 @@
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
+#include "torq/Utils/TorqMatcherBase.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
@@ -38,6 +39,24 @@
 #define DEBUG_TYPE "linalg-torq-conv1d-pattern"
 
 namespace mlir::syna::torq {
+
+namespace {
+
+// Height dim depends on layout:
+//   NHWC [N, H, W, C] → H is at index 1
+//   NCHW [N, C, H, W] → H is at index 2
+static auto conv1DHeight() {
+    return [](auto op) {
+        auto inTy = llvm::cast<RankedTensorType>(op.image().getType());
+        if (inTy.getRank() != 4) {
+            return false;
+        }
+        const int heightDim = llvm::isa<linalg::Conv2DNhwcHwcfOp>(op.getOperation()) ? 1 : 2;
+        return inTy.getShape()[heightDim] == 1;
+    };
+}
+
+} // namespace
 
 template <typename LinalgConv>
 struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
@@ -169,15 +188,13 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
 
     LogicalResult matchAndRewrite(LinalgConv convOp, PatternRewriter &rewriter) const override {
 
-        if (!isa<linalg::Conv2DNhwcHwcfOp>(convOp) && !isa<linalg::Conv2DNchwFchwOp>(convOp)) {
-            return rewriter.notifyMatchFailure(
-                convOp, "Only linalg::Conv2DNhwcHwcfOp and linalg::Conv2DNchwChwOp can be "
-                        "rewritten as Conv1D"
-            );
-            return success();
-        }
-        if (_markFuseGroups && isMarkedFuseGroup(convOp)) {
-            return rewriter.notifyMatchFailure(convOp, "Already marked");
+        auto isFloat = [](Type t) { return t.isFloat(); };
+        TorqStructuredOpMatcher<LinalgConv> matcher;
+        if (!matcher.addPredicate(notMarkedFuseGroupIf(_markFuseGroups))
+                 .inputElementType(0, isFloat)
+                 .addPredicate(conv1DHeight())
+                 .match(convOp)) {
+            return rewriter.notifyMatchFailure(convOp, "Conv1D match failed");
         }
 
         // TODO:
@@ -193,26 +210,10 @@ struct Conv2DToTorqHlConv1DPattern : public OpRewritePattern<LinalgConv> {
         auto strideValue = stridesAttr.getValues<int64_t>()[1];
 
         auto inputType = mlir::cast<RankedTensorType>(input.getType());
-
-        if (!inputType.getElementType().isFloat()) {
-            return rewriter.notifyMatchFailure(
-                convOp, "Only floating point types are supported for Conv1D conversion"
-            );
-        }
-
-        auto inputShape = inputType.getShape();
         auto outputType = cast<RankedTensorType>(output.getType());
         auto outElemType = outputType.getElementType();
         bool isInt = outElemType.isInteger();
         int outChannels = outputType.getShape()[_channelDim];
-
-        // For 1D convolution detection, we need input height (H) to be 1
-        // NCHW format: [N, C, H, W], H is at index 2
-        // NHWC format: [N, H, W, C], H is at index 1
-        const int inputHDim = isa<linalg::Conv2DNhwcHwcfOp>(convOp) ? 1 : 2;
-        if (!(inputType.getRank() == 4 && inputShape[inputHDim] == 1)) {
-            return rewriter.notifyMatchFailure(convOp, "not conv1d");
-        }
 
         // Get dimensions based on layout format
         int64_t batch = inputType.getShape()[0];
