@@ -9,6 +9,7 @@ iree_cc_library(
     Utils
   SRCS
     MemoryUtils.cpp
+    PassProgressUtils.cpp
     TorqUtils.cpp
     CodeSizeUtils.cpp
     ConversionUtils.cpp
@@ -22,6 +23,7 @@ iree_cc_library(
     StorageUtils.cpp
   HDRS
     MemoryUtils.h
+    PassProgressUtils.h
     TorqUtils.h
     CodeSizeUtils.h
     ConversionUtils.h

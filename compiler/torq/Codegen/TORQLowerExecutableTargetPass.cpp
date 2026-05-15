@@ -15,6 +15,7 @@
 #include "torq/Transforms/Linalg/Passes.h"
 #include "torq/Transforms/TorqHL/Passes.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "torq/Utils/PassProgressUtils.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -35,6 +36,12 @@
 #include <algorithm>
 
 #define DEBUG_TYPE "iree-torq-lower-executable-target-pass"
+
+static llvm::cl::opt<bool> clShowPassProgress(
+    "torq-show-pass-progress",
+    llvm::cl::desc("Print progress messages for each pass in the Torq pipeline"),
+    llvm::cl::init(false)
+);
 
 using namespace mlir::iree_compiler;
 
@@ -506,16 +513,35 @@ struct TORQLowerExecutableTargetPass
             return signalPassFailure();
         }
 
+        std::string dispatchName = "unknown";
+        if (Operation *parent = getOperation()->getParentOp()) {
+            if (auto symOp = dyn_cast<mlir::SymbolOpInterface>(parent))
+                dispatchName = symOp.getName().str();
+            else if (auto symAttr = parent->getAttrOfType<StringAttr>("sym_name"))
+                dispatchName = symAttr.str();
+        }
+        llvm::errs() << "[TORQ] Lowering dispatch: " << dispatchName << "\n";
+
         // distribute the work to the workgroups (we have only one at the moment)
-        OpPassManager distributeToWorkgroupsPipeline(maybeDispatchFuncOp->getOperationName());
+        PassManager distributeToWorkgroupsPipeline(
+            getOperation().getContext(), maybeDispatchFuncOp->getOperationName()
+        );
+        if (clShowPassProgress) {
+            distributeToWorkgroupsPipeline.addInstrumentation(
+                std::make_unique<torq::ProgressLogger>(dispatchName + "::workgroups")
+            );
+        }
         distributeToWorkgroupsPipeline.addPass(createTileAndDistributeToWorkgroupsPass());
-        if (failed(runPipeline(distributeToWorkgroupsPipeline, *maybeDispatchFuncOp))) {
+        if (failed(distributeToWorkgroupsPipeline.run(*maybeDispatchFuncOp))) {
             return signalPassFailure();
         }
 
-        OpPassManager pipeline(getOperation().getOperationName());
+        PassManager pipeline(getOperation().getContext(), getOperation().getOperationName());
+        if (clShowPassProgress) {
+            pipeline.addInstrumentation(std::make_unique<torq::ProgressLogger>(dispatchName));
+        }
         addAllPasses(pipeline);
-        if (failed(runPipeline(pipeline, getOperation()))) {
+        if (failed(pipeline.run(getOperation()))) {
             return signalPassFailure();
         }
 
