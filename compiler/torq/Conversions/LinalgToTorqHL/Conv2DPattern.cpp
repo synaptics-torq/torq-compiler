@@ -564,7 +564,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
 
         DominanceInfo dom(convOp->template getParentOfType<FunctionOpInterface>());
         FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output);
-        if (failed(fusionPlanOr)) {
+        if (failed(fusionPlanOr) || !fusionPlanOr->isFusable()) {
             return rewriter.notifyMatchFailure(
                 convOp, "Failed to compute fusion group for per-channel add"
             );
