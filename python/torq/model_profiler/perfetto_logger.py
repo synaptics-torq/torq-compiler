@@ -731,6 +731,148 @@ class PropertyTrack:
     uuid: Optional[str] = None
 
 
+
+def _get_compile_time_range(dispatch, start_op, end_op):
+    """Get compile time range from start/end operations. Returns (start_ns, end_ns, duration_ns) or None."""
+    start_info = dispatch.get_compile_time_info(start_op)
+    end_info = dispatch.get_compile_time_info(end_op)
+    if start_info is None or end_info is None:
+        return None
+    start_ns = start_info.start_time_ns
+    end_ns = end_info.end_time_ns
+    if start_ns is None or end_ns is None:
+        return None
+    duration_ns = end_ns - start_ns
+    if duration_ns <= 0:
+        return None
+    return start_ns, end_ns, duration_ns
+
+
+def _emit_compile_event(trace_writer, tuuid, details, event_start, event_end, async_duration_ns=None):
+    """Emit a compile-time event, splitting into active + WAITING if async duration is shorter."""
+    duration = event_end - event_start
+    if async_duration_ns is not None and async_duration_ns < duration:
+        ready_time = event_start + async_duration_ns
+        trace_writer.add_event(PerfettoEvent(tuuid, details, event_start, ready_time))
+        trace_writer.add_event(PerfettoEvent(tuuid, "WAITING", ready_time, event_end))
+    else:
+        trace_writer.add_event(PerfettoEvent(tuuid, details, event_start, event_end))
+
+
+def _log_compile_time_traces(trace_writer, dispatch):
+    """Log compile-time estimates aligned to runtime start times as Perfetto traces."""
+    if not dispatch.compile_operation_times_ns:
+        return
+
+    # --- NPU (Compile): detailed per-workunit view ---
+    compile_npu_process = trace_writer.add_process_descriptor("NPU Task Breakdown")
+
+    compile_workunits_track_names = OrderedDict([
+        (torq.debug_info.NssProgramWorkUnitDebugInfo, ["NSS Programs (Compile)"]),
+        (torq.debug_info.NssCfgWorkUnitDebugInfo, ["NSS CFG Tasks (Compile)"]),
+        (torq.debug_info.CdmaWorkUnitDebugInfo, ["CDMA (Compile)"]),
+        (torq.debug_info.DmaInWorkUnitDebugInfo, ["NDMA In (Compile)"]),
+        (torq.debug_info.DmaOutWorkUnitDebugInfo, ["NDMA Out (Compile)"]),
+        (torq.debug_info.SliceProgramWorkUnitDebugInfo, ["Slice 0 (Compile)", "Slice 1 (Compile)"]),
+        (torq.debug_info.CssProgramWorkUnitDebugInfo, ["CSS (Compile)"]),
+    ])
+
+    compile_workunits_tracks = {}
+    for workunit_type, track_names in compile_workunits_track_names.items():
+        for track_name in track_names:
+            tuuid = trace_writer.add_thread_descriptor(compile_npu_process, track_name)
+            compile_workunits_tracks.setdefault(workunit_type, []).append(tuuid)
+
+    # Pre-index NSS program workunits with their compile time ranges and build child->parent map
+    nss_program_lookup = []  # (workunit, compile_start, compile_end)
+    parent_nss_map = {}  # child_workunit -> (parent_nss_wu, parent_compile_start)
+
+    for wu in dispatch.workunits:
+        if not isinstance(wu, NssProgramWorkUnitDebugInfo):
+            continue
+        time_range = _get_compile_time_range(dispatch, wu.start_operation, wu.end_operation)
+        if time_range is not None and wu.start_time_ns is not None:
+            nss_program_lookup.append((wu, time_range[0], time_range[1]))
+            # Index all related workunits for O(1) parent lookup
+            for related_wu in wu.related_workunits:
+                parent_nss_map[related_wu] = (wu, time_range[0])
+
+    for workunit in dispatch.workunits:
+        # NSS Programs: place directly at runtime start
+        if isinstance(workunit, NssProgramWorkUnitDebugInfo):
+            time_range = _get_compile_time_range(dispatch, workunit.start_operation, workunit.end_operation)
+            if time_range is None:
+                continue
+            compile_start, _, compile_duration = time_range
+            runtime_start = workunit.start_time_ns
+            if runtime_start is None:
+                continue
+
+            track_uuids = compile_workunits_tracks.get(type(workunit))
+            if track_uuids:
+                compile_info = dispatch.get_compile_time_info(workunit.start_operation)
+                async_dur = compile_info.async_duration_ns if compile_info else None
+                _emit_compile_event(trace_writer, track_uuids[0], workunit.pretty_print,
+                                    runtime_start, runtime_start + compile_duration, async_dur)
+            continue
+
+        # NSS-managed workunits: get timing from parent nss_task op
+        if isinstance(workunit, torq.debug_info.NssManagedWorkUnitDebugInfo):
+            has_parent_start = workunit.start_operation is not None and hasattr(workunit.start_operation, 'parent')
+            has_parent_end = workunit.end_operation is not None and hasattr(workunit.end_operation, 'parent')
+            if not has_parent_start or not has_parent_end:
+                continue
+            time_range = _get_compile_time_range(dispatch, workunit.start_operation.parent,
+                                                 workunit.end_operation.parent)
+            if time_range is None:
+                continue
+            compile_start, _, compile_duration = time_range
+
+            parent_entry = parent_nss_map.get(workunit)
+            if parent_entry is None:
+                continue
+            parent_nss, parent_nss_compile_start = parent_entry
+            if parent_nss.start_time_ns is None:
+                continue
+
+        elif isinstance(workunit, torq.debug_info.NssCfgWorkUnitDebugInfo):
+            time_range = _get_compile_time_range(dispatch, workunit.start_operation, workunit.end_operation)
+            if time_range is None:
+                continue
+            compile_start, compile_end, compile_duration = time_range
+
+            # Find parent NSS program by compile range containment + dispatch match
+            parent_nss = None
+            parent_nss_compile_start = None
+            for (nss_wu, nss_cs, nss_ce) in nss_program_lookup:
+                if nss_cs <= compile_start and compile_end <= nss_ce and workunit.dispatch is nss_wu.dispatch:
+                    parent_nss = nss_wu
+                    parent_nss_compile_start = nss_cs
+                    break
+
+            if parent_nss is None or parent_nss.start_time_ns is None or parent_nss_compile_start is None:
+                continue
+        else:
+            continue
+
+        # Place at runtime_start + offset within parent's compile timeline
+        offset_within_nss = compile_start - parent_nss_compile_start
+        event_start = parent_nss.start_time_ns + offset_within_nss
+        event_end = event_start + compile_duration
+
+        track_uuids = compile_workunits_tracks.get(type(workunit))
+        if track_uuids is None:
+            continue
+
+        try:
+            tuuid = track_uuids[workunit.executor_instance_id]
+        except IndexError:
+            continue
+
+        compile_info = dispatch.get_compile_time_info(workunit.start_operation)
+        async_dur = compile_info.async_duration_ns if compile_info else None
+        _emit_compile_event(trace_writer, tuuid, workunit.pretty_print, event_start, event_end, async_dur)
+
 def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
     """
     Log pre-parsed runtime profile data to Perfetto trace.
@@ -761,7 +903,7 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
     workunits_tracks = {}
 
     host_process = trace_writer.add_process_descriptor("Host")
-    npu_process = trace_writer.add_process_descriptor("NPU")
+    npu_process = trace_writer.add_process_descriptor("NPU Task Breakdown")
 
     # create the tracks for all workunits
     for workunit_type, track_names in workunits_track_names.items():
@@ -778,7 +920,7 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
 
 
     # create tracks of all busy states
-    busy_track_process = trace_writer.add_process_descriptor("NPU Usage")
+    busy_track_process = trace_writer.add_process_descriptor("NPU Task Measurements")
 
 
     busy_tracks = [
@@ -846,6 +988,8 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
                 if usage_attr:                    
                     busy_event = PerfettoEvent(busy_track.uuid, details, start_time_ns, end_time_ns)
                     trace_writer.add_event(busy_event)
+
+    _log_compile_time_traces(trace_writer, dispatch)
 
     original_lines_process = trace_writer.add_process_descriptor("Compiler Input Locations")
 
@@ -1088,8 +1232,6 @@ def convert_to_perfetto(debug_dir, pb_path, view_name="Compile Profile"):
         trace_writer = PerfettoTraceWriter(pb_path / (dispatch_name + ".pb"))
     
         dispatch = debug_info.get_dispatch(dispatch_name)
-
-        # print(f"Processing dispatch: {dispatch_name} with {len(dispatch.workunits)} workunits")
 
         # compute the timestamps for action and tasks based on the cycle counts and clock frequency
         dispatch.infer_runtime_profile_from_cycles()

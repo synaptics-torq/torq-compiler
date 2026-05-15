@@ -627,6 +627,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     
     # Enable compiler profiling by default. If output dir is not specified, use the vmfb folder.
     compile_time_profiling_output_dir = request.config.getoption("--torq-compile-time-profiling-output-dir")
+    runtime_profiling_output_dir = request.config.getoption("--torq-runtime-profiling-output-dir")
     
     # always write debug info
     debug_info_dir = versioned_dir / 'debug'
@@ -635,6 +636,10 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     compile_profile_csv = versioned_dir / 'compile_profile.csv'
     if compile_time_profiling_output_dir:
         cmds.extend(['--torq-enable-profiling', f'--torq-dump-profiling={compile_profile_csv}'])
+    elif runtime_profiling_output_dir:
+        # Enable profiling pass to generate cycle-time attributes in MLIRB,
+        # needed for combined compile+runtime trace
+        cmds.append('--torq-enable-profiling')
 
     print("Compiling for TORQ with: " + " ".join(cmds))
 

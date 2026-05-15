@@ -20,6 +20,7 @@ logger = logging.getLogger("torq.model_profiler.annotation")
 
 # Clock frequency in MHz for cycle-to-time conversion
 CLOCK_FREQ_MHZ = 800
+COMPILE_CLOCK_FREQ_MHZ = 100
 
 def cycles_to_ns(cycles: int, frequency_mhz: int):
     """Convert cycles to nanoseconds given a clock frequency in MHz."""
@@ -522,6 +523,7 @@ class BaseDispatchDebugInfo(ABC):
 
     def __init__(self):
         self.operation_times_ns: Dict = {}
+        self.compile_operation_times_ns: Dict = {}
         self.actions: OrderedDict = OrderedDict()
         self.workunits: List[WorkUnitDebugInfo] = []
         self.original_locations: List = []
@@ -539,6 +541,11 @@ class BaseDispatchDebugInfo(ABC):
     def get_operation_async_duration_ns(self, operation) -> Optional[int]:
         time_info = self.operation_times_ns.get(operation)
         return time_info.async_duration_ns if time_info is not None else None
+
+    # --- compile-time estimate queries ---
+
+    def get_compile_time_info(self, operation) -> Optional['TimeDebugInfo']:
+        return self.compile_operation_times_ns.get(operation)
 
     # --- aggregate time from workunits ---
 
@@ -579,7 +586,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
         self.block_arg_to_value = {}
         self.actions = self._load_actions()                        
         self.nss_blocks_info = {}
-        self.nss_blocks_info = self._load_nss_blocks_info()
+        self._load_nss_blocks_info()
         self.workunits = self._load_host_workunits()
         self.original_locations = self._load_original_locations()
 
@@ -595,8 +602,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
         return OrderedDict([(x.action_id, x) for x in sorted(actions, key=lambda a: a.action_id)])        
 
 
-    def _load_nss_blocks_info(self) -> Dict[Block, BlockDebugInfo]:
-
+    def _load_nss_blocks_info(self):
         for action in self.actions.values():
             
             if not action.is_start_nss_action:
@@ -623,7 +629,6 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
                         finished = True
                         break
 
-        return self.nss_blocks_info
 
     def _load_host_workunits(self) -> List[WorkUnitDebugInfo]:
 
@@ -824,26 +829,24 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
 
             self.operation_times_ns[action.operation] = TimeDebugInfo(start_time_ns=profile_data.start_time_ns, end_time_ns=profile_data.end_time_ns)
 
-    def _update_time_ns(self, operation: Operation, frequency_mhz: int = CLOCK_FREQ_MHZ):
-
+    @staticmethod
+    def _read_time_debug_info(operation, frequency_mhz):
         start_time_ns = None
         if "torq-start-time-cycles" in operation.attributes:
-            start_cycles = operation.attributes["torq-start-time-cycles"].value
-            start_time_ns = cycles_to_ns(start_cycles, frequency_mhz)
+            start_time_ns = cycles_to_ns(operation.attributes["torq-start-time-cycles"].value, frequency_mhz)
 
         end_time_ns = None
-
         if "torq-end-time-cycles" in operation.attributes:
-            end_cycles = operation.attributes["torq-end-time-cycles"].value
-            end_time_ns = cycles_to_ns(end_cycles, frequency_mhz)
+            end_time_ns = cycles_to_ns(operation.attributes["torq-end-time-cycles"].value, frequency_mhz)
 
         async_duration_ns = None
-
         if "torq-async-duration-cycles" in operation.attributes:
-            async_duration_cycles = operation.attributes["torq-async-duration-cycles"].value
-            async_duration_ns = cycles_to_ns(async_duration_cycles, frequency_mhz)        
+            async_duration_ns = cycles_to_ns(operation.attributes["torq-async-duration-cycles"].value, frequency_mhz)
 
-        self.operation_times_ns[operation] = TimeDebugInfo(start_time_ns=start_time_ns, end_time_ns=end_time_ns, async_duration_ns=async_duration_ns)
+        return TimeDebugInfo(start_time_ns=start_time_ns, end_time_ns=end_time_ns, async_duration_ns=async_duration_ns)
+
+    def _update_time_ns(self, operation: Operation, frequency_mhz: int = CLOCK_FREQ_MHZ):
+        self.operation_times_ns[operation] = self._read_time_debug_info(operation, frequency_mhz)
 
 
     def infer_runtime_profile_from_cycles(self, frequency_mhz: int = CLOCK_FREQ_MHZ):
@@ -851,6 +854,23 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
         for workunit in self.workunits:
             self._update_time_ns(workunit.start_operation, frequency_mhz)
             self._update_time_ns(workunit.end_operation, frequency_mhz)
+
+    def load_compile_time_estimates(self, frequency_mhz: int = COMPILE_CLOCK_FREQ_MHZ):
+        """Load compile-time cycle estimates from MLIR attributes into compile_operation_times_ns."""
+        for workunit in self.workunits:
+            operations = [workunit.start_operation, workunit.end_operation]
+
+            # For NSS-managed workunits, timing comes from the parent nss_task op
+            if isinstance(workunit, NssManagedWorkUnitDebugInfo):
+                if workunit.start_operation is not None and hasattr(workunit.start_operation, 'parent'):
+                    operations.append(workunit.start_operation.parent)
+                if workunit.end_operation is not None and hasattr(workunit.end_operation, 'parent'):
+                    operations.append(workunit.end_operation.parent)
+
+            for operation in operations:
+                if operation is None or operation in self.compile_operation_times_ns:
+                    continue
+                self.compile_operation_times_ns[operation] = self._read_time_debug_info(operation, frequency_mhz)
 
 
 @dataclass(frozen=True, eq=False)
@@ -1013,6 +1033,7 @@ class CombinedDispatchDebugInfo(BaseDispatchDebugInfo):
 
         self.workunits.extend(dispatch_debug_info.workunits)
         self.original_locations.extend(dispatch_debug_info.original_locations)
+        self.compile_operation_times_ns.update(dispatch_debug_info.compile_operation_times_ns)
 
 
 class DebugInfo:

@@ -154,6 +154,7 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files):
 
         # Use a fresh DebugInfo so each invocation keeps independent timing data.
         dispatch_debug_info = DebugInfo(debug_info).get_dispatch(invocation.dispatch_name)
+        dispatch_debug_info.load_compile_time_estimates()
         dispatch_debug_info.load_runtime_events(invocation.event_data)
         combined_dispatch_debug_info.add_dispatch(dispatch_debug_info)
 
