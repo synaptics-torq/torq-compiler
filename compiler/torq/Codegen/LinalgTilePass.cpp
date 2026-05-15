@@ -774,7 +774,7 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
             }
 
             if (getTargetExecutor(srcOp) == torq_hl::Executor::Host) {
-                return success();
+                return failure();
             }
         }
 
@@ -882,27 +882,26 @@ class DtcmTilePass : public impl::DtcmTileBase<DtcmTilePass> {
     using DtcmTileBase<DtcmTilePass>::DtcmTileBase;
 
     void runOnOperation() {
-        auto funcOp = getOperation();
+        MLIRContext *ctx = &getContext();
 
-        MLIRContext *ctx = funcOp.getContext();
+        RewritePatternSet convertToLinalgPatterns(ctx);
+
+        // to make tiling of tensor.pad/generate possible we convert them to linalg ops first
+        convertToLinalgPatterns.add<TensorOpConversion<tensor::PadOp>>(ctx);
+        convertToLinalgPatterns.add<TensorOpConversion<tensor::GenerateOp>>(ctx);
+
+        if (failed(applyPatternsGreedily(getOperation(), std::move(convertToLinalgPatterns)))) {
+            return signalPassFailure();
+        }
 
         RewritePatternSet tilePatterns(ctx);
 
-        // to make tiling of tensor.pad/generate possible we convert them to linalg ops first
-        tilePatterns.add<TensorOpConversion<tensor::PadOp>>(ctx);
-        tilePatterns.add<TensorOpConversion<tensor::GenerateOp>>(ctx);
-
-        const uint32_t cssMem = HwInfo::dtcm_size - HwInfo::css_stack_size;
+        const uint32_t cssMem = HwInfo::dtcm_size - HwInfo::css_stack_size - 32;
         tilePatterns.add<TileLinalgOpOperation>(ctx, cssMem, torq_hl::Executor::CSS);
         tilePatterns.add<CheckSortOpMemory>(ctx, cssMem, torq_hl::Executor::CSS);
 
-        tensor::ControlConstantExtractSliceFusionFn controlFn = [](tensor::ExtractSliceOp op) {
-            return true;
-        };
-        tensor::populateFoldConstantExtractSlicePatterns(tilePatterns, controlFn);
-
         GreedyRewriteConfig config;
-        config.setStrictness(GreedyRewriteStrictness::ExistingAndNewOps);
+        config.setStrictness(GreedyRewriteStrictness::ExistingOps);
         if (failed(applyPatternsGreedily(getOperation(), std::move(tilePatterns), config))) {
             return signalPassFailure();
         }

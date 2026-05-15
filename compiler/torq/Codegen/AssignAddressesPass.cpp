@@ -543,7 +543,7 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
 
         if (failed(result)) {
             // TileAndFusePass relies on this message to identify memory overflow
-            funcOp->emitError() << OUT_OF_MEMORY_MESSAGE;
+            emitError(funcOp->getLoc()) << OUT_OF_MEMORY_MESSAGE;
             signalPassFailure();
         }
 
@@ -568,7 +568,7 @@ class AssignDtcmItcmXramAddressesPass
         Pool dtcmPool(HwInfo::dtcm_size - HwInfo::css_stack_size, 0, 4);
 
         if (failed(allocateAddresses(funcOp, dtcmPool, syna::torq_hl::MemorySpace::Dtcm))) {
-            llvm::errs() << "Failed to allocate DTCM addresses\n";
+            emitError(funcOp->getLoc()) << "Failed to allocate DTCM addresses";
             return signalPassFailure();
         }
 
@@ -578,7 +578,7 @@ class AssignDtcmItcmXramAddressesPass
         Pool itcmPool(HwInfo::itcm_size, 0, 4, 8 * 1024);
 
         if (failed(allocateAddresses(funcOp, itcmPool, syna::torq_hl::MemorySpace::Itcm))) {
-            llvm::errs() << "Failed to allocate ITCM addresses\n";
+            emitError(funcOp->getLoc()) << "Failed to allocate ITCM addresses";
             return signalPassFailure();
         };
 
