@@ -21,6 +21,7 @@ namespace torq {
 class Slice;
 struct SlicePrivate;
 class Iterator;
+enum class NdlSyncMode;
 
 // A stride can be specified as either a constant value or an affine expression.
 // Constant strides and offsets always represent items (as in memrefs).
@@ -32,6 +33,9 @@ struct Stride {
     Stride(int64_t stride) : intVal(int(stride)) {}
     Stride(AffineExpr stride) : exprVal(stride) {}
     bool hasVal() const { return intVal.has_value() || exprVal.has_value(); }
+    bool operator==(const Stride &other) const {
+        return intVal.value() == other.intVal && exprVal.value() == other.exprVal;
+    }
 
     std::optional<int> intVal{};
     std::optional<AffineExpr> exprVal{};
@@ -52,8 +56,7 @@ struct ShapeItem {
     ShapeItem(const ShapeItem &) = default;
     ShapeItem &operator=(const ShapeItem &) = default;
     bool operator==(const ShapeItem &other) const {
-        return count == other.count && stride.intVal == other.stride.intVal &&
-               stride.exprVal == other.stride.exprVal && tag == other.tag;
+        return count == other.count && stride == other.stride && tag == other.tag;
     }
 
     int count;
@@ -763,6 +766,8 @@ class Iterator {
 
     operator bool() const { return true; }
     operator Indexes() const { return _iterVars; }
+    operator int() const = delete;
+    operator float() const = delete;
 
   private:
     Slice &_kernel;

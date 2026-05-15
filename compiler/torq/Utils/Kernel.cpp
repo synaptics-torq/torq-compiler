@@ -21,6 +21,8 @@ using namespace std;
 
 namespace mlir::syna::torq {
 
+enum class NdlSyncMode { NONE, R = 'R' };
+
 static int denseDims(const LData &);
 static void fuse(LData &, int count = -1);
 static void vectorize(LData &, int vectorSize, int vectorStride);
@@ -327,11 +329,18 @@ struct SliceCfg {
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, SliceCfg &cfg) {
     os << "SliceCfg(\n";
-    os << "  alu_op0_mode: [" << cfg.alu_op0_mode[0] << ", " << cfg.alu_op0_mode[1] << ", "
-       << cfg.alu_op0_mode[2] << ", " << cfg.alu_op0_mode[3] << "],";
-    os << "  alu_op1_mode: [" << cfg.alu_op1_mode[0] << ", " << cfg.alu_op1_mode[1] << ", "
-       << cfg.alu_op1_mode[2] << ", " << cfg.alu_op1_mode[3] << "]\n";
-    os << "  alu_d_unsigned: " << cfg.alu_d_unsigned << ",";
+    os << "  alu_op0_mode: [";
+    string sep;
+    for (auto mode : cfg.alu_op0_mode) {
+        os << sep << mode;
+        sep = ", ";
+    }
+    sep = "], alu_op1_mode: [";
+    for (auto mode : cfg.alu_op1_mode) {
+        os << sep << mode;
+        sep = ", ";
+    }
+    os << "]\n  alu_d_unsigned: " << cfg.alu_d_unsigned << ",";
     os << "  alu_w_unsigned: " << cfg.alu_w_unsigned << "\n";
     os << "  act_mode: " << cfg.act_mode << ",";
     os << "  act_lsh: [" << cfg.act_lsh[0] << "," << cfg.act_lsh[1] << "," << cfg.act_lsh[2] << ","
@@ -357,38 +366,62 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, SliceCfg &cfg) {
 }
 
 static void ndlToStr(NdlType type, const torq_hw::MemNdlData *ndl) {
+    const char *sep = ",";
     if (!ndl) {
-        LLVM_DEBUG(llvm::dbgs() << type << ": NULL\n");
+        LLVM_DEBUG(llvm::dbgs() << type << ":  NULL\n");
         return;
     }
-
     LLVM_DEBUG(
-        llvm::dbgs() << type << ": "; for (auto &dim
-                                           : ndl->dims) {
-            llvm::dbgs() << dim.tag << "(" << dim.type << ")" << dim.count << "[";
+        llvm::dbgs() << type; if (ndl->set_id) { llvm::dbgs() << ndl->set_id; } else {
+            llvm::dbgs() << ' ';
+        } int count = 0;
+        auto printingType = DimType::L;
+        for (auto &dim
+             : ndl->dims) {
+            if (dim.type != DimType::L && printingType == DimType::L) {
+                llvm::dbgs() << "}";
+            }
+            llvm::dbgs() << (count++ == 0 ? ": {" : sep);
+            if (dim.type == DimType::S && printingType != DimType::S) {
+                llvm::dbgs() << "S(";
+            }
+            llvm::dbgs() << dim.tag << dim.count << ":";
             if (dim.getExprStride().has_value()) {
-                llvm::dbgs() << "expr] ";
+                llvm::dbgs() << "expr";
             }
             else {
-                llvm::dbgs() << dim.getIntStride() << "] ";
+                llvm::dbgs() << dim.getIntStride();
             }
-        } if (ndl->offset) {
-            llvm::dbgs() << "offset=" << ndl->offset;
-        } llvm::dbgs() << "\n";
+            printingType = dim.type;
+        } if (printingType == DimType::S) { llvm::dbgs() << ")"; }
+
+        if (ndl->offset) { llvm::dbgs() << "offset=" << ndl->offset; } if (ndl->sync_mode) {
+            llvm::dbgs() << " sync=" << (char)ndl->sync_mode;
+        } if (ndl->sync_nhd) { llvm::dbgs() << " nhdims=" << (int)ndl->sync_nhd; } llvm::dbgs()
+        << "\n";
     );
 }
 
 static void ndlToStr(NdlType type, const torq_hw::RegNdlData *ndl) {
-
+    const char *sep = ",";
     if (!ndl) {
         LLVM_DEBUG(llvm::dbgs() << type << ": NULL\n");
         return;
     }
-
-    LLVM_DEBUG(llvm::dbgs() << type << ": "; for (auto &dim
-                                                  : ndl->dims) {
-        llvm::dbgs() << dim.tag << "(" << dim.type << ")" << dim.count << "[" << dim.stride << "] ";
-    } llvm::dbgs() << "\n";);
+    LLVM_DEBUG(
+        llvm::dbgs() << type; if (ndl->set_id) { llvm::dbgs() << ndl->set_id; } else {
+            llvm::dbgs() << ' ';
+        } int count = 0;
+        bool printingLDIms = true; for (auto &dim
+                                        : ndl->dims) {
+            if (dim.type != DimType::L && printingLDIms) {
+                printingLDIms = false;
+                llvm::dbgs() << "}";
+            }
+            llvm::dbgs() << (count++ == 0 ? ": {" : sep);
+            llvm::dbgs() << dim.tag << dim.count << ":" << dim.stride;
+        } llvm::dbgs() << "\n";
+    );
 }
 
 static void debugData(const Data &data) { LLVM_DEBUG(llvm::dbgs() << data << "\n"); }
@@ -687,7 +720,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape) {
         }
         os << shape[i].count;
         if (shape[i].stride.hasVal()) {
-            os << "@" << shape[i].stride;
+            os << ":" << shape[i].stride;
         }
     }
     os << "]";
@@ -828,7 +861,7 @@ LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
     assert(elementType != DType::none && "Invalid element type");
 
     Shape dataShape;
-    auto shape = type.getShape();
+    const auto &shape = type.getShape();
     auto strides = getEncodedStridesElements(type);
     for (int i = 0; i < shape.size(); ++i) {
         dataShape.push_back({shape[i], strides[i]});
@@ -2972,7 +3005,7 @@ static void vectorize(LData &data, int vectorSize, int vectorStride) {
 }
 
 static void subviewDim(LData &data, int dimIndex, int offset, int count) {
-    auto shape = data.getShape();
+    auto shape = data.shape();
     int rank = shape.size();
     assert(dimIndex >= 0 && dimIndex < rank && "Dimension index out of range");
     if (!(count > 0 && offset >= 0 && offset + count <= shape[dimIndex].count)) {
