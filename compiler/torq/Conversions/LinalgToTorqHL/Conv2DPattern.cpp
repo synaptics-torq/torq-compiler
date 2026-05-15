@@ -541,7 +541,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         auto shape = inputType.getShape();
         // Layout: NHWC → height is dim 1,  NCHW → height is dim 2
         const int heightDim = (_channelDim == 3) ? 1 : 2;
-        bool isConv1D = inputType.getElementType().isFloat() &&
+        bool isConv1D = (inputType.getElementType().isBF16()) &&
                         (inputType.getRank() == 4 && shape[heightDim] == 1);
 
         bool isDW1DStride1 = false;
