@@ -385,11 +385,13 @@ st.set_page_config(page_title="Torq Buffer dump viewer", layout="wide")
 st.markdown("""<style>:root { font-size: 14px; } html, body, .stApp { font-size: 1rem; }</style>""", unsafe_allow_html=True)
 st.markdown("""<style>.block-container {padding-top: 2rem;}</style>""", unsafe_allow_html=True)
 
-col1, col2 = st.columns([3, 1], vertical_alignment="top")
-with col1:
+hcol1, hcol2 = st.columns([3, 1], vertical_alignment="top")
+with hcol1:
     st.title("Torq Buffer dump viewer")
-    show_info = st.checkbox("Show Info")
-with col2:
+    hcol11, hcol12, _ = st.columns([1, 1, 8])
+    with hcol11:
+        show_info = st.checkbox("Show Info")
+with hcol2:
     analysis_mode = st.radio("Analysis mode", ["View buffers changes for each action", "View buffer state across actions", "Compare two buffer states"])
 
 action_descs = None
@@ -463,18 +465,15 @@ if analysis_mode == "View buffer state across actions":
     show_buffer(buffer, action)
 
 elif analysis_mode == "View buffers changes for each action":
-    col1, col2, col3= st.columns([1, 1, 8], vertical_alignment="bottom")
 
     # Session state for buffer order
     if 'buffer_order' not in st.session_state:
         st.session_state.buffer_order = 'state'
-    with col1:
-        st.session_state.buffer_order = st.radio("Buffer Order", ["state", "id"], horizontal=True, key="buffer_order_selector")
 
     # Verbose IR view
     if 'show_ir' not in st.session_state:
         st.session_state.show_ir = False
-    with col2:
+    with hcol1, hcol12:
         st.session_state.transpose = st.checkbox("Show IR", key="show_ir")
 
     executable = st.selectbox("Dispatch", buffer_dump.executables.keys())
@@ -550,9 +549,14 @@ elif analysis_mode == "View buffers changes for each action":
                 active_buffer_objs.append(buffer)
 
     buffer_selection = st.dataframe(active_buffers, selection_mode="single-row", hide_index=True, key="id", on_select="rerun", row_height=get_table_row_height(), height=212)
+
+    col1, col2, col3, _= st.columns([2, 3, 2, 7], vertical_alignment="bottom")
+    with col1:
+        st.session_state.buffer_order = st.radio("Buffer Order", ["state", "id"], horizontal=True, key="buffer_order_selector")
     
     if len(buffer_selection['selection']['rows']) == 0:
         st.stop()
+
 
     selected_buffer = active_buffer_objs[buffer_selection['selection']['rows'][0]]
 
@@ -561,22 +565,21 @@ elif analysis_mode == "View buffers changes for each action":
         show_buffer(selected_buffer, selected_buffer.last_use_action)
         st.stop()
 
-    col1, col2, _ = st.columns([2, 1, 7], vertical_alignment="bottom")
-    with col1:
-        view = st.radio("Buffer contents", ["Before action", "After action", "Difference"], horizontal=True)
+    with col2:
+        view = st.radio("Buffer content", ["Before", "After", "Difference"], horizontal=True, index = 1)
 
     # Transpose channel
     if 'transpose' not in st.session_state:
         st.session_state.transpose = False
-    with col2:
-        st.session_state.transpose = st.checkbox("Transpose NHWC -> HCHW", key="transpose_checkbox")
+    with col3:
+        st.session_state.transpose = st.checkbox("Transpose NHWC -> NCHW", key="transpose_checkbox")
 
-    if view == "Before action":        
+    if view == "Before":        
         if action == selected_buffer.allocation_action:
             st.warning("No before action available for the allocation action of the buffer.")
         else:            
             show_buffer(selected_buffer, action - 1)
-    elif view == "After action":
+    elif view == "After":
         if action == selected_buffer.deallocation_action:
             st.warning("No after action available for the deallocation action of the buffer.")
         else:
