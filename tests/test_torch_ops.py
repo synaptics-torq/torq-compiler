@@ -10,6 +10,9 @@ def comparison_config_for_conv_truncf(request):
     """Comparison config for conv1d with truncf before reduce (memory-optimized mode)."""
     return {"fp_avg_tol": 0.2, "fp_max_tol": 1.0}
 
+@pytest.fixture
+def comparison_config_for_localavgpool(request):
+    return {"fp_avg_tol": 0.2, "fp_max_tol": 1.004}
 
 @pytest.fixture
 def comparison_config_for_gelu(request):
@@ -42,6 +45,9 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'encoder.mlir.230.Conv_0_small.mlir' in request.param.data.name:
         extra_args["torq_compiler_options"] = ["--torq-conv1d-truncate-for-reduce=true"]
         extra_args["comparison_config"] = "comparison_config_for_conv_truncf"
+
+    if 'localavgpool.mlir' in request.param.data.name:
+        extra_args["comparison_config"] = "comparison_config_for_localavgpool"
     
     if 'gelu' in request.param.data.name:
         extra_args["comparison_config"] = "comparison_config_for_gelu"

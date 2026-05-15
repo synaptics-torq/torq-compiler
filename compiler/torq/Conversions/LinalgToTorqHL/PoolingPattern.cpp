@@ -475,12 +475,123 @@ struct PoolingNchwSumOpConversion : public OpRewritePattern<linalg::PoolingNchwS
     const bool _markFuseGroups; // When true, mark the TI operations, don't convert.
 };
 
+/// Convert linalg.pooling_nchw_sum (local average pooling) to DepthwiseConv2D.
+///
+/// A depthwise conv2d can implement local average pooling because the two
+/// operations are mathematically equivalent when the depthwise weights are
+/// initialized correctly:
+///   AvgPool(x) = 1/(KH·KW) · Σ(xᵢ)
+///   DWConv(x)  = Σ(xᵢ · wᵢ) + bias
+/// With wᵢ = 1/(KH·KW) and bias = 0, DWConv(x) = AvgPool(x).
+///
+/// This pattern:
+/// 1. Matches linalg.pooling_nchw_sum.
+/// 2. Looks for a downstream mulf/divf generic that scales by 1/(KH·KW).
+/// 3. Creates depthwise conv2d weights of shape [C, 1, KH, KW] filled with
+///    that scale value.
+/// 4. Sets bias to zeros and groups = channelCount (making it depthwise).
+/// 5. Replaces both the pooling op and the scale generic with a single
+///    DepthwiseConv2DOp.
+struct PoolingNchwSumOpToDW2DConversion : public OpRewritePattern<linalg::PoolingNchwSumOp> {
+    using OpRewritePattern<linalg::PoolingNchwSumOp>::OpRewritePattern;
+
+    PoolingNchwSumOpToDW2DConversion(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern<linalg::PoolingNchwSumOp>(context), _markFuseGroups(markFuseGroups) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::PoolingNchwSumOp linalgOp, PatternRewriter &rewriter) const override {
+        if (_markFuseGroups && isMarkedFuseGroup(linalgOp)) {
+            return rewriter.notifyMatchFailure(linalgOp, "Already marked");
+        }
+
+        const auto loc = linalgOp.getLoc();
+
+        Value input0 = linalgOp.getInputs()[0];
+        Value kernel = linalgOp.getInputs()[1];
+        Value output = linalgOp.getResultTensors()[0];
+        const auto outType = mlir::cast<RankedTensorType>(output.getType());
+        RankedTensorType input_type = mlir::cast<RankedTensorType>(input0.getType());
+        auto in_s = input_type.getShape();
+        auto kernelType = mlir::cast<RankedTensorType>(kernel.getType());
+        auto kernelShape = kernelType.getShape();
+
+        // Only match local pooling (kernel != whole frame)
+        if (kernelShape.size() != 2 || (kernelShape[0] == in_s[2] && kernelShape[1] == in_s[3])) {
+            return rewriter.notifyMatchFailure(linalgOp, "Only local pooling supported");
+        }
+
+        // Only bf16 for now
+        if (!outType.getElementType().isBF16()) {
+            return rewriter.notifyMatchFailure(linalgOp, "Only bf16 supported");
+        }
+
+        PaddingInfo padInfo = foldBackwardPadding(input0, rewriter, true);
+
+        // Look for downstream elementwise mulf/divf generic that applies a scale.
+        auto [scaleValue, fusedGenericOp] = tryExtractFusedScale(output);
+        if (!fusedGenericOp) {
+            return rewriter.notifyMatchFailure(linalgOp, "No downstream scale generic found");
+        }
+
+        // Verify scale roughly matches 1/(KH*KW).  Use a loose tolerance because
+        // the constant may be in BF16 (epsilon ~ 7.8e-3).
+        float expectedScale = 1.0f / static_cast<float>(kernelShape[0] * kernelShape[1]);
+        if (std::abs(scaleValue - expectedScale) > 1e-2f) {
+            return rewriter.notifyMatchFailure(linalgOp, "Scale does not match 1/(KH*KW)");
+        }
+
+        if (_markFuseGroups) {
+            Value fuseOutput = fusedGenericOp ? fusedGenericOp.getResult(0) : output;
+            markFuseGroupBackward(
+                fuseOutput, {input0, kernel}, rewriter,
+                linalgOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            );
+            return success();
+        }
+
+        int32_t channelCount = static_cast<int32_t>(in_s[1]);
+
+        // Create depthwise conv2d weights [C, 1, KH, KW] filled with scaleValue.
+        auto bf16Type = rewriter.getBF16Type();
+        auto weightType =
+            RankedTensorType::get({channelCount, 1, kernelShape[0], kernelShape[1]}, bf16Type);
+        auto weightAttr =
+            DenseElementsAttr::get(weightType, rewriter.getFloatAttr(bf16Type, scaleValue));
+        auto weights = arith::ConstantOp::create(rewriter, loc, weightType, weightAttr);
+
+        std::vector<float> biasData(channelCount, 0.0f);
+        auto biasScale = createConst(biasData, rewriter, loc);
+
+        auto initTensor = createInitTensor(linalgOp, rewriter, outType);
+
+        auto strides = attrValuesAsVec(linalgOp.getStrides());
+        auto dilations = attrValuesAsVec(linalgOp.getDilations());
+
+        auto dwOp = torq_hl::DepthwiseConv2DOp::create(
+            rewriter, loc, outType, initTensor,
+            /*input_zp=*/0, /*weight_zp=*/0, /*output_zp=*/0,
+            /*output_min=*/0xff800000, /*output_max=*/0x7f800000, /*shift_factor=*/0,
+            /*groups=*/channelCount, padInfo.lrtbPad, strides, dilations,
+            torq_hl::VectorizationModeEnum::None, weights, biasScale, input0,
+            /*isDw1dStride1=*/false, /*segment_output=*/false, /*nhwc_input=*/false
+        );
+
+        rewriter.replaceOp(fusedGenericOp, dwOp.getOutput());
+        rewriter.eraseOp(linalgOp);
+        return success();
+    }
+
+  private:
+    const bool _markFuseGroups;
+};
+
 void populateLinalgToTorqHLPoolingPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
     patterns.insert<PoolingNhwcMaxOpConversion>(context, markFuseGroups);
     patterns.insert<PoolingNchwMaxOpConversion>(context, markFuseGroups);
     patterns.insert<PoolingNhwcSumOpConversion>(context, 20, 20 /* FIXME */, markFuseGroups);
+    patterns.insert<PoolingNchwSumOpToDW2DConversion>(context, markFuseGroups);
     patterns.insert<PoolingNchwSumOpConversion>(context, 20, 20 /* FIXME */, markFuseGroups);
 }
 

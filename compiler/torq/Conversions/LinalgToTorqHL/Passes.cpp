@@ -93,6 +93,12 @@ template <typename PoolingOpT, bool AllowBF16> static bool isPoolingSumLegal(Ope
         wIdx = 3;
     }
 
+    // For BF16, always let patterns attempt conversion (global pooling is handled
+    // by PoolingNchwSumOpConversion, local pooling by PoolingNchwSumOpToDW2DConversion).
+    if (outType.getElementType().isBF16())
+        return false;
+
+    // For integer types, only global pooling (kernel == whole frame) is supported.
     return kernelShape[0] != inputShape[hIdx] || kernelShape[1] != inputShape[wIdx];
 }
 
