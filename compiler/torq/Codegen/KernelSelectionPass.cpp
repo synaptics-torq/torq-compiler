@@ -551,6 +551,19 @@ class FullyConnectedKernelSelection : public OpRewritePattern<torq_hl::FullyConn
         // FIXME: the test below should be improved to avoid hardcoding these values
         int parallel_outs = outputElementType.getIntOrFloatBitWidth() <= 8 ? 64 : 32;
 
+        // Round down to the nearest supported parallel_outs value based on weightShape
+        // (_64x4=4, _32x8=8, _16x16=16, _32x32=32) plus 1 for no packing.
+        static constexpr int kValidParallelOuts[] = {32, 16, 8, 4, 1};
+        auto weightShape = weightTy.getShape();
+        if (!weightShape.empty() && weightShape[0] < parallel_outs) {
+            for (int v : kValidParallelOuts) {
+                if (v <= static_cast<int>(weightShape[0])) {
+                    parallel_outs = v;
+                    break;
+                }
+            }
+        }
+
         weights = weights_OIHW_to_OIHWO(
             rewriter, op.getLoc(), weights, parallel_outs, weightTy.getElementType()
         );
