@@ -557,7 +557,7 @@ def onnx_bf16_model_file(request, versioned_file, onnx_model_file, onnx_bf16_con
 
 @versioned_generated_file_fixture("mlir")
 def onnx_mlir_model_file(request, versioned_file, onnx_model_file, onnx_bf16_model_file, onnx_bf16_config):
-    """Convert ONNX model to MLIR.
+    """Convert ONNX model to MLIR with enhanced error diagnostics.
 
     Uses BF16 model if --auto-convert-bf16 is enabled, otherwise uses original model.
     This ensures the compiler receives the correctly converted model based on user options.
@@ -571,9 +571,46 @@ def onnx_mlir_model_file(request, versioned_file, onnx_model_file, onnx_bf16_mod
     if use_bf16:
         print(f"[BF16] Using BF16 model for MLIR conversion: {model_path}")
 
-    subprocess.check_output(
-        [sys.executable, "-m", "iree.compiler.tools.import_onnx",
-          str(model_path), "-o", str(versioned_file), "--data-prop"])
+    # Pre-validation: verify ONNX model integrity
+    try:
+        model = onnx.load(str(model_path))
+        onnx.checker.check_model(model)
+        print(f"[MLIR] ONNX model validation passed: {model_path}")
+    except Exception as e:
+        raise RuntimeError(
+            f"ONNX model validation failed for {model_path}\n"
+            f"Error: {e}"
+        )
+
+    # Attempt ONNX to MLIR conversion with comprehensive error handling
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "iree.compiler.tools.import_onnx",
+             str(model_path), "-o", str(versioned_file), "--data-prop"],
+            capture_output=True, text=True, timeout=300
+        )
+
+        if result.returncode != 0:
+            # Provide full diagnostic information
+            error_msg = f"iree.compiler.tools.import_onnx failed for {model_path}\n"
+            error_msg += f"Return code: {result.returncode}\n"
+            error_msg += f"stdout:\n{result.stdout or '(empty)'}\n"
+            error_msg += f"stderr:\n{result.stderr or '(empty)'}\n"
+            error_msg += f"Model file size: {model_path.stat().st_size if model_path.exists() else 'N/A'} bytes"
+            raise RuntimeError(error_msg)
+
+        print(f"[MLIR] Successfully converted {model_path} to {versioned_file}")
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"iree.compiler.tools.import_onnx timed out for {model_path}\n"
+            "This may indicate the model is too large or complex for the current environment."
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"iree.compiler.tools.import_onnx failed with exception for {model_path}\n"
+            f"Error: {type(e).__name__}: {e}"
+        )
 
 
 @versioned_hashable_object_fixture
