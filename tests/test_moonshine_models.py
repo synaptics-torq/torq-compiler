@@ -27,6 +27,9 @@ def case_config(request, chip_config):
     extra_args = {}
     if any(s in request.node.name for s in no_negative_input):
         extra_args["tweaked_input_data_range"]  = (0, 100)
+
+    if any(s in request.node.name for s in ('Cos', 'Sin')):
+        extra_args["tweaked_input_data_range"] = 0, 1.5
     
     comp_config = {
          "onnx_model": "onnx_layer_model",

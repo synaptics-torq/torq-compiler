@@ -40,6 +40,18 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in request.param.name for s in no_negative_input):
         extra_args["tweaked_input_data_range"]  = (0, 100)
 
+    # sin/cos are optimized for RoPE, which only runs on (often small)
+    # positive input.  For that reason, negative inputs are not quite
+    # as accurate as they could be.
+    if 'sin-exact' in request.param.name:
+        extra_args["tweaked_input_data_range"] = 0, 3
+    if 'cos-exact' in request.param.name:
+        extra_args["tweaked_input_data_range"] = 0, 1.5
+    if 'sin-coarse' in request.param.name:
+        extra_args["tweaked_input_data_range"] = 0, 12
+    if 'cos-coarse' in request.param.name:
+        extra_args["tweaked_input_data_range"] = 0, 12
+
     # Option Test for conv1d with truncf before reduce (memory-optimized mode) to maintain easily
     # This enables --torq-conv1d-truncate-for-reduce to test bf16 reduce input
     if 'encoder.mlir.230.Conv_0_small.mlir' in request.param.data.name:

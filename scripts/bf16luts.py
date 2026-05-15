@@ -1,7 +1,8 @@
 #!python3
 import warnings
-from torch import (tensor, int32, bfloat16, uint16, int16, float32, float64, log2,
-                   int32, empty, int64, arange, set_printoptions, argmin, stack, inf, ones)
+from torch import (tensor, int32, bfloat16, uint16, int16, float32, float64,
+                   log2, int32, empty, int64, arange, set_printoptions, argmin,
+                   stack, inf, ones, zeros)
 set_printoptions(30)
 
 
@@ -81,6 +82,9 @@ def fit_points(a, delta, gt, start, end):
     v = a.I(gt).round().to(int32)
     assert all(a(v) == gt)
     Δk = tensor((-1, 1),dtype=int32).reshape(2, 1)
+
+    if len(delta) == 1:
+        return v.reshape(1, 1, 1), zeros(1, 1, dtype=int)
 
     for tol in generate_tols(gt):
 
@@ -298,61 +302,50 @@ if __name__ == "__main__":
     approximate_function(exp, negative=False)
 
     print("limited_reciprocal")
-    def limited_reciprocal(x):
-        x = x.clone()
-        x[x < 1] = 1
-        x[x > (2**12)] = 2**12
-        return 1 / x
-    approximate_function(limited_reciprocal, negative=False)
+    approximate_function(lambda x: 1 / x.clamp(1, 2**12), negative=False)
 
     print("gelu neg")
     from torch.nn.functional import gelu
-    def gelu_neg(x):
-        x = x.clone()
-        # allowing 0 bit error in x/2
-        end = bf16(0b1_01110110_1001011)
-        # allowing 1 bit error in x/2
-        end = bf16(0b1_01111000_0110000)
-        # allowing 2 bit error in x/2
-        end = bf16(0b1_01111001_0100001)
-        x[x > end] = end
-        # clip out gelu(-inf) = nan.  gelu saturates well before -1000
-        x[x < -1000] = -1000
-        return gelu(x)
-    # actually fill the most negative table with negative zero: extend_end=2
-    approximate_function(gelu_neg, negative=True, extend_end=2)
+    # clip out gelu(-inf) = nan.  gelu saturates well before -1000
+    approximate_function(lambda x: gelu(x.clamp(-1000,
+                                           # # allowing 0 bit error in x/2
+                                           # bf16(0b1_01110110_1001011))),
+                                           # # allowing 1 bit error in x/2
+                                           # bf16(0b1_01111000_0110000))),
+                                           # allowing 2 bit error in x/2
+                                           bf16(0b1_01111001_0100001))),
+                         negative=True,
+                         # actually fill the most negative table with
+                         # negative zero: extend_end=2
+                         extend_end=2)
     print("gelu pos")
-    def gelu_pos(x):
-        x = x.clone()
-        # allowing 0 bit error in x/2
-        start, end = bf16(0b0_01110110_1001011), bf16(0b0_10000000_0110001)
-        x[x < start] = start
-        x[x > end] = end
-        return gelu(x)
-    approximate_function(gelu_pos, negative=False)
+    approximate_function(lambda x: gelu(x.clamp(bf16(0b0_01110110_1001011),
+                                           bf16(0b0_10000000_0110001))),
+                         negative=False)
 
     print("gelu tan neg")
     from torch.nn.functional import gelu
-    def gelu_neg(x):
-        x = x.clone()
-        # allowing 0 bit error in x/2
-        end = bf16(0b1_01110110_1001011)
-        # allowing 1 bit error in x/2
-        end = bf16(0b1_01111000_0110000)
-        # allowing 2 bit error in x/2
-        end = bf16(0b1_01111000_1100011)
-        x[x > end] = end
-        # clip out gelu(-inf) = nan.  gelu saturates well before -1000
-        x[x < -1000] = -1000
-        return gelu(x, approximate='tanh')
-    # actually fill the most negative table with negative zero: extend_end=2
-    approximate_function(gelu_neg, negative=True, extend_end=2)
+    # clip out gelu(-inf) = nan.  gelu saturates well before -1000
+    approximate_function(lambda x: gelu(x.clamp(-1000,
+                                           # # allowing 0 bit error in x/2
+                                           # bf16(0b1_01110110_1001011))),
+                                           # # allowing 1 bit error in x/2
+                                           # bf16(0b1_01111000_0110000))),
+                                           # allowing 2 bit error in x/2
+                                           bf16(0b1_01111000_1100011)),
+                                   approximate='tanh'),
+                         negative=True,
+                         # actually fill the most negative table with
+                         # negative zero: extend_end=2
+                         extend_end=2)
     print("gelu tan pos")
-    def gelu_pos(x):
-        x = x.clone()
-        # allowing 0 bit error in x/2
-        start, end = bf16(0b0_01110110_1001011), bf16(0b0_10000000_0101111)
-        x[x < start] = start
-        x[x > end] = end
-        return gelu(x, approximate='tanh')
-    approximate_function(gelu_pos, negative=False)
+    approximate_function(lambda x: gelu(x.clamp(bf16(0b0_01110110_1001011),
+                                           bf16(0b0_10000000_0101111)),
+                                   approximate='tanh'),
+                         negative=False)
+
+    from torch import pi, sin, cos
+    print('sin')
+    approximate_function(lambda x: sin(x.clamp(0, pi / 2)), negative=False)
+    print('cos')
+    approximate_function(lambda x: cos(x.clamp(0, pi / 2)), negative=False)

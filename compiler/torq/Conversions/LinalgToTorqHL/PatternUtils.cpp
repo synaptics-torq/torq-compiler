@@ -2604,12 +2604,21 @@ Value makeScaledLut(
     int aShiftFactor, int32_t aInputZp, int32_t aOutputZp, SmallVector<int32_t> bValues,
     int32_t cScaleFactor, int cShiftFactor, int32_t cInputZp, int32_t cOutputZp
 ) {
+    auto inputType = cast<RankedTensorType>(input.getType());
+    bool bitcast = inputType.getElementType().isBF16();
+    if (bitcast)
+        input = makeBitcast(
+            srcOp, rewriter, RankedTensorType::get(inputType.getShape(), rewriter.getI16Type()),
+            input
+        );
     auto scaledInput =
         makeRescale16(srcOp, rewriter, input, cScaleFactor, cShiftFactor, cInputZp, cOutputZp);
     auto lookuped = makeI16LUTFromVals(srcOp, rewriter, scaledInput, bValues);
-    return makeRescale16(
-        srcOp, rewriter, lookuped, aScaleFactor, aShiftFactor, aInputZp, aOutputZp
-    );
+    auto output =
+        makeRescale16(srcOp, rewriter, lookuped, aScaleFactor, aShiftFactor, aInputZp, aOutputZp);
+    if (bitcast)
+        output = makeBitcast(srcOp, rewriter, inputType, output);
+    return output;
 }
 
 Value makeSelect(
