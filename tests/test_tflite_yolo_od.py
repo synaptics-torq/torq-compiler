@@ -208,22 +208,7 @@ def _compare_full_od_pair(left_results, right_results, left_name, right_name, mo
 @pytest.fixture
 def case_config(request, tflite_layer_model):
     """Configure test case settings."""
-    _skip_next_group_full_model(request, tflite_layer_model)
-    torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-css"]
-    torq_compiler_options += ["--torq-enable-torq-hl-tiling", "--torq-enable-transpose-optimization"]
-
-    # Add a warning if neither tiling nor transpose optimization is enabled,
-    # since that is required for correct results on some layers & to get max performance on the full model.
-    is_full_model = not tflite_layer_model.data.is_layer
-    if (is_full_model and "--torq-enable-torq-hl-tiling" not in torq_compiler_options and
-        "--torq-enable-transpose-optimization" not in torq_compiler_options):
-        msg = (
-            "################################################################################\n"
-            "NOTE: For correct results and best performance on YOLO OD full-model tests, "
-            "enable --torq-enable-torq-hl-tiling and --torq-enable-transpose-optimization.\n"
-            "################################################################################\n"
-        )
-        print(msg)
+    torq_compiler_options = []
     return {
         "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",
@@ -232,22 +217,6 @@ def case_config(request, tflite_layer_model):
         "torq_compiler_timeout": 600,
         "torq_runtime_timeout": 600,
     }
-
-
-def _skip_next_group_full_model(request, tflite_layer_model):
-    """Skip full model tests on unsupported targets."""
-    if tflite_layer_model.data.is_layer:
-        return
-    try:
-        chip = request.getfixturevalue("chip_config").data
-    except AttributeError:
-        # AttributeError occurs when chip_config fixture exists but
-        # was not parametrized (no request.param), e.g. in tests
-        # that don't use the torq backend.
-        return
-    if chip.get('target') != "SL2610":
-        pytest.skip(f"Full YOLOv8n-OD model only supported on SL2610")
-
 
 @versioned_cached_data_fixture
 def yolo_od_input_data(request, tflite_layer_model: TFLiteLayerCase, tweaked_random_input_data, mlir_io_spec):

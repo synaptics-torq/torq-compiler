@@ -183,11 +183,7 @@ def _compare_full_pose_pair(left_results, right_results, left_name, right_name, 
 @pytest.fixture
 def case_config(request, tflite_layer_model):
     """Configure test case settings."""
-    _skip_next_group_full_model(request, tflite_layer_model)
-    torq_compiler_options = ["--torq-convert-dtypes", "--torq-disable-css", "--torq-disable-host"]
-    torq_compiler_options += ["--torq-enable-transpose-optimization"]
-    # tile-and-fuse is not working yet
-    torq_compiler_options += ["--torq-enable-torq-hl-tiling"]
+    torq_compiler_options = []
     return {
         "tflite_model": "tflite_layer_model",
         "tflite_model_file": "tflite_model_path",
@@ -197,21 +193,6 @@ def case_config(request, tflite_layer_model):
         "torq_compiler_timeout": 600,
         "torq_runtime_timeout": 600,
     }
-
-
-def _skip_next_group_full_model(request, tflite_layer_model):
-    """Skip full model tests on unsupported targets."""
-    if not tflite_layer_model.data.is_layer:
-        try:
-            chip = request.getfixturevalue("chip_config").data
-        except AttributeError:
-            # AttributeError occurs when chip_config fixture exists but
-            # was not parametrized (no request.param), e.g. in tests
-            # that don't use the torq backend (test_yolo_pose_llvmcpu_tflite).
-            return
-        if chip.get('target') != "SL2610":
-            pytest.skip(f"Full YOLOv8s-pose model only supported on SL2610")
-
 
 @versioned_cached_data_fixture
 def yolo_pose_input_data(request, tflite_layer_model: TFLiteLayerCase, tweaked_random_input_data, mlir_io_spec):
