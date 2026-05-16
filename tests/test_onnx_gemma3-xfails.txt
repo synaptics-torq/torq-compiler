@@ -2,3 +2,4 @@ test_onnx_model_torq[attn_block_layer_Cast_11-aws_fpga-sl2610-v1] synaptics-torq
 test_onnx_model_torq[attn_block_layer_Cast_11-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
 test_onnx_model_torq[attn_block_layer_ReduceMean_32-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
 test_onnx_model_torq[attn_block_layer_ReduceMean_32-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_torq[attn_block_layer_Sin_21-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1596
