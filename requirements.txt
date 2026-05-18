@@ -30,7 +30,8 @@ onnxruntime==1.25.0
 onnxscript==0.6.1
 
 # torch (used for bf16 reference execution in testing)
-torch==2.11.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.11.0+cpu
 
 # Used for image_to_tensor.py utility tools
 opencv-python-headless==4.12.0.88
