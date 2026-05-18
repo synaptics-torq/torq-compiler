@@ -532,6 +532,8 @@ struct TORQLowerExecutableTargetPass
             );
         }
         distributeToWorkgroupsPipeline.addPass(createTileAndDistributeToWorkgroupsPass());
+        if (failed(mlir::applyPassManagerCLOptions(distributeToWorkgroupsPipeline)))
+            return signalPassFailure();
         if (failed(distributeToWorkgroupsPipeline.run(*maybeDispatchFuncOp))) {
             return signalPassFailure();
         }
@@ -541,6 +543,8 @@ struct TORQLowerExecutableTargetPass
             pipeline.addInstrumentation(std::make_unique<torq::ProgressLogger>(dispatchName));
         }
         addAllPasses(pipeline);
+        if (failed(mlir::applyPassManagerCLOptions(pipeline)))
+            return signalPassFailure();
         if (failed(pipeline.run(getOperation()))) {
             return signalPassFailure();
         }
