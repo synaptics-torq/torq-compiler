@@ -363,6 +363,9 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        LLVM_DEBUG(
+            llvm::dbgs() << "[ExtractOpPattern] attempting match on: " << srcOp.getLoc() << "\n"
+        );
 
         if (srcOp.getInputs().size() != 1 || srcOp.getResults().size() != 1) {
             return rewriter.notifyMatchFailure(srcOp, "Expects 1 input and 1 output");
@@ -406,17 +409,22 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         if (valuesAreConstant) {
             setCompileTimeConstAttr(valuesTensor.getDefiningOp());
         }
-        if (!valuesAreConstant)
+        if (!valuesAreConstant) {
+            LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteAsDynamicGather\n");
             return rewriteAsDynamicGather(srcOp, valuesTensor, valuesTensorType, input, rewriter);
+        }
 
         if (isTableOp && !clTableAsGather) {
+            LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteAsTableOp\n");
             rewriteAsTableOp(srcOp, input, valuesTensor, rewriter);
             return success();
         }
         if (isTableOp) { // clTableAsGather == true: emit the LUT as a rotated GatherOp
+            LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteTableAsGather\n");
             rewriteTableAsGather(srcOp, input, valuesTensor, rewriter);
             return success();
         }
+        LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteAsConstantGather\n");
         return rewriteAsConstantGather(srcOp, valuesTensor, input, rewriter);
     }
 };
@@ -434,29 +442,37 @@ class I16ExtractTableOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        LLVM_DEBUG(
+            llvm::dbgs() << "[I16ExtractTableOpPattern] attempting match on: " << srcOp.getLoc()
+                         << "\n"
+        );
 
         // Must have exactly 1 input and 1 output.
-        if (srcOp.getInputs().size() != 1 || srcOp.getResults().size() != 1)
+        if (srcOp.getInputs().size() != 1 || srcOp.getResults().size() != 1) {
             return rewriter.notifyMatchFailure(srcOp, "i16Table: expects 1 input and 1 output");
+        }
 
         Value input = srcOp.getInputs()[0];
         auto inputType = dyn_cast<RankedTensorType>(input.getType());
-        if (!inputType)
+        if (!inputType) {
             return rewriter.notifyMatchFailure(srcOp, "i16Table: input must be a ranked tensor");
+        }
 
         auto inputElemType = inputType.getElementType();
         bool inputIsI8 = inputElemType.isInteger(8);
         bool inputIsI16 = inputElemType.isInteger(16);
-        if (!inputIsI8 && !inputIsI16)
+        if (!inputIsI8 && !inputIsI16) {
             return rewriter.notifyMatchFailure(srcOp, "i16Table: input must be i8 or i16");
+        }
 
         // Check yield.
         auto yieldOp = cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
 
         // The yielded value must come from tensor.extract.
         auto extractOp = yieldOp.getValues()[0].getDefiningOp<tensor::ExtractOp>();
-        if (!extractOp)
+        if (!extractOp) {
             return rewriter.notifyMatchFailure(srcOp, "i16Table: expected tensor.extract");
+        }
 
         // Walk the body depending on input type.
         auto &block = srcOp.getRegion().front();
@@ -466,23 +482,26 @@ class I16ExtractTableOpPattern : public OpRewritePattern<linalg::GenericOp> {
         if (inputIsI16) {
             // Variant (a): trunci -> index_cast -> addi(128) -> extract
             auto trunciOp = dyn_cast<arith::TruncIOp>(firstOp);
-            if (!trunciOp)
+            if (!trunciOp) {
                 return rewriter.notifyMatchFailure(
                     srcOp, "i16Table: i16 input expects arith.trunci first"
                 );
+            }
             indexCastOp = dyn_cast_or_null<arith::IndexCastOp>(trunciOp->getNextNode());
-            if (!indexCastOp)
+            if (!indexCastOp) {
                 return rewriter.notifyMatchFailure(
                     srcOp, "i16Table: expected arith.index_cast after trunci"
                 );
+            }
         }
         else {
             // Variant (b): index_cast -> addi(128) -> extract  (i8 input, no trunci)
             indexCastOp = dyn_cast<arith::IndexCastOp>(firstOp);
-            if (!indexCastOp)
+            if (!indexCastOp) {
                 return rewriter.notifyMatchFailure(
                     srcOp, "i16Table: i8 input expects arith.index_cast first"
                 );
+            }
         }
 
         // The index fed into tensor.extract must be addi(%index_cast, 128).
@@ -509,15 +528,17 @@ class I16ExtractTableOpPattern : public OpRewritePattern<linalg::GenericOp> {
         if (failed(outlineAndReturnOps(tableTensor, /*recursive=*/true)))
             return rewriter.notifyMatchFailure(srcOp, "i16Table: table tensor is not constant");
 
-        setCompileTimeConstAttr(tableTensor.getDefiningOp());
         Location loc = srcOp.getLoc();
         Value packedTable = buildPackedTable(rewriter, loc, tableTensor, /*signExtend=*/false);
+        setCompileTimeConstAttr(packedTable.getDefiningOp());
+
         auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+        LLVM_DEBUG(llvm::dbgs() << "[I16ExtractTableOpPattern] SUCCESS: emitting TableOp\n");
+        // replaceOp already erases srcOp; do not call eraseOp again.
         rewriter.replaceOpWithNewOp<syna::torq_hl::TableOp>(
             srcOp, resultType, createInitTensor(srcOp, rewriter, resultType),
             buildTableScaleBias(srcOp, rewriter), input, packedTable, nullptr
         );
-
         return success();
     }
 };
