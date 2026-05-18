@@ -3080,7 +3080,11 @@ FailureOr<Value> computeBias(
     builder.setInsertionPoint(firstOp);
     auto maybeBias = createNewBias(fusionPlan, builder, opsToDelete, optionalWeightZp);
     if (failed(maybeBias)) {
-        auto biasType = RankedTensorType::get(biasShape, firstOpResultType.getElementType());
+        auto biasType = RankedTensorType::get(
+            biasShape, firstOpResultType.getElementType().isFloat()
+                           ? (Type)Float32Type::get(owner->getContext())
+                           : (Type)IntegerType::get(owner->getContext(), 32)
+        );
         return arith::ConstantOp::create(builder, loc, builder.getZeroAttr(biasType)).getResult();
     }
 
@@ -3494,7 +3498,11 @@ FailureOr<Value> computeBiasForMatmul(
         int64_t biasDim = anchorTy.getShape().size() > 1 ? anchorTy.getShape()[1] : 1;
         OpBuilder builder(anchor->getContext());
         builder.setInsertionPoint(anchor);
-        auto zeroBiasTy = RankedTensorType::get({biasDim}, anchorTy.getElementType());
+        auto zeroBiasTy = RankedTensorType::get(
+            {biasDim}, anchorTy.getElementType().isFloat()
+                           ? (Type)Float32Type::get(anchor->getContext())
+                           : (Type)IntegerType::get(anchor->getContext(), 32)
+        );
         Value bias =
             arith::ConstantOp::create(builder, anchor->getLoc(), builder.getZeroAttr(zeroBiasTy));
         optionalWeightZp.reset();
