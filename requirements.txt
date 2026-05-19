@@ -80,4 +80,4 @@ keras>=2.7.0
 packaging>=24.2
 
 # JAX frontend 
-# jax[cpu]==0.10.0
+jax[cpu]==0.10.0
