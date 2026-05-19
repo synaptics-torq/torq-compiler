@@ -115,8 +115,12 @@ def test_session_summary(request, session_id):
     
     statistics = queries.test_session_statistics.get_session_summary_statistics(session, baseline_session, options['min_duration_ns'])
 
-    return render(request, 'perf/test_session/summary.html', {'session': session, 'baseline_session': baseline_session, 'statistics': statistics, 'form': form})
-
+    return render(request, 'perf/test_session/summary.html', 
+        {'session': session, 
+         'baseline_session': baseline_session, 
+         'statistics': statistics, 
+         'form': form
+        })
 
 def test_session_results(request, session_id):
     """Detailed results page for a test session showing all test case runs and their metrics with filtering and sorting."""
@@ -132,22 +136,45 @@ def test_session_results(request, session_id):
             return redirect('test_session_results', session_id=session_id)
 
         baseline_session = form.cleaned_data['baseline_session']
+        selected_external_engine = form.cleaned_data.get('external_engine', '')
         options.update(form.cleaned_data)
     else:
         baseline_session = queries.test_session_comparison.get_default_comparison_session(session)
+        selected_external_engine = None
         form = forms.TestSessionResultsOptions(initial={'baseline_session': baseline_session})
-    
 
-    results_page, total = queries.test_session_results.get_session_results(
-        session,
-        baseline_session,
-        options['nodeid'],
-        options['status'],
-        options['comparison_transition'],
-        options['sort_by'],
-        options['page'],
-        50,
-    )
+
+    alt_last_session = queries.test_session_results.get_latest_alternative_engine_session()
+    alt_session_id = None
+
+    if alt_last_session:
+        alt_session_id = alt_last_session.id
+
+    alternative_engines = queries.test_session_results.get_compiler_targets_for_session( alt_session_id )
+
+    extra_args = {
+        "nodeid": options["nodeid"],
+        "status": options["status"],
+        "comparison_transition": options["comparison_transition"],
+        "sort_by": options["sort_by"],
+        "page_number": options["page"],
+        "page_size": 50,
+    }
+
+    if selected_external_engine and alt_last_session:
+        results_page, total = queries.test_session_results.get_session_results_compared_to_external_engine(
+            session=session,
+            alt_session_id=alt_session_id,
+            engine_name=selected_external_engine,
+            **extra_args,
+        )
+    else:
+        results_page, total = queries.test_session_results.get_session_results(
+            session=session,
+            baseline_session=baseline_session,
+            **extra_args,
+        )
+
 
     # paginate the results
     paginator = Paginator(range(total), 50) # since this view uses raw SQL we don't directly pass a queryset to the paginator
@@ -159,7 +186,12 @@ def test_session_results(request, session_id):
             'session': session,
             'baseline_session': baseline_session,
             'results': page_obj,
-            'form': form
+            'form': form,
+            'alternative_engines': {
+                "list": alternative_engines,
+                "sessionid": alt_session_id
+            },
+            'selected_external_engine': selected_external_engine
         })
 
 

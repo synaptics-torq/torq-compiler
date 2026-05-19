@@ -9,7 +9,7 @@
 <form method="get" class="mb-0">
     {{ form.page }}
     <div class="row g-3 align-items-stretch mb-4">
-        <div class="col-12 col-lg-8">
+        <div class="col-12 col-lg-6">
             <div class="card h-100">
                 <div class="card-body">
                     <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
@@ -26,7 +26,7 @@
             </div>
         </div>
 
-        <div class="col-12 col-lg-4">
+        <div class="col-12 col-lg-3">
             <div class="card h-100">
                 <div class="card-header">
                     <h2 class="h6 mb-0">Baseline Session</h2>
@@ -37,6 +37,34 @@
                 </div>
             </div>
         </div>
+
+        <div class="col-12 col-lg-3">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h2 class="h6 mb-0">External Engines</h2>
+                </div>
+                <div class="card-body">
+                    <label class="form-label" for="engine-select">Compare with engine</label>
+
+                    <select id="engine-select" name="external_engine" class="form-select">
+                        <option value="">None</option>
+                        {% for engine in alternative_engines.list %}
+                            <option value="{{ engine }}"
+                                    data-session-id="{{ alternative_engines.sessionid }}"
+                                    {% if engine == selected_external_engine %}selected{% endif %}>
+                                {{ engine }}
+                            </option>
+                        {% endfor %}
+                    </select>
+
+                    {% if alternative_engines.sessionid and selected_external_engine %} 
+                        <p id="engine-session-info" class="mt-2 text-muted">Session ID: {{ alternative_engines.sessionid }} </p>
+                    {% endif %}
+                    
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <div class="card mb-4">
@@ -164,4 +192,8 @@
         </div>
     </div>
 </form>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'perf/js/alternative_engines.js' %}"></script>
 {% endblock %}

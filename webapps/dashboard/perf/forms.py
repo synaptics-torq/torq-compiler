@@ -71,6 +71,7 @@ class TestSessionResultsOptions(BaseBootstrapForm):
     comparison_transition = forms.ChoiceField(choices=COMPARISON_TRANSITION_CHOICES, required=False, label="Filter by comparison transition")
     sort_by = forms.ChoiceField(choices=[("nodeid", "Test Name"), ("current_duration", "Duration ↑"), ("-current_duration", "Duration ↓"), ("change_percent", "Change Percent ↑"), ("-change_percent", "Change Percent ↓")], required=False, label="Sort by")
     page = forms.IntegerField(required=False, min_value=1, initial=1, widget=forms.HiddenInput)
+    external_engine = forms.CharField(required=False)
 
 
 class TestRunOptions(BaseBootstrapForm):

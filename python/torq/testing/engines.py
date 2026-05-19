@@ -1,27 +1,37 @@
-from email import parser
-
 import pytest
 from pathlib import Path
 
+engines = None
+
 # This is imported from extras/python
-try:
-    from engines import engines_runner as engines
+def get_engines() -> list:
+    global engines
 
-except ImportError:
-    class _DummyEngines:
-        @staticmethod
-        def compile(*args, **kwargs):
-            return {}
+    if engines is not None:
+        return engines
 
-        @staticmethod
-        def get_compilation_time(*args, **kwargs):
-            return None
-        
-        @staticmethod
-        def list_engines(*args, **kwargs):
-            return []
+    try:
+        from engines import engines_runner
+        engines = engines_runner
 
-    engines = _DummyEngines()
+    except ImportError:
+        print("engines import failed")
+        class _DummyEngines:
+            @staticmethod
+            def compile(*args, **kwargs):
+                return {}
+
+            @staticmethod
+            def get_compilation_time(*args, **kwargs):
+                return None
+            
+            @staticmethod
+            def list_engines(*args, **kwargs):
+                return []
+
+        engines = _DummyEngines()
+
+    return engines
 
 
 @pytest.fixture
@@ -36,7 +46,9 @@ def pytest_addoption(parser):
 def pytest_generate_tests(metafunc):
 
     if "alternative_engine" in metafunc.fixturenames:
-        all_engines = engines.list_engines()
+        engines_runner = get_engines()
+        all_engines = engines_runner.list_engines()
+        print("available engines: ", all_engines)
         selected = metafunc.config.getoption("torq_test_alternative_engines")
 
         if selected:
@@ -55,6 +67,8 @@ def pytest_generate_tests(metafunc):
 
     
 def compile_with_engine(request, tflite_model_path, alternative_engine):
+    engines_runner = get_engines()
+
 
     tmp_path = request.getfixturevalue("tmp_path")
     record_property = request.getfixturevalue("record_property")
@@ -63,10 +77,10 @@ def compile_with_engine(request, tflite_model_path, alternative_engine):
     out_dir = tmp_path / model_path.stem
 
     # Compile with the current engine
-    metadata = engines.compile(alternative_engine, str(model_path), str(out_dir))
+    metadata = engines_runner.compile(alternative_engine, str(model_path), str(out_dir))
     
     # Get compilation time
-    engine_compilation_time = engines.get_compilation_time(alternative_engine, str(model_path), str(out_dir))
+    engine_compilation_time = engines_runner.get_compilation_time(alternative_engine, str(model_path), str(out_dir))
 
     for key, value in metadata.items():
         record_property(key, value)
