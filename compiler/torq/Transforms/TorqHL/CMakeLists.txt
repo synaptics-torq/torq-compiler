@@ -35,7 +35,6 @@ set(deps
     iree::compiler::Utils
     iree::target::torq::Conversions::LinalgToTorqHL::LinalgToTorqHL
     iree::target::torq::Conversions::TorqHLToTorqHW
-    iree::target::torq::Conversions::TosaToTorqHL
 )
 
 if(TORQ_ENABLE_TORQ_GENERIC)

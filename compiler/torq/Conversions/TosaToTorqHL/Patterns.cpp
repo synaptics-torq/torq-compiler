@@ -798,68 +798,6 @@ scale_t reciprocal_scale(uint32_t value) {
     return scale;
 }
 
-struct TableOpConversion : public OpConversionPattern<tosa::TableOp> {
-    TableOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
-
-    LogicalResult matchAndRewrite(
-        tosa::TableOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
-    ) const override {
-
-        Value tableTensor = adaptor.getTable();
-
-        // Perform table lookup using a gather operation if the table is int8.
-        auto tableType = mlir::dyn_cast<RankedTensorType>(tableTensor.getType());
-        if (tableType.getElementType().isInteger(8)) {
-            return rewriter.notifyMatchFailure(srcOp, "table i8 is implemented in linalg");
-        }
-
-        // Get input operands.
-        Value input = adaptor.getInput1();
-
-        ElementsAttr attr;
-
-        if (failed(getFromConst(tableTensor, attr))) {
-            return rewriter.notifyMatchFailure(srcOp, "Cannot lower non-constant table");
-        }
-
-        std::vector<APInt> bias = {APInt(32, 0, /*isSigned=*/true)};
-        std::vector<APInt> scale = {APInt(32, 1, /*isSigned=*/true)};
-
-        SmallVector<int32_t> convertedValues;
-        auto elementType = attr.getElementType();
-        if (elementType.isInteger(16)) {
-            auto values = attr.getValues<int16_t>();
-            for (size_t i = 0; i < 512; i++) {
-                int16_t tb = values[i];                               // Extract base value
-                int16_t ts = (values[i + 1] - values[i]);             // Compute slope
-                int32_t packed = ((int32_t)ts << 16) | (tb & 0xFFFF); // Pack slope and base
-                convertedValues.push_back(packed);
-            }
-        }
-        else if (elementType.isInteger(8)) {
-            auto values = attr.getValues<int8_t>();
-            for (size_t i = 0; i < 256; i++) {
-                int32_t shiftedValue = static_cast<int32_t>(values[i]) << 8;
-                convertedValues.push_back(shiftedValue);
-            }
-            bias = {APInt(32, -128, /*isSigned=*/true)};
-            scale = {APInt(32, 128, /*isSigned=*/true)};
-        }
-        Value packedTable = createI32Const(
-            rewriter, srcOp, convertedValues,
-            llvm::ArrayRef<int64_t>{static_cast<int64_t>(convertedValues.size())}
-        );
-        Value initTensor = createInitTensor(srcOp, rewriter);
-
-        rewriter.replaceOpWithNewOp<syna::torq_hl::TableOp>(
-            srcOp, srcOp.getOutput().getType(), initTensor,
-            createIConst(rewriter, srcOp, interleave(bias, scale)), input, packedTable, nullptr
-        );
-
-        return success();
-    }
-};
-
 struct ArgMaxOpConversion : public OpConversionPattern<tosa::ArgMaxOp> {
 
     ArgMaxOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
@@ -891,104 +829,6 @@ struct ArgMaxOpConversion : public OpConversionPattern<tosa::ArgMaxOp> {
             createIConst(rewriter, srcOp, interleave(bias, scale)), inputVal
         );
 
-        return success();
-    }
-};
-
-struct AvgPool2DOpConversion : public OpConversionPattern<tosa::AvgPool2dOp> {
-
-    AvgPool2DOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
-    LogicalResult matchAndRewrite(
-        tosa::AvgPool2dOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
-    ) const override {
-
-        FailureOr<int64_t> outputZp = srcOp.getOutputZeroPoint();
-        if (!succeeded(outputZp)) {
-            return rewriter.notifyMatchFailure(srcOp, "AvgPool2dOp output zero point not found");
-        }
-        const int64_t output_zp = *outputZp;
-
-        FailureOr<int64_t> inputZp = srcOp.getInputZeroPoint();
-        if (!succeeded(inputZp)) {
-            return rewriter.notifyMatchFailure(srcOp, "AvgPool2dOp input zero point not found");
-        }
-        const int64_t input_zp = *inputZp;
-
-        int32_t out_min = -128;
-        int32_t out_max = 127;
-
-        Type elementType = getElementTypeOrSelf(srcOp.getResult().getType());
-        if (elementType.isSignedInteger() && elementType.getIntOrFloatBitWidth() == 8) {
-            out_min = -128;
-            out_max = 127;
-        }
-        else {
-            return failure();
-        }
-
-        llvm::ArrayRef<int64_t> kernel = srcOp.getKernel();
-        assert(kernel.size() == 2);
-
-        int32_t count = kernel[0] * kernel[1];
-        scale_t scaler = reciprocal_scale(count);
-
-        auto input_shape = mlir::cast<RankedTensorType>(srcOp.getInput().getType()).getShape();
-        // tosa spec request
-        assert(input_shape.size() == 4);
-
-        int32_t num_channels = input_shape[3];
-
-        const std::vector<APInt> scale(
-            num_channels, APInt(32, scaler.multiplier * (1 << scaler.shift))
-        );
-        const std::vector<APInt> bias(num_channels, APInt(32, count * input_zp));
-
-        if (!srcOp->hasOneUse()) {
-            return failure();
-        }
-
-        auto reshapeOp = dyn_cast<tosa::ReshapeOp>(*(srcOp.getOutput().user_begin()));
-
-        if (!reshapeOp) {
-            return failure();
-        }
-
-        auto outShape = reshapeOp.getType().getShape();
-
-        auto out_type =
-            RankedTensorType::get(outShape, srcOp.getResult().getType().getElementType());
-
-        auto avgPool2DOp = rewriter.replaceOpWithNewOp<syna::torq_hl::AvgPool2DOp>(
-            srcOp, out_type, createInitTensor(srcOp, rewriter, out_type),
-            MakeI32Attr(srcOp, input_zp), MakeI32Attr(srcOp, output_zp),
-            MakeI32Attr(srcOp, out_min), MakeI32Attr(srcOp, out_max),
-            MakeI32Attr(srcOp, scaler.shift),
-            createI8Const(
-                rewriter, srcOp, std::vector<int8_t>{1}, llvm::ArrayRef<int64_t>{1, 1, 1, 1}
-            ),
-            createIConst(rewriter, srcOp, interleave(bias, scale)),
-            fuseInputRescaleIfPossible(adaptor.getInput())
-        );
-
-        rewriter.replaceOp(reshapeOp, avgPool2DOp.getOutput());
-
-        // we need to ensure the srcOp is removed as it it the root of the pattern
-        rewriter.eraseOp(srcOp);
-
-        return success();
-    }
-};
-
-struct IdentityOpConversion : public OpConversionPattern<tosa::IdentityOp> {
-
-    IdentityOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
-    LogicalResult matchAndRewrite(
-        tosa::IdentityOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
-    ) const override {
-        rewriter.replaceOpWithNewOp<torq_hl::IdentityOp>(
-            srcOp, srcOp.getOutput().getType(), createInitTensor(srcOp, rewriter),
-            adaptor.getInput1()
-        );
         return success();
     }
 };
@@ -1069,67 +909,13 @@ struct ElementWiseShiftOpConversion final : public OpConversionPattern<OpTy> {
     }
 };
 
-// FIXME: This is supported only upscale of 2, Need to support more
-struct ResizeNearestNeighborOpConversion : public OpConversionPattern<tosa::ResizeOp> {
-    ResizeNearestNeighborOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
-
-    LogicalResult matchAndRewrite(
-        tosa::ResizeOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
-    ) const override {
-
-        SmallVector<int64_t> scale;
-        if (!tosa::getConstShapeValues(srcOp.getScale().getDefiningOp(), scale)) {
-            return failure();
-        }
-        auto mode = adaptor.getMode();
-        // the code only supported for scale factor of 2
-        bool isScaleFactor2 = (scale[0] == (scale[1] * 2));
-        if (mode != tosa::ResizeMode::NEAREST_NEIGHBOR || !isScaleFactor2) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Current support only for NEAREST_NEIGHBOR with scale 2"
-            );
-        }
-
-        // Transpose input NHWC -> NCHW, run the resize in NCHW, then transpose back.
-        auto resultTypeNCHW = convertTypeNHWCtoNCHW(srcOp.getResult().getType());
-        AffineExpr n, c, h, w;
-        bindDims(rewriter.getContext(), n, c, h, w);
-        // NCHW maps: input[n, c, h/2, w/2] -> output[n, c, h, w]
-        auto inputMap =
-            AffineMap::get(4, 0, {n, c, h.floorDiv(2), w.floorDiv(2)}, rewriter.getContext());
-        auto outputMap = AffineMap::get(4, 0, {n, c, h, w}, rewriter.getContext());
-        SmallVector<AffineMap, 4> indexingMaps = {inputMap, outputMap};
-        SmallVector<mlir::utils::IteratorType, 4> iteratorTypes(
-            4, mlir::utils::IteratorType::parallel
-        );
-        auto input = convertNHWCtoNCHW(adaptor.getInput(), srcOp.getLoc(), rewriter);
-        auto output = linalg::GenericOp::create(
-            rewriter, srcOp.getLoc(), resultTypeNCHW, input,
-            createInitTensor(srcOp.getLoc(), resultTypeNCHW, rewriter), indexingMaps, iteratorTypes,
-            [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
-                linalg::YieldOp::create(nestedBuilder, nestedLoc, args[0]);
-            }
-        );
-        auto outputTransposed = convertNCHWtoNHWC(output.getResult(0), srcOp.getLoc(), rewriter);
-        rewriter.replaceOp(srcOp, outputTransposed);
-
-        return success();
-    }
-};
-
 } // namespace
 
-// FIXME: Change the file name to TosaToTorqHLPattern to TosaToLinalgPattern once we have changed
-// all to linalg
 void populateTOSAToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patterns) {
 
     patterns.insert<RescaleOpConversion>(context);
-    // patterns.insert<AvgPool2DOpConversion>(context);
-    // patterns.insert<TableOpConversion>(context);
-    patterns.insert<IdentityOpConversion>(context);
     patterns.insert<ArgMaxOpConversion>(context);
     patterns.insert<ScatterOpConversion>(context);
-    patterns.insert<ResizeNearestNeighborOpConversion>(context);
 }
 
 } // namespace mlir::syna::torq

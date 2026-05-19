@@ -15,6 +15,7 @@ iree_cc_library(
     InputConversionPassPipelines.cpp
   DEPS
     MLIRSupport
+    iree::target::torq::Conversions::TosaToLinalg
     iree::target::torq::Conversions::TosaToTorqHL
     iree::target::torq::Conversions::LinalgToTorqHL
     iree::target::torq::Conversions::TorqHLToTorqHW

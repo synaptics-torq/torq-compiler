@@ -7,6 +7,7 @@
 #include "InputConversionPassPipelines.h"
 
 #include "torq/Conversions/LinalgToTorqHL/Passes.h"
+#include "torq/Conversions/TosaToLinalg/Passes.h"
 #include "torq/Conversions/TosaToTorqHL/Passes.h"
 #include "torq/Transforms/Linalg/Passes.h"
 #include "torq/Transforms/TorqHL/Passes.h"
@@ -47,6 +48,9 @@ static llvm::cl::opt<bool> clAnnotateTiedOperands(
 );
 
 void buildTosaTransformPassPipeline(OpPassManager &passManager) {
+
+    // lower specific TOSA to linalg
+    passManager.addNestedPass<func::FuncOp>(createTosaToLinalgConversionPass());
 
     if (!clDisableSlices) {
         // lower TOSA to a mix of linalg and torq_hl operators
