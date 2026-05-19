@@ -921,11 +921,16 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
     }
 };
 
-/// Helper for tiling a FullyConnectedOp along the row dimension (dim 0).
+/// Helper for tiling a FullyConnectedOp along both the row and channel
+/// dimensions.
 ///
-/// Breaks down large FC into smaller FC ops which
-/// are then subject to existing channel based tiling.
-static LogicalResult tileFullyConnectedByRows(
+/// Produces a flat grid of (row-tile x channel-tile) FC ops, each writing
+/// directly into the full output via InsertSliceOp.  By doing both levels
+/// of tiling in one pass we avoid creating an intermediate full-row-width
+/// EmptyOp that in-place bufferization would alias with the full output
+/// buffer, which would pin the entire output during every FC tile and
+/// overflow LRAM.
+static LogicalResult tileFullyConnectedByRowsAndChannels(
     torq_hl::FullyConnectedOp fcOp, PatternRewriter &rewriter, RankedTensorType outputType,
     ArrayRef<int64_t> outputShape, ShapedType inputType, size_t inputSize, size_t outputSize,
     size_t weightsSize, size_t scaleBiasSize, uint32_t memMaxSize
@@ -944,18 +949,28 @@ static LogicalResult tileFullyConnectedByRows(
 
     auto inputShape = inputType.getShape();
     size_t inputPerRow = inputSize / numRows;
-    size_t outputPerRow = outputSize / numRows;
     int64_t outputChannels = outputShape[1];
+    auto weightShape = fcOp.getWeights().getType().getShape();
 
-    // Compute the maximum rows per tile such that subsequent
-    // channel tiling can still create tiles of at least 64 channels.
-    // From the channel-tiling formula we need:
-    //   (mem - R*inputPerRow) / ceil((R*outputPerRow + wS + sbS) / outCh) >= 64
-    // Relaxing the ceil gives:
-    //   R <= (mem*outCh - 64*(wS+sbS)) / (inputPerRow*outCh + 64*outputPerRow)
-    int64_t numerator =
-        (int64_t)memMaxSize * outputChannels - 64 * (int64_t)(weightsSize + scaleBiasSize);
-    int64_t denominator = (int64_t)inputPerRow * outputChannels + 64 * (int64_t)outputPerRow;
+    // Each tile's LRAM footprint is:
+    //   programBuf + R*inputPerRow + tileChannels*wsbPerCh + R*outputStride
+    //
+    // The output tile is a strided subview of the full output buffer
+    // with row stride = outputChannels, so it occupies R full output rows
+    // in LRAM (outputPerRow = outputChannels*elemSize).
+    //
+    // A slice program buffer (see OutlineSliceProgramsPass) is also
+    // allocated in LRAM alongside the tensor data.
+    //
+    // With tileChannels fixed at 64 (hardware minimum):
+    //   R <= (mem - programBuf - 64*wsbPerCh) / (inputPerRow + outputPerRow)
+    /// FIXME: currently sync'd with OutlineSliceProgramsPass, should be a shared constant
+    static constexpr int64_t kSliceProgramBuf = 0xA00 * 2;
+    int64_t weightScaleBiasPerCh = div_ceil(weightsSize + scaleBiasSize, outputChannels);
+    int64_t outputElementSize = outputType.getElementType().getIntOrFloatBitWidth() / 8;
+    int64_t outputPerRow = outputChannels * outputElementSize;
+    int64_t numerator = (int64_t)memMaxSize - kSliceProgramBuf - 64 * weightScaleBiasPerCh;
+    int64_t denominator = (int64_t)inputPerRow + outputPerRow;
 
     int64_t rowsPerTile = (numerator > 0 && denominator > 0) ? numerator / denominator : 1;
     if (rowsPerTile < 1)
@@ -967,13 +982,13 @@ static LogicalResult tileFullyConnectedByRows(
     }
 
     // Safety check: verify the computed rowsPerTile actually allows
-    // at least 64-channel tiles using the exact formula.
+    // at least 64-channel tiles within the conservative budget.
     for (;;) {
         size_t tileInputSz = rowsPerTile * inputPerRow;
-        if (tileInputSz < memMaxSize) {
-            size_t tileOutputSz = rowsPerTile * outputPerRow;
-            int maxCh = (memMaxSize - tileInputSz) /
-                        div_ceil(tileOutputSz + weightsSize + scaleBiasSize, outputChannels);
+        size_t tileOutputBudget = rowsPerTile * outputPerRow;
+        if (tileInputSz + tileOutputBudget + kSliceProgramBuf < memMaxSize) {
+            int maxCh = (memMaxSize - kSliceProgramBuf - tileInputSz - tileOutputBudget) /
+                        div_ceil(weightsSize + scaleBiasSize, outputChannels);
             if (maxCh >= 64)
                 break;
         }
@@ -984,19 +999,28 @@ static LogicalResult tileFullyConnectedByRows(
         rowsPerTile--;
     }
 
+    // Compute channels per tile from the validated rowsPerTile.
+    size_t tileInputSz = rowsPerTile * inputPerRow;
+    size_t tileOutputBudget = rowsPerTile * outputPerRow;
+    int maxChannelsPerTile = (memMaxSize - kSliceProgramBuf - tileInputSz - tileOutputBudget) /
+                             div_ceil(weightsSize + scaleBiasSize, outputChannels);
+    int channelsPerTile = align_floor(maxChannelsPerTile, 64);
+
     Value outputTensor =
         tensor::EmptyOp::create(rewriter, fcOp.getLoc(), outputShape, outputType.getElementType());
 
     int64_t trailingRows = numRows % rowsPerTile;
-    int64_t totalFullTiles = numRows / rowsPerTile;
-    int64_t totalTiles = totalFullTiles + (trailingRows > 0 ? 1 : 0);
+    int64_t totalRowTiles = numRows / rowsPerTile + (trailingRows > 0 ? 1 : 0);
 
-    for (int64_t i = 0; i < totalTiles; i++) {
-        int64_t rowOffset = i * rowsPerTile;
+    int trailingChannels = outputChannels % channelsPerTile;
+    int totalChTiles = outputChannels / channelsPerTile + (trailingChannels > 0 ? 1 : 0);
+
+    int scaleBiasItems = outputType.getElementType().isInteger() ? 2 : 1;
+
+    for (int64_t ri = 0; ri < totalRowTiles; ri++) {
+        int64_t rowOffset = ri * rowsPerTile;
         int64_t currentRows =
-            (trailingRows > 0 && i == totalTiles - 1) ? trailingRows : rowsPerTile;
-
-        auto tileStrides = createVector({1, 1}, rewriter);
+            (trailingRows > 0 && ri == totalRowTiles - 1) ? trailingRows : rowsPerTile;
 
         // Slice input along rows: [rowOffset : rowOffset+currentRows, :]
         auto inputSlice = tensor::ExtractSliceOp::create(
@@ -1006,28 +1030,46 @@ static LogicalResult tileFullyConnectedByRows(
             createVector({(int64_t)1, (int64_t)1}, rewriter)
         );
 
-        auto outputTileType =
-            RankedTensorType::get({currentRows, outputChannels}, outputType.getElementType());
+        for (int ci = 0; ci < totalChTiles; ci++) {
+            int chOffset = ci * channelsPerTile;
+            int tileChannels = (trailingChannels > 0 && ci == totalChTiles - 1) ? trailingChannels
+                                                                                : channelsPerTile;
 
-        auto initTile = tensor::EmptyOp::create(
-            rewriter, fcOp.getLoc(), outputTileType.getShape(), outputTileType.getElementType()
-        );
+            auto weightTile = tensor::ExtractSliceOp::create(
+                rewriter, fcOp.getLoc(), fcOp.getWeights(), createVector({chOffset, 0}, rewriter),
+                createVector({tileChannels, weightShape[1]}, rewriter),
+                createVector({1, 1}, rewriter)
+            );
 
-        auto outputTile = torq_hl::FullyConnectedOp::create(
-            rewriter, fcOp.getLoc(), outputTileType, initTile.getResult(), fcOp.getInputZp(),
-            fcOp.getWeightZp(), fcOp.getOutputZp(), fcOp.getOutputMin(), fcOp.getOutputMax(),
-            fcOp.getShiftFactor(), fcOp.getVectorizationMode(), fcOp.getWeights(),
-            fcOp.getScaleBias(), inputSlice.getResult()
-        );
+            auto scaleBiasTile = tensor::ExtractSliceOp::create(
+                rewriter, fcOp.getLoc(), fcOp.getScaleBias(),
+                createVector({chOffset * scaleBiasItems}, rewriter),
+                createVector({tileChannels * scaleBiasItems}, rewriter), createVector({1}, rewriter)
+            );
 
-        auto outputTileOffsets = createVector({rowOffset, (int64_t)0}, rewriter);
-        auto outputTileSizes = createVector({currentRows, outputChannels}, rewriter);
+            auto outputTileType =
+                RankedTensorType::get({currentRows, tileChannels}, outputType.getElementType());
 
-        outputTensor = tensor::InsertSliceOp::create(
-                           rewriter, fcOp.getLoc(), outputTile.getOutput(), outputTensor,
-                           outputTileOffsets, outputTileSizes, tileStrides
-        )
-                           .getResult();
+            auto initTile = tensor::EmptyOp::create(
+                rewriter, fcOp.getLoc(), outputTileType.getShape(), outputTileType.getElementType()
+            );
+
+            auto outputTile = torq_hl::FullyConnectedOp::create(
+                rewriter, fcOp.getLoc(), outputTileType, initTile.getResult(), fcOp.getInputZp(),
+                fcOp.getWeightZp(), fcOp.getOutputZp(), fcOp.getOutputMin(), fcOp.getOutputMax(),
+                fcOp.getShiftFactor(), fcOp.getVectorizationMode(), weightTile.getResult(),
+                scaleBiasTile.getResult(), inputSlice.getResult()
+            );
+
+            auto tileOffsets = createVector({rowOffset, (int64_t)chOffset}, rewriter);
+            auto tileSizes = createVector({currentRows, (int64_t)tileChannels}, rewriter);
+
+            outputTensor = tensor::InsertSliceOp::create(
+                               rewriter, fcOp.getLoc(), outputTile.getOutput(), outputTensor,
+                               tileOffsets, tileSizes, createVector({1, 1}, rewriter)
+            )
+                               .getResult();
+        }
     }
 
     rewriter.replaceOp(fcOp, outputTensor);
@@ -1077,7 +1119,7 @@ class FullyConnectedPattern : public OpRewritePattern<torq_hl::FullyConnectedOp>
         //     The greedy rewriter will re-apply this pattern for channel
         //     tiling on the resulting smaller ops.
         if (needsRowTiling) {
-            return tileFullyConnectedByRows(
+            return tileFullyConnectedByRowsAndChannels(
                 fcOp, rewriter, outputType, outputShape, inputType, inputSize, outputSize,
                 weightsSize, scaleBiasSize, mem_max_size
             );

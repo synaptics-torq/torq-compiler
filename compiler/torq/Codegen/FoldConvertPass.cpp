@@ -514,6 +514,20 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
             // check we can fit the concat in LRAM
             totalSize += getEncodedTotalSizeBytes(currentInsert.getSource().getType());
 
+            // Do not pull into LRAM if the source is already LRAM-encoded or
+            // comes from a ConvertOp that decodes from LRAM; the kernel
+            // already manages its own LRAM allocation for the tile.
+            if (getEncodingMemorySpace(currentInsert.getSource().getType()) !=
+                torq_hl::MemorySpace::Xram) {
+                return failure();
+            }
+            if (auto convertOp = currentInsert.getSource().getDefiningOp<torq_hl::ConvertOp>()) {
+                if (getEncodingMemorySpace(convertOp.getInput().getType()) ==
+                    torq_hl::MemorySpace::Lram) {
+                    return failure();
+                }
+            }
+
             // we cannot fit the whole contact in LRAM so we won't apply this pattern
             if (totalSize > TorqHw::get().getAvailableMemoryForTiling()) {
                 return failure();

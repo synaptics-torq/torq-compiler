@@ -63,6 +63,12 @@ def case_config(request, runtime_hw_type, chip_config):
     
     if 'gelu' in request.param.data.name:
         extra_args["comparison_config"] = "comparison_config_for_gelu"
+
+    if 'gemm-fc-row-channel-tiling' in request.param.data.name:
+        extra_args["torq_compiler_options"] = [
+            "--torq-disable-host", "--torq-disable-css",
+            "--torq-enable-torq-hl-tiling",
+        ]
     
     if any(host_mlir in request.param.data.name for host_mlir in ['conv2d-host.mlir', 'mul-i64-scalar.mlir', 'constantshape.mlir']):
         extra_args["torq_compiler_options"] = ["--torq-disable-slices", "--torq-disable-css"]
