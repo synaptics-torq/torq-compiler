@@ -33,7 +33,7 @@ def comparison_config_for_gelu(request):
 def case_config(request, runtime_hw_type, chip_config):
 
     no_negative_input = [
-        'sqrt-scalar',
+        'sqrt-',
     ]
 
     extra_args = {}

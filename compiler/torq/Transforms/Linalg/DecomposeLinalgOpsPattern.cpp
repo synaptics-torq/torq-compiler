@@ -914,6 +914,49 @@ struct QuantizedBatchMatmulPattern : public OpRewritePattern<linalg::QuantizedBa
     }
 };
 
+// Decompose bf16 sqrt(x) into x * rsqrt(x).
+// The resulting rsqrt linalg.generic is further decomposed by BfloatRsqrtPattern.
+class BfloatSqrtPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    BfloatSqrtPattern(MLIRContext *context)
+        : OpRewritePattern<linalg::GenericOp>(context, /*benefit=*/1) {
+        setDebugName("BfloatSqrtPattern");
+    }
+
+    LogicalResult matchAndRewrite(linalg::GenericOp op, PatternRewriter &rewriter) const override {
+        if (!cast<RankedTensorType>(op.getType(0)).getElementType().isBF16() ||
+            !isa_and_nonnull<math::SqrtOp>(getElementwiseUnaryOp(op))) {
+            return rewriter.notifyMatchFailure(op, "Expected bf16 sqrt");
+        }
+        auto [isForced, forced] = setTargetExecutorIfForced(op, rewriter, "sqrt");
+        if (isForced) {
+            return forced;
+        }
+
+        auto loc = op.getLoc();
+        auto input = op.getInputs()[0];
+        auto resultType = cast<RankedTensorType>(op.getType(0));
+        auto rank = resultType.getRank();
+        auto ctx = rewriter.getContext();
+
+        // Create linalg.generic with math.rsqrt in body
+        auto rsqrt = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{resultType}, ValueRange{input},
+            ValueRange{tensor::EmptyOp::create(rewriter, loc, resultType, ValueRange{})},
+            SmallVector<AffineMap>(2, AffineMap::getMultiDimIdentityMap(rank, ctx)),
+            SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel),
+            [&](OpBuilder &b, Location l, ValueRange args) {
+                auto rsqrtVal = math::RsqrtOp::create(b, l, args[0]);
+                linalg::YieldOp::create(b, l, ValueRange{rsqrtVal});
+            }
+        );
+
+        auto result = arith::MulFOp::create(rewriter, loc, input, rsqrt.getResult(0));
+        rewriter.replaceOp(op, result);
+        return success();
+    }
+};
+
 class BfloatRsqrtPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     // using OpRewritePattern::OpRewritePattern;
@@ -1005,6 +1048,7 @@ void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet 
     patterns.insert<BfloatReciprocalPattern>(context);
     patterns.insert<QuantizedBatchMatmulPattern>(context);
     patterns.insert<PowToMulPattern>(context);
+    patterns.insert<BfloatSqrtPattern>(context);
     patterns.insert<BfloatRsqrtPattern>(context);
     patterns.insert<CanonicalizeBF16CastComparePattern>(context);
 }
