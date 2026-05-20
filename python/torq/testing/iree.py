@@ -890,7 +890,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         print()
     
     # Check if profile annotation should be skipped (can be configured via case_config)
-    if enable_profiling and not skip_profile_annotation:
+    if enable_profiling and not skip_profile_annotation and torq_compiled_model_debug_info.exists() and (versioned_dir / 'host_profile.csv').exists():
         logger.debug("Starting profile annotation...")        
         measurements = annotate_host_profile_from_files(
             torq_compiled_model_debug_info,

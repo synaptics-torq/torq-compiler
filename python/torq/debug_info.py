@@ -1075,7 +1075,7 @@ class DebugInfo:
         if not os.path.exists(self.path):
             # There is no debug info available, return an empty list
             return []
-        mlirb_files = [f for f in flist if f.endswith(".mlirb")]
+        mlirb_files = [f for f in os.listdir(self.path) if f.endswith(".mlirb")]
         return sorted([f[:-6] for f in mlirb_files])
 
     def pretty_print_location(self, loc: Location):
