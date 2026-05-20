@@ -174,19 +174,19 @@ RankedTensorType transposeType(Type origType, const SmallVector<int64_t> &permut
 }
 
 Value transposeValue(
-    Value input, const SmallVector<int64_t> &permutation, Location loc, PatternRewriter &rewriter
+    Value input, const SmallVector<int64_t> &permutation, Location loc, OpBuilder &builder
 ) {
     if (permutation.empty()) {
         return input;
     }
-    OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointAfterValue(input);
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointAfterValue(input);
     auto outputType = transposeType(input.getType(), permutation);
     auto initValue =
-        tensor::EmptyOp::create(rewriter, loc, outputType.getShape(), outputType.getElementType())
+        tensor::EmptyOp::create(builder, loc, outputType.getShape(), outputType.getElementType())
             .getResult();
 
-    auto transposeOp = linalg::TransposeOp::create(rewriter, loc, input, initValue, permutation);
+    auto transposeOp = linalg::TransposeOp::create(builder, loc, input, initValue, permutation);
     return transposeOp.getResult()[0];
 }
 
@@ -436,6 +436,11 @@ const Permutation &Permutation::hwcf2fchw() {
 
 const Permutation &Permutation::nhwc2nchw() {
     const static Permutation perm = {0, 3, 1, 2};
+    return perm;
+}
+
+const Permutation &Permutation::nchw2nhwc() {
+    const static Permutation perm = {0, 2, 3, 1};
     return perm;
 }
 

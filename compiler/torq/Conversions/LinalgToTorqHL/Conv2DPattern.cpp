@@ -866,14 +866,7 @@ isKerSmall(int kernelHIndex, ArrayRef<int64_t> inputShape, ArrayRef<int64_t> ker
 void populateLinalgToTorqHLConv2DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-    patterns.insert<Conv2dConvert<linalg::Conv2DNhwcHwcfOp, syna::torq_hl::Conv2DOp>>(
-        context, 3, Permutation::nhwc2nchw(), Permutation::hwcf2fchw(), 28, 12,
-        [](auto i, auto w) { return isKerSmall(0, i, w); }, markFuseGroups
-    );
-    patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
-        context, 3, Permutation::nhwc2nchw(), Permutation::hwc2chw(), 20, 12,
-        [](auto i, auto w) { return isKerSmall(0, i, w); }, markFuseGroups
-    );
+    // NHWC Conv/Depthwise are converted to NCHW at linalg stage
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNchwChwOp, torq_hl::DepthwiseConv2DOp>>(
         context, 1, Permutation::none(), Permutation::none(), 20, 12,
         [](auto i, auto w) { return isKerSmall(1, i, w); }, markFuseGroups, true

@@ -209,6 +209,11 @@ def _compare_full_od_pair(left_results, right_results, left_name, right_name, mo
 def case_config(request, tflite_layer_model):
     """Configure test case settings."""
     torq_compiler_options = []
+
+    # TODO: Need to enable the transpose optimization
+    if "yolov8n_full_integer_quant_320_od.tflite_full_model" in request.node.name:
+        torq_compiler_options += ["--torq-enable-transpose-optimization=false"]
+
     return {
         "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",

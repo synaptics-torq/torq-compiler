@@ -26,6 +26,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createGeneralizeLinalgNamedO
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeLinalgForTorqPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvertNhwcOpToNchwPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeTransposeLayoutPass();
 
 std::unique_ptr<OperationPass<ModuleOp>> createAnnotateTiedOperandsPass();
@@ -37,6 +39,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollStaticScfForLoop
 //----------------------------------------------------------------------------//
 
 void registerLinalgForTorqPasses();
+void registerConvertNhwcOpToNchwPasses();
 void buildTorqTypeConversionPipeline(OpPassManager &passManager);
 
 } // namespace mlir::syna::torq

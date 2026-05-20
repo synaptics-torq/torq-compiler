@@ -1228,7 +1228,7 @@ class AddPattern : public OpRewritePattern<torq_hl::AddOp> {
 
         // For elementwise ops, tiling is layout-agnostic (works same for NCHW/NHWC)
         // We tile along dimension 1 regardless of what it represents
-        int sliceDataSize = getFrameSize(outType) + getFrameSize(inType) * (isRhsScalar ? 1 : 2);
+        int sliceDataSize = getFrameSize(inType) * (isRhsScalar ? 1 : 2);
         if (sliceDataSize < 0) {
             return failure();
         }
@@ -1237,7 +1237,8 @@ class AddPattern : public OpRewritePattern<torq_hl::AddOp> {
             return op.emitError("Frame size is too large to fit in LRAM");
         }
 
-        int maxDim1PerTile = memoryAvailable / sliceDataSize;
+        int maxDim1PerTile = (memoryAvailable - outputSize) / sliceDataSize;
+
         maxDim1PerTile = std::max(1u, align_floor(maxDim1PerTile, 4));
 
         int dim1Size = getChannelCount(outType);

@@ -273,7 +273,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         // Binary ops can actually have only one input if both operands are the same
         Value input1 = eltOp.getInputs()[eltOp.getInputs().size() > 1 ? 1 : 0];
         Value output = eltOp.getResultTensors()[0];
-        const auto outType = cast<RankedTensorType>(output.getType());
+        auto outType = cast<RankedTensorType>(output.getType());
 
         const auto loc = eltOp.getLoc();
 
@@ -307,11 +307,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             opName = "sub";
             break;
         }
-
-        // For rank4 convert in & out to NCHW so that the transposes can be folded with those of the
-        // nearby ops which also work in NCHW. This should be replaced with a pass that is able to
-        // fold transposes before and after any elementwise op.
-        auto dataPerm = outType.getRank() == 4 ? Permutation::nhwc2nchw() : Permutation::none();
 
         bool isInt = outType.getElementType().isInteger();
 
@@ -416,9 +411,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             );
             input1 = input0;
         }
-        // Generate torq_hl op with input in the expected format
-        input0 = transposeValue(input0, dataPerm, loc, rewriter);
-        input1 = transposeValue(input1, dataPerm, loc, rewriter);
 
         // concatenate weight0 and weight1
         std::vector<int16_t> weights = {weight0, weight1};
@@ -435,15 +427,14 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                                : createConst(bias.floats, rewriter, loc);
 
         // Generate torq_hl op with output in the expected format
-        auto torqOutType = transposeType(output.getType(), dataPerm);
+        outType = cast<RankedTensorType>(output.getType());
         auto torqOp = TorqEltOp::create(
-            rewriter, loc, torqOutType, createInitTensor(eltOp, rewriter, torqOutType), opName,
+            rewriter, loc, outType, createInitTensor(eltOp, rewriter, outType), opName,
             /* input zp not needed */ 0, scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift,
             torqWeights, biasScale, input0, input1
         );
-        auto torqOut = transposeValue(torqOp.getOutput(), dataPerm.reverse(), loc, rewriter);
 
-        rewriter.replaceOp(output.getDefiningOp(), torqOut);
+        rewriter.replaceOp(output.getDefiningOp(), torqOp.getOutput());
         return success();
     }
 

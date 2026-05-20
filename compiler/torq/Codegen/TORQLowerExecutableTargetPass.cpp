@@ -105,7 +105,7 @@ static llvm::cl::opt<std::string> clExecutorMap(
 
 static llvm::cl::opt<bool> clEnableTransposeOptimization(
     "torq-enable-transpose-optimization",
-    llvm::cl::desc("enable transpose layout optimization pass"), llvm::cl::init(false)
+    llvm::cl::desc("enable transpose layout optimization pass"), llvm::cl::init(true)
 );
 
 static llvm::cl::opt<bool> clEnableSplitConstantsOptimization(
@@ -132,11 +132,6 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
     funcPm.addPass(createKernelSelectionPass());
 
     funcPm.addPass(createCanonicalizerPass());
-
-    // Move layout transposes through elementwise chains to enable cancellation
-    if (clEnableTransposeOptimization) {
-        funcPm.addPass(createOptimizeTransposeLayoutPass());
-    }
 
     funcPm.addPass(createMarkHostExecutorPass());
 
@@ -334,7 +329,13 @@ void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
 
     // optimize linalg ops for torq
     funcPm.addPass(createOptimizeLinalgForTorqPass());
+    // Convert NHWC conv/pool/depthwise NHWC to NCHW
+    funcPm.addPass(createConvertNhwcOpToNchwPass());
     funcPm.addPass(createCanonicalizerPass());
+
+    if (clEnableTransposeOptimization) {
+        funcPm.addPass(createOptimizeTransposeLayoutPass());
+    }
 
     // Convert tensor-level elementwise arith ops into explicit linalg.generic form.
     funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
@@ -361,11 +362,6 @@ void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
 
     funcPm.addPass(createCompileTimeConstComputePass());
     funcPm.addPass(createCanonicalizerPass());
-
-    // Move layout transposes through elementwise chains to enable cancellation
-    if (clEnableTransposeOptimization) {
-        funcPm.addPass(createOptimizeTransposeLayoutPass());
-    }
 
     funcPm.addPass(createMarkHostExecutorPass());
 
@@ -421,7 +417,13 @@ void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
     // optimize linalg ops for torq
     // this pass use some tags from tile-and-fuse mark pass
     funcPm.addPass(createOptimizeLinalgForTorqPass());
+    // Convert NHWC conv/pool/depthwise NHWC to NCHW
+    funcPm.addPass(createConvertNhwcOpToNchwPass());
     funcPm.addPass(createCanonicalizerPass());
+
+    if (clEnableTransposeOptimization) {
+        funcPm.addPass(createOptimizeTransposeLayoutPass());
+    }
 
     // Convert tensor-level elementwise arith ops (e.g. addi, subi, andi) into
     // explicit linalg.generic form. This makes all elementwise math uniform

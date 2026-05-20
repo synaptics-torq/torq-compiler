@@ -407,7 +407,7 @@ RankedTensorType transposeType(Type origType, const SmallVector<int64_t> &permut
 
 // Transpose the value of a tensor according to the specifed  permutation
 Value transposeValue(
-    Value input, const SmallVector<int64_t> &permutation, Location loc, PatternRewriter &rewriter
+    Value input, const SmallVector<int64_t> &permutation, Location loc, OpBuilder &rewriter
 );
 
 // Rescale the input value  by dividing with divFactor factor and adding bias
@@ -430,6 +430,7 @@ struct Permutation : SmallVector<int64_t> {
 
     // Common permutations
     static const Permutation &nhwc2nchw();
+    static const Permutation &nchw2nhwc();
     static const Permutation &hwcf2fchw();
     static const Permutation &hwc2chw();
     static const Permutation &nhc2nch();

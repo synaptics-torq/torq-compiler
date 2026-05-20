@@ -23,6 +23,7 @@ iree_cc_library(
     OptimizeLinalgForTorqPass.cpp
     OptimizeTransposeLayoutPass.cpp
     UnrollStaticScfForLoopsPass.cpp
+    ConvertNhwcOpToNchwPass.cpp
     RaiseSoftmaxOpPattern.cpp
     OptimizeElementwiseBinaryOpPattern.cpp
     OptimizeSelectOpPattern.cpp

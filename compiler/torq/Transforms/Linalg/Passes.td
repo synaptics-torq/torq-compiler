@@ -73,6 +73,32 @@ def GeneralizeLinalgNamedOps :
     ];
 }
 
+def ConvertNhwcOpToNchw :
+    InterfacePass<"torq-convert-nhwc-op-to-nchw",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Converts NHWC linalg conv/pool/depthwise ops to their NCHW equivalents";
+
+    let description = [{
+        Transforms linalg.conv_2d_nhwc_hwcf, linalg.depthwise_conv_2d_nhwc_hwc, and
+        linalg.pooling_nhwc_max (and their fused clusters of bias/rescale generics)
+        into the corresponding NCHW variants. Input and output transposes are inserted
+        to preserve the external NHWC interface.
+
+        This pass should run after all fusion opportunities (e.g. bias add, rescale)
+        have been applied so that the cluster walk sees the fully fused graph.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createConvertNhwcOpToNchwPass()";
+
+    let dependentDialects = [
+        "linalg::LinalgDialect",
+        "tensor::TensorDialect",
+        "arith::ArithDialect"
+    ];
+}
+
 def OptimizeLinalgForTorq :
     InterfacePass<"torq-optimize-linalg-for-torq",
                   "mlir::FunctionOpInterface"> {

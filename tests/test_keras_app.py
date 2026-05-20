@@ -94,6 +94,7 @@ def case_config(request, runtime_hw_type, chip_config):
   longer_test_timeout = [
       'inceptionv3_conv2d_6',
       'inceptionv3_conv2d_8',
+      'layer_vgg16_block5_conv1',
   ]
   if any(s in request.param.name.lower() for s in longer_test_timeout):
     compile_timeout = compile_timeout * 2

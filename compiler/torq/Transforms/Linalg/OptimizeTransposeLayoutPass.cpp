@@ -8,65 +8,68 @@
 // OptimizeTransposeLayoutPass
 //===----------------------------------------------------------------------===//
 //
-// **APPROACH**: Create transpose pairs around layout-agnostic operations,
-// then rely on canonicalization to eliminate redundant transposes.
+// **PURPOSE**: Eliminate redundant NCHW↔NHWC transposes between NCHW regions
+// by propagating NCHW→NHWC transposes through layout-agnostic elementwise ops.
 //
-// **STRATEGY**: we create MORE transposes
-// initially around operations that can work in different layouts, then let
-// canonicalization clean up the redundant pairs.
+// **KEY STRATEGY**: Only propagate NCHW→NHWC [0,2,3,1] transposes.
+//                   Block NHWC→NCHW [0,3,1,2] transposes (structural boundaries).
 //
-// **STEPS**:
-//   1. Run dataflow analysis ONCE on entire function
-//      → TransposePropagationAnalysis identifies which ops can work in different layouts
-//   2. For each operation that can propagate a transpose:
-//      - Create inverse transposes on inputs (convert to needed layout)
-//      - Transform the operation to work in inverse-permuted layout
-//      - Create forward transpose on output (convert back to expected layout)
-//   3. Transpose canonicalization eliminates back-to-back transpose pairs
+// **APPROACH**:
+//   1. Dataflow analysis marks which ops can propagate NCHW→NHWC transposes
+//   2. Wrap propagatable ops with inverse/forward transpose pairs
+//   3. Canonicalization cancels adjacent transpose pairs
 //
-// **KEY INSIGHT**: We temporarily increase transposes, but canonicalization
-// removes redundant pairs, resulting in transposes moving closer to ops that
-// actually need specific layouts.
+// **RESULT**: Transposes between consecutive NCHW regions are eliminated,
+//            preserving the NCHW regions created by ConvertNhwcOpToNchwPass.
 //
-// **EXAMPLE**:
-//   BEFORE (transpose between elementwise and conv):
-//     %input    = ...                                // NCHW data
-//     %t1       = transpose [0,2,3,1] %input         // NCHW→NHWC
-//     %elem     = elementwise %t1                     // elementwise in NHWC
-//     %conv     = conv %elem                          // conv requires NHWC
+// **EXAMPLE**: Eliminating transposes between NCHW regions
 //
-//   AFTER TRANSFORMATION (Step 2 — inverse/forward pairs wrap elementwise):
-//     %input    = ...                                // NCHW data
-//     %t1       = transpose [0,2,3,1] %input         // NCHW→NHWC (original)
-//     %inv      = transpose [0,3,1,2] %t1            // NHWC→NCHW (new inverse)
-//     %elem_new = elementwise %inv                    // elementwise in NCHW
-//     %fwd      = transpose [0,2,3,1] %elem_new      // NCHW→NHWC (new forward)
-//     %conv     = conv %fwd                           // conv requires NHWC
+//   BEFORE:
+//     %t1 = transpose [0,3,1,2] %input   // NHWC→NCHW (blocked)
+//     %conv1 = conv_nchw %t1              // NCHW region
+//     %t2 = transpose [0,2,3,1] %conv1    // NCHW→NHWC (can propagate)
+//     %add = elementwise %t2              // elementwise in NHWC
+//     %t3 = transpose [0,3,1,2] %add      // NHWC→NCHW (blocked)
+//     %conv2 = conv_nchw %t3              // NCHW region
 //
-//   AFTER CANONICALIZATION (Step 3 — [0,2,3,1] + [0,3,1,2] = identity, cancelled):
-//     %input    = ...                                // NCHW data
-//     %elem_new = elementwise %input                  // elementwise directly on NCHW
-//     %fwd      = transpose [0,2,3,1] %elem_new      // single NCHW→NHWC
-//     %conv     = conv %fwd                           // conv requires NHWC
+//   AFTER TRANSFORMATION (wrap %add with inverse/forward pairs):
+//     %t1 = transpose [0,3,1,2] %input
+//     %conv1 = conv_nchw %t1
+//     %t2 = transpose [0,2,3,1] %conv1
+//     %inv = transpose [0,3,1,2] %t2      // new inverse for %add
+//     %add' = elementwise %inv             // now in NCHW
+//     %fwd = transpose [0,2,3,1] %add'    // new forward
+//     %t3 = transpose [0,3,1,2] %fwd
+//     %conv2 = conv_nchw %t3
 //
-//   Net result: the transpose moved past the elementwise, closer to the conv.
-//   With N consecutive elementwise ops, N-1 intermediate transposes are eliminated.
+//   AFTER CANONICALIZATION (%t2+%inv, %fwd+%t3 cancel):
+//     %t1 = transpose [0,3,1,2] %input
+//     %conv1 = conv_nchw %t1
+//     %add' = elementwise %conv1           // directly on NCHW
+//     %conv2 = conv_nchw %add'             // directly on NCHW
+//
+//   Result: NCHW regions merged, intermediate transposes eliminated.
 //===----------------------------------------------------------------------===//
 
 #include "PassesDetail.h"
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
+#include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/LayoutTransformUtils.h"
 
 #include "mlir/Analysis/DataFlow/ConstantPropagationAnalysis.h"
 #include "mlir/Analysis/DataFlow/DeadCodeAnalysis.h"
 #include "mlir/Analysis/DataFlow/SparseAnalysis.h"
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 
@@ -78,7 +81,7 @@ namespace mlir::syna::torq {
 // Simple Helper Functions
 //===----------------------------------------------------------------------===//
 
-/// Check if affine map is elementwise (no dimension reordering)
+// Check if affine map is elementwise (no dimension permutation).
 static bool isElementwiseMap(AffineMap map) {
 
     if (map.isIdentity() || map.isMinorIdentity()) {
@@ -105,7 +108,7 @@ static bool isElementwiseMap(AffineMap map) {
     return true;
 }
 
-/// Check if a linalg.generic is layout-agnostic elementwise (used by dataflow analysis)
+// Check if linalg.generic is layout-agnostic elementwise (all parallel iterators, no permutations).
 static bool isLayoutAgnosticElementwise(linalg::GenericOp genericOp) {
     // Must be all parallel iterators
     if (!llvm::all_of(genericOp.getIteratorTypesArray(), [](utils::IteratorType iter) {
@@ -131,55 +134,11 @@ static bool isLayoutAgnosticElementwise(linalg::GenericOp genericOp) {
     return true;
 }
 
-/// Check if transpose is NCHW↔NHWC layout conversion (4D only)
-static bool isLayoutConversionTranspose(linalg::TransposeOp transposeOp) {
-    auto perm = transposeOp.getPermutation();
-    if (perm.size() != 4)
-        return false;
-
-    // NCHW→NHWC: [0, 2, 3, 1] or NHWC→NCHW: [0, 3, 1, 2]
-    return (perm[0] == 0 && perm[1] == 2 && perm[2] == 3 && perm[3] == 1) ||
-           (perm[0] == 0 && perm[1] == 3 && perm[2] == 1 && perm[3] == 2);
-}
-
-/// Get inverse permutation: [0,2,3,1] → [0,3,1,2]
-static SmallVector<int64_t> getInversePermutation(ArrayRef<int64_t> perm) {
-    SmallVector<int64_t> inverse(perm.size());
-    for (size_t i = 0; i < perm.size(); ++i)
-        inverse[perm[i]] = i;
-    return inverse;
-}
-
-/// Adapt a 4D layout permutation (e.g. NHWC→NCHW = [0,3,1,2]) to an
-/// arbitrary rank by keeping leading batch dimensions in place and applying
-/// the last-3-axis layout swap to the trailing dims.
-/// Examples:
-///   rank=3, perm4D=[0,3,1,2]  →  [2,0,1]   (HWC→CHW: last 3 of perm4D, rebase)
-///   rank=4, perm4D=[0,3,1,2]  →  [0,3,1,2] (identity, perm already 4D)
-///   rank=5, perm4D=[0,3,1,2]  →  [0,1,4,2,3] (BNHWC→BNCHW: 2 leading + last 3)
-static SmallVector<int64_t> adaptPermToRank(ArrayRef<int64_t> perm4D, int64_t rank) {
-    // perm4D encodes a layout swap over 4 dims. The last 3 elements encode
-    // the HWC↔CHW reordering relative to the batch dim.
-    // We extract those trailing 3 elements and re-base them onto the last 3
-    // dims of the target rank.
-    assert(perm4D.size() == 4 && "expected 4D permutation from lattice");
-    int64_t nLeading = rank - 3; // number of batch/extra leading dims
-    SmallVector<int64_t> result;
-    // Leading dimensions map to themselves.
-    for (int64_t i = 0; i < nLeading; ++i)
-        result.push_back(i);
-    // The last 3 dims of perm4D (indices 1,2,3) encode the HWC/CHW swap.
-    // Re-base each by (nLeading - 1) so they refer to the correct absolute dims.
-    for (int64_t i = 1; i < 4; ++i)
-        result.push_back(perm4D[i] - 1 + nLeading);
-    return result;
-}
-
 //===----------------------------------------------------------------------===//
 // Dataflow Lattice for Transpose Propagation
 //===----------------------------------------------------------------------===//
 
-/// Lattice representing transpose propagation state of an SSA value
+// Lattice tracking whether an SSA value can propagate NCHW→NHWC transposes.
 class TransposePropagationLattice : public dataflow::AbstractSparseLattice {
   public:
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TransposePropagationLattice)
@@ -188,8 +147,8 @@ class TransposePropagationLattice : public dataflow::AbstractSparseLattice {
     enum class PropagationState {
         Unknown,       // Not yet analyzed
         NoPropagation, // No transpose to propagate
-        CanPropagate,  // Can propagate transpose through this value
-        Blocking       // Cannot propagate
+        CanPropagate,  // Can propagate NCHW→NHWC transpose
+        Blocking       // Blocks propagation (structural boundary or incompatible op)
     };
 
     void print(raw_ostream &os) const override {
@@ -256,6 +215,7 @@ class TransposePropagationLattice : public dataflow::AbstractSparseLattice {
     }
 
     bool canPropagate() const { return state == PropagationState::CanPropagate; }
+    bool isBlocking() const { return state == PropagationState::Blocking; }
     ArrayRef<int64_t> getPermutation() const { return permutation; }
 
   private:
@@ -267,7 +227,7 @@ class TransposePropagationLattice : public dataflow::AbstractSparseLattice {
 // Dataflow Analysis
 //===----------------------------------------------------------------------===//
 
-/// Dataflow analysis to determine which operations can propagate transposes
+// Forward dataflow analysis identifying ops that can propagate NCHW→NHWC transposes.
 class TransposePropagationAnalysis
     : public dataflow::SparseForwardDataFlowAnalysis<TransposePropagationLattice> {
   public:
@@ -276,7 +236,6 @@ class TransposePropagationAnalysis
     TransposePropagationAnalysis(DataFlowSolver &solver) : SparseForwardDataFlowAnalysis(solver) {}
 
     void setToEntryState(TransposePropagationLattice *lattice) override {
-        // Entry state: no transpose propagation (normal flow)
         lattice->setNoPropagation();
         propagateIfChanged(lattice, ChangeResult::Change);
     }
@@ -294,25 +253,21 @@ class TransposePropagationAnalysis
             }
         });
 
-        // Handle linalg.transpose - source of propagation
         if (auto transposeOp = dyn_cast<linalg::TransposeOp>(op)) {
             visitTranspose(transposeOp, operands, results);
             return success();
         }
 
-        // Handle linalg.generic - check if layout-agnostic elementwise
         if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
             visitGeneric(genericOp, operands, results);
             return success();
         }
 
-        // Handle tensor.extract_slice - can propagate with parameter adjustment
         if (auto sliceOp = dyn_cast<tensor::ExtractSliceOp>(op)) {
             visitExtractSlice(sliceOp, operands, results);
             return success();
         }
 
-        // Handle tensor.insert_slice - can propagate with parameter adjustment
         if (auto insertOp = dyn_cast<tensor::InsertSliceOp>(op)) {
             visitInsertSlice(insertOp, operands, results);
             return success();
@@ -323,38 +278,22 @@ class TransposePropagationAnalysis
             return success();
         }
 
-        // Handle torq_hl.* operations - these block transpose propagation
-        if (op->getDialect() && op->getDialect()->getNamespace() == "torq_hl") {
-            for (auto *result : results) {
-                result->setBlocking();
-                propagateIfChanged(result, ChangeResult::Change);
-            }
-            LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (torq_hl operation)\n");
-            return success();
-        }
-
-        // Handle tensor.collapse_shape - these block transpose propagation
         if (isa<tensor::CollapseShapeOp>(op)) {
             for (auto *result : results) {
                 result->setBlocking();
                 propagateIfChanged(result, ChangeResult::Change);
             }
-            LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (tensor.collapse_shape)\n");
+            LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (collapse_shape)\n");
             return success();
         }
 
-        // Handle tensor.empty - keep as Unknown (flexible, can adapt to any layout)
         if (isa<tensor::EmptyOp>(op)) {
-            // Keep in Unknown state - tensor.empty can adapt to whatever layout is needed
-            // If used in a transposed context, it can be created in that layout
-            // If used in a normal context, it remains normal
-            LLVM_DEBUG(llvm::dbgs() << "  -> tensor.empty: Keep Unknown (flexible)\n");
+            // Keep Unknown - tensor.empty adapts to whatever layout is needed
+            LLVM_DEBUG(llvm::dbgs() << "  -> Keep Unknown (tensor.empty)\n");
             return success();
         }
 
-        // Default: All other operations can propagate transpose
-        // Operations with no operands get NoPropagation (e.g., constants)
-        // Operations with operands inherit propagation state from first operand
+        // Default: inherit propagation from first operand
         for (auto *result : results) {
             if (operands.empty()) {
                 result->setNoPropagation();
@@ -383,31 +322,34 @@ class TransposePropagationAnalysis
         }
 
         auto perm = transposeOp.getPermutation();
-        results[0]->setPropagation(perm);
-        propagateIfChanged(results[0], ChangeResult::Change);
+        // Only propagate NCHW→NHWC [0,2,3,1] transposes.
+        // Block NHWC→NCHW [0,3,1,2] transposes (structural NCHW region boundaries).
+        bool isNchwToNhwc = isNchwToNhwcTranspose(perm);
 
-        LLVM_DEBUG({
-            llvm::dbgs() << "  -> CanPropagate [";
-            for (auto p : perm)
-                llvm::dbgs() << p << ",";
-            llvm::dbgs() << "]\n";
-        });
+        if (isNchwToNhwc) {
+            results[0]->setPropagation(perm);
+            propagateIfChanged(results[0], ChangeResult::Change);
+            LLVM_DEBUG(llvm::dbgs() << "  -> CanPropagate (NCHW→NHWC)\n");
+        }
+        else {
+            results[0]->setBlocking();
+            propagateIfChanged(results[0], ChangeResult::Change);
+            LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (NHWC→NCHW boundary)\n");
+        }
     }
 
     void visitGeneric(
         linalg::GenericOp genericOp, ArrayRef<const TransposePropagationLattice *> operands,
         ArrayRef<TransposePropagationLattice *> results
     ) {
-
-        // Check if this is a layout-agnostic elementwise operation
         if (!isLayoutAgnosticElementwise(genericOp)) {
             results[0]->setBlocking();
             propagateIfChanged(results[0], ChangeResult::Change);
-            LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (not layout-agnostic)\n");
+            LLVM_DEBUG(llvm::dbgs() << "  -> Blocking (not elementwise)\n");
             return;
         }
 
-        // Elementwise can propagate - inherit from any input that can propagate
+        // Elementwise: inherit propagation from any input
         TransposePropagationLattice *result = results[0];
         bool foundPropagation = false;
 
@@ -436,8 +378,6 @@ class TransposePropagationAnalysis
         tensor::ExtractSliceOp sliceOp, ArrayRef<const TransposePropagationLattice *> operands,
         ArrayRef<TransposePropagationLattice *> results
     ) {
-
-        // Extract slice can propagate transpose with adjusted parameters
         const auto *sourceState = operands[0];
         auto *result = results[0];
 
@@ -457,8 +397,6 @@ class TransposePropagationAnalysis
         tensor::InsertSliceOp insertOp, ArrayRef<const TransposePropagationLattice *> operands,
         ArrayRef<TransposePropagationLattice *> results
     ) {
-
-        // Insert slice can propagate if source (operand 0) has transpose
         const auto *sourceState = operands[0];
         auto *result = results[0];
 
@@ -497,17 +435,74 @@ class TransposePropagationAnalysis
 };
 
 //===----------------------------------------------------------------------===//
-// Direct Transpose Sinking Using Dataflow Results
+// Transformation Helpers
 //===----------------------------------------------------------------------===//
 
-/// Helper: Transform linalg.generic to work in permuted layout
+/// Permute an affine map for NHWC→NCHW layout transformation.
+/// For full-rank maps (4 results), transforms both result positions AND dimension references.
+/// For broadcast maps (fewer results), only replaces dimension references.
+///
+/// Example 1 - Full rank: NHWC map (d0, d1, d2, d3) -> (d0, d1, d2, d3) with inversePerm [0,3,1,2]:
+/// 1. Permute result positions: [d0, d1, d2, d3] → [d0, d3, d1, d2]
+/// 2. Replace dims: d1→d2, d2→d3, d3→d1
+/// 3. Final NCHW map: (d0, d1, d2, d3) -> (d0, d1, d2, d3) (identity)
+///
+/// Example 2 - Broadcast: NHWC map (d0, d1, d2, d3) -> (d0, 0, 0, d3) with inversePerm [0,3,1,2]:
+/// 1. Permute result positions: [d0, 0, 0, d3] → [d0, d3, 0, 0]
+/// 2. Replace dims: d3 (old C at pos 3) → d1 (new C at pos 1)
+/// 3. Final NCHW map: (d0, d1, d2, d3) -> (d0, d1, 0, 0)
+///
+/// Example 3 - 2D broadcast: NHWC map (d0, d1, d2, d3) -> (d0, d3) with perm [0,2,3,1]:
+/// 1. NOT permuted (only 2 results, not full rank)
+/// 2. Replace dims: d3 → d1 (channel moves from pos 3 to pos 1)
+/// 3. Final NCHW map: (d0, d1, d2, d3) -> (d0, d1)
+static AffineMap
+permuteAffineMap(AffineMap map, ArrayRef<int64_t> inversePerm, ArrayRef<int64_t> perm) {
+    auto ctx = map.getContext();
+    auto results = map.getResults();
+
+    // Build dimension replacement map: d_old[i] → d_new[perm[i]]
+    // perm tells us where each old dimension moves to in the new layout.
+    SmallVector<AffineExpr> dimReplacements;
+    dimReplacements.reserve(perm.size());
+    for (auto newPos : perm) {
+        dimReplacements.push_back(getAffineDimExpr(newPos, ctx));
+    }
+
+    // Check if this is a full-rank map (same number of results as permutation size)
+    bool isFullRank = results.size() == inversePerm.size();
+
+    SmallVector<AffineExpr> newResults;
+
+    if (isFullRank) {
+        // Full-rank map: permute result positions AND replace dimension references
+        newResults.reserve(inversePerm.size());
+        for (auto idx : inversePerm) {
+            auto expr = results[idx];
+            auto permutedExpr = expr.replaceDims(dimReplacements);
+            newResults.push_back(permutedExpr);
+        }
+    }
+    else {
+        // Broadcast/reduced map: only replace dimension references, keep result structure
+        newResults.reserve(results.size());
+        for (auto expr : results) {
+            auto permutedExpr = expr.replaceDims(dimReplacements);
+            newResults.push_back(permutedExpr);
+        }
+    }
+
+    return AffineMap::get(map.getNumDims(), map.getNumSymbols(), newResults, ctx);
+}
+
+// Transform linalg.generic to work in permuted (NCHW) layout.
 static Value transformGenericOp(
     linalg::GenericOp genericOp, ArrayRef<int64_t> inversePerm, ArrayRef<int64_t> perm,
     IRRewriter &rewriter
 ) {
     Location loc = genericOp.getLoc();
 
-    // Collect transformed inputs - always create fresh transformations locally
+    // Transform inputs - create fresh inverse transposes
     SmallVector<Value> newInputs;
     for (auto input : genericOp.getInputs()) {
         if (auto emptyOp = input.getDefiningOp<tensor::EmptyOp>()) {
@@ -530,33 +525,44 @@ static Value transformGenericOp(
             });
         }
         else {
-            // Always create fresh inverse transpose for each use
+            // Create inverse transpose to convert input to NCHW
             auto inputType = cast<RankedTensorType>(input.getType());
-            SmallVector<int64_t> transposedShape;
-            for (auto dim : inversePerm) {
-                transposedShape.push_back(inputType.getDimSize(dim));
+
+            // Skip inputs with rank mismatch (e.g., 1D/2D constants broadcast into 4D generic).
+            // These don't need transposition - the indexing map already handles the broadcast.
+            // Examples:
+            // - tensor<1xbf16> with map (d0, d1, d2, d3) -> (d0)
+            // - tensor<1x240xi8> with map (d0, d1, d2, d3) -> (d0, d3)
+            if (inputType.getRank() != static_cast<int64_t>(inversePerm.size())) {
+                newInputs.push_back(input);
+                LLVM_DEBUG({
+                    llvm::dbgs() << "║     → Skipping transpose for rank-" << inputType.getRank()
+                                 << " broadcast input (perm is rank-" << inversePerm.size()
+                                 << ")\n";
+                });
+                continue;
             }
-            auto inverseInit =
-                tensor::EmptyOp::create(rewriter, loc, transposedShape, inputType.getElementType());
+
             auto inverseTranspose =
-                linalg::TransposeOp::create(rewriter, loc, input, inverseInit, inversePerm);
-            newInputs.push_back(inverseTranspose.getResult()[0]);
+                transposeValue(input, SmallVector<int64_t>(inversePerm), loc, rewriter);
+            newInputs.push_back(inverseTranspose);
 
             LLVM_DEBUG({
+                auto transposedType = cast<RankedTensorType>(inverseTranspose.getType());
                 llvm::dbgs() << "║     → Created fresh inverse transpose on input\n";
                 llvm::dbgs() << "║        From: ";
                 for (auto dim : inputType.getShape())
                     llvm::dbgs() << dim << "x";
                 llvm::dbgs() << inputType.getElementType();
                 llvm::dbgs() << " To: ";
-                for (auto dim : transposedShape)
+                for (auto dim : transposedType.getShape())
                     llvm::dbgs() << dim << "x";
                 llvm::dbgs() << inputType.getElementType() << "\n";
             });
         }
     }
 
-    // Compute permuted output shape
+    // Create permuted output init
     auto origOutputType = cast<RankedTensorType>(genericOp.getOutputs()[0].getType());
     SmallVector<int64_t> newOutputShape;
     for (auto idx : inversePerm) {
@@ -568,19 +574,23 @@ static Value transformGenericOp(
         rewriter, loc, newOutputType.getShape(), newOutputType.getElementType()
     );
 
-    // Create transformed generic op (same indexing maps - they're layout-agnostic)
-    auto newGenericOp = linalg::GenericOp::create(
-        rewriter, loc, newOutputType, newInputs, ValueRange{newInit},
-        genericOp.getIndexingMapsArray(), genericOp.getIteratorTypesArray()
-    );
-    // Clone computation body
-    IRMapping mapper;
-    genericOp.getRegion().cloneInto(&newGenericOp.getRegion(), mapper);
+    // Permute indexing maps to match the NCHW layout.
+    // Maps like (d0, 0, 0, d3) in NHWC become (d0, d1, 0, 0) in NCHW.
+    // Maps like (d0, d1, d2, d3) in NHWC become (d0, d1, d2, d3) in NCHW.
+    SmallVector<AffineMap> newMaps;
+    for (auto map : genericOp.getIndexingMapsArray()) {
+        auto newMap = permuteAffineMap(map, inversePerm, perm);
+        newMaps.push_back(newMap);
+        LLVM_DEBUG({ llvm::dbgs() << "║     → Permuted map: " << map << " → " << newMap << "\n"; });
+    }
 
-    return newGenericOp.getResult(0);
+    // Rebuild generic with permuted shapes and permuted maps
+    return rebuildGenericWithNewLayout(
+        rewriter, genericOp, newInputs, newInit.getResult(), newMaps
+    );
 }
 
-/// Helper: Transform extract_slice to work in permuted layout
+/// Transform extract_slice to work in permuted layout.
 static Value transformExtractSliceOp(
     tensor::ExtractSliceOp sliceOp, ArrayRef<int64_t> perm4D, IRRewriter &rewriter
 ) {
@@ -588,7 +598,7 @@ static Value transformExtractSliceOp(
 
     auto sourceType = cast<RankedTensorType>(sliceOp.getSource().getType());
     auto resultType = cast<RankedTensorType>(sliceOp.getType());
-    auto inversePerm4D = getInversePermutation(perm4D);
+    auto inversePerm4D = Permutation(perm4D.begin(), perm4D.end()).reverse();
 
     // Adapt inverse perm to the source rank (handles 3D/4D/5D sources)
     auto srcInversePerm = adaptPermToRank(inversePerm4D, sourceType.getRank());
@@ -610,22 +620,16 @@ static Value transformExtractSliceOp(
         });
     }
     else {
-        SmallVector<int64_t> transposedShape;
-        for (auto dim : srcInversePerm)
-            transposedShape.push_back(sourceType.getDimSize(dim));
-        auto inverseInit =
-            tensor::EmptyOp::create(rewriter, loc, transposedShape, sourceType.getElementType());
-        auto inverseTranspose =
-            linalg::TransposeOp::create(rewriter, loc, source, inverseInit, srcInversePerm);
-        source = inverseTranspose.getResult()[0];
+        source = transposeValue(source, srcInversePerm, loc, rewriter);
         LLVM_DEBUG({
+            auto transposedType = cast<RankedTensorType>(source.getType());
             llvm::dbgs() << "║     → Created fresh inverse transpose on extract_slice source\n";
             llvm::dbgs() << "║        From: ";
             for (auto dim : sourceType.getShape())
                 llvm::dbgs() << dim << "x";
             llvm::dbgs() << sourceType.getElementType();
             llvm::dbgs() << " To: ";
-            for (auto dim : transposedShape)
+            for (auto dim : transposedType.getShape())
                 llvm::dbgs() << dim << "x";
             llvm::dbgs() << sourceType.getElementType() << "\n";
         });
@@ -654,34 +658,28 @@ static Value transformExtractSliceOp(
     return newSlice.getResult();
 }
 
-/// Helper: Transform insert_slice to work in permuted layout
+/// Transform insert_slice to work in permuted layout.
 static Value transformInsertSliceOp(
     tensor::InsertSliceOp insertOp, ArrayRef<int64_t> perm4D, IRRewriter &rewriter
 ) {
     Location loc = insertOp.getLoc();
-    auto inversePerm4D = getInversePermutation(perm4D);
+    auto inversePerm4D = Permutation(perm4D.begin(), perm4D.end()).reverse();
 
     // Transpose source using source-rank adapted perm
     Value source = insertOp.getSource();
     auto sourceType = cast<RankedTensorType>(source.getType());
     auto srcInversePerm = adaptPermToRank(inversePerm4D, sourceType.getRank());
 
-    SmallVector<int64_t> transposedShape;
-    for (auto dim : srcInversePerm)
-        transposedShape.push_back(sourceType.getDimSize(dim));
-    auto inverseInit =
-        tensor::EmptyOp::create(rewriter, loc, transposedShape, sourceType.getElementType());
-    auto inverseTranspose =
-        linalg::TransposeOp::create(rewriter, loc, source, inverseInit, srcInversePerm);
-    source = inverseTranspose.getResult()[0];
+    source = transposeValue(source, srcInversePerm, loc, rewriter);
     LLVM_DEBUG({
+        auto transposedType = cast<RankedTensorType>(source.getType());
         llvm::dbgs() << "║     → Created fresh inverse transpose on insert_slice source\n";
         llvm::dbgs() << "║        From: ";
         for (auto dim : sourceType.getShape())
             llvm::dbgs() << dim << "x";
         llvm::dbgs() << sourceType.getElementType();
         llvm::dbgs() << " To: ";
-        for (auto dim : transposedShape)
+        for (auto dim : transposedType.getShape())
             llvm::dbgs() << dim << "x";
         llvm::dbgs() << sourceType.getElementType() << "\n";
     });
@@ -705,15 +703,9 @@ static Value transformInsertSliceOp(
         });
     }
     else {
-        SmallVector<int64_t> transposedDestShape;
-        for (auto dim : destInversePerm)
-            transposedDestShape.push_back(destType.getDimSize(dim));
-        auto destInverseInit =
-            tensor::EmptyOp::create(rewriter, loc, transposedDestShape, destType.getElementType());
-        auto destInverseTranspose =
-            linalg::TransposeOp::create(rewriter, loc, dest, destInverseInit, destInversePerm);
-        dest = destInverseTranspose.getResult()[0];
+        dest = transposeValue(dest, destInversePerm, loc, rewriter);
         LLVM_DEBUG({
+            auto transposedType = cast<RankedTensorType>(dest.getType());
             llvm::dbgs(
             ) << "║     → Created fresh inverse transpose on dest (chain continuation)\n";
             llvm::dbgs() << "║        From: ";
@@ -721,7 +713,7 @@ static Value transformInsertSliceOp(
                 llvm::dbgs() << dim << "x";
             llvm::dbgs() << destType.getElementType();
             llvm::dbgs() << " To: ";
-            for (auto dim : transposedDestShape)
+            for (auto dim : transposedType.getShape())
                 llvm::dbgs() << dim << "x";
             llvm::dbgs() << destType.getElementType() << "\n";
         });
@@ -744,7 +736,7 @@ static Value transformInsertSliceOp(
     return newInsert.getResult();
 }
 
-// Helper: Transform expand_shape to work in permuted layout
+/// Transform expand_shape to work in permuted layout.
 static Value transformExpandShapeOp(
     tensor::ExpandShapeOp expandOp, ArrayRef<int64_t> perm4D, IRRewriter &rewriter
 ) {
@@ -752,18 +744,11 @@ static Value transformExpandShapeOp(
     Value source = expandOp.getSrc();
     auto sourceType = cast<RankedTensorType>(source.getType());
     auto resultType = cast<RankedTensorType>(expandOp.getResult().getType());
-    auto inversePerm4D = getInversePermutation(perm4D);
+    auto inversePerm4D = Permutation(perm4D.begin(), perm4D.end()).reverse();
 
     // Adapt inverse perm to source rank for the transpose on the source
     auto srcInversePerm = adaptPermToRank(inversePerm4D, sourceType.getRank());
-    SmallVector<int64_t> transposedShape;
-    for (auto dim : srcInversePerm)
-        transposedShape.push_back(sourceType.getDimSize(dim));
-    auto inverseInit =
-        tensor::EmptyOp::create(rewriter, loc, transposedShape, sourceType.getElementType());
-    auto inverseTranspose =
-        linalg::TransposeOp::create(rewriter, loc, source, inverseInit, srcInversePerm);
-    source = inverseTranspose.getResult()[0];
+    source = transposeValue(source, srcInversePerm, loc, rewriter);
 
     // Adapt inverse perm to result rank for the new expand_shape output type
     auto resInversePerm = adaptPermToRank(inversePerm4D, resultType.getRank());
@@ -772,17 +757,107 @@ static Value transformExpandShapeOp(
         newOutputShape.push_back(resultType.getDimSize(dim));
 
     auto newResultType = RankedTensorType::get(newOutputShape, resultType.getElementType());
-    auto newExpand = tensor::ExpandShapeOp::create(
-        rewriter, loc, newResultType, source, expandOp.getReassociationIndices()
+
+    auto newSourceType = cast<RankedTensorType>(source.getType());
+    auto newReassociation = mlir::getReassociationIndicesForReshape(newSourceType, newResultType);
+    assert(
+        newReassociation && "transformExpandShapeOp: failed to recompute reassociation "
+                            "after permutation — incompatible shapes"
     );
+
+    auto newExpand =
+        tensor::ExpandShapeOp::create(rewriter, loc, newResultType, source, *newReassociation);
     return newExpand.getResult();
 }
 
-/// Create transpose pairs around CanPropagate ops for eventual cancellation.
-/// Strategy: For ops that CanPropagate[perm], create inverse transpose before
-/// and forward transpose after, then rely on canonicalization to cancel adjacent pairs.
-/// This transforms: transpose → canPropagate_op → blocking_op
-/// Into: canPropagate_op' → transpose → blocking_op (where ' means transformed layout)
+/// Post-analysis backward pass: promotes NoPropagation elementwise generics
+/// whose results feed into CanPropagate ops.
+///
+/// Algorithm (reverse walk):
+///   For each CanPropagate op (iterated last→first):
+///     For each input operand:
+///       If the defining op is a NoPropagation elementwise generic →
+///         promote it to CanPropagate with the same NCHW→NHWC perm.
+///
+/// This reverse walk ensures that chains of elementwise generics are promoted
+/// in a single pass. The outer fixpoint loop handles cases where the block is
+/// not in strict topological order.
+///
+/// Only NCHW→NHWC [0,2,3,1] CanPropagate ops seed the backward walk —
+/// these are the only perms produced by the forward analysis.
+/// Mutates solver lattice states in-place (safe after initializeAndRun).
+static void backwardPropagate(FunctionOpInterface funcOp, DataFlowSolver &solver) {
+    SmallVector<Operation *> allOps;
+    for (Operation &op : funcOp.getFunctionBody().front())
+        allOps.push_back(&op);
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+
+        // Reverse order: process consumers before their producers so that
+        for (auto it = allOps.rbegin(); it != allOps.rend(); ++it) {
+            Operation *op = *it;
+            if (op->getNumResults() == 0)
+                continue;
+
+            // Skip Transpose ops.
+            if (isa<linalg::TransposeOp>(op))
+                continue;
+
+            const auto *lattice = solver.lookupState<TransposePropagationLattice>(op->getResult(0));
+            if (!lattice || !lattice->canPropagate())
+                continue;
+
+            // Only seed backward walk from CanPropagate ops whose stored perm
+            // is NCHW→NHWC [0,2,3,1] — the only perm the forward analysis ever
+            // writes into a CanPropagate lattice.
+            auto demandPerm = lattice->getPermutation();
+
+            if (!isNchwToNhwcTranspose(demandPerm))
+                continue;
+
+            // Walk every input operand of this CanPropagate op
+            // Use the operand Value directly for the lattice lookup — this is
+            // correct for multi-result ops and avoids getResult(0) confusion.
+            for (Value operand : op->getOperands()) {
+                // Skip block arguments (no defining op).
+                if (!operand.getDefiningOp())
+                    continue;
+
+                const auto *defLattice = solver.lookupState<TransposePropagationLattice>(operand);
+                if (!defLattice)
+                    continue;
+
+                // Skip already-promoted or Blocking ops.
+                if (defLattice->canPropagate() || defLattice->isBlocking())
+                    continue;
+
+                // Only elementwise generics are safe to promote.
+                auto genericOp = dyn_cast<linalg::GenericOp>(operand.getDefiningOp());
+                if (!genericOp || !isLayoutAgnosticElementwise(genericOp))
+                    continue;
+
+                // Promote in-place.
+                const_cast<TransposePropagationLattice *>(defLattice)->setPropagation(demandPerm);
+                changed = true;
+                LLVM_DEBUG({
+                    llvm::dbgs() << "  [BackwardPromote] ";
+                    operand.print(llvm::dbgs());
+                    llvm::dbgs() << " → CanPropagate[";
+                    for (auto p : demandPerm)
+                        llvm::dbgs() << p << ",";
+                    llvm::dbgs() << "]\n";
+                });
+            }
+        }
+    }
+}
+
+// Wrap propagatable ops with inverse/forward transpose pairs.
+// For ops marked CanPropagate, insert inverse transpose before (NHWC→NCHW)
+// and forward transpose after (NCHW→NHWC). Canonicalization will cancel
+// adjacent pairs, eliminating redundant transposes between NCHW regions.
 static void insertTransposePairsAroundPropagateOps(
     FunctionOpInterface funcOp, DataFlowSolver &solver, IRRewriter &rewriter
 ) {
@@ -791,12 +866,28 @@ static void insertTransposePairsAroundPropagateOps(
     for (Operation &op : funcOp.getFunctionBody().front())
         allOps.push_back(&op);
 
+    // Print the state of all ops (lattice already updated by backwardPropagate).
+    LLVM_DEBUG({
+        llvm::dbgs() << "=== Print the state of ops ===\n";
+        for (Operation *op : allOps) {
+            llvm::dbgs() << "Op: " << op->getName();
+            if (op->getNumResults() > 0) {
+                llvm::dbgs() << ", Result: " << op->getResult(0);
+                const auto *lattice =
+                    solver.lookupState<TransposePropagationLattice>(op->getResult(0));
+                if (lattice) {
+                    llvm::dbgs() << "\n  Lattice state: ";
+                    lattice->print(llvm::dbgs());
+                }
+            }
+            llvm::dbgs() << "\n";
+        }
+    });
+
     for (Operation *op : allOps) {
-        // Op may have been erased by a prior iteration (e.g., dead-code removal).
         if (op->getNumResults() == 0)
             continue;
 
-        // Skip if already a transpose — don't create redundant pairs.
         if (isa<linalg::TransposeOp>(op))
             continue;
 
@@ -806,13 +897,11 @@ static void insertTransposePairsAroundPropagateOps(
 
         auto perm4D = lattice->getPermutation(); // always 4D from lattice
 
-        // For generic ops: adapt perm to result rank (all operands share rank for elementwise).
-        // extract/insert slice helpers compute their own rank-adapted perms per operand.
         int64_t opRank = cast<RankedTensorType>(op->getResult(0).getType()).getRank();
         auto perm = adaptPermToRank(perm4D, opRank);
-        auto inversePerm = getInversePermutation(perm);
+        auto inversePerm = Permutation(perm.begin(), perm.end()).reverse();
 
-        // Step 1: Create transformed version of the operation with permuted shapes.
+        // Transform op to work in NCHW layout
         rewriter.setInsertionPoint(op);
         Value transformedResult = nullptr;
 
@@ -832,37 +921,45 @@ static void insertTransposePairsAroundPropagateOps(
             continue;
         }
 
-        // Guard: skip if transform produced nothing.
         if (!transformedResult)
             continue;
 
-        // Step 2: Insert forward transpose after transformed op to restore original layout.
-        Value originalResult = op->getResult(0);
-        auto originalType = cast<RankedTensorType>(originalResult.getType());
+        // Insert forward transpose after transformed op
         auto transformedType = cast<RankedTensorType>(transformedResult.getType());
-
         auto forwardPerm = adaptPermToRank(perm4D, transformedType.getRank());
-        SmallVector<int64_t> forwardInitShape;
-        for (auto dim : forwardPerm)
-            forwardInitShape.push_back(transformedType.getDimSize(dim));
-
-        auto forwardInit = tensor::EmptyOp::create(
-            rewriter, op->getLoc(), forwardInitShape, originalType.getElementType()
-        );
-        auto forwardTranspose = linalg::TransposeOp::create(
-            rewriter, op->getLoc(), transformedResult, forwardInit, forwardPerm
-        );
-
-        Value finalResult = forwardTranspose.getResult()[0];
-        // Step 3: Replace original op's result with final result (after transpose and any rank
-        // adjustment)
+        Value finalResult = transposeValue(transformedResult, forwardPerm, op->getLoc(), rewriter);
         rewriter.replaceOp(op, finalResult);
     }
 }
 
 //===----------------------------------------------------------------------===//
-// Fixed Transpose Composition Pattern
+// Transpose Canonicalization Patterns
 //===----------------------------------------------------------------------===//
+
+/// Fold transpose of tensor.empty by using the output empty directly.
+/// Replaces: transpose(input, tensor.empty<transposed_shape>, perm) →
+/// tensor.empty<transposed_shape> This eliminates no-op transposes where the init is already the
+/// correct transposed shape.
+struct FoldTransposeOfEmpty : OpRewritePattern<linalg::TransposeOp> {
+    using OpRewritePattern<linalg::TransposeOp>::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::TransposeOp transposeOp, PatternRewriter &rewriter) const override {
+        // Check if init (output) is tensor.empty
+        auto emptyOp = transposeOp.getInit().getDefiningOp<tensor::EmptyOp>();
+        if (!emptyOp)
+            return failure();
+
+        // Check if input is also tensor.empty (transpose of empty)
+        auto inputEmptyOp = transposeOp.getInput().getDefiningOp<tensor::EmptyOp>();
+        if (!inputEmptyOp)
+            return failure();
+
+        // Both input and output are empty tensors - the init already has the correct shape
+        rewriter.replaceOp(transposeOp, transposeOp.getInit());
+        return success();
+    }
+};
 
 /// Compose back-to-back transposes: transpose(transpose(x, p1), p2) →
 /// transpose(x, compose(p1, p2)).
@@ -949,19 +1046,28 @@ class OptimizeTransposeLayoutPass
             return signalPassFailure();
         }
 
+        // Step 1b: Backward promotion — promote NoPropagation elementwise ops
+        // that feed into CanPropagate consumers (e.g. residual branches).
+        // Mutates the solver lattice in-place before transformation begins.
+        backwardPropagate(funcOp, solver);
+
         // Step 2: Create transpose pairs around propagate ops using dataflow results
         IRRewriter rewriter(ctx);
         insertTransposePairsAroundPropagateOps(funcOp, solver, rewriter);
 
         // Step 3: Apply transpose canonicalization for back-to-back cancellation
         // Register the upstream canonicalization patterns (identity removal, etc.)
-        // plus our fixed ComposeTransposeOps at higher benefit so it handles
-        // back-to-back transpose composition instead of the buggy upstream
-        // FoldTransposeWithTranspose (which reuses the outer transpose's init
-        // tensor with the wrong shape after composition).
+        // plus our custom patterns at higher benefit:
+        // - FoldTransposeOfEmpty: transpose(empty) → empty
+        // - ComposeTransposeOps: fixes buggy upstream FoldTransposeWithTranspose
         RewritePatternSet patterns(ctx);
         linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
-        patterns.add<ComposeTransposeOps>(ctx, /*benefit=*/2);
+        patterns.add<FoldTransposeOfEmpty, ComposeTransposeOps>(ctx, /*benefit=*/2);
+
+        // Add MLIR's built-in constant folding for linalg ops (includes transpose)
+        // transpose(constant) → constant
+        linalg::ControlFusionFn alwaysFold = [](OpOperand *) { return true; };
+        linalg::populateConstantFoldLinalgOperations(patterns, alwaysFold);
 
         auto frozenPatterns =
             FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);

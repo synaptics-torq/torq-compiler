@@ -16,6 +16,7 @@ iree_cc_library(
     Kernel.cpp
     ComputeConstants.cpp
     InvocationUtils.cpp
+    LayoutTransformUtils.cpp
     TorqHw.cpp
     EncodingUtils.cpp
     ShapeUtils.cpp
@@ -30,6 +31,7 @@ iree_cc_library(
     ComputeConstants.h
     Kernel.h
     InvocationUtils.h
+    LayoutTransformUtils.h
     TorqHw.h
     ExecutorAssignment.h
     EncodingUtils.h

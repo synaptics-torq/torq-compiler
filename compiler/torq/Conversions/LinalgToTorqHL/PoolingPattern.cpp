@@ -588,7 +588,6 @@ struct PoolingNchwSumOpToDW2DConversion : public OpRewritePattern<linalg::Poolin
 void populateLinalgToTorqHLPoolingPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-    patterns.insert<PoolingNhwcMaxOpConversion>(context, markFuseGroups);
     patterns.insert<PoolingNchwMaxOpConversion>(context, markFuseGroups);
     patterns.insert<PoolingNhwcSumOpConversion>(context, 20, 20 /* FIXME */, markFuseGroups);
     patterns.insert<PoolingNchwSumOpToDW2DConversion>(context, markFuseGroups);

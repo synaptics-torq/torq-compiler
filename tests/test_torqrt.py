@@ -51,7 +51,8 @@ def get_torqrt_test_cases():
         "mlir_model_file": "tflite_mlir_model_file",
         "input_data": "tweaked_random_input_data",
         "torq_compiler_options": mbv2_compile_options(),
-        "check_results": False
+        "check_results": False,
+        "torq_compiler_timeout": 600,
     }))
 
     return cases

@@ -85,7 +85,7 @@ def case_config(request, runtime_hw_type, chip_config):
         "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",
         "input_data": "tflite_layer_inputs",
-        "torq_compiler_options": mbv2_compile_options()
+        "torq_compiler_options": mbv2_compile_options(),
     }
 
 @versioned_cached_data_fixture

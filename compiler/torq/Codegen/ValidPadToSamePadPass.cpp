@@ -618,22 +618,28 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
                                (oddWidth && pads[0] == 0 && pads[1] == 0)))
             return failure();
 
-        auto weightType = llvm::cast<RankedTensorType>(op.getWeights().getType());
-        if (!weightType)
-            return failure();
-
-        auto weightShape = weightType.getShape();
         int64_t kh, kw;
-        if (weightType.getRank() == 4) {
-            kh = weightShape[2];
-            kw = weightShape[3];
-        }
-        else if (weightType.getRank() == 3) {
-            kh = weightShape[1];
-            kw = weightShape[2];
+        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+            // For MaxPool, get kernel size directly
+            kh = op.getKernel()[0];
+            kw = op.getKernel()[1];
         }
         else {
-            return failure();
+            auto weightType = llvm::cast<RankedTensorType>(op.getWeights().getType());
+            if (!weightType)
+                return failure();
+            auto weightShape = weightType.getShape();
+            if (weightType.getRank() == 4) {
+                kh = weightShape[2];
+                kw = weightShape[3];
+            }
+            else if (weightType.getRank() == 3) {
+                kh = weightShape[1];
+                kw = weightShape[2];
+            }
+            else {
+                return failure();
+            }
         }
 
         SmallVector<int64_t, 4> paddedShape(shape.begin(), shape.end());

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 namespace mlir::syna::torq {
@@ -36,5 +37,7 @@ void populateMulPatterns(MLIRContext *context, RewritePatternSet &patterns);
 void populateFuseReluClampWithTruncfPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
 void populateAbsorbDecomposedWzpCorrectionPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
+void convertNhwcOpToNchwOp(FunctionOpInterface funcOp);
 
 } // namespace mlir::syna::torq
