@@ -50,6 +50,8 @@ class TorqAstraMachina: public TorqHw {
         const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
     ) override;
 
+    bool isHwCompatible(int32_t hwId) const override;
+
   private:
     static constexpr int kInvalidFd = TORQ_HW_INVALID_FD;
     static constexpr uint32_t kInvalidNetworkId = 0;

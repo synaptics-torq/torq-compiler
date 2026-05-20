@@ -253,6 +253,22 @@ static int torq_add_lram_segment(struct torq_network *net, unsigned int addr,
     return 0;
 }
 
+static int torq_get_hw_info(struct torq_file_inst *inst, struct torq_get_hw_info_req *req)
+{
+    // Query hardware information
+    if (!inst || !req) {
+        KLOGE("Invalid parameters: inst=%p, req=%p", inst, req);
+        return -EINVAL;
+    }
+
+    req->hw_id = HW_ID_SL2610;
+
+    KLOGD("Reporting hardware ID: 0x%x (instance pid:%d)",
+          req->hw_id, inst->pid);
+
+    return 0;
+}
+
 static int torq_create_network(struct torq_file_inst *inst, struct torq_create_network_req *req)
 {
     struct torq_module *torq_dev = inst->torq_device;
@@ -929,6 +945,11 @@ static long torq_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
     switch (cmd) {
 
+        case TORQ_IOCTL_GET_HW_INFO:
+            KLOGD("torq_ioctl get hw info:(pid:%d)", inst->pid);
+            ret = torq_get_hw_info(inst, &data.get_hw_info_request);
+        break;
+
         case TORQ_IOCTL_CREATE_NETWORK:
             KLOGD("torq_ioctl create network:(pid:%d)", inst->pid);
             ret = torq_create_network(inst, &data.create_network_request);
@@ -993,7 +1014,7 @@ static long torq_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
         default:
             KLOGE("unknown ioctl cmd::0x%x", cmd);
-            ret = -EINVAL;
+            ret = -ENOTTY;
     }
 
     if (REQUIRE_DEVICE_LOCK(cmd)) {

@@ -538,4 +538,32 @@ bool TorqAstraMachina::end() {
     return true;
 }
 
+bool TorqAstraMachina::isHwCompatible(int32_t hwId) const {
+    // Query current hardware ID from kernel driver
+    int fd = ::open(TORQ_NODE, O_RDWR | O_SYNC);
+    if (fd == kInvalidFd) {
+        LOGD << "Warning: Cannot verify hardware compatibility - cannot open " << TORQ_NODE;
+        return false;
+    }
+
+    struct torq_get_hw_info_req hw_info = {};
+    int ioctl_result = ::ioctl(fd, TORQ_IOCTL_GET_HW_INFO, &hw_info);
+    ::close(fd);
+
+    if (ioctl_result < 0) {
+        // Kernel driver does not support hardware compatibility checking
+        LOGE << "Warning: Hardware compatibility check not supported by kernel driver "
+             << "(errno: " << errno << ")";
+        return false;
+    }
+
+    bool is_compatible = (hw_info.hw_id == (unsigned int)hwId);
+    if (!is_compatible) {
+        LOGE << "Hardware mismatch: executable requires hw_id=" << hwId
+             << ", but current hardware has hw_id=" << hw_info.hw_id;
+    }
+
+    return is_compatible;
+}
+
 }// synaptics namespace

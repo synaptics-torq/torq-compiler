@@ -16,6 +16,11 @@ extern "C" {
 
 #define TORQ_IOCTL_MAGIC 'S'
 
+/* Hardware ID enumeration */
+enum torq_hw_id {
+    HW_ID_SL2610 = 0x0,
+};
+
 /* IOCTL commands */
 #define TORQ_IOCTL_CREATE_NETWORK  _IOWR(TORQ_IOCTL_MAGIC, 1, struct torq_create_network_req)
 #define TORQ_IOCTL_START_NETWORK   _IOWR(TORQ_IOCTL_MAGIC, 2, struct torq_start_network_req)
@@ -27,6 +32,7 @@ extern "C" {
 #define TORQ_IOCTL_READ_LRAM       _IOWR(TORQ_IOCTL_MAGIC, 8, struct torq_read_lram_req)
 #define TORQ_IOCTL_ATTACH_BINDING  _IOWR(TORQ_IOCTL_MAGIC, 9, struct torq_attach_binding_req)
 #define TORQ_IOCTL_DETACH_BINDING  _IOWR(TORQ_IOCTL_MAGIC, 10, struct torq_detach_binding_req)
+#define TORQ_IOCTL_GET_HW_INFO     _IOWR(TORQ_IOCTL_MAGIC, 11, struct torq_get_hw_info_req)
 
 /* 32bit compact IOCTL commands */
 #define TORQ_IOCTL_WRITE_LRAM_32   _IOWR(TORQ_IOCTL_MAGIC, 7, struct torq_write_lram_req_32compat)
@@ -102,6 +108,10 @@ struct torq_read_lram_req_32compat {
     unsigned int addr;             /* LRAM address offset */
     unsigned int size;             /* Data size */
     unsigned int data;             /* 32bit data pointer value */
+};
+
+struct torq_get_hw_info_req {
+    unsigned int hw_id;            /* Output: Hardware ID */
 };
 
 #ifdef __cplusplus

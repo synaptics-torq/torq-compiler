@@ -74,6 +74,7 @@ endif()
 if(TORQ_ENABLE_ASTRA_MACHINA)
     list(APPEND torq_srcs src/TorqAstraMachina.cpp src/TorqAstraMachina.h)
     list(APPEND torq_defs "ENABLE_ASTRA_MACHINA=1")
+    list(APPEND include_dirs ${CMAKE_CURRENT_LIST_DIR}/hal/SL2610/inc)
     add_subdirectory(hal/SL2610)
 endif()
 

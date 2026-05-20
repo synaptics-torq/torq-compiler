@@ -50,6 +50,7 @@ union torq_ioctl_arg {
     struct torq_read_lram_req lram_read_request;
     struct torq_attach_binding_req attach_binding_request;
     struct torq_detach_binding_req detach_binding_request;
+    struct torq_get_hw_info_req get_hw_info_request;
 };
 
 struct torq_binding_entry {
