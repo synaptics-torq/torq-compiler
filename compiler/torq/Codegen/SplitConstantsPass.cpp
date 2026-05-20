@@ -39,7 +39,15 @@ static syna::torq_hl::ConstOp sliceConstant(
     auto resultStrides = mlir::computeStrides(resultType.getShape());
     int64_t numElems = resultType.getNumElements();
 
-    auto allValues = llvm::to_vector(denseAttr.getValues<Attribute>());
+    // TODO(perf): This lazy range avoids copying the entire source constant for every slice,
+    // which is the current minimal fix for very large constants. A faster follow-up is to add a
+    // guarded raw-buffer path for byte-aligned numeric DenseElementsAttr values: use getRawData(),
+    // copy contiguous innermost-dimension slice rows with memcpy, then rebuild with
+    // DenseElementsAttr::getFromRawBuffer(). That avoids materializing one MLIR Attribute per
+    // sliced element. The same follow-up should use DenseElementsAttr::reshape() for folded
+    // collapse_shape and erase dead original torq_hl.const ops after their slices replace them, so
+    // serialization does not keep unused huge constants.
+    auto allValues = denseAttr.getValues<Attribute>();
     SmallVector<Attribute> slicedValues;
     slicedValues.reserve(numElems);
 
