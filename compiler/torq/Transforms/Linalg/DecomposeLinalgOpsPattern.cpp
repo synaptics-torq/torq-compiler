@@ -173,10 +173,12 @@ class CanonicalizeBF16CastComparePattern : public OpRewritePattern<linalg::Gener
     }
 };
 
-// Rewrites linalg.generic ops containing math.powf(x, cst) where cst is a constant 2
+// Rewrites linalg.generic ops containing math.powf(x, 2) or math.fpowi(x, 2)
 // (for bf16, i8, i16, i32 element types) into a linalg.generic with a multiplication
 // (mul) of the input with itself. This is useful for lowering pow(x, 2) to mul(x, x)
-// until the target dialect does not support powf.
+// until the target dialect does not support powf/fpowi.
+// Handles inline arith.constant exponents, constant tensor inputs,
+// and math.fpowi with integer exponents (torch-mlir lowering).
 class PowToMulPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     PowToMulPattern(MLIRContext *context)
@@ -184,52 +186,127 @@ class PowToMulPattern : public OpRewritePattern<linalg::GenericOp> {
         setDebugName("PowToMulPattern");
     }
 
-    LogicalResult
-    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
-        // Only match elementwise binary ops
-        auto powOp =
-            dyn_cast_or_null<math::PowFOp>(getElementwiseBinaryOp(srcOp, /*allowConstant=*/true));
-        if (!powOp) {
-            return rewriter.notifyMatchFailure(srcOp, "Not a math.powf op");
+  private:
+    struct ExponentMatch {
+        bool isInputTensor = false;
+        unsigned inputIdx = 0;
+    };
+
+    // Check whether an attribute represents the value 2 for the given type.
+    static bool attrIsTwo(Attribute attr, Type ty) {
+        if (ty.isBF16()) {
+            if (auto f = dyn_cast<FloatAttr>(attr))
+                return f.getValueAsDouble() == 2.0;
         }
-        auto rhs = powOp.getRhs();
+        else if (ty.isInteger(8) || ty.isInteger(16) || ty.isInteger(32)) {
+            if (auto i = dyn_cast<IntegerAttr>(attr))
+                return i.getInt() == 2;
+        }
+        return false;
+    }
+
+    // Try to match the exponent operand as the constant 2.
+    // On success, populates `match` with tensor-input metadata.
+    LogicalResult matchExponentTwo(
+        linalg::GenericOp srcOp, math::PowFOp powfOp, math::FPowIOp fpowiOp, ExponentMatch &match,
+        PatternRewriter &rewriter
+    ) const {
+        if (fpowiOp) {
+            auto power = fpowiOp.getRhs();
+            if (auto cOp = power.getDefiningOp<arith::ConstantOp>())
+                if (auto intAttr = dyn_cast<IntegerAttr>(cOp.getValue()))
+                    if (intAttr.getInt() == 2)
+                        return success();
+            return rewriter.notifyMatchFailure(srcOp, "fpowi exponent is not constant 2");
+        }
+
+        auto rhs = powfOp.getRhs();
         Attribute rhsAttr;
 
-        // Only support constant RHS: check for arith.constant
+        // Case 1: RHS is an inline arith.constant in the body
         if (auto cOp = rhs.getDefiningOp<arith::ConstantOp>()) {
             rhsAttr = cOp.getValue();
+        }
+        // Case 2: RHS is a block argument from a constant tensor input
+        else if (auto blockArg = dyn_cast<BlockArgument>(rhs)) {
+            match.inputIdx = blockArg.getArgNumber();
+            if (match.inputIdx < srcOp.getNumDpsInputs()) {
+                Value inputTensor = srcOp.getInputs()[match.inputIdx];
+                if (auto constOp = inputTensor.getDefiningOp<arith::ConstantOp>()) {
+                    if (auto denseAttr = dyn_cast<DenseElementsAttr>(constOp.getValue())) {
+                        if (denseAttr.isSplat()) {
+                            rhsAttr = denseAttr.getSplatValue<Attribute>();
+                            match.isInputTensor = true;
+                        }
+                    }
+                }
+            }
+            if (!rhsAttr)
+                return rewriter.notifyMatchFailure(
+                    srcOp, "RHS block arg is not from a splat constant tensor"
+                );
         }
         else {
             return rewriter.notifyMatchFailure(srcOp, "RHS is not a constant");
         }
 
         Type rhsType = rhs.getType();
-        if (rhsType.isF32()) {
+        if (rhsType.isF32())
             return rewriter.notifyMatchFailure(srcOp, "Type f32 not supported");
-        }
 
-        bool isTwo = false;
-        if (rhsType.isBF16()) {
-            if (auto floatAttr = mlir::dyn_cast<FloatAttr>(rhsAttr)) {
-                isTwo = (floatAttr.getValueAsDouble() == 2.0);
-            }
-        }
-        else if (rhsType.isInteger(8) || rhsType.isInteger(16) || rhsType.isInteger(32)) {
-            if (auto intAttr = mlir::dyn_cast<IntegerAttr>(rhsAttr)) {
-                isTwo = (intAttr.getInt() == 2);
-            }
-        }
-
-        if (!isTwo) {
+        if (!attrIsTwo(rhsAttr, rhsType))
             return rewriter.notifyMatchFailure(srcOp, "RHS constant is not 2");
-        }
+
+        return success();
+    }
+
+  public:
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        // Match elementwise ops containing math.powf or math.fpowi
+        Operation *binaryOp = getElementwiseBinaryOp(srcOp, /*allowConstant=*/true);
+        if (!binaryOp)
+            return rewriter.notifyMatchFailure(srcOp, "Not an elementwise binary op");
+
+        auto powfOp = dyn_cast<math::PowFOp>(binaryOp);
+        auto fpowiOp = dyn_cast<math::FPowIOp>(binaryOp);
+        if (!powfOp && !fpowiOp)
+            return rewriter.notifyMatchFailure(srcOp, "Not a math.powf or math.fpowi op");
+
+        ExponentMatch expMatch;
+        if (failed(matchExponentTwo(srcOp, powfOp, fpowiOp, expMatch, rewriter)))
+            return failure();
 
         auto elemType = cast<RankedTensorType>(srcOp.getResultTypes()[0]).getElementType();
 
-        // Replace powf(x, 2) with mul(x, x)
+        // Build inputs and indexing maps for the replacement.
+        // When the exponent was a tensor input, drop it so the result is a clean
+        // single-input linalg.generic (avoids unused payload arguments).
+        SmallVector<Value> newInputs;
+        SmallVector<AffineMap> newMaps;
+        auto maps = srcOp.getIndexingMapsArray();
+
+        if (expMatch.isInputTensor) {
+            for (unsigned i = 0; i < srcOp.getNumDpsInputs(); i++) {
+                if (i != expMatch.inputIdx) {
+                    newInputs.push_back(srcOp.getInputs()[i]);
+                    newMaps.push_back(maps[i]);
+                }
+            }
+            // Append output indexing maps
+            for (unsigned i = srcOp.getNumDpsInputs(); i < maps.size(); i++) {
+                newMaps.push_back(maps[i]);
+            }
+        }
+        else {
+            newInputs = SmallVector<Value>(srcOp.getInputs());
+            newMaps = SmallVector<AffineMap>(maps);
+        }
+
+        // Replace pow(x, 2) with mul(x, x)
         rewriter.replaceOpWithNewOp<linalg::GenericOp>(
-            srcOp, srcOp.getResultTypes(), srcOp.getInputs(), srcOp.getOutputs(),
-            srcOp.getIndexingMapsArray(), srcOp.getIteratorTypesArray(),
+            srcOp, srcOp.getResultTypes(), newInputs, srcOp.getOutputs(), newMaps,
+            srcOp.getIteratorTypesArray(),
             [&](OpBuilder &b, Location l, ValueRange args) {
                 Value val;
                 if (mlir::isa<FloatType>(elemType)) {
