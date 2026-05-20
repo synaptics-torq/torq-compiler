@@ -1226,6 +1226,8 @@ def convert_to_perfetto(debug_dir, pb_path, view_name="Compile Profile"):
     pb_path.mkdir(parents=True, exist_ok=True)
     
     debug_info = DebugInfo(debug_dir)
+    if not debug_info.dispatch_names:
+        return {}
 
     for dispatch_name in debug_info.dispatch_names:
 
