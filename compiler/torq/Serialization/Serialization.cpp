@@ -125,6 +125,8 @@ class Serializer {
 
     flatbuffers_uint32_vec_ref_t createUI32Vector(std::optional<ArrayRef<int64_t>> vec);
 
+    flatbuffers_uint64_vec_ref_t createUI64Vector(std::optional<ArrayRef<int64_t>> vec);
+
     iree_hal_torq_BufferDebugInfo_ref_t createBufferDebugInfo(
         int64_t bufferId, uint64_t allocationAction, uint64_t lastUseAction,
         uint64_t deallocationAction, TypedValue<MemRefType> buffer
@@ -697,6 +699,19 @@ flatbuffers_uint32_vec_ref_t Serializer::createUI32Vector(std::optional<ArrayRef
     return flatbuffers_uint32_vec_end(_builder);
 }
 
+flatbuffers_uint64_vec_ref_t Serializer::createUI64Vector(std::optional<ArrayRef<int64_t>> vec) {
+
+    flatbuffers_uint64_vec_start(_builder);
+
+    if (vec) {
+        for (uint64_t v : vec.value()) {
+            flatbuffers_uint64_vec_push_create(_builder, v);
+        }
+    }
+
+    return flatbuffers_uint64_vec_end(_builder);
+}
+
 static iree_hal_torq_BufferType_enum_t toBufferType(torq_hl::MemorySpace memorySpace) {
     switch (memorySpace) {
     case torq_hl::MemorySpace::Xram:
@@ -1102,7 +1117,7 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
 
             auto maybeBufferIds = waitOp->getAttrOfType<DenseI64ArrayAttr>("torq-buffer-ids");
 
-            auto bufferIds = createUI32Vector(
+            auto bufferIds = createUI64Vector(
                 maybeBufferIds ? maybeBufferIds.asArrayRef() : ArrayRef<int64_t>()
             );
 
