@@ -44,6 +44,11 @@ namespace mlir::syna::torq {
 
 namespace {
 
+llvm::cl::opt<bool> clEnableTosaIdentity(
+    "torq-enable-tosa-identity", llvm::cl::desc("Enable identity pattern for tosa ops"),
+    llvm::cl::init(false)
+);
+
 static bool typeIsInt8(Type type) {
     Type elementType = getElementTypeOrSelf(type);
     return elementType.isSignedInteger() && elementType.getIntOrFloatBitWidth() == 8;
@@ -833,6 +838,20 @@ struct ArgMaxOpConversion : public OpConversionPattern<tosa::ArgMaxOp> {
     }
 };
 
+struct IdentityOpConversion : public OpConversionPattern<tosa::IdentityOp> {
+
+    IdentityOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
+    LogicalResult matchAndRewrite(
+        tosa::IdentityOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
+    ) const override {
+        rewriter.replaceOpWithNewOp<torq_hl::IdentityOp>(
+            srcOp, srcOp.getOutput().getType(), createInitTensor(srcOp, rewriter),
+            adaptor.getInput1()
+        );
+        return success();
+    }
+};
+
 struct ScatterOpConversion : public OpConversionPattern<tosa::ScatterOp> {
     ScatterOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
 
@@ -914,6 +933,9 @@ struct ElementWiseShiftOpConversion final : public OpConversionPattern<OpTy> {
 void populateTOSAToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patterns) {
 
     patterns.insert<RescaleOpConversion>(context);
+    if (clEnableTosaIdentity) {
+        patterns.insert<IdentityOpConversion>(context);
+    }
     patterns.insert<ArgMaxOpConversion>(context);
     patterns.insert<ScatterOpConversion>(context);
 }

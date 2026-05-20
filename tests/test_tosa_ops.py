@@ -25,6 +25,11 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in request.param.data.name for s in need_input_type_tc):
         extra_args["torq_compiler_options"].append("--iree-input-type=tosa-torq")
 
+    if "identity-" in request.param.name:
+        # Identity op is expected to be a no-op, we need to enforce conversion to TorqHL to see
+        # the benefits of the pattern and also to test some special features of the ALU and ACT blocks.
+        extra_args["torq_compiler_options"].append("--torq-enable-tosa-identity=true")
+
     # Note: "yolov8_block_mul_rescale" might need "--torq-tile-and-fuse-producers-fuse-mode=max-producers"
 
     return {
