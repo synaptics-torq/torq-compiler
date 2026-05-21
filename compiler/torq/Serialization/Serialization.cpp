@@ -748,6 +748,13 @@ iree_hal_torq_BufferDebugInfo_ref_t Serializer::createBufferDebugInfo(
     if (buffer.getType().getElementType().isInteger(1)) {
         elementType = iree_hal_torq_ElementType_I1;
     }
+    else if (buffer.getType().getElementType().isInteger(2) ||
+             buffer.getType().getElementType().isInteger(6)) {
+        assert(false && "i2/i6 dtype requires support to materialize this data type");
+    }
+    else if (buffer.getType().getElementType().isInteger(4)) {
+        elementType = iree_hal_torq_ElementType_I4;
+    }
     else if (buffer.getType().getElementType().isInteger(8)) {
         elementType = iree_hal_torq_ElementType_I8;
     }

@@ -8,6 +8,7 @@
 #include "TorqIO.h"
 
 #if IREE_FILE_IO_ENABLE
+#include "iree/base/alignment.h"
 #include "iree/base/internal/flags.h"
 #include "iree/base/internal/flatcc/parsing.h"
 #include "torq_executable_def_reader.h"
@@ -97,11 +98,78 @@ static iree_hal_element_type_t to_iree_hal_element_type(
   }
 }
 
+static uint32_t subbyte_integer_bit_width(iree_hal_torq_ElementType_enum_t et) {
+  switch (et) {
+    case iree_hal_torq_ElementType_I1: return 1;
+    case iree_hal_torq_ElementType_I2: return 2;
+    case iree_hal_torq_ElementType_I4: return 4;
+    case iree_hal_torq_ElementType_I6: return 6;
+    default:                           return 0;
+  }
+}
+
 static std::vector<iree_device_size_t> to_size_vec(flatbuffers_uint32_vec_t v) {
   std::vector<iree_device_size_t> out;
   for (size_t i = 0; i < flatbuffers_uint32_vec_len(v); ++i)
     out.push_back(flatbuffers_uint32_vec_at(v, i));
   return out;
+}
+
+static size_t strided_element_count(
+    const std::vector<iree_device_size_t>& shape,
+    const std::vector<iree_device_size_t>& strides) {
+  size_t count = 1;
+  for (int d = 0; d < (int)shape.size(); ++d)
+    count += (shape[d] - 1) * strides[d];
+  return count;
+}
+
+static std::vector<iree_device_size_t> dense_strides(
+    const std::vector<iree_device_size_t>& shape) {
+  std::vector<iree_device_size_t> strides(shape.size(), 1);
+  for (size_t i = shape.size(); i > 1; --i)
+    strides[i - 2] = strides[i - 1] * shape[i - 1];
+  return strides;
+}
+
+static std::vector<uint8_t> unpack_subbyte_integer_to_i8(
+    const std::vector<uint8_t>& packed,
+    const std::vector<iree_device_size_t>& shape,
+    const std::vector<iree_device_size_t>& strides,
+    uint32_t bitWidth) {
+  assert(bitWidth > 0 && bitWidth < 8);
+
+  size_t total_elements = 1;
+  for (auto d : shape) total_elements *= d;
+
+  std::vector<uint8_t> unpacked(total_elements);
+  for (size_t i = 0; i < total_elements; ++i) {
+    size_t src_element = 0, remaining = i;
+    for (size_t j = shape.size(); j > 0; --j) {
+      size_t index = remaining % shape[j - 1];
+      remaining /= shape[j - 1];
+      src_element += index * strides[j - 1];
+    }
+
+    size_t bitOffset = src_element * bitWidth;
+    size_t byteIndex = bitOffset / 8;
+    uint32_t bitIndex = bitOffset % 8;
+    assert(byteIndex < packed.size() && "packed sub-byte integer data shorter than expected");
+
+    uint16_t rawValue = packed[byteIndex] >> bitIndex;
+    if (bitIndex + bitWidth > 8) {
+      assert(byteIndex + 1 < packed.size() &&
+             "packed sub-byte integer data shorter than expected");
+      rawValue |= static_cast<uint16_t>(packed[byteIndex + 1]) << (8 - bitIndex);
+    }
+
+    uint8_t mask = static_cast<uint8_t>((1u << bitWidth) - 1u);
+    uint8_t value = static_cast<uint8_t>(rawValue) & mask;
+    uint8_t signBit = static_cast<uint8_t>(1u << (bitWidth - 1));
+    if (value & signBit) value |= static_cast<uint8_t>(~mask);
+    unpacked[i] = value;
+  }
+  return unpacked;
 }
 
 static iree_status_t copy_to_hal_buffer(
@@ -304,21 +372,26 @@ void dumpBuffers(TorqHw* torq, int32_t actionId,
         actionId > ns(BufferDebugInfo_last_use_action(buf)))
       continue;
 
-    auto elementType = to_iree_hal_element_type(
-        ns(BufferDebugInfo_element_type_get(buf)));
-    if (elementType == IREE_HAL_ELEMENT_TYPE_BFLOAT_16)
-      elementType = IREE_HAL_ELEMENT_TYPE_UINT_16;
-    if (elementType == IREE_HAL_ELEMENT_TYPE_NONE) continue;
-
     uint32_t address = ns(BufferDebugInfo_address_get(buf));
     auto shape   = to_size_vec(ns(BufferDebugInfo_shape(buf)));
     auto strides = to_size_vec(ns(BufferDebugInfo_strides(buf)));
-    auto elemBytes = iree_hal_element_dense_byte_count(elementType);
+    auto torqElementType = ns(BufferDebugInfo_element_type_get(buf));
+    uint32_t subbyteBitWidth = subbyte_integer_bit_width(torqElementType);
 
-    size_t dataLen = 1;
-    for (int d = 0; d < (int)shape.size(); ++d)
-      dataLen += (shape[d] - 1) * strides[d];
-    dataLen *= elemBytes;
+    size_t dataLen = strided_element_count(shape, strides);
+    iree_hal_element_type_t elementType = IREE_HAL_ELEMENT_TYPE_NONE;
+    if (subbyteBitWidth) {
+      // Signed sub-byte integers are packed. Dump as int8 because numpy does
+      // not have native i1..i7 dtypes.
+      dataLen = iree_host_size_ceil_div(dataLen * subbyteBitWidth, 8);
+    }
+    else {
+      elementType = to_iree_hal_element_type(torqElementType);
+      if (elementType == IREE_HAL_ELEMENT_TYPE_BFLOAT_16)
+        elementType = IREE_HAL_ELEMENT_TYPE_UINT_16;
+      if (elementType == IREE_HAL_ELEMENT_TYPE_NONE) continue;
+      dataLen *= iree_hal_element_dense_byte_count(elementType);
+    }
 
     std::vector<uint8_t> stridedData(dataLen);
     switch (ns(BufferDebugInfo_buffer_type_get(buf))) {
@@ -331,6 +404,20 @@ void dumpBuffers(TorqHw* torq, int32_t actionId,
 
     const std::string file_path = dump_dir + "buffer_" +
                                   std::to_string(ns(BufferDebugInfo_id(buf))) + ".npy";
+    if (subbyteBitWidth) {
+      auto unpacked = unpack_subbyte_integer_to_i8(
+          stridedData, shape, strides, subbyteBitWidth);
+      auto denseStrides = dense_strides(shape);
+      iree_status_t status = dump_to_numpy(file_path, executable,
+                                           IREE_HAL_ELEMENT_TYPE_INT_8,
+                                           unpacked, shape, denseStrides);
+      if (!iree_status_is_ok(status)) {
+        iree_status_fprint(stderr, status);
+        assert(false && "dump_to_numpy failed");
+      }
+      continue;
+    }
+
     iree_status_t status = dump_to_numpy(file_path, executable, elementType,
                                          stridedData, shape, strides);
     if (!iree_status_is_ok(status)) {
