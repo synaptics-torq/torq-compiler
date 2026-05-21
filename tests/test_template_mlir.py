@@ -8,7 +8,6 @@ import pytest
 
 from torq.testing.iree import list_mlir_files
 from torq.testing.cases import get_test_cases_from_files
-from torq.compile import compile_mlir_for_vm
 
 import logging
 from torq.utils.logging import configure_logging

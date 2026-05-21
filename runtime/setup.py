@@ -31,20 +31,24 @@ Environment variables:
                                   built .so files.
 """
 
-import glob
 import os
 import shutil
-import struct
-import subprocess
 import sys
 import sysconfig
-from datetime import datetime, timezone
 
-from distutils.command.build import build as _build
-from setuptools import Extension, find_namespace_packages, setup
-from setuptools.command.build_ext import build_ext as _build_ext
+from setuptools import find_namespace_packages, setup
 from setuptools.command.build_py import build_py as _build_py
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+from torq.build_tools.setup_helpers import (
+    CMakeExtension,
+    CustomBuild,
+    NoopBuildExtension,
+    cmake_build_targets,
+    cmake_configure_if_needed,
+    cmake_install_script as run_cmake_install_script,
+    make_platform_bdist_wheel,
+    populate_built_package,
+    resolve_cmake_build_dir,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -58,15 +62,9 @@ IREE_SOURCE_DIR = os.path.join(TORQ_SOURCE_DIR, "third_party", "iree")
 CMAKE_INSTALL_DIR_REL = os.path.join("build", "install")
 CMAKE_INSTALL_DIR_ABS = os.path.join(SETUPPY_DIR, CMAKE_INSTALL_DIR_REL)
 
-# CMake build directory: either pre-existing or created from scratch.
-PREBUILT_DIR = os.getenv("TORQ_RUNTIME_CMAKE_BUILD_DIR")
-if PREBUILT_DIR:
-    # Resolve relative paths against the project root (one level up from runtime/)
-    if not os.path.isabs(PREBUILT_DIR):
-        PREBUILT_DIR = os.path.normpath(os.path.join(TORQ_SOURCE_DIR, PREBUILT_DIR))
-    CMAKE_BUILD_DIR = os.path.realpath(PREBUILT_DIR)
-else:
-    CMAKE_BUILD_DIR = os.path.join(SETUPPY_DIR, "build", "cmake")
+PREBUILT_DIR, CMAKE_BUILD_DIR = resolve_cmake_build_dir(
+    SETUPPY_DIR, TORQ_SOURCE_DIR, "TORQ_RUNTIME_CMAKE_BUILD_DIR"
+)
 
 TORQ_WHEEL_VERSION = os.getenv("TORQ_WHEEL_VERSION")
 if TORQ_WHEEL_VERSION:
@@ -92,36 +90,26 @@ TORQ_PYTHON_DIR = os.path.join(SETUPPY_DIR, "bindings", "python")
 
 def cmake_configure_and_build():
     """Run cmake configure + build for a from-scratch native build."""
-    subprocess.check_call(["cmake", "--version"])
     cfg = os.getenv("CMAKE_BUILD_TYPE", "Release")
-
-    os.makedirs(CMAKE_BUILD_DIR, exist_ok=True)
-
-    cmake_cache = os.path.join(CMAKE_BUILD_DIR, "CMakeCache.txt")
-    if not os.path.exists(cmake_cache):
-        cmake_args = [
-            "-GNinja",
-            "-DIREE_BUILD_PYTHON_BINDINGS=ON",
-            "-DIREE_BUILD_COMPILER=OFF",
-            "-DIREE_BUILD_SAMPLES=OFF",
-            "-DIREE_BUILD_TESTS=OFF",
-            "-DIREE_HAL_DRIVER_LOCAL_SYNC=ON",
-            "-DIREE_HAL_DRIVER_LOCAL_TASK=ON",
-            f"-DPython3_EXECUTABLE={sys.executable}",
-            f"-DCMAKE_BUILD_TYPE={cfg}",
-        ]
-        subprocess.check_call(
-            ["cmake", TORQ_SOURCE_DIR] + cmake_args, cwd=CMAKE_BUILD_DIR
-        )
-
-    targets = [
-        "iree_runtime_bindings_python_runtime",
-        "torq_runtime_python_bindings",
+    cmake_args = [
+        "-GNinja",
+        "-DIREE_BUILD_PYTHON_BINDINGS=ON",
+        "-DIREE_BUILD_COMPILER=OFF",
+        "-DIREE_BUILD_SAMPLES=OFF",
+        "-DIREE_BUILD_TESTS=OFF",
+        "-DIREE_HAL_DRIVER_LOCAL_SYNC=ON",
+        "-DIREE_HAL_DRIVER_LOCAL_TASK=ON",
+        f"-DPython3_EXECUTABLE={sys.executable}",
+        f"-DCMAKE_BUILD_TYPE={cfg}",
     ]
-    for target in targets:
-        subprocess.check_call(
-            ["cmake", "--build", ".", "--target", target], cwd=CMAKE_BUILD_DIR
-        )
+    cmake_configure_if_needed(TORQ_SOURCE_DIR, CMAKE_BUILD_DIR, cmake_args)
+    cmake_build_targets(
+        CMAKE_BUILD_DIR,
+        [
+            "iree_runtime_bindings_python_runtime",
+            "torq_runtime_python_bindings",
+        ],
+    )
 
 
 def cmake_install():
@@ -132,14 +120,11 @@ def cmake_install():
 
     cmake_install_script = os.path.join(CMAKE_BUILD_DIR, "cmake_install.cmake")
     for component in ["IreePythonPackage-runtime", "TorqPythonPackage-runtime"]:
-        install_args = [
-            "cmake",
-            f"-DCMAKE_INSTALL_PREFIX={CMAKE_INSTALL_DIR_ABS}/",
-            f"-DCMAKE_INSTALL_COMPONENT={component}",
-            "-P",
+        run_cmake_install_script(
             cmake_install_script,
-        ]
-        subprocess.check_call(install_args)
+            CMAKE_INSTALL_DIR_ABS,
+            component=component,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -184,113 +169,34 @@ class CMakeBuildPy(_build_py):
         super().run()
 
 
-class CustomBuild(_build):
-    def run(self):
-        self.run_command("build_py")
-        self.run_command("build_ext")
-        self.run_command("build_scripts")
-
-
-class CMakeExtension(Extension):
-    """A stub extension that prevents setuptools from trying to build it."""
-    def __init__(self, name, sourcedir=""):
-        Extension.__init__(self, name, sources=[])
-        self.sourcedir = os.path.abspath(sourcedir)
-
-
-class NoopBuildExtension(_build_ext):
-    """Prevents setuptools from trying to compile the CMake extension.
-
-    The real native .so is provided by the cmake install step and included
-    via package_data. The ext_modules declaration exists only so that
-    setuptools produces a platform-specific wheel tag.
-    """
-    def build_extension(self, ext):
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Cross-compilation: wheel platform tag detection
 # ---------------------------------------------------------------------------
 
-# ELF e_machine → platform arch component
-_ELF_MACHINE_TO_ARCH = {
-    0x03: "i686",
-    0x28: "armv7l",
-    0x3E: "x86_64",
-    0xB7: "aarch64",
-}
-
 # minimum glibc version for the manylinux platform tag
-# we should be using GLIBC 2.39 but there are currently 
+# we should be using GLIBC 2.39 but there are currently
 # no stable x86 and aarch64 manylinux releases.
 _MANYLINUX_GLIBC = "2_28"
 
-WHEEL_PLAT = os.getenv("TORQ_WHEEL_PLAT")
-
-
-def _linux_to_manylinux(plat):
-    """Convert a linux_* platform tag to the PEP compatible manylinux tag."""
-    if plat.startswith("linux_"):
-        arch = plat[len("linux_"):]
-        return f"manylinux_{_MANYLINUX_GLIBC}_{arch}"
-    return plat
-
-
-def _detect_platform_from_so(search_dir):
-    """Detect the target platform by reading ELF headers of built .so files."""
-    so_files = glob.glob(os.path.join(search_dir, "*.so"))
-    if not so_files:
-        return None
-    with open(so_files[0], "rb") as f:
-        header = f.read(20)
-    if len(header) < 20 or header[:4] != b"\x7fELF":
-        return None
-    ei_data = header[5]  # 1 = little-endian, 2 = big-endian
-    byte_order = "<" if ei_data == 1 else ">"
-    e_machine = struct.unpack(byte_order + "H", header[18:20])[0]
-    arch = _ELF_MACHINE_TO_ARCH.get(e_machine)
-    if arch is None:
-        return None
-    return f"manylinux_{_MANYLINUX_GLIBC}_{arch}"
-
-
 _RUNTIME_LIBS_DIR = os.path.join(
     CMAKE_INSTALL_DIR_ABS,
-    "python_packages", "iree_runtime", "iree", "_runtime_libs",
+    "python_packages",
+    "iree_runtime",
+    "iree",
+    "_runtime_libs",
 )
 
 
-class PlatOverrideBdistWheel(_bdist_wheel):
-    """Use the correct platform tag when cross-compiling.
-
-    Priority: TORQ_WHEEL_PLAT env var > ELF header detection > default.
-    """
-    def get_tag(self):
-        impl, abi, plat = super().get_tag()
-        if WHEEL_PLAT:
-            plat = WHEEL_PLAT
-        else:
-            detected = _detect_platform_from_so(_RUNTIME_LIBS_DIR)
-            if detected:
-                plat = detected
-            else:
-                plat = _linux_to_manylinux(plat)
-        return impl, abi, plat
+PlatOverrideBdistWheel = make_platform_bdist_wheel(
+    _RUNTIME_LIBS_DIR,
+    glibc_version=_MANYLINUX_GLIBC,
+    recursive=False,
+)
 
 
 # ---------------------------------------------------------------------------
 # Ensure built-package directories exist before setup() introspects them
 # ---------------------------------------------------------------------------
-
-
-def populate_built_package(abs_dir):
-    os.makedirs(abs_dir, exist_ok=True)
-    init_py = os.path.join(abs_dir, "__init__.py")
-    if not os.path.exists(init_py):
-        with open(init_py, "wt") as f:
-            pass
-
 
 populate_built_package(
     os.path.join(

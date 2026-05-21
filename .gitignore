@@ -18,3 +18,4 @@ dist/
 MANIFEST
 __pypackages__/
 runtime/build
+compiler/build

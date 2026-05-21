@@ -129,6 +129,9 @@ jobs:
       - name: Build runtime wheels
         working-directory: /workspace/code
         run: |
+          # Needed for torq.build_tools discovery.
+          source /workspace/venv/bin/activate
+
           if [[ "${{ github.event_name }}" == "release" && "${{ github.event.action }}" == "published" ]]; then
             TAG="${{ github.event.release.tag_name }}"
             export TORQ_WHEEL_VERSION="${TAG#v}"
@@ -145,7 +148,31 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: runtime-wheel
-          path: /workspace/code/dist/*.whl
+          path: /workspace/code/dist/torq_runtime-*.whl
+          retention-days: 30
+
+      - name: Build compiler wheel
+        working-directory: /workspace/code
+        run: |
+          # Needed for torq.build_tools discovery.
+          source /workspace/venv/bin/activate
+
+          if [[ "${{ github.event_name }}" == "release" && "${{ github.event.action }}" == "published" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+            export TORQ_WHEEL_VERSION="${TAG#v}"
+          else
+            TIMESTAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
+            COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+            export TORQ_WHEEL_VERSION="0.dev0+${TIMESTAMP}.g${COMMIT}"
+          fi
+
+          ./scripts/build_compiler_wheel.sh /workspace/build
+
+      - name: Upload compiler wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: compiler-wheel
+          path: /workspace/code/dist/torq_compiler-*.whl
           retention-days: 30
 
       - name: Set tag variable
@@ -474,6 +501,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: runtime-wheel
+          path: dist
+
+      - name: Download compiler wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: compiler-wheel
           path: dist
 
       - name: Compress the user manual as a zip

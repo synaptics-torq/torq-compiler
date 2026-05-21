@@ -11,3 +11,7 @@ iree_setup_c_src_root(
 )
 
 add_subdirectory(torq)
+
+if(IREE_BUILD_PYTHON_BINDINGS)
+  add_subdirectory(bindings/python)
+endif()
