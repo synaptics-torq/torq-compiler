@@ -981,7 +981,7 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
                 # get whether a given NPU component is in use during this workunit
                 usage_attr = getattr(workunit, busy_track.property_name)
 
-                if busy_track.index:
+                if busy_track.index is not None:
                     usage_attr = usage_attr[busy_track.index]
 
                 # if it busy add an event to the corresponding busy track for the entire duration of the workunit
@@ -1066,6 +1066,32 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
             'DMA_COMPUTE_OVERLAP': sum(end - start for start, end in overlap_intervals),
         }
 
+    source_line_requests = {}
+    for original_loc_info in dispatch.original_locations:
+        raw_file = original_loc_info.location.file.strip('"') if original_loc_info.location.file else ""
+        if not raw_file or not os.path.isfile(raw_file):
+            continue
+        try:
+            line_no = int(original_loc_info.location.line)
+        except Exception:
+            continue
+        source_line_requests.setdefault(raw_file, set()).add(line_no)
+
+    source_line_cache = {}
+    for raw_file, requested_lines in source_line_requests.items():
+        requested_lines = set(requested_lines)
+        found_lines = {}
+        try:
+            with open(raw_file, "r") as src_f:
+                for current_line_no, line in enumerate(src_f, start=1):
+                    if current_line_no in requested_lines:
+                        found_lines[current_line_no] = line
+                        if len(found_lines) == len(requested_lines):
+                            break
+        except Exception:
+            found_lines = {}
+        source_line_cache[raw_file] = found_lines
+
     for original_loc_info in dispatch.original_locations:
 
         original_line_desc = f"{original_loc_info.location.file}:{original_loc_info.location.line}:{original_loc_info.location.col}"        
@@ -1080,10 +1106,9 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
         if raw_file and os.path.isfile(raw_file):
             try:
                 line_no = int(original_loc_info.location.line)
-                with open(raw_file, "r") as src_f:
-                    lines = src_f.readlines()
-                if 0 < line_no <= len(lines):
-                    op_name = dispatch.debug_info._extract_operator(line_no, lines[line_no - 1])
+                line = source_line_cache.get(raw_file, {}).get(line_no)
+                if line is not None:
+                    op_name = dispatch.debug_info._extract_operator(line_no, line)
             except Exception:
                 pass
         if op_name is not None:
