@@ -4,12 +4,12 @@ from torq.testing.comparison import compare_test_results
 from torq.testing.tensorflow import generate_layers_from_model
 from torq.testing.iree import llvmcpu_reference_results
 from torq.testing.cases import get_test_cases_from_tf_model
-from torq.testing.versioned_fixtures import versioned_cached_data_fixture
+from torq.testing.versioned_fixtures import versioned_hashable_object_fixture
 
 import tensorflow as tf
 
-@versioned_cached_data_fixture
-def comparison_config_for_efficientnetb0(request):
+@versioned_hashable_object_fixture
+def comparison_config_for_efficientnetb0():
     return {'int_tol': 9, 'int_thld': 9}
 
 def get_model_cases(model_name, input_shape, include_top=False, full_model=False):

@@ -4,18 +4,18 @@ from torq.testing.comparison import compare_test_results
 from torq.testing.onnx import generate_onnx_layers_from_hf
 from torq.testing.iree import llvmcpu_reference_results
 
-from torq.testing.versioned_fixtures import versioned_cached_data_fixture
+from torq.testing.versioned_fixtures import versioned_hashable_object_fixture
 
-@versioned_cached_data_fixture
-def comparison_config_relaxed(request):
+@versioned_hashable_object_fixture
+def comparison_config_relaxed():
     return {"fp_avg_tol": 0.02, "fp_max_tol": 0.02}
 
-@versioned_cached_data_fixture
-def comparison_config_for_reduce_mean_mbv2(request):
+@versioned_hashable_object_fixture
+def comparison_config_for_reduce_mean_mbv2():
     return {"fp_avg_tol": 0.02, "fp_max_tol": 0.5}
 
-@versioned_cached_data_fixture
-def comparison_config_for_mbv2(request):
+@versioned_hashable_object_fixture
+def comparison_config_for_mbv2():
     return {"fp_avg_tol": 0.03, "fp_max_tol": 0.8}
 
 @pytest.fixture

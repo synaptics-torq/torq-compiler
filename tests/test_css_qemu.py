@@ -4,7 +4,6 @@ from torq.testing.iree import MODELS_DIR
 from torq.testing.comparison import compare_test_results
 from .models.keras_models import conv_act_model
 
-from torq.testing.versioned_fixtures import versioned_cached_data_fixture
 from torq.testing.cases import Case
 
 from .models.keras_models import conv_act_model

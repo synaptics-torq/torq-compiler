@@ -23,7 +23,7 @@ except ImportError:
 from .aws_fpga import FpgaSession, RemoteFpgaSession
 from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
-                                versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_generated_directory_fixture
+                                versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
 from torq.performance import annotate_host_profile_from_files
 from torq.model_profiler.generate_perfetto_combined_report import generate_html, extract_model_name, extract_perfetto_summary
 
@@ -740,8 +740,8 @@ def torq_runtime_timeout(request, case_config):
     return int(case_config.get("torq_runtime_timeout", request.config.getoption("--torq-runtime-timeout")))
 
 
-@versioned_cached_data_fixture
-def torq_mlir_func_name(request, mlir_model_file):
+@versioned_unhashable_object_fixture
+def torq_mlir_func_name(mlir_model_file):
     with open(mlir_model_file, 'r') as mlir_file:
         mlir_content = mlir_file.read()
 
@@ -1222,8 +1222,8 @@ def static_mlir_model_file(request, case_config):
     return file_path   
 
 
-@versioned_cached_data_fixture
-def comparison_config_from_mlir(request, mlir_model_file):
+@versioned_unhashable_object_fixture
+def comparison_config_from_mlir(mlir_model_file):
     """
     Extract comparison configuration directives from MLIR file comments
 

@@ -1,6 +1,5 @@
 
 import numpy as np
-from torq.testing.versioned_fixtures import VersionedData
 from pathlib import Path
 
 """
@@ -52,8 +51,7 @@ def compare_test_results(request, observed_result, reference_results, case_confi
     if 'comparison_config' in case_config:
         configuration_overrides = request.getfixturevalue(case_config['comparison_config'])
 
-        if isinstance(configuration_overrides, VersionedData):
-            configuration_overrides = configuration_overrides.data
+        configuration_overrides = getattr(configuration_overrides, 'data', configuration_overrides)
 
         comparison_config.update(configuration_overrides)
 

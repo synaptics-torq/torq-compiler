@@ -11,8 +11,6 @@ from torq.testing.onnx import generate_onnx_layers_from_file, _has_bf16_matmul, 
 from torq.testing.iree import llvmcpu_reference_results
 from torq.testing.iree import  list_files
 
-from torq.testing.versioned_fixtures import versioned_cached_data_fixture
-
 '''
 Any onnx model under tests/testdata/dev_ops, tests/testdata/onnx_models
 could be tested with full model and all their layers

@@ -6,15 +6,15 @@ from torq.testing.iree import llvmcpu_reference_results
 from torq.testing.hf import get_hf_model_file
 from torq.testing.cases import Case
 
-from torq.testing.versioned_fixtures import versioned_cached_data_fixture
+from torq.testing.versioned_fixtures import versioned_hashable_object_fixture
 
 
-@versioned_cached_data_fixture
-def comparison_config_relaxed(request):
+@versioned_hashable_object_fixture
+def comparison_config_relaxed():
     return {"fp_avg_tol": 0.02, "fp_max_tol": 1.0}
 
-@versioned_cached_data_fixture
-def comparison_config_for_tanh(request):
+@versioned_hashable_object_fixture
+def comparison_config_for_tanh():
     return {"fp_avg_tol": 0.033, "fp_max_tol": 0.063}
 
 @pytest.fixture
