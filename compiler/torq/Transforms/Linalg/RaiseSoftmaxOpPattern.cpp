@@ -13,6 +13,8 @@
 #include "torq/Utils/TorqUtils.h"
 #include "llvm/Support/Debug.h"
 
+#include <optional>
+
 #define DEBUG_TYPE "torq-raise-sofmax"
 
 namespace mlir::syna::torq {
@@ -79,49 +81,91 @@ template <class T> SmallVector<Value> findElementwiseOpInputs(Value value) {
     return inputs;
 }
 
-template <class T>
-SmallVector<Value> findReductionOpInputs(Value value, unsigned int reductionDim) {
+struct ReductionOpMatch {
+    SmallVector<Value> inputs;
+    unsigned reductionDim;
+};
+
+template <class T> std::optional<ReductionOpMatch> matchReductionOp(Value value) {
     SmallVector<Value> inputs;
     auto op = value.getDefiningOp<linalg::GenericOp>();
     if (!op) {
-        return inputs;
+        return std::nullopt;
     }
-    // Make sure the reduction dim is valid
-    if (reductionDim >= op.getNumLoops()) {
-        return inputs;
+
+    auto result = dyn_cast<OpResult>(value);
+    if (!result || result.getOwner() != op.getOperation()) {
+        return std::nullopt;
     }
-    // Make sure the reduction dim is valid
-    if (op.getIteratorTypesArray()[reductionDim] != utils::IteratorType::reduction) {
-        return inputs;
+    unsigned resultNumber = result.getResultNumber();
+
+    SmallVector<unsigned> reductionDims;
+    for (auto [i, iteratorType] : llvm::enumerate(op.getIteratorTypesArray())) {
+        if (iteratorType == utils::IteratorType::reduction) {
+            reductionDims.push_back(i);
+        }
     }
-    // Make sure there is only 1 output
-    if (op.getNumDpsInits() != 1) {
-        return inputs;
+    if (reductionDims.size() != 1) {
+        return std::nullopt;
     }
+
+    if (resultNumber >= op.getNumDpsInits()) {
+        return std::nullopt;
+    }
+
     // Make sure there is no permutations or other indexing maps than identity
     if (!checkIdentityLikeIndexingMaps(op)) {
-        return inputs;
+        return std::nullopt;
     }
-    // Make sure the terminator of the generic op returns the result of a truncf op
-    auto innerOp = op.getBody()->getTerminator()->getOperand(0).getDefiningOp<T>();
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
+    if (!yieldOp || resultNumber >= yieldOp.getNumOperands()) {
+        return std::nullopt;
+    }
+
+    auto innerOp = yieldOp.getOperand(resultNumber).getDefiningOp<T>();
     if (!innerOp) {
-        return inputs;
+        return std::nullopt;
     }
-    if (innerOp.getNumOperands() != op.getNumOperands()) {
-        return inputs;
-    }
-    for (unsigned i = 0; i < op.getNumOperands(); ++i) {
-        auto innerOperand = dyn_cast<BlockArgument>(innerOp->getOperands()[i]);
+
+    unsigned expectedOutputArg = op.getNumDpsInputs() + resultNumber;
+    for (Value operand : innerOp->getOperands()) {
+        auto innerOperand = dyn_cast<BlockArgument>(operand);
         // Make sure the inner op operands are the operands of the generic op
-        if (!innerOperand || innerOperand.getArgNumber() != i ||
-            innerOperand.getOwner() != op.getBody()) {
-            return SmallVector<Value>();
+        if (!innerOperand || innerOperand.getOwner() != op.getBody()) {
+            return std::nullopt;
         }
-        if (op.isDpsInput(&op->getOpOperand(i))) {
-            inputs.push_back(op->getOperand(i));
+
+        unsigned argNumber = innerOperand.getArgNumber();
+        if (argNumber >= op.getNumOperands()) {
+            return std::nullopt;
+        }
+
+        OpOperand &opOperand = op->getOpOperand(argNumber);
+        if (op.isDpsInput(&opOperand)) {
+            inputs.push_back(opOperand.get());
+            continue;
+        }
+
+        if (argNumber != expectedOutputArg) {
+            return std::nullopt;
         }
     }
-    return inputs;
+
+    if (inputs.empty()) {
+        return std::nullopt;
+    }
+
+    return ReductionOpMatch{inputs, reductionDims.front()};
+}
+
+template <class T>
+SmallVector<Value> findReductionOpInputs(Value value, unsigned int reductionDim) {
+    auto match = matchReductionOp<T>(value);
+    if (!match || match->reductionDim != reductionDim) {
+        return {};
+    }
+    return match->inputs;
 }
 
 /// Matches a linalg.generic operation that broadcasts along the last dimension.
@@ -342,8 +386,8 @@ class RaiseSoftmaxOnnx : public OpRewritePattern<linalg::GenericOp> {
         if (expInputs.size() != 1) {
             return failure();
         }
-        auto addInputs = findReductionOpInputs<arith::AddFOp>(divInputs[1], 3);
-        if (addInputs.size() != 1) {
+        auto addMatch = matchReductionOp<arith::AddFOp>(divInputs[1]);
+        if (!addMatch || addMatch->inputs.size() != 1) {
             // with --torq-convert-dtypes, the pattern here looks a bit
             // different.  Check for that case
             auto emptyGeneric = divInputs[1].getDefiningOp<linalg::GenericOp>();
@@ -352,11 +396,11 @@ class RaiseSoftmaxOnnx : public OpRewritePattern<linalg::GenericOp> {
             auto reshape = emptyGeneric.getInputs()[0].getDefiningOp<tensor::ReshapeOp>();
             if (!reshape)
                 return failure();
-            addInputs = findReductionOpInputs<arith::AddFOp>(reshape.getOperands()[0], 3);
-            if (addInputs.size() != 1)
+            addMatch = matchReductionOp<arith::AddFOp>(reshape.getOperands()[0]);
+            if (!addMatch || addMatch->inputs.size() != 1)
                 return failure();
         }
-        if (addInputs[0] != divInputs[0]) {
+        if (addMatch->inputs[0] != divInputs[0]) {
             return failure();
         }
         auto subInputs = findElementwiseOpInputs<arith::SubFOp>(expInputs[0]);
@@ -367,7 +411,8 @@ class RaiseSoftmaxOnnx : public OpRewritePattern<linalg::GenericOp> {
         if (!expandInput) {
             return failure();
         }
-        auto maxInputs = findReductionOpInputs<arith::MaximumFOp>(expandInput, 3);
+        auto maxInputs =
+            findReductionOpInputs<arith::MaximumFOp>(expandInput, addMatch->reductionDim);
         if (maxInputs.size() != 1) {
             return failure();
         }
@@ -381,7 +426,7 @@ class RaiseSoftmaxOnnx : public OpRewritePattern<linalg::GenericOp> {
         }
 
         rewriter.replaceOpWithNewOp<linalg::SoftmaxOp>(
-            op, op.getResultTypes(), extInputs[0], op.getOutputs()[0], 3
+            op, op.getResultTypes(), extInputs[0], op.getOutputs()[0], addMatch->reductionDim
         );
 
         return success();

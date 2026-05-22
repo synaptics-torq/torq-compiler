@@ -73,6 +73,9 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(host_mlir in request.param.data.name for host_mlir in ['conv2d-host.mlir', 'mul-i64-scalar.mlir', 'constantshape.mlir']):
         extra_args["torq_compiler_options"] = ["--torq-disable-slices", "--torq-disable-css"]
 
+    if 'softmax-1x2xbf16.mlir' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-css", "--torq-disable-host"]
+
     return {
         "mlir_model_file": "static_mlir_model_file",
         "static_mlir_model_file": request.param.data,
