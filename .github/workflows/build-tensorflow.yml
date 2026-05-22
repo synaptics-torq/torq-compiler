@@ -34,13 +34,15 @@ jobs:
 
     permissions:
       contents: write
+      actions: write
 
     steps:
 
     - name: Update checkout
       uses: actions/checkout@v6      
 
-    - uses: actions/checkout@v6
+    - name: Checkout tensorflow
+      uses: actions/checkout@v6
       with:
         repository: tensorflow/tensorflow
         ref: ${{ env.TF_VERSION }}
@@ -91,11 +93,18 @@ jobs:
       if: ${{ github.event_name == 'push' }}
       with:
         github_token: ${{ secrets.github_token }}
-        repository: ${{ github.repository }}
 
     - name: Upload to GitHub release
       uses: ./.github/actions/upload-to-release
       with:
         github_token: ${{ secrets.github_token }}
-        repository: ${{ github.repository }}
         assets_glob: tflite-tools-${{ env.TF_VERSION }}.zip
+
+    - name: Rebuild Docker images to include new TensorFlow binaries
+      if: ${{ github.event_name == 'push' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh workflow run build-docker.yml --ref ${{ github.ref }}
+        gh workflow run build-docker-ecr.yml --ref ${{ github.ref }}
+        

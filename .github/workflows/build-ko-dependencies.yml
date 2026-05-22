@@ -27,6 +27,7 @@ jobs:
 
     permissions:
       contents: write
+      actions: write
 
     steps:
 
@@ -54,3 +55,11 @@ jobs:
       with:
         github_token: ${{ secrets.github_token }}    
         assets_glob: third_party/runtimes-prebuilt/soc-kernel/syna-kernel-artifacts.tgz
+
+    - name: Rebuild Docker images to include new Kernel module dependencies
+      if: ${{ github.event_name == 'push' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh workflow run build-docker.yml --ref ${{ github.ref }}
+        gh workflow run build-docker-ecr.yml --ref ${{ github.ref }}

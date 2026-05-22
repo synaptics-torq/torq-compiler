@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 COPY scripts/install_dependencies.sh .
-COPY scripts/download_tflite_binaries.py .
+COPY scripts/download_artifact.py .
 
 ARG GITHUB_REPOSITORY
 

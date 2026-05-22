@@ -110,9 +110,9 @@ def get_token(repo):
 
     return token
 
-def get_artifact_url(repo, token, release_version, tflite_version):
+def get_artifact_url(repo, token, release_version, artifact_name):
     """
-    Get the download URL for the artifact containing the TensorFlow binaries for the given release version and TensorFlow version.
+    Get the download URL for the artifact for the given release version and artifact name.
     """
 
     status_code, body = _github_get(
@@ -128,7 +128,7 @@ def get_artifact_url(repo, token, release_version, tflite_version):
     release_info = json.loads(body.decode("utf-8"))
 
     for asset in release_info.get("assets", []):
-        if asset["name"] == f"tflite-tools-{tflite_version}.zip":
+        if asset["name"] == artifact_name:
             if token:
                 # return the API url for the asset, which requires authentication, instead of the browser download URL, 
                 # which does not work with token authentication
@@ -137,7 +137,7 @@ def get_artifact_url(repo, token, release_version, tflite_version):
                 # return the browser download URL if no token is needed, since it is simpler and does not require authentication
                 return asset["browser_download_url"]
 
-    raise RuntimeError(f"Could not find artifact tflite-tools-{tflite_version}.zip in release {release_version} of {repo}")
+    raise RuntimeError(f"Could not find artifact {artifact_name} in release {release_version} of {repo}")
 
 
 def extract_artifact(url, token, output_dir):
@@ -157,7 +157,7 @@ def extract_artifact(url, token, output_dir):
     # save the zip file to the output directory
     artifact_path = os.path.join(output_dir, "artifact.zip")
     with open(artifact_path, "wb") as f:
-        f.write(body)
+        f.write(body)    
 
     with zipfile.ZipFile(artifact_path, "r") as zip_ref:
         for member in zip_ref.infolist():
@@ -171,14 +171,35 @@ def extract_artifact(url, token, output_dir):
     os.remove(artifact_path)
 
 
+def save_artifact(url, token, output_dir, artifact_name):
+    """
+    Download the artifact from the given URL to the output directory.
+    """
+
+    status_code, body = _github_get(url, token=token, accept="application/octet-stream")
+    if status_code != 200:
+        raise RuntimeError(
+            f"Failed to download artifact from {url}: "
+            f"{status_code} {body.decode('utf-8', errors='replace')}"
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # save the artifact file to the output directory
+    artifact_path = os.path.join(output_dir, artifact_name)
+    with open(artifact_path, "wb") as f:
+        f.write(body)    
+
+
 def main():
 
-    argparser = argparse.ArgumentParser(description="Download the latest TensorFlow binaries built by GitHub Actions.")
+    argparser = argparse.ArgumentParser(description="Download the latest artifact built by GitHub Actions.")
 
-    argparser.add_argument("--repo", type=str, default=None, help="The name of the repository to download the binaries from. If not specified, it will be inferred from the location of this script.")
-    argparser.add_argument("--release-version", type=str, default="snapshot", help="The name of the release to download the binaries from. Defaults to 'snapshot' which is a special release that is updated on each commit to main. Can also specify a specific release tag (e.g. 'v2.20.0').")
-    argparser.add_argument("--tflite-version", type=str, default="v2.20.0", help="The version of TensorFlow to download the binaries for.")
-    argparser.add_argument("--output-dir", type=str, required=True, help="Directory to download and extract the TensorFlow binaries to.")
+    argparser.add_argument("--repo", type=str, default=None, help="The name of the repository to download the artifact from. If not specified, it will be inferred from the location of this script.")
+    argparser.add_argument("--release-version", type=str, default="snapshot", help="The name of the release to download the artifact from. Defaults to 'snapshot' which is a special release that is updated on each commit to main. Can also specify a specific release tag (e.g. 'v2.20.0').")
+    argparser.add_argument("artifact_name", type=str, help="The name of the artifact to download.")
+    argparser.add_argument("--extract", action="store_true", help="Whether to extract the artifact if it is a zip file. If not set, the artifact will be saved as-is to the output directory.")
+    argparser.add_argument("--output-dir", type=str, required=True, help="Directory to download and extract the artifact to.")
 
     args = argparser.parse_args()
     
@@ -199,12 +220,16 @@ def main():
         print("Private repository, using GitHub token for authentication")
     
     # get the relase aritfact url
-    artifact_url = get_artifact_url(remote_repo, token, args.release_version, args.tflite_version)
+    artifact_url = get_artifact_url(remote_repo, token, args.release_version, args.artifact_name)
 
     print("Downloading artifact from URL: ", artifact_url)
 
-    # download the artifact and extract it 
-    extract_artifact(artifact_url, token, args.output_dir)
+    if args.extract:
+        # download the artifact and extract it 
+        extract_artifact(artifact_url, token, args.output_dir)
+    else:
+        # download the artifact and save it as-is
+        save_artifact(artifact_url, token, args.output_dir, args.artifact_name)
 
 
 if __name__ == "__main__":
