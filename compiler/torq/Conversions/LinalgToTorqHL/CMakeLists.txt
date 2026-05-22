@@ -10,6 +10,7 @@ set(sources
   ElementWiseBinaryPattern.cpp
   ExpandWeightsPattern.cpp
   GeluPattern.cpp
+  MatmulPattern.cpp
   PoolingPattern.cpp
   ReduceMeanPattern.cpp
   SigmoidPattern.cpp

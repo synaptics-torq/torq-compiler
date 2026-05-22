@@ -53,8 +53,8 @@ ExpandWeightsPattern::transform(torq_hl::ExpandWeightsOp op, PatternRewriter &re
 
     Slice slice("ExpandWeights-oneshot");
 
-    struct In : Vectorized {
-        enum { NonDenseDims };
+    struct Weight : Vectorized {
+        enum { Blocks, BlockLines };
     };
 
     // input is scale
@@ -63,20 +63,26 @@ ExpandWeightsPattern::transform(torq_hl::ExpandWeightsOp op, PatternRewriter &re
     LData output(op.getInit());    // HxW
     LData bias(op.getScaleBias()); // HxW
 
-    int vectorSize = 8; // slice.act.width(input.elementType(), scale.elementType());
+    if (weights.shape().size() == 2 && output.shape().size() == 3 && output.dim(0) == 1) {
+        output.eraseDim(0);
+    }
+
+    int vectorSize = slice.act.width(scale.elementType(), weights.elementType());
     weights.vectorize(vectorSize);
     scale.vectorize(vectorSize); // ((H/32xW) /8) x 8
     bias.vectorize(vectorSize);  // ((H/32xW) /8) x 8
 
     weights.reshapeDim(0, {-1, blockSize});
     output.reshapeDim(0, {-1, blockSize});
-    bias.reshapeDim(bias.shape().size() - 1, {-1, 1});
+    bias.reshapeDim(-1, {-1, 1});
 
-    For(auto block = slice.iterate(weights.dim(0))) {  // iterate over H/32 blocks
-        For(auto wv = slice.iterate(weights.dim(2))) { // iterate over vectors in block
+    For(auto block = slice.iterate(weights.dim(Weight::Blocks))) { // iterate over H/32 blocks
+        For(auto wv =
+                slice.iterate(weights.dim(Weight::Vectors))) { // iterate over vectors in block
             IData sdata = slice.iram.load(scale[block][wv]);
             BData bdata = slice.bram.load(bias[block][wv]);
-            For(auto blockRow = slice.iterate(weights.dim(1))) { // iterate over 32 lines per block
+            For(auto blockRow = slice.iterate(weights.dim(Weight::BlockLines))
+            ) { // iterate over 32 lines per block
                 WData wdata = slice.wram.load(weights[block][blockRow][wv], DType::bf16);
                 PData pdata = slice.alu.elementwiseProductAccumulate(sdata, wdata);
                 QData res = slice.act.rescaleClamp(
