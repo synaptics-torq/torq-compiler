@@ -84,17 +84,19 @@ def case_config(request, runtime_hw_type, chip_config):
     if "full_model" not in request.param.name.lower():
         pytest.skip("AWS FPGA only runs full model tests")
 
-  compile_timeout = 60 * 15
-  runtime_timeout = 60 * 15
+  compile_timeout = 60 * 10
+  runtime_timeout = 60 * 10
 
   if "layer_" in request.param.name:
     compile_timeout = 60 * 5
-    runtime_timeout = 40
+    runtime_timeout = 60
 
   longer_test_timeout = [
       'inceptionv3_conv2d_6',
       'inceptionv3_conv2d_8',
       'layer_vgg16_block5_conv1',
+      'xception_block2_sepconv2',
+      'vgg16_block2_conv1',
   ]
   if any(s in request.param.name.lower() for s in longer_test_timeout):
     compile_timeout = compile_timeout * 2

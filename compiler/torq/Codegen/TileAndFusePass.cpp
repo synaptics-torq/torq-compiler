@@ -1189,8 +1189,9 @@ void TileAndFusePass::tileAndFuse(
     // already returned. That should be fixed, this assert should be
     // uncommented, and the follwing if should be removed.
     // $ pytest
-    // tests/test_keras_app.py::test_keras_app_tflite_torq[layer_inceptionv3_conv2d_13-sim-sr250-v4]
-    // --torq-chips=next.group assert(*tileChanged && "untiled op does not fit in memory but tiling
+    // tests/test_keras_app.py::test_keras_app_tflite_torq[layer_inceptionv3_conv2d_13-sim-xxx-v4]
+    // --torq-chips=next.group
+    //  assert(*tileChanged && "untiled op does not fit in memory but tiling
     // to a single tile does");
     if (!*tileChanged)
         return;

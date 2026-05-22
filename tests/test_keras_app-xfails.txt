@@ -17,17 +17,8 @@ test_keras_app_tflite_torq[layer_nasnetmobile_separable_conv_1_reduction_right1_
 test_keras_app_tflite_torq[layer_nasnetmobile_separable_conv_1_reduction_right1_stem_2-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
 test_keras_app_tflite_torq[layer_resnet50_conv1_conv-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
 test_keras_app_tflite_torq[layer_vgg16_block1_conv2-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
-test_keras_app_tflite_torq[layer_vgg16_block2_conv1-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
 test_keras_app_tflite_torq[layer_vgg16_block2_conv2-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
-test_keras_app_tflite_torq[layer_vgg16_block3_conv1-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
 test_keras_app_tflite_torq[layer_vgg16_block3_conv2-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
 test_keras_app_tflite_torq[layer_vgg16_block4_conv2-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
-test_keras_app_tflite_torq[layer_xception_block2_sepconv2-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
-test_keras_app_tflite_torq[layer_xception_block4_sepconv2-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1300
-test_keras_app_tflite_torq[layer_inceptionresnetv2_conv2d_102-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1510
-test_keras_app_tflite_torq[layer_vgg16_block4_conv1-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1511
-test_keras_app_tflite_torq[layer_xception_block2_sepconv1-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1512
 test_keras_app_tflite_torq[layer_xception_block2_pool-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1462
-test_keras_app_tflite_torq[layer_xception_block3_pool-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1462
 test_keras_app_tflite_torq[layer_xception_block4_pool-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1462
-test_keras_app_tflite_torq[layer_xception_block14_sepconv2-sim-sr250-v4] synaptics-torq/torq-compiler-dev#1462

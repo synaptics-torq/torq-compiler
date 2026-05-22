@@ -20,8 +20,6 @@ test_mlir_files_torq[dw_f5_16x16-bf16.mlir-aws_fpga-sl2610-v1] synaptics-torq/to
 test_mlir_files_torq[dw_f5_16x16-bf16.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1412
 test_mlir_files_torq[fc.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1413
 test_mlir_files_torq[fc.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1413
-test_mlir_files_torq[pw-stride2.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1414
-test_mlir_files_torq[pw-stride2.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1414
 test_mlir_files_torq[dw_f5_s2_128x128x72.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1462
 test_mlir_files_torq[dw_f5_s2_128x128x72.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1462
 test_mlir_files_torq[conv2d-matmul-wzp.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1462
