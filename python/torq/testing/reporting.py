@@ -54,6 +54,20 @@ def pytest_addoption(parser):
         default="template_mlir_profiling_summary.csv",
         help="Filename for aggregated profiling CSV"
     )
+
+    group.addoption(
+        "--report-output-file",
+        action="store",
+        default=None,
+        help="Filename where to store profiling results (ZIP file)"
+    )
+
+    group.addoption(
+        "--print-report",
+        action="store_true",
+        default=False,
+        help="Print profiling report summary to terminal at end of test session"
+    )
     
     group.addoption(
         "--profiling-param-pattern",
@@ -307,6 +321,100 @@ def _collect_profiling_data(report: pytest.TestReport, config):
         traceback.print_exc()
 
 
+def get_metrics():
+    metrics = get_dashboard_metrics()
+
+    metrics.append({"name": "compilation_time", "description": "Total compilation time", "unit": "ns"})
+    metrics.append({"name": "e2e_inference_time", "description": "Total time including model setup", "unit": "ns"})
+    metrics.append({"name": "model_size", "description": "Size of the compiled model file", "unit": "bytes"})
+    metrics.append({"name": "total_segments_size", "description": "Total size of all segments of all dispatches in the model", "unit": "bytes"})
+    metrics.append({"name": "total_initialized_segments_size", "description": "Total size of all initialized segments in the model", "unit": "bytes"})
+    metrics.append({"name": "total_uninitialized_segments_size", "description": "Total size of all uninitialized segments in the model", "unit": "bytes"})
+
+    return metrics
+
+def get_test_data(node_id, report_phases):
+
+    # parse the node id of the report            
+    module, name, parameters = _parse_from_nodeid(node_id)
+
+    # find the complete outcome of the test across all phases
+    outcome = 'failed'            
+    for phase in ['setup', 'call', 'teardown']:              
+        if phase in report_phases:                    
+            outcome = report_phases[phase].outcome
+            if outcome != 'passed':
+                break
+
+    # Distinguish xfail from regular skip: both have outcome="skipped"
+    # but xfail reports carry a wasxfail attribute.
+    # Also detect nxpass (not-expected pass, i.e. xfail test that unexpectedly passes):
+    # - strict=False: outcome="passed" with wasxfail set
+    # - strict=True: outcome="failed" with wasxfail set
+    if outcome == 'skipped':
+        for phase_report in report_phases.values():
+            if getattr(phase_report, 'wasxfail', None):
+                outcome = 'xfail'
+                break
+    elif outcome == 'passed':
+        for phase_report in report_phases.values():
+            if getattr(phase_report, 'wasxfail', None):
+                outcome = 'nxpass'
+                break
+
+    # find all the properties on the test reports            
+    test_metadata = [
+        'compiler_input',
+        'compiler',                
+        'compiler_target',                
+        'compiler_options',
+        'runtime',
+        'runtime_target',
+        'runtime_hw_type',
+        'runtime_options',
+        'runtime_input'
+    ]
+
+    prop_names = [
+        'compile_time_measurements',
+        'runtime_measurements',
+        'compile_time_profile',
+        'profiling_output',
+        'issue',
+        *test_metadata
+    ]
+
+    props = {name: None for name in prop_names}
+
+    for phase in ['setup', 'call', 'teardown']:
+        if phase not in report_phases:
+            continue
+
+        for prop_value in report_phases[phase].user_properties:
+            if prop_value[0] in prop_names:
+                props[prop_value[0]] = prop_value[1]
+    
+    measurements = {}            
+    
+    if props['compile_time_measurements']:
+        measurements.update(props['compile_time_measurements'])
+
+    # runtime measurements have priority
+    if props['runtime_measurements']:
+        measurements.update(props['runtime_measurements'])
+
+    test_run = {
+        'module': module,
+        'name': name,
+        'parameters': parameters,
+        'outcome': outcome,
+        'linked_issue': props['issue'],
+        'measurements': measurements,
+        'metadata': {detail: props.get(detail) for detail in test_metadata}
+    }
+
+    return test_run, props
+
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session):
 
@@ -320,7 +428,9 @@ def pytest_sessionfinish(session):
     # Upload to performance server if configured
     server_url = os.environ.get("TORQ_PERF_SERVER", "")
 
-    if server_url == "":
+    report_output_path = session.config.getoption("--report-output-file")
+
+    if server_url == "" and not report_output_path:
         return
 
     with TemporaryDirectory() as temp_dir:
@@ -334,7 +444,7 @@ def pytest_sessionfinish(session):
             'test_plan': session.config.getoption("--test-plan"),
             'test_runs': [],
             'batch_name': os.environ.get("TORQ_PERF_BATCH_NAME", "default"),
-            'metrics': get_dashboard_metrics()
+            'metrics': get_metrics()
         }
 
         profiles_root = os.path.join(temp_dir, 'profiles')
@@ -345,85 +455,12 @@ def pytest_sessionfinish(session):
         # Build manifest, attaching engines_compilation_time to torq test runs
         for node_id, report_phases in reports.items():
 
-            # parse the node id of the report            
-            module, name, parameters = _parse_from_nodeid(node_id)
+            test_run, props = get_test_data(node_id, report_phases)
 
-            # find the complete outcome of the test across all phases
-            outcome = 'failed'            
-            for phase in ['setup', 'call', 'teardown']:              
-                if phase in report_phases:                    
-                    outcome = report_phases[phase].outcome
-                    if outcome != 'passed':
-                        break
-
-            # Distinguish xfail from regular skip: both have outcome="skipped"
-            # but xfail reports carry a wasxfail attribute.
-            # Also detect nxpass (not-expected pass, i.e. xfail test that unexpectedly passes):
-            # - strict=False: outcome="passed" with wasxfail set
-            # - strict=True: outcome="failed" with wasxfail set
-            if outcome == 'skipped':
-                for phase_report in report_phases.values():
-                    if getattr(phase_report, 'wasxfail', None):
-                        outcome = 'xfail'
-                        break
-            elif outcome == 'passed':
-                for phase_report in report_phases.values():
-                    if getattr(phase_report, 'wasxfail', None):
-                        outcome = 'nxpass'
-                        break
-
+            outcome = test_run['outcome']
+                    
             if outcome == "skipped":
                 continue  # Do not report about skipped tests
-
-            # find all the properties on the test reports            
-            test_metadata = [
-                'compiler_input',
-                'compiler',                
-                'compiler_target',                
-                'compiler_options',
-                'runtime',
-                'runtime_target',
-                'runtime_hw_type',
-                'runtime_options',
-                'runtime_input'
-            ]
-
-            prop_names = [
-                'compile_time_measurements',
-                'runtime_measurements',
-                'compile_time_profile',
-                'profiling_output',
-                'issue',
-                *test_metadata
-            ]
-
-            props = {name: None for name in prop_names}
-
-            for phase in ['setup', 'call', 'teardown']:
-                if phase not in report_phases:
-                    continue
-
-                for prop_value in report_phases[phase].user_properties:
-                    if prop_value[0] in prop_names:
-                        props[prop_value[0]] = prop_value[1]
-
-            # runtime measurements have priority
-            if props['runtime_measurements'] is not None:
-                measurements = props['runtime_measurements']
-            elif props['compile_time_measurements'] is not None:
-                measurements = props['compile_time_measurements']
-            else:
-                measurements = None
-
-            test_run = {
-                'module': module,
-                'name': name,
-                'parameters': parameters,
-                'outcome': outcome,
-                'linked_issue': props['issue'],
-                'measurements': measurements,
-                'metadata': {detail: props.get(detail) for detail in test_metadata}
-            }
 
             # Capture failure log and failed phase for failed tests
             # Classification is done server-side in processing.py
@@ -488,18 +525,23 @@ def pytest_sessionfinish(session):
                     if os.path.isfile(fpath):
                         zf.write(fpath, arcname=os.path.join('failure_logs', fname))
 
-        # Upload bundle        
-        print("Uploading results bundle...")
-        try:
-            session_path = _upload_zip_bundle(zip_path) + "#batch-" + manifest['batch_name']
-        except Exception as e:
-            print(f"ERROR: Failed to upload results bundle: {e}")
-            return
-        print("Upload complete.")
+        if server_url != "":
+            # Upload bundle        
+            print("Uploading results bundle...")
+            try:
+                session_path = _upload_zip_bundle(zip_path) + "#batch-" + manifest['batch_name']
+            except Exception as e:
+                print(f"ERROR: Failed to upload results bundle: {e}")
+                return
+            print("Upload complete.")
 
-        log_url = server_url + session_path
+            log_url = server_url + session_path
 
-        print(f"\nTest results available at {log_url}\n")
+            print(f"\nTest results available at {log_url}\n")
+        
+        if report_output_path:
+            shutil.copy2(zip_path, report_output_path)
+            print(f"Report bundle written to {report_output_path}")
 
         if os.getenv("GITHUB_ACTIONS"):
             try:
@@ -620,12 +662,67 @@ def _format_profiling_summary(summary: dict, model_name: str, wall_time: str | N
     return "\n".join(lines)
 
 
+def format_measurement(value, unit):
+    if unit == "ns":
+        if value >= 1e9:
+            return f"{value / 1e9:.3f} s"
+        elif value >= 1e6:
+            return f"{value / 1e6:.3f} ms"
+        elif value >= 1e3:
+            return f"{value / 1e3:.3f} µs"
+        else:
+            return f"{value} ns"
+    elif unit == "bytes":
+        if value >= 1 << 30:
+            return f"{value / (1 << 30):.3f} GB"
+        elif value >= 1 << 20:
+            return f"{value / (1 << 20):.3f} MB"
+        elif value >= 1 << 10:
+            return f"{value / (1 << 10):.3f} KB"
+        else:
+            return f"{value} B"
+    else:
+        return f"{value} {unit}"
+
+
+def print_metrics_report(terminalreporter, exitstatus, config):
+
+    if not config.getoption("--print-report", default=False):
+        return
+
+    metrics = get_metrics()
+
+    terminalreporter.section("Profiling Report Summary")
+
+    for node_id, report_phases in reports.items():
+
+        terminalreporter.write_line(f"Test: {node_id}")
+
+        test_results, _ = get_test_data(node_id, report_phases)
+
+        terminalreporter.write_line(f"  outcome: {test_results['outcome']}")
+
+        measurements = test_results.get('measurements', {})
+
+        for metric_name, metric_value in measurements.items():
+            metric_info = next((m for m in metrics if m['name'] == metric_name), None)
+            if metric_info:
+                unit = metric_info.get('unit', '')
+                terminalreporter.write_line(f"  {metric_name}: {format_measurement(metric_value, unit)}")
+        
+        terminalreporter.write_line("")
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
-    """Print Host Profile Overview summary at the end of the pytest session.
+    """
+    Print Host Profile Overview summary at the end of the pytest session.
 
     Only active when --update-astra-runtime is enabled.
     """
+    
+    print_metrics_report(terminalreporter, exitstatus, config)
+    
     if not config.getoption("--update-astra-runtime", default=False):
         return
 

@@ -32,10 +32,10 @@ def group_metrics_with_comparison(metrics_with_comparison):
         metric_name = row['metric_name']
 
         if metric_name.endswith('_time'):
-            group_name = metric_name[:-5]
+            group_name = metric_name
             slot = 'time'
         elif metric_name.endswith('_percent'):
-            group_name = metric_name[:-8]
+            group_name = metric_name[:-8] + '_time'
             slot = 'percent'
         else:
             grouped_rows.append(
@@ -86,25 +86,26 @@ def get_test_run_comparison(test_run, baseline_test_run):
     baseline_total_duration = baseline_measurements_by_name.get('total_duration')
 
     comparison_rows = []
-    current_time_measurements = sorted(
+    current_measurements = sorted(
         (
             measurement
             for measurement in current_measurements_by_name.values()
-            if measurement.metric.unit == 'ns'
         ),
         key=lambda measurement: (measurement.metric.name != 'total_duration', measurement.metric.name),
     )
 
-    for measurement in current_time_measurements:
+    for measurement in current_measurements:
         metric_name = measurement.metric.name
         baseline_measurement = baseline_measurements_by_name.get(metric_name)
 
+        current_percent_measurement = None
+        baseline_percent_measurement = None
         percent_metric_name = None
+
         if metric_name.endswith('_time'):
             percent_metric_name = f"{metric_name[:-5]}_percent"
-
-        current_percent_measurement = current_measurements_by_name.get(percent_metric_name) if percent_metric_name else None
-        baseline_percent_measurement = baseline_measurements_by_name.get(percent_metric_name) if percent_metric_name else None
+            current_percent_measurement = current_measurements_by_name.get(percent_metric_name)
+            baseline_percent_measurement = baseline_measurements_by_name.get(percent_metric_name)
 
         difference = None
         metric_change_percent = None
@@ -120,7 +121,6 @@ def get_test_run_comparison(test_run, baseline_test_run):
         comparison_rows.append(
             {
                 'metric_name': metric_name,
-                'metric_label': metric_name[:-5] if metric_name.endswith('_time') else metric_name,
                 'metric_description': measurement.metric.description,
                 'unit': measurement.metric.unit,
                 'current_value': measurement.value,
@@ -314,7 +314,6 @@ def get_test_run_history(test_run, baseline_test_run=None, history_options=None)
                 'unit': measurement.metric.unit,
             }
             for measurement in current_run_measurements
-            if measurement.metric.unit == 'ns'
         ),
         key=lambda metric: (
             metric['name'] != 'total_duration',

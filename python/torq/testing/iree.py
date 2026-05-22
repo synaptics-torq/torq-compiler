@@ -25,7 +25,8 @@ from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_r
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
 from torq.performance import annotate_host_profile_from_files
-from torq.model_profiler.generate_perfetto_combined_report import generate_html, extract_model_name, extract_perfetto_summary
+from torq.testing.performance import record_measurements, measure_time, append_measurements, append_measurement, clear_measurements
+from torq.model_profiler.generate_perfetto_combined_report import generate_html
 
 logger = logging.getLogger("torq.testing.iree")
 
@@ -581,10 +582,41 @@ def enable_phases_dump(request):
     return not request.config.getoption("--no-phases-dump", False)
 
 
+def compute_model_stats(model_file, versioned_dir):
+    model_stats = {}
+
+    model_stats['model_size'] = model_file.stat().st_size
+
+    tool_path = _find_iree_tool('TORQ_RUN_MODULE', 'torq-run-module')    
+        
+    dump_path = versioned_dir / 'vmfb_dump.json'
+
+    subprocess.run([tool_path, model_file, '--dump_dispatches=' + str(dump_path), '--module=' + str(model_file)], check=True)
+
+    with open(dump_path, 'r') as f:
+        dump_data = json.load(f)
+
+    model_stats['total_segments_size'] = 0
+    model_stats['total_uninitialized_segments_size'] = 0
+    model_stats['total_initialized_segments_size'] = 0
+
+    for dispatch in dump_data['dispatches']:
+        for segment in dispatch['segments']:
+            model_stats['total_segments_size'] += segment['size']
+            if segment['initialized']:
+                model_stats['total_initialized_segments_size'] += segment['size']
+            else:
+                model_stats['total_uninitialized_segments_size'] += segment['size']
+
+    return model_stats
+
+
 @versioned_generated_directory_fixture
 def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_model_file, torq_compiler, chip_config, 
                             torq_compiler_timeout, enable_debug_ir, enable_phases_dump, runtime_hw_type):
         
+    clear_measurements(versioned_dir)
+
     model_file = versioned_dir / 'model.vmfb'
 
     target = chip_config.get("target", "SL2610")
@@ -632,6 +664,8 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     # always write debug info
     debug_info_dir = versioned_dir / 'debug'
     cmds.append(f'--torq-debug-info={debug_info_dir}')
+
+    # collect memory usage information
     
     compile_profile_csv = versioned_dir / 'compile_profile.csv'
     if compile_time_profiling_output_dir:
@@ -643,8 +677,12 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     print("Compiling for TORQ with: " + " ".join(cmds))
 
-    with request.getfixturevalue("scenario_log").event("torq_compile"):
+    with measure_time(versioned_dir, 'compilation_time'):
         subprocess.check_call(cmds, cwd=str(versioned_dir), timeout=torq_compiler_timeout)
+
+    # save the size of the model
+    model_stats = compute_model_stats(model_file, versioned_dir)
+    append_measurements(versioned_dir, model_stats)
 
     # Save compile time profiling data if requested
     if compile_time_profiling_output_dir:        
@@ -664,8 +702,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         temp_pb_dir = compile_time_profiling_output_dir / f'{request.node.name}_compile_temp'
         measurements = convert_to_perfetto(str(debug_info_dir), str(temp_pb_dir))
 
-        with open(versioned_dir / 'compile_time_measurements.json', 'w') as f:
-            json.dump(measurements, f, indent=4)        
+        append_measurements(versioned_dir, measurements)
         
         # Move .pb files from temp folder to parent with _compile suffix
         pb_files = sorted(temp_pb_dir.glob('*.pb'))
@@ -690,13 +727,7 @@ def torq_compiled_model(request, torq_compiled_model_dir, torq_compiler_options,
     record_property("compiler_options", torq_compiler_options)
     record_property("compiler_target", chip_config.get("chip_name"))    
 
-    measurements_path = torq_compiled_model_dir / 'compile_time_measurements.json'
-    
-    if measurements_path.exists():
-        with open(measurements_path, 'r') as f:
-            measurements = json.load(f)
-
-        record_property("compile_time_measurements", measurements)
+    record_measurements(request, "compile_time_measurements", torq_compiled_model_dir)
 
     profile_path = torq_compiled_model_dir / f'profile.pb'
 
@@ -783,6 +814,8 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
                         enable_profiling, skip_profile_annotation, torq_compiled_model_debug_info, 
                         torq_benchmark, benchmark_output_dir):
 
+    clear_measurements(versioned_dir)
+
     output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
 
     tv_dir = versioned_dir / 'tv'
@@ -823,11 +856,11 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         )
         if runtime_hw_type == 'aws_fpga':
             port = request.config.getoption("--torq-port")
-            with RemoteFpgaSession(chip_config['aws_fpga'], remote_addr, port) as fpga_session:
-                with request.getfixturevalue("scenario_log").event("torq_run"):
+            with RemoteFpgaSession(chip_config['aws_fpga'], remote_addr, port) as _:
+                with measure_time(versioned_dir, 'e2e_inference_time'):
                     wall_time = runner.run(timeout=torq_runtime_timeout)
         else:
-            with request.getfixturevalue("scenario_log").event("torq_run"):
+            with measure_time(versioned_dir, 'e2e_inference_time'):
                 wall_time = runner.run(timeout=torq_runtime_timeout)
 
         if update_runtime and wall_time is not None:
@@ -849,7 +882,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             # first run the module to obtain the outputs
             run_cmd = [str(torq_runtime), *cmds]            
 
-            with request.getfixturevalue("scenario_log").event("torq_run"):
+            with measure_time(versioned_dir, 'e2e_inference_time'):
                 print("Running for TORQ with: " + " ".join(run_cmd))
                 subprocess.check_call(run_cmd, timeout=torq_runtime_timeout)
 
@@ -897,8 +930,9 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             str(versioned_dir / 'host_profile.csv'),
             [str(versioned_dir / 'annotated_profile.xlsx'), str(versioned_dir / 'trace.pb')]
         )
-        with open(versioned_dir / 'measurements.json', 'w') as f:
-            json.dump(measurements, f, indent=4)        
+
+        append_measurements(versioned_dir, measurements)
+
         logger.debug("Profile annotation completed")
 
 
@@ -923,11 +957,7 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir,
 
     unique_name = _nodeid_to_filename(request.node.nodeid)
 
-    measurements_path = torq_results_dir / 'measurements.json'
-    if measurements_path.exists():
-        with open(measurements_path, 'r') as f:
-            measurements = json.load(f)
-            record_property("runtime_measurements", measurements)
+    record_measurements(request, "runtime_measurements", torq_results_dir)
 
     if benchmark_output_dir:
         benchmark_file = torq_results_dir / 'benchmark.json'        

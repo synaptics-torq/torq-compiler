@@ -17,7 +17,7 @@ class TestSessionChoiceField(forms.ModelChoiceField):
         super().__init__(queryset=TestSession.objects.order_by('-timestamp').all(), empty_label="None", **kwargs)
         
     def label_from_instance(self, obj):
-        return f"#{obj.id} {obj.git_branch} ({obj.timestamp.strftime('%Y-%m-%d %H:%M')})"
+        return f"#{obj.id} {obj.git_branch} [test plan: {obj.test_plan}, timestamp: {obj.timestamp.strftime('%Y-%m-%d %H:%M')}]"
 
 
 class BaseBootstrapForm(forms.Form):
@@ -58,10 +58,12 @@ HISTORY_DATETIME_INPUT_FORMATS = [
     "%Y-%m-%dT%H:%M:%S",
 ]
 
-
 class TestSessionSummaryOptions(BaseBootstrapForm):
     baseline_session = TestSessionChoiceField(required=False, label="Compare with session")
-    min_duration_ns = forms.FloatField(required=False, widget=forms.HiddenInput)
+
+
+class TestSessionMetricDetailsOptions(BaseBootstrapForm):
+    baseline_session = TestSessionChoiceField(required=False, label="Compare with session")
 
 
 class TestSessionResultsOptions(BaseBootstrapForm):

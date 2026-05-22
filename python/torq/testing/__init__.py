@@ -35,7 +35,6 @@ except metadata.PackageNotFoundError:
 # check if the iree package is available, if so add plugins that depend on it
 try:
     import iree
-    pytest_plugins.append("torq.testing.performance")
     pytest_plugins.append("torq.testing.iree")
     pytest_plugins.append("torq.executor_discovery.pytest_plugin")
 

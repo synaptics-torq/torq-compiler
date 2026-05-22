@@ -266,7 +266,7 @@
                     <tbody>
                         {% for row in metrics_with_comparison %}
                         <tr>
-                            <td>{{ row.metric_label }}</td>
+                            <td><code>{{ row.metric_name }}</code></td>
                             <td class="text-muted">{{ row.metric_description }}</td>
                             <td>
                                 {{ row.current_value|format_measurement:row.unit }}

@@ -260,6 +260,32 @@ class Metric(models.Model):
         ]
 
     @property
+    def is_lower_better(self):
+        """
+        Indicates whether lower values are better for this metric.
+
+        This is used to determine whether a change in the metric value represents an improvement or a regression.
+        """
+
+        return True
+    
+    @property
+    def absolute_precision(self):
+        """
+        Returns the absolute precision for the metric based on its unit.
+
+        Values lower than the absolute precision are considered as noise and ignored in the 
+        change percent calculation to avoid skewing results with insignificant changes.
+        """
+
+        if self.unit == 'ns':
+            return 1000 * 1000
+        elif self.unit == 'bytes':
+            return 1024 * 4
+
+        return 0.0
+
+    @property
     def short_description(self):
         return self.name.replace('_', ' ').capitalize()
 

@@ -91,12 +91,39 @@ def main_branch_test_trends(request):
     })
 
 
+def test_session_metric_details(request, session_id, metric_name):
+    """Detailed statistic for a given metric of a given test session"""
+
+    session = get_object_or_404(TestSession, id=session_id)
+
+    if request.GET:
+        form = forms.TestSessionMetricDetailsOptions(data=request.GET)
+
+        if not form.is_valid():                
+            return redirect('test_session_summary', session_id=session_id)
+
+        baseline_session = form.cleaned_data['baseline_session']
+       
+    else:
+        baseline_session = queries.test_session_comparison.get_default_comparison_session(session)
+        form = forms.TestSessionMetricDetailsOptions(initial={'baseline_session': baseline_session})    
+
+    statistics = queries.test_session_statistics.get_metric_statistics(session, baseline_session, metric_name)
+
+    return render(request, 'perf/test_session/metric_details.html', 
+        {'session': session, 
+         'baseline_session': baseline_session, 
+         'statistics': statistics, 
+         'form': form,
+        })
+
+
 def test_session_summary(request, session_id):
     """Summary page for a test session showing overall statistics."""
 
     session = get_object_or_404(TestSession, id=session_id)
-
-    options = {'baseline_session': None, 'min_duration_ns': 1000 * 1000}
+    
+    options = {'baseline_session': None, 'selected_metric': None}
 
     if request.GET:
         form = forms.TestSessionSummaryOptions(data=request.GET)
@@ -104,23 +131,26 @@ def test_session_summary(request, session_id):
         if not form.is_valid():                
             return redirect('test_session_summary', session_id=session_id)
 
-        baseline_session = form.cleaned_data['baseline_session']
-        
-        if min_duration_ns := form.cleaned_data['min_duration_ns']:
-            options['min_duration_ns'] = min_duration_ns
+        baseline_session = form.cleaned_data['baseline_session']        
 
     else:
         baseline_session = queries.test_session_comparison.get_default_comparison_session(session)
-        form = forms.TestSessionSummaryOptions(initial={'baseline_session': baseline_session, 'min_duration_ns': options['min_duration_ns']})
-    
-    statistics = queries.test_session_statistics.get_session_summary_statistics(session, baseline_session, options['min_duration_ns'])
+        form = forms.TestSessionSummaryOptions(initial={
+            'baseline_session': baseline_session
+        })    
+
+    SUMMARY_METRICS = ["total_duration", "compilation_time", "model_size", "total_segments_size"]
+
+    statistics = queries.test_session_statistics.get_session_summary_statistics(session, baseline_session, 
+                                                                                metric_names=SUMMARY_METRICS)
 
     return render(request, 'perf/test_session/summary.html', 
         {'session': session, 
          'baseline_session': baseline_session, 
          'statistics': statistics, 
-         'form': form
+         'form': form,
         })
+
 
 def test_session_results(request, session_id):
     """Detailed results page for a test session showing all test case runs and their metrics with filtering and sorting."""
@@ -227,7 +257,6 @@ def test_run(request, test_run_id):
         baseline_test_run = queries.test_run_comparison.get_corresponding_test_run(test_run, baseline_session)
 
     metrics_with_comparison = queries.test_run_comparison.get_test_run_comparison(test_run, baseline_test_run)
-    grouped_metrics_with_comparison = queries.test_run_comparison.group_metrics_with_comparison(metrics_with_comparison)
     test_run_history = queries.test_run_comparison.get_test_run_history(
         test_run,
         baseline_test_run,
@@ -252,7 +281,6 @@ def test_run(request, test_run_id):
             'form': form,
             'data': data,
             'metrics_with_comparison': metrics_with_comparison,
-            'grouped_metrics_with_comparison': grouped_metrics_with_comparison,
             'test_run_history': test_run_history,
             'total_duration_row': total_duration_row,
         },

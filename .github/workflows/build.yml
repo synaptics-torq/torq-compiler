@@ -261,7 +261,6 @@ jobs:
           # test_data_cache_artifact: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('test-cache-{0}', matrix.chip_group)) || '' }} # upload to github only on main branch 
           pytest_args: >
             -m ci -n auto -v --show-capture=no --tb=short
-            --performance-report=${{ env.PERFORMANCE_REPORT_PATH }}
             --torq-chips ${{ matrix.chip_group }}
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime
@@ -363,7 +362,6 @@ jobs:
 
           pytest_args: >
             -m fpga_ci -n auto 
-            --performance-report=${{ env.PERFORMANCE_REPORT_PATH }} 
             --torq-runtime-hw-type aws_fpga
             --torq-runtime-timeout=20
             --torq-chips ${{ matrix.chip_group }}

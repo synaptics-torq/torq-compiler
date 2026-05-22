@@ -39,6 +39,16 @@ def _format_value(value, unit):
         if float(value).is_integer():
             return f"{int(value)} bps"
         return f"{value:.2f} bps"
+    elif unit == 'bytes':
+        if value >= 1_000_000_000:
+            return f"{value / 1_000_000_000:.2f} GB"
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.2f} MB"
+        if value >= 1_000:
+            return f"{value / 1_000:.2f} KB"
+        if float(value).is_integer():
+            return f"{int(value)} B"
+        return f"{value:.2f} B"
     elif unit == '%':
         return f"{value:.2f} %"
     elif unit == 'unitless':

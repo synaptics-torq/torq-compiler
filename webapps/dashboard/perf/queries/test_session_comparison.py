@@ -11,10 +11,10 @@ def get_metric_changes_query():
     - baseline_session_id: the id of the baseline session to compare with
     - metric_name: the name of the metric to compare
     - current_session_id: the id of the current session to compare
-
+    - min_value: the minimum value for the metric to include in the comparison
     """
 
-    return f"""
+    query = f"""
     
         /*
             Get the highest id test run that is passing for each test case in the baseline session
@@ -85,32 +85,22 @@ def get_metric_changes_query():
         INNER JOIN
             perf_measurement AS c_measurement ON c_measurement.test_run_id = c_testrun.id
         INNER JOIN
-            perf_metric AS c_metric ON c_metric.id = c_measurement.metric_id AND c_metric.name = 'total_duration'        
+            perf_metric AS c_metric ON c_metric.id = c_measurement.metric_id AND c_metric.name = %(metric_name)s
         INNER JOIN
             baseline_testrun as b_testrun ON c_testrun.test_case_id = b_testrun.test_case_id
         INNER JOIN
             perf_measurement AS b_measurement ON b_measurement.test_run_id = b_testrun.id
         INNER JOIN
-            perf_metric AS b_metric ON b_metric.id = b_measurement.metric_id AND b_metric.name = 'total_duration'
+            perf_metric AS b_metric ON b_metric.id = b_measurement.metric_id AND b_metric.name = %(metric_name)s
         WHERE 
             c_testrunbatch.test_session_id = %(current_session_id)s 
         AND
             c_testrun.outcome = {TestRun.Outcome.PASS.value}
-    """, {}
-
-
-def get_duration_changes_query():
+        AND
+            b_measurement.value > %(min_value)s
     """
-    Get a SQL query that returns test runs of a session with the change in total_duration compared to corresponding
-    test runs in a baseline session, but only for test runs where the total_duration is above a certain threshold 
-    in the baseline session. This is useful to focus on the most significant changes.
-    """
-
-    sql, fields = get_metric_changes_query()
-
-    fields['metric_name'] = 'total_duration'
-    
-    return sql + ' AND b_measurement.value > %(min_duration)s', fields
+        
+    return query, {}
 
 
 def get_default_comparison_session(session):

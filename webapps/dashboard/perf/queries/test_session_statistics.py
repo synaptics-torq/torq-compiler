@@ -1,8 +1,10 @@
-from ..models import TestSession, TestRun, TestRunBatch
+from ..models import TestSession, TestRun, TestRunBatch, Metric
 from django.db.models import Count, Q
 
-from .test_session_comparison import get_duration_changes_query
+from .test_session_comparison import get_metric_changes_query
 from .utils import get_histogram, get_average
+
+from dataclasses import dataclass
 
 from django.db import connection
 
@@ -68,24 +70,26 @@ def get_latest_sessions_stats(criterias: Q, limit=None):
     return sessions_with_stats
 
 
-def get_duration_histogram(session, other_session, min_duration_ns):
+def get_change_histogram(session, other_session, metric_name, min_value):
         
-    sql, fields = get_duration_changes_query()
+    sql, fields = get_metric_changes_query()
 
     fields['current_session_id'] = session.id
     fields['baseline_session_id'] = other_session.id
-    fields['min_duration'] = min_duration_ns
+    fields['metric_name'] = metric_name
+    fields['min_value'] = min_value
 
     return get_histogram(sql, 'change_percent', fields, num_bins=10, min_value=-10.0, max_value=10.0)
 
 
-def get_top_duration_changes(session, other_session, limit, desc, min_duration_ns):
+def get_top_changes(session, other_session, limit, desc, metric_name, min_value):
 
-    sub_sql, fields = get_duration_changes_query()
+    sub_sql, fields = get_metric_changes_query()
 
     fields['current_session_id'] = session.id
     fields['baseline_session_id'] = other_session.id
-    fields['min_duration'] = min_duration_ns
+    fields['metric_name'] = metric_name
+    fields['min_value'] = min_value
 
     order = "DESC" if desc else "ASC"
 
@@ -99,16 +103,16 @@ def get_top_duration_changes(session, other_session, limit, desc, min_duration_n
     return rows
 
 
-def get_average_duration_change_percent(session, other_session, min_duration_ns):
+def get_metric_change_percent(session, other_session, metric, min_value):
 
-    sql, fields = get_duration_changes_query()
+    sql, fields = get_metric_changes_query()
 
     fields['current_session_id'] = session.id
     fields['baseline_session_id'] = other_session.id
-    fields['min_duration'] = min_duration_ns
+    fields['min_value'] = min_value
+    fields['metric_name'] = metric
 
     return get_average(sql, 'change_percent', fields)
-
 
 
 def get_outcomes_statistics_comparison(session, baseline_session=None):
@@ -186,25 +190,43 @@ def get_outcomes_statistics_comparison(session, baseline_session=None):
     return {'totals': totals, 'per_module': result}
 
 
-def get_session_summary_statistics(session, baseline_session, min_duration_ns):
+def get_metric_statistics(session, baseline_session, selected_metric):
     """
-    Get a summary of the test session, including the count of each outcome and the histogram of duration changes.
+    Get the statistics for a given metric for the given session and the baseline session, grouped by module, and the difference between them.
     """
 
-    summary = {}
-    
-    summary["outcomes"] = get_outcomes_statistics_comparison(session, baseline_session)
+    metric = Metric.objects.get(name=selected_metric)
 
+    return {
+        'metric': metric,
+        'change_histogram': get_change_histogram(session, baseline_session, metric.name, metric.absolute_precision),
+        'top_improvements': get_top_changes(session, baseline_session, 5, not metric.is_lower_better, metric.name, metric.absolute_precision),
+        'top_regressions': get_top_changes(session, baseline_session, 5, metric.is_lower_better, metric.name, metric.absolute_precision)
+    }
+
+
+def get_session_summary_statistics(session, baseline_session, metric_names: list[str]):
+    """
+    Get a summary of the test session, including the count of each outcome and the average changes for a list of metrics
+    """
+
+    summary = {
+        'outcomes': get_outcomes_statistics_comparison(session, baseline_session),
+        'metrics_changes': []        
+    }
+        
     if baseline_session:
-        summary["duration_change_histogram"] = get_duration_histogram(session, baseline_session, min_duration_ns)
-        summary['top_slower_tests'] = get_top_duration_changes(session, baseline_session, 5, True, min_duration_ns)
-        summary['top_faster_tests'] = get_top_duration_changes(session, baseline_session, 5, False, min_duration_ns)               
-        summary['average_duration_change_percent'] = get_average_duration_change_percent(session, baseline_session, min_duration_ns)
-    else:
-        summary["duration_change_histogram"] = None
-        summary['top_slower_tests'] = []
-        summary['top_faster_tests'] = []
-        summary['average_duration_change_percent'] = None
+        
+        metrics = Metric.objects.filter(name__in=metric_names)
+
+        for metric in metrics:            
+
+            metric_summary = {
+                'metric': metric,
+                'value': get_metric_change_percent(session, baseline_session, metric.name, metric.absolute_precision)
+            }
+
+            summary['metrics_changes'].append(metric_summary)
     
     summary['batches'] = (TestRunBatch.objects
                             .filter(test_session=session)
