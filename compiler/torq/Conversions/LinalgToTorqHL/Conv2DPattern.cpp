@@ -571,6 +571,16 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         }
         auto finalType = cast<RankedTensorType>(output.getType());
 
+        bool isNchw = _2DNchwChw;
+        // NOW that all validation passed (including weight creation),
+        // convert strided insert_slice to InterleavedInsertOp OR fold backward padding
+        PaddingInfo padInfo{{0, 0, 0, 0}, 0};
+        if (failed(convertToInterleaved(input, rewriter, convOp, hasStridedInsertSlice))) {
+            // Fallback to regular padding if conversion failed
+            // Use correct layout: NCHW if channelDim==1, NHWC if channelDim==3
+            padInfo = foldBackwardPadding(input, rewriter, isNchw);
+        }
+
         LLVM_DEBUG({
             llvm::dbgs() << "Marking fuse group for Conv2DMatmulOpConversion\n";
             output.print(llvm::dbgs());
@@ -617,16 +627,6 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         auto mWts = getDilatedWts(torqWeights, finalDilationVec, isDW1DStride1, rewriter);
         if (!failed(mWts)) {
             torqWeights = *mWts;
-        }
-
-        bool isNchw = _2DNchwChw;
-        // NOW that all validation passed (including weight creation),
-        // convert strided insert_slice to InterleavedInsertOp OR fold backward padding
-        PaddingInfo padInfo{{0, 0, 0, 0}, 0};
-        if (failed(convertToInterleaved(input, rewriter, convOp, hasStridedInsertSlice))) {
-            // Fallback to regular padding if conversion failed
-            // Use correct layout: NCHW if channelDim==1, NHWC if channelDim==3
-            padInfo = foldBackwardPadding(input, rewriter, isNchw);
         }
 
         // Generate torq_hl op with input/output in the expected format

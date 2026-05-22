@@ -1384,10 +1384,6 @@ PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nc
                 assert(false && "Unexpected padding top");
             }
 
-            assert(
-                offsets[wDim] == 0 && offsets[wDim] + sizes[wDim] == extractSrcShape[wDim] &&
-                "Unexpected offsets or sizes for conv extract on w dimension"
-            );
             sizes[wDim] -= left;
             sizes[wDim] -= right;
 

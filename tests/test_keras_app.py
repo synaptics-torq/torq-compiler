@@ -80,7 +80,7 @@ def case_config(request, runtime_hw_type, chip_config):
 
   aws_fpga = (runtime_hw_type.data == "aws_fpga")
   if aws_fpga:
-      # Only run full model tests on AWS FPGA
+    # Only run full model tests on AWS FPGA
     if "full_model" not in request.param.name.lower():
         pytest.skip("AWS FPGA only runs full model tests")
 
