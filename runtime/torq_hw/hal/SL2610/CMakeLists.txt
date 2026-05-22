@@ -14,12 +14,12 @@ set(MODULE_NAME "syna_npu.ko")
 set(KERNEL_ARCH "arm64")
 set(KERNEL_CROSS_COMPILE "aarch64-linux-gnu-")
 set(KERNEL_EXTRACT_PATH "${CMAKE_CURRENT_BINARY_DIR}/syna_kernel/")
-set(SYNA_KERNEL_PREBUILTS "${IREE_TORQ_SOURCE_DIR}/third_party/runtimes-prebuilt/soc-kernel/syna-kernel-artifacts.tgz")
+set(SYNA_KERNEL_PREBUILTS "${IREE_TORQ_SOURCE_DIR}/third_party/runtimes-prebuilt/soc-kernel/syna-kernel-artifacts.tgz" CACHE PATH "Path to the tarball containing the prebuilt kernel object files and headers for the Synaptics SoC kernel module")
 
 add_custom_command(
     OUTPUT ${MODULE_NAME}
     BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/${MODULE_NAME}
-    COMMAND ${CMAKE_COMMAND} -E env bash ${IREE_TORQ_SOURCE_DIR}/scripts/setup_soc_ko_build_deps.sh
+    COMMAND ${CMAKE_COMMAND} -E env bash ${IREE_TORQ_SOURCE_DIR}/scripts/setup_soc_ko_build_deps.sh --package-path ${SYNA_KERNEL_PREBUILTS}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${KERNEL_EXTRACT_PATH}
     COMMAND tar -xzf ${SYNA_KERNEL_PREBUILTS} -C ${KERNEL_EXTRACT_PATH}/
     COMMAND KBUILD_MODPOST_WARN=1 make -C ${KERNEL_EXTRACT_PATH}

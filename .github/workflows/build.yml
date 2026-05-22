@@ -119,12 +119,12 @@ jobs:
       - name: Configure build for Astra machina
         working-directory: /workspace/code
         run: |
-          ./scripts/configure_soc_build.sh /workspace/build-astra-sl /workspace/build astra_machina poky
+          ./scripts/configure_soc_build.sh /workspace/build-astra-sl /workspace/build astra_machina poky /opt/synaptics/astra/kernel/syna-kernel-artifacts.tgz
 
       - name: Build for Astra machina
         working-directory: /workspace/build-astra-sl
         run: |
-          cmake --build . --target torq-run-module
+          cmake --build . --target torq-run-module torq_kernel_module
 
       - name: Build runtime wheels
         working-directory: /workspace/code

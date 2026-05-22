@@ -5,16 +5,26 @@
 
 set -e
 
-# Parse options (only --use-gerrit is supported)
+BASE_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")/..
+THIRDPARTY_PREBUILTS_SOC_KERNEL=${BASE_DIR}/third_party/runtimes-prebuilt/soc-kernel/
+SYNA_KERNEL_MODULE_BUILD_PKG=syna-kernel-artifacts.tgz
+
+# Parse options
 USE_GERRIT=0
+PACKAGE_PATH="${THIRDPARTY_PREBUILTS_SOC_KERNEL}/${SYNA_KERNEL_MODULE_BUILD_PKG}"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --use-gerrit)
       USE_GERRIT=1
       shift
       ;;
+    --package-path)
+      PACKAGE_PATH="$2"
+      shift 2
+      ;;
     *)
-      shift
+      echo "Unknown option: $1"
+      exit 1
       ;;
   esac
 done
@@ -32,15 +42,12 @@ else
   DRIVER_BRANCH="scarthgap_6.12_v2.3.0"
 fi
 
-BASE_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")/..
-THIRDPARTY_PREBUILTS_SOC_KERNEL=${BASE_DIR}/third_party/runtimes-prebuilt/soc-kernel/
 SYNA_KERNEL_CHECKOUT=${THIRDPARTY_PREBUILTS_SOC_KERNEL}/main
-SYNA_KERNEL_MODULE_BUILD_PKG=syna-kernel-artifacts.tgz
 
 echo "Configuring to build syna-kernel (source: $([[ $USE_GERRIT -eq 1 ]] && echo 'Gerrit' || echo 'GitHub'))"
 
-if [ -f "${THIRDPARTY_PREBUILTS_SOC_KERNEL}/${SYNA_KERNEL_MODULE_BUILD_PKG}" ]; then
-    echo "kernel artifacts already packed. To rebuild, remove ${THIRDPARTY_PREBUILTS_SOC_KERNEL}/${SYNA_KERNEL_MODULE_BUILD_PKG}"
+if [ -f "${PACKAGE_PATH}" ]; then
+    echo "kernel artifacts already packed. To rebuild, remove ${PACKAGE_PATH}"
 else
     mkdir -p ${THIRDPARTY_PREBUILTS_SOC_KERNEL}
     cd ${THIRDPARTY_PREBUILTS_SOC_KERNEL}
@@ -58,6 +65,6 @@ else
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- sl261x_defconfig
     export LOCALVERSION=""
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
-    tar -cvzf ${THIRDPARTY_PREBUILTS_SOC_KERNEL}/${SYNA_KERNEL_MODULE_BUILD_PKG} .config include/ arch/arm64/include/ scripts/ Makefile arch/arm64/Makefile
+    tar -cvzf ${PACKAGE_PATH} .config include/ arch/arm64/include/ scripts/ Makefile arch/arm64/Makefile
     rm -rf ${SYNA_KERNEL_CHECKOUT}
 fi

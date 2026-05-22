@@ -3,7 +3,7 @@
 # This scripts creates a build directory for IREE with the Synaptics Torq driver suitable for running on targets
 
 function usage () {
-    echo "$0 <soc-fpga-build-dir> <host-build-dir> [target] [toolchain]"
+    echo "$0 <soc-fpga-build-dir> <host-build-dir> [target] [toolchain] [kernel-prebuilt-path]"
 }
 
 if [[ -z "$1" ]] ; then
@@ -97,6 +97,12 @@ if [[ "$TARGET" == "astra_machina" && "$4" == "poky" ]]; then
     -DPython3_NumPy_INCLUDE_DIR="${NUMPY_INCLUDE_PATH}"
     -DPYTHON_MODULE_EXTENSION="${PYTHON_EXT_SUFFIX}"
   )
+
+  if [[ -n "$5" ]]; then
+    echo "Using custom kernel prebuild path: $5"
+    CMAKE_ARGS+=(-DSYNA_KERNEL_PREBUILTS="$5")
+  fi
+
 elif [[ "$TARGET" == "astra_machina" ]]; then
   # Explicitly use the host Python3 to prevent CMake from picking up a
   # cross-SDK Python that may have been sourced into the environment.
