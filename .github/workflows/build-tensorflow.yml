@@ -37,10 +37,14 @@ jobs:
 
     steps:
 
-    - uses: actions/checkout@v3
+    - name: Update checkout
+      uses: actions/checkout@v6      
+
+    - uses: actions/checkout@v6
       with:
         repository: tensorflow/tensorflow
         ref: ${{ env.TF_VERSION }}
+        path: tensorflow
 
     - name: Install bazelisk
       run: |        
@@ -58,51 +62,40 @@ jobs:
     
     - name: Configure build
       run: |
+        cd tensorflow
         yes "" | ./configure
     
     - name: Build TensorFlow binaries
       run: |
+        cd tensorflow
         bazel build //tensorflow/compiler/mlir/lite:flatbuffer_translate //tensorflow/compiler/mlir/tosa:tf-tosa-opt
 
     - name: Create zip package
-      run: |
+      run: |        
         mkdir tflite-tools-${{ env.TF_VERSION }}
 
-        cp bazel-bin/tensorflow/compiler/mlir/lite/stablehlo/libcomposite_utils.so \
-            bazel-bin/tensorflow/core/ir/libDialect.so \
-            bazel-bin/external/llvm-project/llvm/libSupport.so \
-            bazel-bin/external/llvm-project/mlir/libDestinationStyleOpInterface.so \
-            bazel-bin/external/llvm-project/mlir/libPDLDialect.so \
-            bazel-bin/external/llvm-project/mlir/libSparseTensorDialect.so \
-            bazel-bin/tensorflow/compiler/mlir/lite/flatbuffer_translate \
-            bazel-bin/tensorflow/compiler/mlir/tosa/tf-tosa-opt.runfiles/org_tensorflow/tensorflow/compiler/mlir/tosa/tf-tosa-opt \
+        cp tensorflow/bazel-bin/tensorflow/compiler/mlir/lite/stablehlo/libcomposite_utils.so \
+            tensorflow/bazel-bin/tensorflow/core/ir/libDialect.so \
+            tensorflow/bazel-bin/external/llvm-project/llvm/libSupport.so \
+            tensorflow/bazel-bin/external/llvm-project/mlir/libDestinationStyleOpInterface.so \
+            tensorflow/bazel-bin/external/llvm-project/mlir/libPDLDialect.so \
+            tensorflow/bazel-bin/external/llvm-project/mlir/libSparseTensorDialect.so \
+            tensorflow/bazel-bin/tensorflow/compiler/mlir/lite/flatbuffer_translate \
+            tensorflow/bazel-bin/tensorflow/compiler/mlir/tosa/tf-tosa-opt.runfiles/org_tensorflow/tensorflow/compiler/mlir/tosa/tf-tosa-opt \
             tflite-tools-${{ env.TF_VERSION }}/
 
         zip -r tflite-tools-${{ env.TF_VERSION }}.zip tflite-tools-${{ env.TF_VERSION }}
 
     - name: Ensure snapshot release exists
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.github_token }}
-      run: |
-        if gh release -R ${{ github.repository }} view snapshot >/dev/null 2>&1; then
-          echo "snapshot release exists"
-        else
-          gh release -R ${{ github.repository }} create snapshot \
-            -t "Development Snapshot" \
-            -n "Latest build from main. Unstable. Replaced on each commit." \
-            --prerelease
-        fi
+      uses: ./.github/actions/ensure-snapshot-release
+      if: ${{ github.event_name == 'push' }}
+      with:
+        github_token: ${{ secrets.github_token }}
+        repository: ${{ github.repository }}
 
     - name: Upload to GitHub release
-      env:
-        GITHUB_TOKEN: ${{ secrets.github_token }}
-        EVENT_NAME: ${{ github.event_name }}
-        EVENT_ACTION: ${{ github.event.action }}
-        RELEASE_TAG: ${{ github.event.release.tag_name }}
-      run: |
-        if [[ "$EVENT_NAME" == "release" && "$EVENT_ACTION" == "published" ]]; then
-          gh release -R ${{ github.repository }} upload "$RELEASE_TAG" tflite-tools-${{ env.TF_VERSION }}.zip --clobber
-        else
-          gh release -R ${{ github.repository }} upload snapshot tflite-tools-${{ env.TF_VERSION }}.zip --clobber
-        fi
+      uses: ./.github/actions/upload-to-release
+      with:
+        github_token: ${{ secrets.github_token }}
+        repository: ${{ github.repository }}
+        assets_glob: tflite-tools-${{ env.TF_VERSION }}.zip

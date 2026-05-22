@@ -1,0 +1,39 @@
+description: Upload build artifacts to GitHub release or snapshot release
+
+inputs:
+  github_token:
+    description: GitHub token with release write access
+    required: true
+  repository:
+    description: Repository in owner/name format
+    required: false
+    default: ${{ github.repository }}
+  assets_glob:
+    description: Glob for assets to upload
+    required: false
+    default: dist/*
+
+runs:
+  using: composite
+  steps:
+    - name: Upload assets to release
+      shell: bash
+      if: ${{ github.event_name != 'pull_request' }}
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        TARGET_REPOSITORY: ${{ inputs.repository }}
+        ASSETS_GLOB: ${{ inputs.assets_glob }}
+      run: |
+        set -euo pipefail
+
+        if [[ "${{ github.event_name }}" == "release" && "${{ github.event.action }}" == "published" ]]; then
+          TARGET_TAG="${{ github.event.release.tag_name }}"
+        else
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            TARGET_TAG="snapshot"
+          else
+            TARGET_TAG="snapshot-${{ github.ref_name }}"
+          fi
+        fi
+
+        gh release -R "$TARGET_REPOSITORY" upload "$TARGET_TAG" $ASSETS_GLOB --clobber

@@ -1,0 +1,56 @@
+name: Build Kernel module dependencies
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-ko-dependencies.yml'
+  
+  pull_request:    
+    paths:
+      - '.github/workflows/build-ko-dependencies.yml'
+
+  release:
+    types: [published]
+
+
+concurrency:
+  group: build-ko-dependencies-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  build:    
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+
+    - name: Update checkout
+      uses: actions/checkout@v6
+
+    # install the dependencies instead of using the CI docker to avoid circular dependencies
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y binutils-arm-linux-gnueabihf gcc-aarch64-linux-gnu flex bison bc
+
+    - name: Build Kernel Module dependenencies
+      run: |
+        scripts/setup_soc_ko_build_deps.sh    
+
+    - name: Ensure snapshot release exists
+      uses: ./.github/actions/ensure-snapshot-release
+      if: ${{ github.event_name == 'push' }}
+      with:
+        github_token: ${{ secrets.github_token }}
+
+    - name: Upload to GitHub release
+      uses: ./.github/actions/upload-to-release
+      with:
+        github_token: ${{ secrets.github_token }}    
+        assets_glob: third_party/runtimes-prebuilt/soc-kernel/syna-kernel-artifacts.tgz
