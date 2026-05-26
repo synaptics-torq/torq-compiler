@@ -2235,16 +2235,22 @@ bool isRoundingRightShiftOp(linalg::GenericOp op, arith::ShRSIOp &shrsiOp1) {
 
     auto trunciOp = extuiOp.getIn().getDefiningOp<arith::TruncIOp>();
     if (!trunciOp) {
-        // try to find if op is arith.andi
-        auto andiOp = extuiOp.getIn().getDefiningOp<arith::AndIOp>();
-        if (andiOp) {
-            // if andiOp is found, get trunciOp from its rhs
+        if (auto andiOp = extuiOp.getIn().getDefiningOp<arith::AndIOp>()) {
             trunciOp = andiOp.getRhs().getDefiningOp<arith::TruncIOp>();
-            if (!trunciOp) {
-                return false;
+        }
+        else if (auto selectOp = extuiOp.getIn().getDefiningOp<arith::SelectOp>()) {
+            // select(cond, trunci, 0) or select(cond, 0, trunci) forms.
+            // Guards the rounding bit so it's 0 when the shift amount is 0.
+            Value trueVal = selectOp.getTrueValue();
+            Value falseVal = selectOp.getFalseValue();
+            if (matchPattern(falseVal, m_Zero())) {
+                trunciOp = trueVal.getDefiningOp<arith::TruncIOp>();
+            }
+            else if (matchPattern(trueVal, m_Zero())) {
+                trunciOp = falseVal.getDefiningOp<arith::TruncIOp>();
             }
         }
-        else {
+        if (!trunciOp) {
             return false;
         }
     }

@@ -207,7 +207,7 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
 
         // TODO: add more recursive scalar input processing for elementwise binary ops
         // right now we only handle add/sub with recurive scalar input processing
-        if (isa<arith::AddIOp>(eleOp) || isa<arith::SubIOp>(eleOp)) {
+        if (eleOp && (isa<arith::AddIOp>(eleOp) || isa<arith::SubIOp>(eleOp))) {
             if (isScalarFromRecursiveRescale(input1) || isScalarFromRecursiveRescale(input2)) {
                 return rewriter.notifyMatchFailure(
                     srcOp, "one of input or both input is recurive scalar, no need broadcast\n"

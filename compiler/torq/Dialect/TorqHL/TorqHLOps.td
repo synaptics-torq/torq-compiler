@@ -272,7 +272,8 @@ def TorqHL_ElementWiseUnaryOp: TorqHL_LayerOp<"elementwiseunary"> {
   ));
 }
 
-def TorqHL_ElementWiseShiftOp: TorqHL_LayerOp<"elementwiseshift"> {
+def TorqHL_ElementWiseShiftOp: TorqHL_LayerOp<"elementwiseshift",
+    [SameOperandsShape, SameOperandsElementType]> {
   let summary = "Elementwise Shift operator";
   let description = [{
     Elementwise Shift operation
