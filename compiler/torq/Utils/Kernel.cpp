@@ -306,6 +306,7 @@ struct SliceCfg {
     NumberFormat alu_format{NumberFormat::I};
     NumberFormat act_format{NumberFormat::I};
     uint32_t act_sum_bits;
+    ArrayRef<int32_t> table = {};
 
     SliceCFGAttr toSliceCFGAttr(MLIRContext *ctx) const {
         // When using fp32 and bf16 we normally represent values as float32 (see min,max in clamp())
@@ -318,11 +319,11 @@ struct SliceCfg {
             alu_w_unsigned, act_mode, act_lsh,                   //
             act_rsh, act_clip_min, act_clip_max, act_zero_point, //
             no_p_clear,
-            no_p_output,                                                       //
-            kernel.left, kernel.right, kernel.top, kernel.bottom,              //
-            pad.left, pad.right, pad.top, pad.bottom, padValue16b,             //
-            stride, stride_offset, act_round_mode, weight_format,              //
-            alu_disable, act_disable, alu_format, act_format, act_sum_bits, {} /*table*/
+            no_p_output,                                           //
+            kernel.left, kernel.right, kernel.top, kernel.bottom,  //
+            pad.left, pad.right, pad.top, pad.bottom, padValue16b, //
+            stride, stride_offset, act_round_mode, weight_format,  //
+            alu_disable, act_disable, alu_format, act_format, act_sum_bits, table
         );
     }
 };
@@ -2821,6 +2822,15 @@ QData Act::rescaleClamp(
 int Act::width(DType iType, DType wType, bool biasScalePerItem) const {
     assert(!isCompressed(iType) && "Compressed iType not supported here");
     return d->actWidth(iType, toUncompressed(wType), biasScalePerItem);
+}
+
+void Act::setLUT(ArrayRef<int32_t> &lut) {
+    llvm::errs() << "Setting activation LUT: " << lut.size() << "\n";
+    assert(
+        (lut.size() == 256 || lut.size() == 512) &&
+        "Activation LUT must have exactly 256 or 512 entries"
+    );
+    d->_cfg.table = lut;
 }
 
 //

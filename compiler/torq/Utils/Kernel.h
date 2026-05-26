@@ -627,6 +627,10 @@ class Act : SliceComponent {
     // The flag biasScalePerItem indicates if a different bias/scale is required for each item
     // (in which case the width may be reduced)
     int width(DType iType, DType wType = DType::none, bool biasScalePerItem = false) const;
+
+    // Configure the activation lookup table (LUT) for non-linear activation functions.
+    // The table contains 256 i32 entries for piecewise-linear interpolation (e.g., sigmoid, swish)
+    void setLUT(ArrayRef<int32_t> &lut);
 };
 
 // Create a kernel for a slice

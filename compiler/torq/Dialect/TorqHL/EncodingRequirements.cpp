@@ -389,11 +389,7 @@ KernelEncoding AddOp::getKernelEncoding() {
     };
 }
 
-KernelEncoding TableOp::getKernelEncoding() {
-    // The table kernel writes 64 bytes of data. To handle cases where the input is not aligned
-    // to 64 bytes, the output tensor size should be align to 64 bytes.
-    return {{}, {{}, torq::HwInfo::max_input}};
-}
+KernelEncoding TableOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ReduceOp::getKernelEncoding() { return getNoEncoding(); }
 
