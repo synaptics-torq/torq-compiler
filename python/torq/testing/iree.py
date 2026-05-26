@@ -643,7 +643,8 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
             dump_path = versioned_dir / 'ir'
         else:
             dump_path = Path(request.config.rootdir) / enable_debug_ir
-
+        
+        dump_path.mkdir(parents=True, exist_ok=True)
         cmds.extend(['--mlir-print-ir-after-all', f'--mlir-print-ir-tree-dir={dump_path}', '--mlir-elide-elementsattrs-if-larger=50'])
 
     if enable_phases_dump:
