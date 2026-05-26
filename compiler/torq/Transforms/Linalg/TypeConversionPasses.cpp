@@ -154,6 +154,19 @@ bool isTopLevelFunc(func::FuncOp funcOp, Operation *rootOp) {
     return isa_and_nonnull<ModuleOp>(rootOp) && funcOp->getParentOp() == rootOp;
 }
 
+void collectPreservedIO(Operation *op, SmallVectorImpl<PreservedIOFuncInfo> &preservedIO) {
+    ModuleOp module = dyn_cast<ModuleOp>(op);
+    if (!module) {
+        return;
+    }
+
+    for (auto funcOp : module.getOps<func::FuncOp>()) {
+        if (!isTopLevelFunc(funcOp, op))
+            continue;
+        preservedIO.push_back({funcOp.getSymNameAttr(), funcOp.getFunctionType()});
+    }
+}
+
 /// Inserts casts on entry/exit to keep the function signature unchanged while
 /// the body operates on the converted element types.
 LogicalResult addBoundaryCasts(func::FuncOp funcOp, FunctionType originalType, TypeConverter &tc) {
@@ -279,6 +292,11 @@ struct GenericTypeConversionPattern : public ConversionPattern {
     LogicalResult matchAndRewrite(
         Operation *op, ArrayRef<Value> operands, ConversionPatternRewriter &rewriter
     ) const override {
+        if (isa<arith::ExtFOp, arith::TruncFOp, arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp>(op
+            )) {
+            return failure();
+        }
+
         SmallVector<NamedAttribute> newAttrs;
         if (op->hasTrait<OpTrait::ConstantLike>() ||
             isa<iree_compiler::IREE::Util::GlobalOpInterface>(op)) {
@@ -319,8 +337,34 @@ struct GenericTypeConversionPattern : public ConversionPattern {
 
 /// Normalizes arithmetic cast ops after type conversion.
 ///
-/// Removes redundant casts created by type normalization and rejects casts whose
-/// width relationship becomes invalid under the new element types.
+/// Removes redundant casts created by type normalization and rematerializes float
+/// casts whose operation kind changes after conversion.
+template <typename OpTy> struct ConvertFloatArithCastOp : public OpConversionPattern<OpTy> {
+    using OpConversionPattern<OpTy>::OpConversionPattern;
+    LogicalResult matchAndRewrite(
+        OpTy op, typename OpTy::Adaptor adaptor, ConversionPatternRewriter &rewriter
+    ) const override {
+        Type resultType = this->getTypeConverter()->convertType(op.getResult().getType());
+        Value operand = adaptor.getOperands()[0];
+
+        if (resultType == operand.getType()) {
+            rewriter.replaceOp(op, operand);
+            return success();
+        }
+
+        Value converted = convertRankedFloat(rewriter, resultType, operand, op.getLoc());
+        if (!converted) {
+            return rewriter.notifyMatchFailure(op, "invalid float cast after conversion");
+        }
+        rewriter.replaceOp(op, converted);
+        return success();
+    }
+};
+
+/// Normalizes arithmetic integer cast ops after type conversion.
+///
+/// Removes redundant casts created by type normalization and rejects integer
+/// casts whose width relationship becomes invalid under the new element types.
 template <typename OpTy, typename TypeTy, typename OperandToResultWidthLegalityRelation>
 struct ConvertTypeSensitiveArithCastOp : public OpConversionPattern<OpTy> {
     using OpConversionPattern<OpTy>::OpConversionPattern;
@@ -342,7 +386,7 @@ struct ConvertTypeSensitiveArithCastOp : public OpConversionPattern<OpTy> {
             )) {
             return rewriter.notifyMatchFailure(op, "invalid width combination after conversion");
         }
-        rewriter.replaceOpWithNewOp<OpTy>(op, resultType, op.getOperand());
+        rewriter.replaceOpWithNewOp<OpTy>(op, resultType, adaptor.getOperands()[0]);
         return success();
     }
 };
@@ -352,16 +396,15 @@ using CastPatternInserter = function_ref<void(RewritePatternSet &, TypeConverter
 /// Shared driver for whole-op primitive type conversion passes.
 ///
 /// Applies generic cloning, cast normalization, signature rewriting, and dynamic legality.
-LogicalResult runTypeConversion(Operation *op, TypeConverter &tc, CastPatternInserter addCasts) {
+LogicalResult runTypeConversion(
+    Operation *op, TypeConverter &tc, CastPatternInserter addCasts,
+    bool preserveIO = !clConvertIODType
+) {
     MLIRContext *ctx = op->getContext();
     SmallVector<PreservedIOFuncInfo> preservedIO;
     ModuleOp module = dyn_cast<ModuleOp>(op);
-    if (!clConvertIODType && module) {
-        for (auto funcOp : module.getOps<func::FuncOp>()) {
-            if (!isTopLevelFunc(funcOp, op))
-                continue;
-            preservedIO.push_back({funcOp.getSymNameAttr(), funcOp.getFunctionType()});
-        }
+    if (preserveIO) {
+        collectPreservedIO(op, preservedIO);
     }
 
     RewritePatternSet patterns(ctx);
@@ -395,16 +438,18 @@ LogicalResult runTypeConversion(Operation *op, TypeConverter &tc, CastPatternIns
     return success();
 }
 
-LogicalResult runFloatConversion(Operation *op, TypeConverter &tc) {
-    return runTypeConversion(op, tc, [](RewritePatternSet &p, TypeConverter &tc, MLIRContext *ctx) {
-        p.insert<
-            ConvertTypeSensitiveArithCastOp<arith::TruncFOp, FloatType, std::greater<unsigned>>>(
-            tc, ctx
-        );
-        p.insert<ConvertTypeSensitiveArithCastOp<arith::ExtFOp, FloatType, std::less<unsigned>>>(
-            tc, ctx
-        );
-    });
+LogicalResult
+runFloatConversion(Operation *op, TypeConverter &tc, bool preserveIO = !clConvertIODType) {
+    return runTypeConversion(
+        op, tc,
+        [](RewritePatternSet &p, TypeConverter &tc, MLIRContext *ctx) {
+            p.insert<
+                ConvertFloatArithCastOp<arith::TruncFOp>, ConvertFloatArithCastOp<arith::ExtFOp>>(
+                tc, ctx
+            );
+        },
+        preserveIO
+    );
 }
 
 template <typename SourceType, typename TargetType>
@@ -420,6 +465,42 @@ struct IntegerTypeConverter : public PrimitiveTypeConverter<SourceType, TargetTy
     explicit IntegerTypeConverter() {
         this->addSourceMaterialization(convertRankedInteger);
         this->addTargetMaterialization(convertRankedInteger);
+    }
+};
+
+struct ConvertDTypesBoundaryConverter : public TypeConverter {
+    ConvertDTypesBoundaryConverter() {
+        addConversion([](Type type) { return type; });
+        addConversion([](Float16Type type) -> Type {
+            return BFloat16Type::get(type.getContext());
+        });
+        addConversion([](Float32Type type) -> Type {
+            return BFloat16Type::get(type.getContext());
+        });
+        addConversion([](IntegerType type) -> Type {
+            if (!type.isInteger(64)) {
+                return type;
+            }
+            return IntegerType::get(type.getContext(), 32, type.getSignedness());
+        });
+        addConversion([&](ComplexType type) {
+            return ComplexType::get(convertType(type.getElementType()));
+        });
+        addConversion([&](RankedTensorType type) {
+            return RankedTensorType::get(
+                type.getShape(), convertType(type.getElementType()), type.getEncoding()
+            );
+        });
+        addConversion([&](VectorType type) {
+            return VectorType::get(type.getShape(), convertType(type.getElementType()));
+        });
+        addConversion([&](iree_compiler::IREE::Util::PtrType ptrType) {
+            return iree_compiler::IREE::Util::PtrType::get(convertType(ptrType.getTargetType()));
+        });
+        addSourceMaterialization(convertRankedFloat);
+        addTargetMaterialization(convertRankedFloat);
+        addSourceMaterialization(convertRankedInteger);
+        addTargetMaterialization(convertRankedInteger);
     }
 };
 
@@ -467,6 +548,18 @@ struct DemoteI64ToI32Converter : public IntegerTypeConverter<IntegerType, Intege
     }
 };
 
+void addIntegerCastPatterns(RewritePatternSet &p, TypeConverter &tc, MLIRContext *ctx) {
+    p.insert<ConvertTypeSensitiveArithCastOp<arith::TruncIOp, IntegerType, std::greater<unsigned>>>(
+        tc, ctx
+    );
+    p.insert<ConvertTypeSensitiveArithCastOp<arith::ExtUIOp, IntegerType, std::less<unsigned>>>(
+        tc, ctx
+    );
+    p.insert<ConvertTypeSensitiveArithCastOp<arith::ExtSIOp, IntegerType, std::less<unsigned>>>(
+        tc, ctx
+    );
+}
+
 class TorqDemoteI64ToI32Pass : public impl::TorqDemoteI64ToI32Base<TorqDemoteI64ToI32Pass> {
   public:
     using TorqDemoteI64ToI32Base::TorqDemoteI64ToI32Base;
@@ -474,20 +567,54 @@ class TorqDemoteI64ToI32Pass : public impl::TorqDemoteI64ToI32Base<TorqDemoteI64
     void runOnOperation() override {
         DemoteI64ToI32Converter typeConverter;
 
-        LogicalResult res = runTypeConversion(
-            getOperation(), typeConverter,
-            [](RewritePatternSet &p, auto &tc, MLIRContext *ctx) {
-                p.insert<ConvertTypeSensitiveArithCastOp<
-                    arith::TruncIOp, IntegerType, std::greater<unsigned>>>(tc, ctx);
-                p.insert<ConvertTypeSensitiveArithCastOp<
-                    arith::ExtUIOp, IntegerType, std::less<unsigned>>>(tc, ctx);
-                p.insert<ConvertTypeSensitiveArithCastOp<
-                    arith::ExtSIOp, IntegerType, std::less<unsigned>>>(tc, ctx);
-            }
-        );
+        LogicalResult res =
+            runTypeConversion(getOperation(), typeConverter, addIntegerCastPatterns);
 
         if (failed(res)) {
             return signalPassFailure();
+        }
+    }
+};
+
+class TorqConvertAllDTypesPass : public impl::TorqConvertAllDTypesBase<TorqConvertAllDTypesPass> {
+  public:
+    using TorqConvertAllDTypesBase::TorqConvertAllDTypesBase;
+
+    void runOnOperation() override {
+        ModuleOp module = getOperation();
+        SmallVector<PreservedIOFuncInfo> preservedIO;
+        if (!clConvertIODType) {
+            collectPreservedIO(module, preservedIO);
+        }
+
+        ConvertF16ToBF16Converter f16ToBF16Converter;
+        if (failed(runFloatConversion(module, f16ToBF16Converter, /*preserveIO=*/false))) {
+            return signalPassFailure();
+        }
+
+        DemoteF32ToBF16Converter f32ToBF16Converter;
+        if (failed(runFloatConversion(module, f32ToBF16Converter, /*preserveIO=*/false))) {
+            return signalPassFailure();
+        }
+
+        DemoteI64ToI32Converter i64ToI32Converter;
+        if (failed(runTypeConversion(
+                module, i64ToI32Converter, addIntegerCastPatterns, /*preserveIO=*/false
+            ))) {
+            return signalPassFailure();
+        }
+
+        ConvertDTypesBoundaryConverter boundaryConverter;
+        for (const auto &ioInfo : preservedIO) {
+            func::FuncOp funcOp = module.lookupSymbol<func::FuncOp>(ioInfo.name.getValue());
+            if (!funcOp) {
+                module.emitError("failed to locate function after type conversion: ")
+                    << ioInfo.name;
+                return signalPassFailure();
+            }
+            if (failed(addBoundaryCasts(funcOp, ioInfo.originalType, boundaryConverter))) {
+                return signalPassFailure();
+            }
         }
     }
 };
@@ -506,11 +633,13 @@ std::unique_ptr<OperationPass<ModuleOp>> createTorqDemoteI64ToI32Pass() {
     return std::make_unique<TorqDemoteI64ToI32Pass>();
 }
 
+std::unique_ptr<OperationPass<ModuleOp>> createTorqConvertAllDTypesPass() {
+    return std::make_unique<TorqConvertAllDTypesPass>();
+}
+
 void buildTorqTypeConversionPipeline(OpPassManager &passManager) {
     if (clConvertDtypes) {
-        passManager.addPass(createTorqDemoteF32ToBF16Pass());
-        passManager.addPass(createTorqConvertF16ToBF16Pass());
-        passManager.addPass(createTorqDemoteI64ToI32Pass());
+        passManager.addPass(createTorqConvertAllDTypesPass());
     }
 }
 

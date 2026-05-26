@@ -44,6 +44,17 @@ def TorqDemoteI64ToI32 : Pass<"torq-demote-i64-to-i32", "mlir::ModuleOp"> {
   let dependentDialects = ["arith::ArithDialect"];
 }
 
+def TorqConvertAllDTypes : Pass<"torq-convert-all-dtypes", "mlir::ModuleOp"> {
+  let summary = "Runs the Torq dtype conversion pipeline";
+  let description = [{
+    Converts float16, float32, and int64 payloads to the Torq-preferred element
+    types. When model I/O dtypes are preserved, boundary casts are inserted only
+    after all internal dtype conversions have completed.
+  }];
+  let constructor = "mlir::syna::torq::createTorqConvertAllDTypesPass()";
+  let dependentDialects = ["arith::ArithDialect"];
+}
+
 //===---------------------------------------------------------------------===//
 
 def FoldConstants :
