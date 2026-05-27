@@ -219,8 +219,10 @@ jobs:
     timeout-minutes: 50
 
     runs-on:
+          # We use xlarge with 36 cores and 72GB of RAM, to be monitored.
           - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
             image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.choose_runner_image.outputs.image_name }}-tests
+            instance-size:xlarge 
 
     outputs:
       s3_cache_path: ${{ steps.run_cmodel_tests.outputs.s3_cache_path }}
@@ -259,8 +261,9 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           # the cache is too big at the moment, disable
           # test_data_cache_artifact: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('test-cache-{0}', matrix.chip_group)) || '' }} # upload to github only on main branch 
+          # We are currently using 36 cores machines for the cmodel tests, dividing by 2 to avoid overloading the machine which can cause timeouts and OOMs
           pytest_args: >
-            -m ci -n auto -v --show-capture=no --tb=short
+            -m ci -n 18 -v --show-capture=no --tb=short
             --torq-chips ${{ matrix.chip_group }}
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime

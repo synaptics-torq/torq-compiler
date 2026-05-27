@@ -3,6 +3,7 @@ from huggingface_hub import get_collection, list_repo_files, hf_hub_download, tr
 import pytest
 import json
 import numpy as np
+from time import sleep
 
 from .versioned_fixtures import versioned_unhashable_object_fixture, versioned_hashable_object_fixture
 from . import s3
@@ -81,20 +82,25 @@ def get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model", revis
 
     category = repo_type
 
-    # fetch the etag and revision of the latest version
-    try:
-        url = hf_hub_url(
-            repo_id=repo_id,
-            filename=filename,
-            repo_type=repo_type,
-            revision=revision
-        )
+    for _ in range(3):  # try 3 times to handle potential connection failures with huggingface
+        # fetch the etag and revision of the latest version
+        try:
+            url = hf_hub_url(
+                repo_id=repo_id,
+                filename=filename,
+                repo_type=repo_type,
+                revision=revision
+            )
 
-        metadata = get_hf_file_metadata(url=url)
-        etag = metadata.etag
-        revision = metadata.commit_hash
-    except Exception:
-        raise RuntimeError(f"Failed to get metadata for {repo_id}@{revision}/{filename}")
+            metadata = get_hf_file_metadata(url=url)
+            etag = metadata.etag
+            revision = metadata.commit_hash
+            break
+        except Exception:
+            print(f"Attempt to get metadata for {repo_id}@{revision}/{filename} failed, retrying...")
+            sleep(5)  # wait for a bit before retrying
+    else:
+        raise RuntimeError(f"Failed to get metadata for {repo_id}@{revision}/{filename} after multiple attempts")
 
     # try to get the file from the S3 cache (either the local dir or the S3 bucket)
     print("Trying to get file from S3 cache:", repo_id, revision, filename, etag)
