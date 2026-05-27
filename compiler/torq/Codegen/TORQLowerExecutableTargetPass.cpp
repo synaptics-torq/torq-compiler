@@ -431,6 +431,11 @@ void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
     // handle them consistently.
     funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
 
+    if (!clExecutorMap.empty()) {
+        funcPm.addPass(createExecutorAssignmentPass(clExecutorMap));
+        funcPm.addPass(createCanonicalizerPass());
+    }
+
     funcPm.addPass(createMarkPatternsForTileAndFusePass());
     funcPm.addPass(createTileAndFusePass());
 

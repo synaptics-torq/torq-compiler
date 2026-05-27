@@ -61,7 +61,7 @@ def case_config(request, tmp_path, layer_executor_case, chip_config):
 
     # Full model / full subgraph mode: executor assignments provided by fixture
     if executor == "discovered":
-        base_config["torq_compiler_options"] = ["--torq-enable-torq-hl-tiling"]
+        base_config["torq_compiler_options"] = ["--torq-tile-and-fuse-producers-fuse-mode=only-patterns"]
         return base_config
 
     # Layer mode: assign executor to the entire layer
@@ -81,7 +81,7 @@ def case_config(request, tmp_path, layer_executor_case, chip_config):
     elif executor == "host":
         compiler_options.extend(["--torq-disable-slices", "--torq-disable-css"])
 
-    compiler_options.append("--torq-enable-torq-hl-tiling")
+    compiler_options.append("--torq-tile-and-fuse-producers-fuse-mode=only-patterns")
     base_config["torq_compiler_options"] = compiler_options
     return base_config
 

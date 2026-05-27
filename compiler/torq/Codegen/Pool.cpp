@@ -73,7 +73,7 @@ FailureOr<int> Pool::allocate(Value value) {
                 for (int j = 0; j < sizeWords; j++) {
                     if (used_[startIndex + j]) {
                         found = false;
-                        i = startIndex + j;
+                        i = startIndex + j + 1;
                         break;
                     }
                 }

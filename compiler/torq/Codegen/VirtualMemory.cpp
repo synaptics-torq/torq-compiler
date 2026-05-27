@@ -1019,10 +1019,17 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         }
 
         // compute the total size of the operands we need to swap in
+        // use root().size() instead of the operand's type size because aliases
+        // (e.g. memref.subview) may have a smaller type than their parent buffer.
+        // collect distinct roots first to avoid double-counting when multiple
+        // subviews alias the same buffer.
         int swapInSize = 0;
+        SetVector<VirtualBuffer *> distinctRoots;
         for (auto v : toSwapIn) {
-            auto memRefType = cast<MemRefType>(v.getType());
-            swapInSize += getEncodedTotalSizeBytes(memRefType);
+            distinctRoots.insert(&vm.virtualObjects.getVirtualObject(v).root());
+        }
+        for (auto *root : distinctRoots) {
+            swapInSize += root->size();
         }
 
         rewriter.setInsertionPoint(op);
