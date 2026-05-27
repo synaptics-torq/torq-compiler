@@ -73,6 +73,7 @@ def get_metric_changes_query():
             CONCAT(testcase.module, '::', testcase.name, '[', testcase.parameters, ']') AS nodeid,
             c_testrun.outcome AS current_outcome,
             b_testrun.outcome AS baseline_outcome,
+            c_metric.unit AS unit,
             c_measurement.value AS current_value,
             b_measurement.value AS baseline_value,
             (c_measurement.value - b_measurement.value) * 100.0 / NULLIF(b_measurement.value, 0) AS change_percent        

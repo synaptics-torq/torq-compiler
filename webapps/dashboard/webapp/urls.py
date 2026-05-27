@@ -18,10 +18,12 @@ from django.contrib import admin
 from django.urls import path
 
 import perf.backup
+import perf.trim
 import perf.urls
 
 urlpatterns = [
     path('admin/database/backup/', admin.site.admin_view(perf.backup.backup_database_view), name='admin_database_backup'),
     path('admin/database/restore/', admin.site.admin_view(perf.backup.restore_database_view), name='admin_database_restore'),
+    path('admin/database/trim/', admin.site.admin_view(perf.trim.trim_database_view), name='admin_database_trim'),
     path('admin/', admin.site.urls),
 ] + perf.urls.urlpatterns

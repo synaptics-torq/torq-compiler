@@ -100,8 +100,8 @@
                                 <tr>
                                     <td>{{ forloop.counter }}</td>
                                     <td class="text-break">{{ test.nodeid }}</td>
-                                    <td>{{ test.current_value|format_measurement:"ns" }}</td>
-                                    <td>{{ test.baseline_value|format_measurement:"ns" }}</td>
+                                    <td>{{ test.current_value|format_measurement:test.unit }}</td>
+                                    <td>{{ test.baseline_value|format_measurement:test.unit }}</td>
                                     <td>{{ test.change_percent|format_regression:"%" }}</td>
                                 </tr>
                                 {% endfor %}
@@ -131,8 +131,8 @@
                                 <tr>
                                     <td>{{ forloop.counter }}</td>
                                     <td class="text-break">{{ test.nodeid }}</td>
-                                    <td>{{ test.current_value | format_measurement:"ns" }}</td>
-                                    <td>{{ test.baseline_value | format_measurement:"ns" }}</td>
+                                    <td>{{ test.current_value | format_measurement:test.unit }}</td>
+                                    <td>{{ test.baseline_value | format_measurement:test.unit }}</td>
                                     <td>{{ test.change_percent|format_regression:"%" }}</td>
                                 </tr>
                                 {% endfor %}

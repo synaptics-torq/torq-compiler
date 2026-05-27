@@ -85,7 +85,6 @@ def main_branch_test_trends(request):
     }
 
     return render(request, 'perf/main_branch_test_trends.html', {
-        'sessions': sessions,
         'latest_session': latest_session,
         'chart_data': chart_data,
     })

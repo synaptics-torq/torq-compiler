@@ -12,6 +12,8 @@ def _format_value(value, unit):
         return "N/A"
     if unit == 'ns':
         absolute_value = abs(value)
+        if absolute_value >= 1_000_000_000:
+            return f"{value / 1_000_000_000:.2f} s"
         if absolute_value >= 1_000_000:
             return f"{value / 1_000_000:.2f} ms"
         if absolute_value >= 1_000:
