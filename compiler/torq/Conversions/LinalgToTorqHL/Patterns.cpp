@@ -1909,9 +1909,8 @@ struct GenericToBroadcastOpConversion : public OpRewritePattern<linalg::GenericO
     LogicalResult
     matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
 
-        // FIXME (iree-upgrade): see if we can use standard isaBroadcastOpInterface() here
         std::optional<SmallVector<int64_t>> equivalentToBroadcast =
-            torqIsaBroadcastOpInterface(genericOp);
+            linalg::isaBroadcastOpInterface(genericOp);
         if (!equivalentToBroadcast) {
             return failure();
         }

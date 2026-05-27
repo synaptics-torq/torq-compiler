@@ -124,7 +124,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         linalg::GenericOp bcastOp = input.getDefiningOp<linalg::GenericOp>();
         std::optional<SmallVector<int64_t>> bcastDims;
         if (bcastOp) {
-            bcastDims = torqIsaBroadcastOpInterface(bcastOp);
+            bcastDims = linalg::isaBroadcastOpInterface(bcastOp);
             if (bcastDims) {
                 auto success = selectInput(input, bcastOp.getDpsInputOperand(0)->get());
                 if (!success) {
