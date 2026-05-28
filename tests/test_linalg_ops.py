@@ -28,8 +28,11 @@ def case_config(request, runtime_hw_type, chip_config):
     if "reducesum-dma-throughput-test" in request.param.name:
         pytest.skip("DMA throughput test file; run via test_dma_throughput.py")
 
+    # Tests that mix linalg and tosa dialects (e.g. tosa.apply_scale inside a
+    # linalg.generic) need an explicit input type; auto-detection rejects the
+    # mixture.
+    need_input_type_tc = ["conv1d-matmul-fc-i8-bias-requant.mlir"]
     # Prevent torq-run-module timing out on aws_fpga with specific testcases
-    need_input_type_tc = []
     if aws_fpga:
         need_input_type_tc += ["reshape-collapse-expand.mlir"]
 
@@ -40,6 +43,13 @@ def case_config(request, runtime_hw_type, chip_config):
         extra_args["torq_compiler_options"].append("--torq-enable-reciprocal-inf")
     if any(s in request.param.data.name for s in need_input_type_tc):
         extra_args["torq_compiler_options"].append("--iree-input-type=linalg-torq")
+    # Force Conv1D-as-matmul -> fully_connected lowering to land on the
+    # NSS/slice path so we'd fail loudly if a future change silently routed
+    # this case to the host/CSS fallback.
+    if "conv1d-matmul-fc-i8-bias-requant.mlir" in request.param.data.name:
+        extra_args["torq_compiler_options"].extend([
+            "--torq-disable-host", "--torq-disable-css",
+        ])
 
     return {
         "mlir_model_file": "static_mlir_model_file",

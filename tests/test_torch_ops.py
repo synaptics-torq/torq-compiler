@@ -83,6 +83,12 @@ def case_config(request, runtime_hw_type, chip_config):
             "--torq-disable-host", "--torq-disable-css",
             "--torq-enable-torq-hl-tiling",
         ]
+
+    # Force the Conv1D-as-matmul -> fully_connected lowering tests to run on
+    # the NSS/slice path so they fail loudly if a future change silently routes
+    # them to the host/CSS fallback.
+    if 'conv1d_matmul_bf16_' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
     
     if any(host_mlir in request.param.data.name for host_mlir in ['conv2d-host.mlir', 'mul-i64-scalar.mlir', 'constantshape.mlir']):
         extra_args["torq_compiler_options"] = ["--torq-disable-slices", "--torq-disable-css"]

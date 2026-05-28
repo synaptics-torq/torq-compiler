@@ -5,6 +5,7 @@ set(sources
   ArithToTorqHLPattern.cpp
   ClampPattern.cpp
   Conv1DPattern.cpp
+  Conv1DMatmulPattern.cpp
   Conv2DPattern.cpp
   Conv2DMatmulPattern.cpp
   ElementWiseBinaryPattern.cpp

@@ -44,6 +44,11 @@ void populateLinalgToTorqHLPrePatterns(
 
     populateLinalgToTorqHLConv2DPatterns(context, patterns, markFuseGroups);
 
+    // Conv1D-as-matmul → fully_connected with absorbed bias. Registered before
+    // the generic Conv2DMatmulOpConversion; its higher pattern benefit lets it
+    // win when the matmul has the Conv1D transpose/expand layout.
+    populateLinalgToTorqHLConv1DMatmulPatterns(context, patterns, markFuseGroups);
+
     populateLinalgToTorqHLConv2DMatmulPatterns(context, patterns, markFuseGroups);
 
     populateLinalgToTorqHLPoolingPatterns(context, patterns, markFuseGroups);
