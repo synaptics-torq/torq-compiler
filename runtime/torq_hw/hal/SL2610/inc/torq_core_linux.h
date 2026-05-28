@@ -23,6 +23,8 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/interrupt.h>
+#include <linux/ktime.h>
+#include <linux/atomic.h>
 
 #include "torq_kernel_uapi.h"
 
@@ -96,6 +98,10 @@ struct torq_module {
     int job_irq;
     struct completion job_completion;
     unsigned int interrupt_status;
+
+    /* Inference time statistics */
+    atomic64_t total_inference_time_us;
+    ktime_t inference_start;
 };
 
 struct torq_network {

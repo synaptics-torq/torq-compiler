@@ -21,6 +21,46 @@ static int torq_detach_binding(struct torq_file_inst *inst, struct torq_detach_b
                (cmd == TORQ_IOCTL_ATTACH_BINDING) || \
                (cmd == TORQ_IOCTL_DETACH_BINDING))
 
+/* --------------------------------------------------------------------------
+* Sysfs Statistics Interface
+*
+* /sys/class/misc/torq/statistics/inference_time
+*
+* Read  : Cumulative inference time in us since last reset
+*         NPU Load (%) = (value * 100) / 1000000  (1-sec window)
+* Write : Reset counter to 0
+* --------------------------------------------------------------------------
+*/
+
+static ssize_t torq_inference_time_show(struct device *dev,
+                                        struct device_attribute *attr, char *buf)
+{
+    struct torq_module *torq_dev = dev_get_drvdata(dev->parent);
+    return sysfs_emit(buf, "%lld\n",
+                      atomic64_read(&torq_dev->total_inference_time_us));
+}
+
+static ssize_t torq_inference_time_store(struct device *dev,
+                                         struct device_attribute *attr,
+                                         const char *buf, size_t count)
+{
+    struct torq_module *torq_dev = dev_get_drvdata(dev->parent);
+    atomic64_set(&torq_dev->total_inference_time_us, 0);
+    return count;
+}
+
+static DEVICE_ATTR_RW(torq_inference_time);
+
+static struct attribute *torq_stats_attrs[] = {
+    &dev_attr_torq_inference_time.attr,
+    NULL,
+};
+
+static const struct attribute_group torq_stats_group = {
+    .name  = "statistics",
+    .attrs = torq_stats_attrs,
+};
+
 static int torq_power_on(struct torq_module *torq_dev)
 {
     int ret;
@@ -466,6 +506,9 @@ static int torq_run_network(struct torq_file_inst *inst, struct torq_run_network
 
     wmb();
 
+    /* Record inference start time */
+    torq_dev->inference_start = ktime_get();
+
     return 0;
 }
 
@@ -529,6 +572,10 @@ static int torq_wait_network(struct torq_file_inst *inst, struct torq_wait_netwo
               req->network_id, reg_val, req->wait_bits);
         return -EIO;
     }
+
+    /* Accumulate inference time (in microseconds) for NPU load calculation */
+    atomic64_add(ktime_us_delta(ktime_get(), torq_dev->inference_start),
+                 &torq_dev->total_inference_time_us);
 
     return 0;
 }
@@ -1153,6 +1200,7 @@ static const struct file_operations torq_fops = {
     .compat_ioctl = torq_compat_ioctl,
 };
 
+
 static void torq_remove(struct platform_device *pdev)
 {
     struct torq_module *torq_dev = platform_get_drvdata(pdev);
@@ -1163,6 +1211,7 @@ static void torq_remove(struct platform_device *pdev)
     }
 
     if (torq_dev->misc_registered) {
+        sysfs_remove_group(&torq_dev->misc_dev.this_device->kobj, &torq_stats_group);
         misc_deregister(&torq_dev->misc_dev);
     }
 
@@ -1224,6 +1273,7 @@ static int torq_probe(struct platform_device *pdev)
 
     init_completion(&torq_dev->job_completion);
     torq_dev->interrupt_status = 0;
+    atomic64_set(&torq_dev->total_inference_time_us, 0);
     torq_dev->job_irq = platform_get_irq_byname(pdev, "job");
     if (torq_dev->job_irq < 0) {
         KLOGE("Failed to get SYNPU IRQ: %d", torq_dev->job_irq);
@@ -1251,6 +1301,13 @@ static int torq_probe(struct platform_device *pdev)
     }
 
     torq_dev->misc_registered = true;
+
+    /* Explicitly create statistics sysfs group under the misc device */
+    if (sysfs_create_group(&torq_dev->misc_dev.this_device->kobj, &torq_stats_group)) {
+        KLOGE("Failed to create sysfs statistics group");
+        /* Non-fatal: driver still functional without statistics */
+    }
+
     KLOGI("NPU driver loaded");
     return 0;
 }
