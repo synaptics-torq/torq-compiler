@@ -24,7 +24,6 @@ set(sources
     CreateGlobalsPass.cpp
     EncodeTensorsPass.cpp
     FoldConvertPass.cpp
-    FuseActWithConvPass.cpp
     KernelSelectionPass.cpp
     LinalgSlicingPass.cpp
     LinalgTilePass.cpp

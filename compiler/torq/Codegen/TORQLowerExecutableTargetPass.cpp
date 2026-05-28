@@ -147,11 +147,6 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
     funcPm.addPass(createLinalgToTorqHLConversionPass());
     funcPm.addPass(createCanonicalizerPass());
 
-    // fuse torq_hl.act (clamp) into the preceding torq_hl.conv2d by transferring
-    // output_min/output_max from the act op into the conv2d and removing the act
-    funcPm.addPass(createFuseActWithConvPass());
-    funcPm.addPass(createCanonicalizerPass());
-
     // op segment output feature enabled by default, disabled it for cross-check
     if (!clDisableSeg) {
         funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
@@ -375,10 +370,6 @@ void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
 
     // lower the linalg operators to torq_hl
     funcPm.addPass(createLinalgToTorqHLConversionPass());
-    funcPm.addPass(createCanonicalizerPass());
-
-    // fuse torq_hl.act (clamp) into the preceding torq_hl.conv2d
-    funcPm.addPass(createFuseActWithConvPass());
     funcPm.addPass(createCanonicalizerPass());
 
     if (clEnableTorqHLTiling || clForceTorqHLTiling) {
