@@ -6,7 +6,9 @@ on:
 jobs:
   mark-complete:
     name: Mark workflow complete
-    runs-on: codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on:
+    - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+      image:ubuntu-7.0
     steps:
       - name: Notify dashboard
         env:

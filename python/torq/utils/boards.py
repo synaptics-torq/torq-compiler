@@ -30,13 +30,28 @@ import json
 import shutil
 import fcntl
 
+from pathlib import Path
+
+from .remote_runner import remote_command_runner_factory
+
+
+BOARD_USER = "root"
+
+class BuildFailedException(Exception):
+    pass
 
 
 class JenkinsBoardsControl:
 
     def __init__(self, control_file: str):
-        self.user = os.environ.get("JENKINS_USER")
-        self.token = os.environ.get("JENKINS_API_TOKEN")
+        self.jenkins_url = os.environ.get("JENKINS_URL", "").rstrip("/")
+        self.jenkins_job = os.environ.get("JENKINS_JOB", "")
+        self.user = os.environ.get("JENKINS_USER", "")
+        self.token = os.environ.get("JENKINS_API_TOKEN", "")
+
+        if not self.jenkins_url or not self.user or not self.token:
+            raise Exception("Missing Jenkins credentials in environment variables, please set JENKINS_URL, JENKINS_USER, and JENKINS_API_TOKEN")
+        
         self.control_file = control_file        
 
 
@@ -119,7 +134,7 @@ class JenkinsBoardsControl:
             self._write_control_data_locked(f, data)
 
 
-    def create_board(self, build_version=None, force=False):
+    def create_boards(self, build_version, force=False):
         """
         Requests Jenkins to create a board with the given public key. The board creation will be queued.
         """
@@ -139,21 +154,16 @@ class JenkinsBoardsControl:
             if data.get("build_item_url") is not None:
                 raise Exception(f"Control file already contains a build item URL {data['build_item_url']}, cannot create new board")
 
-            trigger_url = "http://devops.synaptics.com:8080/jenkins/job/SL261X_NPU_Test/buildWithParameters"    
+            trigger_url = f"{self.jenkins_url}/job/{self.jenkins_job}/buildWithParameters"
 
             data["board_uuid"] = uuid.uuid4().hex
 
-            payload = {"UUID": data["board_uuid"], "PublicKey": data["board_public_key"]}
-
-            if not force:
-                current_version = self.find_latest_build_version()
-
-                if current_version == build_version:
-                    print(f"Requested build version {build_version} is the same as the current latest installed build version, skipping board creation")
-                    build_version = None  # do not specify the build version to use the default one, which should be the same as the current latest 
-
-            if build_version is not None:
-                payload["BuildVersion"] = build_version   
+            payload = {
+                "UUID": data["board_uuid"],
+                "PublicKey": data["board_public_key"],
+                "ForceUpdate": str(force).lower(),
+                "BuildVersion": build_version
+                }
 
             res = requests.post(trigger_url, data=payload, auth=(self.user, self.token))
 
@@ -181,7 +191,7 @@ class JenkinsBoardsControl:
             if data.get("build_item_url") is not None:
                 raise Exception(f"Control file already contains a build item URL {data['build_item_url']}, cannot use existing build")
             
-            data["build_item_url"] = f"http://devops.synaptics.com:8080/jenkins/job/SL261X_NPU_Test/{board_build_id}/"
+            data["build_item_url"] = f"{self.jenkins_url}/job/{self.jenkins_job}/{board_build_id}/"
             
             self._write_control_data_locked(f, data)
     
@@ -222,6 +232,9 @@ class JenkinsBoardsControl:
         """
         data = self._fetch_build_item_status(build_item_url)
         
+        if data.get("result") == "FAILURE":
+            raise BuildFailedException(f"Board setup failed, build item at {build_item_url} has status FAILURE")
+
         for artifact in data.get("artifacts", []):
             if artifact["fileName"] == "readyDut.json":
                 return self._fetch_data(f"{build_item_url}artifact/{artifact['relativePath']}")
@@ -245,12 +258,10 @@ class JenkinsBoardsControl:
                 data = self._read_control_data_locked(f)
 
                 if data.get("board_ips") is not None:
-                    print("Board IPs already present in control file, assuming boards are ready")
-                    return
+                    break
                 
                 if data.get("queue_item_url") is None:
                     break
-                
                 
                 if data.get("build_item_url") is not None:
                     break
@@ -277,6 +288,9 @@ class JenkinsBoardsControl:
 
                 data = self._read_control_data_locked(f)
 
+                if data.get("board_ips") is not None:
+                    break
+
                 if data.get("build_item_url") is None:
                     raise Exception("Missing build item URL, cannot track board setup progress")
 
@@ -284,7 +298,7 @@ class JenkinsBoardsControl:
 
                 if ready_dut_file is not None:
                 
-                    print("Boards setup completed")
+                    print("Boards powered up and ready to receive connections")
 
                     data["board_ips"] = [dut["ip"] for dut in ready_dut_file]
                     data["board_locks"] = [ False for _ in data["board_ips"] ]
@@ -295,11 +309,39 @@ class JenkinsBoardsControl:
                     self._write_control_data_locked(f, data)
                     break
 
-            print("Boards are being set up...")
-            time.sleep(30)
+            print("Boards are being powered up and flashed if necessary...")
+            time.sleep(15)
+
+        if not self.is_active():
+            raise BuildFailedException("Jenkins build is no longer active")
 
 
-    def release_boards(self, general_result="pass", reason="Boards no longer needed", force=False):
+    def _release_boards(self, build_id, general_result, reason):
+        url = f"{self.jenkins_url}/view/debug_jobs/job/{self.jenkins_job}/{build_id}/input/WaitForGithubPytest/submit"
+
+        proceed_reason = json.dumps({"generalResult": general_result, "summary": reason})
+
+        json_param = json.dumps({
+            "parameter": [
+                {"name": "PROCEED_REASON", "value": proceed_reason}
+            ]
+        })
+
+        res = requests.post(url=url, data={"proceed": "Proceed", "json": json_param}, auth=(self.user, self.token))
+        
+        if res.status_code != 200:
+            raise Exception(f"Failed to release board, status code: {res.status_code}, response: {res.text}")
+
+
+    def force_release_build(self, build_id):
+        """
+        Forcefully continue a given build id, this can be used in case the control file has been lost.
+        """
+
+        self._release_boards(build_id, general_result="pass", reason="Manually forced")
+
+
+    def release_boards(self, general_result="pass", reason="Boards no longer needed"):
         """
         Release the boards by sending a request to Jenkins. This will allow the boards to be reused for future requests.
 
@@ -307,7 +349,11 @@ class JenkinsBoardsControl:
         """
 
         # we can release only boards that are ready
-        self.wait_boards_ready()        
+        build_failed = False
+        try:
+            self.wait_boards_ready()        
+        except BuildFailedException:
+            build_failed = True
         
         with open(self.control_file, "a+") as f:
             
@@ -315,36 +361,28 @@ class JenkinsBoardsControl:
 
             data = self._read_control_data_locked(f)                
 
-            if data.get("build_item_url") is None:
-                print("No build item URL found, cannot release boards")
-                return
+            if not build_failed:
 
-            build_id = data["build_item_url"].rstrip("/").split("/")[-1]
+                if data.get("build_item_url") is None:
+                    print("No build item URL found, cannot release boards")
+                    return
 
-            url = f"http://devops.synaptics.com:8080/jenkins/view/debug_jobs/job/SL261X_NPU_Test/{build_id}/input/WaitForGithubPytest/submit"
+                build_id = data["build_item_url"].rstrip("/").split("/")[-1]
 
-            proceed_reason = json.dumps({"generalResult": general_result, "summary": reason})
-
-            json_param = json.dumps({
-                "parameter": [
-                    {"name": "PROCEED_REASON", "value": proceed_reason}
-                ]
-            })
-
-            res = requests.post(url=url, data={"proceed": "Proceed", "json": json_param}, auth=(self.user, self.token))
-            
-            if res.status_code != 200:
-                raise Exception(f"Failed to release board, status code: {res.status_code}, response: {res.text}")
-            
-            print("Board released successfully")
+                self._release_boards(build_id, general_result, reason)
+                
+                print("Board released successfully")
 
             if data.get("board_tmp_key_path"):
-                shutil.rmtree(data["board_tmp_key_path"])  # clean up the temporary key pair
+                try:
+                    shutil.rmtree(data["board_tmp_key_path"])  # clean up the temporary key pair
+                except Exception as e:
+                    print(f"Failed to clean up temporary key pair at {data['board_tmp_key_path']}: {e}")
 
             self._write_control_data_locked(f, {})  # clear the control file data
 
 
-    def get_board(self):
+    def get_any_board(self):
         """
         Get the IP of an available board and mark it locked, wait until a board is available if all are locked.        
         
@@ -365,33 +403,90 @@ class JenkinsBoardsControl:
                     if not locked:                        
                         data["board_locks"][i] = True
                         self._write_control_data_locked(f, data)
-                        return ip, data["board_private_key_path"]                
+                        return BOARD_USER, ip, data["board_private_key_path"]                
             
             print("All boards are currently in use, waiting for a board to be available...")
             time.sleep(10)
 
 
-    def board(self):
+    def get_board(self, ip):
+        """
+        Get mark the specified board as locked, wait until a board is available if it is already locked.
+        
+        This works even if multiple programs are using the same control file
+        """
+
+        self.wait_boards_ready()
+
+        while True:
+            with open(self.control_file, "a+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                data = self._read_control_data_locked(f)
+
+                if not data.get("board_ips"):
+                    raise Exception("Boards are not ready yet: missing board IPs in control file")                
+
+                for i, (ip, locked) in enumerate(zip(data["board_ips"], data["board_locks"])):
+                    if ip == ip and not locked:                                                   
+                        data["board_locks"][i] = True
+                        self._write_control_data_locked(f, data)
+                        return BOARD_USER, ip, data["board_private_key_path"]              
+            
+            print("Board is currently in use, waiting for a board to be available...")
+            time.sleep(10)
+
+
+    def board(self, ip_address=None):
         """
         Context manager that acquires a board on entry and releases it on exit.
 
         Usage::
 
-            with control.board() as ip:
-                # use the board at `ip`
+            with control.board() as (user, ip, private_key):
+                # use the board at `ip` and `user` with the given `private_key` for SSH access
         """
         from contextlib import contextmanager
 
         @contextmanager
         def _board_ctx():
-            ip, private_key = self.get_board()
+            if ip_address is not None:
+                user, ip, private_key = self.get_board(ip_address)
+            else:
+                user, ip, private_key = self.get_any_board()
+
             try:
-                yield ip, private_key
+                yield user, ip, private_key
             finally:
                 self.put_board(ip)
 
         return _board_ctx()
 
+
+    def is_active(self):
+        """
+        Check that the jenkins job for the boards is still running
+        """
+
+        with open(self.control_file, "a+") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            data = self._read_control_data_locked(f)
+
+            if data.get("build_item_url") is None:
+                return False            
+
+            try:
+                status = self._fetch_build_item_status(data["build_item_url"])
+                
+                result = status.get("result")
+
+                if result is None:
+                    return True
+                
+            except Exception as e:                
+                print("Failed to fetch build item status, assuming the build is not active")
+                pass
+            
+            return False
 
     def put_board(self, ip):
         """
@@ -402,7 +497,6 @@ class JenkinsBoardsControl:
             fcntl.flock(f, fcntl.LOCK_EX)
             data = self._read_control_data_locked(f)
             
-
             try:
                 idx = data["board_ips"].index(ip)
             except ValueError:
@@ -413,14 +507,81 @@ class JenkinsBoardsControl:
 
             data["board_locks"][idx] = False
             self._write_control_data_locked(f, data)
+    
+
+    @property
+    def remote_runner_path(self):
+        """
+        Returns the path where the torq-run-module binary is expected to be on the board, this is where the setup_board method will copy it to.
+        """
+
+        return "/tmp/torq-run-module"
+
+    def setup_board(self, ip, local_runner_path, local_ko_path=None):
+        """
+        Installs torq-runtime and kernel driver to a board        
+        """
+
+        print(f"Setting up board at {ip}...")
+
+        if not Path(local_runner_path).exists():
+            raise Exception(f"Local runner binary not found at {local_runner_path}")
+
+        if local_ko_path is not None and not Path(local_ko_path).exists():
+            raise Exception(f"Local kernel module not found at {local_ko_path}")
+
+        with self.board(ip) as (board_user, board_ip, private_key_path):
+        
+            with remote_command_runner_factory(f"{board_user}@{board_ip}", timeout=5 * 60, 
+                                               ssh_multiplex=True, 
+                                               ssh_port=22, 
+                                               ssh_private_key=private_key_path) as r:
+
+                print("Checking board is alive...")
+                r.run_cmd("echo hello")
+
+                print(f"Copying torq-run-module from {local_runner_path}...")
+                
+                r.copy_files(str(local_runner_path), self.remote_runner_path, board_dst=True, verbose=True)
+
+                if local_ko_path is not None:
+                    print(f"Copying kernel module from {local_ko_path}...")
+                    r.copy_files(str(local_ko_path), "/tmp/syna_npu.ko", board_dst=True, verbose=True)
+                    r.run_cmd('rmmod syna_npu')
+                    r.run_cmd('insmod /tmp/syna_npu.ko')
+                else:
+                    print("No kernel module path provided, skipping kernel module installation")
+            
+        print(f"Board at {board_ip} setup completed")
+
+
+    def list_boards(self) -> list[str]:
+        """
+        Return the list of board IPs from the control file, or an empty list if the boards are not ready yet.
+        """
+        with open(self.control_file, "a+") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            data = self._read_control_data_locked(f)
+            return data.get("board_ips", [])
+
+
+    def setup_boards(self, local_runner_path, local_ko_path=None) -> str:
+        """
+        Installs torq runtime and kernel driver to all boards
+        """
+
+        self.wait_boards_ready()
+
+        for ip in self.list_boards():                
+            self.setup_board(ip, local_runner_path, local_ko_path)        
 
 
     def list_queue(self):
         """
         List the current all tasks queued or running on the job SL261X_NPU_Test
         """
-        
-        url = "http://devops.synaptics.com:8080/jenkins/job/SL261X_NPU_Test/api/json?tree=builds[building,number,url,actions[parameters[name,value]],why]"
+                
+        url = f"{self.jenkins_url}/job/{self.jenkins_job}/api/json?tree=builds[building,number,url,actions[parameters[name,value]],why]"
         data = self._fetch_data(url)
 
         for build in data.get("builds", []):
@@ -444,7 +605,7 @@ class JenkinsBoardsControl:
         Query jenkins queue to find last job that specified a build version parameter and return the value
         """
 
-        url = "http://devops.synaptics.com:8080/jenkins/job/SL261X_NPU_Test/api/json?tree=builds[number,actions[parameters[name,value]]]"
+        url = f"{self.jenkins_url}/job/{self.jenkins_job}/api/json?tree=builds[number,actions[parameters[name,value]]]"
         data = self._fetch_data(url)
 
         latest_build_version = None
@@ -477,7 +638,7 @@ def main():
 
     create_parser = subcommands.add_parser("acquire", help="Acquire a new set of boards and wait until they are ready")    
     create_parser.add_argument("--board-build-id", type=int, help="Do not acquire a new set of boards, use the boards from this existing build ID")    
-    create_parser.add_argument("--build-version", type=str, help="Optional build version to specify when creating the board, if not provided the default build will be used")
+    create_parser.add_argument("--build-version", type=str, help="Optional build version to specify when creating the board, if not provided the default build will be used", required=True)
     create_parser.add_argument("--private-key-path", type=str, help="Path to an existing private key to use for board creation, if not provided a new key pair will be generated")    
     create_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")    
 
@@ -494,7 +655,21 @@ def main():
 
     release_parser = subcommands.add_parser("release", help="Release the board, this should be used after the board is no longer needed to free up resources")
     release_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")
-    
+
+    setup_boards_parser = subcommands.add_parser("setup-boards", help="Install torq runtime and kernel driver to the boards")
+    setup_boards_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")
+    setup_boards_parser.add_argument("--local-runner-path", required=True, help="Path to the local torq-run-module binary")
+    setup_boards_parser.add_argument("--local-ko-path", help="Path to the local kernel module (.ko) file")
+
+    setup_ci_parser = subcommands.add_parser("setup-for-ci", help="Perform all steps to setup a bench for CI testing")
+    setup_ci_parser.add_argument("--force", action="store_true", help="Force update of image even if already present on board")
+    setup_ci_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")
+    setup_ci_parser.add_argument("--local-runner-path", required=True, help="Path to the local torq-run-module binary")
+    setup_ci_parser.add_argument("--local-ko-path", help="Path to the local kernel module (.ko) file")
+    setup_ci_parser.add_argument("--build-version", type=str, help="Optional build version to specify when creating the board, if not provided the default build will be used", required=True)
+
+    force_release_parser = subcommands.add_parser("force-release", help="Force release a board by build ID, this can be used if the control file is lost or corrupted")
+    force_release_parser.add_argument("--build-id", required=True, help="The build ID to force release")
 
     args = parser.parse_args()
 
@@ -516,9 +691,31 @@ def main():
             print(f"Using existing boards build with ID {args.board_build_id}...")
             control.use_existing_build(args.board_build_id)
         else:
-            print("Creating board...")
-            control.create_board(args.build_version)    
+            print("Acquiring boards...")
+            control.create_boards(args.build_version)
 
+    elif args.command == "setup-for-ci":
+
+        print("Creating key pair...")
+        control.create_keypair()
+
+        print("Creating board...")
+        control.create_boards(args.build_version, args.force)
+        
+        try:
+            print("Waiting for board to be ready...")
+            control.wait_boards_ready()
+
+            print("Setting up board...")
+            control.setup_boards(args.local_runner_path, args.local_ko_path)
+
+            print("Board setup for CI completed successfully")
+
+        except BaseException:
+            print("Boards creation job")
+            control.release_boards()
+            raise
+        
     elif args.command == "list-queue":
         control.list_queue()
 
@@ -530,22 +727,32 @@ def main():
             print("No build version found in recent builds")
 
     elif args.command == "wait":
-        control.wait_boards_ready()
+        try:
+            control.wait_boards_ready()
+        except BuildFailedException:
+            print("Board setup failed")
+            exit(1)
 
     elif args.command == "connect":        
 
-        with control.board() as (board_ip, board_private_key_path):            
+        with control.board() as (board_user, board_ip, board_private_key_path):            
 
             print(f"Connecting to board with IP {board_ip} using private key at {board_private_key_path}...")
 
             if args.verbose:
-                subprocess.run(["ssh", "-o", "StrictHostKeyChecking=no", "-v", "-i", board_private_key_path, f"root@{board_ip}"])
+                subprocess.run(["ssh", "-o", "StrictHostKeyChecking=no", "-v", "-i", board_private_key_path, f"{board_user}@{board_ip}"])
             else:
-                subprocess.run(["ssh", "-o", "StrictHostKeyChecking=no", "-i", board_private_key_path, f"root@{board_ip}"])
+                subprocess.run(["ssh", "-o", "StrictHostKeyChecking=no", "-i", board_private_key_path, f"{board_user}@{board_ip}"])
 
     elif args.command == "release":                    
         control.release_boards()
         os.unlink(args.control_file)
+
+    elif args.command == "setup-boards":
+        control.setup_boards(args.local_runner_path, args.local_ko_path)
+
+    elif args.command == "force-release":
+        control.force_release_build(args.build_id)
 
     else:
         raise Exception(f"Unknown command {args.command}")

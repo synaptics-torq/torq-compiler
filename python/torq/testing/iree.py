@@ -15,6 +15,8 @@ import shutil
 import pytest
 import json
 
+from torq.utils.boards import JenkinsBoardsControl
+
 try:
     from iree.compiler.ir import Context, Module
 except ImportError:
@@ -62,8 +64,10 @@ def pytest_addoption(parser):
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
     parser.addoption("--torq-compile-time-profiling-output-dir", default=None, help="Directory to save per-test compile time profiling outputs")
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
+    parser.addoption("--torq-bench-control-file", default=None, help="Path to JSON file used to control a board bench deployment")
     parser.addoption("--torq-addr", default=None, help="SSH address or ADB device ID to run tests remotely, use 'ADB' to select the first detected device")
     parser.addoption("--torq-port", default=22, help="SSH port to run tests remotely")
+    parser.addoption("--torq-private-key", default=None, help="Private key to use to run tests remotely")
     parser.addoption("--torq-benchmark-output-dir", default=None, help="Directory to save run time benchmarks outputs")
     parser.addoption("--update-astra-runtime", action="store_true", default=False, help="Enable runtime update: auto-deploy torq-run-module to the board (hash-based), session-level board lock for exclusive access, and per-user runner paths")
     parser.addoption("--torq-ko-path", default=None, help="Path to a local NPU kernel module (.ko) to deploy to the board when --update-astra-runtime is active (if omitted, the default on-board module is used)")
@@ -833,16 +837,15 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         host_profile_path = versioned_dir / 'host_profile.csv'
         extra_runtime_opts.append(f'--torq_profile_host=' + str(host_profile_path))
 
-    update_runtime = request.config.getoption("--update-astra-runtime")
-    remote_addr = request.config.getoption("--torq-addr")
-    if remote_addr:
-        remote_port = request.config.getoption("--torq-port")
+    def remote_run_module(remote_addr, remote_port, remote_runner_path, update_runtime, private_key):
         all_runtime_opts = (
             list(torq_runtime_options)
             + list(extra_runtime_opts)
-            + ['--torq_hw_type='+runtime_hw_type]
+            + ['--torq_hw_type=' + runtime_hw_type]
         )
-        print("Running for TORQ remotely with iree-run-module at " + remote_addr + ":" + str(remote_port))
+
+        print("Running for TORQ remotely with torq-run-module at " + remote_addr + ":" + str(remote_port))
+
         runner = RemoteTestRunner(
             torq_compiled_model,
             torq_mlir_func_name,
@@ -851,9 +854,10 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
             *all_runtime_opts,
             board_addr=remote_addr,
             port=remote_port,
-            remote_runner_path=_default_remote_runner_path() if update_runtime else None,
+            remote_runner_path=remote_runner_path,
             update_runtime=update_runtime,
-            recompute_cache=request.config.getoption("--recompute-cache")
+            recompute_cache=request.config.getoption("--recompute-cache"),
+            private_key=private_key
         )
         if runtime_hw_type == 'aws_fpga':
             port = request.config.getoption("--torq-port")
@@ -867,8 +871,9 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         if update_runtime and wall_time is not None:
             wall_time_file = versioned_dir / 'wall_time.txt'
             wall_time_file.write_text(f"{wall_time:.3f}")
-    else:
-        
+
+    def run_module():
+            
         cmds = ['--module=' + str(torq_compiled_model),
                 '--function=' + torq_mlir_func_name,
                 *output_args,
@@ -878,22 +883,38 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
 
         cmds += extra_runtime_opts
 
-        def run_module():
+        # first run the module to obtain the outputs
+        run_cmd = [str(torq_runtime), *cmds]            
 
-            # first run the module to obtain the outputs
-            run_cmd = [str(torq_runtime), *cmds]            
+        with measure_time(versioned_dir, 'e2e_inference_time'):
+            print("Running for TORQ with: " + " ".join(run_cmd))
+            subprocess.check_call(run_cmd, timeout=torq_runtime_timeout)
 
-            with measure_time(versioned_dir, 'e2e_inference_time'):
-                print("Running for TORQ with: " + " ".join(run_cmd))
-                subprocess.check_call(run_cmd, timeout=torq_runtime_timeout)
+        # the re-run the module with the benchmark tool if benchmarking is enabled, this will generate a benchmark.json
+        if benchmark_output_dir is not None:            
+            benchmark_file = versioned_dir / 'benchmark.json'
+            benchmark_cmd = [str(torq_benchmark), "--benchmark_out=" + str(benchmark_file), "--benchmark_out_format=json", *cmds]
+            print("Running benchmark for TORQ with: " + " ".join(benchmark_cmd))
+            subprocess.check_call(benchmark_cmd, timeout=torq_runtime_timeout)
+    
+    remote_addr = request.config.getoption("--torq-addr")
+    remote_port = request.config.getoption("--torq-port")
 
-            # the re-run the module with the benchmark tool if benchmarking is enabled, this will generate a benchmark.json
-            if benchmark_output_dir is not None:
-                
-                benchmark_file = versioned_dir / 'benchmark.json'
-                benchmark_cmd = [str(torq_benchmark), "--benchmark_out=" + str(benchmark_file), "--benchmark_out_format=json", *cmds]
-                print("Running benchmark for TORQ with: " + " ".join(benchmark_cmd))
-                subprocess.check_call(benchmark_cmd, timeout=torq_runtime_timeout)
+    if remote_addr:
+
+        update_runtime = request.config.getoption("--update-astra-runtime")
+        remote_runner_path = _default_remote_runner_path() if update_runtime else None
+
+        remote_run_module(remote_addr, remote_port, remote_runner_path, update_runtime, 
+                          private_key=request.config.getoption("--torq-private-key", default=None))
+
+    elif bench_control_file := request.config.getoption("--torq-bench-control-file", default=None):
+        controller = JenkinsBoardsControl(bench_control_file)
+
+        with controller.board() as (user, ip, private_key):
+            remote_run_module(f"{user}@{ip}", 22, controller.remote_runner_path, 
+                              update_runtime=False, private_key=private_key)
+    else:       
 
         if runtime_hw_type == 'aws_fpga':            
             with FpgaSession(chip_config['aws_fpga']) as fpga_session:

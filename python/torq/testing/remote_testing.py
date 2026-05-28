@@ -78,6 +78,7 @@ def check_board_liveness(
     board_addr: str,
     port: int,
     timeout: int = 10,
+    private_key: str | None = None,
 ) -> None:
     """Verify the board is reachable over SSH.
 
@@ -91,9 +92,13 @@ def check_board_liveness(
         "-o", f"ConnectTimeout={timeout}",
         "-o", "StrictHostKeyChecking=no",
         "-p", str(port),
+    ]
+    if private_key:
+        cmd.extend(["-i", private_key])
+    cmd.extend([
         board_addr,
         "true",
-    ]
+    ])
     try:
         subprocess.run(
             cmd,
@@ -138,9 +143,13 @@ def check_board_liveness(
         "-o", f"ConnectTimeout={timeout}",
         "-o", "StrictHostKeyChecking=no",
         "-p", str(port),
+    ]
+    if private_key:
+        hostname_cmd.extend(["-i", private_key])
+    hostname_cmd.extend([
         board_addr,
         "hostname",
-    ]
+    ])
     try:
         result = subprocess.run(
             hostname_cmd,
@@ -173,6 +182,7 @@ def acquire_board_lock(
     port: int,
     timeout: int = 10,
     logger: logging.Logger | None = None,
+    private_key: str | None = None,
 ) -> None:
     """Acquire a session-level exclusive lock on the remote board.
 
@@ -190,7 +200,7 @@ def acquire_board_lock(
     lock_info = f"user={username}\\nhost={hostname}\\npid={pid}\\ntime={timestamp}"
 
     runner = remote_command_runner_factory(
-        board_addr, timeout, ssh_multiplex=True, ssh_port=port
+        board_addr, timeout, ssh_multiplex=True, ssh_port=port, ssh_private_key=private_key
     )
     with runner as r:
         try:
@@ -252,11 +262,12 @@ def release_board_lock(
     port: int,
     timeout: int = 10,
     logger: logging.Logger | None = None,
+    private_key: str | None = None,
 ) -> None:
     """Release the session-level lock on the remote board."""
     log = logger or logging.getLogger("RemoteTestRunner")
     runner = remote_command_runner_factory(
-        board_addr, timeout, ssh_multiplex=True, ssh_port=port
+        board_addr, timeout, ssh_multiplex=True, ssh_port=port, ssh_private_key=private_key
     )
     with runner as r:
         try:
@@ -274,6 +285,7 @@ def setup_dev_board(
     local_ko_path: str | None = None,
     timeout: int = 5,
     logger: logging.Logger | None = None,
+    private_key: str | None = None
 ) -> None:
     """Prepare a remote dev board for testing.
 
@@ -296,13 +308,13 @@ def setup_dev_board(
 
     # Fail fast if the board is not reachable before doing any real work.
     log.info("Checking board liveness: %s:%s ...", board_addr, port)
-    check_board_liveness(board_addr, port, timeout=10)
+    check_board_liveness(board_addr, port, timeout=10, private_key=private_key)
     log.info("Board %s:%s is reachable.", board_addr, port)
 
     local_bin = LOCAL_RUNNER_PATH if LOCAL_RUNNER_PATH.exists() else None
 
     remote_runner = remote_command_runner_factory(
-        board_addr, timeout, ssh_multiplex=True, ssh_port=port
+        board_addr, timeout, ssh_multiplex=True, ssh_port=port, ssh_private_key=private_key
     )
     with remote_runner as runner:
         remote_runner_dir = str(PurePosixPath(remote_runner_path).parent)
@@ -436,6 +448,7 @@ class RemoteTestRunner:
         port : int = 22,
         remote_runner_path: str | None = None,
         update_runtime: bool = False,
+        private_key: str | None = None
     ):
         self.vmfb_path = Path(vmfb_path)
         self.function_name = function_name
@@ -443,10 +456,11 @@ class RemoteTestRunner:
         self.output_data_args = list(output_data_args)
         self.runtime_opts = list(runtime_opts)
         self.board_addr = board_addr
+        self.private_key = private_key
         self.port = port
         self._recompute_cache = recompute_cache
         self._logger = logger or logging.getLogger(__class__.__name__)
-        self.remote_runner_path = remote_runner_path or _default_remote_runner_path()
+        self.remote_runner_path = remote_runner_path
         self._update_runtime = update_runtime
 
         if not self.board_addr:
@@ -517,8 +531,11 @@ class RemoteTestRunner:
             self.board_addr,
             int(timeout),
             ssh_multiplex=True,
-            ssh_port=self.port
+            ssh_port=self.port,
+            ssh_private_key=self.private_key
         )
+
+        effective_remote_runner_path = self.remote_runner_path or _default_remote_runner_path()        
 
         with remote_runner as runner:
             if self._recompute_cache:
@@ -530,9 +547,10 @@ class RemoteTestRunner:
                 setup_dev_board(
                     self.board_addr,
                     self.port,
-                    self.remote_runner_path,
+                    effective_remote_runner_path,
                     timeout=int(timeout),
                     logger=self._logger,
+                    private_key=self.private_key,
                 )
 
             runner.copy_files(str(self.vmfb_path), remote_root, board_dst=True)
@@ -559,7 +577,17 @@ class RemoteTestRunner:
                 # Invoke the runner by its absolute path.
                 cmd = [
                     f"if [ -f /usr/local/bin/setup-test-environment ] ; then source /usr/local/bin/setup-test-environment ; fi ;",
-                    f"{self.remote_runner_path}",
+                    f"{effective_remote_runner_path}",
+                    f"--module={remote_model_path}",
+                    f"--function={self.function_name}",
+                    *remote_runtime_opts,
+                    *remote_output_args,
+                    *remote_input_args,
+                ]
+            elif self.remote_runner_path:
+                # No locking but a specific remote runner path was provided — invoke by absolute path.
+                cmd = [
+                    self.remote_runner_path,
                     f"--module={remote_model_path}",
                     f"--function={self.function_name}",
                     *remote_runtime_opts,

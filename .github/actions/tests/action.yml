@@ -70,6 +70,27 @@ inputs:
     required: false
     default: "false"
 
+  use_bench:
+    description: 'Whether to setup bench for testing'
+    required: false
+    default: "false"
+
+  jenkins_user:
+    description: 'Jenkins user for boards management'
+    required: false
+
+  jenkins_api_token:
+    description: 'Jenkins API token for boards management'
+    required: false
+  
+  jenkins_url:
+    description: 'Jenkins URL for boards management'
+    required: false
+  
+  jenkins_job:
+    description: 'Jenkins job name for boards management'
+    required: false
+
 outputs:
   s3_cache_path:
     description: 'S3 path of the uploaded test data cache artifact'
@@ -214,6 +235,21 @@ runs:
         tar -zxf cache.tar.gz
         rm cache.tar.gz
 
+    - name: Setup bench
+      if: ${{ inputs.use_bench == 'true' }}
+      shell: bash
+      env:
+        JENKINS_USER: ${{ inputs.jenkins_user }}
+        JENKINS_API_TOKEN: ${{ inputs.jenkins_api_token }}
+        JENKINS_URL: ${{ inputs.jenkins_url }}
+        JENKINS_JOB: ${{ inputs.jenkins_job }}
+      run: |
+        python3 -m torq.utils.boards setup-for-ci \
+            --control-file bench-control.json \
+            --local-runner-path ${{github.workspace}}/release/tools/astra-sl-torq-run-module \
+            --local-ko-path ${{github.workspace}}/release/lib/syna_npu.ko \
+            --build-version 202605200846
+
     - name: Run pytest
       shell: bash
       env:
@@ -230,10 +266,31 @@ runs:
         TORQ_PERF_BATCH_NAME: ${{ inputs.batch_name }}
         S3_HF_CACHE_BUCKET_NAME: ${{ inputs.s3_hf_cache_bucket }}
         S3_HF_CACHE_DIR: ${{ inputs.s3_hf_cache_dir }}
+        JENKINS_USER: ${{ inputs.jenkins_user }}
+        JENKINS_API_TOKEN: ${{ inputs.jenkins_api_token }}
+        JENKINS_URL: ${{ inputs.jenkins_url }}
+        JENKINS_JOB: ${{ inputs.jenkins_job }}        
       run: |            
-        # run pytest with ignoring binary mtime changes to generate a cache that can be used in other environments,
-        # also disable phases dump to reduce size of the cache
-        pytest -v ${{ inputs.pytest_args }}
+
+        set -x
+
+        if [[ ${{ inputs.use_bench }} == 'true' ]]; then
+          CONTROL_PARAMS="--torq-bench-control-file ${{github.workspace}}/bench-control.json"
+        fi
+
+        pytest $CONTROL_PARAMS -v ${{ inputs.pytest_args }}
+
+    - name: Release bench
+      if: ${{ inputs.use_bench == 'true'  && always() }}
+      shell: bash
+      env:
+        JENKINS_USER: ${{ inputs.jenkins_user }}
+        JENKINS_API_TOKEN: ${{ inputs.jenkins_api_token }}
+        JENKINS_URL: ${{ inputs.jenkins_url }}
+        JENKINS_JOB: ${{ inputs.jenkins_job }}
+      run: |
+        python3 -m torq.utils.boards release \
+            --control-file bench-control.json
 
     - name: Create compressed test data cache artifact
       if: ${{ inputs.test_data_cache_artifact != '' || inputs.s3_artifact_bucket != '' }}

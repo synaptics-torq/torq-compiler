@@ -65,7 +65,8 @@ class SSHCommandRunner(RemoteCommandRunner):
         multiplex: bool = False,
         keep_alive: int = 10,
         logger: logging.Logger | None = None,
-        port: int = 22
+        port: int = 22,
+        private_key: str | None = None
     ):
         super().__init__(board_ip, timeout, logger=logger)
         self.multiplex = bool(multiplex)
@@ -76,6 +77,10 @@ class SSHCommandRunner(RemoteCommandRunner):
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
         ]
+
+        if private_key:
+            self.ssh_options += ["-i", private_key]
+
         self.ssh_socket = None
         self.port = port
         if self.multiplex:
@@ -166,7 +171,7 @@ class SSHCommandRunner(RemoteCommandRunner):
                 self._format_output(e.stdout),
             ) from e
         
-    def copy_files(self, src: str, dst: str, recursive: bool = False, board_dst: bool = False) -> None:
+    def copy_files(self, src: str, dst: str, recursive: bool = False, board_dst: bool = False, verbose: bool = False) -> None:
         cmd = ["scp"]
         if recursive:
             cmd.append("-r")
@@ -189,19 +194,16 @@ class SSHCommandRunner(RemoteCommandRunner):
                 dst
             ])
         try:
-            subprocess.check_output(
-                cmd,
-                text=True,
-                stderr=subprocess.STDOUT,
-                timeout=self.timeout,
-            )
+            if verbose:
+                subprocess.check_call(cmd, timeout=self.timeout)
+            else:
+                subprocess.check_output(
+                    cmd,
+                    text=True,
+                    stderr=subprocess.STDOUT
+                ) # we cannot set a timeout because it may take very long to upload files
             if not self.multiplex:
                 self._logger.info("Copied \"%s\" to \"%s\"", src, dst)
-        except subprocess.TimeoutExpired as e:
-            raise RemoteCommandError(
-                self._format_cmd(e.cmd),
-                self._format_output(e.output, self.timeout),
-            ) from e
         except subprocess.CalledProcessError as e:
             raise RemoteCommandError(
                 self._format_cmd(e.cmd),
@@ -361,6 +363,7 @@ def remote_command_runner_factory(
     ssh_multiplex: bool = True,
     ssh_keep_alive: int = 10,
     ssh_port: int = 22,
+    ssh_private_key: str | None = None
 ) -> RemoteCommandRunner:
     if board_address.lower() == "adb":
         return ADBCommandRunner(target_device="SL16x0", timeout=timeout)
@@ -393,7 +396,8 @@ def remote_command_runner_factory(
             timeout=timeout, logger=logger,
             multiplex=ssh_multiplex,
             keep_alive=ssh_keep_alive,
-            port=ssh_port
+            port=ssh_port,
+            private_key=ssh_private_key
         )
     else:
         raise ValueError(f"Invalid board address format: expected ADB device ID or IPv4 address, got '{board_address}'")
