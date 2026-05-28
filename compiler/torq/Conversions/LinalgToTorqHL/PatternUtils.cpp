@@ -2273,6 +2273,111 @@ bool isRoundingRightShiftOp(linalg::GenericOp op, arith::ShRSIOp &shrsiOp1) {
     return true;
 }
 
+// Body shape (as tosa-to-linalg emits from tosa.table with i16 input):
+//   shli(extsi(lut[i]), 7) + muli(subi(extsi(lut[i+1]), extsi(lut[i])), frac)
+//   where frac = input & 127.
+LogicalResult matchI16InterpolatedTable(linalg::GenericOp op, LinalgTableMatchInfo &info) {
+    if (op.getInputs().size() != 1 || op.getResults().size() != 1)
+        return failure();
+
+    Value input = op.getInputs()[0];
+    auto inputType = dyn_cast<RankedTensorType>(input.getType());
+    if (!inputType || !inputType.getElementType().isInteger(16))
+        return failure();
+
+    auto outputType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!outputType || !outputType.getElementType().isInteger(32))
+        return failure();
+
+    // Lookup must be per-element; permuted/broadcast indexing breaks callers.
+    for (AffineMap m : op.getIndexingMapsArray())
+        if (!m.isIdentity())
+            return failure();
+
+    auto &block = op.getRegion().front();
+    auto yieldOp = cast<linalg::YieldOp>(block.getTerminator());
+    if (yieldOp.getValues().size() != 1)
+        return failure();
+
+    auto finalAdd = yieldOp.getValues()[0].getDefiningOp<arith::AddIOp>();
+    if (!finalAdd)
+        return failure();
+
+    arith::ShLIOp shli = finalAdd.getLhs().getDefiningOp<arith::ShLIOp>();
+    arith::MulIOp muli = finalAdd.getRhs().getDefiningOp<arith::MulIOp>();
+    if (!shli || !muli) {
+        shli = finalAdd.getRhs().getDefiningOp<arith::ShLIOp>();
+        muli = finalAdd.getLhs().getDefiningOp<arith::MulIOp>();
+    }
+    if (!shli || !muli)
+        return failure();
+
+    if (APInt shAmt; !matchPattern(shli.getRhs(), m_ConstantInt(&shAmt)) || shAmt != 7)
+        return failure();
+
+    auto ext0 = shli.getLhs().getDefiningOp<arith::ExtSIOp>();
+    if (!ext0)
+        return failure();
+
+    // muli = subi(slope) * fraction.
+    arith::SubIOp subi;
+    Value fracSide;
+    if (auto s = muli.getLhs().getDefiningOp<arith::SubIOp>()) {
+        subi = s;
+        fracSide = muli.getRhs();
+    }
+    else if (auto s = muli.getRhs().getDefiningOp<arith::SubIOp>()) {
+        subi = s;
+        fracSide = muli.getLhs();
+    }
+    if (!subi)
+        return failure();
+
+    // fraction = input & 127 (lower 7 bits = interpolation step 2^7). Without
+    // this check, any value reaching the slope multiply would pass.
+    auto andi = fracSide.getDefiningOp<arith::AndIOp>();
+    if (!andi)
+        return failure();
+    APInt mask;
+    if (!matchPattern(andi.getRhs(), m_ConstantInt(&mask)) &&
+        !matchPattern(andi.getLhs(), m_ConstantInt(&mask)))
+        return failure();
+    if (mask != 127)
+        return failure();
+
+    // slope = lut[i+1] - lut[i].
+    auto extA = subi.getLhs().getDefiningOp<arith::ExtSIOp>();
+    auto extB = subi.getRhs().getDefiningOp<arith::ExtSIOp>();
+    if (!extA || !extB)
+        return failure();
+    if (extB != ext0)
+        return failure();
+    arith::ExtSIOp ext1 = extA;
+
+    auto extract0 = ext0.getIn().getDefiningOp<tensor::ExtractOp>();
+    auto extract1 = ext1.getIn().getDefiningOp<tensor::ExtractOp>();
+    if (!extract0 || !extract1)
+        return failure();
+    if (extract0.getTensor() != extract1.getTensor())
+        return failure();
+
+    Value lutTensor = extract0.getTensor();
+    auto lutType = dyn_cast<RankedTensorType>(lutTensor.getType());
+    if (!lutType || lutType.getNumElements() != 513 || !lutType.getElementType().isInteger(16))
+        return failure();
+
+    auto lutConst = lutTensor.getDefiningOp<arith::ConstantOp>();
+    if (!lutConst)
+        return failure();
+    auto lutAttr = dyn_cast<DenseIntElementsAttr>(lutConst.getValue());
+    if (!lutAttr)
+        return failure();
+
+    info.input = input;
+    info.lutData = lutAttr;
+    return success();
+}
+
 // DEADCODE:
 bool isCollapseOrExpandShapeGeneric(Operation *op) {
     if (!isa<linalg::GenericOp>(op))

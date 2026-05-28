@@ -276,6 +276,15 @@ LogicalResult foldForwardDepthToSpace(
 
 bool isRoundingRightShiftOp(linalg::GenericOp op, arith::ShRSIOp &shrsiOp1);
 
+struct LinalgTableMatchInfo {
+    Value input;                  // i16 input being looked up
+    DenseIntElementsAttr lutData; // tensor<513xi16> LUT
+};
+
+// Match a linalg.generic whose body is 2-point linear interpolation over a
+// tensor<513xi16> constant: result = (lut[i] << 7) + (lut[i+1] - lut[i]) * frac.
+LogicalResult matchI16InterpolatedTable(linalg::GenericOp op, LinalgTableMatchInfo &info);
+
 // Return true iff op is a linalg.generic that is the result of conversion from
 // tensor.collapse_shape/expand_shape.
 bool isCollapseOrExpandShapeGeneric(Operation *op);

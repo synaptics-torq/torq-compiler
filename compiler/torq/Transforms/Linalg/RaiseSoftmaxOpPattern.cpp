@@ -4,20 +4,219 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tosa/IR/TosaOps.h"
+#include "mlir/IR/Matchers.h"
 #include "torq/Utils/TorqUtils.h"
 #include "llvm/Support/Debug.h"
 
+#include <cmath>
 #include <optional>
 
 #define DEBUG_TYPE "torq-raise-sofmax"
 
 namespace mlir::syna::torq {
+
+namespace {
+
+// Walk forward through addi-tree consumers from `start` until `expected` is
+// reached. The addi-tree top forks (reciprocal-multiply also reads it), so
+// single-use is required only to advance past a node, not when checking
+// arrival.
+bool walkAddiChainTo(Value start, linalg::GenericOp expected, int maxDepth = 10) {
+    Value current = start;
+    for (int hop = 0; hop < maxDepth; ++hop) {
+        if (llvm::is_contained(current.getUsers(), expected.getOperation()))
+            return true;
+        if (!current.hasOneUse())
+            return false;
+        auto genericOp = dyn_cast<linalg::GenericOp>(*current.getUsers().begin());
+        if (!genericOp)
+            return false;
+        if (!cast<linalg::YieldOp>(genericOp.getBody()->getTerminator())
+                 .getOperand(0)
+                 .getDefiningOp<arith::AddIOp>())
+            return false;
+        current = genericOp.getResult(0);
+    }
+    return false;
+}
+
+// Collect the table-form generics consuming `i16Input` as their lookup input.
+SmallVector<std::pair<linalg::GenericOp, LinalgTableMatchInfo>, 4> gatherTableUsers(Value i16Input
+) {
+    SmallVector<std::pair<linalg::GenericOp, LinalgTableMatchInfo>, 4> tables;
+    for (Operation *user : i16Input.getUsers()) {
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(user)) {
+            LinalgTableMatchInfo info;
+            if (succeeded(matchI16InterpolatedTable(genericOp, info)) && info.input == i16Input)
+                tables.emplace_back(genericOp, info);
+        }
+    }
+    return tables;
+}
+
+// One of the four i16 sub-tables in TFLite's int8 softmax exp() approximation.
+struct TflInt8SoftmaxLane {
+    int shift;
+    bool isRight;
+    DenseIntElementsAttr lut;        // tensor<513xi16>
+    linalg::GenericOp shiftConsumer; // shli/shrsi generic feeding the addi tree
+};
+
+// Build one lane from a table op and its associated match info.
+FailureOr<TflInt8SoftmaxLane>
+extractLane(linalg::GenericOp tableOp, const LinalgTableMatchInfo &info) {
+    assert(info.lutData.getNumElements() == 513 && "guaranteed by matchI16InterpolatedTable");
+    for (Operation *user : tableOp.getResult(0).getUsers()) {
+        auto genericOp = dyn_cast<linalg::GenericOp>(user);
+        if (!genericOp || genericOp.getNumDpsInputs() != 2)
+            continue;
+        for (Operation &innerOp : genericOp.getBody()->getOperations()) {
+            bool isRight = isa<arith::ShRSIOp>(innerOp);
+            if (!isRight && !isa<arith::ShLIOp>(innerOp))
+                continue;
+            APInt shiftAmt;
+            if (!matchPattern(genericOp.getInputs()[1], m_ConstantInt(&shiftAmt))) {
+                LLVM_DEBUG(
+                    llvm::dbgs() << "[SoftmaxTflite] table shift consumer has non-constant shift\n"
+                );
+                return failure();
+            }
+            return TflInt8SoftmaxLane{
+                static_cast<int>(shiftAmt.getSExtValue()),
+                isRight,
+                info.lutData,
+                genericOp,
+            };
+        }
+    }
+    LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] table result has no shift consumer\n");
+    return failure();
+}
+
+// Verify the four-lane shift signature is exactly {17L, 9L, 1L, 7R}.
+LogicalResult verifyLaneShiftSignature(ArrayRef<TflInt8SoftmaxLane> lanes) {
+    assert(lanes.size() == 4);
+    auto count = [&](bool isRight, int shift) {
+        return llvm::count_if(lanes, [=](const TflInt8SoftmaxLane &lane) {
+            return lane.isRight == isRight && lane.shift == shift;
+        });
+    };
+    if (count(false, 17) != 1 || count(false, 9) != 1 || count(false, 1) != 1 ||
+        count(true, 7) != 1) {
+        LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] lane shifts don't match {17L, 9L, 1L, 7R}\n");
+        return failure();
+    }
+    return success();
+}
+
+// Verify every lane's addi-tree path converges to `expected`.
+LogicalResult
+verifyLanesConvergeAt(ArrayRef<TflInt8SoftmaxLane> lanes, linalg::GenericOp expected) {
+    for (const auto &lane : lanes) {
+        linalg::GenericOp consumer = lane.shiftConsumer;
+        if (!walkAddiChainTo(consumer.getResult(0), expected)) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] lane does not converge to the replace target\n"
+            );
+            return failure();
+        }
+    }
+    return success();
+}
+
+// Verify the four table-form generics sharing `i16Input` combine as
+// (T_a << 17) + (T_b << 9) + (T_c << 1) + (T_d >> 7), and that the four-lane
+// sum is consumed by a rounded right-shift by 12. The shift signature
+// reflects how TFLite's reference int8 softmax packs four bytes of a 32-bit
+// fixed-point exp value across the LUTs. See TF's
+// `getTosaConst32bitSoftmaxExpTable` in legalize_utils.cc for the byte layout.
+// Returns one lane per table in gather order.
+FailureOr<SmallVector<TflInt8SoftmaxLane, 4>>
+verifyTflInt8SoftmaxFourTables(Value i16Input, linalg::GenericOp expectedRoundShift) {
+    auto tables = gatherTableUsers(i16Input);
+    if (tables.size() != 4) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "[SoftmaxTflite] expected 4 table users sharing i16 input, got "
+                         << tables.size() << "\n"
+        );
+        return failure();
+    }
+
+    SmallVector<TflInt8SoftmaxLane, 4> lanes;
+    for (auto &[tableOp, info] : tables) {
+        auto lane = extractLane(tableOp, info);
+        if (failed(lane))
+            return failure();
+        lanes.push_back(*lane);
+    }
+
+    if (failed(verifyLaneShiftSignature(lanes)))
+        return failure();
+    if (failed(verifyLanesConvergeAt(lanes, expectedRoundShift)))
+        return failure();
+    return lanes;
+}
+
+// Recover `input_scale * beta` (bf16) from the four sub-tables. The combine
+// output at LUT index `idx` reproduces what the integer pipeline computes for
+// i16 input value (idx - kLutMidpoint) * kI16Step, and approximates
+//   peakValue * exp(i16Input * scalePerI16Unit),
+// so the ratio of two indices recovers scalePerI16Unit. Multiplying by
+// kI16Step converts that back to the i8 input scale (the integer pipeline
+// rescales i8 by 128 before reaching the LUT). This mirrors TF's int8 softmax
+// legalization exactly. Only meaningful for IR that came through that pipeline.
+// Caller must have already verified the lane signature.
+FailureOr<double> recoverInputScale(ArrayRef<TflInt8SoftmaxLane> lanes) {
+    constexpr int kLutMidpoint = 256;
+    constexpr int kI16Step = 128;
+    constexpr int kSampleIdx = 192;
+    constexpr int64_t kSampleI16Input = (kSampleIdx - kLutMidpoint) * kI16Step; // -8192
+
+    auto combineLanesAt = [](ArrayRef<TflInt8SoftmaxLane> lanes, int idx) -> int64_t {
+        int64_t sum = 0;
+        for (const auto &lane : lanes) {
+            int64_t base = lane.lut.getValues<APInt>()[idx].getSExtValue();
+            int64_t v = base << 7; // matches the <<7 inside the table body
+            sum += lane.isRight ? (v >> lane.shift) : (v << lane.shift);
+        }
+        return (sum + (1LL << 11)) >> 12; // round-right-shift by 12 (verified by caller)
+    };
+
+    int64_t peakValue = combineLanesAt(lanes, kLutMidpoint); // i16 input = 0, exp(0) = 1
+    if (peakValue <= 0) {
+        LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] combine at LUT midpoint is not positive\n");
+        return failure();
+    }
+    int64_t refValue = combineLanesAt(lanes, kSampleIdx); // well within typical LUT range
+    if (refValue <= 0 || refValue >= peakValue) {
+        LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] combine at sample idx out of expected range\n");
+        return failure();
+    }
+
+    double ratio = static_cast<double>(refValue) / static_cast<double>(peakValue);
+    double scalePerI16Unit = std::log(ratio) / kSampleI16Input;
+    double bf16Scale = scalePerI16Unit * kI16Step;
+
+    // Typical TFLite int8 softmax scales fall in [0.001, 0.5].
+    if (bf16Scale <= 0.001 || bf16Scale >= 0.5) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "[SoftmaxTflite] recovered scale " << bf16Scale
+                         << " is outside [0.001, 0.5]\n"
+        );
+        return failure();
+    }
+    return bf16Scale;
+}
+
+} // namespace
 
 bool checkIdentityLikeIndexingMaps(linalg::GenericOp op) {
     for (auto [operandIdx, indexingMap] : llvm::enumerate(op.getIndexingMapsArray())) {
@@ -581,9 +780,444 @@ class RaiseDecomposedSoftmax : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
+// Matches the linalg.generic shape TFLite legalizes int8 softmax to:
+//
+//   i8 input -> scale (i8->i32) -> max-reduce + sub-max -> narrow (i32->i16)
+//     -> four tosa.table i16 LUTs combined as (T_a<<17)+(T_b<<9)+(T_c<<1)+(T_d>>7)
+//        and round-shifted right by 12
+//     -> sum-reduce + ctlz + reciprocal multiply -> rounded right-shift
+//     -> apply_scale(mult=2^30, shift=30) + addi(-128) -> i8 result
+//
+// Reference (TF, convertSoftmaxOp int8 path + getTosaConst32bitSoftmaxExpTable):
+//   https://github.com/tensorflow/tensorflow/blob/master/tensorflow/compiler/mlir/tosa/transforms/legalize_common.cc
+//   https://github.com/tensorflow/tensorflow/blob/master/tensorflow/compiler/mlir/tosa/transforms/legalize_utils.cc
+// Canonical example IR: tests/testdata/tosa_ops/mbv2-softmax-i8.mlir
+//
+class RaiseSoftmaxTflite : public OpRewritePattern<linalg::GenericOp> {
+  private:
+    struct MatchInfo {
+        Value i8Input;                   // i8 tensor entering the pipeline
+        int64_t reductionDim;            // softmax axis
+        linalg::GenericOp replaceTarget; // op whose result rewriteSoftmax replaces
+        double inputScale;               // bf16 cast scale (input_scale * beta)
+    };
+
+  public:
+    using OpRewritePattern<linalg::GenericOp>::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(linalg::GenericOp op, PatternRewriter &rewriter) const override {
+        auto info = matchSoftmax(op);
+        if (failed(info))
+            return failure();
+        rewriteSoftmax(op, *info, rewriter);
+        return success();
+    }
+
+  private:
+    FailureOr<MatchInfo> matchSoftmax(linalg::GenericOp op) const {
+        if (op.getNumDpsInputs() != 1 || op.getNumDpsInits() != 1) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] not single-input single-output generic\n");
+            return failure();
+        }
+
+        if (auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+            !resultType || !resultType.getElementType().isInteger(8)) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] result is not i8 ranked tensor\n");
+            return failure();
+        }
+
+        if (!dyn_cast<RankedTensorType>(op.getInputs()[0].getType()) ||
+            !dyn_cast<RankedTensorType>(op.getInputs()[0].getType())
+                 .getElementType()
+                 .isInteger(32)) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] input is not i32 ranked tensor\n");
+            return failure();
+        }
+
+        if (!cast<linalg::YieldOp>(op.getBody()->getTerminator())
+                 .getOperand(0)
+                 .getDefiningOp<arith::TruncIOp>()) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] body does not yield arith.trunci\n");
+            return failure();
+        }
+
+        // Body must be TFLite-canonical: apply_scale(mult=2^30, shift=30) +
+        // addi(ozp=-128). rewriteSoftmax feeds `softmax_prob * 256` (i32) into
+        // apply_scale's input expecting it to pass through unchanged, which
+        // requires effective scale = mult / 2^shift = 1.
+        {
+            tosa::ApplyScaleOp applyScale;
+            arith::AddIOp addOzp;
+            for (Operation &innerOp : op.getBody()->getOperations()) {
+                if (auto as = dyn_cast<tosa::ApplyScaleOp>(&innerOp)) {
+                    if (applyScale) {
+                        LLVM_DEBUG(
+                            llvm::dbgs() << "[SoftmaxTflite] multiple tosa.apply_scale in body\n"
+                        );
+                        return failure();
+                    }
+                    applyScale = as;
+                }
+                else if (auto add = dyn_cast<arith::AddIOp>(&innerOp)) {
+                    if (addOzp) {
+                        LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] multiple arith.addi in body\n");
+                        return failure();
+                    }
+                    addOzp = add;
+                }
+            }
+            if (!applyScale || !addOzp) {
+                LLVM_DEBUG(
+                    llvm::dbgs() << "[SoftmaxTflite] body missing tosa.apply_scale or arith.addi\n"
+                );
+                return failure();
+            }
+
+            if (APInt c; !matchPattern(applyScale.getMultiplier(), m_ConstantInt(&c)) ||
+                         c.getSExtValue() != (1 << 30)) {
+                LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] apply_scale multiplier != 2^30\n");
+                return failure();
+            }
+            if (APInt c;
+                !matchPattern(applyScale.getShift(), m_ConstantInt(&c)) || c.getSExtValue() != 30) {
+                LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] apply_scale shift != 30\n");
+                return failure();
+            }
+
+            // ozp may be either operand.
+            APInt ozp;
+            if (!matchPattern(addOzp.getRhs(), m_ConstantInt(&ozp)) &&
+                !matchPattern(addOzp.getLhs(), m_ConstantInt(&ozp))) {
+                LLVM_DEBUG(
+                    llvm::dbgs() << "[SoftmaxTflite] addi has no constant operand for ozp\n"
+                );
+                return failure();
+            }
+            if (ozp.getSExtValue() != -128) {
+                LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] output zero-point != -128\n");
+                return failure();
+            }
+        }
+
+        // Walking back: rounded-right-shift generic ins(scaled_exp, shift_amount).
+        auto shrsiGenericOp = op.getInputs()[0].getDefiningOp<linalg::GenericOp>();
+        if (!shrsiGenericOp || shrsiGenericOp.getNumDpsInputs() != 2) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] rounded-right-shift generic feeding op missing\n"
+            );
+            return failure();
+        }
+        if (arith::ShRSIOp shrsi; !isRoundingRightShiftOp(shrsiGenericOp, shrsi)) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] shrsi generic body is not a rounded right shift\n"
+            );
+            return failure();
+        }
+
+        // shift_amount = subi(cst, ctlz(expand_shape(sum_reduce))).
+        auto subiShiftGenericOp = shrsiGenericOp.getInputs()[1].getDefiningOp<linalg::GenericOp>();
+        if (!subiShiftGenericOp || subiShiftGenericOp.getNumDpsInputs() != 2 ||
+            subiShiftGenericOp.getNumDpsInits() != 1) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] shift-amount subi generic missing\n");
+            return failure();
+        }
+        if (!cast<linalg::YieldOp>(subiShiftGenericOp.getBody()->getTerminator())
+                 .getOperand(0)
+                 .getDefiningOp<arith::SubIOp>()) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] shift-amount body does not yield arith.subi\n"
+            );
+            return failure();
+        }
+
+        auto ctlzGenericOp = subiShiftGenericOp.getInputs()[1].getDefiningOp<linalg::GenericOp>();
+        if (!ctlzGenericOp || ctlzGenericOp.getNumDpsInputs() != 1 ||
+            ctlzGenericOp.getNumDpsInits() != 1) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] ctlz generic missing or wrong shape\n");
+            return failure();
+        }
+
+        if (!cast<linalg::YieldOp>(ctlzGenericOp.getBody()->getTerminator())
+                 .getOperand(0)
+                 .getDefiningOp<math::CountLeadingZerosOp>()) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] ctlz body does not yield math.ctlz\n");
+            return failure();
+        }
+
+        Value sumReducedValue = matchExpandShapeOp(ctlzGenericOp.getInputs()[0]);
+        if (!sumReducedValue) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] could not trace through expand_shape to sum\n"
+            );
+            return failure();
+        }
+
+        auto sumReduceOp = sumReducedValue.getDefiningOp<linalg::ReduceOp>();
+        if (!sumReduceOp || sumReduceOp.getNumDpsInits() != 1) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] sum linalg.reduce missing or wrong shape\n"
+            );
+            return failure();
+        }
+
+        if (!cast<linalg::YieldOp>(sumReduceOp.getBody()->getTerminator())
+                 .getOperand(0)
+                 .getDefiningOp<arith::AddIOp>()) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] sum-reduce body does not yield arith.addi\n"
+            );
+            return failure();
+        }
+
+        auto sumDimensions = sumReduceOp.getDimensions();
+        if (sumDimensions.size() != 1) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] sum reduction is not over a single dim\n");
+            return failure();
+        }
+        int64_t reductionDim = sumDimensions[0];
+
+        // post-table-sum rounded right-shift by 12.
+        // Its addi-tree input drives both the table-walk start and the lane
+        // convergence target.
+        auto postSumShiftOp = sumReduceOp.getInputs()[0].getDefiningOp<linalg::GenericOp>();
+        if (!postSumShiftOp || postSumShiftOp.getNumDpsInputs() != 2) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] post-table-sum shrsi generic missing\n");
+            return failure();
+        }
+        if (arith::ShRSIOp shrsi; !isRoundingRightShiftOp(postSumShiftOp, shrsi)) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] post-table-sum body is not a rounded right shift\n"
+            );
+            return failure();
+        }
+        if (APInt rsAmt; !matchPattern(postSumShiftOp.getInputs()[1], m_ConstantInt(&rsAmt)) ||
+                         rsAmt.getSExtValue() != 12) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] post-table-sum round-right-shift amount != 12\n"
+            );
+            return failure();
+        }
+
+        // Walk inputs[0] chain to find the table-form generic holding the exp LUT.
+        Value current = postSumShiftOp.getInputs()[0];
+        linalg::GenericOp tableGenericOp;
+        LinalgTableMatchInfo tableInfo;
+        while (auto genericOp = current.getDefiningOp<linalg::GenericOp>()) {
+            if (succeeded(matchI16InterpolatedTable(genericOp, tableInfo))) {
+                tableGenericOp = genericOp;
+                break;
+            }
+            if (genericOp.getNumDpsInputs() == 0)
+                break;
+            current = genericOp.getInputs()[0];
+        }
+
+        if (!tableGenericOp) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] no table-form linalg.generic found in chain\n"
+            );
+            return failure();
+        }
+
+        // tableInfo.input <- i32->i16 narrow <- subi(scaled_input, max) <- i8->i32 scale <- i8
+        // input.
+        auto i16GenericOp = tableInfo.input.getDefiningOp<linalg::GenericOp>();
+        if (!i16GenericOp || i16GenericOp.getNumDpsInputs() != 1 ||
+            i16GenericOp.getNumDpsInits() != 1) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] i32->i16 narrow generic missing\n");
+            return failure();
+        }
+        if (!cast<linalg::YieldOp>(i16GenericOp.getBody()->getTerminator())
+                 .getOperand(0)
+                 .getDefiningOp<arith::TruncIOp>()) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] i32->i16 narrow body does not yield arith.trunci\n"
+            );
+            return failure();
+        }
+
+        auto subMaxGenericOp = i16GenericOp.getInputs()[0].getDefiningOp<linalg::GenericOp>();
+        if (!subMaxGenericOp || subMaxGenericOp.getNumDpsInputs() != 2 ||
+            subMaxGenericOp.getNumDpsInits() != 1) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] sub-max generic missing or wrong shape\n");
+            return failure();
+        }
+
+        if (!cast<linalg::YieldOp>(subMaxGenericOp.getBody()->getTerminator())
+                 .getOperand(0)
+                 .getDefiningOp<arith::SubIOp>()) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] sub-max body does not yield arith.subi\n");
+            return failure();
+        }
+
+        // subi's second input is the expanded max reduction.
+        Value maxReducedValue = matchBroadcastOrExpandShape(subMaxGenericOp.getInputs()[1]);
+        if (!maxReducedValue) {
+            LLVM_DEBUG(
+                llvm::dbgs()
+                << "[SoftmaxTflite] could not trace through broadcast/expand_shape to max\n"
+            );
+            return failure();
+        }
+
+        auto maxReduceOp = maxReducedValue.getDefiningOp<linalg::ReduceOp>();
+        if (!maxReduceOp || maxReduceOp.getNumDpsInits() != 1) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] max linalg.reduce missing or wrong shape\n"
+            );
+            return failure();
+        }
+
+        if (!cast<linalg::YieldOp>(maxReduceOp.getBody()->getTerminator())
+                 .getOperand(0)
+                 .getDefiningOp<arith::MaxSIOp>()) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] max-reduce body does not yield arith.maxsi\n"
+            );
+            return failure();
+        }
+
+        // Max and sum must reduce the same dim.
+        auto maxDimensions = maxReduceOp.getDimensions();
+        if (maxDimensions.size() != 1 || maxDimensions[0] != reductionDim) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] max and sum do not reduce the same dim\n");
+            return failure();
+        }
+
+        Value scaledInputValue = subMaxGenericOp.getInputs()[0];
+        auto scaledInputGenericOp = scaledInputValue.getDefiningOp<linalg::GenericOp>();
+        if (!scaledInputGenericOp || scaledInputGenericOp.getNumDpsInputs() != 1 ||
+            scaledInputGenericOp.getNumDpsInits() != 1) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] scaled-input generic missing\n");
+            return failure();
+        }
+        if (!cast<linalg::YieldOp>(scaledInputGenericOp.getBody()->getTerminator())
+                 .getOperand(0)
+                 .getDefiningOp<tosa::ApplyScaleOp>()) {
+            LLVM_DEBUG(
+                llvm::dbgs()
+                << "[SoftmaxTflite] scaled-input body does not yield tosa.apply_scale\n"
+            );
+            return failure();
+        }
+
+        // Max-reduce and sub-max must share their input.
+        if (maxReduceOp.getInputs()[0] != scaledInputValue) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[SoftmaxTflite] max-reduce and sub-max do not share scaled input\n"
+            );
+            return failure();
+        }
+
+        Value inputValue = scaledInputGenericOp.getInputs()[0];
+        if (auto inputTensorType = dyn_cast<RankedTensorType>(inputValue.getType());
+            !inputTensorType || !inputTensorType.getElementType().isInteger(8)) {
+            LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] original input is not i8 ranked tensor\n");
+            return failure();
+        }
+
+        // The four-table signature is the load-bearing TFLite-specific check.
+        auto lanes = verifyTflInt8SoftmaxFourTables(tableInfo.input, postSumShiftOp);
+        if (failed(lanes))
+            return failure();
+        FailureOr<double> extracted = recoverInputScale(*lanes);
+        if (failed(extracted))
+            return failure();
+
+        return MatchInfo{
+            inputValue,
+            reductionDim,
+            shrsiGenericOp,
+            *extracted,
+        };
+    }
+
+    // Replaces info.replaceTarget with a bf16 detour (i8 -> bf16 cast -> linalg.softmax -> *256 ->
+    // fptosi). the matched op's quant arithmetic are not erased here.
+    void
+    rewriteSoftmax(linalg::GenericOp op, const MatchInfo &info, PatternRewriter &rewriter) const {
+        auto loc = op.getLoc();
+        auto bf16Type = rewriter.getBF16Type();
+        auto i32Type = rewriter.getI32Type();
+        auto inputTensorType = cast<RankedTensorType>(info.i8Input.getType());
+        auto inputShape = inputTensorType.getShape();
+        auto bf16TensorType = RankedTensorType::get(inputShape, bf16Type);
+        auto i32TensorType = RankedTensorType::get(inputShape, i32Type);
+        auto rank = inputTensorType.getRank();
+        auto identityMap = AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext());
+        SmallVector<utils::IteratorType> parallelIterators(rank, utils::IteratorType::parallel);
+
+        // Keep cast and scale in separate generics. `isTorqCastOp` rejects fused form
+        // and forces CSS/host instead of slice.
+
+        // i8 -> bf16.
+        auto emptyBf16Cast = tensor::EmptyOp::create(rewriter, loc, inputShape, bf16Type);
+        auto castToBf16 = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{bf16TensorType}, ValueRange{info.i8Input},
+            ValueRange{emptyBf16Cast}, ArrayRef<AffineMap>{identityMap, identityMap},
+            parallelIterators,
+            [&](OpBuilder &b, Location l, ValueRange args) {
+                auto fp = arith::SIToFPOp::create(b, l, bf16Type, args[0]);
+                linalg::YieldOp::create(b, l, fp.getResult());
+            }
+        );
+
+        // Scale by input_scale * beta.
+        auto emptyBf16Scale = tensor::EmptyOp::create(rewriter, loc, inputShape, bf16Type);
+        auto scaleToBf16 = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{bf16TensorType}, ValueRange{castToBf16.getResult(0)},
+            ValueRange{emptyBf16Scale}, ArrayRef<AffineMap>{identityMap, identityMap},
+            parallelIterators,
+            [&](OpBuilder &b, Location l, ValueRange args) {
+                auto scale =
+                    arith::ConstantOp::create(b, l, b.getFloatAttr(bf16Type, info.inputScale));
+                auto scaled = arith::MulFOp::create(b, l, args[0], scale);
+                linalg::YieldOp::create(b, l, scaled.getResult());
+            }
+        );
+
+        auto emptyBf16Out = tensor::EmptyOp::create(rewriter, loc, inputShape, bf16Type);
+        auto softmaxOp = linalg::SoftmaxOp::create(
+            rewriter, loc, TypeRange{bf16TensorType}, scaleToBf16.getResult(0), emptyBf16Out,
+            info.reductionDim
+        );
+
+        // softmax_prob * 256. Assumes the matched rescale's effective scale = 1;
+        // non-trivial quantizers would need 256 * 2^shift / mult.
+        auto emptyBf16Mul = tensor::EmptyOp::create(rewriter, loc, inputShape, bf16Type);
+        auto scaledBf16 = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{bf16TensorType}, ValueRange{softmaxOp.getResult()},
+            ValueRange{emptyBf16Mul}, ArrayRef<AffineMap>{identityMap, identityMap},
+            parallelIterators,
+            [&](OpBuilder &b, Location l, ValueRange args) {
+                auto scale = arith::ConstantOp::create(b, l, b.getFloatAttr(bf16Type, 256.0));
+                auto scaled = arith::MulFOp::create(b, l, args[0], scale);
+                linalg::YieldOp::create(b, l, scaled.getResult());
+            }
+        );
+
+        // bf16 -> i32. round_even to match `isTorqCastOp`'s "f2i".
+        auto emptyI32 = tensor::EmptyOp::create(rewriter, loc, inputShape, i32Type);
+        auto scaledI32 = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{i32TensorType}, ValueRange{scaledBf16.getResult(0)},
+            ValueRange{emptyI32}, ArrayRef<AffineMap>{identityMap, identityMap}, parallelIterators,
+            [&](OpBuilder &b, Location l, ValueRange args) {
+                auto rounded = math::RoundEvenOp::create(b, l, args[0]);
+                auto asI32 = arith::FPToSIOp::create(b, l, i32Type, rounded);
+                linalg::YieldOp::create(b, l, asI32.getResult());
+            }
+        );
+
+        rewriter.replaceOp(info.replaceTarget, scaledI32.getResult(0));
+
+        setTargetExecutorIfForced(softmaxOp, rewriter, "softmax");
+    }
+};
+
 void populateRaiseSoftmaxOpPatterns(MLIRContext *context, RewritePatternSet &patterns) {
     patterns.add<RaiseSoftmaxOnnx>(context);
     patterns.add<RaiseDecomposedSoftmax>(context);
+    patterns.add<RaiseSoftmaxTflite>(context);
 }
 
 } // namespace mlir::syna::torq
