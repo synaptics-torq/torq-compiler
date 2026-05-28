@@ -1,4 +1,5 @@
 #include "torq/Utils/ExecutorAssignment.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Operation.h"
 
 namespace mlir::syna::torq {
@@ -36,6 +37,27 @@ void setTargetExecutorAttr(Operation *op, torq_hl::Executor executor) {
     op->setAttr(EXECUTOR_ATTR_NAME, torq_hl::ExecutorAttr::get(op->getContext(), executor));
 }
 
+Operation *getDefiningOpForBlockArg(BlockArgument bArg) {
+    auto parentOp = bArg.getParentBlock()->getParentOp();
+
+    // scf.forall block args are [induction vars..., shared_outs...]; handle separately
+    // since operand indices don't map directly to block argument indices.
+    if (auto forallOp = dyn_cast<scf::ForallOp>(parentOp)) {
+        unsigned numInductionVars = forallOp.getRank();
+        if (bArg.getArgNumber() >= numInductionVars) {
+            unsigned outputIndex = bArg.getArgNumber() - numInductionVars;
+            if (outputIndex < forallOp.getOutputs().size())
+                return forallOp.getOutputs()[outputIndex].getDefiningOp();
+        }
+        return nullptr;
+    }
+
+    if (parentOp->getNumOperands() <= bArg.getArgNumber())
+        return nullptr;
+
+    return parentOp->getOperand(bArg.getArgNumber()).getDefiningOp();
+}
+
 void setCompileTimeConstAttr(Operation *op) {
     if (!op)
         return;
@@ -48,6 +70,21 @@ void setCompileTimeConstAttr(Operation *op) {
     while (!worklist.empty()) {
         Operation *currentOp = worklist.pop_back_val();
         visited.insert(currentOp);
+
+        // Collect all ops nested inside the regions of `op` into `result`.
+        // This ensures that ops inside scf.for / scf.forall bodies are also marked
+        // as host executor when the parent loop is a compile-time-const op.
+        for (Region &region : currentOp->getRegions()) {
+            for (Block &block : region.getBlocks()) {
+                for (Operation &nestedOp : block.getOperations()) {
+                    if (visited.insert(&nestedOp).second) {
+                        opsOfInterest.push_back(&nestedOp);
+                        worklist.push_back(&nestedOp);
+                    }
+                }
+            }
+        }
+
         for (Value operand : currentOp->getOperands()) {
             Operation *defOp = operand.getDefiningOp();
             if (!defOp) {
@@ -55,14 +92,7 @@ void setCompileTimeConstAttr(Operation *op) {
                 if (!bArg)
                     continue;
 
-                auto parentOp = bArg.getParentBlock()->getParentOp();
-                // This can happen when tile and fuse extracts operations
-                if (parentOp->getNumOperands() <= bArg.getArgNumber())
-                    continue;
-
-                auto arg = parentOp->getOperand(bArg.getArgNumber());
-                defOp = arg.getDefiningOp();
-
+                defOp = getDefiningOpForBlockArg(bArg);
                 if (!defOp)
                     continue;
             }
