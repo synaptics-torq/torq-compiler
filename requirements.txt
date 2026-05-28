@@ -9,20 +9,15 @@ pytest-json-report==1.5.0
 huggingface_hub==1.3.2
 
 # Used for apps
-streamlit==1.54.0
+streamlit==1.57.0
 
-# force tensorflow that is compatible with IREE version we use
-# (iree has a >= dependency which is picking up 2.19.0 which is not compatible)
-tensorflow==2.18.1
+tensorflow==2.21.0
 
 # for conversion from tflite to TOSA 1.0 compliant MLIR
 tosa-converter-for-tflite==2026.2.0
 
-# for TFLite layer extraction (tflite_layer_extractor.py)
-flatbuffers>=24.3.25
-
 # we depend on this specific version of keras at the moment
-keras==3.12.0
+keras==3.14.1
 
 # onnx
 onnx==1.19.1
@@ -51,7 +46,7 @@ xlsxwriter==3.2.5
 
 # base image packages
 Sphinx==7.4.7
-pillow==12.1.1
+pillow==12.2.0
 
 # head of synaptics theme
 https://github.com/syna-astra-dev/synaptics-sphinx-theme/archive/refs/heads/main.zip
@@ -71,13 +66,8 @@ sympy==1.13.3
 pybind11>=2.10.1
 PyYAML>=5.4.1
 
-# these are from third_party/iree/integrations/tensorflow/test/requirements.txt
-tensorflow==2.18.1
-keras>=2.7.0
-# removed Pillow as we already list it above 
-
 # these are from python/torq/requirements.txt
 packaging>=24.2
 
 # JAX frontend 
-jax[cpu]==0.10.0
+jax[cpu]==0.10.1
