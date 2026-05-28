@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "OpPatternOptions.h"
+#include "PatternUtils.h"
+
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
@@ -180,11 +182,20 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         const std::vector<int32_t> scale = {1};
         Value biasScale = createI32Const(rewriter, srcOp, interleave(bias, scale));
 
-        auto matMulOp = rewriter.replaceOpWithNewOp<torq_hl::MatMulOp>(
-            srcOp, outTy, createInitTensor(srcOp, rewriter, outTy), 0, outMin, outMax, 0, biasScale,
-            srcOp.getOperand(0), srcOp.getOperand(1)
+        auto matMulOp = torq_hl::MatMulOp::create(
+            rewriter, srcOp->getLoc(), outTy, createInitTensor(srcOp, rewriter, outTy), 0, outMin,
+            outMax, 0, biasScale, srcOp.getOperand(0), srcOp.getOperand(1)
         );
-        return matMulOp.getResult(0);
+
+        // linalg::MatmulOp is accumulating, but torq_hl::MatmulOp is not, so we do the addition
+        // explicitly.
+        FailureOr<Value> resultVal =
+            addInitToResult(srcOp.getOutputs().front(), matMulOp.getResult(0), rewriter);
+        assert(succeeded(resultVal) && "failed to add init value");
+
+        rewriter.replaceOp(srcOp, *resultVal);
+
+        return *resultVal;
     }
 
     LogicalResult
@@ -323,6 +334,14 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, srcOp);
         biasV = computeRescaleInfo(*fusionPlanOr, *biasV, scInfo);
         if (failed(biasV)) {
+            replaceWithTorqMatmul(srcOp, rewriter);
+            return success();
+        }
+
+        if (!isAllZerosTensor(srcOp.getOutputs().front())) {
+            // TODO: if the init is not all-zeros, we can still use FC/Conv as below.
+            // If the init is some fill with constant, we can add it to the bias.
+            // Otherwise we need to add torq_hl.add.
             replaceWithTorqMatmul(srcOp, rewriter);
             return success();
         }

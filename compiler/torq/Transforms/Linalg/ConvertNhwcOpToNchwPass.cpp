@@ -331,7 +331,7 @@ FailureOr<Value> convertAnchorToNchw(
             Value kernel = poolOp.getInputs()[1];
             Value outInit = poolOp.getOutputs()[0];
             auto outType = cast<RankedTensorType>(outInit.getType());
-            Value nchwInit = createZeroFilledTensor(
+            Value nchwInit = createMinFilledTensor(
                 rewriter, loc, nhwcToNchwShape(outType.getShape()), outType.getElementType()
             );
             auto nchwOp = linalg::PoolingNchwMaxOp::create(

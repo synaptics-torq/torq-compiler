@@ -4,16 +4,17 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "OpPatternOptions.h"
+
+#include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
+#include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
-#include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -30,6 +31,7 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Transforms/DialectConversion.h"
+
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "linalg-torq-patterns"
@@ -677,28 +679,6 @@ struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expects 1 input and 1 output");
         }
 
-        // fuse fillOp with the op uses fillOp's result as output
-        bool fused = false;
-        if (Operation *u = *srcOp.getResults()[0].getUsers().begin()) {
-            fused = TypeSwitch<Operation *, bool>(u)
-                        .Case<linalg::MatmulOp, linalg::BatchMatmulOp, linalg::PoolingNhwcMaxOp>(
-                            [&](auto typedOp) {
-                                if (typedOp.getOutputs()[0] == srcOp.getResults()[0]) {
-
-                                    rewriter.replaceOp(srcOp, srcOp.getOutputs()[0]);
-                                    return true;
-                                }
-                                return false;
-                            }
-                        )
-                        .Default([&](Operation *op) { return false; });
-        }
-
-        if (fused) {
-            return success();
-        }
-
-        // TODO(sflur): make sure the ConstantOp is still reachable after tiling.
         auto constantOp = srcOp.value().getDefiningOp<mlir::arith::ConstantOp>();
         if (!constantOp) {
             return rewriter.notifyMatchFailure(srcOp, "Expected a ConstantOp defining the value");
@@ -736,123 +716,6 @@ struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
         }
         else {
             return rewriter.notifyMatchFailure(srcOp, "Unsupported constant type");
-        }
-
-        auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-        rewriter.replaceOpWithNewOp<torq_hl::FillOp>(
-            srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
-            bitPatternAttr
-        );
-
-        return success();
-    }
-};
-
-struct FillOpConversionRewrite : public OpRewritePattern<linalg::FillOp> {
-  private:
-    const bool _markFuseGroups;
-
-  public:
-    FillOpConversionRewrite(MLIRContext *context, bool markFuseGroups)
-        : OpRewritePattern(context), _markFuseGroups(markFuseGroups) {}
-
-    LogicalResult matchAndRewrite(linalg::FillOp srcOp, PatternRewriter &rewriter) const override {
-
-        if (srcOp.getInputs().size() != 1 || srcOp.getResults().size() != 1) {
-            return rewriter.notifyMatchFailure(srcOp, "Expects 1 input and 1 output");
-        }
-
-        std::optional<IntegerAttr> maybeFuseGroupAttr = std::nullopt;
-        if (_markFuseGroups) {
-            if (isMarkedFuseGroup(srcOp)) {
-                return rewriter.notifyMatchFailure(srcOp, "Already marked");
-            }
-
-            maybeFuseGroupAttr = srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
-        }
-
-        // fuse fillOp with the op uses fillOp's result as output
-        bool fused = false;
-        if (Operation *u = *srcOp.getResults()[0].getUsers().begin()) {
-            fused = TypeSwitch<Operation *, bool>(u)
-                        .Case<linalg::MatmulOp, linalg::BatchMatmulOp, linalg::PoolingNhwcMaxOp>(
-                            [&](auto typedOp) {
-                                if (typedOp.getOutputs()[0] == srcOp.getResults()[0]) {
-
-                                    if (_markFuseGroups) {
-                                        // Use the id of typedOp to mark srcOp, as typedOp is the
-                                        // principal operation.
-                                        maybeFuseGroupAttr =
-                                            typedOp->template getAttrOfType<IntegerAttr>(
-                                                TORQ_FUSE_GROUP_ID
-                                            );
-                                        markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr);
-                                        // Make sure typedOp is also marked. We have to do it
-                                        // because typedOp might not have a principal pattern (e.g.
-                                        // tests/testdata/tosa_ops/matmul-in-int8-out-int32.mlir
-                                        // breaks without the marking here).
-                                        // NB: this could break the marking of typedOp if it's
-                                        // principal pattern has not run yet. Hence the
-                                        // FillOpConversionRewrite should run after all other
-                                        // patterns.
-                                        markOpFuseGroup(typedOp, rewriter, maybeFuseGroupAttr);
-                                        return true;
-                                    }
-
-                                    rewriter.replaceOp(srcOp, srcOp.getOutputs()[0]);
-                                    return true;
-                                }
-                                return false;
-                            }
-                        )
-                        .Default([&](Operation *op) { return false; });
-        }
-        if (fused) {
-            return success();
-        }
-
-        // TODO(sflur): make sure the ConstantOp is still reachable after tiling.
-        auto constantOp = srcOp.value().getDefiningOp<mlir::arith::ConstantOp>();
-        if (!constantOp) {
-            return rewriter.notifyMatchFailure(srcOp, "Expected a ConstantOp defining the value");
-        }
-
-        TypedAttr valueAttr = constantOp.getValue();
-        mlir::IntegerAttr bitPatternAttr;
-        int fillElementSize = valueAttr.getType().getIntOrFloatBitWidth() / 8;
-        if (auto intAttr = mlir::dyn_cast<IntegerAttr>(valueAttr)) {
-            // Already an integer constant
-            int fillValue = intAttr.getInt();
-            if (fillElementSize > 2 && fillValue != 0) {
-                return rewriter.notifyMatchFailure(srcOp, "Unsupported 32-bits int value");
-            }
-            bitPatternAttr = rewriter.getI32IntegerAttr(fillValue);
-        }
-        else if (auto floatAttr = mlir::dyn_cast<mlir::FloatAttr>(valueAttr)) {
-            // Get the bit pattern of the float
-            APFloat apf = floatAttr.getValue();
-            uint64_t bits;
-            if (&apf.getSemantics() == &llvm::APFloat::BFloat()) {
-                bits = apf.bitcastToAPInt().getZExtValue(); // 16-bit
-                bitPatternAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(bits));
-            }
-            else if (&apf.getSemantics() == &llvm::APFloat::IEEEsingle()) {
-                bits = apf.bitcastToAPInt().getZExtValue(); // 32-bit
-                if (fillElementSize > 2 && bits != 0) {
-                    return rewriter.notifyMatchFailure(srcOp, "Unsupported 32-bits float value");
-                }
-                bitPatternAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(bits));
-            }
-            else {
-                return rewriter.notifyMatchFailure(srcOp, "Unsupported float type");
-            }
-        }
-        else {
-            return rewriter.notifyMatchFailure(srcOp, "Unsupported constant type");
-        }
-
-        if (markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr)) {
-            return success();
         }
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
@@ -2024,20 +1887,13 @@ void populateLinalgToTorqHLPatterns(
 
     // Patterns that have a marking mode:
     populateLinalgToTorqHLMulPatterns(context, patterns, markFuseGroups);
-
     populateLinalgToTorqHLMatmulPatterns(context, patterns, markFuseGroups);
 
-    if (markFuseGroups) {
-        // NB: FillOpConversionRewrite must be the last markFuseGroups pattern (see comment inline
-        // in the fuse case).
-        // This pattern does the marking for FillOpConversion
-        patterns.insert<FillOpConversionRewrite>(context, markFuseGroups);
-        return;
-    }
-    // IMPORTANT: patterns below this line (see the return above) should not
-    // involve more than a single operation! If they do, tile and fuse will
-    // break them. To prevent that, the pattern should be refactored to take
+    // IMPORTANT: patterns below this line should not involve more than a single operation! If they
+    // do, tile and fuse will break them. To prevent that, the pattern should be refactored to take
     // markFuseGroups, and have a marking mode.
+    if (markFuseGroups)
+        return;
 
     // IMPORTANT: Since sigmoid op contains exp in its body Exp pattern must be called after Sigmoid
     // pattern in order to make sure that exp pattern doesn't match sigmoid op, see:

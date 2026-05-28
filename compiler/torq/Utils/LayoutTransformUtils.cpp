@@ -57,6 +57,30 @@ Value createZeroFilledTensor(
     return linalg::FillOp::create(rewriter, loc, ValueRange{zero}, ValueRange{init}).getResult(0);
 }
 
+Value createMinFilledTensor(
+    OpBuilder &rewriter, Location loc, ArrayRef<int64_t> shape, Type elemType
+) {
+    TypedAttr attr;
+    if (auto floatTy = dyn_cast<FloatType>(elemType)) {
+        llvm::APFloat minFloat =
+            llvm::APFloat::getInf(floatTy.getFloatSemantics(), /*isNegative=*/true);
+        attr = FloatAttr::get(floatTy, minFloat);
+    }
+    else if (auto intTy = dyn_cast<IntegerType>(elemType)) {
+        llvm::APInt minInt = intTy.isUnsignedInteger()
+                                 ? llvm::APInt::getMinValue(intTy.getWidth())
+                                 : llvm::APInt::getSignedMinValue(intTy.getWidth());
+        attr = rewriter.getIntegerAttr(intTy, minInt);
+    }
+    else {
+        llvm_unreachable("unsupported element type for min constant");
+    }
+    auto minConst = arith::ConstantOp::create(rewriter, loc, attr).getResult();
+    auto init = tensor::EmptyOp::create(rewriter, loc, shape, elemType);
+    return linalg::FillOp::create(rewriter, loc, ValueRange{minConst}, ValueRange{init})
+        .getResult(0);
+}
+
 Value rebuildGenericWithNewLayout(
     OpBuilder &rewriter, linalg::GenericOp origOp, ValueRange newInputs, Value newOutputInit,
     ArrayRef<AffineMap> newMaps

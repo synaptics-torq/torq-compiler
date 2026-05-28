@@ -78,6 +78,10 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
             return rewriter.notifyMatchFailure(convOp, "Expected 3D tensors for Conv1D");
         }
 
+        if (!isAllZerosTensor(output)) {
+            return rewriter.notifyMatchFailure(convOp, "init is not all zeros");
+        }
+
         // Extract convolution parameters
         SmallVector<int64_t> strides = llvm::to_vector<4>(
             llvm::map_range(convOp.getStrides(), [](APInt v) { return v.getSExtValue(); })
@@ -162,14 +166,17 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         // [Ow, C*Kw] x [C*Kw, F] -> [Ow, F]; accumulate into output element type (f32)
         SmallVector<int64_t> matmulResultShape = {Ow, F};
         auto matmulResultType = RankedTensorType::get(matmulResultShape, outputElemType);
-        auto matmulInit = tensor::EmptyOp::create(rewriter, loc, matmulResultShape, outputElemType);
+        auto matmulInit = linalg::FillOp::create(
+            rewriter, loc, createZeroConstant(rewriter, loc, outputElemType),
+            tensor::EmptyOp::create(rewriter, loc, matmulResultShape, outputElemType).getResult()
+        );
 
         SmallVector<Value> inputs;
         inputs.push_back(unfoldedInput);
         inputs.push_back(transposedFilter.getResults()[0]);
 
         SmallVector<Value> outputs;
-        outputs.push_back(matmulInit.getResult());
+        outputs.push_back(matmulInit.getResult(0));
 
         auto matmulOp =
             linalg::MatmulOp::create(rewriter, loc, TypeRange{matmulResultType}, inputs, outputs);

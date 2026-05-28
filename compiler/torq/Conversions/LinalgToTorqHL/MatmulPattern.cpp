@@ -751,24 +751,38 @@ std::optional<int> findBatchMatmulBcastIdx(linalg::GenericOp op) {
 
 /// Convert a broadcast-batch-matmul linalg.generic to torq_hl::MatMulOp.
 /// The generic has indexing maps with constant-0 on one input's batch dim.
-struct BroadcastBatchMatmulGenericConversion : public OpRewritePattern<linalg::GenericOp> {
+struct BroadcastBatchMatmulGenericRewrite : public OpRewritePattern<linalg::GenericOp> {
   private:
     const bool _markFuseGroups;
 
   public:
-    BroadcastBatchMatmulGenericConversion(MLIRContext *context, bool markFuseGroups)
-        : OpRewritePattern(context), _markFuseGroups(markFuseGroups) {}
+    BroadcastBatchMatmulGenericRewrite(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern<linalg::GenericOp>(context), _markFuseGroups(markFuseGroups) {}
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
-        // TODO: Add fuse group marking support for broadcast batch matmul.
-        if (_markFuseGroups) {
-            return failure();
+        if (_markFuseGroups && isMarkedFuseGroup(srcOp)) {
+            return rewriter.notifyMatchFailure(srcOp, "Already marked");
         }
 
         std::optional<int> broadcastIdx = findBatchMatmulBcastIdx(srcOp);
         if (!broadcastIdx)
             return failure();
+
+        // Input order in the generic: [lhs, rhs]
+        Value input1 = srcOp.getInputs()[0]; // lhs
+        Value input2 = srcOp.getInputs()[1]; // rhs
+
+        if (_markFuseGroups) {
+            markFuseGroupBackward(
+                srcOp.getResult(0),
+                // NB: we intentionally don't include the init operand in the list below. This makes
+                // sure the init is marked, and fused with the matmul.
+                {input1, input2}, rewriter,
+                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            );
+            return success();
+        }
 
         const std::vector<int32_t> bias = {0};
         const std::vector<int32_t> scale = {1};
@@ -776,26 +790,30 @@ struct BroadcastBatchMatmulGenericConversion : public OpRewritePattern<linalg::G
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
         auto [outMin, outMax] = getDTypeRange(srcResultType.getElementType());
 
-        // Input order in the generic: [lhs, rhs]
-        Value input1 = srcOp.getInputs()[0]; // lhs
-        Value input2 = srcOp.getInputs()[1]; // rhs
-
-        rewriter.replaceOpWithNewOp<torq_hl::MatMulOp>(
-            srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
-            0, outMin, outMax, 0, createI32Const(rewriter, srcOp, interleave(bias, scale)), input1,
-            input2
+        auto matMulOp = torq_hl::MatMulOp::create(
+            rewriter, srcOp->getLoc(), srcOp.getResult(0).getType(),
+            createInitTensor(srcOp, rewriter, srcResultType), 0, outMin, outMax, 0,
+            createI32Const(rewriter, srcOp, interleave(bias, scale)), input1, input2
         );
+
+        // linalg ops (OpTy) are mostly accumulating, but torq_hl::MatmulOp is not, so we do the
+        // addition explicitly.
+        FailureOr<Value> resultVal =
+            addInitToResult(srcOp.getOutputs().front(), matMulOp.getResult(0), rewriter);
+        assert(succeeded(resultVal) && "failed to add the init value");
+
+        rewriter.replaceOp(srcOp, *resultVal);
 
         return success();
     }
 };
 
-template <typename OpTy> struct MatmulOpConversion final : public OpRewritePattern<OpTy> {
+template <typename OpTy> struct MatmulOpRewrite final : public OpRewritePattern<OpTy> {
   private:
     const bool _markFuseGroups;
 
   public:
-    MatmulOpConversion(MLIRContext *context, bool markFuseGroups)
+    MatmulOpRewrite(MLIRContext *context, bool markFuseGroups)
         : OpRewritePattern<OpTy>(context), _markFuseGroups(markFuseGroups) {}
 
     LogicalResult matchAndRewrite(OpTy srcOp, PatternRewriter &rewriter) const override {
@@ -811,49 +829,38 @@ template <typename OpTy> struct MatmulOpConversion final : public OpRewritePatte
         Value lhs = srcOp.getOperand(0);
         Value rhs = srcOp.getOperand(1);
 
-        bool foldedLhsIntoDequantOp = false;
         if (FailureOr<Value> foldedLhs =
                 maybeFoldBlockQuantizedMatmulInput(lhs, rewriter, maybeFuseGroupAttr);
             succeeded(foldedLhs)) {
             lhs = *foldedLhs;
-            foldedLhsIntoDequantOp = true;
         }
         else if (FailureOr<Value> foldedLhs =
                      maybeFoldFp8CastMatmulInput(lhs, rewriter, maybeFuseGroupAttr);
                  succeeded(foldedLhs)) {
             lhs = *foldedLhs;
-            foldedLhsIntoDequantOp = true;
         }
 
-        bool foldedRhsIntoDequantOp = false;
         if (FailureOr<Value> foldedRhs =
                 maybeFoldBlockQuantizedMatmulInput(rhs, rewriter, maybeFuseGroupAttr);
             succeeded(foldedRhs)) {
             rhs = *foldedRhs;
-            foldedRhsIntoDequantOp = true;
         }
         else if (FailureOr<Value> foldedRhs =
                      maybeFoldFp8CastMatmulInput(rhs, rewriter, maybeFuseGroupAttr);
                  succeeded(foldedRhs)) {
             rhs = *foldedRhs;
-            foldedRhsIntoDequantOp = true;
         }
 
         if (_markFuseGroups) {
-            // maybeFold* already marked the upstream fusible ops
-            markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr);
+            // maybeFold* already marked the upstream fusible ops, except for the init.
+            markFuseGroupBackward(
+                srcOp.getResult(0),
+                // NB: we intentionally don't include the init operand in the list below. This makes
+                // sure the init is marked, and fused with the matmul.
+                {srcOp.getOperand(0), srcOp.getOperand(1)}, rewriter,
+                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+            );
             return success();
-        }
-
-        if (foldedLhsIntoDequantOp || foldedRhsIntoDequantOp) {
-            rewriter.modifyOpInPlace(srcOp, [&]() {
-                if (foldedLhsIntoDequantOp) {
-                    srcOp->setOperand(0, lhs);
-                }
-                if (foldedRhsIntoDequantOp) {
-                    srcOp->setOperand(1, rhs);
-                }
-            });
         }
 
         const std::vector<int32_t> bias = {0};
@@ -863,10 +870,19 @@ template <typename OpTy> struct MatmulOpConversion final : public OpRewritePatte
         auto [outMin, outMax] = getDTypeRange(srcResultType.getElementType());
 
         Value biasScale = createI32Const(rewriter, srcOp, interleave(bias, scale));
-        rewriter.replaceOpWithNewOp<torq_hl::MatMulOp>(
-            srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
-            0, outMin, outMax, 0, biasScale, lhs, rhs
+        auto matMulOp = torq_hl::MatMulOp::create(
+            rewriter, srcOp->getLoc(), srcOp.getResult(0).getType(),
+            createInitTensor(srcOp, rewriter, srcResultType), 0, outMin, outMax, 0, biasScale, lhs,
+            rhs
         );
+
+        // linalg ops (OpTy) are mostly accumulating, but torq_hl::MatmulOp is not, so we do the
+        // addition explicitly.
+        FailureOr<Value> resultVal =
+            addInitToResult(srcOp.getOutputs().front(), matMulOp.getResult(0), rewriter);
+        assert(succeeded(resultVal) && "failed to add the init value");
+
+        rewriter.replaceOp(srcOp, *resultVal);
 
         return success();
     }
@@ -878,12 +894,12 @@ void populateLinalgToTorqHLMatmulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
     // Make sure to add the new class to isTorqMatmulOp function if here is changed.
-    patterns.insert<MatmulOpConversion<linalg::BatchMatmulOp>>(context, markFuseGroups);
-    patterns.insert<MatmulOpConversion<linalg::DotOp>>(context, markFuseGroups);
-    patterns.insert<MatmulOpConversion<linalg::MatvecOp>>(context, markFuseGroups);
+    patterns.insert<MatmulOpRewrite<linalg::BatchMatmulOp>>(context, markFuseGroups);
+    patterns.insert<MatmulOpRewrite<linalg::DotOp>>(context, markFuseGroups);
+    patterns.insert<MatmulOpRewrite<linalg::MatvecOp>>(context, markFuseGroups);
 
     // TODO: Add fuse group marking support for broadcast batch matmul.
-    patterns.insert<BroadcastBatchMatmulGenericConversion>(context, markFuseGroups);
+    patterns.insert<BroadcastBatchMatmulGenericRewrite>(context, markFuseGroups);
 }
 
 } // namespace mlir::syna::torq

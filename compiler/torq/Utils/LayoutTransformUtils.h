@@ -67,6 +67,11 @@ Value createZeroFilledTensor(
     OpBuilder &rewriter, Location loc, ArrayRef<int64_t> shape, Type elemType
 );
 
+/// Create a min-filled tensor of the given shape and element type.
+Value createMinFilledTensor(
+    OpBuilder &rewriter, Location loc, ArrayRef<int64_t> shape, Type elemType
+);
+
 /// Rebuild a linalg.generic with new inputs, output init, and indexing maps.
 /// The body region is cloned verbatim (element types must be unchanged).
 Value rebuildGenericWithNewLayout(

@@ -333,4 +333,21 @@ Value makeElementWiseBinary(
     torq_hl::ElementwiseOpEnum opType
 );
 
+// Return true if `value` is all zeros. The function can only recognize simple cases. It does not do
+// any computation. In particular, the function does handles extract_slice from an all zeros tensor,
+// to support tiled operations.
+// value - must have a RankedTensorType
+bool isAllZerosTensor(mlir::Value value);
+
+// Return true if all the elements in `value` are the minimum value of the element type. The
+// function can only recognize simple cases. It does not do any computation. In particular, the
+// function does handles extract_slice, to support tiled operations.
+// value - must have a RankedTensorType
+bool isAllMinimumTensor(Value value);
+
+// If initVal is not all zeros, torq_hl.add it to val.
+// This is useful when lowering a linalg operation that accumulates over init, to a torq_hl
+// operation that does not.
+FailureOr<Value> addInitToResult(Value initVal, Value val, PatternRewriter &rewriter);
+
 } // namespace mlir::syna::torq

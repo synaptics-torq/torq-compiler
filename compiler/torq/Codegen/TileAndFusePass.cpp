@@ -826,7 +826,7 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     if (!isMarkedFuseGroup(producerOp)) {
         // Not part of a pattern-fuse-group; there are no restrictions on the domains.
 
-        if (!toTileOps.contains(producerTi)) {
+        if (!toTileOps.contains(producerTi) && !isa<linalg::FillOp>(producerOp)) {
             return doNotFuse;
         }
 
@@ -880,7 +880,7 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         return fuseAndDoNotYieldProducer;
     }
 
-    if (!toTileOps.contains(producerTi)) {
+    if (!toTileOps.contains(producerTi) && !isa<linalg::FillOp>(producerOp)) {
         return doNotFuse;
     }
 

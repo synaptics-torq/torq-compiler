@@ -5,39 +5,41 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
-
-#include "iree/compiler/Codegen/Common/Passes.h"
-#include "iree/compiler/Codegen/LLVMCPU/Passes.h"
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/Dialect/Linalg/Passes.h"
-#include "mlir/Dialect/Utils/StaticValueUtils.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/Verifier.h"
-#include "mlir/Pass/PassManager.h"
+#include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/Casting.h"
-#include "llvm/Support/TargetSelect.h"
 
+#include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+#include "iree/hal/local/executable_library.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
 #include "mlir/ExecutionEngine/OptUtils.h"
-#include "torq/Dialect/TorqHL/TorqHLOps.h"
-#include "torq/Utils/ConversionUtils.h"
-#include "llvm/Support/Debug.h"
-
-#include "iree/hal/local/executable_library.h"
+#include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Pass/PassManager.h"
+
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/LogicalResult.h"
+#include "llvm/Support/TargetSelect.h"
+
 #include <deque>
 #include <numeric>
 #include <optional>
@@ -3706,6 +3708,217 @@ FailureOr<Value> buildWeightWithZp(Value weights, Value weightZp, PatternRewrite
     // Mark as compile-time-const so later passes can fold/use it as static data.
     setCompileTimeConstAttr(weights.getDefiningOp());
     return weights;
+}
+
+static Attribute getConstantSplatAttr(mlir::Value val) {
+    assert(llvm::isa<mlir::RankedTensorType>(val.getType()) && "expected RankedTensorType");
+
+    // 1. Matches constant splat tensor
+    mlir::Attribute attr;
+    if (mlir::matchPattern(val, mlir::m_Constant(&attr))) {
+        if (auto splatAttr = llvm::dyn_cast<mlir::SplatElementsAttr>(attr)) {
+            return splatAttr.getSplatValue<Attribute>();
+        }
+    }
+
+    // 2. linalg.fill: check if the filled scalar value is constant
+    if (linalg::FillOp fillOp = val.getDefiningOp<mlir::linalg::FillOp>()) {
+        mlir::Value fillValue = fillOp.getInputs().front();
+        if (auto constOp = fillValue.getDefiningOp<arith::ConstantOp>()) {
+            return constOp.getValue();
+        }
+    }
+
+    // 2.1 torq_hl.fill
+    if (torq_hl::FillOp fillOp = val.getDefiningOp<torq_hl::FillOp>()) {
+        return IntegerAttr::get(IntegerType::get(val.getContext(), 32), fillOp.getValue());
+    }
+
+    // 3. tensor.extract_slice: recursively check if the source tensor is all constant
+    if (auto sliceOp = val.getDefiningOp<mlir::tensor::ExtractSliceOp>()) {
+        return getConstantSplatAttr(sliceOp.getSource());
+    }
+
+    // 4. tensor.cast: recursively check the source of the cast
+    if (auto castOp = val.getDefiningOp<mlir::tensor::CastOp>()) {
+        return getConstantSplatAttr(castOp.getSource());
+    }
+
+    return nullptr;
+}
+
+bool isAllZerosTensor(mlir::Value value) {
+    assert(llvm::isa<mlir::RankedTensorType>(value.getType()) && "expected RankedTensorType");
+
+    if (auto attr = getConstantSplatAttr(value)) {
+        if (auto intAttr = llvm::dyn_cast<IntegerAttr>(attr)) {
+            return intAttr.getValue().isZero();
+        }
+        if (auto floatAttr = llvm::dyn_cast<FloatAttr>(attr)) {
+            return floatAttr.getValue().isZero();
+        }
+    }
+
+    return false;
+}
+
+bool isAllMinimumTensor(Value value) {
+    assert(llvm::isa<mlir::RankedTensorType>(value.getType()) && "expected RankedTensorType");
+
+    if (Attribute constInitAttr = getConstantSplatAttr(value)) {
+        if (auto constInitFloatAttr = llvm::dyn_cast<FloatAttr>(constInitAttr))
+            return constInitFloatAttr.getValue().isSmallest();
+
+        if (auto constInitIntegerAttr = llvm::dyn_cast<IntegerAttr>(constInitAttr))
+            return constInitIntegerAttr.getValue().isMinValue();
+    }
+
+    return false;
+}
+
+static FailureOr<Value> addInitToResultFloat(Value initVal, Value val, PatternRewriter &rewriter) {
+    auto outputType = cast<RankedTensorType>(initVal.getType());
+
+    assert(outputType.getElementType().isFloat() && "not a float type");
+
+    if (!outputType.getElementType().isBF16())
+        return failure();
+
+    bool rhs_is_scalar = false;
+
+    std::vector<llvm::APFloat> weightsFloat(2, llvm::APFloat(APFloat::BFloat(), "1.0"));
+    std::vector<float> biasScale{0.0};
+
+    Value rhsInput = initVal;
+
+    Attribute constAttr = getConstantSplatAttr(initVal);
+    if (constAttr) {
+        auto data = llvm::dyn_cast<FloatAttr>(constAttr);
+        if (!data)
+            return failure();
+
+        rhs_is_scalar = true;
+        // When one operand is a scalar constant, we create a 1-element tensor for input1 to
+        // preserve add op semantics. This scalar is incorporated into the bias term instead of
+        // being used directly as a tensor input.
+        RankedTensorType constType = RankedTensorType::get({1}, outputType.getElementType());
+        DenseElementsAttr constValue = DenseElementsAttr::get(constType, data.getValue());
+        rhsInput =
+            arith::ConstantOp::create(rewriter, val.getLoc(), constType, constValue).getResult();
+
+        biasScale[0] = data.getValue().convertToFloat();
+    }
+
+    // special handling for float min/max
+    float min = std::numeric_limits<float>::lowest();
+    int32_t outputMin = *reinterpret_cast<int32_t *>(&min);
+    float max = std::numeric_limits<float>::max();
+    int32_t outputMax = *reinterpret_cast<int32_t *>(&max);
+
+    auto weights = createConst(weightsFloat, rewriter, val.getLoc());
+
+    auto empty = tensor::EmptyOp::create(rewriter, val.getLoc(), outputType, {});
+
+    auto addOp = torq_hl::AddOp::create(
+        rewriter, val.getLoc(), outputType, empty, "add",
+        /*input_zp*/ 0, /*output_zp*/ 0, outputMin, outputMax,
+        /*shift_factor*/ 0, weights, createConst(biasScale, rewriter, val.getLoc()), val, rhsInput,
+        /*segment_output*/ false, /*rhs_is_scalar*/ rhs_is_scalar
+    );
+
+    return addOp.getResult(0);
+}
+
+static FailureOr<Value> addInitToResultInt(Value initVal, Value val, PatternRewriter &rewriter) {
+    auto outputType = cast<RankedTensorType>(initVal.getType());
+
+    assert(outputType.getElementType().isInteger() && "not an integer type");
+
+    if (outputType.getElementType().isInteger(64))
+        return failure();
+
+    std::vector<int32_t> bias = {0};
+    std::vector<int32_t> scale = {1};
+    int8_t sign = 1;
+
+    bool rhs_is_scalar = false;
+
+    Value rhsInput = initVal;
+
+    if (outputType.getElementType().isInteger(16) || outputType.getElementType().isInteger(32)) {
+        // one input (initVal) must be constant, the other is the input tensor
+        // TODO(sflur): we could also check if the matMul is a compile time constant?
+
+        Attribute constAttr = getConstantSplatAttr(initVal);
+        if (!constAttr)
+            return failure();
+
+        auto intAttr = llvm::dyn_cast<IntegerAttr>(constAttr);
+        if (!intAttr)
+            return failure();
+
+        int64_t data = intAttr.getInt();
+
+        auto elemType = outputType.getElementType();
+        RankedTensorType constType = RankedTensorType::get({1}, elemType);
+        DenseElementsAttr value;
+        if (elemType.isInteger(16)) {
+            value = DenseIntElementsAttr::get(constType, static_cast<int16_t>(data));
+        }
+        else if (elemType.isInteger(32)) {
+            value = DenseIntElementsAttr::get(constType, static_cast<int32_t>(data));
+        }
+        else {
+            return failure();
+        }
+
+        rhsInput = arith::ConstantOp::create(rewriter, val.getLoc(), constType, value).getResult();
+
+        bias = {static_cast<int32_t>(data)};
+        rhs_is_scalar = true;
+    }
+
+    Value weights;
+    if (outputType.getElementType().isInteger(32)) {
+        auto type = RankedTensorType::get({2}, rewriter.getI8Type());
+        auto elements = DenseIntElementsAttr::get(type, sign);
+        weights = arith::ConstantOp::create(rewriter, val.getLoc(), elements);
+    }
+    else {
+        auto type = RankedTensorType::get({2}, rewriter.getI16Type());
+        auto elements = DenseIntElementsAttr::get(type, static_cast<int16_t>(sign));
+        weights = arith::ConstantOp::create(rewriter, val.getLoc(), elements);
+    }
+
+    auto [outputMin, outputMax] = getDTypeRange(outputType.getElementType());
+
+    auto empty = tensor::EmptyOp::create(rewriter, val.getLoc(), outputType, {});
+
+    auto biasScale = arith::ConstantOp::create(
+        rewriter, val.getLoc(), rewriter.getI32TensorAttr(interleave(bias, scale))
+    );
+
+    auto addOp = torq_hl::AddOp::create(
+        rewriter, val.getLoc(), outputType, empty, "add",
+        /*input_zp*/ 0, /*output_zp*/ 0, outputMin, outputMax,
+        /*shift_factor*/ 0, weights, biasScale, val, rhsInput,
+        /*segment_output*/ false, /*rhs_is_scalar*/ rhs_is_scalar
+    );
+
+    return addOp.getResult(0);
+}
+
+FailureOr<Value> addInitToResult(Value initVal, Value val, PatternRewriter &rewriter) {
+    if (!isa<RankedTensorType>(initVal.getType()))
+        return failure();
+
+    if (isAllZerosTensor(initVal))
+        return val;
+
+    if (cast<RankedTensorType>(initVal.getType()).getElementType().isFloat())
+        return addInitToResultFloat(initVal, val, rewriter);
+
+    return addInitToResultInt(initVal, val, rewriter);
 }
 
 } // namespace mlir::syna::torq

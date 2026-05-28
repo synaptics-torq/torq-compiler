@@ -1,7 +1,9 @@
 module {
   func.func @main(%arg0: tensor<128x64xi8>, %arg1: tensor<64xi8>) -> (tensor<128xi16>) {
-    %init = tensor.empty() : tensor<128xi16>
-    %0 = linalg.matvec ins(%arg0, %arg1 : tensor<128x64xi8>, tensor<64xi8>) outs(%init : tensor<128xi16>) -> tensor<128xi16>
-    return %0 : tensor<128xi16>
+    %cst = arith.constant 0 : i16
+    %0 = tensor.empty() : tensor<128xi16>
+    %1 = linalg.fill ins(%cst : i16) outs(%0 : tensor<128xi16>) -> tensor<128xi16>
+    %2 = linalg.matvec ins(%arg0, %arg1 : tensor<128x64xi8>, tensor<64xi8>) outs(%1 : tensor<128xi16>) -> tensor<128xi16>
+    return %2 : tensor<128xi16>
   }
 }
