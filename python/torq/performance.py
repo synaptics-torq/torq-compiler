@@ -106,11 +106,11 @@ def _write_host_annotated_xlsx(debug_info: BaseDispatchDebugInfo, output_file: s
     with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
         df.rename(columns=_HUMAN_FRIENDLY_COLUMNS, inplace=True)
         sheet_name = "Detailed Performance Data"
-        df.to_excel(writer, index=False, sheet_name=sheet_name)        
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
 
         for worksheet in writer.sheets.values():
             for idx, col in enumerate(df.columns):
-                max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
+                max_len = max(df[col].dropna().astype(str).map(len).max() or 0, len(str(col))) + 2
                 worksheet.set_column(idx, idx, max_len)
 
 
