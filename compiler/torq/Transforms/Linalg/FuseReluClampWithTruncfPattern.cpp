@@ -61,6 +61,90 @@ static linalg::GenericOp matchTruncfF32ToBF16Generic(Value v) {
     return op;
 }
 
+/// Match a linalg.generic doing a simple relu (max(x, low)) in bf16:
+///   ins(%in : tensor<...xbf16>) outs(%out : tensor<...xbf16>)
+///   ^bb0(%arg0: bf16, %arg1: bf16):
+///     %c = arith.cmpf ugt, %arg0, %low : bf16   // %low == arith.constant 0.0
+///     %s = arith.select %c, %arg0, %low : bf16
+///     linalg.yield %s : bf16
+/// Also accepts the equivalent reversed form:
+///     %c = arith.cmpf ult, %low, %arg0 : bf16
+///     %s = arith.select %c, %arg0, %low : bf16
+/// On success, writes lowConst.
+static bool matchBF16SimpleReluGeneric(linalg::GenericOp op, arith::ConstantOp &lowConst) {
+    if (op.getNumDpsInputs() != 1 || op.getNumDpsInits() != 1 || op.getNumResults() != 1)
+        return false;
+    if (op.getNumParallelLoops() != op.getNumLoops())
+        return false;
+    if (!checkIdentityLikeMaps(op))
+        return false;
+
+    auto inputType = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
+    auto outputType = dyn_cast<RankedTensorType>(op.getResultTypes()[0]);
+    if (!inputType || !outputType)
+        return false;
+    if (!inputType.getElementType().isBF16() || !outputType.getElementType().isBF16())
+        return false;
+
+    auto *body = op.getBody();
+    auto yieldOp = dyn_cast<linalg::YieldOp>(body->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+        return false;
+
+    // Match select(cmpf(pred, lhs, rhs), trueVal, falseVal)
+    auto sel = yieldOp.getOperand(0).getDefiningOp<arith::SelectOp>();
+    if (!sel)
+        return false;
+
+    auto cmp = sel.getCondition().getDefiningOp<arith::CmpFOp>();
+    if (!cmp)
+        return false;
+
+    auto pred = cmp.getPredicate();
+    auto cmpLhs = cmp.getLhs();
+    auto cmpRhs = cmp.getRhs();
+    auto selTrue = sel.getTrueValue();
+    auto selFalse = sel.getFalseValue();
+
+    // We expect max(x, c) where x is block arg 0.
+    // Accept two canonical forms:
+    //   select(cmpf(ugt, x, c), x, c)
+    //   select(cmpf(ult, c, x), x, c)
+    Value dataValue, constValue;
+    if (pred == arith::CmpFPredicate::UGT) {
+        // cmpf ugt, x, c  →  true when x > c
+        // select true, x, c  →  x when x > c, else c  →  max(x, c)
+        if (selTrue != cmpLhs || selFalse != cmpRhs)
+            return false;
+        dataValue = cmpLhs;
+        constValue = cmpRhs;
+    }
+    else if (pred == arith::CmpFPredicate::ULT) {
+        // cmpf ult, c, x  →  true when c < x
+        // select true, x, c  →  x when c < x, else c  →  max(x, c)
+        if (selTrue != cmpRhs || selFalse != cmpLhs)
+            return false;
+        dataValue = cmpRhs;
+        constValue = cmpLhs;
+    }
+    else {
+        return false;
+    }
+
+    auto blockArg = dyn_cast<BlockArgument>(dataValue);
+    if (!blockArg || blockArg.getArgNumber() != 0 || blockArg.getOwner() != body)
+        return false;
+
+    auto lowConstOp = constValue.getDefiningOp<arith::ConstantOp>();
+    if (!lowConstOp)
+        return false;
+    if (!isa<FloatAttr>(lowConstOp.getValue()))
+        return false;
+
+    lowConst = lowConstOp;
+    return true;
+}
+
 /// Match a linalg.generic doing a relu6 clamp in bf16:
 ///   ins(%in : tensor<...xbf16>) outs(%out : tensor<...xbf16>)
 ///   ^bb0(%arg0: bf16, %arg1: bf16):
@@ -128,6 +212,10 @@ static bool matchBF16ReluClampGeneric(
     auto lowConstOp = innerCmp.getRhs().getDefiningOp<arith::ConstantOp>();
     if (!lowConstOp)
         return false;
+    if (!isa<FloatAttr>(lowConstOp.getValue()))
+        return false;
+    if (!isa<FloatAttr>(highConstOp.getValue()))
+        return false;
 
     // The false-value and cmpf lhs must both be block argument 0.
     if (innerSel.getFalseValue() != innerCmp.getLhs())
@@ -167,10 +255,15 @@ struct FuseReluClampWithTruncfPattern : public OpRewritePattern<linalg::GenericO
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp clampOp, PatternRewriter &rewriter) const override {
-        // 1. Confirm this op is a bf16 relu6 clamp.
+        // 1. Confirm this op is a bf16 relu6 clamp or a simple bf16 relu.
         arith::ConstantOp lowConst, highConst;
-        if (!matchBF16ReluClampGeneric(clampOp, lowConst, highConst))
-            return rewriter.notifyMatchFailure(clampOp, "not a bf16 relu6 clamp generic");
+        bool isRelu6 = matchBF16ReluClampGeneric(clampOp, lowConst, highConst);
+        if (!isRelu6) {
+            if (!matchBF16SimpleReluGeneric(clampOp, lowConst))
+                return rewriter.notifyMatchFailure(
+                    clampOp, "not a bf16 relu6 clamp or simple relu generic"
+                );
+        }
 
         // 2. Confirm the input comes from a truncf f32->bf16 generic.
         linalg::GenericOp truncfOp = matchTruncfF32ToBF16Generic(clampOp.getInputs()[0]);
@@ -191,11 +284,14 @@ struct FuseReluClampWithTruncfPattern : public OpRewritePattern<linalg::GenericO
 
         // 4. Build f32 clamp bound constants (inserted just before the fused op).
         double lowVal = cast<FloatAttr>(lowConst.getValue()).getValueAsDouble();
-        double highVal = cast<FloatAttr>(highConst.getValue()).getValueAsDouble();
         Value f32LowConst =
             arith::ConstantOp::create(rewriter, loc, rewriter.getFloatAttr(f32Type, lowVal));
-        Value f32HighConst =
-            arith::ConstantOp::create(rewriter, loc, rewriter.getFloatAttr(f32Type, highVal));
+        Value f32HighConst;
+        if (isRelu6) {
+            double highVal = cast<FloatAttr>(highConst.getValue()).getValueAsDouble();
+            f32HighConst =
+                arith::ConstantOp::create(rewriter, loc, rewriter.getFloatAttr(f32Type, highVal));
+        }
 
         // 5. Build fused indexing maps:
         //    - input maps from the truncf op (f32 operands)
@@ -220,16 +316,32 @@ struct FuseReluClampWithTruncfPattern : public OpRewritePattern<linalg::GenericO
         auto fusedOp = linalg::GenericOp::create(
             rewriter, loc, clampOp.getResultTypes(), truncfOp.getInputs(), clampOp.getOutputs(),
             fusedMaps, clampOp.getIteratorTypesArray(),
-            [&](OpBuilder &b, Location innerLoc, ValueRange args) {
+            [isRelu6, f32LowConst, f32HighConst,
+             bf16Type](OpBuilder &b, Location innerLoc, ValueRange args) {
                 Value in = args[0]; // f32 element
-                Value cmp0 =
-                    arith::CmpFOp::create(b, innerLoc, arith::CmpFPredicate::ULT, in, f32LowConst);
-                Value sel0 = arith::SelectOp::create(b, innerLoc, cmp0, f32LowConst, in);
-                Value cmp1 = arith::CmpFOp::create(
-                    b, innerLoc, arith::CmpFPredicate::UGT, sel0, f32HighConst
-                );
-                Value sel1 = arith::SelectOp::create(b, innerLoc, cmp1, f32HighConst, sel0);
-                Value truncated = arith::TruncFOp::create(b, innerLoc, bf16Type, sel1);
+                Value clamped;
+                if (isRelu6) {
+                    Value cmp0 = arith::CmpFOp::create(
+                        b, innerLoc, arith::CmpFPredicate::ULT, in, f32LowConst
+                    );
+                    Value sel0 = arith::SelectOp::create(b, innerLoc, cmp0, f32LowConst, in);
+                    Value cmp1 = arith::CmpFOp::create(
+                        b, innerLoc, arith::CmpFPredicate::UGT, sel0, f32HighConst
+                    );
+                    clamped = arith::SelectOp::create(b, innerLoc, cmp1, f32HighConst, sel0);
+                }
+                else {
+                    // Simple ReLU: max(x, low)
+                    // The original bf16 pattern was:
+                    //   cmpf ugt, x, low  →  true when x > low
+                    //   select true, x, low  →  x when x > low, else low
+                    // In f32 this is the same structure.
+                    Value cmp0 = arith::CmpFOp::create(
+                        b, innerLoc, arith::CmpFPredicate::UGT, in, f32LowConst
+                    );
+                    clamped = arith::SelectOp::create(b, innerLoc, cmp0, in, f32LowConst);
+                }
+                Value truncated = arith::TruncFOp::create(b, innerLoc, bf16Type, clamped);
                 linalg::YieldOp::create(b, innerLoc, truncated);
             }
         );

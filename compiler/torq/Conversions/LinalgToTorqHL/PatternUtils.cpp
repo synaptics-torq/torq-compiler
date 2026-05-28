@@ -3364,9 +3364,10 @@ static bool extractInt8RescaleBodyOps(
     return !!out.applyScaleOp;
 }
 
-/// Returns true if op is the fused f32-relu6-clamp-then-truncf linalg.generic:
+/// Returns true if op is the fused f32-clamp-then-truncf linalg.generic:
 ///   ins(%f32_tensor) outs(%bf16_tensor)
-///   body: cmpf(ult) + select + cmpf(ugt) + select + truncf
+///   body: cmpf(ult) + select + cmpf(ugt) + select + truncf   (relu6)
+///   body: cmpf(ugt) + select + truncf                        (simple ReLU)
 static bool isFusedF32ClampTruncf(linalg::GenericOp op) {
     if (!op || op.getNumDpsInputs() != 1 || op.getNumDpsInits() != 1)
         return false;
@@ -3374,11 +3375,9 @@ static bool isFusedF32ClampTruncf(linalg::GenericOp op) {
     auto outputElemTy = dyn_cast<ShapedType>(op.getResultTypes()[0]).getElementType();
     if (!inputElemTy.isF32() || !outputElemTy.isBF16())
         return false;
-    bool hasCmpfUlt = false, hasCmpfUgt = false, hasTruncf = false;
+    bool hasCmpfUgt = false, hasTruncf = false;
     for (auto &bodyOp : op.getRegion().front().without_terminator()) {
         if (auto cmp = dyn_cast<arith::CmpFOp>(bodyOp)) {
-            if (cmp.getPredicate() == arith::CmpFPredicate::ULT)
-                hasCmpfUlt = true;
             if (cmp.getPredicate() == arith::CmpFPredicate::UGT)
                 hasCmpfUgt = true;
         }
@@ -3386,15 +3385,35 @@ static bool isFusedF32ClampTruncf(linalg::GenericOp op) {
             hasTruncf = true;
         }
     }
-    return hasCmpfUlt && hasCmpfUgt && hasTruncf;
+    // Accept relu6 (ULT + UGT + truncf) or simple ReLU (UGT + truncf).
+    // We require at least one UGT because that's what both relu6 outer clamp
+    // and simple ReLU use.  ULT alone (e.g. a pure min clamp) is not expected
+    // in this fusion path.
+    return hasTruncf && hasCmpfUgt;
 }
 
 /// Extract the f32 clamp bounds from the fused linalg.generic body and store
 /// them as int32 values in ScaleClampInfo.min / ScaleClampInfo.max.
 /// Returns true on success.
+///
+/// Handles both relu6 and simple ReLU.
+/// For a cmpf+select pair the bound classification depends on the select:
+///   ULT + select(true=rhs, false=lhs)  -> max(lhs,rhs) -> min bound
+///   ULT + select(true=lhs, false=rhs)  -> min(lhs,rhs) -> max bound
+///   UGT + select(true=lhs, false=rhs)  -> max(lhs,rhs) -> min bound
+///   UGT + select(true=rhs, false=lhs)  -> min(lhs,rhs) -> max bound
 static bool extractF32ClampTruncfInfo(linalg::GenericOp op, ScaleClampInfo &scInfo) {
     if (!isFusedF32ClampTruncf(op))
         return false;
+
+    // Build a map from cmpf result to the select that consumes it.
+    DenseMap<Value, arith::SelectOp> cmpToSelect;
+    for (auto &bodyOp : op.getRegion().front().without_terminator()) {
+        if (auto sel = dyn_cast<arith::SelectOp>(bodyOp)) {
+            cmpToSelect[sel.getCondition()] = sel;
+        }
+    }
+
     for (auto &bodyOp : op.getRegion().front().without_terminator()) {
         auto cmp = dyn_cast<arith::CmpFOp>(bodyOp);
         if (!cmp)
@@ -3409,10 +3428,31 @@ static bool extractF32ClampTruncfInfo(linalg::GenericOp op, ScaleClampInfo &scIn
         // bitcastToAPInt() gives the raw bit pattern without any numeric conversion.
         int32_t boundBits =
             static_cast<int32_t>(floatAttr.getValue().bitcastToAPInt().getZExtValue());
-        if (cmp.getPredicate() == arith::CmpFPredicate::ULT)
-            scInfo.min = boundBits;
-        else if (cmp.getPredicate() == arith::CmpFPredicate::UGT)
-            scInfo.max = boundBits;
+
+        auto it = cmpToSelect.find(cmp.getResult());
+        if (it == cmpToSelect.end())
+            continue;
+        auto sel = it->second;
+
+        auto pred = cmp.getPredicate();
+        if (pred == arith::CmpFPredicate::ULT) {
+            // ULT: lhs < rhs
+            // select trueVal==rhs, falseVal==lhs -> max(lhs,rhs) -> min
+            // select trueVal==lhs, falseVal==rhs -> min(lhs,rhs) -> max
+            if (sel.getTrueValue() == cmp.getRhs())
+                scInfo.min = boundBits;
+            else if (sel.getTrueValue() == cmp.getLhs())
+                scInfo.max = boundBits;
+        }
+        else if (pred == arith::CmpFPredicate::UGT) {
+            // UGT: lhs > rhs
+            // select trueVal==lhs, falseVal==rhs -> max(lhs,rhs) -> min
+            // select trueVal==rhs, falseVal==lhs -> min(lhs,rhs) -> max
+            if (sel.getTrueValue() == cmp.getLhs())
+                scInfo.min = boundBits;
+            else if (sel.getTrueValue() == cmp.getRhs())
+                scInfo.max = boundBits;
+        }
     }
     return true;
 }
@@ -3432,7 +3472,9 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
     // and return early (no quantized scale tensor to interleave).
     if (isFusedF32ClampTruncf(rescaleOp)) {
         LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: handling fused f32 clamp+truncf\n"; });
-        extractF32ClampTruncfInfo(rescaleOp, scInfo);
+        if (!extractF32ClampTruncfInfo(rescaleOp, scInfo)) {
+            LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: failed to extract clamp bounds\n"; });
+        }
         return biasScale;
     }
 
