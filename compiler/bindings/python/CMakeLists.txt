@@ -48,3 +48,40 @@ install(
   DESTINATION "${_INSTALL_DIR}/torq/"
   FILES_MATCHING PATTERN "*.py"
 )
+
+# Build torq-compile for the Python package with $ORIGIN RPATH so it finds
+# libIREECompiler.so in the same _mlir_libs/ directory at runtime.
+# NOTE: We avoid OUTPUT_NAME "torq-compile" to prevent shadowing the standalone
+# torq-compile target's ninja phony alias. A post-build copy produces the
+# correctly-named binary in the build tree, and install(TARGETS) + rename
+# handles the installed copy with proper RPATH fixup.
+set(_MLIR_LIBS_OUTPUT_DIR "${_TORQ_COMPILER_PYTHON_OUTPUT_DIR}/iree/compiler/_mlir_libs")
+add_executable(torq_compile_python_tool
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/torq-compile-main.cc"
+)
+target_link_libraries(torq_compile_python_tool
+  iree_compiler_bindings_c_headers
+  iree_compiler_API_Impl
+)
+set_target_properties(torq_compile_python_tool PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${_MLIR_LIBS_OUTPUT_DIR}"
+)
+mlir_python_setup_extension_rpath(torq_compile_python_tool)
+add_custom_command(TARGET torq_compile_python_tool POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+    "$<TARGET_FILE:torq_compile_python_tool>"
+    "${_MLIR_LIBS_OUTPUT_DIR}/torq-compile"
+  COMMENT "Copying torq_compile_python_tool -> torq-compile"
+)
+install(TARGETS torq_compile_python_tool
+  COMPONENT "${_INSTALL_COMPONENT}"
+  DESTINATION "${_INSTALL_DIR}/iree/compiler/_mlir_libs"
+)
+install(CODE "
+  file(RENAME
+    \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${_INSTALL_DIR}/iree/compiler/_mlir_libs/torq_compile_python_tool\"
+    \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${_INSTALL_DIR}/iree/compiler/_mlir_libs/torq-compile\"
+  )"
+  COMPONENT "${_INSTALL_COMPONENT}"
+)
+add_dependencies(torq_compiler_python_bindings torq_compile_python_tool)

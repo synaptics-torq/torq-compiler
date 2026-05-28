@@ -8,9 +8,29 @@ This describes how to convert models from _TFLite_ and _Torch_ to MLIR.
 
 ## Convert a TFLite model to TOSA and MLIR
 
-IREE provides a command line tool that can be used to convert a _TFLite_ model to a binary MLIR file
-expressed in the {term}`TOSA` dialect.
+A TFLite model must first be converted to TOSA MLIR before compilation. There are two approaches depending on which distribution you are using.
 
+### Using the Compiler Wheel
+
+```{note}
+Install the `[tflite]` extra to get the `tosa-converter-for-tflite` tool:
+`pip install "torq_compiler-<version>-<platform>.whl[tflite]"`
+```
+
+Convert the model to TOSA bytecode, then compile:
+
+```{code}shell
+$ tosa-converter-for-tflite model.tflite --bytecode -o model.mlirbc
+$ torq-compile model.mlirbc -o model.vmfb
+```
+
+Use `--text` instead of `--bytecode` to produce a human-readable MLIR file:
+
+```{code}shell
+$ tosa-converter-for-tflite model.tflite --text -o model.mlir
+```
+
+### Using the Release Package
 
 - If not yet done, activate the Python environment as explained in [Getting Started](./getting_started.md) (skip this step if using the Docker container).
 
@@ -92,6 +112,10 @@ The `tests/hf/` directory is only included in the [Release Package](./getting_st
 ## Convert ONNX Model to MLIR
 
 IREE provides an ONNX importer that converts ONNX models into a text-based MLIR representation. The importer is available in the Torq compiler Python environment.
+
+```{note}
+**Compiler wheel users:** ONNX importing requires the `onnx` extra. Install with: `pip install "torq_compiler-<version>-<platform>.whl[onnx]"`
+```
 
 - If not using the Docker container, activate the Python environment as explained in [Getting Started](./getting_started.md).
 

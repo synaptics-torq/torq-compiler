@@ -31,6 +31,11 @@ The Torq compiler is delivered in two formats:
 - Contains all contents of the Release package, pre-configured in a containerized environment
 - Pre-installed dependencies and tools
 
+#### Python Wheel (`torq-compiler`)
+- Lightweight pip-installable package containing the Torq compiler Python bindings
+- Available from GitHub releases (version 2.0.0 and above)
+- Does not include example models, tests, or runtime simulator
+
 ### System Requirements
 
 - Supported operating systems:

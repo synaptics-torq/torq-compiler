@@ -55,8 +55,8 @@ def find_tool(exe_name: str = "torq-compile") -> str:
 
     Search order:
       1. TORQ_TOOL_PATH environment variable directories
-      2. Bundled binary alongside this package (_mlir_libs/ or _compiler_libs/)
-      3. iree.compiler._mlir_libs package directory
+      2. iree.compiler._mlir_libs package directory
+      3. Bundled binary in torq/_compiler_libs/
       4. System PATH (via shutil.which)
 
     Args:
@@ -81,13 +81,7 @@ def find_tool(exe_name: str = "torq-compile") -> str:
             if _is_executable(candidate):
                 return candidate
 
-    # check bundled location torq/_compiler_libs/
-    this_dir = os.path.dirname(__file__)
-    bundled = os.path.join(this_dir, "..", "..", "_compiler_libs", exe_name_with_ext)
-    if _is_executable(bundled):
-        return os.path.realpath(bundled)
-
-    # check iree/compiler/_mlir_libs/
+    # check iree/compiler/_mlir_libs/ (preferred: libIREECompiler.so lives here)
     try:
         import iree.compiler._mlir_libs as _mlir_libs
 
@@ -97,6 +91,12 @@ def find_tool(exe_name: str = "torq-compile") -> str:
             return candidate
     except ImportError:
         pass
+
+    # check bundled location torq/_compiler_libs/
+    this_dir = os.path.dirname(__file__)
+    bundled = os.path.join(this_dir, "..", "..", "_compiler_libs", exe_name_with_ext)
+    if _is_executable(bundled):
+        return os.path.realpath(bundled)
 
     # fall-back to system PATH
     import shutil

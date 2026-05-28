@@ -48,7 +48,6 @@ from torq.build_tools.setup_helpers import (
     populate_built_package,
     resolve_cmake_build_dir,
     strip_all_in_dir,
-    strip_binary,
 )
 
 # ---------------------------------------------------------------------------
@@ -81,6 +80,12 @@ IREE_COMPILER_PYTHON_DIR = os.path.join(
     IREE_SOURCE_DIR, "compiler", "bindings", "python"
 )
 TORQ_COMPILER_PYTHON_DIR = os.path.join(SETUPPY_DIR, "bindings", "python")
+
+# iree.tools.tf wrappers live in the IREE submodule (for SavedModel import)
+IREE_TF_INTEGRATIONS_DIR = os.path.join(
+    IREE_SOURCE_DIR, "integrations", "tensorflow", "python_projects"
+)
+IREE_TF_PYTHON_DIR = os.path.join(IREE_TF_INTEGRATIONS_DIR, "iree_tf")
 
 # ---------------------------------------------------------------------------
 # CMake build helpers
@@ -164,24 +169,21 @@ class CMakeBuildPy(_build_py):
         # Strip all ELF binaries (.so files and executables) in the tree.
         strip_all_in_dir(target_dir)
 
-        # Copy torq-compile into iree/compiler/_mlir_libs/ alongside
-        # libIREECompiler.so so that $ORIGIN RPATH resolution works.
+        # Also place a copy of torq-compile in torq/_compiler_libs/ for
+        # discovery by binaries.py as a fallback.
         mlir_libs_dir = os.path.join(target_dir, "iree", "compiler", "_mlir_libs")
-        torq_compile_src = os.path.join(
-            CMAKE_BUILD_DIR, "third_party", "iree", "tools", "torq-compile"
-        )
+        torq_compile_src = os.path.join(mlir_libs_dir, "torq-compile")
         if os.path.isfile(torq_compile_src):
-            dest = os.path.join(mlir_libs_dir, "torq-compile")
-            shutil.copy2(torq_compile_src, dest)
-            strip_binary(dest)
+            torq_libs_dir = os.path.join(target_dir, "torq", "_compiler_libs")
+            os.makedirs(torq_libs_dir, exist_ok=True)
+            shutil.copy2(torq_compile_src, os.path.join(torq_libs_dir, "torq-compile"))
 
-        # Also place a copy in torq/_compiler_libs/ for discovery by binaries.py.
-        torq_libs_dir = os.path.join(target_dir, "torq", "_compiler_libs")
-        os.makedirs(torq_libs_dir, exist_ok=True)
-        if os.path.isfile(torq_compile_src):
-            dest = os.path.join(torq_libs_dir, "torq-compile")
-            shutil.copy2(torq_compile_src, dest)
-            strip_binary(dest)
+        # Copy iree.tools.tf wrappers into the build tree (for SavedModel import).
+        iree_tf_src = os.path.join(IREE_TF_PYTHON_DIR, "iree", "tools", "tf")
+        iree_tools_dst = os.path.join(target_dir, "iree", "tools")
+        os.makedirs(iree_tools_dst, exist_ok=True)
+        if os.path.isdir(iree_tf_src):
+            shutil.copytree(iree_tf_src, os.path.join(iree_tools_dst, "tf"))
 
 
 _MANYLINUX_GLIBC = "2_28"
@@ -230,7 +232,13 @@ torq_packages = find_namespace_packages(
     ],
 )
 
-packages = iree_packages + torq_packages
+# iree.tools.tf wrappers
+iree_tools_packages = find_namespace_packages(
+    where=IREE_TF_PYTHON_DIR,
+    include=["iree.tools.tf*"],
+)
+
+packages = iree_packages + torq_packages + iree_tools_packages
 
 # ---------------------------------------------------------------------------
 # setup()
@@ -268,6 +276,8 @@ setup(
         # Torq sources are discovered directly so metadata generation does not
         # depend on stale cmake install contents.
         "torq": os.path.join("bindings", "python", "torq"),
+        # iree.tools.tf from the IREE submodule
+        "iree.tools.tf": os.path.join(IREE_TF_PYTHON_DIR, "iree", "tools", "tf"),
     },
     packages=packages,
     package_data={
@@ -289,7 +299,24 @@ setup(
             "torq-compile = torq.compiler.tools.binaries:main",
             "iree-compile = iree.compiler.tools.scripts.iree_compile.__main__:main",
             "iree-opt = iree.compiler.tools.scripts.iree_opt.__main__:main",
+            "iree-import-tf = iree.tools.tf.scripts.iree_import_tf.__main__:main [tf]",
         ],
     },
-    install_requires=[],
+    # IMPORTANT: must be synced with third_party/iree/compiler/setup.py
+    install_requires=[
+        "numpy",
+        "sympy",
+    ],
+    # IMPORTANT: dependencies must be synced with ./requirements.txt
+    extras_require={
+        "onnx": [
+            "onnx==1.19.1",
+        ],
+        "tflite": [
+            "tosa-converter-for-tflite==2026.2.0",
+        ],
+        "tf": [
+            "tensorflow==2.18.1",
+        ],
+    },
 )

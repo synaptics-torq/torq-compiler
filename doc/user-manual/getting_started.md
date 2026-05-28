@@ -61,6 +61,50 @@ You can use **either** of the following approaches:
     ```bash
     $ docker run --rm -it -v $(pwd):$(pwd) -w $(pwd) -u $(id -u):$(id -g) <image-name>
     ```
+### Python Wheel (pip)
+
+```{note}
+The `torq-compiler` wheel is available from GitHub releases version 2.0.0 and above. It provides a minimal compiler-only installation without example models, tests, or the runtime simulator.
+```
+
+The `torq-compiler` package is included in the GitHub release. Install the compiler wheel directly from any release snapshot.
+
+To enable ONNX model importing, install with the `onnx` extra:
+
+```bash
+$ pip install "torq_compiler-<version>-<platform>.whl[onnx]"
+```
+
+To enable TFLite model conversion, install with the `tflite` extra:
+
+```bash
+$ pip install "torq_compiler-<version>-<platform>.whl[tflite]"
+```
+
+To enable TensorFlow SavedModel importing, install the `tf` extra:
+
+```bash
+$ pip install "torq_compiler-<version>-<platform>.whl[tf]"
+```
+
+Multiple extras can be combined:
+
+```bash
+$ pip install "torq_compiler-<version>-<platform>.whl[onnx,tflite]"
+```
+
+For ONNX importing via Python:
+
+```bash
+$ python -m iree.compiler.tools.import_onnx model.onnx -o model.mlir
+```
+
+For TFLite conversion:
+
+```bash
+$ tosa-converter-for-tflite model.tflite --bytecode -o model.mlirbc
+```
+
 ## Compile and Run the Model
 
 - Example MLIR models are provided in the `tests/` directory in the package.
