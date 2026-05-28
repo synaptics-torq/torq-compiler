@@ -6,6 +6,7 @@
 
 #include "PassesDetail.h"
 #include "Patterns.h"
+#include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ShapeUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -27,7 +28,7 @@ namespace {
 ///     %t = arith.truncf %arg0 : f32 to bf16
 ///     linalg.yield %t : bf16
 /// Returns the generic op if matched, nullptr otherwise.
-static linalg::GenericOp matchTruncfF32ToBF16Generic(Value v) {
+linalg::GenericOp matchTruncfF32ToBF16Generic(Value v) {
     auto op = v.getDefiningOp<linalg::GenericOp>();
     if (!op)
         return nullptr;
@@ -153,80 +154,158 @@ static bool matchBF16SimpleReluGeneric(linalg::GenericOp op, arith::ConstantOp &
 ///     %c1  = arith.cmpf ugt, %s0,   %high : bf16   // %high == arith.constant 6.0
 ///     %s1  = arith.select %c1, %high, %s0  : bf16
 ///     linalg.yield %s1 : bf16
-/// On success, writes lowConst and highConst.
-static bool matchBF16ReluClampGeneric(
-    linalg::GenericOp op, arith::ConstantOp &lowConst, arith::ConstantOp &highConst
-) {
+/// On success, writes lowVal and highVal.
+LogicalResult matchBF16ReluClampGeneric(linalg::GenericOp op, double &lowVal, double &highVal) {
     if (op.getNumDpsInputs() != 1 || op.getNumDpsInits() != 1 || op.getNumResults() != 1)
-        return false;
+        return failure();
     if (op.getNumParallelLoops() != op.getNumLoops())
-        return false;
+        return failure();
     if (!checkIdentityLikeMaps(op))
-        return false;
+        return failure();
 
     auto inputType = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
     auto outputType = dyn_cast<RankedTensorType>(op.getResultTypes()[0]);
     if (!inputType || !outputType)
-        return false;
+        return failure();
     if (!inputType.getElementType().isBF16() || !outputType.getElementType().isBF16())
-        return false;
+        return failure();
 
     auto *body = op.getBody();
     auto yieldOp = dyn_cast<linalg::YieldOp>(body->getTerminator());
     if (!yieldOp || yieldOp.getNumOperands() != 1)
-        return false;
+        return failure();
 
     // Match outer select: select(cmpf(ugt, prev, high), high, prev)
     auto outerSel = yieldOp.getOperand(0).getDefiningOp<arith::SelectOp>();
     if (!outerSel)
-        return false;
+        return failure();
 
     auto outerCmp = outerSel.getCondition().getDefiningOp<arith::CmpFOp>();
     if (!outerCmp || outerCmp.getPredicate() != arith::CmpFPredicate::UGT)
-        return false;
+        return failure();
 
     // The true-value and the cmpf rhs must be the same high constant.
     if (outerSel.getTrueValue() != outerCmp.getRhs())
-        return false;
+        return failure();
     auto highConstOp = outerCmp.getRhs().getDefiningOp<arith::ConstantOp>();
     if (!highConstOp)
-        return false;
+        return failure();
 
     // The false-value of the outer select is the inner select result;
     // the cmpf lhs must be this same value.
     Value innerSelVal = outerSel.getFalseValue();
     if (outerCmp.getLhs() != innerSelVal)
-        return false;
+        return failure();
 
     auto innerSel = innerSelVal.getDefiningOp<arith::SelectOp>();
     if (!innerSel)
-        return false;
+        return failure();
 
     // Match inner select: select(cmpf(ult, in, low), low, in)
     auto innerCmp = innerSel.getCondition().getDefiningOp<arith::CmpFOp>();
     if (!innerCmp || innerCmp.getPredicate() != arith::CmpFPredicate::ULT)
-        return false;
+        return failure();
 
     if (innerSel.getTrueValue() != innerCmp.getRhs())
-        return false;
+        return failure();
     auto lowConstOp = innerCmp.getRhs().getDefiningOp<arith::ConstantOp>();
     if (!lowConstOp)
-        return false;
+        return failure();
     if (!isa<FloatAttr>(lowConstOp.getValue()))
-        return false;
+        return failure();
     if (!isa<FloatAttr>(highConstOp.getValue()))
-        return false;
+        return failure();
 
     // The false-value and cmpf lhs must both be block argument 0.
     if (innerSel.getFalseValue() != innerCmp.getLhs())
-        return false;
+        return failure();
     auto blockArg = dyn_cast<BlockArgument>(innerSel.getFalseValue());
     if (!blockArg || blockArg.getArgNumber() != 0 || blockArg.getOwner() != body)
-        return false;
+        return failure();
 
-    lowConst = lowConstOp;
-    highConst = highConstOp;
-    return true;
+    lowVal = cast<FloatAttr>(lowConstOp.getValue()).getValueAsDouble();
+    highVal = cast<FloatAttr>(highConstOp.getValue()).getValueAsDouble();
+    return success();
+}
+
+/// Match a linalg.generic doing a relu6 clamp in bf16 where the bounds are
+/// passed as 0-d tensor inputs (3-input form):
+///   ins(%in : tensor<...xbf16>, %low : tensor<bf16>, %high : tensor<bf16>)
+///   outs(%out : tensor<...xbf16>)
+///   ^bb0(%arg0: bf16, %arg1: bf16, %arg2: bf16, %arg3: bf16):
+///     %c0 = arith.cmpf ult, %arg0, %arg1 : bf16
+///     %s0 = arith.select %c0, %arg1, %arg0 : bf16
+///     %c1 = arith.cmpf ugt, %s0,   %arg2 : bf16
+///     %s1 = arith.select %c1, %arg2, %s0  : bf16
+///     linalg.yield %s1 : bf16
+/// On success, writes lowVal and highVal (the constant double values from the
+/// outer dense<...> tensor inputs).
+LogicalResult
+matchBF16ReluClampGeneric3Inputs(linalg::GenericOp op, double &lowVal, double &highVal) {
+    if (op.getNumDpsInputs() != 3 || op.getNumDpsInits() != 1 || op.getNumResults() != 1)
+        return failure();
+    if (op.getNumParallelLoops() != op.getNumLoops())
+        return failure();
+
+    auto dataType = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
+    auto outType = dyn_cast<RankedTensorType>(op.getResultTypes()[0]);
+    if (!dataType || !outType)
+        return failure();
+    if (!dataType.getElementType().isBF16() || !outType.getElementType().isBF16())
+        return failure();
+
+    auto maps = op.getIndexingMapsArray();
+    unsigned outIdx = op.getNumDpsInputs();
+    if (!maps[0].isIdentity() || !maps[outIdx].isIdentity())
+        return failure();
+
+    if (!extractBF16ConstantValue(op.getInputs()[1], lowVal))
+        return failure();
+    if (!extractBF16ConstantValue(op.getInputs()[2], highVal))
+        return failure();
+
+    // Verify the body structure.
+    auto *body = op.getBody();
+    auto yieldOp = dyn_cast<linalg::YieldOp>(body->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+        return failure();
+
+    // Outer select: select(cmpf(ugt, prev, high_arg), high_arg, prev)
+    auto outerSel = yieldOp.getOperand(0).getDefiningOp<arith::SelectOp>();
+    if (!outerSel)
+        return failure();
+    auto outerCmp = outerSel.getCondition().getDefiningOp<arith::CmpFOp>();
+    if (!outerCmp || outerCmp.getPredicate() != arith::CmpFPredicate::UGT)
+        return failure();
+    if (outerSel.getTrueValue() != outerCmp.getRhs())
+        return failure();
+    auto highArg = dyn_cast<BlockArgument>(outerCmp.getRhs());
+    if (!highArg || highArg.getArgNumber() != 2 || highArg.getOwner() != body)
+        return failure();
+
+    Value innerSelVal = outerSel.getFalseValue();
+    if (outerCmp.getLhs() != innerSelVal)
+        return failure();
+
+    // Inner select: select(cmpf(ult, in, low_arg), low_arg, in)
+    auto innerSel = innerSelVal.getDefiningOp<arith::SelectOp>();
+    if (!innerSel)
+        return failure();
+    auto innerCmp = innerSel.getCondition().getDefiningOp<arith::CmpFOp>();
+    if (!innerCmp || innerCmp.getPredicate() != arith::CmpFPredicate::ULT)
+        return failure();
+    if (innerSel.getTrueValue() != innerCmp.getRhs())
+        return failure();
+    auto lowArg = dyn_cast<BlockArgument>(innerCmp.getRhs());
+    if (!lowArg || lowArg.getArgNumber() != 1 || lowArg.getOwner() != body)
+        return failure();
+    if (innerSel.getFalseValue() != innerCmp.getLhs())
+        return failure();
+    auto dataArg = dyn_cast<BlockArgument>(innerSel.getFalseValue());
+    if (!dataArg || dataArg.getArgNumber() != 0 || dataArg.getOwner() != body)
+        return failure();
+
+    return success();
 }
 
 /// Pattern that fuses a bf16 relu6 clamp with the preceding truncf generic into
@@ -255,17 +334,31 @@ struct FuseReluClampWithTruncfPattern : public OpRewritePattern<linalg::GenericO
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp clampOp, PatternRewriter &rewriter) const override {
-        // 1. Confirm this op is a bf16 relu6 clamp or a simple bf16 relu.
-        arith::ConstantOp lowConst, highConst;
-        bool isRelu6 = matchBF16ReluClampGeneric(clampOp, lowConst, highConst);
-        if (!isRelu6) {
-            if (!matchBF16SimpleReluGeneric(clampOp, lowConst))
-                return rewriter.notifyMatchFailure(
-                    clampOp, "not a bf16 relu6 clamp or simple relu generic"
-                );
+        // 1. Confirm this op is a bf16 relu6 clamp (1-input or 3-input form)
+        //    or a simple bf16 relu.
+        arith::ConstantOp lowConst;
+        double lowVal = 0.0, highVal = 0.0;
+        bool isRelu6 = false;
+        if (succeeded(matchBF16ReluClampGeneric(clampOp, lowVal, highVal))) {
+            // 1-input relu6 form: bounds are inline arith.constant ops.
+            isRelu6 = true;
+        }
+        else if (succeeded(matchBF16ReluClampGeneric3Inputs(clampOp, lowVal, highVal))) {
+            // 3-input relu6 form: bounds come from tensor operands.
+            isRelu6 = true;
+        }
+        else if (!matchBF16SimpleReluGeneric(clampOp, lowConst)) {
+            return rewriter.notifyMatchFailure(
+                clampOp, "not a bf16 relu6 clamp or simple relu generic"
+            );
+        }
+        else {
+            // Simple relu: only lowVal is needed.
+            lowVal = cast<FloatAttr>(lowConst.getValue()).getValueAsDouble();
         }
 
-        // 2. Confirm the input comes from a truncf f32->bf16 generic.
+        // 2. Confirm the data input comes from a truncf f32->bf16 generic.
+        //    inputs()[0] is the data tensor in both the 1-input and 3-input forms.
         linalg::GenericOp truncfOp = matchTruncfF32ToBF16Generic(clampOp.getInputs()[0]);
         if (!truncfOp)
             return rewriter.notifyMatchFailure(
@@ -283,12 +376,10 @@ struct FuseReluClampWithTruncfPattern : public OpRewritePattern<linalg::GenericO
         Type bf16Type = rewriter.getBF16Type();
 
         // 4. Build f32 clamp bound constants (inserted just before the fused op).
-        double lowVal = cast<FloatAttr>(lowConst.getValue()).getValueAsDouble();
         Value f32LowConst =
             arith::ConstantOp::create(rewriter, loc, rewriter.getFloatAttr(f32Type, lowVal));
         Value f32HighConst;
         if (isRelu6) {
-            double highVal = cast<FloatAttr>(highConst.getValue()).getValueAsDouble();
             f32HighConst =
                 arith::ConstantOp::create(rewriter, loc, rewriter.getFloatAttr(f32Type, highVal));
         }

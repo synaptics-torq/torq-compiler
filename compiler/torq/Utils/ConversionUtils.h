@@ -267,6 +267,14 @@ createFConst(R &rewriter, T &op, ArrayRef<APFloat> values, llvm::ArrayRef<int64_
 // return a pair with the minimum and maximum value for the given type
 std::pair<int32_t, int32_t> getDTypeRange(Type type);
 
+/// Try to extract a scalar double value from a bf16 arith.constant Value.
+/// Handles three constant forms:
+///   1. Scalar bf16 constant:         arith.constant 0.0 : bf16       (FloatAttr)
+///   2. 0-d bf16 tensor constant:     arith.constant dense<0.0> : tensor<bf16>
+///   3. Rank-1 single-element tensor: arith.constant dense<0.0> : tensor<1xbf16>
+/// Returns true and writes \p out on success; returns false otherwise.
+bool extractBF16ConstantValue(Value v, double &out);
+
 std::vector<int32_t>
 interleave(const std::vector<int32_t> &a, const std::vector<int32_t> &b, bool broadcast_b = true);
 

@@ -45,6 +45,28 @@ std::pair<int32_t, int32_t> getDTypeRange(Type type) {
     return {std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()};
 }
 
+bool extractBF16ConstantValue(Value v, double &out) {
+    auto constOp = v.getDefiningOp<arith::ConstantOp>();
+    if (!constOp)
+        return false;
+    // Case 1: scalar bf16 float constant.
+    if (auto floatAttr = dyn_cast<FloatAttr>(constOp.getValue())) {
+        if (!floatAttr.getType().isBF16())
+            return false;
+        out = floatAttr.getValueAsDouble();
+        return true;
+    }
+    // Cases 2 & 3: dense bf16 tensor constant (0-d or single-element rank-1).
+    auto denseAttr = dyn_cast<DenseElementsAttr>(constOp.getValue());
+    if (!denseAttr || !denseAttr.isSplat())
+        return false;
+    auto tensorTy = dyn_cast<RankedTensorType>(denseAttr.getType());
+    if (!tensorTy || !tensorTy.getElementType().isBF16() || tensorTy.getNumElements() != 1)
+        return false;
+    out = denseAttr.getSplatValue<APFloat>().convertToDouble();
+    return true;
+}
+
 Value createZeroConstant(OpBuilder &b, Location loc, Type elemTy) {
     TypedAttr attr;
     if (isa<IndexType>(elemTy)) {
