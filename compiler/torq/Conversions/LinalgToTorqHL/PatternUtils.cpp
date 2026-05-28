@@ -449,6 +449,47 @@ MultiplierShiftInfo getMultiplierAndShift(
 // ^bb0(%in: i32, %out: i32):                     // linalg.generic (apply_scale)
 //   %2 = tosa.apply_scale %in, %cM_i32, %cS_i8 {double_round = true} : (i32, i32, i8) -> i32
 //   linalg.yield %2 : i32
+bool foldBackwardShapeCast(Value &value) {
+    if (!value.hasOneUse()) {
+        return false;
+    }
+    if (auto expandOp = value.getDefiningOp<tensor::ExpandShapeOp>()) {
+        value = expandOp.getSrc();
+        return true;
+    }
+    if (auto collapseOp = value.getDefiningOp<tensor::CollapseShapeOp>()) {
+        value = collapseOp.getSrc();
+        return true;
+    }
+    return false;
+}
+
+bool foldBackwardYieldOnlyGeneric(Value &value) {
+    if (!value.hasOneUse()) {
+        return false;
+    }
+    auto genericOp = value.getDefiningOp<linalg::GenericOp>();
+    if (!genericOp || genericOp.getInputs().size() != 1 || genericOp.getNumReductionLoops() > 0) {
+        return false;
+    }
+    auto &region = genericOp.getRegion();
+    if (!region.hasOneBlock()) {
+        return false;
+    }
+    auto &body = region.front();
+    auto yieldOp = dyn_cast<linalg::YieldOp>(body.getTerminator());
+    if (!yieldOp || yieldOp.getValues().size() != 1) {
+        return false;
+    }
+    // Body must be just `yield %in`: no payload computation, so the generic is a pure
+    // shape/broadcast copy of its single input.
+    if (yieldOp.getValues()[0] != body.getArgument(0)) {
+        return false;
+    }
+    value = genericOp.getInputs()[0];
+    return true;
+}
+
 bool foldBackwardRescale(Value &value, ScaleInfo &scaleInfo) {
     linalg::GenericOp rescaleOp = value.getDefiningOp<linalg::GenericOp>();
     if (!rescaleOp || rescaleOp.getInputs().size() != 1) {

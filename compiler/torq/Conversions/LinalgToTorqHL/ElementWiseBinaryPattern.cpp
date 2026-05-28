@@ -252,6 +252,130 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         return true;
     }
 
+    // After backward fold peeled shape casts and broadcasts, re-materialize the input at the
+    // add output shape. Handles two cases:
+    //   * a strict suffix match where only leading unit dims are missing (use expand_shape), and
+    //   * a broadcast where some output dims have no corresponding input axis (use a linalg
+    //     broadcast generalized to a linalg.generic so downstream tiling can fuse it).
+    bool alignInputToOutputShape(Value &input, Value output, PatternRewriter &rewriter) const {
+        auto outTy = cast<RankedTensorType>(output.getType());
+        auto inTy = cast<RankedTensorType>(input.getType());
+        if (inTy.getShape() == outTy.getShape()) {
+            return false;
+        }
+        if (inTy.getRank() > outTy.getRank() || inTy.getRank() == 0) {
+            return false;
+        }
+
+        ArrayRef<int64_t> inShape = inTy.getShape();
+        ArrayRef<int64_t> outShape = outTy.getShape();
+
+        // Right-align the input shape with the output shape; missing leading axes are treated
+        // as broadcast dimensions. Any axis that matches in size is preserved, axes where the
+        // input has size 1 and output has a larger size are also broadcast.
+        const int64_t outRank = outTy.getRank();
+        const int64_t inRank = inTy.getRank();
+        const int64_t leadingPad = outRank - inRank;
+        SmallVector<int64_t> broadcastDims;
+        SmallVector<int64_t> keptShape;
+        for (int64_t d = 0; d < outRank; ++d) {
+            int64_t inIdx = d - leadingPad;
+            if (inIdx < 0) {
+                broadcastDims.push_back(d);
+                continue;
+            }
+            int64_t inDim = inShape[inIdx];
+            int64_t outDim = outShape[d];
+            if (inDim == outDim) {
+                keptShape.push_back(inDim);
+            }
+            else if (inDim == 1) {
+                broadcastDims.push_back(d);
+            }
+            else {
+                return false;
+            }
+        }
+
+        if (broadcastDims.empty()) {
+            // Pure rank-padding (leading unit dims). Use a single expand_shape that folds the
+            // missing axes into the first input axis.
+            SmallVector<ReassociationIndices> reassociation;
+            ReassociationIndices first;
+            for (int64_t i = 0; i <= leadingPad; ++i) {
+                first.push_back(i);
+            }
+            reassociation.push_back(first);
+            for (int64_t i = leadingPad + 1; i < outRank; ++i) {
+                reassociation.push_back({i});
+            }
+            auto expandOp = tensor::ExpandShapeOp::create(
+                rewriter, input.getLoc(), outTy, input, reassociation
+            );
+            input = expandOp.getResult();
+            return true;
+        }
+
+        // Need to broadcast. linalg.broadcast expects an input whose rank equals output rank
+        // minus the number of broadcast dims, so squeeze the input to that rank first by
+        // dropping the broadcast positions that fall inside the input's current shape.
+        Value src = input;
+        if (static_cast<int64_t>(keptShape.size()) != inRank) {
+            auto squeezedTy = RankedTensorType::get(keptShape, inTy.getElementType());
+            SmallVector<ReassociationIndices> reassociation;
+            ReassociationIndices group;
+            int64_t inIdx = 0;
+            int64_t keptIdx = 0;
+            for (int64_t d = 0; d < outRank; ++d) {
+                int64_t srcIdx = d - leadingPad;
+                if (srcIdx < 0) {
+                    continue;
+                }
+                if (llvm::is_contained(broadcastDims, d)) {
+                    // Unit dim in input that broadcasts; fold into the previous kept axis,
+                    // or the next kept axis if there is no previous one.
+                    if (!group.empty() || keptIdx == 0) {
+                        group.push_back(inIdx);
+                    }
+                    else {
+                        reassociation.back().push_back(inIdx);
+                    }
+                    ++inIdx;
+                    continue;
+                }
+                group.push_back(inIdx);
+                reassociation.push_back(group);
+                group.clear();
+                ++inIdx;
+                ++keptIdx;
+            }
+            if (!group.empty()) {
+                if (reassociation.empty()) {
+                    reassociation.push_back(group);
+                }
+                else {
+                    reassociation.back().append(group.begin(), group.end());
+                }
+            }
+            if (static_cast<int64_t>(reassociation.size()) !=
+                static_cast<int64_t>(keptShape.size())) {
+                return false;
+            }
+            src = tensor::CollapseShapeOp::create(
+                      rewriter, input.getLoc(), squeezedTy, src, reassociation
+            )
+                      .getResult();
+        }
+
+        auto init =
+            tensor::EmptyOp::create(rewriter, input.getLoc(), outShape, inTy.getElementType());
+        auto bcastOp =
+            linalg::BroadcastOp::create(rewriter, input.getLoc(), src, init, broadcastDims);
+        auto generalized = linalg::generalizeNamedOp(rewriter, bcastOp);
+        input = succeeded(generalized) ? generalized->getResults()[0] : bcastOp.getResults()[0];
+        return true;
+    }
+
     EltwiseBinaryConvert(
         MLIRContext *context, int shift8b, int shift16b, OpType opType, bool markFuseGroups
     )
@@ -318,12 +442,17 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(eltOp, "Cannot fold forward scale/clamp");
         }
 
-        // Fold inputs rescale if present
+        // Fold inputs rescale if present (peel shape casts and broadcast wrappers so rescale
+        // chains are reachable). Upstream broadcast materialization can wrap a per-channel
+        // constant in expand_shape + yield-only broadcast linalg.generic; peeling through both
+        // lets foldBackwardRescale recover the original constant and capture its scale.
         ScaleInfo scaleInput0;
-        while (foldBackwardRescale(input0, scaleInput0)) {
+        while (foldBackwardShapeCast(input0) || foldBackwardYieldOnlyGeneric(input0) ||
+               foldBackwardRescale(input0, scaleInput0)) {
         }
         ScaleInfo scaleInput1;
-        while (foldBackwardRescale(input1, scaleInput1)) {
+        while (foldBackwardShapeCast(input1) || foldBackwardYieldOnlyGeneric(input1) ||
+               foldBackwardRescale(input1, scaleInput1)) {
         }
 
         // Compute scale and bias vectors
@@ -349,6 +478,8 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
         broadcastProcessing(input0, rewriter);
         broadcastProcessing(input1, rewriter);
+        alignInputToOutputShape(input0, output, rewriter);
+        alignInputToOutputShape(input1, output, rewriter);
 
         auto weight0 = doubleToInt<int16_t>(multiplier0 * scaleFactor);
         auto bias0 = -doubleToInt<int32_t>(multiplier0 * scaleFactor * scaleInput0.zp);

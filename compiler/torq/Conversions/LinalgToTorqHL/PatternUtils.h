@@ -169,6 +169,14 @@ Operation *getFuseGroupOutputOp(Operation *op, IntegerAttr fuseGroupAttr);
 // Update value to the input of the folded operations
 PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw = false);
 
+// Peel tensor.expand_shape / tensor.collapse_shape when this is the sole user.
+// Does not change ScaleInfo. Returns true if peeled.
+bool foldBackwardShapeCast(Value &value);
+
+// Peel a yield-only linalg.generic (a plain broadcast/copy with no payload op)
+// when this is the sole user. Does not change ScaleInfo. Returns true if peeled.
+bool foldBackwardYieldOnlyGeneric(Value &value);
+
 // Deduce scaling and zp by looking for a rescale backward
 // If a rescale is found, ScaleInfo information is adjusted accordingly
 // Update value to the input of the folded operations
