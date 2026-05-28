@@ -3,6 +3,7 @@ Django==6.0.4
 sqlparse==0.5.5
 uWSGI==2.0.31
 djangorestframework==3.16.1
+drf-spectacular==0.29.0
 
 # requests and its dependencies
 certifi==2026.1.4

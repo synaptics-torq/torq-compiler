@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TestCase, TestSession, TestRun
+from .models import TestCase, TestSession, TestRun, TestGroup
 
 
 class TestCaseSerializer(serializers.ModelSerializer):
@@ -40,3 +40,38 @@ class TestRunSerializer(serializers.ModelSerializer):
         model = TestRun
         fields = ['id', 'test_run_batch', 'test_case', 'profiling_data', 'outcome', 'failure_type', 'failure_log']
 
+
+class TestGroupListSerializer(serializers.ModelSerializer):    
+    details = serializers.HyperlinkedIdentityField(view_name='testgroup-detail', lookup_field='name')
+
+    class Meta:
+        model = TestGroup
+        fields = ['name', 'details']
+
+
+class TestGroupDetailSerializer(serializers.ModelSerializer):
+    test_cases = TestCaseSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = TestGroup
+        fields = ['name', 'test_cases']
+
+
+class TestGroupMetricsQuerySerializer(serializers.Serializer):
+    session_id = serializers.IntegerField(required=False)
+    git_commit = serializers.CharField(required=False, allow_blank=True)
+    git_branch = serializers.CharField(required=False, allow_blank=True)
+    runtime_target = serializers.CharField(required=False, allow_blank=True)
+    runtime_hw_type = serializers.CharField(required=False, allow_blank=True)
+    compiler_input = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        # Normalize blank query values so downstream code can treat them as unset.
+        for key in ['git_commit', 'git_branch', 'runtime_target', 'runtime_hw_type', 'compiler_input']:
+            if attrs.get(key) == '':
+                attrs[key] = None
+
+        if not any([attrs.get('session_id'), attrs.get('git_commit'), attrs.get('git_branch')]):
+            raise serializers.ValidationError('One of session_id, git_commit, or git_branch is required.')
+
+        return attrs

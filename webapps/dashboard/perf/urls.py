@@ -1,15 +1,20 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .api import TestCaseViewSet, TestSessionViewSet, TestRunViewSet
+from .api import TestCaseViewSet, TestSessionViewSet, TestRunViewSet, TestGroupViewSet
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+
 from . import views
 
 router = DefaultRouter()
 router.register(r'test-cases', TestCaseViewSet)
 router.register(r'test-sessions', TestSessionViewSet)
 router.register(r'test-runs', TestRunViewSet)
+router.register(r'test-groups', TestGroupViewSet)
 
 urlpatterns = [
     path('api/', include(router.urls)),
+    path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
+    path('api/schema/swagger-ui/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('health/', views.health, name='health'),
     path('main-branch-test-trends/', views.main_branch_test_trends, name='main_branch_test_trends'),
     path('test-sessions/<int:session_id>/', views.test_session, name='test_session'),

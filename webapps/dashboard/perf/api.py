@@ -10,8 +10,12 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
 from django.db.models import Count, Q
-from .models import TestCase, TestSession, TestRun, TestRunBatch
-from .serializers import TestCaseSerializer, TestSessionSerializer, TestRunSerializer
+from drf_spectacular.utils import extend_schema, OpenApiParameter, inline_serializer
+from drf_spectacular.openapi import OpenApiTypes
+from rest_framework import serializers
+from .models import TestCase, TestSession, TestRun, TestRunBatch, TestGroup
+from .serializers import TestCaseSerializer, TestSessionSerializer, TestRunSerializer, TestGroupDetailSerializer, TestGroupListSerializer
+from . import queries
 from .processing import process_uploaded_zip
 
 
@@ -21,7 +25,7 @@ class StandardResultsSetPagination(PageNumberPagination):
     max_page_size = 1000
 
 
-class TestCaseViewSet(viewsets.ModelViewSet):
+class TestCaseViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = TestCase.objects.all()
     serializer_class = TestCaseSerializer
     pagination_class = StandardResultsSetPagination
@@ -31,7 +35,104 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     ordering = ['module', 'name', 'parameters', 'id']
 
 
-class TestSessionViewSet(viewsets.ModelViewSet):
+class TestGroupViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = TestGroup.objects.all()
+    lookup_field = 'name'
+    
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return TestGroupListSerializer
+        return TestGroupDetailSerializer
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter('session_id', OpenApiTypes.INT, OpenApiParameter.QUERY, description='ID of the test session.'),
+            OpenApiParameter('git_commit', OpenApiTypes.STR, OpenApiParameter.QUERY, description='Git commit hash; resolves to the most recent session for that commit.'),
+            OpenApiParameter('git_branch', OpenApiTypes.STR, OpenApiParameter.QUERY, description='Git branch name; resolves to the most recent session on that branch.'),
+            OpenApiParameter('runtime_target', OpenApiTypes.STR, OpenApiParameter.QUERY, required=False, description='Filter by runtime target name.'),
+            OpenApiParameter('runtime_hw_type', OpenApiTypes.STR, OpenApiParameter.QUERY, required=False, description='Filter by runtime hardware type.'),
+            OpenApiParameter('compiler_input', OpenApiTypes.STR, OpenApiParameter.QUERY, required=False, description='Filter by compiler input identifier.'),
+        ],
+        responses={
+            200: inline_serializer(
+                name='MetricRow',
+                fields={
+                    'compiler_input': serializers.CharField(allow_null=True),
+                    'node_id': serializers.CharField(),
+                    'total_duration': serializers.FloatField(),
+                    'normalized_duration': serializers.FloatField(allow_null=True),
+                    'test_run_id': serializers.IntegerField(),
+                    'runtime': serializers.CharField(allow_null=True),
+                    'runtime_target': serializers.CharField(allow_null=True),
+                    'runtime_hw_type': serializers.CharField(allow_null=True),
+                    'git_branch': serializers.CharField(allow_null=True),
+                    'git_commit': serializers.CharField(allow_null=True),
+                    'inference_frequency': serializers.FloatField(allow_null=True),
+                    'memory_bandwidth': serializers.FloatField(allow_null=True),
+                    'cache_size': serializers.IntegerField(allow_null=True),
+                },
+                many=True,
+            ),
+            400: inline_serializer(
+                name='MetricsErrorResponse',
+                fields={'detail': serializers.CharField()},
+            ),
+            404: inline_serializer(
+                name='MetricsNotFoundResponse',
+                fields={'detail': serializers.CharField()},
+            ),
+        },
+        summary='Get performance metrics for a test group',
+        description=(
+            'Returns total_duration measurements for all test cases in the group for the '
+            'resolved session. Exactly one of session_id, git_commit, or git_branch must '
+            'be provided. Optional filters narrow results by runtime_target, runtime_hw_type, '
+            'and compiler_input.'
+        ),
+    )
+    @action(detail=True, methods=['get'])
+    def metrics(self, request, name=None):
+        session_id = request.query_params.get('session_id') or None
+        commit_id = request.query_params.get('git_commit') or None
+        branch_name = request.query_params.get('git_branch') or None
+        runtime_target = request.query_params.get('runtime_target') or None
+        runtime_hw_type = request.query_params.get('runtime_hw_type') or None
+        compiler_input = request.query_params.get('compiler_input') or None
+
+        if not any([session_id, commit_id, branch_name]):
+            return Response(
+                {'detail': 'One of session_id, commit_id, or branch_name is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if session_id is not None:
+            try:
+                session_id = int(session_id)
+            except (TypeError, ValueError):
+                return Response({'detail': 'session_id must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+        elif commit_id is not None:
+            session = TestSession.objects.filter(git_commit=commit_id).order_by('-timestamp').first()
+            if session is None:
+                return Response({'detail': f'No session found for commit_id {commit_id!r}.'}, status=status.HTTP_404_NOT_FOUND)
+            session_id = session.id
+        else:
+            session = TestSession.objects.filter(git_branch=branch_name).order_by('-timestamp').first()
+            if session is None:
+                return Response({'detail': f'No session found for branch_name {branch_name!r}.'}, status=status.HTTP_404_NOT_FOUND)
+            session_id = session.id
+
+        test_group = self.get_object()
+        payload = queries.test_case_summary.query_test_durations(
+            [session_id],
+            group_name=test_group.name,
+            runtime_target=runtime_target,
+            runtime_hw_type=runtime_hw_type,
+            compiler_input=compiler_input,
+        )
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class TestSessionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = TestSession.objects.annotate(
         num_total=Count('testrunbatch__testrun'),
         num_passed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.PASS)),
@@ -146,7 +247,7 @@ class TestSessionViewSet(viewsets.ModelViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
         
 
-class TestRunViewSet(viewsets.ModelViewSet):
+class TestRunViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = TestRun.objects.all()
     serializer_class = TestRunSerializer
     pagination_class = StandardResultsSetPagination

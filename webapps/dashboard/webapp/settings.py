@@ -66,8 +66,20 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'drf_spectacular',
     'perf'
 ]
+
+REST_FRAMEWORK = { 
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Torq Dashboard API',
+    'DESCRIPTION': 'API for the Torq performance dashboard, providing access to test sessions, test runs, and related metrics.',
+    'VERSION': '0.0.1',
+    'SERVE_INCLUDE_SCHEMA': False    
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
