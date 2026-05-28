@@ -7,6 +7,7 @@
 #include "PassesDetail.h"
 #include "torq/Codegen/BufferizationUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Utils/MemoryUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -23,8 +24,69 @@ namespace mlir::syna::torq {
 
 namespace {
 
+bool isStaticSubview(memref::SubViewOp subviewOp) {
+    return subviewOp.getOffsets().empty() && subviewOp.getSizes().empty() &&
+           subviewOp.getStrides().empty();
+}
+
+bool isIdentityReinterpretCast(memref::ReinterpretCastOp reinterpretOp) {
+    auto resultType = reinterpretOp.getType();
+    if (!resultType.hasStaticShape())
+        return false;
+
+    auto offsets = reinterpretOp.getStaticOffsets();
+    auto sizes = reinterpretOp.getStaticSizes();
+    auto strides = reinterpretOp.getStaticStrides();
+    if (offsets.size() != 1 || offsets[0] != 0)
+        return false;
+    if (!llvm::equal(sizes, resultType.getShape()))
+        return false;
+    return llvm::equal(strides, mlir::computeStrides(resultType.getShape()));
+}
+
+bool isSplittableDerivedMemRefOperation(Operation *op) {
+    if (!isDerivedMemRefOperation(op))
+        return false;
+
+    if (auto subviewOp = dyn_cast<memref::SubViewOp>(op))
+        return isStaticSubview(subviewOp);
+
+    if (auto reinterpretOp = dyn_cast<memref::ReinterpretCastOp>(op))
+        return isIdentityReinterpretCast(reinterpretOp);
+
+    return true;
+}
+
+bool hasOnlySplittableUses(syna::torq_hl::ConstOp constOp) {
+    for (Operation *user : constOp->getUsers()) {
+        if (isSplittableDerivedMemRefOperation(user) &&
+            getDerivedMemRefBase(user).get() == constOp.getResult())
+            continue;
+
+        return false;
+    }
+    return true;
+}
+
+FailureOr<syna::torq_hl::ConstOp> reshapeConstant(
+    PatternRewriter &rewriter, Location loc, syna::torq_hl::ConstOp constOp, MemRefType resultType
+) {
+    if (!resultType.hasStaticShape())
+        return failure();
+
+    auto denseAttr = cast<DenseElementsAttr>(constOp.getValue());
+    if (denseAttr.getNumElements() != resultType.getNumElements())
+        return failure();
+
+    auto reshapedAttr = DenseElementsAttr::get(
+        RankedTensorType::get(resultType.getShape(), resultType.getElementType()),
+        llvm::to_vector(denseAttr.getValues<Attribute>())
+    );
+    return syna::torq_hl::ConstOp::create(rewriter, loc, resultType, reshapedAttr);
+}
+
 // Slices a constant memref based on the subview parameters and returns a new flat ConstOp.
-static syna::torq_hl::ConstOp sliceConstant(
+FailureOr<syna::torq_hl::ConstOp> sliceConstant(
     PatternRewriter &rewriter, Location loc, syna::torq_hl::ConstOp constOp,
     memref::SubViewOp subviewOp
 ) {
@@ -67,22 +129,77 @@ static syna::torq_hl::ConstOp sliceConstant(
     return syna::torq_hl::ConstOp::create(rewriter, loc, flatResultType, slicedAttr);
 }
 
+MemRefType getDenseMemRefType(Type type) {
+    auto memRefType = cast<MemRefType>(type);
+    return MemRefType::get(memRefType.getShape(), memRefType.getElementType());
+}
+
+FailureOr<syna::torq_hl::ConstOp> foldDerivedMemRefConstant(
+    PatternRewriter &rewriter, Operation *op, syna::torq_hl::ConstOp constOp
+) {
+    if (auto subviewOp = dyn_cast<memref::SubViewOp>(op)) {
+        if (!isStaticSubview(subviewOp))
+            return failure();
+        return sliceConstant(rewriter, subviewOp.getLoc(), constOp, subviewOp);
+    }
+
+    if (auto reinterpretOp = dyn_cast<memref::ReinterpretCastOp>(op)) {
+        if (!isIdentityReinterpretCast(reinterpretOp))
+            return failure();
+        return reshapeConstant(
+            rewriter, op->getLoc(), constOp, getDenseMemRefType(reinterpretOp.getType())
+        );
+    }
+
+    if (auto memorySpaceCastOp = dyn_cast<memref::MemorySpaceCastOp>(op))
+        return reshapeConstant(
+            rewriter, op->getLoc(), constOp, cast<MemRefType>(memorySpaceCastOp.getType())
+        );
+
+    if (isa<memref::CollapseShapeOp, memref::ExpandShapeOp, memref::ReshapeOp>(op))
+        return reshapeConstant(
+            rewriter, op->getLoc(), constOp, getDenseMemRefType(op->getResult(0).getType())
+        );
+
+    return failure();
+}
+
 // Replaces the uses of oldVal with newVal and propagates type changes.
-static void replaceUsesAndPropagateType(Value oldVal, Value newVal, PatternRewriter &rewriter) {
+void replaceUsesAndPropagateType(Value oldVal, Value newVal, PatternRewriter &rewriter) {
     for (auto &use : llvm::make_early_inc_range(oldVal.getUses())) {
         Operation *owner = use.getOwner();
 
+        if (isSplittableDerivedMemRefOperation(owner) && &use == &getDerivedMemRefBase(owner)) {
+            rewriter.setInsertionPoint(owner);
+            auto constOp = newVal.getDefiningOp<syna::torq_hl::ConstOp>();
+            if (constOp) {
+                auto foldedConst = foldDerivedMemRefConstant(rewriter, owner, constOp);
+                if (succeeded(foldedConst)) {
+                    replaceUsesAndPropagateType(
+                        owner->getResult(0), foldedConst->getResult(), rewriter
+                    );
+                    rewriter.eraseOp(owner);
+                    continue;
+                }
+            }
+        }
+
         if (auto subviewUser = dyn_cast<memref::SubViewOp>(owner)) {
+            if (&use != &subviewUser.getSourceMutable()) {
+                rewriter.modifyOpInPlace(owner, [&]() { use.set(newVal); });
+                continue;
+            }
+
             rewriter.setInsertionPoint(subviewUser);
             auto constOp = newVal.getDefiningOp<syna::torq_hl::ConstOp>();
-            bool isStatic = subviewUser.getOffsets().empty() && subviewUser.getSizes().empty() &&
-                            subviewUser.getStrides().empty();
 
-            if (constOp && isStatic) {
+            if (constOp && isStaticSubview(subviewUser)) {
                 auto foldedConst =
                     sliceConstant(rewriter, subviewUser.getLoc(), constOp, subviewUser);
+                if (failed(foldedConst))
+                    continue;
                 replaceUsesAndPropagateType(
-                    subviewUser.getResult(), foldedConst.getResult(), rewriter
+                    subviewUser.getResult(), foldedConst->getResult(), rewriter
                 );
                 rewriter.eraseOp(subviewUser);
                 continue;
@@ -98,28 +215,12 @@ static void replaceUsesAndPropagateType(Value oldVal, Value newVal, PatternRewri
         }
 
         if (auto collapseUser = dyn_cast<memref::CollapseShapeOp>(owner)) {
-            rewriter.setInsertionPoint(collapseUser);
-            auto constOp = newVal.getDefiningOp<syna::torq_hl::ConstOp>();
-            if (constOp) {
-                auto denseAttr = cast<DenseElementsAttr>(constOp.getValue());
-                auto collapsedType = MemRefType::get(
-                    cast<MemRefType>(collapseUser.getType()).getShape(),
-                    cast<MemRefType>(constOp.getType()).getElementType()
-                );
-                auto collapsedAttr = DenseElementsAttr::get(
-                    RankedTensorType::get(collapsedType.getShape(), collapsedType.getElementType()),
-                    llvm::to_vector(denseAttr.getValues<Attribute>())
-                );
-                auto foldedConst = syna::torq_hl::ConstOp::create(
-                    rewriter, collapseUser.getLoc(), collapsedType, collapsedAttr
-                );
-                replaceUsesAndPropagateType(
-                    collapseUser.getResult(), foldedConst.getResult(), rewriter
-                );
-                rewriter.eraseOp(collapseUser);
+            if (&use != &collapseUser.getSrcMutable()) {
+                rewriter.modifyOpInPlace(owner, [&]() { use.set(newVal); });
                 continue;
             }
 
+            rewriter.setInsertionPoint(collapseUser);
             auto oldResultType = cast<MemRefType>(collapseUser.getType());
             auto newResultType =
                 MemRefType::get(oldResultType.getShape(), oldResultType.getElementType());
@@ -136,8 +237,12 @@ static void replaceUsesAndPropagateType(Value oldVal, Value newVal, PatternRewri
         }
 
         if (auto expandUser = dyn_cast<memref::ExpandShapeOp>(owner)) {
-            rewriter.setInsertionPoint(expandUser);
+            if (&use != &expandUser.getSrcMutable()) {
+                rewriter.modifyOpInPlace(owner, [&]() { use.set(newVal); });
+                continue;
+            }
 
+            rewriter.setInsertionPoint(expandUser);
             auto oldResultType = cast<MemRefType>(expandUser.getType());
             auto newResultType =
                 MemRefType::get(oldResultType.getShape(), oldResultType.getElementType());
@@ -148,6 +253,59 @@ static void replaceUsesAndPropagateType(Value oldVal, Value newVal, PatternRewri
             replaceUsesAndPropagateType(expandUser.getResult(), newExpand.getResult(), rewriter);
             rewriter.eraseOp(expandUser);
 
+            continue;
+        }
+
+        if (auto reinterpretUser = dyn_cast<memref::ReinterpretCastOp>(owner)) {
+            if (&use != &reinterpretUser.getSourceMutable()) {
+                rewriter.modifyOpInPlace(owner, [&]() { use.set(newVal); });
+                continue;
+            }
+
+            rewriter.setInsertionPoint(reinterpretUser);
+            auto newReinterpret = memref::ReinterpretCastOp::create(
+                rewriter, reinterpretUser.getLoc(), reinterpretUser.getType(), newVal,
+                reinterpretUser.getOffsets(), reinterpretUser.getSizes(),
+                reinterpretUser.getStrides(), reinterpretUser.getStaticOffsets(),
+                reinterpretUser.getStaticSizes(), reinterpretUser.getStaticStrides()
+            );
+            replaceUsesAndPropagateType(
+                reinterpretUser.getResult(), newReinterpret.getResult(), rewriter
+            );
+            rewriter.eraseOp(reinterpretUser);
+            continue;
+        }
+
+        if (auto memorySpaceCastUser = dyn_cast<memref::MemorySpaceCastOp>(owner)) {
+            if (&use != &memorySpaceCastUser.getSourceMutable()) {
+                rewriter.modifyOpInPlace(owner, [&]() { use.set(newVal); });
+                continue;
+            }
+
+            rewriter.setInsertionPoint(memorySpaceCastUser);
+            auto newMemorySpaceCast = memref::MemorySpaceCastOp::create(
+                rewriter, memorySpaceCastUser.getLoc(), memorySpaceCastUser.getType(), newVal
+            );
+            replaceUsesAndPropagateType(
+                memorySpaceCastUser.getResult(), newMemorySpaceCast.getResult(), rewriter
+            );
+            rewriter.eraseOp(memorySpaceCastUser);
+            continue;
+        }
+
+        if (auto reshapeUser = dyn_cast<memref::ReshapeOp>(owner)) {
+            if (&use != &reshapeUser.getSourceMutable()) {
+                rewriter.modifyOpInPlace(owner, [&]() { use.set(newVal); });
+                continue;
+            }
+
+            rewriter.setInsertionPoint(reshapeUser);
+            auto newReshape = memref::ReshapeOp::create(
+                rewriter, reshapeUser.getLoc(), getDenseMemRefType(reshapeUser.getType()), newVal,
+                reshapeUser.getShape()
+            );
+            replaceUsesAndPropagateType(reshapeUser.getResult(), newReshape.getResult(), rewriter);
+            rewriter.eraseOp(reshapeUser);
             continue;
         }
 
@@ -178,28 +336,93 @@ struct SplitConstSubView : OpRewritePattern<memref::SubViewOp> {
         if (!constOp)
             return failure();
 
-        if (!subviewOp.getOffsets().empty() || !subviewOp.getSizes().empty() ||
-            !subviewOp.getStrides().empty()) {
+        if (!isStaticSubview(subviewOp)) {
+            return failure();
+        }
+
+        if (!hasOnlySplittableUses(constOp)) {
             return failure();
         }
 
         auto newConst = sliceConstant(rewriter, subviewOp.getLoc(), constOp, subviewOp);
-        if (!newConst)
+        if (failed(newConst))
             return failure();
 
-        replaceUsesAndPropagateType(subviewOp.getResult(), newConst.getResult(), rewriter);
+        replaceUsesAndPropagateType(subviewOp.getResult(), newConst->getResult(), rewriter);
         rewriter.eraseOp(subviewOp);
         return success();
     }
 };
 
+struct SplitConstCollapseShape : OpRewritePattern<memref::CollapseShapeOp> {
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(memref::CollapseShapeOp collapseOp, PatternRewriter &rewriter) const override {
+        auto constOp = collapseOp.getSrc().getDefiningOp<syna::torq_hl::ConstOp>();
+        if (!constOp)
+            return failure();
+
+        if (!hasOnlySplittableUses(constOp))
+            return failure();
+
+        auto newConst = reshapeConstant(
+            rewriter, collapseOp.getLoc(), constOp, getDenseMemRefType(collapseOp.getType())
+        );
+        if (failed(newConst))
+            return failure();
+
+        replaceUsesAndPropagateType(collapseOp.getResult(), newConst->getResult(), rewriter);
+        rewriter.eraseOp(collapseOp);
+        return success();
+    }
+};
+
+struct SplitConstDerivedMemRef : RewritePattern {
+    SplitConstDerivedMemRef(MLIRContext *context)
+        : RewritePattern(MatchAnyOpTypeTag(), /*benefit=*/1, context) {}
+
+    LogicalResult matchAndRewrite(Operation *op, PatternRewriter &rewriter) const override {
+        if (isa<memref::SubViewOp, memref::CollapseShapeOp>(op) ||
+            !isSplittableDerivedMemRefOperation(op) || op->getNumResults() != 1)
+            return failure();
+
+        auto constOp = getDerivedMemRefBase(op).get().getDefiningOp<syna::torq_hl::ConstOp>();
+        if (!constOp)
+            return failure();
+
+        if (!hasOnlySplittableUses(constOp))
+            return failure();
+
+        auto newConst = foldDerivedMemRefConstant(rewriter, op, constOp);
+        if (failed(newConst))
+            return failure();
+
+        replaceUsesAndPropagateType(op->getResult(0), newConst->getResult(), rewriter);
+        rewriter.eraseOp(op);
+        return success();
+    }
+};
+
+void eraseDeadConstants(FunctionOpInterface funcOp) {
+    SmallVector<syna::torq_hl::ConstOp> deadConstants;
+    funcOp.walk([&](syna::torq_hl::ConstOp constOp) {
+        if (constOp->use_empty())
+            deadConstants.push_back(constOp);
+    });
+    for (auto constOp : deadConstants)
+        constOp.erase();
+}
+
 struct SplitConstantsPass : public impl::SplitConstantsBase<SplitConstantsPass> {
     void runOnOperation() override {
         auto funcOp = getOperation();
         RewritePatternSet patterns(funcOp->getContext());
-        patterns.add<SplitConstSubView>(funcOp->getContext());
-        // TODO: add a pattern for "%0 = torq_hl.const ...; %1 = memref.collapse_shape %0"
+        patterns.add<SplitConstSubView, SplitConstCollapseShape, SplitConstDerivedMemRef>(
+            funcOp->getContext()
+        );
         (void)applyPatternsGreedily(funcOp, std::move(patterns));
+        eraseDeadConstants(funcOp);
     }
 };
 
