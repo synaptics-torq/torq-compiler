@@ -1,7 +1,4 @@
-"""
-Fixtures and utilities for testing ONNX models.
-"""
-
+import copy as _copy
 import json
 from dataclasses import dataclass
 import subprocess
@@ -13,7 +10,7 @@ import numpy as np
 import onnx
 import onnxruntime
 import pytest
-from onnx import helper, numpy_helper, shape_inference, TensorProto
+from onnx import helper, numpy_helper, shape_inference, TensorProto, AttributeProto
 
 from torq.testing.cases import Case
 from torq.testing.hf import get_hf_model_file
@@ -27,6 +24,28 @@ from .versioned_fixtures import (
     VersionedUncachedData,
 )
 
+"""
+Fixtures and utilities for testing ONNX models.
+"""
+#
+# File structure ----------------------------------------------------------
+#   Classes              ModelWithMetadata, OnnxLayerCase
+#   pytest hooks         pytest_addoption
+#   Node / name utils    _source_node_name, _format_layer_node_name
+#   Model signature      _vi_dtype_shape .. model_signature
+#   Shape helpers        _has_dynamic_dims, _get_static_shape, _set_static_dims
+#   ONNX attr helpers    _get_attr_i, _get_attr_ints, _get_attr_tensor
+#   Value-info helper    _make_value_info_from_initializer
+#   Tensor folding       _CAST_DTYPE .. _make_tensor_folder
+#   Core extraction      _build_model_from_node_subset
+#   Layer extraction     generate_onnx_layers_from_model, extract_onnx_subgraph
+#   Model loading        get_full_model
+#   BF16 conversion      _float32_to_bfloat16 .. convert_fp32_to_bf16
+#   Pytest fixtures      onnx_model, onnx_model_file, ...
+#
+
+
+# ---- Classes ----
 
 class ModelWithMetadata:
     """Wrapper for ONNX model with metadata like node_index.
@@ -56,6 +75,8 @@ class OnnxLayerCase(Case):
     is_full_model: bool = False
 
 
+# ---- pytest hooks ----
+
 def pytest_addoption(parser):
     parser.addoption(
         "--onnx-print-layer-info",
@@ -64,6 +85,8 @@ def pytest_addoption(parser):
         help="Print original ONNX node names for generated ONNX layer tests during setup",
     )
 
+
+# ---- Node / name utilities ----
 
 def _source_node_name(node, node_index):
     if node.name:
@@ -83,6 +106,8 @@ def _format_layer_node_name(case: OnnxLayerCase) -> str:
     label = "nodes" if " -> " in case.node_name else "node"
     return f"ONNX {label}: {case.node_name}"
 
+
+# ---- Model signature ----
 
 def _vi_dtype_shape(vi):
     try:
@@ -137,6 +162,440 @@ def model_signature(model):
     return [inputs, outputs, len(list(graph.node)), [n.op_type for n in graph.node], inits]
 
 
+
+# ---- Shape helpers -- used by extraction and propagation ----
+
+def _has_dynamic_dims(tt):
+    """Return True if the tensor_type has any dimension that is dynamic."""
+    if not tt.shape.dim:
+        return False
+    return any(
+        (d.dim_value == 0 and not d.dim_param) or d.dim_param
+        for d in tt.shape.dim
+    )
+
+
+def _get_static_shape(tt):
+    """Return list of dim_values if all dims are static, otherwise None."""
+    if not tt.shape.dim:
+        return None
+    dims = []
+    for d in tt.shape.dim:
+        if d.dim_value > 0 or (d.dim_value == 0 and not d.dim_param):
+            dims.append(d.dim_value)
+        else:
+            return None
+    return dims
+
+
+def _set_static_dims(vi, shape):
+    """Copy a list of static dims into a value_info.
+
+    Respects the protobuf oneof: setting dim_value on each dim
+    automatically clears any dim_param, avoiding the foot-gun where
+    setting dim_param (even to '') silently clears dim_value.
+    """
+    tt = vi.type.tensor_type
+    if not tt.shape.dim:
+        del tt.shape.dim[:]
+        for s in shape:
+            tt.shape.dim.add().dim_value = s
+    else:
+        for i, s in enumerate(shape):
+            if i < len(tt.shape.dim):
+                tt.shape.dim[i].dim_value = s
+
+
+# ---- ONNX attribute helpers ----
+
+def _get_attr_i(node, name, default=None):
+    """Extract an int attribute from an ONNX node, or *default*."""
+    for attr in node.attribute:
+        if attr.name == name:
+            return attr.i
+    return default
+
+
+def _get_attr_ints(node, name):
+    """Extract an 'ints' attribute as a Python list, or None."""
+    for attr in node.attribute:
+        if attr.name == name:
+            return list(attr.ints)
+    return None
+
+
+def _get_attr_tensor(node, name):
+    """Extract a tensor attribute as a numpy array, or None."""
+    for attr in node.attribute:
+        if attr.name == name and attr.type == AttributeProto.TENSOR:
+            return numpy_helper.to_array(attr.t)
+    return None
+
+
+# ---- Value-info helper (used by extraction) ----
+
+def _make_value_info_from_initializer(init):
+    """Synthesize a value_info for an initializer with its concrete shape."""
+    try:
+        arr = numpy_helper.to_array(init)
+        return helper.make_tensor_value_info(init.name, init.data_type, list(arr.shape))
+    except Exception:
+        return helper.make_tensor_value_info(init.name, TensorProto.FLOAT, [])
+
+
+# ---- Tensor-folding (evaluates shape-producing ONNX subgraphs) ----
+
+_CAST_DTYPE = {
+    TensorProto.INT64:    np.int64,
+    TensorProto.INT32:    np.int32,
+    TensorProto.FLOAT:    np.float32,
+    TensorProto.BFLOAT16: np.float16,
+}
+
+
+def _get_axes(node, _fold):
+    """Resolve Unsqueeze/Squeeze axes from input tensor or attribute."""
+    axes = _fold(node.input[1]) if len(node.input) > 1 else None
+    if axes is not None:
+        return [int(a) for a in np.atleast_1d(axes)]
+    return _get_attr_ints(node, 'axes')
+
+
+def _fold_binary(node, _fold, op):
+    """Fold Mul or Equal: recursively evaluate both inputs, apply elementwise op."""
+    a = _fold(node.input[0])
+    b = _fold(node.input[1])
+    if a is None or b is None:
+        return None
+    return op(a, b)
+
+
+# Per-op folding handlers
+# Each takes (producer_node, fold_fn, cache) -> np.ndarray | None.
+# *fold_fn* is a callable that recursively folds a tensor name; it is
+# produced by _make_tensor_folder() below and carries the extraction
+# context (constant_tensors, initializers, full graph nodes).
+
+def _fold_Shape(node, _fold, lookup_vi):
+    """Fold Shape op: resolve dims from value_info."""
+    vi = lookup_vi(node.input[0])
+    if vi is None:
+        return None
+    dims = _get_static_shape(vi.type.tensor_type)
+    return np.array(dims, dtype=np.int64) if dims is not None else None
+
+
+def _fold_Slice(node, _fold):
+    """Apply numpy slicing with negative-index handling."""
+    data = _fold(node.input[0])
+    starts = _fold(node.input[1])
+    ends = _fold(node.input[2])
+    if data is None or starts is None or ends is None:
+        return None
+    axes  = _fold(node.input[3]) if len(node.input) > 3 and node.input[3] else None
+    steps = _fold(node.input[4]) if len(node.input) > 4 and node.input[4] else None
+
+    starts, ends = np.atleast_1d(starts, ends)
+    axes  = np.atleast_1d(axes)  if axes  is not None else np.arange(len(starts))
+    steps = np.atleast_1d(steps) if steps is not None else np.ones(len(starts), dtype=int)
+
+    slices = [slice(None)] * data.ndim
+    for i in range(len(starts)):
+        ax = int(axes[i])
+        st, en, sp = int(starts[i]), int(ends[i]), int(steps[i])
+        ax += data.ndim if ax < 0 else 0
+        st += data.shape[ax] if st < 0 else 0
+        en += data.shape[ax] if en < 0 else 0
+        slices[ax] = slice(st, en, sp)
+    return data[tuple(slices)]
+
+
+def _fold_Concat(node, _fold):
+    """np.concatenate all inputs along axis attr."""
+    inputs = [_fold(inp) for inp in node.input]
+    return np.concatenate(inputs, axis=_get_attr_i(node, 'axis', 0)) if all(x is not None for x in inputs) else None
+
+
+def _fold_Gather(node, _fold):
+    """np.take along axis attr."""
+    data, indices = _fold(node.input[0]), _fold(node.input[1])
+    return np.take(data, indices, axis=_get_attr_i(node, 'axis', 0)) if data is not None and indices is not None else None
+
+
+def _fold_Unsqueeze(node, _fold):
+    """Insert size-1 dims (sorted reverse to avoid index drift)."""
+    data, axes = _fold(node.input[0]), _get_axes(node, _fold)
+    if data is None or axes is None:
+        return None
+    for ax in sorted(axes, reverse=True):
+        data = np.expand_dims(data, axis=ax + data.ndim + 1 if ax < 0 else ax)
+    return data
+
+
+def _fold_Squeeze(node, _fold):
+    """Remove size-1 dims (sorted reverse); no axes = squeeze all."""
+    data, axes = _fold(node.input[0]), _get_axes(node, _fold)
+    if data is None:
+        return None
+    if axes is None:
+        return np.squeeze(data)
+    for ax in sorted(axes, reverse=True):
+        data = np.squeeze(data, axis=ax + data.ndim if ax < 0 else ax)
+    return data
+
+
+def _fold_Cast(node, _fold):
+    """Cast folded data to the dtype from to-attribute (`_CAST_DTYPE` map)."""
+    data = _fold(node.input[0])
+    if data is None:
+        return None
+    to_type = _get_attr_i(node, 'to')
+    dtype = _CAST_DTYPE.get(to_type)
+    return data.astype(dtype) if dtype else data
+
+
+def _fold_ConstantOfShape(node, _fold):
+    """Fill a shape (folded from input[0]) with the value-attribute scalar."""
+    shape = _fold(node.input[0])
+    if shape is None:
+        return None
+    shape = np.atleast_1d(shape).astype(np.int64)
+    val = _get_attr_tensor(node, 'value')
+    fill_val   = val.flatten()[0] if val is not None else 0
+    fill_dtype = val.dtype           if val is not None else np.float32
+    return np.full(shape, fill_val, dtype=fill_dtype)
+
+
+def _fold_Reshape(node, _fold):
+    """np.reshape to shape from input[1]."""
+    data, shape = _fold(node.input[0]), _fold(node.input[1])
+    return np.reshape(data, np.atleast_1d(shape).astype(np.int64)) if data is not None and shape is not None else None
+
+
+def _fold_Transpose(node, _fold):
+    """np.transpose with optional perm attr; default = reverse all dims."""
+    data, perm = _fold(node.input[0]), _get_attr_ints(node, 'perm')
+    return np.transpose(data, axes=perm if perm else None) if data is not None else None
+
+
+def _fold_Where(node, _fold):
+    """np.where(cond, x, y) with all three folded recursively."""
+    cond, x, y = _fold(node.input[0]), _fold(node.input[1]), _fold(node.input[2])
+    return np.where(cond, x, y) if cond is not None and x is not None and y is not None else None
+
+
+# Base dispatch table -- everything except Shape (which needs a local
+# value_info lookup that varies per extraction).
+# Set of op types that can be constant-folded
+FOLDABLE_OP_TYPES = frozenset([
+    'Constant', 'Shape', 'Slice', 'Concat', 'Gather', 'Unsqueeze',
+    'Squeeze', 'Cast', 'ConstantOfShape', 'Reshape', 'Transpose',
+    'Mul', 'Equal', 'Where', 'Add', 'Sub', 'Div',
+])
+
+_FOLD_BASE = {
+    'Slice':           _fold_Slice,
+    'Concat':          _fold_Concat,
+    'Gather':          _fold_Gather,
+    'Unsqueeze':       _fold_Unsqueeze,
+    'Squeeze':         _fold_Squeeze,
+    'Cast':            _fold_Cast,
+    'ConstantOfShape': _fold_ConstantOfShape,
+    'Reshape':         _fold_Reshape,
+    'Transpose':       _fold_Transpose,
+    'Mul':             lambda n, f: _fold_binary(n, f, np.multiply),
+    'Equal':           lambda n, f: _fold_binary(n, f, np.equal),
+    'Where':           _fold_Where,
+}
+
+
+def _make_tensor_folder(*, constant_tensors, orig_initializers, all_nodes, fold_table):
+    """Return a fold_fn(name=None) that evaluates shape subgraphs.
+
+    The returned closure captures the extraction context so that the
+    per-op handlers (which are pure module-level functions) stay
+    independent of any particular model instance.
+    """
+    def _try_fold(name, _cache=None):
+        """Fold tensor *name* recursively; caches results in _cache."""
+        if _cache is None:
+            _cache = {}
+        if name in _cache:
+            return _cache[name]
+        if name in constant_tensors:
+            return numpy_helper.to_array(constant_tensors[name])
+        if name in orig_initializers:
+            return numpy_helper.to_array(orig_initializers[name])
+
+        producer = None
+        for n in all_nodes:
+            if name in n.output:
+                producer = n
+                break
+        if producer is None:
+            return None
+
+        handler = fold_table.get(producer.op_type)
+        if handler is None:
+            return None
+
+        result = handler(producer, _try_fold)
+        if result is not None:
+            _cache[name] = result
+        return result
+
+    return _try_fold
+
+
+# ---- Shape propagation for external inputs ----
+
+def _resolve_tensor_shape(name, all_nodes, orig_value_info, orig_inputs,
+                          orig_outputs, orig_initializers, constant_tensors,
+                          _cache=None):
+    """Compute the shape of a tensor by tracing back through producers.
+
+    With ONNX shape inference run on the full model first, most tensors
+    already have static shapes in value_info.  This function is a
+    fallback for the few ops where ONNX leaves dynamic dims (unk__*):
+    Reshape, Transpose, and Expand.
+
+    Returns None if the shape cannot be resolved.
+    """
+    if _cache is None:
+        _cache = {}
+    if name in _cache:
+        return _cache[name]
+
+    # 1. Look up in value_info / inputs / outputs
+    for d in [orig_value_info, orig_inputs, orig_outputs]:
+        if name in d:
+            vi = d[name]
+            tt = vi.type.tensor_type
+            if tt.shape.dim:
+                dims = []
+                all_static = True
+                for dim in tt.shape.dim:
+                    if dim.dim_value > 0:
+                        dims.append(dim.dim_value)
+                    else:
+                        all_static = False
+                        break
+                if all_static:
+                    _cache[name] = dims
+                    return dims
+
+    # 2. Look up in initializers
+    if name in orig_initializers:
+        dims = list(orig_initializers[name].dims)
+        _cache[name] = dims
+        return dims
+
+    # 3. Look up in folded constants
+    if name in constant_tensors:
+        t = constant_tensors[name]
+        dims = list(t.dims) if t.dims else list(numpy_helper.to_array(t).shape)
+        _cache[name] = dims
+        return dims
+
+    # 4. Trace back through producer (only for ops ONNX can't fully infer)
+    producer = None
+    for n in all_nodes:
+        if name in n.output:
+            producer = n
+            break
+    if producer is None:
+        return None
+
+    op = producer.op_type
+    result = None
+
+    # Build a fold table that uses value_info for Shape (populated by
+    # onnx.shape_inference.infer_shapes run on the full model).
+    lookup_vi = lambda n: (orig_value_info.get(n) or
+                           orig_inputs.get(n) or
+                           orig_outputs.get(n))
+    fold_table = {**_FOLD_BASE,
+                  'Shape': lambda n, f: _fold_Shape(n, f, lookup_vi)}
+
+    if op == 'Reshape':
+        data_shape = _resolve_tensor_shape(
+            producer.input[0], all_nodes, orig_value_info, orig_inputs,
+            orig_outputs, orig_initializers, constant_tensors, _cache)
+        if data_shape is None:
+            return None
+        _fold = _make_tensor_folder(
+            constant_tensors=constant_tensors,
+            orig_initializers=orig_initializers,
+            all_nodes=all_nodes,
+            fold_table=fold_table,
+        )
+        shape_val = _fold(producer.input[1])
+        if shape_val is None:
+            return None
+        shape_arr = np.atleast_1d(shape_val).astype(np.int64).tolist()
+        # Resolve -1
+        if -1 in shape_arr:
+            known_size = 1
+            for s in shape_arr:
+                if s != -1:
+                    known_size *= s
+            total_size = 1
+            for s in data_shape:
+                total_size *= s
+            if total_size % known_size != 0:
+                return None
+            unknown_size = total_size // known_size
+            shape_arr = [unknown_size if s == -1 else s for s in shape_arr]
+        result = shape_arr
+
+    elif op == 'Transpose':
+        data_shape = _resolve_tensor_shape(
+            producer.input[0], all_nodes, orig_value_info, orig_inputs,
+            orig_outputs, orig_initializers, constant_tensors, _cache)
+        if data_shape is None:
+            return None
+        perm = _get_attr_ints(producer, 'perm')
+        if perm:
+            result = [data_shape[i] for i in perm]
+        else:
+            result = data_shape[::-1]
+
+    elif op == 'Expand':
+        data_shape = _resolve_tensor_shape(
+            producer.input[0], all_nodes, orig_value_info, orig_inputs,
+            orig_outputs, orig_initializers, constant_tensors, _cache)
+        _fold = _make_tensor_folder(
+            constant_tensors=constant_tensors,
+            orig_initializers=orig_initializers,
+            all_nodes=all_nodes,
+            fold_table=fold_table,
+        )
+        shape_val = _fold(producer.input[1])
+        if data_shape is None or shape_val is None:
+            return None
+        target_shape = np.atleast_1d(shape_val).astype(np.int64).tolist()
+        out = []
+        max_ndim = max(len(data_shape), len(target_shape))
+        for i in range(1, max_ndim + 1):
+            d1 = data_shape[-i] if i <= len(data_shape) else 1
+            t1 = target_shape[-i] if i <= len(target_shape) else 1
+            if d1 == 1:
+                out.append(t1)
+            elif t1 == 1:
+                out.append(d1)
+            elif d1 == t1:
+                out.append(d1)
+            else:
+                return None
+        result = out[::-1]
+
+    if result is not None:
+        _cache[name] = result
+    return result
+
+
+# ---- Core extraction ----
+
 def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
                                    init_name_fn, log_prefix=""):
     """Build a standalone ONNX model from a subset of nodes.
@@ -157,8 +616,6 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
         The inferred/checked ONNX model, or a deep copy of the raw model if
         inference fails.
     """
-    import copy as _copy
-
     # Unwrap ModelWithMetadata if needed
     if hasattr(model, 'model'):
         model = model.model
@@ -198,14 +655,59 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
     orig_outputs = {vi.name: vi for vi in graph.output}
     orig_initializers = {init.name: init for init in graph.initializer}
 
-    # Helper to synthesize a simple value_info from an initializer
-    def _value_info_from_initializer(init):
-        try:
-            arr = numpy_helper.to_array(init)
-            shape = list(arr.shape)
-            return helper.make_tensor_value_info(init.name, init.data_type, shape)
-        except Exception:
-            return helper.make_tensor_value_info(init.name, TensorProto.FLOAT, [])
+    # Build map of Constant node outputs -> tensor values so we can preserve
+    # them as initializers in extracted layers. This prevents dynamic shapes
+    # (e.g. ConstantOfShape's shape input becoming an unknown external input).
+    constant_tensors = {}
+    for n in all_nodes:
+        if n.op_type == 'Constant' and n.output:
+            out_name = n.output[0]
+            for attr in n.attribute:
+                if attr.name == 'value' and attr.type == onnx.AttributeProto.TENSOR:
+                    # Constant node TensorProto attributes often have empty name
+                    # fields; copy the output name so renaming works later.
+                    t = _copy.deepcopy(attr.t)
+                    t.name = out_name
+                    constant_tensors[out_name] = t
+                elif attr.name == 'value_ints':
+                    arr = np.array(attr.ints, dtype=np.int64)
+                    constant_tensors[out_name] = numpy_helper.from_array(arr, name=out_name)
+                elif attr.name == 'value_floats':
+                    arr = np.array(attr.floats, dtype=np.float32)
+                    constant_tensors[out_name] = numpy_helper.from_array(arr, name=out_name)
+                elif attr.name == 'value_int':
+                    arr = np.array([attr.i], dtype=np.int64)
+                    constant_tensors[out_name] = numpy_helper.from_array(arr, name=out_name)
+                elif attr.name == 'value_float':
+                    arr = np.array([attr.f], dtype=np.float32)
+                    constant_tensors[out_name] = numpy_helper.from_array(arr, name=out_name)
+
+
+    # Tensor folding: evaluate shape-producing subgraphs
+    # Build the per-extraction dispatch table (Shape needs a local
+    # value_info lookup; the rest come from the module-level _FOLD_BASE).
+
+    _lookup_vi = lambda name: (orig_value_info.get(name) or
+                                orig_inputs.get(name) or
+                                orig_outputs.get(name))
+    _FOLD = {**_FOLD_BASE, 'Shape': lambda n, f: _fold_Shape(n, f, _lookup_vi)}
+
+    _try_fold_tensor = _make_tensor_folder(
+        constant_tensors=constant_tensors,
+        orig_initializers=orig_initializers,
+        all_nodes=all_nodes,
+        fold_table=_FOLD,
+    )
+
+    for name in list(external_inputs):
+        if name in constant_tensors or name in orig_initializers:
+            continue
+        folded = _try_fold_tensor(name)
+        if folded is not None:
+            constant_tensors[name] = numpy_helper.from_array(folded, name=name)
+            if log_prefix:
+                print(f'{log_prefix}: folded shape subgraph for {name} -> {folded.tolist()}')
+
 
     # Build new inputs/outputs/initializers/value_info
     new_inputs = []
@@ -214,7 +716,14 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
     added_initializer_names = set()
 
     for name in sorted(external_inputs):
-        if name in orig_inputs:
+        if name in constant_tensors:
+            # Preserve Constant node values and folded shape-subgraph outputs
+            # as initializers so the compiler can inline them.  They are not
+            # graph inputs – they are baked into the model as constants.
+            init = _copy.deepcopy(constant_tensors[name])
+            new_initializers.append(init)
+            added_initializer_names.add(name)
+        elif name in orig_inputs:
             new_inputs.append(_copy.deepcopy(orig_inputs[name]))
         elif name in orig_value_info:
             new_inputs.append(_copy.deepcopy(orig_value_info[name]))
@@ -222,11 +731,34 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
             init = orig_initializers[name]
             new_initializers.append(_copy.deepcopy(init))
             added_initializer_names.add(name)
-            new_inputs.append(_value_info_from_initializer(init))
+            new_inputs.append(_make_value_info_from_initializer(init))
         elif name in orig_outputs:
             new_inputs.append(_copy.deepcopy(orig_outputs[name]))
         else:
             new_inputs.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, []))
+
+    # Resolve dynamic shapes for external inputs.  With ONNX shape inference
+    # run on the full model first, most shapes are already static in value_info.
+    # The fallback below only handles Reshape/Transpose/Expand where ONNX
+    # leaves dynamic dims (unk__*).
+    shape_cache = {}
+    for vi in new_inputs:
+        tt = vi.type.tensor_type
+        # Resolve shape if empty (no dims) or any dim is dynamic (0 without param or symbolic)
+        has_dynamic = not tt.shape.dim or any(
+            (d.dim_value == 0 and not d.dim_param) or d.dim_param
+            for d in tt.shape.dim
+        )
+        if has_dynamic:
+            resolved = _resolve_tensor_shape(
+                vi.name, all_nodes, orig_value_info, orig_inputs,
+                orig_outputs, orig_initializers, constant_tensors,
+                shape_cache,
+            )
+            if resolved is not None:
+                _set_static_dims(vi, resolved)
+                if log_prefix:
+                    print(f'{log_prefix}: resolved shape for {vi.name} -> {resolved}')
 
     for name in sorted((external_inputs | used)):
         if name in orig_initializers and name not in added_initializer_names:
@@ -242,9 +774,28 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
         if not matched and name in orig_value_info:
             new_outputs.append(_copy.deepcopy(orig_value_info[name]))
         elif not matched and name in orig_initializers:
-            new_outputs.append(_value_info_from_initializer(orig_initializers[name]))
+            new_outputs.append(_make_value_info_from_initializer(orig_initializers[name]))
         elif not matched:
             new_outputs.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, []))
+
+    # Resolve dynamic shapes for external outputs too (needed for ONNX→MLIR
+    # import which uses output shapes for type inference).
+    for vi in new_outputs:
+        tt = vi.type.tensor_type
+        has_dynamic = not tt.shape.dim or any(
+            (d.dim_value == 0 and not d.dim_param) or d.dim_param
+            for d in tt.shape.dim
+        )
+        if has_dynamic:
+            resolved = _resolve_tensor_shape(
+                vi.name, all_nodes, orig_value_info, orig_inputs,
+                orig_outputs, orig_initializers, constant_tensors,
+                shape_cache,
+            )
+            if resolved is not None:
+                _set_static_dims(vi, resolved)
+                if log_prefix:
+                    print(f'{log_prefix}: resolved output shape for {vi.name} -> {resolved}')
 
     new_value_info = []
     for name in sorted(produced | used):
@@ -307,6 +858,22 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
 
     try:
         inferred = shape_inference.infer_shapes(new_model)
+
+        # Propagate static output shapes back into value_info.
+        # shape_inference may leave value_info entries with dynamic dims
+        # even when the matching output has a concrete shape.
+        output_shapes = {}
+        for out in inferred.graph.output:
+            dims = _get_static_shape(out.type.tensor_type)
+            if dims is not None:
+                output_shapes[out.name] = dims
+
+        if output_shapes:
+            for vi in inferred.graph.value_info:
+                shape = output_shapes.get(vi.name)
+                if shape is not None and _has_dynamic_dims(vi.type.tensor_type):
+                    _set_static_dims(vi, shape)
+
         onnx.checker.check_model(inferred)
         return inferred
     except Exception as e:
@@ -315,7 +882,17 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
         return _copy.deepcopy(new_model)
 
 
+
+# ---- Layer / subgraph extraction ----
+
 def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
+    # Run shape inference on the full model so value_info is populated.
+    # This lets _fold_Shape resolve shapes from value_info and eliminates
+    # the need for most per-op handlers in _resolve_tensor_shape.
+    try:
+        model = onnx.shape_inference.infer_shapes(model)
+    except Exception:
+        pass
 
     existing_cases = set()
     layer_configs = {}
@@ -377,6 +954,17 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
             log_prefix=f'layer {layer_name}',
         )
 
+        # Propagate inferred static output shapes back into the original model's
+        # value_info so subsequent extractions see static shapes for intermediate
+        # tensors produced by earlier layers.
+        for out in final_model.graph.output:
+            tt = out.type.tensor_type
+            if _has_dynamic_dims(tt):
+                continue
+            shape = [d.dim_value for d in tt.shape.dim]
+            vi = next((vi for vi in graph.value_info if vi.name == out.name), None)
+            _set_static_dims(vi, shape) if vi else graph.value_info.append(_copy.deepcopy(out))
+
         # Fix dynamic batch dimensions to static 1 for layer testing
         _fix_batch_dimension_to_one(final_model)
 
@@ -415,11 +1003,15 @@ def extract_onnx_subgraph(model, from_index, to_index):
     Returns:
         ModelWithMetadata containing the extracted subgraph
     """
-    import copy as _copy
-
     # Unwrap ModelWithMetadata if needed
     if hasattr(model, 'model'):
         model = model.model
+
+    # Run shape inference on the full model so value_info is populated.
+    try:
+        model = onnx.shape_inference.infer_shapes(model)
+    except Exception:
+        pass
 
     graph = model.graph
     nodes = list(graph.node)
@@ -487,6 +1079,8 @@ def generate_onnx_layers_from_file(filepath:Path, node_groups=None, dedup=False)
     layers = generate_onnx_layers_from_model(model, node_groups, dedup)
     return _build_onnx_layer_cases(filepath.stem, model, layers)
 
+
+# ---- Pytest fixtures ----
 
 @pytest.fixture
 def onnx_model(request, case_config):
@@ -628,6 +1222,9 @@ def onnx_reference_results(request, onnx_model_file):
     return ort_outs
 
 
+
+# ---- Model loading ----
+
 def get_full_model(model_file):
 
     model = onnx.load(model_file)
@@ -640,6 +1237,9 @@ def get_full_model(model_file):
 
     return inferred_model
 
+
+
+# ---- BF16 conversion ----
 
 def _float32_to_bfloat16(arr: np.ndarray) -> np.ndarray:
     """Convert float32 numpy array to bfloat16 (stored as uint16)."""
