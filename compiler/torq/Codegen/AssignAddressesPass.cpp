@@ -304,13 +304,111 @@ static LogicalResult allocateLramAddresses(FunctionOpInterface funcOp) {
     return success();
 }
 
+struct AddressAssignment : public llvm::ilist_node<AddressAssignment> {
+    int64_t address;
+    int64_t size;
+
+    AddressAssignment(int64_t address, int64_t size) : address(address), size(size) {}
+};
+
+static std::pair<int64_t, llvm::ilist<AddressAssignment>::iterator> findEmptyRegion(
+    llvm::ilist<AddressAssignment> &liveAllocations, int64_t startAddress, int64_t size
+) {
+
+    int64_t currentAddress = startAddress;
+
+    for (auto it = liveAllocations.begin(); it != liveAllocations.end(); ++it) {
+        if (it->address - currentAddress >= size) {
+            return {currentAddress, it};
+        }
+        currentAddress = it->address + it->size;
+    }
+
+    return {currentAddress, liveAllocations.end()};
+}
+
+static FailureOr<int64_t>
+assignAddressesToXramAllocs(FunctionOpInterface funcOp, int64_t startAddress) {
+
+    llvm::ilist<AddressAssignment> liveAllocations;
+    llvm::DenseMap<Value, AddressAssignment *> liveAllocationsMap;
+
+    int64_t lastUsedAddress = startAddress;
+
+    // Track which memory regions are in use via liveAllocations (a sorted list of
+    // allocated address ranges). For each AllocOp, find the first gap large enough
+    // to fit the allocation, insert it into the live list, and record the mapping
+    // from value to allocation. When DeallocOps are encountered, remove their
+    // corresponding allocations from the live list. This maintains a fragmented
+    // memory map that can reuse space as allocations are deallocated.
+
+    for (auto &op : funcOp.getFunctionBody().getOps()) {
+        if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
+
+            auto value = allocOp.getResult();
+
+            if (getEncodingMemorySpace(value.getType()) != torq_hl::MemorySpace::Xram) {
+                continue;
+            }
+
+            int64_t allocSize = align_ceil(getEncodedTotalSizeBytes(value.getType()), 4);
+
+            auto [allocAddr, it] = findEmptyRegion(liveAllocations, startAddress, allocSize);
+
+            if (allocAddr + allocSize > HwInfo::xram_size) {
+                return allocOp.emitError("XRAM size exceeded while assigning addresses");
+            }
+
+            lastUsedAddress = std::max(lastUsedAddress, allocAddr + allocSize);
+
+            LLVM_DEBUG({
+                llvm::dbgs() << "Processing alloc: ";
+                allocOp.dump();
+
+                llvm::dbgs() << "Assigned address " << allocAddr << " to allocation of size "
+                             << allocSize << "\n";
+                llvm::dbgs() << "Live allocations:\n";
+                for (auto &alloc : liveAllocations) {
+                    llvm::dbgs() << "   address: " << alloc.address << " size: " << alloc.size
+                                 << "\n";
+                }
+                llvm::dbgs() << "\n";
+
+                llvm::dbgs() << "Last used address: " << lastUsedAddress << "\n";
+            });
+
+            // append the allocation at the right place
+            auto allocation = liveAllocations.insert(it, {allocAddr, allocSize});
+            liveAllocationsMap.try_emplace(value, &*allocation);
+
+            setXramAddress(&op, allocAddr);
+        }
+        else if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
+
+            auto it = liveAllocationsMap.find(deallocOp.getMemref());
+            if (it != liveAllocationsMap.end()) {
+
+                LLVM_DEBUG({
+                    llvm::dbgs() << "Processing dealloc: ";
+                    deallocOp.dump();
+                });
+
+                liveAllocations.erase(it->second->getIterator());
+                liveAllocationsMap.erase(it);
+            }
+        }
+    }
+
+    return lastUsedAddress;
+}
+
 static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
 
     int64_t startAddress = clXramStartAddress;
 
     startAddress = align_ceil(startAddress, HwInfo::xram_page_size);
 
-    // body pass: pack CreateInvocationOp code sections, AllocOp and ConstOp at
+    // initializeed data pass: pack CreateInvocationOp code sections and ConstOp at
     // 4-byte alignment so the whole region can later be mapped as a single SG
     for (auto &op : funcOp.getFunctionBody().getOps()) {
 
@@ -337,7 +435,7 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
 
             createInvocationOp.setXramCodeAddresses(addresses);
         }
-        else if (isa<memref::AllocOp, syna::torq_hl::ConstOp>(op)) {
+        else if (isa<syna::torq_hl::ConstOp>(op)) {
 
             assert(op.getNumResults() == 1 && "Expected a single result for alloc-like operations");
 
@@ -356,6 +454,16 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
             }
         }
     }
+
+    // uninitialized data pass: allocate addresses for Xram memref.alloc operations
+    // while aggressively reusing addresses as soon as a memref is de-allocated
+    auto maybeNextStartAddress = assignAddressesToXramAllocs(funcOp, startAddress);
+
+    if (failed(maybeNextStartAddress)) {
+        return failure();
+    }
+
+    startAddress = *maybeNextStartAddress;
 
     // binding pass: place each MapBindingOp on its own page(s) after the body
     // so that each binding can be IOMMU-mapped independently without sharing a
@@ -427,75 +535,6 @@ static void getBackwardSlice(Operation *op, SetVector<Operation *> *slice) {
         }
     }
     slice->insert(op);
-}
-
-static void moveXramAllocationsToFront(FunctionOpInterface funcOp) {
-
-    SetVector<Operation *> toBeMoved;
-
-    // look for all operations that we want to happen before the NPU is called (and their
-    // depdendencies), these operations define XRAM memrefs
-    for (auto &op : funcOp.getFunctionBody().getOps()) {
-
-        // we want to move only operations that define XRAM memrefs
-        auto isDerivedMemrefOp = isDerivedMemRefOperation(&op);
-        if (!isa<
-                memref::AllocOp, torq_hl::ConstOp, arith::ConstantOp, torq_hl::MapBindingOp,
-                torq_hl::CreateInvocationOp, memref::GetGlobalOp>(op) &&
-            !isDerivedMemrefOp) {
-            continue;
-        }
-
-        // check that the memref returned by the operation is actually in XRAM
-        if (isa<memref::AllocOp, memref::GetGlobalOp>(op) || isDerivedMemrefOp) {
-            auto memRefType = mlir::dyn_cast<MemRefType>(op.getResult(0).getType());
-
-            if (getEncodingMemorySpace(memRefType) != torq_hl::MemorySpace::Xram) {
-                continue;
-            }
-        }
-
-        // ensure all dependencies are also moved
-        getBackwardSlice(&op, &toBeMoved);
-    }
-
-    // Create a list in order of operations to move
-    SmallVector<Operation *> ops;
-    for (auto &op : funcOp.getFunctionBody().getOps()) {
-        if (toBeMoved.contains(&op)) {
-            ops.push_back(&op);
-        }
-    }
-
-    // Move all XRAM allocations to the beginning of the function
-    Block &block = funcOp.getFunctionBody().front();
-
-    for (auto op : llvm::reverse(ops)) {
-        op->moveBefore(&block.front());
-    }
-}
-static void moveXramDeallocToBack(FunctionOpInterface funcOp) {
-
-    SmallVector<Operation *> ops;
-
-    for (auto &op : funcOp.getFunctionBody().getOps()) {
-        // we prefer to allocate everything at the end of the function to avoid
-        // interrupts during execution
-        if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
-            if (getEncodingMemorySpace(deallocOp.getMemref().getType()) ==
-                torq_hl::MemorySpace::Xram) {
-                ops.push_back(deallocOp);
-            }
-        }
-    }
-
-    // Move all XRAM deallocations to the end of the function, just before the terminator
-    Block &block = funcOp.getFunctionBody().front();
-    Operation *terminator = block.getTerminator();
-
-    for (auto deallocOp : ops) {
-        deallocOp->moveBefore(terminator);
-    }
 }
 
 class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramAddressesPass> {
@@ -581,15 +620,6 @@ class AssignDtcmItcmXramAddressesPass
             emitError(funcOp->getLoc()) << "Failed to allocate ITCM addresses";
             return signalPassFailure();
         };
-
-        // move all XRAM allocations to the front to avoid having allocations
-        // during the execution
-        moveXramAllocationsToFront(funcOp);
-
-        // move all XRAM deallocations to the back to avoid having deallocations
-        // during the execution
-        moveXramDeallocToBack(funcOp);
-
         if (failed(allocateXramAddresses(funcOp))) {
             llvm::errs() << "Failed to allocate XRAM addresses\n";
             return signalPassFailure();

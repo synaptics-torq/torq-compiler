@@ -586,6 +586,56 @@ def enable_phases_dump(request):
     return not request.config.getoption("--no-phases-dump", False)
 
 
+def compute_uninitialized_segments_size(dump_data):
+
+    # uninitialized segments may overlap, we need to compute the union of 
+    # their areas to get the total size they occupy in memory
+    segments = []
+
+    for dispatch in dump_data['dispatches']:
+        for segment in dispatch['segments']:
+            if not segment['initialized']:
+                segments.append((segment['address'], segment['size']))                
+
+    # sorted by start address 
+    sorted_areas = sorted(segments, key=lambda x: x[0])
+
+    # merge the intervals that are overlapping or contiguous
+    merged_areas = []
+    current_start, current_end = None, None
+    for start, size in sorted_areas:
+        end = start + size
+        if current_start is None:
+            current_start, current_end = start, end
+        elif start > current_end:
+            merged_areas.append((current_start, current_end))
+            current_start, current_end = start, end
+        else:
+            current_end = max(current_end, end)
+
+    if current_start is not None:
+        merged_areas.append((current_start, current_end))
+
+    total_size = 0        
+
+    # return the sum of the merged intervals
+    for start, end in merged_areas:
+        total_size += end - start
+
+    return total_size
+
+
+def compute_initialized_segments_size(dump_data):
+    total_size = 0
+
+    for dispatch in dump_data['dispatches']:
+        for segment in dispatch['segments']:
+            if segment['initialized']:
+                total_size += segment['size']
+
+    return total_size
+
+
 def compute_model_stats(model_file, versioned_dir):
     model_stats = {}
 
@@ -600,17 +650,9 @@ def compute_model_stats(model_file, versioned_dir):
     with open(dump_path, 'r') as f:
         dump_data = json.load(f)
 
-    model_stats['total_segments_size'] = 0
-    model_stats['total_uninitialized_segments_size'] = 0
-    model_stats['total_initialized_segments_size'] = 0
-
-    for dispatch in dump_data['dispatches']:
-        for segment in dispatch['segments']:
-            model_stats['total_segments_size'] += segment['size']
-            if segment['initialized']:
-                model_stats['total_initialized_segments_size'] += segment['size']
-            else:
-                model_stats['total_uninitialized_segments_size'] += segment['size']
+    model_stats['total_initialized_segments_size'] = compute_initialized_segments_size(dump_data)
+    model_stats['total_uninitialized_segments_size'] = compute_uninitialized_segments_size(dump_data)    
+    model_stats['total_segments_size'] = model_stats['total_initialized_segments_size'] + model_stats['total_uninitialized_segments_size']
 
     return model_stats
 

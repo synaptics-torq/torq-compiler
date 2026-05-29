@@ -221,7 +221,10 @@ static iree_status_t iree_tooling_dump_dispatches(
             output << "        {\"index\": " << j << ", \"initialized\": ";
             output << (iree_hal_torq_Segment_data_is_present(torq_segment) ? "true" : "false");
             output << ", \"size\": "
-                   << iree_hal_torq_Segment_size(torq_segment) << "}";
+                   << iree_hal_torq_Segment_size(torq_segment);
+            output << ", \"address\": "
+                   << iree_hal_torq_Segment_xram_address(torq_segment);
+            output << "}";
           }
 
           output << "\n      ]\n";
