@@ -11,7 +11,11 @@ import tempfile
 import time as _time
 from pathlib import Path, PurePosixPath
 
-from ..utils.remote_runner import RemoteCommandError, remote_command_runner_factory
+from ..utils.remote_runner import (
+    RemoteCommandError,
+    _is_adb_address,
+    remote_command_runner_factory,
+)
 
 
 def _parse_board_wall_time(output: str | None) -> float | None:
@@ -80,37 +84,20 @@ def check_board_liveness(
     timeout: int = 10,
     private_key: str | None = None,
 ) -> None:
-    """Verify the board is reachable over SSH.
+    """Verify the board is reachable.
 
-    Runs `true` on the remote host with a short timeout.  Raises
-    ``RuntimeError`` immediately if the board cannot be reached so that the
-    pytest session fails fast before any tests are collected or run.
+    Uses the remote-command runner (SSH or ADB depending on *board_addr*)
+    to run ``true`` with a short timeout.  Raises ``RuntimeError``
+    immediately if the board cannot be reached so that the pytest session
+    fails fast before any tests are collected or run.
     """
-    cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", f"ConnectTimeout={timeout}",
-        "-o", "StrictHostKeyChecking=no",
-        "-p", str(port),
-    ]
-    if private_key:
-        cmd.extend(["-i", private_key])
-    cmd.extend([
-        board_addr,
-        "true",
-    ])
+    runner = remote_command_runner_factory(board_addr)
     try:
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            text=True,
-        )
-    except subprocess.TimeoutExpired:
+        runner.run_cmd("true")
+    except RemoteCommandError as exc:
         raise RuntimeError(
-            f"Board {board_addr}:{port} did not respond within {timeout}s.\n"
+            f"Board {board_addr} is unreachable.\n"
+            f"  Error: {exc}\n"
             "  The board may be powered off, rebooting, or have a new IP after a reflash.\n"
             "  To find it on the network:\n"
             "    python3 scripts/scan_boards.py\n"
@@ -118,63 +105,49 @@ def check_board_liveness(
             "    python3 scripts/scan_boards.py --find <hostname>\n"
             "  To set a hostname on a board:\n"
             "    python3 scripts/set_board_hostname.py <ip> <hostname>"
-        )
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr.strip() if e.stderr else ""
-        raise RuntimeError(
-            f"Board {board_addr}:{port} is unreachable (exit {e.returncode}).\n"
-            f"  SSH error: {stderr}\n"
-            "  The board may have been reflashed and received a new IP.\n"
-            "  To find it on the network:\n"
-            "    python3 scripts/scan_boards.py\n"
-            "  To search for a specific hostname:\n"
-            "    python3 scripts/scan_boards.py --find <hostname>\n"
-            "  To set a hostname on a board:\n"
-            "    python3 scripts/set_board_hostname.py <ip> <hostname>"
-        )
+        ) from exc
 
-    # Validate that the board's hostname matches the expected pattern
-    # (sl2619-dev-board-NNN).  This catches cases where the IP was
-    # reassigned to a different device after a reflash.
+    # For SSH-based boards, validate that the hostname matches the expected
+    # pattern (sl2619-dev-board-NNN).  This catches cases where the IP was
+    # reassigned to a different device after a reflash.  ADB device IDs are
+    # already identity-verified by the ADB daemon, so skip this check.
     import re as _re
-    hostname_cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", f"ConnectTimeout={timeout}",
-        "-o", "StrictHostKeyChecking=no",
-        "-p", str(port),
-    ]
-    if private_key:
-        hostname_cmd.extend(["-i", private_key])
-    hostname_cmd.extend([
-        board_addr,
-        "hostname",
-    ])
-    try:
-        result = subprocess.run(
-            hostname_cmd,
-            check=True,
-            capture_output=True,
-            timeout=timeout,
-            text=True,
-        )
-        remote_hostname = result.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        raise RuntimeError(
-            f"Board {board_addr}:{port} is reachable but failed to read its hostname.\n"
-            "  Cannot verify board identity."
-        )
+    if not _is_adb_address(board_addr):
+        hostname_cmd = [
+            "ssh",
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={timeout}",
+            "-o", "StrictHostKeyChecking=no",
+            "-p", str(port),
+            board_addr,
+            "hostname",
+        ]
+        try:
+            result = subprocess.run(
+                hostname_cmd,
+                check=True,
+                capture_output=True,
+                timeout=timeout,
+                text=True,
+            )
+            remote_hostname = result.stdout.strip()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            raise RuntimeError(
+                f"Board {board_addr}:{port} is reachable but failed to read its hostname.\n"
+                "  Cannot verify board identity."
+            )
 
-    if not _re.match(r"^sl2619-dev-board-\d+$", remote_hostname):
-        raise RuntimeError(
-            f"Board {board_addr}:{port} is reachable but its hostname is '{remote_hostname}',\n"
-            f"  which does not match the expected pattern 'sl2619-dev-board-NNN'.\n"
-            "  This IP may have been reassigned to a different device.\n\n"
-            "  To set the correct hostname on the board:\n"
-            f"    python3 scripts/set_board_hostname.py {board_addr.split('@')[-1]} sl2619-dev-board-<number>\n"
-            "  To find boards on the network:\n"
-            "    python3 scripts/scan_boards.py"
-        )
+        # TODO
+        if not _re.match(r"^sl2619-dev-board-\d+$", remote_hostname):
+            raise RuntimeError(
+                f"Board {board_addr}:{port} is reachable but its hostname is '{remote_hostname}',\n"
+                f"  which does not match the expected pattern 'sl2619-dev-board-NNN'.\n"
+                "  This IP may have been reassigned to a different device.\n\n"
+                "  To set the correct hostname on the board:\n"
+                f"    python3 scripts/set_board_hostname.py {board_addr.split('@')[-1]} sl2619-dev-board-<number>\n"
+                "  To find boards on the network:\n"
+                "    python3 scripts/scan_boards.py"
+            )
 
 
 def acquire_board_lock(

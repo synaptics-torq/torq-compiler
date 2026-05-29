@@ -5,8 +5,18 @@ import subprocess
 import tempfile
 import platform
 import re
+import time
 from abc import ABC, abstractmethod
 from uuid import uuid4
+
+
+# Matches legacy SL16x0 IDs and newer sl2619-dev-board-NNN style IDs.
+_ADB_ID_PATTERN = re.compile(r"^[Ss][Ll]\d+[a-z]?(-[A-Za-z0-9_]+)*$")
+
+
+def _is_adb_address(addr: str) -> bool:
+    """Return True if *addr* is an ADB device ID (e.g. sl2619-dev-board-NN)."""
+    return addr.lower() == "adb" or bool(_ADB_ID_PATTERN.fullmatch(addr))
 
 
 class RemoteCommandError(Exception):
@@ -103,6 +113,12 @@ class SSHCommandRunner(RemoteCommandRunner):
         ] + self.ssh_options,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL)
+        # Wait for the multiplex socket to be created so that subsequent
+        # commands can reuse the connection rather than racing the master.
+        for _ in range(100):
+            if os.path.exists(self.ssh_socket):
+                return
+            time.sleep(0.05)
 
     def _cleanup(self) -> None:
         if not self.multiplex or not self.ssh_socket:
@@ -355,6 +371,22 @@ class ADBCommandRunner(RemoteCommandRunner):
             ) from e
 
 
+def _get_first_adb_device() -> str | None:
+    """Return the first connected ADB device ID, or None if none found."""
+    try:
+        result = subprocess.run(
+            ["adb", "devices"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        for line in result.stdout.strip().splitlines()[1:]:
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[1] == "device":
+                return parts[0]
+    except Exception:
+        pass
+    return None
+
+
 def remote_command_runner_factory(
     board_address: str,
     timeout: int = 15,
@@ -365,42 +397,31 @@ def remote_command_runner_factory(
     ssh_port: int = 22,
     ssh_private_key: str | None = None
 ) -> RemoteCommandRunner:
+    # "adb" means auto-detect the first connected ADB device.
     if board_address.lower() == "adb":
-        return ADBCommandRunner(target_device="SL16x0", timeout=timeout)
-    
-    ADB_ID_PATTERN = re.compile(r"^SL16x\d+$")
-    IPV4_BODY = (
-        r"(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)\.){3}"
-        r"(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)"
-    )
-    SSH_IPV4_PATTERN = re.compile(
-        rf"^(?P<user>[A-Za-z_][A-Za-z0-9_.-]*)@"
-        rf"(?P<host>{IPV4_BODY})"
-    )
+        first_device = _get_first_adb_device()
+        if not first_device:
+            raise ValueError("No ADB device detected. Connect a device and run 'adb devices'.")
+        return ADBCommandRunner(target_device=first_device, timeout=timeout, logger=logger)
 
-    def _is_adb_device_id() -> bool:
-        return bool(ADB_ID_PATTERN.fullmatch(board_address))
-
-    def _is_ipv4_address() -> bool:
-        return bool(SSH_IPV4_PATTERN.fullmatch(board_address))
-    
-    if _is_adb_device_id():
+    # Legacy SL16x0 IDs are always ADB.
+    _LEGACY_ADB_PATTERN = re.compile(r"^SL16x\d+$")
+    if _LEGACY_ADB_PATTERN.fullmatch(board_address):
         return ADBCommandRunner(
             target_device=board_address,
             timeout=timeout,
             logger=logger
         )
-    elif _is_ipv4_address():
-        return SSHCommandRunner(
-            board_ip=board_address,
-            timeout=timeout, logger=logger,
-            multiplex=ssh_multiplex,
-            keep_alive=ssh_keep_alive,
-            port=ssh_port,
-            private_key=ssh_private_key
-        )
-    else:
-        raise ValueError(f"Invalid board address format: expected ADB device ID or IPv4 address, got '{board_address}'")
+
+    # Everything else (user@ip or bare hostnames like sl2619-dev-board-80) is SSH.
+    return SSHCommandRunner(
+        board_ip=board_address,
+        timeout=timeout, logger=logger,
+        multiplex=ssh_multiplex,
+        keep_alive=ssh_keep_alive,
+        port=ssh_port,
+        private_key=ssh_private_key
+    )
 
 
 if __name__ == "__main__":
