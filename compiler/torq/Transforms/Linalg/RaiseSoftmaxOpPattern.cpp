@@ -165,54 +165,79 @@ verifyTflInt8SoftmaxFourTables(Value i16Input, linalg::GenericOp expectedRoundSh
     return lanes;
 }
 
-// Recover `input_scale * beta` (bf16) from the four sub-tables. The combine
-// output at LUT index `idx` reproduces what the integer pipeline computes for
-// i16 input value (idx - kLutMidpoint) * kI16Step, and approximates
-//   peakValue * exp(i16Input * scalePerI16Unit),
-// so the ratio of two indices recovers scalePerI16Unit. Multiplying by
-// kI16Step converts that back to the i8 input scale (the integer pipeline
-// rescales i8 by 128 before reaching the LUT). This mirrors TF's int8 softmax
-// legalization exactly. Only meaningful for IR that came through that pipeline.
-// Caller must have already verified the lane signature.
+// Recover the scale `a` from the four sub-tables. Modelled as:
+//
+//   combined[idx] ~= M * exp(a * x(idx))
+//     x(idx) = (idx - kLutMidpoint) * kI16Step      // i16 input at LUT idx
+//     M      = combined[kLutMidpoint]               // fixed-point exp(0) = 1
+//
+// Two samples (midpoint + one probe) suffice:
+//
+//   a = log(combined[probe] / M) / x(probe)
+//
+// Final `* kI16Step` lifts `a` from per-i16 to per-i8: the legalization's
+// i8 -> i16 expansion uses the same step as the LUT.
 FailureOr<double> recoverInputScale(ArrayRef<TflInt8SoftmaxLane> lanes) {
+    constexpr int kLutSize = 513;
     constexpr int kLutMidpoint = 256;
     constexpr int kI16Step = 128;
-    constexpr int kSampleIdx = 192;
-    constexpr int64_t kSampleI16Input = (kSampleIdx - kLutMidpoint) * kI16Step; // -8192
 
-    auto combineLanesAt = [](ArrayRef<TflInt8SoftmaxLane> lanes, int idx) -> int64_t {
+    // Precompute the full combined LUT once.
+    SmallVector<int64_t, kLutSize> combined(kLutSize);
+    for (int i = 0; i < kLutSize; ++i) {
         int64_t sum = 0;
         for (const auto &lane : lanes) {
-            int64_t base = lane.lut.getValues<APInt>()[idx].getSExtValue();
+            int64_t base = lane.lut.getValues<int16_t>()[i];
             int64_t v = base << 7; // matches the <<7 inside the table body
             sum += lane.isRight ? (v >> lane.shift) : (v << lane.shift);
         }
-        return (sum + (1LL << 11)) >> 12; // round-right-shift by 12 (verified by caller)
-    };
-
-    int64_t peakValue = combineLanesAt(lanes, kLutMidpoint); // i16 input = 0, exp(0) = 1
-    if (peakValue <= 0) {
-        LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] combine at LUT midpoint is not positive\n");
-        return failure();
+        combined[i] = (sum + (1LL << 11)) >> 12; // round-right-shift by 12 (verified by caller)
     }
-    int64_t refValue = combineLanesAt(lanes, kSampleIdx); // well within typical LUT range
-    if (refValue <= 0 || refValue >= peakValue) {
-        LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] combine at sample idx out of expected range\n");
+
+    int64_t midpointExp = combined[kLutMidpoint]; // i16 input = 0, exp(0) = 1
+    if (midpointExp <= 0) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "[SoftmaxTflite] combine at LUT midpoint (idx=" << kLutMidpoint
+                         << ") is not positive: midpointExp=" << midpointExp << "\n"
+        );
         return failure();
     }
 
-    double ratio = static_cast<double>(refValue) / static_cast<double>(peakValue);
-    double scalePerI16Unit = std::log(ratio) / kSampleI16Input;
+    // Pick the farthest valid probe.
+    int refIdx = -1;
+    for (int i = 0; i < kLutMidpoint; ++i) {
+        if (combined[i] > 0 && combined[i] < midpointExp) {
+            refIdx = i;
+            break;
+        }
+    }
+    if (refIdx < 0) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "[SoftmaxTflite] no valid probe in [0, " << kLutMidpoint
+                         << "): all combined values out of (0, midpointExp=" << midpointExp << ")\n"
+        );
+        return failure();
+    }
+
+    int64_t refExp = combined[refIdx];
+    int64_t refI16Input = (refIdx - kLutMidpoint) * kI16Step;
+    double ratio = static_cast<double>(refExp) / static_cast<double>(midpointExp);
+    double scalePerI16Unit = std::log(ratio) / static_cast<double>(refI16Input);
     double bf16Scale = scalePerI16Unit * kI16Step;
 
     // Typical TFLite int8 softmax scales fall in [0.001, 0.5].
     if (bf16Scale <= 0.001 || bf16Scale >= 0.5) {
         LLVM_DEBUG(
             llvm::dbgs() << "[SoftmaxTflite] recovered scale " << bf16Scale
-                         << " is outside [0.001, 0.5]\n"
+                         << " is outside [0.001, 0.5] (probe idx=" << refIdx
+                         << ", refExp=" << refExp << ", midpointExp=" << midpointExp << ")\n"
         );
         return failure();
     }
+    LLVM_DEBUG(
+        llvm::dbgs() << "[SoftmaxTflite] recovered scale=" << bf16Scale << " (probe idx=" << refIdx
+                     << ", refExp=" << refExp << ", midpointExp=" << midpointExp << ")\n"
+    );
     return bf16Scale;
 }
 
