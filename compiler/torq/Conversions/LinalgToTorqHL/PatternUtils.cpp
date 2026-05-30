@@ -2517,113 +2517,19 @@ Value create1DimTensorFromRescaleScalar(
     linalg::GenericOp srcOp, tosa::ApplyScaleOp applyScaleOp, ScaleInfo &scaleInfo,
     const Type &elementType, PatternRewriter &rewriter
 ) {
-    Value input = applyScaleOp.getValue();
-    if (!input) {
-        LLVM_DEBUG({ llvm::errs() << "applyScaleOp cannot get value\n"; });
+    // Fold the whole rescale generic (input zero-point, scale, output zero-point
+    // and clamp) by recursively evaluating its constant def-use slice. Replaying
+    // only the apply_scale by hand would drop the output zero-point and clamp.
+    Value result = srcOp.getResults()[0];
+    if (cast<RankedTensorType>(result.getType()).getElementType() != elementType) {
         return nullptr;
     }
-
-    auto ms = getMultiplierAndShift(srcOp, applyScaleOp, 1);
-    if (!ms) {
+    auto folded = computeArithConst(result, /*recursive=*/true, {});
+    if (failed(folded)) {
+        LLVM_DEBUG({ llvm::errs() << "rescale scalar fold: not a compile-time constant\n"; });
         return nullptr;
     }
-
-    double scaleFactor = static_cast<double>(ms.multiplier[0]) / (1l << ms.shift[0]);
-
-    if (scaleInfo.scale > 0) {
-        scaleFactor = scaleFactor * scaleInfo.scale;
-    }
-
-    int32_t data = 0;
-    auto constOp = dyn_cast_or_null<arith::ConstantOp>(input.getDefiningOp());
-    if (constOp) {
-        if (!getIntegerConstantValue(constOp, &data)) {
-            LLVM_DEBUG({ llvm::errs() << "cannot get integer constant value\n"; });
-            return input;
-        }
-        data = static_cast<int32_t>(std::round(data * scaleFactor));
-    }
-    else {
-        // Handle the case where a constant tensor is passed as a DPS input to the
-        // linalg.generic (dpsInputCount == 1). Inside the body the constant appears
-        // as a block argument, not as an arith.constant, so we trace backwards:
-        //
-        //   linalg.generic ins(%cst : tensor<i16>) outs(...) {
-        //   ^bb0(%in: i16, %out: i32):
-        //     %ext  = arith.extsi %in : i16 to i32
-        //     %sub  = arith.subi %ext, %zp : i32          // optional zero-point
-        //     %res  = tosa.apply_scale %sub, %mult, %shift
-        //     linalg.yield %res
-        //   }
-        //
-        // We walk: apply_scale input -> subi (extract zp) -> extsi -> block_arg
-        //          -> DPS input operand -> arith.constant
-        // Then fold: result = round((constantValue - zeroPoint) * scaleFactor)
-        int32_t inputZp = 0;
-        Value traceVal = input;
-
-        // Check for subi (zero-point subtraction)
-        if (auto subOp = traceVal.getDefiningOp<arith::SubIOp>()) {
-            auto maybeZp = getConstIntValue(subOp.getRhs());
-            if (maybeZp) {
-                inputZp = *maybeZp;
-            }
-            traceVal = subOp.getLhs();
-        }
-
-        // Check for extsi
-        if (auto extOp = traceVal.getDefiningOp<arith::ExtSIOp>()) {
-            traceVal = extOp.getIn();
-        }
-
-        // Should now be a block argument
-        auto blockArg = dyn_cast<BlockArgument>(traceVal);
-        if (!blockArg) {
-            return nullptr;
-        }
-
-        // Resolve block arg to DPS input of the linalg.generic
-        unsigned argIdx = blockArg.getArgNumber();
-        if (argIdx >= srcOp.getNumDpsInputs()) {
-            return nullptr;
-        }
-
-        Value dpsInput = srcOp.getInputs()[argIdx];
-        auto dpsConstOp = dpsInput.getDefiningOp<arith::ConstantOp>();
-        if (!dpsConstOp) {
-            return nullptr;
-        }
-
-        int32_t inputData = 0;
-        if (!getIntegerConstantValue(dpsConstOp, &inputData)) {
-            LLVM_DEBUG({ llvm::errs() << "cannot get DPS input constant value\n"; });
-            return nullptr;
-        }
-
-        // Compute the rescale: (inputData - inputZp) * scaleFactor
-        data = static_cast<int32_t>(std::round((inputData - inputZp) * scaleFactor));
-        constOp = dpsConstOp;
-    }
-
-    auto outputType = cast<RankedTensorType>(srcOp.getResults()[0].getType());
-    RankedTensorType constType = RankedTensorType::get(outputType.getShape(), elementType);
-    DenseElementsAttr value;
-
-    if (elementType.isInteger(16)) {
-        value = DenseIntElementsAttr::get(constType, static_cast<int16_t>(data));
-    }
-    else if (elementType.isInteger(32)) {
-        value = DenseIntElementsAttr::get(constType, data);
-    }
-    else if (elementType.isInteger(8)) {
-        value = DenseIntElementsAttr::get(constType, static_cast<int8_t>(data));
-    }
-    else {
-        LLVM_DEBUG({ llvm::errs() << "only support 8/16/32 bit integer\n"; });
-        return input;
-    }
-    auto output = arith::ConstantOp::create(rewriter, constOp.getLoc(), constType, value);
-    return output.getResult();
+    return *folded;
 }
 
 bool foldScalarRescale(
