@@ -230,8 +230,16 @@ static Operation *outlineProgram(
     // add a return operation to finish the function
     func::ReturnOp::create(rewriter, loc, ValueRange{});
 
-    // replace the program operation with a import program operation that uses the original program
-    rewriter.setInsertionPoint(programOp);
+    // Place the import_program at the parent function entry, since it is loop-invariant
+    // (ConstantLike, Pure). This prevents subsequent unrolling of enclosing scf.forall from
+    // creating multiple ITCM copies of the same CSS program, which would violate the
+    // single-program-per-dispatch ABI (CSS programs must start at ITCM offset 0). See #1615.
+    if (auto parentFunc = programOp->getParentOfType<func::FuncOp>()) {
+        rewriter.setInsertionPointToStart(&parentFunc.getBody().front());
+    }
+    else {
+        rewriter.setInsertionPoint(programOp);
+    }
     rewriter.replaceOpWithNewOp<torq_hl::ImportProgramOp>(
         programOp, programOp.getType(), programOp.getName()
     );

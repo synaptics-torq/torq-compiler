@@ -57,6 +57,7 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
         );
 
         assert(unrollFactor && "trip count is not a constant");
+        uint64_t unrollCount = unrollFactor->getZExtValue();
 
         // track the original operations in the body loop
         SmallVector<Operation *> originalOps;
@@ -65,11 +66,11 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
         }
 
         // create an operand map for each unrolled iteration
-        SmallVector<IRMapping> operandMaps(unrollFactor->getZExtValue() - 1);
+        SmallVector<IRMapping> operandMaps(unrollCount - 1);
 
         // insert in the operand map the induction variable
         if (!forallOp.getInductionVar(0).use_empty()) {
-            for (unsigned i = 1; i < unrollFactor->getZExtValue(); i++) {
+            for (unsigned i = 1; i < unrollCount; i++) {
                 Value ivUnroll = arith::ConstantOp::create(
                     rewriter, forallOp.getLoc(), rewriter.getIndexAttr(lb + i * step)
                 );
@@ -81,13 +82,39 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
 
         // scan the original operations and accumulate operations until a wait,
         // when a wait is found create unrollFactor - 1 copies of the accumulated operations
-        // and continue
+        // and continue.
+        //
+        // CSS programs run on a single hardware instance, so their start/wait
+        // pairs must remain strictly paired in each iteration (the slice
+        // parallelization assumption above doesn't apply). When the wait
+        // belongs to a CSS invocation, include it in the cloned block and
+        // flush it together with the preceding ops, producing a contiguous
+        // [..., start_css, wait_css] sequence per iteration. See #1615.
         {
             PatternRewriter::InsertionGuard insertionGuard(rewriter);
             for (auto op : originalOps) {
+                bool cssWait = false;
+                if (auto waitOp = dyn_cast<torq_hl::WaitProgramOp>(op)) {
+                    auto invocationType =
+                        cast<torq_hl::InvocationType>(waitOp.getInvocation().getType());
+                    cssWait = invocationType.getExecutor() == torq_hl::Executor::CSS;
+                }
+
+                if (cssWait) {
+                    operationsToClone.push_back(op);
+                    rewriter.setInsertionPointAfter(op);
+                    for (unsigned i = 1; i < unrollCount; i++) {
+                        for (auto prevOp : operationsToClone) {
+                            rewriter.clone(*prevOp, operandMaps[i - 1]);
+                        }
+                    }
+                    operationsToClone.clear();
+                    continue;
+                }
+
                 if (isa<torq_hl::WaitProgramOp>(op) || op->getBlock()->getTerminator() == op) {
                     rewriter.setInsertionPoint(op);
-                    for (unsigned i = 1; i < unrollFactor->getZExtValue(); i++) {
+                    for (unsigned i = 1; i < unrollCount; i++) {
                         // Clone the original loop body operations
                         for (auto prevOp : operationsToClone) {
                             rewriter.clone(*prevOp, operandMaps[i - 1]);
