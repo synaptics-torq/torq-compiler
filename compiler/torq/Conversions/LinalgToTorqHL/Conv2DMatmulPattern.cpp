@@ -230,6 +230,12 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
             );
         }
 
+        // F32 matmuls are not supported on the NPU. Return early so the op
+        // stays as linalg.matmul and MarkHostExecutorPass routes it to the host.
+        if (lhsType.getElementType().isF32() || rhsType.getElementType().isF32()) {
+            return rewriter.notifyMatchFailure(srcOp, "Matmul with F32 input not supported on NPU");
+        }
+
         // Build fusion plan and compute bias/scale using PatternUtils helpers
         FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output);
         if (failed(fusionPlanOr) || !fusionPlanOr->isFusable()) {

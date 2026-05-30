@@ -12,6 +12,7 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
@@ -434,6 +435,18 @@ bool isTorqMatMul(Operation *op, std::string &failReason) {
     if (!isa<linalg::BatchMatmulOp, linalg::MatmulOp, linalg::DotOp, linalg::MatvecOp>(op)) {
         failReason = "Not a supported matmul op";
         return false;
+    }
+
+    // NPU only supports BF16 and INT8 matmuls; F32 must fall back to host.
+    if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
+        for (Value input : linalgOp.getDpsInputs()) {
+            if (auto rankedType = dyn_cast<RankedTensorType>(input.getType())) {
+                if (rankedType.getElementType().isF32()) {
+                    failReason = "matmul with F32 inputs is not supported on NPU";
+                    return false;
+                }
+            }
+        }
     }
 
     return true;
