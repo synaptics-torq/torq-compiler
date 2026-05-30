@@ -2980,7 +2980,6 @@ int Act::width(DType iType, DType wType, bool biasScalePerItem) const {
 }
 
 void Act::setLUT(ArrayRef<int32_t> &lut) {
-    llvm::errs() << "Setting activation LUT: " << lut.size() << "\n";
     assert(
         (lut.size() == 256 || lut.size() == 512) &&
         "Activation LUT must have exactly 256 or 512 entries"

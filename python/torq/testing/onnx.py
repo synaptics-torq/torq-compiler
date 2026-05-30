@@ -188,6 +188,22 @@ def _get_static_shape(tt):
     return dims
 
 
+def _should_propagate_layer_shape(vi, shape):
+    """Return True if a layer-extraction output shape may update full-model value_info."""
+    if not shape:
+        return False
+    if vi is None:
+        return True
+    existing_dims = vi.type.tensor_type.shape.dim
+    if not existing_dims:
+        # Full-model shape inference left this empty; a single-op extraction
+        # often infers the wrong rank (e.g. [560] instead of [1, 560, H]).
+        return False
+    if len(shape) != len(existing_dims):
+        return False
+    return True
+
+
 def _set_static_dims(vi, shape):
     """Copy a list of static dims into a value_info.
 
@@ -439,7 +455,10 @@ def _make_tensor_folder(*, constant_tensors, orig_initializers, all_nodes, fold_
         if handler is None:
             return None
 
-        result = handler(producer, _try_fold)
+        try:
+            result = handler(producer, _try_fold)
+        except (IndexError, ValueError, TypeError):
+            return None
         if result is not None:
             _cache[name] = result
         return result
@@ -963,6 +982,8 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
                 continue
             shape = [d.dim_value for d in tt.shape.dim]
             vi = next((vi for vi in graph.value_info if vi.name == out.name), None)
+            if not _should_propagate_layer_shape(vi, shape):
+                continue
             _set_static_dims(vi, shape) if vi else graph.value_info.append(_copy.deepcopy(out))
 
         # Fix dynamic batch dimensions to static 1 for layer testing
