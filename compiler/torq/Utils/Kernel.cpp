@@ -163,9 +163,13 @@ static SGBlockInfo sgElementCount(const Shape &dims, int busWidthItems, int sgMa
     }
 
     if (isRank3) {
-        assert(false && "Scatter-gather for 3D shapes not supported yet");
         // Handle the outer dimension
-        assert(blockInfo.outerGroups == 1 && "Scatter-gather was not applied");
+        assert(sgMax < 0 || blockInfo.outerGroups == 1 && "Scatter-gather was not applied");
+        // FIXME, we may need the following:
+        // if (sgMax < 0) {
+        // blockInfo.sgGroups = blockInfo.outerGroups;
+        // blockInfo.stride = blockInfo.outerStride;
+        // }
         blockInfo.outerGroups = dims[0].count;
         blockInfo.outerStride = dims[0].stride;
     }
@@ -367,7 +371,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, SliceCfg &cfg) {
 }
 
 static void ndlToStr(NdlType type, const torq_hw::MemNdlData *ndl) {
-    const char *sep = ",";
+    const char *sep = "";
     if (!ndl) {
         LLVM_DEBUG(llvm::dbgs() << type << ":  NULL\n");
         return;
@@ -375,14 +379,15 @@ static void ndlToStr(NdlType type, const torq_hw::MemNdlData *ndl) {
     LLVM_DEBUG(
         llvm::dbgs() << type; if (ndl->set_id) { llvm::dbgs() << ndl->set_id; } else {
             llvm::dbgs() << ' ';
-        } int count = 0;
-        auto printingType = DimType::L;
+        } llvm::dbgs() << ": ";
+        auto printingType = DimType::H;
         for (auto &dim
              : ndl->dims) {
             if (dim.type != DimType::L && printingType == DimType::L) {
                 llvm::dbgs() << "}";
             }
-            llvm::dbgs() << (count++ == 0 ? ": {" : sep);
+            llvm::dbgs() << (dim.type == DimType::L && printingType != DimType::L ? "{" : sep);
+            sep = ",";
             if (dim.type == DimType::S && printingType != DimType::S) {
                 llvm::dbgs() << "S(";
             }
@@ -396,7 +401,7 @@ static void ndlToStr(NdlType type, const torq_hw::MemNdlData *ndl) {
             printingType = dim.type;
         } if (printingType == DimType::S) { llvm::dbgs() << ")"; }
 
-        if (ndl->offset) { llvm::dbgs() << "offset=" << ndl->offset; } if (ndl->sync_mode) {
+        if (ndl->offset) { llvm::dbgs() << " offset=" << ndl->offset; } if (ndl->sync_mode) {
             llvm::dbgs() << " sync=" << (char)ndl->sync_mode;
         } if (ndl->sync_nhd) { llvm::dbgs() << " nhdims=" << (int)ndl->sync_nhd; } llvm::dbgs()
         << "\n";
@@ -451,6 +456,9 @@ int sizeofTypeBits(DType type) {
     case DType::uint32:
     case DType::int32:
     case DType::fp32:
+    case DType::int8x4:
+    case DType::int16x2:
+    case DType::bf16x2:
         return 32;
     case DType::uint1:
     case DType::int1:
@@ -521,7 +529,48 @@ DType getDType(mlir::Type mlirType) {
 
 bool isFloat(DType type) { return type == DType::bf16 || type == DType::fp32; }
 
-bool isInt(DType type) { return type != DType::none && !isFloat(type) && !isCompressed(type); }
+bool isInt(DType type) {
+    switch (type) {
+    case DType::int8:
+    case DType::int16:
+    case DType::int32:
+    case DType::uint8:
+    case DType::uint16:
+    case DType::uint32:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static DType getPackedType(DType type) {
+    switch (type) {
+    case DType::int8:
+    case DType::uint8:
+        return DType::int8x4;
+    case DType::int16:
+    case DType::uint16:
+        return DType::int16x2;
+    case DType::bf16:
+        return DType::bf16x2;
+    default:
+        return DType::none;
+    }
+}
+
+static int getPackFactor(DType type) {
+    switch (type) {
+    case DType::int8x4:
+        return 4;
+    case DType::int16x2:
+    case DType::bf16x2:
+        return 2;
+    default:
+        return 1;
+    }
+}
+
+static bool isPacked(DType type) { return getPackFactor(type) > 1; }
 
 bool isUnsigned(DType dt) {
     return dt == DType::uint8 || dt == DType::uint16 || dt == DType::uint32 || dt == DType::uint1 ||
@@ -609,6 +658,9 @@ int biasScaleWidth(DType type) { return hasScale(type) ? 2 : 1; }
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
     switch (dtype) {
+    case DType::none:
+        os << "none";
+        break;
     case DType::uint8:
         os << "uint8";
         break;
@@ -633,8 +685,14 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
     case DType::fp32:
         os << "fp32";
         break;
-    case DType::none:
-        os << "none";
+    case DType::int8x4:
+        os << "int8x4";
+        break;
+    case DType::int16x2:
+        os << "int16x2";
+        break;
+    case DType::bf16x2:
+        os << "bf16x2";
         break;
     case DType::int1:
         os << "int1";
@@ -1054,7 +1112,7 @@ struct SlicePrivate {
     void aluSetNumberFormat(DType dtype);
     DType aluGetWeightType() const;
     PData aluPData(int blockSize, DType dataType, bool isMulAcc);
-    PData aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc);
+    PData aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc, bool transpose);
     PData aluWAccumulate(const WData &wdata);
     PData aluProductAccumulate(
         const IData &idata, const WData &wdata, ALUOp1Mode acc, bool outer, bool repeatWeight
@@ -1080,7 +1138,7 @@ struct SlicePrivate {
 
     void ref(const LData &data);
 
-    void cedr(const IData &idata, const uint32_t weightSize);
+    void cedr(const IData &idata, uint32_t weightSize, bool transpose);
     void cedw(const IData &idata);
 
     void cewr(const WData &wdata, bool outer = false, bool repeatWeight = false);
@@ -1182,7 +1240,16 @@ int SlicePrivate::addMemNdlDims(
     assert(ix.size() <= dataDims.size());
     int offset = data.offset();
 
-    if (type != NdlType::DEQW) {
+    int packFactor = 1;
+    if (type == NdlType::DEQW) {
+        // packFactor is used with transpose to extract a packed 32-bits partial to multiple 8- or
+        // 16-bits elements
+        auto pramType = _pram.elementType;
+        packFactor = getPackFactor(pramType);
+        assert((packFactor <= 1 || elementSize == 4 / packFactor) && "Type mismatch for unpacking");
+        assert(block.size % packFactor == 0 && "Block size must be multiple of pack factor");
+    }
+    else {
         assert(!block.isEvenOddSplit && "Even-odd split only supported for DEQW");
         assert(!useSDims && "SDIMs only supported for DEQW");
     }
@@ -1190,8 +1257,9 @@ int SlicePrivate::addMemNdlDims(
     // Let's start with LDIMs.
     // We currently handle with LDIMs only the element size and the block.size.
     // Any other dimension will be handled with HDIMs.
-    ndlDims.push_back({DimType::L, MemDimTag::B, elementSize, 1});
-    ndlDims.push_back({DimType::L, MemDimTag::D, block.size, elementSize});
+    ndlDims.push_back({DimType::L, MemDimTag::B, elementSize * packFactor, 1});
+    ndlDims.push_back({DimType::L, MemDimTag::D, block.size / packFactor, elementSize * packFactor}
+    );
     if (block.sgGroups > 1) {
         if (block.size > 1 && !block.isEvenOddSplit) {
             if (block.stride.exprVal.has_value()) {
@@ -1530,7 +1598,7 @@ void SlicePrivate::actSetNumberFormat(DType dtype) {
     if (isFloat(dtype)) {
         _cfg.act_format = torq_hw::NumberFormat::BF;
     }
-    else if (isInt(dtype)) {
+    else if (isInt(dtype) || isPacked(dtype)) {
         _cfg.act_format = torq_hw::NumberFormat::I;
     }
     else {
@@ -1548,7 +1616,7 @@ static int roundUp(int value, const int *validValues) {
     return 0;
 }
 
-void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
+void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose) {
     Shape shape = idata.subShape();
     const int elementSize = sizeofType(idata.elementType());
     SGBlockInfo bi = sgElementCount(shape, backDimCount(shape));
@@ -1577,6 +1645,15 @@ void SlicePrivate::cedr(const IData &idata, const uint32_t weightSize) {
     }
 
     cedrDims.push_back({DimType::L, RegDimTag::D, dSize, elementSize});
+    if (transpose) {
+        assert(cedrDims.size() >= 2);
+        // In Torq API this special stride value is used to indicate transpose
+        cedrDims[1].stride = 36;
+        cedrDims[1].count = 8;
+        // Force G dimension to 32
+        bi.outerGroups = 32 / elementSize;
+    }
+
     if (bi.sgGroups > 1 || bi.outerGroups > 1) {
         // Not sure if stride is actually used by HW here
         int stride = bi.stride.intVal.has_value() ? bi.stride.intVal.value() : 1;
@@ -1782,7 +1859,7 @@ void SlicePrivate::acpr(const PData &pdata) {
         if (auto &sDim = acprDims.back(); sDim.tag == RegDimTag::S) {
             assert(
                 (sDim.count == 1 || sDim.stride == 64) &&
-                "Vector size for non-MAC bf16 accumulate() can't exceed Act vector size"
+                "Multiple partial Act vectors not supported for non-MAC bf16 accumulate()"
             );
             sDim.stride = 64;
         }
@@ -1939,11 +2016,10 @@ PData SlicePrivate::aluPData(int blockSize, DType dataType, bool isMulAcc) {
 
     Shape pramShape = {actBlockCount, {actBlockSize, (HwInfo::pdat_width / sizeofType(pDataType))}};
     PData pdata(pramShape, pDataType);
-    debugData(pdata);
     return pdata;
 }
 
-PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
+PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc, bool transpose) {
     // Configure the ALU in bypass mode with the specified accumulate operation.
     aluSetMode(ALUOp0Mode::DBYP, acc);
     const DType dataType = idata.elementType();
@@ -1975,7 +2051,7 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
     auto iShape = idata.subShape();
     // TODO: check that iShape[rank - 1] is dense
     const int blockSize = elementCount(iShape) * partialElWidth;
-    if (blockSize > HwInfo::max_input) {
+    if (blockSize > HwInfo::max_input && !transpose) {
         llvm::errs() << "Actual block size: " << blockSize << " > " << HwInfo::max_input << "\n";
         assert(false && "Block size too big");
     }
@@ -1989,17 +2065,22 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
         _wram.elementType = wdata.elementType();
         cewr(wdata, false, false);
     }
-    cedr(idata, 0);
+    cedr(idata, 0, transpose);
 
     // Save a copy of current stack, will be needed later to add N and T dimensions
     _stackCopy = _forStack;
+
+    // Transpose actually works on the entire PRam
+    // assert(pData.dim(0) == 4 && pData.dim(1) == 16);
+    PData pdata = transpose ? PData({16, 16}, getPackedType(dataType))
+                            : aluPData(blockSize, dataType, isMulAcc);
 
     // Remember stack nesting level when pram is loaded
     // Will be overwritten if we are inside a for loop
     _pram.loadNesting = _forStack.size();
 
-    return aluPData(blockSize, dataType, isMulAcc);
-    ;
+    debugData(pdata);
+    return pdata;
 }
 
 PData SlicePrivate::aluWAccumulate(const WData &wdata) {
@@ -2039,17 +2120,20 @@ PData SlicePrivate::aluWAccumulate(const WData &wdata) {
     aluSetNumberFormat(weightType);
     IData idata = IData({}, _iram.elementType);
     _iram.loadNesting = 0;
-    cedr(idata, 0);
+    cedr(idata, 0, false);
     cewr(wdata, false, false);
 
     // Save a copy of current stack, will be needed later to add N and T dimensions
     _stackCopy = _forStack;
 
+    PData pdata = aluPData(blockSize, weightType, true);
+
     // Remember stack nesting level when pram is loaded
     // Will be overwritten if we are inside a for loop
     _pram.loadNesting = _forStack.size();
 
-    return aluPData(blockSize, weightType, true);
+    debugData(pdata);
+    return pdata;
 }
 
 PData SlicePrivate::aluProductAccumulate(
@@ -2085,7 +2169,7 @@ PData SlicePrivate::aluProductAccumulate(
         _cfg.alu_w_unsigned = 5;
     }
 
-    cedr(idata, weightSize);
+    cedr(idata, weightSize, false);
     cewr(wdata, outer, repeatWeight);
 
     // Save a copy of current stack, will be needed later to add N and T dimensions
@@ -2148,7 +2232,8 @@ QData SlicePrivate::actClamp(
     // Check that data, weight and partial types are compatible
     assert(
         isInt(dataType) && isInt(partialType) && !isFloat(weightType) ||
-        isFloat(dataType) && isFloat(partialType) && !isInt(weightType)
+        isFloat(dataType) && isFloat(partialType) && !isInt(weightType) ||
+        isPacked(partialType) && weightType == DType::none
     );
 
     if (_useHybridMode) {
@@ -2162,6 +2247,7 @@ QData SlicePrivate::actClamp(
         actClipMin = minVal(DType::int32);
         actClipMax = maxVal(DType::int32);
     }
+    _pram.elementType = partialType;
 
     if (actMode == torq_hw::ACTMode::I2F) {
         assert(isInt(partialType) && "I2F requires int data");
@@ -2252,6 +2338,9 @@ QData SlicePrivate::actClamp(
             resultType = weightType;
         }
     }
+    else if (isPacked(partialType)) {
+        resultType = partialType;
+    }
     else {
         assert(false && "Unsupported partial type");
     }
@@ -2306,6 +2395,10 @@ Slice::Slice(const std::string &name)
     : d{new SlicePrivate(name)}, // Internal state common to the slice and its subcomponents
       iram{d.get()}, wram{d.get()}, bram{d.get()}, alu{d.get()}, act{d.get()} {}
 
+Slice::Slice(Slice &&other)
+    : d{std::move(other.d)}, // Move internal state
+      iram{d.get()}, wram{d.get()}, bram{d.get()}, alu{d.get()}, act{d.get()} {}
+
 Slice::~Slice() {}
 
 const std::string &Slice::name() const { return d->_name; }
@@ -2332,7 +2425,10 @@ Iterator Slice::iterate(const std::vector<int> &counts) { return Iterator(*this,
 static void checkTypeCompatibility(const Data &destData, const Data &sourceData) {
     const DType sType = sourceData.elementType();
     const DType dType = destData.elementType();
-    bool elemTypeCompatible = (isFloat(sType) && isFloat(dType)) || (isInt(sType) && isInt(dType));
+    bool elemTypeCompatible = (isFloat(sType) && isFloat(dType)) ||
+                              (isInt(sType) && isInt(dType)) ||
+                              (isPacked(sType) && getPackedType(dType) == sType);
+
     if (!elemTypeCompatible) {
         llvm::errs() << "Mismatching assignment. ";
         llvm::errs() << "Destination: " << destData << ", ";
@@ -2353,10 +2449,12 @@ static void checkCompatibility(const Data &destData, const Data &sourceData) {
         llvm::errs() << "Destination: " << destData << " has rank " << destRank << "\n";
         assert(false && "Destination rank error");
     }
+
+    int packFactor = getPackFactor(sourceData.elementType());
     bool shapeMatch = destRank == sourceRank;
     if (shapeMatch) {
         for (size_t i = 0; i < destRank; ++i) {
-            if (destShape[i].count != sourceShape[i].count) {
+            if (destShape[i].count != sourceShape[i].count * packFactor) {
                 shapeMatch = false;
                 break;
             }
@@ -2370,7 +2468,7 @@ static void checkCompatibility(const Data &destData, const Data &sourceData) {
         // Also accept a vector assigned to a 2-dim matrix with same total number of elements
         // This is needed to support output scattering
         else if (destRank == 2 && sourceRank == 1 &&
-                 destShape[0].count * destShape[1].count == sourceShape[0].count) {
+                 destShape[0].count * destShape[1].count == sourceShape[0].count * packFactor) {
             shapeMatch = true;
         }
     }
@@ -2685,14 +2783,69 @@ BData BRam::load(const LData &data) {
 //
 
 PData Alu::accumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
-    return d->aluAccumulate(idata, acc);
+    return d->aluAccumulate(idata, acc, false);
 }
 
 PData Alu::load(const IData &idata) {
-    PData pData = d->aluAccumulate(idata, ALUOp1Mode::BOR);
+    PData pData = d->aluAccumulate(idata, ALUOp1Mode::BOR, false);
     assert(pData.dim(0) == 1 && "ALU load can't exceed ACT width");
     // Make PData 1D
     return PData({pData.shape()[1]}, pData.elementType());
+}
+
+PData Alu::transpose(const IData &idata) {
+    assert(sizeofType(idata.elementType()) <= 2);
+    assert(idata.shape().size() == 3 && idata.dim(0) == 4 && idata.dim(1) == 2);
+    assert(idata.dim(2) * sizeofType(idata.elementType()) == 32);
+
+    // Todo: can we accept rank 2?? maybe it already works */
+
+    llvm::errs() << "Transposing idata: " << idata << "\n";
+    PData pData = d->aluAccumulate(idata, ALUOp1Mode::BYP, true);
+    // Transpose reorders and packs input data together in 32 bits values
+    d->_iram.elementType = DType::int32;
+
+    // HW requires the data to be transposed to be loaded as 32 vectors (sub-rows) of 32 byte each.
+    // These vectors must be loaded in a special order. While it would be possible to express this
+    // order in the transpose kernel itself, this would make the kernel much harder to read and
+    // would require handling a subtensor of rank4 in iram::load().
+    // Furthermore this order is an HW implementation detail and depends on the data type,
+    // so to keep thing simple we require the transpose kernel to load the 32 vectors in order
+    // as 4 groups of 4 pairs and do the reordering here by adjusting DEDR.
+    auto dedr = d->_ndls.getMemNdl(NdlType::DEDR);
+    assert(dedr && "DEDR NDL not defined");
+    int hdim4Count = 0;
+    for (auto [ix, dim] : llvm::enumerate(dedr->dims)) {
+        if (dim.type == DimType::H && dim.count == 4 && ++hdim4Count == 2) {
+            // This is the dimension representing the 4 groups
+            auto stride = dim.getIntStride().value();
+            if (sizeofType(idata.elementType()) == 2) {
+                // Swap order of groups vs pairs
+                std::swap(dedr->dims[ix - 1], dedr->dims[ix]);
+            }
+            else {
+                // Split the dimension in two pairs
+                dim.setIntStride(stride / 2);
+                dedr->dims[ix - 1].count /= 2;
+                dedr->dims.insert(
+                    dedr->dims.begin() + ix, {DimType::H, MemDimTag::O, 2, stride * 2}
+                );
+            }
+            break;
+        }
+    }
+    assert(hdim4Count == 2 && "Transpose data must have 4 groups of 4 pairs");
+
+    // Furthermore in case of W of 32 DEDR will load 2 contiguous lines with D64 instead of {D32G2}
+    // but this would not match CEDR expecting 8 groups of 32, so force the use of {D32G2}.
+    if (dedr->dims[1].count == 64) {
+        dedr->dims[1].count = 32;
+        dedr->dims.insert(dedr->dims.begin() + 2, {DimType::L, MemDimTag::G, 2, 32});
+    }
+
+    ndlToStr(NdlType::DEDR, dedr);
+
+    return pData;
 }
 
 PData Alu::load(const WData &wdata) {
@@ -2810,12 +2963,14 @@ QData Act::load(const PData &pdata) {
 }
 
 QData Act::clamp(const PData &pdata, int clipMin, int clipMax, ACTMode actMode) {
+    assert(!isPacked(pdata.elementType()) && "Packed types not supported here");
     return d->actClamp(pdata, 0, 0, clipMin, clipMax, actMode);
 }
 
 QData Act::rescaleClamp(
     const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax
 ) {
+    assert(!isPacked(pdata.elementType()) && "Packed types not supported here");
     return d->actRescaleClamp(pdata, bdata, shift, zeroPoint, clipMin, clipMax, ACTMode::ACT);
 }
 

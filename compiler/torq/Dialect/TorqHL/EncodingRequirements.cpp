@@ -228,12 +228,63 @@ KernelEncoding TransposeOp::getKernelEncoding() {
     KernelTensorEncoding inEncodingAttr;
     KernelTensorEncoding outEncodingAttr;
 
-    // optimized transpose requires alignment
-    if (torq::supportedByOptimizedTranspose(getPerm())) {
+    ArrayRef<int64_t> perm = getPerm();
+    int rank = perm.size();
+    auto inputShape = inputType.getShape();
+    int elementSize = getScalarSizeBytes(inputType.getElementType());
 
+    // Check if the EK block transpose will be used (same conditions as TransposeToHw.cpp)
+    bool transpose2D = rank >= 2 && perm[rank - 1] == rank - 2 && perm[rank - 2] == rank - 1;
+    for (int i = 0; i < rank - 2 && transpose2D; i++) {
+        transpose2D = (perm[i] == i);
+    }
+    bool useBlockTranspose =
+        transpose2D && elementSize <= 2 && inputShape[rank - 2] >= 32 && inputShape[rank - 1] >= 32;
+
+    if (useBlockTranspose) {
+        // The EK block transpose writes output in blocks of R rows x S elements.
+        // When the output dimensions are not multiples of R and S, the writes extend beyond
+        // the dense tensor data. We must ensure the output buffer has enough space by aligning
+        // the stride of the dimension before the transposed 2D matrix.
+        //
+        // Output dims after last-two-dims swap:
+        //   outH = inputShape[rank-1], outW = inputShape[rank-2]
+        int64_t outH = inputShape[rank - 1]; // input cols become output rows
+        int64_t outW = inputShape[rank - 2]; // input rows become output cols
+
+        // R = rows per group in the block transpose (transposeBlockSize / elementSize)
+        // S = vectorize size in elements (transposeBlockSize = 32)
+        constexpr int transposeBlockSize = 32;
+        int R = transposeBlockSize / elementSize; // 16 for bf16, 32 for i8
+        int S = transposeBlockSize;               // 32 elements per write
+
+        int64_t paddedH = torq::align_ceil(outH, R);
+        int64_t paddedW = torq::align_ceil(outW, S);
+        int64_t requiredStrideElements = paddedH * paddedW;
+
+        // Align the row stride of the output 2D matrix so that vectorized writes
+        // (S elements at a time) don't spill into adjacent rows on HW.
+        // Also ensure total buffer size accommodates padded row count (paddedH rows).
+        // For rank>=3, align the stride of the dim before the 2D block.
+        // For rank==2, align the stride of dim 0 and add padding for extra rows.
+        outEncodingAttr.stridesAlign.resize(rank, 0);
+        if (rank >= 3) {
+            outEncodingAttr.stridesAlign[rank - 3] = requiredStrideElements;
+        }
+        else {
+            // rank 2: align row stride to paddedW so writes don't overflow into next row,
+            // and set paddingAlign so total buffer accommodates paddedH rows
+            outEncodingAttr.stridesAlign[0] = paddedW;
+            outEncodingAttr.paddingAlign = requiredStrideElements;
+        }
+
+        // Input encoding: ensure 64-byte alignment for block reads
+        inEncodingAttr.paddingAlign = 64;
+    }
+    else if (torq::supportedByOptimizedTranspose(perm)) {
+        // Legacy optimized transpose path (currently disabled by TORQ_ALWAYS_USE_EK_TRANSPOSE)
         auto outType = dyn_cast<RankedTensorType>(getOutput().getType());
         auto outShape = outType.getShape();
-        int rank = outShape.size();
 
         if (rank < 2) {
             llvm::report_fatal_error("Transpose rank must be at least 2", true);
@@ -253,7 +304,6 @@ KernelEncoding TransposeOp::getKernelEncoding() {
                          << transposeDim << "," << rightDim << ")\n";
         });
 
-        auto inputShape = inputType.getShape();
         torq::groupContinuousDim(
             inputShape, leftDim, transposeDim, rightDim, leftDimSize, transposeDimSize, rightDimSize
         );
@@ -275,6 +325,10 @@ KernelEncoding TransposeOp::getKernelEncoding() {
         else {
             inEncodingAttr.paddingAlign = 64;
         }
+    }
+    else {
+        // Generalized transpose: only needs minimal alignment, no special padding
+        outEncodingAttr.paddingAlign = 64;
     }
 
     return {{{getInputMutable().getOperandNumber(), inEncodingAttr}}, outEncodingAttr};

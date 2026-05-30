@@ -125,6 +125,10 @@ enum class DType {
     int32,
     bf16,
     fp32,
+    // Packed types, can't be directly used for computation
+    int8x4,
+    int16x2,
+    bf16x2,
     // Compressed types, can't be directly used for computation
     uint1,
     uint2,
@@ -502,6 +506,13 @@ class Alu : SliceComponent {
     // where pType is int32 for integer input, iType for float input
     PData load(const IData &idata);
 
+    // Load and transpose input data to PRam
+    // Transposition occours on a block of [32, N] where N is 32 for int8 and 16 for int16.
+    // Input data must be {4,2,N} and the instruction must be repeated 4 times to fill a full PRam.
+    // idata: input tensor data in iram
+    // return: pram data of shape {16,16}:int32
+    PData transpose(const IData &idata);
+
     // Load weight data of shape {N} to PRam
     // N can be any value up to act.width(wType)
     // wdata: weight tensor data in wram
@@ -640,6 +651,7 @@ class Slice {
   public:
     // Create a slice kernel. Name is for debugging purposes only
     Slice(const std::string &name = {});
+    Slice(Slice &&);
     ~Slice();
 
     // Return the name associated to the slice
