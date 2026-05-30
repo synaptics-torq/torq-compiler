@@ -486,6 +486,16 @@ bool foldBackwardYieldOnlyGeneric(Value &value) {
     if (yieldOp.getValues()[0] != body.getArgument(0)) {
         return false;
     }
+    // Only fold through identity or broadcast ops. Block ops with computed indexing
+    // expressions (e.g. `d2 floordiv 2` for resize).
+    if (!linalg::isaBroadcastOpInterface(genericOp)) {
+        // Not a broadcast, so all maps must be identity.
+        for (auto map : genericOp.getIndexingMapsArray()) {
+            if (!map.isIdentity()) {
+                return false;
+            }
+        }
+    }
     value = genericOp.getInputs()[0];
     return true;
 }
