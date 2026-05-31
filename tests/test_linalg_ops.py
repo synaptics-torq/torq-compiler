@@ -5,7 +5,15 @@ from torq.testing.cases import get_test_cases_from_files
 from torq.testing.iree import list_mlir_files
 
 
-@pytest.fixture(params=get_test_cases_from_files(list_mlir_files("linalg_ops")))
+# Cases that genuinely need the host/CSS fallback (e.g. an unsupported
+# linalg.generic in the function body) live under linalg_ops_host_css/ and are
+# exempted from the NSS-only forcing applied to every other linalg_ops case.
+HOST_CSS_DIR = "linalg_ops_host_css"
+
+
+@pytest.fixture(params=get_test_cases_from_files(
+    list_mlir_files("linalg_ops") + list_mlir_files(HOST_CSS_DIR)
+))
 def case_config(request, runtime_hw_type, chip_config):
 
     next_chip = (chip_config.data['target'] != "SL2610")
@@ -43,10 +51,11 @@ def case_config(request, runtime_hw_type, chip_config):
         extra_args["torq_compiler_options"].append("--torq-enable-reciprocal-inf")
     if any(s in request.param.data.name for s in need_input_type_tc):
         extra_args["torq_compiler_options"].append("--iree-input-type=linalg-torq")
-    # Force Conv1D-as-matmul -> fully_connected lowering to land on the
-    # NSS/slice path so we'd fail loudly if a future change silently routed
-    # this case to the host/CSS fallback.
-    if "conv1d-matmul-fc-i8-bias-requant.mlir" in request.param.data.name:
+    # Force every linalg_ops case onto the NSS/slice path so we fail loudly if a
+    # future change silently routes it to the host/CSS fallback. Cases that
+    # legitimately require host/CSS live under linalg_ops_host_css/ and are
+    # exempted.
+    if request.param.data.parent.name != HOST_CSS_DIR:
         extra_args["torq_compiler_options"].extend([
             "--torq-disable-host", "--torq-disable-css",
         ])
