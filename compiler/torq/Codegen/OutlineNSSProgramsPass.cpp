@@ -94,6 +94,21 @@ static bool isNssOperation(Operation &op) {
     return false;
 }
 
+static bool isActionOperation(Operation &op) {
+
+    // NSS operations are not actions
+    if (isNssOperation(op)) {
+        return false;
+    }
+
+    // Host actions defined in the FBS are:
+    // HostCopyParams, StartNSSParams, WaitNSSParams, StartHostParams, WaitHostParams, AllocParams,
+    // DeallocParams
+    return isa<
+        torq_hl::HostCopyOp, torq_hl::StartProgramOp, torq_hl::WaitProgramOp, memref::AllocOp,
+        memref::DeallocOp, func::ReturnOp>(op);
+}
+
 static int getOperationSize(Operation *op) {
 
     // all these operations do not generate any bitstream instruction so
@@ -345,10 +360,42 @@ static SmallVector<Value> getLramCodeAreas(FunctionOpInterface funcOp, OpBuilder
     return values;
 }
 
+static void moveDeclarationsToBeginning(FunctionOpInterface funcOp, OpBuilder &builder) {
+
+    // Collect all get_global operations for host managed memory and move them to the beginning of
+    // the function
+    SmallVector<Operation *> nonActionOps;
+    for (auto &op : funcOp.getCallableRegion()->getOps()) {
+        if (!isNssOperation(op) && !isActionOperation(op)) {
+            nonActionOps.push_back(&op);
+        }
+    }
+
+    // Move the collected non-action operations to the beginning of the function
+    auto &firstBlock = funcOp.getCallableRegion()->front();
+    for (auto op : llvm::reverse(nonActionOps)) {
+        op->moveBefore(&firstBlock, firstBlock.begin());
+    }
+}
+
 void OutlineNSSProgramsPass::runOnOperation() {
     auto funcOp = getOperation();
     auto ctx = funcOp.getContext();
     OpBuilder builder(ctx);
+
+    // move all operations that are not directly actions
+    // to be taken by either host or NSS to the beginning of the function
+    // so that we don't introduce unwanted NSS program breaks when
+    // outlining the programs. By definition all operations that
+    // are not actions and are not NSS operations will not be executed by the
+    // runtime nor NSS and therefore we can freely move them without changing
+    // the semantics of the program (we need to keep their relative order to not
+    // break dependencies between them)
+    //
+    // This includes memref.get_global operations, slice descriptors and
+    // programs, memref.subview and other view-like operations on
+    // global allocations and constants.
+    moveDeclarationsToBeginning(funcOp, builder);
 
     // find operations we want to outline into NSS programs
     auto nssProgramsOps = findPrograms(funcOp);
