@@ -14,7 +14,6 @@
 #include "torq/Utils/MemoryUtils.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
-#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -364,11 +363,8 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
 
         for (auto scalarInput : scalarInputs) {
 
-            SmallVector<Operation *> scalarInputUsers(scalarInput.getUsers());
-            computeTopologicalSorting(scalarInputUsers);
-
-            // Insert just before the top most user.
-            OpBuilder rewriter(scalarInputUsers.back());
+            OpBuilder rewriter(scalarInput.getContext());
+            rewriter.setInsertionPointAfterValue(scalarInput);
 
             Value insertionValue = scalarInput;
 
@@ -423,11 +419,8 @@ static void convertScalarInOutsToTensors(SmallVector<OutliningGroup> &groups) {
 
         for (auto scalarOutput : scalarOutputs) {
 
-            SmallVector<Operation *> scalarOutputUsers(scalarOutput.getUsers());
-            mlir::computeTopologicalSorting(scalarOutputUsers);
-
-            // Insert just before the top most user.
-            OpBuilder rewriter(scalarOutputUsers.back());
+            OpBuilder rewriter(scalarOutput.getContext());
+            rewriter.setInsertionPointAfterValue(scalarOutput);
 
             Value insertionValue = scalarOutput;
 

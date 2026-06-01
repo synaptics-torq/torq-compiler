@@ -1,2 +1,0 @@
-test_mlir_files[quantized_batch_matmul.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1406
-test_mlir_files[quantized_batch_matmul.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1406
