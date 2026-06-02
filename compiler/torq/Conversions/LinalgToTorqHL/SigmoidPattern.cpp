@@ -44,23 +44,10 @@ class SigmoidOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto input = srcOp.getInputs()[0];
         auto tType = cast<RankedTensorType>(input.getType());
-        auto eType = tType.getElementType();
 
         auto shape = tType.getShape();
         auto i16 = rewriter.getIntegerType(16);
         auto i1 = rewriter.getIntegerType(1);
-        auto bf16Threshold = RankedTensorType::get(shape, eType);
-
-        /// FIXME: temporary board-side mitigation until the high-positive Sigmoid
-        /// LUT path is fully debugged and fixed at the real source.
-        auto ones = arith::ConstantOp::create(
-            rewriter, srcOp.getLoc(), bf16Threshold,
-            DenseElementsAttr::get(bf16Threshold, rewriter.getFloatAttr(eType, 1.0))
-        );
-        auto positiveSaturationThreshold = arith::ConstantOp::create(
-            rewriter, srcOp.getLoc(), bf16Threshold,
-            DenseElementsAttr::get(bf16Threshold, rewriter.getFloatAttr(eType, 6.25))
-        );
 
         auto x = makeBitcast(srcOp, rewriter, RankedTensorType::get(shape, i16), input);
 
@@ -227,7 +214,7 @@ class SigmoidOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 226559,   29952,    161535,   30464,    161535,   81098206, 30976,    162047,
                 30976,    30976,    162559,   31488,    162559,   228095,   31488,    162559,
                 31488,    163071,   228607,   32000,    163071,   32000,    163071,   228607,
-                32000,    163071,   32000,    163071,   228607,   32000,    163071,   80706604
+                32000,    163071,   32000,    163071,   228607,   32000,    163071,   61242463
             },
             13707, 8, 15360, -32768
         );
@@ -235,18 +222,7 @@ class SigmoidOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto rawSigmoid = makeSelect(srcOp, rewriter, isNegative, sigmoidNegative, sigmoidPositive);
         auto sigmoid = makeBitcast(srcOp, rewriter, tType, rawSigmoid);
 
-        /// FIXME: remove this saturation guard once the underlying high-positive
-        /// Sigmoid miscompute is fixed.
-        auto isSaturatedPositive =
-            torq_hl::ElementWiseBinaryOp::create(
-                rewriter, srcOp.getLoc(), RankedTensorType::get(shape, i1),
-                createInitTensor(srcOp, rewriter, RankedTensorType::get(shape, i1)),
-                torq_hl::ElementwiseOpEnum::GREATER_EQUAL, input, positiveSaturationThreshold,
-                /*isUnsigned=*/false
-            )
-                .getOutput();
-        auto saturatedSigmoid = makeSelect(srcOp, rewriter, isSaturatedPositive, ones, sigmoid);
-        rewriter.replaceOp(srcOp, saturatedSigmoid);
+        rewriter.replaceOp(srcOp, sigmoid);
         return success();
     }
 };

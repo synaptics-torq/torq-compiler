@@ -2,7 +2,7 @@
 import warnings
 from torch import (tensor, int32, bfloat16, uint16, int16, float32, float64,
                    log2, int32, empty, int64, arange, set_printoptions, argmin,
-                   stack, inf, ones, zeros)
+                   stack, inf, ones, zeros, broadcast_tensors)
 set_printoptions(30)
 
 
@@ -47,10 +47,12 @@ def unpack(packed):
 def domain_to_index_delta(d):
     return (d >> 7) + 256, d % (1 << 7)
 
-def interp(base, slope, delta):
+def interp(base, slope, delta, clamp=False):
     base, slope, delta = base.to(int32), slope.to(int32), delta.to(int32)
-    return (base + ((slope * delta + (1 << 6))) // (1 << 7)
-            ).clip(INT_MIN, INT_MAX).to(int16)
+    out = (base + ((slope * delta + (1 << 6))) // (1 << 7))
+    if clamp:
+        out = out.clamp(INT_MIN, INT_MAX)
+    return out.to(int16)
 
 def run_lut(lut, x):
     index, delta = domain_to_index_delta(x)
@@ -60,20 +62,32 @@ def run_lut(lut, x):
 
 # some error functions
 def torq_error(x, y):
-    x, y = x.view(bfloat16).to(float64), y.view(bfloat16).to(float64)
-    error = (x - y).abs() / (x.abs() + y.abs() + 1e-6)
+    x, y = broadcast_tensors(x.view(bfloat16), y.view(bfloat16))
+    x, y = x.clone(), y.clone()
+
+    # make error against inf finite.  Bump both values down by one
+    # binary representation.
     x_inf, y_inf, x_ninf, y_ninf = x == inf, y == inf, x == -inf, y == -inf
+    x_large, x_nlarge = 1e30 < x, x < -1e30
+    inf_err = (y_inf & (x_large & ~x_inf)) | (y_ninf & (x_nlarge & ~x_ninf))
+    x[inf_err] = (x[inf_err].view(int16) - 1).view(bfloat16)
+    y[inf_err] = (y[inf_err].view(int16) - 1).view(bfloat16)
+
+    x, y = x.to(float64), y.to(float64)
+    error = (x - y).abs() / (x.abs() + y.abs() + 1e-6)
     error[(x_inf & y_inf) | (x_ninf & y_ninf)] = 0
-    error[(x_inf ^ y_inf) | (x_ninf ^ y_ninf)] = inf
     error[x.isnan() | y.isnan()] = inf
-    assert not error.isnan().sum()
+    if error.isnan().sum():
+        assert all((y[error.isnan()] ==  inf) | (x[error.isnan()] ==  inf) |
+                   (y[error.isnan()] == -inf) | (x[error.isnan()] == -inf))
+        error[error.isnan()] = inf
     return error
 
 
 def generate_tols(gt):
     max_bittol = 30
     deviations = arange(-max_bittol, max_bittol, dtype=int32).reshape(-1, 1)
-    x = (gt.to(int32) + deviations).clip(INT_MIN, INT_MAX).to(int16)
+    x = (gt.to(int32) + deviations).to(int16)
     return torq_error(x, gt).unique().sort().values
 
 
@@ -139,12 +153,16 @@ def fit_points(a, delta, gt, start, end):
                 moved = True
                 base_max = b_max
             # the constraints on the base imply constraints on the slope
-            while any(interp(base_min, slope_max, delta) > v_max):
+            while any(interp(base_min, slope_max, delta, clamp=True) > v_max):
                 slope_max -= 1
                 moved = True
-            while any(interp(base_max, slope_min, delta) < v_min):
+                if slope_max < slope_min:
+                    break
+            while any(interp(base_max, slope_min, delta, clamp=True) < v_min):
                 slope_min += 1
                 moved = True
+                if slope_min > slope_max:
+                    break
             # if we rule out everything, then move on to next tolerance
             if slope_min > slope_max or base_min > base_max:
                 break
@@ -304,8 +322,8 @@ if __name__ == "__main__":
     print("limited_reciprocal")
     approximate_function(lambda x: 1 / x.clamp(1, 2**12), negative=False)
 
-    print("gelu neg")
     from torch.nn.functional import gelu
+    print("gelu neg")
     # clip out gelu(-inf) = nan.  gelu saturates well before -1000
     approximate_function(lambda x: gelu(x.clamp(-1000,
                                            # # allowing 0 bit error in x/2
@@ -322,9 +340,7 @@ if __name__ == "__main__":
     approximate_function(lambda x: gelu(x.clamp(bf16(0b0_01110110_1001011),
                                            bf16(0b0_10000000_0110001))),
                          negative=False)
-
     print("gelu tan neg")
-    from torch.nn.functional import gelu
     # clip out gelu(-inf) = nan.  gelu saturates well before -1000
     approximate_function(lambda x: gelu(x.clamp(-1000,
                                            # # allowing 0 bit error in x/2
