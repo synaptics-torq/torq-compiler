@@ -118,7 +118,7 @@
                                 {% for test in statistics.top_regressions %}
                                 <tr>
                                     <td>{{ forloop.counter }}</td>
-                                    <td class="text-break">{{ test.nodeid }}</td>
+                                    <td class="text-break"><a href="{% url 'test_run' test.current_id %}?baseline_session={{ baseline_session.id }}">{{ test.nodeid }}</a></td>
                                     <td>{{ test.current_value|format_measurement:test.unit }}</td>
                                     <td>{{ test.baseline_value|format_measurement:test.unit }}</td>
                                     <td>{{ test.change_percent|format_regression:"%" }}</td>
@@ -149,7 +149,7 @@
                                 {% for test in statistics.top_improvements %}
                                 <tr>
                                     <td>{{ forloop.counter }}</td>
-                                    <td class="text-break">{{ test.nodeid }}</td>
+                                    <td class="text-break"><a href="{% url 'test_run' test.current_id %}?baseline_session={{ baseline_session.id }}">{{ test.nodeid }}</a></td>
                                     <td>{{ test.current_value | format_measurement:test.unit }}</td>
                                     <td>{{ test.baseline_value | format_measurement:test.unit }}</td>
                                     <td>{{ test.change_percent|format_regression:"%" }}</td>
