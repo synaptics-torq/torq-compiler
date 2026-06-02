@@ -91,9 +91,14 @@ def get_top_changes(session, other_session, limit, desc, metric_name, min_value)
     fields['metric_name'] = metric_name
     fields['min_value'] = min_value
 
-    order = "DESC" if desc else "ASC"
+    if desc:
+        order = "DESC"
+        condition = f"> 0"
+    else:
+        order = "ASC"
+        condition = f"< 0"
 
-    sql = f" SELECT * FROM ({sub_sql}) AS subq ORDER BY subq.change_percent {order} LIMIT {limit}"
+    sql = f" SELECT * FROM ({sub_sql}) AS subq WHERE subq.change_percent {condition} ORDER BY subq.change_percent {order} LIMIT {limit}"
 
     with connection.cursor() as cursor:
         cursor.execute(sql, fields)
@@ -178,30 +183,37 @@ def get_outcomes_statistics_comparison(session, baseline_session=None):
     # add totals per outcome across all modules
     totals = {}
 
-    for outcome in outcomes:
-        totals[outcome] = {'current': 0, 'baseline': 0, 'difference': 0}        
+    for outcome in outcomes + ['total']:
+        totals[outcome] = {'current': 0, 'baseline': 0, 'difference': 0}
 
     for module in result:
-        for outcome in outcomes:            
+        for outcome in outcomes:  
             totals[outcome]['current'] += result[module][outcome]['current']
             totals[outcome]['baseline'] += result[module][outcome]['baseline']
             totals[outcome]['difference'] += result[module][outcome]['difference']
 
+            totals['total']['current'] += result[module][outcome]['current']
+            totals['total']['baseline'] += result[module][outcome]['baseline']
+            totals['total']['difference'] += result[module][outcome]['difference']
+
     return {'totals': totals, 'per_module': result}
 
 
-def get_metric_statistics(session, baseline_session, selected_metric):
+def get_metric_statistics(session, baseline_session, metric, cutoff_threshold=None, number_of_top=5):
     """
     Get the statistics for a given metric for the given session and the baseline session, grouped by module, and the difference between them.
     """
 
-    metric = Metric.objects.get(name=selected_metric)
+    metric = Metric.objects.get(name=metric)
+    cutoff = cutoff_threshold if cutoff_threshold is not None else metric.absolute_precision    
 
     return {
         'metric': metric,
-        'change_histogram': get_change_histogram(session, baseline_session, metric.name, metric.absolute_precision),
-        'top_improvements': get_top_changes(session, baseline_session, 5, not metric.is_lower_better, metric.name, metric.absolute_precision),
-        'top_regressions': get_top_changes(session, baseline_session, 5, metric.is_lower_better, metric.name, metric.absolute_precision)
+        'change_histogram': get_change_histogram(session, baseline_session, metric.name, cutoff),
+        'top_improvements': get_top_changes(session, baseline_session, number_of_top, not metric.is_lower_better, metric.name, cutoff),
+        'top_regressions': get_top_changes(session, baseline_session, number_of_top, metric.is_lower_better, metric.name, cutoff),
+        'cutoff_threshold': cutoff,
+        'number_of_top': number_of_top
     }
 
 

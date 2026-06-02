@@ -11,7 +11,7 @@ def get_histogram(sql_query, field, fields, num_bins, min_value, max_value):
     
     histogram_sql = f"""
         SELECT
-            width_bucket(subq.\"{field}\"::double precision, %(max_value)s, %(min_value)s, %(num_bins)s) AS bucket,
+            width_bucket(subq.\"{field}\"::double precision, %(max_bin_value)s, %(min_bin_value)s, %(num_bins)s) AS bucket,
             COUNT(*) AS count
         FROM ({sql_query}) AS subq
         GROUP BY bucket
@@ -19,8 +19,8 @@ def get_histogram(sql_query, field, fields, num_bins, min_value, max_value):
     """
 
     fields['num_bins'] = num_bins
-    fields['min_value'] = min_value
-    fields['max_value'] = max_value
+    fields['min_bin_value'] = min_value
+    fields['max_bin_value'] = max_value
 
     # we use inverted bins to make sure 0 ends up in the negative bin (which is the "good bin")
     with connection.cursor() as cursor:

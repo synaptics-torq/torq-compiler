@@ -26,19 +26,38 @@
         <div class="col-12 col-lg-4">
             <div class="card h-100">
                 <div class="card-header">
-                    <h2 class="h6 mb-0">Baseline Session</h2>
+                    <h2 class="h6 mb-0">Options</h2>
                 </div>
-                <div class="card-body">                    
-                        {% include "perf/partials/bootstrap_field.html" with field=form.baseline_session only %}                        
-                        <button type="submit" class="btn btn-primary">Switch baseline session</button>
+                <div class="card-body">
+                        {% include "perf/partials/bootstrap_field.html" with field=form.baseline_session only %}
+                        <button type="submit" class="btn btn-primary">Apply</button>
                         {% if baseline_session %}
                         <a href="{% url 'test_session_summary' baseline_session.id %}" class="btn btn-outline-secondary" target="_blank" rel="noopener noreferrer">
                             <i class="bi bi-box-arrow-up-right me-1"></i>Go to baseline session
                         </a>
-                        {% endif %}                    
+                        {% endif %}
                 </div>
             </div>
         </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="h6 mb-0">Metric Filters</h2>
+                </div>
+                <div class="card-body">
+                        {% include "perf/partials/bootstrap_field.html" with field=form.metric only %}
+                        {% include "perf/partials/bootstrap_field.html" with field=form.cutoff_threshold only %}
+                        {% include "perf/partials/bootstrap_field.html" with field=form.number_of_top only %}
+                        <button type="submit" class="btn btn-primary">Apply</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="row g-3">
     </div>
     
     <div class="card mb-4">
@@ -62,7 +81,7 @@
                 Only taking into account tests where 
                 <strong>{{ statistics.metric.short_description }}</strong>                        
                 is greater than                
-                {{ statistics.metric.absolute_precision|format_measurement:statistics.metric.unit }}                                
+                {{ statistics.cutoff_threshold|format_measurement:statistics.metric.unit }}                                
                 .
             </p>
 
@@ -78,7 +97,7 @@
                         </figure>
                     </div>
                     {% else %}
-                    <p class="text-body-secondary mb-0">No duration change data available.</p>
+                    <p class="text-body-secondary mb-0">No <strong>{{ statistics.metric.short_description }}</strong> change data available.</p>
                     {% endif %}
                 </div>
 
@@ -90,8 +109,8 @@
                                 <tr>
                                     <th>#</th>
                                     <th>Test</th>
-                                    <th>Current duration</th>
-                                    <th>Baseline duration</th>
+                                    <th>Current</th>
+                                    <th>Baseline</th>
                                     <th>% change</th>
                                 </tr>
                             </thead>
@@ -121,8 +140,8 @@
                                 <tr>
                                     <th>#</th>
                                     <th>Test</th>
-                                    <th>Current duration</th>
-                                    <th>Baseline duration</th>
+                                    <th>Current</th>
+                                    <th>Baseline</th>
                                     <th>% change</th>
                                 </tr>
                             </thead>

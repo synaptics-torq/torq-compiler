@@ -1,5 +1,5 @@
 import django.forms as forms
-from .models import TestSession, TestRun, TestGroup
+from .models import TestSession, TestRun, TestGroup, Metric
 
 
 class TestGroupChoiceField(forms.ModelChoiceField):
@@ -18,6 +18,19 @@ class TestSessionChoiceField(forms.ModelChoiceField):
         
     def label_from_instance(self, obj):
         return f"#{obj.id} {obj.git_branch} [test plan: {obj.test_plan}, timestamp: {obj.timestamp.strftime('%Y-%m-%d %H:%M')}]"
+
+
+class MetricChoiceField(forms.ModelChoiceField):
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            queryset=Metric.objects.order_by('name').all(),
+            to_field_name='name',
+            **kwargs,
+        )
+
+    def label_from_instance(self, obj):
+        return f"{obj.short_description} ({obj.unit})"
 
 
 class BaseBootstrapForm(forms.Form):
@@ -63,7 +76,10 @@ class TestSessionSummaryOptions(BaseBootstrapForm):
 
 
 class TestSessionMetricDetailsOptions(BaseBootstrapForm):
-    baseline_session = TestSessionChoiceField(required=False, label="Compare with session")
+    baseline_session = TestSessionChoiceField(required=True, label="Compare with session")
+    metric = MetricChoiceField(required=True, label="Select metric")
+    cutoff_threshold = forms.FloatField(required=False, label="Cutoff threshold for highlighting significant changes (leave blank for default cutoff)", widget=forms.NumberInput(attrs={"step": "any"}))
+    number_of_top = forms.IntegerField(required=False, label="Number of top regressions/improvements to display", min_value=1)
 
 
 class TestSessionResultsOptions(BaseBootstrapForm):

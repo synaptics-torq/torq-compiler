@@ -90,28 +90,45 @@ def main_branch_test_trends(request):
     })
 
 
-def test_session_metric_details(request, session_id, metric_name):
+def test_session_metric_details(request, session_id):
     """Detailed statistic for a given metric of a given test session"""
 
     session = get_object_or_404(TestSession, id=session_id)
 
-    if request.GET:
-        form = forms.TestSessionMetricDetailsOptions(data=request.GET)
+    # setup the default values if any parameter is missing
+    data = request.GET.copy()
 
-        if not form.is_valid():                
-            return redirect('test_session_summary', session_id=session_id)
+    if 'metric' not in data:
+        data['metric'] = 'total_duration'
+    
+    if 'number_of_top' not in data:
+        data['number_of_top'] = 10
+        
+    if 'baseline_session' not in data:
+        default_baseline = queries.test_session_comparison.get_default_comparison_session(session)
 
-        baseline_session = form.cleaned_data['baseline_session']
-       
-    else:
-        baseline_session = queries.test_session_comparison.get_default_comparison_session(session)
-        form = forms.TestSessionMetricDetailsOptions(initial={'baseline_session': baseline_session})    
+        if default_baseline is not None:
+            data['baseline_session'] = default_baseline.id
+        else:
+            data['baseline_session'] = session_id
 
-    statistics = queries.test_session_statistics.get_metric_statistics(session, baseline_session, metric_name)
+    # parse the parameters and validate them with the form
+    form = forms.TestSessionMetricDetailsOptions(data=data)
+
+    # if there are errors in the form, redirect back to the same page without parameters 
+    # (which will trigger the default values to be used)
+    if not form.is_valid():
+        return redirect('test_session_metric_details', session_id=session_id)
+    
+    # find the significant changes for the given metric and parameters
+    statistics = queries.test_session_statistics.get_metric_statistics(session, form.cleaned_data['baseline_session'], 
+                                                                       form.cleaned_data['metric'].name, 
+                                                                       form.cleaned_data['cutoff_threshold'], 
+                                                                       form.cleaned_data['number_of_top'])
 
     return render(request, 'perf/test_session/metric_details.html', 
         {'session': session, 
-         'baseline_session': baseline_session, 
+         'baseline_session': form.cleaned_data['baseline_session'], 
          'statistics': statistics, 
          'form': form,
         })
@@ -121,22 +138,23 @@ def test_session_summary(request, session_id):
     """Summary page for a test session showing overall statistics."""
 
     session = get_object_or_404(TestSession, id=session_id)
+
+    data = request.GET.copy()
+
+    if 'baseline_session' not in data:
+        default_baseline = queries.test_session_comparison.get_default_comparison_session(session)
+
+        if default_baseline is not None:
+            data['baseline_session'] = default_baseline.id
+        else:
+            data['baseline_session'] = None
     
-    options = {'baseline_session': None, 'selected_metric': None}
+    form = forms.TestSessionSummaryOptions(data=data)
 
-    if request.GET:
-        form = forms.TestSessionSummaryOptions(data=request.GET)
+    if not form.is_valid():                
+        return redirect('test_session_summary', session_id=session_id)
 
-        if not form.is_valid():                
-            return redirect('test_session_summary', session_id=session_id)
-
-        baseline_session = form.cleaned_data['baseline_session']        
-
-    else:
-        baseline_session = queries.test_session_comparison.get_default_comparison_session(session)
-        form = forms.TestSessionSummaryOptions(initial={
-            'baseline_session': baseline_session
-        })    
+    baseline_session = form.cleaned_data['baseline_session']
 
     SUMMARY_METRICS = ["total_duration", "compilation_time", "model_size", "total_segments_size"]
 

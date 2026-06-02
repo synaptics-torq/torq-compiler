@@ -105,7 +105,7 @@
                         for tests with {{ metric.metric.name}} > {{ metric.metric.absolute_precision|format_measurement:metric.metric.unit }}
                     </p>
                         <div class="mt-3">
-                            <a href="{% url 'test_session_metric_details' session.id metric.metric.name %}" class="btn btn-sm btn-outline-secondary">
+                            <a href="{% url 'test_session_metric_details' session.id %}?metric={{ metric.metric.name|urlencode }}{% if baseline_session %}&baseline_session={{ baseline_session.id }}{% endif %}" class="btn btn-sm btn-outline-secondary">
                                 View Details
                             </a>
                         </div>
