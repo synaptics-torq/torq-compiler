@@ -405,20 +405,6 @@ def DtcmTile:
     ];
 }
 
-def TorqHlTile :
-    InterfacePass<"torq-torqhl-tile",
-         "mlir::FunctionOpInterface"> {
-  let summary = "Tile all torq_hl operators so that the operands fit in LRAM";
-  let constructor =
-      "mlir::syna::torq::createTorqHlTilePass()";
-
-  let dependentDialects = [
-        "syna::torq_hl::TorqHLDialect",
-        "tensor::TensorDialect"
-    ];
-
-}
-
 def Slicing :
            InterfacePass<"torq-slicing",
                          "mlir::FunctionOpInterface"> {

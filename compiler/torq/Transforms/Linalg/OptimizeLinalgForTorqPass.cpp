@@ -76,7 +76,6 @@ class OptimizeLinalgForTorqPass
         // Run mul fusion in a separate round so that the swish pattern
         // (which needs the mul op to be a separate generic) fires first.
         RewritePatternSet fusionPatterns(ctx);
-        populateMulPatterns(ctx, fusionPatterns);
         auto frozenFusionPatterns =
             FrozenRewritePatternSet(std::move(fusionPatterns), disabledPatterns, enabledPatterns);
         if (failed(applyPatternsGreedily(getOperation(), frozenFusionPatterns))) {

@@ -51,7 +51,6 @@ set(sources
     ScheduleSliceProgramsPass.cpp
     TORQLowerExecutableTargetPass.cpp
     TorqComprehensiveBufferizePass.cpp
-    TorqHlTilePass.cpp
     TileAndFusePass.cpp
     TilingUtils.cpp
     UnrollForallLoopsPass.cpp

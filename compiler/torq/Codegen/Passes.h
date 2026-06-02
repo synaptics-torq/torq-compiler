@@ -73,8 +73,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createSegmentNSSProgramsPass
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignNSSProgramsAddressesPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHlTilePass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createSlicingPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgSlicingPass();

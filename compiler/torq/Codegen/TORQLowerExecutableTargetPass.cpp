@@ -82,14 +82,6 @@ static llvm::cl::opt<bool> clDisableSeg(
     llvm::cl::desc("Disable fusion of segmentation operations with producer"), llvm::cl::init(false)
 );
 
-llvm::cl::opt<bool> clEnableTorqHLTiling(
-    "torq-enable-torq-hl-tiling", llvm::cl::desc("enable TorqHL tiling"), llvm::cl::init(false)
-);
-
-static llvm::cl::opt<bool> clForceTorqHLTiling(
-    "torq-force-torq-hl-tiling", llvm::cl::desc("force TorqHL tiling"), llvm::cl::init(false)
-);
-
 static llvm::cl::opt<bool> clDisableLinalgSlicing(
     "torq-disable-linalg-slicing", llvm::cl::desc("disable linalg slicing"), llvm::cl::init(true)
 );
@@ -116,7 +108,7 @@ static llvm::cl::opt<bool> clEnableSplitConstantsOptimization(
 namespace {
 
 void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTileAndFuse) {
-    if (!clDisableLinalgSlicing && !clEnableTorqHLTiling)
+    if (!clDisableLinalgSlicing)
         funcPm.addPass(createLinalgSlicingPass());
 
     // lower the linalg operators to torq_hl before tiling
@@ -319,89 +311,6 @@ void addNssPasses(OpPassManager &pm) {
     addNssPostAssignLramAddressesPasses(pm);
 }
 
-void addSlicePassesWithTorqHLTiling(OpPassManager &pm) {
-    auto &funcPm = pm.nest<func::FuncOp>();
-
-    // optimize linalg ops for torq
-    funcPm.addPass(createOptimizeLinalgForTorqPass());
-    // Convert NHWC conv/pool/depthwise NHWC to NCHW
-    funcPm.addPass(createConvertNhwcOpToNchwPass());
-    funcPm.addPass(createCanonicalizerPass());
-
-    if (clEnableTransposeOptimization) {
-        funcPm.addPass(createOptimizeTransposeLayoutPass());
-    }
-
-    // Convert tensor-level elementwise arith ops into explicit linalg.generic form.
-    funcPm.addPass(mlir::createConvertElementwiseToLinalgPass());
-
-    // Apply executor assignments from JSON analysis (if provided).
-    // Run this AFTER all linalg optimization passes so that new linalg ops
-    // created by decomposition patterns also get their executors assigned.
-    if (!clExecutorMap.empty()) {
-        funcPm.addPass(createExecutorAssignmentPass(clExecutorMap));
-        funcPm.addPass(createCanonicalizerPass());
-    }
-
-    if (!clDisableLinalgSlicing && !clEnableTorqHLTiling)
-        funcPm.addPass(createLinalgSlicingPass());
-
-    // lower the linalg operators to torq_hl before tiling
-    funcPm.addPass(createLinalgToTorqHLPreConversionPass());
-
-    // In-dialect rewrite on torq_hl ops (e.g. big-stride conv2d via space-to-depth)
-    funcPm.addPass(torq_hl::createTorqHlOpTransformPass());
-
-    // Handles valid pad operations
-    funcPm.addPass(createValidToSamePadPass());
-
-    funcPm.addPass(createCompileTimeConstComputePass());
-    funcPm.addPass(createCanonicalizerPass());
-
-    funcPm.addPass(createMarkHostExecutorPass());
-
-    // tile the linalg ops or tilingInterface ops
-    funcPm.addPass(createLramTilePass());
-    funcPm.addPass(createCanonicalizerPass());
-
-    // lower arith ops to torq_hl
-    funcPm.addPass(createArithToTorqHLConversionPass());
-    funcPm.addPass(createCanonicalizerPass());
-
-    // lower the linalg operators to torq_hl
-    funcPm.addPass(createLinalgToTorqHLConversionPass());
-    funcPm.addPass(createCanonicalizerPass());
-
-    if (clEnableTorqHLTiling || clForceTorqHLTiling) {
-        funcPm.addPass(createTorqHlTilePass());
-        funcPm.addPass(createKernelSelectionPass());
-        funcPm.addPass(createCompileTimeConstComputePass());
-    }
-
-    // op segment output feature enabled by default, disabled it for cross-check
-    if (!clDisableSeg) {
-        funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
-    }
-    funcPm.addPass(createEncodeTensorsPass());
-
-    const auto sliceCount = TorqHw::get().getSliceCount();
-    LLVM_DEBUG({
-        llvm::dbgs() << "Slicing " << (clDisableSlicing ? "disabled" : "enabled")
-                     << " slice count: " << sliceCount << "\n";
-    });
-    if (!clDisableSlicing && sliceCount > 1) {
-        funcPm.addPass(createSlicingPass());
-    }
-
-    funcPm.addPass(createFoldConvertPass());
-    funcPm.addPass(createCanonicalizerPass());
-
-    // Strip any torq-executor attributes from torq_hl operations.
-    // After lowering to torq_hl, the executor is implicitly NSS/CSS/Host based on context,
-    // so the explicit executor attribute should not be present on torq_hl ops.
-    funcPm.addPass(createStripTorqExecutorAttrPass());
-}
-
 void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
     auto &funcPm = pm.nest<func::FuncOp>();
 
@@ -477,12 +386,8 @@ void addAllPasses(OpPassManager &pipeline) {
     pipeline.addPass(createAnalyzeTensorSizesPass());
 
     if (!clFromPreBufferizedIR && !clDisableSlices) {
-        if (!clEnableTorqHLTiling) {
-            addSlicePassesWithTileAndFuse(pipeline);
-            return;
-        }
-
-        addSlicePassesWithTorqHLTiling(pipeline);
+        addSlicePassesWithTileAndFuse(pipeline);
+        return;
     }
 
     if (!clDisableCSS || !clDisableHost)

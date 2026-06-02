@@ -78,12 +78,6 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'matmul_dql' in request.param.data.name:
         extra_args["comparison_config"] = "comparison_config_for_matmul_dql"
 
-    if 'gemm-fc-row-channel-tiling' in request.param.data.name:
-        extra_args["torq_compiler_options"] = [
-            "--torq-disable-host", "--torq-disable-css",
-            "--torq-enable-torq-hl-tiling",
-        ]
-
     # Force the Conv1D-as-matmul -> fully_connected lowering tests to run on
     # the NSS/slice path so they fail loudly if a future change silently routes
     # them to the host/CSS fallback.

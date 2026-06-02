@@ -43,7 +43,6 @@
 namespace mlir::syna::torq {
 
 extern llvm::cl::opt<bool> clDisableHost;
-extern llvm::cl::opt<bool> clEnableTorqHLTiling;
 extern llvm::cl::opt<bool> clFallbackF32ToHost;
 
 namespace {
@@ -551,113 +550,6 @@ class TileReduceOperation : public OpRewritePattern<linalg::LinalgOp> {
 }
 #endif
 
-class TileSoftmaxOperation : public OpRewritePattern<linalg::SoftmaxOp> {
-  public:
-    TileSoftmaxOperation(
-        MLIRContext *context, int maxTileSize,
-        std::optional<torq_hl::Executor> targetExecutor = std::nullopt
-    )
-        : OpRewritePattern<linalg::SoftmaxOp>(context), maxTileSize(maxTileSize),
-          targetExecutor(targetExecutor) {}
-
-    LogicalResult
-    matchAndRewrite(linalg::SoftmaxOp srcOp, PatternRewriter &rewriter) const override {
-
-        if (targetExecutor.has_value() &&
-            getTargetExecutor(srcOp, *targetExecutor) != *targetExecutor) {
-            return failure();
-        }
-
-        // If tile-and-fuse is enabled (i.e. !clEnableTorqHLTiling), we
-        // shouldn't need to tile anything again here.
-        if (!clEnableTorqHLTiling)
-            return rewriter.notifyMatchFailure(srcOp, "No need to tile this operation");
-
-        auto maybeDataSize = getMemoryRequirements(srcOp);
-
-        if (failed(maybeDataSize)) {
-            if (clDisableHost) {
-                return srcOp->emitError() << "unable to find memory requirements for softmax op "
-                                             "and cannot fall back to host";
-            }
-            rewriter.modifyOpInPlace(srcOp, [&]() {
-                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
-            });
-            return success();
-        }
-
-        if (*maybeDataSize <= maxTileSize) {
-            return rewriter.notifyMatchFailure(srcOp, "No need to tile this softmax operation");
-        }
-
-        // Find valid tile that doesn't tile the reduction dimension
-        auto maybeTileVector = findValidSoftmaxTile(srcOp, maxTileSize);
-
-        if (failed(maybeTileVector)) {
-            if (clDisableHost) {
-                return srcOp->emitError()
-                       << "unable to tile softmax operation and cannot fall back to host";
-            }
-            rewriter.modifyOpInPlace(srcOp, [&]() {
-                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
-            });
-            return success();
-        }
-
-        // Create effective tile vector
-        auto inputType = cast<RankedTensorType>(srcOp.getInput().getType());
-        SmallVector<int64_t> effectiveTileVector(maybeTileVector->size());
-
-        for (size_t i = 0; i < effectiveTileVector.size(); i++) {
-            if (inputType.getDimSize(i) == (*maybeTileVector)[i]) {
-                effectiveTileVector[i] = 0;
-            }
-            else {
-                effectiveTileVector[i] = (*maybeTileVector)[i];
-            }
-        }
-
-        // Create tile sizes and tile the operation
-        SmallVector<OpFoldResult> tileSizes =
-            getAsIndexOpFoldResult(rewriter.getContext(), effectiveTileVector);
-        auto options = scf::SCFTilingOptions().setTileSizes(tileSizes);
-
-        auto tilingInterfaceOp = cast<TilingInterface>(srcOp.getOperation());
-
-        FailureOr<scf::SCFTilingResult> maybeTileResult =
-            scf::tileUsingSCF(rewriter, tilingInterfaceOp, options);
-
-        if (failed(maybeTileResult)) {
-            LLVM_DEBUG({ llvm::dbgs() << "Failed to tile softmax op: " << srcOp << "\n"; });
-            if (clDisableHost) {
-                return srcOp->emitError() << "failed to tile softmax operation";
-            }
-            rewriter.modifyOpInPlace(srcOp, [&]() {
-                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
-            });
-            return success();
-        }
-
-        rewriter.replaceOp(srcOp, maybeTileResult->replacements);
-
-        // Peel the loops for fixed size operations
-        SmallVector<scf::ForOp> forOps;
-        for (auto loop : maybeTileResult->loops) {
-            forOps.push_back(cast<scf::ForOp>(loop));
-        }
-
-        linalg::peelLoops(rewriter, forOps);
-
-        LLVM_DEBUG({ llvm::dbgs() << "Successfully tiled softmax op\n"; });
-
-        return success();
-    }
-
-  private:
-    int maxTileSize;
-    std::optional<torq_hl::Executor> targetExecutor;
-};
-
 // mlir::iree_compiler::IREE::LinalgExt::SortOp implements TilingInterface,
 // but tiling the sort dimension produces independently sorted sub-arrays, not a
 // globally sorted result. There is no merge step to combine tiles. So we
@@ -778,11 +670,8 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
             }
         }
 
-        // If this is an LRAM run, and tile-and-fuse is enabled (i.e.
-        // !clEnableTorqHLTiling), we shouldn't need to tile anything again
-        // here.
-        if (targetExecutor.has_value() && *targetExecutor == torq_hl::Executor::Slice &&
-            !clEnableTorqHLTiling)
+        // If this is an LRAM run we shouldn't need to tile anything again here.
+        if (targetExecutor.has_value() && *targetExecutor == torq_hl::Executor::Slice)
             return rewriter.notifyMatchFailure(srcOp, "No need to tile this operation");
 
         auto maybeDataSize = getMemoryRequirements(srcOp);
@@ -860,7 +749,6 @@ class LramTilePass : public impl::LramTileBase<LramTilePass> {
 
         // Add tiling patterns for the Slice executor
         tilePatterns.add<TileLinalgOpOperation>(ctx, lramSize, torq_hl::Executor::Slice);
-        tilePatterns.add<TileSoftmaxOperation>(ctx, lramSize, torq_hl::Executor::Slice);
 
         tensor::ControlConstantExtractSliceFusionFn controlFn = [](tensor::ExtractSliceOp op) {
             return true;
