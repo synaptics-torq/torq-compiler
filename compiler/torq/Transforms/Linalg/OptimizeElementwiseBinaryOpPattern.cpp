@@ -11,6 +11,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
@@ -27,6 +28,23 @@
 #define DEBUG_TYPE "torq-optimize-elementwise-binary-op-pattern"
 
 namespace mlir::syna::torq {
+
+// Canonicalize tensor-output constant linalg.generic into linalg.fill so it can
+// be lowered by downstream fill conversion patterns.
+class GenericConstantToFillPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (std::optional<Value> fillValue = isaFillOpInterface(srcOp)) {
+            // Always use the detected fill value, regardless of pattern
+            rewriter.replaceOpWithNewOp<linalg::FillOp>(srcOp, *fillValue, srcOp.getDpsInits()[0]);
+            return success();
+        }
+        return failure();
+    }
+};
 
 // elementwise binary ops with 2 inputs
 class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericOp> {
@@ -242,6 +260,7 @@ void populateOptimizeElementwiseBinaryOpPatterns(
     MLIRContext *context, RewritePatternSet &patterns
 ) {
     patterns.add<PromoteScalarsTo1D>(context);
+    patterns.add<GenericConstantToFillPattern>(context);
     patterns.add<BroadcastElementwiseBinaryOpPattern>(context);
     patterns.add<ReshapeToCollapseExpand>(context);
     tensor::populateReassociativeReshapeFoldingPatterns(patterns);
