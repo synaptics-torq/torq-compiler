@@ -1101,9 +1101,16 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
         Value broadcastSource;
         int broadcastIdx = detectBroadcastBatchInput(srcOp, broadcastSource);
         if (broadcastIdx >= 0) {
-            return replaceBatchMatmulWithBroadcastGeneric(
-                srcOp, broadcastSource, broadcastIdx, rewriter
-            );
+            // Only apply when the broadcast source is rank 3 ([1,K,N]).
+            // Rank-2 sources ([K,N]) would produce a linalg.generic with a
+            // rank-2 operand that the TORQ backend cannot convert back to
+            // torq_hl::MatMulOp (findBatchMatmulBcastIdx expects 3-result maps).
+            auto broadcastType = dyn_cast<RankedTensorType>(broadcastSource.getType());
+            if (broadcastType && broadcastType.getRank() == 3) {
+                return replaceBatchMatmulWithBroadcastGeneric(
+                    srcOp, broadcastSource, broadcastIdx, rewriter
+                );
+            }
         }
 
         rewriter.modifyOpInPlace(srcOp, [&]() {
