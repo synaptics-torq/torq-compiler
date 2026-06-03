@@ -356,6 +356,26 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(genericOp, "Not an elementwise operation");
         }
 
+        // Skip linalg.generic ops that contain a narrowing integer/float
+        // truncation (arith.trunci / arith.truncf) and are not part of any
+        // fuse group (no "torq-fuse-group" array attr).  These are standalone
+        // rescale/quantize ops (e.g. pooling: apply_scale -> clamp -> trunci,
+        // i32->i16) that must not be independently sliced.  If the op does
+        // carry "torq-fuse-group" it belongs to a pattern fuse group and the
+        // principal op drives tiling for the whole group — allow it through.
+        bool hasNarrowingTrunc = genericOp.getBody()
+                                     ->walk([](Operation *op) -> WalkResult {
+                                         if (isa<arith::TruncIOp, arith::TruncFOp>(op))
+                                             return WalkResult::interrupt();
+                                         return WalkResult::advance();
+                                     })
+                                     .wasInterrupted();
+        if (hasNarrowingTrunc && !isMarkedFuseGroup(genericOp))
+            return rewriter.notifyMatchFailure(
+                genericOp,
+                "standalone op with trunci/truncf not in any fuse group, skipping slicing"
+            );
+
         // Resolve the slicing dimension: leftmost non-unit.
         std::optional<int64_t> slicingIter;
         ArrayRef<int64_t> shape = cast<ShapedType>(genericOp->getResultTypes()[0]).getShape();
