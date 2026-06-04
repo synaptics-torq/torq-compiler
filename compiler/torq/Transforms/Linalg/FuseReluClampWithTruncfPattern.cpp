@@ -11,7 +11,9 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/Support/Debug.h"
@@ -357,12 +359,12 @@ struct FuseReluClampWithTruncfPattern : public OpRewritePattern<linalg::GenericO
             lowVal = cast<FloatAttr>(lowConst.getValue()).getValueAsDouble();
         }
 
-        // 2. Confirm the data input comes from a truncf f32->bf16 generic.
-        //    inputs()[0] is the data tensor in both the 1-input and 3-input forms.
+        // 2. Confirm the data input (inputs()[0]) comes directly from a
+        //    truncf f32->bf16 generic — no intervening ops.
         linalg::GenericOp truncfOp = matchTruncfF32ToBF16Generic(clampOp.getInputs()[0]);
         if (!truncfOp)
             return rewriter.notifyMatchFailure(
-                clampOp, "clamp input is not from a truncf f32->bf16 generic"
+                clampOp, "clamp input is not directly from a truncf f32->bf16 generic"
             );
 
         // 3. The truncf result must not be used by anything other than this clamp op.
@@ -449,6 +451,22 @@ struct FuseReluClampWithTruncfPattern : public OpRewritePattern<linalg::GenericO
 
 void populateFuseReluClampWithTruncfPatterns(MLIRContext *ctx, RewritePatternSet &patterns) {
     patterns.add<FuseReluClampWithTruncfPattern>(ctx);
+    linalg::populateFoldReshapeOpsByExpansionPatterns(patterns, [](OpOperand *fusedOperand) {
+        if (!fusedOperand)
+            return false;
+
+        auto genericOp = dyn_cast<linalg::GenericOp>(fusedOperand->getOwner());
+        if (!genericOp)
+            return false;
+
+        if (!fusedOperand->get().getDefiningOp<tensor::CollapseShapeOp>())
+            return false;
+
+        double lowVal = 0.0, highVal = 0.0;
+        return succeeded(matchBF16ReluClampGeneric3Inputs(genericOp, lowVal, highVal));
+    });
+    // collpase
+    // linalg.generic(%collapse)
 }
 
 } // namespace mlir::syna::torq
