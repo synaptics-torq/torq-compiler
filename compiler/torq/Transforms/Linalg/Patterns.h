@@ -38,6 +38,10 @@ void populateFuseReluClampWithTruncfPatterns(MLIRContext *ctx, RewritePatternSet
 
 void populateAbsorbDecomposedWzpCorrectionPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+// Converts to standardized representation of the many ops that may not be handled by
+// canonicalization patterns, to make them easier to match for torq-specific patterns
+void populateCommonStandardizationPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 void convertNhwcOpToNchwOp(FunctionOpInterface funcOp);
 
 } // namespace mlir::syna::torq

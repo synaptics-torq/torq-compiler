@@ -333,13 +333,8 @@ void populateOptimizeElementwiseBinaryOpPatterns(
     MLIRContext *context, RewritePatternSet &patterns
 ) {
     patterns.add<RewriteIfScalarConstantPattern>(context);
-    patterns.add<PromoteScalarsTo1D>(context);
     patterns.add<GenericConstantToFillPattern>(context);
     patterns.add<BroadcastElementwiseBinaryOpPattern>(context);
-    patterns.add<ReshapeToCollapseExpand>(context);
-    tensor::populateReassociativeReshapeFoldingPatterns(patterns);
-    patterns.add<ComposeExpandOfCollapseOp<tensor::ExpandShapeOp, tensor::CollapseShapeOp>>(context
-    );
 }
 
 } // namespace mlir::syna::torq

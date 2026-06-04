@@ -234,12 +234,7 @@ class BroadcastSelectOpPattern : public OpRewritePattern<linalg::GenericOp> {
 };
 
 void populateOptimizeSelectPatterns(MLIRContext *context, RewritePatternSet &patterns) {
-    patterns.add<PromoteScalarsTo1D>(context);
     patterns.add<BroadcastSelectOpPattern>(context);
-    patterns.add<ReshapeToCollapseExpand>(context);
-    tensor::populateReassociativeReshapeFoldingPatterns(patterns);
-    patterns.add<ComposeExpandOfCollapseOp<tensor::ExpandShapeOp, tensor::CollapseShapeOp>>(context
-    );
 }
 
 } // namespace mlir::syna::torq

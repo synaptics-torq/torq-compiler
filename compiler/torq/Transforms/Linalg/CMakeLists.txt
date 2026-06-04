@@ -36,6 +36,7 @@ iree_cc_library(
     OptimizeSwishActivationPattern.cpp
     AbsorbDecomposedWzpCorrectionPattern.cpp
     FuseReluClampWithTruncfPattern.cpp
+    CommonStandardizationPatterns.cpp
   DEPS
     ::PassesIncGen
     MLIRArithDialect

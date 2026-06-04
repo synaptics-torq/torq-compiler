@@ -30,6 +30,10 @@ class OptimizeLinalgForTorqPass
         auto *ctx = funcOp.getContext();
         RewritePatternSet patterns(ctx);
 
+        // Convert linalg ops to more specific linalg ops that are easier to match for torq
+        // patterns.
+        populateCommonStandardizationPatterns(ctx, patterns);
+
         populateOptimizeConv1DPatterns(ctx, patterns);
 
         populateOptimizeMatmuOpPatterns(ctx, patterns);
