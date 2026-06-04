@@ -19,18 +19,20 @@ except ImportError:
 This test file validates all executor discovery CLI options by running
 pytest in subprocess (exactly as users would) and verifying outputs.
 
-Run: pytest -m ci tests/test_discovery_cli.py -v
+Run: pytest tests/test_gen_config_cli.py -v
 """
 
 
 # Path to the test model (relative to project root)
 PROJECT_ROOT = Path(__file__).parent.parent
-TEST_MODEL = PROJECT_ROOT / "tests/testdata/onnx_models/example_executor_discovery.onnx"
+TEST_MODEL = PROJECT_ROOT / "tests/testdata/onnx_models/example_gen_config.onnx"
 
 
 def _cleanup_generated_json():
-    """Remove any executor_assignments_*.json files generated in project root."""
-    for json_file in PROJECT_ROOT.glob("executor_assignments_*.json"):
+    """Remove any torq_gen_config_*.json files generated in project root."""
+    for json_file in PROJECT_ROOT.glob("torq_gen_config_*.json"):
+        if json_file.name.endswith("_compiler.json"):
+            continue
         try:
             json_file.unlink()
         except OSError:
@@ -44,7 +46,7 @@ def _run_pytest_and_validate(
     json_validator=None,
     stdout_validator=None,
     expect_success: bool = True,
-    test_filter: str = "example_executor_discovery_layer_Relu_1_host",
+    test_filter: str = "example_gen_config_layer_Relu_1_host",
 ) -> tuple:
     """Run pytest in subprocess and validate outputs.
 
@@ -64,12 +66,12 @@ def _run_pytest_and_validate(
         sys.executable,
         "-m",
         "pytest",
-        "tests/test_onnx_executor_discovery.py",
+        "tests/test_onnx_gen_config.py",
         "-k",
         test_filter,
         f"--model-path={TEST_MODEL}",
         "--recompute-cache",
-        "--executor-discovery-output",
+        "--gen-config-output",
         str(output_dir),
     ] + extra_args
 
@@ -83,8 +85,11 @@ def _run_pytest_and_validate(
     else:
         assert result.returncode != 0, f"{test_name}: Expected pytest to fail but it passed"
 
-    # Find and load JSON output
-    json_files = list(output_dir.glob("executor_assignments_*.json"))
+    # Find and load JSON output (exclude compiler-format JSONs)
+    json_files = [
+        f for f in output_dir.glob("torq_gen_config_*.json")
+        if not f.name.endswith("_compiler.json")
+    ]
     json_data = None
     if json_files:
         with open(json_files[0]) as f:
@@ -127,7 +132,7 @@ class TestExecutorDiscoveryIntegration:
     """Integration tests for all executor discovery CLI options."""
 
     def test_basic_discovery_output(self):
-        """Test basic --executor-discovery-output creates valid JSON."""
+        """Test basic --gen-config-output creates valid JSON."""
         output_dir = Path(tempfile.mkdtemp())
 
         try:
@@ -253,7 +258,7 @@ class TestExecutorDiscoveryIntegration:
                 "executor_skip_mode",
                 ["--executor-skip-mode"],
                 output_dir,
-                test_filter="example_executor_discovery_layer_Relu_1_host",
+                test_filter="example_gen_config_layer_Relu_1_host",
             )
             # Just verify JSON was created and is valid
             assert json_data is not None, "executor_skip_mode: No JSON output generated"
@@ -263,7 +268,7 @@ class TestExecutorDiscoveryIntegration:
             _cleanup_generated_json()
 
     def test_viewer_script_output(self):
-        """Test python/torq/executor_discovery/view_discovery_json.py produces correct output."""
+        """Test python/torq/gen_config/view.py produces correct output."""
         output_dir = Path(tempfile.mkdtemp())
 
         try:
@@ -274,12 +279,12 @@ class TestExecutorDiscoveryIntegration:
                 output_dir,
             )
 
-            json_files = list(output_dir.glob("executor_assignments_*.json"))
+            json_files = [f for f in output_dir.glob("torq_gen_config_*.json") if not f.name.endswith("_compiler.json")]
             assert len(json_files) == 1, "Expected 1 JSON file"
 
             # Run viewer script
             viewer_result = subprocess.run(
-                [sys.executable, "python/torq/executor_discovery/view_discovery_json.py", str(json_files[0])],
+                [sys.executable, "python/torq/gen_config/view.py", str(json_files[0])],
                 capture_output=True,
                 text=True,
                 check=True,
@@ -300,7 +305,7 @@ class TestExecutorDiscoveryIntegration:
             _cleanup_generated_json()
 
     def test_viewer_layer_details(self):
-        """Test python/torq/executor_discovery/view_discovery_json.py <json> <layer_id> shows layer details."""
+        """Test python/torq/gen_config/view.py <json> <layer_id> shows layer details."""
         output_dir = Path(tempfile.mkdtemp())
 
         try:
@@ -310,14 +315,14 @@ class TestExecutorDiscoveryIntegration:
                 output_dir,
             )
 
-            json_files = list(output_dir.glob("executor_assignments_*.json"))
+            json_files = [f for f in output_dir.glob("torq_gen_config_*.json") if not f.name.endswith("_compiler.json")]
             assert len(json_files) == 1, "Expected 1 JSON file"
 
             # Run viewer with layer ID
             viewer_result = subprocess.run(
                 [
                     sys.executable,
-                    "python/torq/executor_discovery/view_discovery_json.py",
+                    "python/torq/gen_config/view.py",
                     str(json_files[0]),
                     "Relu_relu_out",
                 ],
@@ -450,7 +455,7 @@ class TestExecutorDiscoveryIntegration:
                     "--subgraph-to=Relu_relu_out",
                 ],
                 output_dir,
-                test_filter="example_executor_discovery",
+                test_filter="example_gen_config",
                 expect_success=True,
             )
             # Verify JSON was generated even if some tests failed
@@ -520,6 +525,84 @@ class TestExecutorDiscoveryIntegration:
                 output_dir,
                 json_validator=validate_json,
             )
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_compiler_json_generated(self):
+        """Test that discovery generates both report JSON and compiler JSON.
+
+        Verifies:
+        - Report JSON (torq_gen_config_<model>.json) exists with 'ops' format
+        - Compiler JSON (torq_gen_config_<model>_compiler.json) exists with
+          'op_assignments' format
+        - Compiler JSON content matches report JSON recommendations
+        """
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            _run_pytest_and_validate(
+                "compiler_json_gen",
+                [],
+                output_dir,
+            )
+
+            # Find report JSON (exclude compiler JSONs)
+            report_files = [
+                f for f in output_dir.glob("torq_gen_config_*.json")
+                if not f.name.endswith("_compiler.json")
+            ]
+            assert len(report_files) == 1, (
+                f"Expected 1 report JSON, got {len(report_files)}: {report_files}"
+            )
+
+            # Find compiler JSON
+            compiler_files = list(output_dir.glob("torq_gen_config_*_compiler.json"))
+            assert len(compiler_files) == 1, (
+                f"Expected 1 compiler JSON, got {len(compiler_files)}: {compiler_files}"
+            )
+
+            # Load and validate report JSON format
+            with open(report_files[0]) as f:
+                report_data = json.load(f)
+            assert "ops" in report_data, "Report JSON missing 'ops' key"
+            assert "model_name" in report_data, "Report JSON missing 'model_name'"
+
+            # Load and validate compiler JSON format
+            with open(compiler_files[0]) as f:
+                compiler_data = json.load(f)
+            assert "op_assignments" in compiler_data, (
+                "Compiler JSON missing 'op_assignments' key"
+            )
+
+            # Validate compiler JSON content matches report JSON
+            ops = report_data.get("ops", {})
+            assignments = compiler_data.get("op_assignments", {})
+
+            # Every op with a valid line:column location and recommendation
+            # should appear in the compiler JSON
+            expected_count = 0
+            for op_name, op_info in ops.items():
+                location = op_info.get("mlir_location", "")
+                recommended = op_info.get("recommended_executor")
+                # location must be line:column format (not raw op type)
+                if ":" in location and recommended:
+                    expected_count += 1
+                    assert location in assignments, (
+                        f"Compiler JSON missing assignment for {op_name} "
+                        f"at {location}"
+                    )
+                    assert assignments[location]["executor"] == recommended, (
+                        f"Compiler JSON wrong executor for {op_name}: "
+                        f"expected {recommended}, got {assignments[location]['executor']}"
+                    )
+
+            # Compiler JSON should have at least the assignments we expect
+            assert len(assignments) == expected_count, (
+                f"Compiler JSON has {len(assignments)} assignments, "
+                f"expected {expected_count}"
+            )
+
         finally:
             shutil.rmtree(output_dir, ignore_errors=True)
             _cleanup_generated_json()

@@ -37,7 +37,7 @@ try:
     # process-local and avoids duplicate LLVM cl::Option registration aborts.
     from iree.compiler.ir import Context as _IREEContext  # noqa: F401
     pytest_plugins.append("torq.testing.iree")
-    pytest_plugins.append("torq.executor_discovery.pytest_plugin")
+    pytest_plugins.append("torq.gen_config.pytest_plugin")
 
 except ImportError:
     print("Warning: iree not available, skipping iree test support")

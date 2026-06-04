@@ -20,11 +20,29 @@ from torq.testing.versioned_fixtures import (
     versioned_hashable_object_fixture,
 )
 
-from torq.executor_discovery._utils import (
+from torq.gen_config._utils import (
     build_report_lines,
     extract_line_numbers_from_mlir,
     format_per_layer_status_table,
     parse_diff_metrics,
+)
+from torq.gen_config.core import (
+    DEFAULT_TOLERANCE,
+    EXECUTOR_ORDER,
+    TIMING_PRECISION,
+    _discovery_log,
+    build_timing_data,
+    get_compiler_config_path,
+    get_config_path,
+    get_recommended_executor,
+    get_tolerance,
+    is_line_column_format,
+    load_config,
+    save_compiler_config,
+    save_config,
+    update_config_with_results,
+    extract_model_name_from_case_name,
+    get_subgraph_suffix_from_case_name,
 )
 
 """
@@ -36,14 +54,14 @@ Tests each layer on NSS first, then CSS, then Host, recording which one works.
 Executor Discovery and Assignment Flow:
 
     # Step 1: Run layer discovery tests to find optimal executor for each layer
-    # This generates executor_assignments_<model>.json with discovery results
-    pytest tests/test_onnx_executor_discovery.py -v -k "encoder_small_layer_" \
+    # This generates torq_gen_config_<model>.json with discovery results
+    pytest tests/test_onnx_gen_config.py -v -k "encoder_small_layer_" \
         --model-path=./tests/testdata/onnx_models/encoder_small.onnx --recompute-cache
 
     # Step 2: Run full model test with discovered executor assignments
-    # The torq_executor_assignments_json fixture provides the executor assignments
+    # The torq_torq_gen_config_json fixture provides the executor assignments
     # C++ ExecutorAssignmentPass uses line:column matching to assign executors
-    pytest tests/test_onnx_executor_discovery.py \
+    pytest tests/test_onnx_gen_config.py \
         --model-path=./tests/testdata/onnx_models/encoder_small.onnx \
         -v -k "full_model" --debug-ir=tmp --recompute-cache
 
@@ -52,12 +70,12 @@ Design Details:
 
     Step 1: Layer Discovery Tests
     For each layer (e.g., Tanh, Reshape), test NSS -> CSS -> Host in priority order.
-    Save results to executor_assignments_<model>.json with three status types:
+    Save results to torq_gen_config_<model>.json with three status types:
     - "success": Test passed
     - "difference": Accuracy failure (numerical difference)
 
     Users can re-run specific tests with updated tolerance values:
-    pytest tests/test_onnx_executor_discovery.py -v -k "encoder_small_layer_Tanh_0_nss" \
+    pytest tests/test_onnx_gen_config.py -v -k "encoder_small_layer_Tanh_0_nss" \
         --model-path=./tests/testdata/onnx_models/encoder_small.onnx -v --recompute-cache
 
     Step 2: Full Model Test
@@ -66,7 +84,7 @@ Design Details:
        - Tanh at line 10 -> "10:10"
        - Reshape at line 11 -> "11:10"
     3. Update JSON with correct line numbers (replaces temporary "Tanh" with "10:10")
-    4. torq_executor_assignments_json fixture provides executor assignments JSON
+    4. torq_torq_gen_config_json fixture provides executor assignments JSON
        (discovery format with 'ops' key, or compiler format with 'op_assignments' key)
     5. C++ ExecutorAssignmentPass:
        - Loads executor assignments from JSON
@@ -78,7 +96,7 @@ Design Details:
     MLIR (10:10, 11:10). The fixture extracts correct line numbers directly from
     full model MLIR to ensure proper matching.
 
-JSON Format (executor_assignments_<model>.json):
+JSON Format (torq_gen_config_<model>.json):
 {
     "version": "1.1",
     "model_name": "encoder",
@@ -104,9 +122,20 @@ Compiler JSON Formats (C++ ExecutorAssignmentPass accepts both):
 - Compiler format: {"op_assignments": {"10:10": {"executor": "nss"}}}
 """
 
-DEFAULT_TOLERANCE = {"fp_avg_tol": 0.01, "fp_max_tol": 0.01}
-EXECUTOR_ORDER = ["nss", "css", "host"]
-TIMING_PRECISION = 3  # Decimal places for timing values
+
+def _opt(config, short: str, legacy: str, default=None):
+    """Check short (canonical) option first, then legacy alias."""
+    try:
+        val = config.getoption(short, default=None)
+        if val is not None and val != default:
+            return val
+    except ValueError:
+        pass
+    try:
+        return config.getoption(legacy, default=default)
+    except ValueError:
+        return default
+
 
 def _verify_import_ordering(
     onnx_nodes: list, mlir_ops: List[Tuple[str, str]]
@@ -342,11 +371,6 @@ class ExecutorDiscoveryState:
 # Global state
 _discovery_state = ExecutorDiscoveryState()
 
-def _discovery_log(msg: str) -> None:
-    """Write discovery diagnostic output to stderr (redirected to log file when configured)."""
-    print(msg, file=sys.stderr)
-
-
 def _extract_op_type_from_layer(mlir_file: Path, target_op_type: str) -> Optional[str]:
     """Extract operation type from layer MLIR file."""
     if not mlir_file.exists():
@@ -361,9 +385,7 @@ def _extract_op_type_from_layer(mlir_file: Path, target_op_type: str) -> Optiona
     return None
 
 
-def _is_line_column_format(location: str) -> bool:
-    """Check if location is in 'line:column' format (e.g., '10:10')."""
-    return bool(location and re.match(r"^\d+:\d+$", location))
+
 
 
 def _get_skipped_executors(config) -> set:
@@ -469,7 +491,7 @@ def _maybe_skip_executor(
     if executor in skipped_executors:
         pytest.skip(f"Executor '{executor}' is in --skip-executors list")
 
-    skip_mode = request.config.getoption("--executor-skip-mode", default=False)
+    skip_mode = _opt(request.config, "--skip-mode", "--executor-skip-mode", default=False)
     if not skip_mode or not layer_id or not model_name:
         return
 
@@ -497,81 +519,32 @@ def _maybe_skip_executor(
 def _get_json_path(
     config, model_name: Optional[str] = None, subgraph_suffix: Optional[str] = None
 ) -> Path:
-    """Get path to executor assignments JSON file.
-
-    Args:
-        config: pytest config
-        model_name: Base model name
-        subgraph_suffix: Optional suffix for subgraph-specific JSON (e.g., "subgraph_0_5")
-    """
-    output_dir = config.getoption("--executor-discovery-output", default=None)
+    """Get path to executor assignments JSON file."""
+    output_dir = _opt(config, "--output-dir", "--gen-config-output")
     if model_name is None:
-        model_path = config.getoption("--model-path", default=None)
+        model_path = _opt(config, "--model", "--model-path")
         model_name = Path(model_path).stem if model_path else "auto_discovered"
-
-    if subgraph_suffix:
-        filename = f"executor_assignments_{model_name}_{subgraph_suffix}.json"
-    else:
-        filename = f"executor_assignments_{model_name}.json"
-
-    return Path(output_dir) / filename if output_dir else Path(filename)
+    return get_config_path(model_name, output_dir, subgraph_suffix)
 
 
 def _load_json(config, model_name: str, subgraph_suffix: Optional[str] = None) -> Dict:
     """Load JSON config for a model."""
-    json_path = _get_json_path(config, model_name, subgraph_suffix)
-    if json_path.exists():
-        try:
-            with open(json_path) as f:
-                data = json.load(f)
-            _discovery_log(
-                f"[ExecutorJSON] Loaded {len(data.get('ops', {}))} op(s) from {json_path}"
-            )
-            return data
-        except Exception as e:
-            _discovery_log(f"[ExecutorJSON] Error loading {json_path}: {e}")
-    return {
-        "version": "1.1",
-        "default_tolerance": DEFAULT_TOLERANCE.copy(),
-        "ops": {},
-        "model_name": model_name,
-    }
+    path = _get_json_path(config, model_name, subgraph_suffix)
+    data = load_config(path)
+    if not data.get("model_name"):
+        data["model_name"] = model_name
+    return data
 
 
 def _save_json(config, model_name: str, data: Dict) -> None:
     """Save JSON config for a model."""
-    json_path = _get_json_path(config, model_name)
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(json_path, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def _get_tolerance(layer_id: str, json_data: Dict) -> Dict[str, float]:
-    """Get tolerance for an operation from JSON data."""
-    ops = json_data.get("ops", {})
-    if layer_id in ops:
-        op_data = ops[layer_id]
-        # Check executor-specific tolerance first
-        for executor in EXECUTOR_ORDER:
-            exec_data = op_data.get("executors", {}).get(executor, {})
-            if "tolerance_used" in exec_data:
-                return exec_data["tolerance_used"]
-        # Fall back to op's default tolerance
-        if "tolerance_used" in op_data:
-            return op_data["tolerance_used"]
-    return json_data.get("default_tolerance", DEFAULT_TOLERANCE.copy())
+    path = _get_json_path(config, model_name)
+    save_config(path, data)
 
 
 def _extract_model_name_from_case(case) -> Optional[str]:
     """Extract model name from case name."""
-    # Check subgraph first (subgraph cases also contain _layer_)
-    if "_subgraph_" in case.name:
-        return case.name.split("_subgraph_")[0]
-    elif "_layer_" in case.name:
-        return case.name.split("_layer_")[0]
-    elif "_full_model" in case.name:
-        return case.name.split("_full_model")[0]
-    return None
+    return extract_model_name_from_case_name(case.name)
 
 
 def _is_subgraph_case(case) -> bool:
@@ -581,114 +554,19 @@ def _is_subgraph_case(case) -> bool:
 
 def _get_subgraph_suffix(case) -> Optional[str]:
     """Extract subgraph suffix from case name (e.g., 'subgraph_0_5')."""
-    if "_subgraph_" not in case.name:
-        return None
-    # Case name format: {model}_subgraph_{from}_{to}_layer_... or {model}_subgraph_{from}_{to}_full
-    # Extract only the subgraph_{from}_{to} part
-    parts = case.name.split("_subgraph_")
-    if len(parts) >= 2:
-        # Get the part after _subgraph_, which starts with {from}_{to}
-        after_subgraph = parts[1]
-        # Split by _ and take only the first two numeric parts (from_index, to_index)
-        subparts = after_subgraph.split("_")
-        if len(subparts) >= 2:
-            return f"subgraph_{subparts[0]}_{subparts[1]}"
-    return None
-
-
-def _get_recommended_executor(executors: Dict[str, Any], recommend_by_timing: bool = False) -> Optional[str]:
-    """Get the recommended executor from discovery results.
-
-    Priority (when recommend_by_timing is False):
-    1. First working executor (status == "success")
-    2. First difference executor (status == "difference") if no success
-    3. None - if all error or no results
-
-    Priority (when recommend_by_timing is True):
-    1. Fastest executor with status == "success" (based on timing.runtime_ms)
-    2. Fastest executor with status == "difference" if no success
-    3. None - if all error or no results
-
-    Executor order: nss -> css -> host (when not using timing)
-    """
-    if recommend_by_timing:
-        # Find fastest success executor
-        fastest_success = None
-        fastest_success_time = float("inf")
-        for executor in EXECUTOR_ORDER:
-            if executor in executors and executors[executor].get("status") == "success":
-                timing = executors[executor].get("timing", {})
-                runtime_ms = timing.get("runtime_ms") if timing else None
-                if runtime_ms is not None and runtime_ms < fastest_success_time:
-                    fastest_success_time = runtime_ms
-                    fastest_success = executor
-        if fastest_success:
-            return fastest_success
-
-        # Find fastest difference executor if no success
-        fastest_diff = None
-        fastest_diff_time = float("inf")
-        for executor in EXECUTOR_ORDER:
-            if executor in executors and executors[executor].get("status") == "difference":
-                timing = executors[executor].get("timing", {})
-                runtime_ms = timing.get("runtime_ms") if timing else None
-                if runtime_ms is not None and runtime_ms < fastest_diff_time:
-                    fastest_diff_time = runtime_ms
-                    fastest_diff = executor
-        if fastest_diff:
-            return fastest_diff
-    else:
-        # First priority: find first success
-        for executor in EXECUTOR_ORDER:
-            if executor in executors and executors[executor].get("status") == "success":
-                return executor
-
-        # Second priority: find first difference
-        for executor in EXECUTOR_ORDER:
-            if executor in executors and executors[executor].get("status") == "difference":
-                return executor
-
-    # All error or no results - return None
-    return None
+    return get_subgraph_suffix_from_case_name(case.name)
 
 
 def _update_json_with_results(json_data: Dict, mlir_file: Optional[Path], recommend_by_timing: bool = False) -> None:
     """Update JSON data with discovery results and line numbers."""
-    # Ensure ops dict exists
-    if "ops" not in json_data:
-        json_data["ops"] = {}
-
-    # Update with discovery results
-    for layer_id, executors in _discovery_state.results.items():
-        if layer_id not in json_data["ops"]:
-            json_data["ops"][layer_id] = {"executors": {}}
-
-        # Update executors
-        for executor, result in executors.items():
-            json_data["ops"][layer_id]["executors"][executor] = result
-
-        # Always save node_index for later use by full model test
-        node_index = _discovery_state.node_indices.get(layer_id)
-        if node_index is not None:
-            json_data["ops"][layer_id]["_node_index"] = node_index
-
-        # Use the pre-computed full MLIR location if available
-        full_mlir_location = _discovery_state.full_mlir_locations.get(layer_id)
-        if full_mlir_location and re.match(r"^\d+:\d+$", full_mlir_location):
-            json_data["ops"][layer_id]["mlir_location"] = full_mlir_location
-        elif layer_id in _discovery_state.locations:
-            # Fallback to recorded location (op_type)
-            json_data["ops"][layer_id]["mlir_location"] = _discovery_state.locations[layer_id]
-
-    # Recalculate recommended_executor for all ops (including existing ones)
-    for layer_id, op_data in json_data["ops"].items():
-        executors = op_data.get("executors", {})
-        recommended = _get_recommended_executor(executors, recommend_by_timing)
-        if recommended:
-            json_data["ops"][layer_id]["recommended_executor"] = recommended
-        elif executors:
-            # Has executors but none successful - set to None explicitly
-            json_data["ops"][layer_id]["recommended_executor"] = None
+    update_config_with_results(
+        json_data,
+        _discovery_state.results,
+        _discovery_state.node_indices,
+        _discovery_state.locations,
+        _discovery_state.full_mlir_locations,
+        recommend_by_timing,
+    )
 
 
 def _save_discovery_results(
@@ -745,6 +623,11 @@ def _save_discovery_results(
     # Save detailed report with critical failures info
     _save_detailed_report(config, model_name, critical_failures, summary)
 
+    # Generate compiler-format JSON (minimal, only what C++ pass needs)
+    output_dir = _opt(config, "--output-dir", "--gen-config-output")
+    compiler_path = get_compiler_config_path(model_name, output_dir, subgraph_suffix)
+    save_compiler_config(compiler_path, json_data)
+
 
 def _extract_max_diff(error_msg: str) -> Optional[Dict[str, float]]:
     """Extract max differences from comparison error message."""
@@ -792,7 +675,7 @@ def _resolve_op_name_to_index(op_name, name_to_index, option_name):
 
 def _discover_model_files(config) -> List[Path]:
     """Discover ONNX model files from --model-path or default directories."""
-    onnx_model_path = config.getoption("--model-path", default=None)
+    onnx_model_path = _opt(config, "--model", "--model-path")
     if onnx_model_path:
         path = Path(onnx_model_path)
         if not path.exists():
@@ -1090,15 +973,15 @@ def torq_compiler_options(request, case_config):
 
     if not has_executor_map and executor == "discovered":
         try:
-            torq_executor_assignments_json = request.getfixturevalue(
-                "torq_executor_assignments_json"
+            torq_torq_gen_config_json = request.getfixturevalue(
+                "torq_torq_gen_config_json"
             )
             if (
-                torq_executor_assignments_json
-                and torq_executor_assignments_json.file_path.exists()
+                torq_torq_gen_config_json
+                and torq_torq_gen_config_json.file_path.exists()
             ):
                 cmds.append(
-                    f"--torq-executor-map={torq_executor_assignments_json.file_path}"
+                    f"--torq-executor-map={torq_torq_gen_config_json.file_path}"
                 )
         except pytest.FixtureLookupError:
             pass
@@ -1115,7 +998,7 @@ def comparison_config_for_executor_discovery(request, layer_executor_case):
     model_name = _extract_model_name_from_case(case)
     subgraph_suffix = _get_subgraph_suffix(case) if is_subgraph else None
     json_data = _load_json(request.config, model_name, subgraph_suffix) if model_name else {}
-    tolerance = _get_tolerance(layer_id, json_data)
+    tolerance = get_tolerance(layer_id, json_data)
 
     return {
         "int_tol": 1,
@@ -1246,7 +1129,7 @@ def _generate_report_sections(
         rows.append({
             "layer_id": layer_id,
             "statuses": statuses,
-            "recommended": _get_recommended_executor(executors) or "-",
+            "recommended": get_recommended_executor(executors) or "-",
         })
 
     sections["per_layer_status"] = format_per_layer_status_table(
@@ -1261,7 +1144,7 @@ def _print_final_report(config):
     summary = _discovery_state.get_summary()
     critical_failures = _get_all_critical_failures()
 
-    model_path = config.getoption("--model-path", default=None)
+    model_path = _opt(config, "--model", "--model-path")
     model_name = Path(model_path).stem if model_path else "unknown"
     json_path = _get_json_path(config, model_name)
 
@@ -1383,20 +1266,7 @@ def _save_detailed_report(config, model_name: str, critical_failures: List[Dict]
         _discovery_log(f"\nWarning: Failed to save detailed report: {e}")
 
 
-def _build_timing_data(runtime_times: List[float]) -> Optional[Dict[str, Any]]:
-    """Build timing data from collected runtime measurements.
 
-    Note: Compilation timing is not captured here as compilation happens
-    in test fixtures before _run_layer_test() is called.
-    """
-    if not runtime_times:
-        return None
-
-    avg_runtime = sum(runtime_times) / len(runtime_times)
-    return {
-        "runtime_ms": round(avg_runtime, TIMING_PRECISION),
-        "runs": len(runtime_times),
-    }
 
 
 def _run_layer_test(
@@ -1407,7 +1277,7 @@ def _run_layer_test(
     from torq.testing.comparison import compare_test_results
     import time
 
-    tolerance_used = _get_tolerance(layer_id, json_data)
+    tolerance_used = get_tolerance(layer_id, json_data)
     collect_timing = request.config.getoption("--collect-timing", default=False)
     timing_runs = request.config.getoption("--timing-runs", default=1)
 
@@ -1437,7 +1307,7 @@ def _run_layer_test(
                 if collect_timing:
                     runtime_times.append((time.perf_counter() - run_start) * 1000)
 
-        timing = _build_timing_data(runtime_times) if collect_timing else None
+        timing = build_timing_data(runtime_times) if collect_timing else None
 
         _record("success", timing=timing)
 
@@ -1451,7 +1321,7 @@ def _run_layer_test(
     except AssertionError as e:
         max_diff = _extract_max_diff(str(e))
         failure_report = _extract_failure_report(str(e), AssertionError)
-        timing = _build_timing_data(runtime_times) if collect_timing else None
+        timing = build_timing_data(runtime_times) if collect_timing else None
 
         _record("difference", max_diff, failure_report, timing)
         _discovery_log(f"\nLayer {layer_id}: {executor.upper()} = difference{_format_timing_str(timing)}")
@@ -1461,7 +1331,7 @@ def _run_layer_test(
 
     except Exception as e:
         failure_report = _extract_failure_report(str(e), type(e))
-        timing = _build_timing_data(runtime_times) if collect_timing else None
+        timing = build_timing_data(runtime_times) if collect_timing else None
 
         _record("error", failure_report=failure_report, timing=timing)
         _discovery_log(f"\nLayer {layer_id}: {executor.upper()} = error")

@@ -297,6 +297,7 @@ setup(
     entry_points={
         "console_scripts": [
             "torq-compile = torq.compiler.tools.binaries:main",
+            "torq-gen-config = torq.gen_config.cli:main",
             "iree-compile = iree.compiler.tools.scripts.iree_compile.__main__:main",
             "iree-opt = iree.compiler.tools.scripts.iree_opt.__main__:main",
             "iree-import-tf = iree.tools.tf.scripts.iree_import_tf.__main__:main [tf]",

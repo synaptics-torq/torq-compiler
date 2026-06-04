@@ -14,6 +14,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Location.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 
@@ -53,18 +54,29 @@ ExecutorAssignmentPass::loadExecutorMap() {
         return map; // Empty map means use default behavior
     }
 
-    LLVM_DEBUG(llvm::dbgs() << "Loading executor map from: " << executorMapFile << "\n";);
+    // Prefer compiler-format JSON if it exists alongside the given path.
+    // If executorMapFile is "foo.json", check for "foo_compiler.json".
+    std::string actualFile = executorMapFile;
+    if (actualFile.size() > 5 && actualFile.substr(actualFile.size() - 5) == ".json") {
+        std::string compilerFile = actualFile.substr(0, actualFile.size() - 5) + "_compiler.json";
+        if (llvm::sys::fs::exists(compilerFile)) {
+            actualFile = compilerFile;
+            LLVM_DEBUG(llvm::dbgs() << "Found compiler JSON, using: " << actualFile << "\n";);
+        }
+    }
 
-    auto fileOrErr = llvm::MemoryBuffer::getFile(executorMapFile);
+    LLVM_DEBUG(llvm::dbgs() << "Loading executor map from: " << actualFile << "\n";);
+
+    auto fileOrErr = llvm::MemoryBuffer::getFile(actualFile);
     if (std::error_code ec = fileOrErr.getError()) {
-        llvm::errs() << "Error reading executor map file '" << executorMapFile
-                     << "': " << ec.message() << "\n";
+        llvm::errs() << "Error reading executor map file '" << actualFile << "': " << ec.message()
+                     << "\n";
         return failure();
     }
 
     auto jsonOrErr = llvm::json::parse((*fileOrErr)->getBuffer());
     if (!jsonOrErr) {
-        llvm::errs() << "Error parsing executor map JSON from " << executorMapFile << "\n";
+        llvm::errs() << "Error parsing executor map JSON from " << actualFile << "\n";
         return failure();
     }
 

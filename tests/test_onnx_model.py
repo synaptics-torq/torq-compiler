@@ -31,7 +31,7 @@ def case_config(request, chip_config):
 
     example_tc = [
         # unnecessary to run, only for executor discovery test
-        "example_executor_discovery",
+        "example_gen_config",
     ]
     if any(s in request.node.nodeid for s in example_tc):
         pytest.xfail("Skipped Example Cases")

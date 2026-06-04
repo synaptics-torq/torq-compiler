@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import io
 import json
@@ -11,7 +12,7 @@ from typing import Any, Dict, Optional
 import pytest
 from _pytest._io import TerminalWriter
 
-from torq.executor_discovery._utils import extract_line_numbers_from_mlir
+from torq.gen_config._utils import extract_line_numbers_from_mlir
 from torq.testing.versioned_fixtures import (
     versioned_generated_file_fixture,
     versioned_hashable_object_fixture,
@@ -38,29 +39,68 @@ _total_tests = 0
 _completed_tests = 0
 
 
+def _opt(config, short: str, legacy: str, default=None):
+    """Check short (canonical) option first, then legacy alias."""
+    try:
+        val = config.getoption(short, default=None)
+        if val is not None and val != default:
+            return val
+    except ValueError:
+        pass
+    try:
+        return config.getoption(legacy, default=default)
+    except ValueError:
+        return default
+
+
 def pytest_addoption(parser):
+    # Canonical short names (preferred)
     parser.addoption(
-        "--model-path",
+        "--model",
         default=None,
         help="Path to model file (e.g., encoder.onnx) for discovery tests",
     )
     parser.addoption(
-        "--executor-discovery-output",
+        "--output-dir",
         default=None,
         help="Directory to save executor discovery JSON output (default: current directory)",
+    )
+    parser.addoption(
+        "--skip-mode",
+        action="store_true",
+        default=False,
+        help="Skip remaining executors for a layer if one succeeds (speeds up discovery)",
+    )
+    # Legacy aliases (kept for backward compatibility)
+    parser.addoption(
+        "--model-path",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.addoption(
+        "--gen-config-output",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.addoption(
         "--executor-skip-mode",
         action="store_true",
         default=False,
-        help="Skip remaining executors for a layer if one succeeds (speeds up discovery)",
+        help=argparse.SUPPRESS,
     )
+    parser.addoption(
+        "--gen-config-log-file",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+
+    # Shared options (same name in CLI and pytest)
     parser.addoption(
         "--skip-executors",
         default=None,
         help="Comma-separated list of executors to skip entirely (e.g., 'nss,css' or 'nss'). "
         "Useful when certain executors are known to fail or crash. "
-        "Valid values: nss, css, host. Can be combined with --executor-skip-mode.",
+        "Valid values: nss, css, host. Can be combined with --skip-mode.",
     )
     parser.addoption(
         "--auto-convert-bf16",
@@ -105,13 +145,6 @@ def pytest_addoption(parser):
         "(requires --collect-timing)",
     )
     parser.addoption(
-        "--executor-discovery-log-file",
-        default=None,
-        help="Path to log file for executor discovery output. "
-        "When set, all output (pytest, compiler, runtime) goes to the file and "
-        "only the final report is shown on console. Use with -s for best results.",
-    )
-    parser.addoption(
         "--dedup-layers",
         action="store_true",
         default=False,
@@ -122,9 +155,9 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
-    """Redirect stdout/stderr to log file if --executor-discovery-log-file is specified."""
+    """Redirect stdout/stderr to log file if --gen-config-log-file is specified."""
     global _discovery_log_file_handle, _original_stdout, _original_stderr, _verbose_mode
-    log_file_path = config.getoption("--executor-discovery-log-file", default=None)
+    log_file_path = _opt(config, "--log-file", "--gen-config-log-file")
     _verbose_mode = config.getoption("verbose", default=0) > 0
     if log_file_path:
         path = Path(log_file_path)
@@ -230,7 +263,7 @@ def pytest_sessionfinish(session, exitstatus):
     # the log file.  This avoids printing the report to the terminal twice.
     if _verbose_mode and _discovery_log_file_handle:
         try:
-            from torq.executor_discovery.executor_discovery_onnx import (
+            from torq.gen_config.discovery_onnx import (
                 _discovery_state,
                 _print_final_report,
             )
@@ -255,7 +288,7 @@ def pytest_sessionfinish(session, exitstatus):
     # Print final report to terminal exactly once
     if _verbose_mode:
         try:
-            from torq.executor_discovery.executor_discovery_onnx import (
+            from torq.gen_config.discovery_onnx import (
                 _discovery_state,
                 _print_final_report,
             )
@@ -274,7 +307,7 @@ def pytest_sessionfinish(session, exitstatus):
 
 def _get_model_name_from_config(config) -> Optional[str]:
     """Extract model name from config options."""
-    model_path = config.getoption("--model-path", default=None)
+    model_path = _opt(config, "--model", "--model-path")
     return Path(model_path).stem if model_path else None
 
 
@@ -288,7 +321,7 @@ def _find_discovery_json(
     if not model_name:
         return None
 
-    output_dir = config.getoption("--executor-discovery-output", default=None)
+    output_dir = _opt(config, "--output-dir", "--gen-config-output")
     search_dir = Path(output_dir) if output_dir else Path(".")
 
     if not search_dir.exists():
@@ -296,17 +329,17 @@ def _find_discovery_json(
 
     # For subgraph tests, look for subgraph-specific JSON first
     if subgraph_suffix:
-        json_path = search_dir / f"executor_assignments_{model_name}_{subgraph_suffix}.json"
+        json_path = search_dir / f"torq_gen_config_{model_name}_{subgraph_suffix}.json"
         if json_path.exists():
             return json_path
 
-    # Look for executor_assignments_<model_name>.json
-    json_path = search_dir / f"executor_assignments_{model_name}.json"
+    # Look for torq_gen_config_<model_name>.json
+    json_path = search_dir / f"torq_gen_config_{model_name}.json"
     if json_path.exists():
         return json_path
 
     # Search by model_name field inside JSON files
-    for json_file in search_dir.glob("executor_assignments_*.json"):
+    for json_file in search_dir.glob("torq_gen_config_*.json"):
         try:
             with open(json_file, "r") as f:
                 data = json.load(f)
@@ -419,43 +452,63 @@ def _discovery_json_version(request):
 
 
 @versioned_generated_file_fixture("json")
-def torq_executor_assignments_json(
+def torq_torq_gen_config_json(
     request, versioned_file, mlir_model_file, _discovery_json_version
 ):
     """Generate executor assignments JSON file for compiler.
 
     Priority:
-    1. If executor_assignments_<model>.json exists, use it directly
-       (compiler now supports both discovery format and op_assignments format)
-    2. For subgraph tests, use executor_assignments_<model>_<subgraph>.json
+    1. Find the discovery JSON, update line numbers from full MLIR,
+       then generate a minimal compiler-format JSON for the C++ pass.
+    2. For subgraph tests, use torq_gen_config_<model>_<subgraph>.json
     3. Otherwise, generate a default empty assignments file
 
-    The compiler accepts both formats:
-    - Discovery format:
-      {"ops": {"Conv_0": {"recommended_executor": "nss", "mlir_location": "10:10"}}}
-    - Compiler format: {"op_assignments": {"10:10": {"executor": "nss"}}}
+    Two files are kept in sync:
+    - Report JSON (discovery format): torq_gen_config_<model>.json
+      Contains full discovery data: ops, statuses, tolerances, timing, report.
+    - Compiler JSON: torq_gen_config_<model>_compiler.json
+      Minimal format: {"op_assignments": {"line:column": {"executor": "nss"}}}
     """
 
     # Check if this is a subgraph test
     test_node_id = request.node.nodeid if hasattr(request, "node") else ""
     subgraph_suffix = _get_subgraph_suffix_from_nodeid(test_node_id)
 
-    # Option 1: Find and use discovery JSON directly
-    # The compiler now supports discovery format natively, no conversion needed
     model_name = _get_model_name_from_config(request.config)
     discovery_json = _find_discovery_json(request.config, model_name, subgraph_suffix)
 
     if discovery_json:
         suffix_str = f" ({subgraph_suffix})" if subgraph_suffix else ""
         logger.info(f"[ExecutorAssignments] Using discovery JSON{suffix_str}: {discovery_json}")
-        # For subgraph tests, the mlir_model_file is already the subgraph MLIR
+
+        # Update discovery JSON with correct line numbers from full model MLIR
         _update_discovery_json_line_numbers(discovery_json, mlir_model_file)
-        # Copy discovery JSON to versioned file location for compiler to use
-        shutil.copy(discovery_json, versioned_file)
+
+        # Generate compiler-format JSON from the updated discovery data
+        from torq.gen_config.core import (
+            generate_compiler_config,
+            load_config,
+            save_config,
+        )
+        discovery_data = load_config(discovery_json)
+        compiler_data = generate_compiler_config(discovery_data)
+
+        # Write compiler JSON to the versioned file for the compiler to consume
+        with open(versioned_file, "w") as f:
+            json.dump(compiler_data, f, indent=2)
+
+        # Also persist compiler JSON next to discovery JSON for user reference
+        output_dir = _opt(request.config, "--output-dir", "--gen-config-output")
+        if output_dir:
+            compiler_path = Path(output_dir) / f"torq_gen_config_{model_name}{f'_{subgraph_suffix}' if subgraph_suffix else ''}_compiler.json"
+        else:
+            compiler_path = Path(f"torq_gen_config_{model_name}{f'_{subgraph_suffix}' if subgraph_suffix else ''}_compiler.json")
+        save_config(compiler_path, compiler_data)
+
+        logger.info(f"[ExecutorAssignments] Compiler JSON ({len(compiler_data.get('op_assignments', {}))} ops) -> {versioned_file}")
         return versioned_file
 
     # Option 2: Default empty assignments
-    # Only log warning for full model tests when --model-path is set
     is_full_model_mode = "_full_model" in test_node_id or "_full" in test_node_id
 
     if is_full_model_mode and model_name:
@@ -463,7 +516,7 @@ def torq_executor_assignments_json(
         logger.warning(f"[ExecutorAssignments] No discovery JSON found for model '{model_name}'{suffix_str}.")
         logger.warning(
             "[ExecutorAssignments] Run discovery: "
-            "pytest tests/test_onnx_executor_discovery.py "
+            "pytest tests/test_onnx_gen_config.py "
             "-v --model-path=<model>.onnx"
         )
 
@@ -509,7 +562,7 @@ def _get_layer_info_from_item(item) -> Optional[Dict[str, str]]:
 def _record_setup_error(layer_id, executor, is_subgraph, failure_report):
     """Record setup error for single layer or subgraph layer."""
     try:
-        from torq.executor_discovery.executor_discovery_onnx import (
+        from torq.gen_config.discovery_onnx import (
             DEFAULT_TOLERANCE,
             _discovery_state,
         )

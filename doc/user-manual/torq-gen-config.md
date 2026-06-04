@@ -1,6 +1,6 @@
-# TORQ Executor Discovery Manual
+# torq-gen-config: a TORQ config generation tool
 
-A guide for finding the best executor (NSS/CSS/Host) for each operation in a model.
+A guide for finding the best execution configuration (NSS/CSS/Host) for each operation in a model.
 
 ---
 
@@ -21,7 +21,7 @@ A guide for finding the best executor (NSS/CSS/Host) for each operation in a mod
 
 ## 1. Overview
 
-### Why Executor Discovery?
+### Why tork-gen-config?
 
 TORQ has three executors, each with different strengths:
 
@@ -31,7 +31,7 @@ TORQ has three executors, each with different strengths:
 | **CSS** | CPU Subsystem (hardware) | 2nd |
 | **Host** | CPU fallback | 3rd |
 
-Different operations work better on different executors. For example, convolution layers often run efficiently on NSS, while some complex tensor operations may only work correctly on Host. Additionally, the same operation might work on one executor but fail on another due to hardware limitations, unsupported data types, or numerical precision issues. Executor Discovery automatically tests each operation with all executors and records which ones work correctly, ensuring optimal performance and correctness when running the full model.
+Different operations work better on different executors. For example, convolution layers often run efficiently on NSS, while some complex tensor operations may only work correctly on Host. Additionally, the same operation might work on one executor but fail on another due to hardware limitations, unsupported data types, or numerical precision issues. tork-gen-config automatically tests each operation with all executors and records which ones work correctly, ensuring optimal performance and correctness when running the full model.
 
 ### How It Works
 
@@ -45,7 +45,7 @@ This manual uses `squeezenet1.0-12.onnx` (66 operations: Conv, Relu, MaxPool, Co
 
 ### Tested Models
 
-The following CNN models have been verified to work with executor discovery:
+The following CNN models have been verified to work with tork-gen-config:
 
 | Model | Type | Status |
 |-------|------|--------|
@@ -64,7 +64,13 @@ The following CNN models have been verified to work with executor discovery:
 Test each operation to find the best executor:
 
 ```bash
-pytest tests/test_onnx_executor_discovery.py \
+# Using torq-gen-config (recommended)
+torq-gen-config discover \
+    --model ./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
+    --skip-mode
+
+# Or using pytest directly
+pytest tests/test_onnx_gen_config.py \
     -v -k "_layer_" \
     --model-path=./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
     --executor-skip-mode --recompute-cache
@@ -74,14 +80,18 @@ pytest tests/test_onnx_executor_discovery.py \
 - Extracts each layer from the model
 - Tests NSS → CSS → Host
 - Stops after first success (with `--executor-skip-mode`)
-- Creates `executor_assignments_squeezenet1.0-12.json`
+- Creates `torq_gen_config_squeezenet1.0-12.json`
 
 ### Step 2: Review
 
 View the JSON results with the built-in viewer:
 
 ```bash
-python3 python/torq/executor_discovery/view_discovery_json.py executor_assignments_squeezenet1.0-12.json
+# Using torq-gen-config (recommended)
+torq-gen-config view torq_gen_config_squeezenet1.0-12.json
+
+# Or using the viewer module directly
+python3 -m torq.gen_config view torq_gen_config_squeezenet1.0-12.json
 ```
 
 Output shows each layer with status for all executors:
@@ -107,7 +117,7 @@ A `difference` status means the executor runs successfully but produces numerica
 
 1. **View the current difference:**
    ```bash
-   python3 python/torq/executor_discovery/view_discovery_json.py executor_assignments_squeezenet1.0-12.json Conv_conv1_1
+   python3 -m torq.gen_config view torq_gen_config_squeezenet1.0-12.json Conv_conv1_1
    ```
 
 2. **Edit the JSON** to increase tolerance for that executor:
@@ -138,7 +148,7 @@ If the test passes with new tolerance, the `recommended_executor` will be update
 Compile and run the complete model with discovered assignments:
 
 ```bash
-pytest tests/test_onnx_executor_discovery.py \
+pytest tests/test_onnx_gen_config.py \
     -v -k "_full_model" \
     --model-path=./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
     --debug-ir=tmp --recompute-cache
@@ -154,10 +164,10 @@ The viewer displays results layer by layer:
 
 ```bash
 # View summary of all layers
-python3 python/torq/executor_discovery/view_discovery_json.py executor_assignments_squeezenet1.0-12.json
+python3 -m torq.gen_config view torq_gen_config_squeezenet1.0-12.json
 
 # View details for specific layer
-python3 python/torq/executor_discovery/view_discovery_json.py executor_assignments_squeezenet1.0-12.json Conv_conv1_1
+python3 -m torq.gen_config view torq_gen_config_squeezenet1.0-12.json Conv_conv1_1
 ```
 
 ### Understanding the JSON
@@ -208,7 +218,7 @@ You can manually override the recommendation by editing the JSON file:
 
 1. **Open the JSON file:**
    ```bash
-   vim executor_assignments_squeezenet1.0-12.json
+   vim torq_gen_config_squeezenet1.0-12.json
    ```
 
 2. **Change the `recommended_executor` field:**
@@ -245,7 +255,7 @@ By default, the recommended executor is determined by priority order (`nss` → 
 
 ```bash
 # Collect timing and recommend by performance
-pytest tests/test_onnx_executor_discovery.py \
+pytest tests/test_onnx_gen_config.py \
     -v -k "_layer_" \
     --model-path=./model.onnx \
     --collect-timing \
@@ -288,7 +298,7 @@ When a layer fails (e.g., CSS shows `error`), debug it individually:
 
 ```bash
 # Re-test a specific layer with all executors
-pytest tests/test_onnx_executor_discovery.py \
+pytest tests/test_onnx_gen_config.py \
     -v -k "squeezenet1.0-12_layer_Conv_0" \
     --model-path=./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
     --recompute-cache
@@ -298,7 +308,7 @@ This runs the layer (`Conv_0`) with NSS, CSS, and Host separately to see detaile
 
 **Important: Layer Tests are for Discovery Only**
 
-Layer tests (`-k "_layer_"`) are designed for **executor discovery** only. They test which executor works for each operation but do NOT perform C++ executor assignment.
+Layer tests (`-k "_layer_"`) are designed for **tork-gen-config** only. They test which executor works for each operation but do NOT perform C++ executor assignment.
 
 To see executor assignment in the IR dump, use **subgraph test** or **full model test**:
 
@@ -343,8 +353,8 @@ linalg.conv_2d_nchw_fchw {...} {torq-executor = "nss"}
 
 1. View the error in JSON:
    ```bash
-   python3 python/torq/executor_discovery/view_discovery_json.py \
-       executor_assignments_squeezenet1.0-12.json Conv_conv1_1
+   python3 -m torq.gen_config view \
+       torq_gen_config_squeezenet1.0-12.json Conv_conv1_1
    ```
 
 2. Re-test that specific layer:
@@ -390,7 +400,7 @@ for i, n in enumerate(model.graph.node):
 
 **Run subgraph discovery (nodes 10-16):**
 ```bash
-pytest tests/test_onnx_executor_discovery.py \
+pytest tests/test_onnx_gen_config.py \
     -v \
     --model-path=./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
     --subgraph-from=Conv_fire3/squeeze1x1_1 \
@@ -398,7 +408,7 @@ pytest tests/test_onnx_executor_discovery.py \
     --executor-skip-mode --recompute-cache
 ```
 
-This creates `executor_assignments_squeezenet1.0-12_subgraph_10_16.json` and runs layer discovery + full subgraph test.
+This creates `torq_gen_config_squeezenet1.0-12_subgraph_10_16.json` and runs layer discovery + full subgraph test.
 
 **Subgraph Options:**
 | Option | Description |
@@ -413,7 +423,7 @@ This creates `executor_assignments_squeezenet1.0-12_subgraph_10_16.json` and run
 If full model fails but individual layers pass:
 
 1. Check debug IR: `ls tmp/`
-2. Verify assignments in viewer: `python3 python/torq/executor_discovery/view_discovery_json.py executor_assignments_*.json`
+2. Verify assignments in viewer: `python3 -m torq.gen_config view torq_gen_config_*.json`
 3. Re-run discovery for problematic layers
 
 ### Skipping Executors (Extra Debug Option)
@@ -492,7 +502,7 @@ This is designed for **speeding up incremental discovery**, not for re-testing.
 
 3. **Option C: Delete the JSON file**
    ```bash
-   rm executor_assignments_*.json
+   rm torq_gen_config_*.json
    pytest ... -k "_layer_" --executor-skip-mode --recompute-cache
    ```
 
@@ -531,7 +541,7 @@ To verify executor assignment in the IR:
 
 ## 5. Auto-Converting FP32 Models to BF16
 
-TORQ NSS accelerator has limited FP32 support and requires BF16 (bfloat16) input for many operations. CSS and Host executors generally support FP32. The executor discovery framework provides automatic FP32 to BF16 conversion with accuracy validation.
+TORQ NSS accelerator has limited FP32 support and requires BF16 (bfloat16) input for many operations. CSS and Host executors generally support FP32. The tork-gen-config framework provides automatic FP32 to BF16 conversion with accuracy validation.
 
 ### Why Convert to BF16?
 
@@ -600,11 +610,11 @@ This runs both models with random inputs and compares outputs:
 - Uses ONNX Runtime for both FP32 and BF16 inference
 - Reports per-sample and aggregate error statistics
 
-### Using BF16 with Executor Discovery
+### Using BF16 with tork-gen-config
 
 **Basic usage:**
 ```bash
-pytest tests/test_onnx_executor_discovery.py \
+pytest tests/test_onnx_gen_config.py \
     -v -k "_layer_" \
     --model-path=./model.onnx \
     --auto-convert-bf16 \
@@ -648,7 +658,7 @@ pytest ... --auto-convert-bf16 --save-bf16-model=/path/to/output.onnx
 
 ## 6. ONNX to MLIR Mapping Mechanism
 
-This section explains how executor discovery maps ONNX operations to their corresponding line numbers in the MLIR generated by torch-mlir. This mapping is essential for the C++ compiler to assign the correct executor to each operation.
+This section explains how tork-gen-config maps ONNX operations to their corresponding line numbers in the MLIR generated by torch-mlir. This mapping is essential for the C++ compiler to assign the correct executor to each operation.
 
 ### torch-mlir Import Guarantees
 
@@ -707,7 +717,7 @@ The JSON stores this mapping:
 
 ### Verification
 
-Executor discovery automatically verifies the mapping during test generation:
+tork-gen-config automatically verifies the mapping during test generation:
 - Count check: ONNX and MLIR have the same number of non-Constant ops
 - Type check: Op types match at each position
 - Warning output if verification fails
@@ -746,7 +756,7 @@ If you see warnings like `COUNT MISMATCH` or `OP TYPE MISMATCHES` during discove
 | `--collect-timing` | Collect compile and runtime timing data |
 | `--timing-runs=N` | Number of runtime runs for timing average (default: 1) |
 | `--recommend-by-timing` | Recommend fastest executor based on timing data |
-| `--executor-discovery-log-file=PATH` | Redirect all output to log file; terminal shows only test progress and final report (use with `-s`) |
+| `--gen-config-log-file=PATH` | Redirect all output to log file; terminal shows only test progress and final report (use with `-s`) |
 | `--dedup-layers` | Detect duplicate layers by ONNX signature and copy results instead of re-testing |
 
 ### Common Patterns
@@ -769,7 +779,7 @@ pytest ... --model-path=model.onnx -k "_layer_" --collect-timing --timing-runs=5
 
 # Redirect output to log file (terminal shows only progress + final report)
 pytest ... --model-path=model.onnx -k "_layer_" -v -s \
-    --executor-discovery-log-file=discovery.log
+    --gen-config-log-file=discovery.log
 
 # Skip duplicate layers by ONNX signature (speeds up models with repeated blocks)
 pytest ... --model-path=model.onnx -k "_layer_" --dedup-layers --executor-skip-mode

@@ -6,13 +6,13 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-# Allow importing from torq.executor_discovery when run as standalone script
+# Allow importing from torq.gen_config when run as standalone script
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from torq.executor_discovery._utils import format_per_layer_status_table
+from torq.gen_config._utils import format_per_layer_status_table
 
 
 def use_color() -> bool:
@@ -170,7 +170,7 @@ def print_layer_details(data: Dict[str, Any], layer_id: str) -> None:
 def main():
     if len(sys.argv) < 2:
         print("Usage: python/torq/executor_discovery/view_discovery_json.py <json_file> [layer_id]")
-        print("  json_file: Path to executor_assignments_*.json")
+        print("  json_file: Path to torq_gen_config_*.json")
         print("  layer_id: (Optional) Show details for specific layer")
         sys.exit(1)
 

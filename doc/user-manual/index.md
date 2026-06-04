@@ -12,9 +12,9 @@ profiling.md
 css_host_fallback.md
 custom_hw.md
 debug_tips.md
+torq-gen-config.md
+torq-synap-integration.md
 appendices.md
 release_notes.md
-tools.md
-torq-synap-integration.md
 ```
 

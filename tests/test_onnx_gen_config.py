@@ -10,14 +10,14 @@ except ImportError:
 ONNX Executor Discovery Test Entry Point
 
 cmd:
-pytest tests/test_onnx_executor_discovery.py --model-path=encoder.onnx -v
+pytest tests/test_onnx_gen_config.py --model-path=encoder.onnx -v
 
 """
 
-from torq.executor_discovery.executor_discovery_onnx import pytest_generate_tests
+from torq.gen_config.discovery_onnx import pytest_generate_tests
 
 # Fixtures
-from torq.executor_discovery.executor_discovery_onnx import (
+from torq.gen_config.discovery_onnx import (
     reference_results,
     layer_executor_case,
     onnx_layer_model,
@@ -27,7 +27,7 @@ from torq.executor_discovery.executor_discovery_onnx import (
 )
 
 # Core logic imports
-from torq.executor_discovery.executor_discovery_onnx import (
+from torq.gen_config.discovery_onnx import (
     executor_discovery,
     _extract_model_name_from_case,
     _get_subgraph_suffix,
@@ -68,7 +68,7 @@ def case_config(request, tmp_path, layer_executor_case, chip_config):
     # Note: Layer tests are for DISCOVERY only. Executor assignment in C++ pass
     # only works for full model tests where line numbers match.
     # The --torq-disable-* flags enforce the executor for layer tests.
-    json_path = tmp_path / f"executor_assignments_{executor}.json"
+    json_path = tmp_path / f"torq_gen_config_{executor}.json"
     assignment = {"op_assignments": {layer_id: {"executor": executor}}}
     with open(json_path, "w") as f:
         json.dump(assignment, f, indent=2)
