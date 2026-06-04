@@ -30,6 +30,9 @@ jobs:
   choose_runner_image:
     name: Choose runner image
     uses: ./.github/workflows/choose-runner.yml
+    permissions:
+      contents: read
+      pull-requests: read
 
   build:
 

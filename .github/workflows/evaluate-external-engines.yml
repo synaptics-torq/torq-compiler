@@ -1,13 +1,7 @@
 name: Evaluate External Compilation Engines
 
-on: 
-
-  # workflow_dispatch is used on main and vX.Y branches to generate official data
+on:
   workflow_dispatch:
-
-  # pull_request is used to test changes to the external engine support
-  pull_request:
-    
 
 concurrency:  
   group: ${{ github.workflow }}-${{ github.event.number || github.sha }}
@@ -18,7 +12,9 @@ jobs:
   choose_runner_image:
     name: Choose runner image
     uses: ./.github/workflows/choose-runner.yml
-    if: contains(github.event.pull_request.labels.*.name, 'test-alt-engines') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      pull-requests: read
 
   test:    
     name: Test with external engines

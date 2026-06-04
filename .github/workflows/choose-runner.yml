@@ -12,10 +12,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_name: ${{ steps.set-runner-image.outputs.image_name }}
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Choose runner image
         id: set-runner-image
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.github_token }}
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             if [[ "${{ github.base_ref }}" == "main" ]]; then
@@ -23,7 +28,19 @@ jobs:
             else
               echo "image_name=${{ github.base_ref }}" >> $GITHUB_OUTPUT
             fi
-          elif [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # find a pr for this branch if it exists and use the base ref
+            PR_BASE_REF=$(gh pr list --repo ${{ github.repository }} --head ${{ github.ref_name }} --json baseRefName --jq '.[0].baseRefName')
+            if [[ -z "$PR_BASE_REF" ]]; then
+              echo "image_name=latest" >> $GITHUB_OUTPUT
+            else
+              if [[ "$PR_BASE_REF" == "main" ]]; then
+                echo "image_name=latest" >> $GITHUB_OUTPUT
+              else
+                echo "image_name=$PR_BASE_REF" >> $GITHUB_OUTPUT
+              fi
+            fi
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
             if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
               echo "image_name=latest" >> $GITHUB_OUTPUT
             else

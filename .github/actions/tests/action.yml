@@ -114,6 +114,14 @@ runs:
       if: ${{ inputs.extra_repo != '' }}
       shell: bash
       run: |
+
+        # check if we have been invoked on a tag
+        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          echo "Workflow invoked on a tag, using the tag name as branch for extras repository"
+          echo "branch=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
         token="${{ steps.generate_token.outputs.token }}"
         branch_name="${{ github.head_ref || github.ref_name }}"
         repo="${{ inputs.extra_repo }}"
@@ -125,8 +133,27 @@ runs:
         if [ "$status" = "200" ]; then
           echo "branch=$branch_name" >> $GITHUB_OUTPUT
         else
-          # use the base branch if we have a PR event, otherwise fallback to the branch being pushed (or tag)
-          echo "branch=${{ github.base_ref || github.ref_name }}" >> $GITHUB_OUTPUT
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # try to find a PR associated with this branch and get the base branch
+            base_branch=$(curl -s \
+              -H "Authorization: Bearer $token" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls?head=${{ github.repository_owner }}:$branch_name&state=open" | \
+              python3 -c "import sys, json; d=json.load(sys.stdin); print(d[0]['base']['ref'])" 2> /dev/null || echo null)
+
+            if [ "$base_branch" != "null" ]; then
+              echo "Found base branch $base_branch for workflow_dispatch event, using it for extras checkout"
+              echo "branch=$base_branch" >> $GITHUB_OUTPUT
+            else
+              echo "No branch found for extras repository and no associated PR found for workflow_dispatch event, failing"
+              exit 1
+            fi
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # use the base branch for PR events
+            echo "branch=${{ github.base_ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "No branch found for extras repository and event is not workflow_dispatch or pull_request, failing"
+            exit 1
+          fi
         fi
 
     - name: Checkout extras repository
