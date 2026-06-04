@@ -47,6 +47,86 @@ class GenericConstantToFillPattern : public OpRewritePattern<linalg::GenericOp> 
 };
 
 // elementwise binary ops with 2 inputs
+
+class RewriteIfScalarConstantPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+    // Rewrites a multi dimensional scalar value passed to a linalg genericOp as single dim scalar
+    // Ex: tensor<1x1x1xbf16> -> tensor<1xbf16>
+    // While doing this any linalg iteration map has to be changed. Since the input is multi
+    // dimensional with 1x1x1 or similar shape the indexing map will have affine dim expressions
+    // like (d0, d1, d2) -> (d0, d1, d2) or (d0, d1, d2) -> (d0, d1, 0) etc. After the rewrite the
+    // indexing map has to be changed to (d0, d1, d2) -> (0)
+    LogicalResult rewriteIfScalarConstant(
+        linalg::GenericOp gOp, OpOperand &operand, PatternRewriter &rewriter
+    ) const {
+        auto denseAttr = returnDenseElementAttr(operand.get());
+        if (!denseAttr || denseAttr.getType().getRank() == 1 || denseAttr.getNumElements() != 1) {
+            return failure();
+        }
+
+        auto iteratorTypes = gOp.getIteratorTypesArray();
+        if (!llvm::all_of(iteratorTypes, [](utils::IteratorType iter) {
+                return iter == utils::IteratorType::parallel;
+            })) {
+            return failure();
+        }
+        ShapedType type = cast<ShapedType>(operand.get().getType());
+
+        auto elementType = type.getElementType();
+        auto newType = RankedTensorType::get({1}, elementType);
+        auto loc = operand.get().getLoc();
+        auto newConst =
+            arith::ConstantOp::create(rewriter, loc, newType, denseAttr.reshape(newType));
+
+        auto opIdx = operand.getOperandNumber();
+        auto itrMap = gOp.getIndexingMapsArray();
+        SmallVector<AffineMap> newIndexingMaps;
+        newIndexingMaps.reserve(itrMap.size());
+
+        for (auto [i, map] : llvm::enumerate(itrMap)) {
+            if (i == opIdx) {
+                auto newMap = AffineMap::get(
+                    map.getNumDims(), map.getNumSymbols(), {rewriter.getAffineConstantExpr(0)},
+                    rewriter.getContext()
+                );
+                newIndexingMaps.push_back(newMap);
+            }
+            else {
+                newIndexingMaps.push_back(map);
+            }
+        }
+
+        rewriter.modifyOpInPlace(gOp, [&]() {
+            gOp.setOperand(opIdx, newConst);
+            gOp.setIndexingMapsAttr(rewriter.getAffineMapArrayAttr(newIndexingMaps));
+        });
+
+        return success();
+    }
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        // If the generic op matches a broadcast then don't do anything because the broadcast
+        // pattern will handle the scalar constant and we don't want to interfere with that
+        if (linalg::isaBroadcastOpInterface(srcOp)) {
+            return failure();
+        }
+
+        // Only handle elementwise binary ops for now, we can add more ops later if needed
+        bool changed = false;
+        for (auto operand : srcOp.getDpsInputOperands()) {
+            if (succeeded(rewriteIfScalarConstant(srcOp, *operand, rewriter))) {
+                changed = true;
+            }
+        }
+        if (changed) {
+            return success();
+        }
+        return failure();
+    }
+};
+
 class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -194,19 +274,6 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             );
         }
 
-        auto isConstantValue = [](Value val) {
-            if (auto definingOp = val.getDefiningOp()) {
-                return isa<arith::ConstantOp>(definingOp);
-            }
-            return false;
-        };
-
-        auto isScalarConstant = [&](Value val, ShapedType type) {
-            // return isConstantValue(val) && type.getRank() == 1 && type.getShape()[0] == 1;
-            return isConstantValue(val) &&
-                   llvm::all_of(type.getShape(), [](int64_t dim) { return dim == 1; });
-        };
-
         auto rank1 = input1Type.getRank();
         auto rank2 = input2Type.getRank();
 
@@ -215,11 +282,17 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
                 srcOp, "one of input or both input rank is 0, no need broadcast\n"
             );
         }
+        auto isScalar = [&](Value input) {
+            if (isa_and_nonnull<arith::ConstantOp>(input.getDefiningOp()) &&
+                returnDenseElementAttr(input).getNumElements() == 1) {
+                return true;
+            }
+            return false;
+        };
 
-        // if one input is rank=1 scalar constant, no need to broadcast
-        if (isScalarConstant(input1, input1Type) || isScalarConstant(input2, input2Type)) {
+        if (isScalar(input1) || isScalar(input2)) {
             return rewriter.notifyMatchFailure(
-                srcOp, "one of input or both input is rank=1 constant, no need broadcast\n"
+                srcOp, "one of input or both input is scalar, no need broadcast\n"
             );
         }
 
@@ -259,6 +332,7 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
 void populateOptimizeElementwiseBinaryOpPatterns(
     MLIRContext *context, RewritePatternSet &patterns
 ) {
+    patterns.add<RewriteIfScalarConstantPattern>(context);
     patterns.add<PromoteScalarsTo1D>(context);
     patterns.add<GenericConstantToFillPattern>(context);
     patterns.add<BroadcastElementwiseBinaryOpPattern>(context);

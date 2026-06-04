@@ -10,6 +10,7 @@
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/ShapeUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -46,11 +47,19 @@ struct TensorBitcastPattern : public OpRewritePattern<tensor::BitcastOp> {
         );
 
         size_t rank = inputType.getRank();
+        size_t outRank = resultType.getRank();
+        SmallVector<AffineExpr> exprs;
+        for (size_t i = 0; i < rank; ++i) {
+            exprs.push_back(getAffineDimExpr(i, rewriter.getContext()));
+        }
 
         SmallVector<AffineMap> maps{
-            2, AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext())
+            AffineMap::get(outRank, 0, exprs, rewriter.getContext()),
+            AffineMap::getMultiDimIdentityMap(outRank, rewriter.getContext()),
         };
-        SmallVector<utils::IteratorType> iteratorTypes{rank, utils::IteratorType::parallel};
+        SmallVector<utils::IteratorType> iteratorTypes{
+            max(rank, outRank), utils::IteratorType::parallel
+        };
 
         rewriter.replaceOpWithNewOp<linalg::GenericOp>(
             bitcastOp, resultType, ValueRange{bitcastOp.getSource()}, ValueRange{emptyOp}, maps,
@@ -390,6 +399,23 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
         auto numerator = srcOp.getOperand(0);
         auto denominator = srcOp.getOperand(1);
         auto output = srcOp.getOutputs()[0];
+
+        SmallVector<Value> inputs = srcOp.getInputs();
+        if (succeeded(broadcastInputs(srcOp, inputs, rewriter))) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "Broadcasted inputs for divf pattern in op: " << srcOp << "\n"
+            );
+            numerator = inputs[0];
+            denominator = inputs[1];
+        }
+
+        SmallVector<AffineMap> maps;
+        maps.append(
+            srcOp.getNumOperands(),
+            AffineMap::getMultiDimIdentityMap(
+                cast<RankedTensorType>(output.getType()).getRank(), rewriter.getContext()
+            )
+        );
         auto recip =
             linalg::ReciprocalOp::create(rewriter, srcOp.getLoc(), denominator, srcOp.getOutputs())
                 .getResult(0);
@@ -398,7 +424,7 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
             srcOp,
             linalg::GenericOp::create(
                 rewriter, srcOp.getLoc(), TypeRange{output.getType()}, ValueRange{numerator, recip},
-                ValueRange{output}, srcOp.getIndexingMapsArray(), srcOp.getIteratorTypesArray(),
+                ValueRange{output}, maps, srcOp.getIteratorTypesArray(),
                 [&](OpBuilder &b, Location l, ValueRange args) {
                     linalg::YieldOp::create(
                         rewriter, l,
