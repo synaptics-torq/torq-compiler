@@ -38,7 +38,17 @@ LogicalResult TablePattern::transform(torq_hl::TableOp op, PatternRewriter &rewr
     LData output(op.getInit());
     LData biasScale(op.getScaleBias());
 
-    ArrayRef<int32_t> lut = op.getStaticTableAttr().asArrayRef();
+    // HW ACT LUT bytes are fixed in the slice descriptor; there is no runtime table buffer.
+    // ExtractPattern must have set static_table when creating torq_hl.table; runtime LUTs
+    // must be torq_hl.gather instead.
+    DenseI32ArrayAttr staticTable = op.getStaticTableAttr();
+    if (!staticTable) {
+        return rewriter.notifyMatchFailure(
+            op, "torq_hl.table missing static_table (expected set at Linalg lowering; "
+                "non-const LUTs must be torq_hl.gather)"
+        );
+    }
+    ArrayRef<int32_t> lut = staticTable.asArrayRef();
     slice.act.setLUT(lut);
 
     input.fuse(std::min(input.denseDims(), output.denseDims()))
