@@ -55,7 +55,7 @@ def pytest_generate_tests(metafunc):
         ]
 
     for f in files:
-        cases += generate_onnx_layers_from_file(f, node_groups)
+        cases += generate_onnx_layers_from_file(metafunc.config.cache, f, node_groups)
 
     metafunc.parametrize("onnx_layer_model", cases, indirect=True, ids=[c.name for c in cases])
 

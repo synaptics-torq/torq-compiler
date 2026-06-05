@@ -816,7 +816,7 @@ def _generate_layer_cases(f: Path, config) -> List[Case]:
             Case(f"{f.stem}_{key}", layer)
             for key, layer in layers.items()
         ] + [Case(f"{f.stem}_full_model", model)]
-    return generate_onnx_layers_from_file(f)
+    return generate_onnx_layers_from_file(config.cache, f)
 
 
 def _assemble_layer_test_cases(

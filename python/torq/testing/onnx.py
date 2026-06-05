@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+import re
 
 import numpy as np
 import onnx
@@ -44,6 +45,7 @@ Fixtures and utilities for testing ONNX models.
 #   Pytest fixtures      onnx_model, onnx_model_file, ...
 #
 
+_pytest_config = None
 
 # ---- Classes ----
 
@@ -900,7 +902,104 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
             print(f'{log_prefix}: inference/check failed: {e}; using raw model')
         return _copy.deepcopy(new_model)
 
+# ---- Layer cache (disk-backed) ----------------------------------------
+#
+# Caches the output of generate_onnx_layers_from_model() under
+# .pytest_cache/d/onnx_layer_cache/<model>/ so repeated pytest runs skip
+# shape inference + extraction and just onnx.load each layer file.
+#
+# Layout:
+#   <cache_dir>/<model>/
+#       manifest.json     -- ordered list of layers + metadata
+#       full_model.onnx   -- shape-inferred full model
+#       <safe_layer_name>.onnx ...
 
+_LAYER_CACHE_VERSION = 1  # bump when extraction logic changes
+
+def _load_layers_from_cache(key_dir: Path, model_file: str,
+                            node_groups, dedup):
+    """Return (full_model, layers_dict) or None on miss / mismatch / corrupt."""
+    manifest_path = key_dir / "manifest.json"
+    full_path = key_dir / "full_model.onnx"
+    if not manifest_path.exists() or not full_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+
+        # Invalidate if the model file or extraction options changed.
+        stat = Path(model_file).stat()
+        if (manifest.get("version") != _LAYER_CACHE_VERSION
+                or manifest.get("model_size") != stat.st_size
+                or manifest.get("model_mtime_ns") != stat.st_mtime_ns
+                or manifest.get("node_groups") != node_groups
+                or manifest.get("dedup") != dedup):
+            return None
+
+        full_model = onnx.load(str(full_path))
+        layers = {}
+        for entry in manifest["layers"]:
+            layer_path = key_dir / entry["filename"]
+            if not layer_path.exists():
+                return None  # partial cache, treat as miss
+            model = onnx.load(str(layer_path))
+            layers[entry["name"]] = ModelWithMetadata(
+                model, entry.get("node_index"))
+        return full_model, layers
+    except Exception as e:
+        print(f"[onnx-layer-cache] ignoring corrupt cache at {key_dir}: {e}")
+        return None
+
+
+def _save_layers_to_cache(key_dir: Path, full_model, layers: dict,
+                          model_file: str, node_groups, dedup) -> None:
+    """Atomically write full_model + layers + manifest under key_dir."""
+    import os
+    import shutil
+
+    tmp_dir = key_dir.with_name(key_dir.name + f".tmp.{os.getpid()}")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=False)
+
+    try:
+        onnx.save(full_model, str(tmp_dir / "full_model.onnx"))
+
+        entries = []
+        used = set()
+        for name, layer in layers.items():
+            model = layer.model if hasattr(layer, "model") else layer
+            node_index = getattr(layer, "node_index", None)
+
+            filename = f"{name}.onnx"
+            i = 0
+            while filename in used:
+                i += 1
+                filename = f"{name}_{i}.onnx"
+            used.add(filename)
+
+            onnx.save(model, str(tmp_dir / filename))
+            entries.append({
+                "name": name,
+                "filename": filename,
+                "node_index": node_index,
+            })
+
+        stat = Path(model_file).stat()
+        (tmp_dir / "manifest.json").write_text(json.dumps({
+            "version": _LAYER_CACHE_VERSION,
+            "model_size": stat.st_size,
+            "model_mtime_ns": stat.st_mtime_ns,
+            "node_groups": node_groups,
+            "dedup": dedup,
+            "layers": entries,
+        }, indent=2))
+
+        if key_dir.exists():
+            shutil.rmtree(key_dir)
+        tmp_dir.rename(key_dir)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
 # ---- Layer / subgraph extraction ----
 
@@ -1088,18 +1187,40 @@ def _build_onnx_layer_cases(model_prefix: str, model, layers):
     cases.append(OnnxLayerCase(name=f"{model_prefix}_full_model", data=model, is_full_model=True))
     return cases
 
+def _load_cached_layers(cache, model_file: str, name_stem: str,
+                                    node_groups, dedup):
+    """Shared cache-aware wrapper used by both _from_file and _from_hf."""
+
+    cache_dir = cache.mkdir('onnx_layer_cache')
+    key_dir = cache_dir / name_stem
+
+    cached = _load_layers_from_cache(key_dir, model_file, node_groups, dedup)
+    if cached is not None:
+        full_model, layers = cached
+        print(f"[onnx-layer-cache] HIT  {name_stem} -> {key_dir}")
+        return _build_onnx_layer_cases(name_stem, full_model, layers)
+
+    print(f"[onnx-layer-cache] MISS {name_stem} -> {key_dir}")
+    full_model = get_full_model(model_file)
+    layers = generate_onnx_layers_from_model(full_model, node_groups, dedup)
+    try:
+        _save_layers_to_cache(key_dir, full_model, layers,
+                                model_file, node_groups, dedup)
+    except Exception as e:
+        print(f"[onnx-layer-cache] save failed (continuing): {e}")
+    return _build_onnx_layer_cases(name_stem, full_model, layers)
+
 
 def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, dedup=True):
-    model = get_full_model(get_hf_model_file(cache, repo_id, filename))
-    layers = generate_onnx_layers_from_model(model, node_groups, dedup)
-    return _build_onnx_layer_cases(Path(filename).stem, model, layers)
+    model_file = get_hf_model_file(cache, repo_id, filename)
+    return _load_cached_layers(
+        cache, model_file, Path(filename).stem, node_groups, dedup)
 
 
-def generate_onnx_layers_from_file(filepath:Path, node_groups=None, dedup=False):
-    model = get_full_model(str(filepath))
-    layers = generate_onnx_layers_from_model(model, node_groups, dedup)
-    return _build_onnx_layer_cases(filepath.stem, model, layers)
-
+def generate_onnx_layers_from_file(cache, filepath: Path, node_groups=None, dedup=False):
+    print("filepath: ", filepath)
+    return _load_cached_layers(
+        cache, str(filepath), filepath.stem, node_groups, dedup)
 
 # ---- Pytest fixtures ----
 
