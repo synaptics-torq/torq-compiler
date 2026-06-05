@@ -24,6 +24,93 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
 
+namespace {
+
+// Dimension indicators for the reduce input: batch is the outermost dim, the
+// data vectors are the innermost (from Vectorized).
+struct In : Vectorized {
+    enum {
+        Batch = 0,
+    };
+};
+
+// Emit the reduce loop nest with a fused per-channel bias. The accumulated
+// result is biased per output channel in the activation stage, in fp32,
+// matching a separate `reduce + bias` computed in fp32.
+void emitPerChannelBiasReduce(
+    Slice &slice, LData &input, LData &biasScale, LData &output, int axis,
+    torq_hw::ALUOp1Mode hwOp1Mode, torq_hl::ReduceOp op
+) {
+    // Per-channel bias is laid out along output channel dim 1 (NCHW), as
+    // produced by the native conv1d generic lowering. Reshape the [C] bias to
+    // the output rank (1s on the non-channel dims) and broadcast it (stride 0)
+    // so it can be indexed by the output position `b`.
+    constexpr int kBiasChannelDim = 1;
+    const int outRank = static_cast<int>(output.shape().size());
+    for (int d = 0; d < kBiasChannelDim; ++d) {
+        biasScale.insertDim(0, {1});
+    }
+    for (int d = kBiasChannelDim + 1; d < outRank; ++d) {
+        biasScale.insertDim(static_cast<int>(biasScale.shape().size()), {1});
+    }
+    biasScale.broadcastAs(output);
+
+    For(auto b = slice.iterate(input.dims(In::Batch, axis))) {
+        BData bdata = slice.bram.load(biasScale[b]);
+        For(auto i = slice.iterate(input.dims(axis + 1, In::Vectors))) {
+            For(auto rv = slice.iterate(input.dim(In::Vectors))) {
+                PData pdata;
+                For(auto r = slice.iterate(input.dim(axis))) {
+                    IData idata = slice.iram.load(input[b][r][i][rv]);
+                    pdata = slice.alu.accumulate(idata, hwOp1Mode);
+                }
+                For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                    // fp32 rescaleClamp: result = clamp(pdata + bias). shift must be 0.
+                    QData res = slice.act.rescaleClamp(
+                        pdata[av], bdata, 0, op.getOutputZp(), op.getOutputMin(), op.getOutputMax()
+                    );
+                    slice.append(output[b][i], res);
+                }
+            }
+        }
+    }
+}
+
+// Single-iteration kernel: makes compute negligible so DMA transfer time
+// dominates. Used for DMA throughput measurement.
+void emitFakeReduce(Slice &slice, LData &input, LData &output, torq_hw::ALUOp1Mode hwOp1Mode) {
+    IData idata = slice.iram.load(input[Indexes(input.shape().size(), 0)]);
+    PData pdata = slice.alu.accumulate(idata, hwOp1Mode);
+    QData res = slice.act.load(pdata);
+    slice.append(output, res);
+}
+
+// Emit the default reduce loop nest (no per-channel bias).
+void emitDefaultReduce(
+    Slice &slice, LData &input, LData &output, int axis, torq_hw::ALUOp1Mode hwOp1Mode
+) {
+    For(auto b = slice.iterate(input.dims(In::Batch, axis))) {
+        For(auto i = slice.iterate(input.dims(axis + 1, In::Vectors))) {
+            For(auto rv = slice.iterate(input.dim(In::Vectors))) {
+                PData pdata;
+                For(auto r = slice.iterate(input.dim(axis))) {
+                    // Accumulate across the reduce dimension
+                    IData idata = slice.iram.load(input[b][r][i][rv]);
+                    pdata = slice.alu.accumulate(idata, hwOp1Mode);
+                }
+
+                // Store the accumulated result
+                For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                    QData res = slice.act.load(pdata[av]);
+                    slice.append(output[b][i], res);
+                }
+            }
+        }
+    }
+}
+
+} // namespace
+
 template <>
 LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &rewriter) const {
     auto ctx = op.getContext();
@@ -65,6 +152,12 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
     LData input(op.getInput());
     LData output(op.getInit());
 
+    // A fused per-channel bias (e.g. a conv1d bias absorbed into the reduce) is
+    // signalled by an fp32 scale_bias operand. The default reduce uses an i32
+    // scale_bias and applies no bias (plain act.load).
+    LData biasScale(op.getScaleBias());
+    const bool hasPerChannelBias = biasScale.elementType() == DType::fp32;
+
     auto inputShape = input.shape();
     int rank = inputShape.size();
     int denseDims = std::min(input.denseDims(), output.denseDims());
@@ -76,39 +169,14 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
     // Vectorize only the last dimension (retain)
     input.fuse(denseDims).vectorize(vectorSize);
 
-    struct In : Vectorized {
-        enum {
-            Batch = 0,
-        };
-    };
-
-    if (clTorqFakeReduce) {
-        // Single-iteration kernel: makes compute negligible so DMA transfer
-        // time dominates. Used for DMA throughput measurement.
-        IData idata = slice.iram.load(input[Indexes(input.shape().size(), 0)]);
-        PData pdata = slice.alu.accumulate(idata, hwOp1Mode);
-        QData res = slice.act.load(pdata);
-        slice.append(output, res);
+    if (hasPerChannelBias) {
+        emitPerChannelBiasReduce(slice, input, biasScale, output, axis, hwOp1Mode, op);
+    }
+    else if (clTorqFakeReduce) {
+        emitFakeReduce(slice, input, output, hwOp1Mode);
     }
     else {
-        For(auto b = slice.iterate(input.dims(In::Batch, axis))) {
-            For(auto i = slice.iterate(input.dims(axis + 1, In::Vectors))) {
-                For(auto rv = slice.iterate(input.dim(In::Vectors))) {
-                    PData pdata;
-                    For(auto r = slice.iterate(input.dim(axis))) {
-                        // Accumulate across the reduce dimension
-                        IData idata = slice.iram.load(input[b][r][i][rv]);
-                        pdata = slice.alu.accumulate(idata, hwOp1Mode);
-                    }
-
-                    // Store the accumulated result
-                    For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
-                        QData res = slice.act.load(pdata[av]);
-                        slice.append(output[b][i], res);
-                    }
-                }
-            }
-        }
+        emitDefaultReduce(slice, input, output, axis, hwOp1Mode);
     }
 
     rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(

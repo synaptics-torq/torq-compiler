@@ -839,10 +839,32 @@ struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
         // If output is bf16, keep it as bf16 (user's choice for memory/performance)
         RankedTensorType resultType = srcOutputType;
 
+        // A per-channel conv bias may have been folded into this reduce (see
+        // FoldConvBiasIntoReducePattern). If so, materialize it as an fp32
+        // scale_bias operand so the activation stage applies it per output channel
+        // in fp32 (matching `round_bf16(sum_f32 + bias_f32)`). The fp32 scale_bias
+        // element type also signals the HW kernel to take the biased path.
+        int32_t outputMin = 0;
+        int32_t outputMax = 0;
+        Value scaleBias = createI32Const(rewriter, srcOp, interleave(bias, scale));
+        if (auto biasAttr = srcOp->getAttrOfType<DenseFPElementsAttr>(kReducePerChannelBiasAttr)) {
+            std::vector<float> biasVals;
+            biasVals.reserve(biasAttr.getNumElements());
+            for (auto v : biasAttr.getValues<APFloat>()) {
+                biasVals.push_back(v.convertToFloat());
+            }
+            scaleBias = createConst(biasVals, rewriter, srcOp.getLoc());
+            // fp32 rescaleClamp interprets clipMin/clipMax as float bit patterns.
+            float minF = std::numeric_limits<float>::lowest();
+            float maxF = std::numeric_limits<float>::max();
+            outputMin = *reinterpret_cast<int32_t *>(&minF);
+            outputMax = *reinterpret_cast<int32_t *>(&maxF);
+        }
+
         rewriter.replaceOpWithNewOp<syna::torq_hl::ReduceOp>(
-            srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), opName, axis, 0, 0, 0,
-            shift_factor, createI16Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{2}),
-            createI32Const(rewriter, srcOp, interleave(bias, scale)), input
+            srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), opName, axis, 0,
+            outputMin, outputMax, shift_factor,
+            createI16Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{2}), scaleBias, input
         );
 
         return success();

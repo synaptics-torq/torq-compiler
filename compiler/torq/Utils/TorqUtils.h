@@ -13,6 +13,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Region.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
 
 #ifndef TORQ_EXPERIMENTAL_LINALG_CONV_TILING
@@ -30,6 +31,9 @@ void printRegion(Region &region);
 void printBlock(Block &block);
 
 namespace torq {
+
+/// Per-output-channel fp32 bias folded into linalg.reduce_sum (OptimizeConv1DPattern).
+inline constexpr llvm::StringLiteral kReducePerChannelBiasAttr{"torq.reduce_per_channel_bias"};
 
 /// @return dividend / divisor rounded upward
 constexpr uint32_t div_ceil(uint32_t dividend, uint32_t divisor) {

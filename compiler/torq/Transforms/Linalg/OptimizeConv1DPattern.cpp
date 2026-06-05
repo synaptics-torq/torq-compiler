@@ -402,7 +402,12 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
 /// The preserved kernel dimension (Kw) in the 5D output allows the downstream
 /// LinalgGenericConv1DToTorqHLConv1DPattern to directly lower to torq_hl.conv1d.
 struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
-    using OpRewritePattern::OpRewritePattern;
+    // When `onlyNonPointwise` is set the pattern skips pointwise convs (Kw == 1),
+    // which lower more efficiently through the matmul -> fully_connected path.
+    Conv1DNcwFcwToGenericConv1DPattern(
+        MLIRContext *context, PatternBenefit benefit = 1, bool onlyNonPointwise = false
+    )
+        : OpRewritePattern(context, benefit), onlyNonPointwise(onlyNonPointwise) {}
 
     LogicalResult
     matchAndRewrite(linalg::Conv1DNcwFcwOp convOp, PatternRewriter &rewriter) const override {
@@ -433,6 +438,23 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         int64_t F = filterShape[0];
         int64_t Kw = filterShape[2];
         int64_t Ow = outputShape[2];
+
+        // The generic lowering's iteration space has no channel dimension: the input
+        // and filter maps read channel 0 only and there is no contraction over C. It is
+        // therefore correct solely for a single input channel. Multi-channel convs must
+        // use the matmul path (im2col + matmul), so bail out here for C > 1.
+        if (C != 1) {
+            return rewriter.notifyMatchFailure(
+                convOp, "generic conv1d path only supports a single input channel"
+            );
+        }
+
+        // Pointwise convs lower to a fully_connected that runs efficiently on the
+        // NPU, so leave them to the matmul path when only non-pointwise convs were
+        // requested (see populateOptimizeConv1DPatterns).
+        if (onlyNonPointwise && Kw == 1) {
+            return rewriter.notifyMatchFailure(convOp, "pointwise conv handled by matmul path");
+        }
 
         // Expand input from [N, C, W] to [N, C, 1, W] (add height dimension)
         SmallVector<int64_t> input4DShape = {N, C, 1, inputShape[2]};
@@ -709,6 +731,70 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
 
         return success();
     }
+
+    bool onlyNonPointwise;
+};
+
+/// Fold a per-channel bias add that follows the conv1d reduce_sum into the
+/// reduce itself. The native conv1d path lowers to:
+///   conv1d(mul) -> reduce_sum(f32) -> collapse -> addf(bias) -> truncf(bf16)
+/// The fp32 bias add has no NSS lowering, so when Host fallback is disabled it
+/// cannot run anywhere. Attaching the per-channel bias to the reduce lets the
+/// reduce's activation stage apply it in fp32 (see ReduceOpConversion and the
+/// reduce HW kernel), which is bit-exact with `round_bf16(sum_f32 + bias_f32)`.
+struct FoldConvBiasIntoReducePattern : public OpRewritePattern<linalg::ReduceOp> {
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::ReduceOp reduceOp, PatternRewriter &rewriter) const override {
+        if (reduceOp->hasAttr(kReducePerChannelBiasAttr) || reduceOp.getNumResults() != 1) {
+            return failure();
+        }
+
+        // Only an fp32 reduce result can carry an fp32 per-channel bias.
+        auto reduceResult = reduceOp.getResult(0);
+        auto reduceType = dyn_cast<RankedTensorType>(reduceResult.getType());
+        if (!reduceType || !reduceType.getElementType().isF32()) {
+            return failure();
+        }
+
+        // reduce -> tensor.collapse_shape -> per-channel bias add (+ optional truncf)
+        auto collapseOp = getSingleUser<tensor::CollapseShapeOp>(reduceResult);
+        if (!collapseOp) {
+            return failure();
+        }
+        Value collapseResult = collapseOp.getResult();
+        auto collapseType = dyn_cast<RankedTensorType>(collapseResult.getType());
+
+        // Channel dimension is dim 1 (NCHW) for the conv1d generic path.
+        constexpr int channelDim = 1;
+        if (!collapseType || collapseType.getRank() <= channelDim) {
+            return failure();
+        }
+        const int64_t numChannels = collapseType.getDimSize(channelDim);
+        if (numChannels <= 0) {
+            return failure();
+        }
+
+        VectorIntOrFloat biasVec(numChannels, /*isInt=*/false);
+        Value folded = collapseResult;
+        if (!foldForwardPerChannelAdd(folded, channelDim, biasVec)) {
+            return failure();
+        }
+        Operation *addOp = folded.getDefiningOp();
+        if (!addOp) {
+            return failure();
+        }
+
+        auto biasType = RankedTensorType::get({numChannels}, rewriter.getF32Type());
+        auto biasAttr = DenseFPElementsAttr::get(biasType, biasVec.floats);
+        rewriter.modifyOpInPlace(reduceOp, [&]() {
+            reduceOp->setAttr(kReducePerChannelBiasAttr, biasAttr);
+        });
+        // Drop the folded bias add, rerouting its users back to the collapse result.
+        rewriter.replaceOp(addOp, collapseResult);
+        return success();
+    }
 };
 
 void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &patterns) {
@@ -721,6 +807,19 @@ void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &pat
     else {
         patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
     }
+
+    // A non-pointwise (Kw > 1) conv1d cannot run on the matmul path: its im2col gather
+    // has no NPU lowering, and the matmul bails on the non-zero init of a biased conv,
+    // leaving an fp32 conv that would otherwise fall back to the host. Always route
+    // those convs through the native generic path (higher benefit so it wins over the
+    // matmul pattern above) and fold the per-channel bias into the reduce, so we avoid
+    // host operations regardless of whether host fallback is enabled. Pointwise convs
+    // already lower to an efficient fully_connected on the NPU, so they keep the path
+    // selected above.
+    patterns.insert<Conv1DNcwFcwToGenericConv1DPattern>(
+        context, /*benefit=*/2, /*onlyNonPointwise=*/true
+    );
+    patterns.insert<FoldConvBiasIntoReducePattern>(context);
 }
 
 } // namespace mlir::syna::torq
