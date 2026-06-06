@@ -15,13 +15,13 @@ A guide for finding the best execution configuration (NSS/CSS/Host) for each ope
 4. [Handling Issues](#4-handling-issues)
 5. [Auto-Converting FP32 Models to BF16](#5-auto-converting-fp32-models-to-bf16)
 6. [ONNX to MLIR Mapping Mechanism](#6-onnx-to-mlir-mapping-mechanism)
-7. [Command Options](#7-command-options)
+7. [Command Reference](#7-command-reference)
 
 ---
 
 ## 1. Overview
 
-### Why tork-gen-config?
+### Why torq-gen-config?
 
 TORQ has three executors, each with different strengths:
 
@@ -31,7 +31,7 @@ TORQ has three executors, each with different strengths:
 | **CSS** | CPU Subsystem (hardware) | 2nd |
 | **Host** | CPU fallback | 3rd |
 
-Different operations work better on different executors. For example, convolution layers often run efficiently on NSS, while some complex tensor operations may only work correctly on Host. Additionally, the same operation might work on one executor but fail on another due to hardware limitations, unsupported data types, or numerical precision issues. tork-gen-config automatically tests each operation with all executors and records which ones work correctly, ensuring optimal performance and correctness when running the full model.
+Different operations work better on different executors. For example, convolution layers often run efficiently on NSS, while some complex tensor operations may only work correctly on Host. Additionally, the same operation might work on one executor but fail on another due to hardware limitations, unsupported data types, or numerical precision issues. torq-gen-config automatically tests each operation with all executors and records which ones work correctly, ensuring optimal performance and correctness when running the full model.
 
 ### How It Works
 
@@ -45,7 +45,7 @@ This manual uses `squeezenet1.0-12.onnx` (66 operations: Conv, Relu, MaxPool, Co
 
 ### Tested Models
 
-The following CNN models have been verified to work with tork-gen-config:
+The following CNN models have been verified to work with torq-gen-config:
 
 | Model | Type | Status |
 |-------|------|--------|
@@ -54,6 +54,34 @@ The following CNN models have been verified to work with tork-gen-config:
 | `squeezenet1.0-12.onnx` | CNN | Working |
 | `mobilenetv2-7.onnx` | CNN | Working |
 | `resnet18_Opset18_timm.onnx` | CNN | Working |
+
+### Output Files
+
+Discovery produces two JSON files:
+
+| File | Suffix | Purpose |
+|------|--------|---------|
+| **Report JSON** | `torq_gen_config_<model>.json` | Human-readable discovery results: statuses, timing, tolerances, per-layer details. Used by `view` and `edit`. |
+| **Compiler JSON** | `torq_gen_config_<model>_compiler.json` | Minimal `op_assignments` consumed by the C++ `ExecutorAssignmentPass`. Auto-generated from the report JSON. |
+
+Key rules:
+
+1. Report JSON is the source of truth.
+   If it exists, `run` always regenerates the compiler JSON from it.
+
+2. `edit` only touches report JSON.
+   It never reads or writes compiler JSON directly.
+
+3. Compiler JSON is always a derived artifact.
+   It's either regenerated from report JSON (on `run`) or hand-edited.
+
+4. Compiler JSON alone is a valid input.
+   If report JSON is absent, the compiler consumes the compiler JSON as-is.
+
+5. Hand-edited compiler JSON is overwritten on the next `run` — unless
+   the report JSON is missing, in which case your edits stick forever.
+
+You normally only interact with the **report JSON**.
 
 ---
 
@@ -67,19 +95,21 @@ Test each operation to find the best executor:
 # Using torq-gen-config (recommended)
 torq-gen-config discover \
     --model ./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
+    --output-dir ./results \
     --skip-mode
 
 # Or using pytest directly
 pytest tests/test_onnx_gen_config.py \
     -v -k "_layer_" \
     --model-path=./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
-    --executor-skip-mode --recompute-cache
+    --output-dir=./results \
+    --skip-mode --recompute-cache
 ```
 
 **What it does:**
 - Extracts each layer from the model
 - Tests NSS → CSS → Host
-- Stops after first success (with `--executor-skip-mode`)
+- Stops after first success (with `--skip-mode`)
 - Creates `torq_gen_config_squeezenet1.0-12.json`
 
 ### Step 2: Review
@@ -87,11 +117,13 @@ pytest tests/test_onnx_gen_config.py \
 View the JSON results with the built-in viewer:
 
 ```bash
-# Using torq-gen-config (recommended)
-torq-gen-config view torq_gen_config_squeezenet1.0-12.json
+# Using --model shortcut (auto-resolves JSON path from --output-dir)
+torq-gen-config view \
+    --model ./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
+    --output-dir ./results
 
-# Or using the viewer module directly
-python3 -m torq.gen_config view torq_gen_config_squeezenet1.0-12.json
+# Or specify the JSON path directly
+torq-gen-config view ./results/torq_gen_config_squeezenet1.0-12.json
 ```
 
 Output shows each layer with status for all executors:
@@ -117,28 +149,21 @@ A `difference` status means the executor runs successfully but produces numerica
 
 1. **View the current difference:**
    ```bash
-   python3 -m torq.gen_config view torq_gen_config_squeezenet1.0-12.json Conv_conv1_1
+   torq-gen-config view torq_gen_config_squeezenet1.0-12.json Conv_conv1_1
    ```
 
-2. **Edit the JSON** to increase tolerance for that executor:
-   ```json
-   {
-     "ops": {
-       "Conv_conv1_1": {
-         "executors": {
-           "css": {
-             "status": "difference",
-             "tolerance_used": {"fp_avg_tol": 0.1, "fp_max_tol": 0.1}
-           }
-         }
-       }
-     }
-   }
+2. **Use the `edit` command** to increase tolerance:
+   ```bash
+   torq-gen-config edit \
+       --model model.onnx \
+       --layer Conv_conv1_1 \
+       --tolerance-avg 0.1 \
+       --tolerance-max 0.1
    ```
 
 3. **Re-test just that layer:**
    ```bash
-   pytest ... -k "squeezenet1.0-12_layer_Conv_0_css" --recompute-cache
+   torq-gen-config discover --model model.onnx -- -k "Conv_0_css" --recompute-cache
    ```
 
 If the test passes with new tolerance, the `recommended_executor` will be updated to prefer that executor.
@@ -148,9 +173,17 @@ If the test passes with new tolerance, the `recommended_executor` will be update
 Compile and run the complete model with discovered assignments:
 
 ```bash
+# Using torq-gen-config (recommended)
+torq-gen-config run \
+    --model ./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
+    --output-dir ./results \
+    --debug-ir=tmp
+
+# Or using pytest directly
 pytest tests/test_onnx_gen_config.py \
     -v -k "_full_model" \
     --model-path=./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
+    --output-dir=./results \
     --debug-ir=tmp --recompute-cache
 ```
 
@@ -163,11 +196,46 @@ pytest tests/test_onnx_gen_config.py \
 The viewer displays results layer by layer:
 
 ```bash
-# View summary of all layers
-python3 -m torq.gen_config view torq_gen_config_squeezenet1.0-12.json
+# Using --model shortcut (auto-resolves JSON path from --output-dir)
+torq-gen-config view --model squeezenet1.0-12.onnx --output-dir results/
 
-# View details for specific layer
-python3 -m torq.gen_config view torq_gen_config_squeezenet1.0-12.json Conv_conv1_1
+# Or specify the JSON path directly
+torq-gen-config view results/torq_gen_config_squeezenet1.0-12.json
+
+# View details for a specific layer
+torq-gen-config view --model squeezenet1.0-12.onnx --output-dir results/ Conv_conv1_1
+```
+
+### Viewing Compiler JSON
+
+The viewer also handles compiler-format JSON (`*_compiler.json`) gracefully:
+
+```bash
+# View compiler JSON — shows executor distribution and line:col assignments
+torq-gen-config view --model squeezenet1.0-12.onnx --output-dir results/
+# (auto-detects compiler format if report JSON is absent)
+
+# Or point directly at the compiler JSON
+torq-gen-config view torq_gen_config_squeezenet1.0-12_compiler.json
+```
+
+Output for a compiler JSON:
+```
+============================================================
+MODEL: squeezenet1.0-12  (compiler format)
+============================================================
+
+Total assignments: 66
+
+Executor distribution:
+  NSS: 52
+  CSS: 10
+  HOST: 4
+
+Assignments:
+  42:12 → nss
+  43:12 → nss
+  ...
 ```
 
 ### Understanding the JSON
@@ -214,33 +282,54 @@ The `recommended_executor` is selected automatically based on executor priority 
 
 ### Changing the Recommended Executor
 
-You can manually override the recommendation by editing the JSON file:
+Use the `edit` command to safely override the recommendation. The command validates the JSON, updates the report, and regenerates the compiler config automatically.
 
-1. **Open the JSON file:**
-   ```bash
-   vim torq_gen_config_squeezenet1.0-12.json
-   ```
+**Edit a single layer:**
+```bash
+torq-gen-config edit \
+    --model ./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
+    --layer Conv_conv1_1 \
+    --executor css
+```
 
-2. **Change the `recommended_executor` field:**
-   ```json
-   {
-     "ops": {
-       "Conv_conv1_1": {
-         "executors": {...},
-         "recommended_executor": "css",
-         "_node_index": 0,
-         "mlir_location": "271:12"
-       }
-     }
-   }
-   ```
+**Layer matching:** The `--layer` argument supports several strategies:
 
-3. **Run full model test** - the compiler will use your updated assignment:
-   ```bash
-   pytest ... -k "_full_model" --model-path=./tests/testdata/onnx_models/squeezenet1.0-12.onnx
-   ```
+| Strategy | Example | Matches |
+|----------|---------|---------|
+| Exact (case-insensitive) | `--layer Conv_conv1_1` | `Conv_conv1_1` only |
+| Substring | `--layer conv1` | All layers containing "conv1" |
+| fnmatch wildcard | `--layer Conv_*` | All layers starting with "Conv_" |
+| ALL | `--layer ALL` | Every layer |
 
-**Note:** The compiler reads `recommended_executor` from the JSON at compile time. No need to re-run discovery - just edit and recompile.
+**Batch edit multiple layers:**
+```bash
+# All Conv layers → NSS
+torq-gen-config edit --model model.onnx --layer "Conv_*" --executor nss
+
+# Every layer → CSS
+torq-gen-config edit --model model.onnx --layer ALL --executor css
+```
+
+**Edit tolerance:**
+```bash
+torq-gen-config edit \
+    --model model.onnx \
+    --layer Conv_conv1_1 \
+    --tolerance-avg 0.1 \
+    --tolerance-max 0.5
+```
+
+**List available layers:**
+```bash
+torq-gen-config edit --model model.onnx --list
+torq-gen-config edit --model model.onnx --list conv
+```
+
+**Notes:**
+- The `edit` command only modifies the **report JSON** (`torq_gen_config_*.json`). It never reads or writes the compiler JSON directly.
+- If you accidentally pass the compiler JSON (e.g., `torq_gen_config_model_compiler.json`), `edit` detects it and refuses, pointing you to the correct report JSON file.
+- After editing, run `torq-gen-config run` — it will regenerate the compiler JSON from the updated report JSON before compiling.
+- No need to re-run discovery. The compiler reads `recommended_executor` from the JSON at compile time.
 
 ### Timing-Based Executor Recommendation
 
@@ -255,6 +344,13 @@ By default, the recommended executor is determined by priority order (`nss` → 
 
 ```bash
 # Collect timing and recommend by performance
+torq-gen-config discover \
+    --model ./model.onnx \
+    --collect-timing \
+    --timing-runs=5 \
+    --recommend-by-timing
+
+# Or using pytest directly
 pytest tests/test_onnx_gen_config.py \
     -v -k "_layer_" \
     --model-path=./model.onnx \
@@ -297,7 +393,13 @@ CRITICAL FAILURES (all executors error): 1
 When a layer fails (e.g., CSS shows `error`), debug it individually:
 
 ```bash
-# Re-test a specific layer with all executors
+# Re-test a specific layer with all executors via torq-gen-config
+# (pass pytest -k filter through extra options after --)
+torq-gen-config discover \
+    --model ./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
+    -- -k "Conv_0" --recompute-cache
+
+# Or using pytest directly
 pytest tests/test_onnx_gen_config.py \
     -v -k "squeezenet1.0-12_layer_Conv_0" \
     --model-path=./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
@@ -308,16 +410,19 @@ This runs the layer (`Conv_0`) with NSS, CSS, and Host separately to see detaile
 
 **Important: Layer Tests are for Discovery Only**
 
-Layer tests (`-k "_layer_"`) are designed for **tork-gen-config** only. They test which executor works for each operation but do NOT perform C++ executor assignment.
+Layer tests (`-k "_layer_"`) are designed for **torq-gen-config** only. They test which executor works for each operation but do NOT perform C++ executor assignment.
 
 To see executor assignment in the IR dump, use **subgraph test** or **full model test**:
 
 ```bash
 # Subgraph test - shows executor assignment for that subgraph
-pytest ... --subgraph-from=Conv_0 --subgraph-to=Conv_0 -k "_full" --debug-ir=tmp
+torq-gen-config discover \
+    --model model.onnx \
+    --subgraph-from=Conv_0 \
+    --subgraph-to=Conv_0
 
 # Full model test - shows executor assignment for all operations
-pytest ... -k "_full_model" --debug-ir=tmp
+torq-gen-config run --model model.onnx --debug-ir=tmp
 ```
 
 In the dumped IR:
@@ -330,58 +435,61 @@ linalg.conv_2d_nchw_fchw {...} {torq-executor = "nss"}
 
 1. **First discovery** (get initial results):
    ```bash
-   pytest ... -k "_layer_" --executor-skip-mode --recompute-cache
+   torq-gen-config discover --model model.onnx --skip-mode
    ```
 
 2. **Debug specific layers** (optional - set `recommended_executor: null` to re-test):
    ```bash
-   # Edit JSON: set recommended_executor to null for the layer
-   pytest ... -k "model_layer_Conv_0_nss" --recompute-cache
+   torq-gen-config edit --model model.onnx --layer Conv_0 --executor null
+   # Then re-test via torq-gen-config:
+   torq-gen-config discover --model model.onnx -- -k "Conv_0_nss" --recompute-cache
    # JSON automatically updated with new results
    ```
 
 3. **Verify executor assignment** (use subgraph or full model - layer tests won't show assignment):
    ```bash
    # Subgraph test shows executor assignment in IR
-   pytest ... --subgraph-from=Conv_0 --subgraph-to=Conv_0 -k "_full" --debug-ir=tmp
+   torq-gen-config discover \
+       --model model.onnx \
+       --subgraph-from=Conv_0 \
+       --subgraph-to=Conv_0
    
    # Or full model test
-   pytest ... -k "_full_model" --debug-ir=tmp
+   torq-gen-config run --model model.onnx --debug-ir=tmp
    ```
 
 **Example scenario - CSS error on Conv_0:**
 
 1. View the error in JSON:
    ```bash
-   python3 -m torq.gen_config view \
+   torq-gen-config view \
        torq_gen_config_squeezenet1.0-12.json Conv_conv1_1
    ```
 
-2. Re-test that specific layer:
+2. Re-test that specific layer via torq-gen-config:
+   ```bash
+   torq-gen-config discover --model model.onnx -- -k "Conv_0_css" --recompute-cache
+   ```
+
+   Or using pytest directly:
    ```bash
    pytest ... -k "squeezenet1.0-12_layer_Conv_0_css" --recompute-cache
    ```
 
-3. If CSS consistently fails, edit the JSON to use a different executor:
-   ```json
-   {
-     "ops": {
-       "Conv_conv1_1": {
-         "recommended_executor": "nss"
-       }
-     }
-   }
+3. If CSS consistently fails, use the `edit` command to switch to a different executor:
+   ```bash
+   torq-gen-config edit \
+       --model model.onnx \
+       --layer Conv_conv1_1 \
+       --executor nss
    ```
 
-4. To test without any executor assignment (debug mode):
-   ```json
-   {
-     "ops": {
-       "Conv_conv1_1": {
-         "recommended_executor": null
-       }
-     }
-   }
+4. To test without any executor assignment (debug mode), set executor to `null`:
+   ```bash
+   torq-gen-config edit \
+       --model model.onnx \
+       --layer Conv_conv1_1 \
+       --executor null
    ```
 
 ### Subgraph Debugging
@@ -400,12 +508,19 @@ for i, n in enumerate(model.graph.node):
 
 **Run subgraph discovery (nodes 10-16):**
 ```bash
+torq-gen-config discover \
+    --model ./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
+    --subgraph-from=Conv_fire3/squeeze1x1_1 \
+    --subgraph-to=Concat_fire3/concat_1 \
+    --skip-mode
+
+# Or using pytest directly
 pytest tests/test_onnx_gen_config.py \
     -v \
     --model-path=./tests/testdata/onnx_models/squeezenet1.0-12.onnx \
     --subgraph-from=Conv_fire3/squeeze1x1_1 \
     --subgraph-to=Concat_fire3/concat_1 \
-    --executor-skip-mode --recompute-cache
+    --skip-mode --recompute-cache
 ```
 
 This creates `torq_gen_config_squeezenet1.0-12_subgraph_10_16.json` and runs layer discovery + full subgraph test.
@@ -423,7 +538,7 @@ This creates `torq_gen_config_squeezenet1.0-12_subgraph_10_16.json` and runs lay
 If full model fails but individual layers pass:
 
 1. Check debug IR: `ls tmp/`
-2. Verify assignments in viewer: `python3 -m torq.gen_config view torq_gen_config_*.json`
+2. Verify assignments in viewer: `torq-gen-config view torq_gen_config_*.json`
 3. Re-run discovery for problematic layers
 
 ### Skipping Executors (Extra Debug Option)
@@ -432,21 +547,25 @@ If NSS or CSS crashes/hangs during discovery, skip them:
 
 ```bash
 # Skip NSS only
-pytest ... --skip-executors=nss
+torq-gen-config discover --model model.onnx --skip-executors=nss
 
 # Skip both NSS and CSS (test only Host)
+torq-gen-config discover --model model.onnx --skip-executors=nss,css
+
+# Or using pytest directly
+pytest ... --skip-executors=nss
 pytest ... --skip-executors=nss,css
 ```
 
 This helps identify if an operation works on at least one executor when others are unstable.
 
-### Important: How `--executor-skip-mode` and JSON Cache Work
+### Important: How `--skip-mode` and JSON Cache Work
 
-**Understanding the interaction between `--executor-skip-mode`, JSON file, and test execution:**
+**Understanding the interaction between `--skip-mode`, JSON file, and test execution:**
 
-#### 1. `--executor-skip-mode` Behavior
+#### 1. `--skip-mode` Behavior
 
-When `--executor-skip-mode` is enabled:
+When `--skip-mode` is enabled:
 - **First run**: Tests each executor (NSS → CSS → Host) until one succeeds, then saves `"status": "success"` to JSON
 - **Subsequent runs**: Checks JSON file first - if a layer already has `"status": "success"`, the test is **skipped entirely** (pytest.skip)
 
@@ -472,15 +591,15 @@ This is designed for **speeding up incremental discovery**, not for re-testing.
 - No executor assignment happens in the dumped IR
 - The test seems to use cached results
 
-**Root Cause:** `--executor-skip-mode` reads the JSON file and skips tests for layers with `"status": "success"`. The `--recompute-cache` only invalidates the ONNX/MLIR file cache, not the JSON test results.
+**Root Cause:** `--skip-mode` reads the JSON file and skips tests for layers with `"status": "success"`. The `--recompute-cache` only invalidates the ONNX/MLIR file cache, not the JSON test results.
 
 **Solution - To actually re-run and check executor assignment:**
 
-1. **Option A: Remove `--executor-skip-mode`** (recommended for debugging)
+1. **Option A: Remove `--skip-mode`** (recommended for debugging)
    ```bash
    # This will re-run all tests regardless of JSON status
    pytest ... -k "squeezenet1.0-12_layer_Conv_0" --recompute-cache
-   # Note: WITHOUT --executor-skip-mode
+   # Note: WITHOUT --skip-mode
    ```
 
 2. **Option B: Set `recommended_executor` to `null`**
@@ -498,12 +617,12 @@ This is designed for **speeding up incremental discovery**, not for re-testing.
      }
    }
    ```
-   Then run with `--executor-skip-mode` - it will test all executors again.
+   Then run with `--skip-mode` - it will test all executors again.
 
 3. **Option C: Delete the JSON file**
    ```bash
    rm torq_gen_config_*.json
-   pytest ... -k "_layer_" --executor-skip-mode --recompute-cache
+   pytest ... -k "_layer_" --skip-mode --recompute-cache
    ```
 
 #### 4. Verifying Executor Assignment
@@ -535,13 +654,13 @@ To verify executor assignment in the IR:
 | Force test specific executor | No | Yes | Set `recommended_executor` to desired executor |
 | Full model with new assignments | N/A | No | Edit `recommended_executor` fields |
 
-**Key Takeaway:** `--executor-skip-mode` + existing JSON with `"status": "success"` = skipped tests. Remove skip mode or modify JSON to actually re-run tests.
+**Key Takeaway:** `--skip-mode` + existing JSON with `"status": "success"` = skipped tests. Remove skip mode or modify JSON to actually re-run tests.
 
 ---
 
 ## 5. Auto-Converting FP32 Models to BF16
 
-TORQ NSS accelerator has limited FP32 support and requires BF16 (bfloat16) input for many operations. CSS and Host executors generally support FP32. The tork-gen-config framework provides automatic FP32 to BF16 conversion with accuracy validation.
+TORQ NSS accelerator has limited FP32 support and requires BF16 (bfloat16) input for many operations. CSS and Host executors generally support FP32. The torq-gen-config framework provides automatic FP32 to BF16 conversion with accuracy validation.
 
 ### Why Convert to BF16?
 
@@ -610,15 +729,18 @@ This runs both models with random inputs and compares outputs:
 - Uses ONNX Runtime for both FP32 and BF16 inference
 - Reports per-sample and aggregate error statistics
 
-### Using BF16 with tork-gen-config
+### Using BF16 with torq-gen-config
 
 **Basic usage:**
 ```bash
+torq-gen-config discover --model model.onnx --auto-convert-bf16 --skip-mode
+
+# Or using pytest directly
 pytest tests/test_onnx_gen_config.py \
     -v -k "_layer_" \
     --model-path=./model.onnx \
     --auto-convert-bf16 \
-    --executor-skip-mode --recompute-cache
+    --skip-mode --recompute-cache
 ```
 
 **Key points:**
@@ -637,6 +759,9 @@ The conversion script automatically fixes dynamic batch dimensions:
 
 To save the BF16 model for external use:
 ```bash
+torq-gen-config discover --model model.onnx --auto-convert-bf16 --save-bf16-model=/path/to/output.onnx
+
+# Or using pytest directly
 pytest ... --auto-convert-bf16 --save-bf16-model=/path/to/output.onnx
 ```
 
@@ -658,7 +783,7 @@ pytest ... --auto-convert-bf16 --save-bf16-model=/path/to/output.onnx
 
 ## 6. ONNX to MLIR Mapping Mechanism
 
-This section explains how tork-gen-config maps ONNX operations to their corresponding line numbers in the MLIR generated by torch-mlir. This mapping is essential for the C++ compiler to assign the correct executor to each operation.
+This section explains how torq-gen-config maps ONNX operations to their corresponding line numbers in the MLIR generated by torch-mlir. This mapping is essential for the C++ compiler to assign the correct executor to each operation.
 
 ### torch-mlir Import Guarantees
 
@@ -717,7 +842,7 @@ The JSON stores this mapping:
 
 ### Verification
 
-tork-gen-config automatically verifies the mapping during test generation:
+torq-gen-config automatically verifies the mapping during test generation:
 - Count check: ONNX and MLIR have the same number of non-Constant ops
 - Type check: Op types match at each position
 - Warning output if verification fails
@@ -732,23 +857,141 @@ If you see warnings like `COUNT MISMATCH` or `OP TYPE MISMATCHES` during discove
 
 ---
 
-## 7. Command Options
+## 7. Command Reference
 
-### Essential Options
+### torq-gen-config CLI
+
+The recommended way to interact with the discovery system.
+
+#### `discover` — Run executor discovery
+
+| Option | Description |
+|--------|-------------|
+| `--model` | Path to ONNX model (**required**) |
+| `--output-dir` | Directory for generated JSON (default: current directory) |
+| `--test-file` | Path to `test_onnx_gen_config.py` (auto-detected) |
+| `--skip-mode` | Stop after first success per layer |
+| `--skip-executors` | Comma-separated list to skip (e.g., `nss,css`) |
+| `--auto-convert-bf16` | Convert FP32 model to BF16 |
+| `--save-bf16-model` | Save converted BF16 model to path |
+| `--subgraph-from` | Start op name for subgraph |
+| `--subgraph-to` | End op name for subgraph |
+| `--collect-timing` | Collect runtime timing data |
+| `--timing-runs` | Number of runtime runs for timing average |
+| `--recommend-by-timing` | Recommend fastest executor based on timing |
+| `--dedup-layers` | Detect duplicate layers and copy results |
+| `--log-file` | Redirect discovery output to log file |
+
+```bash
+# Basic discovery
+torq-gen-config discover --model model.onnx
+
+# With skip mode and BF16 conversion
+torq-gen-config discover --model model.onnx --skip-mode --auto-convert-bf16
+
+# Timing-based recommendation
+torq-gen-config discover --model model.onnx --collect-timing --timing-runs=5 --recommend-by-timing
+
+# Pass extra pytest flags (use '--' before flags starting with '-')
+torq-gen-config discover --model model.onnx --skip-mode -- -s -v --tb=short
+```
+
+#### `run` — Run full model test
+
+| Option | Description |
+|--------|-------------|
+| `--model` | Path to ONNX model (**required**) |
+| `--output-dir` | Directory where config JSON is located |
+| `--test-file` | Path to `test_onnx_gen_config.py` (auto-detected) |
+| `--auto-convert-bf16` | Convert FP32 model to BF16 |
+| `--debug-ir` | Dump IR directory for debugging (default: `tmp`) |
+| `--recompute-cache` | Force recompute cached fixtures |
+| `--log-file` | Redirect output to log file |
+
+```bash
+# Run full model with discovered assignments
+torq-gen-config run --model model.onnx
+
+# With debug IR dump
+torq-gen-config run --model model.onnx --debug-ir=tmp
+
+# Pass extra pytest flags (use '--' before flags starting with '-')
+torq-gen-config run --model model.onnx -- -s -v
+```
+
+**Note:** `run` accepts either the report JSON or the compiler JSON. If the report JSON exists, `run` regenerates the compiler JSON from it before compiling. If only the compiler JSON exists, the full model test uses it directly.
+
+#### `view` — View executor config
+
+| Argument | Description |
+|----------|-------------|
+| `config` | Path to report or compiler JSON (optional; `--model` auto-resolves) |
+| `--model` | Path to ONNX model (auto-resolves JSON from model name) |
+| `--output-dir` | Directory where config JSON is located (default: current directory) |
+| `layer` | Optional layer ID for detailed view |
+
+```bash
+# Using --model shortcut
+torq-gen-config view --model model.onnx --output-dir results/
+
+# View summary from report JSON path
+torq-gen-config view torq_gen_config_model.json
+
+# View details for one layer
+torq-gen-config view torq_gen_config_model.json Conv_conv1_1
+
+# View compiler JSON (auto-detected)
+torq-gen-config view torq_gen_config_model_compiler.json
+
+# View layer details with --model
+torq-gen-config view --model model.onnx --output-dir results/ Conv_conv1_1
+```
+
+#### `edit` — Edit executor assignments
+
+| Option | Description |
+|--------|-------------|
+| `config` | Path to report JSON (optional; `--model` auto-resolves) |
+| `--model` | Path to ONNX model (auto-resolves JSON from model name) |
+| `--output-dir` | Directory where config JSON is located |
+| `--layer` | Layer ID to edit. Supports exact, substring, fnmatch (`*`, `?`), or `ALL` |
+| `--executor` | Set recommended executor (`nss`/`css`/`host`/`null`) |
+| `--tolerance-avg` | Set `fp_avg_tol` for this layer |
+| `--tolerance-max` | Set `fp_max_tol` for this layer |
+| `--list [FILTER]` | List available layers and exit |
+
+```bash
+# Edit single layer
+torq-gen-config edit --model model.onnx --layer Conv_0 --executor nss
+
+# Batch edit all Conv layers
+torq-gen-config edit --model model.onnx --layer "Conv_*" --executor nss
+
+# Edit every layer
+torq-gen-config edit --model model.onnx --layer ALL --executor css
+
+# Update tolerance
+torq-gen-config edit --model model.onnx --layer Conv_0 --tolerance-avg 0.1
+
+# List layers
+torq-gen-config edit --model model.onnx --list
+torq-gen-config edit --model model.onnx --list conv
+```
+
+---
+
+### Advanced: raw pytest options
+
+For advanced use cases (e.g., single-layer re-testing, custom pytest flags), you can invoke pytest directly. The `torq-gen-config` commands above are the recommended approach for normal workflows.
 
 | Option | Description |
 |--------|-------------|
 | `--model-path` | Path to ONNX model |
 | `-k "_layer_"` | Run layer discovery |
 | `-k "_full_model"` | Run full model test |
-| `--executor-skip-mode` | Stop after first success per layer |
+| `--skip-mode` | Stop after first success per layer |
 | `--recompute-cache` | Force recompute (ignore cache) |
 | `--debug-ir=DIR` | Dump IR for debugging |
-
-### Additional Options
-
-| Option | Description |
-|--------|-------------|
 | `--skip-executors=nss,css` | Skip specific executors |
 | `--auto-convert-bf16` | Convert FP32 to BF16 |
 | `--subgraph-from=OP` | Subgraph start |
@@ -756,14 +999,12 @@ If you see warnings like `COUNT MISMATCH` or `OP TYPE MISMATCHES` during discove
 | `--collect-timing` | Collect compile and runtime timing data |
 | `--timing-runs=N` | Number of runtime runs for timing average (default: 1) |
 | `--recommend-by-timing` | Recommend fastest executor based on timing data |
-| `--gen-config-log-file=PATH` | Redirect all output to log file; terminal shows only test progress and final report (use with `-s`) |
-| `--dedup-layers` | Detect duplicate layers by ONNX signature and copy results instead of re-testing |
-
-### Common Patterns
+| `--gen-config-log-file=PATH` | Redirect all output to log file (pytest name; torq-gen-config uses `--log-file`) |
+| `--dedup-layers` | Detect duplicate layers and copy results |
 
 ```bash
 # Layer discovery with skip mode
-pytest ... --model-path=model.onnx -k "_layer_" --executor-skip-mode
+pytest ... --model-path=model.onnx -k "_layer_" --skip-mode
 
 # Full model with debug output
 pytest ... --model-path=model.onnx -k "_full_model" --debug-ir=tmp
@@ -774,13 +1015,13 @@ pytest ... --model-path=model.onnx --subgraph-from=StartOp --subgraph-to=EndOp
 # Skip crashing executors
 pytest ... --model-path=model.onnx --skip-executors=nss -k "_layer_"
 
-# Timing-based executor recommendation (performance optimization)
+# Timing-based executor recommendation
 pytest ... --model-path=model.onnx -k "_layer_" --collect-timing --timing-runs=5 --recommend-by-timing
 
-# Redirect output to log file (terminal shows only progress + final report)
+# Redirect output to log file
 pytest ... --model-path=model.onnx -k "_layer_" -v -s \
     --gen-config-log-file=discovery.log
 
-# Skip duplicate layers by ONNX signature (speeds up models with repeated blocks)
-pytest ... --model-path=model.onnx -k "_layer_" --dedup-layers --executor-skip-mode
+# Skip duplicate layers
+pytest ... --model-path=model.onnx -k "_layer_" --dedup-layers --skip-mode
 ```

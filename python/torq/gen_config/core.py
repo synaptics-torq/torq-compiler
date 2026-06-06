@@ -27,6 +27,20 @@ def _discovery_log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def _opt(config, short: str, legacy: str, default=None):
+    """Check short (canonical) option first, then legacy alias."""
+    try:
+        val = config.getoption(short, default=None)
+        if val is not None and val != default:
+            return val
+    except ValueError:
+        pass
+    try:
+        return config.getoption(legacy, default=default)
+    except ValueError:
+        return default
+
+
 def is_line_column_format(location: str) -> bool:
     """Check if location is in 'line:column' format (e.g., '10:10')."""
     return bool(location and re.match(r"^\d+:\d+$", location))
@@ -82,11 +96,16 @@ def get_compiler_config_path(
     return Path(output_dir) / filename if output_dir else Path(filename)
 
 
-def generate_compiler_config(discovery_data: Dict[str, Any]) -> Dict[str, Any]:
+def generate_compiler_config(
+    discovery_data: Dict[str, Any], model_name: Optional[str] = None
+) -> Dict[str, Any]:
     """Generate a minimal compiler config from discovery data.
 
     The compiler JSON contains only what the C++ ExecutorAssignmentPass needs:
     {"op_assignments": {"line:column": {"executor": "nss"}, ...}}
+
+    If *model_name* is provided it is stored in the JSON so the file can be
+    used standalone (e.g. by ``torq-gen-config run`` without a report JSON).
     """
     op_assignments: Dict[str, Dict[str, str]] = {}
     for layer_id, op_data in discovery_data.get("ops", {}).items():
@@ -94,14 +113,39 @@ def generate_compiler_config(discovery_data: Dict[str, Any]) -> Dict[str, Any]:
         recommended = op_data.get("recommended_executor")
         if mlir_location and is_line_column_format(mlir_location) and recommended:
             op_assignments[mlir_location] = {"executor": recommended}
-    return {"op_assignments": op_assignments}
+    result: Dict[str, Any] = {"op_assignments": op_assignments}
+    if model_name is not None:
+        result["model_name"] = model_name
+    return result
 
 
-def save_compiler_config(path: Path, discovery_data: Dict[str, Any]) -> None:
+def save_compiler_config(
+    path: Path, discovery_data: Dict[str, Any], model_name: Optional[str] = None
+) -> None:
     """Generate and save the compiler-format config from *discovery_data*."""
-    compiler_data = generate_compiler_config(discovery_data)
+    compiler_data = generate_compiler_config(discovery_data, model_name)
     save_config(path, compiler_data)
     _discovery_log(f"[CompilerJSON] Saved {len(compiler_data['op_assignments'])} assignment(s) to {path}")
+
+
+def _get_json_path(
+    config, model_name: Optional[str] = None, subgraph_suffix: Optional[str] = None
+) -> Path:
+    """Get path to executor assignments JSON file."""
+    output_dir = _opt(config, "--output-dir", "--gen-config-output")
+    if model_name is None:
+        model_path = _opt(config, "--model", "--model-path")
+        model_name = Path(model_path).stem if model_path else "auto_discovered"
+    return get_config_path(model_name, output_dir, subgraph_suffix)
+
+
+def _load_json(config, model_name: str, subgraph_suffix: Optional[str] = None) -> Dict:
+    """Load JSON config for a model."""
+    path = _get_json_path(config, model_name, subgraph_suffix)
+    data = load_config(path)
+    if not data.get("model_name"):
+        data["model_name"] = model_name
+    return data
 
 
 def get_recommended_executor(
@@ -208,7 +252,11 @@ def update_config_with_results(
         elif layer_id in locations:
             json_data["ops"][layer_id]["mlir_location"] = locations[layer_id]
 
-    for layer_id, op_data in json_data["ops"].items():
+    # Only recompute recommended_executor for ops that were just discovered
+    # (present in *results*). Existing ops that the user may have edited
+    # manually (e.g. via `torq-gen-config edit`) are left untouched.
+    for layer_id in results:
+        op_data = json_data["ops"].get(layer_id, {})
         executors = op_data.get("executors", {})
         recommended = get_recommended_executor(executors, recommend_by_timing)
         if recommended:
@@ -239,3 +287,153 @@ def get_subgraph_suffix_from_case_name(case_name: str) -> Optional[str]:
         if len(subparts) >= 2:
             return f"subgraph_{subparts[0]}_{subparts[1]}"
     return None
+
+
+def _build_report_from_ops(
+    ops: Dict[str, Any]
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Build summary, critical failures, and per-layer rows from an *ops* dict.
+
+    Returns *(summary, critical_failures, rows)* where *rows* are ready for
+    :func:`format_per_layer_status_table`.
+    """
+    status_counts: Dict[str, int] = {"success": 0, "difference": 0, "error": 0}
+    executor_counts: Dict[str, int] = {executor: 0 for executor in EXECUTOR_ORDER}
+    critical_failures: List[Dict[str, Any]] = []
+    executor_timing: Dict[str, List[float]] = {executor: [] for executor in EXECUTOR_ORDER}
+
+    sorted_ops = sorted(
+        ops.items(),
+        key=lambda item: item[1].get("_node_index", float("inf")),
+    )
+
+    rows: List[Dict[str, Any]] = []
+    for layer_id, op_data in sorted_ops:
+        executors = op_data.get("executors", {})
+        tested_executors = [e for e in EXECUTOR_ORDER if e in executors]
+
+        statuses: Dict[str, str] = {}
+        all_error = bool(tested_executors)
+        first_success: Optional[str] = None
+
+        for executor in EXECUTOR_ORDER:
+            result = executors.get(executor, {})
+            status = result.get("status", "unknown")
+            statuses[executor] = "-" if status == "unknown" else status
+            if status in ("success", "difference"):
+                all_error = False
+            if status == "success" and first_success is None:
+                first_success = executor
+            if status in status_counts:
+                status_counts[status] += 1
+
+            timing = result.get("timing")
+            if timing and "runtime_ms" in timing:
+                executor_timing[executor].append(timing["runtime_ms"])
+
+        if first_success:
+            executor_counts[first_success] += 1
+
+        recommended = op_data.get("recommended_executor")
+        if recommended is None:
+            recommended = get_recommended_executor(executors) or "-"
+
+        rows.append(
+            {
+                "layer_id": layer_id,
+                "statuses": statuses,
+                "recommended": recommended,
+            }
+        )
+
+        if all_error and tested_executors:
+            error_details: Dict[str, Dict[str, Any]] = {}
+            for executor in tested_executors:
+                error_details[executor] = {
+                    "status": executors[executor].get("status", "error"),
+                    "report": executors[executor].get("failure_report", {}),
+                }
+            critical_failures.append(
+                {
+                    "layer_id": layer_id,
+                    "error_details": error_details,
+                    "node_index": op_data.get("_node_index"),
+                    "mlir_location": op_data.get("mlir_location"),
+                }
+            )
+
+    summary: Dict[str, Any] = {
+        "total_layers": len(ops),
+        "status_counts": status_counts,
+        "executor_counts": executor_counts,
+    }
+
+    timing_summary = {}
+    for executor in EXECUTOR_ORDER:
+        times = executor_timing[executor]
+        if times:
+            timing_summary[executor] = {
+                "avg_ms": round(sum(times) / len(times), TIMING_PRECISION),
+                "min_ms": round(min(times), TIMING_PRECISION),
+                "max_ms": round(max(times), TIMING_PRECISION),
+                "samples": len(times),
+            }
+    if timing_summary:
+        summary["timing_summary"] = timing_summary
+
+    return summary, critical_failures, rows
+
+
+def generate_final_report_text(data: Dict[str, Any]) -> Optional[str]:
+    """Regenerate final_report_text from the JSON data dict.
+
+    Computes summary and critical failures from *data['ops']* rather than
+    relying on the stored ``discovery_report``, so user edits are reflected.
+    """
+    from torq.gen_config._utils import build_report_lines, format_per_layer_status_table
+
+    ops = data.get("ops", {})
+    if not ops:
+        return None
+
+    model_name = data.get("model_name", "unknown")
+    summary, critical_failures, rows = _build_report_from_ops(ops)
+
+    sections: Dict[str, List[str]] = {
+        "header": [
+            "FINAL EXECUTOR DISCOVERY REPORT",
+            "",
+            f"Model: {model_name}",
+            f"Total layers tested: {summary['total_layers']}",
+        ],
+        "status_summary": ["Status Summary:"] + [
+            f"  {status}: {count}" for status, count in summary["status_counts"].items()
+        ],
+        "executor_distribution": ["First Working Executor Distribution:"] + [
+            f"  {executor.upper()}: {summary['executor_counts'].get(executor, 0)}"
+            for executor in EXECUTOR_ORDER
+        ],
+        "critical_failures": [],
+        "per_layer_status": ["Per-Layer Status:"],
+        "full_model_comparison": [],
+    }
+
+    if critical_failures:
+        sections["critical_failures"].append(
+            f"CRITICAL: {len(critical_failures)} layer(s) with ALL executors ERRORS"
+        )
+        sections["critical_failures"].append("")
+        for cf in critical_failures:
+            sections["critical_failures"].append(
+                f"  - {cf['layer_id']} (node: {cf.get('node_index')})"
+            )
+    else:
+        sections["critical_failures"].append(
+            "No critical failures - all layers have at least one working executor"
+        )
+
+    sections["per_layer_status"] = format_per_layer_status_table(
+        rows, executor_order=EXECUTOR_ORDER, use_color=False
+    )
+
+    return "\n".join(build_report_lines(sections))

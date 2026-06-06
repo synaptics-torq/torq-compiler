@@ -39,18 +39,7 @@ _total_tests = 0
 _completed_tests = 0
 
 
-def _opt(config, short: str, legacy: str, default=None):
-    """Check short (canonical) option first, then legacy alias."""
-    try:
-        val = config.getoption(short, default=None)
-        if val is not None and val != default:
-            return val
-    except ValueError:
-        pass
-    try:
-        return config.getoption(legacy, default=default)
-    except ValueError:
-        return default
+from torq.gen_config.core import _opt
 
 
 def pytest_addoption(parser):
@@ -263,7 +252,7 @@ def pytest_sessionfinish(session, exitstatus):
     # the log file.  This avoids printing the report to the terminal twice.
     if _verbose_mode and _discovery_log_file_handle:
         try:
-            from torq.gen_config.discovery_onnx import (
+            from torq.gen_config.discovery import (
                 _discovery_state,
                 _print_final_report,
             )
@@ -272,7 +261,7 @@ def pytest_sessionfinish(session, exitstatus):
                 old_stderr = sys.stderr
                 sys.stderr = buf
                 try:
-                    _print_final_report(session.config)
+                    _print_final_report(session.config, _discovery_state)
                 finally:
                     sys.stderr = old_stderr
                 _discovery_log_file_handle.write(buf.getvalue())
@@ -288,12 +277,12 @@ def pytest_sessionfinish(session, exitstatus):
     # Print final report to terminal exactly once
     if _verbose_mode:
         try:
-            from torq.gen_config.discovery_onnx import (
+            from torq.gen_config.discovery import (
                 _discovery_state,
                 _print_final_report,
             )
             if _discovery_state.results:
-                _print_final_report(session.config)
+                _print_final_report(session.config, _discovery_state)
         except Exception:
             pass
 
@@ -338,8 +327,51 @@ def _find_discovery_json(
     if json_path.exists():
         return json_path
 
-    # Search by model_name field inside JSON files
+    # Search by model_name field inside JSON files (exclude compiler JSONs)
     for json_file in search_dir.glob("torq_gen_config_*.json"):
+        if json_file.name.endswith("_compiler.json"):
+            continue
+        try:
+            with open(json_file, "r") as f:
+                data = json.load(f)
+            if data.get("model_name") == model_name:
+                return json_file
+        except Exception:
+            continue
+
+    return None
+
+
+def _find_compiler_json(
+    config, model_name: str, subgraph_suffix: Optional[str] = None
+) -> Optional[Path]:
+    """Find existing compiler-format JSON file for the model.
+
+    Searches for torq_gen_config_<model>_compiler.json files. If not found
+    by exact name, falls back to searching by model_name field inside JSON.
+    """
+    if not model_name:
+        return None
+
+    output_dir = _opt(config, "--output-dir", "--gen-config-output")
+    search_dir = Path(output_dir) if output_dir else Path(".")
+
+    if not search_dir.exists():
+        return None
+
+    # For subgraph tests, look for subgraph-specific compiler JSON first
+    if subgraph_suffix:
+        json_path = search_dir / f"torq_gen_config_{model_name}_{subgraph_suffix}_compiler.json"
+        if json_path.exists():
+            return json_path
+
+    # Look for torq_gen_config_<model_name>_compiler.json
+    json_path = search_dir / f"torq_gen_config_{model_name}_compiler.json"
+    if json_path.exists():
+        return json_path
+
+    # Search by model_name field inside compiler JSON files
+    for json_file in search_dir.glob("torq_gen_config_*_compiler.json"):
         try:
             with open(json_file, "r") as f:
                 data = json.load(f)
@@ -448,6 +480,15 @@ def _discovery_json_version(request):
             content = f.read()
             hash_value = hashlib.sha256(content).hexdigest()[:16]
             return f"discovery_{hash_value}"
+
+    # Fallback: hash compiler JSON if no discovery JSON exists
+    compiler_json = _find_compiler_json(request.config, model_name)
+    if compiler_json and compiler_json.exists():
+        with open(compiler_json, "rb") as f:
+            content = f.read()
+            hash_value = hashlib.sha256(content).hexdigest()[:16]
+            return f"compiler_{hash_value}"
+
     return "no_discovery"
 
 
@@ -491,7 +532,7 @@ def torq_torq_gen_config_json(
             save_config,
         )
         discovery_data = load_config(discovery_json)
-        compiler_data = generate_compiler_config(discovery_data)
+        compiler_data = generate_compiler_config(discovery_data, model_name)
 
         # Write compiler JSON to the versioned file for the compiler to consume
         with open(versioned_file, "w") as f:
@@ -508,7 +549,23 @@ def torq_torq_gen_config_json(
         logger.info(f"[ExecutorAssignments] Compiler JSON ({len(compiler_data.get('op_assignments', {}))} ops) -> {versioned_file}")
         return versioned_file
 
-    # Option 2: Default empty assignments
+    # Option 2: Use compiler JSON directly (no report JSON needed)
+    compiler_json = _find_compiler_json(request.config, model_name, subgraph_suffix)
+    if compiler_json:
+        suffix_str = f" ({subgraph_suffix})" if subgraph_suffix else ""
+        logger.info(f"[ExecutorAssignments] Using compiler JSON{suffix_str}: {compiler_json}")
+
+        with open(compiler_json, "r") as f:
+            compiler_data = json.load(f)
+
+        # Write compiler JSON to the versioned file for the compiler to consume
+        with open(versioned_file, "w") as f:
+            json.dump(compiler_data, f, indent=2)
+
+        logger.info(f"[ExecutorAssignments] Compiler JSON ({len(compiler_data.get('op_assignments', {}))} ops) -> {versioned_file}")
+        return versioned_file
+
+    # Option 3: Default empty assignments
     is_full_model_mode = "_full_model" in test_node_id or "_full" in test_node_id
 
     if is_full_model_mode and model_name:
@@ -562,10 +619,8 @@ def _get_layer_info_from_item(item) -> Optional[Dict[str, str]]:
 def _record_setup_error(layer_id, executor, is_subgraph, failure_report):
     """Record setup error for single layer or subgraph layer."""
     try:
-        from torq.gen_config.discovery_onnx import (
-            DEFAULT_TOLERANCE,
-            _discovery_state,
-        )
+        from torq.gen_config.core import DEFAULT_TOLERANCE
+        from torq.gen_config.discovery import _discovery_state
     except Exception:
         return
 

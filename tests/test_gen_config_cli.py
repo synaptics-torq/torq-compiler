@@ -574,6 +574,9 @@ class TestExecutorDiscoveryIntegration:
             assert "op_assignments" in compiler_data, (
                 "Compiler JSON missing 'op_assignments' key"
             )
+            assert "model_name" in compiler_data, (
+                "Compiler JSON missing 'model_name' key"
+            )
 
             # Validate compiler JSON content matches report JSON
             ops = report_data.get("ops", {})
@@ -606,3 +609,657 @@ class TestExecutorDiscoveryIntegration:
         finally:
             shutil.rmtree(output_dir, ignore_errors=True)
             _cleanup_generated_json()
+
+    def test_run_with_compiler_json_only(self):
+        """Test that 'run' works with only compiler JSON (no report JSON).
+
+        This verifies the workflow where a user shares or keeps only the
+        minimal compiler-format JSON and later runs the full model without
+        having the full discovery report.
+        """
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery to generate both JSONs.
+            # Use --auto-convert-bf16 and run all layer tests so the
+            # compiler JSON contains valid assignments for every op.
+            _run_pytest_and_validate(
+                "run_compiler_only_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            # Find generated JSONs
+            report_files = [
+                f for f in output_dir.glob("torq_gen_config_*.json")
+                if not f.name.endswith("_compiler.json")
+            ]
+            compiler_files = list(output_dir.glob("torq_gen_config_*_compiler.json"))
+            assert len(report_files) == 1, "Expected 1 report JSON"
+            assert len(compiler_files) == 1, "Expected 1 compiler JSON"
+
+            # Step 2: Delete the report JSON, keep only compiler JSON
+            report_files[0].unlink()
+            assert not report_files[0].exists(), "Report JSON should be deleted"
+
+            # Step 3: Run 'torq-gen-config run' with only compiler JSON present
+            run_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "run",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--auto-convert-bf16",
+                "--recompute-cache",
+            ]
+            run_result = subprocess.run(run_cmd, capture_output=True, text=True)
+
+            assert run_result.returncode == 0, (
+                f"run with compiler JSON only failed: {run_result.returncode}\n"
+                f"stdout: {run_result.stdout}\nstderr: {run_result.stderr}"
+            )
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_and_run(self):
+        """Test that 'edit' updates both JSONs and 'run' uses the edit.
+
+        Verifies:
+        - edit changes recommended_executor in report JSON
+        - edit updates final_report_text
+        - edit regenerates compiler JSON
+        - run respects the edited recommendation in terminal output
+        """
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery to generate both JSONs
+            _run_pytest_and_validate(
+                "edit_run_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            report_files = [
+                f for f in output_dir.glob("torq_gen_config_*.json")
+                if not f.name.endswith("_compiler.json")
+            ]
+            compiler_files = list(output_dir.glob("torq_gen_config_*_compiler.json"))
+            assert len(report_files) == 1, "Expected 1 report JSON"
+            assert len(compiler_files) == 1, "Expected 1 compiler JSON"
+            report_path = report_files[0]
+            compiler_path = compiler_files[0]
+
+            # Step 2: Edit a layer's recommended executor
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                str(report_path),
+                "--layer",
+                "Add_output",
+                "--executor",
+                "host",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode == 0, (
+                f"edit failed: {edit_result.returncode}\n"
+                f"stderr: {edit_result.stderr}"
+            )
+
+            # Step 3: Verify report JSON was updated
+            with open(report_path) as f:
+                report_data = json.load(f)
+            assert report_data["ops"]["Add_output"]["recommended_executor"] == "host"
+
+            # Verify final_report_text was updated
+            report_text = report_data.get("final_report_text", "")
+            add_line = [l for l in report_text.split("\n") if "Add_output" in l]
+            assert len(add_line) == 1, "Add_output line not found in final_report_text"
+            assert add_line[0].endswith(" host"), (
+                f"final_report_text did not update: {add_line[0]}"
+            )
+
+            # Step 4: Verify compiler JSON was updated
+            with open(compiler_path) as f:
+                compiler_data = json.load(f)
+            assignments = compiler_data.get("op_assignments", {})
+            # Add_output should now map to host (location is 9:10)
+            assert assignments.get("9:10", {}).get("executor") == "host", (
+                f"compiler JSON not updated: {assignments}"
+            )
+
+            # Step 5: Run and verify terminal output respects the edit
+            run_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "run",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--auto-convert-bf16",
+                "--recompute-cache",
+            ]
+            run_result = subprocess.run(run_cmd, capture_output=True, text=True)
+            assert run_result.returncode == 0, (
+                f"run after edit failed: {run_result.returncode}\n"
+                f"stderr: {run_result.stderr}"
+            )
+            # Terminal output should show the edited recommendation
+            # (report may be in stdout or stderr depending on pytest config)
+            combined_output = run_result.stdout + run_result.stderr
+            assert "Add_output" in combined_output, "Add_output not in run output"
+            add_lines = [
+                l for l in combined_output.split("\n")
+                if "Add_output" in l and "host" in l
+            ]
+            assert len(add_lines) >= 1, (
+                "run output did not reflect edited recommendation"
+            )
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_with_model_flag(self):
+        """Test that 'edit' works with --model instead of positional path."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery
+            _run_pytest_and_validate(
+                "edit_model_flag_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            # Step 2: Edit using --model + --output-dir (no positional path)
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--layer",
+                "Add_output",
+                "--executor",
+                "host",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode == 0, (
+                f"edit with --model failed: {edit_result.returncode}\n"
+                f"stderr: {edit_result.stderr}"
+            )
+
+            # Step 3: Verify report JSON was updated
+            report_files = [
+                f for f in output_dir.glob("torq_gen_config_*.json")
+                if not f.name.endswith("_compiler.json")
+            ]
+            assert len(report_files) == 1, "Expected 1 report JSON"
+            with open(report_files[0]) as f:
+                report_data = json.load(f)
+            assert report_data["ops"]["Add_output"]["recommended_executor"] == "host"
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_list_layers(self):
+        """Test that 'edit --list' prints available layers with full executor table."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery
+            _run_pytest_and_validate(
+                "edit_list_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            # Step 2: Run edit --list (no filter)
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--list",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode == 0, (
+                f"edit --list failed: {edit_result.returncode}\n"
+                f"stderr: {edit_result.stderr}"
+            )
+
+            output = edit_result.stdout
+            # Should contain per-layer status table headers (same as final report)
+            assert "Per-Layer Status:" in output, "Missing Per-Layer Status header"
+            assert "NSS" in output, "Missing NSS column header"
+            assert "CSS" in output, "Missing CSS column header"
+            assert "HOST" in output, "Missing HOST column header"
+            assert "Recommended" in output, "Missing Recommended column"
+            # Should contain known layers
+            assert "Add_output" in output, "Missing Add_output layer"
+            assert "Relu_relu_out" in output, "Missing Relu_relu_out layer"
+            # Should show total count
+            assert "Total:" in output, "Missing total count"
+
+            # Step 3: Run edit --list with filter
+            edit_cmd_filter = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--list",
+                "add",
+            ]
+            edit_result_filter = subprocess.run(
+                edit_cmd_filter, capture_output=True, text=True
+            )
+            assert edit_result_filter.returncode == 0, (
+                f"edit --list add failed: {edit_result_filter.returncode}\n"
+                f"stderr: {edit_result_filter.stderr}"
+            )
+
+            filter_output = edit_result_filter.stdout
+            # Should contain Add_output
+            assert "Add_output" in filter_output, "Missing Add_output in filtered list"
+            # Should show filtered count
+            assert "filtered from" in filter_output, "Missing filtered count"
+
+            # Step 4: Run edit --list with non-matching filter
+            edit_cmd_none = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--list",
+                "xyz_nonexistent",
+            ]
+            edit_result_none = subprocess.run(
+                edit_cmd_none, capture_output=True, text=True
+            )
+            assert edit_result_none.returncode == 0, (
+                f"edit --list xyz_nonexistent failed: {edit_result_none.returncode}"
+            )
+            assert "No layers match" in edit_result_none.stdout, (
+                f"Missing 'No layers match' message: {edit_result_none.stdout}"
+            )
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_compiler_json_guard(self):
+        """Test that 'edit' on a compiler JSON prints a helpful error."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery
+            _run_pytest_and_validate(
+                "edit_guard_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            compiler_files = list(output_dir.glob("torq_gen_config_*_compiler.json"))
+            assert len(compiler_files) == 1, "Expected 1 compiler JSON"
+            compiler_path = compiler_files[0]
+
+            # Step 2: Try to edit the compiler JSON (should fail with helpful msg)
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                str(compiler_path),
+                "--layer",
+                "Add_output",
+                "--executor",
+                "host",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode != 0, (
+                "edit on compiler JSON should have failed"
+            )
+            stderr = edit_result.stderr
+            assert "compiler json" in stderr.lower(), (
+                f"Missing 'compiler JSON' hint in error: {stderr}"
+            )
+            assert "report json" in stderr.lower(), (
+                f"Missing 'report JSON' hint in error: {stderr}"
+            )
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_layer_substring_single(self):
+        """Test that --layer with a substring matching one layer edits it."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery
+            _run_pytest_and_validate(
+                "edit_layer_sub_single_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            # Step 2: Edit with partial layer name "add" (matches "Add_output" only)
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--layer",
+                "add",
+                "--executor",
+                "host",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode == 0, (
+                f"edit with substring failed: {edit_result.returncode}\n"
+                f"stderr: {edit_result.stderr}"
+            )
+
+            # Step 3: Verify the edit landed on Add_output
+            report_files = [
+                f for f in output_dir.glob("torq_gen_config_*.json")
+                if not f.name.endswith("_compiler.json")
+            ]
+            with open(report_files[0]) as f:
+                report_data = json.load(f)
+            assert report_data["ops"]["Add_output"]["recommended_executor"] == "host"
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_layer_substring_multi(self):
+        """Test that --layer with a substring matching multiple layers batch-edits all."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery
+            _run_pytest_and_validate(
+                "edit_layer_sub_multi_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            # Step 2: Edit with a query that matches multiple layers ("_out" matches all 3)
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--layer",
+                "_out",
+                "--executor",
+                "host",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode == 0, (
+                f"edit with multi-match substring failed: {edit_result.returncode}\n"
+                f"stderr: {edit_result.stderr}"
+            )
+            stdout = edit_result.stdout
+            assert "Batch edit" in stdout, f"Missing batch header: {stdout}"
+            assert "3 layer(s)" in stdout, f"Missing match count: {stdout}"
+
+            # Step 3: Verify all layers were updated
+            report_files = [
+                f for f in output_dir.glob("torq_gen_config_*.json")
+                if not f.name.endswith("_compiler.json")
+            ]
+            with open(report_files[0]) as f:
+                report_data = json.load(f)
+            for layer in ["Add_output", "Relu_relu_out", "Conv_conv_out"]:
+                assert report_data["ops"][layer]["recommended_executor"] == "host", (
+                    f"Layer {layer} was not updated"
+                )
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_layer_batch_fnmatch(self):
+        """Test that --layer batch-edits all matching layers."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery
+            _run_pytest_and_validate(
+                "edit_layer_batch_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            # Step 2: Batch edit all layers matching "*_*" (all 3 layers have underscores)
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--layer",
+                "*_*",
+                "--executor",
+                "host",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode == 0, (
+                f"edit --layer failed: {edit_result.returncode}\n"
+                f"stderr: {edit_result.stderr}"
+            )
+            stdout = edit_result.stdout
+            assert "Batch edit" in stdout, f"Missing batch header: {stdout}"
+            assert "3 layer(s) match" in stdout, f"Missing match count: {stdout}"
+            assert "Updated recommended_executor for 3 layer(s)" in stdout, (
+                f"Missing update summary: {stdout}"
+            )
+
+            # Step 3: Verify all layers were updated
+            report_files = [
+                f for f in output_dir.glob("torq_gen_config_*.json")
+                if not f.name.endswith("_compiler.json")
+            ]
+            with open(report_files[0]) as f:
+                report_data = json.load(f)
+            for layer in ["Add_output", "Relu_relu_out", "Conv_conv_out"]:
+                assert report_data["ops"][layer]["recommended_executor"] == "host", (
+                    f"Layer {layer} was not updated"
+                )
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_layer_no_match(self):
+        """Test that --layer with no matches errors helpfully."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery
+            _run_pytest_and_validate(
+                "edit_layer_batch_none_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            # Step 2: Pattern that matches nothing
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--layer",
+                "xyz_nonexistent_*",
+                "--executor",
+                "host",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode != 0, (
+                "edit with no-match should have failed"
+            )
+            stderr = edit_result.stderr
+            assert "No layers match" in stderr, (
+                f"Missing no-match error: {stderr}"
+            )
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_layer_all(self):
+        """Test that --layer ALL edits every layer."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery
+            _run_pytest_and_validate(
+                "edit_layer_batch_all_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            # Step 2: Edit ALL layers
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--layer",
+                "ALL",
+                "--executor",
+                "host",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode == 0, (
+                f"edit --layer ALL failed: {edit_result.returncode}\n"
+                f"stderr: {edit_result.stderr}"
+            )
+            stdout = edit_result.stdout
+            assert "3 layer(s)" in stdout, f"Missing layer count: {stdout}"
+
+            # Step 3: Verify all layers were updated
+            report_files = [
+                f for f in output_dir.glob("torq_gen_config_*.json")
+                if not f.name.endswith("_compiler.json")
+            ]
+            with open(report_files[0]) as f:
+                report_data = json.load(f)
+            for layer in ["Add_output", "Relu_relu_out", "Conv_conv_out"]:
+                assert report_data["ops"][layer]["recommended_executor"] == "host", (
+                    f"Layer {layer} was not updated"
+                )
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_layer_batch_fnmatch_tolerance(self):
+        """Test that --layer batch edit works for tolerance changes."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            # Step 1: Run discovery
+            _run_pytest_and_validate(
+                "edit_layer_batch_tol_discovery",
+                ["--auto-convert-bf16"],
+                output_dir,
+                test_filter="example_gen_config_layer_",
+            )
+
+            # Step 2: Batch change tolerance for ALL layers
+            edit_cmd = [
+                sys.executable,
+                "-m",
+                "torq.gen_config",
+                "edit",
+                f"--model={TEST_MODEL}",
+                f"--output-dir={output_dir}",
+                "--layer",
+                "ALL",
+                "--tolerance-avg",
+                "0.5",
+                "--tolerance-max",
+                "0.8",
+            ]
+            edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+            assert edit_result.returncode == 0, (
+                f"edit --layer ALL tolerance failed: {edit_result.returncode}\n"
+                f"stderr: {edit_result.stderr}"
+            )
+            stdout = edit_result.stdout
+            assert "Updated tolerance for 3 layer(s)" in stdout, (
+                f"Missing tolerance update summary: {stdout}"
+            )
+
+            # Step 3: Verify all layers got the new tolerance
+            report_files = [
+                f for f in output_dir.glob("torq_gen_config_*.json")
+                if not f.name.endswith("_compiler.json")
+            ]
+            with open(report_files[0]) as f:
+                report_data = json.load(f)
+            for layer in ["Add_output", "Relu_relu_out", "Conv_conv_out"]:
+                tol = report_data["ops"][layer].get("tolerance_used", {})
+                assert tol.get("fp_avg_tol") == 0.5, (
+                    f"Layer {layer} fp_avg_tol not updated: {tol}"
+                )
+                assert tol.get("fp_max_tol") == 0.8, (
+                    f"Layer {layer} fp_max_tol not updated: {tol}"
+                )
+
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_edit_no_args(self):
+        """Test that 'edit' with no --model and no config path errors."""
+        edit_cmd = [
+            sys.executable,
+            "-m",
+            "torq.gen_config",
+            "edit",
+            "--layer",
+            "Add_output",
+            "--executor",
+            "host",
+        ]
+        edit_result = subprocess.run(edit_cmd, capture_output=True, text=True)
+        assert edit_result.returncode != 0, (
+            "edit with no args should have failed"
+        )

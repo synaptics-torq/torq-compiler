@@ -1,29 +1,44 @@
+# Copyright 2025-2026 Synaptics Inc.
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+"""ONNX executor discovery test cases and fixtures.
+
+Contains ``pytest_generate_tests``, all pytest fixtures, and the core
+``executor_discovery`` implementation used by ``tests/test_onnx_gen_config.py``.
+"""
+
+import contextlib
+import io
 import json
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import onnx
 import pytest
 
+from torq.testing.cases import Case
 from torq.testing.iree import list_files
 from torq.testing.onnx import (
+    extract_onnx_subgraph,
     generate_onnx_layers_from_file,
     generate_onnx_layers_from_model,
-    extract_onnx_subgraph,
     model_signature,
 )
-from torq.testing.cases import Case
 from torq.testing.versioned_fixtures import (
     VersionedUncachedData,
     versioned_hashable_object_fixture,
 )
 
+from torq.gen_config._state import ExecutorDiscoveryState, _discovery_state
 from torq.gen_config._utils import (
-    build_report_lines,
     extract_line_numbers_from_mlir,
-    format_per_layer_status_table,
     parse_diff_metrics,
 )
 from torq.gen_config.core import (
@@ -31,110 +46,23 @@ from torq.gen_config.core import (
     EXECUTOR_ORDER,
     TIMING_PRECISION,
     _discovery_log,
+    _get_json_path,
+    _load_json,
+    _opt,
     build_timing_data,
+    extract_model_name_from_case_name,
     get_compiler_config_path,
     get_config_path,
     get_recommended_executor,
+    get_subgraph_suffix_from_case_name,
     get_tolerance,
     is_line_column_format,
     load_config,
     save_compiler_config,
     save_config,
     update_config_with_results,
-    extract_model_name_from_case_name,
-    get_subgraph_suffix_from_case_name,
 )
-
-"""
-ONNX Executor Discovery Test
-
-Discovers the appropriate executor (NSS/CSS/Host) for each layer of an ONNX model.
-Tests each layer on NSS first, then CSS, then Host, recording which one works.
-
-Executor Discovery and Assignment Flow:
-
-    # Step 1: Run layer discovery tests to find optimal executor for each layer
-    # This generates torq_gen_config_<model>.json with discovery results
-    pytest tests/test_onnx_gen_config.py -v -k "encoder_small_layer_" \
-        --model-path=./tests/testdata/onnx_models/encoder_small.onnx --recompute-cache
-
-    # Step 2: Run full model test with discovered executor assignments
-    # The torq_torq_gen_config_json fixture provides the executor assignments
-    # C++ ExecutorAssignmentPass uses line:column matching to assign executors
-    pytest tests/test_onnx_gen_config.py \
-        --model-path=./tests/testdata/onnx_models/encoder_small.onnx \
-        -v -k "full_model" --debug-ir=tmp --recompute-cache
-
-
-Design Details:
-
-    Step 1: Layer Discovery Tests
-    For each layer (e.g., Tanh, Reshape), test NSS -> CSS -> Host in priority order.
-    Save results to torq_gen_config_<model>.json with three status types:
-    - "success": Test passed
-    - "difference": Accuracy failure (numerical difference)
-
-    Users can re-run specific tests with updated tolerance values:
-    pytest tests/test_onnx_gen_config.py -v -k "encoder_small_layer_Tanh_0_nss" \
-        --model-path=./tests/testdata/onnx_models/encoder_small.onnx -v --recompute-cache
-
-    Step 2: Full Model Test
-    1. Generate full model MLIR from ONNX
-    2. Extract CORRECT line numbers from full model MLIR:
-       - Tanh at line 10 -> "10:10"
-       - Reshape at line 11 -> "11:10"
-    3. Update JSON with correct line numbers (replaces temporary "Tanh" with "10:10")
-    4. torq_torq_gen_config_json fixture provides executor assignments JSON
-       (discovery format with 'ops' key, or compiler format with 'op_assignments' key)
-    5. C++ ExecutorAssignmentPass:
-       - Loads executor assignments from JSON
-       - For each operation, extracts line:column from CallSiteLoc
-       - Matches line:column with assignment keys
-       - Sets torq-executor attribute
-
-    Note: Line numbers from layer MLIRs (4:10, 6:10) are different from full model
-    MLIR (10:10, 11:10). The fixture extracts correct line numbers directly from
-    full model MLIR to ensure proper matching.
-
-JSON Format (torq_gen_config_<model>.json):
-{
-    "version": "1.1",
-    "model_name": "encoder",
-    "default_tolerance": {"fp_avg_tol": 0.01, "fp_max_tol": 0.01},
-    "ops": {
-        "Tanh_/Tanh_output_0": {
-            "executors": {
-                "nss": {
-                    "status": "success",
-                    "timing": {"runtime_ms": 15.2, "total_ms": 150.5}
-                },
-                "css": {"status": "difference", ...},
-                "host": {"status": "success", ...}
-            },
-            "expected_executor": "nss",
-            "mlir_location": "10:10"
-        }
-    }
-}
-
-Compiler JSON Formats (C++ ExecutorAssignmentPass accepts both):
-- Discovery format: {"ops": {"Conv_0": {"recommended_executor": "nss", "mlir_location": "10:10"}}}
-- Compiler format: {"op_assignments": {"10:10": {"executor": "nss"}}}
-"""
-
-
-def _opt(config, short: str, legacy: str, default=None):
-    """Check short (canonical) option first, then legacy alias."""
-    try:
-        val = config.getoption(short, default=None)
-        if val is not None and val != default:
-            return val
-    except ValueError:
-        pass
-    try:
-        return config.getoption(legacy, default=default)
-    except ValueError:
-        return default
+from torq.gen_config._report import _get_all_critical_failures, _save_detailed_report
 
 
 def _verify_import_ordering(
@@ -241,136 +169,6 @@ def _build_onnx_to_mlir_mapping(onnx_model_path: Path, mlir_file: Path) -> Dict[
         _discovery_log(f"[ONNXtoMLIR] Error building mapping: {e}")
         return {}
 
-
-class ExecutorDiscoveryState:
-    """Global state for executor discovery results."""
-
-    def __init__(self) -> None:
-        self.results: Dict[str, Dict[str, Dict]] = {}  # layer_id -> executor -> result
-        self.locations: Dict[str, str] = {}  # layer_id -> mlir_location (op_type for layer tests)
-        self.node_indices: Dict[str, int] = {}  # layer_id -> node_index in ONNX graph
-        self.mlir_files: Dict[str, Path] = {}  # layer_id -> mlir file path
-        # layer_id -> line:column from full model MLIR
-        self.full_mlir_locations: Dict[str, str] = {}
-        # Full model comparison metrics (populated when running full model test)
-        self.full_model_metrics: Optional[Dict[str, Any]] = None
-
-    def record_result(
-        self,
-        layer_id: str,
-        executor: str,
-        status: str,
-        tolerance_used: Dict[str, float],
-        max_diff: Optional[Dict] = None,
-        failure_report: Optional[Dict] = None,
-        timing: Optional[Dict[str, float]] = None,
-    ) -> None:
-        """Record test result for a layer/executor."""
-        if layer_id not in self.results:
-            self.results[layer_id] = {}
-
-        result: Dict[str, Any] = {"status": status, "tolerance_used": tolerance_used}
-        if max_diff:
-            result["max_diff"] = max_diff
-        if failure_report:
-            result["failure_report"] = failure_report
-        if timing:
-            result["timing"] = timing
-
-        self.results[layer_id][executor] = result
-
-    def record_metadata(
-        self,
-        layer_id: str,
-        node_index: Optional[int] = None,
-        mlir_location: Optional[str] = None,
-        full_mlir_location: Optional[str] = None,
-        mlir_file: Optional[Path] = None,
-    ) -> None:
-        """Record metadata for a layer."""
-        if node_index is not None:
-            self.node_indices[layer_id] = node_index
-        if mlir_location:
-            self.locations[layer_id] = mlir_location
-        if full_mlir_location:
-            self.full_mlir_locations[layer_id] = full_mlir_location
-        if mlir_file:
-            self.mlir_files[layer_id] = mlir_file
-
-    def load_from_json(self, json_data: Dict[str, Any]) -> None:
-        """Load existing results from JSON data (for skip mode consistency)."""
-        ops = json_data.get("ops", {})
-        loaded_count = 0
-        for layer_id, op_data in ops.items():
-            executors = op_data.get("executors", {})
-            for executor, result in executors.items():
-                # Only load if not already recorded
-                if layer_id not in self.results:
-                    self.results[layer_id] = {}
-                if executor not in self.results[layer_id]:
-                    self.results[layer_id][executor] = result
-                    loaded_count += 1
-
-            # Load metadata
-            node_index = op_data.get("_node_index")
-            if node_index is not None and layer_id not in self.node_indices:
-                self.node_indices[layer_id] = node_index
-            mlir_loc = op_data.get("mlir_location")
-            if mlir_loc and layer_id not in self.locations:
-                self.locations[layer_id] = mlir_loc
-
-        if loaded_count > 0:
-            _discovery_log(f"Loaded {loaded_count} cached results from existing JSON")
-
-    def get_summary(self) -> Dict[str, Any]:
-        """Get summary statistics."""
-        status_counts = {"success": 0, "difference": 0, "error": 0}
-        executor_counts = {executor: 0 for executor in EXECUTOR_ORDER}
-
-        # Timing statistics
-        timing_available = False
-        executor_timing = {executor: [] for executor in EXECUTOR_ORDER}
-
-        for executors in self.results.values():
-            for executor, result in executors.items():
-                status = result.get("status", "error")
-                status_counts[status] = status_counts.get(status, 0) + 1
-                if status == "success" and executor in executor_counts:
-                    executor_counts[executor] += 1
-
-                # Collect timing data
-                timing = result.get("timing")
-                if timing and "runtime_ms" in timing:
-                    timing_available = True
-                    executor_timing[executor].append(timing["runtime_ms"])
-
-        summary = {
-            "total_layers": len(self.results),
-            "status_counts": status_counts,
-            "executor_counts": executor_counts,
-        }
-
-        # Add timing summary if available
-        if timing_available:
-            timing_summary = {}
-            for executor in EXECUTOR_ORDER:
-                times = executor_timing[executor]
-                if times:
-                    timing_summary[executor] = {
-                        "avg_ms": round(sum(times) / len(times), TIMING_PRECISION),
-                        "min_ms": round(min(times), TIMING_PRECISION),
-                        "max_ms": round(max(times), TIMING_PRECISION),
-                        "samples": len(times),
-                    }
-            if timing_summary:
-                summary["timing_summary"] = timing_summary
-
-        return summary
-
-
-# Global state
-_discovery_state = ExecutorDiscoveryState()
-
 def _extract_op_type_from_layer(mlir_file: Path, target_op_type: str) -> Optional[str]:
     """Extract operation type from layer MLIR file."""
     if not mlir_file.exists():
@@ -401,7 +199,6 @@ def _get_skipped_executors(config) -> set:
     if skip_executors_option:
         return {e.strip().lower() for e in skip_executors_option.split(",")}
     return set()
-
 
 def _get_layer_id_from_case(case) -> str:
     """Extract layer_id (opType_outputName) from a Case's ONNX model."""
@@ -437,16 +234,18 @@ def _build_duplicate_layer_map(cases) -> Dict[str, str]:
     return layer_id_to_source
 
 
-def _copy_result_from_source_layer(layer_id: str, executor: str, source_layer_id: str) -> None:
+def _copy_result_from_source_layer(
+    layer_id: str, executor: str, source_layer_id: str, discovery_state: ExecutorDiscoveryState
+) -> None:
     """Copy executor result from source layer to duplicate layer.
 
     If the source layer has a result for this executor, copy it into
-    _discovery_state and log. If not, skip the test.
+    *discovery_state* and log. If not, skip the test.
     """
-    source_results = _discovery_state.results.get(source_layer_id, {})
+    source_results = discovery_state.results.get(source_layer_id, {})
     if executor in source_results:
         src = source_results[executor]
-        _discovery_state.record_result(
+        discovery_state.record_result(
             layer_id,
             executor,
             src["status"],
@@ -473,6 +272,7 @@ def _maybe_skip_executor(
     executor: str,
     model_name: Optional[str],
     subgraph_suffix: Optional[str] = None,
+    discovery_state: ExecutorDiscoveryState = _discovery_state,
 ) -> None:
     """Skip remaining executors for a layer if one already succeeded.
 
@@ -485,6 +285,7 @@ def _maybe_skip_executor(
         executor: Current executor being tested (nss/css/host)
         model_name: Name of the model
         subgraph_suffix: Optional suffix for subgraph-specific JSON
+        discovery_state: Discovery state instance (defaults to global singleton).
     """
     # Check if this executor should be skipped entirely (--skip-executors option)
     skipped_executors = _get_skipped_executors(request.config)
@@ -496,8 +297,8 @@ def _maybe_skip_executor(
         return
 
     # First check in-memory results from current test session (e.g., NSS just passed)
-    if layer_id in _discovery_state.results:
-        for exec_name, exec_result in _discovery_state.results[layer_id].items():
+    if layer_id in discovery_state.results:
+        for exec_name, exec_result in discovery_state.results[layer_id].items():
             if exec_result.get("status") == "success":
                 pytest.skip(f"Layer {layer_id} already works with {exec_name}, skipping {executor}")
 
@@ -516,31 +317,10 @@ def _maybe_skip_executor(
             pytest.skip(f"Layer {layer_id} already works with {exec_name}, skipping {executor}")
 
 
-def _get_json_path(
-    config, model_name: Optional[str] = None, subgraph_suffix: Optional[str] = None
-) -> Path:
-    """Get path to executor assignments JSON file."""
-    output_dir = _opt(config, "--output-dir", "--gen-config-output")
-    if model_name is None:
-        model_path = _opt(config, "--model", "--model-path")
-        model_name = Path(model_path).stem if model_path else "auto_discovered"
-    return get_config_path(model_name, output_dir, subgraph_suffix)
-
-
-def _load_json(config, model_name: str, subgraph_suffix: Optional[str] = None) -> Dict:
-    """Load JSON config for a model."""
-    path = _get_json_path(config, model_name, subgraph_suffix)
-    data = load_config(path)
-    if not data.get("model_name"):
-        data["model_name"] = model_name
-    return data
-
-
 def _save_json(config, model_name: str, data: Dict) -> None:
     """Save JSON config for a model."""
     path = _get_json_path(config, model_name)
     save_config(path, data)
-
 
 def _extract_model_name_from_case(case) -> Optional[str]:
     """Extract model name from case name."""
@@ -556,21 +336,29 @@ def _get_subgraph_suffix(case) -> Optional[str]:
     """Extract subgraph suffix from case name (e.g., 'subgraph_0_5')."""
     return get_subgraph_suffix_from_case_name(case.name)
 
-
-def _update_json_with_results(json_data: Dict, mlir_file: Optional[Path], recommend_by_timing: bool = False) -> None:
+def _update_json_with_results(
+    json_data: Dict,
+    mlir_file: Optional[Path],
+    recommend_by_timing: bool = False,
+    discovery_state: ExecutorDiscoveryState = _discovery_state,
+) -> None:
     """Update JSON data with discovery results and line numbers."""
     update_config_with_results(
         json_data,
-        _discovery_state.results,
-        _discovery_state.node_indices,
-        _discovery_state.locations,
-        _discovery_state.full_mlir_locations,
+        discovery_state.results,
+        discovery_state.node_indices,
+        discovery_state.locations,
+        discovery_state.full_mlir_locations,
         recommend_by_timing,
     )
 
 
 def _save_discovery_results(
-    config, case, mlir_file: Optional[Path], is_subgraph: bool = False
+    config,
+    case,
+    mlir_file: Optional[Path],
+    is_subgraph: bool = False,
+    discovery_state: ExecutorDiscoveryState = _discovery_state,
 ) -> None:
     """Save discovery results to JSON file.
 
@@ -586,7 +374,7 @@ def _save_discovery_results(
     # Determine JSON path (subgraph-specific or main model)
     subgraph_suffix = _get_subgraph_suffix(case) if is_subgraph else None
     json_data = _load_json(config, model_name, subgraph_suffix)
-    _update_json_with_results(json_data, mlir_file, recommend_by_timing)
+    _update_json_with_results(json_data, mlir_file, recommend_by_timing, discovery_state)
 
     if model_name:
         json_data["model_name"] = model_name
@@ -595,8 +383,8 @@ def _save_discovery_results(
     _save_json(config, json_name, json_data)
 
     # Get summary and critical failures once
-    summary = _discovery_state.get_summary()
-    critical_failures = _get_all_critical_failures()
+    summary = discovery_state.get_summary()
+    critical_failures = _get_all_critical_failures(discovery_state)
 
     # Print summary
     _discovery_log("\n\nExecutor Discovery Summary")
@@ -621,13 +409,12 @@ def _save_discovery_results(
     _discovery_log("")
 
     # Save detailed report with critical failures info
-    _save_detailed_report(config, model_name, critical_failures, summary)
+    _save_detailed_report(config, model_name, discovery_state)
 
     # Generate compiler-format JSON (minimal, only what C++ pass needs)
     output_dir = _opt(config, "--output-dir", "--gen-config-output")
     compiler_path = get_compiler_config_path(model_name, output_dir, subgraph_suffix)
-    save_compiler_config(compiler_path, json_data)
-
+    save_compiler_config(compiler_path, json_data, model_name)
 
 def _extract_max_diff(error_msg: str) -> Optional[Dict[str, float]]:
     """Extract max differences from comparison error message."""
@@ -672,7 +459,6 @@ def _resolve_op_name_to_index(op_name, name_to_index, option_name):
         f"Could not resolve {option_name}='{op_name}'. Available: {available}..."
     )
 
-
 def _discover_model_files(config) -> List[Path]:
     """Discover ONNX model files from --model-path or default directories."""
     onnx_model_path = _opt(config, "--model", "--model-path")
@@ -695,30 +481,15 @@ def _precompute_mlir_mappings(files: List[Path], config) -> Dict[str, Dict[str, 
 
     for f in files:
         model_name = f.stem
-        json_path = _get_json_path(config, model_name)
         mlir_cache = Path(f".pytest_cache/onnx_full_mlir/{model_name}.mlir")
 
         if model_name not in pytest_generate_tests._onnx_to_mlir_maps:
             mapping = _build_onnx_to_mlir_mapping(f, mlir_cache)
             pytest_generate_tests._onnx_to_mlir_maps[model_name] = mapping
 
-            # Pre-populate JSON with mapping if it doesn't exist
-            if json_path and not json_path.exists():
-                json_data = {
-                    "version": "1.1",
-                    "model_name": model_name,
-                    "default_tolerance": DEFAULT_TOLERANCE.copy(),
-                    "ops": {},
-                    "_onnx_to_mlir_map": mapping,
-                }
-                json_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(json_path, "w") as jf:
-                    json.dump(json_data, jf, indent=2)
-
         onnx_to_mlir_map[model_name] = pytest_generate_tests._onnx_to_mlir_maps[model_name]
 
     return onnx_to_mlir_map
-
 
 def _maybe_apply_bf16_conversion(model, f: Path, auto_convert: bool, save_path: Optional[str]) -> Any:
     """Apply BF16 conversion to a model if requested.
@@ -739,7 +510,6 @@ def _maybe_apply_bf16_conversion(model, f: Path, auto_convert: bool, save_path: 
         onnx.save(converted, str(sp))
         _discovery_log(f"[BF16] Saved converted model to: {sp}")
     return converted
-
 
 def _generate_subgraph_cases(f: Path, config) -> List[Case]:
     """Generate test cases in subgraph mode."""
@@ -800,7 +570,6 @@ def _generate_subgraph_cases(f: Path, config) -> List[Case]:
         cases.append(Case(case_name, layer_data))
     cases.append(Case(f"{model_name}_{subgraph_suffix}_full", subgraph))
     return cases
-
 
 def _generate_layer_cases(f: Path, config) -> List[Case]:
     """Generate test cases in normal layer-extraction mode."""
@@ -864,7 +633,6 @@ def _assemble_layer_test_cases(
 
     return test_cases
 
-
 def pytest_generate_tests(metafunc):
     """Generate test cases for each layer, subgraph, or full model."""
     files = _discover_model_files(metafunc.config)
@@ -899,13 +667,13 @@ def pytest_generate_tests(metafunc):
         ids=[f"{c.name}_{exec}" for c, _, exec, _, _, _, _ in test_cases],
     )
 
-
 @pytest.fixture
 def reference_results(request, onnx_layer_model):
     return request.getfixturevalue("composite_reference_results")
 
 
 @pytest.fixture
+
 def layer_executor_case(request):
     """Provide the layer case with executor info."""
     case, layer_id, executor, node_index, full_mlir_location, is_subgraph, source_layer_id = request.param
@@ -919,7 +687,6 @@ def layer_executor_case(request):
         "source_layer_id": source_layer_id,
     }
 
-
 @pytest.fixture
 def onnx_layer_model(request, layer_executor_case):
     """Provide the layer model."""
@@ -932,7 +699,7 @@ def onnx_layer_model(request, layer_executor_case):
         executor = layer_executor_case["executor"]
         source_results = _discovery_state.results.get(source_layer_id, {})
         if executor in source_results:
-            _copy_result_from_source_layer(layer_id, executor, source_layer_id)
+            _copy_result_from_source_layer(layer_id, executor, source_layer_id, _discovery_state)
             node_index = layer_executor_case.get("node_index")
             full_mlir_location = layer_executor_case.get("full_mlir_location")
             _discovery_state.record_metadata(
@@ -947,7 +714,6 @@ def onnx_layer_model(request, layer_executor_case):
     case = layer_executor_case["case"]
     version = "onnx_layer_" + case.name
     return VersionedUncachedData(data=case.data, version=version)
-
 
 @versioned_hashable_object_fixture
 def torq_compiler_options(request, case_config):
@@ -988,7 +754,6 @@ def torq_compiler_options(request, case_config):
 
     return cmds
 
-
 @pytest.fixture
 def comparison_config_for_executor_discovery(request, layer_executor_case):
     """Provide comparison config with per-op tolerances."""
@@ -1010,268 +775,22 @@ def comparison_config_for_executor_discovery(request, layer_executor_case):
         "skip_nan_check": False,
     }
 
-
 @pytest.fixture(autouse=True)
 def save_progress(request, layer_executor_case):
-    """Save discovery progress after each test."""
+    """Save discovery progress after each layer test."""
     yield
 
-    # MLIR file is now recorded during test execution to avoid fixture teardown issues
+    # Skip full model tests — they don't perform discovery and should not
+    # overwrite the discovery JSON or compiler JSON.
     case = layer_executor_case.get("case") if layer_executor_case else None
     is_subgraph = layer_executor_case.get("is_subgraph", False)
-    if case:
+    if case and "_full_model" not in case.name and "_full" not in case.name:
         _save_discovery_results(request.config, case, None, is_subgraph)
-
-
-
-# Final Reporting
-def _get_all_critical_failures() -> List[Dict[str, Any]]:
-    """Identify layers where ALL executors have ERROR status (setup/compilation failures).
-
-    "difference" means executor is working but results don't match - NOT a critical failure.
-    "error" means setup/compilation/runtime error - IS a critical failure.
-
-    Returns list of critical failure records.
-    """
-    critical_failures = []
-
-    for layer_id, executors in _discovery_state.results.items():
-        tested_executors = [e for e in EXECUTOR_ORDER if e in executors]
-        if not tested_executors:
-            continue
-
-        all_error = True
-        error_details = {}
-
-        for executor in tested_executors:
-            status = executors[executor].get("status", "error")
-            if status in ("success", "difference"):
-                # At least one tested executor is working
-                all_error = False
-                break
-            # Only "error" status counts as critical
-            error_details[executor] = {
-                "status": status,
-                "report": executors[executor].get("failure_report", {}),
-            }
-
-        if all_error:
-            critical_failures.append({
-                "layer_id": layer_id,
-                "error_details": error_details,
-                "node_index": _discovery_state.node_indices.get(layer_id),
-                "mlir_location": _discovery_state.locations.get(layer_id),
-                "full_mlir_location": _discovery_state.full_mlir_locations.get(layer_id),
-            })
-
-    return critical_failures
-
-
-def _generate_report_sections(
-    model_name: str, summary: Dict, critical_failures: List[Dict]
-) -> Dict[str, List[str]]:
-    """Generate report sections as reusable lists of lines."""
-    sections = {
-        "header": [
-            "FINAL EXECUTOR DISCOVERY REPORT",
-            "",
-            f"Model: {model_name}",
-            f"Total layers tested: {summary['total_layers']}",
-        ],
-        "status_summary": ["Status Summary:"] + [
-            f"  {status}: {count}" for status, count in summary["status_counts"].items()
-        ],
-        "executor_distribution": ["First Working Executor Distribution:"] + [
-            f"  {executor.upper()}: {summary['executor_counts'].get(executor, 0)}"
-            for executor in EXECUTOR_ORDER
-        ],
-        "critical_failures": [],
-        "per_layer_status": ["Per-Layer Status:"],
-        "full_model_comparison": [],
-    }
-
-    # Critical failures section
-    if critical_failures:
-        sections["critical_failures"].append(
-            f"CRITICAL: {len(critical_failures)} layer(s) with ALL executors ERRORS"
-        )
-        sections["critical_failures"].append("")
-        for cf in critical_failures:
-            sections["critical_failures"].append(f"  - {cf['layer_id']} (node: {cf['node_index']})")
-    else:
-        sections["critical_failures"].append(
-            "No critical failures - all layers have at least one working executor"
-        )
-
-    # Full model comparison metrics
-    if _discovery_state.full_model_metrics:
-        sections["full_model_comparison"].append("--- Full Model Comparison ---")
-        m = _discovery_state.full_model_metrics
-        if "max_rel_diff" in m:
-            sections["full_model_comparison"].append(f"  Max relative difference: {m['max_rel_diff']}")
-        if "max_abs_diff" in m:
-            sections["full_model_comparison"].append(f"  Max absolute difference: {m['max_abs_diff']}")
-        if "num_differences" in m:
-            sections["full_model_comparison"].append(f"  Number of differences: {m['num_differences']}")
-
-    # Per-layer status — sorted by ONNX node index (model order)
-    sorted_results = sorted(
-        _discovery_state.results.items(),
-        key=lambda item: _discovery_state.node_indices.get(item[0], float("inf")),
-    )
-
-    rows = []
-    for layer_id, executors in sorted_results:
-        statuses = {}
-        for executor in EXECUTOR_ORDER:
-            status = executors.get(executor, {}).get("status", "-")
-            statuses[executor] = "-" if status == "unknown" else status
-        rows.append({
-            "layer_id": layer_id,
-            "statuses": statuses,
-            "recommended": get_recommended_executor(executors) or "-",
-        })
-
-    sections["per_layer_status"] = format_per_layer_status_table(
-        rows, executor_order=EXECUTOR_ORDER, use_color=False
-    )
-
-    return sections
-
-
-def _print_final_report(config):
-    """Print comprehensive final report including critical failures."""
-    summary = _discovery_state.get_summary()
-    critical_failures = _get_all_critical_failures()
-
-    model_path = _opt(config, "--model", "--model-path")
-    model_name = Path(model_path).stem if model_path else "unknown"
-    json_path = _get_json_path(config, model_name)
-
-    sections = _generate_report_sections(model_name, summary, critical_failures)
-
-    # Print header with formatting (always to console, also to log file if configured)
-    report_lines = [
-        "",
-        "",
-        "=" * 80,
-        sections["header"][0],
-        "=" * 80,
-    ] + sections["header"][1:] + [
-        f"Output file: {json_path}",
-        "",
-        "--- Status Summary ---",
-    ] + sections["status_summary"] + [
-        "",
-        "--- First Working Executor Distribution ---",
-    ] + sections["executor_distribution"]
-
-    if critical_failures:
-        report_lines.append(f"\nCRITICAL FAILURES: {len(critical_failures)} layers with ALL executors ERRORS")
-        report_lines.append("\nThese layers CANNOT work. Need to fix specific issues:")
-        for i, failure in enumerate(critical_failures, 1):
-            report_lines.append(f"\n  {i}. Layer: {failure['layer_id']}")
-            report_lines.append(f"     Node index: {failure['node_index']}")
-            report_lines.append(f"     MLIR location: {failure['mlir_location'] or 'N/A'}")
-            loc = failure['full_mlir_location'] or 'N/A'
-            report_lines.append(f"     Full MLIR location: {loc}")
-            report_lines.append("     Executor errors:")
-            for executor, details in failure["error_details"].items():
-                status = details["status"]
-                report_summary = details["report"].get("summary", "No details")
-                summary = report_summary[:100]
-                report_lines.append(f"       - {executor.upper()}: {status} - {summary}")
-    else:
-        report_lines.append("\n--- No Critical Failures ---")
-        report_lines.append("All layers have at least one working executor.")
-
-    if sections["full_model_comparison"]:
-        report_lines.append("")
-        report_lines.extend(sections["full_model_comparison"])
-
-    report_lines.append("\n--- Per-Layer Detailed Status ---")
-    report_lines.extend(sections["per_layer_status"])
-    report_lines.append("")
-
-    # Colorize per-layer status lines when printing to a terminal
-    use_color = sys.stderr.isatty()
-    if use_color:
-        _COLOR_MAP = {
-            "success": "\033[32m",      # Green
-            "difference": "\033[33m",   # Yellow
-            "error": "\033[31m",        # Red
-            "reset": "\033[0m",
-        }
-        colorized_lines = []
-        for line in report_lines:
-            # Only colorize lines that look like per-layer status rows
-            # (they start with two spaces and have status columns)
-            if line.startswith("  ") and not line.startswith("  -") and "Layer" not in line:
-                # Replace status words with colored versions
-                for status, code in _COLOR_MAP.items():
-                    if status in line:
-                        line = line.replace(status, f"{code}{status}{_COLOR_MAP['reset']}")
-            colorized_lines.append(line)
-        report_lines = colorized_lines
-
-    # Print to stderr (goes to console when stdout/stderr are restored,
-    # or to log file when they are redirected)
-    for line in report_lines:
-        print(line, file=sys.stderr)
-
-    _save_detailed_report(config, model_name, critical_failures, summary)
-
-
-def _generate_final_report_text(
-    model_name: str, summary: Dict, critical_failures: List[Dict]
-) -> str:
-    """Generate final report text for JSON storage."""
-    sections = _generate_report_sections(model_name, summary, critical_failures)
-    return "\n".join(build_report_lines(sections))
-
-
-def _save_detailed_report(config, model_name: str, critical_failures: List[Dict], summary: Dict):
-    """Save detailed report including critical failures to JSON."""
-    json_path = _get_json_path(config, model_name)
-    if not json_path:
-        return
-
-    try:
-        json_data = _load_json(config, model_name) if json_path.exists() else {
-            "version": "1.1",
-            "model_name": model_name,
-            "default_tolerance": DEFAULT_TOLERANCE.copy(),
-            "ops": {},
-        }
-
-        # Add discovery report with summary and critical failures only
-        # (detailed results are in "ops" section)
-        json_data["discovery_report"] = {
-            "summary": summary,
-            "critical_failures": critical_failures,
-        }
-
-        # Add flag if model has critical issues
-        json_data["has_critical_failures"] = len(critical_failures) > 0
-        json_data["final_report_text"] = _generate_final_report_text(
-            model_name, summary, critical_failures
-        )
-
-        with open(json_path, "w") as f:
-            json.dump(json_data, f, indent=2)
-
-        _discovery_log(f"\nDetailed report saved to: {json_path}")
-
-    except Exception as e:
-        _discovery_log(f"\nWarning: Failed to save detailed report: {e}")
-
-
-
-
 
 def _run_layer_test(
     request, torq_results, reference_results, case_config,
-    layer_id, executor, node_index, mlir_file_path, json_data, case_name
+    layer_id, executor, node_index, mlir_file_path, json_data, case_name,
+    discovery_state: ExecutorDiscoveryState = _discovery_state,
 ):
     """Run a single layer test with result recording to JSON."""
     from torq.testing.comparison import compare_test_results
@@ -1282,11 +801,11 @@ def _run_layer_test(
     timing_runs = request.config.getoption("--timing-runs", default=1)
 
     def _record(status, max_diff=None, failure_report=None, timing=None):
-        _discovery_state.record_result(
+        discovery_state.record_result(
             layer_id, executor, status, tolerance_used, max_diff, failure_report, timing
         )
         if node_index is not None:
-            _discovery_state.record_metadata(layer_id, node_index=node_index)
+            discovery_state.record_metadata(layer_id, node_index=node_index)
 
     def _format_timing_str(timing: Optional[Dict]) -> str:
         """Format timing for display."""
@@ -1314,7 +833,7 @@ def _run_layer_test(
         op_type = case_name.split("_")[-2]
         loc = _extract_op_type_from_layer(mlir_file_path, op_type)
         if loc:
-            _discovery_state.record_metadata(layer_id, mlir_location=loc)
+            discovery_state.record_metadata(layer_id, mlir_location=loc)
 
         _discovery_log(f"\nLayer {layer_id}: {executor.upper()} = success{_format_timing_str(timing)}")
 
@@ -1339,7 +858,6 @@ def _run_layer_test(
         # (pytest.fail() would produce FAILED, which is for assertion failures)
         raise
 
-
 def executor_discovery(
     request,
     torq_results,
@@ -1347,6 +865,7 @@ def executor_discovery(
     case_config,
     layer_executor_case,
     onnx_mlir_model_file,
+    discovery_state: ExecutorDiscoveryState = _discovery_state,
 ):
     """Core executor discovery implementation."""
     layer_id = layer_executor_case["layer_id"]
@@ -1370,7 +889,7 @@ def executor_discovery(
         if model_name:
             json_data = _load_json(request.config, model_name, subgraph_suffix)
             if json_data:
-                _discovery_state.load_from_json(json_data)
+                discovery_state.load_from_json(json_data)
 
     # Full model / full subgraph test: no layer_id, just compare
     if layer_id is None:
@@ -1393,13 +912,13 @@ def executor_discovery(
                     metrics["max_abs_diff"] = line.split(":", 1)[1].strip()
                 elif line.startswith("Number of differences:"):
                     metrics["num_differences"] = line.split(":", 1)[1].strip()
-            _discovery_state.full_model_metrics = metrics
+            discovery_state.full_model_metrics = metrics
             raise
         return
 
     # Layer mode: record metadata first so duplicates also get correct
     # node_index and mlir_location in the JSON output.
-    _discovery_state.record_metadata(
+    discovery_state.record_metadata(
         layer_id=layer_id,
         node_index=node_index,
         full_mlir_location=full_mlir_location,
@@ -1413,7 +932,7 @@ def executor_discovery(
     # Short-circuit duplicate layers: copy results from source layer
     source_layer_id = layer_executor_case.get("source_layer_id")
     if source_layer_id:
-        _copy_result_from_source_layer(layer_id, executor, source_layer_id)
+        _copy_result_from_source_layer(layer_id, executor, source_layer_id, discovery_state)
         return
 
     json_data = _load_json(request.config, model_name, subgraph_suffix) if model_name else {}
@@ -1428,5 +947,3 @@ def executor_discovery(
         request, torq_results, reference_results, case_config,
         layer_id, executor, node_index, mlir_file_path, json_data, case.name
     )
-
-

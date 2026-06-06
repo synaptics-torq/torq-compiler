@@ -14,10 +14,10 @@ pytest tests/test_onnx_gen_config.py --model-path=encoder.onnx -v
 
 """
 
-from torq.gen_config.discovery_onnx import pytest_generate_tests
+from torq.gen_config.discovery import pytest_generate_tests
 
 # Fixtures
-from torq.gen_config.discovery_onnx import (
+from torq.gen_config.discovery import (
     reference_results,
     layer_executor_case,
     onnx_layer_model,
@@ -27,7 +27,7 @@ from torq.gen_config.discovery_onnx import (
 )
 
 # Core logic imports
-from torq.gen_config.discovery_onnx import (
+from torq.gen_config.discovery import (
     executor_discovery,
     _extract_model_name_from_case,
     _get_subgraph_suffix,
