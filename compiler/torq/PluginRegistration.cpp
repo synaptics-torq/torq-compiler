@@ -115,6 +115,10 @@ struct TORQSession : public PluginSession<
         typeMnemonics.insert("stablehlo_xla-torq");
     }
 
+    void extendPreprocessingPassPipeline(OpPassManager &passManager) override {
+        passManager.addPass(createTorqAnnotateTorqResourcesPass());
+    }
+
     void populateDetectedCustomInputConversionTypes(ModuleOp &module, StringSet<> &typeMnemonics)
         override {
 

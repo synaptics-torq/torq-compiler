@@ -209,4 +209,21 @@ def UnrollStaticScfForLoops :
     ];
 }
 
+def TorqAnnotateTorqResources : Pass<"torq-annotate-torq-resources", "mlir::ModuleOp"> {
+
+    let summary = "Annotates module with Torq stream.resources attribute";
+
+    let description = [{
+        Annotates the module with a `stream.resources` attribute that describes the
+        alignment requirements of Torq buffers.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createTorqAnnotateTorqResourcesPass()";
+
+    let dependentDialects = [
+        "iree_compiler::IREE::Stream::StreamDialect"
+    ];
+}
+
 #endif // IREE_CODEGEN_SYNPHL_TO_HW_PASSES

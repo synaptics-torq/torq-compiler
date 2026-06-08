@@ -35,6 +35,8 @@ std::unique_ptr<OperationPass<ModuleOp>> createAnnotateTiedOperandsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollStaticScfForLoopsPass();
 
+std::unique_ptr<OperationPass<ModuleOp>> createTorqAnnotateTorqResourcesPass();
+
 //----------------------------------------------------------------------------//
 // Registration
 //----------------------------------------------------------------------------//

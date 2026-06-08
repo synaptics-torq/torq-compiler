@@ -8,6 +8,7 @@
 
 #include "Passes.h"
 
+#include "iree/compiler/Dialect/Stream/IR/StreamDialect.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -30,6 +31,7 @@ namespace mlir::syna::torq {
 #define GEN_PASS_DEF_TORQCONVERTALLDTYPES
 #define GEN_PASS_DEF_ANNOTATETIEDOPERANDS
 #define GEN_PASS_DEF_UNROLLSTATICSCFFORLOOPS
+#define GEN_PASS_DEF_TORQANNOTATETORQRESOURCES
 
 #include "torq/Transforms/Linalg/Passes.h.inc"
 
