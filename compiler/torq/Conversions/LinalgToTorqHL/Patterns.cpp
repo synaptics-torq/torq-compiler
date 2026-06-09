@@ -1667,26 +1667,13 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         else {
             auto truncOp = yieldValues[0].getDefiningOp<arith::TruncIOp>();
 
-            // Handle the case where CastI32MulPattern has converted rescale to i16 output.
-            // In this case rescale ops feeding multiply ops are optimized to output i16 directly
-            // (instead of i32), so there's no truncOp here.
-            if (truncOp && outputElementType.isInteger(16)) {
-                applyScaleOp = truncOp.getIn().getDefiningOp<tosa::ApplyScaleOp>();
-                outputMin = std::numeric_limits<int32_t>::min();
-                outputMax = std::numeric_limits<int32_t>::max();
+            if (!truncOp) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Expected a defining operation for yield operand to be arith.trunci"
+                );
             }
-            else {
-                if (!truncOp) {
-                    return rewriter.notifyMatchFailure(
-                        srcOp, "Expected a defining operation for yield operand to be arith.trunci"
-                    );
-                }
-                auto minOp = truncOp.getIn().getDefiningOp<arith::MinSIOp>();
-                if (!minOp) {
-                    return rewriter.notifyMatchFailure(
-                        srcOp, "Expected a defining operation for yield operand to be arith.minsi"
-                    );
-                }
+            auto minOp = truncOp.getIn().getDefiningOp<arith::MinSIOp>();
+            if (minOp) {
                 // The max constant is used in the min operation
                 auto maybeMaxConst = getConstIntValue(minOp.getRhs());
                 if (!maybeMaxConst) {
@@ -1724,6 +1711,11 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
                 else {
                     applyScaleOp = maxOp.getLhs().getDefiningOp<tosa::ApplyScaleOp>();
                 }
+            }
+            else {
+                applyScaleOp = truncOp.getIn().getDefiningOp<tosa::ApplyScaleOp>();
+                outputMin = std::numeric_limits<int32_t>::min();
+                outputMax = std::numeric_limits<int32_t>::max();
             }
         }
 

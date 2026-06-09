@@ -80,16 +80,10 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
 
         SmallVector<Operation *> operationsToClone;
 
-        // scan the original operations and accumulate operations until a wait,
-        // when a wait is found create unrollFactor - 1 copies of the accumulated operations
-        // and continue.
-        //
-        // CSS programs run on a single hardware instance, so their start/wait
-        // pairs must remain strictly paired in each iteration (the slice
-        // parallelization assumption above doesn't apply). When the wait
-        // belongs to a CSS invocation, include it in the cloned block and
-        // flush it together with the preceding ops, producing a contiguous
-        // [..., start_css, wait_css] sequence per iteration. See #1615.
+        // Scan the original operations and accumulate them until the block
+        // terminator. When the terminator is reached, or for NSS when the
+        // WaitProgramOp is reached, clone the collected ops for the remaining
+        // unrolled iterations.
         {
             PatternRewriter::InsertionGuard insertionGuard(rewriter);
             for (auto op : originalOps) {
@@ -100,19 +94,8 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
                     cssWait = invocationType.getExecutor() == torq_hl::Executor::CSS;
                 }
 
-                if (cssWait) {
-                    operationsToClone.push_back(op);
-                    rewriter.setInsertionPointAfter(op);
-                    for (unsigned i = 1; i < unrollCount; i++) {
-                        for (auto prevOp : operationsToClone) {
-                            rewriter.clone(*prevOp, operandMaps[i - 1]);
-                        }
-                    }
-                    operationsToClone.clear();
-                    continue;
-                }
-
-                if (isa<torq_hl::WaitProgramOp>(op) || op->getBlock()->getTerminator() == op) {
+                if ((isa<torq_hl::WaitProgramOp>(op) && !cssWait) ||
+                    op->getBlock()->getTerminator() == op) {
                     rewriter.setInsertionPoint(op);
                     for (unsigned i = 1; i < unrollCount; i++) {
                         // Clone the original loop body operations
@@ -124,7 +107,7 @@ class ForallOpPattern : public OpRewritePattern<scf::ForallOp> {
                 }
                 operationsToClone.push_back(op);
             }
-        } // distruct insertionGuard
+        } // destroy insertionGuard
 
         // Loop now has a single iteration so we can remove it
         forallOp.setStaticUpperBound(lb + step);
