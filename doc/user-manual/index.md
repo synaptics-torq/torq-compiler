@@ -9,6 +9,7 @@ step_by_step_examples.md
 torq_runtime.md
 ops.md
 profiling.md
+inference_time.md
 css_host_fallback.md
 custom_hw.md
 debug_tips.md
