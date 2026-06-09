@@ -261,11 +261,11 @@ static LogicalResult processNssTask(
         return failure();
     }
 
-    remainingBlockSize -= size;
-
-    if (remainingBlockSize < 0) {
+    if (remainingBlockSize < size) {
         return nssTaskOp->emitOpError("NSS task overflows block size");
     }
+
+    remainingBlockSize -= size;
 
     return success();
 }
