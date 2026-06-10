@@ -10,13 +10,25 @@ from abc import ABC, abstractmethod
 from uuid import uuid4
 
 
-# Matches legacy SL16x0 IDs and newer sl2619-dev-board-NNN style IDs.
-_ADB_ID_PATTERN = re.compile(r"^[Ss][Ll]\d+[a-z]?(-[A-Za-z0-9_]+)*$")
+def _is_known_adb_device(device_id: str) -> bool:
+    """Return True if *device_id* appears in the current `adb devices` list."""
+    try:
+        result = subprocess.run(
+            ["adb", "devices"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        for line in result.stdout.strip().splitlines()[1:]:
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[1] == "device" and parts[0] == device_id:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _is_adb_address(addr: str) -> bool:
-    """Return True if *addr* is an ADB device ID (e.g. sl2619-dev-board-NN)."""
-    return addr.lower() == "adb" or bool(_ADB_ID_PATTERN.fullmatch(addr))
+    """Return True if *addr* is the auto-detect keyword or a known ADB device."""
+    return addr.lower() == "adb" or _is_known_adb_device(addr)
 
 
 class RemoteCommandError(Exception):
@@ -404,9 +416,8 @@ def remote_command_runner_factory(
             raise ValueError("No ADB device detected. Connect a device and run 'adb devices'.")
         return ADBCommandRunner(target_device=first_device, timeout=timeout, logger=logger)
 
-    # Legacy SL16x0 IDs are always ADB.
-    _LEGACY_ADB_PATTERN = re.compile(r"^SL16x\d+$")
-    if _LEGACY_ADB_PATTERN.fullmatch(board_address):
+    # ADB device IDs (e.g. sl2619, sl2619-dev-board-NNN, SL16x0).
+    if _is_adb_address(board_address):
         return ADBCommandRunner(
             target_device=board_address,
             timeout=timeout,
