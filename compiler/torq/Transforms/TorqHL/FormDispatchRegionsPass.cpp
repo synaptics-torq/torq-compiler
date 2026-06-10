@@ -129,8 +129,9 @@ LogicalResult FormDispatchRegionsPass::formSingleDispatch() {
 }
 
 void FormDispatchRegionsPass::runOnOperation() {
-
     funcOp = getOperation();
+
+    fusionGroups.clear();
 
     if (disableDispatchFusion) {
         if (failed(formMultipleDispatches())) {
@@ -145,21 +146,39 @@ void FormDispatchRegionsPass::runOnOperation() {
         }
     }
 
+    if (fusionGroups.empty()) {
+        llvm::errs() << "[TORQ][FormDispatchRegions] no fusion groups for func=" << funcOp.getName()
+                     << "; leaving function unchanged\n";
+        return;
+    }
+
     IRRewriter rewriter(funcOp->getContext());
 
-    for (auto fusionGroup : fusionGroups) {
-        auto regionResult = IREE::Flow::wrapOpInDispatchRegion(rewriter, fusionGroup.back());
+    for (auto &fusionGroup : fusionGroups) {
+        if (fusionGroup.empty()) {
+            LLVM_DEBUG(llvm::dbgs() << "[TORQ][FormDispatchRegions] skipping empty fusion group\n");
+            continue;
+        }
+
+        mlir::Operation *rootOp = fusionGroup.back();
+
+        auto regionResult = IREE::Flow::wrapOpInDispatchRegion(rewriter, rootOp);
 
         if (failed(regionResult)) {
+            rootOp->emitError("failed to wrap op in dispatch region");
             return signalPassFailure();
         }
+
         for (auto op : llvm::reverse(fusionGroup)) {
-            if (op == fusionGroup.back()) {
+            if (op == rootOp) {
                 continue;
             }
+
             regionResult =
                 IREE::Flow::movePrecedingOpsIntoDispatchRegion(rewriter, op, *regionResult);
+
             if (failed(regionResult)) {
+                op->emitError("failed to move op into dispatch region");
                 return signalPassFailure();
             }
         }
