@@ -1,5 +1,4 @@
 set(sources
-    Conv2DOpBigStridePattern.cpp
     FormDispatchRegionsPass.cpp
     Passes.cpp
     TorqHLOptimizeSegmentationPass.cpp

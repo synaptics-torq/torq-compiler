@@ -114,9 +114,6 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
 
-    // In-dialect rewrite on torq_hl ops (e.g. big-stride conv2d via space-to-depth)
-    funcPm.addPass(torq_hl::createTorqHlOpTransformPass());
-
     // Handles valid pad operations
     funcPm.addPass(createValidToSamePadPass());
 
@@ -320,6 +317,7 @@ void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
     // Convert NHWC conv/pool/depthwise NHWC to NCHW
     funcPm.addPass(createConvertNhwcOpToNchwPass());
     funcPm.addPass(createCanonicalizerPass());
+    funcPm.addPass(createDecomposeConvToSpaceToDepthPass());
 
     if (clEnableTransposeOptimization) {
         funcPm.addPass(createOptimizeTransposeLayoutPass());

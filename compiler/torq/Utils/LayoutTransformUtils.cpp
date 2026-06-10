@@ -109,4 +109,45 @@ Value rebuildGenericWithNewLayout(
     return newOp.getResult(0);
 }
 
+//===----------------------------------------------------------------------===//
+// SpaceToDepth Utility
+//===----------------------------------------------------------------------===//
+
+Value getSpaceToDepth(Value input, int64_t bH, int64_t bW, PatternRewriter &rewriter) {
+    auto loc = input.getLoc();
+    auto inputType = cast<RankedTensorType>(input.getType());
+    auto elemType = inputType.getElementType();
+    auto shape = inputType.getShape();
+    assert(shape.size() == 4 && "getSpaceToDepth expects a 4-D tensor");
+
+    int64_t n = shape[0], c = shape[1], h = shape[2], w = shape[3];
+    assert(h % bH == 0 && w % bW == 0 && "spatial dims must be divisible by block");
+
+    // Step 1: expand [n, c, h, w] -> [n, c, h/bH, bH, w/bW, bW]
+    SmallVector<int64_t> expandedShape = {n, c, h / bH, bH, w / bW, bW};
+    auto expandedType = RankedTensorType::get(expandedShape, elemType);
+    Value expanded = tensor::ExpandShapeOp::create(
+        rewriter, loc, expandedType, input, ArrayRef<ReassociationIndices>{{0}, {1}, {2, 3}, {4, 5}}
+    );
+
+    // Step 2: transpose [n, c, h/bH, bH, w/bW, bW]
+    //                -> [n, c, bH, bW, h/bH, w/bW]  (perm: 0,1,3,5,2,4)
+    // Channel packing order after collapse: c * bH * bW + bh * bW + bw
+    SmallVector<int64_t> transpShape = {n, c, bH, bW, h / bH, w / bW};
+    Value transpInit =
+        tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>(transpShape), elemType);
+    Value transposed = linalg::TransposeOp::create(
+                           rewriter, loc, expanded, transpInit, ArrayRef<int64_t>{0, 1, 3, 5, 2, 4}
+    )
+                           ->getResult(0);
+
+    // Step 3: collapse [n, c, bH, bW, h/bH, w/bW] -> [n, c*bH*bW, h/bH, w/bW]
+    auto outType = RankedTensorType::get({n, c * bH * bW, h / bH, w / bW}, elemType);
+    Value out = tensor::CollapseShapeOp::create(
+        rewriter, loc, outType, transposed, ArrayRef<ReassociationIndices>{{0}, {1, 2, 3}, {4}, {5}}
+    );
+
+    return out;
+}
+
 } // namespace mlir::syna::torq

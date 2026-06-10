@@ -38,6 +38,7 @@ iree_cc_library(
     AbsorbDecomposedWzpCorrectionPattern.cpp
     FuseReluClampWithTruncfPattern.cpp
     CommonStandardizationPatterns.cpp
+    DecomposeConvToSpaceToDepthPass.cpp
   DEPS
     ::PassesIncGen
     MLIRArithDialect

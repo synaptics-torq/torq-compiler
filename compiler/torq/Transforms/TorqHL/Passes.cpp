@@ -20,29 +20,6 @@
 namespace mlir::syna::torq_hl {
 
 #define DEBUG_TYPE "torq-hl-op-transform"
-class TorqHlOpTransformPass : public impl::TorqHlOpTransformBase<TorqHlOpTransformPass> {
-  public:
-    using TorqHlOpTransformBase::TorqHlOpTransformBase;
-
-    void runOnOperation() override {
-        auto funcOp = getOperation();
-        auto *ctx = funcOp.getContext();
-
-        RewritePatternSet patterns(ctx);
-        populateTorqHLConv2DBigStridePatterns(ctx, patterns, false);
-
-        auto frozenPatterns =
-            FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
-
-        if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
-            return signalPassFailure();
-        }
-    }
-};
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHlOpTransformPass() {
-    return std::make_unique<TorqHlOpTransformPass>();
-}
 
 //===---------------------------------------------------------------------===//
 // TorqHLFoldTableConstantPass

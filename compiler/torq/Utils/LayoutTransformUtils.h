@@ -59,6 +59,24 @@ inline bool isNhwcToNchwTranspose(ArrayRef<int64_t> perm) {
 bool isLayoutConversionTranspose(linalg::TransposeOp transposeOp);
 
 //===----------------------------------------------------------------------===//
+// SpaceToDepth Utility
+//===----------------------------------------------------------------------===//
+
+/// Folds spatial blocks into the channel dimension of a 4-D NCHW tensor.
+///
+/// Input layout : [N,  C,      H,    W   ]
+/// Output layout: [N,  C*bH*bW, H/bH, W/bW]
+/// Channel order: c * (bH*bW) + bh * bW + bw  (C-major, bh/bw innermost)
+///
+/// This is identical to the SpaceToDepth used in Conv2DOpBigStridePattern.
+/// Applying it to a weight tensor [F, C, kH, kW] (treating F as N) gives
+/// [F, C*bH*bW, kH/bH, kW/bW], which is exactly the kernel repack needed
+/// when the corresponding input undergoes the same SpaceToDepth.
+///
+/// Preconditions (asserted): H % bH == 0, W % bW == 0.
+Value getSpaceToDepth(Value input, int64_t bH, int64_t bW, PatternRewriter &rewriter);
+
+//===----------------------------------------------------------------------===//
 // Tensor Utilities
 //===----------------------------------------------------------------------===//
 

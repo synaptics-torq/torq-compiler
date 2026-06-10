@@ -209,6 +209,44 @@ def UnrollStaticScfForLoops :
     ];
 }
 
+def DecomposeConvToSpaceToDepth :
+    InterfacePass<"torq-decompose-conv-to-space-to-depth",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Decomposes large-kernel conv2d into SpaceToDepth reshape + smaller conv";
+
+    let description = [{
+        Matches linalg.conv_2d_nchw_fchw ops whose kernel height or width exceeds
+        the HW-efficient threshold (default: 7) and rewrites them as a SpaceToDepth
+        reshape followed by a convolution with a smaller kernel.
+
+        Block sizes bH and bW are chosen independently per axis as the largest
+        divisor of (kDim, stride, inputDim) that satisfies kDim/b <= 7 and
+        stride/b <= 2. The pattern fires only when at least one axis benefits.
+
+        Transformation:
+          input  [N, C, H, W]      -> s2d_input  [N, C*bH*bW, H/bH,  W/bW ]
+          filter [F, C, kH, kW]    -> s2d_filter [F, C*bH*bW, kH/bH, kW/bW]
+          conv(stride=[sH,sW])     -> conv(stride=[sH/bH, sW/bW])
+
+        Both input and filter are reshaped with the same SpaceToDepth transform
+        ([N,C,H,W] -> expand -> transpose -> collapse), so the convolution result
+        is numerically identical to the original.
+
+        Preconditions: dilation==1, kH%bH==0, kW%bW==0, sH%bH==0, sW%bW==0,
+        H%bH==0, W%bW==0.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createDecomposeConvToSpaceToDepthPass()";
+
+    let dependentDialects = [
+        "linalg::LinalgDialect",
+        "tensor::TensorDialect",
+        "arith::ArithDialect"
+    ];
+}
+
 def TorqAnnotateTorqResources : Pass<"torq-annotate-torq-resources", "mlir::ModuleOp"> {
 
     let summary = "Annotates module with Torq stream.resources attribute";

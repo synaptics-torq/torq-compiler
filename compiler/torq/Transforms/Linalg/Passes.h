@@ -37,6 +37,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollStaticScfForLoop
 
 std::unique_ptr<OperationPass<ModuleOp>> createTorqAnnotateTorqResourcesPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createDecomposeConvToSpaceToDepthPass();
+
 //----------------------------------------------------------------------------//
 // Registration
 //----------------------------------------------------------------------------//
