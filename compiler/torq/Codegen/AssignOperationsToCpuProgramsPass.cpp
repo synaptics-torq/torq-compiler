@@ -70,8 +70,6 @@ struct OutliningGroup {
 class AssignOperationsToCpuProgramsPass
     : public impl::AssignOperationsToCpuProgramsBase<AssignOperationsToCpuProgramsPass> {
   public:
-    using AssignOperationsToCpuProgramsBase::AssignOperationsToCpuProgramsBase;
-
     AssignOperationsToCpuProgramsPass(const AssignOperationsToCpuProgramsOptions &options) {
         this->disableCSS.setValue(options.disableCSS);
         this->disableHost.setValue(options.disableHost);

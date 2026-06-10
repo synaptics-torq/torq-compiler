@@ -40,6 +40,8 @@ iree_cc_library(
   DEPS
     MLIRIR
     IREEDialectsTransforms
+    MLIRExecutionEngine
+    iree::target::torq::Codegen::css_bootstrap::torq_kernel_riscv
     iree::target::torq::Conversions::TorqHLToLinalg::TorqHLToLinalg
     iree::target::torq::Dialect::TorqHL::Dialect
     iree::target::torq::Dialect::TorqHW::Dialect

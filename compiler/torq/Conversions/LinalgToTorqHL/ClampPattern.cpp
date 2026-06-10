@@ -313,7 +313,9 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
         }
 
         ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, srcOp);
-        Value biasScale = createI32Const(rewriter, srcOp, interleave({0}, {1}));
+        std::vector<int32_t> a{0};
+        std::vector<int32_t> b{1};
+        Value biasScale = createI32Const(rewriter, srcOp, interleave(a, b));
 
         FailureOr<Value> biasV = computeRescaleInfo(*fusionPlanOr, biasScale, scInfo);
         if (failed(biasV)) {

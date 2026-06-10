@@ -1342,7 +1342,7 @@ int SlicePrivate::addMemNdlDims(
             }
         }
 
-        assert(!iv || !iv->modulo() && "Iteration with modulo not allowed here");
+        assert((!iv || !iv->modulo()) && "Iteration with modulo not allowed here");
         if (stride.exprVal.has_value()) {
             assert((!iv || !iv->isReverse()) && "Reverse iteration not allowed with expr");
             ndlDims.push_back({DimType::H, _forStack[i].tag, loopIterCount, stride.exprVal.value()}
@@ -2231,9 +2231,9 @@ QData SlicePrivate::actClamp(
 
     // Check that data, weight and partial types are compatible
     assert(
-        isInt(dataType) && isInt(partialType) && !isFloat(weightType) ||
-        isFloat(dataType) && isFloat(partialType) && !isInt(weightType) ||
-        isPacked(partialType) && weightType == DType::none
+        (isInt(dataType) && isInt(partialType) && !isFloat(weightType)) ||
+        (isFloat(dataType) && isFloat(partialType) && !isInt(weightType)) ||
+        (isPacked(partialType) && weightType == DType::none)
     );
 
     if (_useHybridMode) {

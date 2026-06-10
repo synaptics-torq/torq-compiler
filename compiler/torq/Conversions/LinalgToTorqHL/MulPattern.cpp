@@ -201,10 +201,12 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
                          << " outMax: " << outMax << " outZp: " << outZp << "\n"
         );
 
+        std::vector<int32_t> a{bias};
+        std::vector<int32_t> b{scale};
         Value torqOut =
             torq_hl::MulOp::create(
                 rewriter, srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
-                outZp, outMin, outMax, createI32Const(rewriter, srcOp, interleave({bias}, {scale})),
+                outZp, outMin, outMax, createI32Const(rewriter, srcOp, interleave(a, b)),
                 shiftFactor, input1, input2
             )
                 .getResult(0);
@@ -365,10 +367,12 @@ class MulRescaleOpPattern : public OpRewritePattern<linalg::GenericOp> {
         );
 
         // --- Create torq_hl::MulOp ---
+        std::vector<int32_t> a{bias};
+        std::vector<int32_t> b{scale};
         Value torqOut =
             torq_hl::MulOp::create(
                 rewriter, srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
-                outZp, outMin, outMax, createI32Const(rewriter, srcOp, interleave({bias}, {scale})),
+                outZp, outMin, outMax, createI32Const(rewriter, srcOp, interleave(a, b)),
                 shiftFactor, input1, input2
             )
                 .getResult(0);
