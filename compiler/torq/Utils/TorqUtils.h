@@ -78,40 +78,6 @@ std::vector<uint32_t> prepareWeightDims(
 std::pair<bool, LogicalResult>
 setTargetExecutorIfForced(Operation *op, PatternRewriter &rewriter, std::string opName);
 
-// A RAII guard to ensure an Operation is erased when it goes out of scope.
-// The `release()` method can be used to explicitly transfer ownership of the
-// `Operation` away from the guard, preventing it from being erased upon
-// destruction.
-class OpEraseGuard {
-  public:
-    explicit OpEraseGuard(Operation *op = nullptr) : op_(op) {}
-
-    // Destructor: Erase the operation if it still exists.
-    ~OpEraseGuard() {
-        if (op_) {
-            op_->erase();
-        }
-    }
-
-    // Release the operation from the guard without erasing it.
-    Operation *release() {
-        Operation *temp = op_;
-        op_ = nullptr;
-        return temp;
-    }
-
-    // Allow implicit conversion to Operation* for convenience
-    operator Operation *() const { return op_; }
-
-    OpEraseGuard(const OpEraseGuard &) = delete;
-    OpEraseGuard(OpEraseGuard &&other) = delete;
-    OpEraseGuard &operator=(const OpEraseGuard &) = delete;
-    OpEraseGuard &operator=(OpEraseGuard &&other) = delete;
-
-  private:
-    Operation *op_;
-};
-
 } // namespace torq
 
 } // namespace mlir::syna

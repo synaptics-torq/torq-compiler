@@ -8,6 +8,7 @@
 #include "TilingUtils.h"
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
+#include "torq/Dialect/TorqHL/TorqHLAttrs.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -31,6 +32,7 @@
 #include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OpDefinition.h"
+#include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
@@ -42,6 +44,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/FunctionExtras.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetOperations.h"
 #include "llvm/ADT/SetVector.h"
@@ -49,6 +52,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/ADT/iterator_range.h"
+#include "llvm/IR/Function.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -129,69 +133,140 @@ void setSourcesDistance(Operation *op, std::optional<int64_t> distance) {
     }
 }
 
-torq_hl::Executor getExecutor(Operation *op) {
-    return isMarkedFuseGroup(op) ? torq_hl::Executor::Slice : torq_hl::Executor::CSS;
+// Return true if a length can be represented using the SDIM encoding in
+// Utils/Kernel.cpp without tripping the decomposeIntoTwoFactors() assert.
+// A "SDIM-friendly" length is either:
+//   * <= 0x7fff  – fits in a single SDIM counter, or
+//   * factorizable as a * b with a, b <= 0x7fff – can be encoded as two nested SDIM loops.
+const int64_t kMaxFactor = 0x7fff;
+bool isSdimFriendlyCount(int64_t number) {
+    if (number <= kMaxFactor)
+        return true;
+
+    for (int64_t i = div_ceil(number, kMaxFactor); i <= (int64_t)std::sqrt((double)number) + 1;
+         ++i) {
+        if (number % i == 0) {
+            int64_t j = number / i;
+            if (j <= kMaxFactor) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
-// Return the iteration domains of `tilingInterfaceOp` that can be tiled, in the order which we
-// should tile them.
-// NB: The order of insertion to SmallSetVector is important. That is the order
-// in which we will tile the domains. First one we insert, is the first we tile.
-llvm::SmallSetVector<int64_t, 4> getTilingIterDomainsOrder(TilingInterface tilingInterfaceOp) {
-    llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder;
+// Return true if using `tileSize` to 1-D tile `originalSize` is compatible
+// with SDIM handling in Kernel.cpp.
+//
+// We require that both:
+//   * tileSize          – the common tile length, and
+//   * remainder         – the final (possibly smaller) tile where
+//
+//         originalSize = k * tileSize + remainder
+//
+// are SDIM-friendly. This guarantees that addMemNdlDims() can always encode
+// both the main tiles and the tail tile without decomposeIntoTwoFactors()
+// ever returning {-1, -1}.
+bool isSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize) {
+    if (!isSdimFriendlyCount(tileSize))
+        return false;
+
+    int64_t remainder = iterDomainSize % tileSize;
+    return (remainder == 0 || isSdimFriendlyCount(remainder));
+}
+
+int64_t makeSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize) {
+    // Adjust tileSize downwards until both the common tile size and the
+    // remainder tile size are SDIM-friendly. This preserves the
+    // memory-fit invariant because we only shrink the tile.
+    for (tileSize = std::min(int64_t(kMaxFactor * kMaxFactor), tileSize); tileSize > 0;
+         --tileSize) {
+        if (isSdimFriendlyTileSize(iterDomainSize, tileSize))
+            break;
+    }
+    // isValidTileSize should always succeed for tileSize == 1
+    assert(tileSize > 0 && "failed to find SDIM-friendly tile size for domain");
+
+    return tileSize;
+}
+
+struct TilingInfo {
+    // Iteration domains that can be tiled, in the order they should be tiled.
+    llvm::SmallSetVector<int64_t, 4> tilingOrder;
+
+    // Downward size adjustments per iter domain index.
+    llvm::SmallVector<std::function<int64_t(int64_t)>, 4> adjustSize;
+};
+
+TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
+    TilingInfo tilingInfo;
 
     auto loopIteratorTypes = tilingInterfaceOp.getLoopIteratorTypes();
 
-    // Handler that uses all the parallel domains.
-    auto allParallelDomains = [&]() {
-        for (size_t domain = 0; domain < loopIteratorTypes.size(); ++domain) {
-            if (loopIteratorTypes[domain] == utils::IteratorType::parallel)
-                tilingIterDomsOrder.insert(domain);
-        }
-    };
-
-    // Handler for nhwc operations: we tile C, followed by H.
-    auto nhwcOpHandler = [&]() {
-        assert(
-            loopIteratorTypes[3] == utils::IteratorType::parallel &&
-            "expected domain 3 to be parallel"
-        );
-        tilingIterDomsOrder.insert(3); // C
-
-        assert(
-            loopIteratorTypes[1] == utils::IteratorType::parallel &&
-            "expected domain 1 to be parallel"
-        );
-        tilingIterDomsOrder.insert(1); // H
-    };
-
-    // Decide which domains to tile, and in what order, based on the executor and the operation.
-    switch (getExecutor(tilingInterfaceOp)) {
-    case torq_hl::Executor::Slice: {
-        Operation *principalOp = getFuseGroupPrincipalOpBackward(tilingInterfaceOp);
-        assert(principalOp != nullptr && "could not find the principal op of the fuse group");
-
-        TypeSwitch<Operation *>(principalOp)
-            .Case<
-                linalg::Conv2DNhwcHwcfOp, // NB: 4th iteration domain is actually F
-                                          // (filters/output-channels) in this case
-                linalg::DepthwiseConv2DNhwcHwcOp, linalg::PoolingNhwcMaxOp,
-                linalg::PoolingNhwcMaxUnsignedOp, linalg::PoolingNhwcMinOp,
-                linalg::PoolingNhwcMinUnsignedOp, linalg::PoolingNhwcSumOp>([&](auto) {
-                nhwcOpHandler();
-            })
-            .Default([&](auto) { allParallelDomains(); });
-        break;
-    }
-    case torq_hl::Executor::CSS:
-        allParallelDomains();
-        break;
-
-    default:
-        llvm_unreachable("expected Slice or CSS executor");
+    for (size_t domain = 0; domain < loopIteratorTypes.size(); ++domain) {
+        if (loopIteratorTypes[domain] == utils::IteratorType::parallel)
+            tilingInfo.tilingOrder.insert(domain);
     }
 
-    return tilingIterDomsOrder;
+    OpBuilder builder(tilingInterfaceOp->getContext());
+    auto [iterDomainOffsets, iterDomainSizes, iterDomainStrides] =
+        getOffsetsSizesAndStrides(tilingInterfaceOp.getIterationDomain(builder));
+
+    std::optional<SmallVector<int64_t>> iterDomainConstSizes =
+        getConstantIntValues(iterDomainSizes);
+    assert(iterDomainConstSizes && "iteration domain sizes are not constants");
+
+    tilingInfo.adjustSize.reserve(loopIteratorTypes.size());
+    for (size_t index = 0; index < loopIteratorTypes.size(); ++index) {
+        auto domainSize = (*iterDomainConstSizes)[index];
+        tilingInfo.adjustSize.push_back([=](int64_t size) {
+            return makeSdimFriendlyTileSize(domainSize, size);
+        });
+    }
+
+    /**********************************************************************************************
+     * The commented code below forces convolutions with stride 2 to have even tile sizes for
+     * the H channel
+     **********************************************************************************************
+     *
+     * Operation *principalOp = isMarkedFuseGroup(tilingInterfaceOp)
+     *                              ? getFuseGroupPrincipalOpBackward(tilingInterfaceOp)
+     *                              : tilingInterfaceOp;
+     *
+     * assert(principalOp != nullptr && "could not find the principal op of the fuse group");
+     *
+     * auto getFixpointF = [](std::function<int64_t(int64_t)> f1, std::function<int64_t(int64_t)>
+     *f2) { return [=](int64_t size) { int64_t newSize = f2(f1(size)); while (newSize != size) {
+     *             size = newSize;
+     *             newSize = f2(f1(size));
+     *         }
+     *         return newSize;
+     *     };
+     * };
+     *
+     * auto makeEven = [](int64_t size) {
+     *     return size - (size % 2);
+     * };
+     *
+     * if (auto conv = dyn_cast<linalg::Conv2DNchwFchwOp>(principalOp)) {
+     *     if (llvm::all_of(conv.getStrides(), [](APInt value) { return value == 2; })) {
+     *         tilingInfo.adjustSize[1] = getFixpointF(makeEven, tilingInfo.adjustSize[1]);
+     *     }
+     * }
+     * else if (auto dw = dyn_cast<linalg::DepthwiseConv2DNchwChwOp>(principalOp)) {
+     *     if (llvm::all_of(dw.getStrides(), [](APInt value) { return value == 2; }))
+     *         tilingInfo.adjustSize[1] = getFixpointF(makeEven, tilingInfo.adjustSize[1]);
+     * }
+     * else if (auto pooling = dyn_cast<linalg::PoolingNchwSumOp>(principalOp)) {
+     *     if (llvm::all_of(pooling.getStrides(), [](APInt value) { return value == 2; }))
+     *         tilingInfo.adjustSize[1] = getFixpointF(makeEven, tilingInfo.adjustSize[1]);
+     * }
+     * else if (auto pooling = dyn_cast<linalg::PoolingNchwMaxOp>(principalOp)) {
+     *     if (llvm::all_of(pooling.getStrides(), [](APInt value) { return value == 2; }))
+     *         tilingInfo.adjustSize[1] = getFixpointF(makeEven, tilingInfo.adjustSize[1]);
+     * }
+     */
+    return tilingInfo;
 }
 
 // Try to compute the int value of sizeFoldResult. If the value is not a
@@ -297,8 +372,8 @@ void collectOpsForMemoryCheck(
 // This allows the function to be used when we initially check if an untiled op
 // requires tiling at all.
 ModuleOp extractOpsForMemoryCheck(
-    const std::string &moduleName, Operation *consumerOp,
-    ArrayRef<int64_t> tilingIterDomsOrder = {}, const SetVector<Operation *> &producerOps = {}
+    const std::string &moduleName, Operation *consumerOp, const TilingInfo &tilingInfo = {},
+    const SetVector<Operation *> &producerOps = {}
 ) {
     MLIRContext *context = consumerOp->getContext();
     Location loc = consumerOp->getLoc();
@@ -313,9 +388,9 @@ ModuleOp extractOpsForMemoryCheck(
     collectOpsForMemoryCheck(consumerOp, producerOps, ops, inputs);
 
     SmallVector<Type> inputTypes;
-    inputTypes.reserve(tilingIterDomsOrder.size() + inputs.size());
+    inputTypes.reserve(tilingInfo.tilingOrder.size() + inputs.size());
 
-    for (size_t i = 0; i < tilingIterDomsOrder.size(); ++i)
+    for (size_t i = 0; i < tilingInfo.tilingOrder.size(); ++i)
         inputTypes.push_back(builder.getIndexType());
 
     for (Value input : inputs)
@@ -336,7 +411,7 @@ ModuleOp extractOpsForMemoryCheck(
     // Map the inputs to the function args. This will result in the function
     // args driving the appropriate cloned ops, when we clone them.
     auto nonDomainArgs = llvm::make_range(
-        funcOp.getFunctionBody().getArguments().begin() + tilingIterDomsOrder.size(),
+        funcOp.getFunctionBody().getArguments().begin() + tilingInfo.tilingOrder.size(),
         funcOp.getFunctionBody().getArguments().end()
     );
     for (auto [input, arg] : llvm::zip_equal(inputs, nonDomainArgs))
@@ -366,9 +441,8 @@ ModuleOp extractOpsForMemoryCheck(
 // "symbolically" tile and fuse everything in the only function in `moduleOp`.
 // Tile sizes are non-constant (hence "symbolically"), and are the first
 // arguments of the only function in the module.
-llvm::LogicalResult tileModuleForMemoryCheck(
-    ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder, size_t tileSizesCount
-) {
+llvm::LogicalResult
+tileModuleForMemoryCheck(ModuleOp moduleOp, const TilingInfo &tilingInfo, size_t tileSizesCount) {
     OpBuilder builder(moduleOp->getContext());
 
     auto funcOp = cast<func::FuncOp>(&moduleOp.getBody()->front());
@@ -381,9 +455,9 @@ llvm::LogicalResult tileModuleForMemoryCheck(
     // Drive the sizes that we can tile by the appropriate function args.
     auto tileSizeArgs = llvm::make_range(
         funcOp.getFunctionBody().args_begin(),
-        funcOp.getFunctionBody().args_begin() + tilingIterDomsOrder.size()
+        funcOp.getFunctionBody().args_begin() + tilingInfo.tilingOrder.size()
     );
-    for (auto [domain, arg] : llvm::zip_equal(tilingIterDomsOrder, tileSizeArgs))
+    for (auto [domain, arg] : llvm::zip_equal(tilingInfo.tilingOrder, tileSizeArgs))
         tileSizes[domain] = arg;
 
     scf::SCFTileAndFuseOptions options{};
@@ -433,21 +507,21 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     llvm::FailureOr<bool> checkModuleFitsInMemory(ModuleOp moduleOp);
 
     llvm::FailureOr<bool> checkTileFitsInMemory(
-        ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder, ArrayRef<OpFoldResult> offsets,
+        ModuleOp moduleOp, const TilingInfo &tilingInfo, ArrayRef<OpFoldResult> offsets,
         ArrayRef<OpFoldResult> sizes
     );
 
     void tileAndFuse(TilingInterface tiOp, const DenseSet<TilingInterface> &toTileOps);
 
     LogicalResult searchTileSizeForDim(
-        IRRewriter &rewriter, ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder,
+        IRRewriter &rewriter, ModuleOp moduleOp, const TilingInfo &tilingInfo,
         MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes, size_t dim,
         int64_t iterDomainSize, int64_t minFactor, int64_t maxFactor
     );
 
     FailureOr<bool> fitTileToMemory(
         Operation *consumerOp, const SetVector<Operation *> &producerOps,
-        ArrayRef<int64_t> tilingIterDomsOrder, ArrayRef<int64_t> iterDomainSizes,
+        const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes,
         MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
     );
 
@@ -537,17 +611,16 @@ llvm::FailureOr<bool> TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp
 
 // Return true iff the tile fits in memory
 llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
-    ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder, ArrayRef<OpFoldResult> offsets,
+    ModuleOp moduleOp, const TilingInfo &tilingInfo, ArrayRef<OpFoldResult> offsets,
     ArrayRef<OpFoldResult> sizes
 ) {
     OpBuilder builder(moduleOp->getContext());
 
     // Clone the module, as the check is distructive
     IRMapping map;
-    ModuleOp fixedModuleOp = cast<ModuleOp>(builder.clone(*moduleOp, map));
-    OpEraseGuard fixedModuleEraseGuard(fixedModuleOp);
+    OwningOpRef<ModuleOp> fixedModuleOp = cast<ModuleOp>(builder.clone(*moduleOp, map));
 
-    auto funcOp = cast<func::FuncOp>(&fixedModuleOp.getBody()->front());
+    auto funcOp = cast<func::FuncOp>(&fixedModuleOp->getBody()->front());
     // This counter is to give the dumps different names.
     static unsigned instanceCount = 0;
     std::ostringstream funcName;
@@ -558,9 +631,9 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
     builder.setInsertionPointToStart(&funcOp.getFunctionBody().front());
     auto tileSizeArgs = llvm::make_range(
         funcOp.getFunctionBody().args_begin(),
-        funcOp.getFunctionBody().args_begin() + tilingIterDomsOrder.size()
+        funcOp.getFunctionBody().args_begin() + tilingInfo.tilingOrder.size()
     );
-    for (auto [domain, arg] : llvm::zip_equal(tilingIterDomsOrder, tileSizeArgs)) {
+    for (auto [domain, arg] : llvm::zip_equal(tilingInfo.tilingOrder, tileSizeArgs)) {
         // NB1: sizes[domain] is a Value/Attribute in the original module, so we
         // need to copy it to the fixedModuleOp before we can use it there.
         // NB2: as far as I can tell, it is almost always an attribute, except
@@ -579,49 +652,7 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
         arg.replaceAllUsesWith(size);
     }
 
-    return checkModuleFitsInMemory(fixedModuleOp);
-}
-
-// Return true if a length can be represented using the SDIM encoding in
-// Utils/Kernel.cpp without tripping the decomposeIntoTwoFactors() assert.
-// A "SDIM-friendly" length is either:
-//   * <= 0x7fff  – fits in a single SDIM counter, or
-//   * factorizable as a * b with a, b <= 0x7fff – can be encoded as two nested SDIM loops.
-const int64_t kMaxFactor = 0x7fff;
-bool isSdimFriendlyCount(int64_t number) {
-    if (number <= kMaxFactor)
-        return true;
-
-    for (int64_t i = div_ceil(number, kMaxFactor); i <= (int64_t)std::sqrt((double)number) + 1;
-         ++i) {
-        if (number % i == 0) {
-            int64_t j = number / i;
-            if (j <= kMaxFactor) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// Return true if using `tileSize` to 1-D tile `originalSize` is compatible
-// with SDIM handling in Kernel.cpp.
-//
-// We require that both:
-//   * tileSize          – the common tile length, and
-//   * remainder         – the final (possibly smaller) tile where
-//
-//         originalSize = k * tileSize + remainder
-//
-// are SDIM-friendly. This guarantees that addMemNdlDims() can always encode
-// both the main tiles and the tail tile without decomposeIntoTwoFactors()
-// ever returning {-1, -1}.
-bool isValidTileSize(int64_t iterDomainSize, int64_t tileSize) {
-    if (!isSdimFriendlyCount(tileSize))
-        return false;
-
-    int64_t remainder = iterDomainSize % tileSize;
-    return (remainder == 0 || isSdimFriendlyCount(remainder));
+    return checkModuleFitsInMemory(*fixedModuleOp);
 }
 
 // Binary-search for the largest tile size along a single iteration domain that fits in memory.
@@ -629,7 +660,7 @@ bool isValidTileSize(int64_t iterDomainSize, int64_t tileSize) {
 //               and does not fit when sizes[domain] = div_ceil(iterDomainSize, minFactor).
 // Postcondition: sizes[domain] is set to the largest fitting tile size.
 LogicalResult TileAndFusePass::searchTileSizeForDim(
-    IRRewriter &rewriter, ModuleOp moduleOp, ArrayRef<int64_t> tilingIterDomsOrder,
+    IRRewriter &rewriter, ModuleOp moduleOp, const TilingInfo &tilingInfo,
     MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes, size_t domain,
     int64_t iterDomainSize, int64_t minFactor, int64_t maxFactor
 ) {
@@ -646,13 +677,19 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
     //                 else iterDomainSize / (2*sqrt(iterDomainSize) - n)
     // Now we can do a binary search over n between 1 and 2*sqrt(iterDomainSize).
     // For each n we calculate midFactor = nth_factor(n).
-    while (maxFactor != minFactor + 1) {
+    while (maxFactor > minFactor + 1) {
         int64_t midFactor = midpoint(minFactor, maxFactor);
-        sizes[domain] = rewriter.getIndexAttr(div_ceil(iterDomainSize, midFactor));
+
+        int64_t tileSize = div_ceil(iterDomainSize, midFactor);
+        tileSize = tilingInfo.adjustSize[domain](tileSize);
+
+        sizes[domain] = rewriter.getIndexAttr(tileSize);
+
         llvm::FailureOr<bool> tileFits =
-            checkTileFitsInMemory(moduleOp, tilingIterDomsOrder, offsets, sizes);
+            checkTileFitsInMemory(moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
             return LogicalResult::failure();
+
         if (*tileFits) {
             // At the very end of the file there's a proof that the assignment
             // below is better than `maxFactor = midFactor`.
@@ -666,17 +703,7 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
     }
 
     int64_t tileSize = div_ceil(iterDomainSize, maxFactor);
-
-    // Adjust tileSize downwards until both the common tile size and the
-    // remainder tile size are SDIM-friendly. This preserves the
-    // memory-fit invariant because we only shrink the tile.
-    for (tileSize = std::min(int64_t(kMaxFactor * kMaxFactor), tileSize); tileSize > 0;
-         --tileSize) {
-        if (isValidTileSize(iterDomainSize, tileSize))
-            break;
-    }
-    // isValidTileSize should always succeed for tileSize == 1
-    assert(tileSize > 0 && "failed to find SDIM-friendly tile size for domain");
+    tileSize = tilingInfo.adjustSize[domain](tileSize);
 
     sizes[domain] = rewriter.getIndexAttr(tileSize);
 
@@ -686,21 +713,19 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
 // Return true iff sizes was changed (made smaller). If the tile is not big
 // enough, use binary search to find the biggest tile that fits in memory.
 llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
-    Operation *consumerOp, const SetVector<Operation *> &producerOps,
-    ArrayRef<int64_t> tilingIterDomsOrder, ArrayRef<int64_t> iterDomainSizes,
-    MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
+    Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
+    MutableArrayRef<OpFoldResult> sizes
 ) {
-    ModuleOp moduleOp = extractOpsForMemoryCheck(
-        "fit_tile_to_memory", cast<TilingInterface>(consumerOp), tilingIterDomsOrder, producerOps
+    OwningOpRef<ModuleOp> moduleOp = extractOpsForMemoryCheck(
+        "fit_tile_to_memory", cast<TilingInterface>(consumerOp), tilingInfo, producerOps
     );
-    OpEraseGuard moduleEraseGuard(moduleOp);
 
-    if (failed(tileModuleForMemoryCheck(moduleOp, tilingIterDomsOrder, iterDomainSizes.size())))
+    if (failed(tileModuleForMemoryCheck(*moduleOp, tilingInfo, iterDomainSizes.size())))
         return llvm::failure();
 
     // First establish that the original tile is not big enough.
-    llvm::FailureOr<bool> tileFits =
-        checkTileFitsInMemory(moduleOp, tilingIterDomsOrder, offsets, sizes);
+    llvm::FailureOr<bool> tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
     if (failed(tileFits))
         return LogicalResult::failure();
     if (*tileFits)
@@ -713,21 +738,21 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
 
     // Shrink pass: set domains to 1, one by one, until the tile fits.
     ArrayRef<int64_t>::iterator tilingDomainIter;
-    for (tilingDomainIter = tilingIterDomsOrder.begin();
-         tilingDomainIter != tilingIterDomsOrder.end(); ++tilingDomainIter) {
+    for (tilingDomainIter = tilingInfo.tilingOrder.begin();
+         tilingDomainIter != tilingInfo.tilingOrder.end(); ++tilingDomainIter) {
         int64_t domain = *tilingDomainIter;
         if (isOneInteger(sizes[domain]))
             continue;
 
         sizes[domain] = one;
-        tileFits = checkTileFitsInMemory(moduleOp, tilingIterDomsOrder, offsets, sizes);
+        tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
             return LogicalResult::failure();
         if (*tileFits)
             break;
     }
 
-    if (tilingDomainIter == tilingIterDomsOrder.end()) {
+    if (tilingDomainIter == tilingInfo.tilingOrder.end()) {
         consumerOp->emitWarning("tile-and-fuse: operation can't be tiled: no more domains to tile");
         LLVM_DEBUG(assert(false));
         return LogicalResult::failure();
@@ -741,7 +766,7 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
             continue;
 
         sizes[domain] = rewriter.getIndexAttr(iterDomainSizes[domain]);
-        tileFits = checkTileFitsInMemory(moduleOp, tilingIterDomsOrder, offsets, sizes);
+        tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
             return LogicalResult::failure();
         if (*tileFits)
@@ -752,12 +777,11 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
         // sizes[domain] = 1 does fit, hence factor iterDomainSizes[domain] =
         // iterDomainSizes[domain]/1 is a good maximum.
         if (failed(searchTileSizeForDim(
-                rewriter, moduleOp, tilingIterDomsOrder, offsets, sizes, domain,
-                iterDomainSizes[domain],
+                rewriter, *moduleOp, tilingInfo, offsets, sizes, domain, iterDomainSizes[domain],
                 /*minFactor=*/1, /*maxFactor=*/iterDomainSizes[domain]
             )))
             return LogicalResult::failure();
-    } while (tilingDomainIter-- != tilingIterDomsOrder.begin());
+    } while (tilingDomainIter-- != tilingInfo.tilingOrder.begin());
     // NB: the tilingDimIter-- above goes passed the .begin() at the very end,
     // which is not nice, and depending on the implementation of
     // ArrayRef::iterator, could fail. The implementation is just a pointer, so
@@ -786,13 +810,21 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
     bool isDestinationOperand
 ) {
-    const std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> doNotFuse = std::nullopt;
+    Operation *producerOp = producerOpResult.getOwner();
+
+    auto doNotFuse = [&]() {
+        assert(
+            !isMarkedFuseGroup(producerOp) ||
+            isFuseGroupOutput(producerOp) && "Unable to fuse a pattern fuse group member"
+        );
+        return std::nullopt;
+    };
+
     const scf::SCFTileAndFuseOptions::ControlFnResult fuseAndDoNotYieldProducer{false};
 
-    Operation *producerOp = producerOpResult.getOwner();
     auto producerTi = dyn_cast<TilingInterface>(producerOp);
     if (!producerTi)
-        return doNotFuse;
+        return doNotFuse();
 
     // FIXME: should we not fuse destination operands?
     // if (isDestinationOperand) {
@@ -812,8 +844,8 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         producerOp->emitWarning(
             "tile-and-fuse: failed to compute producer's operand slices, skipping producer."
         );
-        LLVM_DEBUG(assert(false));
-        return doNotFuse;
+        // LLVM_DEBUG(assert(false));
+        return doNotFuse();
     }
 
     auto [iterOffsets, iterSizes, iterStrides] =
@@ -823,107 +855,59 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
     );
 
-    if (!isMarkedFuseGroup(producerOp)) {
-        // Not part of a pattern-fuse-group; there are no restrictions on the domains.
-
-        if (!toTileOps.contains(producerTi) && !isa<linalg::FillOp>(producerOp)) {
-            return doNotFuse;
-        }
-
-        if (!shouldFuseMultiUsersOp(producerOp)) {
-            return doNotFuse;
-        }
-
-        if (distance && *distance <= 0)
-            return doNotFuse;
+    if (isMarkedFuseGroup(producerOp) && !isFuseGroupOutput(producerOp)) {
         setSourcesDistance(producerOp, distance);
-
-        llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder =
-            getTilingIterDomainsOrder(producerTi);
-
-        ModuleOp moduleOp = extractOpsForMemoryCheck(
-            "fuse_control_max_size_no_pattern", producerTi, tilingIterDomsOrder.getArrayRef()
-        );
-        OpEraseGuard moduleEraseGuard(moduleOp);
-        if (failed(tileModuleForMemoryCheck(
-                moduleOp, tilingIterDomsOrder.getArrayRef(), iterSizes.size()
-            )))
-            assert(false && "failed to compute producer's tiled memory size");
-
-        llvm::FailureOr<bool> producerFits = checkTileFitsInMemory(
-            moduleOp, tilingIterDomsOrder.getArrayRef(), mappedOffsets, mappedSizes
-        );
-        if (failed(producerFits)) {
-            producerOp->emitWarning(
-                "tile-and-fuse: failed to check if tiled producer overflows, skipping producer."
-            );
-            LLVM_DEBUG(assert(false));
-            return doNotFuse;
-        }
-
-        if (!*producerFits) {
-            // Producer does not fit in memory, don't fuse.
-            return doNotFuse;
-        }
-
         return fuseAndDoNotYieldProducer;
     }
 
-    if (!isFuseGroupOutput(producerOp)) {
-        // Is part of a pattern-fuse-group, but not the output operation (bottom most).
-        // We only check the output operation of such group.
-
-        // We can't break fuse groups, so we don't check if distance has reached
-        // 0, but we still propagate it to the sources.
-        setSourcesDistance(producerOp, distance);
-
-        return fuseAndDoNotYieldProducer;
-    }
+    TilingInfo tilingInfo = getTilingInfo(producerTi);
 
     if (!toTileOps.contains(producerTi) && !isa<linalg::FillOp>(producerOp)) {
-        return doNotFuse;
+        return doNotFuse();
     }
 
     if (!shouldFuseMultiUsersOp(producerOp)) {
-        return doNotFuse;
+        return doNotFuse();
     }
 
     if (distance && *distance <= 0)
-        return doNotFuse;
-    setSourcesDistance(producerOp, distance);
+        return doNotFuse();
 
-    llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(producerTi);
-
-    // The domains the producer can be tiled over
-    // Don't fuse if we are tiling a domain the producer's fuse group can not be tiled over
     if (!allDomains) {
         for (size_t index = 0; index < iterSizes.size(); ++index) {
-            if (mappedSizes[index] != iterSizes[index] && !tilingIterDomsOrder.contains(index)) {
-                return doNotFuse;
+            if (mappedSizes[index] != iterSizes[index]) {
+                // Don't fuse if we are tiling a domain the producer can not be tiled over
+                if (!tilingInfo.tilingOrder.contains(index))
+                    return doNotFuse();
+
+                // If the required size needs adjusting, we can't fuse this producer
+                llvm::FailureOr<int64_t> maybeSize =
+                    computeSizeAtFirstIteration(mappedSizes[index]);
+                if (failed(maybeSize)) {
+                    LLVM_DEBUG(assert(false));
+                    return doNotFuse();
+                }
+                if (tilingInfo.adjustSize[index](*maybeSize) != *maybeSize)
+                    return doNotFuse();
             }
         }
     }
 
-    ModuleOp moduleOp = extractOpsForMemoryCheck(
-        "fuse_control_max_size_pattern_output", producerTi, tilingIterDomsOrder.getArrayRef()
-    );
-    OpEraseGuard moduleEraseGuard(moduleOp);
-    if (failed(
-            tileModuleForMemoryCheck(moduleOp, tilingIterDomsOrder.getArrayRef(), iterSizes.size())
-        ))
+    OwningOpRef<ModuleOp> moduleOp =
+        extractOpsForMemoryCheck("fuse_control_max_size_output", producerTi, tilingInfo);
+    if (failed(tileModuleForMemoryCheck(*moduleOp, tilingInfo, iterSizes.size())))
         assert(false && "failed to compute producer's tiled memory size");
 
-    llvm::FailureOr<bool> producerFuseGroupFits = checkTileFitsInMemory(
-        moduleOp, tilingIterDomsOrder.getArrayRef(), mappedOffsets, mappedSizes
-    );
-    if (failed(producerFuseGroupFits)) {
-        producerOp->emitWarning("tile-and-fuse: failed to check if tiled (pattern-fuse-group) "
-                                "producers overflows, skipping producer.");
+    llvm::FailureOr<bool> producerFits =
+        checkTileFitsInMemory(*moduleOp, tilingInfo, mappedOffsets, mappedSizes);
+    if (failed(producerFits)) {
+        producerOp->emitWarning("tile-and-fuse: failed to check if tiled "
+                                "producer overflows, skipping producer.");
         LLVM_DEBUG(assert(false));
-        return doNotFuse;
+        return doNotFuse();
     }
-    if (!*producerFuseGroupFits)
-        return doNotFuse;
+    if (!*producerFits)
+        return doNotFuse();
 
     // Fuse iff producer fits in the tile
     return fuseAndDoNotYieldProducer;
@@ -935,57 +919,33 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
     mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
     bool isDestinationOperand
 ) {
-    const std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> doNotFuse = std::nullopt;
+    Operation *producerOp = producerOpResult.getOwner();
+
+    auto doNotFuse = [&]() {
+        assert(
+            !isMarkedFuseGroup(producerOp) ||
+            isFuseGroupOutput(producerOp) && "Unable to fuse a pattern fuse group member"
+        );
+        return std::nullopt;
+    };
+
     const scf::SCFTileAndFuseOptions::ControlFnResult fuseAndDoNotYieldProducer{false};
 
-    Operation *producerOp = producerOpResult.getOwner();
     auto producerTi = dyn_cast<TilingInterface>(producerOp);
     if (!producerTi)
-        return doNotFuse;
+        return doNotFuse();
 
     if (producerOps && !(*producerOps)->contains(producerOp))
-        return doNotFuse;
+        return doNotFuse();
 
     // FIXME: should we not fuse destination operands?
     // if (isDestinationOperand) {
     //     return doNotFuse;
     // }
 
-    // From here on we check if the producer can be tiled on the domains that
-    // are being tiled. The first element in the return tuple indicates if the
-    // producer should be fused (true) or not (false).
-
     std::optional<int64_t> distance;
     if (auto distanceAttr = producerOp->getAttrOfType<mlir::IntegerAttr>(TORQ_TNF_DISTANCE))
         distance = distanceAttr.getSInt();
-
-    if (!isMarkedFuseGroup(producerOp)) {
-        // Not part of a pattern-fuse-group; there are no restrictions on the domains.
-
-        if (distance && *distance <= 0)
-            return doNotFuse;
-        setSourcesDistance(producerOp, distance);
-
-        return fuseAndDoNotYieldProducer;
-    }
-
-    if (!isFuseGroupOutput(producerOp)) {
-        // Is part of a pattern-fuse-group, but not the output operation (bottom most).
-        // We only check the output operation of such group.
-
-        // We can't break fuse groups, so we don't check if distance has reached
-        // 0, but we still propagate it to the sources.
-        setSourcesDistance(producerOp, distance);
-
-        return fuseAndDoNotYieldProducer;
-    }
-
-    if (distance && *distance <= 0)
-        return doNotFuse;
-    setSourcesDistance(producerOp, distance);
-
-    // The domains the producer can be tiled over
-    llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(producerTi);
 
     SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
     if (failed(producerTi.getIterationDomainTileFromResultTile(
@@ -995,8 +955,8 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
         producerOp->emitWarning(
             "tile-and-fuse: failed to compute producer's operand slices, skipping producer."
         );
-        LLVM_DEBUG(assert(false));
-        return doNotFuse;
+        // LLVM_DEBUG(assert(false));
+        return doNotFuse();
     }
 
     auto [iterOffsets, iterSizes, iterStrides] =
@@ -1006,18 +966,33 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
         mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
     );
 
-    // Don't fuse if we are tiling a domain the producer can not be tiled over
+    if (isMarkedFuseGroup(producerOp) && !isFuseGroupOutput(producerOp)) {
+        setSourcesDistance(producerOp, distance);
+        return fuseAndDoNotYieldProducer;
+    }
+
+    TilingInfo tilingInfo = getTilingInfo(producerTi);
+
     for (size_t index = 0; index < iterSizes.size(); ++index) {
-        if (getConstantIntValue(mappedSizes[index]) != getConstantIntValue(iterSizes[index]) &&
-            !tilingIterDomsOrder.contains(index)) {
-            LLVM_DEBUG({
-                llvm::dbgs() << "Do not fuse (can not be tiled over domain " << index << ", "
-                             << mappedSizes[index] << " != " << iterSizes[index]
-                             << "): " << producerOp->getName() << "\n";
-            });
-            return doNotFuse;
+        if (mappedSizes[index] != iterSizes[index]) {
+            // Don't fuse if we are tiling a domain the producer can not be tiled over
+            if (!tilingInfo.tilingOrder.contains(index))
+                return doNotFuse();
+
+            // If the required size needs adjusting, we can't fuse this producer
+            llvm::FailureOr<int64_t> maybeSize = computeSizeAtFirstIteration(mappedSizes[index]);
+            if (failed(maybeSize)) {
+                LLVM_DEBUG(assert(false));
+                return doNotFuse();
+            }
+            if (tilingInfo.adjustSize[index](*maybeSize) != *maybeSize)
+                return doNotFuse();
         }
     }
+
+    if (distance && *distance <= 0)
+        return doNotFuse();
+    setSourcesDistance(producerOp, distance);
 
     // Producer can be fused
     return fuseAndDoNotYieldProducer;
@@ -1138,8 +1113,7 @@ void TileAndFusePass::tileAndFuse(
     // Will hold the new tile size
     SmallVector<OpFoldResult> tileOffsets(iterDomainOffsets), tileSizes(iterDomainSizes);
 
-    // Get the order in which we should tile the domains.
-    llvm::SmallSetVector<int64_t, 4> tilingIterDomsOrder = getTilingIterDomainsOrder(tiOp);
+    TilingInfo tilingInfo = getTilingInfo(tiOp);
 
     llvm::SetVector<Operation *> producerOps;
     std::optional<llvm::SetVector<Operation *> *> restrictToProducerOps = std::nullopt;
@@ -1153,7 +1127,7 @@ void TileAndFusePass::tileAndFuse(
 
         SmallVector<OpFoldResult> smallestTileSizes(iterDomainSizes);
         auto one = getAsIndexOpFoldResult(&getContext(), 1);
-        for (auto dim : tilingIterDomsOrder) {
+        for (auto dim : tilingInfo.tilingOrder) {
             smallestTileSizes[dim] = one;
         }
 
@@ -1175,8 +1149,7 @@ void TileAndFusePass::tileAndFuse(
     // required pattern-fuse-group members)
     llvm::SetVector<Operation *> empty;
     llvm::FailureOr<bool> tileChanged = fitTileToMemory(
-        tiOp, producerOps, tilingIterDomsOrder.getArrayRef(), *iterDomainConstSizes, tileOffsets,
-        tileSizes
+        tiOp, producerOps, tilingInfo, *iterDomainConstSizes, tileOffsets, tileSizes
     );
     if (failed(tileChanged)) {
         tiOp->emitWarning("tile-and-fuse: failed to tile an operation, skipping it");
@@ -1240,10 +1213,10 @@ void TileAndFusePass::tileAndFuse(
         }
         assert(tiledOp);
 
-        ModuleOp moduleOp = extractOpsForMemoryCheck("check_tiling_succeeded", tiledOp);
-        OpEraseGuard moduleEraseGuard(moduleOp);
+        OwningOpRef<ModuleOp> moduleOp =
+            extractOpsForMemoryCheck("check_tiling_succeeded", tiledOp);
 
-        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(moduleOp);
+        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp);
         assert(succeeded(opFitsInMemory));
         assert(*opFitsInMemory);
     });
@@ -1271,9 +1244,8 @@ void TileAndFusePass::runOnOperation() {
             return;
 
         // Check if tiOp already fits in memory.
-        ModuleOp moduleOp = extractOpsForMemoryCheck("check_needs_tiling", tiOp);
-        OpEraseGuard moduleEraseGuard(moduleOp);
-        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(moduleOp);
+        OwningOpRef<ModuleOp> moduleOp = extractOpsForMemoryCheck("check_needs_tiling", tiOp);
+        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp);
         if (failed(opFitsInMemory)) {
             tiOp->emitWarning(
                 "tile-and-fuse: initial memory overflow check failed, skipping this operation."
