@@ -268,9 +268,13 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
         if (eleOp && !isa<arith::AddIOp>(eleOp) && !isa<arith::AddFOp>(eleOp) &&
             !isa<arith::SubIOp>(eleOp) && !isa<arith::SubFOp>(eleOp) &&
             !isa<arith::MulIOp>(eleOp) && !isa<arith::MulFOp>(eleOp) &&
-            !isa<arith::DivFOp>(eleOp) && !isa<arith::CmpIOp>(eleOp)) {
+            !isa<arith::DivFOp>(eleOp) && !isa<arith::CmpIOp>(eleOp) &&
+            !isa<arith::MinSIOp>(eleOp) && !isa<arith::MaxSIOp>(eleOp) &&
+            !isa<arith::MinUIOp>(eleOp) && !isa<arith::MaxUIOp>(eleOp) &&
+            !isa<arith::MinimumFOp>(eleOp) && !isa<arith::MaximumFOp>(eleOp) &&
+            !isa<arith::MinNumFOp>(eleOp) && !isa<arith::MaxNumFOp>(eleOp)) {
             return rewriter.notifyMatchFailure(
-                srcOp, "elementwise binary op pattern only supports add/sub/mul/cmp ..\n"
+                srcOp, "elementwise binary op pattern only supports add/sub/mul/cmp/min/max ..\n"
             );
         }
 
