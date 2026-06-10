@@ -52,6 +52,8 @@ _RUN_FLAGS = [
     ("--debug-ir={v}",            "debug_ir",            False),
     ("--recompute-cache",         "recompute_cache",     True),
     ("--gen-config-log-file={v}", "log_file",            False),
+    ("--subgraph-from={v}",       "subgraph_from",       False),
+    ("--subgraph-to={v}",         "subgraph_to",         False),
 ]
 
 
@@ -143,11 +145,20 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Verify config exists (report JSON or compiler JSON)
     model_name = Path(model_path).stem
-    config_path = get_config_path(model_name, args.output_dir)
-    compiler_config_path = get_compiler_config_path(model_name, args.output_dir)
-    if not config_path.exists() and not compiler_config_path.exists():
+    subgraph_mode = bool(args.subgraph_from and args.subgraph_to)
+
+    if subgraph_mode:
+        # For subgraph runs, accept any torq_gen_config JSON in the output dir
+        search_dir = Path(args.output_dir) if args.output_dir else Path(".")
+        has_config = any(search_dir.glob("torq_gen_config_*.json"))
+    else:
+        config_path = get_config_path(model_name, args.output_dir)
+        compiler_config_path = get_compiler_config_path(model_name, args.output_dir)
+        has_config = config_path.exists() or compiler_config_path.exists()
+
+    if not has_config:
         print(
-            f"Error: Config not found: {config_path}\n"
+            f"Error: Config not found for {model_name}\n"
             f"Run discovery first:\n"
             f"  python3 -m torq.gen_config discover --model {model_path}",
             file=sys.stderr,
@@ -156,10 +167,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     extra_args = _build_extra_args(args, _RUN_FLAGS)
 
+    # Use '_full' filter so it matches both full-model (_full_model) and
+    # subgraph-full (_full) test cases.
+    test_filter = "_full"
+
     return _run_pytest(
         test_file=test_file,
         model_path=model_path,
-        test_filter="_full_model",
+        test_filter=test_filter,
         output_dir=args.output_dir,
         extra_args=extra_args,
     )
@@ -505,6 +520,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--recompute-cache",
         action="store_true",
         help="Force recompute cached fixtures",
+    )
+    run_parser.add_argument(
+        "--subgraph-from",
+        help="Start op name for subgraph (output tensor name or OpType_outputName)",
+    )
+    run_parser.add_argument(
+        "--subgraph-to",
+        help="End op name for subgraph (output tensor name or OpType_outputName)",
     )
     run_parser.set_defaults(func=cmd_run)
 

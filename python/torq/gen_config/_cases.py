@@ -409,7 +409,7 @@ def _save_discovery_results(
     _discovery_log("")
 
     # Save detailed report with critical failures info
-    _save_detailed_report(config, model_name, discovery_state)
+    _save_detailed_report(config, model_name, discovery_state, subgraph_suffix)
 
     # Generate compiler-format JSON (minimal, only what C++ pass needs)
     output_dir = _opt(config, "--output-dir", "--gen-config-output")

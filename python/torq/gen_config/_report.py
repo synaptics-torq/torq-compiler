@@ -12,7 +12,7 @@ Produces the final human-readable report and persists it to JSON.
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from torq.gen_config._utils import build_report_lines, format_per_layer_status_table
 from torq.gen_config.core import (
@@ -215,7 +215,14 @@ def _print_final_report(config, discovery_state: ExecutorDiscoveryState):
     for line in report_lines:
         print(line, file=sys.stderr)
 
-    _save_detailed_report(config, model_name, discovery_state)
+    # Only save detailed report for full-model runs. Subgraph results are
+    # already saved incrementally by _save_discovery_results per-layer.
+    subgraph_mode = (
+        config.getoption("--subgraph-from", default=None) is not None
+        and config.getoption("--subgraph-to", default=None) is not None
+    )
+    if not subgraph_mode:
+        _save_detailed_report(config, model_name, discovery_state)
 
 
 def _generate_final_report_text(
@@ -226,14 +233,14 @@ def _generate_final_report_text(
     return "\n".join(build_report_lines(sections))
 
 
-def _save_detailed_report(config, model_name: str, discovery_state: ExecutorDiscoveryState):
+def _save_detailed_report(config, model_name: str, discovery_state: ExecutorDiscoveryState, subgraph_suffix: Optional[str] = None):
     """Save detailed report including critical failures to JSON."""
-    json_path = _get_json_path(config, model_name)
+    json_path = _get_json_path(config, model_name, subgraph_suffix)
     if not json_path:
         return
 
     try:
-        json_data = _load_json(config, model_name) if json_path.exists() else {
+        json_data = _load_json(config, model_name, subgraph_suffix) if json_path.exists() else {
             "version": "1.1",
             "model_name": model_name,
             "default_tolerance": DEFAULT_TOLERANCE.copy(),
