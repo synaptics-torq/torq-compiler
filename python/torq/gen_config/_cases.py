@@ -777,12 +777,29 @@ def comparison_config_for_executor_discovery(request, layer_executor_case):
 
 @pytest.fixture(autouse=True)
 def save_progress(request, layer_executor_case):
-    """Save discovery progress after each layer test."""
+    """Save discovery progress after each layer test.
+
+    Clears in-memory discovery state when switching to a different model
+    so that each model's JSON only contains its own layers.
+    """
+    case = layer_executor_case.get("case") if layer_executor_case else None
+    if case:
+        current_model = _extract_model_name_from_case(case)
+        prev_model = getattr(save_progress, "_last_model", None)
+        if prev_model and prev_model != current_model:
+            # Model changed — reset discovery state to prevent cross-model
+            # pollution in the JSON output.
+            _discovery_state.results.clear()
+            _discovery_state.locations.clear()
+            _discovery_state.node_indices.clear()
+            _discovery_state.full_mlir_locations.clear()
+            _discovery_state.recommended_executors.clear()
+        save_progress._last_model = current_model
+
     yield
 
     # Skip full model tests — they don't perform discovery and should not
     # overwrite the discovery JSON or compiler JSON.
-    case = layer_executor_case.get("case") if layer_executor_case else None
     is_subgraph = layer_executor_case.get("is_subgraph", False)
     if case and "_full_model" not in case.name and "_full" not in case.name:
         _save_discovery_results(request.config, case, None, is_subgraph)

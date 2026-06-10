@@ -2,3 +2,6 @@
 	path = third_party/iree
 	url = ../iree.git
 	
+[submodule "tests/torq-model-configs"]
+	path = tests/torq-model-configs
+	url = https://github.com/synaptics-torq/torq-model-configs.git

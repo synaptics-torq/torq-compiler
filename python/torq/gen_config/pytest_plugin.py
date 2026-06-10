@@ -92,6 +92,18 @@ def pytest_addoption(parser):
         "Valid values: nss, css, host. Can be combined with --skip-mode.",
     )
     parser.addoption(
+        "--model-dir",
+        default=None,
+        help="Directory to scan for *.onnx models during folder discovery. "
+        "Used by test_onnx_discovery.py instead of --model-path.",
+    )
+    parser.addoption(
+        "--model-filter",
+        default=None,
+        help="Filter models by name pattern during folder discovery (e.g., 'resnet*', '*bert*'). "
+        "Supports fnmatch wildcards (*, ?). Only models matching the filter are processed.",
+    )
+    parser.addoption(
         "--auto-convert-bf16",
         action="store_true",
         default=False,

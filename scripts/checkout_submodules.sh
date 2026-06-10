@@ -16,7 +16,7 @@ else
 fi
 echo "Updating third_party/iree submodule..."
 
-git "${USE_EXTRA_HEADER[@]}" submodule update --depth=1 --init third_party/iree
+git "${USE_EXTRA_HEADER[@]}" submodule update --depth=1 --init third_party/iree tests/torq-model-configs
 
 cd third_party/iree
 

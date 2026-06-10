@@ -24,6 +24,7 @@ Executor Discovery and Assignment Flow:
         -v -k "full_model" --debug-ir=tmp --recompute-cache
 
 
+
 Design Details:
 
     Step 1: Layer Discovery Tests
@@ -79,6 +80,46 @@ Compiler JSON Formats (C++ ExecutorAssignmentPass accepts both):
 - Discovery format: {"ops": {"Conv_0": {"recommended_executor": "nss", "mlir_location": "10:10"}}}
 - Compiler format: {"op_assignments": {"10:10": {"executor": "nss"}}}
 """
+import os
+from pathlib import Path
+
+
+# Default Hugging Face repos for batch model discovery.
+# Both test_onnx_discover_gen_config_models.py and test_onnx_run_gen_config_models.py
+# import this list so there is a single source of truth.
+DEFAULT_HF_REPOS = [
+    "onnxmodelzoo/alexnet_Opset17",
+    "onnxmodelzoo/adv_inception_v3_Opset16",
+    "onnxmodelzoo/cs3darknet_x_Opset18",
+    "onnxmodelzoo/cs3edgenet_x_Opset18",
+    "onnxmodelzoo/cspresnet50_Opset18",
+    "onnxmodelzoo/cspresnext50_Opset18",
+    "onnxmodelzoo/darknet53_Opset18",
+    "onnxmodelzoo/densenet121_Opset18_timm",
+    "onnxmodelzoo/dla102_Opset18",
+    "onnxmodelzoo/dpn98_Opset18",
+    "onnxmodelzoo/ecaresnet50t_Opset17",
+    "onnxmodelzoo/ecaresnetlight_Opset17",
+    "onnxmodelzoo/efficientnet_b1_Opset17_timm",
+    "onnxmodelzoo/efficientnetv2_rw_t_Opset17",
+    "onnxmodelzoo/ens_adv_inception_resnet_v2_Opset18",
+    "onnxmodelzoo/fbnetc_100_Opset18",
+    "onnxmodelzoo/ghostnet_100_Opset17",
+    "onnxmodelzoo/gluon_resnet50_v1s_Opset18",
+    "onnxmodelzoo/gluon_resnext50_32x4d_Opset18",
+    "onnxmodelzoo/ig_resnext101_32x16d_Opset18",
+    "onnxmodelzoo/inception_v3_Opset17_timm",
+    "onnxmodelzoo/inception_resnet_v2_Opset18",
+    "onnxmodelzoo/mixnet_xl_Opset17",
+    "onnxmodelzoo/mnasnet_small_Opset17",
+    "onnxmodelzoo/regnetx_320_Opset18",
+    "onnxmodelzoo/repvgg_b3g4_Opset18",
+    "onnxmodelzoo/res2next50_Opset18",
+    "onnxmodelzoo/resnet50_Opset18_timm",
+]
+
+# Default directory for ONNX model JSON configs (shared by discovery and run scripts)
+_DEFAULT_ONNX_JSON_DIR = Path(__file__).parent.parent.parent.parent / "tests" / "torq-model-configs" / "onnx"
 
 # Re-export state
 from torq.gen_config._state import ExecutorDiscoveryState, _discovery_state
