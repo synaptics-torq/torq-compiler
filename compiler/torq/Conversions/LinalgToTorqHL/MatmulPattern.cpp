@@ -254,30 +254,6 @@ FailureOr<std::vector<APInt>> getIntegerConstantValues(arith::ConstantOp constOp
     return values;
 }
 
-Value maybeSliceLike(Location loc, Value value, Value like, PatternRewriter &rewriter) {
-    SmallVector<tensor::ExtractSliceOp> sliceOps;
-    Value current = like;
-    while (auto sliceOp = current.getDefiningOp<tensor::ExtractSliceOp>()) {
-        sliceOps.push_back(sliceOp);
-        current = sliceOp.getSource();
-    }
-
-    for (tensor::ExtractSliceOp sliceOp : llvm::reverse(sliceOps)) {
-        auto valueType = dyn_cast<RankedTensorType>(value.getType());
-        auto likeSourceType = dyn_cast<RankedTensorType>(sliceOp.getSource().getType());
-        if (!valueType || !likeSourceType || valueType.getShape() != likeSourceType.getShape()) {
-            return value;
-        }
-
-        value = tensor::ExtractSliceOp::create(
-            rewriter, loc, value, sliceOp.getMixedOffsets(), sliceOp.getMixedSizes(),
-            sliceOp.getMixedStrides()
-        );
-    }
-
-    return value;
-}
-
 FailureOr<Value>
 collapseReductionDimBlockParam(Location loc, Value value, PatternRewriter &rewriter) {
     auto type = dyn_cast<RankedTensorType>(value.getType());
@@ -299,9 +275,63 @@ collapseReductionDimBlockParam(Location loc, Value value, PatternRewriter &rewri
         .getResult();
 }
 
+/// If `sliceLikeValue` is produced by a tensor.extract_slice, recreate the
+/// same slice on `value` but override the size of the trailing (column)
+/// dimension to `wantedCols`.
+///
+/// This is used when the ExpandWeights bias requires an even column count.
+/// The root bias constant may be padded with extra trailing columns, and this
+/// helper adjusts the extracted slice width to match the padded bias width
+/// while preserving the original offsets and strides.
+///
+/// Example:
+///   tensor.extract_slice %src[0, 0, %arg0] [20, 1, 205] [1, 1, 1]
+///
+/// becomes:
+///
+///   tensor.extract_slice %bias[0, 0, %arg0] [20, 1, 206] [1, 1, 1]
+///
+/// If `sliceLikeValue` is not an extract_slice, `value` is returned unchanged.
+static Value maybeSliceLikeWithCols(
+    Location loc, Value value, Value sliceLikeValue, int64_t wantedCols, PatternRewriter &rewriter
+) {
+    auto sliceOp = sliceLikeValue.getDefiningOp<tensor::ExtractSliceOp>();
+    if (!sliceOp)
+        return value;
+
+    auto srcType = cast<RankedTensorType>(value.getType());
+    auto resultType = cast<RankedTensorType>(sliceOp.getResultType());
+
+    int64_t rank = resultType.getRank();
+    int64_t colDim = rank - 1;
+
+    SmallVector<OpFoldResult> offsets = sliceOp.getMixedOffsets();
+    SmallVector<OpFoldResult> sizes = sliceOp.getMixedSizes();
+    SmallVector<OpFoldResult> strides = sliceOp.getMixedStrides();
+
+    sizes[colDim] = rewriter.getIndexAttr(wantedCols);
+
+    SmallVector<int64_t> newShape(resultType.getShape().begin(), resultType.getShape().end());
+    newShape[colDim] = wantedCols;
+
+    auto newType = RankedTensorType::get(newShape, srcType.getElementType());
+
+    return tensor::ExtractSliceOp::create(rewriter, loc, newType, value, offsets, sizes, strides);
+}
+
+/// Compute the bias constant for ExpandWeightsOp from scale and zero-point
+/// constants. The bias is: -zp * scale (element-wise).
+///
+/// The root constants (looked through extract_slice) may be larger than the
+/// sub-region actually used by this dequant op. We resolve slice offsets
+/// statically to extract only the needed sub-region directly from the data.
+///
+/// The result is a 2D constant [rows, cols]. If cols is odd, it is padded to
+/// cols+1 with zeros because the torq HW requires the bias column count to be
+/// even.
 FailureOr<Value> buildReductionDimScaleBias(
     Location loc, Value scales, Value zeroPoints, RankedTensorType outputType,
-    PatternRewriter &rewriter, linalg::GenericOp anchorOp
+    PatternRewriter &rewriter, linalg::GenericOp anchorOp, int64_t biasCols
 ) {
     arith::ConstantOp scaleConstOp = getConstantLikeTensorOp(scales);
     arith::ConstantOp zeroPointConstOp = getConstantLikeTensorOp(zeroPoints);
@@ -372,12 +402,87 @@ FailureOr<Value> buildReductionDimScaleBias(
         return failure();
     }
 
-    Value scaleBias = createFConst(rewriter, anchorOp, biasValues, scaleConstType.getShape());
-    if (zeroPoints.getDefiningOp<tensor::ExtractSliceOp>()) {
-        scaleBias = maybeSliceLike(loc, scaleBias, zeroPoints, rewriter);
+    int64_t rank = scaleConstType.getRank();
+    if (rank != 2 && rank != 3) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "buildReductionDimScaleBias: unsupported bias rank " << rank << "\n"
+        );
+        return failure();
     }
-    else if (scales.getDefiningOp<tensor::ExtractSliceOp>()) {
-        scaleBias = maybeSliceLike(loc, scaleBias, scales, rewriter);
+
+    SmallVector<int64_t> biasShape(
+        scaleConstType.getShape().begin(), scaleConstType.getShape().end()
+    );
+
+    int64_t colDim = biasShape.size() - 1;
+    int64_t rootCols = biasShape[colDim];
+
+    if (biasCols > rootCols) {
+        biasShape[colDim] = biasCols;
+        // only matters for unsliced small constants
+    }
+
+    if (biasCols % 2 == 0 && rootCols % 2 != 0) {
+        biasShape[colDim] = rootCols + 1;
+    }
+
+    auto sliceOp = zeroPoints.getDefiningOp<tensor::ExtractSliceOp>();
+    if (!sliceOp)
+        sliceOp = scales.getDefiningOp<tensor::ExtractSliceOp>();
+
+    if (sliceOp) {
+        auto resultType = cast<RankedTensorType>(sliceOp.getResultType());
+        int64_t tileCols = resultType.getDimSize(resultType.getRank() - 1);
+
+        if (tileCols % 2 != 0) {
+            int64_t rootCols = biasShape[colDim];
+            int64_t paddedTileCols = tileCols + 1;
+            int64_t numTiles = llvm::divideCeil(rootCols, tileCols);
+
+            // Example: root=1024, tile=205
+            // new root = 4 * 205 + 206 = 1026
+            biasShape[colDim] = (numTiles - 1) * tileCols + paddedTileCols;
+        }
+    }
+
+    // Pad the root bias constant so dynamic extract_slice users can request an
+    // even column count directly. This avoids emitting tensor.pad or remapping
+    // dynamic offsets, both of which are undesirable for TORQ lowering.
+    std::vector<APFloat> paddedBiasValues(
+        ShapedType::getNumElements(biasShape), APFloat(APFloat::IEEEsingle(), "0")
+    );
+
+    ArrayRef<int64_t> oldShape = scaleConstType.getShape();
+    int64_t oldCols = oldShape.back();
+    int64_t newCols = biasShape.back();
+
+    if (rank == 2) {
+        int64_t rows = oldShape[0];
+
+        for (int64_t r = 0; r < rows; ++r) {
+            for (int64_t c = 0; c < oldCols; ++c)
+                paddedBiasValues[r * newCols + c] = biasValues[r * oldCols + c];
+        }
+    }
+    else if (rank == 3) {
+        int64_t rows = oldShape[0];
+        int64_t mid = oldShape[1];
+
+        for (int64_t r = 0; r < rows; ++r) {
+            for (int64_t m = 0; m < mid; ++m) {
+                for (int64_t c = 0; c < oldCols; ++c)
+                    paddedBiasValues[(r * mid + m) * newCols + c] =
+                        biasValues[(r * mid + m) * oldCols + c];
+            }
+        }
+    }
+    Value scaleBias = createFConst(rewriter, anchorOp, paddedBiasValues, biasShape);
+
+    if (auto sliceOp = zeroPoints.getDefiningOp<tensor::ExtractSliceOp>()) {
+        scaleBias = maybeSliceLikeWithCols(loc, scaleBias, zeroPoints, biasCols, rewriter);
+    }
+    else if (auto sliceOp = scales.getDefiningOp<tensor::ExtractSliceOp>()) {
+        scaleBias = maybeSliceLikeWithCols(loc, scaleBias, scales, biasCols, rewriter);
     }
     return collapseReductionDimBlockParam(loc, scaleBias, rewriter);
 }
@@ -558,8 +663,9 @@ FailureOr<Value> maybeFoldBlockQuantizedMatmulInput(
         return failure();
     }
 
-    FailureOr<Value> scaleBias =
-        buildReductionDimScaleBias(loc, scales, zeroPoints, outputType, rewriter, genericOp);
+    FailureOr<Value> scaleBias = buildReductionDimScaleBias(
+        loc, scales, zeroPoints, outputType, rewriter, genericOp, llvm::alignTo(cols, 2)
+    );
     if (failed(scaleBias)) {
         return failure();
     }
