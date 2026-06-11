@@ -592,6 +592,8 @@ void populateLinalgToTorqHLEWBinaryPatterns(
     patterns.insert<EltwiseBinaryConvert>(
         context, sh8b, sh16b, EltwiseBinaryConvert::SUB_OP, markFuseGroups
     );
+    // bf16 float add/sub is lowered by AddOpPattern (createBf16Add) in the main
+    // LinalgToTorqHL conversion pass; no dedicated pre-pass pattern is needed.
 }
 
 } // namespace mlir::syna::torq

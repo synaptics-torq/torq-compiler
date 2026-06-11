@@ -90,6 +90,13 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'softmax-1x2xbf16.mlir' in request.param.data.name:
         extra_args["torq_compiler_options"] = ["--torq-disable-css", "--torq-disable-host"]
 
+    # Force the bf16 elementwise add onto the NSS/slice path so it fails loudly if a
+    # future change stops lowering bf16 add via AddOpPattern (createBf16Add -> torq_hl.add).
+    # (f32 two-tensor add is intentionally not lowered to NSS: the bf16-width data path
+    # mis-strides f32 inputs and produces garbage.)
+    if 'add-nss-25x511-bf16.mlir' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
+
     return {
         "mlir_model_file": "static_mlir_model_file",
         "static_mlir_model_file": request.param.data,

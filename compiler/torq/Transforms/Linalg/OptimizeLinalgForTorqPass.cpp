@@ -51,6 +51,8 @@ class OptimizeLinalgForTorqPass
         linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
 
         populateOptimizeArithElementwiseBinaryOpPatterns(ctx, patterns);
+        // The fused fp32-clamp + truncf->bf16 generic is lowered to a single
+        // torq_hl.act (clamp in f32, emit bf16) by ClampOpConversion::matchFusedClampTruncf.
         populateFuseReluClampWithTruncfPatterns(ctx, patterns);
         populateAbsorbDecomposedWzpCorrectionPatterns(ctx, patterns);
 
