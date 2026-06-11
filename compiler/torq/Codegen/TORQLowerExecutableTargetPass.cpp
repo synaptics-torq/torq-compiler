@@ -230,6 +230,7 @@ void addNssUpToAssignLramAddresses(OpPassManager &pm) {
     // unroll all loops since NSS cannot deal with them
     funcPm.addPass(createUnrollLoopPass());
     funcPm.addPass(createCanonicalizerPass());
+    funcPm.addPass(createCSEPass());
 
     if (clEnableSplitConstantsOptimization)
         funcPm.addPass(createSplitConstantsPass());
