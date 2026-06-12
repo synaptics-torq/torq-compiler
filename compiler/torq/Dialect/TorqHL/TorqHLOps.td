@@ -834,7 +834,7 @@ def TorqHl_WaitProgramOp: TorqHL_Op<"wait_program"> {
 def TorqHl_ImportProgramOp: TorqHL_Op<"import_program", [ConstantLike, Pure]> {
   let summary = "Import externally defined program";
 
-  let arguments = (ins    
+  let arguments = (ins
     FlatSymbolRefAttr:$name
   );
 
@@ -843,6 +843,37 @@ def TorqHl_ImportProgramOp: TorqHL_Op<"import_program", [ConstantLike, Pure]> {
   );
 
   let hasFolder = 1;
+
+}
+
+def TorqHl_ProgramCodeOp: TorqHL_Op<"program_code", [Pure]> {
+  let summary = "Projects the code section of a program as a memref";
+
+  let description = [{
+    Returns the program's code section as a memref. The code is a property of the
+    program (one binary per program symbol), not of any single invocation, so all
+    invocations of the same program share this one value. Placing the code in XRAM
+    is then done exactly once instead of once per invocation. See
+    synaptics-torq/torq-compiler-dev#1615.
+
+    Only CSS programs have a position-independent shared code section. NSS and
+    Slice bitstreams bake in LRAM/XRAM addresses, so their code is not shareable
+    this way; this op is restricted to CSS programs.
+  }];
+
+  let arguments = (ins
+    TorqHL_Program:$program
+  );
+
+  let results = (outs
+    AnyMemRef:$code
+  );
+
+  let assemblyFormat = [{
+    $program attr-dict `:` qualified(type($program)) `->` type($code)
+  }];
+
+  let hasVerifier = 1;
 
 }
 

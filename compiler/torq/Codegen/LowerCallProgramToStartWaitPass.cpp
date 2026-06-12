@@ -82,15 +82,10 @@ static Value stageCssArgsAddressesSection(
     return dtcmArgsAddresses;
 }
 
-// Look up the CSS program binary referenced by `importOp` and compute the
-// CreateInvocationOp result types (invocation + code section + args-addresses
-// section) for a call site with `argsNumber` inputs+inits.
-static FailureOr<SmallVector<Type>> resolveCssInvocationResultTypes(
-    OpBuilder &builder, torq_hl::ImportProgramOp importOp, int64_t argsNumber
-) {
-    auto ctx = builder.getContext();
-    auto invocationType = torq_hl::InvocationType::get(ctx, torq_hl::Executor::CSS);
-
+// Look up the CSS program binary referenced by `importOp` and return the memref
+// type of its code section.
+static FailureOr<MemRefType>
+getCssCodeSectionType(OpBuilder &builder, torq_hl::ImportProgramOp importOp) {
     auto program = SymbolTable::lookupNearestSymbolFrom<IREE::HAL::ExecutableOp>(
         importOp, importOp.getNameAttr()
     );
@@ -107,16 +102,35 @@ static FailureOr<SmallVector<Type>> resolveCssInvocationResultTypes(
 
     auto binaryDataAttr = cast<DenseIntElementsAttr>(binaryOp.getDataAttr());
     auto codeVectorType = dyn_cast<VectorType>(binaryDataAttr.getType());
-    auto codeSectionType =
-        MemRefType::get(codeVectorType.getShape(), codeVectorType.getElementType());
-    auto argsAddressesSectionType = MemRefType::get({argsNumber + 1}, builder.getI32Type());
-    return SmallVector<Type>{invocationType, codeSectionType, argsAddressesSectionType};
+    return MemRefType::get(codeVectorType.getShape(), codeVectorType.getElementType());
+}
+
+// Create a torq_hl.program_code op projecting the shared XRAM code memref of the
+// CSS program. It is placed right after the import_program so it is
+// loop-invariant. This is called once per program (from the ITCM-staging
+// cache-miss path), so every invocation of the program reuses this single value
+// and the binary is placed in XRAM exactly once. See
+// synaptics-torq/torq-compiler-dev#1615.
+static FailureOr<Value>
+createProgramCode(RewriterBase &rewriter, torq_hl::ImportProgramOp importOp) {
+    auto maybeType = getCssCodeSectionType(rewriter, importOp);
+    if (failed(maybeType)) {
+        return failure();
+    }
+
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointAfter(importOp);
+    auto programCodeOp = torq_hl::ProgramCodeOp::create(
+        rewriter, importOp.getLoc(), *maybeType, importOp.getResult()
+    );
+
+    return programCodeOp.getCode();
 }
 
 // Lower a single torq_hl.call_program op into create_invocation + start_program
-// + wait_program. If `sharedItcmCode` is non-null the CSS code section staging
-// is skipped and the call's start_program references that pre-staged ITCM
-// allocation instead.
+// + wait_program. For CSS calls `sharedItcmCode` is the ITCM-staged code memref
+// (shared across all invocations of the program); the call's create_invocation
+// only produces the per-invocation args-addresses section.
 static LogicalResult
 lowerCallProgramOp(RewriterBase &rewriter, torq_hl::CallProgramOp callOp, Value sharedItcmCode) {
     rewriter.setInsertionPoint(callOp);
@@ -132,12 +146,10 @@ lowerCallProgramOp(RewriterBase &rewriter, torq_hl::CallProgramOp callOp, Value 
 
     SmallVector<Type> invocationResultsTypes = {invocationType};
     if (executor == torq_hl::Executor::CSS) {
+        // The code section is shared via torq_hl.program_code; create_invocation
+        // only carries the per-invocation args-addresses section.
         int64_t argsNumber = callOp.getInputs().size() + callOp.getInits().size();
-        auto maybeTypes = resolveCssInvocationResultTypes(rewriter, importProgramOp, argsNumber);
-        if (failed(maybeTypes)) {
-            return failure();
-        }
-        invocationResultsTypes = std::move(*maybeTypes);
+        invocationResultsTypes.push_back(MemRefType::get({argsNumber + 1}, rewriter.getI32Type()));
     }
 
     auto createInvocationOp = torq_hl::CreateInvocationOp::create(
@@ -147,15 +159,10 @@ lowerCallProgramOp(RewriterBase &rewriter, torq_hl::CallProgramOp callOp, Value 
 
     SmallVector<Value> startOpCodeSections;
     if (executor == torq_hl::Executor::CSS) {
-        if (sharedItcmCode) {
-            startOpCodeSections.push_back(sharedItcmCode);
-        }
-        else {
-            auto code = cast<TypedValue<MemRefType>>(createInvocationOp.getCodeSections()[0]);
-            startOpCodeSections.push_back(stageCssCodeSection(rewriter, callOp.getLoc(), code));
-        }
+        assert(sharedItcmCode && "CSS call requires staged ITCM code");
+        startOpCodeSections.push_back(sharedItcmCode);
 
-        auto argsAddresses = cast<TypedValue<MemRefType>>(createInvocationOp.getCodeSections()[1]);
+        auto argsAddresses = cast<TypedValue<MemRefType>>(createInvocationOp.getCodeSections()[0]);
         startOpCodeSections.push_back(
             stageCssArgsAddressesSection(rewriter, callOp.getLoc(), argsAddresses)
         );
@@ -177,14 +184,15 @@ lowerCallProgramOp(RewriterBase &rewriter, torq_hl::CallProgramOp callOp, Value 
 }
 
 // Lowers each call_program at its own site. For CSS calls, the program's code
+// memref is the single torq_hl.program_code value at the function entry, and its
 // staging (XRAM->LRAM->ITCM copy) is hoisted to the smallest enclosing point
 // that still covers every clone produced by later UnrollForallLoops -- the
 // outermost scf.forall ancestor if any, otherwise the call site itself -- and
 // cached, so the cloned start_program ops all reference the same ITCM
 // allocation. The CSS program then stays at ITCM offset 0 (its binary is
-// linked assuming offset 0). The cache key is the ImportProgramOp; in
-// practice AssignOperationsToCpuPrograms assigns a unique program id per
-// outlined op, so each CSS import is referenced by exactly one call_program.
+// linked assuming offset 0). The cache is keyed on the program symbol, so even
+// if the same program is imported by more than one import_program op the code
+// is projected (program_code) and staged into ITCM exactly once.
 //
 // Staying at the smallest necessary scope keeps the ITCM allocation's
 // lifetime short, so when two different CSS programs run sequentially in the
@@ -192,10 +200,8 @@ lowerCallProgramOp(RewriterBase &rewriter, torq_hl::CallProgramOp callOp, Value 
 // of being placed side-by-side. See synaptics-torq/torq-compiler-dev#1615.
 class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
   public:
-    CallProgramPattern(
-        MLIRContext *ctx, llvm::DenseMap<torq_hl::ImportProgramOp, Value> &cssCodeCache
-    )
-        : OpRewritePattern(ctx), cssCodeCache(cssCodeCache) {}
+    CallProgramPattern(MLIRContext *ctx, llvm::DenseMap<StringAttr, Value> &itcmCodeCache)
+        : OpRewritePattern(ctx), itcmCodeCache(itcmCodeCache) {}
 
     LogicalResult
     matchAndRewrite(torq_hl::CallProgramOp callOp, PatternRewriter &rewriter) const override {
@@ -207,11 +213,29 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
 
         Value sharedItcmCode;
         if (importOp.getType().getExecutor() == torq_hl::Executor::CSS) {
-            auto it = cssCodeCache.find(importOp);
-            if (it != cssCodeCache.end()) {
+
+            // Reusing the cached ITCM staging across call sites assumes the
+            // cached value dominates this call. That holds today because the
+            // function body is a single flat block (the staging is hoisted to a
+            // function-entry import or an enclosing scf.forall). If multi-block
+            // function bodies are ever introduced here, this needs a dominance
+            // check before reuse to avoid producing use-before-def IR.
+            //
+            // The cache miss path runs exactly once per program symbol, so the
+            // program_code projection is created there too: one program_code op
+            // per program, hence a single XRAM placement, without a second cache.
+            StringAttr programSymbol = importOp.getNameAttr().getAttr();
+            auto it = itcmCodeCache.find(programSymbol);
+            if (it != itcmCodeCache.end()) {
                 sharedItcmCode = it->second;
             }
             else {
+                auto maybeProgramCode = createProgramCode(rewriter, importOp);
+                if (failed(maybeProgramCode)) {
+                    return failure();
+                }
+                Value programCode = *maybeProgramCode;
+
                 // Pick the outermost scf.forall ancestor of the call (within
                 // the parent function); if there isn't one, hoist no further
                 // than the call site. This keeps the ITCM allocation alive
@@ -225,26 +249,11 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
                 }
                 rewriter.setInsertionPoint(hoistAnchor);
 
-                // Materialize a CreateInvocationOp at the hoist point solely to
-                // obtain an SSA value for the code section memref; the per-call
-                // invocation and args section are emitted in lowerCallProgramOp.
-                // The invocation and args-addresses results of this hoisted op
-                // are unused.
-                int64_t argsNumber = callOp.getInputs().size() + callOp.getInits().size();
-                auto maybeTypes = resolveCssInvocationResultTypes(rewriter, importOp, argsNumber);
-                if (failed(maybeTypes)) {
-                    return failure();
-                }
-
-                auto hoistedInvocationOp = torq_hl::CreateInvocationOp::create(
-                    rewriter, hoistAnchor->getLoc(), *maybeTypes, importOp.getName(),
-                    importOp.getResult(), nullptr, nullptr, nullptr, nullptr
+                sharedItcmCode = stageCssCodeSection(
+                    rewriter, hoistAnchor->getLoc(), cast<TypedValue<MemRefType>>(programCode)
                 );
 
-                auto code = cast<TypedValue<MemRefType>>(hoistedInvocationOp.getCodeSections()[0]);
-                sharedItcmCode = stageCssCodeSection(rewriter, hoistAnchor->getLoc(), code);
-
-                cssCodeCache.try_emplace(importOp, sharedItcmCode);
+                itcmCodeCache.try_emplace(programSymbol, sharedItcmCode);
             }
         }
 
@@ -252,7 +261,7 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
     }
 
   private:
-    llvm::DenseMap<torq_hl::ImportProgramOp, Value> &cssCodeCache;
+    llvm::DenseMap<StringAttr, Value> &itcmCodeCache;
 };
 
 class LowerCallProgramToStartWaitPass
@@ -266,10 +275,10 @@ class LowerCallProgramToStartWaitPass
 
 void LowerCallProgramToStartWaitPass::runOnOperation() {
     MLIRContext *ctx = &getContext();
-    llvm::DenseMap<torq_hl::ImportProgramOp, Value> cssCodeCache;
+    llvm::DenseMap<StringAttr, Value> itcmCodeCache;
 
     RewritePatternSet patterns(ctx);
-    patterns.add<CallProgramPattern>(ctx, cssCodeCache);
+    patterns.add<CallProgramPattern>(ctx, itcmCodeCache);
 
     walkAndApplyPatterns(getOperation(), std::move(patterns));
 }

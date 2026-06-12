@@ -653,5 +653,14 @@ LogicalResult mlir::syna::torq_hl::StartProgramOp::verify() {
     return success();
 }
 
+LogicalResult mlir::syna::torq_hl::ProgramCodeOp::verify() {
+
+    if (getProgram().getType().getExecutor() != Executor::CSS) {
+        return emitOpError("only CSS programs have a position-independent shared code section");
+    }
+
+    return success();
+}
+
 #define GET_OP_CLASSES
 #include "torq/Dialect/TorqHL/TorqHLOps.cpp.inc"

@@ -115,6 +115,8 @@ class Serializer {
 
     LogicalResult serializeCssInvocation(torq_hl::CreateInvocationOp &op);
 
+    LogicalResult serializeProgramCode(torq_hl::ProgramCodeOp op);
+
     LogicalResult serializeHostInvocation(torq_hl::CreateInvocationOp &op);
 
     FailureOr<flatbuffers_uint8_vec_ref_t> serializeHostCode(mlir::FunctionOpInterface funcOp);
@@ -476,17 +478,16 @@ LogicalResult Serializer::addUninitializedSegment(uint32_t xramAddress, int size
     return success();
 }
 
-LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &createInvocationOp) {
+// Serialize the program binary into XRAM once per program. The code section is
+// shared across all invocations via torq_hl.program_code, so the binary is
+// emitted here rather than per invocation. See
+// synaptics-torq/torq-compiler-dev#1615.
+LogicalResult Serializer::serializeProgramCode(torq_hl::ProgramCodeOp programCodeOp) {
 
-    if (createInvocationOp.getCodeSections().size() != 2) {
-        return createInvocationOp->emitOpError("Expected exactly two code section for CSS program");
-    }
-
-    // add a section with the code for the CSS call
-    auto cssProgram = createInvocationOp.getProgram().getDefiningOp<torq_hl::ImportProgramOp>();
+    auto cssProgram = programCodeOp.getProgram().getDefiningOp<torq_hl::ImportProgramOp>();
 
     if (!cssProgram) {
-        return createInvocationOp->emitOpError("program is not a torq_hl::CSSProgramOp");
+        return programCodeOp->emitOpError("program is not a torq_hl::ImportProgramOp");
     }
 
     auto cssExecutable =
@@ -508,28 +509,49 @@ LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &cr
                << "Executable binary css_task in " << cssExecutable.getName() << " not found";
     }
 
-    auto xramAddress = getXramAddress(createInvocationOp.getCodeSections()[0], 0);
+    auto xramAddress = getXramAddress(programCodeOp.getCode(), 0);
 
     if (!xramAddress) {
-        return createInvocationOp.emitError() << "Missing xram address for code section #0";
+        return programCodeOp.emitError() << "Missing xram address for program code";
     }
 
     auto text = executableBinaryOp.getData();
 
-    if (auto textAttr = dyn_cast<DenseIntOrFPElementsAttr>(text)) {
-        LLVM_DEBUG({
-            llvm::dbgs() << "*** CSS text: size = " << textAttr.getRawData().size() << " ***\n";
-        });
-
-        if (failed(addSegment(xramAddress.value(), textAttr, true))) {
-            return failure();
-        }
-    }
-    else {
-        return createInvocationOp.emitError() << "CSS text is not a DenseElementsAttr";
+    auto textAttr = dyn_cast<DenseIntOrFPElementsAttr>(text);
+    if (!textAttr) {
+        return programCodeOp.emitError() << "CSS text is not a DenseElementsAttr";
     }
 
-    // add a segment with the arguments of the CSS call
+    // The program_code memref type is derived from the binary at lowering time and
+    // drives the XRAM reservation; make sure the binary we serialize here still
+    // matches it, so a recompiled/resized binary can never overrun its reservation.
+    auto codeType = mlir::cast<ShapedType>(programCodeOp.getCode().getType());
+    int64_t reservedBytes = getEncodedTotalSizeBytes(codeType);
+    int64_t actualBytes = textAttr.getRawData().size();
+    if (reservedBytes != actualBytes) {
+        return programCodeOp.emitError()
+               << "CSS binary size (" << actualBytes << " bytes) does not match the program_code "
+               << "memref size (" << reservedBytes << " bytes)";
+    }
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "*** CSS text: size = " << textAttr.getRawData().size() << " ***\n";
+    });
+
+    return addSegment(xramAddress.value(), textAttr, true);
+}
+
+LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &createInvocationOp) {
+
+    if (createInvocationOp.getCodeSections().size() != 1) {
+        return createInvocationOp->emitOpError(
+            "Expected exactly one code section (args-addresses) for CSS program"
+        );
+    }
+
+    // The program binary is shared via torq_hl.program_code and serialized once
+    // per program in serializeProgramCode; here we only emit the per-invocation
+    // arguments segment.
 
     SmallVector<uint32_t> args;
 
@@ -567,10 +589,10 @@ LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &cr
     auto argsAttr =
         DenseIntElementsAttr::get(argsType, llvm::ArrayRef<uint32_t>(args.data(), args.size()));
 
-    auto argsXramAddress = getXramAddress(createInvocationOp.getCodeSections()[1], 0);
+    auto argsXramAddress = getXramAddress(createInvocationOp.getCodeSections()[0], 0);
 
     if (!argsXramAddress) {
-        return createInvocationOp.emitError() << "Missing xram address for code section #1";
+        return createInvocationOp.emitError() << "Missing xram address for args section";
     }
 
     LLVM_DEBUG({
@@ -930,8 +952,8 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
 
         if (isa<torq_hl::ProgramOp, torq_hl::CreateInvocationOp, torq_hl::ConstOp,
                 torq_hl::DescriptorOp, torq_hl::MapBindingOp, func::ReturnOp,
-                torq_hl::ImportProgramOp, torq_hl::GetBlockOp, torq_hw::DispatchProfilingOp,
-                memref::GetGlobalOp>(op) ||
+                torq_hl::ImportProgramOp, torq_hl::ProgramCodeOp, torq_hl::GetBlockOp,
+                torq_hw::DispatchProfilingOp, memref::GetGlobalOp>(op) ||
             isDerivedMemRefOperation(&op)) {
             continue; // skip these ops
         }
@@ -1185,6 +1207,19 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
 LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
 
     LLVM_DEBUG({ llvm::dbgs() << "---- serializing programs\n"; });
+    // Walk the whole body (not just top-level ops): a program_code is expected at
+    // function entry, but walking ensures a nested one is never silently skipped,
+    // which would drop its binary from XRAM. serializeProgramCode then fails loudly
+    // if such an op lacks an assigned XRAM address.
+    if (funcOp
+            .walk([&](torq_hl::ProgramCodeOp op) {
+                return failed(serializeProgramCode(op)) ? WalkResult::interrupt()
+                                                        : WalkResult::advance();
+            })
+            .wasInterrupted()) {
+        return failure();
+    }
+
     for (auto op : funcOp.getFunctionBody().getOps<torq_hl::CreateInvocationOp>()) {
         if (failed(serializeInvocation(op))) {
             return failure();

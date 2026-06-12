@@ -435,6 +435,20 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
 
             createInvocationOp.setXramCodeAddresses(addresses);
         }
+        else if (auto programCodeOp = dyn_cast<syna::torq_hl::ProgramCodeOp>(op)) {
+
+            // The program code is shared across all invocations of the program, so
+            // it is placed in XRAM exactly once here.
+            auto type = mlir::cast<MemRefType>(programCodeOp.getCode().getType());
+
+            setXramAddress(&op, startAddress);
+
+            startAddress = align_ceil(startAddress + getEncodedTotalSizeBytes(type), 4);
+
+            if (startAddress > HwInfo::xram_size) {
+                return programCodeOp.emitError("XRAM size exceeded while assigning addresses");
+            }
+        }
         else if (isa<syna::torq_hl::ConstOp>(op)) {
 
             assert(op.getNumResults() == 1 && "Expected a single result for alloc-like operations");
@@ -517,6 +531,24 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
     }
 
     reserveXramArea(funcOp, bindingBase);
+
+    // The body pass above only visits top-level ops, which is where program_code
+    // is expected to live. Guard against a nested program_code silently missing an
+    // XRAM address (which would later drop its binary from the serialized output).
+    if (funcOp
+            .walk([&](syna::torq_hl::ProgramCodeOp programCodeOp) {
+                if (!getXramAddress(programCodeOp.getOperation())) {
+                    programCodeOp.emitError(
+                        "program_code must be at the function-body top level to be "
+                        "assigned an XRAM address"
+                    );
+                    return WalkResult::interrupt();
+                }
+                return WalkResult::advance();
+            })
+            .wasInterrupted()) {
+        return failure();
+    }
 
     return success();
 }
