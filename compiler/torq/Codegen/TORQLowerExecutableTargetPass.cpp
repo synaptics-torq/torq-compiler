@@ -285,6 +285,8 @@ void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
         // create NSS programs with all the NSS instructions
         funcPm.addPass(createOutlineNSSProgramsPass());
 
+        funcPm.addPass(createCanonicalizerPass());
+
         // segment the NSS programs in small blocks that fit the NSS block size
         funcPm.addPass(createSegmentNSSProgramsPass());
 

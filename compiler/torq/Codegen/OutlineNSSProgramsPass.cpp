@@ -22,6 +22,8 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/Debug.h"
 
+#include <deque>
+
 #define DEBUG_TYPE "torq-segment-nss-program"
 
 static llvm::cl::opt<int> clNssTaskSize(
@@ -70,25 +72,15 @@ static bool isNssOperation(Operation &op) {
 
         return executor == torq_hl::Executor::Slice || executor == torq_hl::Executor::CSS;
     }
-    else if (isDerivedMemRefOperation(&op)) {
-        auto memRefType = mlir::cast<MemRefType>(op.getResult(0).getType());
-        return isNssManagedMemory(memRefType);
-    }
     else if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
-        return isNssManagedMemory(allocOp.getResult().getType());
+        assert(false && "alloc operations should have been converted at this point");
     }
     else if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
-        return isNssManagedMemory(deallocOp.getMemref().getType());
+        assert(false && "alloc operations should have been converted at this point");
     }
     else if (auto copyOp = dyn_cast<memref::CopyOp>(op)) {
         return isNssManagedMemory(copyOp.getSource().getType()) ||
                isNssManagedMemory(copyOp.getTarget().getType());
-    }
-    else if (auto getGlobalOp = dyn_cast<memref::GetGlobalOp>(op)) {
-        // get_global for NSS memory are going to be outlined in the NSS programs
-        // other get_global are kept in the main program (may be used by
-        //  host_copy and host_programs only)
-        return isNssManagedMemory(getGlobalOp.getType());
     }
 
     return false;
@@ -124,8 +116,28 @@ static int getOperationSize(Operation *op) {
     return 1;
 }
 
-static SmallVector<SmallVector<Operation *>> findPrograms(FunctionOpInterface funcOp) {
-    SmallVector<SmallVector<Operation *>> nssProgramsOps;
+struct NssProgramOutliningInfo {
+    // all NSS operations we want to outline together in the same program
+    SmallVector<Operation *> nssProgramOps;
+
+    // all outputs of the program (outputs of nssProgramOps that are used outside the program)
+    SmallVector<Value> programOutputs;
+
+    // all the inputs of the program (operands of nssProgramOps that are defined outside the program
+    // and not defined by inlinedInputsOps)
+    SmallVector<Value> programInputs;
+
+    // all the operations producing inputs required by nssProgramOps that we want to inline in the
+    // NSS program
+    SmallVector<Operation *> inlinedInputsOps;
+
+    // all operations we want to outline together in the same program (nssProgramOps +
+    // inlinedInputsOps)
+    SmallVector<Operation *> outlinedOps;
+};
+
+static SmallVector<NssProgramOutliningInfo, 0> findPrograms(FunctionOpInterface funcOp) {
+    SmallVector<NssProgramOutliningInfo, 0> outliningInfo;
 
     bool createNewProgram = true;
     int programSize = 0;
@@ -153,7 +165,7 @@ static SmallVector<SmallVector<Operation *>> findPrograms(FunctionOpInterface fu
         // if we need to break or the operation doesn't fit in the current program, start a new one
         if (createNewProgram ||
             (clNssTaskSize > 0 && programSize + operationSize > maxProgramSize)) {
-            nssProgramsOps.push_back({});
+            outliningInfo.push_back({});
             createNewProgram = false;
             programSize = 0;
         }
@@ -161,14 +173,182 @@ static SmallVector<SmallVector<Operation *>> findPrograms(FunctionOpInterface fu
         programSize += operationSize;
 
         // add the operation to the current program
-        nssProgramsOps.back().push_back(&op);
+        outliningInfo.back().nssProgramOps.push_back(&op);
     }
 
-    return nssProgramsOps;
+    return outliningInfo;
+}
+
+static DenseSet<Value> getNssProgramInputs(SmallVector<Operation *> programOps) {
+    // find all the values used by the program that are defined outside the program
+    DenseSet<Value> programValues;
+    DenseSet<Value> inputs;
+
+    for (Operation *op : programOps) {
+        op->walk([&](Operation *nestedOp) {
+            for (Value result : nestedOp->getResults()) {
+                programValues.insert(result);
+            }
+
+            for (Value operand : nestedOp->getOperands()) {
+                if (!programValues.contains(operand)) {
+                    inputs.insert(operand);
+                }
+            }
+        });
+    }
+
+    return inputs;
+}
+
+static SetVector<Operation *>
+getInlineableOperations(SmallVector<Value> inputs, DenseSet<Value> &inlineableInputs) {
+
+    // these are the operations we can inline, in topological order
+    SetVector<Operation *> inlineableOperations;
+    DenseSet<Operation *> visited;
+
+    std::deque<Operation *> worklist;
+
+    DenseSet<Value> originalInputs(inputs.begin(), inputs.end());
+
+    // add all defining operations of any input to the worklist to start the traversal
+    for (auto input : inputs) {
+        auto definingOp = input.getDefiningOp();
+
+        // if the input doesn't have a defining operation, it means it's a block argument
+        // block arguments are not inlineable, so we skip it
+        if (!definingOp) {
+            continue;
+        }
+
+        worklist.push_back(definingOp);
+    }
+
+    while (!worklist.empty()) {
+
+        Operation *op = worklist.front();
+        worklist.pop_front();
+
+        if (visited.contains(op)) {
+            continue;
+        }
+
+        bool inlined = false;
+
+        // get_global operations can be inlined
+        if (isa<memref::GetGlobalOp>(op)) {
+
+            inlineableOperations.insert(op);
+            inlined = true;
+        }
+        else if (isDerivedMemRefOperation(op)) {
+
+            bool allVisitedOperandsInlineable = true;
+            bool anyOperandNotVisited = false;
+
+            for (Value operand : op->getOperands()) {
+
+                auto operandDefiningOp = operand.getDefiningOp();
+
+                if (!operandDefiningOp) {
+                    // if the operand doesn't have a defining operation, it means it's a block
+                    // argument block arguments are not inlineable, so we consider this operand not
+                    // inlineable and break
+                    allVisitedOperandsInlineable = false;
+
+                    break;
+                }
+                // we don't have the info on the operand defining operation yet, so we schedule it
+                // to be visited
+                else if (!visited.contains(operandDefiningOp)) {
+                    worklist.push_back(operandDefiningOp);
+                    anyOperandNotVisited = true;
+                }
+                // if the operand defining operation is not inlineable, we consider this operation
+                // not inlineable
+                else if (!inlineableOperations.contains(operandDefiningOp)) {
+                    allVisitedOperandsInlineable = false;
+                    break;
+                }
+            }
+
+            // if we have any operand that is not visited, we cannot consider the
+            // input inlineable yet, we need to wait for visiting all its operands first
+            // if we found any non inlineable operand we consider this input
+            // not inlineable
+            if (anyOperandNotVisited && allVisitedOperandsInlineable) {
+                worklist.push_back(op);
+                continue;
+            }
+
+            // if all the operands are inlineable, we can inline this operation as well
+            if (allVisitedOperandsInlineable) {
+                inlineableOperations.insert(op);
+                inlined = true;
+            }
+        }
+
+        if (inlined) {
+            for (Value result : op->getResults()) {
+                if (originalInputs.contains(result)) {
+                    inlineableInputs.insert(result);
+                }
+            }
+        }
+
+        visited.insert(op);
+    }
+
+    return inlineableOperations;
+}
+
+static SmallVector<NssProgramOutliningInfo, 0> createNSSOutliningInfo(FunctionOpInterface funcOp) {
+
+    // find the operations we want to put in different NSS programs
+    auto outliningInfo = findPrograms(funcOp);
+
+    for (auto &programInfo : outliningInfo) {
+
+        auto outlinedOpsWithNested = getOutlinedOps(programInfo.nssProgramOps);
+
+        // find all inputs to the program
+        auto inputs = getOutlineOpsInputs(programInfo.nssProgramOps, outlinedOpsWithNested);
+
+        // find all outputs of the program
+        programInfo.programOutputs =
+            getOutlineOpsOutputs(programInfo.nssProgramOps, outlinedOpsWithNested);
+
+        // find all operations producing inputs that can be inlined
+        DenseSet<Value> inlineableInputs;
+        auto inlineableOperations = getInlineableOperations(inputs, inlineableInputs);
+        programInfo.inlinedInputsOps.append(
+            inlineableOperations.begin(), inlineableOperations.end()
+        );
+
+        // put togheter all the operation we need to outline in the same program (first the inlined
+        // input operations, then the program operations to make sure all the inputs are defined
+        // before being used)
+        programInfo.outlinedOps.append(
+            programInfo.inlinedInputsOps.begin(), programInfo.inlinedInputsOps.end()
+        );
+        programInfo.outlinedOps.append(
+            programInfo.nssProgramOps.begin(), programInfo.nssProgramOps.end()
+        );
+
+        // collect all the inputs to the program that we couldn't inline
+        for (Value input : inputs) {
+            if (!inlineableInputs.contains(input)) {
+                programInfo.programInputs.push_back(input);
+            }
+        }
+    }
+
+    return outliningInfo;
 }
 
 static FailureOr<torq_hl::StartProgramOp> outlineOperations(
-    int index, OpBuilder &builder, Operation *funcOp, SmallVector<Operation *> &programOps,
+    int index, OpBuilder &builder, Operation *funcOp, NssProgramOutliningInfo outliningInfo,
     Value &lramProgramAlloc, Value &lramNextProgramAlloc,
     torq_hl::StartProgramOp previousInvocationStart
 ) {
@@ -183,9 +363,16 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
         builder.setInsertionPoint(previousInvocationStart);
     }
 
+    SmallVector<Operation *> opsToOutline;
+    opsToOutline.append(
+        outliningInfo.inlinedInputsOps.begin(), outliningInfo.inlinedInputsOps.end()
+    );
+    opsToOutline.append(outliningInfo.nssProgramOps.begin(), outliningInfo.nssProgramOps.end());
+
     auto maybeOutliningResults = outlineProgram(
         builder, std::string("nss_program_") + std::to_string(index), torq_hl::Executor::NSS,
-        programOps, /*destinationStyle=*/false
+        opsToOutline, /*destinationStyle=*/false, outliningInfo.programInputs,
+        outliningInfo.programOutputs
     );
 
     if (failed(maybeOutliningResults)) {
@@ -214,7 +401,7 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
 
     // Use programOp's location if known
     Location loc = programOp->getLoc();
-    if (mlir::isa<mlir::UnknownLoc>(loc) && programOps.empty()) {
+    if (mlir::isa<mlir::UnknownLoc>(loc) && outliningInfo.nssProgramOps.empty()) {
         // fall back to func op's loc if the program op is unknown
         // This can happen for very first program which only includes the host copy
         loc = funcOp->getLoc();
@@ -278,8 +465,8 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
         );
     }
 
-    if (!programOps.empty()) {
-        builder.setInsertionPoint(programOps.front());
+    if (!outliningInfo.nssProgramOps.empty()) {
+        builder.setInsertionPoint(outliningInfo.nssProgramOps.front());
     }
 
     // add the start and wait operations
@@ -330,7 +517,7 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
     }
 
     // erase the original operations that have been outlined
-    for (auto op : llvm::reverse(programOps)) {
+    for (auto op : llvm::reverse(outliningInfo.nssProgramOps)) {
         op->erase();
     }
 
@@ -398,13 +585,13 @@ void OutlineNSSProgramsPass::runOnOperation() {
     moveDeclarationsToBeginning(funcOp, builder);
 
     // find operations we want to outline into NSS programs
-    auto nssProgramsOps = findPrograms(funcOp);
+    auto nssProgramsOps = createNSSOutliningInfo(funcOp);
 
     // add an empty program at the beginning that will be
     // uploaded via host_copy and will be used to DMA the
     // first program (which is more efficient)
     if (!nssProgramsOps.empty()) {
-        nssProgramsOps.insert(nssProgramsOps.begin(), SmallVector<Operation *>{});
+        nssProgramsOps.insert(nssProgramsOps.begin(), NssProgramOutliningInfo{});
     }
 
     // create the two allocations used to load programs (current program and next program)

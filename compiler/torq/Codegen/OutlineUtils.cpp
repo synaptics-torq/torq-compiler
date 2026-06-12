@@ -23,7 +23,7 @@ using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
-static DenseSet<Operation *> getAllOpsIncludingNested(const SmallVector<Operation *> &targets) {
+DenseSet<Operation *> getOutlinedOps(const SmallVector<Operation *> &targets) {
     DenseSet<Operation *> opsSet(targets.begin(), targets.end());
 
     for (auto op : targets) {
@@ -33,7 +33,7 @@ static DenseSet<Operation *> getAllOpsIncludingNested(const SmallVector<Operatio
     return opsSet;
 }
 
-static SmallVector<Value> getOutputs(
+SmallVector<Value> getOutlineOpsOutputs(
     const SmallVector<Operation *> &targets, const DenseSet<Operation *> &targetsWithNested
 ) {
     SmallVector<Value> outputs;
@@ -60,8 +60,9 @@ static SmallVector<Value> getOutputs(
     return outputs;
 }
 
-static SmallVector<Value>
-getInputs(const SmallVector<Operation *> &targets, const DenseSet<Operation *> &targetsWithNested) {
+SmallVector<Value> getOutlineOpsInputs(
+    const SmallVector<Operation *> &targets, const DenseSet<Operation *> &targetsWithNested
+) {
 
     SmallVector<Value> inputs;
 
@@ -209,6 +210,24 @@ FailureOr<OutliningResults> outlineProgram(
     OpBuilder &builder, std::string name, torq_hl::Executor executor,
     const SmallVector<Operation *> &targets, bool destinationStyle
 ) {
+
+    // create a set to help finding which ops we are outlining
+    auto targetsWithNested = getOutlinedOps(targets);
+
+    // find all the outputs of the outlined function
+    auto outputs = getOutlineOpsOutputs(targets, targetsWithNested);
+
+    // find all inputs of the outlined function
+    auto inputs = getOutlineOpsInputs(targets, targetsWithNested);
+
+    return outlineProgram(builder, name, executor, targets, destinationStyle, inputs, outputs);
+}
+
+FailureOr<OutliningResults> outlineProgram(
+    OpBuilder &builder, std::string name, torq_hl::Executor executor,
+    const SmallVector<Operation *> &targets, bool destinationStyle,
+    const SmallVector<Value> &inputs, const SmallVector<Value> &outputs
+) {
     auto loc = builder.getUnknownLoc();
 
     // Try to find a non-unknown location from targets
@@ -228,15 +247,6 @@ FailureOr<OutliningResults> outlineProgram(
             op->dump();
         }
     });
-
-    // create a set to help finding which ops we are outlining
-    auto targetsWithNested = getAllOpsIncludingNested(targets);
-
-    // find all the outputs of the outlined function
-    auto outputs = getOutputs(targets, targetsWithNested);
-
-    // find all inputs of the outlined function
-    auto inputs = getInputs(targets, targetsWithNested);
 
     // try to find all inputs that can be used as init of the outputs
     DenseMap<Value, Value> outputToInputs;
