@@ -52,7 +52,7 @@ static LogicalResult updateCreateInvocation(
     // in case the invocation is a argument of the current program
     // get the actual invocation value that was passed to the current
     // program (this is outside the current program)
-    auto invocationValue = mapping.lookup(startProgramOp.getInvocation());
+    auto invocationValue = cast<InvocationValue>(mapping.lookup(startProgramOp.getInvocation()));
 
     // get the create_invocation operation that created this invocation
     auto createInvocationOp = invocationValue.getDefiningOp<torq_hl::CreateInvocationOp>();
@@ -82,6 +82,8 @@ static LogicalResult updateCreateInvocation(
 
     // update the address for all the arguments
     SmallVector<Attribute> argAttrs;
+
+    AddressCache cache;
 
     for (auto [idx, arg] : llvm::enumerate(startProgramOp.getArgs())) {
 
@@ -134,7 +136,7 @@ static LogicalResult updateCreateInvocation(
         }
         else if (auto memRefArg = dyn_cast<TypedValue<MemRefType>>(argValue)) {
 
-            auto maybeStartAddress = getDataStartAddress(argValue, 0);
+            auto maybeStartAddress = getDataStartAddress(argValue, 0, nullptr, &cache);
 
             if (!maybeStartAddress) {
                 return startProgramOp.emitError()
@@ -165,9 +167,10 @@ static LogicalResult updateWait(
 ) {
 
     SmallVector<int64_t> executorArgsAddresses;
+    AddressCache cache;
     for (auto returnValue : returnValues) {
 
-        auto returnValueAddress = getAddress(returnValue, 0);
+        auto returnValueAddress = getAddress(returnValue, 0, nullptr, &cache);
 
         if (returnValueAddress) {
             executorArgsAddresses.push_back(*returnValueAddress);
@@ -191,6 +194,14 @@ void ResolveInvocationArgumentsPass::runOnOperation() {
     // and we know the actual addresses of the arguments and code sections
     options.onStart = updateCreateInvocation;
     options.onFinish = updateWait;
+
+    // Only recurse into NSS programs. CSS/Slice/Host programs are always
+    // leaf programs — guaranteed by the program lowering pass which ensures
+    // non-NSS executors never contain nested StartProgramOp/WaitProgramOp pairs.
+    options.walkInto = [&](torq_hl::StartProgramOp startProgramOp, InvocationValue invocation,
+                           const mlir::IRMapping &) {
+        return startProgramOp.getInvocation().getType().getExecutor() == torq_hl::Executor::NSS;
+    };
 
     if (failed(walkExecution(funcOp, options))) {
         return signalPassFailure();

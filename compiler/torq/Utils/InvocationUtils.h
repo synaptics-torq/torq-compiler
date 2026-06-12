@@ -23,6 +23,12 @@ struct WalkExecutionOptions {
         onFinish;
 
     // an operation is executed in a given invocation
+    // onExecute receives the current mapping. The mapping contains:
+    //   - block arguments (mapped via NextOp)
+    //   - wait program / return op results
+    //   - all intermediate op results (mapped during walk)
+    // Callbacks should use mapping.lookup() — missing keys indicate a bug
+    // in walkExecution and will trigger an assertion failure.
     std::function<LogicalResult(Operation *, InvocationValue, const IRMapping &)> onExecute;
 };
 
@@ -48,20 +54,27 @@ FailureOr<Value> getInvocationArgument(InvocationValue invocation, BlockArgument
 // Returns the executor id for the given invocation when evaluated within the contextInvocation
 std::optional<int64_t> getExecutorId(InvocationValue invocation, InvocationValue contextInvocation);
 
+// All queries within one cache lifetime share the same invocation context.
+using AddressCache = DenseMap<Value, std::optional<int64_t>>;
+
 // Returns the address of the given value when it is accesses within the given program invocation
-std::optional<int64_t>
-getAddress(Value value, int64_t offset = 0, InvocationValue invocation = nullptr);
+std::optional<int64_t> getAddress(
+    Value value, int64_t offset = 0, InvocationValue invocation = nullptr,
+    AddressCache *cache = nullptr
+);
 
 // Returns the address of the first byte of the given value (this is the base address plus the
 // offset in the layout), the optional invocation parameter can be used to resolve the address
 // within the given invocation context
-std::optional<int64_t>
-getDataStartAddress(Value value, int64_t offset = 0, InvocationValue invocationContext = nullptr);
+std::optional<int64_t> getDataStartAddress(
+    Value value, int64_t offset = 0, InvocationValue invocationContext = nullptr,
+    AddressCache *cache = nullptr
+);
 
 // return the address of the first entry of a memref as seen by the executor, if it is accessible
 std::optional<int64_t> getExecutorDataStartAddress(
     torq_hl::Executor executor, Value value, int64_t offset = 0,
-    InvocationValue invocation = nullptr
+    InvocationValue invocation = nullptr, AddressCache *cache = nullptr
 );
 
 } // namespace mlir::syna::torq

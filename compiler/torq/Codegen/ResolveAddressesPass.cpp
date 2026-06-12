@@ -18,10 +18,9 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
-
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #define DEBUG_TYPE "torq-resolve-addresses"
 
@@ -37,13 +36,14 @@ class ResolveAddressesPass : public impl::ResolveAddressesBase<ResolveAddressesP
     void runOnOperation() override;
 };
 
-static FailureOr<int64_t>
-getCdmaDataStartAddress(Value value, TypedValue<torq_hl::InvocationType> invocation) {
+static FailureOr<int64_t> getCdmaDataStartAddress(
+    Value value, TypedValue<torq_hl::InvocationType> invocation, AddressCache *cache
+) {
 
     auto memrefType = dyn_cast<MemRefType>(value.getType());
     auto memSpace = getEncodingMemorySpace(memrefType);
 
-    std::optional<int64_t> addr = getDataStartAddress(value, 0, invocation);
+    std::optional<int64_t> addr = getDataStartAddress(value, 0, invocation, cache);
 
     int64_t baseAddress = 0;
 
@@ -68,10 +68,11 @@ getCdmaDataStartAddress(Value value, TypedValue<torq_hl::InvocationType> invocat
     return baseAddress + addr.value();
 }
 
-static FailureOr<int64_t>
-getNdmaDataStartAddress(Value value, TypedValue<torq_hl::InvocationType> invocation) {
+static FailureOr<int64_t> getNdmaDataStartAddress(
+    Value value, TypedValue<torq_hl::InvocationType> invocation, AddressCache *cache
+) {
 
-    auto address = getDataStartAddress(value, 0, invocation);
+    auto address = getDataStartAddress(value, 0, invocation, cache);
 
     if (!address) {
         return failure();
@@ -80,180 +81,152 @@ getNdmaDataStartAddress(Value value, TypedValue<torq_hl::InvocationType> invocat
     return address.value();
 }
 
-template <typename OpT> class ResolveDmaCfg : public OpRewritePattern<OpT> {
-  public:
-    using OpRewritePattern<OpT>::OpRewritePattern;
-
-    LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override {
-
-        if (op.getReadAddressAttr() && op.getWriteAddressAttr()) {
-            return failure();
-        }
-
-        auto nssInvocation = getNssInvocation(op);
-
-        auto maybeReadAddress = getNdmaDataStartAddress(op.getRead(), nssInvocation);
-
-        if (failed(maybeReadAddress)) {
-            return op.emitError("unable to resolve read address of value of ") << op.getRead();
-        }
-
-        auto maybeWriteAddress = getNdmaDataStartAddress(op.getWrite(), nssInvocation);
-
-        if (failed(maybeWriteAddress)) {
-            return op.emitError("unable to resolve write address of ") << op.getWrite();
-        }
-
-        rewriter.modifyOpInPlace(op, [&]() {
-            op.setReadAddress(*maybeReadAddress);
-            op.setWriteAddress(*maybeWriteAddress);
-        });
-
+template <typename OpT> static LogicalResult resolveDmaCfg(OpT op, AddressCache *cache) {
+    if (op.getReadAddressAttr() && op.getWriteAddressAttr()) {
         return success();
     }
-};
 
-class ResolveCDMAStart : public OpRewritePattern<torq_hw::CDMAStartOp> {
-  public:
-    using OpRewritePattern<torq_hw::CDMAStartOp>::OpRewritePattern;
+    auto nssInvocation = getNssInvocation(op);
 
-    LogicalResult
-    matchAndRewrite(torq_hw::CDMAStartOp op, PatternRewriter &rewriter) const override {
+    auto maybeReadAddress = getNdmaDataStartAddress(op.getRead(), nssInvocation, cache);
 
-        if (op.getDestAddress() && op.getSrcAddress()) {
-            return failure();
-        }
+    if (failed(maybeReadAddress)) {
+        return op.emitError("unable to resolve read address of value of ") << op.getRead();
+    }
 
-        auto nssInvocation = getNssInvocation(op);
+    auto maybeWriteAddress = getNdmaDataStartAddress(op.getWrite(), nssInvocation, cache);
 
-        auto maybeSrcAddress = getCdmaDataStartAddress(op.getSrc(), nssInvocation);
+    if (failed(maybeWriteAddress)) {
+        return op.emitError("unable to resolve write address of ") << op.getWrite();
+    }
 
-        if (failed(maybeSrcAddress)) {
-            return op.emitError("unable to resolve src address");
-        }
+    op.setReadAddress(*maybeReadAddress);
+    op.setWriteAddress(*maybeWriteAddress);
 
-        auto maybeDestAddress = getCdmaDataStartAddress(op.getDest(), nssInvocation);
+    return success();
+}
 
-        if (failed(maybeDestAddress)) {
-            return op.emitError("unable to resolve dest address");
-        }
-
-        rewriter.modifyOpInPlace(op, [&]() {
-            op.setSrcAddress(*maybeSrcAddress);
-            op.setDestAddress(*maybeDestAddress);
-        });
-
+static LogicalResult resolveCDMAStart(torq_hw::CDMAStartOp op, AddressCache *cache) {
+    if (op.getDestAddress() && op.getSrcAddress()) {
         return success();
     }
-};
 
-class ResolveCSSStart : public OpRewritePattern<torq_hw::CSSStartOp> {
-  public:
-    using OpRewritePattern<torq_hw::CSSStartOp>::OpRewritePattern;
+    auto nssInvocation = getNssInvocation(op);
 
-    LogicalResult
-    matchAndRewrite(torq_hw::CSSStartOp op, PatternRewriter &rewriter) const override {
+    auto maybeSrcAddress = getCdmaDataStartAddress(op.getSrc(), nssInvocation, cache);
 
-        if (op.getProgramAddress() && op.getArgAddressesAddress()) {
-            return failure();
-        }
+    if (failed(maybeSrcAddress)) {
+        return op.emitError("unable to resolve src address");
+    }
 
-        auto nssInvocation = getNssInvocation(op);
+    auto maybeDestAddress = getCdmaDataStartAddress(op.getDest(), nssInvocation, cache);
 
-        auto maybeProgramAddress =
-            getExecutorDataStartAddress(torq_hl::Executor::CSS, op.getProgram(), 0, nssInvocation);
+    if (failed(maybeDestAddress)) {
+        return op.emitError("unable to resolve dest address");
+    }
 
-        if (!maybeProgramAddress) {
-            return op.emitError("unable to resolve program address");
-        }
+    op.setSrcAddress(*maybeSrcAddress);
+    op.setDestAddress(*maybeDestAddress);
 
-        auto maybeArgAddress = getExecutorDataStartAddress(
-            torq_hl::Executor::CSS, op.getArgsAddresses(), 0, nssInvocation
-        );
+    return success();
+}
 
-        if (!maybeArgAddress) {
-            return op.emitError("unable to resolve addresses buffer addresss");
-        }
-
-        rewriter.modifyOpInPlace(op, [&]() {
-            op.setProgramAddress(*maybeProgramAddress);
-            op.setArgAddressesAddress(*maybeArgAddress);
-        });
-
+static LogicalResult resolveCSSStart(torq_hw::CSSStartOp op, AddressCache *cache) {
+    if (op.getProgramAddress() && op.getArgAddressesAddress()) {
         return success();
     }
-};
 
-class ResolveSliceStart : public OpRewritePattern<torq_hw::SliceStartOp> {
-  public:
-    using OpRewritePattern<torq_hw::SliceStartOp>::OpRewritePattern;
+    auto nssInvocation = getNssInvocation(op);
 
-    LogicalResult
-    matchAndRewrite(torq_hw::SliceStartOp op, PatternRewriter &rewriter) const override {
+    auto maybeProgramAddress = getExecutorDataStartAddress(
+        torq_hl::Executor::CSS, op.getProgram(), 0, nssInvocation, cache
+    );
 
-        if (op.getProgramAddress()) {
-            return failure();
-        }
+    if (!maybeProgramAddress) {
+        return op.emitError("unable to resolve program address");
+    }
 
-        auto nssInvocation = getNssInvocation(op);
+    auto maybeArgAddress = getExecutorDataStartAddress(
+        torq_hl::Executor::CSS, op.getArgsAddresses(), 0, nssInvocation, cache
+    );
 
-        auto maybeProgramAddress = getExecutorDataStartAddress(
-            torq_hl::Executor::Slice, op.getProgram(), 0, nssInvocation
-        );
+    if (!maybeArgAddress) {
+        return op.emitError("unable to resolve addresses buffer addresss");
+    }
 
-        if (!maybeProgramAddress) {
-            return op.emitError("unable to resolve program address");
-        }
+    op.setProgramAddress(*maybeProgramAddress);
+    op.setArgAddressesAddress(*maybeArgAddress);
 
-        rewriter.modifyOpInPlace(op, [&]() { op.setProgramAddress(*maybeProgramAddress); });
+    return success();
+}
 
+static LogicalResult resolveSliceStart(torq_hw::SliceStartOp op, AddressCache *cache) {
+    if (op.getProgramAddress()) {
         return success();
     }
-};
 
-class ResolveNext : public OpRewritePattern<torq_hl::NextOp> {
-  public:
-    using OpRewritePattern<torq_hl::NextOp>::OpRewritePattern;
+    auto nssInvocation = getNssInvocation(op);
 
-    LogicalResult matchAndRewrite(torq_hl::NextOp op, PatternRewriter &rewriter) const override {
+    auto maybeProgramAddress = getExecutorDataStartAddress(
+        torq_hl::Executor::Slice, op.getProgram(), 0, nssInvocation, cache
+    );
 
-        if (op.getLramAddress()) {
-            return failure();
-        }
+    if (!maybeProgramAddress) {
+        return op.emitError("unable to resolve program address");
+    }
 
-        auto nssInvocation = getNssInvocation(op);
+    op.setProgramAddress(*maybeProgramAddress);
 
-        auto maybeProgramAddress =
-            getExecutorDataStartAddress(torq_hl::Executor::NSS, op.getLramArea(), 0, nssInvocation);
+    return success();
+}
 
-        if (!maybeProgramAddress) {
-            return op.emitError("unable to resolve lram area address");
-        }
-
-        rewriter.modifyOpInPlace(op, [&]() { op.setLramAddress(*maybeProgramAddress); });
-
+static LogicalResult resolveNext(torq_hl::NextOp op, AddressCache *cache) {
+    if (op.getLramAddress()) {
         return success();
     }
-};
+
+    auto nssInvocation = getNssInvocation(op);
+
+    auto maybeProgramAddress = getExecutorDataStartAddress(
+        torq_hl::Executor::NSS, op.getLramArea(), 0, nssInvocation, cache
+    );
+
+    if (!maybeProgramAddress) {
+        return op.emitError("unable to resolve lram area address");
+    }
+
+    op.setLramAddress(*maybeProgramAddress);
+
+    return success();
+}
 
 void ResolveAddressesPass::runOnOperation() {
     auto funcOp = getOperation();
 
-    MLIRContext *ctx = getOperation().getContext();
+    AddressCache cache;
+    LogicalResult result = success();
 
-    RewritePatternSet patterns(ctx);
+    auto walkResult = funcOp.walk([&](Operation *op) {
+        TypeSwitch<Operation *>(op)
+            .Case<torq_hw::DmaInCfgOp, torq_hw::DmaOutCfgOp>([&](auto dmaOp) {
+                result = resolveDmaCfg(dmaOp, &cache);
+            })
+            .Case<torq_hw::CDMAStartOp>([&](auto cdmaOp) {
+                result = resolveCDMAStart(cdmaOp, &cache);
+            })
+            .Case<torq_hw::CSSStartOp>([&](auto cssOp) { result = resolveCSSStart(cssOp, &cache); })
+            .Case<torq_hw::SliceStartOp>([&](auto sliceOp) {
+                result = resolveSliceStart(sliceOp, &cache);
+            })
+            .Case<torq_hl::NextOp>([&](auto nextOp) { result = resolveNext(nextOp, &cache); });
 
-    patterns.add<ResolveDmaCfg<torq_hw::DmaInCfgOp>>(ctx);
-    patterns.add<ResolveDmaCfg<torq_hw::DmaOutCfgOp>>(ctx);
-    patterns.add<ResolveCDMAStart>(ctx);
-    patterns.add<ResolveCSSStart>(ctx);
-    patterns.add<ResolveSliceStart>(ctx);
-    patterns.add<ResolveNext>(ctx);
+        if (failed(result))
+            return WalkResult::interrupt();
+        return WalkResult::advance();
+    });
 
-    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
-        funcOp.emitError("Failed to apply ResolveAddressesVisitor pattern");
-        signalPassFailure();
-    }
+    if (walkResult.wasInterrupted())
+        return signalPassFailure();
 }
 
 } // namespace
