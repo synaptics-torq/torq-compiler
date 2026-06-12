@@ -348,7 +348,7 @@ jobs:
           # precomputed_cache: ${{ env.GENERATE_STATUS_REPORT == 'true' && '' || needs.test_cmodel.outputs.s3_cache_path }}
 
           pytest_args: >
-            tests/test_tflite_mbv2.py
+            tests/test_tflite_mbv2.py tests/test_heterogeneous.py
             -m astra_machina_sl_ci -n auto 
             --torq-runtime-hw-type astra_machina
             --torq-runtime-timeout=20

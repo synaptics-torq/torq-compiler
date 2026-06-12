@@ -16,6 +16,8 @@ iree_cc_library(
     Passes.h.inc
   SRCS
     Passes.cpp
+    AnnotateLinalgAffinitiesPass.cpp
+    OutlineTorqDispatchesPass.cpp
     AnnotateTiedOperandsPass.cpp
     TypeConversionPasses.cpp
     FoldConstantsPass.cpp
@@ -49,6 +51,7 @@ iree_cc_library(
     MLIRTensorDialect
     MLIRTosaDialect
     MLIRTransformUtils
+    iree::compiler::Dialect::HAL::IR
     iree::compiler::Dialect::Util::IR
     iree::target::torq::Conversions::LinalgToTorqHL
     iree::target::torq::Utils

@@ -1778,41 +1778,43 @@ iree_status_t TorqExecutable::processAction(ns(HostAction_table_t) action) {
     auto params = ns(HostAction_params_get(action));
     auto paramsType = ns(HostAction_params_type(action));
 
+    iree_status_t result = iree_ok_status();
+
     switch (paramsType) {
 
       case ns(HostActionParams_HostCopyParams):
-        processHostCopyAction(action, (ns(HostCopyParams_table_t)) params);
+        result = processHostCopyAction(action, (ns(HostCopyParams_table_t)) params);
         break;
 
       case ns(HostActionParams_StartNSSParams):
-        processStartNSSAction(action, (ns(StartNSSParams_table_t)) params);
+        result = processStartNSSAction(action, (ns(StartNSSParams_table_t)) params);
         break;
 
       case ns(HostActionParams_WaitNSSParams):
-        processWaitNSSAction(action, (ns(WaitNSSParams_table_t)) params);
+        result = processWaitNSSAction(action, (ns(WaitNSSParams_table_t)) params);
         break;
       
       case ns(HostActionParams_AllocParams):
-        processAllocAction(action, (ns(AllocParams_table_t)) params);
+        result = processAllocAction(action, (ns(AllocParams_table_t)) params);
         break;
 
       case ns(HostActionParams_DeallocParams):
-        processDeallocAction(action, (ns(DeallocParams_table_t)) params);
+        result = processDeallocAction(action, (ns(DeallocParams_table_t)) params);
         break;
 
       case ns(HostActionParams_StartHostParams):
-        processStartHostAction(action, (ns(StartHostParams_table_t)) params);
+        result = processStartHostAction(action, (ns(StartHostParams_table_t)) params);
         break;
 
       case ns(HostActionParams_WaitHostParams):
-        processWaitHostAction(action, (ns(WaitHostParams_table_t)) params);
+        result = processWaitHostAction(action, (ns(WaitHostParams_table_t)) params);
         break;
 
       default:
         return iree_make_status(IREE_STATUS_UNIMPLEMENTED, "unknown host action type %d", paramsType);
     }
 
-    return iree_ok_status();
+    return result;
 
 }
 

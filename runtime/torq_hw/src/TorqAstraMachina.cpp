@@ -424,7 +424,10 @@ bool TorqAstraMachina::waitNetwork(uint32_t waitBits) {
 
     int ret = ioctl(_torqDevNode, TORQ_IOCTL_WAIT_NETWORK, &waitReq);
     if (ret < 0) {
-        cerr << "Failed to wait for network job via IOCTL: " << ret << endl;
+        cerr << "Failed to wait for network job via IOCTL: ret=" << ret
+             << ", errno=" << errno << " (" << strerror(errno) << ")"
+             << ", network_id=" << _networkId
+             << ", wait_bits=0x" << hex << waitBits << dec << endl;
         return false;
     }
 

@@ -409,7 +409,7 @@ class JenkinsBoardsControl:
             time.sleep(10)
 
 
-    def get_board(self, ip):
+    def get_board(self, ip_address):
         """
         Get mark the specified board as locked, wait until a board is available if it is already locked.
         
@@ -427,7 +427,7 @@ class JenkinsBoardsControl:
                     raise Exception("Boards are not ready yet: missing board IPs in control file")                
 
                 for i, (ip, locked) in enumerate(zip(data["board_ips"], data["board_locks"])):
-                    if ip == ip and not locked:                                                   
+                    if ip_address == ip and not locked:
                         data["board_locks"][i] = True
                         self._write_control_data_locked(f, data)
                         return BOARD_USER, ip, data["board_private_key_path"]              

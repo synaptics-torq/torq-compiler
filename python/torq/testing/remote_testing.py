@@ -525,13 +525,14 @@ class RemoteTestRunner:
                     logger=self._logger,
                     private_key=self.private_key,
                 )
-
+            print(f"Copying model to board: {self.vmfb_path} -> {remote_root}")
             runner.copy_files(str(self.vmfb_path), remote_root, board_dst=True)
             remote_input_args: list[str] = []
             staged_inputs: set[Path] = set()
             for arg in self.input_data_args:
                 remote_arg, local_path, _ = self._rewrite_arg_with_remote_path(arg)
                 if local_path is not None and local_path not in staged_inputs:
+                    print(f"Copying input data to board: {local_path} -> {remote_root}")
                     runner.copy_files(str(local_path), remote_root, board_dst=True)
                     staged_inputs.add(local_path)
                 remote_input_args.append(remote_arg)
@@ -596,7 +597,10 @@ class RemoteTestRunner:
                         "'time' output not found in command output"
                     )
             else:
-                runner.run_cmd(cmd)
+                print("Running TORQ remotely with command: " + " ".join(cmd))
+                result = runner.run_cmd(cmd)
+                print("Command output:")
+                print(result)
                 wall_time = None
 
             for remote_path, local_path in output_files.items():

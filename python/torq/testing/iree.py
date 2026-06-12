@@ -71,6 +71,7 @@ def pytest_addoption(parser):
     parser.addoption("--torq-benchmark-output-dir", default=None, help="Directory to save run time benchmarks outputs")
     parser.addoption("--update-astra-runtime", action="store_true", default=False, help="Enable runtime update: auto-deploy torq-run-module to the board (hash-based), session-level board lock for exclusive access, and per-user runner paths")
     parser.addoption("--torq-ko-path", default=None, help="Path to a local NPU kernel module (.ko) to deploy to the board when --update-astra-runtime is active (if omitted, the default on-board module is used)")
+    parser.addoption("--torq-dump-affinities", action="store_true", default=False, help="Dump the opeartion affinities to a file in the compiled model directory")
     
 
 
@@ -558,7 +559,7 @@ def runtime_hw_type(request):
 
 
 @versioned_hashable_object_fixture
-def torq_compiler_options(request, case_config):
+def base_torq_compiler_options(request, case_config):
 
     cmds = case_config.get("torq_compiler_options", [])
 
@@ -569,6 +570,21 @@ def torq_compiler_options(request, case_config):
         cmds.append('--torq-enable-buffer-debug-info')
 
     return cmds
+
+
+@versioned_hashable_object_fixture
+def empty_list_fixture(request):
+    return []
+
+
+@pytest.fixture
+def extra_torq_compile_option(request, case_config):
+    return request.getfixturevalue(case_config.get("extra_torq_compile_option", "empty_list_fixture"))
+
+
+@versioned_unhashable_object_fixture
+def torq_compiler_options(request, base_torq_compiler_options, extra_torq_compile_option):    
+    return base_torq_compiler_options + extra_torq_compile_option
 
 
 @versioned_hashable_object_fixture
@@ -584,6 +600,11 @@ def enable_debug_ir(request):
 @versioned_hashable_object_fixture
 def enable_phases_dump(request):
     return not request.config.getoption("--no-phases-dump", False)
+
+
+@versioned_hashable_object_fixture
+def enable_affinities_dump(request):
+    return request.config.getoption("--torq-dump-affinities", False)
 
 
 def compute_uninitialized_segments_size(dump_data):
@@ -657,9 +678,21 @@ def compute_model_stats(model_file, versioned_dir):
     return model_stats
 
 
+@versioned_hashable_object_fixture
+def affinities(request, case_config):
+    return case_config.get("affinities", [])
+
+
+@versioned_generated_file_fixture("json")
+def affinities_file(request, versioned_file, affinities):
+    with open(versioned_file, "w") as fp:
+        json.dump(affinities, fp)
+
+
 @versioned_generated_directory_fixture
 def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_model_file, torq_compiler, chip_config, 
-                            torq_compiler_timeout, enable_debug_ir, enable_phases_dump, runtime_hw_type):
+                            torq_compiler_timeout, enable_debug_ir, enable_phases_dump, enable_affinities_dump, runtime_hw_type,
+                            affinities):
         
     clear_measurements(versioned_dir)
 
@@ -692,6 +725,17 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         
         dump_path.mkdir(parents=True, exist_ok=True)
         cmds.extend(['--mlir-print-ir-after-all', f'--mlir-print-ir-tree-dir={dump_path}', '--mlir-elide-elementsattrs-if-larger=50'])
+
+    if enable_affinities_dump:
+        cmds.extend(["--torq-enable-annotate-tensor-affinities", f'--torq-dump-operation-affinities-path={versioned_dir}/affinities_dump.json'])
+
+    if affinities:
+        affinities_file = versioned_dir / 'affinities.json'
+
+        with open(affinities_file, "w") as fp:
+            json.dump(affinities, fp)
+
+        cmds.extend(["--torq-enable-annotate-tensor-affinities", f'--torq-load-operation-affinities-path={affinities_file}'])
 
     if enable_phases_dump:
         cmds.append(f'--dump-compilation-phases-to={versioned_dir}/phases')
@@ -802,6 +846,7 @@ def torq_runtime_options(request, case_config):
         cmds.extend(request.config.getoption("--extra-torq-runtime-options").split(" "))
 
     return cmds
+
 
 @versioned_hashable_object_fixture
 def enable_torq_buffer_tracing(request):

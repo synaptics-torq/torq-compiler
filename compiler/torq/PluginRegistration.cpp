@@ -34,6 +34,15 @@
 using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
+
+llvm::cl::opt<bool> clTorqEnableAnnotateTensorAffinities(
+    "torq-enable-annotate-tensor-affinities",
+    llvm::cl::desc(
+        "Annotate tensors with affinities to help guide partitioning and scheduling decisions."
+    ),
+    llvm::cl::init(false)
+);
+
 namespace {
 
 struct TORQSession : public PluginSession<
@@ -103,6 +112,10 @@ struct TORQSession : public PluginSession<
             return true;
         }
 
+        if (clTorqEnableAnnotateTensorAffinities) {
+            passManager.addPass(createAnnotateLinalgAffinitiesPass());
+        }
+
         return false;
     }
 
@@ -116,6 +129,11 @@ struct TORQSession : public PluginSession<
     }
 
     void extendPreprocessingPassPipeline(OpPassManager &passManager) override {
+
+        if (clTorqEnableAnnotateTensorAffinities) {
+            passManager.addPass(createOutlineTorqDispatchesPass());
+        }
+
         passManager.addPass(createTorqAnnotateTorqResourcesPass());
     }
 

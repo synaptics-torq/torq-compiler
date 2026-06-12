@@ -31,6 +31,10 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvertNhwcOpToNchwPas
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeTransposeLayoutPass();
 
+std::unique_ptr<OperationPass<ModuleOp>> createAnnotateLinalgAffinitiesPass();
+
+std::unique_ptr<OperationPass<ModuleOp>> createOutlineTorqDispatchesPass();
+
 std::unique_ptr<OperationPass<ModuleOp>> createAnnotateTiedOperandsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollStaticScfForLoopsPass();

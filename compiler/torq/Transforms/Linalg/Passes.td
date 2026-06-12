@@ -169,6 +169,29 @@ def OptimizeTransposeLayout :
     ];
 }
 
+def AnnotateLinalgAffinities :
+    Pass<"torq-annotate-linalg-affinities",
+                  "mlir::ModuleOp"> {
+
+    let summary = "Annotate linalg operations with executor affinity attributes";
+
+    let constructor =
+        "mlir::syna::torq::createAnnotateLinalgAffinitiesPass()";
+
+    let dependentDialects = [
+        "linalg::LinalgDialect"
+    ];
+}
+
+def OutlineTorqDispatches : Pass<"outline-torq-dispatches", "mlir::ModuleOp"> {
+  let summary = "Create dispatch regions for Torq execution";
+  let description = [{
+    This pass creates fused large regions with as many torq operations as possible
+    to be compatible with the Torq backend's dispatch model.
+  }];
+  let constructor = "mlir::syna::torq::createOutlineTorqDispatchesPass()";
+}
+
 def AnnotateTiedOperands : Pass<"torq-annotate-tied-operands", "mlir::ModuleOp"> {
   let summary = "Annotate function results with iree.abi.tied for in-place buffer reuse";
   let description = [{

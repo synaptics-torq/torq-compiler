@@ -55,9 +55,11 @@ set(torq_deps
     iree::base::internal
     iree::base::internal::arena
     iree::base::internal::cpu
+    iree::base::internal::event_pool
     iree::base::internal::synchronization
     iree::base::internal::flatcc::parsing
     iree::hal
+    iree::hal::drivers::local_task::task_driver
     iree::hal::local
     iree::hal::local::executable_environment
     iree::hal::utils::deferred_command_buffer

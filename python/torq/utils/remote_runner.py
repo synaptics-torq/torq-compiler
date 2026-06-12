@@ -339,11 +339,15 @@ class ADBCommandRunner(RemoteCommandRunner):
             )
             return result
         except subprocess.TimeoutExpired as e:
+            print("Command timed out:")
+            print(e.output)
             raise RemoteCommandError(
                 self._format_cmd(e.cmd),
                 self._format_output(e.output, self.timeout),
             ) from e
         except subprocess.CalledProcessError as e:
+            print("Command failed:")
+            print(e.output)
             raise RemoteCommandError(
                 self._format_cmd(e.cmd),
                 self._format_output(e.stdout),

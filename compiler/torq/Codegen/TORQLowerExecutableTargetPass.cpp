@@ -427,13 +427,8 @@ struct TORQLowerExecutableTargetPass
             return signalPassFailure();
         }
 
-        std::string dispatchName = "unknown";
-        if (Operation *parent = getOperation()->getParentOp()) {
-            if (auto symOp = dyn_cast<mlir::SymbolOpInterface>(parent))
-                dispatchName = symOp.getName().str();
-            else if (auto symAttr = parent->getAttrOfType<StringAttr>("sym_name"))
-                dispatchName = symAttr.str();
-        }
+        auto dispatchName = maybeDispatchFuncOp->getName().str();
+
         llvm::errs() << "[TORQ] Lowering dispatch: " << dispatchName << "\n";
 
         // distribute the work to the workgroups (we have only one at the moment)

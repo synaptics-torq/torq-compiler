@@ -16,8 +16,9 @@
 
 #include "iree/base/internal/arena.h"
 #include "iree/base/internal/cpu.h"
+#include "iree/base/internal/event_pool.h"
+#include "iree/hal/drivers/local_task/task_semaphore.h"
 #include "torq_event.h"
-#include "torq_semaphore.h"
 #include "iree/hal/local/executable_environment.h"
 #include "iree/hal/local/inline_command_buffer.h"
 #include "iree/hal/utils/deferred_command_buffer.h"
@@ -39,10 +40,8 @@ typedef struct iree_hal_torq_device_t {
   // buffers can contain inlined data uploads).
   iree_arena_block_pool_t large_block_pool;
 
-  // Shared semaphore state used to emulate OS-level primitives. This backend
-  // is intended to run on bare-metal systems where we need to perform all
-  // synchronization ourselves.
-  iree_hal_torq_semaphore_state_t semaphore_state;
+  // Shared pool of host events used by task semaphores for blocking waits.
+  iree_event_pool_t* event_pool;
 
   iree_host_size_t loader_count;
   iree_hal_executable_loader_t* loaders[];
@@ -103,14 +102,16 @@ iree_status_t iree_hal_torq_device_create(
     iree_hal_allocator_retain(device_allocator);
     iree_arena_block_pool_initialize(params->arena_block_size, host_allocator,
                                      &device->large_block_pool);
+    status = iree_event_pool_allocate(/*available_capacity=*/32, host_allocator,
+                                      &device->event_pool);
 
-    device->loader_count = loader_count;
-    for (iree_host_size_t i = 0; i < device->loader_count; ++i) {
-      device->loaders[i] = loaders[i];
-      iree_hal_executable_loader_retain(device->loaders[i]);
+    if (iree_status_is_ok(status)) {
+      device->loader_count = loader_count;
+      for (iree_host_size_t i = 0; i < device->loader_count; ++i) {
+        device->loaders[i] = loaders[i];
+        iree_hal_executable_loader_retain(device->loaders[i]);
+      }
     }
-
-    iree_hal_torq_semaphore_state_initialize(&device->semaphore_state);
   }
 
   if (iree_status_is_ok(status)) {
@@ -127,7 +128,7 @@ static void iree_hal_torq_device_destroy(iree_hal_device_t* base_device) {
   iree_allocator_t host_allocator = iree_hal_device_host_allocator(base_device);
   IREE_TRACE_ZONE_BEGIN(z0);
 
-  iree_hal_torq_semaphore_state_deinitialize(&device->semaphore_state);
+  iree_event_pool_free(device->event_pool);
 
   for (iree_host_size_t i = 0; i < device->loader_count; ++i) {
     iree_hal_executable_loader_release(device->loaders[i]);
@@ -287,13 +288,16 @@ static iree_status_t iree_hal_torq_device_create_semaphore(
     uint64_t initial_value, iree_hal_semaphore_flags_t flags,
     iree_hal_semaphore_t** out_semaphore) {
   iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
-  return iree_hal_torq_semaphore_create(&device->semaphore_state, initial_value,
+  return iree_hal_task_semaphore_create(device->event_pool, initial_value,
                                         device->host_allocator, out_semaphore);
 }
 
 static iree_hal_semaphore_compatibility_t
 iree_hal_torq_device_query_semaphore_compatibility(
     iree_hal_device_t* base_device, iree_hal_semaphore_t* semaphore) {
+  if (iree_hal_task_semaphore_isa(semaphore)) {
+    return IREE_HAL_SEMAPHORE_COMPATIBILITY_ALL;
+  }
   // The synchronous submission queue handles all semaphores as if host-side.
   return IREE_HAL_SEMAPHORE_COMPATIBILITY_HOST_ONLY;
 }
@@ -492,9 +496,8 @@ static iree_status_t iree_hal_torq_device_queue_execute(
   // Wait for semaphores to be signaled before performing any work.
   IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
       profile_scope, status, IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_WAIT,
-      iree_hal_torq_semaphore_multi_wait(
-          &device->semaphore_state, IREE_HAL_WAIT_MODE_ALL, wait_semaphore_list,
-          iree_infinite_timeout(), IREE_HAL_WAIT_FLAG_DEFAULT));
+      iree_hal_semaphore_list_wait(wait_semaphore_list, iree_infinite_timeout(),
+                     IREE_HAL_WAIT_FLAG_DEFAULT));
 
   // Run all deferred command buffers - any we could have run inline we
   // already did during recording.
@@ -508,8 +511,7 @@ static iree_status_t iree_hal_torq_device_queue_execute(
   IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
       profile_scope, status,
       IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_SIGNAL,
-      iree_hal_torq_semaphore_multi_signal(&device->semaphore_state,
-                                           signal_semaphore_list));
+      iree_hal_semaphore_list_signal(signal_semaphore_list));
 
   iree_hal_torq_profile_scope_end(profile_scope);
   return status;
@@ -526,8 +528,9 @@ static iree_status_t iree_hal_torq_device_wait_semaphores(
     const iree_hal_semaphore_list_t semaphore_list, iree_timeout_t timeout,
     iree_hal_wait_flags_t flags) {
   iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
-  return iree_hal_torq_semaphore_multi_wait(&device->semaphore_state, wait_mode,
-                                            semaphore_list, timeout, flags);
+  return iree_hal_task_semaphore_multi_wait(
+      wait_mode, semaphore_list, timeout, flags, device->event_pool,
+      &device->large_block_pool);
 }
 
 static iree_status_t iree_hal_torq_device_profiling_begin(
