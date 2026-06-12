@@ -475,6 +475,8 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
 class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
+    KeepConcatInLram(MLIRContext *ctx, int64_t lramSize)
+        : OpRewritePattern(ctx), lramSize_(lramSize) {}
 
     LogicalResult
     matchAndRewrite(tensor::InsertSliceOp rootOp, PatternRewriter &rewriter) const override {
@@ -529,7 +531,7 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
             }
 
             // we cannot fit the whole contact in LRAM so we won't apply this pattern
-            if (totalSize > TorqHw::get().getAvailableMemoryForTiling()) {
+            if (totalSize > lramSize_) {
                 return failure();
             }
 
@@ -577,6 +579,9 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
 
         return success();
     }
+
+  private:
+    int64_t lramSize_;
 };
 
 // Fold duplicate conversions where two convert ops convert the same input tensor
@@ -658,17 +663,20 @@ class FoldDuplicateConversion : public OpRewritePattern<torq_hl::ConvertOp> {
 class FoldConvertPass : public impl::FoldConvertBase<FoldConvertPass> {
   public:
     using FoldConvertBase<FoldConvertPass>::FoldConvertBase;
+    FoldConvertPass(const FoldConvertOptions &options) { this->lramSize = options.lramSize; }
+    FoldConvertPass(const FoldConvertPass &pass) { this->lramSize = pass.lramSize; }
     void runOnOperation() override;
 };
 
 void FoldConvertPass::runOnOperation() {
+    assert(this->lramSize > 0 && "LRAM size must be greater than 0");
     MLIRContext *ctx = getOperation().getContext();
 
     RewritePatternSet patterns(ctx);
     patterns.add<FoldConvertChainWithKernel>(ctx);
     patterns.add<FoldRoundTripConversion>(ctx);
     patterns.add<FoldLramToLramConversionChain>(ctx);
-    patterns.add<KeepConcatInLram>(ctx);
+    patterns.add<KeepConcatInLram>(ctx, this->lramSize);
     patterns.add<FoldDuplicateConversion>(ctx);
 
 #if 0
@@ -685,8 +693,8 @@ void FoldConvertPass::runOnOperation() {
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass() {
-    return std::make_unique<FoldConvertPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass(int64_t lramSize) {
+    return std::make_unique<FoldConvertPass>(FoldConvertOptions{lramSize});
 }
 
 } // namespace mlir::syna::torq

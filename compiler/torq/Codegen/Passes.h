@@ -65,7 +65,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileNSSInvocationsP
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerCallProgramToStartWaitPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerHostCopiesToNpuPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>>
+createLowerHostCopiesToNpuPass(int64_t lramSize = 0);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOutlineNSSProgramsPass();
 
@@ -101,7 +102,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveInvocationArgum
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignObjectsIdentifiersPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass(int64_t lramSize = 0);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createStripTorqExecutorAttrPass();
 

@@ -231,6 +231,11 @@ def LowerHostCopiesToNpu :
 
   let summary = "Lower host-side memory copies to NPU operations";
   let constructor = "mlir::syna::torq::createLowerHostCopiesToNpuPass()";
+  let options=[
+    Option<"lramSize", "lram-size", "int64_t",
+           /*default=*/"0",
+           "Size of LRAM in bytes. Used to determine whether a copy can be done by the NPU or not">
+  ];
 
   let dependentDialects = [
     "syna::torq_hl::TorqHLDialect",
@@ -483,6 +488,12 @@ def FoldConvert :
     InterfacePass<"torq-fold-convert", "mlir::FunctionOpInterface"> {
         let summary = "Fold tensor conversion operations";
         let constructor = "mlir::syna::torq::createFoldConvertPass()";
+        let options=[
+          Option<"lramSize", "lram-size", "int64_t",
+                 /*default=*/"0",
+                 "Size of LRAM in bytes. Used to determine whether a copy can be done by the NPU or not">
+        ];
+
         let dependentDialects = [
             "syna::torq_hl::TorqHLDialect"
         ];

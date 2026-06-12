@@ -20,6 +20,9 @@ int Pool::usedSize() { return usedSizeWords_ * wordSizeBytes_; }
 int Pool::usableSize() { return totalSize() - reservedBytes_; }
 
 void Pool::clear() {
+    for (int i = 0; i < used_.size(); i++) {
+        used_[i] = false;
+    }
     for (int i = 0; i < (reservedBytes_ + wordSizeBytes_ - 1) / wordSizeBytes_; i++) {
         used_[i] = true;
     }
@@ -32,11 +35,12 @@ FailureOr<int> Pool::allocate(Value value) {
     int sizeBytes = getEncodedTotalSizeBytes(mlir::cast<MemRefType>(value.getType()));
 
     int sizeWords = (sizeBytes + wordSizeBytes_ - 1) / wordSizeBytes_;
+    assert(sizeWords > 0 && "Cannot allocate 0 sized object");
 
     // allocate small objects at the beginning of the pool and large at the end
     // this prevents some fragmentation
     if (sizeBytes < largeAllocSizeBytes_) {
-        for (int i = 0; i < used_.size() - sizeWords; i++) {
+        for (int i = 0; i < used_.size() - sizeWords + 1; i++) {
             if (!used_[i]) {
                 bool found = true;
                 for (int j = 0; j < sizeWords; j++) {
@@ -64,10 +68,9 @@ FailureOr<int> Pool::allocate(Value value) {
         }
     }
     else {
-        for (int i = used_.size(); i > sizeWords; i--) {
+        for (int i = used_.size(); i >= sizeWords; i--) {
 
             int startIndex = i - sizeWords;
-
             if (!used_[startIndex]) {
                 bool found = true;
                 for (int j = 0; j < sizeWords; j++) {

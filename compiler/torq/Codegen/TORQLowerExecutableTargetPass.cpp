@@ -107,6 +107,13 @@ static llvm::cl::opt<bool> clEnableSplitConstantsOptimization(
 
 namespace {
 
+int64_t getLramSizeBasedOnBudget(bool optimizeForTileAndFuse) {
+    int64_t lramSize = TorqHw::get().getLramSize();
+    int nssProgramPoolSize = HwInfo::nss_max_program_size * 2;
+    lramSize -= nssProgramPoolSize;
+    return lramSize;
+}
+
 void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTileAndFuse) {
     if (!clDisableLinalgSlicing)
         funcPm.addPass(createLinalgSlicingPass());
@@ -164,7 +171,8 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
         funcPm.addPass(createSlicingPass());
     }
 
-    funcPm.addPass(createFoldConvertPass());
+    auto lramSize = getLramSizeBasedOnBudget(optimizeForTileAndFuse);
+    funcPm.addPass(createFoldConvertPass(lramSize));
     funcPm.addPass(createCanonicalizerPass());
 }
 
@@ -200,12 +208,13 @@ void addCpuPasses(OpPassManager &pm) {
 
     // since to run on CSS we inserted a bunch of copies to LRAM we can
     // now simplify them
-    funcPm.addPass(createFoldConvertPass());
+    auto lramSize = getLramSizeBasedOnBudget(false);
+    funcPm.addPass(createFoldConvertPass(lramSize));
 
     funcPm.addPass(createCanonicalizerPass());
 }
 
-void addNssUpToAssignLramAddresses(OpPassManager &pm) {
+void addNssUpToAssignLramAddresses(OpPassManager &pm, bool optimizeForTileAndFuse = false) {
     auto &funcPm = pm.nest<func::FuncOp>();
 
     if (!clFromPreBufferizedIR) {
@@ -220,7 +229,8 @@ void addNssUpToAssignLramAddresses(OpPassManager &pm) {
 
         funcPm.addPass(createEraseHALDescriptorTypeFromMemRefPass());
 
-        funcPm.addPass(createLowerHostCopiesToNpuPass());
+        int64_t lramSize = getLramSizeBasedOnBudget(optimizeForTileAndFuse);
+        funcPm.addPass(createLowerHostCopiesToNpuPass(lramSize));
 
         funcPm.addPass(createMapBindingsPass());
     }
@@ -481,7 +491,7 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
         addCpuPasses(pipeline);
     }
 
-    addNssUpToAssignLramAddresses(pipeline);
+    addNssUpToAssignLramAddresses(pipeline, optimizeForTileAndFuse);
 }
 
 std::unique_ptr<OperationPass<ModuleOp>> createTORQLowerExecutableTargetPass() {
