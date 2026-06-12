@@ -123,7 +123,7 @@ typedef struct torq_wrap_t {
     int stg_id;
     int slc_id;
     char new_job;
-    char entry_point;
+    int8_t entry_point;
     char cdma_in_use;
     char cdma_release;
     void *dump_ctx;
@@ -477,7 +477,11 @@ static int _nss_cfg_desc_gen(torq_wrap_t *wrap)
     wrap->regs.NSS.START.xw      = !!wrap->cfg.dma_xw_wait;
     wrap->regs.NSS.START.slc0    = !!wrap->cfg.slc_wait[0];
     wrap->regs.NSS.START.slc1    = !!wrap->cfg.slc_wait[1];
-    wait = (*(uint32_t *)&wrap->regs.NSS.START)&0xffff;
+
+    uint32_t start_raw_memcpy = 0;
+    memcpy(&start_raw_memcpy, &wrap->regs.NSS.START, sizeof(start_raw_memcpy));
+
+    wait = start_raw_memcpy & 0xffff;
     wait |= ((!!wrap->cfg.cdma_wait)<<12) | ((!!wrap->cfg.css_wait)<<9); //assuming CSS2NSS IRQ is MBX1 (#9)
     wrap->regs.NSS.CTRL.ien_nss  = 1;
     wrap->regs.NSS.CTRL.ien_xr   = 0;
