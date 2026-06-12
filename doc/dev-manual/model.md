@@ -346,7 +346,7 @@ The source code of the fixtures and their dependecy relatioship can be found by 
 
 ## TFLite model testing
 
-The testing framework also supports TFLite models. Unlike ONNX models which are imported via ``iree.compiler.tools.import_onnx``, TFLite models go through a different conversion pipeline: ``iree-import-tflite`` (TFLite → TOSA bytecode) followed by ``iree-opt`` (TOSA → text MLIR).
+The testing framework also supports TFLite models. Unlike ONNX models which are imported via ``iree.compiler.tools.import_onnx``, TFLite models go through a different conversion pipeline: ``tosa-converter-for-tflite`` (TFLite → MLIR).
 
 A key difference from the ONNX workflow is how layers are extracted. TFLite layers are extracted by directly manipulating the TFLite flatbuffer, which **preserves quantization parameters exactly** from the original model. This ensures that each extracted layer remains correctly quantized with its original scale and zero-point values.
 
@@ -381,7 +381,7 @@ The output will show individual layer tests and a full model test:
 Each TFLite test case:
 
 1. **Extracts layers** from the TFLite flatbuffer (at collection time). Each layer becomes a standalone ``.tflite`` model preserving the original quantization.
-2. **Converts to MLIR** via ``iree-import-tflite`` → ``iree-opt`` (at test runtime, cached by versioned fixtures).
+2. **Converts to MLIR** via ``tosa-converter-for-tflite`` (at test runtime, cached by versioned fixtures).
 3. **Compiles** the MLIR for Torq simulation (``torq-compile``) and LLVM-CPU (``iree-compile``).
 4. **Runs inference** with random inputs on both backends.
 5. **Compares results** element-wise between the two backends.
@@ -445,7 +445,7 @@ TFLite tests use two caching layers:
 The same debugging approaches described in the ONNX sections above apply. The key fixture
 names differ for TFLite:
 
-- **tflite_mlir_model_file**: converts TFLite → TOSA (via ``iree-import-tflite``) → text MLIR (via ``iree-opt``). Errors here indicate unsupported TFLite operators or conversion issues.
+- **tflite_mlir_model_file**: converts TFLite → text MLIR (via ``tosa-converter-for-tflite``). Errors here indicate unsupported TFLite operators or conversion issues.
 
 - **torq_compiled_model_dir**: compiles the MLIR with ``torq-compile``. Same as ONNX.
 

@@ -44,22 +44,12 @@ $ tosa-converter-for-tflite model.tflite --text -o model.mlir
     **Model Source:** This model - MobileNetV2 is generated from tf.keras.applications using [tf_model_generator.py](https://github.com/synaptics-torq/iree-synaptics-synpu/blob/main/tests/model_generator/tf_model_generator.py). The dataset for int8 quantization is done using random data.
 
     ```{code} shell
-    $ iree-import-tflite tests/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite -o mobilenetv2.tosa
+    $ tosa-converter-for-tflite tests/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite --text -o mobilenetv2.mlir
     ```
 
 ```{note}
 The `tests/hf/` directory is only included in the [Release Package](./getting_started.md#release-package-ubuntu-24-04) and is not available in the compiler GitHub repository.
 ```
-
-
-- More details on the IREE TFLite tools can be found in the 
-[official IREE website](https://iree.dev/guides/ml-frameworks/tflite/).
-
-    ```{tip}
-    The generated *.tosa* file is a *binary* MLIR file. To convert it to a text representation, run:
-    ```{code}shell
-    $ iree-opt mobilenetv2.tosa -o mobilenetv2.mlir
-    ```
 
 ## Convert Torch Model to MLIR
 

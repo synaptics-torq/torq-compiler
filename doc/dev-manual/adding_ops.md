@@ -65,11 +65,10 @@ Quantized TFLite REDUCE_MAX model created successfully: model.tflite
 The ``gen-model.py`` script can be easily customized to create models with the desired layer(s)
 :::
 
-Now that we have a model we can convert it to TOSA as explained in @tflite-to-tosa:
+Now that we have a model we can convert it to TOSA-dialect MLIR:
 
 ```{code} shell
-$ iree-import-tflite model.tflite -o model.tosa
-../iree-build/third_party/iree/tools/iree-opt model.tosa -o model.mlir
+$ tosa-converter-for-tflite model.tflite --text -o model.mlir
 ```
 
 The generated MLIR file is very simple:

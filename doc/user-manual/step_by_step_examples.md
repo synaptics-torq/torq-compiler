@@ -20,7 +20,7 @@ Here is a quick summary of conversion commands:
 
 **TFLite:**
 ```{code}shell
-$ iree-import-tflite path/to/model.tflite -o model.tosa
+$ tosa-converter-for-tflite path/to/model.tflite --text -o model.mlir
 ```
 
 **ONNX:**
@@ -51,7 +51,7 @@ The key flags are:
 | Source Framework | Input Type | Typical File Extension |
 |-----------------|------------|----------------------|
 | Auto (default) | `auto` | all |
-| TFLite | `tosa-torq` | `.tosa` |
+| TFLite | `tosa-torq` | `.mlir` |
 | ONNX | `onnx-torq` | `.mlir` |
 | Torch | `torch-torq` | `.mlir` |
 | Linalg | `linalg-torq` | `.mlir` |
@@ -66,10 +66,10 @@ Input type defaults to `auto`, which defers input type detection and conversion 
 
 ```{code}shell
 # Convert TFLite to TOSA
-$ iree-import-tflite tests/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite -o mobilenetv2.tosa
+$ tosa-converter-for-tflite tests/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite --text -o mobilenetv2.mlir
 
 # Compile for device
-$ torq-compile mobilenetv2.tosa -o mobilenetv2.vmfb
+$ torq-compile mobilenetv2.mlir -o mobilenetv2.vmfb
 ```
 
 ### Example: ONNX model
@@ -116,7 +116,7 @@ The `VMFBInferenceRunner` class supports options such as `function` and `load_me
 To compile for the current host machine (e.g., for testing without device hardware), add simulator-specific flags:
 
 ```{code}shell
-$ torq-compile mobilenetv2.tosa \
+$ torq-compile mobilenetv2.mlir \
     --torq-css-qemu \
     --torq-target-host-triple=native \
     -o mobilenetv2.vmfb
