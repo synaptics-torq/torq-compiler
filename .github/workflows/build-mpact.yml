@@ -1,0 +1,78 @@
+name: Build mpact
+
+on:
+  workflow_call:    
+    outputs:
+      cache_key:
+        description: Cache key of the built artifact
+        value: ${{ jobs.check-cache.outputs.cache-key }}
+
+      path:
+        description: Path to the built artifact
+        value: ${{ jobs.check-cache.outputs.artifact-path }}
+
+env:
+  MPACT_REF: 2e1097cb199ec6511c4990cbf3cead46443b3fc4
+
+jobs:
+
+  check-cache:
+    name: Check cache
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+      cache-key: ${{ steps.gen_vars.outputs.cache_key }}
+      artifact-path: ${{ steps.gen_vars.outputs.path }}
+    steps:
+      - name: Checkout actions
+        uses: actions/checkout@v6
+
+      - name: Generate cache key and paths
+        id: gen_vars
+        run: |
+          echo "cache_key=mpact-${{ env.MPACT_REF }}-${{ hashFiles('.github/workflows/build-mpact.yml') }}" >> $GITHUB_OUTPUT
+          echo "path=coralnpu-mpact-simulator-${{ env.MPACT_REF }}.tar.gz" >> $GITHUB_OUTPUT
+
+      - id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.gen_vars.outputs.path }}
+          key: ${{ steps.gen_vars.outputs.cache_key }}
+          lookup-only: true
+
+  build:    
+    name: Build
+    needs: check-cache
+    runs-on: ubuntu-latest
+    if: needs.check-cache.outputs.cache-hit != 'true'
+
+    steps:          
+
+      - name: Checkout actions
+        uses: actions/checkout@v6
+
+      - name: Checkout coralnpu-mpact
+        uses: actions/checkout@v6
+        with:
+          repository: synaptics-torq/coralnpu-mpact
+          ref: ${{ env.MPACT_REF }}
+          path: coralnpu-mpact
+      
+      - name: Build mpact simulation library
+        run: |
+          cd coralnpu-mpact
+          bazel build sim/hw_sim:libcoralnpu_simulator_mpact.so
+
+      - name: Package the mpact simulation library
+        run: |
+          mkdir -p mpact-lib
+          cp coralnpu-mpact/bazel-bin/sim/hw_sim/libcoralnpu_simulator_mpact.so mpact-lib/
+          cp coralnpu-mpact/sim/hw_sim/coralnpu_simulator.h mpact-lib/
+          tar -czvf ${{ needs.check-cache.outputs.artifact-path }} -C mpact-lib .
+
+      - name: Upload to cache
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ needs.check-cache.outputs.artifact-path }}
+          key: ${{ needs.check-cache.outputs.cache-key }}
+      

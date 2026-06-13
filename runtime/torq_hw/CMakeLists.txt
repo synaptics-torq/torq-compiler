@@ -45,12 +45,22 @@ if (TORQ_ENABLE_SIMULATOR)
   list(APPEND include_dirs ${TORQ_SIMULATOR_INC_DIR})
   list(APPEND torq_deps ${TORQ_SIMULATOR_LIB})
 
-  set(TORQ_CORALNPU_SIMULATOR_LIB
-    ${IREE_TORQ_SOURCE_DIR}/third_party/coralnpu-mpact/${CMAKE_HOST_SYSTEM_PROCESSOR}-${CMAKE_HOST_SYSTEM_NAME}/libcoralnpu_simulator_mpact.so)
-  if(TORQ_ENABLE_CORALNPU_SIMULATOR AND EXISTS ${TORQ_CORALNPU_SIMULATOR_LIB})
-    list(APPEND torq_srcs src/CoralNpuCSSSimulation.cpp)
-    list(APPEND torq_deps ${TORQ_CORALNPU_SIMULATOR_LIB})
-    list(APPEND torq_defs "TORQ_CORALNPU_SIMULATOR=1")
+  set(TORQ_MPACT_SIMULATOR_LIB
+    ${IREE_TORQ_SOURCE_DIR}/third_party/coralnpu-mpact/${CMAKE_HOST_SYSTEM_PROCESSOR}-${CMAKE_HOST_SYSTEM_NAME}/libcoralnpu_simulator_mpact.so
+      CACHE FILEPATH "Path to the mpact simulator shared library")
+
+  set(TORQ_MPACT_SIMULATOR_INC_DIR
+    ${IREE_TORQ_SOURCE_DIR}/third_party/coralnpu-mpact/${CMAKE_HOST_SYSTEM_PROCESSOR}-${CMAKE_HOST_SYSTEM_NAME}/
+      CACHE PATH "Path to the mpact simulator include directory")
+  
+  if(EXISTS ${TORQ_MPACT_SIMULATOR_LIB} AND EXISTS ${TORQ_MPACT_SIMULATOR_INC_DIR})
+    message(STATUS "Using mpact simulator library: ${TORQ_MPACT_SIMULATOR_LIB}")
+    list(APPEND include_dirs ${TORQ_MPACT_SIMULATOR_INC_DIR})
+    list(APPEND torq_srcs src/MpactCSSSimulation.cpp)
+    list(APPEND torq_deps ${TORQ_MPACT_SIMULATOR_LIB})
+    list(APPEND torq_defs "TORQ_MPACT_SIMULATOR=1")
+  else()
+    message(WARNING "mpact simulator library or include directory not found. mpact simulation will be disabled.")
   endif()
 endif()
 

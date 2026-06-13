@@ -61,6 +61,7 @@ def pytest_addoption(parser):
     parser.addoption("--torq-chips", action="store", default="default.group", help="Command separate list of chips to compile models for")
     parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
     parser.addoption("--torq-compiler-timeout", type=int, default=60*5, help="Timeout in seconds for torq compiler invocations")
+    parser.addoption("--torq-mpact-simulation", action="store_true", default=False, help="Enable Coral NPU simulation instead of QEMU simulation")
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
     parser.addoption("--torq-compile-time-profiling-output-dir", default=None, help="Directory to save per-test compile time profiling outputs")
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
@@ -603,6 +604,10 @@ def enable_phases_dump(request):
 
 
 @versioned_hashable_object_fixture
+def enable_mpact_simulation(request):
+    return request.config.getoption("--torq-mpact-simulation", False)
+
+@versioned_hashable_object_fixture
 def enable_affinities_dump(request):
     return request.config.getoption("--torq-dump-affinities", False)
 
@@ -692,7 +697,7 @@ def affinities_file(request, versioned_file, affinities):
 @versioned_generated_directory_fixture
 def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_model_file, torq_compiler, chip_config, 
                             torq_compiler_timeout, enable_debug_ir, enable_phases_dump, enable_affinities_dump, runtime_hw_type,
-                            affinities):
+                            affinities, enable_mpact_simulation):
         
     clear_measurements(versioned_dir)
 
@@ -740,9 +745,13 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     if enable_phases_dump:
         cmds.append(f'--dump-compilation-phases-to={versioned_dir}/phases')
 
-    # when the runtime is cmodel, we need to compile with qemu address map
+    # when the runtime is cmodel, we need to compile host binaries for host
     if runtime_hw_type == 'sim':
-        cmds.extend(['--torq-css-qemu', "--torq-target-host-triple=native"])
+        cmds.extend(["--torq-target-host-triple=native"])
+        # if we are not using the mpact simulation, we use qemu that requires
+        # models compiled with a special memory map
+        if not enable_mpact_simulation:
+            cmds.append("--torq-css-qemu")
     elif runtime_hw_type == 'aws_fpga':
         cmds.extend(["--torq-target-host-triple=native"])
 
@@ -904,7 +913,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
                         enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name,
                         enable_profiling, skip_profile_annotation, torq_compiled_model_debug_info, 
-                        torq_benchmark, benchmark_output_dir):
+                        torq_benchmark, benchmark_output_dir, enable_mpact_simulation):
 
     clear_measurements(versioned_dir)
 
@@ -913,6 +922,9 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
     tv_dir = versioned_dir / 'tv'
     buffers_dir = versioned_dir / 'buffers'
     extra_runtime_opts = []
+
+    if enable_mpact_simulation:
+        extra_runtime_opts.append('--torq_enable_mpact_simulation')
 
     if enable_hw_test_vectors:
         extra_runtime_opts.append('--torq_dump_test_vectors_dir=' + str(tv_dir))

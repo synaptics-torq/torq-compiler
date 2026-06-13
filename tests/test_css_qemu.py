@@ -8,6 +8,8 @@ from torq.testing.cases import Case
 
 from .models.keras_models import conv_act_model
 
+from torq.testing.versioned_fixtures import versioned_hashable_object_fixture
+
 
 def get_test_cases():
 
@@ -32,6 +34,11 @@ def get_test_cases():
     }))
 
     return test_cases
+
+
+@versioned_hashable_object_fixture
+def enable_mpact_simulation():
+    return False # Force disable MPACT simulation for this test case as we want to test QEMU
 
 
 @pytest.fixture(params=get_test_cases())

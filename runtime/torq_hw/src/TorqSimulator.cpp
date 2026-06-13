@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "TorqSimulator.h"
-#include "CoralNpuCSSSimulation.h"
+#include "MpactCSSSimulation.h"
 #include "QemuCSSSimulation.h"
 
 #include "torq_cm.h"
@@ -20,20 +20,29 @@
 #include <cstring>
 #include <iostream>
 
-IREE_FLAG(bool, torq_enable_coralnpu, false, "Enable CoralNPU CSS simulation")
+IREE_FLAG(bool, torq_enable_mpact_simulation, false, "Enable MPACT CSS simulation")
 
 using namespace std;
 
 namespace synaptics {
 
+typedef void (*simulator_fun)(void *);
+
 bool TorqSimulator::open() {
     cm = torq_cm_open(_xram.data(), _xramStartAddr, _xram.size());
 
-#ifdef TORQ_CORALNPU_SIMULATOR
-    auto simulator = FLAG_torq_enable_coralnpu ? &run_cpu_kelvin_binary : &run_cpu_qemu_binary;
-#else
-    auto simulator = &run_cpu_qemu_binary;
-#endif
+    simulator_fun simulator;
+
+    if (FLAG_torq_enable_mpact_simulation) {
+        #ifdef TORQ_MPACT_SIMULATOR
+        simulator = &run_cpu_mpact_binary;
+        #else
+        cerr << "MPACT simulation is not supported" << endl;
+        return false;
+        #endif
+    } else {
+        simulator = &run_cpu_qemu_binary;        
+    }
 
     torq_cm__set_css_cpu_code(cm, simulator);
     

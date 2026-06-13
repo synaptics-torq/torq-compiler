@@ -93,6 +93,7 @@ def cmake_configure_and_build():
     cfg = os.getenv("CMAKE_BUILD_TYPE", "Release")
     cmake_args = [
         "-GNinja",
+        "-DTORQ_MPACT_SIMULATOR_LIB=OFF", # TODO: we need to enable this and package the MPACT lib
         "-DIREE_BUILD_PYTHON_BINDINGS=ON",
         "-DIREE_BUILD_COMPILER=OFF",
         "-DIREE_BUILD_SAMPLES=OFF",

@@ -34,11 +34,15 @@ jobs:
       contents: read
       pull-requests: read
 
+  build_mpact:
+    name: Build mpact
+    uses: ./.github/workflows/build-mpact.yml
+   
   build:
 
     name: Build compiler and runtime
 
-    needs: choose_runner_image
+    needs: [build_mpact, choose_runner_image]
 
     if: ${{ vars.CODEBUILD_PROJECT_CODEBASE != ''}}
 
@@ -55,8 +59,11 @@ jobs:
       contents: read
       id-token: write
 
-    # ensure build jobs fail before CodeBuild kills the runners
-    timeout-minutes: 50
+    outputs:
+      mpact_cache_key: ${{ needs.build_mpact.outputs.cache_key }}
+      mpact_cache_path: ${{ needs.build_mpact.outputs.path }}
+      
+    timeout-minutes: 50 # ensure build jobs fail before CodeBuild kills the runners
 
     steps:
 
@@ -99,6 +106,20 @@ jobs:
         working-directory: /workspace/code
         run: |
           ./scripts/configure_python.sh /workspace/venv /workspace/build
+
+      - name: Download mpact simulation library from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ needs.build_mpact.outputs.path }}
+          key: ${{ needs.build_mpact.outputs.cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Uncompress mpact simulation library
+        run: |
+          mkdir -p /workspace/code/third_party/coralnpu-mpact/x86_64-Linux
+          tar -xzf ${{ needs.build_mpact.outputs.path }} --strip-components=1 -C /workspace/code/third_party/coralnpu-mpact/x86_64-Linux
+
+          find /workspace/code/third_party/coralnpu-mpact/x86_64-Linux
 
       - name: Configure build for host
         working-directory: /workspace/code

@@ -47,6 +47,13 @@ mkdir ${INSTALL_DIR}/scripts
 
 cp ${BUILD_DIR}/third_party/iree/tools/iree-run-module ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools
+
+# get the value from CMake TORQ_MPACT_SIMULATOR_LIB variable
+MPACT_SIMULATOR_LIB=$(egrep 'TORQ_MPACT_SIMULATOR_LIB:FILEPATH' ${BUILD_DIR}/CMakeCache.txt | cut -d= -f2)
+if [[ -f ${MPACT_SIMULATOR_LIB} ]]; then
+    cp ${MPACT_SIMULATOR_LIB} ${INSTALL_DIR}/lib
+fi
+
 cp ${BUILD_DIR}/third_party/iree/tools/iree-compile ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-c-embed-data ${INSTALL_DIR}/tools
 cp ${BUILD_DIR}/third_party/iree/tools/iree-flatcc-cli ${INSTALL_DIR}/tools
