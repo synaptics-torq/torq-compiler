@@ -355,16 +355,23 @@ LogicalResult ProfilingPass::cycleProfiling(mlir::FunctionOpInterface funcOp) {
     return success();
 }
 
-static uint64_t getDmaNdlTransferElements(torq_hw::DmaNdlAttr ndl) {
+// Returns the total DMA transfer size in BYTES.
+//
+// DMA NDL dims are constructed in bytes, not elements: the innermost contiguous
+// dim is a byte count (contiguousElementsSizeBytes) and any outer dims are plain
+// repeat counts (see createNdl and the StoreOp/LoadOp lowering in
+// TorqHLToTorqHW/Patterns.cpp). The product of the dim counts is therefore
+// already the total transfer size in bytes.
+static uint64_t getDmaNdlTransferBytes(torq_hw::DmaNdlAttr ndl) {
     if (!ndl) {
         return 0;
     }
 
-    uint64_t elements = 1;
+    uint64_t bytes = 1;
     for (auto dim : ndl.getDims()) {
-        elements *= static_cast<uint64_t>(dim.getCount());
+        bytes *= static_cast<uint64_t>(dim.getCount());
     }
-    return elements;
+    return bytes;
 }
 
 /// Compute MTU (Maximum Transfer Unit) efficiency for AXI burst transfers.
@@ -394,17 +401,6 @@ static uint64_t getDmaNdlTransferElements(torq_hw::DmaNdlAttr ndl) {
 static double mtuEfficiency(unsigned mtu, double delta = 1.5) {
     double beats = static_cast<double>(1u << mtu);
     return beats / (beats + delta);
-}
-
-static uint64_t getDmaNdlTransferBytes(torq_hw::DmaNdlAttr ndl, Type bufferType) {
-    auto shapedType = dyn_cast<ShapedType>(bufferType);
-    if (!shapedType) {
-        return 0;
-    }
-
-    uint64_t elements = getDmaNdlTransferElements(ndl);
-    uint64_t elementBytes = static_cast<uint64_t>(getElementSizeBytes(shapedType));
-    return elements * elementBytes;
 }
 
 static LogicalResult
@@ -437,15 +433,13 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
 
     // DMA in config contains reference to slice_program op
     if (auto dmaInCfgOp = dyn_cast<torq_hw::DmaInCfgOp>(op)) {
-        prof.currentDmaInBytes =
-            getDmaNdlTransferBytes(dmaInCfgOp.getWriteNdl(), dmaInCfgOp.getWrite().getType());
+        prof.currentDmaInBytes = getDmaNdlTransferBytes(dmaInCfgOp.getWriteNdl());
         prof.currentDmaInCycles =
             (uint64_t)std::ceil(prof.currentDmaInBytes / dmaInEffectiveThroughput);
         prof.currentDmaInLoc = toString(dmaInCfgOp.getLoc());
     }
     else if (auto dmaOutCfgOp = dyn_cast<torq_hw::DmaOutCfgOp>(op)) {
-        prof.currentDmaOutBytes =
-            getDmaNdlTransferBytes(dmaOutCfgOp.getReadNdl(), dmaOutCfgOp.getRead().getType());
+        prof.currentDmaOutBytes = getDmaNdlTransferBytes(dmaOutCfgOp.getReadNdl());
         prof.currentDmaOutCycles =
             (uint64_t)std::ceil(prof.currentDmaOutBytes / dmaOutEffectiveThroughput);
         prof.currentDmaOutLoc = toString(dmaOutCfgOp.getLoc());
