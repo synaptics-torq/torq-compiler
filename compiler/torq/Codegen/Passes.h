@@ -7,6 +7,7 @@
 #pragma once
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -56,6 +57,9 @@ createAssignOperationsToCpuProgramsPass(bool disableCss = false, bool disableHos
 std::unique_ptr<OperationPass<ModuleOp>> createOutlineCpuProgramsPass();
 
 std::unique_ptr<OperationPass<ModuleOp>> createCompileCpuProgramsPass();
+
+std::unique_ptr<OperationPass<iree_compiler::IREE::HAL::ExecutableOp>>
+createAttachX86CpuObjectsPass();
 
 std::unique_ptr<OperationPass<ModuleOp>> createCreateGlobalsPass();
 

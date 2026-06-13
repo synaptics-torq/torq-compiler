@@ -192,6 +192,34 @@ def CompileCpuPrograms :
   ];
 }
 
+def AttachX86CpuObjects :
+    Pass<"torq-attach-x86-cpu-objects",
+         "::mlir::iree_compiler::IREE::HAL::ExecutableOp"> {
+  let summary = "Attach a hal.executable.object to every x86_64 host-CPU variant";
+  let description = [{
+    For every `hal.executable.variant` whose target triple is `x86_64-*`, attach
+    an `#hal.executable.object<{path = "libclang_rt.builtins-x86_64.a", data = ...}>`
+    entry to its `objects` attribute. IREE's LLVMCPU plugin links that archive
+    at the link stage, supplying soft-float helpers like `__truncsfbf2` that
+    LLVM emits when lowering `int -> bf16` casts on CPUs without native bf16.
+
+    The archive bytes are embedded inside the compiler binary at build time via
+    `.incbin` (see `host_x86_objects.S`), so the pass needs neither an external
+    archive name option nor a `--iree-hal-executable-object-search-path` flag;
+    the archive travels with the binary.
+
+    Intended to be invoked via IREE's
+    `--iree-hal-preprocess-executables-with=builtin.module(torq-attach-x86-cpu-objects)`
+    flag. The `builtin.module(...)` wrapper is a trigger marker; the inner
+    pipeline is anchored at `hal.executable`.
+  }];
+  let constructor = "mlir::syna::torq::createAttachX86CpuObjectsPass()";
+
+  let dependentDialects = [
+    "iree_compiler::IREE::HAL::HALDialect"
+  ];
+}
+
 def CompileSliceInvocations :
     InterfacePass<"torq-compile-slice-invocations",
          "mlir::FunctionOpInterface"> {

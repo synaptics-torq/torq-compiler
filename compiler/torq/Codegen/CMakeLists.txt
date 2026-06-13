@@ -10,6 +10,7 @@ set(sources
     AssignAddressesPass.cpp
     AssignObjectsIdentifiersPass.cpp
     AssignOperationsToCpuProgramsPass.cpp
+    AttachX86CpuObjectsPass.cpp
     ExecutorAssignmentPass.cpp
     BufferizationUtils.cpp
     CheckCssStackSizePass.cpp
@@ -119,7 +120,26 @@ iree_cc_library(
     iree::target::torq::Conversions::TorqHLToTorqHW
     iree::target::torq::Transforms::Linalg::Transforms    
     iree::target::torq::Codegen::css_bootstrap::torq_kernel_riscv
+    iree::target::torq::Codegen::torq_host_x86_objects
     iree::target::torq::Serialization::Serialization
 )
 
 add_subdirectory("css_bootstrap")
+
+# Embed libclang_rt.builtins-x86_64.a inside the compiler binary via .incbin so
+# AttachX86CpuObjectsPass can attach the archive bytes to host x86_64 dispatches
+# without a file-system lookup. Same pattern as css_bootstrap/torq_kernel_riscv.
+set(TORQ_HOST_X86_ARCHIVE
+    "${CMAKE_SOURCE_DIR}/third_party/runtimes-prebuilt/libclang_rt.builtins-x86_64.a")
+set_source_files_properties(host_x86_objects.S PROPERTIES
+    OBJECT_DEPENDS "${TORQ_HOST_X86_ARCHIVE}")
+
+iree_cc_library(
+  NAME
+    torq_host_x86_objects
+  SRCS
+    host_x86_objects.S
+  DEFINES
+    HOST_X86_ARCHIVE_PATH="${TORQ_HOST_X86_ARCHIVE}"
+  PUBLIC
+)

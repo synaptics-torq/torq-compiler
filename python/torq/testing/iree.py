@@ -1159,6 +1159,7 @@ def llvmcpu_compiled_model(versioned_file, llvmcpu_compiler, request, mlir_model
     cmd = [str(llvmcpu_compiler),
            '--iree-hal-target-backends=llvm-cpu',
            '--iree-llvmcpu-target-cpu=host',
+           '--iree-hal-preprocess-executables-with=builtin.module(torq-attach-x86-cpu-objects)',
            str(mlir_model_file),
            *llvmcpu_compiler_options,
            '-o', str(versioned_file)]

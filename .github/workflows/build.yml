@@ -243,9 +243,12 @@ jobs:
         if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: actions/checkout@v6
         with:
-          lfs: false
+          # LFS is needed so that third_party/runtimes-prebuilt/libclang_rt.builtins-x86_64.a
+          # (attached to x86_64 LLVMCPU dispatches by torq-attach-x86-cpu-objects) is the
+          # real archive instead of a pointer file.
+          lfs: true
           submodules: false
-    
+
       - name: Run C model tests
         id: run_cmodel_tests
         if: ${{ vars.DISABLE_TESTS != 'true' }}
@@ -325,9 +328,12 @@ jobs:
         if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: actions/checkout@v6
         with:
-          lfs: false
+          # LFS is needed so that third_party/runtimes-prebuilt/libclang_rt.builtins-x86_64.a
+          # (attached to x86_64 LLVMCPU dispatches by torq-attach-x86-cpu-objects) is the
+          # real archive instead of a pointer file.
+          lfs: true
           submodules: false
-    
+
       - name: Run Astra Machina SL tests
         if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: ./.github/actions/tests
@@ -416,9 +422,12 @@ jobs:
         if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: actions/checkout@v6
         with:
-          lfs: false
+          # LFS is needed so that third_party/runtimes-prebuilt/libclang_rt.builtins-x86_64.a
+          # (attached to x86_64 LLVMCPU dispatches by torq-attach-x86-cpu-objects) is the
+          # real archive instead of a pointer file.
+          lfs: true
           submodules: false
-    
+
       - name: Run AWS FPGA model tests
         if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: ./.github/actions/tests
