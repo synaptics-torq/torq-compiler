@@ -118,6 +118,9 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
     if (!clDisableLinalgSlicing)
         funcPm.addPass(createLinalgSlicingPass());
 
+    // tile reduction dimensions that exceed LRAM before TorqHL conversion
+    funcPm.addPass(createTileReductionForLramPass());
+
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
 

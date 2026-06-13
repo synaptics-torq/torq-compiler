@@ -1,3 +1,7 @@
+import re
+from pathlib import Path
+
+import ml_dtypes
 import numpy as np
 import onnx
 import onnxruntime
@@ -273,6 +277,76 @@ def numpy_global_average_pool_reference_results(input_data):
     data = input_data.data if hasattr(input_data, 'data') else input_data
     assert len(data) == 1
     return [_numpy_global_average_pool(data[0])]
+
+
+def _decode_bf16_resource(hex_str, num_elements):
+    """Decode a 1-D bf16 dense_resource hex blob.
+
+    MLIR prefixes the blob with an alignment header, so the tensor data is the
+    trailing num_elements * 2 bytes (bf16 is 2 bytes/element).
+    """
+    raw = bytes.fromhex(hex_str[2:] if hex_str.startswith("0x") else hex_str)
+    return np.frombuffer(raw[-(num_elements * 2):], dtype=ml_dtypes.bfloat16).astype(np.float32)
+
+
+def _parse_instance_norm_params(mlir_model_file):
+    """Extract (scale, bias, eps) for the onnx.InstanceNormalization op from an MLIR model.
+
+    scale/bias are per-channel constants stored as dense_resource blobs; eps is an op attribute.
+    """
+    text = Path(mlir_model_file).read_text()
+    eps = float(re.search(r"onnx\.epsilon\s*=\s*([0-9.eE+-]+)", text).group(1))
+    op = re.search(
+        r'onnx\.InstanceNormalization"\((%[\w]+),\s*(%[\w]+),\s*(%[\w]+)\)', text
+    )
+
+    def const_resource(ssa):
+        m = re.search(
+            re.escape(ssa)
+            + r'\s*=\s*torch\.operator "onnx\.Constant".*?dense_resource<(\w+)>\s*:\s*tensor<(\d+)x',
+            text, re.S,
+        )
+        name, count = m.group(1), int(m.group(2))
+        blob = re.search(re.escape(name) + r'\s*:\s*"(0x[0-9A-Fa-f]+)"', text).group(1)
+        return _decode_bf16_resource(blob, count)
+
+    return const_resource(op.group(2)), const_resource(op.group(3)), eps
+
+
+def _numpy_instance_norm(x, scale, bias, eps, output_dtype):
+    """ONNX InstanceNormalization with fp32 accumulation (matches the TORQ NPU).
+
+    Normalizes over the spatial dims (all dims after N, C) per (N, C); scale/bias are
+    per-channel. The mean/variance reductions are accumulated in fp32: IREE's llvm-cpu
+    reference accumulates the bf16 reductions in bf16, which loses catastrophic precision
+    for large spatial sizes (variance off by ~20x), so it is not a valid golden here.
+    """
+    x32 = x.astype(np.float32)
+    spatial_axes = tuple(range(2, x32.ndim))
+    mean = np.mean(x32, axis=spatial_axes, keepdims=True, dtype=np.float32)
+    var = np.mean((x32 - mean) ** 2, axis=spatial_axes, keepdims=True, dtype=np.float32)
+    norm = (x32 - mean) / np.sqrt(var + np.float32(eps))
+    channel_shape = [1, -1] + [1] * len(spatial_axes)
+    out = norm * scale.reshape(channel_shape) + bias.reshape(channel_shape)
+    return out.astype(output_dtype)
+
+
+@versioned_unhashable_object_fixture
+def numpy_instancenorm_reference_results(input_data, mlir_io_spec, mlir_model_file):
+    """InstanceNormalization reference computed in numpy with fp32 accumulation.
+
+    Bypasses the llvm-cpu reference, whose bf16-accumulated mean/variance is wildly
+    inaccurate for large spatial reductions (and order-dependent), while the TORQ NPU
+    accumulates in fp32.
+    """
+    from .iree import get_dtype
+
+    data = input_data.data if hasattr(input_data, 'data') else input_data
+    assert len(data) == 1
+    assert len(mlir_io_spec.outputs) == 1
+    output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
+    scale, bias, eps = _parse_instance_norm_params(mlir_model_file)
+    return [_numpy_instance_norm(data[0], scale, bias, eps, output_dtype)]
 
 
 @versioned_unhashable_object_fixture

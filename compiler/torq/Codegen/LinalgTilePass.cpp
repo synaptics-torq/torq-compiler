@@ -29,6 +29,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -505,51 +506,6 @@ static LogicalResult parallelTileAndPeel(
     return success();
 }
 
-#if 0
-class TileReduceOperation : public OpRewritePattern<linalg::LinalgOp> {
-  public:
-    TileReduceOperation(MLIRContext *context, torq_hl::SubSystem subSystem)
-        : OpRewritePattern<linalg::LinalgOp>(context), subSystem(subSystem) {}
-    
-    LogicalResult matchAndRewrite(linalg::LinalgOp linalgOp, PatternRewriter &rewriter) const override {
-            if (linalgOp.getNumReductionLoops() < 1) {
-        return failure();
-    }
-
-    SmallVector<int64_t> tileSizes(linalgOp.getNumLoops(), 0);
-
-    SmallVector<unsigned> reductionDims;
-    linalgOp.getReductionDims(reductionDims);
-
-    for (int i = 0; i < reductionDims.size(); ++i) {
-        if (reductionDims[reductionDims.size() - 1 - i] != linalgOp.getNumLoops() - 1 - i) {
-            return rewriter.notifyMatchFailure(linalgOp, "reductionDims not the innermost ones");
-        }
-    }
-
-    if (reductionDims.size() == linalgOp.getNumReductionLoops()) {
-        for (unsigned i = 0; i < linalgOp.getNumReductionLoops(); i++) {
-            tileSizes[reductionDims[i]] = 64;
-        }
-    }
-
-    if (!tileSizes.empty()) {
-        SmallVector<OpFoldResult> sizes;
-        for (int64_t size : tileSizes) {
-            sizes.push_back(rewriter.getIndexAttr(size));
-        }
-        FailureOr<scf::SCFReductionTilingResult> results = scf::tileReductionUsingScf(
-            rewriter, cast<PartialReductionOpInterface>(linalgOp.getOperation()), sizes
-        );
-        if (failed(results)) {
-            return failure();
-        }
-    }
-
-    return success();
-}
-#endif
-
 // mlir::iree_compiler::IREE::LinalgExt::SortOp implements TilingInterface,
 // but tiling the sort dimension produces independently sorted sub-arrays, not a
 // globally sorted result. There is no merge step to combine tiles. So we
@@ -734,6 +690,206 @@ template <typename OpTy> struct TensorOpConversion : public OpRewritePattern<OpT
     }
 };
 
+/// Tile reduction dimensions of linalg.generic ops whose reduction input
+/// exceeds LRAM.
+class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReductionForLramPass> {
+  public:
+    using TileReductionForLramBase<TileReductionForLramPass>::TileReductionForLramBase;
+
+    void runOnOperation() {
+        auto funcOp = getOperation();
+        const uint32_t lramSize = TorqHw::get().getAvailableMemoryForTiling();
+
+        SmallVector<linalg::GenericOp> opsToTile;
+        funcOp.walk([&](linalg::GenericOp genericOp) {
+            if (genericOp.getNumReductionLoops() == 0)
+                return;
+
+            // TODO: Handle ops with multiple reduction dims
+            SmallVector<unsigned> reductionDims;
+            genericOp.getReductionDims(reductionDims);
+            if (reductionDims.size() != 1) {
+                LLVM_DEBUG({
+                    llvm::dbgs() << "TileReductionForLram: only one reduction dimension is "
+                                    "supported, but found "
+                                 << reductionDims.size() << "; aborting.\n";
+                });
+                return;
+            }
+
+            FailureOr<int64_t> totalBytes = estimateOperandBytes(genericOp);
+            if (failed(totalBytes)) {
+                LLVM_DEBUG({
+                    llvm::dbgs(
+                    ) << "TileReductionForLram: skipping op because operand memory could "
+                         "not be estimated\n";
+                });
+                return;
+            }
+
+            if (*totalBytes > lramSize) {
+                LLVM_DEBUG({
+                    llvm::dbgs(
+                    ) << "TileReductionForLram: selected op for reduction tiling; totalBytes="
+                      << *totalBytes << " lramSize=" << lramSize << "\n";
+                });
+                opsToTile.push_back(genericOp);
+            }
+        });
+
+        IRRewriter rewriter(&getContext());
+        for (linalg::GenericOp genericOp : opsToTile) {
+            if (failed(tileReductionToFitLram(rewriter, genericOp, lramSize))) {
+                genericOp.emitError() << "failed to tile reduction dimension to fit LRAM size "
+                                      << lramSize << " bytes";
+                signalPassFailure();
+                return;
+            }
+        }
+    }
+
+  private:
+    FailureOr<int64_t> estimateOperandBytes(linalg::GenericOp genericOp) {
+        int64_t totalBytes = 0;
+        for (OpOperand &operand : genericOp->getOpOperands()) {
+            auto tensorType = dyn_cast<RankedTensorType>(operand.get().getType());
+            if (!tensorType || !tensorType.hasStaticShape())
+                return failure();
+
+            int64_t elementBytes = llvm::divideCeil(tensorType.getElementTypeBitWidth(), 8);
+            totalBytes += tensorType.getNumElements() * elementBytes;
+        }
+        return totalBytes;
+    }
+
+    FailureOr<int64_t> estimateTiledOperandBytes(
+        linalg::GenericOp genericOp, unsigned reductionDim, int64_t tileSize
+    ) {
+        int64_t estimatedBytes = 0;
+
+        for (OpOperand &operand : genericOp->getOpOperands()) {
+            auto tensorType = dyn_cast<RankedTensorType>(operand.get().getType());
+            if (!tensorType || !tensorType.hasStaticShape()) {
+                LLVM_DEBUG({
+                    llvm::dbgs(
+                    ) << "TileReductionForLram: cannot estimate tiled bytes for non-static "
+                         "ranked tensor operand\n";
+                });
+                return failure();
+            }
+
+            AffineMap map = genericOp.getMatchingIndexingMap(&operand);
+            int64_t numElements = 1;
+            for (auto [i, expr] : llvm::enumerate(map.getResults())) {
+                int64_t dimSize = tensorType.getDimSize(i);
+                if (auto dimExpr = dyn_cast<AffineDimExpr>(expr)) {
+                    if (dimExpr.getPosition() == reductionDim) {
+                        numElements *= tileSize;
+                        continue;
+                    }
+                }
+                numElements *= dimSize;
+            }
+            int64_t elementBytes = llvm::divideCeil(tensorType.getElementTypeBitWidth(), 8);
+            estimatedBytes += numElements * elementBytes;
+        }
+        return estimatedBytes;
+    }
+
+    LogicalResult
+    tileReductionToFitLram(IRRewriter &rewriter, linalg::GenericOp genericOp, uint32_t lramSize) {
+        SmallVector<unsigned> reductionDims;
+        genericOp.getReductionDims(reductionDims);
+        assert(reductionDims.size() == 1);
+        unsigned reductionDim = reductionDims[0];
+
+        auto loopRanges = genericOp.getStaticLoopRanges();
+        int64_t reductionSize = loopRanges[reductionDim];
+        if (reductionSize == ShapedType::kDynamic) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "TileReductionForLram: cannot tile op because reduction dimension "
+                             << reductionDim << " is dynamic\n";
+            });
+            return failure();
+        }
+        if (reductionSize <= 1)
+            return failure();
+
+        // The reduce write descriptor (CEPW n_size) can encode at most 1<<16 elements per
+        // reduction, so a single tile's reduction length must not exceed this regardless of how
+        // much LRAM is available. Reference:
+        // third_party/torq-hw/ct/torq_api.c:L1444: _reg_ndl_desc_gen: Assertion `n>=1 &&
+        // n<=(1<<16)' failed
+        constexpr int64_t kMaxReduceTileElements = 1 << 16;
+
+        // Repeatedly halve the reduction tile size until the estimated memory requirement fits in
+        // LRAM and the tile is within the hardware reduce descriptor limit.
+        int64_t tileSize = reductionSize;
+        bool fitsInLram = false;
+
+        while (tileSize > 1) {
+            tileSize = std::max(tileSize / 2, int64_t(1));
+
+            FailureOr<int64_t> estimatedBytes =
+                estimateTiledOperandBytes(genericOp, reductionDim, tileSize);
+            if (failed(estimatedBytes))
+                return failure();
+
+            LLVM_DEBUG({
+                llvm::dbgs() << "TileReductionForLram: candidate tileSize=" << tileSize
+                             << " estimatedBytes=" << *estimatedBytes << " lramSize=" << lramSize
+                             << "\n";
+            });
+
+            if (*estimatedBytes <= lramSize && tileSize <= kMaxReduceTileElements) {
+                fitsInLram = true;
+                break;
+            }
+        }
+
+        if (!fitsInLram) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "TileReductionForLram: failed to find reduction tile that fits "
+                                "in LRAM\n";
+            });
+            return failure();
+        }
+
+        unsigned numLoops = genericOp.getNumLoops();
+        SmallVector<OpFoldResult> tileSizes(numLoops, rewriter.getIndexAttr(0));
+        tileSizes[reductionDim] = rewriter.getIndexAttr(tileSize);
+
+        LLVM_DEBUG({
+            llvm::dbgs() << "TileReductionForLram: tiling reductionDim=" << reductionDim
+                         << " reductionSize=" << reductionSize << " tileSize=" << tileSize << "\n";
+        });
+
+        // Create a loop to accumulate partial results into the same output buffer.
+        scf::SCFTilingOptions options;
+        options.setTileSizes(tileSizes);
+        options.setReductionTilingStrategy(ReductionTilingStrategy::FullReduction);
+        options.setReductionDims({reductionDim});
+
+        rewriter.setInsertionPoint(genericOp);
+        FailureOr<scf::SCFTilingResult> tilingResult =
+            scf::tileUsingSCF(rewriter, cast<TilingInterface>(genericOp.getOperation()), options);
+        if (failed(tilingResult)) {
+            LLVM_DEBUG({ llvm::dbgs() << "TileReductionForLram: scf::tileUsingSCF failed\n"; });
+            return failure();
+        }
+
+        SmallVector<scf::ForOp> forOps;
+        for (auto loop : tilingResult->loops) {
+            if (auto forOp = dyn_cast<scf::ForOp>(loop.getOperation()))
+                forOps.push_back(forOp);
+        }
+
+        linalg::peelLoops(rewriter, forOps);
+        rewriter.replaceOp(genericOp, tilingResult->replacements);
+        return success();
+    }
+};
+
 class LramTilePass : public impl::LramTileBase<LramTilePass> {
   public:
     using LramTileBase<LramTilePass>::LramTileBase;
@@ -802,6 +958,10 @@ class DtcmTilePass : public impl::DtcmTileBase<DtcmTilePass> {
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLramTilePass() {
     return std::make_unique<LramTilePass>();
+}
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileReductionForLramPass() {
+    return std::make_unique<TileReductionForLramPass>();
 }
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createDtcmTilePass() {

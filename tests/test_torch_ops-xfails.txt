@@ -6,7 +6,5 @@ test_mlir_files[dynamicquantize.mlir1-aws_fpga-sl2610-v1] synaptics-torq/torq-co
 test_mlir_files[dynamicquantize.mlir1-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1092
 test_mlir_files[equal.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
 test_mlir_files[equal.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
-test_mlir_files[instancenorm.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
-test_mlir_files[instancenorm.mlir-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1389
 test_mlir_files[constantshape.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1569
 test_mlir_files[i1-bf16.mlir-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1578

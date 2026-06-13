@@ -164,6 +164,12 @@ static IREEOneShotBufferizationOptions getBufferizationOptions() {
         return bufferization::getMemRefTypeWithFullyDynamicLayout(tensorType, memorySpace);
     };
 
+    // scf.for reduction accumulators may be yielded through a torq_hl.convert
+    // (lram->xram), which is a real copy and therefore not bufferization-equivalent
+    // to the iter_arg. Allow the loop to return allocs+copies instead of erroring;
+    // the loop is fully unrolled later (UnrollLoopPass), flattening these away.
+    options.allowReturnAllocsFromLoops = true;
+
     return options;
 }
 

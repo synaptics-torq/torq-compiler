@@ -741,6 +741,176 @@ struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
     }
 };
 
+/// Map the arith op in a reduction body to the corresponding torq_hl reduce
+/// kernel name. Shared by the linalg.generic and linalg.reduce conversions.
+static FailureOr<std::string> getReduceOpName(Operation *reduceBodyOp) {
+    if (isa<arith::AddIOp>(reduceBodyOp) || isa<arith::AddFOp>(reduceBodyOp)) {
+        return std::string("reduce_sum");
+    }
+    if (isa<arith::MaxSIOp>(reduceBodyOp) || isa<arith::MaxUIOp>(reduceBodyOp) ||
+        isa<arith::MaximumFOp>(reduceBodyOp)) {
+        return std::string("reduce_max");
+    }
+    if (isa<arith::MinSIOp>(reduceBodyOp) || isa<arith::MinUIOp>(reduceBodyOp) ||
+        isa<arith::MinimumFOp>(reduceBodyOp)) {
+        return std::string("reduce_min");
+    }
+    if (isa<arith::OrIOp>(reduceBodyOp)) {
+        return std::string("reduce_or");
+    }
+    if (isa<arith::AndIOp>(reduceBodyOp)) {
+        return std::string("reduce_and");
+    }
+    if (isa<arith::XOrIOp>(reduceBodyOp)) {
+        return std::string("reduce_xor");
+    }
+    if (isa<arith::MulFOp>(reduceBodyOp)) {
+        return std::string("reduce_mul");
+    }
+    return failure();
+}
+
+/// Emit the torq_hl::ReduceOp with the standard fixed weights/shift. Callers
+/// supply the scale_bias operand and output clamp (the linalg.reduce path may
+/// override these for a folded per-channel conv bias).
+template <typename SrcOpT>
+static torq_hl::ReduceOp emitTorqReduce(
+    PatternRewriter &rewriter, SrcOpT srcOp, RankedTensorType resultType, StringRef opName,
+    int64_t axis, Value scaleBias, int32_t outputMin, int32_t outputMax, Value input
+) {
+    constexpr int shift_factor = 12;
+    std::vector<int16_t> weights = {1, 1};
+    Value weightsConst = createI16Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{2});
+    return torq_hl::ReduceOp::create(
+        rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
+        opName.str(), axis,
+        /*output_zp*/ 0, outputMin, outputMax, shift_factor, weightsConst, scaleBias, input
+    );
+}
+
+struct GenericReductionInfo {
+    Value input;
+    Value init;
+    RankedTensorType resultType;
+    int64_t axis;
+    std::string opName;
+};
+
+static FailureOr<GenericReductionInfo>
+getGenericReductionInfo(linalg::GenericOp srcOp, PatternRewriter &rewriter) {
+    if (srcOp.getNumReductionLoops() != 1) {
+        return failure();
+    }
+
+    if (srcOp.getInputs().size() != 1) {
+        return failure();
+    }
+
+    if (srcOp.getNumDpsInits() != 1) {
+        return failure();
+    }
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
+    if (!yieldOp) {
+        return failure();
+    }
+
+    auto reduceBodyOp = yieldOp.getOperand(0).getDefiningOp();
+    if (!reduceBodyOp) {
+        return failure();
+    }
+
+    auto opName = getReduceOpName(reduceBodyOp);
+    if (failed(opName)) {
+        return failure();
+    }
+
+    SmallVector<unsigned> reductionDims;
+    srcOp.getReductionDims(reductionDims);
+
+    if (reductionDims.size() != 1) {
+        return failure();
+    }
+
+    unsigned reductionLoopIdx = reductionDims[0];
+
+    AffineMap inMap = srcOp.getIndexingMapsArray()[0];
+
+    auto reductionAxis = inMap.getResultPosition(rewriter.getAffineDimExpr(reductionLoopIdx));
+
+    if (!reductionAxis) {
+        return failure();
+    }
+
+    Value init = srcOp.getDpsInitOperand(0)->get();
+
+    return GenericReductionInfo{
+        srcOp.getInputs()[0], init, cast<RankedTensorType>(srcOp.getResultTypes()[0]),
+        static_cast<int64_t>(*reductionAxis), *opName
+    };
+}
+
+static bool isScfAccumulator(Value value) {
+    auto blockArg = dyn_cast<BlockArgument>(value);
+    if (!blockArg)
+        return false;
+    return isa<scf::ForOp>(blockArg.getOwner()->getParentOp());
+}
+
+/// Lowers a single-reduction-loop `linalg.generic` to `torq_hl::ReduceOp`
+struct GenericReductionConversion : public OpRewritePattern<linalg::GenericOp> {
+
+    GenericReductionConversion(MLIRContext *context) : OpRewritePattern(context) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+
+        auto info = getGenericReductionInfo(srcOp, rewriter);
+
+        if (failed(info)) {
+            return rewriter.notifyMatchFailure(srcOp, "not a supported reduction generic");
+        }
+
+        LLVM_DEBUG({
+            llvm::dbgs() << "\nGenericReductionConversion: Reduce source op:\n";
+            srcOp.dump();
+            llvm::dbgs() << "\nGenericReductionConversion: Reduction init:\n";
+            info->init.dump();
+        });
+        if (auto blockArg = dyn_cast<BlockArgument>(info->init)) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "arg index=" << blockArg.getArgNumber() << "\n";
+                llvm::dbgs() << "owner op:\n";
+                blockArg.getOwner()->getParentOp()->dump();
+            });
+        }
+
+        const std::vector<int32_t> bias = {0};
+        const std::vector<int32_t> scale = {1};
+
+        Value scaleBias = createI32Const(rewriter, srcOp, interleave(bias, scale));
+        auto reduceOp = emitTorqReduce(
+            rewriter, srcOp, info->resultType, info->opName, info->axis, scaleBias,
+            /*outputMin*/ 0, /*outputMax*/ 0, info->input
+        );
+
+        if (!isScfAccumulator(info->init)) {
+            rewriter.replaceOp(srcOp, reduceOp.getResult(0));
+            return success();
+        }
+
+        FailureOr<Value> accumulated = addInitToResult(info->init, reduceOp.getResult(0), rewriter);
+        if (failed(accumulated)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "failed to accumulate tiled reduction into scf iter_arg"
+            );
+        }
+        rewriter.replaceOp(srcOp, *accumulated);
+        return success();
+    }
+};
+
+/// Lowers a single-input, single-dimension `linalg.reduce` to `torq_hl::ReduceOp`
 struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
 
     ReduceOpConversion(MLIRContext *context) : OpRewritePattern(context) {}
@@ -797,43 +967,17 @@ struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
         }
         int64_t axis = dimensions[0];
 
-        std::string opName = "reduce_sum";
-        auto reduceOp = yieldOp.getOperand(0).getDefiningOp();
-
-        if (isa<arith::AddIOp>(reduceOp) || isa<arith::AddFOp>(reduceOp)) {
-            opName = "reduce_sum";
-        }
-        else if (isa<arith::MaxSIOp>(reduceOp) || isa<arith::MaxUIOp>(reduceOp) ||
-                 isa<arith::MaximumFOp>(reduceOp)) {
-            opName = "reduce_max";
-        }
-        else if (isa<arith::MinSIOp>(reduceOp) || isa<arith::MinUIOp>(reduceOp) ||
-                 isa<arith::MinimumFOp>(reduceOp)) {
-            opName = "reduce_min";
-        }
-        else if (isa<arith::OrIOp>(reduceOp)) {
-            opName = "reduce_or";
-        }
-        else if (isa<arith::AndIOp>(reduceOp)) {
-            opName = "reduce_and";
-        }
-        else if (isa<arith::XOrIOp>(reduceOp)) {
-            opName = "reduce_xor";
-        }
-        else if (isa<arith::MulFOp>(reduceOp)) {
-            opName = "reduce_mul";
-        }
-        else {
+        auto reduceBodyOp = yieldOp.getOperand(0).getDefiningOp();
+        auto opName = getReduceOpName(reduceBodyOp);
+        if (failed(opName)) {
             return rewriter.notifyMatchFailure(srcOp, "Unsupported reduction operation");
         }
 
-        constexpr int shift_factor = 12;
         // reduceOp out_min and out_max is defined in kernel, here just initialize
 
         // TODO: materialize bias/scale weights for rescale precision
         const std::vector<int32_t> bias = {0};
         const std::vector<int32_t> scale = {1};
-        std::vector<int16_t> weights = {1, 1};
 
         // For bf16 reduce_sum with f32 output, preserve f32 type for better precision
         // If output is bf16, keep it as bf16 (user's choice for memory/performance)
@@ -861,11 +1005,10 @@ struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
             outputMax = *reinterpret_cast<int32_t *>(&maxF);
         }
 
-        rewriter.replaceOpWithNewOp<syna::torq_hl::ReduceOp>(
-            srcOp, resultType, createInitTensor(srcOp, rewriter, resultType), opName, axis, 0,
-            outputMin, outputMax, shift_factor,
-            createI16Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{2}), scaleBias, input
+        auto reduceOp = emitTorqReduce(
+            rewriter, srcOp, resultType, *opName, axis, scaleBias, outputMin, outputMax, input
         );
+        rewriter.replaceOp(srcOp, reduceOp.getResult(0));
 
         return success();
     }
@@ -1938,6 +2081,7 @@ void populateLinalgToTorqHLPatterns(
 
     patterns.insert<TensorPadOpConversion>(context);
 
+    patterns.insert<GenericReductionConversion>(context);
     patterns.insert<ReduceOpConversion>(context);
     patterns.insert<CastOpPattern>(context);
     patterns.insert<BroadcastOpConversion>(context);

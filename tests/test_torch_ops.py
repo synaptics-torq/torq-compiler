@@ -40,6 +40,16 @@ def comparison_config_for_matmul_dql(request):
     return {"fp_max_tol": 0.5, "allowed_wrong": 0.15}
 
 
+@pytest.fixture
+def comparison_config_for_instancenorm(request):
+    """Comparison config for InstanceNormalization.
+
+    The normalized bf16 output carries ~1 bf16 ULP of error; against the fp32
+    numpy reference a few near-zero elements just exceed the default fp_max_tol.
+    """
+    return {"fp_max_tol": 2e-2, "allowed_wrong": 1e-3}
+
+
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_file_group("torch_ops")))
 def case_config(request, runtime_hw_type, chip_config):
 
@@ -77,6 +87,9 @@ def case_config(request, runtime_hw_type, chip_config):
 
     if 'matmul_dql' in request.param.data.name:
         extra_args["comparison_config"] = "comparison_config_for_matmul_dql"
+
+    if 'instancenorm' in request.param.data.name:
+        extra_args["comparison_config"] = "comparison_config_for_instancenorm"
 
     # Force the Conv1D-as-matmul -> fully_connected lowering tests to run on
     # the NSS/slice path so they fail loudly if a future change silently routes
@@ -116,6 +129,11 @@ def _is_global_average_pool_case(case_config):
     return mlir_file is not None and "globalaveragepool" in mlir_file.name.lower()
 
 
+def _is_instancenorm_case(case_config):
+    mlir_file = case_config.get("static_mlir_model_file")
+    return mlir_file is not None and "instancenorm" in mlir_file.name.lower()
+
+
 @pytest.fixture
 def reference_results(request, case_config):
     if _is_gelu_case(case_config):
@@ -123,6 +141,9 @@ def reference_results(request, case_config):
 
     if _is_global_average_pool_case(case_config):
         return request.getfixturevalue("numpy_global_average_pool_reference_results")
+
+    if _is_instancenorm_case(case_config):
+        return request.getfixturevalue("numpy_instancenorm_reference_results")
 
     try:
         return request.getfixturevalue("llvmcpu_reference_results")
