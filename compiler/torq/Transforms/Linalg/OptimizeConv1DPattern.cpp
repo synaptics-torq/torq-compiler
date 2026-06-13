@@ -210,6 +210,142 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
     }
 };
 
+// True if `v` traces back (through layout/cast ops) to a compile-time constant,
+// i.e. a normal conv weight rather than a runtime activation.
+//
+// A one-level check is NOT enough: by this pass both a constant weight and a
+// runtime-activation filter arrive as a linalg.transpose (transpose(const) vs
+// transpose(activation)), so we must look THROUGH the value-preserving
+// layout/cast ops to the root to tell them apart. The real chain is 1-2 ops
+// (a transpose, sometimes an i8->i16 cast generic); kMaxDepth keeps the walk
+// short and bounds it so a long/cyclic def chain can never spin.
+static bool tracesToConstantWeight(Value v) {
+    constexpr int kMaxDepth = 4;
+    for (int i = 0; i < kMaxDepth && v; ++i) {
+        Operation *def = v.getDefiningOp();
+        if (!def)
+            return false; // block argument / runtime input -> activation
+        if (isa<arith::ConstantOp>(def))
+            return true;
+        // Look through pure layout/cast ops that just reshape or retype weights.
+        if (isa<linalg::TransposeOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp>(def)) {
+            v = def->getOperand(0);
+            continue;
+        }
+        if (auto g = dyn_cast<linalg::GenericOp>(def)) {
+            if (g.getNumDpsInputs() >= 1) {
+                v = g.getDpsInputOperand(0)->get();
+                continue;
+            }
+        }
+        return false;
+    }
+    // Hit the depth bound without resolving -> treat as non-constant (activation)
+    // so we don't raise something we couldn't prove is a weight.
+    return false;
+}
+
+// Raise a 1x1 linalg.conv_2d_nhwc_hwcf (matmul-as-conv) into a linalg.matmul
+// before the NHWC->NCHW pass runs, but ONLY when both conv inputs are runtime
+// activations (e.g. a TFLite FULLY_CONNECTED with two activation inputs, as in
+// attention). For a normal conv with a constant weight the existing conv path
+// already handles it correctly, so we leave those untouched.
+//
+// The NHWC->NCHW pass cannot correctly relayout the quantized epilogue of an
+// activation x activation matmul-as-conv; raising to matmul avoids the layout
+// boundary and lets the matmul lowering handle the quant params.
+//   input  [N,1,1,C]  -> collapse -> [N,C]
+//   filter [1,1,C,F]  -> collapse -> [C,F]
+//   matmul [N,C]x[C,F] -> [N,F]   -> expand -> [N,1,1,F]
+struct Conv2D1x1NhwcHwcfToMatmulPattern : public OpRewritePattern<linalg::Conv2DNhwcHwcfOp> {
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::Conv2DNhwcHwcfOp convOp, PatternRewriter &rewriter) const override {
+        auto loc = convOp.getLoc();
+
+        Value input = convOp.getInputs()[0];   // [N, H, W, C]
+        Value filter = convOp.getInputs()[1];  // [Kh, Kw, C, F]
+        Value output = convOp.getOutputs()[0]; // [N, Ho, Wo, F]
+
+        auto inputType = cast<RankedTensorType>(input.getType());
+        auto filterType = cast<RankedTensorType>(filter.getType());
+        auto outputType = cast<RankedTensorType>(output.getType());
+
+        ArrayRef<int64_t> inputShape = inputType.getShape();
+        ArrayRef<int64_t> filterShape = filterType.getShape();
+
+        // Only handle the 1x1 pointwise kernel (matmul-as-conv).
+        if (filterShape[0] != 1 || filterShape[1] != 1) {
+            return rewriter.notifyMatchFailure(convOp, "not a 1x1 kernel");
+        }
+
+        // Only raise the activation x activation case. A constant-weight conv is
+        // handled correctly by the existing conv path; raising it regresses the
+        // full model (downstream rank mismatch).
+        if (tracesToConstantWeight(filter)) {
+            return rewriter.notifyMatchFailure(convOp, "constant weight; keep as conv");
+        }
+
+        // Unit stride/dilation only — a 1x1 stride-1 conv is a pure matmul.
+        SmallVector<int64_t> strides = llvm::to_vector<4>(
+            llvm::map_range(convOp.getStrides(), [](APInt v) { return v.getSExtValue(); })
+        );
+        SmallVector<int64_t> dilations = llvm::to_vector<4>(
+            llvm::map_range(convOp.getDilations(), [](APInt v) { return v.getSExtValue(); })
+        );
+        if (strides[0] != 1 || strides[1] != 1 || dilations[0] != 1 || dilations[1] != 1) {
+            return rewriter.notifyMatchFailure(convOp, "non-unit stride/dilation");
+        }
+
+        // The conv accumulator must start at zero so the matmul reproduces it.
+        if (!isAllZerosTensor(output)) {
+            return rewriter.notifyMatchFailure(convOp, "conv init is not all zeros");
+        }
+
+        int64_t N = inputShape[0];
+        int64_t C = inputShape[3];
+        int64_t F = filterShape[3];
+        auto inElemType = inputType.getElementType();
+        auto outElemType = outputType.getElementType();
+
+        // input [N,1,1,C] -> [N,C]
+        auto collapsedInputType = RankedTensorType::get({N, C}, inElemType);
+        auto collapsedInput = tensor::CollapseShapeOp::create(
+            rewriter, loc, collapsedInputType, input, ArrayRef<ReassociationIndices>{{0, 1, 2}, {3}}
+        );
+
+        // filter [1,1,C,F] -> [C,F] (no transpose: matmul contracts [N,C]x[C,F]).
+        auto collapsedFilterType = RankedTensorType::get({C, F}, filterType.getElementType());
+        auto collapsedFilter = tensor::CollapseShapeOp::create(
+            rewriter, loc, collapsedFilterType, filter,
+            ArrayRef<ReassociationIndices>{{0, 1, 2}, {3}}
+        );
+
+        // [N,C] x [C,F] -> [N,F], accumulating into the conv output element type.
+        SmallVector<int64_t> matmulShape = {N, F};
+        auto matmulType = RankedTensorType::get(matmulShape, outElemType);
+        auto matmulInit = linalg::FillOp::create(
+            rewriter, loc, createZeroConstant(rewriter, loc, outElemType),
+            tensor::EmptyOp::create(rewriter, loc, matmulShape, outElemType).getResult()
+        );
+        auto matmulOp = linalg::MatmulOp::create(
+            rewriter, loc, TypeRange{matmulType},
+            ValueRange{collapsedInput.getResult(), collapsedFilter.getResult()},
+            ValueRange{matmulInit.getResult(0)}
+        );
+
+        // [N,F] -> [N,1,1,F]
+        auto expandedResult = tensor::ExpandShapeOp::create(
+            rewriter, loc, outputType, matmulOp.getResult(0),
+            ArrayRef<ReassociationIndices>{{0, 1, 2}, {3}}
+        );
+
+        rewriter.replaceOp(convOp, expandedResult.getResult());
+        return success();
+    }
+};
+
 struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
     using OpRewritePattern::OpRewritePattern;
 
@@ -798,6 +934,9 @@ struct FoldConvBiasIntoReducePattern : public OpRewritePattern<linalg::ReduceOp>
 };
 
 void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &patterns) {
+    // Raise 1x1 matmul-as-conv to linalg.matmul before the NHWC->NCHW pass.
+    patterns.insert<Conv2D1x1NhwcHwcfToMatmulPattern>(context);
+
     if (clConv1dAsMatmul) {
         patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
     }
