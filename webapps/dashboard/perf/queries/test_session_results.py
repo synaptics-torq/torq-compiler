@@ -105,7 +105,7 @@ def get_test_runs(include_metadata=False):
             perf_measurement AS measurement
                 ON measurement.test_run_id = x.id
                 AND measurement.metric_id = (
-                    SELECT id FROM perf_metric WHERE name = 'total_duration'
+                    SELECT id FROM perf_metric WHERE name = 'total_npu_operations'
                 )
         WHERE
             testrunbatch.test_session_id = %s
@@ -169,7 +169,7 @@ def get_session_results(session, baseline_session, nodeid, status, comparison_tr
                         baseline_testrunbatch.test_session_id = %s and baseline_testrun_groups.outcome != {TestRun.Outcome.SKIP.value}
                 ) AS x
             LEFT JOIN
-                perf_measurement AS measurement ON measurement.test_run_id = x.id AND measurement.metric_id = (SELECT id FROM perf_metric WHERE name = 'total_duration')            
+                perf_measurement AS measurement ON measurement.test_run_id = x.id AND measurement.metric_id = (SELECT id FROM perf_metric WHERE name = 'total_npu_operations')            
             WHERE x.rn = 1        
         """        
 
@@ -273,7 +273,7 @@ def get_session_results_compared_to_external_engine(
             perf_measurement AS measurement
                 ON measurement.test_run_id = x.id
                 AND measurement.metric_id = (
-                    SELECT id FROM perf_metric WHERE name = 'total_duration'
+                    SELECT id FROM perf_metric WHERE name = 'total_npu_operations'
                 )
         WHERE
             testrunbatch.test_session_id = %s

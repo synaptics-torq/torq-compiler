@@ -5,3 +5,4 @@ This repository hosts the Torq Compiler which enables the compilation of machine
 
 ## Documentation
 Comprehensive project documentation is available in the [Usage Guide](https://synaptics-torq.github.io/torq-compiler/v/latest/).
+

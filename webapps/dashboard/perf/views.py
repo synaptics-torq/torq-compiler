@@ -99,7 +99,7 @@ def test_session_metric_details(request, session_id):
     data = request.GET.copy()
 
     if 'metric' not in data:
-        data['metric'] = 'total_duration'
+        data['metric'] = 'total_npu_operations'
     
     if 'number_of_top' not in data:
         data['number_of_top'] = 10
@@ -156,7 +156,7 @@ def test_session_summary(request, session_id):
 
     baseline_session = form.cleaned_data['baseline_session']
 
-    SUMMARY_METRICS = ["total_duration", "compilation_time", "model_size", "total_segments_size"]
+    SUMMARY_METRICS = ["total_duration", "total_npu_operations", "compilation_time", "model_size", "total_segments_size"]
 
     statistics = queries.test_session_statistics.get_session_summary_statistics(session, baseline_session, 
                                                                                 metric_names=SUMMARY_METRICS)
@@ -281,7 +281,7 @@ def test_run(request, test_run_id):
     )
 
     total_duration_row = next(
-        (row for row in metrics_with_comparison if row['metric_name'] == 'total_duration'),
+        (row for row in metrics_with_comparison if row['metric_name'] == 'total_npu_operations'),
         None,
     )
 

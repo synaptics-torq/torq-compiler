@@ -641,13 +641,17 @@ def _format_profiling_summary(summary: dict, model_name: str, wall_time: str | N
     if total_duration is not None:
         lines.append(f"  {'OVERALL':<26s} {total_duration:>14s}")
 
+    total_npu_operations = summary.get('total_npu_operations')
+    if total_npu_operations is not None:
+        lines.append(f"  {'TOTAL NPU OPERATIONS':<26s} {total_npu_operations:>14s}")
+
     # Pretty labels: strip _time suffix, replace underscores with spaces,
     # title-case.  E.g. 'dma_total_time' -> 'Dma Total'.
     def _label(key: str) -> str:
         return key.removesuffix('_time').replace('_', ' ').title()
 
     # Print every *_time key and its matching *_percent (if present).
-    skip = {'total_duration', 'available'}
+    skip = {'total_duration', 'total_npu_operations', 'available'}
     for key, value in summary.items():
         if key in skip or value is None or not key.endswith('_time'):
             continue
@@ -660,6 +664,45 @@ def _format_profiling_summary(summary: dict, model_name: str, wall_time: str | N
             lines.append(f"  {label:<26s} {value:>14s}")
 
     return "\n".join(lines)
+
+
+def _format_compact_measurement(value, unit):
+    if unit == "ns":
+        if value >= 1e9:
+            return f"{value / 1e9:.3f}s"
+        if value >= 1e6:
+            return f"{value / 1e6:.3f}ms"
+        if value >= 1e3:
+            return f"{value / 1e3:.3f}µs"
+        return f"{int(value)}ns"
+
+    if unit == "bytes":
+        if value >= 1 << 30:
+            return f"{value / (1 << 30):.3f}GB"
+        if value >= 1 << 20:
+            return f"{value / (1 << 20):.3f}MB"
+        if value >= 1 << 10:
+            return f"{value / (1 << 10):.3f}KB"
+        return f"{int(value)}B"
+
+    return f"{value}{unit}"
+
+
+def _summary_from_measurements(measurements: dict) -> dict:
+    summary = {'available': bool(measurements)}
+    metric_units = {metric['name']: metric.get('unit') for metric in get_metrics()}
+
+    for name, value in measurements.items():
+        unit = metric_units.get(name)
+        if unit is None:
+            continue
+
+        if unit == '%':
+            summary[name] = f"{value:.2f}"
+        else:
+            summary[name] = _format_compact_measurement(value, unit)
+
+    return summary
 
 
 def format_measurement(value, unit):
@@ -740,6 +783,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     # Collect .pb files and wall times recorded by tests in this session
     pb_files_from_session = []
     wall_times: dict[Path, str] = {}  # pb_file -> wall_time string
+    runtime_measurements_by_pb: dict[Path, dict] = {}
     for node_id, report_phases in reports.items():
         for phase in ['call', 'setup']:
             if phase not in report_phases:
@@ -753,6 +797,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
                 wt = props.get('wall_time')
                 if wt:
                     wall_times[pb] = wt
+                runtime_measurements = props.get('runtime_measurements')
+                if runtime_measurements:
+                    runtime_measurements_by_pb[pb] = runtime_measurements
 
     if not pb_files_from_session:
         return
@@ -761,7 +808,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
     for pb_file in sorted(set(pb_files_from_session)):
         model_name = extract_model_name(pb_file.name)
-        summary = extract_perfetto_summary(str(pb_file))
+        summary = _summary_from_measurements(runtime_measurements_by_pb[pb_file]) if pb_file in runtime_measurements_by_pb else extract_perfetto_summary(str(pb_file))
         formatted = _format_profiling_summary(summary, model_name, wall_times.get(pb_file))
         if formatted:
             terminalreporter.write_line(formatted)

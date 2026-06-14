@@ -229,9 +229,15 @@ def get_session_summary_statistics(session, baseline_session, metric_names: list
         
     if baseline_session:
         
-        metrics = Metric.objects.filter(name__in=metric_names)
+        metrics_by_name = {
+            metric.name: metric
+            for metric in Metric.objects.filter(name__in=metric_names)
+        }
 
-        for metric in metrics:            
+        for metric_name in metric_names:
+            metric = metrics_by_name.get(metric_name)
+            if metric is None:
+                continue
 
             metric_summary = {
                 'metric': metric,

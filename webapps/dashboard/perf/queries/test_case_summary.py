@@ -9,7 +9,7 @@ def query_test_durations(
     runtime_hw_type=None,
     compiler_input=None,
 ):
-    """Query total_duration measurements from the database for tests in the selected group and sessions.
+    """Query default duration measurements from the database for tests in the selected group and sessions.
 
     Returns a flat list of dicts, one per measurement.
     """
@@ -24,7 +24,7 @@ def query_test_durations(
     measurements = Measurement.objects.filter(
         test_run__test_case__in=test_cases,
         test_run__test_run_batch__test_session_id__in=session_ids,
-        metric__name='total_duration',
+        metric__name='total_npu_operations', 
     )
 
     if runtime_target:

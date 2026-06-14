@@ -290,6 +290,29 @@ def intersect_intervals(intervals_a, intervals_b):
     return intersections
 
 
+def get_non_hal_bounds(workunits):
+    """Return the outer time bounds of all non-HAL workunits."""
+    non_hal_intervals = []
+
+    for workunit in workunits:
+        if isinstance(workunit, HalWorkUnitDebugInfo):
+            continue
+
+        start_time_ns = workunit.start_time_ns
+        end_time_ns = workunit.end_time_ns
+        if start_time_ns is None or end_time_ns is None:
+            continue
+        if end_time_ns < start_time_ns:
+            continue
+
+        non_hal_intervals.append((start_time_ns, end_time_ns))
+
+    if not non_hal_intervals:
+        return None, None
+
+    return min(start for start, _ in non_hal_intervals), max(end for _, end in non_hal_intervals)
+
+
 # =============================================================================
 # STRING FORMATTING UTILITIES
 # =============================================================================
@@ -333,7 +356,8 @@ class MetricDescription:
     dashboard_unit: str
 
 _METRICS = [
-    MetricDescription(('OVERALL', 'time'), '15 OVERALL', 'OVERALL', 'total_duration', 'Total execution duration of the workload', 'ns'),
+    MetricDescription(('OVERALL', 'time'), '15 OVERALL', 'OVERALL', 'total_duration', 'Total execution duration of the workload including HAL operations', 'ns'),
+    MetricDescription(('TOTAL_NPU_OPERATIONS', 'time'), None, None, 'total_npu_operations', 'Total execution duration of NPU operations', 'ns'),
     MetricDescription(('DMA', 'time'), '02 OVERVIEW DMA', 'DMA total', 'dma_time', 'Combined time for DMA and CDMA operations (union)', 'ns'),
     MetricDescription(('DMA', 'percent'), None, None, 'dma_percent', 'Percentage of dma_time over total duration', '%'),
     MetricDescription(('DMA_ONLY', 'time'), '08 OVERVIEW DMA ONLY', 'DMA/CDMA ONLY (no compute)', 'dma_only_time', 'Time spent exclusively on DMA/CDMA without compute overlap', 'ns'),
@@ -527,6 +551,7 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     
     overall_start = dispatch.start_time_ns
     overall_end = dispatch.end_time_ns
+    non_hal_start, non_hal_end = get_non_hal_bounds(dispatch.workunits)
 
     dma_intervals = []
     dma_in_intervals = []
@@ -640,9 +665,21 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
     total_host = sum(end - start for start, end in merged_host)
     
     overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
+    base_npu_ops = (
+        non_hal_end - non_hal_start
+        if (non_hal_start is not None and non_hal_end is not None)
+        else 0
+    )
+    npu_activity = merge_intervals(merged_dma_combined + merged_compute_combined)
+    host_activity = merge_intervals(merged_host_copy + merged_host)
+    exclusive_host_intervals = subtract_intervals(host_activity, npu_activity + merged_hal)
+    total_exclusive_host = sum(end - start for start, end in exclusive_host_intervals)
+    total_npu_operations = max(0, base_npu_ops - total_exclusive_host)
     
-    # Calculate BUSY time (union of DMA+CDMA, SLICE+CSS, HAL, HOST, and HOST_COPY)
-    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined + merged_hal + host_copy_intervals + host_intervals)
+    # BUSY covers DMA, compute, HAL, host copy, and host activity.
+    busy_intervals = merge_intervals(
+        merged_dma_combined + merged_compute_combined + merged_hal + merged_host_copy + merged_host
+    )
     busy_time = sum(end - start for start, end in busy_intervals)
     
     # Calculate IDLE time
@@ -667,6 +704,7 @@ def compute_runtime_metrics(dispatch: DispatchDebugInfo):
         'COMPUTE_ONLY': {'time': total_compute_only, 'percent': calc_percent(total_compute_only)},
         'DMA_COMPUTE_OVERLAP': {'time': total_overlap, 'percent': calc_percent(total_overlap)},
         'OVERALL': {'time': overall_time},
+        'TOTAL_NPU_OPERATIONS': {'time': total_npu_operations},
         'HAL': {'time': total_hal, 'percent': calc_percent(total_hal)},
         'HOST_COPY': {'time': total_host_copy, 'percent': calc_percent(total_host_copy)},
         'HOST': {'time': total_host, 'percent': calc_percent(total_host)}
@@ -683,17 +721,18 @@ def print_metrics_summary(profile_name, metrics):
     """Print formatted metrics summary to console."""
     print(f"\n=== Overview ({profile_name}) ===")
     order = [
-        'OVERALL', 'DMA_COMPUTE_OVERLAP', 'SLICE', 'SLICE_0', 'SLICE_1', 
+        'OVERALL', 'TOTAL_NPU_OPERATIONS', 'DMA_COMPUTE_OVERLAP', 'SLICE', 'SLICE_0', 'SLICE_1', 
         'COMPUTE_COMBINED', 'CSS', 'COMPUTE_ONLY', 'DMA_COMBINED', 
         'DMA_ONLY', 'DMA', 'CDMA', 'IDLE'
     ]
     for key in order:
         if key in metrics:
             metric = metrics[key]
+            label = 'TOTAL NPU OPERATIONS' if key == 'TOTAL_NPU_OPERATIONS' else key
             if 'percent' in metric:
-                print(f"{key} time: {metric['time']} ({metric['percent']:.2f}%)")
+                print(f"{label} time: {metric['time']} ({metric['percent']:.2f}%)")
             else:
-                print(f"{key} time: {metric['time']}")
+                print(f"{label} time: {metric['time']}")
 
 
 # =============================================================================
