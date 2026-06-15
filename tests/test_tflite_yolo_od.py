@@ -327,6 +327,7 @@ def test_alternative_engine(
 
 @pytest.mark.ci
 @pytest.mark.fpga_ci
+@pytest.mark.astra_machina_sl_ci
 def test_yolo_od_tflite_torq(
     request,
     tflite_reference_results,
