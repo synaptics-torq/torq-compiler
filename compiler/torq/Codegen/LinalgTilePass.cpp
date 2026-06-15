@@ -300,12 +300,6 @@ static FailureOr<SmallVector<int64_t>> findValidParallelTile(linalg::LinalgOp sr
     return failure();
 }
 
-static bool isIm2ColOp(linalg::LinalgOp op) {
-    // check if op has attribute marking it as im2col
-    return op && op->hasAttr("torq.im2col") &&
-           cast<BoolAttr>(op->getAttr("torq.im2col")).getValue();
-}
-
 // Find a valid tile for SoftmaxOp that fits in maxSize memory
 // Does not tile the reduction dimension (softmax dimension)
 static FailureOr<SmallVector<int64_t>> findValidSoftmaxTile(linalg::SoftmaxOp op, int maxSize) {
@@ -614,12 +608,6 @@ class TileLinalgOpOperation : public OpInterfaceRewritePattern<linalg::LinalgOp>
 
         if (clFallbackF32ToHost && !isa<linalg::TransposeOp>(srcOp) &&
             !isa<linalg::FillOp>(srcOp)) {
-
-            // TODO: move to MarkHostExecutorPass
-            if (isIm2ColOp(srcOp)) {
-                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
-                return success();
-            }
 
             if (getTargetExecutor(srcOp) == torq_hl::Executor::Host) {
                 return failure();

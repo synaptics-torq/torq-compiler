@@ -48,6 +48,7 @@ typedef OpPattern<torq_hl::Conv2DOp> Conv2DPattern;
 typedef OpPattern<torq_hl::MaxPool2dOp> MaxPool2dPattern;
 typedef OpPattern<torq_hl::MatMulOp> MatMulPattern;
 typedef OpPattern<torq_hl::GatherOp> GatherPattern;
+typedef OpPattern<torq_hl::Im2ColOp> Im2ColPattern;
 typedef OpPattern<torq_hl::IdentityOp> IdentityPattern;
 typedef OpPattern<torq_hl::ConvertOp> ConvertPattern;
 typedef OpPattern<torq_hl::MulOp> MulPattern;

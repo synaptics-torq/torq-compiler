@@ -20,6 +20,7 @@ set(sources
     FillPattern.cpp
     FMAPattern.cpp
     GatherPattern.cpp
+    Im2ColPattern.cpp
     IdentityPattern.cpp
     ExpandWeightsPattern.cpp
     MatMulPattern.cpp

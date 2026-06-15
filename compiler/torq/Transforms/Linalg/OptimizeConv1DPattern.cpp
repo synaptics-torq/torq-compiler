@@ -11,10 +11,13 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
+#include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
+#include "algorithm"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/Pass/Pass.h"
@@ -50,6 +53,178 @@ llvm::cl::opt<bool> clConv1dTruncateForReduce(
                    "When true: insert truncf between conv1d and reduce (memory efficient)."),
     llvm::cl::init(false)
 );
+
+// The conv1d im2col materialises the collapsed input and the unfolded [Ow, C*Kw] result as a
+// single non-tileable torq_hl.im2col op. Returns false when both buffers exceed the tiling budget.
+static bool im2ColFitsInLram(int64_t C, int64_t W, int64_t Ow, int64_t Kw, Type elemType) {
+    int64_t K = C * Kw;
+    int64_t elemBytes = (elemType.getIntOrFloatBitWidth() + 7) / 8;
+    int64_t bytes = (C * W) * elemBytes + (Ow * K) * elemBytes;
+    return bytes <= static_cast<int64_t>(TorqHw::get().getAvailableMemoryForTiling());
+}
+
+// Emit the im2col unfold ([Ow, C*Kw]) as an affine-map linalg.generic marked torq.im2col.
+// Used when the NDL im2col op is too large to stay LRAM-resident: MarkHostExecutorPass routes
+// the marked generic to the host (torq_hl.im2col is not tileable).
+static Value emitHostIm2Col(
+    PatternRewriter &rewriter, Location loc, Value input, int64_t C, int64_t W, int64_t Kw,
+    int64_t Ow, int64_t stride, int64_t dilation, RankedTensorType unfoldedType
+) {
+    auto elemType = unfoldedType.getElementType();
+
+    // Collapse [N,C,W] -> [C,W] so the indexing map is rank-2 with no constant dims (constant
+    // dims get folded by canonicalization, causing an operand-rank vs map-result-rank mismatch
+    // later).
+    auto collapsedInputType = RankedTensorType::get({C, W}, elemType);
+    auto collapsedInput = tensor::CollapseShapeOp::create(
+        rewriter, loc, collapsedInputType, input, ArrayRef<ReassociationIndices>{{0, 1}, {2}}
+    );
+
+    // (d0=Ow, d1=C*Kw) -> (d1/Kw, d0*stride + (d1%Kw)*dilation)
+    auto dim0 = rewriter.getAffineDimExpr(0);
+    auto dim1 = rewriter.getAffineDimExpr(1);
+    auto channelIdx = dim1.floorDiv(rewriter.getAffineConstantExpr(Kw));
+    auto kernelIdx = dim1 % rewriter.getAffineConstantExpr(Kw);
+    auto inputPosExpr = dim0 * rewriter.getAffineConstantExpr(stride) +
+                        kernelIdx * rewriter.getAffineConstantExpr(dilation);
+
+    SmallVector<AffineExpr> unfoldIndexExprs = {channelIdx, inputPosExpr};
+    auto unfoldIndexMap = AffineMap::get(2, 0, unfoldIndexExprs, rewriter.getContext());
+    auto outputIndexMap = AffineMap::getMultiDimIdentityMap(2, rewriter.getContext());
+
+    auto unfoldedInit = tensor::EmptyOp::create(rewriter, loc, unfoldedType.getShape(), elemType);
+    SmallVector<utils::IteratorType> iteratorTypes(2, utils::IteratorType::parallel);
+
+    auto im2col = linalg::GenericOp::create(
+        rewriter, loc, TypeRange{unfoldedType}, ValueRange{collapsedInput.getResult()},
+        ValueRange{unfoldedInit}, ArrayRef<AffineMap>{unfoldIndexMap, outputIndexMap},
+        iteratorTypes,
+        [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
+            linalg::YieldOp::create(nestedBuilder, nestedLoc, blockArgs[0]);
+        }
+    );
+    im2col->setAttr("torq.im2col", rewriter.getBoolAttr(true));
+    return im2col.getResult(0);
+}
+
+// Emit the im2col unfold ([Ow, C*Kw]) as torq_hl.im2col: the hardware lowering reads sliding input
+// windows via an affine DEDR NDL and writes the unfolded layout via DEQW.
+static Value emitIm2Col(
+    PatternRewriter &rewriter, Location loc, Value input, int64_t C, int64_t W, int64_t Kw,
+    int64_t Ow, int64_t stride, int64_t dilation, RankedTensorType unfoldedType
+) {
+    auto elemType = unfoldedType.getElementType();
+
+    // Collapse [N,C,W] -> [C,W]; the op addresses input[c, ow*stride + kw*dilation].
+    auto collapsedInputType = RankedTensorType::get({C, W}, elemType);
+    auto collapsedInput = tensor::CollapseShapeOp::create(
+        rewriter, loc, collapsedInputType, input, ArrayRef<ReassociationIndices>{{0, 1}, {2}}
+    );
+
+    auto unfoldedInit = tensor::EmptyOp::create(rewriter, loc, unfoldedType.getShape(), elemType);
+
+    auto im2col = torq_hl::Im2ColOp::create(
+        rewriter, loc, TypeRange{unfoldedType}, unfoldedInit.getResult(),
+        collapsedInput.getResult(), rewriter.getI64IntegerAttr(stride),
+        rewriter.getI64IntegerAttr(dilation), rewriter.getI64IntegerAttr(Kw)
+    );
+    return im2col.getOutput();
+}
+
+// Largest output-column block whose windowed im2col (sliced input window + unfolded patches)
+// stays within the LRAM tiling budget. torq_hl.im2col is not tileable, so tiling along the
+// output width keeps each unfold LRAM-resident. Returns 0 when even one column does not fit
+// (pathological; caller falls back to the host im2col).
+static int64_t computeIm2ColBlockOw(
+    int64_t C, int64_t W, int64_t Ow, int64_t Kw, int64_t stride, int64_t dilation, Type elemType
+) {
+    int64_t K = C * Kw;
+    int64_t elemBytes = (elemType.getIntOrFloatBitWidth() + 7) / 8;
+    int64_t budget = static_cast<int64_t>(TorqHw::get().getAvailableMemoryForTiling());
+
+    // A block of bOw output columns reads windowW input columns; offsets are window-relative,
+    // and valid-conv output sizing guarantees windowW <= W.
+    auto blockFits = [&](int64_t bOw) {
+        int64_t windowW = (bOw - 1) * stride + (Kw - 1) * dilation + 1;
+        int64_t bytes = (C * windowW) * elemBytes + (bOw * K) * elemBytes;
+        return bytes <= budget;
+    };
+
+    int64_t lo = 1, hi = Ow, best = 0;
+    while (lo <= hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if (blockFits(mid)) {
+            best = mid;
+            lo = mid + 1;
+        }
+        else {
+            hi = mid - 1;
+        }
+    }
+    return best;
+}
+
+// Build the [Ow, F] conv1d matmul result by tiling im2col + matmul along the output width.
+// Each block slices the minimal input window it reads, runs torq_hl.im2col on that window,
+// and matmuls into the corresponding rows of the result.
+static Value emitTiledIm2ColConv1dMatmul(
+    PatternRewriter &rewriter, Location loc, Value input, Value transposedFilter, int64_t C,
+    int64_t Kw, int64_t Ow, int64_t F, int64_t stride, int64_t dilation, int64_t blockOw,
+    Type elemType, Type outElemType
+) {
+    int64_t K = C * Kw;
+    Value zero = createZeroConstant(rewriter, loc, outElemType);
+    Value result =
+        tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{Ow, F}, outElemType).getResult();
+
+    for (int64_t ow0 = 0; ow0 < Ow; ow0 += blockOw) {
+        int64_t curOw = std::min(blockOw, Ow - ow0);
+        int64_t w0 = ow0 * stride;
+        int64_t windowW = (curOw - 1) * stride + (Kw - 1) * dilation + 1;
+
+        // Slice the input window [1, C, w0 : w0 + windowW] this block reads from.
+        auto sliceType = RankedTensorType::get({1, C, windowW}, elemType);
+        Value inputSlice = tensor::ExtractSliceOp::create(
+            rewriter, loc, sliceType, input,
+            SmallVector<OpFoldResult>{
+                rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(w0)
+            },
+            SmallVector<OpFoldResult>{
+                rewriter.getIndexAttr(1), rewriter.getIndexAttr(C), rewriter.getIndexAttr(windowW)
+            },
+            SmallVector<OpFoldResult>{
+                rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)
+            }
+        );
+
+        // Offsets are window-relative, so this is a full unfold over the slice with W = windowW.
+        auto blockUnfoldedType = RankedTensorType::get({curOw, K}, elemType);
+        Value blockUnfolded = emitIm2Col(
+            rewriter, loc, inputSlice, C, windowW, Kw, curOw, stride, dilation, blockUnfoldedType
+        );
+
+        // matmul [curOw, C*Kw] x [C*Kw, F] -> [curOw, F]
+        auto blockMatmulType = RankedTensorType::get({curOw, F}, outElemType);
+        auto blockInit = linalg::FillOp::create(
+            rewriter, loc, zero,
+            tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{curOw, F}, outElemType)
+                .getResult()
+        );
+        auto blockMatmul = linalg::MatmulOp::create(
+            rewriter, loc, TypeRange{blockMatmulType}, ValueRange{blockUnfolded, transposedFilter},
+            ValueRange{blockInit.getResult(0)}
+        );
+
+        // Write this block's rows into the [Ow, F] result.
+        result = tensor::InsertSliceOp::create(
+            rewriter, loc, blockMatmul.getResults()[0], result,
+            SmallVector<OpFoldResult>{rewriter.getIndexAttr(ow0), rewriter.getIndexAttr(0)},
+            SmallVector<OpFoldResult>{rewriter.getIndexAttr(curOw), rewriter.getIndexAttr(F)},
+            SmallVector<OpFoldResult>{rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)}
+        );
+    }
+    return result;
+}
 
 /// Optimization pattern for linalg.conv_1d operation.
 
@@ -98,95 +273,71 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         int64_t stride = strides[0];     // Stride value
         int64_t dilation = dilations[0]; // Dilation value
 
-        // Step 1: im2col - unfold input patches into [Ow, C*Kw]
+        // Steps 1-3: im2col (unfold input patches into [Ow, C*Kw]) + matmul -> [Ow, F].
+        //
+        // The unfold is torq_hl.im2col (affine NDL window read -> unfolded buffer). The op is not
+        // tileable, so when the full unfold does not fit in LRAM we tile im2col + matmul along
+        // the output width. Only a pathological conv whose single-column unfold still overflows
+        // LRAM falls back to an affine-map generic marked torq.im2col on the host.
         auto elemType = inputType.getElementType();
         auto outputElemType = outputType.getElementType();
+        int64_t W = inputShape[2];
 
-        // Collapse [N, C, W] -> [C, W] so the indexing map is rank-2 with no constant dims.
-        // Constant dims in linalg.generic indexing maps get folded by canonicalization,
-        // causing an operand-rank vs map-result-rank mismatch in downstream passes.
-        SmallVector<int64_t> collapsedInputShape = {C, inputShape[2]};
-        auto collapsedInputType = RankedTensorType::get(collapsedInputShape, elemType);
-        auto collapsedInput = tensor::CollapseShapeOp::create(
-            rewriter, loc, collapsedInputType, input, ArrayRef<ReassociationIndices>{{0, 1}, {2}}
-        );
-
-        SmallVector<int64_t> unfoldedShape = {Ow, C * Kw};
-        auto unfoldedType = RankedTensorType::get(unfoldedShape, elemType);
-        auto unfoldedInit = tensor::EmptyOp::create(rewriter, loc, unfoldedShape, elemType);
-
-        // (d0=Ow, d1=C*Kw) -> (d1/Kw, d0*stride + (d1%Kw)*dilation)
-        auto dim0 = rewriter.getAffineDimExpr(0);
-        auto dim1 = rewriter.getAffineDimExpr(1);
-        auto channelIdx = dim1.floorDiv(rewriter.getAffineConstantExpr(Kw));
-        auto kernelIdx = dim1 % rewriter.getAffineConstantExpr(Kw);
-        auto inputPosExpr = dim0 * rewriter.getAffineConstantExpr(stride) +
-                            kernelIdx * rewriter.getAffineConstantExpr(dilation);
-
-        SmallVector<AffineExpr> unfoldIndexExprs = {channelIdx, inputPosExpr};
-        auto unfoldIndexMap = AffineMap::get(2, 0, unfoldIndexExprs, rewriter.getContext());
-        auto outputIndexMap = AffineMap::getMultiDimIdentityMap(2, rewriter.getContext());
-
-        // Create the generic op for unfolding with explicit iterator types
-        SmallVector<utils::IteratorType> iteratorTypes(2, utils::IteratorType::parallel);
-
-        auto im2col = linalg::GenericOp::create(
-            rewriter, loc, TypeRange{unfoldedType}, ValueRange{collapsedInput},
-            ValueRange{unfoldedInit}, ArrayRef<AffineMap>{unfoldIndexMap, outputIndexMap},
-            iteratorTypes,
-            [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
-                linalg::YieldOp::create(nestedBuilder, nestedLoc, blockArgs[0]);
-            }
-        );
-
-        // Set torq.im2col attribute so that we can easily recognize this op during tiling
-        im2col->setAttr("torq.im2col", rewriter.getBoolAttr(true));
-        auto unfoldedInput = im2col.getResult(0);
-
-        // Step 2: Reshape the filter tensor from [F, C, Kw] to [F, C*Kw]
-        SmallVector<int64_t> reshapedFilterShape = {F, C * Kw};
-        auto reshapedFilterType =
-            RankedTensorType::get(reshapedFilterShape, filterType.getElementType());
+        // Filter: [F, C, Kw] -> [F, C*Kw] -> [C*Kw, F] (transpose the filter rather than the
+        // im2col output so the matmul lands directly in [Ow, F]).
+        auto reshapedFilterType = RankedTensorType::get({F, C * Kw}, filterType.getElementType());
         auto reshapedFilter = tensor::CollapseShapeOp::create(
             rewriter, loc, reshapedFilterType, filter, ArrayRef<ReassociationIndices>{{0}, {1, 2}}
         );
-
-        // Step 3: Create the matmul operation
-        // We'll do: [Ow, C*Kw] @ [C*Kw, F] -> [Ow, F]
-        // Transpose the filter [F, C*Kw] -> [C*Kw, F] instead of transposing im2col output
-        SmallVector<int64_t> transposedFilterShape = {C * Kw, F};
         auto transposedFilterInit = tensor::EmptyOp::create(
-            rewriter, loc, transposedFilterShape, filterType.getElementType()
+            rewriter, loc, ArrayRef<int64_t>{C * Kw, F}, filterType.getElementType()
         );
+        Value transposedFilter = linalg::TransposeOp::create(
+                                     rewriter, loc, reshapedFilter.getResult(),
+                                     transposedFilterInit, ArrayRef<int64_t>{1, 0}
+        )
+                                     .getResults()[0];
 
-        auto transposedFilter = linalg::TransposeOp::create(
-            rewriter, loc, reshapedFilter.getResult(), transposedFilterInit, ArrayRef<int64_t>{1, 0}
-        );
+        // [Ow, C*Kw] x [C*Kw, F] -> [Ow, F]; accumulate into the output element type (f32).
+        auto emitMatmul = [&](Value unfolded) -> Value {
+            auto matmulResultType = RankedTensorType::get({Ow, F}, outputElemType);
+            auto matmulInit = linalg::FillOp::create(
+                rewriter, loc, createZeroConstant(rewriter, loc, outputElemType),
+                tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{Ow, F}, outputElemType)
+                    .getResult()
+            );
+            return linalg::MatmulOp::create(
+                       rewriter, loc, TypeRange{matmulResultType},
+                       ValueRange{unfolded, transposedFilter}, ValueRange{matmulInit.getResult(0)}
+            )
+                .getResults()[0];
+        };
 
-        // [Ow, C*Kw] x [C*Kw, F] -> [Ow, F]; accumulate into output element type (f32)
-        SmallVector<int64_t> matmulResultShape = {Ow, F};
-        auto matmulResultType = RankedTensorType::get(matmulResultShape, outputElemType);
-        auto matmulInit = linalg::FillOp::create(
-            rewriter, loc, createZeroConstant(rewriter, loc, outputElemType),
-            tensor::EmptyOp::create(rewriter, loc, matmulResultShape, outputElemType).getResult()
-        );
-
-        SmallVector<Value> inputs;
-        inputs.push_back(unfoldedInput);
-        inputs.push_back(transposedFilter.getResults()[0]);
-
-        SmallVector<Value> outputs;
-        outputs.push_back(matmulInit.getResult(0));
-
-        auto matmulOp =
-            linalg::MatmulOp::create(rewriter, loc, TypeRange{matmulResultType}, inputs, outputs);
+        Value matmulResult;
+        if (im2ColFitsInLram(C, W, Ow, Kw, elemType)) {
+            auto unfoldedType = RankedTensorType::get({Ow, C * Kw}, elemType);
+            matmulResult = emitMatmul(
+                emitIm2Col(rewriter, loc, input, C, W, Kw, Ow, stride, dilation, unfoldedType)
+            );
+        }
+        else if (int64_t blockOw = computeIm2ColBlockOw(C, W, Ow, Kw, stride, dilation, elemType)) {
+            matmulResult = emitTiledIm2ColConv1dMatmul(
+                rewriter, loc, input, transposedFilter, C, Kw, Ow, F, stride, dilation, blockOw,
+                elemType, outputElemType
+            );
+        }
+        else {
+            auto unfoldedType = RankedTensorType::get({Ow, C * Kw}, elemType);
+            matmulResult = emitMatmul(
+                emitHostIm2Col(rewriter, loc, input, C, W, Kw, Ow, stride, dilation, unfoldedType)
+            );
+        }
 
         // Transpose result [Ow, F] -> [F, Ow]
-        SmallVector<int64_t> transposedResultShape = {F, Ow};
         auto transposedResultInit =
-            tensor::EmptyOp::create(rewriter, loc, transposedResultShape, outputElemType);
+            tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{F, Ow}, outputElemType);
         auto transposedResult = linalg::TransposeOp::create(
-            rewriter, loc, matmulOp.getResults()[0], transposedResultInit, ArrayRef<int64_t>{1, 0}
+            rewriter, loc, matmulResult, transposedResultInit, ArrayRef<int64_t>{1, 0}
         );
 
         // Step 4: expand [F, Ow] -> [N, F, Ow]
@@ -947,8 +1098,8 @@ void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &pat
         patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
     }
 
-    // A non-pointwise (Kw > 1) conv1d cannot run on the matmul path: its im2col gather
-    // has no NPU lowering, and the matmul bails on the non-zero init of a biased conv,
+    // A non-pointwise (Kw > 1) biased conv1d cannot run on the matmul path: the matmul
+    // pattern bails on the non-zero init of a biased conv,
     // leaving an fp32 conv that would otherwise fall back to the host. Always route
     // those convs through the native generic path (higher benefit so it wins over the
     // matmul pattern above) and fold the per-channel bias into the reduce, so we avoid

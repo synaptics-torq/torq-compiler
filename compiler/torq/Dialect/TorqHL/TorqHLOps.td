@@ -351,6 +351,24 @@ def TorqHL_GatherOp: TorqHL_LayerOp<"gather"> {
       ));
 }     
 
+def TorqHL_Im2ColOp: TorqHL_LayerOp<"im2col"> {
+  let summary = "Im2col sliding-window unfold operation";
+  let description = [{
+    Unfolds sliding input windows into matmul rows without materializing an index table.
+    Given `input` of shape [C, W] and `init` of shape [Ow, C*Kw], writes
+      out[ow, c*Kw + kw] = input[c, ow*stride + kw*dilation]
+    The hardware lowering reads the window via affine NDL addressing (DEDR) and writes the
+    unfolded layout (DEQW), so no gather index table is needed.
+  }];
+
+  let arguments = !con(commonArgs, (ins
+    TensorOrMemref: $input,
+    I64Attr: $stride,
+    I64Attr: $dilation,
+    I64Attr: $kernel_width
+  ));
+}
+
 def TorqHl_IdentityOp: TorqHL_LayerOp<"identity"> {
   let summary = "Identity operator";
   let description = [{
