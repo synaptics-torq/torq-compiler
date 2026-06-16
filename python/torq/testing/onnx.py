@@ -5,8 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-import re
-
 import numpy as np
 import onnx
 import onnxruntime
@@ -56,9 +54,10 @@ class ModelWithMetadata:
     so we use this wrapper to store additional metadata.
     """
 
-    def __init__(self, model: Any, node_index: int = None):
-        self.model = model
+    def __init__(self, model: Any = None, node_index: int = None, path=None):
+        self._model = model
         self.node_index = node_index
+        self.path = str(path) if path is not None else None
 
     def __getattr__(self, name):
         # Delegate attribute access to wrapped model
@@ -67,6 +66,12 @@ class ModelWithMetadata:
     def __getitem__(self, key):
         # Support dict-style access (e.g. layer["model"]) for backward compatibility
         return getattr(self, key)
+
+    @property
+    def model(self):
+        if self._model is None and self.path is not None:
+            self._model = onnx.load(self.path)
+        return self._model
 
 
 @dataclass
@@ -920,8 +925,9 @@ def _load_layers_from_cache(key_dir: Path, model_file: str,
                             node_groups, dedup):
     """Return (full_model, layers_dict) or None on miss / mismatch / corrupt."""
     manifest_path = key_dir / "manifest.json"
-    full_path = key_dir / "full_model.onnx"
-    if not manifest_path.exists() or not full_path.exists():
+    full_model_path = key_dir / "full_model.onnx"
+
+    if not manifest_path.exists() or not full_model_path.exists():
         return None
     try:
         manifest = json.loads(manifest_path.read_text())
@@ -934,17 +940,18 @@ def _load_layers_from_cache(key_dir: Path, model_file: str,
                 or manifest.get("node_groups") != node_groups
                 or manifest.get("dedup") != dedup):
             return None
-
-        full_model = onnx.load(str(full_path))
+        
         layers = {}
+
         for entry in manifest["layers"]:
             layer_path = key_dir / entry["filename"]
             if not layer_path.exists():
                 return None  # partial cache, treat as miss
-            model = onnx.load(str(layer_path))
+
             layers[entry["name"]] = ModelWithMetadata(
-                model, entry.get("node_index"))
-        return full_model, layers
+                node_index=entry.get("node_index"), path=layer_path)
+        return ModelWithMetadata(path=full_model_path), layers
+    
     except Exception as e:
         print(f"[onnx-layer-cache] ignoring corrupt cache at {key_dir}: {e}")
         return None
@@ -1193,8 +1200,8 @@ def _load_cached_layers(cache, model_file: str, name_stem: str,
 
     cache_dir = cache.mkdir('onnx_layer_cache')
     key_dir = cache_dir / name_stem
-
     cached = _load_layers_from_cache(key_dir, model_file, node_groups, dedup)
+
     if cached is not None:
         full_model, layers = cached
         print(f"[onnx-layer-cache] HIT  {name_stem} -> {key_dir}")
@@ -1218,7 +1225,6 @@ def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, ded
 
 
 def generate_onnx_layers_from_file(cache, filepath: Path, node_groups=None, dedup=False):
-    print("filepath: ", filepath)
     return _load_cached_layers(
         cache, str(filepath), filepath.stem, node_groups, dedup)
 
