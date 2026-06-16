@@ -64,7 +64,7 @@ SmallVector<Value> getOutlineOpsInputs(
     const SmallVector<Operation *> &targets, const DenseSet<Operation *> &targetsWithNested
 ) {
 
-    SmallVector<Value> inputs;
+    SetVector<Value> inputs;
 
     for (auto op : targets) {
         op->walk([&](Operation *op) {
@@ -83,7 +83,7 @@ SmallVector<Value> getOutlineOpsInputs(
                     continue;
                 }
 
-                inputs.push_back(operand);
+                inputs.insert(operand);
             }
         });
     }
@@ -96,7 +96,7 @@ SmallVector<Value> getOutlineOpsInputs(
         }
     });
 
-    return inputs;
+    return SmallVector<Value>(inputs.begin(), inputs.end());
 }
 
 static void copyToProgramBody(

@@ -14,6 +14,7 @@
 #include "torq/Codegen/BufferizationUtils.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/EncodingUtils.h"
+#include "torq/Utils/MemoryUtils.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-segment-nss-programs"
@@ -37,7 +38,9 @@ class SegmentNSSProgramsPass : public impl::SegmentNSSProgramsBase<SegmentNSSPro
 static int getOperationSize(Operation *op) {
 
     // some operations are not serialized into the NSS program
-    if (isa<memref::AllocOp, memref::DeallocOp, torq_hl::ReturnOp>(op)) {
+    if (isa<memref::AllocOp, memref::DeallocOp, torq_hl::GetBlockOp, memref::GetGlobalOp,
+            torq_hl::ReturnOp>(op) ||
+        isDerivedMemRefOperation(op)) {
         return 0;
     }
 

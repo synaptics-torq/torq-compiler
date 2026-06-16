@@ -179,28 +179,6 @@ static SmallVector<NssProgramOutliningInfo, 0> findPrograms(FunctionOpInterface 
     return outliningInfo;
 }
 
-static DenseSet<Value> getNssProgramInputs(SmallVector<Operation *> programOps) {
-    // find all the values used by the program that are defined outside the program
-    DenseSet<Value> programValues;
-    DenseSet<Value> inputs;
-
-    for (Operation *op : programOps) {
-        op->walk([&](Operation *nestedOp) {
-            for (Value result : nestedOp->getResults()) {
-                programValues.insert(result);
-            }
-
-            for (Value operand : nestedOp->getOperands()) {
-                if (!programValues.contains(operand)) {
-                    inputs.insert(operand);
-                }
-            }
-        });
-    }
-
-    return inputs;
-}
-
 static SetVector<Operation *>
 getInlineableOperations(SmallVector<Value> inputs, DenseSet<Value> &inlineableInputs) {
 

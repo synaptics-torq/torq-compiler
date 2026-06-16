@@ -332,17 +332,25 @@ LogicalResult Serializer::processGlobalOp(memref::GlobalOp &globalOp) {
     }
 }
 
-LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
+LogicalResult Serializer::serializeInvocation(torq_hl::CreateInvocationOp &createInvocationOp) {
 
-    auto data = mlir::cast<DenseIntOrFPElementsAttr>(constOp.getValue());
+    switch (createInvocationOp.getProgram().getType().getExecutor()) {
+    case torq_hl::Executor::CSS:
+        return serializeCssInvocation(createInvocationOp);
+    case torq_hl::Executor::Host:
+        return serializeHostInvocation(createInvocationOp);
+    default:
+        return createInvocationOp->emitOpError("unsupported executor type for invocation");
+    }
+}
 
-    flatbuffers_uint8_vec_ref_t dataRef;
+LogicalResult
+Serializer::addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data, bool isCode) {
 
-    auto xramAddress = getXramAddress(constOp.getOperation()).value();
-
-    // FIXME: we probably don't want to use DenseIntElementsAttr in torq_hl::ConstOp, instead use
-    // DenseIntArrayAttr that doesn't support splats
     if (data.isSplat()) {
+
+        flatbuffers_uint8_vec_ref_t dataRef;
+
         auto elementType = data.getElementType();
         auto bitWidth = data.getType().getElementTypeBitWidth();
         if (elementType.isInteger()) {
@@ -396,71 +404,59 @@ LogicalResult Serializer::processConstOp(torq_hl::ConstOp &constOp) {
             return failure();
         }
 
-        LLVM_DEBUG({
-            llvm::dbgs() << "*** Constant from splat: size = " << data.getNumElements() << " ***\n";
-        });
-
         // NOTE: torq::div_ceil() returns int32_t type which might overflow when we have a huge
         // tensor. We should switch to llvm::divideCeil() which returns int64_t
         auto dataSize = shouldPackSubByteIntegerBitWidth(bitWidth)
                             ? computePackedSubByteIntegerSize(data.getNumElements(), bitWidth)
                             : torq::div_ceil(bitWidth, 8) * data.getNumElements();
 
-        _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, dataSize, dataRef));
-    }
-    else {
-        LLVM_DEBUG({
-            llvm::dbgs() << "*** Constant: size = " << data.getRawData().size() << " ***\n";
-        });
-
-        return addSegment(xramAddress, data, false);
-    }
-
-    return success();
-}
-
-LogicalResult Serializer::serializeInvocation(torq_hl::CreateInvocationOp &createInvocationOp) {
-
-    switch (createInvocationOp.getProgram().getType().getExecutor()) {
-    case torq_hl::Executor::CSS:
-        return serializeCssInvocation(createInvocationOp);
-    case torq_hl::Executor::Host:
-        return serializeHostInvocation(createInvocationOp);
-    default:
-        return createInvocationOp->emitOpError("unsupported executor type for invocation");
-    }
-}
-
-LogicalResult
-Serializer::addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data, bool isCode) {
-
-    auto bitWidth = data.getType().getElementTypeBitWidth();
-    if (!isCode && data.getElementType().isInteger() &&
-        shouldPackSubByteIntegerBitWidth(bitWidth)) {
-        flatbuffers_uint8_vec_ref_t dataRef;
-        if (failed(createPackedSubByteIntegerSegment(data, _builder, dataRef, xramAddress))) {
+        if (!succeeded(dumpSegmentDescriptor(
+                0, true, xramAddress, data.getRawData().data(), dataSize, isCode
+            ))) {
             return failure();
-        }
+        };
 
-        auto size = computePackedSubByteIntegerSize(data.getNumElements(), bitWidth);
-        _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, size, dataRef));
+        _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, dataSize, dataRef));
+
         return success();
     }
+    else {
 
-    auto size = data.getRawData().size();
+        auto bitWidth = data.getType().getElementTypeBitWidth();
+        if (!isCode && data.getElementType().isInteger() &&
+            shouldPackSubByteIntegerBitWidth(bitWidth)) {
+            flatbuffers_uint8_vec_ref_t dataRef;
+            if (failed(createPackedSubByteIntegerSegment(data, _builder, dataRef, xramAddress))) {
+                return failure();
+            }
 
-    auto dataRef =
-        flatbuffers_uint8_vec_create(_builder, (const uint8_t *)data.getRawData().data(), size);
+            auto size = computePackedSubByteIntegerSize(data.getNumElements(), bitWidth);
 
-    if (!succeeded(
-            dumpSegmentDescriptor(0, true, xramAddress, data.getRawData().data(), size, isCode)
-        )) {
-        return failure();
-    };
+            if (!succeeded(dumpSegmentDescriptor(
+                    0, true, xramAddress, data.getRawData().data(), size, isCode
+                ))) {
+                return failure();
+            };
 
-    _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, size, dataRef));
+            _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, size, dataRef));
+            return success();
+        }
 
-    return success();
+        auto size = data.getRawData().size();
+
+        auto dataRef =
+            flatbuffers_uint8_vec_create(_builder, (const uint8_t *)data.getRawData().data(), size);
+
+        if (!succeeded(
+                dumpSegmentDescriptor(0, true, xramAddress, data.getRawData().data(), size, isCode)
+            )) {
+            return failure();
+        };
+
+        _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, size, dataRef));
+
+        return success();
+    }
 }
 
 LogicalResult Serializer::addUninitializedSegment(uint32_t xramAddress, int size) {
@@ -620,6 +616,12 @@ LogicalResult Serializer::serializeHostInvocation(torq_hl::CreateInvocationOp &c
 }
 
 LogicalResult Serializer::serializeDescriptor(torq_hl::DescriptorOp descriptorOp) {
+
+    // only process NSS descriptors here, the other ones have already been
+    // moved to globals
+    if (descriptorOp.getInvocation().getType().getExecutor() != torq_hl::Executor::NSS) {
+        return success();
+    }
 
     for (auto [codeAddr, codeAttr] :
          llvm::zip(descriptorOp.getXramCodeAddresses(), descriptorOp.getCodeData())) {
@@ -1232,14 +1234,7 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
         }
     }
 
-    LLVM_DEBUG({ llvm::dbgs() << "---- serializing constants\n"; });
-    for (auto constOp : funcOp.getFunctionBody().getOps<torq_hl::ConstOp>()) {
-        if (failed(processConstOp(constOp))) {
-            return failure();
-        }
-    }
-
-    LLVM_DEBUG({ llvm::dbgs() << "---- serializing uninitalized sections\n"; });
+    LLVM_DEBUG({ llvm::dbgs() << "---- serializing global sections\n"; });
     for (auto globalOp :
          funcOp.getOperation()->getParentOfType<ModuleOp>().getOps<memref::GlobalOp>()) {
         if (failed(processGlobalOp(globalOp))) {
