@@ -27,3 +27,5 @@ test_keras_app_tflite_torq[layer_xception_block4_sepconv2-sim-sl2610-v1] synapti
 test_keras_app_tflite_torq[layer_inceptionresnetv2_conv2d_102-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1510
 test_keras_app_tflite_torq[layer_vgg16_block4_conv1-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1511
 test_keras_app_tflite_torq[layer_xception_block2_sepconv1-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1512
+test_keras_app_tflite_torq[layer_inceptionresnetv2_conv2d_257-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1849
+test_keras_app_tflite_torq[layer_inceptionresnetv2_conv2d_257-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1849

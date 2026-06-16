@@ -1434,7 +1434,7 @@ int SlicePrivate::addMemNdlDims(
             // Should be even-odd split or 4-quadrants even-odd segmentation
             assert(elementSize <= 2 && "Non-dense SDIMs not supported for element size > 2");
             assert(sdimsShape[1].count == 2 && "Not even-odd split");
-            assert((sdimsShape.size() < 2 || sdimsShape[3].count == 2) && "Not even-odd split");
+            assert((sdimsShape.size() < 4 || sdimsShape[3].count == 2) && "Not even-odd split");
             int i = 0;
             for (const auto &s : llvm::reverse(sdimsShape)) {
                 assert(s.stride.intVal.has_value());
@@ -2877,11 +2877,11 @@ PData Alu::multiScalarProductAccumulate(const IData &idata, const WData &wdata, 
     auto iShape = idata.subShape();
     auto wShape = wdata.subShape();
     if (iShape.size() != 2) {
-        llvm::errs() << "Invalid input shape for scalarProductAccumulate: " << iShape << "\n";
+        llvm::errs() << "Invalid input shape for multiScalarProductAccumulate: " << iShape << "\n";
         assert(false && "Invalid input shape");
     }
     if (wShape.size() != 1) {
-        llvm::errs() << "Invalid weight shape for scalarProductAccumulate: " << wShape << "\n";
+        llvm::errs() << "Invalid weight shape for multiScalarProductAccumulate: " << wShape << "\n";
         assert(false && "Invalid weight shape");
     }
 

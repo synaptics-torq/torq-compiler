@@ -186,6 +186,7 @@ void insertSegmentationOp(Stride2Op op, PatternRewriter &rewriter, int h, int w)
     ShapedType inputType = op.getInput().getType();
     assert(inputType.getRank() == 4 && "Expecting 4D input tensor");
     auto outputType = inputType;
+    auto segmentationInput = op.getInput();
 
     rewriter.setInsertionPoint(op);
     Value initTensor = tensor::EmptyOp::create(rewriter, op.getLoc(), outputType, ValueRange{});
@@ -194,9 +195,38 @@ void insertSegmentationOp(Stride2Op op, PatternRewriter &rewriter, int h, int w)
     auto dummy_scale_bias =
         createIConst(rewriter, op, std::vector<APInt>{APInt(32, 0), APInt(32, 1)});
 
+    auto insertSliceOp = dyn_cast_or_null<tensor::InsertSliceOp>(op.getInput().getDefiningOp());
+    if (insertSliceOp && h == 2 && w == 2 &&
+        dyn_cast_or_null<tensor::EmptyOp>(insertSliceOp.getDest().getDefiningOp())) {
+        // Op input comes from an insert slice into an empty tensor.
+        // Fold the insert slice into the segmentation if possible by using its source as input
+        // to the segmentation and adjusting the offsets accordingly.
+        auto source = insertSliceOp.getSource();
+        auto sourceType = llvm::dyn_cast<RankedTensorType>(source.getType());
+        auto destType = llvm::dyn_cast<RankedTensorType>(insertSliceOp.getDest().getType());
+        if (!sourceType || !destType)
+            return;
+        if (sourceType.getRank() == 4 && destType.getRank() == 4) {
+            // Check if the insert slice is effectively copying the entire input tensor into a
+            // larger tensor with padding. This is the common pattern we expect to see after the
+            // valid-tosame padding pass.
+            const auto &destShape = destType.getShape();
+            const auto &sourceShape = sourceType.getShape();
+            // Check if the insert slice is copying the entire source tensor into the top-left
+            // corner of the destination tensor, and the source tensor has odd H or W dimensions
+            auto offsets = SmallVector<int64_t>(insertSliceOp.getStaticOffsets());
+            if (destShape[0] == sourceShape[0] && destShape[1] == sourceShape[1] &&
+                destShape[2] >= sourceShape[2] && destShape[3] >= sourceShape[3] &&
+                offsets == SmallVector<int64_t, 4>{0, 0, 0, 0}) {
+                // Adjust the segmentation input to use the source of the insert slice
+                segmentationInput = source;
+            }
+        }
+    }
+
     auto segmentationOp = syna::torq_hl::SegmentationOp::create(
         rewriter, op.getLoc(), outputType, initTensor, h, w, dummy_weights.getResult(),
-        dummy_scale_bias.getResult(), op.getInput()
+        dummy_scale_bias.getResult(), segmentationInput
     );
 
     rewriter.modifyOpInPlace(op, [&]() {

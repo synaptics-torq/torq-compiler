@@ -19,26 +19,55 @@ namespace mlir::syna::torq {
 // Segment H and W dimensions to 2 segments each (4 quadrants) EE, EO, OE, OO
 static torq_hw::SliceTaskOp
 segmentToQuadrants(torq_hl::SegmentationOp op, PatternRewriter &rewriter) {
+    struct In : NCHW, Vectorized {};
+
     Slice slice("segmentation-hw");
     LData input(op.getInput());
     LData output(op.getInit());
     assert(input.shape().size() == 4 && output.shape().size() == 4);
-    struct In : NCHW, Vectorized {};
-
-    // Vectorize the input data vectors based on the activation width
+    assert(input.denseDims() >= 1 && output.denseDims() >= 1);
+    assert(output.dim(In::H) % 2 == 0 && output.dim(In::W) % 2 == 0 && "H and W dims must be even");
     int vectorSize = slice.act.width(input.elementType());
-    input.fuse({In::H, In::W}).vectorize(vectorSize);
 
     // Reorganize the output to be partitioned in 4 quadrants by index parity in height and width
     output.partitionByIndexParity2D();
 
-    For(auto batch = slice.iterate(input.dim(In::N))) {
-        For(auto ch = slice.iterate(input.dim(In::C))) {
-            For(auto iv = slice.iterate(input.dim(In::Vectors))) {
-                IData idata = slice.iram.load(input[batch][ch][iv]);
-                PData pdata = slice.alu.load(idata);
-                QData res = slice.act.load(pdata);
-                slice.append(output[batch][ch], res);
+    if (input.dim(In::W) % 2 || input.denseDims() < 2 || output.denseDims() < 2) {
+        // Input width is odd or working with non dense tensors.
+        // We have to handle one row at a time (potentially less efficient).
+        // Make the column count even (without changing the stride)
+        input.getShape()[In::W].count += input.dim(In::W) % 2;
+
+        // Reorganize rows in pairs (even/odd) and vectorize each row separately
+        input.reshapeDim(In::H, {-1, 2}, true).vectorize(vectorSize);
+
+        For(auto batch = slice.iterate(input.dim(In::N))) {
+            For(auto ch = slice.iterate(input.dim(In::C))) {
+                For(auto h = slice.iterate(input.dim(In::H))) {
+                    For(auto oe = slice.iterate(2)) {
+                        For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+                            IData idata = slice.iram.load(input[batch][ch][h][oe][iv]);
+                            PData pdata = slice.alu.load(idata);
+                            QData res = slice.act.load(pdata);
+                            slice.append(output[batch][ch][h][oe], res);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else {
+        // Vectorize the input data channels
+        input.fuse({In::H, In::W}).vectorize(vectorSize);
+
+        For(auto batch = slice.iterate(input.dim(In::N))) {
+            For(auto ch = slice.iterate(input.dim(In::C))) {
+                For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+                    IData idata = slice.iram.load(input[batch][ch][iv]);
+                    PData pdata = slice.alu.load(idata);
+                    QData res = slice.act.load(pdata);
+                    slice.append(output[batch][ch], res);
+                }
             }
         }
     }
