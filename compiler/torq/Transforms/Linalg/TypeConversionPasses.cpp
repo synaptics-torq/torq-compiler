@@ -12,9 +12,11 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/PassManager.h"
@@ -23,6 +25,9 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/CommandLine.h"
@@ -163,6 +168,20 @@ void collectPreservedIO(Operation *op, SmallVectorImpl<PreservedIOFuncInfo> &pre
     for (auto funcOp : module.getOps<func::FuncOp>()) {
         if (!isTopLevelFunc(funcOp, op))
             continue;
+        // Only entry points (public funcs) get I/O preservation. Private helpers are converted
+        // end-to-end; their internal call sites are rewritten to the converted dtypes, so
+        // restoring a callee's original signature would leave those calls type-mismatched.
+        if (!funcOp.isPublic())
+            continue;
+        // Defensive: a public function that is also called internally cannot have its signature
+        // restored without breaking those (already-converted) call sites. Warn and let it convert
+        // fully rather than emit invalid IR.
+        auto uses = SymbolTable::getSymbolUses(funcOp.getOperation(), module);
+        if (uses && !uses->empty()) {
+            funcOp.emitWarning("I/O dtype not preserved: public function is also called internally"
+            );
+            continue;
+        }
         preservedIO.push_back({funcOp.getSymNameAttr(), funcOp.getFunctionType()});
     }
 }
@@ -192,6 +211,10 @@ LogicalResult addBoundaryCasts(func::FuncOp funcOp, FunctionType originalType, T
 
     SmallVector<Value> remappedArgs;
     remappedArgs.reserve(convertedType.getNumInputs());
+    // Maps each materialized input-cast result back to its original (untouched-dtype) argument so
+    // a value that flows unchanged to an output can bypass the lossy convert-and-convert-back
+    // round-trip (e.g. an identity/passthrough tensor).
+    DenseMap<Value, Value> inputCastToOriginal;
     for (auto [idx, arg] : llvm::enumerate(newEntry->getArguments())) {
         Type expectedType = convertedType.getInput(idx);
         Value mapped = arg;
@@ -201,6 +224,7 @@ LogicalResult addBoundaryCasts(func::FuncOp funcOp, FunctionType originalType, T
                 funcOp.emitOpError("failed to materialize input boundary cast at index ") << idx;
                 return failure();
             }
+            inputCastToOriginal[mapped] = arg;
         }
         remappedArgs.push_back(mapped);
     }
@@ -224,6 +248,14 @@ LogicalResult addBoundaryCasts(func::FuncOp funcOp, FunctionType originalType, T
             Type expectedType = originalResults[idx];
             Value updated = operand;
             if (operand.getType() != expectedType) {
+                // If the returned value is exactly a converted input we still hold in its original
+                // dtype, route that original through directly instead of casting it back (avoids a
+                // precision-losing round-trip).
+                if (auto it = inputCastToOriginal.find(operand);
+                    it != inputCastToOriginal.end() && it->second.getType() == expectedType) {
+                    newOperands.push_back(it->second);
+                    continue;
+                }
                 updated = tc.materializeSourceConversion(
                     retBuilder, returnOp.getLoc(), expectedType, operand
                 );
@@ -281,6 +313,81 @@ struct PrimitiveTypeConverter : public TypeConverter {
     virtual Type getTargetType(SourceType type) = 0;
 };
 
+/// Warns when narrowing an integer constant drops information.
+///
+/// IREE's convertAttribute narrows integers with a silent modular truncation; we keep that
+/// behavior (the conversion itself is still delegated to IREE) but surface a diagnostic so
+/// out-of-range shape/index values are not silently corrupted. A value is representable iff it
+/// fits the target width as either signed or unsigned.
+void warnOnIntegerNarrowing(Location loc, TypedAttr attr, Type newType) {
+    auto newShaped = dyn_cast<ShapedType>(newType);
+    Type newElem = newShaped ? newShaped.getElementType() : newType;
+    auto newIntTy = dyn_cast<IntegerType>(newElem);
+    if (!newIntTy) {
+        return;
+    }
+    unsigned width = newIntTy.getWidth();
+    auto fits = [&](const APInt &v) {
+        return v.getSignificantBits() <= width || v.getActiveBits() <= width;
+    };
+
+    if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+        if (!fits(intAttr.getValue())) {
+            emitWarning(loc) << "narrowing integer constant to " << newIntTy
+                             << " loses information";
+        }
+        return;
+    }
+    if (auto denseAttr = dyn_cast<DenseIntElementsAttr>(attr)) {
+        for (const APInt &v : denseAttr.getValues<APInt>()) {
+            if (!fits(v)) {
+                emitWarning(loc) << "narrowing integer constant to " << newIntTy
+                                 << " loses information";
+                break;
+            }
+        }
+    }
+}
+
+/// Torq-local replacement for iree_compiler::convertAttribute.
+///
+/// Deviates from IREE in two intentional, Torq-specific ways; everything else falls back to
+/// iree_compiler::convertAttribute unchanged:
+///   1. Floating-point literals round to the target type with round-to-nearest-even, matching
+///      arith.truncf and runtime behavior. IREE rounds toward zero, which biases converted
+///      weights and diverges from the value a runtime truncf would produce.
+///   2. Lossy integer narrowing emits a warning (the narrowing itself stays with IREE, so its
+///      modular-truncation semantics are unchanged).
+Attribute convertConstantAttribute(Location loc, Attribute oldAttr, const TypeConverter &tc) {
+    if (auto typedAttr = dyn_cast<TypedAttr>(oldAttr)) {
+        Type newType = tc.convertType(typedAttr.getType());
+        if (newType && newType != typedAttr.getType()) {
+            warnOnIntegerNarrowing(loc, typedAttr, newType);
+
+            if (auto floatAttr = dyn_cast<FloatAttr>(typedAttr)) {
+                auto newFloatTy = cast<FloatType>(newType);
+                APFloat value = floatAttr.getValue();
+                bool losesInfo = false;
+                value.convert(
+                    newFloatTy.getFloatSemantics(), APFloat::rmNearestTiesToEven, &losesInfo
+                );
+                return FloatAttr::get(newFloatTy, value);
+            }
+            if (auto denseAttr = dyn_cast<DenseFPElementsAttr>(typedAttr)) {
+                auto newElemTy = cast<FloatType>(cast<ShapedType>(newType).getElementType());
+                const auto &sem = newElemTy.getFloatSemantics();
+                return denseAttr.mapValues(newElemTy, [&](const APFloat &src) {
+                    APFloat v = src;
+                    bool losesInfo = false;
+                    v.convert(sem, APFloat::rmNearestTiesToEven, &losesInfo);
+                    return v.bitcastToAPInt();
+                });
+            }
+        }
+    }
+    return iree_compiler::convertAttribute(loc, oldAttr, tc);
+}
+
 /// Generic op cloner that rewrites types, attributes, and regions.
 ///
 /// Constants and globals rewrite attributes to avoid silently changing literal meaning;
@@ -301,9 +408,8 @@ struct GenericTypeConversionPattern : public ConversionPattern {
         if (op->hasTrait<OpTrait::ConstantLike>() ||
             isa<iree_compiler::IREE::Util::GlobalOpInterface>(op)) {
             for (auto attr : op->getAttrs()) {
-                auto newAttr = iree_compiler::convertAttribute(
-                    op->getLoc(), attr.getValue(), *getTypeConverter()
-                );
+                auto newAttr =
+                    convertConstantAttribute(op->getLoc(), attr.getValue(), *getTypeConverter());
                 newAttrs.emplace_back(attr.getName(), newAttr);
             }
         }
@@ -478,10 +584,13 @@ struct ConvertDTypesBoundaryConverter : public TypeConverter {
             return BFloat16Type::get(type.getContext());
         });
         addConversion([](IntegerType type) -> Type {
-            if (!type.isInteger(64)) {
+            // Only signless integers are converted: the arith cast ops used to materialize
+            // conversions (trunci/extsi/extui) require signless operands, so signed/unsigned
+            // i64 must pass through untouched to avoid emitting invalid IR.
+            if (!type.isSignlessInteger(64)) {
                 return type;
             }
-            return IntegerType::get(type.getContext(), 32, type.getSignedness());
+            return IntegerType::get(type.getContext(), 32);
         });
         addConversion([&](ComplexType type) {
             return ComplexType::get(convertType(type.getElementType()));
@@ -542,7 +651,9 @@ class TorqConvertF16ToBF16Pass : public impl::TorqConvertF16ToBF16Base<TorqConve
 
 /// Demotes i64 element types to i32 element types.
 struct DemoteI64ToI32Converter : public IntegerTypeConverter<IntegerType, IntegerType> {
-    bool isSourceType(IntegerType type) override { return type.isInteger(64); }
+    // Restrict to signless i64: arith trunci/extsi/extui require signless operands, so
+    // converting signed/unsigned i64 would materialize invalid casts.
+    bool isSourceType(IntegerType type) override { return type.isSignlessInteger(64); }
     Type getTargetType(IntegerType type) override {
         return IntegerType::get(type.getContext(), 32, type.getSignedness());
     }
