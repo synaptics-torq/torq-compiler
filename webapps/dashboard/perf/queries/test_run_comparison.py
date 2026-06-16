@@ -83,7 +83,7 @@ def get_test_run_comparison(test_run, baseline_test_run):
             for measurement in baseline_test_run.measurement_set.all()
         }
 
-    baseline_total_duration = baseline_measurements_by_name.get('total_npu_operations')
+    baseline_total_duration = baseline_measurements_by_name.get('total_duration')
 
     comparison_rows = []
     current_measurements = sorted(
@@ -91,7 +91,7 @@ def get_test_run_comparison(test_run, baseline_test_run):
             measurement
             for measurement in current_measurements_by_name.values()
         ),
-        key=lambda measurement: (measurement.metric.name != 'total_npu_operations', measurement.metric.name),
+        key=lambda measurement: (measurement.metric.name != 'total_duration', measurement.metric.name),
     )
 
     for measurement in current_measurements:
@@ -170,9 +170,6 @@ def get_corresponding_test_run(test_run, baseline_session):
 
 
 def _default_history_metric_name(history_metrics):
-    if any(metric['name'] == 'total_npu_operations' for metric in history_metrics):
-        return 'total_npu_operations'
-
     if any(metric['name'] == 'total_duration' for metric in history_metrics):
         return 'total_duration'
 
@@ -319,7 +316,7 @@ def get_test_run_history(test_run, baseline_test_run=None, history_options=None)
             for measurement in current_run_measurements
         ),
         key=lambda metric: (
-            metric['name'] != 'total_npu_operations',
+            metric['name'] != 'total_duration',
             metric['label'],
         ),
     )

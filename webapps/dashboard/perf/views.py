@@ -99,7 +99,7 @@ def test_session_metric_details(request, session_id):
     data = request.GET.copy()
 
     if 'metric' not in data:
-        data['metric'] = 'total_npu_operations'
+        data['metric'] = 'total_duration'
     
     if 'number_of_top' not in data:
         data['number_of_top'] = 10
@@ -281,7 +281,7 @@ def test_run(request, test_run_id):
     )
 
     total_duration_row = next(
-        (row for row in metrics_with_comparison if row['metric_name'] == 'total_npu_operations'),
+        (row for row in metrics_with_comparison if row['metric_name'] == 'total_duration'),
         None,
     )
 
@@ -339,4 +339,3 @@ def download_failure_log(request, test_run_id):
     response = FileResponse(test_run.failure_log.open('rb'), content_type='text/plain')
     response['Content-Disposition'] = f'inline; filename="{filename}"'
     return response
-

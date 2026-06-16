@@ -84,7 +84,7 @@ class TestGroupViewSet(viewsets.ReadOnlyModelViewSet):
         },
         summary='Get performance metrics for a test group',
         description=(
-            'Returns total_npu_operations measurements for all test cases in the group for the '
+            'Returns total_duration measurements for all test cases in the group for the '
             'resolved session. Exactly one of session_id, git_commit, or git_branch must '
             'be provided. Optional filters narrow results by runtime_target, runtime_hw_type, '
             'and compiler_input.'

@@ -24,7 +24,7 @@ def query_test_durations(
     measurements = Measurement.objects.filter(
         test_run__test_case__in=test_cases,
         test_run__test_run_batch__test_session_id__in=session_ids,
-        metric__name='total_npu_operations', 
+        metric__name='total_duration',
     )
 
     if runtime_target:
@@ -110,7 +110,6 @@ def get_reference_test_durations(session_ids):
         result[key].sort(key=lambda x: (x['runtime'] or '', x['node_id']))
 
     return dict(sorted(result.items(), key=lambda item: item[0] or ''))
-
 
 
 
