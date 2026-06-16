@@ -31,6 +31,8 @@ typedef struct iree_hal_torq_allocator_t {
 
 static const iree_hal_allocator_vtable_t iree_hal_torq_allocator_vtable;
 static const iree_hal_buffer_vtable_t iree_hal_torq_buffer_vtable;
+static const iree_device_size_t kTorqUncachedDmaHeapMinAllocationSize =
+    32ull * 1024ull * 1024ull;
 
 static iree_hal_torq_allocator_t *
 iree_hal_torq_allocator_cast(iree_hal_allocator_t *IREE_RESTRICT base_value) {
@@ -264,6 +266,13 @@ static iree_status_t iree_hal_torq_allocator_allocate_buffer(
     torq_hw_device_buffer_mode_t allocation_mode = TORQ_HW_DEVICE_BUFFER_MODE_MALLOC;
 #ifdef ENABLE_ASTRA_MACHINA
     allocation_mode = TORQ_HW_DEVICE_BUFFER_MODE_DMA_HEAP;
+
+  // Use uncached DMA heap only for the observed large dmabuf allocations.
+  // Smaller allocations remain on the normal cached DMA heap path.
+if (allocation_size > kTorqUncachedDmaHeapMinAllocationSize) {
+    allocation_mode = TORQ_HW_DEVICE_BUFFER_MODE_DMA_HEAP_UNCACHED;
+}
+
 #endif // ENABLE_ASTRA_MACHINA
 
     iree_status_t alloc_status =
@@ -314,6 +323,19 @@ static iree_status_t iree_hal_torq_allocator_import_buffer(
         return iree_make_status(
             IREE_STATUS_INVALID_ARGUMENT,
             "allocator cannot import a buffer with the given parameters"
+        );
+    }
+
+    // workaround: constants are imported with this function, but we can't really
+    // map the constants with zero-copy in the NPU address space because they may
+    // not be aligned correctly so for the moment we just reject importing
+    // host allocation buffers and let the caller fall back to copy them into
+    // device buffers.
+    if (external_buffer->type == IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION) {
+        printf("importing host allocation buffer with pointer %p\n", external_buffer->handle.host_allocation.ptr);
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "allocator cannot import a host allocation buffer as it is not device-aligned"
         );
     }
 

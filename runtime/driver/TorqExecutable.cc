@@ -4,6 +4,7 @@
 #include "TorqIO.h"
 #include "TorqDump.h"
 #include "torq_allocator.h"
+#include "torq_device.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -53,7 +54,7 @@ static EventType toEventType(ns(HostActionParams_union_type_t) paramsType) {
 
 
 
-static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable_def, uint32_t* xram_base, uint32_t* xram_size) {
+static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable_def, bool is_dmabuf_mode,uint32_t* xram_base, uint32_t* xram_size) {
 
   int xram_start = UINT32_MAX;
   int xram_end = 0;
@@ -91,28 +92,35 @@ static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable
   
   }
 
-  // iterate over all the bindings and compute the xram start and end address of each to find the xram base and size
-  iree_hal_torq_Binding_vec_t bindings = ns(ExecutableDef_bindings_get(executable_def));
-  size_t bindings_count = ns(Binding_vec_len(bindings));
-  for (size_t i = 0; i < bindings_count; i++) {
-    iree_hal_torq_Binding_table_t binding = ns(Binding_vec_at(bindings, i));
-    
-    uint32_t xram_address = ns(Binding_address(binding));
+  if (!is_dmabuf_mode) {
+    if (iree_hal_torq_ExecutableDef_bindings_is_present(executable_def)) {
+      iree_hal_torq_Binding_vec_t bindings =
+          ns(ExecutableDef_bindings_get(executable_def));
+      size_t bindings_count = ns(Binding_vec_len(bindings));
 
-    uint32_t xram_size_binding = ns(Binding_size(binding));
+      for (size_t i = 0; i < bindings_count; i++) {
+        iree_hal_torq_Binding_table_t binding =
+            ns(Binding_vec_at(bindings, i));
 
-    if (xram_address < xram_start) {
-      xram_start = xram_address;
+        uint32_t xram_address = ns(Binding_address(binding));
+        uint32_t xram_size_binding = ns(Binding_size(binding));
+
+        if (xram_address < xram_start) {
+          xram_start = xram_address;
+        }
+
+        if (xram_address + xram_size_binding > xram_end) {
+          xram_end = xram_address + xram_size_binding;
+        }
+
+        LOGD << "Binding " << i << ": xram_address=" << xram_address
+             << ", xram_size_binding=" << xram_size_binding
+             << ", xram_start=" << xram_start
+             << ", xram_end=" << xram_end;
+      }
     }
-
-    if (xram_address + xram_size_binding > xram_end) {
-      xram_end = xram_address + xram_size_binding;
-    }
-
-    LOGD << "Binding " << i << ": xram_address=" << xram_address 
-         << ", xram_size_binding=" << xram_size_binding 
-         << ", xram_start=" << xram_start 
-         << ", xram_end=" << xram_end;
+  } else {
+    printf("[torq] Skipping binding ranges in XRAM footprint for dmabuf mode\n");
   }
 
   // iterate over all actions and find the xram start and end address of each alloc operation
@@ -663,7 +671,12 @@ iree_status_t TorqExecutable::initialize() {
   }
 
   TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
-  ret = compute_xram_footprint(executableDef, &xram_base, &xram_size);
+  bool is_dmabuf_mode =
+    iree_hal_torq_device_is_dmabuf_mode(nativeExecutable_->device);
+
+  ret = compute_xram_footprint(
+    executableDef, is_dmabuf_mode, &xram_base, &xram_size);
+
   TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
 
   if (!iree_status_is_ok(ret)) {

@@ -18,7 +18,7 @@
 #include <stddef.h>
 
 IREE_FLAG(
-    string, torq_device_allocator, "dmabuf",
+    string, torq_device_allocator, "cpu",
     "Allocator backing Torq device buffers: ['cpu', 'dmabuf']"
 );
 
@@ -103,6 +103,15 @@ static iree_status_t iree_hal_torq_driver_factory_try_create(
 
   iree_hal_torq_device_params_t default_params;
   iree_hal_torq_device_params_initialize(&default_params);
+
+  iree_string_view_t allocator_name =
+    iree_make_cstring_view(FLAG_torq_device_allocator);
+
+  if (iree_string_view_equal(allocator_name, IREE_SV("cpu"))) {
+    default_params.is_dmabuf_mode = false;
+  } else if (iree_string_view_equal(allocator_name, IREE_SV("dmabuf"))) {
+    default_params.is_dmabuf_mode = true;
+  }
 
   iree_hal_executable_plugin_manager_t* plugin_manager = NULL;
   iree_status_t status = iree_hal_executable_plugin_manager_create_from_flags(

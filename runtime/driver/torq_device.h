@@ -22,6 +22,7 @@ typedef struct iree_hal_torq_device_params_t {
   // Larger sizes will lower overhead and ensure the heap isn't hit for
   // transient allocations while also increasing memory consumption.
   iree_host_size_t arena_block_size;
+    bool is_dmabuf_mode;
 } iree_hal_torq_device_params_t;
 
 // Initializes |out_params| to default values.
@@ -36,6 +37,7 @@ iree_status_t iree_hal_torq_device_create(
     iree_host_size_t loader_count, iree_hal_executable_loader_t** loaders,
     iree_hal_allocator_t* device_allocator, iree_allocator_t host_allocator,
     iree_hal_device_t** out_device);
+bool iree_hal_torq_device_is_dmabuf_mode(iree_hal_device_t* device);
 
 #ifdef __cplusplus
 }  // extern "C"

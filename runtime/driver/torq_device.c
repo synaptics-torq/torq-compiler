@@ -32,6 +32,7 @@ typedef struct iree_hal_torq_device_t {
 
   iree_allocator_t host_allocator;
   iree_hal_allocator_t* device_allocator;
+  bool is_dmabuf_mode;
 
   // Optional provider used for creating/configuring collective channels.
   iree_hal_channel_provider_t* channel_provider;
@@ -55,10 +56,16 @@ static iree_hal_torq_device_t* iree_hal_torq_device_cast(
   return (iree_hal_torq_device_t*)base_value;
 }
 
+bool iree_hal_torq_device_is_dmabuf_mode(iree_hal_device_t* base_device) {
+  iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
+  return device->is_dmabuf_mode;
+}
+
 void iree_hal_torq_device_params_initialize(
     iree_hal_torq_device_params_t* out_params) {
   memset(out_params, 0, sizeof(*out_params));
   out_params->arena_block_size = 32 * 1024;
+  out_params->is_dmabuf_mode = false;
 }
 
 static iree_status_t iree_hal_torq_device_check_params(
@@ -99,6 +106,7 @@ iree_status_t iree_hal_torq_device_create(
                                       (char*)device + struct_size);
     device->host_allocator = host_allocator;
     device->device_allocator = device_allocator;
+    device->is_dmabuf_mode = params->is_dmabuf_mode;
     iree_hal_allocator_retain(device_allocator);
     iree_arena_block_pool_initialize(params->arena_block_size, host_allocator,
                                      &device->large_block_pool);
