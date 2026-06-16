@@ -11,10 +11,13 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
+#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-assign-nss-programs-addresses"
+
+extern llvm::cl::opt<int> clMaxNssProgramsSize;
 
 namespace mlir::syna::torq {
 
@@ -62,6 +65,14 @@ void AssignNSSProgramsAddressesPass::runOnOperation() {
 
     Builder builder(getOperation().getContext());
 
+    // find the base address for the NSS programs that was reserved in the AssignAddressesPass
+    int64_t nssProgramBase =
+        getOperation()->getAttrOfType<IntegerAttr>("torq-nss-program-base").getInt();
+
+    int64_t maxNssProgramAddress = nssProgramBase + clMaxNssProgramsSize;
+
+    int64_t nextNssProgramAddress = nssProgramBase;
+
     for (auto invocationOp : nssInvocations.value()) {
 
         auto programOp = invocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
@@ -80,7 +91,9 @@ void AssignNSSProgramsAddressesPass::runOnOperation() {
             programSize += blockSize;
         }
 
-        auto programAddress = reserveXramArea(getOperation(), programSize);
+        auto programAddress = llvm::alignTo(nextNssProgramAddress, 4);
+
+        nextNssProgramAddress = programAddress + programSize;
 
         SmallVector<int64_t> addresses;
 
@@ -91,6 +104,19 @@ void AssignNSSProgramsAddressesPass::runOnOperation() {
         }
 
         invocationOp.setXramCodeAddresses(addresses);
+    }
+
+    if (nextNssProgramAddress > maxNssProgramAddress) {
+
+        getOperation().emitError(
+            "Not enough space available for NSS programs (required " +
+            std::to_string(nextNssProgramAddress - nssProgramBase) + " bytes, available " +
+            std::to_string(maxNssProgramAddress - nssProgramBase) +
+            " bytes) (this can be increased with the --torq-max-nss-programs-size option)"
+        );
+
+        signalPassFailure();
+        return;
     }
 }
 

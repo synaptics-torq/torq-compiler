@@ -37,6 +37,11 @@ static llvm::cl::opt<int> clXramStartAddress(
     llvm::cl::init(0x100000) // 1MB
 );
 
+llvm::cl::opt<int> clMaxNssProgramsSize(
+    "torq-max-nss-programs-size", llvm::cl::desc("Size of the XRAM reserved for NSS programs"),
+    llvm::cl::init(mlir::syna::torq::HwInfo::xram_nss_programs_size)
+);
+
 using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
@@ -478,6 +483,15 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
     }
 
     startAddress = *maybeNextStartAddress;
+
+    // reseve a chunk of memory at the end of the model, but before the bindings
+    // where we will be able to store NSS programs
+    int64_t nssProgramBase = startAddress;
+
+    Builder builder(funcOp.getContext());
+    funcOp->setAttr("torq-nss-program-base", builder.getI64IntegerAttr(nssProgramBase));
+
+    startAddress = startAddress + clMaxNssProgramsSize;
 
     // binding pass: place each MapBindingOp on its own page(s) after the body
     // so that each binding can be IOMMU-mapped independently without sharing a

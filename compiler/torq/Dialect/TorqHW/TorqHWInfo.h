@@ -49,9 +49,11 @@ struct HwInfo {
         css_itcm_base_address =
             0x00000000, // REG_ADDR__TORQ_CV_ITCM in torq-hw/reg/torq_regs_css_view.h
         css_dtcm_base_address =
-            0x00010000,              // REG_ADDR__TORQ_CV_DTCM in torq-hw/reg/torq_regs_css_view.h,
-        css_stack_size = 512,        // size of the CSS stack in bytes
-        nss_max_program_size = 0x280 // maximum size of a NSS program in bytes
+            0x00010000,               // REG_ADDR__TORQ_CV_DTCM in torq-hw/reg/torq_regs_css_view.h,
+        css_stack_size = 512,         // size of the CSS stack in bytes
+        nss_max_program_size = 0x280, // maximum size of a NSS program in bytes
+        xram_nss_programs_size =
+            0x800000, // size of the XRAM segment reserved for NSS programs in bytes
     };
 };
 
