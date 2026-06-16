@@ -731,6 +731,8 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         // therefore correct solely for a single input channel. Multi-channel convs must
         // use the matmul path (im2col + matmul), so bail out here for C > 1.
         if (C != 1) {
+            // FIXME: torq conv1d kernel is actually optimized for multiple input channels
+            // we should improve the generic lowering to support C > 1.
             return rewriter.notifyMatchFailure(
                 convOp, "generic conv1d path only supports a single input channel"
             );

@@ -462,20 +462,6 @@ static auto depthwiseStridesCapable() {
     };
 }
 
-// FIXME: float Conv2D with height=1 + non-depthwise is currently dispatched
-// to Conv1DPattern by rejecting the match here. Remove this guard once Conv2D
-// pattern handles the height=1 case directly.
-static auto notConv1DNonDepthwise(int channelDim) {
-    return [channelDim](auto op) {
-        auto inTy = llvm::cast<RankedTensorType>(op.image().getType());
-        if (!inTy.getElementType().isFloat() || inTy.getRank() != 4) {
-            return true;
-        }
-        const int heightDim = (channelDim == 3) ? 1 : 2;
-        return !(inTy.getShape()[heightDim] == 1 && !isLinalgDW(op.getOperation()));
-    };
-}
-
 template <typename MatchFn> static auto shapeMatchOrPass(MatchFn matchFn) {
     return [matchFn](auto op) {
         if (!matchFn) {
@@ -525,7 +511,6 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         TorqStructuredOpMatcher<LinalgConvOp> matcher;
         if (!matcher.addPredicate(notMarkedFuseGroupIf(_markFuseGroups))
                  .addPredicate(depthwiseStridesCapable())
-                 .addPredicate(notConv1DNonDepthwise(_channelDim))
                  .addPredicate(shapeMatchOrPass(_matchFn))
                  .match(convOp)) {
             return rewriter.notifyMatchFailure(convOp, "Conv2D match failed");
