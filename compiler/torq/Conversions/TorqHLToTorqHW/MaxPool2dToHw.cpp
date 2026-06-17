@@ -108,11 +108,29 @@ static torq_hw::SliceTaskOp lowerMaxPool1DHorizontalToHw(
     );
 
     // kh==1 and strideH==1, so each output row maps directly to the corresponding input row.
-    // Keep the native N,C,H,W layout and only split W into [outputWidth, kw] tiles.
+    // Keep the native N,C,H,W layout and split W into [outputWidth, nOuterGroups, tile] tiles.
+    //
+    // The innermost `tile` is read as the strided 'S' dimension of a single IRAM load, which the
+    // hardware descriptor limits to alu.kerWidth(). A wide window (e.g. kw=10) would otherwise emit
+    // an S dimension of kw and trip the `dims.sn<=4` assertion in the HW descriptor generator.
+    // Picking `tile` as the largest divisor of kw not exceeding that limit keeps each load legal
+    // (and avoids over-reading past the window), while the remaining `nOuterGroups` factor is
+    // reduced with an outer loop of separate loads -- max is associative, so the per-group partial
+    // maxima combine to the same result.
     // TODO: This path reduces along the innermost W dimension, so it cannot leverage vectorized
     // reduction like the vertical 1D case. For larger tensors, consider swapping H/W first and
     // reusing the faster H-reduction path.
-    input.reshapeDim(Dim::W, {-1, kw});
+    const int maxSDim = slice.alu.kerWidth();
+    int tile = 1;
+    for (int t = std::min(kw, maxSDim); t >= 1; --t) {
+        if (kw % t == 0) {
+            tile = t;
+            break;
+        }
+    }
+    int nOuterGroups = kw / tile;
+
+    input.reshapeDim(Dim::W, {-1, nOuterGroups, tile});
 
     int in_ch = input.dim(In::C);
 
@@ -121,9 +139,12 @@ static torq_hw::SliceTaskOp lowerMaxPool1DHorizontalToHw(
             For(auto op_row = slice.iterate(input.dim(In::H))) {
                 For(auto op_col = slice.iterate(input.dim(In::W))) {
                     PData pdata;
-                    IData idata = slice.iram.load(input[batch][ch_block][op_row][op_col]);
-                    For(auto kw_idx = slice.iterate(kw)) {
-                        pdata = slice.alu.accumulate(idata[kw_idx], torq_hw::ALUOp1Mode::MAX);
+                    For(auto kw_group = slice.iterate(nOuterGroups)) {
+                        IData idata =
+                            slice.iram.load(input[batch][ch_block][op_row][op_col][kw_group]);
+                        For(auto kw_idx = slice.iterate(tile)) {
+                            pdata = slice.alu.accumulate(idata[kw_idx], torq_hw::ALUOp1Mode::MAX);
+                        }
                     }
                     QData res = slice.act.load(pdata);
                     slice.store(output[batch][ch_block][op_row][op_col], res);
