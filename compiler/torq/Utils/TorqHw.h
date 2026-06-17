@@ -26,9 +26,6 @@ class TorqHw {
     // Get Number of Slices
     size_t getSliceCount() const { return _sliceCount; }
 
-    // Get Available Memory for Tiling in bytes
-    size_t getAvailableMemoryForTiling() const { return _availableMemoryForTiling; }
-
     // Get the CSS configuration name
     std::string getCSSConfigName() const { return _cssConfigName; }
 
@@ -59,15 +56,14 @@ class TorqHw {
 
     TorqHw(
         std::string name, uint32_t hw_id, std::string description, size_t lramSize,
-        size_t sliceCount, size_t availableMemoryForTiling, std::string cssConfigName,
-        std::string nssConfigName, double dmaTheoreticalBytesPerCycle = 8.0, double dmaFactor = 1.0,
+        size_t sliceCount, std::string cssConfigName, std::string nssConfigName,
+        double dmaTheoreticalBytesPerCycle = 8.0, double dmaFactor = 1.0,
         std::string hostTriple = "native", std::string hostCpu = "host",
         std::string hostCpuFeatures = "host"
     )
         : _name(name), _hw_id(hw_id), _description(description), _lramSize(lramSize),
-          _sliceCount(sliceCount), _availableMemoryForTiling(availableMemoryForTiling),
-          _cssConfigName(cssConfigName), _nssConfigName(nssConfigName), _hostTriple(hostTriple),
-          _hostCpu(hostCpu), _hostCpuFeatures(hostCpuFeatures),
+          _sliceCount(sliceCount), _cssConfigName(cssConfigName), _nssConfigName(nssConfigName),
+          _hostTriple(hostTriple), _hostCpu(hostCpu), _hostCpuFeatures(hostCpuFeatures),
           _dmaTheoreticalBytesPerCycle(dmaTheoreticalBytesPerCycle), _dmaFactor(dmaFactor) {}
 
     TorqHw() = default;
@@ -79,7 +75,6 @@ class TorqHw {
     std::string _version{};
     size_t _lramSize = 0;
     size_t _sliceCount = 0;
-    size_t _availableMemoryForTiling = 0;
     std::string _cssConfigName{};
     std::string _nssConfigName{};
     std::string _hostTriple{};

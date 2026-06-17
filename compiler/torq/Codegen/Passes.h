@@ -98,8 +98,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollDynamicShapeLoop
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createReplaceForLoopsWithFirstIterationPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createLramTilePass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileReductionForLramPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createDtcmTilePass();

@@ -134,10 +134,6 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
 
     funcPm.addPass(createMarkHostExecutorPass());
 
-    // tile the linalg ops or tilingInterface ops
-    funcPm.addPass(createLramTilePass());
-    funcPm.addPass(createCanonicalizerPass());
-
     // lower arith ops to torq_hl
     funcPm.addPass(createArithToTorqHLConversionPass());
     funcPm.addPass(createCanonicalizerPass());

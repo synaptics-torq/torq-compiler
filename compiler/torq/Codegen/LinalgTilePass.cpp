@@ -686,7 +686,8 @@ class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReduc
 
     void runOnOperation() {
         auto funcOp = getOperation();
-        const uint32_t lramSize = TorqHw::get().getAvailableMemoryForTiling();
+        // Leave 14k headroom for descriptors (used to be TorqHw::get().getAvailableLramSize())
+        const uint32_t lramSize = TorqHw::get().getLramSize() - 14 * 1024;
 
         SmallVector<linalg::GenericOp> opsToTile;
         funcOp.walk([&](linalg::GenericOp genericOp) {
@@ -878,37 +879,6 @@ class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReduc
     }
 };
 
-class LramTilePass : public impl::LramTileBase<LramTilePass> {
-  public:
-    using LramTileBase<LramTilePass>::LramTileBase;
-
-    void runOnOperation() {
-        auto funcOp = getOperation();
-
-        MLIRContext *ctx = funcOp.getContext();
-
-        RewritePatternSet tilePatterns(ctx);
-
-        const uint32_t lramSize = TorqHw::get().getAvailableMemoryForTiling();
-
-        // Add tiling patterns for the Slice executor
-        tilePatterns.add<TileLinalgOpOperation>(ctx, lramSize, torq_hl::Executor::Slice);
-
-        tensor::ControlConstantExtractSliceFusionFn controlFn = [](tensor::ExtractSliceOp op) {
-            return true;
-        };
-        tensor::populateFoldConstantExtractSlicePatterns(tilePatterns, controlFn);
-
-        GreedyRewriteConfig config;
-        config.setStrictness(GreedyRewriteStrictness::ExistingOps);
-        if (failed(applyPatternsGreedily(getOperation(), std::move(tilePatterns), config))) {
-            return signalPassFailure();
-        }
-
-        return;
-    }
-};
-
 class DtcmTilePass : public impl::DtcmTileBase<DtcmTilePass> {
   public:
     using DtcmTileBase<DtcmTilePass>::DtcmTileBase;
@@ -943,10 +913,6 @@ class DtcmTilePass : public impl::DtcmTileBase<DtcmTilePass> {
 };
 
 } // namespace
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createLramTilePass() {
-    return std::make_unique<LramTilePass>();
-}
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileReductionForLramPass() {
     return std::make_unique<TileReductionForLramPass>();

@@ -716,7 +716,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     if target == "custom":
         dma_tp = chip_config.get("dma_theoretical_bytes_per_cycle", 8)
         dma_factor = chip_config.get("dma_factor", 1.0)
-        cmds.append(f'--torq-hw={chip_config["hw_id"]}:{chip_config["lram_size"]}:{chip_config["slice_count"]}:{chip_config["tiling_memory"]}:'
+        cmds.append(f'--torq-hw={chip_config["hw_id"]}:{chip_config["lram_size"]}:{chip_config["slice_count"]}:'
                      f'{chip_config.get("css_features","")}:{chip_config.get("nss_features","")}:{dma_tp}:{dma_factor}:'
                      f'{chip_config.get("host_triple","native")}:{chip_config.get("host_cpu","host")}:{chip_config.get("host_cpu_features","host")}')
     else:

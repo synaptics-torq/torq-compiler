@@ -17,12 +17,10 @@ You can configure the LRAM size and the number of slices at model compilation ti
 To compile a model for a custom hardware configuration, use the following options:
 
 ```{code} shell
-$ torq-compile ... --torq-hw=<LRAM>:<Slices>:<tiling_memory>:<CSS features>:<NSS features>
+$ torq-compile ... --torq-hw=<LRAM>:<Slices>:<CSS features>:<NSS features>
 ```
 - `<LRAM>`: Size of LRAM (integer)
 - `<slices>`: Number of SLICE blocks (integer)
-- `<tiling_memory>`: Tiling memory size in kilobytes (kb)
-    > **Tiling memory:** specifies the available memory for tiling operations. When an operation's memory requirement exceeds the LRAM value, the compiler will automatically tile the operation to fit within the specified tiling memory.
 - `<CSS features>`: indicates the css features to enable (at the moment "+m")
 - `<NSS features >`: indicates the NSS features to enable (at the moment "nss_v1")
 

@@ -12,14 +12,12 @@ using namespace std;
 namespace mlir::syna::torq {
 
 llvm::SmallVector<TorqHw, 1> hwTypes = {TorqHw(
-    "SL2610", 0x0, "Synaptics SL2610 SoC family", 512 * 1024, 2, 498 * 1024, "coral_v1", "nss_v1",
-    8, 0.65, "aarch64-unknown-linux-gnu", "generic",
-    "+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse,+sve"
+    "SL2610", 0x0, "Synaptics SL2610 SoC family", 512 * 1024, 2, "coral_v1", "nss_v1", 8, 0.65,
+    "aarch64-unknown-linux-gnu", "generic", "+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse,+sve"
 )};
 
 #define TORQ_CUSTOM_FORMAT                                                                         \
-    "<hw_id>:<lram_size_kb>:<slice_count>:<available_memory_for_tiling_kb>:<css_features>:<nss_"   \
-    "features>"                                                                                    \
+    "<hw_id>:<lram_size_kb>:<slice_count>:<css_features>:<nss_features>"                           \
     "[:<dma_theoretical_throughput>[:<dma_factor>:<host_triple>:<host_cpu>:<host_cpu_features>]]"
 
 struct TorqHwParser : public llvm::cl::parser<TorqHw> {
@@ -30,7 +28,7 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
         llvm::cl::Option &O, llvm::StringRef ArgName, const llvm::StringRef &ArgValue, TorqHw &Val
     ) {
 
-        llvm::SmallVector<llvm::StringRef, 8> parts;
+        llvm::SmallVector<llvm::StringRef, 10> parts;
         ArgValue.split(parts, ':');
 
         if (parts.size() == 1) {
@@ -57,22 +55,22 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
             );
         }
 
-        if (parts.size() == 6) {
+        if (parts.size() == 5) {
             parts.push_back("8"); // dma_theoretical_throughput default
         }
-        if (parts.size() == 7) {
+        if (parts.size() == 6) {
             parts.push_back("1.0"); // dma_factor default
         }
-        if (parts.size() == 8) {
+        if (parts.size() == 7) {
             parts.push_back("native"); // host triple default
         }
-        if (parts.size() == 9) {
+        if (parts.size() == 8) {
             parts.push_back("host"); // host cpu default
         }
-        if (parts.size() == 10) {
+        if (parts.size() == 9) {
             parts.push_back("host"); // host cpu features default
         }
-        if (parts.size() != 11) {
+        if (parts.size() != 10) {
             return O.error(ArgName, " custom hardware specification format: " TORQ_CUSTOM_FORMAT);
         }
 
@@ -100,35 +98,25 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
             return O.error(ArgName, " Slice count must be a valid number\n");
         }
 
-        size_t available_memory_for_tiling_kb;
-
-        if (parts[3].getAsInteger(10, available_memory_for_tiling_kb)) {
-            return O.error(ArgName, " Available memory for tiling must be a valid number\n");
-        }
-
-        size_t available_memory_for_tiling = available_memory_for_tiling_kb * 1024;
-
-        std::string cpu_config = parts[4].str();
-        std::string nss_config = parts[5].str();
+        std::string cpu_config = parts[3].str();
+        std::string nss_config = parts[4].str();
 
         double dma_theoretical_throughput;
-        if (parts[6].getAsDouble(dma_theoretical_throughput)) {
+        if (parts[5].getAsDouble(dma_theoretical_throughput)) {
             return O.error(ArgName, " DMA theoretical throughput must be a valid number\n");
         }
         double dma_factor;
-        if (parts[7].getAsDouble(dma_factor)) {
+        if (parts[6].getAsDouble(dma_factor)) {
             return O.error(ArgName, " DMA factor must be a valid number\n");
         }
-        std::string host_triple = parts[8].str();
-        std::string host_cpu = parts[9].str();
-        std::string host_cpu_features = parts[10].str();
+        std::string host_triple = parts[7].str();
+        std::string host_cpu = parts[8].str();
+        std::string host_cpu_features = parts[9].str();
 
         llvm::outs() << "Custom Torq Hardware Configuration:\n";
         llvm::outs() << "  HW ID: " << hw_id << "\n";
         llvm::outs() << "  LRAM Size: " << lram_size << " bytes\n";
         llvm::outs() << "  Slice Count: " << slice_count << "\n";
-        llvm::outs() << "  Available Memory for Tiling: " << available_memory_for_tiling
-                     << " bytes\n";
         llvm::outs() << "  CSS Config: " << cpu_config << "\n";
         llvm::outs() << "  NSS Config: " << nss_config << "\n";
         llvm::outs() << "  Host Triple: " << host_triple << "\n";
@@ -139,9 +127,8 @@ struct TorqHwParser : public llvm::cl::parser<TorqHw> {
         llvm::outs() << "  DMA Factor: " << dma_factor << "\n";
 
         Val = TorqHw(
-            name, hw_id, description, lram_size, slice_count, available_memory_for_tiling,
-            cpu_config, nss_config, dma_theoretical_throughput, dma_factor, host_triple, host_cpu,
-            host_cpu_features
+            name, hw_id, description, lram_size, slice_count, cpu_config, nss_config,
+            dma_theoretical_throughput, dma_factor, host_triple, host_cpu, host_cpu_features
         );
 
         // no error
@@ -170,9 +157,8 @@ const TorqHw &TorqHw::get() {
             instance = TorqHw(
                 clTorqHw.getName(), clTorqHw.getHwId(), clTorqHw.getDescription(),
                 clTorqHw.getLramSize(), clTorqHw.getSliceCount(),
-                clTorqHw.getAvailableMemoryForTiling(), clTorqHw.getCSSConfigName() + "_qemu",
-                clTorqHw.getNSSConfigName(), clTorqHw.getDmaTheoreticalBytesPerCycle(),
-                clTorqHw.getDmaFactor()
+                clTorqHw.getCSSConfigName() + "_qemu", clTorqHw.getNSSConfigName(),
+                clTorqHw.getDmaTheoreticalBytesPerCycle(), clTorqHw.getDmaFactor()
             );
         }
         else {

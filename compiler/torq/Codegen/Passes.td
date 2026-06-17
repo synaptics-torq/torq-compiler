@@ -422,24 +422,6 @@ def TileReductionForLram:
     ];
 }
 
-def LramTile:
-    InterfacePass<"torq-lram-tile",
-                  "mlir::FunctionOpInterface"> {
-
-    let summary = "Tile operations to fit in LRAM";
-
-    let description = [{
-        Tile operations to fit LRAM constraints
-    }];
-
-    let constructor =
-        "mlir::syna::torq::createLramTilePass()";
-
-    let dependentDialects = [
-        "::mlir::linalg::LinalgDialect"
-    ];
-}
-
 def DtcmTile:
     InterfacePass<"torq-dtcm-tile",
                   "mlir::FunctionOpInterface"> {

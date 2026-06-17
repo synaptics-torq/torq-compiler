@@ -60,7 +60,9 @@ static bool im2ColFitsInLram(int64_t C, int64_t W, int64_t Ow, int64_t Kw, Type 
     int64_t K = C * Kw;
     int64_t elemBytes = (elemType.getIntOrFloatBitWidth() + 7) / 8;
     int64_t bytes = (C * W) * elemBytes + (Ow * K) * elemBytes;
-    return bytes <= static_cast<int64_t>(TorqHw::get().getAvailableMemoryForTiling());
+    // Leave 14k headroom for descriptors (used to be TorqHw::get().getAvailableLramSize())
+    const int64_t availableLram = static_cast<int64_t>(TorqHw::get().getLramSize() - 14 * 1024);
+    return bytes <= availableLram;
 }
 
 // Emit the im2col unfold ([Ow, C*Kw]) as an affine-map linalg.generic marked torq.im2col.
@@ -140,7 +142,9 @@ static int64_t computeIm2ColBlockOw(
 ) {
     int64_t K = C * Kw;
     int64_t elemBytes = (elemType.getIntOrFloatBitWidth() + 7) / 8;
-    int64_t budget = static_cast<int64_t>(TorqHw::get().getAvailableMemoryForTiling());
+
+    // Leave 14k headroom for descriptors (used to be TorqHw::get().getAvailableLramSize())
+    int64_t budget = static_cast<int64_t>(TorqHw::get().getLramSize() - 14 * 1024);
 
     // A block of bOw output columns reads windowW input columns; offsets are window-relative,
     // and valid-conv output sizing guarantees windowW <= W.
