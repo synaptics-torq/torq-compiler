@@ -1,6 +1,7 @@
 import copy as _copy
 import json
 from dataclasses import dataclass
+from functools import wraps
 import subprocess
 import sys
 from pathlib import Path
@@ -1233,6 +1234,24 @@ def generate_onnx_layers_from_file(cache, filepath: Path, node_groups=None, dedu
 @pytest.fixture
 def onnx_model(request, case_config):
     return request.getfixturevalue(case_config['onnx_model'])
+
+
+def onnx_model_fixture(fun):
+    """Decorator for fixtures that build an in-memory onnx.ModelProto (mirror of
+    tensorflow.keras_model_fixture). The wrapped fixture is consumed via the
+    existing onnx_model -> onnx_model_file -> onnx_mlir_model_file chain, so a
+    parametric builder needs no new downstream plumbing."""
+    @versioned_unhashable_object_fixture
+    @wraps(fun)
+    def wrapper(**kwargs):
+        request = kwargs.get("request")
+        if request is None:
+            raise ValueError("onnx_model_fixture requires a request fixture")
+        record_property = request.getfixturevalue("record_property")
+        record_property("compiler_input", f"onnx:{fun.__module__}.{fun.__qualname__}")
+        return fun(**kwargs)
+
+    return wrapper
 
 
 @versioned_generated_file_fixture("onnx")

@@ -14,6 +14,7 @@ contributing.md
 debug_tips.md
 appendices.md
 testing.md
+more_testing.md
 tools.md
 model.md
 ```

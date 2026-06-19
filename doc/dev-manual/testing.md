@@ -498,4 +498,6 @@ def test_bar(complex_input):
 
 ```
 
+For test suites that are not run by default, see [More testing](more_testing.md).
+
 
