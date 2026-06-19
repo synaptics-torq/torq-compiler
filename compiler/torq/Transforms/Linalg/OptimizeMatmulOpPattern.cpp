@@ -818,6 +818,15 @@ static void foldInput(Value &input, PatternRewriter &rewriter) {
     if (resultType != inputType)
         return;
 
+    // Only peel a genuine no-op generic (body just yields its single input, e.g. a
+    // layout/copy). A real unary elementwise op (abs, negate, mulf %in,%in, ...) also has
+    // one input, one result and matching input/result types, but it performs a computation;
+    // folding it would silently discard that computation and rewire the matmul to read the
+    // op's input. Require an identity body, matching
+    // getCollapsedMatmulInput/peelBlockParamBroadcast.
+    if (!isYieldedBlockArgument(foldOp, 0))
+        return;
+
     if (collapseOp) {
         rewriter.modifyOpInPlace(collapseOp, [&]() { collapseOp->setOperand(0, currentInput); });
         return;
