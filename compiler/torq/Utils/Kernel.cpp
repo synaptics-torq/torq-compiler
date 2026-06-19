@@ -14,6 +14,8 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/Support/Debug.h"
 
+#include <numeric>
+
 #define DEBUG_TYPE "torq-easy-kernel"
 
 using namespace mlir::syna::torq_hw;
@@ -1947,11 +1949,119 @@ void SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSiz
     ndlToStr(ndlType, _ndls.getMemNdl(ndlType));
 }
 
+// Check that no read in `ndl` crosses a `bankBytes`-byte memory-bank boundary.
+// Memory is split into fixed banks of `bankBytes`, and the HW can only fetch
+// whole banks. Each inner iteration reads one contiguous datum:
+//   - the L dims give its size (`readWidth` bytes);
+//   - the H dims give its start offset (which moves with the loop indices).
+//
+// A datum of W bytes starting at offset A is fine when it either starts on a
+// bank boundary or fits inside one bank:
+//   A % bankBytes == 0               -> starts on a boundary (reads whole banks), OR
+//   A % bankBytes + W <= bankBytes   -> fits inside the bank it starts in.
+//
+// The H loops can produce many start offsets, but only A % bankBytes matters.
+// This check collapses their static strides into an overall alignment against
+// `bankBytes`. Assumes the base address is bank-aligned.
+static void verifyNdlBankAlignment(const MemNdlData *ndl, int64_t bankBytes) {
+    assert(ndl && "NDL must exist");
+    assert(bankBytes > 0 && "bank size must be greater than 0");
+
+    // Compute read block len (assume all L-dims are contiguous).
+    int64_t readWidth = 1;
+    for (const auto &dim : ndl->dims) {
+        readWidth *= dim.type == DimType::L ? dim.count : 1;
+    }
+
+    // Compute the overall alignment of read addresses with respect to the bank size.
+    int64_t alignment = bankBytes;
+    for (const auto &dim : ndl->dims) {
+        if (dim.type == DimType::H && dim.count > 1) {
+            auto stride = dim.getIntStride();
+            assert(
+                stride.has_value() && "NDL H dimension stride must be static to verify alignment"
+            );
+            alignment = std::gcd(alignment, stride.value());
+        }
+    }
+
+    bool alignedToBank = alignment == bankBytes;
+    bool crossesBank = (bankBytes - alignment) + readWidth > bankBytes;
+    assert((alignedToBank || !crossesBank) && "Read must be aligned to bank or not cross it");
+
+#if 0
+    // Previous exact finite-count residue enumeration kept for reference. Unlike the gcd-based
+    // check above, this considers each H-dim count and finds every possible in-bank start offset
+    // that the finite loop nest can produce.
+    // Find every in-bank start position (0 .. bankBytes-1) that some combination
+    // of H-loop counters can produce. reachable[r] == true means position r is
+    // possible. Start bank-aligned (only position 0), then fold in one H dim at
+    // a time.
+    SmallVector<bool> reachable(bankBytes, false);
+    reachable[0] = true;
+    for (const auto &dim : ndl->dims) {
+        if (dim.type != DimType::H)
+            continue; // L dims are the datum, not a moving offset
+
+        auto stride = dim.getIntStride();
+
+        if (dim.count <= 1)
+            continue; // a count<=1 loop only ever adds 0
+
+        assert(stride.has_value() && "NDL H dimension stride must be static to verify alignment");
+
+        // How far one tick of this loop shifts the in-bank position = stride mod
+        // bankBytes. % can yield a negative remainder, and strides can be
+        // negative (reverse iteration), so ((x % b) + b) % b normalizes into
+        // [0, bankBytes). E.g. stride -4, bank 8: -4%8 = -4 -> +8 = 4 -> %8 = 4.
+        const int64_t step = ((stride.value() % bankBytes) + bankBytes) % bankBytes;
+        if (step == 0)
+            continue; // whole-bank jumps never change the in-bank position
+
+        // From each currently reachable position p, this loop reaches
+        //   p, p+step, p+2*step, ...  (mod bankBytes).
+        // Those positions repeat after at most bankBytes steps, so iterating that
+        // many times covers all of them no matter how large the loop count is.
+        const int64_t steps = std::min(dim.count, bankBytes);
+        SmallVector<bool> updated(bankBytes, false);
+        for (int64_t p = 0; p < bankBytes; ++p) {
+            if (!reachable[p])
+                continue;
+            int64_t pos = p;
+            for (int64_t k = 0; k < steps; ++k) {
+                updated[pos] = true;
+                pos = (pos + step) % bankBytes;
+            }
+        }
+        reachable = updated;
+    }
+
+    // Every reachable start position must keep the datum inside one bank.
+    for (int64_t r = 0; r < bankBytes; ++r) {
+        if (!reachable[r])
+            continue;
+        assert(
+            (r == 0 || r + readWidth <= bankBytes) &&
+            "NDL read crosses a memory-bank boundary for some H-index combination: "
+            "the datum must start bank-aligned or fit within one bank"
+        );
+    }
+#endif
+}
+
 void SlicePrivate::dedr(const LData &data) { memNdl(NdlType::DEDR, data); }
 
 void SlicePrivate::dewr(const LData &data) { memNdl(NdlType::DEWR, data); }
 
-void SlicePrivate::debr(const LData &data) { memNdl(NdlType::DEBR, data); }
+void SlicePrivate::debr(const LData &data) {
+    memNdl(NdlType::DEBR, data);
+
+    // TORQ fetches bias from LRAM in B-bus in fixed 8-byte banks and can only read whole
+    // banks, so make sure no bias read crosses a bank boundary for any H-index
+    // combination.
+    constexpr int64_t kLramBankBytes = 8;
+    verifyNdlBankAlignment(_ndls.getMemNdl(NdlType::DEBR), kLramBankBytes);
+}
 
 void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
     memNdl(NdlType::DEQW, output, appendBlockSize);
