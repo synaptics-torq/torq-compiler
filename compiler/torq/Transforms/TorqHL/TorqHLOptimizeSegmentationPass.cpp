@@ -99,13 +99,13 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
             // Only 4-quandrants segmentation can be fused at the moment
             return failure();
         }
-        // Currently only op with even input H and W dimensions even can be fused
+        // Currently only op with even W dimension can be fused.
+        // H can be even or odd since this makes no difference in how segmenation is computed.
         auto inputType = llvm::cast<RankedTensorType>(segOp.getInput().getType());
         if (!inputType || inputType.getRank() != 4) {
             return failure();
         }
-        auto inputShape = inputType.getShape();
-        if (inputShape[2] % 2 || inputShape[3] % 2) {
+        if (inputType.getShape()[3] % 2) {
             return failure();
         }
         auto op = segOp.getInput().getDefiningOp();
