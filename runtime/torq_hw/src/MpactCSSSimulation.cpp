@@ -200,6 +200,55 @@ private:
     void *cpu_;
 };
 
+typedef int (*fake_cb_read_mem_t) (void *ctx, uint32_t tag, size_t addr, size_t size, uint8_t *data);
+typedef int (*fake_cb_write_mem_t) (void *ctx, uint32_t tag, size_t addr, size_t size, uint8_t *data);
+
+typedef struct fake_css_cpu_t {
+    uint32_t state;
+    char is_waiting;
+    uint8_t* itcm;
+    uint32_t itcm_size;
+    uint8_t* dtcm;
+    uint32_t dtcm_size;
+    uint32_t cpu_regs [REG_SIZE__TORQ_CPU_REGS/4];
+    void* ext_mem_ctx;
+    fake_cb_read_mem_t cb_read_ext_mem;
+    fake_cb_write_mem_t cb_write_ext_mem;
+    void* ext_irq_ctx;
+    void* cb_get_ext_irq;
+    void (*css_sw)(void *);
+} fake_css_cpu_t;
+
+
+class LramTarget: public CoralMemoryTarget {
+public:
+    LramTarget(void *cpu) : cpu_((fake_css_cpu_t *)cpu) {
+
+    }
+
+    void Load(uint64_t address, uint8_t* data, size_t size) override {
+                
+        int r = (*(cpu_->cb_read_ext_mem))(cpu_->ext_mem_ctx, 'CCPU', address, size, data);
+        
+        if (r < 0) {
+            fprintf(stderr, "Invalid CSS read at address 0x%08x, size %zu\n", (uint32_t)address, size);
+            abort();
+        }
+    
+    }
+
+    void Store(uint64_t address, const uint8_t* data, size_t size) override {
+        int r = (*(cpu_->cb_write_ext_mem))(cpu_->ext_mem_ctx, 'CCPU', address, size, (uint8_t *)data);
+        
+        if (r < 0) {
+            fprintf(stderr, "Invalid CSS write at address 0x%08x, size %zu\n", (uint32_t)address, size);
+            abort();
+        }
+    }
+private:
+    fake_css_cpu_t *cpu_;
+};
+
 class OOBTarget : public CoralMemoryTarget {
 public:
     void Load(uint64_t address, uint8_t* data, size_t size) override {
@@ -233,6 +282,7 @@ void trace_callback(uint32_t pc, uint32_t instruction, std::string &disassembly)
 } // namespace
 
 
+
 void run_cpu_mpact_binary(void *cpu) {
     LOG("Creating CPU\n");
 
@@ -241,12 +291,15 @@ void run_cpu_mpact_binary(void *cpu) {
     TCMMemoryTarget tcm_memory_target(cpu);
     UartTarget uart_target;
     CssRegsTarget css_regs_target(cpu);
+    LramTarget lram_target(cpu);
     OOBTarget oob_target;
 
     coral_sim->RegisterMemoryTarget(REG_ADDR__TORQ_CV_ITCM, REG_SIZE__TORQ_CV_ITCM, &tcm_memory_target);
     coral_sim->RegisterMemoryTarget(REG_ADDR__TORQ_CV_DTCM, REG_SIZE__TORQ_CV_DTCM, &tcm_memory_target);
+    coral_sim->RegisterMemoryTarget(REG_ADDR__TORQ_CV_LRAM, REG_SIZE__TORQ_CV_LRAM, &lram_target);
     coral_sim->RegisterMemoryTarget(0x10000000, 4, &uart_target);
     coral_sim->RegisterMemoryTarget(REG_ADDR__TORQ_CV_CSS_REGS, REG_SIZE__TORQ_CV_CSS_REGS, &css_regs_target);    
+    coral_sim->RegisterMemoryTarget(REG_ADDR__TORQ_CV_CDMA_REGS, REG_SIZE__TORQ_CV_CDMA_REGS, &css_regs_target);
     coral_sim->RegisterOOBMemoryTarget(&oob_target);
 
     if (FLAG_torq_mpact_trace_file[0]) {
