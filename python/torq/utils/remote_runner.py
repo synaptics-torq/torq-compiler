@@ -50,7 +50,7 @@ class RemoteCommandRunner(ABC):
     def run_cmd(self, cmd: str | list[str]) -> str | None: ...
 
     @abstractmethod
-    def copy_files(self, src: str, dst: str, recursive: bool = False, board_dst: bool = False) -> None: ...
+    def copy_files(self, src: str, dst: str, recursive: bool = False, board_dst: bool = False, verbose: bool = False) -> None: ...
 
     @abstractmethod
     def _cleanup(self) -> None: ...
@@ -353,7 +353,7 @@ class ADBCommandRunner(RemoteCommandRunner):
                 self._format_output(e.stdout),
             ) from e
 
-    def copy_files(self, src: str, dst: str, recursive: bool = False, board_dst: bool = False) -> None:
+    def copy_files(self, src: str, dst: str, recursive: bool = False, board_dst: bool = False, verbose: bool = False) -> None:
         """
         Copy files using ADB:
           - board_dst=True  -> push  (local src -> device dst)

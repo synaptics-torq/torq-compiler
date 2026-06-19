@@ -331,9 +331,9 @@ def parse_code(file_path):
                             operation_str = child.operation.name
                             if child.operation.name in ["torq_hl.start_program"]:
                                 opp = child.operation.operands[5]
-                                for a in opp.owner.operation.attributes:
-                                    if a.name == 'name':
-                                        operation_str += ': ' + str(a.attr)
+                                for name, attr in opp.owner.operation.attributes.items():
+                                    if name == 'name':
+                                        operation_str += ': ' + str(attr)
 
                             # Parse IR to show the operations in the program being executed
                             if child.operation.name in ["torq_hl.start_program", "torq_hl.wait_program"]:                                                                

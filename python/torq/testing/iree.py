@@ -15,7 +15,7 @@ import shutil
 import pytest
 import json
 
-from torq.utils.boards import JenkinsBoardsControl
+from torq.utils.boards import create_boards_control
 
 try:
     from iree.compiler.ir import Context, Module
@@ -1008,10 +1008,10 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
                           private_key=request.config.getoption("--torq-private-key", default=None))
 
     elif bench_control_file := request.config.getoption("--torq-bench-control-file", default=None):
-        controller = JenkinsBoardsControl(bench_control_file)
+        controller = create_boards_control(bench_control_file)
 
         with controller.board() as (user, ip, private_key):
-            remote_run_module(f"{user}@{ip}", 22, controller.remote_runner_path, 
+            remote_run_module(controller.get_remote_address(user, ip), 22, controller.remote_runner_path,
                               update_runtime=False, private_key=private_key)
     else:       
 
