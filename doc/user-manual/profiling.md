@@ -1,8 +1,8 @@
-# Profiling
+# Performance Profiling Tool
 
-Profiling helps you understand the performance characteristics of your models on the Synaptics backend. This includes:
+Torq profiling helps you understand the performance characteristics of your models on the Synaptics backend. This includes:
 - **Compile-time profiling**: Estimates of approximate clock cycles per operation.
-- **Runtime profiling**: Actual execution times for each block during inference.
+- **Runtime profiling**: Timestamped execution events from hardware or simulator inference runs.
 
 ---
 ## Compile-Time Profiling
@@ -11,13 +11,13 @@ Profiling helps you understand the performance characteristics of your models on
 
 - Torq profiling adds memory footprints and approximate clock cycles information in the MLIR output.
     By default it is disabled, to enable it add option ``--torq-enable-profiling``
-    to the ``torq-compile`` command. By default profiling is written to `timeline.csv`. The profiling details can be written to a different file using ``--torq-dump-profiling=path/to/trace.csv``
+    to the ``torq-compile`` command. By default profiling is written to `timeline.csv`. The profiling details can be written to a different file using ``--torq-dump-profiling=path/to/trace.csv``. Runtime profile annotation also needs debug information from ``--torq-debug-info=path/to/debug_info``.
 
 - Compile the model using torq-compile with the profiling flag:
     ```shell
-    $ torq-compile tests/testdata/tosa_ops/add.mlir -o model.vmfb --torq-enable-profiling --torq-dump-profiling=./trace.csv --dump-compilation-phases-to=./compilation_phases
+    $ torq-compile tests/testdata/tosa_ops/add.mlir -o model.vmfb --torq-enable-profiling --torq-dump-profiling=./trace.csv --torq-debug-info=./model_debug_info
     ```
-> **Note:** The `--dump-compilation-phases-to` flag dumps the debug information into a specified directory. These debug files are later used to annotate the runtime profiling results.
+> **Note:** The `--torq-debug-info` directory is later used to annotate runtime profiling results.
 
 - Understanding trace.csv Output
 
@@ -36,58 +36,61 @@ Profiling helps you understand the performance characteristics of your models on
 
 ## Runtime Profiling
 
-```{warning}
-**This release only supports host-based simulation which is not cycle accurate**. The reported timing will not be representative of the real performance; the documentation in this section shall be considered as a preview of the profiling mode available on the upcoming release.
+Runtime profiling records timestamped execution events when the model runs with `torq-run-module`. It can be used on hardware as well as simulator builds. The `--torq_profile_host` flag writes a runtime CSV on the host side; on hardware, those events can be correlated with compiler debug information to inspect Torq/NPU actions in the executed model.
+
+When you plan to annotate the runtime profile, compile with profiling and debug info enabled:
+
+```shell
+$ torq-compile model.mlir -o model.vmfb --torq-enable-profiling --torq-debug-info=model_debug
 ```
 
-- Runtime profiling records the actual execution time for each code block when the model is run on simulation. This will print the time each individual block of code takes to execute.
+Run the model with runtime profiling enabled:
 
-- Run the model using torq-run-module with the profiling flag:
-    ```shell
-    $ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1" --torq_profile_host=./runtime.csv
-    ```
-- Understanding `runtime.csv` Output
+```shell
+$ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1" --torq_profile_host=model_profile.csv
+```
 
-  The `runtime.csv` file contains detailed timing information per execution block. This helps analyze actual performance, identify slow paths, and correlate them with model structure.
+### Runtime CSV
 
-  **Column Breakdown:**
+The `runtime.csv` file contains timestamped runtime events. This helps analyze actual performance, identify slow paths, and correlate them with model structure.
 
-  | Column           | Description                                                              |
-  |------------------|--------------------------------------------------------------------------|
-  | actionIndex      | Runtime action index (starting from 0).                                  |
-  | elapsed_time(us) | Time elapsed (μs) since the previous operation.                          |
-  | timestamp(us)    | Timestamp (μs) of the event                                              |
-  | event            | Type of action                                                           |
-  | location         | MLIR source location that generated this operation. Helpful for tracing. |
+| Column        | Description |
+|---------------|-------------|
+| dispatch_name | Runtime dispatch or host event name. |
+| invocation_id | Invocation index for repeated dispatch execution. |
+| action_id     | Runtime action index within the dispatch. |
+| timestamp_us  | Event timestamp in μs. |
+| event         | Event type, such as start or end. |
 
+### Annotating Runtime Profiles
 
-- To annotate the runtime profiling ``runtime.csv``, use annotate_profiling.py by passing the runtime.csv file along with the executable-targets phase dump file, which you can obtain using the ``--dump-compilation-phases-to`` flag during compilation.
+Use `scripts/annotate_profiling.py` by passing the debug-info directory generated with `--torq-debug-info`, the runtime CSV produced by `--torq_profile_host`, and the output file to write.
 
-  ```shell
-  $ annotate_profiling.py ./compilation_phases/add.9.executable-targets.mlir ./runtime.csv ./annotated_runtime.csv
-  ```
+```shell
+$ python scripts/annotate_profiling.py model_debug model_profile.csv model_profile.pb
+```
 
-- This enriches the trace with hardware-level details such as actual DMA operations, kernel launch times, and usage of slices.
+The output can be an annotated `.csv`, an `.xlsx` workbook, or a Perfetto `.pb` trace. Annotation enriches the runtime events with hardware-level details such as DMA operations, kernel launch times, slice usage, and source locations.
 
-  **Annotated CSV Columns:**
+**Annotated CSV Columns:**
 
-  | Column | Description |
-  |--------|-------------|
-  | action_id | Index of the runtime action |
-  | job_id | Index of the NSS job associated with the action (if applicable) |
-  | operation | Action being performed |
-  | invocation_names | Name of the slice programs invoked during the action (if applicable) |
-  | original_operator | Original operator from input model |
-  | total_time | Total duration of the operation in μs |
-  | slice_used_0_in_program | Flag indicating if slice 0 was used by this action |
-  | slice_used_1_in_program | Flag indicating if slice 1 was used by this action |
-  | dma_in_used_in_program | Flag indicating if DMA input was used by this action |
-  | dma_out_used_in_program | Flag indicating if DMA output was used by this action |
-  | cdma_used_in_program | Flag indicating if CDMA was used by this action |
-  | css_used_in_program | Flag indicating if CSS was used by this action |
-  | timestamp_start | Start timestamp in μs |
-  | timestamp_end | End timestamp in μs |
-  | location | MLIR source location that generated this operation |
+| Column | Description |
+|--------|-------------|
+| action_id | Index of the runtime action |
+| job_id | Index of the NSS job associated with the action, if applicable |
+| operation | Action being performed |
+| invocation_names | Name of the slice programs invoked during the action, if applicable |
+| original_operators | Original operators from the input model |
+| total_time | Total duration of the operation in μs |
+| slice_used_0_in_program | Flag indicating if slice 0 was used by this action |
+| slice_used_1_in_program | Flag indicating if slice 1 was used by this action |
+| dma_in_used_in_program | Flag indicating if DMA input was used by this action |
+| dma_out_used_in_program | Flag indicating if DMA output was used by this action |
+| cdma_used_in_program | Flag indicating if CDMA was used by this action |
+| css_used_in_program | Flag indicating if CSS was used by this action |
+| timestamp_start | Start timestamp in μs |
+| timestamp_end | End timestamp in μs |
+| location | MLIR source location that generated this operation |
 
 
 ## Profiling with the Test Framework

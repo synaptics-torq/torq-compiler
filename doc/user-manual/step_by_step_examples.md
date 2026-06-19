@@ -6,33 +6,33 @@ This guide walks through converting, compiling, and running ML models on a Torq 
 
 - Activate the Python environment as explained in [Getting Started](./getting_started.md). (Skip this step if using the Docker container.)
 
-- Navigate to the root directory of the [Release Package](./getting_started.md#release-package-ubuntu-2404), or run the [Docker container](./getting_started.md#docker-image).
+- Navigate to the root directory of the {ref}`Release Package <release-package-ubuntu-24-04>`, or run the {ref}`Docker container <docker-image>`.
   For the Docker container, the release package is located at:
-  ```{code}shell
+  ```{code} shell
   $ cd /opt/release
   ```
 
 ## Prepare Model (Convert to MLIR)
 
-Before compiling, your model must be converted to MLIR. See [Model Preparation](./model_conversion.md) for full instructions on each framework.
+Before compiling, your model must be converted to MLIR. See [Model Conversion](./model_conversion.md) for full instructions on each framework.
 
 Here is a quick summary of conversion commands:
 
 **TFLite:**
-```{code}shell
+```{code} shell
 $ tosa-converter-for-tflite path/to/model.tflite --text -o model.mlir
 ```
 
 **ONNX:**
-```{code}shell
+```{code} shell
 $ python -m iree.compiler.tools.import_onnx path/to/model.onnx -o model.mlir --data-prop
 ```
 
 **Torch:**
-See [Convert Torch Model to MLIR](./model_conversion.md#convert-torch-model-to-mlir) for the Python-based conversion workflow.
+See {ref}`Convert Torch Model to MLIR <convert-torch-model-to-mlir>` for the Python-based conversion workflow.
 
 ```{note}
-The `tests/hf/` directory containing sample models is only included in the [Release Package](./getting_started.md#release-package-ubuntu-2404) and is not available in the compiler GitHub repository.
+The `tests/hf/` directory containing sample models is only included in the {ref}`Release Package <release-package-ubuntu-24-04>` and is not available in the compiler GitHub repository.
 ```
 
 ## Compile for Device
@@ -62,9 +62,9 @@ Input type defaults to `auto`, which defers input type detection and conversion 
 
 ### Example: TFLite model (MobileNetV2)
 
-**Model Source:** The MobileNetV2 model is generated from tf.keras.applications using [tf_model_generator.py](https://github.com/synaptics-torq/iree-synaptics-synpu/blob/main/tests/model_generator/tf_model_generator.py). The dataset used for int8 quantization consists of random data. This model is only included in the [Release Package](./getting_started.md#release-package-ubuntu-2404) and is not available in the compiler GitHub repository.
+**Model Source:** The MobileNetV2 model is generated from tf.keras.applications using [tf_model_generator.py](https://github.com/synaptics-torq/iree-synaptics-synpu/blob/main/tests/model_generator/tf_model_generator.py). The dataset used for int8 quantization consists of random data. This model is only included in the {ref}`Release Package <release-package-ubuntu-24-04>` and is not available in the compiler GitHub repository.
 
-```{code}shell
+```{code} shell
 # Convert TFLite to TOSA
 $ tosa-converter-for-tflite tests/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite --text -o mobilenetv2.mlir
 
@@ -74,7 +74,7 @@ $ torq-compile mobilenetv2.mlir -o mobilenetv2.vmfb
 
 ### Example: ONNX model
 
-```{code}shell
+```{code} shell
 # Convert ONNX to MLIR
 $ python -m iree.compiler.tools.import_onnx path/to/model.onnx -o model.mlir --data-prop
 
@@ -86,7 +86,7 @@ $ torq-compile model.mlir -o model.vmfb
 
 Use the compiled model with `torq-run-module` to run inference:
 
-```{code}shell
+```{code} shell
 $ torq-run-module \
     --module=mobilenetv2.vmfb \
     --function=main \
@@ -94,7 +94,7 @@ $ torq-run-module \
 ```
 
 ```{note}
-To use an actual image as input, preprocess the image and save it as a NumPy array (`.npy` file). Then provide the path to the `.npy` file as input, as described in the [Input Guide](./input_guide.md#converting-images-to-npy-or-bin).
+To use an actual image as input, preprocess the image and save it as a NumPy array (`.npy` file). Then provide the path to the `.npy` file as input, as described in the {ref}`image conversion section <converting-images-to-npy-or-bin>`.
 ```
 
 ### Using the Python Bindings
@@ -115,7 +115,7 @@ The `VMFBInferenceRunner` class supports options such as `function` and `load_me
 
 To compile for the current host machine (e.g., for testing without device hardware), add simulator-specific flags:
 
-```{code}shell
+```{code} shell
 $ torq-compile mobilenetv2.mlir \
     --torq-css-qemu \
     --torq-target-host-triple=native \

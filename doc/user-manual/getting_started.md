@@ -1,5 +1,4 @@
 # Quickstart
-------------
 
 ```{important}
 The following section assumes you are familiar with IREE. To get started with IREE you can follow the [IREE TensorFlowLite Guide](https://iree.dev/guides/ml-frameworks/tflite/)
@@ -9,6 +8,7 @@ and the [IREE CPU Deployment Guide](https://iree.dev/guides/deployment-configura
 
 - Install compiler and simulator in **one of the following** two ways.
 
+(release-package-ubuntu-24-04)=
 ### Release Package Ubuntu 24.04
 
 - Download the [release.tar.gz](https://github.com/synaptics-torq/torq-compiler/releases) from the **Assets** section and uncompress it.
@@ -30,6 +30,7 @@ Please refer to apt-packages.txt for the list.
     ```
     You can now use the compiler and runtime tools from this environment.
 
+(docker-image)=
 ### Docker Image
 
 You can use **either** of the following approaches:
@@ -37,7 +38,7 @@ You can use **either** of the following approaches:
 **A. Use the prebuilt image:**
 - Log-in to the GitHub docker registry
 
-   ```{code}shell
+   ```{code} shell
    docker login ghcr.io
    ```
 

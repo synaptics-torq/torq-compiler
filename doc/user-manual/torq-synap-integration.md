@@ -1,15 +1,20 @@
-# What is SyNAP?
+# Torq and SyNAP Integration
 
-SyNAP is Synaptics AI software framework designed to enable efficient deployment, execution, and management of machine learning models on Synaptics hardware platforms. It provides a unified API for model inference, pre- and post-processing, and supports integration with various backends, including Torq. SyNAP also offers tools for model conversion, runtime management, and GStreamer-based pipelines for multimedia AI applications.
+SyNAP is a Synaptics AI software framework designed to enable efficient deployment, execution, and management of machine learning models on Synaptics hardware platforms. It provides a unified API for model inference, pre- and post-processing, and supports integration with various backends, including Torq. SyNAP also offers tools for model conversion, runtime management, and GStreamer-based pipelines for multimedia AI applications.
 
 - [SyNAP Public GitHub Repository](https://github.com/synaptics-synap)
 
 ---
 
+## SyNAP Compatibility and Migration
+
+SyNAP is the predecessor to Torq in Synaptics AI deployment flows. Torq provides the VMFB compiler and runtime path for NPU execution, while SyNAP can keep the higher-level application structure around model bundles, pre-processing, post-processing, and GStreamer pipelines.
+
+For existing SyNAP users, the main benefit is migration: SyNAP applications and workflows can move to Torq-backed execution without changing much of their surrounding tooling or application software. New Torq deployments can also use SyNAP when they need SyNAP APIs, GStreamer elements, or standardized `.synap` model packaging.
 
 ## SyNAP - Torq Backend
 
-The Torq backend is fully integrated within the SyNAP framework, allowing user to leverage SyNAP’s advanced pre- and post-processing capabilities and GStreamer pipelines while utilizing the Torq runtime for model inference. This integration enables:
+The Torq backend is fully integrated within the SyNAP framework, allowing users to leverage SyNAP’s advanced pre- and post-processing capabilities and GStreamer pipelines while utilizing the Torq runtime for model inference. This integration enables:
 
 - Seamless use of Torq as an inference backend from SyNAP APIs and tools.
 - Direct access to SyNAP’s pre- and post-processing, including image, video, and tensor operations, before and after model execution on Torq hardware.
@@ -17,13 +22,13 @@ The Torq backend is fully integrated within the SyNAP framework, allowing user t
 
 This approach allows developers to build complex AI pipelines, chaining together preprocessing, inference, and postprocessing, all managed through the SyNAP interface while benefiting from Torq’s performance.
 
-## Torq Model to Synap model conversion
+## Torq Model to SyNAP Model Conversion
 
 This section describes how to prepare, convert ML TORQ models to SyNAP models to execute on Torq HW.
 
 **Conversion Flow:**
 - **For Torq:**
-  - Use `torq-compile` to convert supported models (e.g., TFLite, ONNX, MLIR) into the Torq-specific VMFB format for execution with the Torq runtime.
+  - Convert supported source models to MLIR, then use `torq-compile` to compile the MLIR into the Torq-specific VMFB format for execution with the Torq runtime.
   - See detailed conversion steps and usage examples in the [Torq-compiler Step-by-Step Examples](https://github.com/synaptics-torq/torq-compiler/blob/main/doc/user-manual/step_by_step_examples.md).
 
   **Example: Converting YOLOv8 Model for SyNAP/Torq**
@@ -50,7 +55,7 @@ This section describes how to prepare, convert ML TORQ models to SyNAP models to
 
   2. **Convert TFLite to Torq VMFB**
 
-    Use `torq-compile` to convert the TFLite model to the Torq `.vmfb` format. (See [Torq-compiler examples](https://github.com/synaptics-torq/torq-compiler/blob/main/doc/user-manual/step_by_step_examples.md) for details.)
+    Convert the TFLite model to MLIR, then use `torq-compile` to compile the MLIR to the Torq `.vmfb` format. (See [Torq-compiler examples](https://github.com/synaptics-torq/torq-compiler/blob/main/doc/user-manual/step_by_step_examples.md) for details.)
 
   3. **Create SyNAP Model Bundle**
 
@@ -229,5 +234,3 @@ For an out-of-the-box experience, refer to the OOBE AI Demo, which demonstrates 
 - [Model Conversion Tutorial](https://synaptics-synap.github.io/doc/v/latest/docs/manual/working_with_models.html#model-conversion-tutorial)
 - [Running SyNAP Tools](https://synaptics-synap.github.io/doc/v/latest/docs/manual/working_with_models.html#running-synap-tools)
 - [synap_cli Application Guide](https://synaptics-synap.github.io/doc/v/latest/docs/manual/getting_started.html#synap-cli-application)
-
----

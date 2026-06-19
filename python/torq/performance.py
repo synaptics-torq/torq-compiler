@@ -134,8 +134,8 @@ def _write_dispatch_outputs(dispatch_debug_info, output_files):
 
 def annotate_host_profile_from_files(debug_info, profile_file, output_files):
     """
-    Given an MLIR file containing the executable-targets phase dump and a profiling log produced by the runtime with --torq_profile_host, 
-    generates annotated profiling data that matches the actions in the profiling log with the corresponding operations in the MLIR,
+    Given a debug-info directory generated with --torq-debug-info and a profiling log produced by the runtime with --torq_profile_host,
+    generates annotated profiling data that matches the actions in the profiling log with the corresponding operations in the model,
     and outputs this data to the specified output files (Excel, CSV or Perfetto trace).
     """
 

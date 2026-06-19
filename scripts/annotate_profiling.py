@@ -5,10 +5,10 @@ import logging
 from torq.performance import annotate_host_profile_from_files, logger
 
 def main():
-    parser = argparse.ArgumentParser(description="Parse an MLIR file.")
-    parser.add_argument("mlir_file", type=str, help="Path to the executable-targets phase dump file")
-    parser.add_argument("profile_file", type=str, help="Path to the file produced with the --torq_profile_host option of torq-run-module ")
-    parser.add_argument("annotated_profile_file", type=str, help="Path to the output (either .csv, .xlsx, or .pb for perfetto trace)")    
+    parser = argparse.ArgumentParser(description="Annotate a Torq runtime profiling log.")
+    parser.add_argument("debug_info_dir", type=str, help="Path to the debug-info directory produced with --torq-debug-info")
+    parser.add_argument("profile_file", type=str, help="Path to the runtime CSV produced with --torq_profile_host")
+    parser.add_argument("annotated_profile_file", type=str, help="Path to the output file (.csv, .xlsx, or .pb for a Perfetto trace)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()
@@ -20,7 +20,7 @@ def main():
 
 
     annotate_host_profile_from_files(
-                    args.mlir_file,
+                    args.debug_info_dir,
                     args.profile_file,
                     [args.annotated_profile_file]
                 )

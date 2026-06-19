@@ -1,6 +1,6 @@
-# Inference Time Statistics
+# NPU Load Status
 
-Torq exposes cumulative NPU inference time through a Linux `sysfs` entry created by the kernel driver. This allows user-space tools to sample NPU activity and compute a simple utilization percentage over a fixed time window.
+Torq exposes cumulative NPU inference time through a Linux `sysfs` entry created by the kernel driver. This is the supported way to show NPU load status on Torq-enabled Astra targets: user-space tools can sample NPU activity and compute a utilization percentage over a fixed time window.
 
 ## Sysfs Path
 
