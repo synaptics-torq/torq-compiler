@@ -8,6 +8,7 @@
 {% block content %}
 <form method="get" class="mb-0">
     {{ form.page }}
+    {{ form.sort_by }}
     <div class="row g-3 align-items-stretch mb-4">
         <div class="col-12 col-lg-6">
             <div class="card h-100">
@@ -78,7 +79,7 @@
                         {% include "perf/partials/bootstrap_field.html" with field=form.status only %}
                     </div>
                     <div class="col-12 col-md-4">
-                        {% include "perf/partials/bootstrap_field.html" with field=form.sort_by only %}
+                        {% include "perf/partials/bootstrap_field.html" with field=form.metric only %}
                     </div>
                     {% if baseline_session %}
                     <div class="col-12 col-md-4">
@@ -127,15 +128,35 @@
             <table class="table table-sm table-striped align-middle mb-0">
                 <thead class="table-light">
                     <tr>
-                        <th scope="col">Name</th>
+                        <th scope="col">
+                            <span class="d-inline-flex align-items-center gap-1">
+                                Name
+                                <button type="submit" name="page" value="1" onclick="this.form.elements.sort_by.value='{{ sort_controls.nodeid.next_sort }}'" class="{{ sort_controls.nodeid.button_class }}" title="{{ sort_controls.nodeid.title }}" aria-label="{{ sort_controls.nodeid.aria_label }}">{{ sort_controls.nodeid.indicator }}</button>
+                            </span>
+                        </th>
                         <th scope="col">Outcome</th> 
                         {% if baseline_session %}                       
                         <th scope="col">Baseline Outcome</th>
                         {% endif %}
-                        <th scope="col">Duration</th>
+                        <th scope="col">
+                            <span class="d-inline-flex align-items-center gap-1">
+                                {% if selected_metric %}{{ selected_metric.short_description }}{% else %}Metric{% endif %}
+                                <button type="submit" name="page" value="1" onclick="this.form.elements.sort_by.value='{{ sort_controls.current_value.next_sort }}'" class="{{ sort_controls.current_value.button_class }}" title="{{ sort_controls.current_value.title }}" aria-label="{{ sort_controls.current_value.aria_label }}">{{ sort_controls.current_value.indicator }}</button>
+                            </span>
+                        </th>
                         {% if baseline_session %}
-                        <th scope="col">Baseline Duration</th>                        
-                        <th scope="col">Change</th>
+                        <th scope="col">
+                            <span class="d-inline-flex align-items-center gap-1">
+                                Baseline {% if selected_metric %}{{ selected_metric.short_description }}{% else %}Metric{% endif %}
+                                <button type="submit" name="page" value="1" onclick="this.form.elements.sort_by.value='{{ sort_controls.baseline_value.next_sort }}'" class="{{ sort_controls.baseline_value.button_class }}" title="{{ sort_controls.baseline_value.title }}" aria-label="{{ sort_controls.baseline_value.aria_label }}">{{ sort_controls.baseline_value.indicator }}</button>
+                            </span>
+                        </th>                        
+                        <th scope="col">
+                            <span class="d-inline-flex align-items-center gap-1">
+                                Change
+                                <button type="submit" name="page" value="1" onclick="this.form.elements.sort_by.value='{{ sort_controls.change_percent.next_sort }}'" class="{{ sort_controls.change_percent.button_class }}" title="{{ sort_controls.change_percent.title }}" aria-label="{{ sort_controls.change_percent.aria_label }}">{{ sort_controls.change_percent.indicator }}</button>
+                            </span>
+                        </th>
                         {% endif %}
                     </tr>
                 </thead>
@@ -144,9 +165,9 @@
                         <tr>
                             {% if result.current_id %}
                             {% if baseline_session %}
-                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_id %}?baseline_session={{ baseline_session.id }}{% if result.baseline_id %}&baseline_test_run={{ result.baseline_id }}{% endif %}">{{ result.nodeid }}</a></td>
+                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_id %}?{% if selected_metric %}metric={{ selected_metric.name|urlencode }}&{% endif %}baseline_session={{ baseline_session.id }}{% if result.baseline_id %}&baseline_test_run={{ result.baseline_id }}{% endif %}">{{ result.nodeid }}</a></td>
                             {% else %}
-                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_id %}">{{ result.nodeid }}</a></td>
+                            <td class="fw-semibold"><a href="{% url 'test_run' result.current_id %}{% if selected_metric %}?metric={{ selected_metric.name|urlencode }}{% endif %}">{{ result.nodeid }}</a></td>
                             {% endif %}
                             {% else %}
                             <td class="fw-semibold">{{ result.nodeid }}</td>
@@ -155,9 +176,9 @@
                             {% if baseline_session %}
                             <td>{% outcome_badge result.baseline_outcome %}</td>
                             {% endif %}
-                            <td>{{ result.current_duration |format_measurement:"ns" }}</td>
+                            <td>{{ result.current_value |format_measurement:selected_metric_unit }}</td>
                             {% if baseline_session %}
-                            <td>{{ result.baseline_duration |format_measurement:"ns" }}</td>
+                            <td>{{ result.baseline_value |format_measurement:selected_metric_unit }}</td>
                             <td>{{ result.change_percent|format_regression:"%" }}</td>
                             {% endif %}
                         </tr>                        

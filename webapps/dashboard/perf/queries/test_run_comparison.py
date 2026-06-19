@@ -91,7 +91,7 @@ def get_test_run_comparison(test_run, baseline_test_run):
             measurement
             for measurement in current_measurements_by_name.values()
         ),
-        key=lambda measurement: (measurement.metric.name != 'total_duration', measurement.metric.name),
+        key=lambda measurement: (measurement.metric.priority, measurement.metric.name),
     )
 
     for measurement in current_measurements:
@@ -312,13 +312,11 @@ def get_test_run_history(test_run, baseline_test_run=None, history_options=None)
                 'label': measurement.metric.short_description,
                 'description': measurement.metric.description,
                 'unit': measurement.metric.unit,
+                'priority': measurement.metric.priority,
             }
-            for measurement in current_run_measurements
+        for measurement in current_run_measurements
         ),
-        key=lambda metric: (
-            metric['name'] != 'total_duration',
-            metric['label'],
-        ),
+        key=lambda metric: (metric['priority'], metric['name']),
     )
     history_metrics = [
         {

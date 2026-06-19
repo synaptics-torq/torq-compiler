@@ -15,7 +15,12 @@ outcome_rank_sql = f"""
 
 def execute_paginated_results_query(query, query_params, sort_by, page_number, page_size):
     if sort_by:
-        query += f" ORDER BY {sort_by}"
+        sort_direction = "DESC" if sort_by.startswith("-") else "ASC"
+        sort_column = sort_by[1:] if sort_by.startswith("-") else sort_by
+        if sort_column not in {"nodeid", "current_value", "baseline_value", "change_percent"}:
+            sort_column = "nodeid"
+            sort_direction = "ASC"
+        query += f" ORDER BY {sort_column} {sort_direction} NULLS LAST"
     else:
         query += " ORDER BY nodeid"
 
@@ -83,7 +88,7 @@ def apply_test_result_filters(
 
     return query, query_params
 
-def get_test_runs(include_metadata=False):
+def get_test_runs(metric_name, include_metadata=False):
     results_query = f"""
         SELECT DISTINCT ON (x.id)
             x.id,
@@ -105,7 +110,7 @@ def get_test_runs(include_metadata=False):
             perf_measurement AS measurement
                 ON measurement.test_run_id = x.id
                 AND measurement.metric_id = (
-                    SELECT id FROM perf_metric WHERE name = 'total_duration'
+                    SELECT id FROM perf_metric WHERE name = %s
                 )
         WHERE
             testrunbatch.test_session_id = %s
@@ -124,8 +129,8 @@ def join_current_and_baseline_results(baseline_query, results_query, join_key = 
             c_testrun.nodeid AS nodeid,
             c_testrun.outcome AS current_outcome,
             b_testrun.outcome AS baseline_outcome,
-            c_testrun.value AS current_duration,
-            b_testrun.value AS baseline_duration,
+            c_testrun.value AS current_value,
+            b_testrun.value AS baseline_value,
             (c_testrun.value - b_testrun.value) * 100.0 / NULLIF(b_testrun.value, 0) AS change_percent
         FROM
             testrun AS c_testrun
@@ -134,12 +139,12 @@ def join_current_and_baseline_results(baseline_query, results_query, join_key = 
     """
     return joined_results
 
-def get_session_results(session, baseline_session, nodeid, status, comparison_transition, sort_by, page_number, page_size):
+def get_session_results(session, baseline_session, metric_name, nodeid, status, comparison_transition, sort_by, page_number, page_size):
     """
-    Get the detailed results of a test session, including the status and duration of each test case, and the comparison with another session if provided.
+    Get the detailed results of a test session, including the status and selected metric value of each test case, and the comparison with another session if provided.
     """
 
-    results_query = get_test_runs()
+    results_query = get_test_runs(metric_name)
 
 
     if baseline_session:
@@ -169,14 +174,14 @@ def get_session_results(session, baseline_session, nodeid, status, comparison_tr
                         baseline_testrunbatch.test_session_id = %s and baseline_testrun_groups.outcome != {TestRun.Outcome.SKIP.value}
                 ) AS x
             LEFT JOIN
-                perf_measurement AS measurement ON measurement.test_run_id = x.id AND measurement.metric_id = (SELECT id FROM perf_metric WHERE name = 'total_duration')
+                perf_measurement AS measurement ON measurement.test_run_id = x.id AND measurement.metric_id = (SELECT id FROM perf_metric WHERE name = %s)
             WHERE x.rn = 1        
         """        
 
-        # Join the current session test runs with the baseline test runs based on the test case, and compute the change in duration between them (if available for both runs).    
+        # Join the current session test runs with the baseline test runs based on the test case, and compute the metric change between them (if available for both runs).
 
         joined_results = join_current_and_baseline_results(baseline_query, results_query, join_key="test_case_id")
-        query_params = [baseline_session.id, session.id]
+        query_params = [baseline_session.id, metric_name, metric_name, session.id]
     else:
         joined_results = f"""
             WITH testrun AS ({results_query})
@@ -187,13 +192,13 @@ def get_session_results(session, baseline_session, nodeid, status, comparison_tr
                 c_testrun.nodeid AS nodeid,
                 c_testrun.outcome AS current_outcome,
                 NULL AS baseline_outcome,
-                c_testrun.value AS current_duration,
-                NULL AS baseline_duration,
+                c_testrun.value AS current_value,
+                NULL AS baseline_value,
                 NULL AS change_percent
             FROM
                 testrun as c_testrun            
         """
-        query_params = [session.id]
+        query_params = [metric_name, session.id]
 
     query, query_params = apply_test_result_filters(
         query_params,
@@ -238,6 +243,7 @@ def get_session_results_compared_to_external_engine(
     session,
     alt_session_id,
     engine_name,
+    metric_name,
     nodeid,
     status,
     comparison_transition,
@@ -253,7 +259,7 @@ def get_session_results_compared_to_external_engine(
     test cases for the same model/layer.
     """
 
-    results_query = get_test_runs(include_metadata=True)
+    results_query = get_test_runs(metric_name, include_metadata=True)
 
     baseline_query = f"""
         SELECT
@@ -273,7 +279,7 @@ def get_session_results_compared_to_external_engine(
             perf_measurement AS measurement
                 ON measurement.test_run_id = x.id
                 AND measurement.metric_id = (
-                    SELECT id FROM perf_metric WHERE name = 'total_duration'
+                    SELECT id FROM perf_metric WHERE name = %s
                 )
         WHERE
             testrunbatch.test_session_id = %s
@@ -289,8 +295,10 @@ def get_session_results_compared_to_external_engine(
     joined_results = join_current_and_baseline_results(baseline_query, results_query, join_key="compiler_input")
 
     query_params = [
+        metric_name,
         alt_session_id,
         engine_name,
+        metric_name,
         session.id,
     ]
 

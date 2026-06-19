@@ -251,6 +251,9 @@ class Metric(models.Model):
     """ Unit of the metric (e.g. "seconds", "MB", etc.)"""
     unit = models.TextField()
 
+    """Ordering priority for metric selectors and display. Lower values appear first."""
+    priority = models.PositiveIntegerField(default=1000, db_index=True)
+
     class Meta:
         constraints = [
             models.UniqueConstraint(

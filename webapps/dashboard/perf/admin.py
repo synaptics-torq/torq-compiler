@@ -34,7 +34,9 @@ class TestRunAdmin(admin.ModelAdmin):
 
 @admin.register(Metric)
 class MetricAdmin(admin.ModelAdmin):
-    list_display = ('name', 'unit', 'description')
+    list_display = ('name', 'unit', 'priority', 'description')
+    list_editable = ('priority',)
+    ordering = ('priority', 'name')
     search_fields = ('name', 'description')
 
 

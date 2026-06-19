@@ -3,12 +3,44 @@ from django.http import JsonResponse, FileResponse, Http404
 from django.db.models import Q
 from django.core.paginator import Paginator
 
-from .models import TestSession, TestRun
+from .models import TestSession, TestRun, Metric
 
 from . import forms
 from . import queries
 
 import os
+
+DEFAULT_RESULTS_METRIC = "total_duration"
+
+
+def _get_default_results_metric():
+    return Metric.objects.order_by("priority", "name").first()
+
+
+def _sort_control(sort_by, column, label):
+    if sort_by == column:
+        return {
+            "indicator": "↑",
+            "next_sort": f"-{column}",
+            "aria_label": f"Sort {label} descending",
+            "button_class": "btn btn-primary btn-sm py-0 px-1 fw-semibold",
+            "title": f"Sort {label} descending",
+        }
+    if sort_by == f"-{column}":
+        return {
+            "indicator": "↓",
+            "next_sort": column,
+            "aria_label": f"Sort {label} ascending",
+            "button_class": "btn btn-primary btn-sm py-0 px-1 fw-semibold",
+            "title": f"Sort {label} ascending",
+        }
+    return {
+        "indicator": "↕",
+        "next_sort": column,
+        "aria_label": f"Sort {label} ascending",
+        "button_class": "btn btn-outline-secondary btn-sm py-0 px-1",
+        "title": f"Sort {label} ascending",
+    }
 
 
 def health(request):
@@ -174,10 +206,16 @@ def test_session_results(request, session_id):
 
     session = get_object_or_404(TestSession, id=session_id)
 
-    options = {'baseline_session': None, 'nodeid': '', 'status': 'ALL', 'comparison_transition': 'ALL', 'sort_by': 'nodeid', 'page': 1}
+    default_metric = _get_default_results_metric()
+
+    options = {'baseline_session': None, 'metric': default_metric, 'nodeid': '', 'status': 'ALL', 'comparison_transition': 'ALL', 'sort_by': 'nodeid', 'page': 1}
 
     if request.GET:
-        form = forms.TestSessionResultsOptions(data=request.GET)
+        data = request.GET.copy()
+        if not data.get('metric') and default_metric is not None:
+            data['metric'] = default_metric.name
+
+        form = forms.TestSessionResultsOptions(data=data)
 
         if not form.is_valid():                
             return redirect('test_session_results', session_id=session_id)
@@ -185,10 +223,15 @@ def test_session_results(request, session_id):
         baseline_session = form.cleaned_data['baseline_session']
         selected_external_engine = form.cleaned_data.get('external_engine', '')
         options.update(form.cleaned_data)
+        if not options["sort_by"]:
+            options["sort_by"] = "nodeid"
     else:
         baseline_session = queries.test_session_comparison.get_default_comparison_session(session)
         selected_external_engine = None
-        form = forms.TestSessionResultsOptions(initial={'baseline_session': baseline_session})
+        initial = {'baseline_session': baseline_session}
+        if default_metric is not None:
+            initial['metric'] = default_metric.name
+        form = forms.TestSessionResultsOptions(initial=initial)
 
 
     alt_last_session = queries.test_session_results.get_latest_alternative_engine_session()
@@ -200,6 +243,7 @@ def test_session_results(request, session_id):
     alternative_engines = queries.test_session_results.get_compiler_targets_for_session( alt_session_id )
 
     extra_args = {
+        "metric_name": options["metric"].name if options["metric"] is not None else DEFAULT_RESULTS_METRIC,
         "nodeid": options["nodeid"],
         "status": options["status"],
         "comparison_transition": options["comparison_transition"],
@@ -227,6 +271,7 @@ def test_session_results(request, session_id):
     paginator = Paginator(range(total), 50) # since this view uses raw SQL we don't directly pass a queryset to the paginator
     page_obj = paginator.get_page(options['page'])
     page_obj.object_list = results_page # Attach the actual results to the page object for rendering
+    sort_by = options["sort_by"]
 
     return render(request, 'perf/test_session/results.html',
         {
@@ -234,6 +279,14 @@ def test_session_results(request, session_id):
             'baseline_session': baseline_session,
             'results': page_obj,
             'form': form,
+            'selected_metric': options["metric"],
+            'selected_metric_unit': options["metric"].unit if options["metric"] is not None else "ns",
+            'sort_controls': {
+                'nodeid': _sort_control(sort_by, 'nodeid', 'test name'),
+                'current_value': _sort_control(sort_by, 'current_value', 'selected metric'),
+                'baseline_value': _sort_control(sort_by, 'baseline_value', 'baseline metric'),
+                'change_percent': _sort_control(sort_by, 'change_percent', 'metric change'),
+            },
             'alternative_engines': {
                 "list": alternative_engines,
                 "sessionid": alt_session_id

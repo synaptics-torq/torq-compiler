@@ -23,8 +23,9 @@ class TestSessionChoiceField(forms.ModelChoiceField):
 class MetricChoiceField(forms.ModelChoiceField):
 
     def __init__(self, **kwargs):
+        queryset = kwargs.pop('queryset', Metric.objects.order_by('priority', 'name').all())
         super().__init__(
-            queryset=Metric.objects.order_by('name').all(),
+            queryset=queryset,
             to_field_name='name',
             **kwargs,
         )
@@ -84,10 +85,11 @@ class TestSessionMetricDetailsOptions(BaseBootstrapForm):
 
 class TestSessionResultsOptions(BaseBootstrapForm):
     baseline_session = TestSessionChoiceField(required=False, label="Compare with session")
+    metric = MetricChoiceField(required=True, label="Metric", queryset=Metric.objects.filter(unit="ns").order_by("priority", "name"))
     nodeid = forms.CharField(required=False, label="Filter by Test Name")    
     status = forms.ChoiceField(choices=STATUS_FILTER_CHOICES, required=False, label="Filter by status in current session")
     comparison_transition = forms.ChoiceField(choices=COMPARISON_TRANSITION_CHOICES, required=False, label="Filter by comparison transition")
-    sort_by = forms.ChoiceField(choices=[("nodeid", "Test Name"), ("current_duration", "Duration ↑"), ("-current_duration", "Duration ↓"), ("change_percent", "Change Percent ↑"), ("-change_percent", "Change Percent ↓")], required=False, label="Sort by")
+    sort_by = forms.ChoiceField(choices=[("nodeid", "Test Name"), ("-nodeid", "Test Name ↓"), ("current_value", "Metric ↑"), ("-current_value", "Metric ↓"), ("baseline_value", "Baseline Metric ↑"), ("-baseline_value", "Baseline Metric ↓"), ("change_percent", "Change Percent ↑"), ("-change_percent", "Change Percent ↓")], required=False, label="Sort by", widget=forms.HiddenInput)
     page = forms.IntegerField(required=False, min_value=1, initial=1, widget=forms.HiddenInput)
     external_engine = forms.CharField(required=False)
 
