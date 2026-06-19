@@ -662,8 +662,8 @@ iree_status_t TorqExecutable::initialize() {
   
   auto runtimeVersion = ns(ExecutableDef_runtime_version_get(executableDef));
 
-  if (runtimeVersion != 1) {
-    return iree_make_status(IREE_STATUS_UNAVAILABLE, "executable runtime version %d does not match expected version %d", runtimeVersion, 1);
+  if (runtimeVersion != 2) {
+    return iree_make_status(IREE_STATUS_UNAVAILABLE, "executable runtime version %d does not match expected version %d", runtimeVersion, 2);
   }
 
   if (TorqEventLog::isProfilingEnabled()) {
@@ -926,8 +926,8 @@ std::string TorqExecutable::executableName() {
 }
 
 // runs all the host actions in the executable, one after the other
-iree_status_t TorqExecutable::executeActions(TorqDispatchEventLog* eventLog) {
-  
+iree_status_t TorqExecutable::executeActions(TorqDispatchEventLog* eventLog, const iree_hal_executable_dispatch_state_v0_t* state) {
+
   actionIndex_ = 0;
   nextJobId_ = 0;
   
@@ -946,8 +946,8 @@ iree_status_t TorqExecutable::executeActions(TorqDispatchEventLog* eventLog) {
         eventLog->addEvent(eventType, Event::BEGIN, actionIndex_);
     }
 
-    auto status = processAction(action);
-    
+    auto status = processAction(action, state);
+
     if (eventLog) {
         eventLog->addEvent(eventType, Event::END, actionIndex_);
     }
@@ -1081,7 +1081,7 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
 
     // run all host actions using the hardware if necessary
     TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_EXECUTE_ACTIONS);
-    status = executeActions(eventLog.get());
+    status = executeActions(eventLog.get(), state);
     TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_EXECUTE_ACTIONS);
 
     if (iree_status_is_ok(status)) {
@@ -1563,14 +1563,69 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
 
   }
 
-  iree_status_t TorqExecutable::copyElement(int inputOffset, int outputOffset, int size, ns(HostCopyParams_table_t) params) {
+  iree_status_t TorqExecutable::resolveDynamicByteOffset(
+      ns(HostCopyParams_table_t) params,
+      const iree_hal_executable_dispatch_state_v0_t* state,
+      uint32_t* byteOffset) {
+    *byteOffset = 0;
+    int32_t constIdx = ns(HostCopyParams_input_byte_offset_constant_index(params));
+    int32_t bindingIdx = ns(HostCopyParams_input_byte_offset_binding_index(params));
+    if (constIdx >= 0 && bindingIdx >= 0) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+        "HostCopyParams has both constant-index and binding-index set");
+    }
+    // byteOffset = index * indexUnitBytes.
+    uint32_t indexUnitBytes = ns(HostCopyParams_index_unit_bytes(params));
+    if (constIdx >= 0) {
+      if (!state || constIdx >= (int32_t)state->constant_count) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+          "input_byte_offset_constant_index %d out of range [0, %u)",
+          constIdx, state ? state->constant_count : 0);
+      }
+      *byteOffset = state->constants[constIdx] * indexUnitBytes;
+      return iree_ok_status();
+    }
+    if (bindingIdx >= 0) {
+      if (!state) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+          "input_byte_offset_binding_index requires a dispatch state");
+      }
+      if (bindingIdx >= (int32_t)state->binding_count) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+          "input_byte_offset_binding_index %d out of range [0, %u)",
+          bindingIdx, state->binding_count);
+      }
+      const void* hostPtr = state->binding_ptrs[bindingIdx];
+      if (!hostPtr) {
+        return iree_make_status(IREE_STATUS_INTERNAL,
+          "binding %d has no host pointer", bindingIdx);
+      }
+      int32_t indexValue;
+      std::memcpy(&indexValue, hostPtr, sizeof(int32_t));
+      *byteOffset = static_cast<uint32_t>(indexValue) * indexUnitBytes;
+    }
+    return iree_ok_status();
+  }
+
+  iree_status_t TorqExecutable::copyElement(int inputOffset, int outputOffset, int size, ns(HostCopyParams_table_t) params, const iree_hal_executable_dispatch_state_v0_t* state) {
     std::vector<uint8_t> data(size);
 
     uint32_t inputAddress = ns(HostCopyParams_input_address(params));
     uint32_t outputAddress = ns(HostCopyParams_output_address(params));
 
+    uint32_t dynamicByteOffset = 0;
+    IREE_RETURN_IF_ERROR(resolveDynamicByteOffset(params, state, &dynamicByteOffset));
+    auto direction = ns(HostCopyParams_direction(params));
+    if (dynamicByteOffset != 0) {
+      if (direction == ns(ByteCopyDirection_PreDispatchRead)) {
+        inputAddress += dynamicByteOffset;
+      } else {
+        outputAddress += dynamicByteOffset;
+      }
+    }
+
     ns(BufferType_enum_t) inputType = ns(HostCopyParams_input_buffer_type(params));
-    ns(BufferType_enum_t) outputType = ns(HostCopyParams_output_buffer_type(params));  
+    ns(BufferType_enum_t) outputType = ns(HostCopyParams_output_buffer_type(params));
 
     if (inputType == ns(BufferType_XRAM) && outputType == ns(BufferType_LRAM)) {
       if (!torq_->readXram(inputAddress + inputOffset, size, data.data())) {
@@ -1612,7 +1667,7 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
     return iree_ok_status();
   };
 
-  iree_status_t TorqExecutable::copyDimension(int dim, int inputOffset, int outputOffset, ns(HostCopyParams_table_t) params) {
+  iree_status_t TorqExecutable::copyDimension(int dim, int inputOffset, int outputOffset, ns(HostCopyParams_table_t) params, const iree_hal_executable_dispatch_state_v0_t* state) {
     auto inputStridesBytes = ns(HostCopyParams_input_strides_bytes(params));
     auto outputStridesBytes = ns(HostCopyParams_output_strides_bytes(params));
     auto shape = ns(HostCopyParams_shape(params));
@@ -1623,7 +1678,7 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
     if (dim == rank) {
       //cout << "****** last dim == rank, copying element, dim=" << dim << " rank=" << rank << endl;
       auto elementSize = ns(HostCopyParams_element_size_bytes(params));
-      auto ret = copyElement(inputOffset, outputOffset, elementSize, params);
+      auto ret = copyElement(inputOffset, outputOffset, elementSize, params, state);
 
       if (!iree_status_is_ok(ret)) {
         return ret;
@@ -1631,7 +1686,7 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
     } else {
       for (int i = 0; i < flatbuffers_uint32_vec_at(shape, dim); i++) {
         auto ret = copyDimension(dim + 1, inputOffset + i * flatbuffers_uint32_vec_at(inputStridesBytes, dim),
-                                outputOffset + i * flatbuffers_uint32_vec_at(outputStridesBytes, dim), params);
+                                outputOffset + i * flatbuffers_uint32_vec_at(outputStridesBytes, dim), params, state);
         if (!iree_status_is_ok(ret)) {
           return ret;
         }
@@ -1640,10 +1695,22 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
     return iree_ok_status();
   };
 
-  iree_status_t TorqExecutable::processHostCopyAction(ns(HostAction_table_t) action, ns(HostCopyParams_table_t) params) {
+  iree_status_t TorqExecutable::processHostCopyAction(ns(HostAction_table_t) action, ns(HostCopyParams_table_t) params, const iree_hal_executable_dispatch_state_v0_t* state) {
 
     uint32_t inputAddress = ns(HostCopyParams_input_address(params));
     uint32_t outputAddress = ns(HostCopyParams_output_address(params));
+
+    uint32_t dynamicByteOffset = 0;
+    IREE_RETURN_IF_ERROR(resolveDynamicByteOffset(params, state, &dynamicByteOffset));
+    auto direction = ns(HostCopyParams_direction(params));
+    if (dynamicByteOffset != 0) {
+      // PreDispatchRead = input side snapshot. PostDispatchWrite = output side commit.
+      if (direction == ns(ByteCopyDirection_PreDispatchRead)) {
+        inputAddress += dynamicByteOffset;
+      } else {
+        outputAddress += dynamicByteOffset;
+      }
+    }
 
     ns(BufferType_enum_t) inputType = ns(HostCopyParams_input_buffer_type(params));
     ns(BufferType_enum_t) outputType = ns(HostCopyParams_output_buffer_type(params));  
@@ -1678,11 +1745,11 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
     // recursion
     bool memcpySupported = torq_->getType() == TorqHw::Type::SIMULATOR || torq_->getType() == TorqHw::Type::ASTRA_MACHINA;
     if (memcpySupported && inputType == ns(BufferType_XRAM) && outputType == ns(BufferType_XRAM)) {
-      auto inputAddress = static_cast<const uint8_t*>(
-        torq_->startXramReadAccess(ns(HostCopyParams_input_address(params))));
-      auto outputAddress = static_cast<uint8_t*>(
-        torq_->startXramWriteAccess(ns(HostCopyParams_output_address(params))));
-      if (!inputAddress || !outputAddress) {
+      auto inputBuf = static_cast<const uint8_t*>(
+        torq_->startXramReadAccess(inputAddress));
+      auto outputBuf = static_cast<uint8_t*>(
+        torq_->startXramWriteAccess(outputAddress));
+      if (!inputBuf || !outputBuf) {
         return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "XRAM access issue");
       }
       auto inputStridesBytes = ns(HostCopyParams_input_strides_bytes(params));
@@ -1694,8 +1761,8 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
       LOGD << "Doing optimized host copy for xram to xram, rank=" << rank;
       LOGD << "Input strides bytes: " <<  inputStridesBytes;
       LOGD << "Output strides bytes: " << outputStridesBytes;
-      LOGD << "Input Address: " << static_cast<const void*>(inputAddress);
-      LOGD << "Output Address: " << static_cast<void*>(outputAddress);
+      LOGD << "Input Address: " << static_cast<const void*>(inputBuf);
+      LOGD << "Output Address: " << static_cast<void*>(outputBuf);
       LOGD << "Element size bytes: " << elementSize;
       
       // Calculate total number of elements
@@ -1720,8 +1787,8 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
           outputOffset += idx * flatbuffers_uint32_vec_at(outputStridesBytes, dim);
         }
         
-        auto src = inputAddress + inputOffset;
-        auto dst = outputAddress + outputOffset;
+        auto src = inputBuf + inputOffset;
+        auto dst = outputBuf + outputOffset;
         switch (elementSize)
         {
         case 1:
@@ -1743,7 +1810,7 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
       }
     }
     else {
-      ret = copyDimension(0, 0, 0, params);
+      ret = copyDimension(0, 0, 0, params, state);
     }
 
     return ret;
@@ -1786,8 +1853,8 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
   }
 
 
-iree_status_t TorqExecutable::processAction(ns(HostAction_table_t) action) {
-    
+iree_status_t TorqExecutable::processAction(ns(HostAction_table_t) action, const iree_hal_executable_dispatch_state_v0_t* state) {
+
     auto params = ns(HostAction_params_get(action));
     auto paramsType = ns(HostAction_params_type(action));
 
@@ -1796,7 +1863,7 @@ iree_status_t TorqExecutable::processAction(ns(HostAction_table_t) action) {
     switch (paramsType) {
 
       case ns(HostActionParams_HostCopyParams):
-        result = processHostCopyAction(action, (ns(HostCopyParams_table_t)) params);
+        result = processHostCopyAction(action, (ns(HostCopyParams_table_t)) params, state);
         break;
 
       case ns(HostActionParams_StartNSSParams):

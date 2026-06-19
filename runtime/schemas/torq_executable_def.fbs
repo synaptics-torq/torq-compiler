@@ -53,6 +53,12 @@ enum BufferType : uint32 {
   OTHER = 4
 }
 
+// Direction of a runtime-resolved byte-offset host copy.
+enum ByteCopyDirection : int32 {
+  PreDispatchRead = 0,
+  PostDispatchWrite = 1
+}
+
 // Element types of buffers
 enum ElementType : uint32 {
   I8 = 0,
@@ -82,23 +88,27 @@ table BufferDebugInfo {
   strides: [uint32];
 }
 
-// Action to copy data between locations
-// the input and output buffers are considered to be
-// tensors of elements of size element_size_bytes 
-// given shape (the input and output shape are the same)
-// the memory layout is such that the address of 
-// element idx = (i1, i2, ...) in the input buffer is given 
-// by "input_address + idx dot input_strides_bytes" (resp. 
-// output_address / output_strides_bytes for the output tensor)
+// Action to copy data between locations.
+// element_size_bytes is the leaf contiguous chunk size for the copy loop
+// (may equal full buffer size). When input_byte_offset_constant_index or
+// input_byte_offset_binding_index is set (>= 0), the runtime fetches an
+// integer index from that slot and adds `index * index_unit_bytes` to the
+// input (or output, for PostDispatchWrite) address. index_unit_bytes is
+// the byte width of one index step (1 when the slot already holds a byte
+// offset, the element byte width when the slot holds an element index).
 table HostCopyParams {
   input_buffer_type: BufferType;
   output_buffer_type: BufferType;
   input_address: uint32;
-  output_address: uint32;  
+  output_address: uint32;
   input_strides_bytes: [uint32];
   output_strides_bytes: [uint32];
   shape: [uint32];
   element_size_bytes: uint32;
+  input_byte_offset_constant_index: int32 = -1;
+  input_byte_offset_binding_index: int32 = -1;
+  index_unit_bytes: uint32 = 1;
+  direction: ByteCopyDirection = PreDispatchRead;
 }
 
 // Action to start NSS CFG at a given address

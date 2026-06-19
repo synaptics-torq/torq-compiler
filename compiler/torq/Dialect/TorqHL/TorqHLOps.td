@@ -589,7 +589,7 @@ def TorqHL_LoadOp: TorqHL_Op<"load"> {
 
 def TorqHL_HostCopyOp: TorqHL_Op<"host_copy"> {
   let summary = "Copy between memrefs using the host";
-  
+
   let arguments = (ins
     AnyMemRef:$output,
     AnyMemRef:$input,
@@ -600,7 +600,7 @@ def TorqHL_HostCopyOp: TorqHL_Op<"host_copy"> {
   );
 
   let hasVerifier = 1;
-  
+
   let hasCanonicalizer = 1;
 
   let assemblyFormat = [{
@@ -609,6 +609,34 @@ def TorqHL_HostCopyOp: TorqHL_Op<"host_copy"> {
 
 }
 
+def TorqHL_DynamicHostCopyOp : TorqHL_Op<"dynamic_host_copy"> {
+    let summary = "Copy a runtime-offset region between memrefs using the host";
+    let description = [{
+    Copies a region of `input` into `output` at a runtime byte offset.
+    Exactly one of `input_byte_offset_constant_index` or
+    `input_byte_offset_binding_index` selects the runtime index value;
+    final byte offset is `index * index_unit_bytes`, where
+    `index_unit_bytes` is the byte width of one index step (1 when the
+    index is already a byte offset, `element_width_bytes` when the index
+    counts memref elements).
+  }];
+
+    let arguments = (ins AnyMemRef:$output, AnyMemRef:$input,
+        DenseI64ArrayAttr:$input_strides_bytes,
+        DenseI64ArrayAttr:$output_strides_bytes, DenseI64ArrayAttr:$shape,
+        I64Attr:$element_size_bytes,
+        OptionalAttr<I32Attr>:$input_byte_offset_constant_index,
+        OptionalAttr<I32Attr>:$input_byte_offset_binding_index,
+        DefaultValuedAttr<I64Attr, "1">:$index_unit_bytes,
+        TorqHL_DynamicHostCopyDirection:$direction);
+
+    let hasVerifier = 1;
+
+    let assemblyFormat = [{
+    `from` $input `to` $output
+    `:` type($input) `,` type($output) attr-dict
+  }];
+}
 
 def TorqHL_StoreOp: TorqHL_Op<"store"> {
   let summary = "Copy contents LRAM to XRAM";

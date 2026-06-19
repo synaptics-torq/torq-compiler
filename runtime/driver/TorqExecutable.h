@@ -94,22 +94,24 @@ private:
 
   iree_status_t processWaitNSSAction(ns(HostAction_table_t) action, ns(WaitNSSParams_table_t) params);
 
-  iree_status_t processHostCopyAction(ns(HostAction_table_t) action, ns(HostCopyParams_table_t) params);
+  iree_status_t processHostCopyAction(ns(HostAction_table_t) action, ns(HostCopyParams_table_t) params, const iree_hal_executable_dispatch_state_v0_t* state);
 
   iree_status_t processAllocAction(ns(HostAction_table_t) action, ns(AllocParams_table_t) params);
 
   iree_status_t processDeallocAction(ns(HostAction_table_t) action, ns(DeallocParams_table_t) params);
 
-  iree_status_t processAction(ns(HostAction_table_t) action);
+  iree_status_t processAction(ns(HostAction_table_t) action, const iree_hal_executable_dispatch_state_v0_t* state);
   
   iree_status_t writeHostCopyDataToTestVector(const std::vector<uint8_t> & data, uint32_t outputAddress, uint32_t inputOffset, uint32_t outputOffset, ns(BufferType_enum_t) inputType, ns(BufferType_enum_t) outputType);
 
-  iree_status_t copyElement(int inputOffset, int outputOffset, int size, ns(HostCopyParams_table_t) params);
+  iree_status_t copyElement(int inputOffset, int outputOffset, int size, ns(HostCopyParams_table_t) params, const iree_hal_executable_dispatch_state_v0_t* state);
 
-  iree_status_t copyDimension(int dim, int inputOffset, int outputOffset, ns(HostCopyParams_table_t) params);
+  iree_status_t copyDimension(int dim, int inputOffset, int outputOffset, ns(HostCopyParams_table_t) params, const iree_hal_executable_dispatch_state_v0_t* state);
+
+  iree_status_t resolveDynamicByteOffset(ns(HostCopyParams_table_t) params, const iree_hal_executable_dispatch_state_v0_t* state, uint32_t* byteOffset);
 
   // runs all the host actions in the executable, one after the other
-  iree_status_t executeActions(TorqDispatchEventLog* eventLog);
+  iree_status_t executeActions(TorqDispatchEventLog* eventLog, const iree_hal_executable_dispatch_state_v0_t* state);
 
   iree_status_t setupDumpDirectories();
 

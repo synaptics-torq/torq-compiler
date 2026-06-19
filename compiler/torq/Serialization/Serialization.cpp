@@ -1004,8 +1004,47 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
                 inputAddress.value(), outputAddress.value(),
                 createUI32Vector(hostActionOp.getInputStridesBytes()),
                 createUI32Vector(hostActionOp.getOutputStridesBytes()),
-                createUI32Vector(hostActionOp.getShape()), hostActionOp.getElementSizeBytes()
+                createUI32Vector(hostActionOp.getShape()), hostActionOp.getElementSizeBytes(),
+                /*input_byte_offset_constant_index=*/-1,
+                /*input_byte_offset_binding_index=*/-1,
+                /*index_unit_bytes=*/1,
+                /*direction=*/iree_hal_torq_ByteCopyDirection_PreDispatchRead
+            );
 
+            params = iree_hal_torq_HostActionParams_as_HostCopyParams(hostCopyParams);
+        }
+        else if (auto dynamicHostCopyOp = dyn_cast<torq_hl::DynamicHostCopyOp>(op)) {
+
+            auto inputMemSpace = getEncodingMemorySpace(dynamicHostCopyOp.getInput().getType());
+            auto outputMemSpace = getEncodingMemorySpace(dynamicHostCopyOp.getOutput().getType());
+
+            auto inputAddress = getDataStartAddress(dynamicHostCopyOp.getInput());
+            if (!inputAddress) {
+                op.emitOpError("Input buffer address is not set");
+                return failure();
+            }
+
+            auto outputAddress = getDataStartAddress(dynamicHostCopyOp.getOutput());
+            if (!outputAddress) {
+                op.emitOpError("Output buffer address is not set");
+                return failure();
+            }
+
+            auto direction = dynamicHostCopyOp.getDirection() ==
+                                     torq_hl::DynamicHostCopyDirection::PreDispatchRead
+                                 ? iree_hal_torq_ByteCopyDirection_PreDispatchRead
+                                 : iree_hal_torq_ByteCopyDirection_PostDispatchWrite;
+
+            auto hostCopyParams = iree_hal_torq_HostCopyParams_create(
+                _builder, toBufferType(inputMemSpace), toBufferType(outputMemSpace),
+                inputAddress.value(), outputAddress.value(),
+                createUI32Vector(dynamicHostCopyOp.getInputStridesBytes()),
+                createUI32Vector(dynamicHostCopyOp.getOutputStridesBytes()),
+                createUI32Vector(dynamicHostCopyOp.getShape()),
+                dynamicHostCopyOp.getElementSizeBytes(),
+                dynamicHostCopyOp.getInputByteOffsetConstantIndex().value_or(-1),
+                dynamicHostCopyOp.getInputByteOffsetBindingIndex().value_or(-1),
+                dynamicHostCopyOp.getIndexUnitBytes(), direction
             );
 
             params = iree_hal_torq_HostActionParams_as_HostCopyParams(hostCopyParams);
@@ -1329,7 +1368,7 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
 
     // mark the file to ensure that models are not the same as v1.5 models even if
     // that runtime doesn't check the version number
-    int32_t runtimeVersion = 1;
+    int32_t runtimeVersion = 2;
 
     iree_hal_torq_ExecutableDef_create_as_root(
         _builder, executableName, codeRef, bindingRef, *maybeRuntimeProgram, bufferDebugInfo,

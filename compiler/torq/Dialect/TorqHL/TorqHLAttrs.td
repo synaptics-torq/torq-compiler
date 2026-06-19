@@ -39,6 +39,12 @@ def TorqHL_ExecutorAttr : TorqHL_I32EnumAttr<"Executor",
       I32EnumAttrCase<"Host", 3, "host">
 ]>;
 
+def TorqHL_DynamicHostCopyDirection : TorqHL_I32EnumAttr<"DynamicHostCopyDirection",
+    "Copy direction for dynamic_host_copy", "dynamic_host_copy_direction", [
+      I32EnumAttrCase<"PreDispatchRead", 0, "pre_dispatch_read">,
+      I32EnumAttrCase<"PostDispatchWrite", 1, "post_dispatch_write">
+]>;
+
 def TorqHL_Program : TorqHL_Type<"Program", "program"> {
   let summary = "A program that can be executed on one of the executors";
   let description = [{    

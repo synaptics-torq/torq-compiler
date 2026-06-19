@@ -94,10 +94,9 @@ def MapBindings
     let summary = "Lower all the hal.interface.binding.subspan ops to torq_hl.map_binding ops";
     let constructor = "mlir::syna::torq::createMapBindingsPass()";
 
-    let dependentDialects = [
-        "iree_compiler::IREE::HAL::HALDialect",
-        "syna::torq_hl::TorqHLDialect"
-    ];
+    let dependentDialects = ["iree_compiler::IREE::HAL::HALDialect",
+                             "syna::torq_hl::TorqHLDialect",
+                             "mlir::memref::MemRefDialect"];
 }
 
 def LowerArithConstants

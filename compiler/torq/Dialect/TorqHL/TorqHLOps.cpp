@@ -425,6 +425,55 @@ LogicalResult HostCopyOp::verify() {
     return success();
 }
 
+LogicalResult DynamicHostCopyOp::verify() {
+    bool hasConstIdx = getInputByteOffsetConstantIndex().has_value();
+    bool hasBindingIdx = getInputByteOffsetBindingIndex().has_value();
+    if (hasConstIdx == hasBindingIdx) {
+        return emitOpError("exactly one of input_byte_offset_constant_index or "
+                           "input_byte_offset_binding_index must be set");
+    }
+
+    if (getIndexUnitBytes() <= 0) {
+        return emitOpError("index_unit_bytes must be positive");
+    }
+
+    auto inputType = cast<MemRefType>(getInput().getType());
+    auto outputType = cast<MemRefType>(getOutput().getType());
+
+    if (inputType.getElementType() != outputType.getElementType()) {
+        return emitOpError("input and output element type must match");
+    }
+
+    auto shape = getShape();
+    auto rank = shape.size();
+
+    if (getInputStridesBytes().size() != rank) {
+        return emitOpError("input strides rank must match shape rank");
+    }
+    if (getOutputStridesBytes().size() != rank) {
+        return emitOpError("output strides rank must match shape rank");
+    }
+
+    auto transferredBytes = computeTransferredDataSize(shape, getElementSizeBytes());
+
+    // For PreDispatchRead the dynamic side is `input` (binding) and `output`
+    // is the static destination, which must match the transfer exactly. For
+    // PostDispatchWrite the dynamic side is `output` (binding) and `input` is
+    // the static source, which must match instead.
+    bool preRead = getDirection() == DynamicHostCopyDirection::PreDispatchRead;
+    auto staticType = preRead ? outputType : inputType;
+    auto staticSide = preRead ? "output" : "input";
+    auto staticBytes = computeTotalByteSizeElements(staticType);
+    if (staticBytes != transferredBytes) {
+        return emitOpError(
+            "transferred data size " + std::to_string(transferredBytes) + " bytes does not match " +
+            staticSide + " memref size " + std::to_string(staticBytes) + " bytes"
+        );
+    }
+
+    return success();
+}
+
 LogicalResult StoreOp::verify() {
 
     auto inputType = dyn_cast<MemRefType>(getInput().getType());
