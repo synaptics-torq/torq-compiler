@@ -220,11 +220,11 @@ class HalInterfaceBindingSubspanPattern
             }
 
             auto loc = subspanOp.getLoc();
-            auto baseMap = rewriter.create<syna::torq_hl::MapBindingOp>(
-                loc, outputType, rewriter.getIndexAttr(0), subspanOp.getBindingAttr(),
+            auto baseMap = syna::torq_hl::MapBindingOp::create(
+                rewriter, loc, outputType, rewriter.getIndexAttr(0), subspanOp.getBindingAttr(),
                 rewriter.getBoolAttr(isReadOnly), rewriter.getBoolAttr(isWriteOnly)
             );
-            auto destAlloc = rewriter.create<memref::AllocOp>(loc, outputType, ValueRange{});
+            auto destAlloc = memref::AllocOp::create(rewriter, loc, outputType, ValueRange{});
 
             SmallVector<int64_t> fromStrides, toStrides, shape;
             int64_t elemSizeBytes;
@@ -235,8 +235,8 @@ class HalInterfaceBindingSubspanPattern
             }
 
             auto emitCopy = [&](Value out, Value in, syna::torq_hl::DynamicHostCopyDirection dir) {
-                rewriter.create<syna::torq_hl::DynamicHostCopyOp>(
-                    loc, out, in, rewriter.getDenseI64ArrayAttr(fromStrides),
+                syna::torq_hl::DynamicHostCopyOp::create(
+                    rewriter, loc, out, in, rewriter.getDenseI64ArrayAttr(fromStrides),
                     rewriter.getDenseI64ArrayAttr(toStrides), rewriter.getDenseI64ArrayAttr(shape),
                     rewriter.getI64IntegerAttr(elemSizeBytes), rewriter.getI32IntegerAttr(*ordinal),
                     /*input_byte_offset_binding_index=*/IntegerAttr{},
@@ -383,10 +383,10 @@ class WorkloadOrdinalSubviewPattern : public OpRewritePattern<memref::SubViewOp>
             resultType.getMemorySpace()
         );
         auto loc = subviewOp.getLoc();
-        auto alloc = rewriter.create<memref::AllocOp>(loc, staticDstType, ValueRange{});
+        auto alloc = memref::AllocOp::create(rewriter, loc, staticDstType, ValueRange{});
 
-        rewriter.create<syna::torq_hl::DynamicHostCopyOp>(
-            loc, alloc.getResult(), subviewOp.getSource(),
+        syna::torq_hl::DynamicHostCopyOp::create(
+            rewriter, loc, alloc.getResult(), subviewOp.getSource(),
             rewriter.getDenseI64ArrayAttr({elementBytes}),
             rewriter.getDenseI64ArrayAttr({elementBytes}),
             rewriter.getDenseI64ArrayAttr({numElements}), rewriter.getI64IntegerAttr(elementBytes),
@@ -398,7 +398,7 @@ class WorkloadOrdinalSubviewPattern : public OpRewritePattern<memref::SubViewOp>
         );
 
         // Cast back to the original strided-layout type so downstream users keep typing.
-        auto casted = rewriter.create<memref::CastOp>(loc, resultType, alloc.getResult());
+        auto casted = memref::CastOp::create(rewriter, loc, resultType, alloc.getResult());
         rewriter.replaceOp(subviewOp, casted.getResult());
         return success();
     }
