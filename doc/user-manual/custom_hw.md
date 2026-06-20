@@ -21,43 +21,40 @@ $ torq-compile ... --torq-hw=<LRAM>:<Slices>:<CSS features>:<NSS features>
 ```
 - `<LRAM>`: Size of LRAM (integer)
 - `<slices>`: Number of SLICE blocks (integer)
-- `<CSS features>`: indicates the css features to enable (at the moment "+m")
+- `<CSS features>`: indicates the css features to enable (at the moment "coral_v1")
 - `<NSS features >`: indicates the NSS features to enable (at the moment "nss_v1")
 
 #### Example Configurations
 
 **SL2610 Configuration**
 
-This is the default configuration:
-
+This is the default configuration for TorqV1 as found in SL2610 SoC family:
 - LRAM: 512
 - Slices: 2
-- Tiling memory: 450
+- CSS features: coral_v1
+- NSS features: nss_v1
 
-**Custom configuration 1**
-- Version: 1
+**Custom configuration 1: enabling only 1 slice**
 - LRAM: 512
 - Slices: 1
-- Tiling memory: 450
-- CSS features: +m
+- CSS features: coral_v1
 - NSS features: nss_v1
 
   Compile with:
   ```shell
-  $ torq-compile ... --torq-hw=512:1:450:+m:nss_v1
+  $ torq-compile ... --torq-hw=512:1:coral_v1:nss_v1
   ```
 
-**Custom configuration 2**
+**Custom configuration 2: use experimental support for TorqV2 (simulation only)**
 
 - LRAM: 512
-- Slices: 1
-- Tiling memory: specify as needed
-- CSS features: +m
+- Slices: 2
+- CSS features: coral_v2
 - NSS features: nss_v2
 
   Compile with:
   ```shell
-  $ torq-compile ... --torq-hw=512:1:400:+m:nss_v2
+  $ torq-compile ... --torq-hw=512:1:coral_v2:nss_v2
   ```
 
 > **Note:** When compiling models with a smaller LRAM configuration, stability may vary due to the need for very small tile sizes. Support for this configuration is still under development. Full compatibility is not guaranteed in this release. For a more representative configuration, you can compile with 512kB size of LRAM and keep the rest of the configuration the same.
