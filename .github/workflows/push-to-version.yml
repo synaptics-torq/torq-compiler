@@ -1,0 +1,41 @@
+name: Push to version branch
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Target branch name'
+        required: true        
+
+jobs:
+  push-to-repo:
+    name: Push current branch into version branch
+    runs-on: ubuntu-latest    
+    environment: push-to-versions
+
+    steps:      
+      
+      - name: Generate GitHub token
+        id: generate_token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.PUSH_APP_ID }}
+          private-key: ${{ secrets.PUSH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Push to version branch
+        run: |
+
+          if [[ "${{ inputs.target_branch }}" != v[0-9]*.[0-9]* ]]; then
+            echo "Target branch name must start with 'v' followed by a version number (e.g. v1.2)"
+            exit 1
+          fi
+
+          REPO_URL="https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }}.git"
+
+          # this will fail if the version branch has been updated in the meantime, which is what we want          
+          git push "${REPO_URL}" HEAD:${{ github.event.inputs.target_branch }}
