@@ -41,7 +41,7 @@ jobs:
         lookup-only: true
     
     - name: Install dependencies
-      if: steps.lookup_cache.outputs.cache-hit != true
+      if: steps.lookup_cache.outputs.cache-hit != 'true'
       run: |
 
         # install the dependencies instead of using the CI docker to avoid circular dependencies between 
@@ -50,7 +50,7 @@ jobs:
         sudo apt-get install -y binutils-arm-linux-gnueabihf gcc-aarch64-linux-gnu flex bison bc
 
     - name: Build Kernel Module dependenencies
-      if: steps.lookup_cache.outputs.cache-hit != true
+      if: steps.lookup_cache.outputs.cache-hit != 'true'
       run: |
         scripts/setup_soc_ko_build_deps.sh    
 
