@@ -28,6 +28,9 @@ jobs:
           lfs: true
           persist-credentials: false
 
+      - name: Download all LFS objects reachable from the current branch
+        run: git lfs fetch --all "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ${{ github.ref_name }}
+
       - name: Push to other repository
         run: |
 
