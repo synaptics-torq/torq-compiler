@@ -38,11 +38,15 @@ jobs:
     name: Build mpact
     uses: ./.github/workflows/build-mpact.yml
    
+  build_ko_dependencies:
+    name: Build ko dependencies
+    uses: ./.github/workflows/build-ko-dependencies.yml
+
   build:
 
     name: Build compiler and runtime
 
-    needs: [build_mpact, choose_runner_image]
+    needs: [build_mpact, build_ko_dependencies, choose_runner_image]
 
     if: ${{ vars.CODEBUILD_PROJECT_CODEBASE != ''}}
 
@@ -58,10 +62,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-
-    outputs:
-      mpact_cache_key: ${{ needs.build_mpact.outputs.cache_key }}
-      mpact_cache_path: ${{ needs.build_mpact.outputs.path }}
       
     timeout-minutes: 50 # ensure build jobs fail before CodeBuild kills the runners
 
@@ -112,6 +112,13 @@ jobs:
         with:
           path: ${{ needs.build_mpact.outputs.path }}
           key: ${{ needs.build_mpact.outputs.cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Download ko dependencies from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ needs.build_ko_dependencies.outputs.path }}
+          key: ${{ needs.build_ko_dependencies.outputs.cache_key }}
           fail-on-cache-miss: true
 
       - name: Uncompress mpact simulation library

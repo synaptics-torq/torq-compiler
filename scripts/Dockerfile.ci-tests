@@ -8,11 +8,6 @@ COPY scripts/download_artifact.py .
 
 ARG GITHUB_REPOSITORY
 
-RUN --mount=type=secret,id=github_token \
-    GITHUB_TOKEN="$(cat /run/secrets/github_token)" \
-    GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
-    ./download_artifact.py --extract tflite-tools-v2.20.0.zip --output-dir /opt/synaptics/astra/tensorflow
-
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
     unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip && rm -rf /root/.cache
 

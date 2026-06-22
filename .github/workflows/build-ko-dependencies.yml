@@ -1,65 +1,62 @@
 name: Build Kernel module dependencies
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/build-ko-dependencies.yml'
-  
-  pull_request:    
-    paths:
-      - '.github/workflows/build-ko-dependencies.yml'
+  workflow_call:    
+    outputs:
+      cache_key:
+        description: Cache key of the built artifact
+        value: ${{ jobs.build.outputs.cache-key }}
 
-  release:
-    types: [published]
+      path:
+        description: Path to the built artifact
+        value: ${{ jobs.build.outputs.path }}
 
-
-concurrency:
-  group: build-ko-dependencies-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
 
   build:    
-
+    name: Build
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: write
-      actions: write
+    outputs:
+      cache-key: ${{ steps.gen_vars.outputs.cache_key }}
+      path: ${{ steps.gen_vars.outputs.path }}
 
     steps:
 
-    - name: Update checkout
+    - name: Checkout actions and scripts
       uses: actions/checkout@v6
-
-    # install the dependencies instead of using the CI docker to avoid circular dependencies
-    - name: Install dependencies
+      
+    - name: Generate cache key and paths
+      id: gen_vars
       run: |
+        echo "cache_key=ko-deps-${{ hashFiles('.github/workflows/build-ko-dependencies.yml', 'scripts/setup_soc_ko_build_deps.sh') }}" >> $GITHUB_OUTPUT
+        echo "path=third_party/runtimes-prebuilt/soc-kernel/syna-kernel-artifacts.tgz" >> $GITHUB_OUTPUT
+
+    - id: lookup_cache
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ steps.gen_vars.outputs.path }}
+        key: ${{ steps.gen_vars.outputs.cache_key }}
+        lookup-only: true
+    
+    - name: Install dependencies
+      if: steps.lookup_cache.outputs.cache-hit != true
+      run: |
+
+        # install the dependencies instead of using the CI docker to avoid circular dependencies between 
+        # the docker image and the kernel module artifacts
         sudo apt-get update
         sudo apt-get install -y binutils-arm-linux-gnueabihf gcc-aarch64-linux-gnu flex bison bc
 
     - name: Build Kernel Module dependenencies
+      if: steps.lookup_cache.outputs.cache-hit != true
       run: |
         scripts/setup_soc_ko_build_deps.sh    
 
-    - name: Ensure snapshot release exists
-      uses: ./.github/actions/ensure-snapshot-release
-      if: ${{ github.event_name == 'push' }}
+    - name: Upload to cache
+      if: steps.lookup_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
       with:
-        github_token: ${{ secrets.github_token }}
-
-    - name: Upload to GitHub release
-      uses: ./.github/actions/upload-to-release
-      with:
-        github_token: ${{ secrets.github_token }}    
-        assets_glob: third_party/runtimes-prebuilt/soc-kernel/syna-kernel-artifacts.tgz
-
-    - name: Rebuild Docker images to include new Kernel module dependencies
-      if: ${{ github.event_name == 'push' }}
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        gh workflow run build-docker.yml --ref ${{ github.ref }}
-        gh workflow run build-docker-ecr.yml --ref ${{ github.ref }}
+        path: ${{  steps.gen_vars.outputs.path }}
+        key: ${{ steps.gen_vars.outputs.cache_key }}
