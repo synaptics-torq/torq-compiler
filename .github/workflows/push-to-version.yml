@@ -25,17 +25,19 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v6
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Push to version branch
         run: |
 
-          if [[ "${{ inputs.target_branch }}" != v[0-9]*.[0-9]* ]]; then
+          if [[ ! "${{ inputs.target_branch }}" =~ ^v[0-9]+\.[0-9]+$ ]]; then
             echo "Target branch name must start with 'v' followed by a version number (e.g. v1.2)"
             exit 1
           fi
 
           REPO_URL="https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }}.git"
-
+                    
+          # push the current branch into the version branch
           # this will fail if the version branch has been updated in the meantime, which is what we want          
-          git push "${REPO_URL}" HEAD:${{ github.event.inputs.target_branch }}
+          git push "${REPO_URL}" HEAD:${{ inputs.target_branch }}
