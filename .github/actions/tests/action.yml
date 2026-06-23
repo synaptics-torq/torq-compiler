@@ -91,6 +91,11 @@ inputs:
     description: 'Jenkins job name for boards management'
     required: false
 
+  ignore_failures:
+    description: 'Whether to ignore test failures and continue the workflow'
+    required: false
+    default: "false"
+
 outputs:
   s3_cache_path:
     description: 'S3 path of the uploaded test data cache artifact'
@@ -305,7 +310,18 @@ runs:
           CONTROL_PARAMS="--torq-bench-control-file ${{github.workspace}}/bench-control.json"
         fi
 
-        pytest $CONTROL_PARAMS -v ${{ inputs.pytest_args }}
+        if pytest $CONTROL_PARAMS -v ${{ inputs.pytest_args }}; then
+          echo "pytest passed"
+        else
+          PYTEST_EXIT_CODE=$?
+          if [[ "${{ inputs.ignore_failures }}" == 'true' ]]; then
+            echo "pytest failed with exit code $PYTEST_EXIT_CODE, but ignore_failures=true so continuing"
+            exit 0
+          fi
+
+          exit "$PYTEST_EXIT_CODE"
+
+        fi
 
     - name: Release bench
       if: ${{ inputs.use_bench == 'true'  && always() }}

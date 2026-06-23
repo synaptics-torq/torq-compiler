@@ -290,7 +290,7 @@ jobs:
           # the cache is too big at the moment, disable
           # test_data_cache_artifact: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('test-cache-{0}', matrix.chip_group)) || '' }} # upload to github only on main branch 
           # We are currently using 36 cores machines for the cmodel tests, dividing by 2 to avoid overloading the machine which can cause timeouts and OOMs
-          pytest_args: >
+          pytest_args: >-
             -m ci -n 18 -v --show-capture=no --tb=short
             --torq-chips ${{ matrix.chip_group }}
             --tflite-layer-test-generate-full-model-only
@@ -299,12 +299,13 @@ jobs:
             ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to={0}', env.TEST_STATUS_REPORT_PATH) || '' }}
           # s3_artifact_bucket: ${{ vars.ARTIFACT_BUCKET }}
           torq_perf_server: ${{ env.DASHBOARD_SERVER }}
+          ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
           batch_name: cmodel-${{ matrix.chip_group }}
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
           s3_hf_cache_dir: hf_cache
 
       - name: Upload host test status report
-        if: ${{ vars.DISABLE_TESTS != 'true' && env.GENERATE_STATUS_REPORT == 'true' && !cancelled() }}
+        if: ${{ env.GENERATE_STATUS_REPORT == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: cmodel_test_status_${{ matrix.chip_group }}
@@ -328,7 +329,7 @@ jobs:
           image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.choose_runner_image.outputs.image_name }}-tests
 
     # run on push (main/version branches), when label test-astra-machina-sl is present on PR and when label generate-test-status-report is present on PR even in case of failure
-    if: (contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') && !cancelled()) || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'test-astra-machina-sl')
+    if: contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'test-astra-machina-sl')
     
     needs: [test_cmodel, choose_runner_image ]
 
@@ -381,8 +382,8 @@ jobs:
           # we don't download the cache when we are generating status reports because we run FPGA tests in parallel with Cmodel ones
           # precomputed_cache: ${{ env.GENERATE_STATUS_REPORT == 'true' && '' || needs.test_cmodel.outputs.s3_cache_path }}
 
-          pytest_args: >
-            -m astra_machina_sl_ci -n auto 
+          pytest_args: >-
+            -m astra_machina_sl_ci -n 4
             --torq-runtime-hw-type astra_machina
             --torq-runtime-timeout=20
             --torq-chips sl2610-v1
@@ -390,13 +391,14 @@ jobs:
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime
             ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to {0}', env.TEST_STATUS_REPORT_PATH) || '' }}
+          ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
           torq_perf_server: ${{ env.DASHBOARD_SERVER }}
           batch_name: fpga-${{ matrix.chip_group }}
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
           s3_hf_cache_dir: hf_cache
                 
       - name: Upload Astra Machina SL test status report
-        if: ${{ vars.DISABLE_TESTS != 'true' && env.GENERATE_STATUS_REPORT == 'true' && !cancelled() }}
+        if: ${{ env.GENERATE_STATUS_REPORT == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: astra_machina_sl_test_status
@@ -408,8 +410,8 @@ jobs:
 
     runs-on: ${{ vars.DISABLE_TESTS != 'true' && format('torq-fpga-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
 
-    # run on push (main/version branches), when label test-aws is present on PR and always when label generate-test-status-report is present on PR
-    if: contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') && !cancelled() || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'test-aws')
+    # run on push (main/version branches), and when either label test-aws or generate-test-status-report is present on PR
+    if: contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'test-aws')
     
     needs: [test_cmodel]
 
@@ -469,7 +471,7 @@ jobs:
           # we don't download the cache when we are generating status reports because we run FPGA tests in parallel with Cmodel ones
           # precomputed_cache: ${{ env.GENERATE_STATUS_REPORT == 'true' && '' || needs.test_cmodel.outputs.s3_cache_path }}
 
-          pytest_args: >
+          pytest_args: >-
             -m fpga_ci -n auto 
             --torq-runtime-hw-type aws_fpga
             --torq-runtime-timeout=20
@@ -478,6 +480,7 @@ jobs:
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime
             ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to {0}', env.TEST_STATUS_REPORT_PATH) || '' }}
+          ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
           torq_perf_server: ${{ env.DASHBOARD_SERVER }}
           batch_name: fpga-${{ matrix.chip_group }}
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
@@ -492,7 +495,7 @@ jobs:
           retention-days: 60
           
       - name: Upload AWS FPGA test status report
-        if: ${{ vars.DISABLE_TESTS != 'true' && env.GENERATE_STATUS_REPORT == 'true' && !cancelled() }}
+        if: ${{ env.GENERATE_STATUS_REPORT == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: aws_fpga_test_status_${{ matrix.chip_group }}
