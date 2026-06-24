@@ -1,0 +1,79 @@
+name: Build FPGA tests image
+
+on:
+  workflow_call:
+    outputs:
+      image_name:
+        description: Name of the built Docker image
+        value: ${{ jobs.build.outputs.image_name }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/build-docker-ecr.yml
+    with:
+      docker_file: scripts/Dockerfile.ci-fpga-tests
+      sources: >-
+        scripts/install_dependencies.sh
+        scripts/configure_python.sh
+        requirements.txt
+
+  # fpga tests runners use a tag build from main to run tests
+  tag:
+    name: Tag
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}    
+    needs: [build]
+    runs-on: codebuild-${{vars.CODEBUILD_PROJECT_DOCKER}}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout actions
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: ./.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
+            
+      - name: Tag image
+        run: |
+          IMAGE_NAME=${{ needs.build.outputs.image_name }}
+          REPOSITORY_NAME=${IMAGE_NAME#${{ vars.ECR_REGISTRY }}/}
+          SOURCE_TAG=${REPOSITORY_NAME##*:}
+          REPOSITORY_NAME=${REPOSITORY_NAME%:*}
+
+          IMAGE_DIGEST=$(aws ecr describe-images \
+            --repository-name "${REPOSITORY_NAME}" \
+            --image-ids imageTag="${SOURCE_TAG}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          
+          LATEST_DIGEST=$(aws ecr describe-images \
+            --repository-name "${REPOSITORY_NAME}" \
+            --image-ids imageTag=latest-fpga-tests \
+            --query 'imageDetails[0].imageDigest' \
+            --output text || true)
+
+          # check in case the latest-fpga-tests tag already points to the same image, we don't need to update it
+          if [[ -n "${LATEST_DIGEST}" &&  "${IMAGE_DIGEST}" == "${LATEST_DIGEST}" ]]; then
+            echo "Tag latest-fpga-tests already points to the same image, skipping tagging"
+            exit 0
+          fi
+
+          IMAGE_MANIFEST=$(aws ecr batch-get-image \
+            --repository-name "${REPOSITORY_NAME}" \
+            --image-ids imageTag="${SOURCE_TAG}" \
+            --query 'images[0].imageManifest' \
+            --output text)
+
+          aws ecr put-image \
+            --repository-name "${REPOSITORY_NAME}" \
+            --image-tag latest-fpga-tests \
+            --image-manifest "${IMAGE_MANIFEST}"
+
+          

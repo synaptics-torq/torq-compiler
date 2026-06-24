@@ -25,14 +25,37 @@ env:
   # use production dashboard for all PRs except those that have the label "test-stage-dashboard"
   DASHBOARD_SERVER: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}  
 
+
+permissions:
+  contents: read
+  id-token: write  # this is used to assume AWS roles
+
 jobs:
 
-  choose_runner_image:
-    name: Choose runner image
-    uses: ./.github/workflows/choose-runner.yml
-    permissions:
-      contents: read
-      pull-requests: read
+  check_format:
+    name: Check code formatting
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run format check
+        run: |
+              scripts/format-code
+              git diff --exit-code
+
+  docker_image_builder:
+    name: Build builder image
+    uses: ./.github/workflows/build-docker-image-builder.yml
+
+  docker_image_tests:
+    name: Build test image
+    uses: ./.github/workflows/build-docker-image-tests.yml
+
+  docker_image_fpga_tests:
+    name: Build FPGA test image
+    uses: ./.github/workflows/build-docker-image-fpga-tests.yml
 
   build_mpact:
     name: Build mpact
@@ -43,41 +66,24 @@ jobs:
     uses: ./.github/workflows/build-ko-dependencies.yml
 
   build:
-
     name: Build compiler and runtime
 
-    needs: [build_mpact, build_ko_dependencies, choose_runner_image]
+    needs: [check_format, docker_image_builder, build_mpact, build_ko_dependencies]
 
     if: ${{ vars.CODEBUILD_PROJECT_CODEBASE != ''}}
 
     runs-on:
       - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-        image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.choose_runner_image.outputs.image_name }}
+        image:custom-linux-${{ needs.docker_image_builder.outputs.image_name }}
 
     env:
       SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
       SCCACHE_REGION: ${{ vars.AWS_REGION }}
       SCCACHE_S3_KEY_PREFIX: clang-build
-
-    permissions:
-      contents: read
-      id-token: write
       
     timeout-minutes: 50 # ensure build jobs fail before CodeBuild kills the runners
 
     steps:
-
-      - name: Assume AWS role to access cache
-        uses: aws-actions/configure-aws-credentials@v6
-        id: assume_role
-        with:
-          aws-region: ${{ vars.AWS_REGION }}
-          # only the main and version branches role has permissions to write to the cache
-          role-to-assume: ${{ github.event_name == 'push' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
-
-      - name: Show active AWS identity
-        run: |
-          aws sts get-caller-identity
 
       - name: Make cached checkout visible to workflow
         env:
@@ -101,6 +107,14 @@ jobs:
         working-directory: /workspace/code
         run: |
           bash scripts/checkout_submodules.sh        
+
+      - name: Configure AWS credentials
+        uses: ./code/.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
 
       - name: Configure python venv for host build and test
         working-directory: /workspace/code
@@ -230,12 +244,8 @@ jobs:
 
     if: ${{ github.event_name == 'push' || !contains(github.event.pull_request.labels.*.name || '', 'skip-test-cmodel') }}
 
-    needs: [ build, choose_runner_image ]
-
-    permissions:
-      contents: read
-      id-token: write  # this is required to assume the AWS role
-
+    needs: [ build, docker_image_tests ]
+    
     strategy:
       fail-fast: false
       matrix:
@@ -245,10 +255,9 @@ jobs:
     timeout-minutes: 50
 
     runs-on:
-          # We use xlarge with 36 cores and 72GB of RAM, to be monitored.
           - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-            image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.choose_runner_image.outputs.image_name }}-tests
-            instance-size:xlarge 
+            image:custom-linux-${{ needs.docker_image_tests.outputs.image_name }}
+            instance-size:xlarge
 
     outputs:
       s3_cache_path: ${{ steps.run_cmodel_tests.outputs.s3_cache_path }}
@@ -258,15 +267,7 @@ jobs:
       CMODEL_PROFILING_LOGS_PATH: ${{ github.workspace }}/cmodel_compile_profiling_logs_${{ matrix.chip_group }}
 
     steps:
-
-      # this is required to be able to upload the artifacts to S3
-      - name: Assume AWS role
-        uses: aws-actions/configure-aws-credentials@v6
-        id: assume_role
-        with:
-          aws-region: ${{ vars.AWS_REGION }}
-          role-to-assume: ${{ github.event_name == 'push' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
-
+      
       - name: Checkout repository
         if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: actions/checkout@v6
@@ -276,6 +277,16 @@ jobs:
           # real archive instead of a pointer file.
           lfs: true
           submodules: false
+
+      # this is required to be able to upload the artifacts to S3
+      - name: Configure AWS credentials
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
+        uses: ./.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
 
       - name: Run C model tests
         id: run_cmodel_tests
@@ -320,22 +331,17 @@ jobs:
           path: ${{ env.CMODEL_PROFILING_LOGS_PATH }}
           retention-days: 60
 
-  
   test_astra_machina_sl:    
     name: Test with Astra Machina SL
 
     runs-on:
         - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-          image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.choose_runner_image.outputs.image_name }}-tests
+          image:custom-linux-${{ needs.docker_image_tests.outputs.image_name }}
 
     # run on push (main/version branches), when label test-astra-machina-sl is present on PR and when label generate-test-status-report is present on PR even in case of failure
     if: contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'test-astra-machina-sl')
     
-    needs: [test_cmodel, choose_runner_image ]
-
-    permissions:
-      contents: read
-      id-token: write  # this is required to assume the AWS role
+    needs: [test_cmodel, docker_image_tests ]
 
     timeout-minutes: 50
 
@@ -345,14 +351,6 @@ jobs:
 
     steps:
       
-      # this is required to be able to download artifacts from S3
-      - name: Assume AWS role
-        uses: aws-actions/configure-aws-credentials@v6
-        id: assume_role
-        with:
-          aws-region: ${{ vars.AWS_REGION }}
-          role-to-assume: ${{ github.event_name == 'push' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}      
-    
       - name: Checkout repository
         if: ${{ vars.DISABLE_TESTS != 'true' }}
         uses: actions/checkout@v6
@@ -362,6 +360,16 @@ jobs:
           # real archive instead of a pointer file.
           lfs: true
           submodules: false
+
+      # this is required to be able to download artifacts from S3
+      - name: Configure AWS credentials
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
+        uses: ./.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
 
       - name: Run Astra Machina SL tests
         if: ${{ vars.DISABLE_TESTS != 'true' }}
@@ -408,16 +416,13 @@ jobs:
   test_aws_fpga:    
     name: Test with AWS FPGA on ${{ matrix.chip_group }}
 
+    # TODO: here we should use the built image, not the default image
     runs-on: ${{ vars.DISABLE_TESTS != 'true' && format('torq-fpga-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
 
     # run on push (main/version branches), and when either label test-aws or generate-test-status-report is present on PR
     if: contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name || '', 'test-aws')
     
-    needs: [test_cmodel]
-
-    permissions:
-      contents: read
-      id-token: write  # this is required to assume the AWS role
+    needs: [test_cmodel, docker_image_fpga_tests ]
 
     timeout-minutes: 50
 
@@ -431,21 +436,6 @@ jobs:
       TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/aws_fpga_test_status_${{ matrix.chip_group }}.json
 
     steps:
-      
-      # this is required to be able to download artifacts from S3
-      - name: Assume AWS role
-        uses: aws-actions/configure-aws-credentials@v6
-        id: assume_role
-        with:
-          aws-region: ${{ vars.AWS_REGION }}
-          role-to-assume: ${{ github.event_name == 'push' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
-
-      - name: Clear FPGA slot
-        if: ${{ vars.DISABLE_TESTS != 'true' }}
-        run: |
-          # the instance on which this is running may have already served another shell
-          # so we need to clear the slot before running our tests to ensure a clean state
-          fpga-clear-local-image -S 0
     
       - name: Checkout repository
         if: ${{ vars.DISABLE_TESTS != 'true' }}
@@ -456,6 +446,23 @@ jobs:
           # real archive instead of a pointer file.
           lfs: true
           submodules: false
+
+      # this is required to be able to download artifacts from S3
+      - name: Configure AWS credentials
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
+        uses: ./.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
+
+      - name: Clear FPGA slot
+        if: ${{ vars.DISABLE_TESTS != 'true' }}
+        run: |
+          # the instance on which this is running may have already served another shell
+          # so we need to clear the slot before running our tests to ensure a clean state
+          fpga-clear-local-image -S 0
 
       - name: Run AWS FPGA model tests
         if: ${{ vars.DISABLE_TESTS != 'true' }}

@@ -11,14 +11,12 @@ on:
             - '.github/workflows/build-docker.yml'
             - 'scripts/Dockerfile.localdev'
             - 'scripts/install_dependencies.sh'
-            - 'scripts/download_artifact.py'
 
     pull_request:
         paths:
             - '.github/workflows/build-docker.yml'
             - 'scripts/Dockerfile.localdev'
             - 'scripts/install_dependencies.sh'
-            - 'scripts/download_artifact.py'
 jobs:
 
     build-and-push:

@@ -1,116 +1,142 @@
-name: Build Docker Image for CI
+name: Build ECR docker
 
 on:
-    workflow_dispatch:
+  workflow_call:
+    inputs:
+      docker_file:
+        description: Path to the Dockerfile to build
+        required: true
+        type: string      
+      sources:
+        description: Paths to the files that are required for the Docker build, used to generate the cache key
+        required: true
+        type: string
+      source_submodules:
+        description: Paths to the submodules that are required for the Docker build, used to generate the cache key
+        required: false
+        type: string
 
-    push:
-        branches:
-             - main
-             - v*
-        paths:
-            - 'scripts/Dockerfile.ci'
-            - 'scripts/Dockerfile.ci-tests'
-            - 'scripts/Dockerfile.ci-fpga-tests'
-            - 'scripts/install_dependencies.sh'
-            - 'scripts/download_artifact.py'
-            - 'scripts/configure_python.sh'
-            - 'requirements.txt'
-            - 'third_party/iree'
-            - '.github/workflows/build-docker-ecr.yml'            
-
-    pull_request:
-        paths:
-            - 'scripts/Dockerfile.ci'
-            - 'scripts/Dockerfile.ci-tests'
-            - 'scripts/Dockerfile.ci-fpga-tests'
-            - 'scripts/install_dependencies.sh'
-            - 'scripts/download_artifact.py'
-            - 'scripts/configure_python.sh'
-            - 'requirements.txt'
-            - 'third_party/iree'
-            - '.github/workflows/build-docker-ecr.yml'
-     
+    outputs:      
+      image_name:
+        description: Name of the built Docker image
+        value: ${{ jobs.build-and-push.outputs.image_name }}
+        
 jobs:
 
-    build-and-push:
+  build-and-push:
 
-        if: ${{ vars.ECR_REPOSITORY != '' }}
+    name: Build
 
-        permissions:
-            contents: read
-            packages: write
-            attestations: write
-            id-token: write
+    runs-on: codebuild-${{vars.CODEBUILD_PROJECT_DOCKER}}-${{ github.run_id }}-${{ github.run_attempt }}
 
-        runs-on: codebuild-${{vars.CODEBUILD_PROJECT_DOCKER}}-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      image_name: ${{ steps.check-image.outputs.image_name }}
 
-        steps:
+    permissions:
+      contents: read
+      id-token: write # this is required to assume the role in AWS
 
-          - name: Configure AWS Credentials
-            uses: aws-actions/configure-aws-credentials@v6
-            if: ${{ github.event_name == 'push' }}
-            with:
-              aws-region: ${{ vars.AWS_REGION }}
-              role-to-assume: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+    steps:
+      - name: Checkout actions
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: ./.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
+
+      - name: Generate cache key
+        id: gen_vars
+        run: |        
           
-          - name: Show AWS identity
-            run: |
-              aws sts get-caller-identity
+          # get the hashes of the files that are relevant for the Docker image build to generate the cache key
+          FILE_HASHES=$(
+            sha256sum ${{ inputs.sources }} \
+                      ${{ inputs.docker_file }} \
+                      .github/workflows/build-docker-ecr.yml | awk '{print $1}')
 
-          - name: Log in to ECR
-            if: ${{ github.event_name == 'push' }}
-            run:
-              aws ecr get-login-password --region ${{ vars.AWS_REGION }} | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
-            
-          - name: Checkout repository
-            uses: actions/checkout@v6
-            with:
-              lfs: true
+          # get the submodule commit id for the third_party/iree directory
+          for submodule in ${{ inputs.source_submodules }}; do
+            SUBMODULE_COMMIT=$(git submodule status -- "$submodule" | awk '{print $1}' | sed 's/^-//')
+            FILE_HASHES="$FILE_HASHES:$SUBMODULE_COMMIT"
+          done
 
-          - name: Checkout required submodules
-            shell: bash
-            run: |
-              bash scripts/checkout_submodules.sh
+          # combine the file hashes and the submodule commit id to generate the cache key
+          CACHE_KEY="image-$(echo "$FILE_HASHES" | sha256sum | awk '{print $1}' | cut -c1-8)"
 
-          - name: Prepare checkout for use in other workflows
-            run: |
-              set -x
+          echo "cache_key=${CACHE_KEY}" >> "$GITHUB_OUTPUT"
 
-              # this speeds up the checkout action
-              git checkout --detach
-              
-              # remove the hooks to make sure we can re-install them when we use the checkout in other workflows
-              rm -f .git/hooks/*
+      - name: Lookup cache
+        id: check-image
+        run: |
+          
+          # select the ECR repository to use based on whether we are on a protected branch or not
+          if [[ "${{ steps.configure-aws-credentials.outputs.protected_role }}" == "true" ]]; then
+            SCOPE_ECR_REPOSITORY=${{ vars.ECR_REPOSITORY }}
+          else
+            SCOPE_ECR_REPOSITORY=${{ vars.WIP_ECR_REPOSITORY }}
+          fi
 
-          - name: Build and push build Docker image
-            uses: docker/build-push-action@v7
-            with:
-              context: .
-              file: scripts/Dockerfile.ci
-              push: ${{ github.event_name == 'push' }}
-              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ ( github.event_name == 'push' && github.ref != 'refs/heads/main') && github.ref_name || 'latest' }}
-              build-args: GITHUB_REPOSITORY=${{ github.repository }}
-              secrets: |
-                "github_token=${{ secrets.GITHUB_TOKEN }}"
+          CACHE_KEY=${{ steps.gen_vars.outputs.cache_key }}
 
-          - name: Build and push tests Docker image
-            uses: docker/build-push-action@v7            
-            with:
-              context: .
-              file: scripts/Dockerfile.ci-tests
-              push: ${{ github.event_name == 'push' }}
-              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ ( github.event_name == 'push' && github.ref != 'refs/heads/main') && github.ref_name || 'latest' }}-tests
-              build-args: GITHUB_REPOSITORY=${{ github.repository }}
-              secrets: |
-                "github_token=${{ secrets.GITHUB_TOKEN }}"
+          # check the scoped repository for the image (main repo for protected branches, wip repo for wip branches)
+          if aws ecr describe-images --repository-name ${SCOPE_ECR_REPOSITORY} --image-ids imageTag=${CACHE_KEY} > /dev/null 2>&1; then
+            echo "image_found=true" >> $GITHUB_OUTPUT
+            echo "image_name=${{ vars.ECR_REGISTRY }}/${SCOPE_ECR_REPOSITORY}:${CACHE_KEY}" >> $GITHUB_OUTPUT
+            echo "Cache hit: image with digest $CACHE_KEY found in ECR ${SCOPE_ECR_REPOSITORY}"
+            exit 0
+          fi
+          
+          # check the main repository for the image, even if we are on a wip branch
+          if [[ "$SCOPE_ECR_REPOSITORY" != "${{ vars.ECR_REPOSITORY }}" ]]; then
+            if aws ecr describe-images --repository-name ${{ vars.ECR_REPOSITORY }} --image-ids imageTag=${CACHE_KEY} > /dev/null 2>&1; then
+              echo "image_found=true" >> $GITHUB_OUTPUT
+              echo "image_name=${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${CACHE_KEY}" >> $GITHUB_OUTPUT
+              echo "Cache hit: image with digest $CACHE_KEY found in ECR ${{ vars.ECR_REPOSITORY }}"
+              exit 0
+            fi
+          fi
 
-          - name: Build and push FPGA tests Docker image
-            uses: docker/build-push-action@v7            
-            with:
-              context: .
-              file: scripts/Dockerfile.ci-fpga-tests
-              push: ${{ github.event_name == 'push' }}
-              tags: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ ( github.event_name == 'push' && github.ref != 'refs/heads/main') && github.ref_name || 'latest' }}-fpga-tests
-              build-args: GITHUB_REPOSITORY=${{ github.repository }}
-              secrets: |
-                "github_token=${{ secrets.GITHUB_TOKEN }}"
+          # we didn't find the image in either repository, so we need to build it
+          echo "image_found=false" >> $GITHUB_OUTPUT
+          echo "image_name=${{ vars.ECR_REGISTRY }}/${SCOPE_ECR_REPOSITORY}:${CACHE_KEY}" >> $GITHUB_OUTPUT
+          echo "Cache miss: image with digest $CACHE_KEY not found on ECR"
+
+      - name: Log in to ECR
+        if: steps.check-image.outputs.image_found != 'true'
+        run: |
+          aws ecr get-login-password --region ${{ vars.AWS_REGION }} | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
+        
+      - name: Checkout required submodules
+        if: steps.check-image.outputs.image_found != 'true' && inputs.source_submodules != ''
+        run: |
+          bash scripts/checkout_submodules.sh
+
+      - name: Prepare checkout for use in other workflows
+        if: steps.check-image.outputs.image_found != 'true'
+        run: |
+          set -x
+
+          # this speeds up the checkout action
+          git checkout --detach
+          
+          # remove the hooks to make sure we can re-install them when we use the checkout in other workflows
+          rm -f .git/hooks/*
+
+      - name: Build and push build Docker image
+        id: build-docker
+        uses: docker/build-push-action@v7
+        if: steps.check-image.outputs.image_found != 'true'
+        with:
+          context: .
+          file: ${{ inputs.docker_file }}
+          push: true
+          build-args: GITHUB_REPOSITORY=${{ github.repository }}
+          tags: ${{ steps.check-image.outputs.image_name }}
+          secrets: |
+            "github_token=${{ secrets.GITHUB_TOKEN }}"
+
+          

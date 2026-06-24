@@ -1,0 +1,50 @@
+description: Select AWS role and configure AWS credentials
+
+inputs:
+  aws_region:
+    description: AWS region for credentials configuration
+    required: true
+  protected_role_arn:
+    description: IAM role ARN used for protected refs
+    required: true
+  non_protected_role_arn:
+    description: IAM role ARN used for non-protected refs
+    required: true
+
+outputs:
+  protected_role:
+    description: Was the protected role selected (true/false)
+    value: ${{ steps.select-role.outputs.protected_role }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select role to assume
+      id: select-role
+      shell: bash
+      run: |
+        if [[ "${{ github.event_name }}" == "push" ]]; then
+          SELECTED_ROLE="${{ inputs.protected_role_arn }}"
+          PROTECTED_ROLE=true
+        elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == refs/heads/v* || "${{ github.ref }}" == refs/tags/v* ]]; then
+            SELECTED_ROLE="${{ inputs.protected_role_arn }}"
+            PROTECTED_ROLE=true
+          else
+            SELECTED_ROLE="${{ inputs.non_protected_role_arn }}"
+            PROTECTED_ROLE=false
+          fi
+        else
+          SELECTED_ROLE="${{ inputs.non_protected_role_arn }}"
+          PROTECTED_ROLE=false
+        fi
+
+        echo "role_arn=${SELECTED_ROLE}" >> "$GITHUB_OUTPUT"
+        echo "protected_role=${PROTECTED_ROLE}" >> "$GITHUB_OUTPUT"
+        echo "Selected role ${SELECTED_ROLE} for event ${{ github.event_name }} on ref ${{ github.ref }}"
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        aws-region: ${{ inputs.aws_region }}
+        role-to-assume: ${{ steps.select-role.outputs.role_arn }}

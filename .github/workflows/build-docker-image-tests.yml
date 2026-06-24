@@ -1,0 +1,23 @@
+name: Build tests image
+
+on:
+  workflow_call:
+    outputs:
+      image_name:
+        description: Name of the built Docker image
+        value: ${{ jobs.build.outputs.image_name }}
+
+jobs:
+  build:
+    name: Build test image
+    uses: ./.github/workflows/build-docker-ecr.yml
+    with:
+      docker_file: scripts/Dockerfile.ci-tests
+      sources: >-
+        scripts/install_dependencies.sh
+        scripts/configure_python.sh
+        requirements.txt
+
+    permissions:
+      contents: read
+      id-token: write

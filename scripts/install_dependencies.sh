@@ -28,7 +28,7 @@ URL="https://github.com/synaptics-astra/sdk/releases/download/scarthgap_6.12_v2.
 
 if [ ! -d "$TOOLCHAIN_DIR" ]; then
     echo "Downloading Astra toolchain..."
-    wget -c "$URL/$FILE.000" "$URL/$FILE.001"
+    wget -nv -c "$URL/$FILE.000" "$URL/$FILE.001"
 
     echo "Combining and installing..."
     cat "${FILE}."* > "$FILE" && rm -f "${FILE}."*

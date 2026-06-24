@@ -7,45 +7,43 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.number || github.sha }}
   cancel-in-progress: true  
 
+permissions:
+    contents: read
+    id-token: write # required to assume the role in AWS
+
 jobs:
 
-  choose_runner_image:
-    name: Choose runner image
-    uses: ./.github/workflows/choose-runner.yml
-    permissions:
-      contents: read
-      pull-requests: read
-
+  docker_image_tests:
+    name: Build test image
+    uses: ./.github/workflows/build-docker-image-tests.yml
+  
   test:    
     name: Test with external engines
 
     timeout-minutes: 50
 
-    needs: [choose_runner_image]
+    needs: [docker_image_tests]
 
     runs-on:
-          - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-            image:custom-linux-${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.choose_runner_image.outputs.image_name }}-tests
-
-    permissions:
-      contents: read
-      id-token: write
+      - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+        image:custom-linux-${{ needs.docker_image_tests.outputs.image_name }}
 
     steps:
       
-      # this is required to be able to download artifacts from S3
-      - name: Assume AWS role
-        uses: aws-actions/configure-aws-credentials@v6
-        id: assume_role
-        with:
-          aws-region: ${{ vars.AWS_REGION }}
-          role-to-assume: ${{ github.ref == 'refs/heads/main' && vars.MAIN_BRANCH_ROLE_ARN  || vars.PULL_REQUEST_ROLE_ARN }}
-
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           lfs: false
           submodules: false
+
+      # this is required to be able to download artifacts from S3
+      - name: Configure AWS credentials
+        uses: ./.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
     
       - name: Run tests with alternative engines
         uses: ./.github/actions/tests

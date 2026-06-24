@@ -1,0 +1,24 @@
+name: Build builder image
+
+on:
+  workflow_call:
+    outputs:
+      image_name:
+        description: Name of the built Docker image
+        value: ${{ jobs.build.outputs.image_name }}
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/build-docker-ecr.yml
+    with:
+      docker_file: scripts/Dockerfile.ci
+      sources: >-
+        scripts/install_dependencies.sh
+        scripts/configure_python.sh
+        requirements.txt
+      source_submodules: third_party/iree
+
+    permissions:
+      contents: read
+      id-token: write
