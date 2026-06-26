@@ -681,6 +681,26 @@ struct TransposeOpConversionRewrite : public OpRewritePattern<linalg::TransposeO
     }
 };
 
+// [#1508] A non-zero 32-bit fill cannot use the NSS pad-fill primitive: the
+// pad_value register is 16 bits and is replicated across every 16-bit unit, so a
+// 32-bit element ends up holding (lo16 << 16) | lo16 instead of the requested
+// value. Realize such fills by broadcasting a single-element constant through the
+// 32-bit data path (iram -> alu -> act) instead. This costs only a 4-byte
+// constant rather than materializing a full-tensor constant.
+static LogicalResult
+fillViaBroadcast(PatternRewriter &rewriter, linalg::FillOp srcOp, TypedAttr valueAttr) {
+    auto outTy = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+    SmallVector<int64_t> oneShape(outTy.getRank(), 1);
+    auto inTy = RankedTensorType::get(oneShape, outTy.getElementType());
+    auto denseAttr = DenseElementsAttr::get(inTy, ArrayRef<Attribute>{valueAttr});
+    Value input = mlir::arith::ConstantOp::create(rewriter, srcOp.getLoc(), denseAttr);
+    rewriter.replaceOpWithNewOp<torq_hl::BroadcastOp>(
+        srcOp, outTy, createInitTensor(srcOp, rewriter, outTy), rewriter.getDenseI64ArrayAttr({}),
+        input
+    );
+    return success();
+}
+
 struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
 
     FillOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
@@ -704,7 +724,13 @@ struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
             // Already an integer constant
             int fillValue = intAttr.getInt();
             if (fillElementSize > 2 && fillValue != 0) {
-                return rewriter.notifyMatchFailure(srcOp, "Unsupported 32-bits int value");
+                // Only 32-bit elements map to an NSS dtype the broadcast data path
+                // can carry. Wider integers (e.g. i64) have no NSS representation,
+                // so leave them to the host/CSS fallback instead of crashing in the
+                // broadcast lowering.
+                if (fillElementSize != 4)
+                    return rewriter.notifyMatchFailure(srcOp, "Unsupported integer fill width");
+                return fillViaBroadcast(rewriter, srcOp, valueAttr);
             }
             bitPatternAttr = rewriter.getI32IntegerAttr(fillValue);
         }
@@ -719,7 +745,7 @@ struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
             else if (&apf.getSemantics() == &llvm::APFloat::IEEEsingle()) {
                 bits = apf.bitcastToAPInt().getZExtValue(); // 32-bit
                 if (fillElementSize > 2 && bits != 0) {
-                    return rewriter.notifyMatchFailure(srcOp, "Unsupported 32-bits float value");
+                    return fillViaBroadcast(rewriter, srcOp, valueAttr);
                 }
                 bitPatternAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(bits));
             }
