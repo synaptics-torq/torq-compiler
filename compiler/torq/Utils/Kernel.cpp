@@ -1468,11 +1468,16 @@ void SlicePrivate::addDims(
 
     // Check that the indexes are not referring to some loop before the load point
     // This is allowed only for modulo indexes which generate their own local loop
+    bool processLoopContainingLoad = false;
     for (const auto &iterVar : ix) {
         if (iterVar.iterId() < 0) {
             assert(iterVar.constIndex() == 0 && "Indexing with non-0 constant not allowed here");
         }
-        else if (iterVar.iterId() < loadNesting && !iterVar.modulo()) {
+        else if (iterVar.modulo()) {
+            assert(iterVar.iterId() == loadNesting - 1 && "% can only refer to innermost loop");
+            processLoopContainingLoad = true;
+        }
+        else if (iterVar.iterId() < loadNesting) {
             llvm::errs() << "Error, " << data << " uses index from loop " << iterVar
                          << " which is before load at level " << loadNesting << "\n";
             assert(false && "Invalid index in data");
@@ -1490,7 +1495,7 @@ void SlicePrivate::addDims(
     int strideTagIx = 0;
     bool prevDimIsRepeat = false;
 
-    for (int i = _forStack.size() - 1; i >= loadNesting; i--) {
+    for (int i = _forStack.size() - 1; i >= loadNesting - processLoopContainingLoad; i--) {
         // Check if this loop appears in the list of indexed dimensions,
         // in this case compute the stride from dataDims.
         // If not, this loop doesn't affect this data load, so this is a repeat with stride 0
@@ -1506,7 +1511,7 @@ void SlicePrivate::addDims(
                 );
                 if (iterVar.modulo()) {
                     // Special case to split the same loop between mem and reg based NDLs
-                    loopIterCount = iterVar.modulo();
+                    loopIterCount = min(loopIterCount, iterVar.modulo());
                 }
                 if (loopIterCount > dataDims[dataDimensionIx].count) {
                     llvm::errs() << "Out of bounds access to dimension " << dataDimensionIx
