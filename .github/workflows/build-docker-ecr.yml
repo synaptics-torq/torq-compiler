@@ -15,6 +15,11 @@ on:
         description: Paths to the submodules that are required for the Docker build, used to generate the cache key
         required: false
         type: string
+      extra_tags:
+        description: Extra tags to apply to the built Docker image
+        required: false
+        default: ''
+        type: string
 
     outputs:      
       image_name:
@@ -138,5 +143,43 @@ jobs:
           tags: ${{ steps.check-image.outputs.image_name }}
           secrets: |
             "github_token=${{ secrets.GITHUB_TOKEN }}"
+                
+      - name: Tag image
+        if: inputs.extra_tags != ''
+        run: |
+          IMAGE_NAME=${{ steps.check-image.outputs.image_name }}
+          REPOSITORY_NAME=${IMAGE_NAME#${{ vars.ECR_REGISTRY }}/}
+          SOURCE_TAG=${REPOSITORY_NAME##*:}
+          REPOSITORY_NAME=${REPOSITORY_NAME%:*}
+
+          IMAGE_DIGEST=$(aws ecr describe-images \
+            --repository-name "${REPOSITORY_NAME}" \
+            --image-ids imageTag="${SOURCE_TAG}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          
+          LATEST_DIGEST=$(aws ecr describe-images \
+            --repository-name "${REPOSITORY_NAME}" \
+            --image-ids imageTag=${{ inputs.extra_tags }} \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2> /dev/null || true)
+
+          # check in case the tag already points to the same image, we don't need to update it
+          if [[ -n "${LATEST_DIGEST}" &&  "${IMAGE_DIGEST}" == "${LATEST_DIGEST}" ]]; then
+            echo "Tag ${{ inputs.extra_tags }} already points to the same image, skipping tagging"
+            exit 0
+          fi
+
+          IMAGE_MANIFEST=$(aws ecr batch-get-image \
+            --repository-name "${REPOSITORY_NAME}" \
+            --image-ids imageTag="${SOURCE_TAG}" \
+            --query 'images[0].imageManifest' \
+            --output text)
+
+          aws ecr put-image \
+            --repository-name "${REPOSITORY_NAME}" \
+            --image-tag "${{ inputs.extra_tags }}" \
+            --image-manifest "${IMAGE_MANIFEST}"
+
 
           

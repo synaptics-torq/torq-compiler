@@ -17,6 +17,7 @@ jobs:
         scripts/install_dependencies.sh
         scripts/configure_python.sh
         requirements.txt
+      extra_tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'latest-tests' || '' }}
 
     permissions:
       contents: read
