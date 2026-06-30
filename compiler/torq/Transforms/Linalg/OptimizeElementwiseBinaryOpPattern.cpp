@@ -287,8 +287,9 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             );
         }
         auto isScalar = [&](Value input) {
-            if (isa_and_nonnull<arith::ConstantOp>(input.getDefiningOp()) &&
-                returnDenseElementAttr(input).getNumElements() == 1) {
+            auto denseAttr = returnDenseElementAttr(input);
+            if (isa_and_nonnull<arith::ConstantOp>(input.getDefiningOp()) && denseAttr &&
+                denseAttr.getNumElements() == 1) {
                 return true;
             }
             return false;

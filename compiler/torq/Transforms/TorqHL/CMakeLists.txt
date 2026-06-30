@@ -1,5 +1,6 @@
 set(sources
     FormDispatchRegionsPass.cpp
+    InlineDenseResourcesPass.cpp
     Passes.cpp
     TorqHLOptimizeSegmentationPass.cpp
 )

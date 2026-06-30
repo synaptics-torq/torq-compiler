@@ -20,6 +20,7 @@
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 #include "torch-mlir/Conversion/TorchToLinalg/TorchToLinalg.h"
+#include "torch-mlir/Dialect/Torch/Transforms/Passes.h"
 #include "torch-mlir/Dialect/TorchConversion/Transforms/Passes.h"
 #include "llvm/Support/Debug.h"
 
@@ -86,6 +87,18 @@ void registerTosaTransformPassPipeline() {
 }
 
 void buildTorchTransformPassPipeline(OpPassManager &passManager) {
+
+    // Inline DenseResourceElementsAttr to DenseElementsAttr.
+    //
+    // The IREE FX importer emits bf16 constants as e.g.
+    //   torch.vtensor.literal(dense_resource<torch_tensor_96_3_7_7_torch.bfloat16> :
+    //   tensor<96x3x7x7xbf16>)
+    // Leaving them as DenseResourceElementsAttr causes torq-compile to SIGABRT
+    // in Serializer::processGlobalOp while serializing the global memref for
+    // the constant. Converting them to inline DenseElementsAttr before the
+    // Torch backend pipeline avoids the crash.
+    // See torch-mlir issue #3840 for the upstream dense_resource problem.
+    passManager.addPass(createInlineDenseResourcesPass());
 
     passManager.addPass(mlir::torch::Torch::createLowerToBackendContractPass(10, true, true, {}, "")
     );

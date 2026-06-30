@@ -68,4 +68,24 @@ def TorqHLFoldTableConstant :
   ];
 }
 
+def InlineDenseResources :
+    Pass<"torq-inline-dense-resources", "mlir::ModuleOp"> {
+
+  let summary = "Inline DenseResourceElementsAttr to DenseElementsAttr";
+
+  let description = [{
+    Converts all DenseResourceElementsAttr attributes to DenseElementsAttr.
+    This works around a torch-mlir/IREE bug where bf16 dense_resource constants
+    get their result type incorrectly promoted to f32 during lowering.
+  }];
+
+  let constructor =
+      "mlir::syna::torq_hl::createInlineDenseResourcesPass()";
+
+  let dependentDialects = [
+        "::mlir::BuiltinDialect"
+    ];
+
+}
+
 #endif // IREE_COMPILER_DIALECT_TORQHL_TRANSFORMS_PASSES_TD_
