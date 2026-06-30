@@ -37,12 +37,17 @@ namespace mlir::syna::torq {
 
 llvm::cl::opt<bool> clConv1dAsMatmul(
     "torq-convert-conv1d-to-matmul", llvm::cl::desc("Convert conv1d to imToCol + matmul"),
-    llvm::cl::init(true)
+    llvm::cl::init(false)
 );
 
 llvm::cl::opt<bool> clConv1dToGenericConv1D(
     "torq-convert-conv1d-to-generic",
     llvm::cl::desc("Convert conv1d to generic conv1d (5D output with preserved kernel dim)"),
+    llvm::cl::init(false)
+);
+
+llvm::cl::opt<bool> clConv1dToConv2D(
+    "torq-convert-conv1d-to-conv2d", llvm::cl::desc("Convert conv1d to conv2d"),
     llvm::cl::init(false)
 );
 
@@ -771,31 +776,31 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
         auto filterType = cast<RankedTensorType>(filter.getType());
         auto outputType = cast<RankedTensorType>(output.getType());
 
-        // Add height dimension (1) to input: [N,C,W] -> [N,C,1,W]
+        // Add extra dimension (1) to input as W: [N,C,W] -> [N,C,W,1]
         // Need to use proper reassociation indices
         SmallVector<ReassociationIndices> inputReassoc = {{0}, {1}, {2, 3}};
         auto expandedInputType = RankedTensorType::get(
-            {inputType.getShape()[0], inputType.getShape()[1], 1, inputType.getShape()[2]},
+            {inputType.getShape()[0], inputType.getShape()[1], inputType.getShape()[2], 1},
             inputType.getElementType()
         );
 
         auto expandedInput =
             tensor::ExpandShapeOp::create(rewriter, loc, expandedInputType, input, inputReassoc);
 
-        // Add height dimension to filter: [F,C,W] -> [F,C,1,W]
+        // Add extra dimension (1) to filter: [F,C,W] -> [F,C,W,1]
         SmallVector<ReassociationIndices> filterReassoc = {{0}, {1}, {2, 3}};
         auto expandedFilterType = RankedTensorType::get(
-            {filterType.getShape()[0], filterType.getShape()[1], 1, filterType.getShape()[2]},
+            {filterType.getShape()[0], filterType.getShape()[1], filterType.getShape()[2], 1},
             filterType.getElementType()
         );
 
         auto expandedFilter =
             tensor::ExpandShapeOp::create(rewriter, loc, expandedFilterType, filter, filterReassoc);
 
-        // Add height dimension to output: [N,F,W] -> [N,F,1,W]
+        // Add extra dimension (1) to output: [N,F,W] -> [N,F,W,1]
         SmallVector<ReassociationIndices> outputReassoc = {{0}, {1}, {2, 3}};
         auto expandedOutputType = RankedTensorType::get(
-            {outputType.getShape()[0], outputType.getShape()[1], 1, outputType.getShape()[2]},
+            {outputType.getShape()[0], outputType.getShape()[1], outputType.getShape()[2], 1},
             outputType.getElementType()
         );
 
@@ -806,11 +811,11 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
         auto stridesAttr = convOp.getStrides();
         auto dilationsAttr = convOp.getDilations();
 
-        // Convert 1D strides/dilations to 2D (add height dimension)
-        SmallVector<int64_t> strides2d = {1};
-        strides2d.push_back(stridesAttr.getValues<int64_t>()[0]);
-        SmallVector<int64_t> dilations2d = {1};
-        dilations2d.push_back(dilationsAttr.getValues<int64_t>()[0]);
+        // Convert 1D strides/dilations to 2D (add 1 as width dimension)
+        SmallVector<int64_t> strides2d = {stridesAttr.getValues<int64_t>()[0]};
+        strides2d.push_back(1);
+        SmallVector<int64_t> dilations2d = {dilationsAttr.getValues<int64_t>()[0]};
+        dilations2d.push_back(1);
 
         auto attrType = RankedTensorType::get({2}, rewriter.getIntegerType(64));
         auto stridesAttr2d = DenseIntElementsAttr::get(attrType, strides2d);
@@ -851,8 +856,8 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
             }
         }
 
-        // Collapse height dimension: [N,F,1,W] -> [N,F,W]
-        // create a new reassociation indices for collapsing the height dimension
+        // Collapsing the width dimension ([N,F,Ow,1] -> [N,F,Ow])
+        // Create a new reassociation indices for collapsing the last dimension
         SmallVector<ReassociationIndices> collapseReassoc = {{0}, {1}, {2, 3}};
         auto collapsedResultType = RankedTensorType::get(
             {outputType.getShape()[0], outputType.getShape()[1], outputType.getShape()[2]},
@@ -1175,13 +1180,22 @@ void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &pat
     // Raise 1x1 matmul-as-conv to linalg.matmul before the NHWC->NCHW pass.
     patterns.insert<Conv2D1x1NhwcHwcfToMatmulPattern>(context);
 
+    // We have multiple ways of lowering conv1d.
+    // If none explicitly enabled, default to the matmul path.
+    // Later we can enable multiple paths and pick the best one for each conv1d
+    if (!clConv1dAsMatmul && !clConv1dToGenericConv1D && !clConv1dToConv2D) {
+        // Automatic selection of the best lowering path for conv1d
+        // Always use the matmul path for now
+        clConv1dAsMatmul = true;
+    }
+
     if (clConv1dAsMatmul) {
         patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
     }
-    else if (clConv1dToGenericConv1D) {
+    if (clConv1dToGenericConv1D) {
         patterns.insert<Conv1DNcwFcwToGenericConv1DPattern>(context);
     }
-    else {
+    if (clConv1dToConv2D) {
         patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
     }
 
