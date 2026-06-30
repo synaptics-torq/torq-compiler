@@ -1044,16 +1044,18 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
 
-    FloatAttr fromConstScalar(arith::ConstantOp constOp) const {
+    static std::optional<llvm::APFloat> fromConstScalar(arith::ConstantOp constOp) {
         if (!constOp) {
-            return nullptr;
+            return std::nullopt;
         }
         auto attr = constOp.getValue();
-        if (auto intAttr = dyn_cast<FloatAttr>(attr)) {
-            return intAttr;
+        if (auto floatAttr = dyn_cast<FloatAttr>(attr)) {
+            return floatAttr.getValue();
         }
         auto denseAttr = dyn_cast<DenseFPElementsAttr>(attr);
-        assert(denseAttr && "Unsupported constant type");
+        if (!denseAttr) {
+            return std::nullopt;
+        }
         // Only treat as scalar if all dimensions are 1
         // e.g. tensor<1x1xbf16> is scalar, tensor<1x1000xbf16> is NOT
         if (!llvm::all_of(denseAttr.getType().getShape(), [](int64_t dim) { return dim == 1; })) {
@@ -1061,30 +1063,122 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 llvm::dbgs() << "[fromConstScalar] Skipping non-scalar tensor: "
                              << denseAttr.getType() << "\n";
             });
-            return nullptr;
+            return std::nullopt;
         }
-        return denseAttr.getValues<FloatAttr>()[0];
+        return *denseAttr.getValues<llvm::APFloat>().begin();
     }
 
-    // trace back to the defining arith.ConstantOp outside the linalg.generic.
+    static std::optional<llvm::APFloat> convertFloatToType(llvm::APFloat value, Type type) {
+        auto floatType = dyn_cast<FloatType>(type);
+        if (!floatType) {
+            return std::nullopt;
+        }
+        bool losesInfo = false;
+        value.convert(
+            floatType.getFloatSemantics(), llvm::APFloat::rmNearestTiesToEven, &losesInfo
+        );
+        return value;
+    }
+
+    // Trace back to the defining arith.ConstantOp outside the linalg.generic.
     static arith::ConstantOp traceToConstOp(linalg::GenericOp srcOp, Value val) {
-        // If direct defining op is a constant (scalar case), return it
         if (auto constOp = val.getDefiningOp<arith::ConstantOp>()) {
             return constOp;
         }
-        // If it's a BlockArgument, trace back to the linalg.generic input
         if (auto blockArg = dyn_cast<BlockArgument>(val)) {
             unsigned argIdx = blockArg.getArgNumber();
-            // Block args: first N are inputs, last M are outputs (inits)
             auto inputs = srcOp.getDpsInputs();
             if (argIdx < inputs.size()) {
                 Value input = inputs[argIdx];
-                // Check if the input itself is defined by an arith.constant
                 return input.getDefiningOp<arith::ConstantOp>();
             }
         }
         return nullptr;
     };
+
+    // Trace back to a scalar float constant outside the linalg.generic.
+    static std::optional<llvm::APFloat> traceToScalarFloat(linalg::GenericOp srcOp, Value val) {
+        if (auto truncOp = val.getDefiningOp<arith::TruncFOp>()) {
+            auto value = traceToScalarFloat(srcOp, truncOp.getIn());
+            if (!value) {
+                return std::nullopt;
+            }
+            return convertFloatToType(*value, truncOp.getOut().getType());
+        }
+        if (auto extOp = val.getDefiningOp<arith::ExtFOp>()) {
+            auto value = traceToScalarFloat(srcOp, extOp.getIn());
+            if (!value) {
+                return std::nullopt;
+            }
+            return convertFloatToType(*value, extOp.getOut().getType());
+        }
+        // If direct defining op is a constant (scalar case), return it
+        if (auto constOp = val.getDefiningOp<arith::ConstantOp>()) {
+            return fromConstScalar(constOp);
+        }
+        // If it's a BlockArgument, trace back to the linalg.generic input
+        if (auto blockArg = dyn_cast<BlockArgument>(val)) {
+            if (blockArg.getOwner() != srcOp.getBody()) {
+                return std::nullopt;
+            }
+            unsigned argIdx = blockArg.getArgNumber();
+            // Block args: first N are inputs, last M are outputs (inits)
+            auto inputs = srcOp.getDpsInputs();
+            if (argIdx < inputs.size()) {
+                Value input = inputs[argIdx];
+                return traceToScalarFloat(srcOp, input);
+            }
+        }
+        return std::nullopt;
+    };
+
+    static Operation *getElementwiseAddSubOp(linalg::GenericOp op) {
+        Operation *binaryOp = getElementwiseBinaryOp(op, true);
+        if (binaryOp) {
+            return binaryOp;
+        }
+
+        Value output = op.getResultTensors()[0];
+        auto rank = cast<RankedTensorType>(output.getType()).getRank();
+        if (rank > 0 && op.getNumLoops() < 1) {
+            return nullptr;
+        }
+        if (op.getNumParallelLoops() != op.getNumLoops()) {
+            return nullptr;
+        }
+        if (op.getNumDpsInputs() != 2 && op.getNumDpsInputs() != 1) {
+            return nullptr;
+        }
+        if (op.getNumDpsInits() != 1) {
+            return nullptr;
+        }
+        for (int i = 0; i < op.getNumDpsInputs(); i++) {
+            if (!op.payloadUsesValueFromOperand(op.getDpsInputOperand(i))) {
+                return nullptr;
+            }
+        }
+
+        auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
+        if (!yieldOp || yieldOp.getNumOperands() != 1) {
+            return nullptr;
+        }
+
+        binaryOp = yieldOp.getOperand(0).getDefiningOp();
+        if (!binaryOp || !isa<arith::AddFOp, arith::SubFOp>(binaryOp) ||
+            binaryOp->getNumOperands() != 2) {
+            return nullptr;
+        }
+
+        auto isBlockArgOrScalarFloat = [&](Value value) {
+            return isa<BlockArgument>(value) || traceToScalarFloat(op, value).has_value();
+        };
+        if (!isBlockArgOrScalarFloat(binaryOp->getOperand(0)) ||
+            !isBlockArgOrScalarFloat(binaryOp->getOperand(1))) {
+            return nullptr;
+        }
+
+        return binaryOp;
+    }
 
     LogicalResult get2Inputs(
         linalg::GenericOp srcOp, Operation *binaryOp, Value &input0, Value &input1, float &newBias,
@@ -1115,14 +1209,13 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto lhs = binaryOp->getOperand(0);
         auto rhs = binaryOp->getOperand(1);
 
-        auto constOp = traceToConstOp(srcOp, rhs);
-        if (!constOp) {
-            constOp = traceToConstOp(srcOp, lhs);
-            if (constOp) {
+        auto data = traceToScalarFloat(srcOp, rhs);
+        if (!data) {
+            data = traceToScalarFloat(srcOp, lhs);
+            if (data) {
                 needReverse = true;
             }
         }
-        FloatAttr data = fromConstScalar(constOp);
         if (data) {
             if (needReverse && numLinalgInputs == 2) {
                 // input0 is the tensor input, input1 is the const scalar
@@ -1133,14 +1226,18 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 input0 = srcOp.getInputs()[0];
             }
 
-            newBias = data.getValue().convertToFloat();
-            rhs_is_scalar = true;
             // When one operand is a scalar constant, we create a 1-element tensor for input1 to
             // preserve add op semantics. This scalar is incorporated into the bias term instead of
             // being used directly as a tensor input.
             auto elemType = mlir::cast<RankedTensorType>(input0.getType()).getElementType();
+            auto scalar = convertFloatToType(*data, elemType);
+            if (!scalar) {
+                return rewriter.notifyMatchFailure(srcOp, "scalar constant must have float type");
+            }
+            newBias = scalar->convertToFloat();
+            rhs_is_scalar = true;
             RankedTensorType constType = RankedTensorType::get({1}, elemType);
-            DenseElementsAttr value = DenseElementsAttr::get(constType, data.getValue());
+            DenseElementsAttr value = DenseElementsAttr::get(constType, *scalar);
             input1 =
                 arith::ConstantOp::create(rewriter, srcOp.getLoc(), constType, value).getResult();
 
@@ -1238,7 +1335,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
 
-        Operation *binaryOp = getElementwiseBinaryOp(srcOp, true);
+        Operation *binaryOp = getElementwiseAddSubOp(srcOp);
         if (!binaryOp) {
             return rewriter.notifyMatchFailure(srcOp, "Not an elementwise binary op");
         }
