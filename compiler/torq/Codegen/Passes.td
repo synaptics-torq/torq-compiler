@@ -43,6 +43,24 @@ def ConvertTensorPadToLinalg
   ];
 }
 
+def DecomposeTensorConcat
+    : Pass<"torq-decompose-tensor-concat", "func::FuncOp"> {
+
+  let summary = "Decompose tensor.concat ops to insert_slice form";
+
+  let description = [{
+    Decompose tensor.concat ops to a chain of tensor.insert_slice ops so that
+    downstream destination-passing-style conversion can tie the tensor chain to
+    the dispatch output buffer.
+  }];
+
+  let constructor = "mlir::syna::torq::createDecomposeTensorConcatPass()";
+
+  let dependentDialects = [
+    "tensor::TensorDialect"
+  ];
+}
+
 def ValidToSamePadPass
     : InterfacePass<"torq-convert-conv-valid-to-same", "mlir::FunctionOpInterface"> {
 

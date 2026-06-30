@@ -16,6 +16,7 @@ set(sources
     CheckCssStackSizePass.cpp
     CompileCpuProgramsPass.cpp
     ConvertTensorPadToLinalgPass.cpp
+    DecomposeTensorConcatPass.cpp
     CompileNSSInvocationsPass.cpp
     CompileSliceInvocationsPass.cpp
     CompileTimeConstComputePass.cpp

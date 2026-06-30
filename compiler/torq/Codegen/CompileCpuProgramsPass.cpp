@@ -21,9 +21,6 @@
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
-#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
-#include "mlir/IR/DialectRegistry.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
@@ -90,29 +87,6 @@ static llvm::cl::opt<std::string> clTargetHostCpuFeatures(
 );
 
 namespace {
-
-class DecomposeTensorConcatPass
-    : public PassWrapper<DecomposeTensorConcatPass, OperationPass<func::FuncOp>> {
-  public:
-    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DecomposeTensorConcatPass);
-
-    void getDependentDialects(DialectRegistry &registry) const override {
-        registry.insert<tensor::TensorDialect>();
-    }
-
-    void runOnOperation() override {
-        RewritePatternSet patterns(&getContext());
-        tensor::populateDecomposeTensorConcatPatterns(patterns);
-
-        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
-            return signalPassFailure();
-        }
-    }
-};
-
-std::unique_ptr<OperationPass<func::FuncOp>> createDecomposeTensorConcatPass() {
-    return std::make_unique<DecomposeTensorConcatPass>();
-}
 
 class CssLinker {
 
