@@ -174,6 +174,35 @@ AffineMap nchwMap(AffineMap origMap, MLIRContext *ctx) {
     return remapChannelDim(origMap, ctx);
 }
 
+// After the NHWC→NCHW relabel (d3→d1, see remapChannelDim) a broadcast generic's
+// indexing map can become invalid.  A matmul lowered to a 1x1 conv carries an
+// input-zero-point correction broadcast with map (d1,d2,d3) over a [1,1,C] tensor;
+// relabeling d3→d1 collapses it to (d1,d2,d1), where d1 repeats.  The rebuilt
+// generic then fails verification ("dimension #2 to be 1, but found C").  Detect
+// such a non-injective relabel so the caller can leave the cluster in NHWC. (#1828)
+bool nchwRelabelWouldBeInvalid(ArrayRef<Operation *> ops) {
+    for (Operation *op : ops) {
+        auto genericOp = dyn_cast<linalg::GenericOp>(op);
+        if (!genericOp)
+            continue;
+        for (AffineMap map : genericOp.getIndexingMapsArray()) {
+            // 4D maps become the identity (nchwMap), which is always valid.
+            if (map.getNumResults() == 4)
+                continue;
+            AffineMap relabeled = remapChannelDim(map, map.getContext());
+            SmallVector<unsigned, 4> dims;
+            for (AffineExpr expr : relabeled.getResults())
+                if (auto dim = dyn_cast<AffineDimExpr>(expr))
+                    dims.push_back(dim.getPosition());
+            for (unsigned i = 0; i + 1 < dims.size(); ++i)
+                for (unsigned j = i + 1; j < dims.size(); ++j)
+                    if (dims[i] == dims[j])
+                        return true;
+        }
+    }
+    return false;
+}
+
 // Convert a linalg.generic op from NHWC to NCHW layout.
 // This function:
 //   - Remaps inputs using the provided valMap (NHWC -> NCHW replacements)
@@ -537,6 +566,22 @@ void convertNhwcOpToNchwOp(FunctionOpInterface funcOp) {
                 llvm::dbgs() << "[nhwc→nchw]   " << anchorOp->getName()
                              << " standalone (no fusion)\n"
             );
+        }
+
+        // A matmul lowered to a 1x1 conv (1x1 spatial output) can carry broadcast
+        // operands — e.g. an input-zero-point correction with map (d1,d2,d3) over a
+        // [1,1,C] tensor — whose NHWC→NCHW d3→d1 relabel collapses to an invalid
+        // (non-injective) map and fails verification.  NCHW gives a 1x1-spatial conv
+        // no benefit, so leave the whole cluster in NHWC instead. (#1828)
+        auto outTy = dyn_cast<RankedTensorType>(anchorOp->getResult(0).getType());
+        bool is1x1Spatial =
+            outTy && outTy.getRank() == 4 && outTy.getShape()[1] == 1 && outTy.getShape()[2] == 1;
+        if (is1x1Spatial && nchwRelabelWouldBeInvalid(neededOps)) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[nhwc→nchw]   skipping matmul-as-conv (unsafe broadcast relabel) "
+                             << anchorOp->getName() << "\n"
+            );
+            continue;
         }
 
         clusters.push_back({anchorOp, neededOps, outOp});
