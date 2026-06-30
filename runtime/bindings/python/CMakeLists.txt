@@ -12,6 +12,7 @@ set(_TORQ_RUNTIME_PYTHON_OUTPUT_DIR "${IREE_BINARY_DIR}/runtime/bindings/python"
 set(_TORQ_RUNTIME_PYTHON_SRCS
   "torq/runtime/__init__.py"
   "torq/runtime/base.py"
+  "torq/runtime/profiling.py"
   "torq/runtime/utils.py"
   "torq/runtime/vmfb.py"
   "torq/runtime/scripts/__init__.py"

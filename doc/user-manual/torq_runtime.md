@@ -76,6 +76,8 @@ print(f"Peak DRAM footprint: {stats.peak_dram_footprint_bytes / 1024 / 1024:.1f}
 print(f"Average memory usage: {stats.avg_anon_mem_bytes / 1024 / 1024:.1f} MB")
 print(f"Peak memory usage: {stats.peak_anon_mem_bytes / 1024 / 1024:.1f} MB")
 print(f"Average CPU usage: {stats.avg_cpu_percent:.1f}%")
+if stats.avg_npu_load_percent is not None:
+    print(f"Average NPU usage: {stats.avg_npu_load_percent:.1f}%")
 ```
 
 ### Running with Custom Inputs
@@ -155,6 +157,7 @@ VMFBInferenceRunner(
 | `model_path` | `PathLike` | Path to the loaded model file. |
 | `infer_time_ms` | `float` | Elapsed time in milliseconds for the last call to `infer()`. |
 | `device` | `HalDevice` | The underlying IREE HAL device. |
+| `function_names` | `list[str]` | Exported VMFB function names discovered after the module is loaded. Defaults to an empty list. |
 | `inputs_info` | `list[TensorInfo] \| None` | Input tensor metadata extracted from the model, or `None` if unavailable. |
 | `outputs_info` | `list[TensorInfo] \| None` | Output tensor metadata extracted from the model, or `None` if unavailable. |
 
@@ -176,7 +179,7 @@ Allocate a device buffer and copy a host NumPy array into it.
 
 ### `profile_vmfb_inference_time`
 
-Load a `.vmfb` model and run inference multiple times for profiling.
+Load or reuse a `.vmfb` model and run inference multiple times for profiling.
 
 ```python
 profile_vmfb_inference_time(
@@ -198,7 +201,7 @@ profile_vmfb_inference_time(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model_path` | `str \| PathLike` | *(required)* | Path to the `.vmfb` file. |
+| `model_path` | `str \| PathLike \| VMFBInferenceRunner` | *(required)* | Path to the `.vmfb` file or an existing runner. |
 | `inputs` | `Iterable[NDArray] \| None` | `None` | Input arrays. Generated randomly from model metadata when `None`. |
 | `n_iters` | `int` | `5` | Number of timed inference iterations. |
 | `do_warmup` | `bool` | `True` | Whether to run one untimed warmup pass first. |
@@ -214,7 +217,7 @@ profile_vmfb_inference_time(
 
 ### `profile_vmfb_resources`
 
-Load a `.vmfb` model and run inference multiple times, collecting DRAM and CPU statistics alongside timing. Requires a Linux target (reads from `/proc`).
+Load or reuse a `.vmfb` model and run inference multiple times, collecting DRAM, CPU, and Torq NPU statistics alongside timing. Requires a Linux target for process statistics (reads from `/proc`). NPU load is reported when `/sys/class/misc/torq/statistics/torq_inference_time` is available.
 
 ```python
 from torq.runtime import profile_vmfb_resources
@@ -239,7 +242,7 @@ profile_vmfb_resources(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model_path` | `str \| PathLike` | *(required)* | Path to the `.vmfb` file. |
+| `model_path` | `str \| PathLike \| VMFBInferenceRunner` | *(required)* | Path to the `.vmfb` file or an existing runner. |
 | `inputs` | `Iterable[NDArray] \| None` | `None` | Input arrays. Generated randomly from model metadata when `None`. |
 | `n_iters` | `int` | `5` | Number of timed inference iterations. |
 | `do_warmup` | `bool` | `True` | Whether to run one untimed warmup pass first. |
@@ -269,6 +272,8 @@ from torq.runtime.profiling import ProfileStats
 | `avg_anon_mem_bytes` | `int` | Average anonymous memory (heap/stack) in bytes, excluding file-backed pages. |
 | `peak_anon_mem_bytes` | `int` | Peak anonymous memory in bytes. |
 | `avg_cpu_percent` | `float` | Average CPU utilisation as a percentage (across all cores) during timed iterations. |
+| `npu_inference_time_us` | `int \| None` | Torq NPU execution time accumulated during timed iterations, or `None` when unavailable. |
+| `avg_npu_load_percent` | `float \| None` | Average Torq NPU utilisation during timed iterations, or `None` when unavailable. |
 
 **Methods:**
 
@@ -287,11 +292,12 @@ print(stats.summary())
 #   Avg memory usage:    23.4 MB  (heap/stack only, excludes model file)
 #   Peak memory usage:   28.1 MB
 #   Avg CPU usage:       47.3%
+#   Avg NPU usage:       82.4%
 ```
 
 ### `ResourceSampler`
 
-A reusable background sampler for collecting process-wide DRAM and CPU metrics around arbitrary workloads. Used internally by `profile_vmfb_resources` but available for custom profiling scenarios.
+A reusable background sampler for collecting process-wide DRAM and CPU metrics plus optional Torq NPU load around arbitrary workloads. Used internally by `profile_vmfb_resources` but available for custom profiling scenarios.
 
 ```python
 from torq.runtime.profiling import ResourceSampler
@@ -301,6 +307,7 @@ from torq.runtime.profiling import ResourceSampler
 |-----------|------|---------|-------------|
 | `pid` | `int` | *(required)* | Process ID to monitor. |
 | `interval` | `float` | `0.01` | Sampling interval in seconds. |
+| `npu_inference_time_path` | `str \| PathLike \| None` | Torq sysfs path | Path to the Torq cumulative NPU inference-time counter, or `None` to disable NPU load reporting. |
 
 **Properties (available after `stop()`):**
 
@@ -311,6 +318,8 @@ from torq.runtime.profiling import ResourceSampler
 | `avg_anon_rss` | `int` | Average anonymous RSS in bytes. |
 | `peak_anon_rss` | `int` | Peak anonymous RSS in bytes. |
 | `avg_cpu_percent` | `float` | Average CPU utilisation percentage. |
+| `npu_inference_time_us` | `int \| None` | Torq NPU execution time accumulated while the sampler was running, or `None` when unavailable. |
+| `avg_npu_load_percent` | `float \| None` | Average Torq NPU utilisation while the sampler was running, or `None` when unavailable. |
 
 ### `run_vmfb`
 

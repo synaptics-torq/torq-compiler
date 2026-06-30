@@ -8,6 +8,7 @@ import os
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from time import perf_counter_ns
 from typing import Literal
 
 import numpy.typing as npt
@@ -20,6 +21,8 @@ __all__ = [
     "ResourceSampler",
     "profile_vmfb_resources",
 ]
+
+TORQ_INFERENCE_TIME_PATH = "/sys/class/misc/torq/statistics/torq_inference_time"
 
 
 @dataclass
@@ -35,6 +38,10 @@ class ProfileStats:
     """Average CPU utilisation percentage. Measured process-wide; includes
     the Python interpreter, the sampling thread, and any other activity
     in the process."""
+    npu_inference_time_us: int | None = None
+    """NPU execution time accumulated by the Torq driver during profiling."""
+    avg_npu_load_percent: float | None = None
+    """Average NPU utilisation percentage during the profiling window."""
 
     def summary(self) -> str:
         """Return a human-readable summary of the profiling results."""
@@ -51,6 +58,10 @@ class ProfileStats:
             f"  Peak memory usage:   {_mb(self.peak_anon_mem_bytes)}",
             f"  Avg CPU usage:       {self.avg_cpu_percent:.1f}%",
         ]
+        if self.avg_npu_load_percent is not None:
+            lines.append(f"  Avg NPU usage:       {self.avg_npu_load_percent:.1f}%")
+        else:
+            lines.append("  Avg NPU usage:       unavailable")
         return "\n".join(lines)
 
 
@@ -95,8 +106,17 @@ def _read_process_cpu_times(pid: int) -> tuple[float, float] | None:
         return None
 
 
+def _read_npu_inference_time_us(path: str | os.PathLike) -> int | None:
+    """Return cumulative Torq NPU inference time in microseconds."""
+    try:
+        with open(path, "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 class ResourceSampler:
-    """Background thread that periodically samples memory and CPU usage.
+    """Background thread that samples process resources and optional NPU load.
 
     Usage::
 
@@ -107,11 +127,22 @@ class ResourceSampler:
         print(sampler.avg_rss, sampler.peak_rss)
         print(sampler.avg_anon_rss, sampler.peak_anon_rss)
         print(sampler.avg_cpu_percent)
+        print(sampler.avg_npu_load_percent)
     """
 
-    def __init__(self, pid: int, interval: float = 0.01):
+    def __init__(
+        self,
+        pid: int,
+        interval: float = 0.01,
+        npu_inference_time_path: str | os.PathLike | None = TORQ_INFERENCE_TIME_PATH,
+    ):
         self._pid = pid
         self._interval = interval
+        self._npu_inference_time_path = npu_inference_time_path
+        self._npu_start_us: int | None = None
+        self._npu_end_us: int | None = None
+        self._npu_start_time_ns: int | None = None
+        self._npu_end_time_ns: int | None = None
         self._stop = threading.Event()
         self._rss_samples: list[int] = []
         self._anon_rss_samples: list[int] = []
@@ -121,11 +152,17 @@ class ResourceSampler:
 
     def start(self):
         self._cpu_start = _read_process_cpu_times(self._pid)
+        if self._npu_inference_time_path is not None:
+            self._npu_start_us = _read_npu_inference_time_us(self._npu_inference_time_path)
+            self._npu_start_time_ns = perf_counter_ns()
         self._thread.start()
 
     def stop(self):
         self._stop.set()
         self._thread.join()
+        if self._npu_inference_time_path is not None:
+            self._npu_end_time_ns = perf_counter_ns()
+            self._npu_end_us = _read_npu_inference_time_us(self._npu_inference_time_path)
         self._cpu_end = _read_process_cpu_times(self._pid)
 
     def _run(self):
@@ -164,9 +201,30 @@ class ResourceSampler:
                 return (proc_delta / total_delta) * 100.0 * ncpus
         return 0.0
 
+    @property
+    def npu_inference_time_us(self) -> int | None:
+        if self._npu_start_us is None or self._npu_end_us is None:
+            return None
+        if self._npu_end_us < self._npu_start_us:
+            return None
+        return self._npu_end_us - self._npu_start_us
+
+    @property
+    def avg_npu_load_percent(self) -> float | None:
+        if (
+            self.npu_inference_time_us is None
+            or self._npu_start_time_ns is None
+            or self._npu_end_time_ns is None
+        ):
+            return None
+        window_us = (self._npu_end_time_ns - self._npu_start_time_ns) / 1000.0
+        if window_us <= 0:
+            return None
+        return (self.npu_inference_time_us * 100.0) / window_us
+
 
 def profile_vmfb_resources(
-    model_path: str | os.PathLike,
+    model_path: str | os.PathLike | VMFBInferenceRunner,
     inputs: Iterable[npt.NDArray] | None = None,
     *,
     n_iters: int = 5,
@@ -179,10 +237,11 @@ def profile_vmfb_resources(
     runtime_flags: Iterable[str] = None,
     device_io: bool = False,
 ) -> ProfileStats:
-    """Profile VMFB inference including DRAM and CPU statistics.
+    """Profile VMFB inference including DRAM, CPU, and NPU statistics.
 
     Args:
-        model_path: Path to the ``.vmfb`` file.
+        model_path: Path to the ``.vmfb`` file or an existing
+            :class:`~torq.runtime.VMFBInferenceRunner`.
         inputs: Input arrays; generated randomly from model metadata when *None*.
         n_iters: Number of timed inference iterations.
         do_warmup: If True, run one untimed warmup pass first.
@@ -196,21 +255,24 @@ def profile_vmfb_resources(
 
     Returns:
         A :class:`ProfileStats` with average inference time, DRAM usage,
-        and CPU utilisation.
+        CPU utilisation, and NPU utilisation when available.
 
     Raises:
         ValueError: If *inputs* is None and reflection metadata is unavailable.
     """
-    runner = VMFBInferenceRunner(
-        model_path,
-        function=function,
-        device_uri=device,
-        n_threads=n_threads,
-        load_method=load_method,
-        load_model_to_mem=load_model_to_mem,
-        runtime_flags=runtime_flags,
-        device_outputs=device_io,
-    )
+    if isinstance(model_path, VMFBInferenceRunner):
+        runner = model_path
+    else:
+        runner = VMFBInferenceRunner(
+            model_path,
+            function=function,
+            device_uri=device,
+            n_threads=n_threads,
+            load_method=load_method,
+            load_model_to_mem=load_model_to_mem,
+            runtime_flags=runtime_flags,
+            device_outputs=device_io,
+        )
     if not inputs:
         if runner.inputs_info is None:
             raise ValueError(
@@ -239,4 +301,6 @@ def profile_vmfb_resources(
         avg_anon_mem_bytes=sampler.avg_anon_rss,
         peak_anon_mem_bytes=sampler.peak_anon_rss,
         avg_cpu_percent=sampler.avg_cpu_percent,
+        npu_inference_time_us=sampler.npu_inference_time_us,
+        avg_npu_load_percent=sampler.avg_npu_load_percent,
     )

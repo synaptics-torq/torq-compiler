@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import mmap as mmap_mod
 import os
 import logging
@@ -77,7 +79,7 @@ def run_vmfb(
 
 
 def profile_vmfb_inference_time(
-    model_path: str | os.PathLike,
+    model_path: str | os.PathLike | VMFBInferenceRunner,
     inputs: Iterable[npt.NDArray] | None = None,
     *,
     n_iters: int = 5,
@@ -90,10 +92,11 @@ def profile_vmfb_inference_time(
     runtime_flags: Iterable[str] = None,
     device_io: bool = False,
 ):
-    """Load a VMFB model and run inference ``n_iters`` times for profiling.
+    """Load or reuse a VMFB model and run inference ``n_iters`` times for profiling.
 
     Args:
-        model_path: Path to the ``.vmfb`` file.
+        model_path: Path to the ``.vmfb`` file or an existing
+            :class:`VMFBInferenceRunner`.
         inputs: Input arrays; generated randomly from model metadata when *None*.
         n_iters: Number of timed inference iterations.
         do_warmup: If True, run one untimed warmup pass first.
@@ -111,16 +114,19 @@ def profile_vmfb_inference_time(
     Raises:
         ValueError: If *inputs* is None and reflection metadata is unavailable.
     """
-    runner = VMFBInferenceRunner(
-        model_path,
-        function=function,
-        device_uri=device,
-        n_threads=n_threads,
-        load_method=load_method,
-        load_model_to_mem=load_model_to_mem,
-        runtime_flags=runtime_flags,
-        device_outputs=device_io,
-    )
+    if isinstance(model_path, VMFBInferenceRunner):
+        runner = model_path
+    else:
+        runner = VMFBInferenceRunner(
+            model_path,
+            function=function,
+            device_uri=device,
+            n_threads=n_threads,
+            load_method=load_method,
+            load_model_to_mem=load_model_to_mem,
+            runtime_flags=runtime_flags,
+            device_outputs=device_io,
+        )
     if not inputs:
         if runner.inputs_info is None:
             raise ValueError("Input tensor info unavailable from model reflection data; please provide inputs explicitly")
@@ -199,6 +205,7 @@ class VMFBInferenceRunner(InferenceRunner):
         self._invoker = None
         self._inputs_info = None
         self._outputs_info = None
+        self._function_names: list[str] = []
         if load_model_to_mem:
             self._load_invoker()
         self._logger.info("Loaded VMFB model '%s'", str(self._model_path))
@@ -210,6 +217,10 @@ class VMFBInferenceRunner(InferenceRunner):
     @property
     def outputs_info(self) -> list[TensorInfo] | None:
         return self._outputs_info
+
+    @property
+    def function_names(self) -> list[str]:
+        return self._function_names
 
     @property
     def device(self):
@@ -241,8 +252,13 @@ class VMFBInferenceRunner(InferenceRunner):
             module = _ctx.modules[vm_module.name]
             self._logger.debug("'%s' preloaded via mmap + madvise", str(self._model_path))
 
-        if self._function not in vm_module.function_names:
-            raise ValueError(f"Function '{self._function}' not found in '{self._model_path}'")
+        self._function_names = list(vm_module.function_names)
+        if self._function not in self._function_names:
+            valid_functions = ", ".join(repr(name) for name in self._function_names) or "<none>"
+            raise ValueError(
+                f"Function '{self._function}' not found in '{self._model_path}'. "
+                f"Valid functions: {valid_functions}"
+            )
         self._invoker = module[self._function]
         io_info = get_inputs_and_outputs(self._invoker, self._function)
         if io_info:
