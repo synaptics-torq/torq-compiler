@@ -662,7 +662,7 @@ iree_status_t TorqExecutable::initialize() {
   
   auto runtimeVersion = ns(ExecutableDef_runtime_version_get(executableDef));
 
-  if (runtimeVersion != 2) {
+  if (runtimeVersion > 2) {
     return iree_make_status(IREE_STATUS_UNAVAILABLE, "executable runtime version %d does not match expected version %d", runtimeVersion, 2);
   }
 
