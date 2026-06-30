@@ -41,9 +41,9 @@ namespace mlir::syna::torq {
 
 /// Lowers linalg::GenericOp (from Conv1D with preserved kernel dim) to torq_hl::Conv1DOp.
 ///
-/// This pattern matches a 5D linalg.generic op produced by Conv1DNcwFcwToGenericConv1DPattern
-/// and lowers it directly to torq_hl.conv1d. The 5D structure [N, F, 1, Ow, Kw] is preserved
-/// in the output, allowing downstream patterns to handle the kernel reduction.
+/// This pattern matches a linalg.generic op (5 or 6 loop dims) produced by
+/// Conv1DNcwFcwToGenericConv1DPattern and lowers it directly to torq_hl.conv1d. Output tensor
+/// shape [N, F, 1, Ow, Kw] is preserved for downstream kernel reduction.
 ///
 /// Input/Output Shapes (NCHW layout):
 ///   - Input: [N, C, 1, W] (4D)
@@ -142,7 +142,7 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
         }
 
         // Extract stride and dilation from input affine map
-        // Input map: (n, f, kh, ow, kw) -> (n, 0, kh, ow * stride + kw * dilation)
+        // Input map: (n,f,kh,ow,kw[,c]) -> (n,c,kh,ow * stride + kw * dilation)
         int64_t strideValue = 1;
         int64_t dilationValue = 1;
 
@@ -178,10 +178,14 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
             }
         }
 
-        // Should be all parallel: (parallel, parallel, parallel, parallel, parallel)
+        // Five parallel iterators, or six with a final reduction over C.
         auto iterators = genericOp.getIteratorTypesArray();
-        if (iterators.size() != 5) {
-            return rewriter.notifyMatchFailure(genericOp, "Expected 5 iterator types");
+        if (iterators.size() == 6) {
+            if (iterators.back() != utils::IteratorType::reduction)
+                return failure();
+        }
+        else if (iterators.size() != 5) {
+            return failure();
         }
 
         // The generic op should perform a multiply operation

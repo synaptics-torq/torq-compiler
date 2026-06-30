@@ -53,7 +53,14 @@ LogicalResult transformWithReduce(torq_hl::Conv1DOp op, PatternRewriter &rewrite
     );
     assert(inputShape[In::H] == 1 && outputShape[In::H] == 1);
     assert(biasShape[0] == outputChannels);
-    assert(dataType == DType::bf16 && weightType == DType::bf16 && biasType == DType::fp32);
+    // Only bf16 data/weights with an fp32 bias are supported by this kernel. Emit a
+    // diagnostic instead of asserting so an unsupported dtype (e.g. an f32 conv1d that
+    // slipped past the front-end routing) fails the compile cleanly rather than aborting.
+    if (dataType != DType::bf16 || weightType != DType::bf16 || biasType != DType::fp32) {
+        return op.emitError(
+            "native conv1d HW lowering requires bf16 data, bf16 weights, and fp32 bias"
+        );
+    }
 
     Slice slice;
     const int32_t inBlockSize = slice.alu.iWidth(dataType, weightType);
