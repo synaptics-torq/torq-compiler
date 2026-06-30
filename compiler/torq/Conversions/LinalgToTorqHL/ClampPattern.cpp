@@ -44,6 +44,33 @@ static float toFloat(arith::ConstantOp cst) {
     return mlir::cast<FloatAttr>(cst.getValue()).getValue().convertToFloat();
 }
 
+// Resolve a clamp bound to its scalar float value. The bound may be either an
+// inlined arith.constant in the body, or a linalg input block argument backed by
+// a splat constant operand. The latter is how torch lowers an ONNX Clip/ReLU6
+// whose min/max are constant tensors: the bounds become 0-D constant tensor
+// inputs (block args) instead of inlined constants in the body.
+static std::optional<float> resolveConstBound(Value v, linalg::GenericOp op) {
+    auto fromConst = [](arith::ConstantOp cst) -> std::optional<float> {
+        if (auto f = dyn_cast<FloatAttr>(cst.getValue()))
+            return f.getValue().convertToFloat();
+        if (auto d = dyn_cast<DenseElementsAttr>(cst.getValue()))
+            if (d.isSplat() && isa<FloatType>(d.getElementType()))
+                return d.getSplatValue<APFloat>().convertToFloat();
+        return std::nullopt;
+    };
+
+    if (auto cst = v.getDefiningOp<arith::ConstantOp>())
+        return fromConst(cst);
+
+    // Block arguments [0, numInputs) map 1:1 to the generic's input operands.
+    auto barg = dyn_cast<BlockArgument>(v);
+    if (!barg || barg.getArgNumber() >= op.getInputs().size())
+        return std::nullopt;
+    if (auto cst = op.getInputs()[barg.getArgNumber()].getDefiningOp<arith::ConstantOp>())
+        return fromConst(cst);
+    return std::nullopt;
+}
+
 // Shared precondition for the two cmpf/select matchers: single f32/bf16 input,
 // single output, exactly 5 ops in the body.
 static bool isFloatClampCandidate(linalg::GenericOp op) {
@@ -188,6 +215,78 @@ static bool matchUnorderedClamp(linalg::GenericOp srcOp, ClampInfo &info) {
     info.variant = ClampVariant::Unordered;
     info.minFloat = toFloat(cstMin);
     info.maxFloat = toFloat(cstMax);
+    return true;
+}
+
+// Unordered clamp whose bounds are passed as splat-constant *inputs* (block
+// args) rather than inlined constants. This is how torch lowers an ONNX Clip /
+// ReLU6 whose min/max are constant tensors:
+//
+//   %0 = linalg.generic ... ins(%data, %cstMin, %cstMax) outs(%out) {
+//   ^bb0(%in: bf16, %inMin: bf16, %inMax: bf16, %out: bf16):
+//     %cmp0 = arith.cmpf ult, %in, %inMin : bf16
+//     %sel0 = arith.select %cmp0, %inMin, %in : bf16
+//     %cmp1 = arith.cmpf ugt, %sel0, %inMax : bf16
+//     %sel1 = arith.select %cmp1, %inMax, %sel0 : bf16
+//     linalg.yield %sel1 : bf16
+//   }
+//
+// Structurally identical to matchUnorderedClamp, but the bounds are resolved
+// through the input operands instead of from inlined constants, so it keeps the
+// op on the NSS slice instead of falling through to the Host/CSS path.
+static bool matchUnorderedClampConstInputs(linalg::GenericOp srcOp, ClampInfo &info) {
+    if (srcOp.getInputs().empty() || srcOp.getOutputs().size() != 1)
+        return false;
+    auto inputType = dyn_cast<RankedTensorType>(srcOp.getInputs()[0].getType());
+    if (!inputType)
+        return false;
+    auto elemTy = inputType.getElementType();
+    if ((!elemTy.isF32() && !elemTy.isBF16()) ||
+        srcOp.getRegion().front().getOperations().size() != 5)
+        return false;
+
+    auto &block = srcOp.getRegion().front();
+
+    auto cmpfUlt = dyn_cast<arith::CmpFOp>(block.front());
+    if (!cmpfUlt || cmpfUlt.getPredicate() != arith::CmpFPredicate::ULT)
+        return false;
+    auto inArg = dyn_cast<BlockArgument>(cmpfUlt.getLhs());
+    auto minVal = resolveConstBound(cmpfUlt.getRhs(), srcOp);
+    if (!inArg || inArg.getArgNumber() != 0 || !minVal)
+        return false;
+
+    auto select1 = dyn_cast<arith::SelectOp>(cmpfUlt->getNextNode());
+    if (!select1 || select1.getCondition() != cmpfUlt.getResult())
+        return false;
+    if (!resolveConstBound(select1.getTrueValue(), srcOp))
+        return false;
+    auto inArg2 = dyn_cast<BlockArgument>(select1.getFalseValue());
+    if (!inArg2 || inArg2.getArgNumber() != 0)
+        return false;
+
+    auto cmpfUgt = dyn_cast<arith::CmpFOp>(select1->getNextNode());
+    if (!cmpfUgt || cmpfUgt.getPredicate() != arith::CmpFPredicate::UGT)
+        return false;
+    auto maxVal = resolveConstBound(cmpfUgt.getRhs(), srcOp);
+    if (!maxVal || cmpfUgt.getLhs() != select1.getResult())
+        return false;
+
+    auto select2 = dyn_cast<arith::SelectOp>(cmpfUgt->getNextNode());
+    if (!select2 || select2.getCondition() != cmpfUgt.getResult())
+        return false;
+    if (!resolveConstBound(select2.getTrueValue(), srcOp))
+        return false;
+    if (select2.getFalseValue() != select1.getResult())
+        return false;
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(select2->getNextNode());
+    if (!yieldOp || yieldOp.getValues().size() != 1 ||
+        yieldOp.getValues()[0] != select2.getResult())
+        return false;
+
+    info.variant = ClampVariant::Unordered;
+    info.minFloat = *minVal;
+    info.maxFloat = *maxVal;
     return true;
 }
 
@@ -342,8 +441,8 @@ static bool matchFusedClampTruncf(linalg::GenericOp srcOp, ClampInfo &info) {
 
 static bool matchClamp(linalg::GenericOp srcOp, ClampInfo &info) {
     return matchOrderedClamp(srcOp, info) || matchNaiveOrderedClamp(srcOp, info) ||
-           matchUnorderedClamp(srcOp, info) || matchReLU(srcOp, info) ||
-           matchFusedClampTruncf(srcOp, info);
+           matchUnorderedClamp(srcOp, info) || matchUnorderedClampConstInputs(srcOp, info) ||
+           matchReLU(srcOp, info) || matchFusedClampTruncf(srcOp, info);
 }
 
 struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
