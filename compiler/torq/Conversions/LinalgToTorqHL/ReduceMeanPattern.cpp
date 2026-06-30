@@ -112,9 +112,9 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expected div or mul op");
 
         // if output is used by CollapseShape, fold collapseShape op
-        if (output.hasOneUse() && (isa<tensor::CollapseShapeOp>(*output.getUsers().begin()) ||
-                                   isCollapseOrExpandShapeGeneric(*output.getUsers().begin()))) {
-            output = output.getUsers().begin()->getResult(0);
+        if (Operation *user = getSingleUser(output);
+            user && (isa<tensor::CollapseShapeOp>(user) || isCollapseOrExpandShapeGeneric(user))) {
+            output = user->getResult(0);
         }
 
         auto reducesumOp = srcOp.getInputs()[0].getDefiningOp<linalg::GenericOp>();

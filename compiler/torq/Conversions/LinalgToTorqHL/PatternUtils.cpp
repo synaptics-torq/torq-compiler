@@ -127,12 +127,6 @@ std::optional<float> getFloatValue(Value val) {
     return fillValueAPFloat.convertToFloat();
 }
 
-Operation *getSingleUser(Value value) {
-    if (!value.hasOneUse())
-        return {};
-    return *value.getUsers().begin();
-}
-
 bool markOpFuseGroup(
     Operation *op, PatternRewriter &rewriter, const std::optional<IntegerAttr> &maybeFuseGroupAttr
 ) {
@@ -610,19 +604,16 @@ bool foldBackwardRescale(Value &value, ScaleInfo &scaleInfo) {
 // an arith.truncf, if its output is BF16 truncation pattern and
 // forward `output` to that genericOp's result.
 static void foldForwardTruncFOp(Value &value) {
-    if (value.hasOneUse()) {
-        auto *userOp = *value.getUsers().begin();
-        if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
-            Block *body = genericOp.getBody();
+    if (auto genericOp = getSingleUser<linalg::GenericOp>(value)) {
+        Block *body = genericOp.getBody();
 
-            // Strict check: body has a truncf
-            if (isa<arith::TruncFOp>(body->front())) {
-                if (dyn_cast<arith::TruncFOp>(body->front()).getOut().getType().isBF16()) {
-                    value = genericOp.getResult(0);
-                }
-                else {
-                    LLVM_DEBUG({ llvm::dbgs() << "truncFOp output type request bf16\n"; });
-                }
+        // Strict check: body has a truncf
+        if (isa<arith::TruncFOp>(body->front())) {
+            if (dyn_cast<arith::TruncFOp>(body->front()).getOut().getType().isBF16()) {
+                value = genericOp.getResult(0);
+            }
+            else {
+                LLVM_DEBUG({ llvm::dbgs() << "truncFOp output type request bf16\n"; });
             }
         }
     }
@@ -953,8 +944,8 @@ ScaleClampInfo foldForwardScaleClamp(
     linalg::GenericOp genericOp = getSingleUser<linalg::GenericOp>(value);
     if (!genericOp) {
         // close to scaleclamp generic op to check expandshapeop for integer dtype
-        if (value.hasOneUse() && isa<tensor::ExpandShapeOp>(*value.getUsers().begin())) {
-            value = value.getUsers().begin()->getResult(0);
+        if (auto expandOp = getSingleUser<tensor::ExpandShapeOp>(value)) {
+            value = expandOp.getResult();
             genericOp = getSingleUser<linalg::GenericOp>(value);
         }
         if (!genericOp) {
@@ -1112,7 +1103,7 @@ ScaleClampInfo foldForwardScaleClamp(
 
     // for some int16 conv2d case, there is a following extra clamp generic op for relu-like
     // operation
-    linalg::GenericOp extraClampOp = dyn_cast_or_null<linalg::GenericOp>(getSingleUser(value));
+    linalg::GenericOp extraClampOp = getSingleUser<linalg::GenericOp>(value);
     if (extraClampOp) {
         // in general, compare with constant, so input number is 1
         if (extraClampOp.getNumDpsInputs() == 1 && extraClampOp.getNumDpsInits() == 1) {
@@ -2208,9 +2199,8 @@ LogicalResult foldForwardDepthToSpace(
         return rewriter.notifyMatchFailure(transposeOp, "Not DepthToSpace");
     }
 
-    auto collapseOp =
-        mlir::dyn_cast<tensor::CollapseShapeOp>(*transposeOp.getResult().getUsers().begin()
-        ); // Pattern for D2S CollapseShape after transpose
+    // Pattern for D2S CollapseShape after transpose.
+    auto collapseOp = getSingleUser<tensor::CollapseShapeOp>(transposeOp->getResult(0));
     if (!collapseOp) {
         return rewriter.notifyMatchFailure(transposeOp, "Not DepthToSpace");
     }
@@ -2717,12 +2707,12 @@ FailureOr<Value> pickGroupResultInt8(Value value) {
     // Follow single-use chain forward until we hit an int rescale/clamp boundary,
     // which defines the terminal value for fusion planning.
     while (true) {
-        if (!value.hasOneUse()) {
+        auto *userOp = getSingleUser(value);
+        if (!userOp) {
             // Ambiguous fanout: stop to avoid planning across multiple consumers.
             return failure();
         }
-        auto userOp = value.getUsers().begin();
-        if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
             value = genericOp.getResult(0);
             for (auto &op : genericOp.getRegion().getOps()) {
                 if (isa<linalg::YieldOp>(op)) {
@@ -2735,9 +2725,9 @@ FailureOr<Value> pickGroupResultInt8(Value value) {
                 }
             }
         }
-        else if (isa<tensor::ExpandShapeOp>(*userOp)) {
+        else if (isa<tensor::ExpandShapeOp>(userOp)) {
             // Shape-only op: keep walking through the transformed value.
-            value = (*userOp)->getResult(0);
+            value = userOp->getResult(0);
         }
         else {
             // Non-target user kind: current value is the best terminal point.
@@ -2750,11 +2740,11 @@ FailureOr<Value> pickGroupResultInt8(Value value) {
 FailureOr<Value> pickGroupResultFloat(Value value) {
     // Float path mirrors int path but uses float rescale/clamp markers.
     while (true) {
-        if (!value.hasOneUse()) {
+        auto *userOp = getSingleUser(value);
+        if (!userOp) {
             return failure();
         }
-        auto userOp = value.getUsers().begin();
-        if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
             value = genericOp.getResult(0);
             for (auto &op : genericOp.getRegion().getOps()) {
                 if (isa<linalg::YieldOp>(op)) {
@@ -2767,8 +2757,8 @@ FailureOr<Value> pickGroupResultFloat(Value value) {
                 }
             }
         }
-        else if (isa<tensor::ExpandShapeOp>(*userOp)) {
-            value = (*userOp)->getResult(0);
+        else if (isa<tensor::ExpandShapeOp>(userOp)) {
+            value = userOp->getResult(0);
         }
         else {
             return value;

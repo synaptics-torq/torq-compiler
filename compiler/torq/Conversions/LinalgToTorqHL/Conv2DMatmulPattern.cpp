@@ -252,9 +252,8 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         }
 
         // If there is an expand_shape user, use it to determine 4D output shape
-        tensor::ExpandShapeOp outputExpandOp = nullptr;
-        if (output.hasOneUse() && isa<tensor::ExpandShapeOp>(*output.getUsers().begin())) {
-            outputExpandOp = cast<tensor::ExpandShapeOp>(*output.getUsers().begin());
+        tensor::ExpandShapeOp outputExpandOp = getSingleUser<tensor::ExpandShapeOp>(output);
+        if (outputExpandOp) {
             output = outputExpandOp.getResult();
         }
         RankedTensorType finalType = cast<RankedTensorType>(output.getType());

@@ -19,6 +19,7 @@
 #include "Patterns.h"
 
 #include "torq/Utils/ComputeConstants.h"
+#include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -53,14 +54,13 @@ struct AbsorbWzpCorrectionPattern : public RewritePattern {
         auto poolingOp = cast<linalg::PoolingNhwcSumOp>(op);
 
         // Match: pooling → collapse_shape → termB (subi(acc, Σinput*wzp))
-        if (!poolingOp->hasOneUse())
-            return rewriter.notifyMatchFailure(op, "pooling has multiple uses");
+        auto collapseOp = getSingleUser<tensor::CollapseShapeOp>(poolingOp->getResult(0));
+        if (!collapseOp)
+            return rewriter.notifyMatchFailure(
+                op, "expected single-use collapse_shape after pooling"
+            );
 
-        auto collapseOp = dyn_cast<tensor::CollapseShapeOp>(*poolingOp->getUsers().begin());
-        if (!collapseOp || !collapseOp->hasOneUse())
-            return rewriter.notifyMatchFailure(op, "expected single-use collapse_shape");
-
-        auto termB = dyn_cast<linalg::GenericOp>(*collapseOp->getUsers().begin());
+        auto termB = getSingleUser<linalg::GenericOp>(collapseOp.getResult());
         if (!termB || termB.getNumDpsInputs() != 2)
             return rewriter.notifyMatchFailure(op, "unexpected termB shape");
 

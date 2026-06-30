@@ -618,33 +618,30 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvPoo
         }
 
         // Update extract_slice if present
-        if (op.getOutput().hasOneUse()) {
-            auto user = *op.getOutput().getUsers().begin();
-            if (auto extractSliceOp = dyn_cast<tensor::ExtractSliceOp>(user)) {
-                auto extractOffsets = extractSliceOp.getMixedOffsets();
-                auto extractSizes = extractSliceOp.getMixedSizes();
-                auto extractStrides = extractSliceOp.getMixedStrides();
+        if (auto extractSliceOp = getSingleUser<tensor::ExtractSliceOp>(op.getOutput())) {
+            auto extractOffsets = extractSliceOp.getMixedOffsets();
+            auto extractSizes = extractSliceOp.getMixedSizes();
+            auto extractStrides = extractSliceOp.getMixedStrides();
 
-                if (extractOffsets.size() == 4) {
-                    SmallVector<OpFoldResult, 4> newExtractOffsets;
-                    for (size_t i = 0; i < extractOffsets.size(); ++i) {
-                        if (i == NCHW::H) {
-                            newExtractOffsets.push_back(rewriter.getIndexAttr(0));
-                        }
-                        else {
-                            newExtractOffsets.push_back(extractOffsets[i]);
-                        }
+            if (extractOffsets.size() == 4) {
+                SmallVector<OpFoldResult, 4> newExtractOffsets;
+                for (size_t i = 0; i < extractOffsets.size(); ++i) {
+                    if (i == NCHW::H) {
+                        newExtractOffsets.push_back(rewriter.getIndexAttr(0));
                     }
-
-                    auto newExtractSlice = tensor::ExtractSliceOp::create(
-                        rewriter, extractSliceOp.getLoc(), newOp.getOutput(), newExtractOffsets,
-                        extractSizes, extractStrides
-                    );
-
-                    rewriter.replaceOp(extractSliceOp, newExtractSlice.getResult());
-                    rewriter.eraseOp(op);
-                    return success();
+                    else {
+                        newExtractOffsets.push_back(extractOffsets[i]);
+                    }
                 }
+
+                auto newExtractSlice = tensor::ExtractSliceOp::create(
+                    rewriter, extractSliceOp.getLoc(), newOp.getOutput(), newExtractOffsets,
+                    extractSizes, extractStrides
+                );
+
+                rewriter.replaceOp(extractSliceOp, newExtractSlice.getResult());
+                rewriter.eraseOp(op);
+                return success();
             }
         }
 

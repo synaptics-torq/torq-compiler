@@ -78,10 +78,7 @@ static bool is1DPooling(llvm::ArrayRef<int64_t> kernels, llvm::ArrayRef<int64_t>
 /// by a constant. If found, return the constant scale value and the generic op.
 /// For divf, the scale is the reciprocal of the divisor.
 static std::pair<float, linalg::GenericOp> tryExtractFusedScale(Value output) {
-    if (!output.hasOneUse())
-        return {1.0f, nullptr};
-
-    auto genericOp = dyn_cast<linalg::GenericOp>(*output.getUsers().begin());
+    auto genericOp = getSingleUser<linalg::GenericOp>(output);
     if (!genericOp || genericOp.getNumDpsInputs() != 1 || genericOp.getNumDpsInits() != 1 ||
         genericOp.getNumReductionLoops() != 0)
         return {1.0f, nullptr};

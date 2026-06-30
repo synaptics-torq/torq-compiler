@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
+#include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -34,9 +35,7 @@ bool walkAddiChainTo(Value start, linalg::GenericOp expected, int maxDepth = 10)
     for (int hop = 0; hop < maxDepth; ++hop) {
         if (llvm::is_contained(current.getUsers(), expected.getOperation()))
             return true;
-        if (!current.hasOneUse())
-            return false;
-        auto genericOp = dyn_cast<linalg::GenericOp>(*current.getUsers().begin());
+        auto genericOp = getSingleUser<linalg::GenericOp>(current);
         if (!genericOp)
             return false;
         if (!cast<linalg::YieldOp>(genericOp.getBody()->getTerminator())

@@ -17,6 +17,14 @@ namespace mlir::syna::torq {
 // Convert a vector of integers to a SmallVector of OpFoldResult
 SmallVector<OpFoldResult> createVector(::llvm::ArrayRef<int64_t> values, PatternRewriter &rewriter);
 
+// return the single operation using the value
+// return nullptr if no user or more than one user
+Operation *getSingleUser(Value value);
+
+template <class OpT> OpT getSingleUser(Value value) {
+    return dyn_cast_or_null<OpT>(getSingleUser(value));
+}
+
 template <typename T, typename R> Value createInitTensor(T &srcOp, R &rewriter) {
     return mlir::tensor::EmptyOp::create(
                rewriter, srcOp.getLoc(), srcOp.getResult().getType().getShape(),

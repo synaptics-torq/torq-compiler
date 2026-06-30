@@ -94,14 +94,6 @@ bool isI32Type(Value val, PatternRewriter &rewriter); // Deprecated
 std::optional<int64_t> getConstIntValue(Value val);
 std::optional<float> getFloatValue(Value val);
 
-// return the single operation using the value
-// return nullptr if no user or more than one user
-Operation *getSingleUser(Value value);
-
-template <class OpT> OpT getSingleUser(Value value) {
-    return dyn_cast_or_null<OpT>(getSingleUser(value));
-}
-
 // If maybeFuseGroupAttr is not std::nullopt and op implements TilingInterface,
 // add maybeFuseGroupAttr to the TORQ_FUSE_GROUP array attribute of op. If op
 // does not implement TilingInterface, it must be one of:

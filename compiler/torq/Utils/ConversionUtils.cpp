@@ -30,6 +30,12 @@ createVector(::llvm::ArrayRef<int64_t> values, PatternRewriter &rewriter) {
     return result;
 }
 
+Operation *getSingleUser(Value value) {
+    if (!value.hasOneUse())
+        return {};
+    return *value.getUsers().begin();
+}
+
 std::pair<int32_t, int32_t> getDTypeRange(Type type) {
     /// Check if type is float
     if (isa<FloatType>(type)) {
