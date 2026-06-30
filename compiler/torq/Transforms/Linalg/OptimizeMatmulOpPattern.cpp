@@ -862,6 +862,11 @@ static void expandConstantInput(Value &input, PatternRewriter &rewriter) {
     auto resultType = dyn_cast<RankedTensorType>(definingOp.getResultTypes().front());
     auto inputType = dyn_cast<RankedTensorType>(definingOp.getInputs()[0].getType());
 
+    // Guard before dereferencing below: a non-RankedTensorType operand/result
+    // yields a null type from dyn_cast, which would crash at getShape().
+    if (!resultType || !inputType)
+        return;
+
     if (resultType == inputType)
         return;
 
@@ -878,14 +883,22 @@ static void expandConstantInput(Value &input, PatternRewriter &rewriter) {
         }
     }
 
-    // When the broadcast dimension is 1, expand_shape is a zero-copy reshape and always valid
-    // regardless if the input is constant or tensor.
-    // Thus, bail out only if bcast_dim != 1 and input != arith.constant.
+    // A tensor.expand_shape can only introduce size-1 dimensions; it preserves
+    // element count and cannot express a broadcast. The reassociation built
+    // below ([[0,1],[2],...]) folds the new leading dimension into the source's
+    // first dimension, so it is only valid when that leading dimension is 1
+    // (a zero-copy reshape, e.g. [K,N] -> [1,K,N]).
+    //
+    // When outputShape[0] != 1 the generic is a genuine batch broadcast
+    // ([K,N] -> [B,K,N]). Rewriting it as an expand_shape produces a result
+    // whose element count differs from its source; the greedy rewriter then
+    // constant-folds it (tensor::ExpandShapeOp::fold -> DenseElementsAttr::reshape)
+    // and asserts on the element-count mismatch (see issue #1767). This is true
+    // even when the source is a constant, so leave such broadcasts in place and
+    // let normal lowering materialize them -- mirroring the (already working)
+    // non-constant broadcast-weight path.
     if (outputShape[0] != 1) {
-        TypedAttr constAttr;
-        if (!matchPattern(definingOp.getInputs()[0], m_Constant(&constAttr))) {
-            return;
-        }
+        return;
     }
 
     // create a new expandshapeOp to replace the genericOp
@@ -953,6 +966,46 @@ static int detectBroadcastBatchInput(linalg::BatchMatmulOp srcOp, Value &broadca
         auto inputType = cast<RankedTensorType>(genericOp.getInputs()[0].getType());
         auto outputType = cast<RankedTensorType>(genericOp.getResultTypes()[0]);
         if (inputType.getNumElements() >= outputType.getNumElements())
+            continue;
+
+        broadcastSource = genericOp.getInputs()[0];
+        return i;
+    }
+    return -1;
+}
+
+/// Check if a batch_matmul input comes *directly* (no intervening collapse_shape)
+/// from a broadcast linalg.generic that broadcasts a 2-D [K,N] value over the batch
+/// dim to [B,K,N] with B >= 2:
+///   linalg.generic { maps = [(d0,d1,d2)->(d1,d2), (d0,d1,d2)->(d0,d1,d2)] }
+///                  ins([K,N]) outs([B,K,N]) { yield %in }
+/// This is the form expandConstantInput leaves behind for a constant weight once the
+/// #1767 fix declines to rewrite the broadcast as an (invalid) expand_shape. Returns
+/// the broadcast input index (0 or 1), or -1; the un-broadcast 2-D source is returned
+/// via `broadcastSource`.
+static int detectDirectBatchBroadcastInput(linalg::BatchMatmulOp srcOp, Value &broadcastSource) {
+    for (int i : {0, 1}) {
+        Value input = srcOp.getInputs()[i];
+        auto genericOp = input.getDefiningOp<linalg::GenericOp>();
+        if (!genericOp || genericOp.getNumDpsInputs() != 1 || genericOp.getNumResults() != 1)
+            continue;
+        // identity body: only a yield of the single input block argument
+        if (genericOp.getBody()->getOperations().size() != 1 ||
+            !isYieldedBlockArgument(genericOp, 0))
+            continue;
+        auto inputType = dyn_cast<RankedTensorType>(genericOp.getInputs()[0].getType());
+        auto outputType = dyn_cast<RankedTensorType>(genericOp.getResultTypes()[0]);
+        if (!inputType || !outputType || inputType.getRank() != 2 || outputType.getRank() != 3 ||
+            ShapedType::isDynamicShape(outputType.getShape()))
+            continue;
+        // output must be [B,K,N] with B >= 2 and trailing [K,N] == input
+        if (outputType.getShape()[0] < 2 ||
+            outputType.getShape().drop_front() != inputType.getShape())
+            continue;
+        // maps: input drops the batch dim ((d0,d1,d2)->(d1,d2)); output is identity
+        auto maps = genericOp.getIndexingMapsArray();
+        if (maps.size() != 2 || !isFinalMatmulRhsBroadcastMap(maps[0]) ||
+            !isIdentityMap(maps[1], 3))
             continue;
 
         broadcastSource = genericOp.getInputs()[0];
@@ -1120,6 +1173,25 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
                     srcOp, broadcastSource, broadcastIdx, rewriter
                 );
             }
+        }
+
+        // Constant-weight batch broadcast left in place by expandConstantInput (the
+        // #1767 fix): the matmul input is directly a [K,N] -> [B,K,N] broadcast generic.
+        // Absorb it into the matmul via indexing maps instead of materializing the
+        // [B,K,N] buffer, by first expanding the source [K,N] -> [1,K,N] (a zero-copy
+        // reshape) and reusing the rank-3 broadcast path -- which emits a 3-result
+        // (0,k,n) map the TORQ backend (findBatchMatmulBcastIdx) already lowers.
+        Value directSource;
+        int directIdx = detectDirectBatchBroadcastInput(srcOp, directSource);
+        if (directIdx >= 0) {
+            auto srcType = cast<RankedTensorType>(directSource.getType());
+            SmallVector<int64_t> expShape = {1, srcType.getShape()[0], srcType.getShape()[1]};
+            auto expType = RankedTensorType::get(expShape, srcType.getElementType());
+            SmallVector<ReassociationIndices> reassoc = {{0, 1}, {2}};
+            Value expanded = tensor::ExpandShapeOp::create(
+                rewriter, srcOp.getLoc(), expType, directSource, reassoc
+            );
+            return replaceBatchMatmulWithBroadcastGeneric(srcOp, expanded, directIdx, rewriter);
         }
 
         rewriter.modifyOpInPlace(srcOp, [&]() {
