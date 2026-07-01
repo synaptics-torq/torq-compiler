@@ -8,8 +8,6 @@ import onnxruntime
 import pytest
 import re
 import shutil
-import torch
-import torch.nn.functional as F
 from dataclasses import dataclass
 from filelock import FileLock
 from pathlib import Path
@@ -18,6 +16,7 @@ try:
     import torch
     import torch.nn.functional as F
 except ImportError:
+    print("Warning: pytorch not available")
     torch = None
     F = None
 
@@ -28,16 +27,16 @@ from .versioned_fixtures import (
     VersionedUncachedData,
 )
 
-
-TORCH_DTYPE_MAP = {
-    "float16": torch.float16, "half": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float32": torch.float32, "float": torch.float32,
-    "int8": torch.int8, "int16": torch.int16,
-    "int32": torch.int32, "int": torch.int32,
-    "int64": torch.int64, "long": torch.int64,
-    "uint8": torch.uint8,
-}
+if torch:
+    TORCH_DTYPE_MAP = {
+        "float16": torch.float16, "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32, "float": torch.float32,
+        "int8": torch.int8, "int16": torch.int16,
+        "int32": torch.int32, "int": torch.int32,
+        "int64": torch.int64, "long": torch.int64,
+        "uint8": torch.uint8,
+    }
 
 
 _TORCH_LAYER_CACHE_VERSION = 1
