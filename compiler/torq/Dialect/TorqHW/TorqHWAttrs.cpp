@@ -84,6 +84,154 @@ SliceCFGAttr SliceCFGAttr::get(
     );
 }
 
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, SliceCFGAttr &cfg) {
+    os << "SliceCfg(\n";
+    os << "  alu_op0_mode: [";
+    std::string sep;
+    for (auto mode : cfg.getAluOp0Mode()) {
+        os << sep << mode;
+        sep = ", ";
+    }
+    sep = "], alu_op1_mode: [";
+    for (auto mode : cfg.getAluOp1Mode()) {
+        os << sep << mode;
+        sep = ", ";
+    }
+    os << "]\n  alu_d_unsigned: " << cfg.getAluDUnsigned() << ",";
+    os << "  alu_w_unsigned: " << cfg.getAluWUnsigned() << "\n";
+    os << "  act_mode: " << cfg.getActMode() << ",";
+    const auto alsh = cfg.getActLsh();
+    os << "  act_lsh: [" << alsh[0] << "," << alsh[1] << "," << alsh[2] << "," << alsh[3] << "],";
+    os << "  act_rsh: " << static_cast<int>(cfg.getActRsh()) << ",";
+    os << "  act_clip_min: " << cfg.getActClipMin() << ",";
+    os << "  act_clip_max: " << cfg.getActClipMax() << ",";
+    os << "  act_zero_point: " << cfg.getActZeroPoint() << "\n";
+    os << "  no_p_clear: " << static_cast<int>(cfg.getNoPClear()) << ",";
+    os << "  no_p_output: " << static_cast<int>(cfg.getNoPOutput()) << "\n";
+    os << "  kernel: " << "{l:" << cfg.getKernelLeft() << ", r:" << cfg.getKernelRight()
+       << ", t:" << cfg.getKernelTop() << ", b:" << cfg.getKernelBottom() << "},";
+    os << "  pad: " << "{l:" << cfg.getPadLeft() << ", r:" << cfg.getPadRight()
+       << ", t:" << cfg.getPadTop() << ", b:" << cfg.getPadBottom() << "},";
+    os << "  pad_value: " << cfg.getPadValue() << ",";
+    os << "  stride: " << cfg.getStride() << ", stride_offset: " << cfg.getStrideOffset() << "\n";
+    os << "  act_round_mode: " << cfg.getActRoundMode() << ",";
+    os << "  weight_format: " << cfg.getWeightFormat() << ",";
+    os << "  alu_disable: " << cfg.getAluDisable() << ",";
+    os << "  act_disable: " << cfg.getActDisable() << ",";
+    os << "  alu_format: " << cfg.getAluFormat() << ",";
+    os << "  act_format: " << cfg.getActFormat() << ",";
+    os << "  act_sum_bits: " << cfg.getActSumBits() << "\n";
+    os << "  table_size: " << cfg.getTable().size() << "\n";
+    os << ")\n";
+    return os;
+}
+
+llvm::raw_ostream &printNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::MemNdlData *ndl) {
+    const char *sep = "";
+    os << type << (type == NdlType::REF ? " " : "");
+    if (!ndl) {
+        os << " : none\n";
+        return os;
+    }
+    if (ndl->set_id) {
+        os << ndl->set_id;
+    }
+    else {
+        os << ' ';
+    }
+    os << ": ";
+    auto printingType = DimType::H;
+    for (auto &dim : ndl->dims) {
+        if (dim.type != DimType::L && printingType == DimType::L) {
+            os << "}";
+        }
+        os << (dim.type == DimType::L && printingType != DimType::L ? "{" : sep);
+        sep = ",";
+        if (dim.type == DimType::S && printingType != DimType::S) {
+            os << "S(";
+        }
+        os << dim.tag << dim.count << ":";
+        if (dim.getExprStride().has_value()) {
+            os << "expr";
+        }
+        else {
+            os << dim.getIntStride();
+        }
+        printingType = dim.type;
+    }
+    if (printingType == DimType::S) {
+        os << ")";
+    }
+    if (ndl->offset) {
+        os << " offset=" << ndl->offset;
+    }
+    if (ndl->sync_mode) {
+        os << " sync=" << (char)ndl->sync_mode;
+    }
+    if (ndl->sync_nhd) {
+        os << " nhdims=" << (int)ndl->sync_nhd;
+    }
+    os << "\n";
+    return os;
+}
+
+llvm::raw_ostream &printNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::RegNdlData *ndl) {
+    const char *sep = ",";
+    if (!ndl) {
+        os << type << " : none\n";
+        return os;
+    }
+    os << type;
+    if (ndl->set_id) {
+        os << ndl->set_id;
+    }
+    else {
+        os << ' ';
+    }
+    int count = 0;
+    bool printingLDIms = true;
+    for (auto &dim : ndl->dims) {
+        if (dim.type != DimType::L && printingLDIms) {
+            printingLDIms = false;
+            os << "}";
+        }
+        os << (count++ == 0 ? ": {" : sep);
+        os << dim.tag << dim.count << ":" << dim.stride;
+    }
+    os << "\n";
+    return os;
+}
+
+static void printRegNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::Ndls &ndls) {
+    if (auto ndl = ndls.getRegNdl(type)) {
+        printNdl(os, type, ndl);
+    }
+}
+
+static void printMemNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::Ndls &ndls) {
+    if (auto ndl = ndls.getMemNdl(type)) {
+        printNdl(os, type, ndl);
+    }
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const torq_hw::Ndls &ndls) {
+    printMemNdl(os, NdlType::REF, ndls);
+    printMemNdl(os, NdlType::DEDR, ndls);
+    printMemNdl(os, NdlType::DEWR, ndls);
+    printMemNdl(os, NdlType::DEBR, ndls);
+    printRegNdl(os, NdlType::CEDW, ndls);
+    printRegNdl(os, NdlType::CEDR, ndls);
+    printRegNdl(os, NdlType::CEWW, ndls);
+    printRegNdl(os, NdlType::CEWR, ndls);
+    printRegNdl(os, NdlType::ACBW, ndls);
+    printRegNdl(os, NdlType::ACBR, ndls);
+    printRegNdl(os, NdlType::CEPR, ndls);
+    printRegNdl(os, NdlType::ACPR, ndls);
+    printRegNdl(os, NdlType::ACPW, ndls);
+    printMemNdl(os, NdlType::DEQW, ndls);
+    return os;
+}
+
 std::optional<int64_t> MemDimAttr::getStrideAsI64(ArrayAttr symbolValues) const {
 
     // check if the affine map is a constant value, we can return it directly

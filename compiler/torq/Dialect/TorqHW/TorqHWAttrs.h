@@ -73,7 +73,7 @@ struct RegNdlData {
 };
 
 struct Ndls {
-    MemNdlData *getMemNdl(NdlType type, size_t index = 0, int64_t set_id = 0) {
+    const MemNdlData *getMemNdl(NdlType type, size_t index = 0, int64_t set_id = 0) const {
         for (auto &ndl : memNdls) {
             if (ndl.type == type && ndl.index == index && ndl.set_id == set_id) {
                 return &ndl;
@@ -81,13 +81,20 @@ struct Ndls {
         }
         return nullptr;
     }
-    RegNdlData *getRegNdl(NdlType type, size_t index = 0, int64_t set_id = 0) {
+    MemNdlData *getMemNdl(NdlType type, size_t index = 0, int64_t set_id = 0) {
+        return const_cast<MemNdlData *>(std::as_const(*this).getMemNdl(type, index, set_id));
+    }
+
+    const RegNdlData *getRegNdl(NdlType type, size_t index = 0, int64_t set_id = 0) const {
         for (auto &ndl : regNdls) {
             if (ndl.type == type && ndl.set_id == set_id) {
                 return &ndl;
             }
         }
         return nullptr;
+    }
+    RegNdlData *getRegNdl(NdlType type, size_t index = 0, int64_t set_id = 0) {
+        return const_cast<RegNdlData *>(std::as_const(*this).getRegNdl(type, index, set_id));
     }
     void
     add(NdlType type, MemNdlDimsData dims, int64_t offset = 0, int64_t set_id = 0,
@@ -107,6 +114,12 @@ struct Ndls {
     SmallVector<MemNdlData> memNdls;
     SmallVector<RegNdlData> regNdls;
 };
+
+class SliceCFGAttr;
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, SliceCFGAttr &cfg);
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const torq_hw::Ndls &ndls);
+llvm::raw_ostream &printNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::RegNdlData *ndl);
+llvm::raw_ostream &printNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::MemNdlData *ndl);
 
 } // namespace mlir::syna::torq_hw
 

@@ -334,104 +334,6 @@ struct SliceCfg {
     }
 };
 
-llvm::raw_ostream &operator<<(llvm::raw_ostream &os, SliceCfg &cfg) {
-    os << "SliceCfg(\n";
-    os << "  alu_op0_mode: [";
-    string sep;
-    for (auto mode : cfg.alu_op0_mode) {
-        os << sep << mode;
-        sep = ", ";
-    }
-    sep = "], alu_op1_mode: [";
-    for (auto mode : cfg.alu_op1_mode) {
-        os << sep << mode;
-        sep = ", ";
-    }
-    os << "]\n  alu_d_unsigned: " << cfg.alu_d_unsigned << ",";
-    os << "  alu_w_unsigned: " << cfg.alu_w_unsigned << "\n";
-    os << "  act_mode: " << cfg.act_mode << ",";
-    os << "  act_lsh: [" << cfg.act_lsh[0] << "," << cfg.act_lsh[1] << "," << cfg.act_lsh[2] << ","
-       << cfg.act_lsh[3] << "],";
-    os << "  act_rsh: " << static_cast<int>(cfg.act_rsh) << ",";
-    os << "  act_clip_min: " << cfg.act_clip_min << ",";
-    os << "  act_clip_max: " << cfg.act_clip_max << ",";
-    os << "  act_zero_point: " << cfg.act_zero_point << "\n";
-    os << "  no_p_clear: " << static_cast<int>(cfg.no_p_clear) << ",";
-    os << "  no_p_output: " << static_cast<int>(cfg.no_p_output) << "\n";
-    os << "  kernel: " << cfg.kernel << ",";
-    os << "  pad: " << cfg.pad << ", pad_value: " << cfg.pad_value << ",";
-    os << "  stride: " << cfg.stride << ", stride_offset: " << cfg.stride_offset << "\n";
-    os << "  act_round_mode: " << cfg.act_round_mode << ",";
-    os << "  weight_format: " << cfg.weight_format << ",";
-    os << "  alu_disable: " << cfg.alu_disable << ",";
-    os << "  act_disable: " << cfg.act_disable << ",";
-    os << "  alu_format: " << cfg.alu_format << ",";
-    os << "  act_format: " << cfg.act_format << ",";
-    os << "  act_sum_bits: " << cfg.act_sum_bits << "\n";
-    os << ")\n";
-    return os;
-}
-
-static void ndlToStr(NdlType type, const torq_hw::MemNdlData *ndl) {
-    const char *sep = "";
-    if (!ndl) {
-        LLVM_DEBUG(llvm::dbgs() << type << ":  NULL\n");
-        return;
-    }
-    LLVM_DEBUG(
-        llvm::dbgs() << type; if (ndl->set_id) { llvm::dbgs() << ndl->set_id; } else {
-            llvm::dbgs() << ' ';
-        } llvm::dbgs() << ": ";
-        auto printingType = DimType::H;
-        for (auto &dim
-             : ndl->dims) {
-            if (dim.type != DimType::L && printingType == DimType::L) {
-                llvm::dbgs() << "}";
-            }
-            llvm::dbgs() << (dim.type == DimType::L && printingType != DimType::L ? "{" : sep);
-            sep = ",";
-            if (dim.type == DimType::S && printingType != DimType::S) {
-                llvm::dbgs() << "S(";
-            }
-            llvm::dbgs() << dim.tag << dim.count << ":";
-            if (dim.getExprStride().has_value()) {
-                llvm::dbgs() << "expr";
-            }
-            else {
-                llvm::dbgs() << dim.getIntStride();
-            }
-            printingType = dim.type;
-        } if (printingType == DimType::S) { llvm::dbgs() << ")"; }
-
-        if (ndl->offset) { llvm::dbgs() << " offset=" << ndl->offset; } if (ndl->sync_mode) {
-            llvm::dbgs() << " sync=" << (char)ndl->sync_mode;
-        } if (ndl->sync_nhd) { llvm::dbgs() << " nhdims=" << (int)ndl->sync_nhd; } llvm::dbgs()
-        << "\n";
-    );
-}
-
-static void ndlToStr(NdlType type, const torq_hw::RegNdlData *ndl) {
-    const char *sep = ",";
-    if (!ndl) {
-        LLVM_DEBUG(llvm::dbgs() << type << ": NULL\n");
-        return;
-    }
-    LLVM_DEBUG(
-        llvm::dbgs() << type; if (ndl->set_id) { llvm::dbgs() << ndl->set_id; } else {
-            llvm::dbgs() << ' ';
-        } int count = 0;
-        bool printingLDIms = true; for (auto &dim
-                                        : ndl->dims) {
-            if (dim.type != DimType::L && printingLDIms) {
-                printingLDIms = false;
-                llvm::dbgs() << "}";
-            }
-            llvm::dbgs() << (count++ == 0 ? ": {" : sep);
-            llvm::dbgs() << dim.tag << dim.count << ":" << dim.stride;
-        } llvm::dbgs() << "\n";
-    );
-}
-
 static void debugData(const Data &data) { LLVM_DEBUG(llvm::dbgs() << data << "\n"); }
 
 // Return the number of elements in the last dimension of the shape or 1 if the shape is empty
@@ -1707,8 +1609,6 @@ void SlicePrivate::cedw(const IData &idata) {
     auto ramWrCount = iterationCount(dedr);
     regDims.push_back({DimType::H, RegDimTag::T, ramWrCount / iterationCount(regDims)});
     _ndls.add(NdlType::CEDW, regDims);
-
-    ndlToStr(NdlType::CEDW, _ndls.getRegNdl(NdlType::CEDW));
 }
 
 void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
@@ -1785,7 +1685,6 @@ void SlicePrivate::ceww(const WData &wdata) {
     regDims.push_back({DimType::H, RegDimTag::T, ramWrCount / iterationCount(regDims)});
 
     _ndls.add(NdlType::CEWW, regDims);
-    ndlToStr(NdlType::CEWW, _ndls.getRegNdl(NdlType::CEWW));
 }
 
 void SlicePrivate::acbr(const BData &bdata) {
@@ -1810,7 +1709,6 @@ void SlicePrivate::acbr(const BData &bdata) {
     acbrDims.push_back({DimType::H, RegDimTag::T, ramWrCount});
 
     _ndls.add(NdlType::ACBR, acbrDims);
-    ndlToStr(NdlType::ACBR, _ndls.getRegNdl(NdlType::ACBR));
 }
 
 void SlicePrivate::acbw(const BData &bdata) {
@@ -1834,7 +1732,6 @@ void SlicePrivate::acbw(const BData &bdata) {
     regDims.push_back({DimType::H, RegDimTag::T, ramWrCount});
 
     _ndls.add(NdlType::ACBW, regDims);
-    ndlToStr(NdlType::ACBW, _ndls.getRegNdl(NdlType::ACBW));
 }
 
 void SlicePrivate::acpr(const PData &pdata) {
@@ -1876,7 +1773,6 @@ void SlicePrivate::acpr(const PData &pdata) {
     acprDims.push_back({DimType::H, RegDimTag::T, outerIterCount(_forStack, _pram.loadNesting)});
 
     _ndls.add(NdlType::ACPR, acprDims);
-    ndlToStr(NdlType::ACPR, _ndls.getRegNdl(NdlType::ACPR));
 }
 
 void SlicePrivate::cepr(const PData &pdata) {
@@ -1916,15 +1812,12 @@ void SlicePrivate::cepr(const PData &pdata) {
         int cedrT = div_ceil(ceprCount, iterationCount(cedr->dims));
         // If elementType is none we are in weight-bypass mode, so use a dummy T of 0
         cedr->dims.back().count = _iram.elementType == DType::none ? 0 : cedrT;
-        ndlToStr(NdlType::CEDR, _ndls.getRegNdl(NdlType::CEDR));
     }
     if (auto cewr = _ndls.getRegNdl(NdlType::CEWR)) {
         cewr->dims.back().count = div_ceil(ceprCount, iterationCount(cewr->dims));
-        ndlToStr(NdlType::CEWR, _ndls.getRegNdl(NdlType::CEWR));
     }
 
     _ndls.add(NdlType::CEPR, ceprDims);
-    ndlToStr(NdlType::CEPR, _ndls.getRegNdl(NdlType::CEPR));
 }
 
 void SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSize) {
@@ -1951,7 +1844,6 @@ void SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSiz
     }
 
     _ndls.add(ndlType, ndlDims, offset);
-    ndlToStr(ndlType, _ndls.getMemNdl(ndlType));
 }
 
 // Check that no read in `ndl` crosses a `bankBytes`-byte memory-bank boundary.
@@ -2080,8 +1972,6 @@ void SlicePrivate::ref(const LData &data) {
     }
 
     _ndls.add(NdlType::REF, refNdlDims);
-    ndlToStr(NdlType::REF, _ndls.getMemNdl(NdlType::REF));
-    LLVM_DEBUG(llvm::dbgs() << _cfg << "\n");
 }
 
 void SlicePrivate::acpw(DType dataType, const uint32_t weightSize) {
@@ -2098,7 +1988,6 @@ void SlicePrivate::acpw(DType dataType, const uint32_t weightSize) {
         acpwDims.push_back({DimType::H, RegDimTag::T, actIterationCount});
 
         _ndls.add(NdlType::ACPW, acpwDims);
-        ndlToStr(NdlType::ACPW, _ndls.getRegNdl(NdlType::ACPW));
     }
 }
 
@@ -2712,7 +2601,9 @@ void Slice::segment(const std::vector<int> &nchw, int channelStride) {
 }
 
 torq_hw::SliceCFGAttr Slice::getCfgAttr(MLIRContext *ctx) const {
-    return d->_cfg.toSliceCFGAttr(ctx);
+    SliceCFGAttr cfgAttr = d->_cfg.toSliceCFGAttr(ctx);
+    LLVM_DEBUG(llvm::dbgs() << cfgAttr);
+    return cfgAttr;
 }
 
 const torq_hw::Ndls &Slice::getNdls() const {
@@ -2733,6 +2624,7 @@ const torq_hw::Ndls &Slice::getNdls() const {
         assert(false && "Iteration count mismatch");
     }
 #endif
+    LLVM_DEBUG(llvm::dbgs() << d->_ndls);
     // Just return the NDLs
     return d->_ndls;
 }
@@ -2957,8 +2849,6 @@ PData Alu::transpose(const IData &idata) {
         dedr->dims[1].count = 32;
         dedr->dims.insert(dedr->dims.begin() + 2, {DimType::L, MemDimTag::G, 2, 32});
     }
-
-    ndlToStr(NdlType::DEDR, dedr);
 
     return pData;
 }
