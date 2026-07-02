@@ -1,0 +1,55 @@
+name: Build Documentation
+
+on:
+  workflow_call:
+    outputs:
+      user_manual_artifact_id:
+        description: ID of the artifact with the built user manual
+        value: ${{ jobs.doc_build.outputs.user_manual_artifact_id }}
+      website_artifact_id:
+        description: ID of the artifact with the built website
+        value: ${{ jobs.doc_build.outputs.website_artifact_id }}
+
+jobs:
+  doc_build:
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      user_manual_artifact_id: ${{ steps.upload_user_manual.outputs.artifact-id }}
+      website_artifact_id: ${{ steps.upload_website.outputs.artifact-id }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          lfs: true
+          submodules: false
+
+      - name: Build user manual
+        uses: syna-astra-dev/action-doc-publish/actions/doc-build@v3
+        with:
+          doc_dir: doc/user-manual
+
+      - name: Upload user manual artifact
+        id: upload_user_manual
+        uses: actions/upload-artifact@v7
+        with:
+          name: user-manual
+          path: _build/html
+          retention-days: 7
+
+      - name: Clear output directory
+        run: |
+          rm -rf _build
+
+      - name: Build website
+        uses: syna-astra-dev/action-doc-publish/actions/doc-build@v3
+        with:
+          doc_dir: doc
+
+      - name: Upload website artifact
+        id: upload_website
+        uses: actions/upload-artifact@v7
+        with:
+          name: website
+          path: _build/html
+          retention-days: 7

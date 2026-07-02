@@ -2,10 +2,20 @@ name: Build tests image
 
 on:
   workflow_call:
+    inputs:
+      push:
+        description: Push the built docker images to the registry
+        required: false
+        default: 'false'
+        type: string
     outputs:
       image_name:
         description: Name of the built Docker image
         value: ${{ jobs.build.outputs.image_name }}
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   build:
@@ -17,8 +27,4 @@ jobs:
         scripts/install_dependencies.sh
         scripts/configure_python.sh
         requirements.txt
-      extra_tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'latest-tests' || '' }}
-
-    permissions:
-      contents: read
-      id-token: write
+      extra_tags: ${{ inputs.push == 'true' && github.ref == 'refs/heads/main' && 'latest-tests' || '' }}

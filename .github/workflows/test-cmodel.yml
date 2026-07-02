@@ -1,0 +1,105 @@
+name: C model
+
+on:
+  workflow_call:
+    inputs:
+      docker_image_tests_name:
+        type: string
+        required: true
+      release_artifact_id:
+        description: ID of the artifact with the built release
+        required: true
+        type: string
+    secrets:
+      CI_APP_ID:
+        required: true
+      CI_APP_PRIVATE_KEY:
+        required: true
+      HF_TOKEN:
+        required: true
+
+permissions:
+    id-token: write
+    contents: read
+
+env:
+  ENABLE_CMODEL_PROFILING: ${{ (github.event_name == 'push' || github.event_name == 'merge_group' || contains(github.event.pull_request.labels.*.name || '', 'enable-cmodel-profiling')) && 'true' || 'false' }}
+  GENERATE_STATUS_REPORT: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') && 'true' || 'false' }}
+  DASHBOARD_SERVER: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
+
+jobs:
+  test_cmodel:
+    name: Test on C model for ${{ matrix.chip_group }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        chip_group: ${{ vars.TEST_GROUPS && fromJSON(vars.TEST_GROUPS) || fromJSON('["default.group"]') }}
+
+    timeout-minutes: 50
+
+    runs-on:
+      - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+        image:custom-linux-${{ inputs.docker_image_tests_name }}
+        instance-size:xlarge
+
+    outputs:
+      s3_cache_path: ${{ steps.run_cmodel_tests.outputs.s3_cache_path }}
+
+    env:      
+      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/host_test_status_${{ matrix.chip_group }}.json
+      CMODEL_PROFILING_LOGS_PATH: ${{ github.workspace }}/cmodel_compile_profiling_logs_${{ matrix.chip_group }}
+
+    steps:
+      
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          lfs: true
+          submodules: false
+
+      - name: Configure AWS credentials
+        uses: ./.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
+
+      - name: Run C model tests
+        id: run_cmodel_tests
+        uses: ./.github/actions/tests
+        with:
+          app_id: ${{ vars.CI_APP_ID }}
+          app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          extra_repo: ${{ vars.EXTRAS_REPO }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          release_artifact_id: ${{ inputs.release_artifact_id }}
+          pytest_args: >-
+            -m ci -n 18 -v --show-capture=no --tb=short
+            --torq-chips ${{ matrix.chip_group }}
+            --tflite-layer-test-generate-full-model-only
+            --ignore-binary-mtime
+            ${{ env.ENABLE_CMODEL_PROFILING == 'true' && format('--torq-compile-time-profiling-output-dir={0}', env.CMODEL_PROFILING_LOGS_PATH) || '' }}
+            ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to={0}', env.TEST_STATUS_REPORT_PATH) || '' }}
+          torq_perf_server: ${{ env.DASHBOARD_SERVER }}
+          ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
+          batch_name: cmodel-${{ matrix.chip_group }}
+          s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
+          s3_hf_cache_dir: hf_cache
+
+      - name: Upload host test status report
+        if: env.GENERATE_STATUS_REPORT == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: cmodel_test_status_${{ matrix.chip_group }}
+          path: ${{ env.TEST_STATUS_REPORT_PATH }}
+          retention-days: 60
+
+      - name: Upload compile time profiling logs
+        if: env.ENABLE_CMODEL_PROFILING == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: cmodel_compile_profiling_logs_${{ matrix.chip_group }}
+          path: ${{ env.CMODEL_PROFILING_LOGS_PATH }}
+          retention-days: 60

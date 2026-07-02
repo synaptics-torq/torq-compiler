@@ -2,6 +2,12 @@ name: Build FPGA tests image
 
 on:
   workflow_call:
+    inputs:
+      push:
+        description: Push the built docker images to the registry
+        required: false
+        default: 'false'
+        type: string
     outputs:
       image_name:
         description: Name of the built Docker image
@@ -13,7 +19,7 @@ permissions:
 
 jobs:
   build:
-    name: Build
+    name: Build FPGA tests image
     uses: ./.github/workflows/build-docker-ecr.yml
     with:
       docker_file: scripts/Dockerfile.ci-fpga-tests
@@ -21,5 +27,5 @@ jobs:
         scripts/install_dependencies.sh
         scripts/configure_python.sh
         requirements.txt
-      extra_tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'latest-fpga-tests' || '' }}
+      extra_tags: ${{ inputs.push == 'true' && github.ref == 'refs/heads/main' && 'latest-fpga-tests' || '' }}
           

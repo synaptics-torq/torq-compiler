@@ -1,0 +1,102 @@
+name: AWS FPGA
+
+on:
+  workflow_call:
+    inputs:
+      docker_image_fpga_tests_name:
+        type: string
+        required: true
+      release_artifact_id:
+        description: ID of the artifact with the built release
+        required: true
+        type: string
+    secrets:
+      CI_APP_ID:
+        required: true
+      CI_APP_PRIVATE_KEY:
+        required: true
+      HF_TOKEN:
+        required: true
+
+permissions:
+    id-token: write
+    contents: read
+
+env:
+  GENERATE_STATUS_REPORT: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') && 'true' || 'false' }}
+  DASHBOARD_SERVER: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
+
+jobs:
+  test_aws_fpga:    
+    name: Test on FPGA for ${{ matrix.chip_group }}
+    runs-on: ${{ format('torq-fpga-{0}-{1}', github.run_id, github.run_attempt) }}    
+
+    timeout-minutes: 50
+
+    strategy:
+      fail-fast: false
+      matrix:
+        chip_group: ${{ vars.TEST_GROUPS && fromJSON(vars.TEST_GROUPS) || fromJSON('["default.group"]') }}
+
+    env:      
+      RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
+      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/aws_fpga_test_status_${{ matrix.chip_group }}.json
+
+    steps:
+    
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          lfs: true
+          submodules: false
+
+      - name: Configure AWS credentials
+        uses: ./.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
+
+      - name: Clear FPGA slot
+        run: |
+          fpga-clear-local-image -S 0
+
+      - name: Run AWS FPGA model tests
+        uses: ./.github/actions/tests
+        with:
+          app_id: ${{ vars.CI_APP_ID }}
+          app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          extra_repo: ${{ vars.EXTRAS_REPO }}
+          release_artifact_id: ${{ inputs.release_artifact_id }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+
+          pytest_args: >-
+            -m fpga_ci -n auto 
+            --torq-runtime-hw-type aws_fpga
+            --torq-runtime-timeout=20
+            --torq-chips ${{ matrix.chip_group }}
+            --torq-runtime-profiling-output-dir=${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
+            --tflite-layer-test-generate-full-model-only
+            --ignore-binary-mtime
+            ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to {0}', env.TEST_STATUS_REPORT_PATH) || '' }}
+          ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
+          torq_perf_server: ${{ env.DASHBOARD_SERVER }}
+          batch_name: fpga-${{ matrix.chip_group }}
+          s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
+          s3_hf_cache_dir: hf_cache
+      
+      - name: Upload AWS FPGA profiling logs
+        uses: actions/upload-artifact@v7
+        with:
+          name: aws_fpga_profiling_logs_${{ matrix.chip_group }}
+          path: ${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
+          retention-days: 60
+          
+      - name: Upload AWS FPGA test status report
+        if: env.GENERATE_STATUS_REPORT == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: aws_fpga_test_status_${{ matrix.chip_group }}
+          path: ${{ env.TEST_STATUS_REPORT_PATH }}
+          retention-days: 60

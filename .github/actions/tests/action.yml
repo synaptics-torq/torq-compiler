@@ -2,9 +2,9 @@ description: Run Torq compiler tests
 
 inputs:
 
-  release_run_id:
-    description: 'Run ID of the build to test against'
-    default: ${{ github.run_id }}
+  release_artifact_id:
+    description: 'ID of the artifact with the built release'
+    default: 'none'
     required: false
 
   hf_token:
@@ -192,22 +192,21 @@ runs:
 
     - name: Download the compiler and runtime
       uses: actions/download-artifact@v8
-      if: ${{ inputs.release_run_id != 'none' }}
+      if: ${{ inputs.release_artifact_id != 'none' }}
       with:
-        name: release
+        artifact-ids: ${{ inputs.release_artifact_id }}
         path: .
-        run-id: ${{ inputs.release_run_id }}
         github-token: ${{ steps.generate_token.outputs.token }}
 
     - name: Extract the compiler and runtime
-      if: ${{ inputs.release_run_id != 'none' }}
+      if: ${{ inputs.release_artifact_id != 'none' }}
       shell: bash
       run: |
         tar -zxf release.tar.gz
 
     - name: Setup python virtualenv with on release files
       shell: bash
-      if: ${{ inputs.release_run_id != 'none' }}
+      if: ${{ inputs.release_artifact_id != 'none' }}
       run: |
         pip install -r ${{github.workspace}}/release/python/requirements.txt
 
@@ -226,7 +225,7 @@ runs:
 
     - name: Setup python virtualenv using checkout files
       shell: bash
-      if: ${{ inputs.release_run_id == 'none' }}
+      if: ${{ inputs.release_artifact_id == 'none' }}
       run: |
         pip install -r ${{github.workspace}}/requirements.txt
         

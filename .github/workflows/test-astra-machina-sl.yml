@@ -1,0 +1,95 @@
+name: Astra Machina SL
+
+on:
+  workflow_call:
+    inputs:
+      docker_image_tests_name:
+        type: string
+        required: true
+      release_artifact_id:
+        description: ID of the artifact with the built release
+        required: true
+        type: string
+    secrets:
+      CI_APP_ID:
+        required: true
+      CI_APP_PRIVATE_KEY:
+        required: true
+      HF_TOKEN:
+        required: true
+      JENKINS_API_TOKEN:
+        required: true
+
+permissions:
+    id-token: write
+    contents: read
+
+env:
+  GENERATE_STATUS_REPORT: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') && 'true' || 'false' }}
+  DASHBOARD_SERVER: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
+
+jobs:
+  test_astra_machina_sl:    
+    name: Test on Astra Machina SL
+
+    runs-on:
+      - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+        image:custom-linux-${{ inputs.docker_image_tests_name }}
+
+    timeout-minutes: 50
+
+    env:
+      RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
+      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/aws_fpga_test_status_${{ matrix.chip_group }}.json
+
+    steps:
+      
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          lfs: true
+          submodules: false
+
+      - name: Configure AWS credentials
+        uses: ./.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
+
+      - name: Run Astra Machina SL tests
+        uses: ./.github/actions/tests
+        with:
+          app_id: ${{ vars.CI_APP_ID }}
+          app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          extra_repo: ${{ vars.EXTRAS_REPO }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          release_artifact_id: ${{ inputs.release_artifact_id }}
+          use_bench: true
+          jenkins_user: ${{ vars.JENKINS_USER }}
+          jenkins_api_token: ${{ secrets.JENKINS_API_TOKEN }}
+          jenkins_url: ${{ vars.JENKINS_URL }}
+          jenkins_job: ${{ vars.JENKINS_JOB }}
+          pytest_args: >-
+            -m astra_machina_sl_ci -n 4
+            --torq-runtime-hw-type astra_machina
+            --torq-runtime-timeout=20
+            --torq-chips sl2610-v1
+            --torq-runtime-profiling-output-dir=${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
+            --tflite-layer-test-generate-full-model-only
+            --ignore-binary-mtime
+            ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to {0}', env.TEST_STATUS_REPORT_PATH) || '' }}
+          ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
+          torq_perf_server: ${{ env.DASHBOARD_SERVER }}
+          batch_name: fpga-${{ matrix.chip_group }}
+          s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
+          s3_hf_cache_dir: hf_cache
+                
+      - name: Upload Astra Machina SL test status report
+        if: env.GENERATE_STATUS_REPORT == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: astra_machina_sl_test_status
+          path: ${{ env.TEST_STATUS_REPORT_PATH }}
+          retention-days: 60

@@ -1,0 +1,240 @@
+name: Build compiler and runtime
+
+on:
+  workflow_call:
+    inputs:
+      push:
+        description: Push the built docker images to the registry
+        required: false
+        default: 'false'
+        type: string
+
+    outputs:
+      release_artifact_id:
+        description: ID of the artifact with the release package to download
+        value: ${{ jobs.build.outputs.release_artifact_id }}
+
+      compiler_wheel_artifact_id:
+        description: ID of the artifact with the compiler wheel to download
+        value: ${{ jobs.build.outputs.compiler_wheel_artifact_id }}
+
+      runtime_wheel_artifact_id:
+        description: ID of the artifact with the runtime wheel to download
+        value: ${{ jobs.build.outputs.runtime_wheel_artifact_id }}
+
+      user_manual_artifact_id:
+        description: ID of the artifact with the built user manual to download
+        value: ${{ jobs.build_docs.outputs.user_manual_artifact_id }}
+      
+      website_artifact_id:
+        description: ID of the artifact with the built website to download
+        value: ${{ jobs.build_docs.outputs.website_artifact_id }}
+
+    secrets:
+      HF_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write  
+  packages: write
+  attestations: write
+
+jobs:
+
+  docker_image_builder:
+    name: Create Builder docker
+    uses: ./.github/workflows/build-docker-image-builder.yml
+    with:
+      push: ${{ inputs.push }}
+
+  build_mpact:
+    name: Build Mpact
+    uses: ./.github/workflows/build-mpact.yml
+   
+  build_ko_dependencies:
+    name: Build KO dependencies
+    uses: ./.github/workflows/build-ko-dependencies.yml
+
+  build_docs:    
+    name: Build documentation
+    uses: ./.github/workflows/build-docs.yml
+
+  build:
+    name: Build compiler and runtime
+    needs: [docker_image_builder, build_mpact, build_ko_dependencies]
+
+    runs-on:
+      - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+        image:custom-linux-${{ needs.docker_image_builder.outputs.image_name }}
+
+    env:
+      SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+      SCCACHE_REGION: ${{ vars.AWS_REGION }}
+      SCCACHE_S3_KEY_PREFIX: clang-build
+
+    timeout-minutes: 50 # ensure build jobs fail before CodeBuild kills the runners
+
+    outputs:
+      release_artifact_id: ${{ steps.upload_release.outputs.artifact-id }}
+      compiler_wheel_artifact_id: ${{ steps.upload_compiler_wheel.outputs.artifact-id }}
+      runtime_wheel_artifact_id: ${{ steps.upload_runtime_wheel.outputs.artifact-id }}
+
+    steps:
+
+      - name: Make cached checkout visible to workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # actions/checkout and uses keyword can only access files within the current workflow workspace
+          ln -s /workspace/code .
+
+          # ensure the github token is used by the checkout action for all operations (the action cannot handle this
+          # because it assumes the checkout is not a symlink in the way it sets up authentication)
+          AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git config --global "http.https://github.com/.extraheader" "AUTHORIZATION: basic $AUTH"
+
+      - name: Update checkout
+        uses: actions/checkout@v6
+        with:
+          path: code
+          lfs: true
+
+      - name: Update required submodules
+        working-directory: /workspace/code
+        run: |
+          bash scripts/checkout_submodules.sh
+
+      - name: Configure AWS credentials
+        uses: ./code/.github/actions/configure-aws-credentials
+        id: configure-aws-credentials
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+          protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
+          non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
+
+      - name: Configure python venv for host build and test
+        working-directory: /workspace/code
+        run: |
+          ./scripts/configure_python.sh /workspace/venv /workspace/build
+
+      - name: Download mpact simulation library from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ needs.build_mpact.outputs.path }}
+          key: ${{ needs.build_mpact.outputs.cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Download ko dependencies from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ needs.build_ko_dependencies.outputs.path }}
+          key: ${{ needs.build_ko_dependencies.outputs.cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Uncompress mpact simulation library
+        run: |
+          mkdir -p /workspace/code/third_party/coralnpu-mpact/x86_64-Linux
+          tar -xzf ${{ needs.build_mpact.outputs.path }} --strip-components=1 -C /workspace/code/third_party/coralnpu-mpact/x86_64-Linux
+
+          find /workspace/code/third_party/coralnpu-mpact/x86_64-Linux
+
+      - name: Configure build for host
+        working-directory: /workspace/code
+        run: |
+          ./scripts/configure_build.sh /workspace/build
+
+      - name: Build for host
+        working-directory: /workspace/build
+        env:
+          SCCACHE_SERVER_UDS: ${{github.workspace}}/sccache.sock
+        run: |
+          sccache --start-server
+          cmake --build . --target torq
+          sccache --show-stats
+
+      - name: Configure build for Astra machina
+        working-directory: /workspace/code
+        run: |
+          ./scripts/configure_soc_build.sh /workspace/build-astra-sl /workspace/build astra_machina poky
+
+      - name: Build for Astra machina
+        working-directory: /workspace/build-astra-sl
+        run: |
+          cmake --build . --target torq-run-module torq_kernel_module
+
+      - name: Set tag variable
+        id: vars
+        working-directory: /workspace/code
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            REF_NAME=${{ github.ref_name }}
+            echo "wheel_version=${REF_NAME#v}" >> $GITHUB_OUTPUT
+            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            TIMESTAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
+            COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+            echo "wheel_version=0.dev0+${TIMESTAMP}.g${COMMIT}" >> $GITHUB_OUTPUT
+            echo "tag_name=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build runtime wheels
+        working-directory: /workspace/code
+        run: |
+          # Needed for torq.build_tools discovery.
+          source /workspace/venv/bin/activate
+
+          export TORQ_WHEEL_VERSION="${{ steps.vars.outputs.wheel_version }}"
+
+          ./scripts/build_runtime_wheel.sh /workspace/build
+          ./scripts/build_runtime_wheel.sh /workspace/build /workspace/build-astra-sl astra_machina poky
+
+      - name: Upload runtime wheels
+        id: upload_runtime_wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-wheel
+          path: /workspace/code/dist/torq_runtime-*.whl
+          retention-days: 30
+
+      - name: Build compiler wheel
+        working-directory: /workspace/code
+        run: |
+          # Needed for torq.build_tools discovery.
+          source /workspace/venv/bin/activate
+
+          export TORQ_WHEEL_VERSION="${{ steps.vars.outputs.wheel_version }}"
+
+          ./scripts/build_compiler_wheel.sh /workspace/build
+
+      - name: Upload compiler wheel
+        id: upload_compiler_wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: compiler-wheel
+          path: /workspace/code/dist/torq_compiler-*.whl
+          retention-days: 30
+
+      - name: Gather release files
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          /workspace/code/scripts/assemble_release_docker.sh /workspace/build /workspace/build-astra-sl release
+          echo "${{ steps.vars.outputs.tag_name }}" > release/VERSION
+          tar -zcf release.tar.gz release
+
+      - name: Upload release files
+        id: upload_release
+        uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: release.tar.gz
+          retention-days: 30
+
+  build_docker:
+    name: Build release docker image
+    needs: build
+    uses: ./.github/workflows/build-docker-image-release.yml
+    with:
+      release_artifact_id: ${{ needs.build.outputs.release_artifact_id }}
+      push: ${{ inputs.push }}

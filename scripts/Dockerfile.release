@@ -8,11 +8,16 @@ RUN apt-get update && \
     xargs -a /opt/release/apt-packages.txt apt-get install -y --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
+# Setup venv first to favor caching (this would be done by the setup.sh script)
+COPY python/requirements.txt /
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install -r /requirements.txt && rm /requirements.txt
+
 # Copy release files
 COPY . /opt/release
 
-# Create and set up the venv
+# Perform the release setup
 RUN /opt/release/setup.sh /opt/venv
+
 
 # After copying, set executable permissions for all files in /opt/release/scripts
 RUN chmod a+x /opt/release/scripts/*

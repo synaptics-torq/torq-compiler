@@ -51,18 +51,20 @@ jobs:
           app_id: ${{ vars.CI_APP_ID }}
           app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           extra_repo: ${{ vars.EXTRAS_REPO }}
-          release_run_id: none # we run the tests without a release package
           setup_external_engine_requirements: true
           hf_token: ${{ secrets.HF_TOKEN }}
           pytest_args: -m alternative_engines -n auto --tflite-layer-test-generate-full-model-only --test-plan alt
           torq_perf_server: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
           batch_name: alternative-engines
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
-          s3_hf_cache_dir: hf_cache
+          s3_hf_cache_dir: hf_cache    
 
-  mark_complete:
-    name: Mark workflow complete
-    if: needs.test.result != 'skipped' && always()
-    needs: [test]
-    uses: ./.github/workflows/mark-workflow-complete.yml
-
+      - name: Notify dashboard
+        if: always()
+        env:
+          DASHBOARD_URL: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          curl -sf -X POST \
+            -F "workflow_url=${WORKFLOW_URL}" \
+            "${DASHBOARD_URL}/api/test-sessions/mark_complete/" || true # we ignore errors

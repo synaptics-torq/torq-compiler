@@ -39,11 +39,26 @@ jobs:
 
           echo "BUILD_RUN_ID=${BUILD_RUN_ID}" >> $GITHUB_OUTPUT
 
+      - name: Get release artifact ID
+        id: get_artifact_id
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_app_token.outputs.token }}
+        run: |
+          ARTIFACT_ID=$(gh api repos/${{ github.repository }}/actions/runs/${{ steps.get_latest_build_id.outputs.BUILD_RUN_ID }}/artifacts \
+            --jq '.artifacts[] | select(.name=="release") | .id' | head -1)
+          
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "Error: Could not find release artifact"
+            exit 1
+          fi
+          
+          echo "ARTIFACT_ID=${ARTIFACT_ID}" >> $GITHUB_OUTPUT
+
       - name: Clear FPGA slot
         run: |
           fpga-describe-local-image-slots
 
-          # the instance on which this is running may have already served another shell
+          # the instance on which this is running may have already served another shell 
           # so we need to clear the slot before running our tests to ensure a clean state
           fpga-clear-local-image -S 0
 
@@ -51,7 +66,7 @@ jobs:
         uses: ./.github/actions/tests
         with:
           app_id: ${{ vars.CI_APP_ID }}
-          release_run_id: ${{ steps.get_latest_build_id.outputs.BUILD_RUN_ID }}
+          release_artifact_id: ${{ steps.get_artifact_id.outputs.ARTIFACT_ID }}
           app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           extra_repo: ${{ vars.EXTRAS_REPO }}
           hf_token: ${{ secrets.HF_TOKEN }}          
