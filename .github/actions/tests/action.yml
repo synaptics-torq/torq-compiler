@@ -152,6 +152,9 @@ runs:
               echo "No branch found for extras repository and no associated PR found for workflow_dispatch event, failing"
               exit 1
             fi
+          elif [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            # use the base branch name
+            echo "branch=${{ github.event.merge_group.base_ref }}" >> $GITHUB_OUTPUT
           elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
             # use the base branch for PR events
             echo "branch=${{ github.base_ref }}" >> $GITHUB_OUTPUT
