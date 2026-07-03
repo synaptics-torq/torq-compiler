@@ -403,16 +403,6 @@ class DepthWise2DPattern : public OpRewritePattern<torq_hl::DepthwiseConv2DOp> {
         }
         channels /= kSliceCount;
 
-        // Be sure input data is in NOT in LRAM (to avoid a memref.copy of the subview at each iter)
-        if (op.getStride()[0] == 2) {
-            // If the stride is 2, the input is already in LRAM because of the segmentation layer
-            // This generates a memref.copy of the subview at each iteration which we don't support
-            // FIXME
-            return rewriter.notifyMatchFailure(
-                op, "Slicing of DepthWise2D with stride 2 not supported"
-            );
-        }
-
         // Split the operation on each slice using a parallel forall loop
         Value inputTile = op.getInput();
         scf::ForallOp forallOp =
