@@ -231,6 +231,20 @@ jobs:
           path: release.tar.gz
           retention-days: 30
 
+      - name: Upload KO dependencies as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ko-dependencies
+          path: ${{ needs.build_ko_dependencies.outputs.path }}
+          retention-days: ${{ inputs.push == 'true' && 30 || 1 }}
+      
+      - name: Upload mpact simulation library as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mpact-libs
+          path: ${{ needs.build_mpact.outputs.path }}
+          retention-days: ${{ inputs.push == 'true' && 30 || 1 }}
+
   build_docker:
     name: Build release docker image
     needs: build
