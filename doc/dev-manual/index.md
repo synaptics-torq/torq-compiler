@@ -17,6 +17,7 @@ testing.md
 more_testing.md
 tools.md
 model.md
+ci.md
 ```
 
 This manual is structured step-by-step, starting from introduction and setup, through model conversion,
