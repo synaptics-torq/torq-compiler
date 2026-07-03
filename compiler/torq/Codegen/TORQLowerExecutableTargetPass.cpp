@@ -430,6 +430,19 @@ struct TORQLowerExecutableTargetPass
 
         llvm::errs() << "[TORQ] Lowering dispatch: " << dispatchName << "\n";
 
+        // Create a shared DefaultTimingManager so that --mlir-timing instruments both
+        // inner PassManagers in the same timing tree.
+        //
+        // Background: applyPassManagerCLOptions does NOT enable timing — it handles
+        // crash reproducers, stats, and IR printing only. Timing is enabled separately
+        // via applyDefaultTimingPassManagerCLOptions / enableTiming. Each call to
+        // enableTiming() with no argument creates an independent DefaultTimingManager
+        // that prints a separate per-dispatch report. Sharing one TimingScope ensures
+        // all sub-pass timings are aggregated into a single report.
+        DefaultTimingManager tm;
+        applyDefaultTimingManagerCLOptions(tm);
+        TimingScope timingScope = tm.getRootScope();
+
         // distribute the work to the workgroups (we have only one at the moment)
         PassManager distributeToWorkgroupsPipeline(
             getOperation().getContext(), maybeDispatchFuncOp->getOperationName()
@@ -440,6 +453,7 @@ struct TORQLowerExecutableTargetPass
             );
         }
         distributeToWorkgroupsPipeline.addPass(createTileAndDistributeToWorkgroupsPass());
+        distributeToWorkgroupsPipeline.enableTiming(timingScope);
         if (failed(mlir::applyPassManagerCLOptions(distributeToWorkgroupsPipeline)))
             return signalPassFailure();
         if (failed(distributeToWorkgroupsPipeline.run(*maybeDispatchFuncOp))) {
@@ -451,6 +465,7 @@ struct TORQLowerExecutableTargetPass
             pipeline.addInstrumentation(std::make_unique<torq::ProgressLogger>(dispatchName));
         }
         addAllPasses(pipeline);
+        pipeline.enableTiming(timingScope);
         if (failed(mlir::applyPassManagerCLOptions(pipeline)))
             return signalPassFailure();
         if (failed(pipeline.run(getOperation()))) {
