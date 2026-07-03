@@ -199,15 +199,6 @@ LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &re
         stride = 1;
         stride_offset = 0;
     }
-    if (stride == 2) {
-        // Not clear why we have to overwrite the padding values here.
-        // TODO: support cases where pad_top and/or pad_bottom is 0
-        // not sure how we can handle XY tiling which requires different pad_top/pad_bottom config?
-        pad_left = 1;
-        pad_right = 1;
-        pad_top = 1;
-        pad_bottom = 1;
-    }
 
     int32_t kernel_left = (weight_shape[3] - 1) / 2;
     int32_t kernel_right = weight_shape[3] - kernel_left - 1;

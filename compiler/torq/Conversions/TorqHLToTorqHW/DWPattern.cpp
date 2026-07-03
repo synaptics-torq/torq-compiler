@@ -498,13 +498,6 @@ LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewrite
         stride_offset = 0;
     }
 
-    if (stride == 2) {
-        pad_left = 1;
-        pad_right = 1;
-        pad_top = 1;
-        pad_bottom = 1;
-    }
-
     const int32_t kernel_left = (weight_shape[3] - 1) / 2;
     const int32_t kernel_right = weight_shape[3] - kernel_left - 1;
     const int32_t kernel_top = (weight_shape[2] - 1) / 2;
@@ -591,8 +584,8 @@ LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewrite
         {DimType::H, MemDimTag::J, ksize_y, 0},
         {DimType::H, MemDimTag::U, input_shape[1], 0}
     };
-    ref.push_back({DimType::H, MemDimTag::X, output_shape[3], 0});
-    ref.push_back({DimType::H, MemDimTag::Y, output_shape[2], 0});
+    ref.push_back({DimType::H, MemDimTag::X, input_shape[3] / stride, 0});
+    ref.push_back({DimType::H, MemDimTag::Y, input_shape[2] / stride, 0});
     ;
     ndls.add(NdlType::REF, ref);
 
