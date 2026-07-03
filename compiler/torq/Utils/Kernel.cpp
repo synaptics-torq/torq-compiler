@@ -1129,6 +1129,67 @@ static torq_hw::MemDimTag tagToMemDimTag(ShapeItem::Tag tag, torq_hw::MemDimTag 
     assert(false && "Unknown ShapeItem::Tag");
 }
 
+// Ensure the NDL doesn't contain too many (or too few) HDIMs
+// If beyond the max number of HDIMs supported by the HW, try to compact them if possible
+static void compactHDims(NdlType type, torq_hw::MemNdlDimsData &ndlDims) {
+    const int ldimCount =
+        count_if(ndlDims.begin(), ndlDims.end(), [](auto &d) { return d.type == DimType::L; });
+    llvm::errs() << "UUUU ldimCount: " << ldimCount << "\n";
+
+    int hdimCount = ndlDims.size() - ldimCount;
+    if (hdimCount <= HwInfo::hdim_count) {
+        if (hdimCount < 1) {
+            // Ensure ndlDims contains at least 1 HDIM for _mem_ndl_desc_gen()
+            ndlDims.push_back({DimType::H, MemDimTag::O, 1});
+        }
+        return;
+    }
+    LLVM_DEBUG(llvm::dbgs() << "Warning: " << type << " contains " << hdimCount << " HDIMs");
+
+    // Remove dummy dimensions with only 1 iteration
+    ndlDims.erase(
+        remove_if(
+            ndlDims.begin(), ndlDims.end(),
+            [](auto &d) { return d.type == DimType::H && d.count == 1; }
+        ),
+        ndlDims.end()
+    );
+    hdimCount = ndlDims.size() - ldimCount;
+
+    if (hdimCount > HwInfo::hdim_count) {
+        // Still beyond limit, join nearby HDIMs working on dense or 0 strides
+        MemNdlDimsData compactedDims;
+        int denseStride = 0;
+        for (const MemNdlDimData &d : ndlDims) {
+            if (d.type == DimType::H) {
+                const auto stride = d.getIntStride();
+                // Only general-porpose dimensions (O-tag) can be compacted
+                if (stride.has_value() && d.tag == torq_hw::MemDimTag::O) {
+                    if (stride.value() == denseStride && !compactedDims.empty() &&
+                        compactedDims.back().count * d.count <= HwInfo::hdim_max_count) {
+                        compactedDims.back().count *= d.count;
+                        denseStride *= d.count;
+                        continue;
+                    }
+                    denseStride = stride.value() * d.count;
+                }
+                else {
+                    denseStride = std::numeric_limits<int>::min();
+                }
+            }
+            compactedDims.push_back(d);
+        }
+        ndlDims = compactedDims;
+        hdimCount = ndlDims.size() - ldimCount;
+    }
+    LLVM_DEBUG(llvm::dbgs() << " reduced to " << hdimCount << "\n");
+
+    if (hdimCount > HwInfo::hdim_count) {
+        llvm::errs() << "Error: " << type << " has " << hdimCount << " HDIMs\n";
+        assert(false && "Too many HDIMs");
+    }
+}
+
 int SlicePrivate::addMemNdlDims(
     NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data, int appendBlockSize
 ) {
@@ -1194,8 +1255,6 @@ int SlicePrivate::addMemNdlDims(
             ndlDims.push_back({DimType::L, MemDimTag::G, block.size, elementSize});
         }
     }
-    // Ensure we have at least 2 DIMs for _mem_ndl_desc_gen()
-    ndlDims.push_back({DimType::H, MemDimTag::G, 1});
 
     // Generate an extra HDIM to load the entire size of the indexed data block
     if (block.outerGroups > 1) {
@@ -1277,6 +1336,9 @@ int SlicePrivate::addMemNdlDims(
             offset += iterVar.constIndex() * strideVal;
         }
     }
+
+    // Compact HDIMs if needed
+    compactHDims(type, ndlDims);
 
     if (useSDims) {
         assert(block.outerGroups == 1 && "SDIMs only supported for single block transfers");

@@ -29,6 +29,8 @@ struct HwInfo {
         act_limit = 4,  // TODO: rename to act_groups ?
         act_width = 16, // TODO: rename to act_count as for mac_count ?
         slice_count = 2,
+        hdim_count = 8,                   // Max number of HDIMs in a MemNDL
+        hdim_max_count = ((1 << 28) - 1), // Max countr value for an HDIMs in a MemNDL
         // Derived constants
         iram_width = iram_seg_width * iram_seg,
         bbus_width = breg_width * act_limit,
