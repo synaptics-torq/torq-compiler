@@ -1,0 +1,127 @@
+name: Test build
+
+on: 
+  
+  workflow_call:
+    inputs:
+      release_artifact_id:
+        description: ID of the artifact with the built release
+        required: true
+        type: string
+      test_cmodel:
+        required: false
+        default: true
+        type: boolean
+      test_astra_machina_sl:
+        required: false
+        default: true
+        type: boolean
+      test_aws_fpga:
+        required: false
+        default: true
+        type: boolean
+      push_images:        
+        required: false
+        default: false
+        type: boolean
+
+    secrets:      
+      CI_APP_PRIVATE_KEY:
+        required: true
+      HF_TOKEN:
+        required: true
+      JENKINS_API_TOKEN:
+        required: true
+
+permissions:
+  id-token: write # used to assume AWS roles
+  contents: read  
+  packages: write
+  attestations: write
+  
+jobs:
+
+  docker_image_tests:
+    name: Build test docker
+    uses: ./.github/workflows/build-docker-image-tests.yml
+    with:
+      push: ${{ inputs.push_images }}
+
+  docker_image_fpga_tests:
+    name: Build FPGA test docker
+    uses: ./.github/workflows/build-docker-image-fpga-tests.yml
+    with:
+      push: ${{ inputs.push_images }}
+
+  test_cmodel:
+    needs: docker_image_tests
+    name: Test with C model
+    if: ${{ inputs.test_cmodel }}
+    uses: ./.github/workflows/test-cmodel.yml
+    with:
+      docker_image_tests_name: ${{ needs.docker_image_tests.outputs.image_name }}
+      release_artifact_id: ${{ inputs.release_artifact_id }}
+    secrets:
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  test_astra_machina_sl:
+    needs: docker_image_tests
+    name: Test with Astra Machina SL
+    if: ${{ inputs.test_astra_machina_sl }}
+    uses: ./.github/workflows/test-astra-machina-sl.yml
+    with:
+      docker_image_tests_name: ${{ needs.docker_image_tests.outputs.image_name }}
+      release_artifact_id: ${{ inputs.release_artifact_id }}
+    secrets:
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+
+  test_aws_fpga:
+    needs: docker_image_fpga_tests
+    name: Test with AWS FPGA
+    if: ${{ inputs.test_aws_fpga }}
+    uses: ./.github/workflows/test-aws-fpga.yml
+    with:
+      docker_image_fpga_tests_name: ${{ needs.docker_image_fpga_tests.outputs.image_name }}
+      release_artifact_id: ${{ inputs.release_artifact_id }}
+    secrets:
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  mark-complete:
+    name: Notify dashboard
+    if: always()
+
+    needs: [test_cmodel, test_aws_fpga, test_astra_machina_sl]
+
+    runs-on:
+    - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+      image:ubuntu-7.0
+
+    steps:
+      - name: Notify dashboard
+        env:
+          DASHBOARD_URL: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          curl -sf -X POST \
+            -F "workflow_url=${WORKFLOW_URL}" \
+            "${DASHBOARD_URL}/api/test-sessions/mark_complete/" || true # we ignore errors
+  
+  run-tests-failure-alert:
+    name: Collect results
+    runs-on: ubuntu-latest
+    needs: [test_cmodel, test_aws_fpga, test_astra_machina_sl]
+    # this job is used as check to know if the merge queue can be merged. if it doesn't run, GH will consider
+    # it as passed, so we run it only when one of the tests jobs above fails or is cancelled to notify GH the
+    # merge queue is not ready to be merged. By doing this trick we ensure this job runs only when it is really
+    # needed and we don't waste resources running it when all the tests pass.
+    if: ${{ cancelled() || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'failure') }}
+    steps:
+      - name: Conditionally Fail Required Check
+        shell: bash
+        run: |
+          echo "::error Some required job has failed!"
+          exit 1

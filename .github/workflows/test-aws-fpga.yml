@@ -11,8 +11,6 @@ on:
         required: true
         type: string
     secrets:
-      CI_APP_ID:
-        required: true
       CI_APP_PRIVATE_KEY:
         required: true
       HF_TOKEN:

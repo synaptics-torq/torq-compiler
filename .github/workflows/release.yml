@@ -23,40 +23,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-
-  release_docker_image_tests:
-    name: Release test docker
-    permissions:
-      contents: read
-      id-token: write
-
-    if: ${{ github.ref == 'refs/heads/main' }}    
-    uses: ./.github/workflows/build-docker-image-tests.yml
-    with:
-      push: true
-
-  release_docker_image_fpga_tests:
-    name: Release FPGA test docker
-    permissions:
-      contents: read
-      id-token: write
-
-    if: ${{ github.ref == 'refs/heads/main' }}
-    uses: ./.github/workflows/build-docker-image-fpga-tests.yml
-    with:
-      push: true
   
   build:
-    name: Build torq
+    name: Build release
     uses: ./.github/workflows/build-torq.yml
     with:
       push: true
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+  test:
+    name: Test release
+    needs: build
+    uses: ./.github/workflows/test-build.yml
+    with:
+      release_artifact_id: ${{ needs.build.outputs.release_artifact_id }}
+      push_images: ${{ github.ref == 'refs/heads/main' }}
+    secrets:
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+
   release_assets:
     name: Publish release assets
-    needs: build
+    needs: [test, build]
     runs-on: ubuntu-latest
     
     permissions:
