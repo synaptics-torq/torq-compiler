@@ -131,7 +131,7 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
   public:
     using OpRewritePattern::OpRewritePattern;
 
-    bool isScalarFromRecursiveRescale(const Value &v) const {
+    bool isConstScalarFromRecursiveRescale(const Value &v) const {
         Value input = v;
         ScaleInfo scaleInfo;
 
@@ -278,15 +278,15 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             );
         }
 
-        auto rank1 = input1Type.getRank();
-        auto rank2 = input2Type.getRank();
-
-        if (rank1 == 0 || rank2 == 0) {
+        // Only add/sub need an explicit rank-0 broadcast (they lower to torq_hl.add, which
+        // needs a full-rank first operand); other ops handle scalar broadcast internally.
+        if ((input1Type.getRank() == 0 || input2Type.getRank() == 0) &&
+            !isa_and_nonnull<arith::AddIOp, arith::AddFOp, arith::SubIOp, arith::SubFOp>(eleOp)) {
             return rewriter.notifyMatchFailure(
-                srcOp, "one of input or both input rank is 0, no need broadcast\n"
+                srcOp, "rank-0 scalar broadcast handled internally for non-add/sub ops\n"
             );
         }
-        auto isScalar = [&](Value input) {
+        auto isConstScalar = [&](Value input) {
             auto denseAttr = returnDenseElementAttr(input);
             if (isa_and_nonnull<arith::ConstantOp>(input.getDefiningOp()) && denseAttr &&
                 denseAttr.getNumElements() == 1) {
@@ -295,7 +295,7 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             return false;
         };
 
-        if (isScalar(input1) || isScalar(input2)) {
+        if (isConstScalar(input1) || isConstScalar(input2)) {
             return rewriter.notifyMatchFailure(
                 srcOp, "one of input or both input is scalar, no need broadcast\n"
             );
@@ -304,7 +304,8 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
         // TODO: add more recursive scalar input processing for elementwise binary ops
         // right now we only handle add/sub with recurive scalar input processing
         if (eleOp && (isa<arith::AddIOp>(eleOp) || isa<arith::SubIOp>(eleOp))) {
-            if (isScalarFromRecursiveRescale(input1) || isScalarFromRecursiveRescale(input2)) {
+            if (isConstScalarFromRecursiveRescale(input1) ||
+                isConstScalarFromRecursiveRescale(input2)) {
                 return rewriter.notifyMatchFailure(
                     srcOp, "one of input or both input is recurive scalar, no need broadcast\n"
                 );
