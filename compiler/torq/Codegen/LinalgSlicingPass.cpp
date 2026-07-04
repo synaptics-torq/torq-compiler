@@ -24,7 +24,10 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
@@ -337,6 +340,223 @@ struct BatchMatmulPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
     }
 }; // class BatchMatmulPattern
 
+// True iff `op` is a pure-elementwise linalg.generic that is a legal member of a
+// coalesced elementwise slicing region: all-parallel, projected-permutation
+// indexing (linalg::isElementwise) and static shape.
+//
+// NOTE on narrowing trunc: the standalone narrowing-trunc guard declines to slice
+// a STANDALONE narrowing-trunc generic (an i32->i16 rescale/quantize that must not
+// be tiled on its own). That guard lives in ElementwisePattern::matchAndRewrite and
+// is unchanged. Here we do NOT reject trunc-bearing generics, because (a) coalescing
+// only acts on chains of >=2 ops with a single escaping leaf, so a standalone trunc
+// op forms a size-1 region and is skipped; and (b) interior trunc ops are legitimate
+// chain members -- e.g. tanh's float-exponent range-reduction block
+// (bitcast/subi/trunci/index_cast/extui/addi/bitcast) sits in the middle of the
+// polynomial chain. Excluding it would split the chain and defeat coalescing. When
+// fused into one forall the trunc is tiled per-element, never sliced standalone, so
+// the standalone-trunc concern does not arise.
+bool isCoalescableElementwise(Operation *op) {
+    auto genericOp = dyn_cast<linalg::GenericOp>(op);
+    if (!genericOp)
+        return false;
+    if (!linalg::isElementwise(genericOp))
+        return false;
+    if (!cast<ShapedType>(genericOp->getResult(0).getType()).hasStaticShape())
+        return false;
+    return true;
+}
+
+// Map each fuse-group id to whether EVERY op carrying it is a coalescable
+// pure-elementwise generic, computed in ONE walk of the function. A singleton
+// (1 member) and a pure-elementwise pattern group (e.g. mul+clamp -- arith.mulf +
+// cmpf/select, all elementwise) map to true; a group with ANY non-elementwise
+// member (e.g. a conv/matmul fused group) maps to false -> that group is a hard
+// region boundary. Built once so isDissolvableElementwise is an O(1) lookup per
+// query instead of walking the whole function each time (the seed scan + BFS call
+// it O(N) times).
+llvm::DenseMap<int64_t, bool> buildGroupAllCoalescableMap(FunctionOpInterface funcOp) {
+    llvm::DenseMap<int64_t, bool> groupAllCoalescable;
+    funcOp->walk([&](Operation *op) {
+        auto arr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+        if (!arr)
+            return;
+        bool coalescable = isCoalescableElementwise(op);
+        for (IntegerAttr fuseGroupAttr : arr.getAsRange<IntegerAttr>()) {
+            auto [it, inserted] =
+                groupAllCoalescable.try_emplace(fuseGroupAttr.getInt(), coalescable);
+            if (!inserted)
+                it->second = it->second && coalescable;
+        }
+    });
+    return groupAllCoalescable;
+}
+
+// A legal coalescing-region member: a coalescable pure-elementwise generic that is
+// EITHER ungrouped OR belongs to a fuse group ALL of whose members are themselves
+// coalescable pure-elementwise generics. That admits both a length-1 SINGLETON
+// (each polynomial step) AND a pure-elementwise PATTERN group such as the final
+// mul+clamp (so the whole erf/tanh tail joins one sliced region). A group
+// containing ANY non-elementwise member (conv/matmul fused groups) is rejected ->
+// hard region boundary, and its size()==1 invariant is never disturbed.
+bool isDissolvableElementwise(
+    Operation *op, const llvm::DenseMap<int64_t, bool> &groupAllCoalescable
+) {
+    if (!isCoalescableElementwise(op))
+        return false;
+    if (!isMarkedFuseGroup(op))
+        return true; // ungrouped
+    ArrayAttr arr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+    if (!arr)
+        return true;
+    for (IntegerAttr fuseGroupAttr : arr.getAsRange<IntegerAttr>())
+        if (!groupAllCoalescable.lookup(fuseGroupAttr.getInt()))
+            return false;
+    return true;
+}
+
+// Coalesce a maximal connected region of pure-elementwise generics
+// (the erf/tanh/mul polynomial chain) into ONE pattern fuse group so the whole
+// region is sliced into a SINGLE scf.forall, keeping every intermediate
+// LRAM-resident (one DRAM load -> LRAM chain -> one DRAM store per slice),
+// matching the slicing-OFF behaviour. Without this, each polynomial step is a
+// standalone principal -> its own forall -> a full-size DRAM round-trip per step
+// (torq_hl.store explosion 1 -> 36 for erf).
+//
+// Region membership (isDissolvableElementwise):
+//   - a coalescable pure-elementwise generic that is EITHER ungrouped OR in a
+//     fuse group whose members are ALL coalescable pure-elementwise. This admits
+//     both a length-1 singleton (each polynomial step) AND a pure-elementwise
+//     pattern group such as the final mul+clamp, so the whole erf/tanh tail
+//     joins one sliced region;
+//   - grown over def-use edges to producer/consumer ops that are also
+//     dissolvable. Multi-use values ARE allowed inside the region (the erf x^2
+//     term feeds 5 muls); a use only matters if it escapes the region (handled
+//     below as the leaf's external use).
+// Boundary stops (never crossed):
+//   - any non-coalescable op (reduction / matmul / conv / transpose / reshape) --
+//     linalg::isElementwise is false for these;
+//   - any fuse group with a non-elementwise member (a conv/matmul fused group):
+//     dissolving it would break the assert(size()==1) invariant in peelAndSlice,
+//     so it is left untouched and its result is a region input/output edge.
+// Each member's existing fuseGroup (a singleton UID, or a pure-elementwise pattern
+// group like mul+clamp) is stripped before the single shared id is set.
+// The region's principal is its unique leaf (the op whose result is used outside
+// the region or is the dispatch store operand). The leaf's own
+// TORQ_FUSE_GROUP_ID becomes the shared group id, so isFuseGroupPrincipalOp
+// returns it for the leaf automatically and every interior op hits the existing
+// "not the principal" skip in ElementwisePattern.
+void coalesceElementwiseChains(FunctionOpInterface funcOp) {
+    MLIRContext *context = funcOp.getContext();
+    // Precompute "are all members of this fuse group coalescable?" once, so the
+    // membership test below is an O(1) lookup rather than a per-call walk.
+    llvm::DenseMap<int64_t, bool> groupAllCoalescable = buildGroupAllCoalescableMap(funcOp);
+
+    // Collect all candidate seeds in deterministic order.
+    SmallVector<linalg::GenericOp> seeds;
+    funcOp->walk([&](linalg::GenericOp g) {
+        if (isDissolvableElementwise(g, groupAllCoalescable))
+            seeds.push_back(g);
+    });
+
+    llvm::DenseSet<Operation *> assigned;
+    for (linalg::GenericOp seed : seeds) {
+        if (assigned.contains(seed.getOperation()))
+            continue;
+
+        // BFS the maximal connected coalescable region around `seed`.
+        llvm::SetVector<Operation *> region;
+        SmallVector<Operation *> work{seed.getOperation()};
+        region.insert(seed.getOperation());
+        while (!work.empty()) {
+            Operation *cur = work.pop_back_val();
+
+            // Walk to producers (defining ops of operands).
+            for (Value operand : cur->getOperands()) {
+                Operation *def = operand.getDefiningOp();
+                if (!def || region.contains(def))
+                    continue;
+                if (!isDissolvableElementwise(def, groupAllCoalescable))
+                    continue;
+                region.insert(def);
+                work.push_back(def);
+            }
+            // Walk to consumers (users of results).
+            for (Value result : cur->getResults()) {
+                for (Operation *user : result.getUsers()) {
+                    if (region.contains(user))
+                        continue;
+                    if (!isDissolvableElementwise(user, groupAllCoalescable))
+                        continue;
+                    region.insert(user);
+                    work.push_back(user);
+                }
+            }
+        }
+
+        // A single op is no different from the standalone path; skip.
+        if (region.size() < 2)
+            continue;
+
+        // Find the region leaf: the op whose result is consumed only OUTSIDE the
+        // region (escapes to the dispatch store or to an already-grouped op). A
+        // well-formed elementwise chain has exactly one such leaf; if there are
+        // several (the region forks to multiple external consumers) we bail out
+        // for safety -- coalescing a fork could change materialization semantics.
+        Operation *leaf = nullptr;
+        bool multipleLeaves = false;
+        for (Operation *op : region) {
+            bool escapes = false;
+            for (Value result : op->getResults()) {
+                for (Operation *user : result.getUsers()) {
+                    if (!region.contains(user)) {
+                        escapes = true;
+                        break;
+                    }
+                }
+                if (escapes)
+                    break;
+            }
+            if (escapes) {
+                if (leaf) {
+                    multipleLeaves = true;
+                    break;
+                }
+                leaf = op;
+            }
+        }
+        if (multipleLeaves || !leaf)
+            continue;
+
+        // Use the leaf's own per-op UID as the shared group id so the leaf is the
+        // principal (isFuseGroupPrincipalOp(leaf) == leafFuseGroupAttr).
+        auto leafFuseGroupAttr = leaf->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
+        if (!leafFuseGroupAttr)
+            continue;
+
+        // Region members may carry a fuse group: a length-1 SINGLETON (own UID) or
+        // a pure-elementwise PATTERN group (e.g. mul+clamp, whose members share
+        // the principal's UID as fuseGroup). Strip every fuseGroup each member carries FIRST
+        // (removeFuseGroupMarkingBackwards removes that fuseGroup from the backward cone;
+        // those fuseGroups live only inside this region, so nothing outside is touched),
+        // so all members are ungrouped before we assign the single shared [leafFuseGroupAttr].
+        // This keeps the assert(size()==1) invariant in peelAndSlice intact.
+        for (Operation *op : region) {
+            if (auto arr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
+                SmallVector<int64_t> fuseGroups;
+                for (IntegerAttr fuseGroupAttr : arr.getAsRange<IntegerAttr>())
+                    fuseGroups.push_back(fuseGroupAttr.getInt());
+                for (int64_t fuseGroup : fuseGroups)
+                    removeFuseGroupMarkingBackwards(op, fuseGroup);
+            }
+        }
+        ArrayAttr groupAttr = ArrayAttr::get(context, {leafFuseGroupAttr});
+        for (Operation *op : region) {
+            op->setAttr(TORQ_FUSE_GROUP, groupAttr);
+            assigned.insert(op);
+        }
+    }
+}
+
 // Elementwise pattern for linalg.generic ops. Picks the leftmost non-unit
 // dimension to slice on, keeping inner dimensions contiguous in memory.
 struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
@@ -405,6 +625,12 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
 
         auto funcOp = getOperation();
         MLIRContext *context = funcOp.getContext();
+
+        // Coalesce pure-elementwise polynomial chains (erf/tanh/mul) into one fuse
+        // group BEFORE the patterns below run, so each chain slices into a single
+        // scf.forall (LRAM-resident) instead of one forall per op (DRAM round-trip
+        // per step).
+        coalesceElementwiseChains(funcOp);
 
         RewritePatternSet patterns(context);
 
