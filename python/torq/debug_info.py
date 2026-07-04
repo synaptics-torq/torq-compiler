@@ -671,10 +671,23 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
                 if invocation_type == "!torq_hl.invocation<host>":
                     workunit = pending.host_program
                     pending.host_program = None
+                    if workunit is None:
+                        logger.warning(
+                            "Skipping unmatched wait_program for host invocation at action id %s (location: %s)",
+                            action.action_id,
+                            action.operation.location,
+                        )
+                        # Keep analyzing remaining actions (including NSS/NPU tasks).
+                        continue
                 elif invocation_type == "!torq_hl.invocation<nss>":
                     workunit = pending.nss_program
-                    workunit.end_action = action
                     pending.nss_program = None
+                    if workunit is None:
+                        raise ValueError(
+                            f"Unmatched wait_program for nss invocation at action id {action.action_id} "
+                            f"(location: {action.operation.location})"
+                        )
+                    workunit.end_action = action
                 else:
                     raise ValueError(f"Unknown invocation type {invocation_type} at action id {action.action_id}")
 
@@ -846,6 +859,8 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
         return TimeDebugInfo(start_time_ns=start_time_ns, end_time_ns=end_time_ns, async_duration_ns=async_duration_ns)
 
     def _update_time_ns(self, operation: Operation, frequency_mhz: int = CLOCK_FREQ_MHZ):
+        if operation is None:
+            return
         self.operation_times_ns[operation] = self._read_time_debug_info(operation, frequency_mhz)
 
 

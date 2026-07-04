@@ -37,6 +37,8 @@ def pytest_generate_tests(metafunc):
 
 @pytest.fixture
 def torch_model_case(request):
+    if not hasattr(request, "param"):
+        pytest.skip("No torch model test cases found (.pt files under tests/testdata/torch_models)")
     return request.param
 
 

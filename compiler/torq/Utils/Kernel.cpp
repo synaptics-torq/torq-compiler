@@ -1134,7 +1134,6 @@ static torq_hw::MemDimTag tagToMemDimTag(ShapeItem::Tag tag, torq_hw::MemDimTag 
 static void compactHDims(NdlType type, torq_hw::MemNdlDimsData &ndlDims) {
     const int ldimCount =
         count_if(ndlDims.begin(), ndlDims.end(), [](auto &d) { return d.type == DimType::L; });
-    llvm::errs() << "UUUU ldimCount: " << ldimCount << "\n";
 
     int hdimCount = ndlDims.size() - ldimCount;
     if (hdimCount <= HwInfo::hdim_count) {
@@ -2869,7 +2868,6 @@ PData Alu::transpose(const IData &idata) {
 
     // Todo: can we accept rank 2?? maybe it already works */
 
-    llvm::errs() << "Transposing idata: " << idata << "\n";
     PData pData = d->aluAccumulate(idata, ALUOp1Mode::BYP, true);
     // Transpose reorders and packs input data together in 32 bits values
     d->_iram.elementType = DType::int32;
