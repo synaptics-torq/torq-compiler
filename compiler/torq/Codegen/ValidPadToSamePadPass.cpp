@@ -21,6 +21,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 
@@ -54,6 +55,23 @@ bool needsSamePadConversionW(llvm::ArrayRef<int64_t> pads, int64_t ksize_w) {
         (pads[LRTBDim::Left] == kernel_left && pads[LRTBDim::Right] == kernel_right) ||
         (pads[LRTBDim::Left] == kernel_right && pads[LRTBDim::Right] == kernel_left)
     );
+}
+
+// A conv/pool that is effectively 1D: one spatial axis is degenerate (extent 1, kernel 1,
+// stride 1) while the other carries stride 2 with zero (valid) padding. The NPU executes such
+// a valid stride-2 op correctly, but mis-executes the asymmetric SAME padding that the
+// valid->same rewrites would introduce, corrupting ~99% of the outputs. Keep these valid.
+// True 2D stride-2 convs (both axes strided) still require the SAME conversion: the NPU cannot
+// execute a valid (grown-to-even) 2D stride-2 conv directly.
+bool isValid1DStride2Conv(
+    llvm::ArrayRef<int64_t> shape, int64_t kh, int64_t kw, int64_t strideH, int64_t strideW,
+    llvm::ArrayRef<int64_t> pads
+) {
+    if (!llvm::all_of(pads, [](int64_t p) { return p == 0; }))
+        return false;
+    const bool degenerateW = shape[NCHW::W] == 1 && kw == 1 && strideW == 1;
+    const bool degenerateH = shape[NCHW::H] == 1 && kh == 1 && strideH == 1;
+    return (degenerateW && strideH == 2) || (degenerateH && strideW == 2);
 }
 
 template <class TorqConvPoolOp>
@@ -851,15 +869,27 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
             }
         }
 
-        const bool validPadH = oddHeight && needsSamePadConversionH(pads, kh);
-        const bool validPadW = oddWidth && needsSamePadConversionW(pads, kw);
-        const bool convertToSame = validPadH || validPadW;
-
         SmallVector<int64_t, 4> paddedShape(shape.begin(), shape.end());
         if (oddHeight)
             paddedShape[NCHW::H]++;
         if (oddWidth)
             paddedShape[NCHW::W]++;
+
+        auto outputType = llvm::cast<RankedTensorType>(op.getResult(0).getType());
+        auto origOutShape = outputType.getShape();
+
+        // An effectively-1D valid stride-2 conv (see isValid1DStride2Conv) must stay valid: grow
+        // the odd axis to even by appending one zero rather than converting to asymmetric SAME,
+        // which the NPU mis-executes. Only safe when growing preserves the output shape (odd
+        // kernels); even kernels, and true 2D stride-2 convs, fall through to the SAME handling
+        // below (the NPU cannot execute a valid grown-to-even 2D stride-2 conv directly).
+        const bool keepValid =
+            isValid1DStride2Conv(shape, kh, kw, strides[0], strides[1], pads) &&
+            (paddedShape[NCHW::H] - kh) / strides[0] + 1 == origOutShape[NCHW::H] &&
+            (paddedShape[NCHW::W] - kw) / strides[1] + 1 == origOutShape[NCHW::W];
+        const bool validPadH = !keepValid && oddHeight && needsSamePadConversionH(pads, kh);
+        const bool validPadW = !keepValid && oddWidth && needsSamePadConversionW(pads, kw);
+        const bool convertToSame = validPadH || validPadW;
 
         auto loc = op.getLoc();
         auto elemType = inputType.getElementType();
@@ -896,6 +926,10 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
             std::swap(newPads[LRTBDim::Left], newPads[LRTBDim::Right]);
         }
 
+        // Keep a valid conv valid: the grown buffer uses zero padding, not SAME.
+        if (keepValid)
+            newPads.assign(pads.begin(), pads.end());
+
         if (validPadH) {
             int centre = (kh - 1) / 2;
             offsetH = ((centre - pads[LRTBDim::Top]) ^ stride_offset) & 1;
@@ -906,9 +940,6 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
             offsetW = ((centre - pads[LRTBDim::Left]) ^ stride_offset) & 1;
             extractOffsetW = (centre + offsetW - pads[LRTBDim::Left]) / 2;
         }
-
-        auto outputType = llvm::cast<RankedTensorType>(op.getResult(0).getType());
-        auto origOutShape = outputType.getShape();
 
         SmallVector<int64_t, 4> convOutShape;
         if (convertToSame) {
