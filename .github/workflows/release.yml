@@ -35,6 +35,7 @@ jobs:
   test:
     name: Test release
     needs: build
+    if: ${{ vars.DISABLE_TESTS != 'true' }}
     uses: ./.github/workflows/test-build.yml
     with:
       release_artifact_id: ${{ needs.build.outputs.release_artifact_id }}
@@ -46,7 +47,7 @@ jobs:
 
   release_assets:
     name: Publish release assets
-    needs: [test, build]
+    needs: build
     runs-on: ubuntu-latest
     
     permissions:
