@@ -17,10 +17,8 @@ permissions:
   attestations: write
   
 concurrency:
-
-  # we release only the last push to each ref_name, we can abort previous incomplete runs
+  # we release only the last push to each ref_name but we let each release process to complete
   group: release-${{ github.ref_name }}
-  cancel-in-progress: true
 
 jobs:
   
