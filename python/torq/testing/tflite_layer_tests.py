@@ -8,6 +8,7 @@ import tensorflow as tf
 import numpy as np
 
 
+from torq.testing.cache_utils import atomic_write_json_file
 from torq.testing.tensorflow import run_with_tflite
 
 # Import the direct TFLite layer extractor (preserves quantization)
@@ -91,9 +92,11 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
 
     # when using pytest xdist multiple processes will be trying to run this in parallel
     # we want to make sure the first that gets here computes the stuff and the other ones
-    # wait for it to complete and just use the cached data
-    with FileLock(str(layers_dir / "lock")):
-        
+    # wait for it to complete and just use the cached data.
+    # Keep the lock file outside layers_dir so the directory is never blocked from
+    # being replaced/cleaned on NFS-like filesystems.
+    with FileLock(str(cache_dir / f"{model_name}.lock")):
+
         # Check for cached cases file (fast path - no TF import needed)
         cases_cache_file = layers_dir / "_cases_cache.json"
 
@@ -114,23 +117,23 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
 
         # Use the new direct layer extractor that preserves quantization
         print(f"Processing {tflite_path.name} with quantization-preserving extractor...")
-        
+
         extraction_results = extract_all_layers(
             str(tflite_path),
             str(layers_dir),
             max_layers=max_layers,
             force=force_extract
-        )        
+        )
 
         for result in extraction_results:
             op_name = result['op_name']
             op_index = result['layer_index']
             layer_name = f"{model_name}_layer_{op_name}_{op_index}"
-            
+
             if not result['success']:
                 # Create case anyway but mark as failed
                 cases.append(TFLiteLayerCase(
-                    name=layer_name, 
+                    name=layer_name,
                     full_model_path=str(tflite_path),
                     op_name=op_name,
                     op_index=op_index,
@@ -139,11 +142,10 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
                     is_quantized=result.get('is_quantized', False),
                 ))
                 continue
-            
+
             layer_tflite = Path(result['layer_file'])
-            
-            
-            cases.append(TFLiteLayerCase(name=layer_name, 
+
+            cases.append(TFLiteLayerCase(name=layer_name,
                 full_model_path=str(tflite_path),
                 layer_model_path=str(layer_tflite),
                 op_name=op_name,
@@ -152,20 +154,20 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
                 is_quantized=result.get('is_quantized', False),
                 input_tensors=[x['index'] for x in result.get('inputs', []) if not x['is_constant']]
             ))
-        
+
         # Add full model case
-        cases.append(TFLiteLayerCase(name=f"{model_name}_full_model", 
+        cases.append(TFLiteLayerCase(name=f"{model_name}_full_model",
             full_model_path=str(tflite_path),
             is_layer=False,
         ))
-        
+
         # Save cases cache for fast loading next time
         try:
-            with open(cases_cache_file, 'w') as f:
-                json_mod.dump([asdict(c) for c in cases], f)
+            atomic_write_json_file(layers_dir, "_cases_cache.json",
+                                   [asdict(c) for c in cases])
         except Exception:
             pass  # Ignore cache write errors
-        
+
         print(f"  Generated {len(cases)} test cases ({sum(1 for r in extraction_results if r['success'])} layers + 1 full model)")
         return cases
 

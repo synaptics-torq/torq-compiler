@@ -20,6 +20,7 @@ except ImportError:
     torch = None
     F = None
 
+from .cache_utils import atomic_write_json_manifest
 from .cases import Case
 from .versioned_fixtures import (
     versioned_unhashable_object_fixture,
@@ -933,35 +934,24 @@ def _load_torch_layer_cache(key_dir: Path, filepath: Path, node_groups, dedup):
 
 def _save_torch_layer_cache(key_dir: Path, filepath: Path, cases, node_groups, dedup):
     """Atomically write case metadata to the pytest cache directory."""
-    tmp_dir = key_dir.with_name(key_dir.name + f".tmp.{os.getpid()}")
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir(parents=True, exist_ok=False)
-    try:
-        stat = _model_file_stat(filepath)
-        entries = []
-        for c in cases:
-            entries.append({
-                "name": c.name,
-                "layer_name": c.layer_name,
-                "is_full_model": c.is_full_model,
-                "layer_input_shapes": c.data.get("layer_input_shapes", []),
-                "layer_output_shapes": c.data.get("layer_output_shapes", []),
-            })
-        (tmp_dir / "manifest.json").write_text(json.dumps({
-            "version": _TORCH_LAYER_CACHE_VERSION,
-            "model_size": stat["size"],
-            "model_mtime_ns": stat["mtime_ns"],
-            "node_groups": node_groups,
-            "dedup": dedup,
-            "cases": entries,
-        }, indent=2))
-        if key_dir.exists():
-            shutil.rmtree(key_dir)
-        tmp_dir.rename(key_dir)
-    except Exception:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
+    stat = _model_file_stat(filepath)
+    entries = []
+    for c in cases:
+        entries.append({
+            "name": c.name,
+            "layer_name": c.layer_name,
+            "is_full_model": c.is_full_model,
+            "layer_input_shapes": c.data.get("layer_input_shapes", []),
+            "layer_output_shapes": c.data.get("layer_output_shapes", []),
+        })
+    atomic_write_json_manifest(key_dir, {
+        "version": _TORCH_LAYER_CACHE_VERSION,
+        "model_size": stat["size"],
+        "model_mtime_ns": stat["mtime_ns"],
+        "node_groups": node_groups,
+        "dedup": dedup,
+        "cases": entries,
+    })
 
 
 def generate_torch_layers_from_model(model, example_inputs, node_groups=None, dedup=False):
@@ -1157,7 +1147,9 @@ def generate_torch_layers_from_file(filepath, example_inputs=None, node_groups=N
     if cache is not None and example_inputs is None:
         cache_dir = cache.mkdir('torch_layer_cache')
         key_dir = cache_dir / filepath.stem
-        lock_path = key_dir / "lock"
+        # Keep the lock file outside key_dir so the directory can be replaced
+        # safely under pytest-xdist / NFS.
+        lock_path = cache_dir / (filepath.stem + ".lock")
         key_dir.mkdir(parents=True, exist_ok=True)
 
         with FileLock(str(lock_path)):
@@ -1184,33 +1176,22 @@ def generate_torch_layers_from_file(filepath, example_inputs=None, node_groups=N
 
 def _save_torch_metadata_cache(key_dir: Path, model_version: str, cases, node_groups, dedup):
     """Atomically write lightweight case metadata (no model weights) to disk."""
-    tmp_dir = key_dir.with_name(key_dir.name + f".tmp.{os.getpid()}")
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir(parents=True, exist_ok=False)
-    try:
-        entries = []
-        for c in cases:
-            entries.append({
-                "name": c.name,
-                "layer_name": c.layer_name,
-                "is_full_model": c.is_full_model,
-                "layer_input_shapes": c.data.get("layer_input_shapes", []),
-                "layer_output_shapes": c.data.get("layer_output_shapes", []),
-            })
-        (tmp_dir / "manifest.json").write_text(json.dumps({
-            "version": _TORCH_LAYER_CACHE_VERSION,
-            "model_version": model_version,
-            "node_groups": node_groups,
-            "dedup": dedup,
-            "cases": entries,
-        }, indent=2))
-        if key_dir.exists():
-            shutil.rmtree(key_dir)
-        tmp_dir.rename(key_dir)
-    except Exception:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
+    entries = []
+    for c in cases:
+        entries.append({
+            "name": c.name,
+            "layer_name": c.layer_name,
+            "is_full_model": c.is_full_model,
+            "layer_input_shapes": c.data.get("layer_input_shapes", []),
+            "layer_output_shapes": c.data.get("layer_output_shapes", []),
+        })
+    atomic_write_json_manifest(key_dir, {
+        "version": _TORCH_LAYER_CACHE_VERSION,
+        "model_version": model_version,
+        "node_groups": node_groups,
+        "dedup": dedup,
+        "cases": entries,
+    })
 
 
 def _load_torch_metadata_cases(manifest: dict, model_loader_key: str):
@@ -1255,7 +1236,9 @@ def generate_torch_layers_from_model_metadata_cache(
     """
     cache_dir = cache.mkdir('torch_model_metadata_cache')
     key_dir = cache_dir / prefix
-    lock_path = key_dir / "lock"
+    # Keep the lock file outside key_dir so the directory can be replaced
+    # safely under pytest-xdist / NFS.
+    lock_path = cache_dir / (prefix + ".lock")
     key_dir.mkdir(parents=True, exist_ok=True)
 
     with FileLock(str(lock_path)):

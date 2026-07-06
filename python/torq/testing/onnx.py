@@ -1,6 +1,7 @@
 import copy as _copy
 import json
 from dataclasses import dataclass
+from filelock import FileLock
 from functools import wraps
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from onnx import helper, numpy_helper, shape_inference, TensorProto, AttributePr
 from torq.testing.cases import Case
 from torq.testing.hf import get_hf_model_file
 
+from .cache_utils import atomic_write_json_manifest
 from .versioned_fixtures import (
     versioned_cached_data_fixture,
     versioned_generated_file_fixture,
@@ -960,54 +962,55 @@ def _load_layers_from_cache(key_dir: Path, model_file: str,
 
 def _save_layers_to_cache(key_dir: Path, full_model, layers: dict,
                           model_file: str, node_groups, dedup) -> None:
-    """Atomically write full_model + layers + manifest under key_dir."""
+    """Write full_model + layers + manifest under key_dir.
+
+    Must be called while holding the cache lock for this model. Individual
+    files are written through a temporary file and renamed into place so a
+    reader never sees a partially written artifact.
+    """
     import os
-    import shutil
 
-    tmp_dir = key_dir.with_name(key_dir.name + f".tmp.{os.getpid()}")
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir(parents=True, exist_ok=False)
+    key_dir.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
 
-    try:
-        onnx.save(full_model, str(tmp_dir / "full_model.onnx"))
+    full_tmp = key_dir / f"full_model.onnx.tmp.{pid}"
+    full_tmp.unlink(missing_ok=True)
+    onnx.save(full_model, str(full_tmp))
+    full_tmp.rename(key_dir / "full_model.onnx")
 
-        entries = []
-        used = set()
-        for name, layer in layers.items():
-            model = layer.model if hasattr(layer, "model") else layer
-            node_index = getattr(layer, "node_index", None)
+    entries = []
+    used = set()
+    for name, layer in layers.items():
+        model = layer.model if hasattr(layer, "model") else layer
+        node_index = getattr(layer, "node_index", None)
 
-            filename = f"{name}.onnx"
-            i = 0
-            while filename in used:
-                i += 1
-                filename = f"{name}_{i}.onnx"
-            used.add(filename)
+        filename = f"{name}.onnx"
+        i = 0
+        while filename in used:
+            i += 1
+            filename = f"{name}_{i}.onnx"
+        used.add(filename)
 
-            onnx.save(model, str(tmp_dir / filename))
-            entries.append({
-                "name": name,
-                "filename": filename,
-                "node_index": node_index,
-            })
+        layer_tmp = key_dir / f"{filename}.tmp.{pid}"
+        layer_tmp.unlink(missing_ok=True)
+        onnx.save(model, str(layer_tmp))
+        layer_tmp.rename(key_dir / filename)
 
-        stat = Path(model_file).stat()
-        (tmp_dir / "manifest.json").write_text(json.dumps({
-            "version": _LAYER_CACHE_VERSION,
-            "model_size": stat.st_size,
-            "model_mtime_ns": stat.st_mtime_ns,
-            "node_groups": node_groups,
-            "dedup": dedup,
-            "layers": entries,
-        }, indent=2))
+        entries.append({
+            "name": name,
+            "filename": filename,
+            "node_index": node_index,
+        })
 
-        if key_dir.exists():
-            shutil.rmtree(key_dir)
-        tmp_dir.rename(key_dir)
-    except Exception:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
+    stat = Path(model_file).stat()
+    atomic_write_json_manifest(key_dir, {
+        "version": _LAYER_CACHE_VERSION,
+        "model_size": stat.st_size,
+        "model_mtime_ns": stat.st_mtime_ns,
+        "node_groups": node_groups,
+        "dedup": dedup,
+        "layers": entries,
+    })
 
 # ---- Layer / subgraph extraction ----
 
@@ -1201,22 +1204,27 @@ def _load_cached_layers(cache, model_file: str, name_stem: str,
 
     cache_dir = cache.mkdir('onnx_layer_cache')
     key_dir = cache_dir / name_stem
-    cached = _load_layers_from_cache(key_dir, model_file, node_groups, dedup)
+    # Keep the lock outside key_dir so the directory can be cleaned/replaced
+    # safely on NFS-like filesystems.
+    lock_path = cache_dir / (name_stem + ".lock")
 
-    if cached is not None:
-        full_model, layers = cached
-        print(f"[onnx-layer-cache] HIT  {name_stem} -> {key_dir}")
+    with FileLock(str(lock_path)):
+        cached = _load_layers_from_cache(key_dir, model_file, node_groups, dedup)
+
+        if cached is not None:
+            full_model, layers = cached
+            print(f"[onnx-layer-cache] HIT  {name_stem} -> {key_dir}")
+            return _build_onnx_layer_cases(name_stem, full_model, layers)
+
+        print(f"[onnx-layer-cache] MISS {name_stem} -> {key_dir}")
+        full_model = get_full_model(model_file)
+        layers = generate_onnx_layers_from_model(full_model, node_groups, dedup)
+        try:
+            _save_layers_to_cache(key_dir, full_model, layers,
+                                    model_file, node_groups, dedup)
+        except Exception as e:
+            print(f"[onnx-layer-cache] save failed (continuing): {e}")
         return _build_onnx_layer_cases(name_stem, full_model, layers)
-
-    print(f"[onnx-layer-cache] MISS {name_stem} -> {key_dir}")
-    full_model = get_full_model(model_file)
-    layers = generate_onnx_layers_from_model(full_model, node_groups, dedup)
-    try:
-        _save_layers_to_cache(key_dir, full_model, layers,
-                                model_file, node_groups, dedup)
-    except Exception as e:
-        print(f"[onnx-layer-cache] save failed (continuing): {e}")
-    return _build_onnx_layer_cases(name_stem, full_model, layers)
 
 
 def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, dedup=True):
