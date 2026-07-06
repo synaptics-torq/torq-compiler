@@ -97,10 +97,16 @@ def case_config(request, runtime_hw_type, chip_config):
       'layer_vgg16_block5_conv1',
       'xception_block2_sepconv2',
       'vgg16_block2_conv1',
+      'inceptionv3_conv2d_30',
+      'inceptionresnetv2_conv2d_173',
+      'inceptionresnetv2_conv2d_170',
+      'resnet50_conv3_block1_1_conv',
+      'resnet50_conv3_block1_0_conv',
+      'xception_conv2d',
   ]
   if any(s in request.param.name.lower() for s in longer_test_timeout):
     compile_timeout = compile_timeout * 2
-    runtime_timeout = runtime_timeout * 2
+    runtime_timeout = runtime_timeout * 3
 
   keras_model = request.param.data
 

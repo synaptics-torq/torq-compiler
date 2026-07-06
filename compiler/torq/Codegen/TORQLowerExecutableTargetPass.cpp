@@ -82,10 +82,6 @@ static llvm::cl::opt<bool> clDisableSeg(
     llvm::cl::desc("Disable fusion of segmentation operations with producer"), llvm::cl::init(false)
 );
 
-static llvm::cl::opt<bool> clDisableLinalgSlicing(
-    "torq-disable-linalg-slicing", llvm::cl::desc("disable linalg slicing"), llvm::cl::init(true)
-);
-
 static llvm::cl::opt<bool> clDisableSlicing(
     "torq-disable-slicing", llvm::cl::desc("disable slicing"), llvm::cl::init(false)
 );
@@ -115,7 +111,7 @@ int64_t getLramSizeBasedOnBudget(bool optimizeForTileAndFuse) {
 }
 
 void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTileAndFuse) {
-    if (!clDisableLinalgSlicing)
+    if (!clDisableSlicing)
         funcPm.addPass(createLinalgSlicingPass());
 
     // tile reduction dimensions that exceed LRAM before TorqHL conversion
@@ -158,18 +154,6 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
     }
 
     funcPm.addPass(createEncodeTensorsPass());
-
-    // Note: slicing should be done *before* kernel selection, but kernel selection is doing
-    // weight reorganinzation and this can't operate on a subview of the weights.
-    const auto sliceCount = TorqHw::get().getSliceCount();
-    LLVM_DEBUG({
-        llvm::dbgs() << "Slicing " << (clDisableSlicing ? "disabled" : "enabled")
-                     << " slice count: " << sliceCount << "\n";
-    });
-    if (!clDisableSlicing && sliceCount > 1) {
-        funcPm.addPass(createSlicingPass());
-    }
-
     auto lramSize = getLramSizeBasedOnBudget(optimizeForTileAndFuse);
     funcPm.addPass(createFoldConvertPass(lramSize));
     funcPm.addPass(createCanonicalizerPass());

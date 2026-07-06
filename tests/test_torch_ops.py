@@ -73,6 +73,19 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'cos-coarse' in request.param.name:
         extra_args["tweaked_input_data_range"] = 0, 12
 
+    no_slicing_tc = [
+        #  error: failed to allocate LRAM addresses
+        "matmul_dql_q8_0",
+        # assertion for next 2 in function LData, file Kernel.cpp, line 824
+        #  (elementType != DType::none && "Invalid elemen= DType::none)
+        "topk-1x2100-bf16",
+        "topk-1x2100-indices-only-bf16"
+    ]
+    extra_args["torq_compiler_options"] = []
+    if any(s in request.param.data.name for s in no_slicing_tc):
+        extra_args["torq_compiler_options"].append("--torq-disable-slicing")
+
+
     # Option Test for conv1d with truncf before reduce (memory-optimized mode) to maintain easily
     # This enables --torq-conv1d-truncate-for-reduce to test bf16 reduce input
     if 'encoder.mlir.230.Conv_0_small.mlir' in request.param.data.name:

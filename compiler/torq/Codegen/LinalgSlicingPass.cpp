@@ -576,6 +576,16 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(genericOp, "Not an elementwise operation");
         }
 
+        // Downstream NSS lowering for standalone elementwise linalg.generic ops
+        // only recognizes unary, binary, ternary/select, and a few named
+        // special cases. Wider n-ary epilogues, such as quantized matmul
+        // zero-point correction, stay on CSS/host and should not be sliced.
+        if (genericOp.getNumDpsInputs() > 3) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "n-ary elementwise generic has no NSS lowering, skipping slicing"
+            );
+        }
+
         // Skip linalg.generic ops that contain a narrowing integer/float
         // truncation (arith.trunci / arith.truncf) and are not part of any
         // fuse group (no "torq-fuse-group" array attr).  These are standalone

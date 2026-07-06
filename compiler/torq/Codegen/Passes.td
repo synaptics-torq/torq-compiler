@@ -457,21 +457,6 @@ def DtcmTile:
     ];
 }
 
-def Slicing :
-           InterfacePass<"torq-slicing",
-                         "mlir::FunctionOpInterface"> {
-    let summary = "Slice all torq_hl operators so that the they can be parallelized";
-    let constructor =
-        "mlir::syna::torq::createSlicingPass()";
-
-    let dependentDialects = [
-        "syna::torq_hl::TorqHLDialect",
-        "bufferization::BufferizationDialect",
-        "tensor::TensorDialect"
-    ];
-
-}
-
 def StripTorqExecutorAttr :
     InterfacePass<"torq-strip-executor-attr",
                   "mlir::FunctionOpInterface"> {

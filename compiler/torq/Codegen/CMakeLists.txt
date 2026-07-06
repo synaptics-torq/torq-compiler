@@ -47,7 +47,6 @@ set(sources
     ResolveInvocationArgumentsPass.cpp
     ScalarsToTensorsPass.cpp
     SegmentNSSProgramsPass.cpp
-    SlicingPass.cpp
     SplitConstantsPass.cpp
     StripTorqExecutorAttrPass.cpp
     ScheduleSliceProgramsPass.cpp

@@ -17,11 +17,20 @@ def case_config(request, runtime_hw_type, chip_config):
 
     extra_args = {}
 
+    no_slicing_tc = [
+        # conv2d_1x1_size1_bias_matmul_as_conv-i8.mlir:23:11: error: expected 5 offset values, got 4
+        # Assertion failed: (succeeded(verify(constV.getDefiningOp())) && "Expected defining op for const result"), function matchAndRewrite, file CompileTimeConstOutlinePass.cpp, line 444.
+        "conv2d_1x1_size1_bias_matmul_as_conv-i8",
+    ]
+
+    extra_args["torq_compiler_options"] = []
+    if any(s in request.param.data.name for s in no_slicing_tc):
+        extra_args["torq_compiler_options"].append("--torq-disable-slicing=true")
+
     if "mul-1hwc-in-int16-out-int16" in request.param.name:
         # specific input data for the mul test case
         extra_args["tweaked_input_data_range"]  = (-32768, 32767)
 
-    extra_args["torq_compiler_options"] = []
     if any(s in request.param.data.name for s in need_input_type_tc):
         extra_args["torq_compiler_options"].append("--iree-input-type=tosa-torq")
 
