@@ -65,7 +65,6 @@ set(torq_deps
     iree::hal::utils::deferred_command_buffer
     iree::hal::utils::executable_header
     iree::hal::utils::file_transfer
-    iree::hal::utils::files
     iree::hal::utils::semaphore_base
     iree::tooling::numpy_io
     iree::io::stream
