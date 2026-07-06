@@ -25,6 +25,12 @@
 
 #define DEBUG_TYPE "torq-map-bindings"
 
+// Attribute set on scf.for / scf.forall ops that contain more than one
+// call_program op in their bodies. Used by CallProgramPattern to decide how
+// far to hoist the per-program ITCM staging.
+constexpr llvm::StringLiteral kContainsMultipleCallProgramsAttr =
+    "torq.contains_multiple_call_programs";
+
 using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
@@ -236,14 +242,20 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
                 }
                 Value programCode = *maybeProgramCode;
 
-                // Pick the outermost scf.forall ancestor of the call (within
-                // the parent function); if there isn't one, hoist no further
-                // than the call site. This keeps the ITCM allocation alive
-                // only across the iterations that share it.
+                // Pick the outermost scf.for / scf.forall ancestor of the
+                // call that does NOT contain multiple call_program ops (i.e.
+                // is not marked by the pre-pass). Hoisting to such a loop is
+                // safe: only this program's calls live inside it, so all
+                // iterations share a single ITCM staging. Stop at the first
+                // marked ancestor: that loop mixes multiple programs and
+                // hoisting past it would leave the ITCM allocation live while
+                // another program occupies the same slot.
                 Operation *hoistAnchor = callOp;
                 for (Operation *parent = callOp->getParentOp();
                      parent && !isa<FunctionOpInterface>(parent); parent = parent->getParentOp()) {
-                    if (isa<scf::ForallOp>(parent)) {
+                    if (isa<scf::ForOp, scf::ForallOp>(parent)) {
+                        if (parent->hasAttr(kContainsMultipleCallProgramsAttr))
+                            break;
                         hoistAnchor = parent;
                     }
                 }
@@ -264,6 +276,24 @@ class CallProgramPattern : public OpRewritePattern<torq_hl::CallProgramOp> {
     llvm::DenseMap<StringAttr, Value> &itcmCodeCache;
 };
 
+// Walk `funcOp` and set `kContainsMultipleCallProgramsAttr` on every
+// scf.for / scf.forall that transitively contains more than one call_program
+// op. This information is later consumed by CallProgramPattern to decide
+// whether it is safe to hoist a program's ITCM staging above a loop.
+static void markLoopsContainingMultipleCallProgramOps(Operation *funcOp) {
+    funcOp->walk([](Operation *loopOp) {
+        if (!isa<scf::ForOp, scf::ForallOp>(loopOp))
+            return;
+
+        int count = 0;
+        loopOp->walk([&](torq_hl::CallProgramOp) { ++count; });
+
+        if (count > 1) {
+            loopOp->setAttr(kContainsMultipleCallProgramsAttr, UnitAttr::get(loopOp->getContext()));
+        }
+    });
+}
+
 class LowerCallProgramToStartWaitPass
     : public impl::LowerCallProgramToStartWaitBase<LowerCallProgramToStartWaitPass> {
   public:
@@ -276,6 +306,9 @@ class LowerCallProgramToStartWaitPass
 void LowerCallProgramToStartWaitPass::runOnOperation() {
     MLIRContext *ctx = &getContext();
     llvm::DenseMap<StringAttr, Value> itcmCodeCache;
+
+    // Walk the function and mark all for and forall loops that contain more than one call_program.
+    markLoopsContainingMultipleCallProgramOps(getOperation());
 
     RewritePatternSet patterns(ctx);
     patterns.add<CallProgramPattern>(ctx, itcmCodeCache);
