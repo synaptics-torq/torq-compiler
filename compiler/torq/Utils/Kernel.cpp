@@ -2557,11 +2557,45 @@ static void checkCompatibility(const Data &destData, const Data &sourceData) {
     }
 }
 
+static int32_t extendPadValue(int32_t value, DType type) {
+    switch (sizeofType(type)) {
+    case 1:
+        value &= 0xFF;
+        return value | (value << 8) | (value << 16) | (value << 24);
+    case 2:
+        value &= 0xFFFF;
+        return value | (value << 16);
+    case 4:
+        return value;
+    default:
+        assert(false && "Unsupported type for extendPadValue");
+        return 0;
+    }
+}
+
 void Slice::append(const LData &output, const QData &data) {
     assert(data.indexes().size() == 0 && "QData can't be indexed during append");
     assert(data.shape().size() == 1 && "Unexpected QData rank during append");
     checkTypeCompatibility(output, data);
     d->deqw(output, backDimCount(data.subShape()));
+    d->ref(output);
+}
+
+void Slice::append(const LData &output, int value) {
+    // Check that no values loaded in RAM by mistake
+    if (d->_iram.loadNesting >= 0 || d->_wram.loadNesting >= 0 || d->_bram.loadNesting >= 0) {
+        llvm::errs() << "Error: values loaded in memory not used";
+        assert(false);
+    }
+
+    // Be sure ALU and ACT are completely disabled
+    d->_cfg.alu_disable = 0xFFFF;
+    d->_cfg.act_disable = 0xF;
+    d->aluSetMode(torq_hw::ALUOp0Mode::DBYP, torq_hw::ALUOp1Mode::BXOR);
+
+    // Configure the value to be stored as pad value
+    d->_cfg.pad_value = extendPadValue(value, output.elementType());
+    d->deqw(output, act.width(output.elementType()));
     d->ref(output);
 }
 
@@ -2579,8 +2613,8 @@ void Slice::store(const LData &output, int value) {
         llvm::errs() << "Error: values loaded in memory not used";
         assert(false);
     }
-    const Shape subShape = output.subShape();
-    assert(subShape.size() == 0 && "output must be a scalar");
+    int itemCount = elementCount(output.subShape());
+    assert(itemCount <= act.width(output.elementType()) && "output subtensor too big");
 
     // Be sure ALU and ACT are completely disabled
     d->_cfg.alu_disable = 0xFFFF;
@@ -2588,7 +2622,7 @@ void Slice::store(const LData &output, int value) {
     d->aluSetMode(torq_hw::ALUOp0Mode::DBYP, torq_hw::ALUOp1Mode::BXOR);
 
     // Configure the value to be stored as pad value
-    d->_cfg.pad_value = value;
+    d->_cfg.pad_value = extendPadValue(value, output.elementType());
     d->deqw(output);
     d->ref(output);
 }

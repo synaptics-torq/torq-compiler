@@ -682,7 +682,7 @@ class Slice {
     void store(const LData &output, const QData &data);
 
     // Store a value to LRAM
-    // output must represent a scalar
+    // output must represent a scalar or a subtensor with up to act::width() items
     // In case of a floating point scalar, value is interpreted as a float.
     // Can only be used if iram, wram and bram haven't been loaded
     void store(const LData &output, int value);
@@ -705,6 +705,14 @@ class Slice {
     //     kernel.append(out[n], res);
     // The extra 2 elements in each channels are discarded.
     void append(const LData &output, const QData &data);
+
+    // Append value to LRAM
+    // The value is appended act::width() times to the specified position in the output tensor.
+    // In case the appeend would go beyond the end of the indexed subtensor
+    // the data in excess is discarded.
+    // In case of a floating point output, value is interpreted as a float.
+    // Can only be used if iram, wram and bram haven't been loaded.
+    void append(const LData &output, int value);
 
     // Get max scattering supported by the slice in the store() operation
     // Scattering indicates the max number of different addresses that can be generated in parallel
