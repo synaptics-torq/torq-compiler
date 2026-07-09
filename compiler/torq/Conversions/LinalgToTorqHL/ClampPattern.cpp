@@ -473,6 +473,12 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
         Value input = srcOp.getInputs()[0];
         Value output = srcOp.getResultTensors()[0];
 
+        // The clamp's own result, captured before buildFusionPlanAndRebindOutput()
+        // rebinds `output` to the downstream fused result. The fallback (non-fusible)
+        // path must mark from this original result, otherwise the backward walk starts
+        // at the rebound downstream value and sweeps the whole producer cone.
+        Value markOrigin = srcOp.getResultTensors()[0];
+
         // Post-clamp requantise chains only exist on integer paths (int8 conv2d
         // producing i32 followed by tosa.apply_scale + trunc). Float clamps never
         // have a fusible tail, so skip the IR walk entirely for f32/bf16.
@@ -484,7 +490,8 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
         if (!hasFusionPlan || !fusionPlanOr->isFusable()) {
             if (_markFuseGroups) {
                 markFuseGroupBackward(
-                    output, {input}, rewriter, srcOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                    markOrigin, {input}, rewriter,
+                    srcOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
                 );
                 return success();
             }
