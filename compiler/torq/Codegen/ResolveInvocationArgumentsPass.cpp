@@ -136,6 +136,18 @@ static LogicalResult updateCreateInvocation(
         }
         else if (auto memRefArg = dyn_cast<TypedValue<MemRefType>>(argValue)) {
 
+            // A data-dependent (dynamic) memory offset — e.g. from a slice whose
+            // start index is a runtime value (stablehlo.dynamic_slice) — cannot be
+            // resolved to a static address on Torq. Reject it with a clear
+            // diagnostic instead of aborting deeper in address resolution.
+            if (memRefHasDynamicOffset(memRefArg.getType())) {
+                return startProgramOp.emitError()
+                       << "argument #" << idx
+                       << " has a data-dependent (dynamic) memory offset, which Torq does not "
+                          "support (e.g. a slice with a runtime start index); see: "
+                       << argValue;
+            }
+
             auto maybeStartAddress = getDataStartAddress(argValue, 0, nullptr, &cache);
 
             if (!maybeStartAddress) {

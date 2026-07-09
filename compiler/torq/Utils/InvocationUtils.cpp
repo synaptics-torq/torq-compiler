@@ -577,6 +577,12 @@ std::optional<int64_t>
 getDataStartAddress(Value value, int64_t offset, InvocationValue invocation, AddressCache *cache) {
 
     MemRefType type = cast<MemRefType>(value.getType());
+    // A data-dependent (dynamic) offset has no compile-time address. Report "no
+    // address" so callers can emit a graceful diagnostic instead of crashing in
+    // getMemRefTypeOffsetBytes.
+    if (memRefHasDynamicOffset(type)) {
+        return std::nullopt;
+    }
     return getAddress(value, offset + getMemRefTypeOffsetBytes(type), invocation, cache);
 }
 

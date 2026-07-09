@@ -60,6 +60,11 @@ int getAlignmentByType(int bytes, mlir::Type type);
 // Returns the offset in bytes of the first element of the given memref type
 int64_t getMemRefTypeOffsetBytes(MemRefType memRefType);
 
+// Returns true if the memref's strided layout has a data-dependent (dynamic)
+// offset, i.e. one that is only known at runtime. Torq address resolution
+// requires a compile-time-constant offset, so callers must reject these.
+bool memRefHasDynamicOffset(MemRefType memRefType);
+
 // Copy address attributes from an operation to another
 void copyAddressAttributes(Operation *srcOp, Operation *dstOp);
 

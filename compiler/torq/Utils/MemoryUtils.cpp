@@ -38,6 +38,13 @@ size_t getShapeTypeDataSize(mlir::ShapedType type) {
     return numElements * elementSize;
 }
 
+bool memRefHasDynamicOffset(MemRefType memRefType) {
+    if (auto stridesAttr = mlir::dyn_cast_if_present<StridedLayoutAttr>(memRefType.getLayout())) {
+        return stridesAttr.getOffset() == ShapedType::kDynamic;
+    }
+    return false;
+}
+
 int64_t getMemRefTypeOffsetBytes(MemRefType memRefType) {
     if (auto stridesAttr = mlir::dyn_cast_if_present<StridedLayoutAttr>(memRefType.getLayout())) {
 
