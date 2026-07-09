@@ -48,7 +48,9 @@ void convAdjustPadding(LData &input, const LRTBDim &pad, const LRTBDim &kernelBo
         // NPU always starts fetching data kernel.top rows before the beginning of the data.
         // If (some) valid padding, add an offset to start fetching from the beginning of the frame
         // and reduce the height accordingly
-        input.setOffset(validPadLines * input.shape()[Dim::H].stride.intVal.value());
+        input.setOffset(
+            input.offset() + validPadLines * input.shape()[Dim::H].stride.intVal.value()
+        );
         input.getShape()[Dim::H].count -= validPadLines;
     }
     if (int validPadLines = kernelBorder.bottom - pad.bottom) {

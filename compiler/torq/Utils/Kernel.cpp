@@ -2009,7 +2009,25 @@ static void verifyNdlBankAlignment(const MemNdlData *ndl, int64_t bankBytes) {
 
 void SlicePrivate::dedr(const LData &data) { memNdl(NdlType::DEDR, data); }
 
-void SlicePrivate::dewr(const LData &data) { memNdl(NdlType::DEWR, data); }
+void SlicePrivate::dewr(const LData &data) {
+    memNdl(NdlType::DEWR, data);
+    if (_cfg.stride == 2) {
+        // Adjust DEWR
+        // In stride 2 mode the ALU automatically select the kernel part (quadrant) to use while
+        // we have to iterate explicitely over the 4 input quadrants. These iterations must not
+        // appear in DEWR to avoid confusing the HW, so we remove them here.
+        // Remove the innermost O2:0,O2:0 due to input segment handling
+        MemNdlDimsData dewr;
+        int skipCount = 0;
+        for (const MemNdlDimData &d : _ndls.getMemNdl(NdlType::DEWR)->dims) {
+            if (d.type == DimType::H && d.tag == MemDimTag::O && d.count == 2 && skipCount++ < 2)
+                continue;
+            dewr.push_back(d);
+        }
+        assert(skipCount >= 2 && "Input quadrants loops not found");
+        _ndls.getMemNdl(NdlType::DEWR)->dims = dewr;
+    }
+}
 
 void SlicePrivate::debr(const LData &data) {
     memNdl(NdlType::DEBR, data);

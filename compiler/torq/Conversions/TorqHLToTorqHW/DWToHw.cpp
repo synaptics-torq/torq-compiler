@@ -24,11 +24,6 @@ namespace mlir::syna::torq {
 // Layout of the input/output memref data before vectorization
 using Dim = NCHW;
 
-// Layout of the in/out/weight tensors for processing
-struct In {
-    enum { N, CVectors, CInGroup, IVectors, KernelRows, KernelColGroups, CVectorItems, IElements };
-};
-
 struct Out {
     enum { N, CVectors, CVectorItems, H, W };
 };
@@ -144,13 +139,221 @@ static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
     );
 }
 
+static torq_hw::SliceTaskOp lowerDwStride2ToHw(
+    torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
+    int chCount
+) {
+    struct In {
+        enum {
+            N,
+            CVectors,
+            CInGroup,
+            IVectors,
+            RowQuadrant,
+            ColQuadrant,
+            KernelRows,
+            KernelColGroups,
+            CVectorItems,
+            IElements
+        };
+    };
+
+    if (!hasEkLoweringConv(op)) {
+        return {};
+    }
+
+    int stride = op.getStride()[0];
+
+    // Define operands in LRAM
+    LData input(op.getInput());
+    LData output(op.getInit());
+    LData biasScale(op.getScaleBias());
+    LData weight(op.getWeights());
+
+    if (weight.dims().size() <= Weight::OCVectorItems) {
+        weight.insertDim(Weight::OCVectorItems, {1});
+    }
+    getSubview(input, output, weight, biasScale, chOffset, chCount);
+
+    // FIXME Adjust stride & padding for stride 2 case (also consider all stride values)
+    HWDim kernelDim(weight.dim(Weight::H), weight.dim(Weight::W));
+    LRTBDim pad(op.getPad());
+
+    // Configure convolution parameters
+    Slice slice("DepthwiseConv2dStride2");
+    LRTBDim kernelBorder = LRTBDim::symmetric(kernelDim);
+    slice.setKernel(kernelBorder);
+
+    // For 2x2 (and generally when pad == (kw-1)/2), stride_offset should be 0
+    // because the kernel tiles evenly without needing an offset. For other kernels
+    // (e.g. 3x3 with same padding), stride_offset=1 is required (same as maxpool stride2).
+    int strideOffset = (pad.left == pad.top && pad.left == (kernelDim.w - 1) / stride) ? 0 : 1;
+    // FIXME: not sure if needed (from dw sride2 NDL kernel)
+    // if (stride == 2 && (ksize_x == 1 && ksize_y == 1)) {
+    //     stride = 1;
+    //     stride_offset = 0;
+    // }
+
+    slice.setStrideOffset(strideOffset);
+    slice.setStride(stride);
+
+    slice.setOutputChannelShape(input.dim(Dim::H) / stride, input.dim(Dim::W) / stride);
+
+    if (pad.top) {
+        pad.top = kernelBorder.top;
+    }
+    if (pad.bottom) {
+        pad.bottom = kernelBorder.bottom;
+    }
+    slice.setPadding(pad, op.getInputZp());
+
+    // Get out ch vector size from weight tensor (or less to handle peeled channels without padding)
+    int outChVectSize = std::min(weight.dim(Weight::OCVectorItems), chCount);
+
+    // Vectorize input
+    // Note that we don't have to limit the vector size to the segment size (H*W/4)
+    const int alukw = slice.alu.kerWidth();
+    int vectStride = slice.alu.iWidth(input.elementType(), weight.elementType(), outChVectSize);
+
+    int vectSize = vectStride + std::min(kernelBorder.left /* + kernelBorder.right */, alukw - 1);
+    input.fuse({Dim::H, Dim::W}).reshapeDim(Dim::H, {2, 2, -1}).vectorize(vectSize, vectStride);
+    // Shape: [N, C, RowQuadrant, ColQuadrant, IVectors, vectSize]
+    input.moveDim(Vectorized::Vectors, Dim::C + 1);
+    // Shape: [N, C, IVectors, RowQuadrant, ColQuadrant, vectSize]
+
+    // Split the input channels in groups to accumulate over the input channels in the same group
+    // After the split input.dim(Dim::C) will be equal to output.dim(Dim::C) as for normal dw convs.
+    int inChGroupSize = weight.dim(Weight::IC);
+    assert(input.dim(Dim::C) % inChGroupSize == 0 && "Input channels not multiple of group");
+    input.reshapeDim(Dim::C, {-1, inChGroupSize}, false);
+    // Shape: [N, C, CInGroup, IVectors, RowQuadrant, ColQuadrant, vectSize]
+
+    // Split the C dimension into CVectors and CVectorItems
+    input.reshapeDim(In::CVectors, {-1, outChVectSize}, true);
+    // Shape: [N, CVectors, CVectorItems, CInGroup, IVectors, RowQuadrant, ColQuadrant, vectSize]
+
+    // Move CVectorItems dimension just before IElements so that we can load 4 IVectors in parallel
+    input.moveDim(In::CVectors + 1, -2);
+    // Shape: [N, CVectors, CInGroup, IVectors, RowQuadrant, ColQuadrant, CVectorItems, vectSize]
+
+    // Add additional dimension to scan over the kernelDim.h input rows
+    int rowSize = output.dim(Dim::W);
+    ShapeItem rowsDim(div_ceil(kernelDim.h, 2), Stride(rowSize), ShapeItem::Tag::KernelRows);
+    input.insertDim(In::KernelRows, rowsDim);
+    // [N, CVectors, CInGroup, IVectors, RowQuadrant, ColQuadrant, KernelRows, CVectorItems, vectSz]
+
+    // Add additional dimension to scan over the kernelDim.w/ColGroupSize input column groups
+    ShapeItem colGroupsDim(
+        div_ceil(div_ceil(kernelDim.w, 2), alukw), Stride(alukw), ShapeItem::Tag::KernelCols
+    );
+    input.insertDim(In::KernelColGroups, colGroupsDim);
+    // Shape: [N, CVectors, CInGroup, IVectors, RowQuadrant, ColQuadrant, KernelRows,
+    // KernelColGroups, CVectorItems, vectSize]
+
+    // Tag quandrants since the HW needs to be aware
+    input.getShape()[In::RowQuadrant].tag = ShapeItem::Tag::KernelRows;
+    input.getShape()[In::ColQuadrant].tag = ShapeItem::Tag::KernelCols;
+
+    // Reshape output to match the processing layout
+    output.reshapeDim(Dim::C, {-1, outChVectSize}, true);
+    if (op.getSegmentOutput()) {
+        output.partitionByIndexParity2D();
+    }
+
+    // Reshape biasScale to match the processing layout
+    biasScale.reshapeDim(0, {-1, outChVectSize, biasScaleWidth(input.elementType())}, true);
+
+    // If start_pos we have to iterate the corresponding quadrant in reverse order,
+    // but the starting offset and stride must be tweaked so we can't use the standard reverse()
+    // method. Instead we manually adjust the starting offset and stride of the quadrant dimensions.
+    const int32_t start_pos_x = (-kernelBorder.left + strideOffset) & 1;
+    const int32_t start_pos_y = (-kernelBorder.top + strideOffset) & 1;
+    const int32_t kernel_left_even = (kernelBorder.left - strideOffset + 1) >> 1;
+    const int32_t kernel_left_odd = kernelBorder.left - strideOffset - kernel_left_even;
+    const int32_t kernel_top_even = (kernelBorder.top - strideOffset + 1) >> 1;
+    const int32_t kernel_top_odd = kernelBorder.top - strideOffset - kernel_top_even;
+    const int32_t colQStride = input.shape()[In::ColQuadrant].stride.intVal.value();
+    const int32_t rowQStride = input.shape()[In::RowQuadrant].stride.intVal.value();
+    input.setOffset(input.offset() + (2 * start_pos_y + start_pos_x) * colQStride);
+    input.getShape()[In::ColQuadrant].stride =
+        colQStride * (start_pos_x == 0 ? 1 : -1) + kernel_left_even - kernel_left_odd;
+    input.getShape()[In::RowQuadrant].stride = rowQStride * (start_pos_y == 0 ? 1 : -1) +
+                                               output.dim(-1) * (kernel_top_even - kernel_top_odd);
+
+    // Main processing loops. Instead of processing one input vector at a time, we load multiple
+    // vectors in iram from neighboring channels. The number of vectors loaded is equal to the
+    // weight vectorization (dimension 4 of the weight vector if present).
+    // Loading multiple vectors allows to parallelize the iram load (4 cycles) with the
+    // processing of the idata by the alu (kernelDim.w cycles).
+    For(auto n = slice.iterate(input.dim(In::N))) {
+        For(auto ocv = slice.iterate(output.dim(Out::CVectors))) {
+            For(auto iv = slice.iterate(input.dim(In::IVectors))) {
+                PData pdata;
+                For(auto ic = slice.iterate(weight.dim(Weight::IC))) {
+                    For(auto kh = slice.iterate(kernelDim.h)) {
+                        For(auto qr = slice.iterate(input.dim(In::RowQuadrant))) {
+                            For(auto qc = slice.iterate(input.dim(In::ColQuadrant))) {
+                                For(auto kw = slice.iterate(kernelDim.w)) {
+                                    WData wdata = slice.wram.load(weight[ocv][ic][kh][kw]);
+                                    // Load vectors from neighboring channels
+                                    IData idata = slice.iram.load(
+                                        input[n][ocv][ic][iv][qr][qc][kh / 2][kw / (alukw * 2)]
+                                    );
+                                    idata.setShape({{alukw, Stride(1)}, idata.dim(0), vectStride});
+                                    pdata = slice.alu.multiScalarProductAccumulate(
+                                        idata[kw % 2], wdata
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                For(auto o = slice.iterate(outChVectSize)) { // Not necessarily all the pdata
+                    BData bdata = slice.bram.load(biasScale[ocv][o]);
+                    For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                        QData res = slice.act.rescaleClamp(
+                            pdata[o][av], bdata, op.getShiftFactor(), op.getOutputZp(),
+                            op.getOutputMin(), op.getOutputMax()
+                        );
+                        slice.append(output[n][ocv][o], res);
+                    }
+                }
+            }
+        }
+    }
+
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
+        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+    );
+}
+
 // Lower torq_hl op to SliceTaskOp
 static torq_hw::SliceTaskOp lowerToHw(
     torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
     int chCount
 ) {
+    // Layout of the in/out/weight tensors for processing
+    struct In {
+        enum {
+            N,
+            CVectors,
+            CInGroup,
+            IVectors,
+            KernelRows,
+            KernelColGroups,
+            CVectorItems,
+            IElements
+        };
+    };
+
     if (!hasEkLoweringConv(op)) {
         return {};
+    }
+
+    int stride = op.getStride()[0];
+    if (stride == 2) {
+        return lowerDwStride2ToHw(op, rewriter, taskInitTensor, chOffset, chCount);
     }
 
     // Define operands in LRAM

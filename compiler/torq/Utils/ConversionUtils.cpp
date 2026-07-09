@@ -686,28 +686,30 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
     return true;
 }
 
+llvm::cl::opt<bool> clLowerDWUsingNdlKernel(
+    "torq-dw-ndl", llvm::cl::desc("Lower depthwise using NDL kenels"), llvm::cl::init(false)
+);
+
 // Check if the DepthwiseConv2DOp can be lowered using EK kernel
 bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
-    auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
-    int kh = weightShape[2];
-    int kw = weightShape[3];
-    int32_t pad_left = op.getPad()[0];
-    int32_t pad_right = op.getPad()[1];
-    bool isDw1dStride1 = op.getIsDw1dStride1();
-    if (isDw1dStride1) {
+    if (op.getIsDw1dStride1()) {
         return true;
     }
-    if ((pad_left != (kw - 1) / 2 && pad_left != kw / 2) || pad_right != kw / 2) {
-        // Not supported by HW
+    if (clLowerDWUsingNdlKernel) {
+        llvm::errs() << "Warning: lowering DW using NDL kernel!\n";
         return false;
     }
-    int stride = op.getStride()[0]; // FIXME: consider all stride values
-    if (stride != 1 || kh > 7 || kw > 7) {
-        // Not supported by HW
+    auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
+
+    const int kh = weightShape[2];
+    const int kw = weightShape[3];
+
+    // Common HW/kernel limitations.
+    if (kh > 7 || kw > 7) {
         return false;
     }
+
     if (weightShape.size() == 5 && weightShape[4] != 4) {
-        // Not supported by this EK kernel
         return false;
     }
 
