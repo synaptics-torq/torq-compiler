@@ -123,6 +123,14 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'add-nss-25x511-bf16.mlir' in request.param.data.name:
         extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
 
+    # Force the dynamic-indices gather onto the NSS/slice path so it fails loudly if
+    # the value copy stops lowering to torq_hl.gather. CSS is left enabled on purpose:
+    # the ONNX Gather index math (negative-index normalization on i64 plus the
+    # i64->i32 demote) has no NSS data path and must run on CSS. Adding
+    # --torq-disable-css would orphan those scalar ops and break serialization.
+    if 'gather-dynamic-indices' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-host"]
+
     return {
         "mlir_model_file": "static_mlir_model_file",
         "static_mlir_model_file": request.param.data,

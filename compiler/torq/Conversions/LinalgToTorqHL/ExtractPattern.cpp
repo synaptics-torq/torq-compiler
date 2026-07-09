@@ -20,6 +20,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include <optional>
 
@@ -63,6 +64,52 @@ static Value buildTableScaleBias(linalg::GenericOp srcOp, PatternRewriter &rewri
 
 // TODO: only support int8 for now in order to use generic tiling for table op
 class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
+
+    bool isDerivedFrom(Value value, Value root, int depth = 0) const {
+        if (value == root)
+            return true;
+        if (depth >= 4)
+            return false;
+
+        Operation *defOp = value.getDefiningOp();
+        if (!defOp)
+            return false;
+
+        return llvm::any_of(defOp->getOperands(), [&](Value operand) {
+            return isDerivedFrom(operand, root, depth + 1);
+        });
+    }
+
+    std::optional<int64_t>
+    getGatherExtractDim(linalg::GenericOp srcOp, tensor::ExtractOp tensorExtractOp) const {
+        if (srcOp.getBody()->getNumArguments() == 0)
+            return std::nullopt;
+
+        Value gatherIndex = srcOp.getBody()->getArgument(0);
+        for (auto [dim, index] : llvm::enumerate(tensorExtractOp.getIndices())) {
+            if (isDerivedFrom(index, gatherIndex))
+                return dim;
+        }
+
+        return std::nullopt;
+    }
+
+    std::optional<OpFoldResult>
+    getResultInsertSliceOffset(linalg::GenericOp srcOp, unsigned dim) const {
+        Value result = srcOp.getResult(0);
+        if (!result.hasOneUse())
+            return std::nullopt;
+
+        auto insertSliceOp = dyn_cast<tensor::InsertSliceOp>(*result.user_begin());
+        if (!insertSliceOp || insertSliceOp.getSource() != result)
+            return std::nullopt;
+
+        auto offsets = insertSliceOp.getMixedOffsets();
+        if (dim >= offsets.size())
+            return std::nullopt;
+
+        return offsets[dim];
+    }
 
     LogicalResult validateGatherValuesRank(
         linalg::GenericOp srcOp, Value values, PatternRewriter &rewriter,
@@ -174,29 +221,35 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             2, AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext())
         };
         SmallVector<utils::IteratorType> iterTypes(rank, utils::IteratorType::parallel);
-        demotedIndices =
-            linalg::GenericOp::create(
-                rewriter, loc, i32IndicesType, indices, emptyDemoted, maps, iterTypes, "", "",
-                [](OpBuilder &b, Location loc, ValueRange args) {
-                    Value trunc = arith::TruncIOp::create(b, loc, b.getI32Type(), args[0]);
-                    linalg::YieldOp::create(b, loc, trunc);
-                }
-            ).getResult(0);
+        auto demoteOp = linalg::GenericOp::create(
+            rewriter, loc, i32IndicesType, indices, emptyDemoted, maps, iterTypes, "", "",
+            [](OpBuilder &b, Location loc, ValueRange args) {
+                Value trunc = arith::TruncIOp::create(b, loc, b.getI32Type(), args[0]);
+                linalg::YieldOp::create(b, loc, trunc);
+            }
+        );
+        demotedIndices = demoteOp.getResult(0);
+        setTargetExecutorAttr(demoteOp, torq_hl::Executor::CSS);
         return success();
     }
 
     // GatherOp treats indices as linear offsets into the flattened values buffer.
     // For supported sliced gathers (rank > 1 within the rank-1/2/3 cases),
-    // rescale constant outer-dim indices so they point at the start of each
-    // contiguous slice in that flattened layout.
+    // rescale outer-dim indices so they point at the start of each contiguous
+    // slice in that flattened layout. Last-dim gathers already use element
+    // offsets and are lowered with channel-strided addressing.
     LogicalResult scaleGatherIndicesForSlice(
         linalg::GenericOp srcOp, Value values, Value indices, PatternRewriter &rewriter,
-        Value &scaledIndices
+        Value &scaledIndices, std::optional<int64_t> gatherDim
     ) const {
         scaledIndices = indices;
 
         auto valuesType = dyn_cast<RankedTensorType>(values.getType());
         if (!valuesType || valuesType.getRank() <= 1) {
+            return success();
+        }
+
+        if (gatherDim && *gatherDim != 0) {
             return success();
         }
 
@@ -238,7 +291,62 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
                     linalg::YieldOp::create(b, loc, scaled);
                 }
             ).getResult(0);
-        setCompileTimeConstAttr(scaledIndices.getDefiningOp());
+        if (succeeded(outlineAndReturnOps(indices))) {
+            setCompileTimeConstAttr(scaledIndices.getDefiningOp());
+        }
+        return success();
+    }
+
+    LogicalResult sliceAxisLastRank2GatherValuesForTile(
+        linalg::GenericOp srcOp, Value &valuesTensor, RankedTensorType &valuesTensorType,
+        PatternRewriter &rewriter, std::optional<int64_t> gatherDim, bool valuesAreConstant
+    ) const {
+        auto resultType = cast<RankedTensorType>(srcOp.getResult(0).getType());
+        if (valuesTensorType.getRank() != 2 || resultType.getRank() != 3 || !gatherDim ||
+            *gatherDim != 1) {
+            return success();
+        }
+
+        int64_t channelCount = resultType.getDimSize(1);
+        int64_t sourceChannelCount = valuesTensorType.getDimSize(0);
+        int64_t sourceWidth = valuesTensorType.getDimSize(1);
+        if (ShapedType::isDynamic(channelCount) || ShapedType::isDynamic(sourceChannelCount) ||
+            ShapedType::isDynamic(sourceWidth) || channelCount >= sourceChannelCount) {
+            return success();
+        }
+
+        std::optional<OpFoldResult> channelOffset = getResultInsertSliceOffset(srcOp, 1);
+        if (!channelOffset) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected tiled axis-last gather result to feed tensor.insert_slice"
+            );
+        }
+
+        std::optional<int64_t> constantChannelOffset = getConstantIntValue(*channelOffset);
+        if (constantChannelOffset && (*constantChannelOffset < 0 ||
+                                      *constantChannelOffset + channelCount > sourceChannelCount)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Axis-last gather tile channel range exceeds source tensor"
+            );
+        }
+
+        auto indexAttr = [&](int64_t value) -> OpFoldResult {
+            return rewriter.getIndexAttr(value);
+        };
+        SmallVector<OpFoldResult> offsets{*channelOffset, indexAttr(0)};
+        SmallVector<OpFoldResult> sizes{indexAttr(channelCount), indexAttr(sourceWidth)};
+        SmallVector<OpFoldResult> strides{indexAttr(1), indexAttr(1)};
+        auto sliceType = RankedTensorType::get(
+            {channelCount, sourceWidth}, valuesTensorType.getElementType(),
+            valuesTensorType.getEncoding()
+        );
+        valuesTensor = tensor::ExtractSliceOp::create(
+            rewriter, srcOp.getLoc(), sliceType, valuesTensor, offsets, sizes, strides
+        );
+        valuesTensorType = cast<RankedTensorType>(valuesTensor.getType());
+        if (valuesAreConstant) {
+            setCompileTimeConstAttr(valuesTensor.getDefiningOp());
+        }
         return success();
     }
 
@@ -248,7 +356,7 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
     // are rescaled by the trailing slice stride before lowering.
     LogicalResult rewriteAsDynamicGather(
         linalg::GenericOp srcOp, Value valuesTensor, RankedTensorType valuesTensorType, Value input,
-        PatternRewriter &rewriter
+        PatternRewriter &rewriter, std::optional<int64_t> gatherDim
     ) const {
         auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
 
@@ -270,7 +378,16 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             // Rank-1 gathers are direct scalar lookups. Rank-2 gathers use
             // GatherOp's flat linear-offset path and need their constant
             // outer-dim indices rescaled by the trailing slice stride.
-            if (failed(scaleGatherIndicesForSlice(srcOp, valuesTensor, input, rewriter, input)))
+            if (failed(sliceAxisLastRank2GatherValuesForTile(
+                    srcOp, valuesTensor, valuesTensorType, rewriter, gatherDim,
+                    /*valuesAreConstant=*/false
+                )))
+                return rewriter.notifyMatchFailure(
+                    srcOp, "Failed to slice axis-last gather values for tiled output"
+                );
+            if (failed(scaleGatherIndicesForSlice(
+                    srcOp, valuesTensor, input, rewriter, input, gatherDim
+                )))
                 return rewriter.notifyMatchFailure(
                     srcOp, "Failed to scale constant gather indices for sliced gathers"
                 );
@@ -345,10 +462,21 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
     // Lower a plain constant values tensor to GatherOp.
     // Rank-2 outer-dim indices are rescaled by the trailing slice stride.
     LogicalResult rewriteAsConstantGather(
-        linalg::GenericOp srcOp, Value valuesTensor, Value input, PatternRewriter &rewriter
+        linalg::GenericOp srcOp, Value valuesTensor, Value input, PatternRewriter &rewriter,
+        std::optional<int64_t> gatherDim
     ) const {
         auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-        if (failed(scaleGatherIndicesForSlice(srcOp, valuesTensor, input, rewriter, input)))
+        auto valuesTensorType = cast<RankedTensorType>(valuesTensor.getType());
+        if (failed(sliceAxisLastRank2GatherValuesForTile(
+                srcOp, valuesTensor, valuesTensorType, rewriter, gatherDim,
+                /*valuesAreConstant=*/true
+            )))
+            return rewriter.notifyMatchFailure(
+                srcOp, "Failed to slice axis-last gather values for tiled output"
+            );
+        if (failed(
+                scaleGatherIndicesForSlice(srcOp, valuesTensor, input, rewriter, input, gatherDim)
+            ))
             return rewriter.notifyMatchFailure(
                 srcOp, "Failed to scale constant gather indices for sliced gathers"
             );
@@ -380,6 +508,13 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expected a tensor.extract op");
         }
 
+        Value valuesTensor = tensorExtractOp.getTensor();
+
+        RankedTensorType valuesTensorType;
+        if (failed(validateGatherValuesRank(srcOp, valuesTensor, rewriter, valuesTensorType)))
+            return failure();
+        std::optional<int64_t> gatherDim = getGatherExtractDim(srcOp, tensorExtractOp);
+
         if (failed(demoteGatherIndicesToI32(srcOp, input, rewriter, input))) {
             return rewriter.notifyMatchFailure(
                 srcOp, "Failed to demote tensor.extract indices to int32"
@@ -397,12 +532,6 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             )))
             return failure();
 
-        Value valuesTensor = tensorExtractOp.getTensor();
-
-        RankedTensorType valuesTensorType;
-        if (failed(validateGatherValuesRank(srcOp, valuesTensor, rewriter, valuesTensorType)))
-            return failure();
-
         auto maybeConst = outlineAndReturnOps(valuesTensor);
         bool valuesAreConstant = succeeded(maybeConst);
 
@@ -411,7 +540,9 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         }
         if (!valuesAreConstant) {
             LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteAsDynamicGather\n");
-            return rewriteAsDynamicGather(srcOp, valuesTensor, valuesTensorType, input, rewriter);
+            return rewriteAsDynamicGather(
+                srcOp, valuesTensor, valuesTensorType, input, rewriter, gatherDim
+            );
         }
 
         if (isTableOp && !clTableAsGather) {
@@ -425,7 +556,7 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return success();
         }
         LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteAsConstantGather\n");
-        return rewriteAsConstantGather(srcOp, valuesTensor, input, rewriter);
+        return rewriteAsConstantGather(srcOp, valuesTensor, input, rewriter, gatherDim);
     }
 };
 

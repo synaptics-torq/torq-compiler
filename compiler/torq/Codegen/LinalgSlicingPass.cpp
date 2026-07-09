@@ -586,6 +586,21 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
             );
         }
 
+        // Skip gather / table-lookup ops: their body reads a tensor via
+        // tensor.extract, which is a hidden data-dependent operand that is NOT
+        // sliced when the output tile is sliced. linalg::isElementwise is true
+        // for them (projected-permutation maps, all-parallel iterators), but
+        // tiling here would read the whole extracted tensor per tile. Leave them
+        // un-tiled so LinalgToTorqHL lowers them to torq_hl.gather/torq_hl.table,
+        // which the downstream NSS lowering tiles to the LRAM/DTCM budget.
+        bool hasExtract =
+            genericOp.getBody()->walk([](tensor::ExtractOp) { return WalkResult::interrupt(); }
+            ).wasInterrupted();
+        if (hasExtract)
+            return rewriter.notifyMatchFailure(
+                genericOp, "gather/table extract is not sliceable as elementwise, skipping slicing"
+            );
+
         // Skip linalg.generic ops that contain a narrowing integer/float
         // truncation (arith.trunci / arith.truncf) and are not part of any
         // fuse group (no "torq-fuse-group" array attr).  These are standalone

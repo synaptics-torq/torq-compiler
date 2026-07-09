@@ -37,6 +37,8 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
         return rewriter.notifyMatchFailure(op, "Expected GatherOp values rank to be 1, 2, or 3");
     }
     auto output_strides = getEncodedStridesElements(output_type);
+    auto output_shape = output_type.getShape();
+    int indicesCount = indices_type.getNumElements();
     int channelCount = 1;
     int channelStride = 0;
     int outChannelStride = 0;
@@ -45,10 +47,20 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
     // per-index slice (`channelCount * outChannelStride`) and overrides this
     // below.
     int outputSliceStride = entry_size;
+    const bool rank2AxisLastGather =
+        input_shape.size() == 2 && output_shape.size() == 3 && indices_shape.size() == 1 &&
+        output_shape.back() == indicesCount && output_shape[1] <= input_shape[0];
 
     if (input_shape.size() == 3) {
         channelCount = input_shape[1];
         channelStride = input_strides[1] * entry_size;
+        outChannelStride = output_strides[1] * entry_size;
+    }
+    else if (rank2AxisLastGather) {
+        // Unit-batch axis-last gathers may be collapsed to rank-2 values
+        // [C, W] while the output remains [1, C_tile, W_out].
+        channelCount = output_shape[1];
+        channelStride = input_strides[0] * entry_size;
         outChannelStride = output_strides[1] * entry_size;
     }
     else if (input_shape.size() == 2) {
@@ -59,10 +71,11 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
         outChannelStride = output_strides.back() * entry_size;
         outputSliceStride = channelCount * outChannelStride;
     }
-    int indicesCount = indices_type.getNumElements();
-    // Rank-2 gathers need group_size=1 to preserve full-slice writes for each index.
-    // For rank-1 and rank-3 the grouped path is safe and more efficient.
-    const uint32_t group_size = input_shape.size() == 2   ? 1
+    // Rank-2 sliced gathers need group_size=1 to preserve full-slice writes
+    // for each index. Axis-last rank-2 gathers use the rank-3-style grouped
+    // path because each index writes one element per channel.
+    const bool rank2SlicedGather = input_shape.size() == 2 && !rank2AxisLastGather;
+    const uint32_t group_size = rank2SlicedGather         ? 1
                                 : (indicesCount % 4 == 0) ? 4
                                 : (indicesCount % 2 == 0) ? 2
                                                           : 1;
@@ -121,13 +134,12 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
 
     );
 
-    // Rank-2 collapsed gathers fold the per-index slice into the REF loop, so
-    // each REF iteration covers `group_size * max_entries` work units. Rank-1
-    // and rank-3 instead rely on the DEDR/DEQW indices-dim loop and only
-    // advance `group_size` per REF iteration; using the rank-2 count here
-    // caused the DEDR producer/consumer to hang on FPGA.
-    const int refSize = input_shape.size() == 2 ? static_cast<int>(group_size * max_entries)
-                                                : static_cast<int>(group_size);
+    // Rank-2 sliced gathers fold the per-index slice into the REF loop, so each
+    // REF iteration covers `group_size * max_entries` work units. Rank-1,
+    // rank-3, and axis-last rank-2 gathers rely on the DEDR/DEQW indices-dim
+    // loop and only advance `group_size` per REF iteration.
+    const int refSize = rank2SlicedGather ? static_cast<int>(group_size * max_entries)
+                                          : static_cast<int>(group_size);
 
     Ndls ndls;
     ndls.add(NdlType::REF, {{DimType::H, MemDimTag::X, refSize}});
