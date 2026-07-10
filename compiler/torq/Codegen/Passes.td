@@ -550,6 +550,15 @@ def AssignObjectsIdentifiers :
         ];
 }
 
+def EliminateRedundantLramLoads :
+    InterfacePass<"torq-eliminate-redundant-lram-loads", "mlir::FunctionOpInterface"> {
+        let summary = "Reuse LRAM buffers for repeated read-only loads within a region";
+        let constructor = "mlir::syna::torq::createEliminateRedundantLramLoadsPass()";
+        let dependentDialects = [
+            "syna::torq_hl::TorqHLDialect"
+        ];
+}
+
 def EncodeTensors :
     InterfacePass<"torq-encode-tensors", "mlir::FunctionOpInterface"> {
         let summary = "Encodes tensor data for torq_hl operations that require it";

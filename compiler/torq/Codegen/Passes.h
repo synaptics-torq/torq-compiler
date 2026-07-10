@@ -49,6 +49,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignDtcmItcmXramAddr
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOutlineSliceProgramsPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createEliminateRedundantLramLoadsPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollForallLoopsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createScheduleSliceProgramsPass();

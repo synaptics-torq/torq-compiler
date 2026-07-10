@@ -24,6 +24,7 @@ set(sources
     CompileTimeConstOutlinePass.cpp
     CompileTimeConstStubsPass.cpp
     CreateGlobalsPass.cpp
+    EliminateRedundantLramLoadsPass.cpp
     EncodeTensorsPass.cpp
     FoldConvertPass.cpp
     KernelSelectionPass.cpp

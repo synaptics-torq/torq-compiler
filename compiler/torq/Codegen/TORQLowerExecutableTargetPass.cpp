@@ -231,6 +231,11 @@ void addNssUpToAssignLramAddresses(OpPassManager &pm, bool optimizeForTileAndFus
     funcPm.addPass(torq_hl::createTorqHLFoldTableConstantPass());
 
     funcPm.addPass(createOutlineSliceProgramsPass());
+    // Reuse LRAM buffers for repeated read-only loads (const/input) within each
+    // slice-program region BEFORE the forall body is unrolled per slice, so the
+    // saving replicates onto every slice. Must run pre-unroll: slices have
+    // separate LRAM, so a buffer must not be shared across unrolled slice bodies.
+    funcPm.addPass(createEliminateRedundantLramLoadsPass());
     funcPm.addPass(createUnrollForallLoopsPass());
     funcPm.addPass(createScheduleSliceProgramsPass());
 

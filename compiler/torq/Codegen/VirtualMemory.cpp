@@ -308,8 +308,16 @@ class PhysicalMemory {
     int defragCount_ = 0;
     int swapOutCount_ = 0;
 
+    // Buffers the spill-on-fragmentation path must not swap out: the operands of the
+    // op currently being processed (they are non-pinned during result allocation but
+    // are needed by the op, so spilling them would break it).
+    llvm::DenseSet<VirtualBuffer *> spillProtect_;
+
   public:
     PhysicalMemory(VirtualMemory &vm, Pool &pool) : vm_(vm), pool_(pool) {}
+
+    void clearSpillProtect() { spillProtect_.clear(); }
+    void addSpillProtect(VirtualBuffer *buffer) { spillProtect_.insert(buffer); }
 
     int totalPinnedSize() const { return totalPinnedSize_; }
 
@@ -424,6 +432,31 @@ class PhysicalMemory {
             }
 
             maybeAddr = pool_.allocate(value);
+
+            // Still no address after defragment: spill non-pinned buffers (LRU first)
+            // to XRAM and leave them out, retrying after each, until a contiguous block
+            // opens or nothing spillable remains. This is stronger than defragment(),
+            // which swaps non-pinned buffers out and immediately back in and so cannot
+            // free a contiguous region blocked by resident buffers. Protected buffers
+            // (the current op's own operands) are never spilled.
+            if (failed(maybeAddr)) {
+                IRRewriter spillRewriter(value.getContext());
+                spillRewriter.setInsertionPoint(value.getDefiningOp());
+                while (failed(maybeAddr)) {
+                    VirtualBuffer *victim = nullptr;
+                    for (PhysicalBuffer *pb : lastUsedPhysicalBuffer_) {
+                        if (!pinnedBuffers_.contains(pb) &&
+                            !spillProtect_.contains(&pb->virtualBuffer())) {
+                            victim = &pb->virtualBuffer();
+                            break;
+                        }
+                    }
+                    if (!victim)
+                        break; // nothing spillable left
+                    victim->swapOut(spillRewriter, value.getLoc());
+                    maybeAddr = pool_.allocate(value);
+                }
+            }
 
             // we still fail to find an address, the pinned buffers prevent us from successfully
             // defragment
@@ -1065,6 +1098,15 @@ LogicalResult convertVirtualToPhysicalMemRefs(
             vm.unpin(pinnedValue);
         }
 
+        // Protect this op's operands from the spill-on-fragmentation path while they
+        // are unpinned (during their own swap-in and the result allocation): they are
+        // needed by the op, so they must not be spilled and left out.
+        vm.physicalMemory.clearSpillProtect();
+        for (auto &opOperand : memrefOperands)
+            vm.physicalMemory.addSpillProtect(
+                &vm.virtualObjects.getVirtualObject(opOperand->get()).root()
+            );
+
         // swap in all the operands that are currently swapped out (this will cause defragmentation
         // if necessary)
         for (auto virtualValue : toSwapIn) {
@@ -1080,6 +1122,7 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         // allocate all the results (this will cause defragmentation if necessary)
         for (auto result : memrefResults) {
             if (failed(vm.addAllocation(result))) {
+                vm.physicalMemory.clearSpillProtect();
                 llvm::dbgs() << "Failed to allocate result for operation: ";
                 result.dump();
                 return op->emitError(
@@ -1088,6 +1131,7 @@ LogicalResult convertVirtualToPhysicalMemRefs(
                 );
             }
         }
+        vm.physicalMemory.clearSpillProtect();
 
         // pin all the memref operands and replace virtual with physical values
         pinnedValues.clear();
