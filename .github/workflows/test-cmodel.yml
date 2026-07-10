@@ -74,7 +74,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           release_artifact_id: ${{ inputs.release_artifact_id }}
           pytest_args: >-
-            -m ci -n 18 --dist worksteal -v --show-capture=no --tb=short
+            -m ci -n 18 --dist worksteal --show-capture=no --tb=short
             --torq-chips ${{ matrix.chip_group }}
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime

@@ -270,7 +270,7 @@ runs:
           CONTROL_PARAMS="--torq-bench-control-file ${{github.workspace}}/bench-control.json"
         fi
 
-        if pytest $CONTROL_PARAMS -v ${{ inputs.pytest_args }}; then
+        if pytest $CONTROL_PARAMS --no-phases-dump ${{ inputs.pytest_args }}; then
           echo "pytest passed"
         else
           PYTEST_EXIT_CODE=$?
