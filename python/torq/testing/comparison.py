@@ -43,6 +43,8 @@ def compare_test_results(request, observed_result, reference_results, case_confi
                         "int_thld": 1,
                         "fp_avg_tol": 1e-2,
                         "fp_max_tol": 1e-2,
+                        "use_abs_tol_gate": False,
+                        "fp_abs_tol_frac": 0.0,
                         "epsilon": 1e-6,
                         "allow_all_zero": False,
                         "allowed_wrong": 0,
@@ -99,6 +101,7 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
             abs_diff = differences = np.sum(expected_output != observed_output)
         else:
             abs_diff = np.abs(expected_output.astype(np.float32)-observed_output.astype(np.float32))
+            raw_abs_diff = abs_diff
             if (np.issubdtype(expected_output.dtype, np.integer)):
                 differences = abs_diff > comparison_config['int_tol']
             else:
@@ -121,5 +124,15 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
             if (np.issubdtype(expected_output.dtype, np.integer) or np.issubdtype(expected_output.dtype, bool)):
                 assert (np.max(abs_diff) <= comparison_config['int_thld']) and not (abs_diff != 0).sum(), difference_summary
             else:
-                wrong = (rel_diff > comparison_config['fp_max_tol']).sum()
+                if comparison_config['use_abs_tol_gate']:
+                    # An element counts as "wrong" only if it exceeds BOTH the relative tolerance
+                    # and an absolute tolerance scaled to the tensor's dynamic range.  This keeps
+                    # the check sensitive to real numerical drift while ignoring near-zero
+                    # cancellation outputs, where small (bf16 ULP-sized) absolute error produces a
+                    # large relative difference.  Opt-in via use_abs_tol_gate so existing callers
+                    # keep the pure relative gate unchanged.
+                    abs_tol = comparison_config['fp_abs_tol_frac'] * np.max(np.abs(expected_output.astype(np.float32)))
+                    wrong = ((rel_diff > comparison_config['fp_max_tol']) & (raw_abs_diff > abs_tol)).sum()
+                else:
+                    wrong = (rel_diff > comparison_config['fp_max_tol']).sum()
                 assert wrong / rel_diff.size <= comparison_config['allowed_wrong'], difference_summary

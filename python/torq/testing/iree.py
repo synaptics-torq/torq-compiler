@@ -23,6 +23,10 @@ except ImportError:
     pytest.skip("iree package not available, skipping iree based tests", allow_module_level=True)
 
 from .aws_fpga import FpgaSession, RemoteFpgaSession
+from .dtype_utils import (
+    get_dtype,
+    convert_io_dtypes_policy,
+)
 from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
@@ -73,6 +77,14 @@ def pytest_addoption(parser):
     parser.addoption("--update-astra-runtime", action="store_true", default=False, help="Enable runtime update: auto-deploy torq-run-module to the board (hash-based), session-level board lock for exclusive access, and per-user runner paths")
     parser.addoption("--torq-ko-path", default=None, help="Path to a local NPU kernel module (.ko) to deploy to the board when --update-astra-runtime is active (if omitted, the default on-board module is used)")
     parser.addoption("--torq-dump-affinities", action="store_true", default=False, help="Dump the opeartion affinities to a file in the compiled model directory")
+    parser.addoption("--convert-io-dtypes", nargs="+", default=["all"], metavar="all|input:IDX|output:IDX|!input:IDX|!output:IDX",
+        help=(
+            "Convert VMFB I/O dtypes during execution. No effect if test case compiled without `--torq-convert-dtypes --torq-convert-io-dtype`."
+            "\n'all' converts all inputs and outputs. "
+            "\n'input:0 output:1' converts only selected local input/output indices. "
+            "\n'!input:0 !output:1' converts all except selected local indices."
+        ),
+    )
     
 
 
@@ -294,36 +306,12 @@ def load_outputs(output_specs, output_paths):
     return output_data
 
 
-def get_dtype(name):
-    """
-    Returns the numpy dtype corresponding to the given MLIR type name
-    """
-
-    dict_types = {'i1': bool,
-                  'i8': np.int8,
-                  'i16': np.int16,
-                  'i32': np.int32,              
-                  'ui8': np.uint8,
-                  'f16': np.float16,
-                  'f32': np.float32,
-                  'si8': np.int8,
-                  'si16': np.int16,
-                  'si64': np.int64,
-                  'si32': np.int32,
-                  'bf16': ml_dtypes.bfloat16
-                  }
-    
-    if name in dict_types:
-        return dict_types[name]
-        
-    raise ValueError(f"Unsupported dtype {name}")
-
-
 def is_float_type(dtype):
     """
     Returns true if the given dtype is a floating point type (either numpy native or bfloat16)
     """
-    return np.issubdtype(dtype, np.floating) or dtype == ml_dtypes.bfloat16
+    dtype = np.dtype(dtype)
+    return np.issubdtype(dtype, np.floating) or dtype == np.dtype(ml_dtypes.bfloat16)
 
 
 @dataclass
@@ -534,7 +522,6 @@ def iree_input_data(request, versioned_dir, input_data):
     """
     Save the received test data for inference
     """
-
     for i, data in enumerate(input_data):
         file_name = versioned_dir / f'in_rnd_{i}.bin'
 
@@ -542,6 +529,38 @@ def iree_input_data(request, versioned_dir, input_data):
             f.write(data.tobytes())
 
         np.save(str(file_name) + '.npy', data)
+
+
+@versioned_generated_directory_fixture
+def torq_input_data(request, versioned_dir, input_data, convert_io_dtypes_policy):
+    """
+    Save input data for torq inference, converting dtypes when convert dtypes is enabled
+    """
+    for i, data in enumerate(input_data):
+        if convert_io_dtypes_policy.should_convert_input(i):
+            data = data.astype(convert_io_dtypes_policy.convert_io_dtype(data.dtype))
+
+        file_name = versioned_dir / f'in_rnd_{i}.bin'
+
+        with open(file_name, 'wb') as f:
+            f.write(data.tobytes())
+
+        np.save(str(file_name) + '.npy', data)
+
+
+@versioned_unhashable_object_fixture
+def torq_input_data_args(torq_input_data, mlir_io_spec, convert_io_dtypes_policy):
+    input_args = []
+    for i, tensor_type in enumerate(mlir_io_spec.inputs):
+        file_name = torq_input_data / f'in_rnd_{i}.bin'
+        if convert_io_dtypes_policy.should_convert_input(i):
+            fmt = convert_io_dtypes_policy.convert_io_fmt(tensor_type.fmt)
+            type_spec = "x".join([str(x) for x in tensor_type.shape] + [fmt])
+        else:
+            type_spec = tensor_type.to_arg()
+        input_args.append(f'--input={type_spec}=@{file_name}')
+
+    return input_args
 
 
 @pytest.fixture
@@ -909,7 +928,7 @@ def benchmark_output_dir(request):
 
 
 @versioned_generated_directory_fixture
-def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_data_args, mlir_io_spec, 
+def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_data_args, mlir_io_spec,
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
                         enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name,
                         enable_profiling, skip_profile_annotation, torq_compiled_model_debug_info, 
@@ -948,7 +967,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
         runner = RemoteTestRunner(
             torq_compiled_model,
             torq_mlir_func_name,
-            iree_input_data_args,
+            torq_input_data_args,
             output_args,
             *all_runtime_opts,
             board_addr=remote_addr,
@@ -978,7 +997,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, iree_input_dat
                 *output_args,
                 '--torq_hw_type=' + runtime_hw_type,
                 *torq_runtime_options,
-                *iree_input_data_args]
+                *torq_input_data_args]
 
         cmds += extra_runtime_opts
 
@@ -1067,8 +1086,8 @@ def torq_test_vectors(request, torq_results_dir, enable_hw_test_vectors):
 
 
 @versioned_unhashable_object_fixture
-def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir, 
-                 runtime_hw_type, torq_runtime_options, chip_config):
+def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir,
+                 runtime_hw_type, torq_runtime_options, chip_config, convert_io_dtypes_policy):
 
     record_property = request.getfixturevalue("record_property")    
     record_property("runtime", "torq")
@@ -1144,7 +1163,18 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir,
             print(f"✓ Generated profiling report: {html_output_path}")
 
     output_paths = create_output_paths(torq_results_dir, mlir_io_spec.outputs)
-    return load_outputs(mlir_io_spec.outputs, output_paths)
+
+    if not convert_io_dtypes_policy:
+        return load_outputs(mlir_io_spec.outputs, output_paths)
+
+    outputs = []
+    for idx, tensor_type in enumerate(mlir_io_spec.outputs):
+        dtype = get_dtype(tensor_type.fmt)
+        if convert_io_dtypes_policy.should_convert_output(idx):
+            dtype = convert_io_dtypes_policy.convert_io_dtype(dtype)
+        with open(output_paths[idx], 'rb') as f:
+            outputs.append(np.frombuffer(f.read(), dtype=dtype).reshape(tensor_type.shape))
+    return outputs
 
 
 @versioned_hashable_object_fixture
@@ -1227,7 +1257,7 @@ def random_uniform_input_data(request, mlir_io_spec):
             data = rng.uniform(finfo(dtype).min, finfo(dtype).max, inp_spec.shape).astype(dtype)
         elif np.issubdtype(dtype, np.integer):
             data = rng.integers(np.iinfo(dtype).min, np.iinfo(dtype).max, size=inp_spec.shape, dtype=dtype, endpoint=True)
-        elif dtype is bool:
+        elif np.issubdtype(dtype, np.bool_):
             data = rng.integers(0, 2, inp_spec.shape, dtype=dtype)
         else:
             raise ValueError(f"Requested random uniform data for unsupported dtype '{dtype}'")
@@ -1275,7 +1305,7 @@ def tweaked_random_input_data(request, mlir_io_spec, tweaked_random_input_data_r
         elif np.issubdtype(dtype, np.integer):
             tensor = rng.integers(random_range[0], random_range[1],
                                     tensor_type.shape, dtype=dtype)
-        elif dtype is bool:
+        elif np.issubdtype(dtype, np.bool_):
             tensor = rng.integers(0, 2, tensor_type.shape, dtype=dtype)
         else:
             raise ValueError(f"Unsupported dtype {dtype}")

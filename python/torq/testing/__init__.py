@@ -16,6 +16,8 @@ pytest_plugins = [
     "torq.testing.issues",
     "torq.testing.xfail",
     "torq.testing.engines",
+    "torq.testing.dtype_utils",
+    "torq.testing.quantization",
 ]
 
 # IMPORTANT: IREE must be imported BEFORE tensorflow to avoid LLVM symbol conflicts.

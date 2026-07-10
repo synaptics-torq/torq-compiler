@@ -23,6 +23,8 @@ keras==3.14.1
 onnx==1.19.1
 onnxruntime==1.25.0
 onnxscript==0.6.1
+# for python/torq/testing/decoder_components_extractor.py
+onnx_graphsurgeon==0.6.1
 
 # torch (used for bf16 reference execution in testing)
 --extra-index-url https://download.pytorch.org/whl/cpu

@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+import ml_dtypes
 import numpy as np
 import onnx
 import onnxruntime
@@ -24,6 +25,10 @@ from .versioned_fixtures import (
     versioned_static_file_fixture,
     versioned_unhashable_object_fixture,
     VersionedUncachedData,
+)
+from .quantization import (
+    onnx_fake_quantize_config,
+    onnx_fake_quantize
 )
 
 """
@@ -735,7 +740,8 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
         if folded is not None:
             constant_tensors[name] = numpy_helper.from_array(folded, name=name)
             if log_prefix:
-                print(f'{log_prefix}: folded shape subgraph for {name} -> {folded.tolist()}')
+                print(f'{log_prefix}: folded shape subgraph for {name}', end='')
+                print(f" -> {folded.tolist()}") if folded.size <= 100 else print()
 
 
     # Build new inputs/outputs/initializers/value_info
@@ -1263,7 +1269,9 @@ def onnx_model_fixture(fun):
 
 
 @versioned_generated_file_fixture("onnx")
-def onnx_model_file(request, versioned_file, onnx_model):
+def onnx_model_file(request, versioned_file, onnx_model, onnx_fake_quantize_config):
+    if onnx_fake_quantize_config["fake_quantize"]:
+        onnx_model = onnx_fake_quantize(_copy.deepcopy(onnx_model))
     onnx.checker.check_model(onnx_model)
     onnx.save(onnx_model, versioned_file)
 
@@ -1381,20 +1389,36 @@ def onnx_mlir_model_file(request, versioned_file, onnx_model_file, onnx_bf16_mod
             f"Error: {type(e).__name__}: {e}"
         )
 
+@versioned_hashable_object_fixture
+def onnx_ref_data_cache_key():
+    return "round-trip-converted-inputs-v1"
+
+@versioned_cached_data_fixture
+def onnx_ref_data(request, input_data, convert_io_dtypes_policy, onnx_ref_data_cache_key):
+    return convert_io_dtypes_policy.round_trip_inputs(input_data)
+
+def _prepare_onnxruntime_feed_value(data):
+    """Convert reference feed arrays that ONNX Runtime's Python API cannot accept."""
+    if np.dtype(data.dtype) == np.dtype(ml_dtypes.bfloat16):
+        return data.astype(np.float32)
+    return data
 
 @versioned_hashable_object_fixture
 def onnx_params(case_config):
     return {"opset": case_config.get("opset", 20)}
 
-
-@versioned_cached_data_fixture
-def onnx_reference_results(request, onnx_model_file):
+@versioned_unhashable_object_fixture
+def onnx_reference_results(request, onnx_ref_data, convert_io_dtypes_policy):
+    onnx_model_file = request.getfixturevalue("onnx_model_file").file_path
     onnx_model = onnx.load(str(onnx_model_file))
     onnx.checker.check_model(onnx_model)
     ort_session = onnxruntime.InferenceSession(str(onnx_model_file))
-    ort_inputs = {ort_session.get_inputs()[0].name: sample_input.numpy()}
-    ort_outs = ort_session.run(None, ort_inputs)
-    return ort_outs
+    ort_inputs = {
+        inp.name: _prepare_onnxruntime_feed_value(onnx_ref_data[i])
+        for i, inp in enumerate(ort_session.get_inputs())
+    }
+    outputs = ort_session.run(None, ort_inputs)
+    return convert_io_dtypes_policy.round_trip_outputs(outputs)
 
 
 
@@ -1500,7 +1524,6 @@ def convert_fp32_to_bf16(model: onnx.ModelProto) -> onnx.ModelProto:
 
     print(f"[BF16] Converted {total_count} weight values, max error: {max_error:.6f}")
     return model
-
 
 @pytest.fixture
 def onnx_layer_model(request):

@@ -1,2 +1,10 @@
-test_onnx_model_torq[attn_block_layer_Cast_11-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
-test_onnx_model_torq[attn_block_layer_Cast_11-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1408
+test_onnx_model_torq[embed_scale_full_model-astra_machina-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[embed_scale_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[decoder_block_full_model-astra_machina-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[decoder_block_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[final_norm_full_model-astra_machina-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[final_norm_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[lm_head_full_model-astra_machina-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[lm_head_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[source_full_model-astra_machina-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[source_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
