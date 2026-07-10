@@ -373,6 +373,36 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
                 tensor::EmptyOp::create(rewriter, loc, fullShape, opTy.getElementType())
                     .getResult();
 
+            // An original loop's block args split into induction variables (which
+            // lead the list) and loop-carried destinations (scf.for iter_args /
+            // scf.forall shared_outs). The const-accumulator shell loop threads a
+            // single, differently-typed iter-arg, so the destinations have no
+            // positional counterpart. Def-chain ops only read such destinations to
+            // size a write (their values are fully overwritten downstream), so
+            // substitute a fresh tensor.empty of the same type. Materialize it here,
+            // outside the shell nest, so it dominates every clone. Mapping these onto
+            // the accumulator iter-arg positionally instead would splice a
+            // wrong-typed source into cloned slice/insert ops and emit invalid IR.
+            IRMapping moveMapping;
+            for (auto level : loopLevels) {
+                Block *origBody = &level.getLoopRegions()[0]->front();
+                unsigned numIvs = level.getLoopInductionVars()->size();
+                for (unsigned i = numIvs, e = origBody->getNumArguments(); i < e; ++i) {
+                    BlockArgument destArg = origBody->getArgument(i);
+                    if (destArg.use_empty())
+                        continue;
+                    auto destTy = dyn_cast<RankedTensorType>(destArg.getType());
+                    if (!destTy || !destTy.hasStaticShape())
+                        return failure();
+                    moveMapping.map(
+                        destArg, tensor::EmptyOp::create(
+                                     rewriter, loc, destTy.getShape(), destTy.getElementType()
+                                 )
+                                     .getResult()
+                    );
+                }
+            }
+
             // Build the shell loops (outermost-first) using the original loop bounds.
             SmallVector<LoopLikeOpInterface> newCloneLoops;
             {
@@ -400,14 +430,18 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
                 }
             }
 
-            // Build IRMapping: original loop block args → new shell loop block args.
+            // Map induction variables positionally: they lead the block-argument
+            // list of both scf.for and scf.forall, so index i matches. Loop-carried
+            // destinations were already remapped to fresh tensor.empty values above.
             // loopLevels[0] = innermost original → newCloneLoops.back() = innermost shell.
-            IRMapping moveMapping;
             for (auto [level, cloneInfo] :
                  llvm::zip_equal(loopLevels, llvm::reverse(newCloneLoops))) {
                 Block *origBody = &level.getLoopRegions()[0]->front();
                 Block *newBody = &cloneInfo.getLoopRegions()[0]->front();
-                moveMapping.map(origBody->getArguments(), newBody->getArguments());
+
+                unsigned numIvs = level.getLoopInductionVars()->size();
+                for (unsigned i = 0; i < numIvs; ++i)
+                    moveMapping.map(origBody->getArgument(i), newBody->getArgument(i));
             }
 
             // Collect origDefChain ops in topological order across all loop levels.
