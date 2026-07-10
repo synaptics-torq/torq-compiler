@@ -1,0 +1,31 @@
+name: Build Astra Builder Image
+on:
+  workflow_call:
+    inputs:
+      push:
+        description: Push the built docker images to the registry
+        required: false
+        default: 'false'
+        type: string
+    outputs:
+      image_name:
+        description: Name of the built Docker image
+        value: ${{ jobs.build.outputs.image_name }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: Build Astra image
+    uses: ./.github/workflows/build-docker-ecr.yml
+    with:
+      docker_file: scripts/Dockerfile.astra
+      sources: >-
+        scripts/install_astra_dependencies.sh
+        scripts/install_toolchain.sh
+        scripts/configure_astra_python.sh
+        requirements_astra.txt
+      source_submodules: third_party/iree
+      extra_tags: ${{ inputs.push == 'true' && github.ref == 'refs/heads/main' && 'latest-astra' || '' }}

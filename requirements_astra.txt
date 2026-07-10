@@ -1,0 +1,15 @@
+# This file must contain only pinned versions of dependencies
+
+pip>=21.3
+setuptools>=62.4.0
+nanobind==2.0
+numpy>=2.0.0b1
+ml_dtypes>=0.4.0
+requests>=2.28.0
+wheel>=0.36.2
+sympy==1.13.3
+pybind11>=2.10.1
+PyYAML>=5.4.1
+
+# these are from python/torq/requirements.txt
+packaging>=24.2

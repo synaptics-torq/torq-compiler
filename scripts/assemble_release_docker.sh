@@ -1,103 +1,36 @@
 #!/bin/bash
 
-# This script assembles in a directory the files necessary
-# to create a docker image with runtime and compiler
-#
+# Adds static release files and downloads HF models into a pre-assembled release directory.
+# The release/ directory must already contain merged host and astra packages.
+# Usage: assemble_release_docker.sh <install-dir>
 
 set -e
-
-function usage() {
-    echo "Usage: $0 <build-dir> <target-build-dir> <install-dir>"
-    echo "  build-dir: Build dir containing the host version of the compiler/runtime"
-    echo "  target-build-dir: Build dir containing the target version of the runtime."
-    echo "  install-dir: Directory where to assemble files."
-}
 
 BASE_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")/..
 
 if [[ -z "$1" ]]; then
-    usage
+    echo "Usage: $0 <install-dir>"
     exit 1
 fi
 
-if [[ -z "$2" ]]; then
-    usage
-    exit 1
-fi
+INSTALL_DIR=$(readlink -f $1)
 
-if [[ -z "$3" ]]; then
-    usage
-    exit 1
-fi
+mkdir -p ${INSTALL_DIR}/scripts
 
-BUILD_DIR=$1
-TARGET_BUILD_DIR=$2
-INSTALL_DIR=$3
+# Static release files from source tree
+cp ${BASE_DIR}/scripts/Dockerfile.release  ${INSTALL_DIR}/Dockerfile
+cp ${BASE_DIR}/scripts/setup.sh            ${INSTALL_DIR}/
+cp ${BASE_DIR}/scripts/apt-packages.txt    ${INSTALL_DIR}/
 
-if [[ -d ${INSTALL_DIR} ]]; then
-    echo "Directory ${INSTALL_DIR} already exists. Please remove it first."
-    exit 1
-fi
+cp ${BASE_DIR}/scripts/diff-tensor.py          ${INSTALL_DIR}/scripts/
+cp ${BASE_DIR}/scripts/image_to_tensor.py      ${INSTALL_DIR}/scripts/
+cp ${BASE_DIR}/scripts/annotate_profiling.py   ${INSTALL_DIR}/scripts/
 
-mkdir ${INSTALL_DIR}
+cp ${BASE_DIR}/pytest.ini   ${INSTALL_DIR}/
+cp -r ${BASE_DIR}/tests     ${INSTALL_DIR}/
 
-mkdir ${INSTALL_DIR}/tools
-mkdir ${INSTALL_DIR}/lib
-mkdir ${INSTALL_DIR}/scripts
-
-cp ${BUILD_DIR}/third_party/iree/tools/iree-run-module ${INSTALL_DIR}/tools
-cp ${BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools
-
-# get the value from CMake TORQ_MPACT_SIMULATOR_LIB variable
-MPACT_SIMULATOR_LIB=$(egrep 'TORQ_MPACT_SIMULATOR_LIB:FILEPATH' ${BUILD_DIR}/CMakeCache.txt | cut -d= -f2)
-if [[ -f ${MPACT_SIMULATOR_LIB} ]]; then
-    cp ${MPACT_SIMULATOR_LIB} ${INSTALL_DIR}/lib
-fi
-
-cp ${BUILD_DIR}/third_party/iree/tools/iree-compile ${INSTALL_DIR}/tools
-cp ${BUILD_DIR}/third_party/iree/tools/iree-c-embed-data ${INSTALL_DIR}/tools
-cp ${BUILD_DIR}/third_party/iree/tools/iree-flatcc-cli ${INSTALL_DIR}/tools
-cp ${BUILD_DIR}/third_party/iree/tools/torq-compile ${INSTALL_DIR}/tools
-cp ${BUILD_DIR}/third_party/iree/tools/iree-opt ${INSTALL_DIR}/tools
-cp ${BUILD_DIR}/third_party/torq-hw/rt/torq_rt_cm ${INSTALL_DIR}/tools
-cp ${BUILD_DIR}/third_party/iree/lib/libIREECompiler.so ${INSTALL_DIR}/lib
-
-cp ${TARGET_BUILD_DIR}/runtime/tools/torq-run-module ${INSTALL_DIR}/tools/astra-sl-torq-run-module
-cp ${TARGET_BUILD_DIR}/third_party/iree/runtime/plugins/TORQ/torq_hw/hal/SL2610/syna_npu.ko ${INSTALL_DIR}/lib/syna_npu.ko
-
-cp ${BASE_DIR}/scripts/Dockerfile.release ${INSTALL_DIR}/Dockerfile
-cp ${BASE_DIR}/scripts/setup.sh ${INSTALL_DIR}
-cp ${BASE_DIR}/scripts/apt-packages.txt ${INSTALL_DIR}
-
-cp ${BASE_DIR}/scripts/diff-tensor.py ${INSTALL_DIR}/scripts
-cp ${BASE_DIR}/scripts/image_to_tensor.py ${INSTALL_DIR}/scripts
-cp ${BASE_DIR}/scripts/annotate_profiling.py ${INSTALL_DIR}/scripts
-
-mkdir ${INSTALL_DIR}/python
-
-mkdir -p ${INSTALL_DIR}/python ${INSTALL_DIR}/python/compiler ${INSTALL_DIR}/python/runtime
-cp -rL ${BUILD_DIR}/third_party/iree/compiler/bindings/python/iree ${INSTALL_DIR}/python/compiler
-cp -rL ${BUILD_DIR}/third_party/iree/runtime/bindings/python/iree ${INSTALL_DIR}/python/runtime
-cp -rL ${BASE_DIR}/python/torq ${INSTALL_DIR}/python
-
-cp ${BASE_DIR}/requirements.txt ${INSTALL_DIR}/python/requirements.txt
-
-cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tf ${INSTALL_DIR}/python
-cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tflite ${INSTALL_DIR}/python
-
-# pytest.ini file would required to initialize torq module for tests
-cp ${BASE_DIR}/pytest.ini ${INSTALL_DIR}/pytest.ini
-cp -r ${BASE_DIR}/tests ${INSTALL_DIR}
-
-# Release full models from HF(e.g., Mbv2) 
+# Download release models from HuggingFace
 python3 ${BASE_DIR}/scripts/model_release.py ${INSTALL_DIR}/tests
 
-# remove redundant libIREECompiler.so library
-rm ${INSTALL_DIR}/python/compiler/iree/compiler/_mlir_libs/libIREECompiler.so
-
-# remove all __pycache__ directories
+# Remove __pycache__
 find ${INSTALL_DIR} -type d -name "__pycache__" -prune -exec rm -rf {} \;
-
-# strip all the binaries and libraries
-find ${INSTALL_DIR} -name "*.so" -exec strip {} \;
-find ${INSTALL_DIR}/tools -type f -executable ! -name "astra-sl-*" -exec strip {} \;

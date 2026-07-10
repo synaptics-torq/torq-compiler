@@ -1,0 +1,26 @@
+FROM public.ecr.aws/ubuntu/ubuntu:24.04
+
+COPY . /workspace/code
+
+ARG GITHUB_REPOSITORY
+
+RUN --mount=type=secret,id=github_token \
+    GITHUB_TOKEN="$(cat /run/secrets/github_token)" \
+    GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+    /workspace/code/scripts/install_astra_dependencies.sh && \
+    /workspace/code/scripts/install_toolchain.sh /opt/synaptics/astra/toolchain && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y unzip zstd && rm -rf /var/lib/apt/lists/*
+
+# Build the host-only tool `iree-flatcc-cli` inside the Astra image so downstream
+# packaging steps can find it without requiring a separate host build job.
+RUN mkdir -p /workspace/build && \
+        cmake -S /workspace/code -B /workspace/build -G Ninja \
+            -DIREE_BUILD_HOST_TOOLS=ON -DIREE_BUILD_COMPILER=ON && \
+        cmake --build /workspace/build --target iree-flatcc-cli -j"$(nproc)"
+
+# Run python setup with tracing to surface pip failure details during image builds
+RUN bash -x /workspace/code/scripts/configure_astra_python.sh /workspace/venv /workspace/build && rm -rf /root/.cache
+
+ENV PATH="/workspace/venv/bin:$PATH"

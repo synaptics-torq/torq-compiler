@@ -20,45 +20,52 @@ BASE_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")/..
 SOC_BUILD_DIR=$(readlink -f $1)
 HOST_BUILD_DIR=$(readlink -f $2)
 TARGET=${3:-soc_fpga}
+TOOLCHAIN=${4:-}
+TOOLCHAIN_PATH=${5:-}
+KERNEL_PREBUILT=${6:-}
 
 # Set CMake flags based on target
 if [[ "$TARGET" == "astra_machina" ]]; then
     TORQ_ENABLE_SOC_FPGA=OFF
     TORQ_ENABLE_ASTRA_MACHINA=ON
 
-    if [[ "$4" == "poky" ]]; then
-        # Use the Poky toolchain
+    if [[ "$TOOLCHAIN" == "poky" ]]; then
+      # Use the Poky toolchain
+      if [[ -n "${TOOLCHAIN_PATH}" ]]; then
+        SDK_DIR="${TOOLCHAIN_PATH}"
+      else
         SDK_DIR="/opt/synaptics/astra/toolchain"
-        echo "Sourcing Astra SDK environment..."
-        . "${SDK_DIR}/environment-setup-cortexa55-poky-linux"
-        TOOLCHAIN_FILE="${SDK_DIR}/sysroots/x86_64-pokysdk-linux/usr/share/cmake/cortexa55-poky-linux-toolchain.cmake"
-        PYTHON3="${SDK_DIR}/sysroots/x86_64-pokysdk-linux/usr/bin/python3"
-        PYVER="$("${PYTHON3}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-        PYVER_NODOT="${PYVER//./}"
-        TARGET_ARCH="${OECORE_TARGET_ARCH}"
-        PYTHON_EXT_SUFFIX=".cpython-${PYVER_NODOT}-${TARGET_ARCH}-linux-gnu.so"
+      fi
+      echo "Sourcing Astra SDK environment..."
+      . "${SDK_DIR}/environment-setup-cortexa55-poky-linux"
+      TOOLCHAIN_FILE="${SDK_DIR}/sysroots/x86_64-pokysdk-linux/usr/share/cmake/cortexa55-poky-linux-toolchain.cmake"
+      PYTHON3="${SDK_DIR}/sysroots/x86_64-pokysdk-linux/usr/bin/python3"
+      PYVER="$("${PYTHON3}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+      PYVER_NODOT="${PYVER//./}"
+      TARGET_ARCH="${OECORE_TARGET_ARCH}"
+      PYTHON_EXT_SUFFIX=".cpython-${PYVER_NODOT}-${TARGET_ARCH}-linux-gnu.so"
 
-        # Detect NumPy path (support both NumPy 2.x with _core and NumPy 1.x with core)
-        # Check for actual header files, not just directory existence
-        NUMPY_BASE="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/lib/python${PYVER}/site-packages/numpy"
+      # Detect NumPy path (support both NumPy 2.x with _core and NumPy 1.x with core)
+      # Check for actual header files, not just directory existence
+      NUMPY_BASE="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/lib/python${PYVER}/site-packages/numpy"
 
-        for layout in "_core" "core"; do
-            HEADER="${NUMPY_BASE}/${layout}/include/numpy/arrayobject.h"
+      for layout in "_core" "core"; do
+          HEADER="${NUMPY_BASE}/${layout}/include/numpy/arrayobject.h"
 
-            if [[ -f "${HEADER}" ]]; then
-                NUMPY_INCLUDE_PATH="${NUMPY_BASE}/${layout}/include"
-                echo "Detected NumPy layout: ${layout}"
-                echo "Using NumPy include path: ${NUMPY_INCLUDE_PATH}"
-                break
-            fi
-        done
+          if [[ -f "${HEADER}" ]]; then
+              NUMPY_INCLUDE_PATH="${NUMPY_BASE}/${layout}/include"
+              echo "Detected NumPy layout: ${layout}"
+              echo "Using NumPy include path: ${NUMPY_INCLUDE_PATH}"
+              break
+          fi
+      done
 
-        if [[ -z "${NUMPY_INCLUDE_PATH}" ]]; then
-            echo "ERROR: NumPy headers not found in ${NUMPY_BASE}"
-            echo "  Checked: _core/include/numpy/arrayobject.h"
-            echo "  Checked: core/include/numpy/arrayobject.h"
-            exit 1
-        fi
+      if [[ -z "${NUMPY_INCLUDE_PATH}" ]]; then
+          echo "ERROR: NumPy headers not found in ${NUMPY_BASE}"
+          echo "  Checked: _core/include/numpy/arrayobject.h"
+          echo "  Checked: core/include/numpy/arrayobject.h"
+          exit 1
+      fi
     else
         # Default to aarch64 toolchain
         TOOLCHAIN_FILE=${BASE_DIR}/scripts/toolchain.aarch64.cmake
@@ -117,3 +124,4 @@ fi
 
 echo "Configuring build for target: $TARGET"
 cmake "${CMAKE_ARGS[@]}"
+
