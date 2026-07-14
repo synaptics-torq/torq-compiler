@@ -34,7 +34,7 @@ jobs:
       - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
         image:custom-linux-${{ inputs.docker_image_tests_name }}
 
-    timeout-minutes: 200 # very high timeout because we may need to wait for a long time to get access to the board
+    timeout-minutes: 50 # this is not enough in case there is a lot of contention on astra machina but we can't increase it as codebuild kills the job at 60 mins anyways
 
     env:
       RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
