@@ -341,8 +341,8 @@ static FailureOr<Value> buildBlockQuantizedExpandWeightsOp(
 
     auto [outMin, outMax] = getDTypeRange(outputType.getElementType());
     auto expandWeightsOp = torq_hl::ExpandWeightsOp::create(
-        rewriter, loc, outputType, createInitTensor(anchorOp, rewriter, outputType),
-        *inputZpBiasScale, outMin, outMax, scales, packedWeights, static_cast<uint32_t>(blockSize)
+        rewriter, loc, outputType, createInitTensor(anchorOp, rewriter, outputType), outMin, outMax,
+        scales, packedWeights, static_cast<uint32_t>(blockSize), *inputZpBiasScale
     );
     return expandWeightsOp.getOutput();
 }

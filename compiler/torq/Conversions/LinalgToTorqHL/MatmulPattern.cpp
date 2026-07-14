@@ -25,6 +25,8 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Endian.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <limits>
 #include <optional>
@@ -160,16 +162,6 @@ bool usesUnsignedIntegerZeroPoint(linalg::GenericOp genericOp) {
     return false;
 }
 
-std::optional<APFloat::Semantics> getFloatSemantics(Type type) {
-    if (type.isBF16()) {
-        return APFloat::S_BFloat;
-    }
-    if (type.isF32()) {
-        return APFloat::S_IEEEsingle;
-    }
-    return std::nullopt;
-}
-
 uint64_t readLittleEndianBits(ArrayRef<char> data, int64_t elementIndex, unsigned byteWidth) {
     uint64_t bits = 0;
     int64_t offset = elementIndex * byteWidth;
@@ -177,44 +169,6 @@ uint64_t readLittleEndianBits(ArrayRef<char> data, int64_t elementIndex, unsigne
         bits |= static_cast<uint64_t>(static_cast<uint8_t>(data[offset + byte])) << (8 * byte);
     }
     return bits;
-}
-
-FailureOr<std::vector<APFloat>> getFloatConstantValues(arith::ConstantOp constOp) {
-    auto type = dyn_cast<RankedTensorType>(constOp.getType());
-    if (!type || ShapedType::isDynamicShape(type.getShape())) {
-        return failure();
-    }
-
-    if (auto denseAttr = dyn_cast<DenseFPElementsAttr>(constOp.getValue())) {
-        std::vector<APFloat> values;
-        values.reserve(denseAttr.getNumElements());
-        llvm::append_range(values, denseAttr.getValues<APFloat>());
-        return values;
-    }
-
-    auto resourceAttr = dyn_cast<DenseResourceElementsAttr>(constOp.getValue());
-    std::optional<APFloat::Semantics> semantics = getFloatSemantics(type.getElementType());
-    if (!resourceAttr || !semantics) {
-        return failure();
-    }
-
-    unsigned bitWidth = type.getElementType().getIntOrFloatBitWidth();
-    if (bitWidth == 0 || bitWidth % 8 != 0 || bitWidth > 64) {
-        return failure();
-    }
-    unsigned byteWidth = bitWidth / 8;
-    ArrayRef<char> data = resourceAttr.getData();
-    if (data.size() != static_cast<size_t>(type.getNumElements() * byteWidth)) {
-        return failure();
-    }
-
-    std::vector<APFloat> values;
-    values.reserve(type.getNumElements());
-    for (int64_t idx = 0, count = type.getNumElements(); idx < count; ++idx) {
-        uint64_t bits = readLittleEndianBits(data, idx, byteWidth);
-        values.emplace_back(APFloat::EnumToSemantics(*semantics), APInt(bitWidth, bits));
-    }
-    return values;
 }
 
 FailureOr<std::vector<APInt>> getIntegerConstantValues(arith::ConstantOp constOp) {
@@ -237,19 +191,42 @@ FailureOr<std::vector<APInt>> getIntegerConstantValues(arith::ConstantOp constOp
     }
 
     unsigned bitWidth = integerType.getWidth();
-    if (bitWidth == 0 || bitWidth % 8 != 0 || bitWidth > 64) {
+    if (bitWidth == 0 || bitWidth > 64) {
         return failure();
     }
-    unsigned byteWidth = bitWidth / 8;
     ArrayRef<char> data = resourceAttr.getData();
-    if (data.size() != static_cast<size_t>(type.getNumElements() * byteWidth)) {
-        return failure();
-    }
 
     std::vector<APInt> values;
     values.reserve(type.getNumElements());
+    if (bitWidth % 8 == 0) {
+        unsigned byteWidth = bitWidth / 8;
+        if (data.size() != static_cast<size_t>(type.getNumElements() * byteWidth)) {
+            return failure();
+        }
+        for (int64_t idx = 0, count = type.getNumElements(); idx < count; ++idx) {
+            values.emplace_back(bitWidth, readLittleEndianBits(data, idx, byteWidth));
+        }
+        return values;
+    }
+
+    int64_t packedBitCount = type.getNumElements() * static_cast<int64_t>(bitWidth);
+    size_t packedSize = static_cast<size_t>(llvm::divideCeil(packedBitCount, int64_t{8}));
+    if (data.size() != packedSize) {
+        return failure();
+    }
+
+    SmallVector<char> paddedData(data.begin(), data.end());
+    paddedData.resize(data.size() + 2 * sizeof(uint64_t), 0);
     for (int64_t idx = 0, count = type.getNumElements(); idx < count; ++idx) {
-        values.emplace_back(bitWidth, readLittleEndianBits(data, idx, byteWidth));
+        int64_t bitOffset = idx * bitWidth;
+        uint64_t bits = llvm::support::endian::readAtBitAlignment<
+            uint64_t, llvm::endianness::little, llvm::support::unaligned>(
+            paddedData.data() + bitOffset / 8, bitOffset % 8
+        );
+        if (bitWidth < 64) {
+            bits &= llvm::maskTrailingOnes<uint64_t>(bitWidth);
+        }
+        values.emplace_back(bitWidth, bits);
     }
     return values;
 }
@@ -319,19 +296,14 @@ static Value maybeSliceLikeWithCols(
     return tensor::ExtractSliceOp::create(rewriter, loc, newType, value, offsets, sizes, strides);
 }
 
-/// Compute the bias constant for ExpandWeightsOp from scale and zero-point
-/// constants. The bias is: -zp * scale (element-wise).
+/// Build the negated zero-point tensor used to produce the ExpandWeightsOp bias.
 ///
-/// The root constants (looked through extract_slice) may be larger than the
-/// sub-region actually used by this dequant op. We resolve slice offsets
-/// statically to extract only the needed sub-region directly from the data.
-///
-/// The result is a 2D constant [rows, cols]. If cols is odd, it is padded to
-/// cols+1 with zeros because the torq HW requires the bias column count to be
-/// even.
-FailureOr<Value> buildReductionDimScaleBias(
-    Location loc, Value scales, Value zeroPoints, RankedTensorType outputType,
-    PatternRewriter &rewriter, linalg::GenericOp anchorOp, int64_t biasCols
+/// The result is a 2D constant [rows, cols]. If
+/// cols is odd, it is padded to cols+1 with zeros because the torq HW requires
+/// the bias column count to be even.
+FailureOr<Value> buildReductionDimBias(
+    Location loc, Value scales, Value zeroPoints, PatternRewriter &rewriter,
+    linalg::GenericOp anchorOp, int64_t biasCols
 ) {
     arith::ConstantOp scaleConstOp = getConstantLikeTensorOp(scales);
     arith::ConstantOp zeroPointConstOp = getConstantLikeTensorOp(zeroPoints);
@@ -341,77 +313,33 @@ FailureOr<Value> buildReductionDimScaleBias(
 
     auto scaleConstType = dyn_cast<RankedTensorType>(scaleConstOp.getType());
     auto zeroPointConstType = dyn_cast<RankedTensorType>(zeroPointConstOp.getType());
-    if (!scaleConstType || !zeroPointConstType ||
-        scaleConstType.getShape() != zeroPointConstType.getShape() ||
-        ShapedType::isDynamicShape(scaleConstType.getShape())) {
+    auto scaleType = dyn_cast<RankedTensorType>(scales.getType());
+    auto zeroPointType = dyn_cast<RankedTensorType>(zeroPoints.getType());
+
+    // We need the root constants to materialize the bias values, even when the
+    // dequant operands are extract_slice views into those constants.
+    if (!scaleConstType || !zeroPointConstType || !scaleType || !zeroPointType) {
         return failure();
     }
 
-    FailureOr<std::vector<APFloat>> maybeScaleValues = getFloatConstantValues(scaleConstOp);
-    if (failed(maybeScaleValues)) {
-        return failure();
-    }
-    Type outputElementType = outputType.getElementType();
-    if (!outputElementType.isBF16() && !outputElementType.isF32()) {
-        return failure();
-    }
-    // Floating ACT/BRAM consumes fp32 bias even when the expanded weights are bf16.
-    const llvm::fltSemantics &biasSemantics = APFloat::IEEEsingle();
-
-    std::vector<APFloat> biasValues;
-    biasValues.reserve(scaleConstType.getNumElements());
-    const bool zeroPointIsUnsigned = usesUnsignedIntegerZeroPoint(anchorOp);
-    if (FailureOr<std::vector<APInt>> zeroPointValues = getIntegerConstantValues(zeroPointConstOp);
-        succeeded(zeroPointValues)) {
-        if (zeroPointValues->size() != maybeScaleValues->size()) {
-            return failure();
-        }
-        for (auto [scaleValue, zeroPointValue] :
-             llvm::zip_equal(*maybeScaleValues, *zeroPointValues)) {
-            bool ignored;
-            scaleValue.convert(biasSemantics, APFloat::rmNearestTiesToEven, &ignored);
-            int64_t zeroPoint = zeroPointIsUnsigned
-                                    ? static_cast<int64_t>(zeroPointValue.getZExtValue())
-                                    : zeroPointValue.getSExtValue();
-            APFloat biasValue(static_cast<float>(zeroPoint));
-            biasValue.convert(biasSemantics, APFloat::rmNearestTiesToEven, &ignored);
-            biasValue.changeSign();
-            scaleValue.multiply(biasValue, APFloat::rmNearestTiesToEven);
-            biasValues.push_back(scaleValue);
-        }
-    }
-    else if (FailureOr<std::vector<APFloat>> zeroPointValues =
-                 getFloatConstantValues(zeroPointConstOp);
-             succeeded(zeroPointValues)) {
-        if (zeroPointValues->size() != maybeScaleValues->size()) {
-            return failure();
-        }
-        for (auto [scaleValue, zeroPointValue] :
-             llvm::zip_equal(*maybeScaleValues, *zeroPointValues)) {
-            bool ignored;
-            scaleValue.convert(biasSemantics, APFloat::rmNearestTiesToEven, &ignored);
-            zeroPointValue.convert(biasSemantics, APFloat::rmNearestTiesToEven, &ignored);
-            zeroPointValue.changeSign();
-            scaleValue.multiply(zeroPointValue, APFloat::rmNearestTiesToEven);
-            biasValues.push_back(scaleValue);
-        }
-    }
-    else {
-        anchorOp.emitError("expected integer or floating-point input zero-point for "
-                           "reduction-dimension expand_weights bias");
+    // Check the effective dequant operand shapes, not just the root constant
+    // shapes. Tiled DQL may use a small scale constant with a zero-point slice
+    // from a larger root constant, but the consumed tile shapes must match.
+    if (scaleType.getShape() != zeroPointType.getShape() ||
+        ShapedType::isDynamicShape(scaleType.getShape()) ||
+        ShapedType::isDynamicShape(zeroPointType.getShape()) ||
+        ShapedType::isDynamicShape(zeroPointConstType.getShape())) {
         return failure();
     }
 
-    int64_t rank = scaleConstType.getRank();
+    int64_t rank = zeroPointConstType.getRank();
     if (rank != 2 && rank != 3) {
-        LLVM_DEBUG(
-            llvm::dbgs() << "buildReductionDimScaleBias: unsupported bias rank " << rank << "\n"
-        );
+        LLVM_DEBUG(llvm::dbgs() << "buildReductionDimBias: unsupported bias rank " << rank << "\n");
         return failure();
     }
 
     SmallVector<int64_t> biasShape(
-        scaleConstType.getShape().begin(), scaleConstType.getShape().end()
+        zeroPointConstType.getShape().begin(), zeroPointConstType.getShape().end()
     );
 
     int64_t colDim = biasShape.size() - 1;
@@ -445,46 +373,66 @@ FailureOr<Value> buildReductionDimScaleBias(
         }
     }
 
-    // Pad the root bias constant so dynamic extract_slice users can request an
-    // even column count directly. This avoids emitting tensor.pad or remapping
-    // dynamic offsets, both of which are undesirable for TORQ lowering.
-    std::vector<APFloat> paddedBiasValues(
-        ShapedType::getNumElements(biasShape), APFloat(APFloat::IEEEsingle(), "0")
-    );
-
-    ArrayRef<int64_t> oldShape = scaleConstType.getShape();
+    ArrayRef<int64_t> oldShape = zeroPointConstType.getShape();
     int64_t oldCols = oldShape.back();
     int64_t newCols = biasShape.back();
 
-    if (rank == 2) {
-        int64_t rows = oldShape[0];
+    auto copyPaddedBiasValues = [&](auto &paddedBiasValues, const auto &biasValues) {
+        if (rank == 2) {
+            int64_t rows = oldShape[0];
 
-        for (int64_t r = 0; r < rows; ++r) {
-            for (int64_t c = 0; c < oldCols; ++c)
-                paddedBiasValues[r * newCols + c] = biasValues[r * oldCols + c];
-        }
-    }
-    else if (rank == 3) {
-        int64_t rows = oldShape[0];
-        int64_t mid = oldShape[1];
-
-        for (int64_t r = 0; r < rows; ++r) {
-            for (int64_t m = 0; m < mid; ++m) {
+            for (int64_t r = 0; r < rows; ++r) {
                 for (int64_t c = 0; c < oldCols; ++c)
-                    paddedBiasValues[(r * mid + m) * newCols + c] =
-                        biasValues[(r * mid + m) * oldCols + c];
+                    paddedBiasValues[r * newCols + c] = biasValues[r * oldCols + c];
             }
         }
+        else if (rank == 3) {
+            int64_t rows = oldShape[0];
+            int64_t mid = oldShape[1];
+
+            for (int64_t r = 0; r < rows; ++r) {
+                for (int64_t m = 0; m < mid; ++m) {
+                    for (int64_t c = 0; c < oldCols; ++c)
+                        paddedBiasValues[(r * mid + m) * newCols + c] =
+                            biasValues[(r * mid + m) * oldCols + c];
+                }
+            }
+        }
+    };
+
+    auto zeroPointElementType = dyn_cast<IntegerType>(zeroPointConstType.getElementType());
+    if (!zeroPointElementType) {
+        anchorOp.emitError("non-integer zero-point for reduction-dimension expand_weights bias is "
+                           "not yet supported");
+        return failure();
     }
-    Value scaleBias = createFConst(rewriter, anchorOp, paddedBiasValues, biasShape);
+
+    FailureOr<std::vector<APInt>> maybeBiasValues = getIntegerConstantValues(zeroPointConstOp);
+    if (failed(maybeBiasValues)) {
+        return failure();
+    }
+
+    std::vector<APInt> paddedBiasValues(
+        ShapedType::getNumElements(biasShape), APInt(zeroPointElementType.getWidth(), 0)
+    );
+    std::vector<APInt> negatedBiasValues;
+    negatedBiasValues.reserve(maybeBiasValues->size());
+    for (APInt value : *maybeBiasValues) {
+        negatedBiasValues.push_back(-value);
+    }
+    copyPaddedBiasValues(paddedBiasValues, negatedBiasValues);
+
+    auto biasType = RankedTensorType::get(biasShape, zeroPointConstType.getElementType());
+    auto biasAttr = DenseIntElementsAttr::get(biasType, paddedBiasValues);
+    Value bias = arith::ConstantOp::create(rewriter, loc, biasType, biasAttr);
 
     if (auto sliceOp = zeroPoints.getDefiningOp<tensor::ExtractSliceOp>()) {
-        scaleBias = maybeSliceLikeWithCols(loc, scaleBias, zeroPoints, biasCols, rewriter);
+        bias = maybeSliceLikeWithCols(loc, bias, zeroPoints, biasCols, rewriter);
     }
     else if (auto sliceOp = scales.getDefiningOp<tensor::ExtractSliceOp>()) {
-        scaleBias = maybeSliceLikeWithCols(loc, scaleBias, scales, biasCols, rewriter);
+        bias = maybeSliceLikeWithCols(loc, bias, scales, biasCols, rewriter);
     }
-    return collapseReductionDimBlockParam(loc, scaleBias, rewriter);
+    return collapseReductionDimBlockParam(loc, bias, rewriter);
 }
 
 /// Matches the simplified block-quantized dequant linalg.generic produced by
@@ -663,17 +611,32 @@ FailureOr<Value> maybeFoldBlockQuantizedMatmulInput(
         return failure();
     }
 
-    FailureOr<Value> scaleBias = buildReductionDimScaleBias(
-        loc, scales, zeroPoints, outputType, rewriter, genericOp, llvm::alignTo(cols, 2)
-    );
-    if (failed(scaleBias)) {
+    FailureOr<Value> bias =
+        buildReductionDimBias(loc, scales, zeroPoints, rewriter, genericOp, llvm::alignTo(cols, 2));
+    if (failed(bias)) {
         return failure();
     }
 
     auto [outMin, outMax] = getDTypeRange(outputType.getElementType());
+    Value expandedBias = *bias;
+    auto biasType = cast<RankedTensorType>(bias->getType());
+
+    if (!biasType.getElementType().isF32()) {
+        auto biasF32Type = RankedTensorType::get(
+            biasType.getShape(), rewriter.getF32Type(), biasType.getEncoding()
+        );
+        Value biasF32 = createInitTensor(genericOp, rewriter, biasF32Type);
+
+        auto expandBiasToF32Op = torq_hl::ExpandWeightsOp::create(
+            rewriter, loc, biasF32Type, biasF32, outMin, outMax, *collapsedScales, *bias,
+            /*block_size=*/1, Value{}
+        );
+        expandedBias = expandBiasToF32Op.getOutput();
+    }
+
     auto expandWeightsOp = torq_hl::ExpandWeightsOp::create(
-        rewriter, loc, outputType, createInitTensor(genericOp, rewriter, outputType), *scaleBias,
-        outMin, outMax, *collapsedScales, flattenedWeights, static_cast<uint32_t>(blockSize)
+        rewriter, loc, outputType, createInitTensor(genericOp, rewriter, outputType), outMin,
+        outMax, *collapsedScales, flattenedWeights, static_cast<uint32_t>(blockSize), expandedBias
     );
     return expandWeightsOp.getOutput();
 }
@@ -761,17 +724,14 @@ FailureOr<Value> buildFp8CastExpandWeightsOp(
     }
 
     const llvm::fltSemantics &bf16 = llvm::APFloat::BFloat();
-    std::vector<APFloat> zeroBias(rows, APFloat(bf16, "0.0"));
     std::vector<APFloat> oneScale(rows, APFloat(bf16, "1.0"));
-    SmallVector<int64_t, 3> biasShape{rows, 1, 1};
     SmallVector<int64_t, 2> scaleShape{rows, 1};
-    Value scaleBias = createFConst(rewriter, anchorOp, zeroBias, biasShape);
     Value scale = createFConst(rewriter, anchorOp, oneScale, scaleShape);
 
     auto [outMin, outMax] = getDTypeRange(outputType.getElementType());
     auto expandWeightsOp = torq_hl::ExpandWeightsOp::create(
-        rewriter, loc, outputType, createInitTensor(anchorOp, rewriter, outputType), scaleBias,
-        outMin, outMax, scale, packedWeights, static_cast<uint32_t>(cols)
+        rewriter, loc, outputType, createInitTensor(anchorOp, rewriter, outputType), outMin, outMax,
+        scale, packedWeights, static_cast<uint32_t>(cols), Value{} // bias
     );
     return expandWeightsOp.getOutput();
 }

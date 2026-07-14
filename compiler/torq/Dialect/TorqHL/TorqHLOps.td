@@ -943,16 +943,16 @@ def TorqHL_FMAOp: TorqHL_LayerOp<"fma"> {
 def TorqHL_ExpandWeightsOp: TorqHL_LayerOp<"expand_weights"> {
   let summary = "Block quantized expand weights operation";
   let description = [{
-    Expands a quantized weight tensor using a bias-scale pair and per-block scales.
+    Expands a quantized weight tensor using per-block scales and optional bias.
   }];
 
   let arguments = !con(commonArgs, (ins
-    TensorOrMemref:$scale_bias,
     I32Attr:$output_min,
     I32Attr:$output_max,
     TensorOrMemref:$scale,
     TensorOrMemref:$input,
-    I32Attr:$block_size
+    I32Attr:$block_size,
+    Optional<TensorOrMemref>:$bias
   ));
 }
 
