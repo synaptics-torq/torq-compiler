@@ -151,9 +151,9 @@ def pytest_generate_tests(metafunc):
     params = []
     for case in cases:
         marks = (
-            (pytest.mark.fpga_ci, pytest.mark.astra_machina_sl_ci)
+            (pytest.mark.fpga_ci, )
             if case.name in skip_cmodel
-            else (pytest.mark.ci, pytest.mark.fpga_ci, pytest.mark.astra_machina_sl_ci)
+            else (pytest.mark.ci, pytest.mark.fpga_ci, )
         )
         params.append(pytest.param(case, marks=marks))
 
