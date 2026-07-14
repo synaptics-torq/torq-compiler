@@ -111,8 +111,12 @@ int64_t getLramSizeBasedOnBudget(bool optimizeForTileAndFuse) {
 }
 
 void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTileAndFuse) {
-    if (!clDisableSlicing)
+    if (!clDisableSlicing) {
+        // Group each pure-elementwise chain (erf/tanh/mul) before slicing, so the
+        // chain slices as one scf.forall and its middle values stay in LRAM.
+        funcPm.addPass(createCoalesceElementwiseChainsPass());
         funcPm.addPass(createLinalgSlicingPass());
+    }
 
     // tile reduction dimensions that exceed LRAM before TorqHL conversion
     funcPm.addPass(createTileReductionForLramPass());

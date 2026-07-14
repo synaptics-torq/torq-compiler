@@ -14,6 +14,7 @@ set(sources
     ExecutorAssignmentPass.cpp
     BufferizationUtils.cpp
     CheckCssStackSizePass.cpp
+    CoalesceElementwiseChainsPass.cpp
     CompileCpuProgramsPass.cpp
     ConvertTensorPadToLinalgPass.cpp
     DecomposeTensorConcatPass.cpp

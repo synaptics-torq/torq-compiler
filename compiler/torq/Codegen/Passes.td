@@ -469,6 +469,19 @@ def StripTorqExecutorAttr :
     ];
 }
 
+def CoalesceElementwiseChains :
+        InterfacePass<"torq-coalesce-elementwise-chains",
+                      "mlir::FunctionOpInterface"> {
+    let summary = "Coalesce pure-elementwise generic chains into one fuse group before slicing";
+
+    let constructor =
+        "mlir::syna::torq::createCoalesceElementwiseChainsPass()";
+
+    let dependentDialects = [
+        "linalg::LinalgDialect"
+    ];
+}
+
 def LinalgSlicing :
            InterfacePass<"torq-linalg-slicing",
                          "mlir::FunctionOpInterface"> {
