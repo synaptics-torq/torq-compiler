@@ -147,22 +147,77 @@ If you are using a different environment you can use a Docker image:
 
 ## Build runtime for target
 
-In order to cross-compile the runtime for an embedded target use the following commands:
+To cross-compile the runtime for an embedded target, first install the Astra toolchain:
 
-1. Build the host version of the compiler as explained in the previous section (some host tools 
-   are required for the cross-build)
+```{code} shell
+$ scripts/install_toolchain.sh /opt/synaptics/astra/toolchain
+```
 
-2. Configure the cross-compile build:
+You can install the toolchain at any path. If you use a custom path, pass that same location as the optional 5th argument to `scripts/configure_soc_build.sh`.
 
-    ```{code} shell
-    $ scripts/configure_soc_build.sh ../iree-build-soc ../iree-build astra_machina poky
-    ```
+After the prerequisite is complete, choose one of the following flows.
 
-4. Run the cross-compile build:
+### Flow A: reuse an existing host build
 
-    ```{code} shell
-    $ cmake --build ../iree-build-soc/ --target torq-run-module
-    ```
+Use this flow if you already built host artifacts in `../iree-build` from the previous section.
+
+1. Configure the cross-compile build:
+
+   ```{code} shell
+   $ scripts/configure_soc_build.sh ../iree-build-soc ../iree-build astra_machina poky
+   ```
+
+   If using a custom toolchain install path:
+
+   ```{code} shell
+   $ scripts/configure_soc_build.sh ../iree-build-soc ../iree-build astra_machina poky /path/to/toolchain
+   ```
+
+2. Build the target runtime:
+
+   ```{code} shell
+   $ cmake --build ../iree-build-soc/ --target torq-run-module
+   ```
+
+### Flow B: runtime-only (without a full host compiler build)
+
+Use this flow when you only need target runtime artifacts.
+
+1. Setup Astra python environment:
+
+   ```{code} shell
+   $ scripts/configure_astra_python.sh ../venv ../iree_build
+   $ source ../venv/bin/activate
+   ```
+
+2. (optional but strongly suggested) Setup `ccache`:
+
+   ```{code} shell
+   $ export CCACHE_DIR=../iree_build/ccache
+   $ ccache --max-size=20G
+   ```
+
+3. Build the host-only tool `iree-flatcc-cli` required by the cross-build:
+
+   ```{code} shell
+   $ mkdir -p ../iree_build
+   $ cmake -S . -B ../iree_build -G Ninja -DIREE_BUILD_HOST_TOOLS=ON -DIREE_BUILD_COMPILER=ON
+   $ cmake --build ../iree_build --target iree-flatcc-cli -j"$(nproc)"
+   ```
+
+4. Configure and build the target runtime:
+
+   ```{code} shell
+   $ scripts/configure_soc_build.sh ../iree-build-soc ../iree_build astra_machina poky
+   $ cmake --build ../iree-build-soc/ --target torq-run-module
+   ```
+
+   If using a custom toolchain install path:
+
+   ```{code} shell
+   $ scripts/configure_soc_build.sh ../iree-build-soc ../iree_build astra_machina poky /path/to/toolchain
+   $ cmake --build ../iree-build-soc/ --target torq-run-module
+   ```
 
 The statically linked ``torq-run-module`` is available in ``../iree-build-soc/third_party/iree/tools/torq-run-module``.
 
