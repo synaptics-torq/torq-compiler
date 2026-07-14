@@ -640,8 +640,11 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const DType dtype) {
 }
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const IterVar &iv) {
-    if (iv.iterId() < 0) {
+    if (iv.isConstIndex()) {
         os << "Const(" << iv.constIndex() << ")";
+    }
+    if (iv.isAllItems()) {
+        os << ":";
     }
     else if (iv.isReverse())
         os << "R(" << static_cast<int>(iv.iterId()) << ")";
@@ -800,7 +803,18 @@ void Data::setShape(const Shape &shape) {
     assert(_ix.size() <= _shape.size());
 }
 
-Shape Data::subShape() const { return Shape(&_shape[_ix.size()], &_shape[_shape.size()]); }
+Shape Data::subShape() const {
+    auto subShape = Shape(&_shape[_ix.size()], &_shape[_shape.size()]);
+    // If an index selects all items we need to include the corresponding dimension in the subShape
+    int ixIndex = _ix.size() - 1;
+    for (const auto &dim : llvm::reverse(_ix)) {
+        if (dim.isAllItems()) {
+            subShape.insert(subShape.begin(), _shape[ixIndex]);
+        }
+        ixIndex--;
+    }
+    return subShape;
+}
 
 const std::string &Data::name() const { return _name; }
 
@@ -1328,7 +1342,7 @@ int SlicePrivate::addMemNdlDims(
     // Handle constant indexes
     for (int dataDimensionIx = 0; dataDimensionIx < ix.size(); dataDimensionIx++) {
         const IterVar &iterVar{ix[dataDimensionIx]};
-        if (iterVar.iterId() < 0 && iterVar.constIndex() != 0) {
+        if (iterVar.isConstIndex() && iterVar.constIndex() != 0) {
             Stride stride = computeStride(dataDims, dataDimensionIx);
             assert(!stride.exprVal.has_value() && "Constant index not allowed for expr stride");
             int strideVal = stride.intVal.has_value() ? stride.intVal.value() : 0;
@@ -1433,8 +1447,11 @@ void SlicePrivate::addDims(
     // This is allowed only for modulo indexes which generate their own local loop
     bool processLoopContainingLoad = false;
     for (const auto &iterVar : ix) {
-        if (iterVar.iterId() < 0) {
+        if (iterVar.isConstIndex()) {
             assert(iterVar.constIndex() == 0 && "Indexing with non-0 constant not allowed here");
+        }
+        if (iterVar.isAllItems()) {
+            assert(iterVar.constIndex() == 0 && "Selecting all items not allowed here");
         }
         else if (iterVar.modulo()) {
             assert(iterVar.iterId() == loadNesting - 1 && "% can only refer to innermost loop");

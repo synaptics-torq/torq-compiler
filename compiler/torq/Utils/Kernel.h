@@ -73,14 +73,20 @@ class Shape : public std::vector<ShapeItem> {
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Shape &shape);
 
-// Loop iteration variable
+// Index of a tensor dimension, e.g. a loop variable or a constant index
 class IterVar {
+    enum { ConstIndex = -1, AllItems = -2 }; // Special values for iterId
   public:
     // Create from a constant index. We can make this explicit if needed.
-    IterVar(int constIndex) : _iterId(-1), _constIndex{constIndex} {}
+    IterVar(int constIndex) : _iterId(ConstIndex), _constIndex{constIndex} {}
+
+    // Refer to all items in this dimension, equivalent to mat[:] in numpy
+    // str must be ":"
+    IterVar(const char *str) : _iterId(AllItems) { assert(strcmp(str, ":") == 0); }
 
     // Create from a loop id. Internal usage only.
     IterVar(int iterId, const SlicePrivate &) : _iterId(iterId) {}
+
     int iterId() const { return _iterId; }
 
     void reverse() { _reverse = !_reverse; }
@@ -90,7 +96,12 @@ class IterVar {
     bool isReverse() const { return _reverse; }
     int divisor() const { return _divisor; }
     int modulo() const { return _modulo; }
-    int constIndex() const { return _constIndex; }
+    bool isConstIndex() const { return _iterId == ConstIndex; }
+    int constIndex() const {
+        assert(isConstIndex());
+        return _constIndex;
+    }
+    bool isAllItems() const { return _iterId == AllItems; }
 
   private:
     int _iterId;
