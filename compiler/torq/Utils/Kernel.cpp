@@ -2719,25 +2719,71 @@ torq_hw::SliceCFGAttr Slice::getCfgAttr(MLIRContext *ctx) const {
     return cfgAttr;
 }
 
-const torq_hw::Ndls &Slice::getNdls() const {
-#if 0
-    // This doesn't work yet. Check conv-stride1.mlir vs conv-stride1-notile-5ch.mlir with:
-    // biasScale.getShape()[1].count = 4;
-
-    // Check consistency
-    auto acbr = d->_ndls.getRegNdl(NdlType::ACBR);
-    auto acpr = d->_ndls.getRegNdl(NdlType::ACPR);
-    int acbrRepeat = (acbr && acbr->dims.size() > 2) ? acbr->dims[acbr->dims.size() - 2].count : 1;
-    if (acbr && acpr && iterationCount(acbr->dims) != iterationCount(acpr->dims) * acbrRepeat) {
-        llvm::errs() << "The biasScale read don't match the number of executions of ACT\n";
+static bool
+checkNdlConsistency(NdlType type1, NdlType type2, const torq_hw::Ndls &ndls, bool relaxed = false) {
+    auto n1 = ndls.getRegNdl(type1);
+    auto n2 = ndls.getRegNdl(type2);
+    int cnt1 = n1 ? iterationCount(n1->dims) : 0;
+    int cnt2 = n2 ? iterationCount(n2->dims) : 0;
+    if (n1 && n2 && (relaxed ? (cnt1 > cnt2) : (cnt1 != cnt2))) {
+        llvm::errs() << "Error: mismatching iterations in " << type1 << " and " << type2 << "\n";
         llvm::errs() << "Mismatching iteration counts:\n";
-        llvm::errs() << "  BiasScale: " << iterationCount(acbr->dims) << "/" << acbrRepeat << "\n";
-        llvm::errs() << "  ACT: " << iterationCount(acpr->dims) << "\n";
-        llvm::errs() << "  DEQW: " << iterationCount(d->_ndls.getMemNdl(NdlType::DEQW)) << "\n";
-        assert(false && "Iteration count mismatch");
+        llvm::errs() << "  " << type1 << ": " << cnt1 << "\n";
+        llvm::errs() << "  " << type2 << ": " << cnt2 << "\n";
+        return false;
     }
-#endif
+    return true;
+}
+
+static bool checkNdlTopConsistency(NdlType type1, NdlType type2, const torq_hw::Ndls &ndls) {
+    auto n1 = ndls.getRegNdl(type1);
+    auto n2 = ndls.getRegNdl(type2);
+    int topCount = n2 && n2->dims.size() > 0 ? n2->dims[n2->dims.size() - 1].count : 0;
+    if (n1 && n2 && iterationCount(n1->dims) != topCount) {
+        llvm::errs() << "Error: mismatching dimensions in " << type1 << " and " << type2 << "\n";
+        llvm::errs() << "Mismatching dimension counts:\n";
+        llvm::errs() << "  " << type1 << "all: " << iterationCount(n1->dims) << "\n";
+        llvm::errs() << "  " << type2 << "top: " << topCount << "\n";
+        return false;
+    }
+    return true;
+}
+
+static bool checkNdlTopTopConsistency(NdlType type1, NdlType type2, const torq_hw::Ndls &ndls) {
+    auto n1 = ndls.getRegNdl(type1);
+    auto n2 = ndls.getRegNdl(type2);
+    int top1Count = n1 && n1->dims.size() > 0 ? n1->dims[n1->dims.size() - 1].count : 0;
+    int top2Count = n2 && n2->dims.size() > 0 ? n2->dims[n2->dims.size() - 1].count : 0;
+    if (n1 && n2 && top1Count != top2Count) {
+        llvm::errs() << "Error: mismatching dimensions in " << type1 << " and " << type2 << "\n";
+        llvm::errs() << "Mismatching dimension counts:\n";
+        llvm::errs() << "  " << type1 << "top: " << top1Count << "\n";
+        llvm::errs() << "  " << type2 << "top: " << top2Count << "\n";
+        return false;
+    }
+    return true;
+}
+
+const torq_hw::Ndls &Slice::getNdls() const {
     LLVM_DEBUG(llvm::dbgs() << d->_ndls);
+
+    // Check ACT consistency
+    bool ok = true;
+    ok &= checkNdlConsistency(NdlType::ACPR, NdlType::ACBR, d->_ndls);
+    ok &= checkNdlConsistency(NdlType::ACPR, NdlType::DEQW, d->_ndls);
+
+    // Check ALU consistency (CEPR:25, CEDR:27 is ok)
+    ok &= checkNdlConsistency(NdlType::CEPR, NdlType::CEDR, d->_ndls, true);
+    ok &= checkNdlConsistency(NdlType::CEPR, NdlType::CEWR, d->_ndls, true);
+    ok &= checkNdlTopTopConsistency(NdlType::ACPR, NdlType::CEPR, d->_ndls);
+    ok &= checkNdlTopTopConsistency(NdlType::ACPR, NdlType::CEPW, d->_ndls);
+
+    // Check consistency between Mem- and Reg- based NDLs
+    ok &= checkNdlTopConsistency(NdlType::DEDR, NdlType::CEDW, d->_ndls);
+    ok &= checkNdlTopConsistency(NdlType::DEWR, NdlType::CEWW, d->_ndls);
+    ok &= checkNdlTopConsistency(NdlType::DEBR, NdlType::ACBW, d->_ndls);
+    assert(ok && "NDL consistency check failed");
+
     // Just return the NDLs
     return d->_ndls;
 }
