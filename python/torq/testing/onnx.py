@@ -31,6 +31,12 @@ from .quantization import (
     onnx_fake_quantize
 )
 
+from torq.testing.quantize_onnx import (
+    add_onnx_quantization_options,
+    is_model_quantized,
+    quantize_onnx_model,
+)
+
 """
 Fixtures and utilities for testing ONNX models.
 """
@@ -88,9 +94,23 @@ class OnnxLayerCase(Case):
 
     node_name: str = ""
     is_full_model: bool = False
+    source_model_path: str = ""
 
 
-# ---- pytest hooks ----
+def is_onnx_qdq_wrapper_layer(case: OnnxLayerCase) -> bool:
+    """Return True if *case* is a standalone QDQ/Cast layer produced by torch->onnx export.
+
+    These wrapper layers are not meaningful compute units; skipping them keeps the
+    per-layer tests focused on real ops.
+    """
+    if case.is_full_model:
+        return False
+    # Layer names have the form <stem>_layer_<OpType>_<index>.
+    if "_layer_" not in case.name:
+        return False
+    op_type = case.name.split("_layer_")[-1].split("_")[0]
+    return op_type in {"QuantizeLinear", "DequantizeLinear", "Cast"}
+
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -99,6 +119,8 @@ def pytest_addoption(parser):
         default=False,
         help="Print original ONNX node names for generated ONNX layer tests during setup",
     )
+    # Shared ONNX quantization flags (also used by torq-gen-config).
+    add_onnx_quantization_options(parser)
 
 
 # ---- Node / name utilities ----
@@ -631,7 +653,7 @@ def _resolve_tensor_shape(name, all_nodes, orig_value_info, orig_inputs,
 # ---- Core extraction ----
 
 def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
-                                   init_name_fn, log_prefix=""):
+                                   init_name_fn, log_prefix="", quantize=False):
     """Build a standalone ONNX model from a subset of nodes.
 
     Shared logic between layer extraction and subgraph extraction.
@@ -758,15 +780,23 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
             init = _copy.deepcopy(constant_tensors[name])
             new_initializers.append(init)
             added_initializer_names.add(name)
+        elif name in orig_initializers:
+            # Keep weights/constants as initializers.  Some exporters list
+            # initializers as graph inputs too; treating them as inputs breaks
+            # ONNX Runtime quantization (it sees them as overrideable inputs
+            # rather than constant weights).  For quantized tests we therefore
+            # leave them as initializers only.  For non-quantized tests keep the
+            # historical behavior of exposing them as inputs so the layer test
+            # randomizes the weights along with the activations.
+            init = orig_initializers[name]
+            new_initializers.append(_copy.deepcopy(init))
+            added_initializer_names.add(name)
+            if not quantize:
+                new_inputs.append(_make_value_info_from_initializer(init))
         elif name in orig_inputs:
             new_inputs.append(_copy.deepcopy(orig_inputs[name]))
         elif name in orig_value_info:
             new_inputs.append(_copy.deepcopy(orig_value_info[name]))
-        elif name in orig_initializers:
-            init = orig_initializers[name]
-            new_initializers.append(_copy.deepcopy(init))
-            added_initializer_names.add(name)
-            new_inputs.append(_make_value_info_from_initializer(init))
         elif name in orig_outputs:
             new_inputs.append(_copy.deepcopy(orig_outputs[name]))
         else:
@@ -889,6 +919,9 @@ def _build_model_from_node_subset(nodes_subset, all_nodes, model, graph_name,
 
     new_model = helper.make_model(new_graph)
     new_model.ir_version = model.ir_version
+    # helper.make_model adds a default ai.onnx opset; replace it with the
+    # original model's opset imports so there is exactly one ai.onnx domain.
+    del new_model.opset_import[:]
     new_model.opset_import.extend(model.opset_import)
 
     try:
@@ -956,11 +989,23 @@ def _load_layers_from_cache(key_dir: Path, model_file: str,
             layer_path = key_dir / entry["filename"]
             if not layer_path.exists():
                 return None  # partial cache, treat as miss
+            try:
+                layer_model = onnx.load(str(layer_path))
+            except Exception as e:
+                print(f"[onnx-layer-cache] ignoring corrupt layer at {layer_path}: {e}")
+                return None
 
             layers[entry["name"]] = ModelWithMetadata(
-                node_index=entry.get("node_index"), path=layer_path)
-        return ModelWithMetadata(path=full_model_path), layers
-    
+                model=layer_model, node_index=entry.get("node_index"))
+
+        try:
+            full_model = onnx.load(str(full_model_path))
+        except Exception as e:
+            print(f"[onnx-layer-cache] ignoring corrupt full model at {full_model_path}: {e}")
+            return None
+
+        return ModelWithMetadata(model=full_model), layers
+
     except Exception as e:
         print(f"[onnx-layer-cache] ignoring corrupt cache at {key_dir}: {e}")
         return None
@@ -1020,7 +1065,7 @@ def _save_layers_to_cache(key_dir: Path, full_model, layers: dict,
 
 # ---- Layer / subgraph extraction ----
 
-def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
+def generate_onnx_layers_from_model(model, node_groups=None, dedup=True, quantize=False):
     # Run shape inference on the full model so value_info is populated.
     # This lets _fold_Shape resolve shapes from value_info and eliminates
     # the need for most per-op handlers in _resolve_tensor_shape.
@@ -1087,6 +1132,7 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
             graph_name=f'part{part_num - 1}_graph',
             init_name_fn=lambda base, idx, pn=part_num - 1: f"{base}_part{pn}_init{idx}",
             log_prefix=f'layer {layer_name}',
+            quantize=quantize,
         )
 
         # Propagate inferred static output shapes back into the original model's
@@ -1125,7 +1171,7 @@ def generate_onnx_layers_from_model(model, node_groups=None, dedup=True):
     return layer_configs
 
 
-def extract_onnx_subgraph(model, from_index, to_index):
+def extract_onnx_subgraph(model, from_index, to_index, quantize=False):
     """
     Extract a subgraph from an ONNX model given start and end node indices.
 
@@ -1185,6 +1231,7 @@ def extract_onnx_subgraph(model, from_index, to_index):
         graph_name=f"subgraph_{from_index}_to_{to_index}",
         init_name_fn=lambda base, idx: f"{base}_subgraph_init{idx}",
         log_prefix="[Subgraph]",
+        quantize=quantize,
     )
 
     # Fix dynamic batch dimensions to static 1 for subgraph testing
@@ -1193,15 +1240,26 @@ def extract_onnx_subgraph(model, from_index, to_index):
     return ModelWithMetadata(final_model, from_index)
 
 
-def _build_onnx_layer_cases(model_prefix: str, model, layers):
+def _build_onnx_layer_cases(model_prefix: str, model, layers, source_model_path: str = ""):
+    for layer in layers.values():
+        if isinstance(layer, ModelWithMetadata):
+            layer.source_model_path = source_model_path
     cases = [
         OnnxLayerCase(
             name=f"{model_prefix}_{key}",
             data=layer,
+            source_model_path=source_model_path,
         )
         for key, layer in layers.items()
     ]
-    cases.append(OnnxLayerCase(name=f"{model_prefix}_full_model", data=model, is_full_model=True))
+    cases.append(
+        OnnxLayerCase(
+            name=f"{model_prefix}_full_model",
+            data=model,
+            is_full_model=True,
+            source_model_path=source_model_path,
+        )
+    )
     return cases
 
 def _load_cached_layers(cache, model_file: str, name_stem: str,
@@ -1220,7 +1278,7 @@ def _load_cached_layers(cache, model_file: str, name_stem: str,
         if cached is not None:
             full_model, layers = cached
             print(f"[onnx-layer-cache] HIT  {name_stem} -> {key_dir}")
-            return _build_onnx_layer_cases(name_stem, full_model, layers)
+            return _build_onnx_layer_cases(name_stem, full_model, layers, source_model_path=model_file)
 
         print(f"[onnx-layer-cache] MISS {name_stem} -> {key_dir}")
         full_model = get_full_model(model_file)
@@ -1230,7 +1288,7 @@ def _load_cached_layers(cache, model_file: str, name_stem: str,
                                     model_file, node_groups, dedup)
         except Exception as e:
             print(f"[onnx-layer-cache] save failed (continuing): {e}")
-        return _build_onnx_layer_cases(name_stem, full_model, layers)
+        return _build_onnx_layer_cases(name_stem, full_model, layers, source_model_path=model_file)
 
 
 def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, dedup=True):
@@ -1274,6 +1332,23 @@ def onnx_model_file(request, versioned_file, onnx_model, onnx_fake_quantize_conf
         onnx_model = onnx_fake_quantize(_copy.deepcopy(onnx_model))
     onnx.checker.check_model(onnx_model)
     onnx.save(onnx_model, versioned_file)
+
+
+@pytest.fixture
+def onnx_source_model_file(request, onnx_model):
+    """Return the source ONNX model path used to expand per-layer calibration data.
+
+    For generated layer tests the source model path is carried on the layer
+    case metadata. For full-model or hand-written fixtures it is typically
+    absent, in which case this fixture returns ``None``.
+    """
+    model = onnx_model
+    if isinstance(model, VersionedUncachedData):
+        model = model.data
+    source_path = getattr(model, "source_model_path", None)
+    if source_path:
+        return Path(source_path)
+    return None
 
 
 def is_model_bf16(model: onnx.ModelProto) -> bool:
@@ -1332,21 +1407,94 @@ def onnx_bf16_model_file(request, versioned_file, onnx_model_file, onnx_bf16_con
     return versioned_file
 
 
-@versioned_generated_file_fixture("mlir")
-def onnx_mlir_model_file(request, versioned_file, onnx_model_file, onnx_bf16_model_file, onnx_bf16_config):
-    """Convert ONNX model to MLIR with enhanced error diagnostics.
+@versioned_hashable_object_fixture
+def onnx_quant_config(request):
+    """Return quantization config for version hashing.
 
-    Uses BF16 model if --auto-convert-bf16 is enabled, otherwise uses original model.
-    This ensures the compiler receives the correctly converted model based on user options.
+    This ensures cache invalidation when --quantize or its sub-options change.
+    """
+    return {
+        "quantize": request.config.getoption("--quantize", default=False),
+        "per_channel": request.config.getoption("--per-channel", default=False),
+        "full_integer": request.config.getoption("--full-integer", default=False),
+        "quant_format": request.config.getoption("--quant-format", default="qdq"),
+        "quant_dtype": request.config.getoption("--quant-dtype", default="A8W8"),
+    }
 
-    Note: Both onnx_model_file and onnx_bf16_model_file are Path objects
+
+@versioned_generated_file_fixture("onnx_quantized")
+def onnx_quantized_model_file(
+    request, versioned_file, onnx_model_file, onnx_quant_config
+):
+    """Quantize ONNX model to int8 if --quantize is enabled.
+
+    Uses the original ONNX model as the source. If quantization is disabled,
+    the original model is copied to the versioned location.
+
+    Note: onnx_model_file is a Path object
     (versioned_generated_file_fixture unwraps VersionedFile to Path).
     """
-    use_bf16 = request.config.getoption("--auto-convert-bf16", default=False)
-    model_path = onnx_bf16_model_file if use_bf16 else onnx_model_file
+    import shutil
 
-    if use_bf16:
+    use_quantize = request.config.getoption("--quantize", default=False)
+    per_channel = request.config.getoption("--per-channel", default=False)
+    full_integer = request.config.getoption("--full-integer", default=False)
+    quant_format = request.config.getoption("--quant-format", default="qdq")
+    quant_dtype = request.config.getoption("--quant-dtype", default="A8W8")
+
+    source_path = onnx_model_file
+
+    if not use_quantize:
+        print(f"[Quantize] Quantization disabled, copying source model to {versioned_file}")
+        shutil.copy(str(source_path), str(versioned_file))
+        return versioned_file
+
+    model = onnx.load(str(source_path))
+    if is_model_quantized(model):
+        print(f"[Quantize] Model already quantized, copying to {versioned_file}")
+        shutil.copy(str(source_path), str(versioned_file))
+        return versioned_file
+
+    print(
+        f"[Quantize] Quantizing {source_path.name} "
+        f"(quant_format={quant_format}, quant_dtype={quant_dtype}, "
+        f"per_channel={per_channel}, full_integer={full_integer})..."
+    )
+    quantized_model = quantize_onnx_model(
+        model,
+        per_channel=per_channel,
+        full_integer=full_integer,
+        quant_format=quant_format,
+        quant_dtype=quant_dtype,
+    )
+    onnx.save(quantized_model, str(versioned_file))
+    print(f"[Quantize] Saved to: {versioned_file}")
+    return versioned_file
+
+
+@versioned_generated_file_fixture("mlir")
+def onnx_mlir_model_file(request, versioned_file, onnx_model_file, onnx_bf16_model_file, onnx_bf16_config, onnx_quantized_model_file, onnx_quant_config):
+    """Convert ONNX model to MLIR with enhanced error diagnostics.
+
+    Uses quantized model if --quantize is enabled, otherwise BF16 model if
+    --auto-convert-bf16 is enabled, otherwise uses the original model.
+    This ensures the compiler receives the correctly converted model based on
+    user options.
+
+    Note: onnx_model_file, onnx_bf16_model_file, and onnx_quantized_model_file
+    are Path objects (versioned_generated_file_fixture unwraps VersionedFile to Path).
+    """
+    use_quantize = request.config.getoption("--quantize", default=False)
+    use_bf16 = request.config.getoption("--auto-convert-bf16", default=False)
+
+    if use_quantize:
+        model_path = onnx_quantized_model_file
+        print(f"[Quantize] Using quantized model for MLIR conversion: {model_path}")
+    elif use_bf16:
+        model_path = onnx_bf16_model_file
         print(f"[BF16] Using BF16 model for MLIR conversion: {model_path}")
+    else:
+        model_path = onnx_model_file
 
     # Pre-validation: verify ONNX model integrity
     try:
@@ -1562,10 +1710,19 @@ def composite_reference_results(request, input_data):
     2. numpy fallback (for bf16 MatMul/Einsum/MaxPool)
     3. llvmcpu fallback (IREE reference compilation)
     4. torch fallback (last resort for bf16 models with unsupported ops)
+
+    When --quantize is enabled, the ONNXRuntime reference runs the quantized
+    ONNX model (via onnx_quantized_model_file) so the TORQ compiled output is
+    compared against the same quantized integer graph instead of the original
+    FP32 model.
     """
     # Try ONNX-based paths first if an ONNX model is available.
     try:
-        onnx_model_file = request.getfixturevalue("onnx_model_file")
+        use_quantize = request.config.getoption("--quantize", default=False)
+        if use_quantize:
+            onnx_model_file = request.getfixturevalue("onnx_quantized_model_file")
+        else:
+            onnx_model_file = request.getfixturevalue("onnx_model_file")
         onnx_model = onnx.load(str(onnx_model_file))
 
         # 1. Try ONNXRuntime first

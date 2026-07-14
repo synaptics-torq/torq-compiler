@@ -26,6 +26,13 @@ from torq.gen_config.core import (
 )
 from torq.gen_config._utils import format_per_layer_status_table
 from torq.gen_config.view import print_layer_details, print_summary
+from torq.testing.quantize_onnx import (
+    _parse_quant_dtype,
+    _parse_quant_format,
+    add_onnx_quantization_args,
+    convert_qdq_to_full_integer,
+    quantize_onnx_static,
+)
 
 
 DEFAULT_TEST_FILE = "tests/test_onnx_gen_config.py"
@@ -45,6 +52,13 @@ _DISCOVER_FLAGS = [
     ("--recommend-by-timing",     "recommend_by_timing", True),
     ("--dedup-layers",            "dedup_layers",        True),
     ("--gen-config-log-file={v}", "log_file",            False),
+    ("--recompute-cache",             "recompute_cache",       True),
+    ("--debug-ir={v}",                "debug_ir",              False),
+    ("--quantize",                    "quantize",              True),
+    ("--per-channel",                 "per_channel",           True),
+    ("--full-integer",                "full_integer",          True),
+    ("--quant-format={v}",            "quant_format",          False),
+    ("--quant-dtype={v}",             "quant_dtype",           False),
 ]
 
 _RUN_FLAGS = [
@@ -54,6 +68,11 @@ _RUN_FLAGS = [
     ("--gen-config-log-file={v}", "log_file",            False),
     ("--subgraph-from={v}",       "subgraph_from",       False),
     ("--subgraph-to={v}",         "subgraph_to",         False),
+    ("--quantize",                    "quantize",              True),
+    ("--per-channel",                 "per_channel",           True),
+    ("--full-integer",                "full_integer",          True),
+    ("--quant-format={v}",            "quant_format",          False),
+    ("--quant-dtype={v}",             "quant_dtype",           False),
 ]
 
 
@@ -66,7 +85,12 @@ def _build_extra_args(args: argparse.Namespace, flag_defs: list) -> List[str]:
             continue
         extra_args.append(template if is_bool else template.format(v=val))
     if getattr(args, "extra_options", None):
-        extra_args.extend(args.extra_options)
+        # Users may pass pytest flags either as `-s -v` or as `-- -s -v`.
+        # Strip the argparse separator `--` if it is the first token.
+        extra = list(args.extra_options)
+        if extra and extra[0] == "--":
+            extra = extra[1:]
+        extra_args.extend(extra)
     return extra_args
 
 
@@ -124,7 +148,14 @@ def cmd_discover(args: argparse.Namespace) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    extra_args = ["--recompute-cache"] + _build_extra_args(args, _DISCOVER_FLAGS)
+    if args.auto_convert_bf16 and args.quantize:
+        print(
+            "Error: --auto-convert-bf16 and --quantize are mutually exclusive.",
+            file=sys.stderr,
+        )
+        return 1
+
+    extra_args = _build_extra_args(args, _DISCOVER_FLAGS)
 
     return _run_pytest(
         test_file=test_file,
@@ -141,6 +172,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         test_file, model_path = _resolve_test_and_model(args)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if args.auto_convert_bf16 and args.quantize:
+        print(
+            "Error: --auto-convert-bf16 and --quantize are mutually exclusive.",
+            file=sys.stderr,
+        )
         return 1
 
     # Verify config exists (report JSON or compiler JSON)
@@ -178,6 +216,48 @@ def cmd_run(args: argparse.Namespace) -> int:
         output_dir=args.output_dir,
         extra_args=extra_args,
     )
+
+
+def cmd_quantize(args: argparse.Namespace) -> int:
+    """Quantize an FP32 ONNX model to integer QDQ (optionally full-integer)."""
+    import onnx
+
+    model_path = Path(args.model)
+    if not model_path.exists():
+        print(f"Error: Model not found: {model_path}", file=sys.stderr)
+        return 1
+
+    output_path = Path(args.output) if args.output else model_path.with_suffix(".int8.onnx")
+
+    try:
+        quant_format = _parse_quant_format(args.quant_format)
+        activation_type, weight_type = _parse_quant_dtype(
+            getattr(args, "quant_dtype", "A8W8")
+        )
+
+        quantize_onnx_static(
+            model_input=model_path,
+            model_output=output_path,
+            num_calib=args.num_calib,
+            per_channel=args.per_channel,
+            quant_format=quant_format,
+            activation_type=activation_type,
+            weight_type=weight_type,
+        )
+
+        if args.full_integer:
+            model = onnx.load(str(output_path))
+            model = convert_qdq_to_full_integer(
+                model, io_dtype=activation_type.tensor_type
+            )
+            onnx.save(model, str(output_path))
+            print(f"Full-integer quantized model saved to: {output_path}")
+        else:
+            print(f"Quantized model saved to: {output_path}")
+        return 0
+    except Exception as e:
+        print(f"Error quantizing model: {e}", file=sys.stderr)
+        return 1
 
 
 def cmd_view(args: argparse.Namespace) -> int:
@@ -451,22 +531,29 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     def _add_common_run_args(p):
         """Add arguments shared by discover and run subcommands."""
-        p.add_argument("--model", required=True, help="Path to the ONNX model")
+        p.add_argument(
+            "--model",
+            required=True,
+            help="Path to the model (ONNX .onnx, Torch .pt/.pth, or .py)",
+        )
         p.add_argument(
             "--output-dir",
             help="Directory for executor config JSON (default: current directory)",
         )
-        p.add_argument("--test-file", help="Path to test_onnx_gen_config.py")
+        p.add_argument(
+            "--test-file",
+            help="Path to the test entry point (default: inferred from model type)",
+        )
         p.add_argument(
             "--auto-convert-bf16",
             action="store_true",
-            help="Automatically convert FP32 ONNX models to BF16",
+            help="Automatically convert FP32 models to BF16",
         )
         p.add_argument("--log-file", help="Redirect output to log file")
         p.add_argument(
             "extra_options",
-            nargs="*",
-            help="Extra options passed directly to pytest. Use '--' before flags starting with '-' (e.g., '-- -s -v')",
+            nargs=argparse.REMAINDER,
+            help="Extra options passed directly to pytest. May be given as '-- -s -v' or simply '-s -v'",
         )
 
     # discover
@@ -504,6 +591,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Detect duplicate layers and copy results",
     )
+    discover_parser.add_argument(
+        "--recompute-cache",
+        action="store_true",
+        help="Force recompute cached fixtures",
+    )
+    discover_parser.add_argument(
+        "--debug-ir",
+        default=None,
+        nargs="?",
+        const="tmp",
+        help="Dump IR to directory for debugging (default: tmp)",
+    )
+    add_onnx_quantization_args(discover_parser)
     discover_parser.set_defaults(func=cmd_discover)
 
     # run (full model)
@@ -529,6 +629,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--subgraph-to",
         help="End op name for subgraph (output tensor name or OpType_outputName)",
     )
+    add_onnx_quantization_args(run_parser)
     run_parser.set_defaults(func=cmd_run)
 
     # view
@@ -580,6 +681,51 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="List available layers and exit. Optional FILTER substring to match layer IDs.",
     )
     edit_parser.set_defaults(func=cmd_edit)
+
+    # quantize
+    quantize_parser = subparsers.add_parser(
+        "quantize", help="Quantize an FP32 ONNX model to integer QDQ"
+    )
+    quantize_parser.add_argument("--model", required=True, help="Path to the FP32 ONNX model")
+    quantize_parser.add_argument(
+        "--output", help="Output path for the quantized ONNX model (default: <model>.int8.onnx)"
+    )
+    quantize_parser.add_argument(
+        "--num-calib",
+        type=int,
+        default=20,
+        help="Number of random calibration samples (default: 20)",
+    )
+    quantize_parser.add_argument(
+        "--per-channel",
+        action="store_true",
+        help="Use per-channel weight quantization",
+    )
+    quantize_parser.add_argument(
+        "--full-integer",
+        action="store_true",
+        help="Rewrite I/O to integer (remove input Q and output DQ nodes)",
+    )
+    quantize_parser.add_argument(
+        "--quant-format",
+        default="qdq",
+        choices=["qdq", "qoperator", "hybrid"],
+        help=(
+            "ONNX quantization format: qdq (default), qoperator, or hybrid. "
+            "Hybrid picks qoperator for ops with good qoperator support "
+            "(Conv, Add, MatMul, ...) and qdq for the rest, applied per layer."
+        ),
+    )
+    quantize_parser.add_argument(
+        "--quant-dtype",
+        default="A8W8",
+        choices=["A8W8"],
+        help=(
+            "Quantized activation/weight integer dtype combination "
+            "(case-insensitive). Currently only A8W8 is supported."
+        ),
+    )
+    quantize_parser.set_defaults(func=cmd_quantize)
 
     args = parser.parse_args(argv)
     return args.func(args)

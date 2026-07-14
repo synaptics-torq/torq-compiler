@@ -230,6 +230,7 @@ def update_config_with_results(
     locations: Dict[str, str],
     full_mlir_locations: Dict[str, str],
     recommend_by_timing: bool = False,
+    orig_indices: Optional[Dict[str, int]] = None,
 ) -> None:
     """Update JSON data with discovery results and line numbers."""
     if "ops" not in json_data:
@@ -245,6 +246,11 @@ def update_config_with_results(
         node_index = node_indices.get(layer_id)
         if node_index is not None:
             json_data["ops"][layer_id]["_node_index"] = node_index
+
+        if orig_indices is not None:
+            orig_index = orig_indices.get(layer_id)
+            if orig_index is not None:
+                json_data["ops"][layer_id]["_orig_index"] = orig_index
 
         full_mlir_location = full_mlir_locations.get(layer_id)
         if full_mlir_location and re.match(r"^\d+:\d+$", full_mlir_location):
@@ -304,7 +310,14 @@ def _build_report_from_ops(
 
     sorted_ops = sorted(
         ops.items(),
-        key=lambda item: item[1].get("_node_index", float("inf")),
+        key=lambda item: (
+            item[1].get("_orig_index")
+            if item[1].get("_orig_index") is not None
+            else float("inf"),
+            item[1].get("_node_index")
+            if item[1].get("_node_index") is not None
+            else float("inf"),
+        ),
     )
 
     rows: List[Dict[str, Any]] = []

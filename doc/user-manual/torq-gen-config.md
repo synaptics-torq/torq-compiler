@@ -39,6 +39,8 @@ Different operations work better on different executors. For example, convolutio
 ONNX Model → Extract Layers → Test NSS/CSS/Host → Get Recommended Executor → Save JSON → Run Full Model
 ```
 
+`torq-gen-config` accepts ONNX (`.onnx`) models.
+
 ### Example: SqueezeNet 1.0
 
 This manual uses `squeezenet1.0-12.onnx` (66 operations: Conv, Relu, MaxPool, Concat, etc.) as a running example.
@@ -840,6 +842,32 @@ The JSON stores this mapping:
 }
 ```
 
+### Quantized Models
+
+When `--quantize` is used, the final quantized MLIR contains extra `QuantizeLinear` and `DequantizeLinear` wrapper ops around the real compute ops. In addition, activations such as `Relu` may be fused into neighboring `Conv` ops and disappear as separate MLIR operations.
+
+To handle this, the mapping is built from the **final quantized MLIR** rather than the original ONNX node order:
+
+1. Import the quantized ONNX model into MLIR.
+2. Strip `QuantizeLinear`/`DequantizeLinear` wrappers.
+3. Build a list of quantized compute ops (`Conv`, `MaxPool`, `Add`, etc.) in MLIR order.
+4. Align this list with the original unquantized layer op-types using **Longest Common Subsequence (LCS)**.
+   - LCS preserves order and skips non-matching entries.
+   - Fused activations are skipped automatically.
+   - Each remaining compute op is mapped to its correct quantized MLIR line.
+
+The resulting compiler JSON therefore assigns executors only to compute-op line numbers, never to Q/DQ wrapper lines.
+
+**Fused activations in the report JSON:**  
+A fused activation such as `Relu` still appears in the discovery report JSON with a `recommended_executor` from its per-layer test, because per-layer quantization keeps it as a standalone op (`Q → Relu → DQ`). However, it is intentionally omitted from the compiler JSON: in the full quantized model there is no separate `Relu` line to assign, so the fused `Conv+Relu` is represented entirely by the `Conv` assignment.
+
+**Comparison with quantization:**  
+When `--quantize` is active, `torq-gen-config` still compares results using the
+same FP32 tolerances as non-quantized models. The quantized reference is
+produced by ONNX Runtime, and the observed output is produced by the TORQ
+compiler; the comparison reports the usual max absolute/relative difference and
+number of differing elements.
+
 ### Verification
 
 torq-gen-config automatically verifies the mapping during test generation:
@@ -880,6 +908,11 @@ The recommended way to interact with the discovery system.
 | `--timing-runs` | Number of runtime runs for timing average |
 | `--recommend-by-timing` | Recommend fastest executor based on timing |
 | `--dedup-layers` | Detect duplicate layers and copy results |
+| `--quantize` | Quantize each layer to int8 before testing |
+| `--per-channel` | Use per-channel weight quantization with `--quantize` |
+| `--full-integer` | Rewrite quantized I/O to int8 (remove input Q/output DQ) |
+| `--quant-format` | ONNX quantization format: `qdq` (default) or `qoperator` |
+| `--recompute-cache` | Force recompute cached fixtures during discovery |
 | `--log-file` | Redirect discovery output to log file |
 
 ```bash
@@ -888,6 +921,17 @@ torq-gen-config discover --model model.onnx
 
 # With skip mode and BF16 conversion
 torq-gen-config discover --model model.onnx --skip-mode --auto-convert-bf16
+
+# Quantized discovery (QDQ)
+torq-gen-config discover --model model.onnx --skip-mode --quantize
+
+# Quantized discovery (full-integer int8 I/O)
+torq-gen-config discover --model model.onnx --skip-mode --quantize --full-integer
+
+# Quantized discovery using QOperator (native int8 ops such as QLinearConv).
+# For Host/NSS it is recommended to also pass --full-integer so graph I/O are int8;
+# QOperator without --full-integer may fail to legalize ops such as QLinearAdd.
+torq-gen-config discover --model model.onnx --skip-mode --quantize --quant-format=qoperator --full-integer
 
 # Timing-based recommendation
 torq-gen-config discover --model model.onnx --collect-timing --timing-runs=5 --recommend-by-timing
@@ -904,6 +948,10 @@ torq-gen-config discover --model model.onnx --skip-mode -- -s -v --tb=short
 | `--output-dir` | Directory where config JSON is located |
 | `--test-file` | Path to `test_onnx_gen_config.py` (auto-detected) |
 | `--auto-convert-bf16` | Convert FP32 model to BF16 |
+| `--quantize` | Quantize the full model to int8 before compiling |
+| `--per-channel` | Use per-channel weight quantization with `--quantize` |
+| `--full-integer` | Rewrite quantized I/O to int8 (remove input Q/output DQ) |
+| `--quant-format` | ONNX quantization format: `qdq` (default) or `qoperator` |
 | `--debug-ir` | Dump IR directory for debugging (default: `tmp`) |
 | `--recompute-cache` | Force recompute cached fixtures |
 | `--log-file` | Redirect output to log file |
@@ -915,11 +963,14 @@ torq-gen-config run --model model.onnx
 # With debug IR dump
 torq-gen-config run --model model.onnx --debug-ir=tmp
 
+# Run full model with the same quantization settings used during discovery
+torq-gen-config run --model model.onnx --output-dir results/ --quantize
+
 # Pass extra pytest flags (use '--' before flags starting with '-')
 torq-gen-config run --model model.onnx -- -s -v
 ```
 
-**Note:** `run` accepts either the report JSON or the compiler JSON. If the report JSON exists, `run` regenerates the compiler JSON from it before compiling. If only the compiler JSON exists, the full model test uses it directly.
+**Note:** `run` accepts either the report JSON or the compiler JSON. If the report JSON exists, `run` regenerates the compiler JSON from it before compiling. If only the compiler JSON exists, the full model test uses it directly. When quantization was used during discovery, pass the same `--quantize`/`--per-channel`/`--full-integer`/`--quant-format` flags to `run` so the full model is compiled with the same settings.
 
 #### `view` — View executor config
 
@@ -1001,6 +1052,10 @@ For advanced use cases (e.g., single-layer re-testing, custom pytest flags), you
 | `--recommend-by-timing` | Recommend fastest executor based on timing data |
 | `--gen-config-log-file=PATH` | Redirect all output to log file (pytest name; torq-gen-config uses `--log-file`) |
 | `--dedup-layers` | Detect duplicate layers and copy results |
+| `--quantize` | Quantize layers/full model to int8 |
+| `--per-channel` | Per-channel weight quantization |
+| `--full-integer` | Rewrite quantized I/O to int8 |
+| `--quant-format` | ONNX quantization format: `qdq` (default) or `qoperator` |
 
 ```bash
 # Layer discovery with skip mode

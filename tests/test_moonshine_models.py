@@ -134,13 +134,15 @@ def pytest_generate_tests(metafunc):
     ]
     testcases = ["decoder", "encoder"]
 
+    quantize = metafunc.config.getoption("--quantize", default=False)
+
     cases = []
-    for ttype in testtypes: 
+    for ttype in testtypes:
         for t in testcases:
             testbf16 = f"onnx/{ttype}/{t}.onnx"
             model_file = get_hf_model_file(metafunc.config.cache,  "Synaptics/Moonshine", testbf16)
             model = get_full_model(model_file)
-            layers = generate_onnx_layers_from_model(model)
+            layers = generate_onnx_layers_from_model(model, quantize=quantize)
 
             cases += [Case(f"{t}_{ttype}_{key}", layer) for key, layer in layers.items()] + [ Case(f"{t}_{ttype}_full_model", model) ]
 

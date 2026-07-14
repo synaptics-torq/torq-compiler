@@ -2344,6 +2344,7 @@ void populateLinalgToTorqHLPatterns(
     // Patterns that have a marking mode:
     populateLinalgToTorqHLMulPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLMatmulPatterns(context, patterns, markFuseGroups);
+    populateLinalgToTorqHLQuantizePatterns(context, patterns, markFuseGroups);
 
     // IMPORTANT: patterns below this line should not involve more than a single operation! If they
     // do, tile and fuse will break them. To prevent that, the pattern should be refactored to take

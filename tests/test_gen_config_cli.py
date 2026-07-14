@@ -6,12 +6,23 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
+import onnx
 import pytest
+from onnx import TensorProto, helper, numpy_helper
+from onnxruntime.quantization import QuantType
 
+from torq.testing.quantize_onnx import (
+    _parse_quant_dtype,
+    convert_qdq_to_full_integer,
+    quantize_onnx_model,
+)
 try:
     import iree.compiler
+
+    IREE_AVAILABLE = True
 except ImportError:
-    pytest.skip("iree package not available", allow_module_level=True)
+    IREE_AVAILABLE = False
 
 
 """Integration tests for executor discovery CLI options.
@@ -39,6 +50,11 @@ def _cleanup_generated_json():
             pass  # Ignore cleanup errors
 
 
+LARGE_TEST_MODEL = (
+    PROJECT_ROOT / "tests/testdata/onnx_models/example_gen_config_large.onnx"
+)
+
+
 def _run_pytest_and_validate(
     test_name: str,
     extra_args: list,
@@ -47,6 +63,7 @@ def _run_pytest_and_validate(
     stdout_validator=None,
     expect_success: bool = True,
     test_filter: str = "example_gen_config_layer_Relu_1_host",
+    model_path: Path = TEST_MODEL,
 ) -> tuple:
     """Run pytest in subprocess and validate outputs.
 
@@ -58,6 +75,7 @@ def _run_pytest_and_validate(
         stdout_validator: Function to validate stdout content
         expect_success: Whether pytest should succeed (returncode 0)
         test_filter: pytest -k filter (default: specific layer test)
+        model_path: ONNX model path to use for discovery
 
     Returns:
         Tuple of (json_data, stdout, stderr)
@@ -69,7 +87,7 @@ def _run_pytest_and_validate(
         "tests/test_onnx_gen_config.py",
         "-k",
         test_filter,
-        f"--model-path={TEST_MODEL}",
+        f"--model-path={model_path}",
         "--recompute-cache",
         "--gen-config-output",
         str(output_dir),
@@ -127,7 +145,10 @@ def _validate_timing_fields(test_name: str, data: dict, should_exist: bool = Tru
                     f"{test_name}: Unexpected timing for {op_name}/{exec_name}"
                 )
 
-@pytest.mark.skipif(not TEST_MODEL.exists(), reason=f"Test model not found: {TEST_MODEL}")
+@pytest.mark.skipif(
+    not TEST_MODEL.exists() or not IREE_AVAILABLE,
+    reason=f"Test model not found: {TEST_MODEL} or iree package not available",
+)
 class TestExecutorDiscoveryIntegration:
     """Integration tests for all executor discovery CLI options."""
 
@@ -1263,3 +1284,235 @@ class TestExecutorDiscoveryIntegration:
         assert edit_result.returncode != 0, (
             "edit with no args should have failed"
         )
+
+    def test_quantize_discovery_qdq_full_integer(self):
+        """Test --quantize --full-integer succeeds on Host with QDQ format."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            def validate_json(name, data):
+                assert "ops" in data, f"{name}: Missing ops"
+                assert "Conv_conv_out" in data["ops"], (
+                    f"{name}: Expected Conv_conv_out layer"
+                )
+                host = data["ops"]["Conv_conv_out"]["executors"]["host"]
+                assert host["status"] == "success", (
+                    f"{name}: Quantized QDQ conv should succeed on host"
+                )
+
+            _run_pytest_and_validate(
+                "quantize_qdq_full_integer",
+                ["--quantize", "--full-integer"],
+                output_dir,
+                json_validator=validate_json,
+                test_filter="example_gen_config_layer_Conv_0_host",
+            )
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    def test_quantize_discovery_qoperator_full_integer(self):
+        """Test --quantize --quant-format=qoperator --full-integer on Host."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            def validate_json(name, data):
+                assert "ops" in data, f"{name}: Missing ops"
+                assert "Conv_conv_out" in data["ops"], (
+                    f"{name}: Expected Conv_conv_out layer"
+                )
+                host = data["ops"]["Conv_conv_out"]["executors"]["host"]
+                assert host["status"] == "success", (
+                    f"{name}: Quantized QOperator conv should succeed on host"
+                )
+
+            _run_pytest_and_validate(
+                "quantize_qoperator_full_integer",
+                ["--quantize", "--quant-format=qoperator", "--full-integer"],
+                output_dir,
+                json_validator=validate_json,
+                test_filter="example_gen_config_layer_Conv_0_host",
+            )
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    @pytest.mark.skipif(
+        not LARGE_TEST_MODEL.exists(),
+        reason=f"Large test model not found: {LARGE_TEST_MODEL}",
+    )
+    def test_quantize_discovery_large_qdq_full_integer(self):
+        """Quantized large Conv (QDQ full-integer) succeeds on Host and exercises tiling."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            def validate_json(name, data):
+                assert "ops" in data, f"{name}: Missing ops"
+                assert "Conv_conv_out" in data["ops"], (
+                    f"{name}: Expected Conv_conv_out layer"
+                )
+                host = data["ops"]["Conv_conv_out"]["executors"]["host"]
+                assert host["status"] == "success", (
+                    f"{name}: Large quantized QDQ conv should succeed on host"
+                )
+
+            _run_pytest_and_validate(
+                "quantize_large_qdq_full_integer",
+                ["--quantize", "--full-integer"],
+                output_dir,
+                json_validator=validate_json,
+                test_filter="example_gen_config_large_layer_Conv_0_host",
+                model_path=LARGE_TEST_MODEL,
+            )
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+    @pytest.mark.skipif(
+        not LARGE_TEST_MODEL.exists(),
+        reason=f"Large test model not found: {LARGE_TEST_MODEL}",
+    )
+    def test_quantize_discovery_large_qoperator_full_integer(self):
+        """Quantized large Conv (QOperator full-integer) succeeds on Host and exercises tiling."""
+        output_dir = Path(tempfile.mkdtemp())
+
+        try:
+            def validate_json(name, data):
+                assert "ops" in data, f"{name}: Missing ops"
+                assert "Conv_conv_out" in data["ops"], (
+                    f"{name}: Expected Conv_conv_out layer"
+                )
+                host = data["ops"]["Conv_conv_out"]["executors"]["host"]
+                assert host["status"] == "success", (
+                    f"{name}: Large quantized QOperator conv should succeed on host"
+                )
+
+            _run_pytest_and_validate(
+                "quantize_large_qoperator_full_integer",
+                ["--quantize", "--quant-format=qoperator", "--full-integer"],
+                output_dir,
+                json_validator=validate_json,
+                test_filter="example_gen_config_large_layer_Conv_0_host",
+                model_path=LARGE_TEST_MODEL,
+            )
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            _cleanup_generated_json()
+
+
+def _load_example_model() -> onnx.ModelProto:
+    """Load the example FP32 ONNX model used by the CLI tests."""
+    return onnx.load(str(TEST_MODEL))
+
+
+def test_quantize_onnx_model_qdq():
+    """quantize_onnx_model produces a QDQ model with float I/O."""
+    quantized = quantize_onnx_model(_load_example_model())
+
+    # QDQ format keeps float I/O.
+    assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
+    assert quantized.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT
+
+    # QuantizeLinear / DequantizeLinear nodes should be present.
+    op_types = [n.op_type for n in quantized.graph.node]
+    assert "QuantizeLinear" in op_types
+    assert "DequantizeLinear" in op_types
+
+
+def test_quantize_onnx_model_full_integer():
+    """quantize_onnx_model with full_integer=True produces int8 I/O."""
+    quantized = quantize_onnx_model(_load_example_model(), full_integer=True)
+
+    # Full-integer rewrite should make I/O int8.
+    assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.INT8
+    assert quantized.graph.output[0].type.tensor_type.elem_type == TensorProto.INT8
+
+
+def test_convert_qdq_to_full_integer():
+    """Full-integer rewrite removes I/O Q/DQ nodes and changes graph I/O to int8."""
+    qdq_model = quantize_onnx_model(_load_example_model())
+    converted = convert_qdq_to_full_integer(qdq_model)
+
+    # I/O should now be int8.
+    assert converted.graph.input[0].type.tensor_type.elem_type == TensorProto.INT8
+    assert converted.graph.output[0].type.tensor_type.elem_type == TensorProto.INT8
+
+    # Inner Q/DQ pairs between ops should remain.
+    remaining_ops = [n.op_type for n in converted.graph.node]
+    assert "QuantizeLinear" in remaining_ops
+    assert "DequantizeLinear" in remaining_ops
+
+
+def test_quantize_onnx_model_qoperator():
+    """quantize_onnx_model with quant_format='qoperator' produces QLinearConv."""
+    quantized = quantize_onnx_model(_load_example_model(), quant_format="qoperator")
+
+    # QOperator format keeps float I/O unless full_integer is used.
+    assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
+    assert quantized.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT
+
+    # The graph should contain a QLinearConv node.
+    op_types = [n.op_type for n in quantized.graph.node]
+    assert "QLinearConv" in op_types
+
+
+def test_quantize_onnx_model_qoperator_full_integer():
+    """qoperator + full-integer produces int8 I/O and QLinearConv."""
+    quantized = quantize_onnx_model(
+        _load_example_model(), quant_format="qoperator", full_integer=True
+    )
+
+    # Full-integer rewrite should make I/O int8.
+    assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.INT8
+    assert quantized.graph.output[0].type.tensor_type.elem_type == TensorProto.INT8
+
+    # The graph should contain a QLinearConv node.
+    op_types = [n.op_type for n in quantized.graph.node]
+    assert "QLinearConv" in op_types
+
+
+
+def test_quantize_onnx_model_hybrid_prefers_qoperator_for_conv():
+    """hybrid format picks qoperator for Conv layers (QLinearConv)."""
+    quantized = quantize_onnx_model(
+        _load_example_model(), quant_format="hybrid", full_integer=True
+    )
+
+    # Full-integer rewrite should make I/O int8.
+    assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.INT8
+    assert quantized.graph.output[0].type.tensor_type.elem_type == TensorProto.INT8
+
+    # The graph should contain a QLinearConv node because the example model's
+    # compute op is Conv.
+    op_types = [n.op_type for n in quantized.graph.node]
+    assert "QLinearConv" in op_types
+
+
+def test_quantize_onnx_model_hybrid_falls_back_to_qdq_for_reducemean():
+    """hybrid format falls back to QDQ (or leaves fp32) for unsupported ops."""
+    input = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, 4, 4])
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 3, 1, 1])
+    axes = numpy_helper.from_array(np.array([2, 3], dtype=np.int64), name="axes")
+    rm = helper.make_node("ReduceMean", ["input", "axes"], ["output"], keepdims=1)
+    graph = helper.make_graph([rm], "rm", [input], [output], [axes])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    model.ir_version = 10
+
+    quantized = quantize_onnx_model(model, quant_format="hybrid", full_integer=True)
+
+    # ONNX Runtime does not quantize ReduceMean, so the model is unchanged and
+    # QLinearReduceMean does not exist.  This verifies the hybrid picker did not
+    # force qoperator for an unsupported op.
+    op_types = [n.op_type for n in quantized.graph.node]
+    assert "ReduceMean" in op_types
+    assert "QLinearReduceMean" not in op_types
+    assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
+
+
+def test_parse_quant_dtype():
+    """_parse_quant_dtype returns the expected (activation, weight) QuantType pair."""
+    assert _parse_quant_dtype("a8w8") == (QuantType.QInt8, QuantType.QInt8)
+    assert _parse_quant_dtype("A8W8") == (QuantType.QInt8, QuantType.QInt8)
+
+    with pytest.raises(ValueError):
+        _parse_quant_dtype("a16w8")

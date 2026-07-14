@@ -12,7 +12,10 @@ from typing import Any, Dict, Optional
 import pytest
 from _pytest._io import TerminalWriter
 
-from torq.gen_config._utils import extract_line_numbers_from_mlir
+from torq.gen_config._utils import (
+    _normalize_quantized_op_type,
+    extract_line_numbers_from_mlir,
+)
 from torq.testing.versioned_fixtures import (
     versioned_generated_file_fixture,
     versioned_hashable_object_fixture,
@@ -153,6 +156,9 @@ def pytest_addoption(parser):
         "from the first-seen (canonical) layer instead of re-testing. "
         "Each duplicate still appears in JSON with its own correct line number.",
     )
+    # ONNX quantization flags (--quantize, --per-channel, --full-integer,
+    # --quant-format) are registered by torq.testing.onnx so they can be shared
+    # between the pytest test suite and torq-gen-config.
 
 
 def pytest_configure(config):
@@ -258,26 +264,71 @@ def pytest_sessionfinish(session, exitstatus):
     """Restore stdout/stderr, print final report, and close log file."""
     global _discovery_log_file_handle, _original_stdout, _original_stderr
 
-    # Capture final report to a buffer (while streams are still redirected).
-    # We temporarily swap sys.stderr so _print_final_report writes into the
-    # buffer instead of the log file, then we manually write the buffer to
-    # the log file.  This avoids printing the report to the terminal twice.
-    if _verbose_mode and _discovery_log_file_handle:
+    # Produce the final report for both layer-discovery sessions ("discover")
+    # and full-model sessions ("run").  The report is based on the persisted
+    # JSON so it is complete even when most tests are skipped.
+    # Note: under pytest-xdist the controller session may not have `.items`
+    # populated, so fall back to an empty list.
+    session_items = getattr(session, "items", [])
+    is_executor_discovery_session = any(
+        "test_executor_discovery" in item.nodeid for item in session_items
+    )
+
+    if is_executor_discovery_session:
         try:
             from torq.gen_config.discovery import (
                 _discovery_state,
                 _print_final_report,
+                _save_detailed_report,
             )
-            if _discovery_state.results:
-                buf = io.StringIO()
-                old_stderr = sys.stderr
-                sys.stderr = buf
-                try:
-                    _print_final_report(session.config, _discovery_state)
-                finally:
-                    sys.stderr = old_stderr
-                _discovery_log_file_handle.write(buf.getvalue())
-                _discovery_log_file_handle.flush()
+            from torq.gen_config.core import _load_json
+
+            model_path = _opt(session.config, "--model", "--model-path")
+            model_name = Path(model_path).stem if model_path else "unknown"
+
+            # Determine subgraph suffix from state or from collected test IDs.
+            subgraph_suffix = getattr(_discovery_state, "subgraph_suffix", None)
+            if not subgraph_suffix:
+                for item in session_items:
+                    suffix = _get_subgraph_suffix_from_nodeid(item.nodeid)
+                    if suffix:
+                        subgraph_suffix = suffix
+                        break
+
+            # Merge persisted JSON results into the in-memory state.  During
+            # --skip-mode most tests are skipped, and even the few error tests
+            # that run only populate a subset of the state.  Loading the JSON
+            # ensures the final report covers all layers.
+            if model_path:
+                json_data = _load_json(session.config, model_name, subgraph_suffix)
+                if json_data:
+                    _discovery_state.load_from_json(json_data)
+                    if subgraph_suffix:
+                        _discovery_state.subgraph_suffix = subgraph_suffix
+
+            if _discovery_state.results or _discovery_state.full_model_metrics:
+                # Persist the detailed report text into the JSON.  This must
+                # happen regardless of verbosity so downstream tools/tests can
+                # rely on the ``discovery_report`` / ``final_report_text`` keys.
+                _save_detailed_report(
+                    session.config, model_name, _discovery_state, subgraph_suffix
+                )
+
+                if _verbose_mode:
+                    # Capture final report to a buffer (while streams are still
+                    # redirected). We temporarily swap sys.stderr so
+                    # _print_final_report writes into the buffer instead of the
+                    # log file, then we manually write the buffer to the log file.
+                    if _discovery_log_file_handle:
+                        buf = io.StringIO()
+                        old_stderr = sys.stderr
+                        sys.stderr = buf
+                        try:
+                            _print_final_report(session.config, _discovery_state)
+                        finally:
+                            sys.stderr = old_stderr
+                        _discovery_log_file_handle.write(buf.getvalue())
+                        _discovery_log_file_handle.flush()
         except Exception:
             pass
 
@@ -287,13 +338,13 @@ def pytest_sessionfinish(session, exitstatus):
         sys.stderr = _original_stderr
 
     # Print final report to terminal exactly once
-    if _verbose_mode:
+    if is_executor_discovery_session and _verbose_mode:
         try:
             from torq.gen_config.discovery import (
                 _discovery_state,
                 _print_final_report,
             )
-            if _discovery_state.results:
+            if _discovery_state.results or _discovery_state.full_model_metrics:
                 _print_final_report(session.config, _discovery_state)
         except Exception:
             pass
@@ -410,6 +461,9 @@ def _get_subgraph_suffix_from_nodeid(nodeid: str) -> Optional[str]:
     return None
 
 
+_QUANT_WRAPPER_OPS = {"QuantizeLinear", "DequantizeLinear"}
+
+
 def _update_discovery_json_line_numbers(
     discovery_json_path: Path, mlir_file: Path
 ) -> None:
@@ -418,13 +472,22 @@ def _update_discovery_json_line_numbers(
     Layer tests save mlir_location as op_type (e.g., "Tanh"). This updates
     it to line:column format (e.g., "10:10") from full model MLIR.
     Uses node_index (position) for matching.
+
+    For quantized models, Q/DQ wrapper nodes are ignored so that executor
+    assignments target compute ops, not inserted wrappers.
     """
     if not discovery_json_path.exists() or not mlir_file.exists():
         return
 
-    # Get all operations in order from full model MLIR
+    # Get compute operations in order from full model MLIR, skipping Q/DQ wrappers.
+    # Normalize qoperator op names (QLinearConv -> Conv, etc.) so they match the
+    # original layer op types stored in the discovery JSON.
     all_ops = extract_line_numbers_from_mlir(mlir_file)
-    if not all_ops:
+    compute_ops = [
+        (_normalize_quantized_op_type(op_type), loc) for op_type, loc in all_ops
+        if op_type not in _QUANT_WRAPPER_OPS
+    ]
+    if not compute_ops:
         return
 
     with open(discovery_json_path, "r") as f:
@@ -433,37 +496,60 @@ def _update_discovery_json_line_numbers(
     updated = False
     for op_name in sorted(data.get("ops", {}).keys()):
         op_data = data["ops"][op_name]
+        expected_op_type = op_name.split("_")[0] if op_name else None
 
         # Use node_index if available for precise matching
         node_index = op_data.get("_node_index")
-        if node_index is not None and 0 <= node_index < len(all_ops):
-            op_type, new_location = all_ops[node_index]
-            old_location = op_data.get("mlir_location", "")
+        if node_index is not None and 0 <= node_index < len(compute_ops):
+            op_type, new_location = compute_ops[node_index]
 
-            if old_location != new_location:
-                op_data["mlir_location"] = new_location
-                updated = True
-                msg = (
-                    f"[ExecutorAssignments] Updated {op_name}: {old_location} -> "
-                    f"{new_location} (node_index={node_index})"
-                )
-                logger.info(msg)
-        else:
-            # Warn if node_index is out of bounds (indicates a bug in discovery)
-            if node_index is not None and node_index >= len(all_ops):
+            # If the stored index points at the wrong op type (stale/fused
+            # data), fall back to op_type matching instead.  This is expected
+            # for quantized models where Q/DQ wrappers are stripped or where
+            # activations like Relu are fused into the preceding compute op.
+            if expected_op_type and op_type == expected_op_type:
+                old_location = op_data.get("mlir_location", "")
+                if old_location != new_location:
+                    op_data["mlir_location"] = new_location
+                    updated = True
+                    msg = (
+                        f"[ExecutorAssignments] Updated {op_name}: {old_location} -> "
+                        f"{new_location} (node_index={node_index})"
+                    )
+                    logger.info(msg)
+                continue
+
+        # Warn if node_index is out of bounds and the expected op type is still
+        # present in the MLIR (indicates a stale index). If the op was removed
+        # by quantization, fallback silently leaves the op_type string.
+        if node_index is not None and node_index >= len(compute_ops):
+            if expected_op_type and any(ot == expected_op_type for ot, _ in compute_ops):
                 logger.warning(
                     f"[ExecutorAssignments] node_index {node_index} out of bounds for {op_name} "
-                    f"(max: {len(all_ops) - 1}). This indicates a bug in layer discovery. "
+                    f"(max: {len(compute_ops) - 1}), but {expected_op_type} still exists in MLIR. "
                     f"Using fallback matching by op_type."
                 )
-            # Fallback: try to match by op_type (first occurrence)
-            op_type = op_name.split("_")[0] if op_name else None
-            for ot, loc in all_ops:
-                if ot == op_type:
+
+        # Fallback: try to match by op_type (first occurrence)
+        matched = False
+        for ot, loc in compute_ops:
+            if ot == expected_op_type:
+                old_location = op_data.get("mlir_location", "")
+                if old_location != loc:
                     op_data["mlir_location"] = loc
                     updated = True
                     logger.info(f"[ExecutorAssignments] Updated {op_name} (fallback): -> {loc}")
-                    break
+                matched = True
+                break
+
+        # Fused or otherwise unmapped layers get their op_type string back so
+        # the compiler config excludes them (only line:column keys are valid).
+        if not matched and expected_op_type:
+            old_location = op_data.get("mlir_location", "")
+            if old_location != expected_op_type:
+                op_data["mlir_location"] = expected_op_type
+                updated = True
+                logger.info(f"[ExecutorAssignments] Cleared stale location for {op_name}: -> {expected_op_type}")
 
     if updated:
         with open(discovery_json_path, "w") as f:

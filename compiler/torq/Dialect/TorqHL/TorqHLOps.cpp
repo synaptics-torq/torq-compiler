@@ -713,3 +713,64 @@ LogicalResult mlir::syna::torq_hl::ProgramCodeOp::verify() {
 
 #define GET_OP_CLASSES
 #include "torq/Dialect/TorqHL/TorqHLOps.cpp.inc"
+
+namespace mlir::syna::torq_hl {
+
+// A clamp that covers the entire integer range is a no-op.
+static bool isFullIntegerClamp(ActOp op) {
+    if (op.getName() != "clamp")
+        return false;
+
+    // Only fold pure clamps (no extra weights).
+    if (op.getWeights())
+        return false;
+
+    auto inTy = dyn_cast<RankedTensorType>(op.getInput().getType());
+    Value output = op.getOutput();
+    if (!output)
+        return false;
+    auto outTy = dyn_cast<RankedTensorType>(output.getType());
+    if (!inTy || !outTy || inTy != outTy)
+        return false;
+
+    auto intTy = dyn_cast<IntegerType>(inTy.getElementType());
+    if (!intTy)
+        return false;
+
+    // The zero points must match; otherwise the op would shift values.
+    if (op.getInputZp() != op.getOutputZp())
+        return false;
+
+    unsigned width = intTy.getWidth();
+    int64_t min = op.getMinInt();
+    int64_t max = op.getMaxInt();
+    bool isSigned = min < 0;
+
+    APInt actualMin(width, min, isSigned);
+    APInt actualMax(width, max, isSigned);
+    APInt expectedMin(width, isSigned ? llvm::minIntN(width) : 0, isSigned);
+    APInt expectedMax(width, isSigned ? llvm::maxIntN(width) : llvm::maxUIntN(width), isSigned);
+
+    return actualMin == expectedMin && actualMax == expectedMax;
+}
+
+// Fold a torq_hl.act "clamp" whose limits span the whole integer range.
+// It is a no-op and just forwards its input.
+class FoldNoOpClamp : public OpRewritePattern<ActOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(ActOp op, PatternRewriter &rewriter) const override {
+        if (!isFullIntegerClamp(op))
+            return failure();
+
+        rewriter.replaceOp(op, op.getInput());
+        return success();
+    }
+};
+
+void ActOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context) {
+    results.add<FoldNoOpClamp>(context);
+}
+
+} // namespace mlir::syna::torq_hl

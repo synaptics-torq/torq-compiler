@@ -29,6 +29,7 @@ class ExecutorDiscoveryState:
         self.results: Dict[str, Dict[str, Dict]] = {}  # layer_id -> executor -> result
         self.locations: Dict[str, str] = {}  # layer_id -> mlir_location (op_type for layer tests)
         self.node_indices: Dict[str, int] = {}  # layer_id -> node_index in source graph
+        self.orig_indices: Dict[str, int] = {}  # layer_id -> original position in model order
         self.mlir_files: Dict[str, Path] = {}  # layer_id -> mlir file path
         # layer_id -> line:column from full model MLIR
         self.full_mlir_locations: Dict[str, str] = {}
@@ -36,6 +37,8 @@ class ExecutorDiscoveryState:
         self.full_model_metrics: Optional[Dict[str, Any]] = None
         # layer_id -> recommended_executor (loaded from JSON to preserve user edits)
         self.recommended_executors: Dict[str, str] = {}
+        # Subgraph suffix for the current model (e.g., "subgraph_0_7")
+        self.subgraph_suffix: Optional[str] = None
 
     def record_result(
         self,
@@ -65,6 +68,7 @@ class ExecutorDiscoveryState:
         self,
         layer_id: str,
         node_index: Optional[int] = None,
+        orig_index: Optional[int] = None,
         mlir_location: Optional[str] = None,
         full_mlir_location: Optional[str] = None,
         mlir_file: Optional[Path] = None,
@@ -72,6 +76,8 @@ class ExecutorDiscoveryState:
         """Record metadata for a layer."""
         if node_index is not None:
             self.node_indices[layer_id] = node_index
+        if orig_index is not None:
+            self.orig_indices[layer_id] = orig_index
         if mlir_location:
             self.locations[layer_id] = mlir_location
         if full_mlir_location:
@@ -97,6 +103,9 @@ class ExecutorDiscoveryState:
             node_index = op_data.get("_node_index")
             if node_index is not None and layer_id not in self.node_indices:
                 self.node_indices[layer_id] = node_index
+            orig_index = op_data.get("_orig_index")
+            if orig_index is not None and layer_id not in self.orig_indices:
+                self.orig_indices[layer_id] = orig_index
             mlir_loc = op_data.get("mlir_location")
             if mlir_loc and layer_id not in self.locations:
                 self.locations[layer_id] = mlir_loc

@@ -29,6 +29,7 @@ from torq.testing.onnx import (
     extract_onnx_subgraph,
     generate_onnx_layers_from_file,
     generate_onnx_layers_from_model,
+    get_full_model,
     model_signature,
 )
 from torq.testing.versioned_fixtures import (
@@ -38,6 +39,7 @@ from torq.testing.versioned_fixtures import (
 
 from torq.gen_config._state import ExecutorDiscoveryState, _discovery_state
 from torq.gen_config._utils import (
+    _normalize_quantized_op_type,
     extract_line_numbers_from_mlir,
     parse_diff_metrics,
 )
@@ -62,7 +64,18 @@ from torq.gen_config.core import (
     save_config,
     update_config_with_results,
 )
-from torq.gen_config._report import _get_all_critical_failures, _save_detailed_report
+from torq.testing.quantize_onnx import (
+    is_model_quantized,
+    quantize_onnx_model,
+)
+
+
+_TORCH_SUFFIXES = (".pt", ".pth", ".py")
+
+
+def _is_torch_model(model_path: Path) -> bool:
+    """Return True if the model path points to a Torch model file."""
+    return model_path.suffix.lower() in _TORCH_SUFFIXES
 
 
 def _verify_import_ordering(
@@ -169,6 +182,105 @@ def _build_onnx_to_mlir_mapping(onnx_model_path: Path, mlir_file: Path) -> Dict[
         _discovery_log(f"[ONNXtoMLIR] Error building mapping: {e}")
         return {}
 
+
+_QUANT_WRAPPER_OPS = {"QuantizeLinear", "DequantizeLinear"}
+
+
+def _lcs_alignment(a: List[str], b: List[str]) -> List[Tuple[int, int]]:
+    """Return matched index pairs from a longest-common-subsequence alignment."""
+    m, n = len(a), len(b)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m - 1, -1, -1):
+        for j in range(n - 1, -1, -1):
+            if a[i] == b[j]:
+                dp[i][j] = 1 + dp[i + 1][j + 1]
+            else:
+                dp[i][j] = max(dp[i + 1][j], dp[i][j + 1])
+
+    alignment: List[Tuple[int, int]] = []
+    i = j = 0
+    while i < m and j < n:
+        if a[i] == b[j]:
+            alignment.append((i, j))
+            i += 1
+            j += 1
+        elif dp[i + 1][j] >= dp[i][j + 1]:
+            i += 1
+        else:
+            j += 1
+    return alignment
+
+
+def _build_quantized_mlir_mapping(
+    quantized_model,
+    mlir_file: Path,
+    original_layers: List[Tuple[str, Any]],
+) -> Tuple[Dict[str, str], Dict[str, int]]:
+    """Map original layer IDs to line numbers in the final quantized MLIR.
+
+    Quantization inserts Q/DQ wrapper nodes around compute ops and may fuse
+    activations (e.g. Conv+ReLU). The final executor assignment must target
+    the compute op lines in the quantized MLIR, not the Q/DQ wrappers. This
+    helper imports the quantized model, extracts compute-op line numbers, and
+    aligns them with the original unquantized layer order using a longest
+    common subsequence so fused layers are skipped automatically.
+
+    Returns:
+        (layer_id -> "line:column", layer_id -> node_index in full quantized MLIR)
+    """
+    mlir_file.parent.mkdir(parents=True, exist_ok=True)
+    onnx_path = mlir_file.with_suffix(".onnx")
+    try:
+        model_proto = _get_model_from_wrapper(quantized_model)
+        onnx.save(model_proto, str(onnx_path))
+        subprocess.run(
+            [sys.executable, "-m", "iree.compiler.tools.import_onnx",
+             str(onnx_path), "-o", str(mlir_file), "--data-prop"],
+            check=True,
+            capture_output=True,
+        )
+
+        all_ops = extract_line_numbers_from_mlir(mlir_file)
+        compute_ops = [
+            (_normalize_quantized_op_type(op_type), loc) for op_type, loc in all_ops
+            if op_type not in _QUANT_WRAPPER_OPS
+        ]
+        # _update_discovery_json_line_numbers uses the same compute-only list
+        # (no Q/DQ wrappers) so node_index points at a compute op.
+        indexed_ops = compute_ops
+
+        original_ops: List[Tuple[str, str]] = []
+        for _layer_key, layer_data in original_layers:
+            model = _get_model_from_wrapper(layer_data)
+            if not model.graph.node:
+                continue
+            op_type = model.graph.node[0].op_type
+            layer_id = _get_layer_id_from_case(Case("", layer_data))
+            original_ops.append((layer_id, op_type))
+
+        alignment = _lcs_alignment(
+            [op_type for _, op_type in original_ops],
+            [op_type for op_type, _ in indexed_ops],
+        )
+
+        mapping: Dict[str, str] = {}
+        node_indices: Dict[str, int] = {}
+        for orig_idx, comp_idx in alignment:
+            layer_id, _ = original_ops[orig_idx]
+            op_type, loc = indexed_ops[comp_idx]
+            mapping[layer_id] = loc
+            node_indices[layer_id] = comp_idx
+
+        _discovery_log(
+            f"[QuantizedONNXtoMLIR] Mapped {len(mapping)}/{len(original_ops)} "
+            f"original layers to {len(compute_ops)} quantized compute ops"
+        )
+        return mapping, node_indices
+    except Exception as e:
+        _discovery_log(f"[QuantizedONNXtoMLIR] Error building quantized mapping: {e}")
+        return {}, {}
+
+
 def _extract_op_type_from_layer(mlir_file: Path, target_op_type: str) -> Optional[str]:
     """Extract operation type from layer MLIR file."""
     if not mlir_file.exists():
@@ -200,14 +312,56 @@ def _get_skipped_executors(config) -> set:
         return {e.strip().lower() for e in skip_executors_option.split(",")}
     return set()
 
+def _get_model_from_wrapper(model_wrapper):
+    """Return the underlying onnx.ModelProto from a wrapper or raw model."""
+    return model_wrapper.model if hasattr(model_wrapper, 'model') else model_wrapper
+
+
+def _set_model_metadata(model, key: str, value: str):
+    """Set a string metadata property on an onnx.ModelProto."""
+    model = _get_model_from_wrapper(model)
+    for prop in model.metadata_props:
+        if prop.key == key:
+            prop.value = value
+            return
+    prop = model.metadata_props.add()
+    prop.key = key
+    prop.value = value
+
+
+def _get_model_metadata(model, key: str) -> Optional[str]:
+    """Get a string metadata property from an onnx.ModelProto."""
+    model = _get_model_from_wrapper(model)
+    for prop in model.metadata_props:
+        if prop.key == key:
+            return prop.value
+    return None
+
+
 def _get_layer_id_from_case(case) -> str:
-    """Extract layer_id (opType_outputName) from a Case's ONNX model."""
+    """Extract layer_id (opType_outputName) from a Case's ONNX model.
+
+    If the model carries a ``torq_original_layer_id`` metadata property (set
+    when quantization renames tensors), that value is returned. Otherwise the
+    first non-QDQ compute node is used so quantized layers keep their original
+    op identity.
+    """
     model_wrapper = case.data
     model = model_wrapper.model if hasattr(model_wrapper, 'model') else model_wrapper
+
+    original_id = _get_model_metadata(model, "torq_original_layer_id")
+    if original_id:
+        return original_id
+
     graph = model.graph
+    for node in graph.node:
+        if node.op_type in ("QuantizeLinear", "DequantizeLinear"):
+            continue
+        if node.output:
+            return f"{node.op_type}_{node.output[0]}"
     return (
         f"{graph.node[0].op_type}_{graph.node[0].output[0]}"
-        if graph.node
+        if graph.node and graph.node[0].output
         else "unknown_layer"
     )
 
@@ -302,6 +456,13 @@ def _maybe_skip_executor(
             if exec_result.get("status") == "success":
                 pytest.skip(f"Layer {layer_id} already works with {exec_name}, skipping {executor}")
 
+    # --recompute-cache invalidates the versioned fixture cache and forces the
+    # layer to be compiled/run again. Don't let a stale persisted JSON success
+    # short-circuit that, otherwise --debug-ir and similar debug flags never run.
+    recompute_cache = request.config.getoption("--recompute-cache", default=False)
+    if recompute_cache:
+        return
+
     # Then check persisted results from JSON file (subgraph-specific or main model)
     json_path = _get_json_path(request.config, model_name, subgraph_suffix)
     if not json_path or not json_path.exists():
@@ -350,6 +511,7 @@ def _update_json_with_results(
         discovery_state.locations,
         discovery_state.full_mlir_locations,
         recommend_by_timing,
+        discovery_state.orig_indices,
     )
 
 
@@ -376,40 +538,34 @@ def _save_discovery_results(
     json_data = _load_json(config, model_name, subgraph_suffix)
     _update_json_with_results(json_data, mlir_file, recommend_by_timing, discovery_state)
 
+    # Clean stale executor entries when --skip-mode or --skip-executors is active.
+    # Otherwise a previous run's errors for lower-priority executors stay in the
+    # JSON and make the final report look like those executors were tested.
+    skip_mode = _opt(config, "--skip-mode", "--executor-skip-mode", default=False)
+    skipped_executors = _get_skipped_executors(config)
+    if skip_mode or skipped_executors:
+        for op_data in json_data.get("ops", {}).values():
+            executors = op_data.get("executors", {})
+            # Remove executors the user explicitly told us to skip.
+            for exc in skipped_executors:
+                executors.pop(exc, None)
+            # In skip mode, once a higher-priority executor succeeds we no longer
+            # care about lower-priority results from earlier runs.
+            if skip_mode:
+                first_success_idx = None
+                for idx, exc in enumerate(EXECUTOR_ORDER):
+                    if executors.get(exc, {}).get("status") == "success":
+                        first_success_idx = idx
+                        break
+                if first_success_idx is not None:
+                    for exc in EXECUTOR_ORDER[first_success_idx + 1:]:
+                        executors.pop(exc, None)
+
     if model_name:
         json_data["model_name"] = model_name
 
     json_name = model_name if not subgraph_suffix else f"{model_name}_{subgraph_suffix}"
     _save_json(config, json_name, json_data)
-
-    # Get summary and critical failures once
-    summary = discovery_state.get_summary()
-    critical_failures = _get_all_critical_failures(discovery_state)
-
-    # Print summary
-    _discovery_log("\n\nExecutor Discovery Summary")
-    output_path = _get_json_path(config, model_name, subgraph_suffix)
-    _discovery_log(f"Output file: {output_path}")
-    _discovery_log(f"Total layers: {summary['total_layers']}")
-    _discovery_log("\nStatus counts:")
-    for status, count in summary["status_counts"].items():
-        _discovery_log(f"  {status}: {count}")
-    _discovery_log("\nFirst working executor distribution:")
-    for executor in EXECUTOR_ORDER:
-        count = summary["executor_counts"].get(executor, 0)
-        _discovery_log(f"  {executor.upper()}: {count}")
-
-    # Print critical failures if any layer has all executors failed
-    if critical_failures:
-        msg = f"\nCRITICAL: {len(critical_failures)} layer(s) where ALL executors have ERRORS!"
-        _discovery_log(msg)
-        for cf in critical_failures:
-            _discovery_log(f"  - {cf['layer_id']} (node: {cf['node_index']})")
-        _discovery_log(f"\nThese layers CANNOT work. Check the JSON for details.")
-    _discovery_log("")
-
-    # Save detailed report with critical failures info
-    _save_detailed_report(config, model_name, discovery_state, subgraph_suffix)
 
     # Generate compiler-format JSON (minimal, only what C++ pass needs)
     output_dir = _opt(config, "--output-dir", "--gen-config-output")
@@ -511,21 +667,75 @@ def _maybe_apply_bf16_conversion(model, f: Path, auto_convert: bool, save_path: 
         _discovery_log(f"[BF16] Saved converted model to: {sp}")
     return converted
 
+
+def _maybe_apply_quantization(
+    model,
+    quantize: bool,
+    per_channel: bool,
+    full_integer: bool,
+    quant_format: str = "qdq",
+    label: str = "model",
+) -> Any:
+    """Apply int8 static quantization to a model if requested.
+
+    Returns the (possibly quantized) model. Logs the operation.
+    """
+    if not quantize:
+        return model
+
+    # Unwrap ModelWithMetadata if needed
+    wrapped = None
+    if hasattr(model, "model") and hasattr(model, "_model"):
+        wrapped = model
+        model_proto = model.model
+    else:
+        model_proto = model
+
+    if is_model_quantized(model_proto):
+        _discovery_log(f"[Quantize] {label} already quantized, skipping")
+        return model
+
+    _discovery_log(
+        f"[Quantize] Quantizing {label} (quant_format={quant_format}, "
+        f"per_channel={per_channel}, full_integer={full_integer})..."
+    )
+    try:
+        quantized = quantize_onnx_model(
+            model_proto,
+            per_channel=per_channel,
+            full_integer=full_integer,
+            quant_format=quant_format,
+        )
+    except Exception as e:
+        _discovery_log(f"[Quantize] Failed to quantize {label}: {e}; using original model")
+        return model
+
+    if wrapped is not None:
+        wrapped._model = quantized
+        return wrapped
+    return quantized
+
 def _generate_subgraph_cases(f: Path, config) -> List[Case]:
     """Generate test cases in subgraph mode."""
-    from torq.testing.onnx import get_full_model
-
     subgraph_from = config.getoption("--subgraph-from")
     subgraph_to = config.getoption("--subgraph-to")
     auto_convert_bf16 = config.getoption("--auto-convert-bf16", default=False)
     save_bf16_path = config.getoption("--save-bf16-model", default=None)
+    quantize = config.getoption("--quantize", default=False)
+    per_channel = config.getoption("--per-channel", default=False)
+    full_integer = config.getoption("--full-integer", default=False)
+    quant_format = config.getoption("--quant-format", default="qdq")
     model_name = f.stem
+
+    if _is_torch_model(f):
+        raise ValueError(f"Torch models are not supported in this branch: {f}")
 
     full_model = get_full_model(str(f))
     full_model = _maybe_apply_bf16_conversion(full_model, f, auto_convert_bf16, save_bf16_path)
 
-    # Build name -> index mapping and resolve op names to indices
-    all_layers = generate_onnx_layers_from_model(full_model, node_groups=None, dedup=False)
+    # Build name -> index mapping from the (possibly BF16 but not yet quantized)
+    # full model so indices match the original ONNX node positions.
+    all_layers = generate_onnx_layers_from_model(full_model, node_groups=None, dedup=False, quantize=quantize)
     name_to_index = {}
     for layer_data in all_layers.values():
         layer_node_index = getattr(layer_data, 'node_index', None)
@@ -548,26 +758,84 @@ def _generate_subgraph_cases(f: Path, config) -> List[Case]:
     _discovery_log(f"[Subgraph] Extracting subgraph from node {from_index} to "
                    f"{to_index} from {f.name}")
     try:
-        subgraph = extract_onnx_subgraph(full_model, from_index, to_index)
+        subgraph = extract_onnx_subgraph(full_model, from_index, to_index, quantize=quantize)
     except Exception as e:
         _discovery_log(f"[Subgraph] Error extracting subgraph: {e}")
         pytest.skip(f"Failed to extract subgraph: {e}")
         return []
 
-    subgraph_suffix = f"subgraph_{from_index}_{to_index}"
-    node_count = len(subgraph.model.graph.node)
-    _discovery_log(f"[Subgraph] Successfully extracted subgraph with {node_count} nodes")
+    subgraph.source_model_path = str(f)
 
-    # Extract layers FROM the subgraph (like a mini full-model workflow)
+    subgraph_suffix = f"subgraph_{from_index}_{to_index}"
+    source_model_path = str(f)
+
+    # Build a subgraph-specific ONNX-to-MLIR mapping so the executor
+    # assignment pass matches the subgraph MLIR (not the full-model MLIR).
+    subgraph_onnx_path = config.cache.mkdir('subgraph_onnx') / f"{model_name}_{subgraph_suffix}.onnx"
+    subgraph_onnx_path.parent.mkdir(parents=True, exist_ok=True)
+    onnx.save(subgraph.model, str(subgraph_onnx_path))
+    subgraph_mlir_cache = Path(f".pytest_cache/onnx_full_mlir/{model_name}_{subgraph_suffix}.mlir")
+    map_key = f"{model_name}_{subgraph_suffix}"
+    if not hasattr(pytest_generate_tests, '_onnx_to_mlir_maps'):
+        pytest_generate_tests._onnx_to_mlir_maps = {}
+
+    # Extract layers from the UNQUANTIZED subgraph first so layer IDs stay
+    # tied to the original compute ops, then quantize each layer individually.
     subgraph_layers = generate_onnx_layers_from_model(
-        subgraph.model, node_groups=None, dedup=False
+        subgraph.model, node_groups=None, dedup=False, quantize=quantize
     )
     _discovery_log(f"[Subgraph] Extracted {len(subgraph_layers)} layers from subgraph")
+
+    # Quantize the full subgraph for the full-model test.
+    if quantize:
+        subgraph = _maybe_apply_quantization(
+            subgraph,
+            quantize=True,
+            per_channel=per_channel,
+            full_integer=full_integer,
+            quant_format=quant_format,
+            label=f"subgraph {from_index}-{to_index}",
+        )
+
+    # Build the ONNX->MLIR mapping from the final model that the compiler will
+    # see. For quantized models this must be the quantized MLIR so that executor
+    # assignments target the actual compute ops (not inserted Q/DQ wrappers).
+    if quantize:
+        quantized_subgraph_mlir_cache = subgraph_mlir_cache.with_suffix(".quantized.mlir")
+        subgraph_mapping, quantized_node_indices = _build_quantized_mlir_mapping(
+            subgraph,
+            quantized_subgraph_mlir_cache,
+            list(subgraph_layers.items()),
+        )
+    else:
+        subgraph_mapping = _build_onnx_to_mlir_mapping(subgraph_onnx_path, subgraph_mlir_cache)
+        quantized_node_indices = {}
+    pytest_generate_tests._onnx_to_mlir_maps[map_key] = subgraph_mapping
+    _discovery_log(
+        f"[Subgraph] Built subgraph MLIR mapping ({len(subgraph_mapping)} ops) "
+        f"under key {map_key}"
+    )
+
+    node_count = len(subgraph.model.graph.node)
+    _discovery_log(f"[Subgraph] Successfully extracted subgraph with {node_count} nodes")
 
     cases = []
     for layer_key, layer_data in subgraph_layers.items():
         case_name = f"{model_name}_{subgraph_suffix}_{layer_key}"
-        cases.append(Case(case_name, layer_data))
+        original_layer_id = _get_layer_id_from_case(Case("", layer_data))
+        quantized_layer = _maybe_apply_quantization(
+            layer_data,
+            quantize=quantize,
+            per_channel=per_channel,
+            full_integer=full_integer,
+            quant_format=quant_format,
+            label=f"subgraph layer {layer_key}",
+        )
+        quantized_layer.source_model_path = source_model_path
+        _set_model_metadata(quantized_layer, "torq_original_layer_id", original_layer_id)
+        if quantize and original_layer_id in quantized_node_indices:
+            quantized_layer.node_index = quantized_node_indices[original_layer_id]
+        cases.append(Case(case_name, quantized_layer))
     cases.append(Case(f"{model_name}_{subgraph_suffix}_full", subgraph))
     return cases
 
@@ -575,16 +843,74 @@ def _generate_layer_cases(f: Path, config) -> List[Case]:
     """Generate test cases in normal layer-extraction mode."""
     auto_convert_bf16 = config.getoption("--auto-convert-bf16", default=False)
     save_bf16_path = config.getoption("--save-bf16-model", default=None)
+    quantize = config.getoption("--quantize", default=False)
+    per_channel = config.getoption("--per-channel", default=False)
+    full_integer = config.getoption("--full-integer", default=False)
+    quant_format = config.getoption("--quant-format", default="qdq")
 
-    if auto_convert_bf16:
-        from torq.testing.onnx import get_full_model
+    if _is_torch_model(f):
+        raise ValueError(f"Torch models are not supported in this branch: {f}")
+
+    if auto_convert_bf16 and not quantize:
+        # Original BF16-only path: convert full model, then extract layers.
         model = get_full_model(str(f))
         model = _maybe_apply_bf16_conversion(model, f, auto_convert_bf16, save_bf16_path)
-        layers = generate_onnx_layers_from_model(model, node_groups=None, dedup=False)
+        layers = generate_onnx_layers_from_model(model, node_groups=None, dedup=False, quantize=False)
         return [
             Case(f"{f.stem}_{key}", layer)
             for key, layer in layers.items()
         ] + [Case(f"{f.stem}_full_model", model)]
+
+    if quantize:
+        # Quantize path: extract layers from the original full model first, then
+        # quantize each layer individually so per-layer tests use their own
+        # calibration data and the ONNX-to-MLIR mapping stays tied to the
+        # original op positions. BF16 conversion is mutually exclusive with
+        # quantization at the CLI level.
+        source_model_path = str(f)
+        model = get_full_model(str(f))
+        layers = generate_onnx_layers_from_model(model, node_groups=None, dedup=False, quantize=True)
+
+        # Quantize the full model first so the ONNX->MLIR mapping is built from
+        # the final quantized MLIR while the unquantized layer list is still
+        # intact (quantizing layers in place would mutate the list below).
+        quantized_full = _maybe_apply_quantization(
+            model,
+            quantize=True,
+            per_channel=per_channel,
+            full_integer=full_integer,
+            quant_format=quant_format,
+            label=f"full model {f.name}",
+        )
+        quantized_mlir_cache = Path(f".pytest_cache/onnx_full_mlir/{f.stem}.quantized.mlir")
+        mapping, node_indices = _build_quantized_mlir_mapping(
+            quantized_full, quantized_mlir_cache, list(layers.items())
+        )
+        if not hasattr(pytest_generate_tests, '_onnx_to_mlir_maps'):
+            pytest_generate_tests._onnx_to_mlir_maps = {}
+        pytest_generate_tests._onnx_to_mlir_maps[f.stem] = mapping
+
+        cases = []
+        for key, layer in layers.items():
+            original_layer_id = _get_layer_id_from_case(Case("", layer))
+
+            quantized_layer = _maybe_apply_quantization(
+                layer,
+                quantize=True,
+                per_channel=per_channel,
+                full_integer=full_integer,
+                quant_format=quant_format,
+                label=f"layer {key}",
+            )
+            quantized_layer.source_model_path = source_model_path
+            _set_model_metadata(quantized_layer, "torq_original_layer_id", original_layer_id)
+            if original_layer_id in node_indices:
+                quantized_layer.node_index = node_indices[original_layer_id]
+            cases.append(Case(f"{f.stem}_{key}", quantized_layer))
+
+        cases.append(Case(f"{f.stem}_full_model", quantized_full))
+        return cases
+
     return generate_onnx_layers_from_file(config.cache, f)
 
 
@@ -603,20 +929,27 @@ def _assemble_layer_test_cases(
     layer_id_to_source = _build_duplicate_layer_map(non_full_cases) if dedup_layers else {}
 
     test_cases = []
-    for case in non_full_cases:
+    for orig_index, case in enumerate(non_full_cases):
         model_wrapper = case.data
         node_index = getattr(model_wrapper, 'node_index', None)
 
         if "_subgraph_" in case.name:
             model_name = case.name.split("_subgraph_")[0]
+            subgraph_suffix = _get_subgraph_suffix(case)
+            map_key = f"{model_name}_{subgraph_suffix}" if subgraph_suffix else model_name
             is_subgraph = True
         else:
             model_name = case.name.split("_layer_")[0]
+            map_key = model_name
             is_subgraph = False
 
         layer_id = _get_layer_id_from_case(case)
+        # Subgraph cases use a subgraph-specific MLIR mapping built during
+        # case generation; full-model cases use the precomputed full mapping.
+        global_maps = getattr(pytest_generate_tests, '_onnx_to_mlir_maps', {})
         full_mlir_location = (
-            onnx_to_mlir_map.get(model_name, {}).get(layer_id) if model_name else None
+            global_maps.get(map_key, onnx_to_mlir_map.get(model_name, {})).get(layer_id)
+            if model_name else None
         )
         source_layer_id = layer_id_to_source.get(layer_id)
 
@@ -624,12 +957,13 @@ def _assemble_layer_test_cases(
             if executor in skipped_executors:
                 continue
             test_cases.append(
-                (case, layer_id, executor, node_index, full_mlir_location, is_subgraph, source_layer_id)
+                (case, layer_id, executor, node_index, full_mlir_location, is_subgraph, source_layer_id, orig_index)
             )
 
     # Full model / full subgraph tests
     for case in [c for c in cases if "_full_model" in c.name or c.name.endswith("_full")]:
-        test_cases.append((case, None, "discovered", None, None, False, None))
+        is_subgraph = "_subgraph_" in case.name
+        test_cases.append((case, None, "discovered", None, None, is_subgraph, None, None))
 
     return test_cases
 
@@ -664,7 +998,7 @@ def pytest_generate_tests(metafunc):
         "layer_executor_case",
         test_cases,
         indirect=True,
-        ids=[f"{c.name}_{exec}" for c, _, exec, _, _, _, _ in test_cases],
+        ids=[f"{c.name}_{exec}" for c, _, exec, _, _, _, _, _ in test_cases],
     )
 
 @pytest.fixture
@@ -676,12 +1010,13 @@ def reference_results(request, onnx_layer_model):
 
 def layer_executor_case(request):
     """Provide the layer case with executor info."""
-    case, layer_id, executor, node_index, full_mlir_location, is_subgraph, source_layer_id = request.param
+    case, layer_id, executor, node_index, full_mlir_location, is_subgraph, source_layer_id, orig_index = request.param
     return {
         "case": case,
         "layer_id": layer_id,
         "executor": executor,
         "node_index": node_index,
+        "orig_index": orig_index,
         "full_mlir_location": full_mlir_location,
         "is_subgraph": is_subgraph,
         "source_layer_id": source_layer_id,
@@ -701,10 +1036,12 @@ def onnx_layer_model(request, layer_executor_case):
         if executor in source_results:
             _copy_result_from_source_layer(layer_id, executor, source_layer_id, _discovery_state)
             node_index = layer_executor_case.get("node_index")
+            orig_index = layer_executor_case.get("orig_index")
             full_mlir_location = layer_executor_case.get("full_mlir_location")
             _discovery_state.record_metadata(
                 layer_id,
                 node_index=node_index,
+                orig_index=orig_index,
                 full_mlir_location=full_mlir_location,
             )
             pytest.skip(
@@ -765,7 +1102,7 @@ def comparison_config_for_executor_discovery(request, layer_executor_case):
     json_data = _load_json(request.config, model_name, subgraph_suffix) if model_name else {}
     tolerance = get_tolerance(layer_id, json_data)
 
-    return {
+    config = {
         "int_tol": 1,
         "int_thld": 1,
         "fp_avg_tol": tolerance.get("fp_avg_tol", 0.01),
@@ -774,6 +1111,8 @@ def comparison_config_for_executor_discovery(request, layer_executor_case):
         "allow_all_zero": False,
         "skip_nan_check": False,
     }
+
+    return config
 
 @pytest.fixture(autouse=True)
 def save_progress(request, layer_executor_case):
@@ -888,6 +1227,7 @@ def executor_discovery(
     layer_id = layer_executor_case["layer_id"]
     executor = layer_executor_case["executor"]
     node_index = layer_executor_case.get("node_index")
+    orig_index = layer_executor_case.get("orig_index")
     full_mlir_location = layer_executor_case.get("full_mlir_location")
     is_subgraph = layer_executor_case.get("is_subgraph", False)
     case = layer_executor_case["case"]
@@ -907,6 +1247,8 @@ def executor_discovery(
             json_data = _load_json(request.config, model_name, subgraph_suffix)
             if json_data:
                 discovery_state.load_from_json(json_data)
+                if subgraph_suffix:
+                    discovery_state.subgraph_suffix = subgraph_suffix
 
     # Full model / full subgraph test: no layer_id, just compare
     if layer_id is None:
@@ -918,9 +1260,12 @@ def executor_discovery(
         try:
             with contextlib.redirect_stdout(capture):
                 compare_test_results(request, torq_results, reference_results, case_config)
-        except AssertionError:
-            # Parse comparison metrics from captured stdout
+        finally:
+            # Always print the comparison report and store the metrics so the
+            # final run report is visible regardless of pass/fail.
             captured = capture.getvalue()
+            if captured:
+                print(captured, end="")
             metrics = {}
             for line in captured.splitlines():
                 if line.startswith("Max relative difference:"):
@@ -930,14 +1275,14 @@ def executor_discovery(
                 elif line.startswith("Number of differences:"):
                     metrics["num_differences"] = line.split(":", 1)[1].strip()
             discovery_state.full_model_metrics = metrics
-            raise
         return
 
     # Layer mode: record metadata first so duplicates also get correct
-    # node_index and mlir_location in the JSON output.
+    # node_index, orig_index and mlir_location in the JSON output.
     discovery_state.record_metadata(
         layer_id=layer_id,
         node_index=node_index,
+        orig_index=orig_index,
         full_mlir_location=full_mlir_location,
         mlir_file=(
             Path(onnx_mlir_model_file.file_path)

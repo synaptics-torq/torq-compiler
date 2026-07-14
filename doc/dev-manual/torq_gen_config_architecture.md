@@ -8,10 +8,11 @@
 2. [Module Map](#2-module-map)
 3. [Dependency Graph](#3-dependency-graph)
 4. [Two-JSON Design](#4-two-json-design)
-5. [CLI Subcommand Flow](#5-cli-subcommand-flow)
-6. [How to Add a New Model Format](#6-how-to-add-a-new-model-format)
-7. [How to Add a New CLI Subcommand](#7-how-to-add-a-new-cli-subcommand)
-8. [Testing Architecture](#8-testing-architecture)
+5. [Quantization Support](#5-quantization-support)
+6. [CLI Subcommand Flow](#6-cli-subcommand-flow)
+7. [How to Add a New Model Format](#7-how-to-add-a-new-model-format)
+8. [How to Add a New CLI Subcommand](#8-how-to-add-a-new-cli-subcommand)
+9. [Testing Architecture](#9-testing-architecture)
 
 ---
 
@@ -57,6 +58,8 @@ python/torq/gen_config/
 ├── _cases.py            ONNX-specific: pytest fixtures, test parametrization,
 │                        executor_discovery(), BF16 conversion, subgraph extraction.
 │
+├── quantize_onnx.py     ONNX QDQ/QOperator quantization helpers.
+│
 ├── discovery.py         PUBLIC ENTRY POINT. Re-exports from _state, _report,
 │                        and _cases. Everything outside gen_config/ imports
 │                        from here.
@@ -74,6 +77,7 @@ python/torq/gen_config/
 | `_state.py` | Accumulate discovery results in memory | No |
 | `_report.py` | Generate human-readable reports from state | No |
 | `_cases.py` | ONNX fixtures, hooks, test generation | **Yes** |
+| `quantize_onnx.py` | ONNX quantization (QDQ / QOperator) | **Yes** |
 | `cli.py` | argparse, subprocess, user-facing commands | No |
 | `view.py` | Pretty-print report / compiler JSONs | No |
 | `discovery.py` | Public re-export facade | No |
@@ -103,15 +107,20 @@ python/torq/gen_config/
                   │                 └───┬───┘
       ┌───────────┼───────────┐       │
       │           │           │       │
-  ┌───▼───┐  ┌────▼───┐  ┌────▼──────▼───┐
-  │ _state│  │_report │  │     _cases     │ ← ONNX-specific
-  └───┬───┘  └───┬────┘  └───────┬────────┘
+  ┌───▼───┐  ┌────▼───┐  ┌────▼──────▼───────┐
+  │ _state│  │_report │  │    _cases     │ ← ONNX-specific
+  └───┬───┘  └───┬────┘  └───────┬───────────┘
       │          │               │
-      └────┬─────┴───────────────┘
-           │
-      ┌────▼────────────┐
-      │   discovery.py  │ ← public facade
-      └────┬────────────┘
+      │          │       ┌───────┴───────┐
+      │          │       │               │
+      │          │   ┌───▼─────┐         │
+      │          │   │quantize │         │
+      │          │   │_onnx    │         │
+      └────┬─────┴───┴────┬────┴─────────┘
+           │              │
+      ┌────▼──────────────▼──────────────┐
+      │            discovery.py          │ ← public facade
+      └────┬─────────────────────────────┘
            │
       ┌────▼────────────┐
       │ external callers│
@@ -132,7 +141,9 @@ python/torq/gen_config/
    `_report`, and `_cases`. No logic lives here.
 5. Everything outside `gen_config/` imports from `discovery.py` only.
    No external code imports `_state`, `_report`, or `_cases` directly.
-6. `view.py` and `pytest_plugin.py` are internal utilities that import from
+6. `quantize_onnx.py` is a helper used by `_cases.py`; it is not imported by
+   `discovery.py`.
+7. `view.py` and `pytest_plugin.py` are internal utilities that import from
    `_utils` (and `core` for the plugin). They are not part of the public API.
 
 ---
@@ -194,7 +205,51 @@ python/torq/gen_config/
 
 ---
 
-## 5. CLI Subcommand Flow
+## 5. Quantization Support
+
+Quantization is implemented in `quantize_onnx.py`. It takes an FP32 ONNX model and produces either QDQ (Quantize-Dequantize) or QOperator (native int8 ops such as `QLinearConv`) format.
+
+### Discovery flow with quantization
+
+```
+_user passes --quantize --full-integer --quant-format=qdq_
+_cases.py:_maybe_apply_quantization()
+    ├── quantize the full model/subgraph once
+    ├── import the quantized ONNX into MLIR
+    ├── build mapping: original layer op-type → quantized compute-op line
+    │   (strips Q/DQ wrappers, aligns via LCS)
+    └── quantize each layer individually for per-layer tests
+```
+
+### Mapping quantized MLIR to original layers
+
+The C++ `ExecutorAssignmentPass` must receive line numbers from the **final** quantized MLIR, not the original FP32 MLIR. The mapping therefore:
+
+1. Imports the quantized ONNX model into MLIR.
+2. Discards `QuantizeLinear`/`DequantizeLinear` wrapper ops.
+3. Aligns the remaining compute ops with the original layer order using **Longest Common Subsequence (LCS)**.
+   - Fused activations (e.g. `Conv`+`Relu`) disappear in the quantized MLIR and are skipped by LCS.
+   - Each surviving compute op keeps its correct quantized MLIR line number.
+4. Stores `node_index` as an index into the compute-only op list.
+
+`pytest_plugin.py:_update_discovery_json_line_numbers()` uses the same compute-only list when resolving `_node_index`, and falls back to op-type matching (or clears stale locations) for fused/skipped layers.
+
+### Quantization options
+
+| Option | Effect |
+|--------|--------|
+| `--quantize` | Run ONNX Runtime static quantization on each layer and on the full model |
+| `--per-channel` | Use per-channel weight quantization |
+| `--full-integer` | Convert input Q/output DQ to int8 I/O (remove graph input/output Q/DQ) |
+| `--quant-format=qdq` | Insert `QuantizeLinear`/`DequantizeLinear` nodes around ops (default) |
+| `--quant-format=qoperator` | Use native int8 ops such as `QLinearConv` |
+
+**Note:** `discover` and `run` must use the same quantization flags so the full model compiler JSON matches the final quantized MLIR.
+
+See [`onnx_quantization.md`](onnx_quantization.md) for the
+full quantization design, mapping algorithm, and CLI examples.
+
+## 6. CLI Subcommand Flow
 
 ### `discover`
 
@@ -265,19 +320,20 @@ cli.py:cmd_edit()
 
 ---
 
-## 6. How to Add a New Model Format
+## 7. How to Add a New Model Format
 
-Example: adding Torch model support.
+> **Note:** This branch focuses on ONNX models. The pattern below shows how a
+> new format could be added by creating a format-specific `_cases_<format>.py`
+> module that reuses the same discovery algorithm.
 
-### Step 1: Create `_cases_torch.py`
+### Step 1: Create `_cases_<format>.py`
 
 Copy the structure of `_cases.py` but replace ONNX-specific logic:
 
 ```python
-# _cases_torch.py
-"""Torch executor discovery test cases and fixtures."""
+# _cases_<format>.py
+"""<Format> executor discovery test cases and fixtures."""
 
-import torch
 import pytest
 
 from torq.gen_config._state import ExecutorDiscoveryState, _discovery_state
@@ -288,43 +344,39 @@ from torq.gen_config.core import (
 )
 from torq.gen_config._report import _get_all_critical_failures, _save_detailed_report
 
-# Torch-specific model loading
-from torq.testing.torch import load_torch_model, generate_torch_layers
+# Format-specific model loading
+from torq.testing.<format> import load_<format>_model, generate_<format>_layers
 
 
 def _discover_model_files(config):
-    """Discover Torch model files from --model-path."""
-    # Return .pt or .pth files instead of .onnx
+    """Discover <format> model files from --model-path."""
     ...
 
 
-def _build_torch_to_mlir_mapping(model_path, mlir_file):
-    """Build mapping from Torch ops to MLIR line numbers."""
-    # Torch-specific MLIR import
+def _build_<format>_to_mlir_mapping(model_path, mlir_file):
+    """Build mapping from <format> ops to MLIR line numbers."""
     ...
 
 
 def _generate_layer_cases(f, config):
-    """Generate test cases in Torch layer-extraction mode."""
-    # Use generate_torch_layers instead of generate_onnx_layers_from_file
+    """Generate test cases in <format> layer-extraction mode."""
     ...
 
 
 def pytest_generate_tests(metafunc):
     """Generate test cases for each layer."""
-    # Same pattern as _cases.py but with Torch-specific functions
+    # Same pattern as _cases.py but with <format>-specific functions
     ...
 
 
 @pytest.fixture
-def torch_layer_model(request, layer_executor_case):
-    """Provide the Torch layer model."""
-    # Torch-specific fixture
+def <format>_layer_model(request, layer_executor_case):
+    """Provide the <format> layer model."""
     ...
 
 
 def executor_discovery(request, torq_results, reference_results,
-                       case_config, layer_executor_case, torch_mlir_model_file,
+                       case_config, layer_executor_case, <format>_mlir_model_file,
                        discovery_state=_discovery_state):
     """Core executor discovery — same algorithm, different model format."""
     # Same algorithm as _cases.py:executor_discovery()
@@ -336,11 +388,11 @@ def executor_discovery(request, torq_results, reference_results,
 ```python
 # discovery.py (add these lines)
 
-# Re-export Torch case generation and fixtures
-from torq.gen_config._cases_torch import (
-    executor_discovery as executor_discovery_torch,
-    pytest_generate_tests as pytest_generate_tests_torch,
-    torch_layer_model,
+# Re-export <format> case generation and fixtures
+from torq.gen_config._cases_<format> import (
+    executor_discovery as executor_discovery_<format>,
+    pytest_generate_tests as pytest_generate_tests_<format>,
+    <format>_layer_model,
     ...
 )
 ```
@@ -348,13 +400,13 @@ from torq.gen_config._cases_torch import (
 ### Step 3: Create the test entry point
 
 ```python
-# tests/test_torch_gen_config.py
+# tests/test_<format>_gen_config.py
 """Thin orchestration — same pattern as test_onnx_gen_config.py."""
 
-from torq.gen_config.discovery import pytest_generate_tests_torch as pytest_generate_tests
+from torq.gen_config.discovery import pytest_generate_tests_<format> as pytest_generate_tests
 from torq.gen_config.discovery import (
-    executor_discovery_torch as executor_discovery,
-    torch_layer_model as onnx_layer_model,
+    executor_discovery_<format> as executor_discovery,
+    <format>_layer_model as onnx_layer_model,
     reference_results,
     ...
 )
@@ -369,7 +421,7 @@ format-specific. These live in `_cases_<format>.py`.
 
 ---
 
-## 7. How to Add a New CLI Subcommand
+## 8. How to Add a New CLI Subcommand
 
 ### Step 1: Add the handler in `cli.py`
 
@@ -408,14 +460,14 @@ def test_compare(self):
 
 ---
 
-## 8. Testing Architecture
+## 9. Testing Architecture
 
 ### Test files
 
 | File | What it tests | Runs as |
 |------|--------------|---------|
 | `tests/test_gen_config_cli.py` | All CLI options end-to-end | Subprocess (spawns pytest) |
-| `tests/test_onnx_gen_config.py` | Discovery orchestration | Direct (imports from `discovery.py`) |
+| `tests/test_onnx_gen_config.py` | ONNX discovery orchestration | Direct (imports from `discovery.py`) |
 
 ### CLI test pattern
 

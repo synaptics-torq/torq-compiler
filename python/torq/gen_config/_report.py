@@ -79,6 +79,7 @@ def _generate_report_sections(
         ops[layer_id] = {
             "executors": executors,
             "_node_index": discovery_state.node_indices.get(layer_id),
+            "_orig_index": discovery_state.orig_indices.get(layer_id),
             "mlir_location": discovery_state.locations.get(layer_id),
             "recommended_executor": discovery_state.recommended_executors.get(layer_id),
         }
@@ -142,7 +143,8 @@ def _print_final_report(config, discovery_state: ExecutorDiscoveryState):
 
     model_path = _opt(config, "--model", "--model-path")
     model_name = Path(model_path).stem if model_path else "unknown"
-    json_path = _get_json_path(config, model_name)
+    subgraph_suffix = getattr(discovery_state, "subgraph_suffix", None)
+    json_path = _get_json_path(config, model_name, subgraph_suffix)
 
     sections = _generate_report_sections(model_name, discovery_state)
 
@@ -217,12 +219,8 @@ def _print_final_report(config, discovery_state: ExecutorDiscoveryState):
 
     # Only save detailed report for full-model runs. Subgraph results are
     # already saved incrementally by _save_discovery_results per-layer.
-    subgraph_mode = (
-        config.getoption("--subgraph-from", default=None) is not None
-        and config.getoption("--subgraph-to", default=None) is not None
-    )
-    if not subgraph_mode:
-        _save_detailed_report(config, model_name, discovery_state)
+    if not subgraph_suffix:
+        _save_detailed_report(config, model_name, discovery_state, subgraph_suffix)
 
 
 def _generate_final_report_text(
@@ -253,6 +251,7 @@ def _save_detailed_report(config, model_name: str, discovery_state: ExecutorDisc
             ops[layer_id] = {
                 "executors": executors,
                 "_node_index": discovery_state.node_indices.get(layer_id),
+                "_orig_index": discovery_state.orig_indices.get(layer_id),
                 "mlir_location": discovery_state.locations.get(layer_id),
                 "recommended_executor": discovery_state.recommended_executors.get(layer_id),
             }

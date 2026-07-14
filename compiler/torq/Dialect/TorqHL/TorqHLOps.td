@@ -294,6 +294,8 @@ def TorqHL_ActOp: TorqHL_LayerOp<"act"> {
     Activation operation
   }];
 
+  let hasCanonicalizer = 1;
+
   let arguments = !con(commonArgs, (ins
     // we use $name to differentiate various activation ops
     StrAttr:$name,

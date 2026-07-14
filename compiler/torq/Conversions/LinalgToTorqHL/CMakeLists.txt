@@ -7,6 +7,8 @@ set(sources
   Conv1DPattern.cpp
   Conv1DMatmulPattern.cpp
   Conv2DPattern.cpp
+  QConv2DPattern.cpp
+  QuantPatternUtils.cpp
   Conv2DMatmulPattern.cpp
   ElementWiseBinaryPattern.cpp
   ExpandWeightsPattern.cpp
@@ -21,6 +23,7 @@ set(sources
   TrigPattern.cpp
   MulPattern.cpp
   ExtractPattern.cpp
+  QuantizePattern.cpp
 )
 
 set(deps
@@ -57,6 +60,7 @@ iree_cc_library(
     Passes.h.inc
     Patterns.h
     OpPatternOptions.h
+    QuantPatternUtils.h
   SRCS
     ${sources}
   DEPS

@@ -226,6 +226,18 @@ FailureOr<Value> computeBiasAndRescaleInfo(
 // adjusted_w = sext(weight) - trunc(weightZp), materialized as i16 tensor.
 FailureOr<Value> buildWeightWithZp(Value weights, Value weightZp, PatternRewriter &rewriter);
 
+// Normalize filter layout and optionally fold a weight zero-point into weights.
+Value preConversionWeights(
+    Value weights, const Permutation &_weightsPerm, std::optional<Value> weightZpV,
+    ScaleClampInfo &scInfo, PatternRewriter &rewriter, bool isDepthwise
+);
+
+// Materialize dilation into the weight tensor when dilations > 1.
+FailureOr<Value> getDilatedWts(
+    Value weights, std::vector<int64_t> &finalDilationVec, bool isDW1DStride1,
+    PatternRewriter &rewriter
+);
+
 // Deduce ScaleClampInfo forward
 // scaleValuesCount is the expected number of scale values
 // shift8b is the shift amount of the scale values for 8bits computations

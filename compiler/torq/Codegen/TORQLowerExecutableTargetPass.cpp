@@ -421,8 +421,6 @@ struct TORQLowerExecutableTargetPass
 
         auto dispatchName = maybeDispatchFuncOp->getName().str();
 
-        llvm::errs() << "[TORQ] Lowering dispatch: " << dispatchName << "\n";
-
         // Create a shared DefaultTimingManager so that --mlir-timing instruments both
         // inner PassManagers in the same timing tree.
         //

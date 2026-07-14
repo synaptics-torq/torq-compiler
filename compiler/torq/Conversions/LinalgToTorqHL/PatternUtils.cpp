@@ -3131,8 +3131,16 @@ static void reduceBodyTruncYield(OpBuilder &b, Location loc, ValueRange args) {
 }
 
 static void reduceBodyExtFYield(OpBuilder &b, Location loc, ValueRange args) {
-    Value y = arith::ExtFOp::create(b, loc, b.getF32Type(), args[0]);
-    linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
+    // Bias element type may already be f32 (e.g. quantized convolutions whose
+    // rescale tail is in f32). ExtFOp requires different source/result types,
+    // so only emit it when widening from a narrower float type.
+    if (args[0].getType().isF32()) {
+        linalg::YieldOp::create(b, loc, ArrayRef<Value>{args[0]});
+    }
+    else {
+        Value y = arith::ExtFOp::create(b, loc, b.getF32Type(), args[0]);
+        linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
+    }
 }
 
 FailureOr<Value> computeBias(
@@ -3652,19 +3660,35 @@ FailureOr<Value> buildWeightWithZp(Value weights, Value weightZp, PatternRewrite
     //   adjusted_w = sext(weight_i8) - trunc(weight_zp)
     // Result is materialized as i16 to preserve headroom for downstream arithmetic.
     auto wTy = mlir::cast<RankedTensorType>(weights.getType());
+    auto loc = weights.getLoc();
     auto rankedI16Type = RankedTensorType::get(wTy.getShape(), rewriter.getIntegerType(16));
-    auto initTensor = createInitTensor(*weights.getDefiningOp(), rewriter, rankedI16Type);
+    Value initTensor = tensor::EmptyOp::create(
+                           rewriter, loc, rankedI16Type.getShape(), rankedI16Type.getElementType()
+    )
+                           .getResult();
+
+    // linalg.generic inputs must be tensors. If weightZp is a scalar (the common
+    // case for linalg.conv_2d_nchw_fchw_q), splat it into a 0-D tensor first.
+    Value zpTensor = weightZp;
+    if (!mlir::isa<ShapedType>(weightZp.getType())) {
+        auto zpEmpty =
+            tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{}, weightZp.getType())
+                .getResult();
+        zpTensor = linalg::FillOp::create(rewriter, loc, ValueRange{weightZp}, ValueRange{zpEmpty})
+                       .getResult(0);
+    }
+
     SmallVector<utils::IteratorType> iterTypes(wTy.getRank(), utils::IteratorType::parallel);
     SmallVector<AffineMap> indexingMaps = {
         rewriter.getMultiDimIdentityMap(wTy.getRank()),
-        // Treat weightZp as a scalar-like/broadcasted input across all weight elements.
-        AffineMap::get(wTy.getRank(), 0, rewriter.getAffineConstantExpr(0), rewriter.getContext()),
+        // 0-D tensor input: maps from the iteration space to no indices.
+        AffineMap::get(wTy.getRank(), 0, {}, rewriter.getContext()),
         rewriter.getMultiDimIdentityMap(wTy.getRank())
     };
     auto rescaledWeights =
         linalg::GenericOp::create(
-            rewriter, weights.getLoc(), rankedI16Type, ValueRange{weights, weightZp},
-            ValueRange{initTensor}, indexingMaps, iterTypes,
+            rewriter, loc, rankedI16Type, ValueRange{weights, zpTensor}, ValueRange{initTensor},
+            indexingMaps, iterTypes,
             [](OpBuilder &b, Location loc, ValueRange args) {
                 // Sign-extend weights to i16 first to avoid overflow/underflow on subtraction.
                 auto w = arith::ExtSIOp::create(b, loc, b.getIntegerType(16), args[0]);

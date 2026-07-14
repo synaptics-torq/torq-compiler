@@ -5,6 +5,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# ONNX Runtime's qoperator format renames wrapped ops (e.g. Conv -> QLinearConv,
+# Add -> QLinearAdd). Normalize them back to the original op type so alignment
+# between original layers and quantized compute ops still works.
+_QUANTIZED_OP_ALIASES = {
+    "QLinearConv": "Conv",
+    "QLinearAdd": "Add",
+    "QLinearMul": "Mul",
+    "QLinearMatMul": "MatMul",
+    "QLinearAveragePool": "AveragePool",
+    "QLinearGlobalAveragePool": "GlobalAveragePool",
+    "QLinearSigmoid": "Sigmoid",
+    "QLinearSoftmax": "Softmax",
+    "ConvInteger": "Conv",
+    "MatMulInteger": "MatMul",
+}
+
+
+def _normalize_quantized_op_type(op_type: str) -> str:
+    return _QUANTIZED_OP_ALIASES.get(op_type, op_type)
+
+
 def extract_line_numbers_from_mlir(
     mlir_file: Path, skip_constants: bool = True
 ) -> List[Tuple[str, str]]:

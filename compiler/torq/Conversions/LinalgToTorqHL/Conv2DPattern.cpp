@@ -322,7 +322,7 @@ static bool isStridedInsertSlice(Value input, bool isDW1DStride1) {
     return false;
 }
 
-static mlir::FailureOr<Value> getDilatedWts(
+mlir::FailureOr<Value> getDilatedWts(
     Value weights, std::vector<int64_t> &finalDilationVec, bool isDW1DStride1,
     PatternRewriter &rewriter
 ) {
@@ -386,7 +386,7 @@ static Value createOutput(
     return newOutput;
 }
 
-static Value preConversionWeights(
+Value preConversionWeights(
     Value weights, const Permutation &_weightsPerm, std::optional<Value> weightZpV,
     ScaleClampInfo &scInfo, PatternRewriter &rewriter, bool isDepthwise
 ) {

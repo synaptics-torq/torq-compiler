@@ -25,6 +25,9 @@ void populateLinalgConv2DToTorqHLConv1DPatterns(
 void populateLinalgToTorqHLConv2DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
+void populateLinalgToTorqHLQConv2DPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
 void populateLinalgToTorqHLConv2DMatmulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
@@ -50,6 +53,9 @@ void populateLinalgToTorqHLEWBinaryPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
 void populateLinalgToTorqHLReduceMeanPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+void populateLinalgToTorqHLQuantizePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
 void populateLinalgToTorqHLPatterns(
