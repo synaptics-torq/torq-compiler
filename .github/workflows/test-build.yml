@@ -65,8 +65,20 @@ jobs:
       CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+  test_aws_fpga:
+    needs: [docker_image_fpga_tests, test_cmodel]
+    name: Test with AWS FPGA
+    if: ${{ inputs.test_aws_fpga }}
+    uses: ./.github/workflows/test-aws-fpga.yml
+    with:
+      docker_image_fpga_tests_name: ${{ needs.docker_image_fpga_tests.outputs.image_name }}
+      release_artifact_id: ${{ inputs.release_artifact_id }}
+    secrets:
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   test_astra_machina_sl:
-    needs: docker_image_tests
+    needs: [docker_image_tests, test_aws_fpga]
     name: Test with Astra Machina SL
     if: ${{ inputs.test_astra_machina_sl }}
     uses: ./.github/workflows/test-astra-machina-sl.yml
@@ -77,18 +89,6 @@ jobs:
       CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
-
-  test_aws_fpga:
-    needs: docker_image_fpga_tests
-    name: Test with AWS FPGA
-    if: ${{ inputs.test_aws_fpga }}
-    uses: ./.github/workflows/test-aws-fpga.yml
-    with:
-      docker_image_fpga_tests_name: ${{ needs.docker_image_fpga_tests.outputs.image_name }}
-      release_artifact_id: ${{ inputs.release_artifact_id }}
-    secrets:
-      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   mark-complete:
     name: Notify dashboard

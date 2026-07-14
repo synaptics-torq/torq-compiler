@@ -34,7 +34,7 @@ jobs:
       - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
         image:custom-linux-${{ inputs.docker_image_tests_name }}
 
-    timeout-minutes: 50
+    timeout-minutes: 200 # very high timeout because we may need to wait for a long time to get access to the board
 
     env:
       RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
