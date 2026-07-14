@@ -1314,7 +1314,8 @@ static LogicalResult foldTensorPad(
     return success();
 }
 
-PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw) {
+PaddingInfo
+foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value outputValue) {
     // Process any extract_slice op and check there is no dynamic slice extraction
     Value val = value;
     SmallVector<tensor::ExtractSliceOp> extractSliceOps;
@@ -1364,6 +1365,28 @@ PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nc
         if (padOffsetsBelow[i] != 0 || padOffsetsAbove[i] != 0) {
             // We are only able to handle padding on the H and W dimensions of 4D tensors
             LLVM_DEBUG({ llvm::dbgs() << "Padding in an unsupported dimension\n"; });
+            return {};
+        }
+    }
+
+    // Check if output spatial dims >= padding_input spatial dims.
+    // In such cases, we skip folding and leave the pad as a separate op.
+    if (outputValue) {
+        auto inputType = cast<RankedTensorType>(val.getType());
+        auto outputType = cast<RankedTensorType>(outputValue.getType());
+        auto inputShape = inputType.getShape();
+        auto outputShape = outputType.getShape();
+        int64_t inputH = inputShape[hDim];
+        int64_t inputW = inputShape[wDim];
+        int64_t outputH = outputShape[hDim];
+        int64_t outputW = outputShape[wDim];
+
+        if (outputH >= inputH || outputW >= inputW) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "[foldBackwardPadding] Skipping: output spatial dims (" << outputH
+                             << "x" << outputW << ") >= padding_input spatial dims (" << inputH
+                             << "x" << inputW << ")\n";
+            });
             return {};
         }
     }

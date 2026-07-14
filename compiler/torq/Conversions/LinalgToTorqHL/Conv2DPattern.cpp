@@ -562,8 +562,8 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         PaddingInfo padInfo{{0, 0, 0, 0}, 0};
         if (failed(convertToInterleaved(input, rewriter, convOp, hasStridedInsertSlice))) {
             // Fallback to regular padding if conversion failed
-            // Use correct layout: NCHW if channelDim==1, NHWC if channelDim==3
-            padInfo = foldBackwardPadding(input, rewriter, isNchw);
+            // foldBackwardPadding will check if output >= padding_input and skip folding
+            padInfo = foldBackwardPadding(input, rewriter, isNchw, output);
         }
 
         LLVM_DEBUG({
@@ -631,7 +631,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                            scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift, groups,
                            padInfo.lrtbPad, attrValuesAsVec(convOp.getStrides()), finalDilationVec,
                            torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input,
-                           isDW1DStride1, false, isDW1DStride1
+                           nhwcInput, false, isDW1DStride1
                 )
                            .getResult(0);
             }
@@ -848,6 +848,14 @@ isKerSmall(int kernelHIndex, ArrayRef<int64_t> inputShape, ArrayRef<int64_t> ker
            kernelShape[kernelHIndex] <= maxKerHW && kernelShape[kernelWIndex] <= maxKerHW;
 }
 
+static bool isDepthwiseKernelShape(
+    int kernelHIndex, ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape
+) {
+    int kernelWIndex = kernelHIndex + 1;
+    return inputShape.size() == 4 && kernelShape.size() >= 3 &&
+           kernelShape[kernelHIndex] == inputShape[1] && kernelShape[kernelWIndex] == inputShape[2];
+}
+
 void populateLinalgToTorqHLConv2DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
@@ -855,6 +863,10 @@ void populateLinalgToTorqHLConv2DPatterns(
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNchwChwOp, torq_hl::DepthwiseConv2DOp>>(
         context, 1, Permutation::none(), Permutation::none(), 20, 12,
         [](auto i, auto w) { return isKerSmall(1, i, w); }, markFuseGroups, true
+    );
+    patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
+        context, 3, Permutation::none(), Permutation::none(), 20, 12,
+        [](auto i, auto w) { return isDepthwiseKernelShape(0, i, w); }, markFuseGroups, false
     );
     patterns.insert<Conv2dConvert<linalg::Conv2DNchwFchwOp, syna::torq_hl::Conv2DOp>>(
         context, 1, Permutation::none(), Permutation::none(), 28, 12,

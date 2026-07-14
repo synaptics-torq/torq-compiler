@@ -313,6 +313,23 @@ Value convertGenericOpToNchw(
 // Returns true if this op is a supported NHWC anchor op.
 // Add new op types here when extending support.
 bool isSupportedNhwcAnchorOp(Operation *op) {
+    // For depthwise conv, skip conversion if the kernel is a "full spatial" kernel
+    // (i.e. filter H == input H or filter W == input W), as those are handled
+    // separately and should not be converted to NCHW here.
+    if (auto dwOp = dyn_cast<linalg::DepthwiseConv2DNhwcHwcOp>(op)) {
+        Value filter = dwOp.getInputs()[1];
+        Value input = dwOp.getInputs()[0];
+        auto filterType = dyn_cast<RankedTensorType>(filter.getType());
+        auto inputType = dyn_cast<RankedTensorType>(input.getType());
+        if (filterType && inputType) {
+            auto filterShape = filterType.getShape(); // [H, W, C]
+            auto inputShape = inputType.getShape();   // [N, H, W, C]
+            if (filterShape[0] == inputShape[1] || filterShape[1] == inputShape[2]) {
+                return false;
+            }
+        }
+        return true;
+    }
     return isa<
         linalg::Conv2DNhwcHwcfOp, linalg::PoolingNhwcMaxOp, linalg::DepthwiseConv2DNhwcHwcOp>(op);
 }

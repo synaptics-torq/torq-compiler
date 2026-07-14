@@ -17,6 +17,7 @@
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
@@ -658,7 +659,9 @@ struct TransposeOpConversionRewrite : public OpRewritePattern<linalg::TransposeO
 
         std::optional<IntegerAttr> maybeFuseGroupAttr = std::nullopt;
         if (_markFuseGroups) {
-            maybeFuseGroupAttr = srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
+            if (auto attr = srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)) {
+                maybeFuseGroupAttr = attr;
+            }
         }
 
         if (srcOp.getResults().size() != 1) {
@@ -678,6 +681,166 @@ struct TransposeOpConversionRewrite : public OpRewritePattern<linalg::TransposeO
         // This pattern should only be called for doing the marking; for the
         // conversion TransposeOpConversion is called
         assert(false);
+    }
+};
+
+// Helper: if `expr` is `dim[dimPos] floordiv C`, returns C. Otherwise nullopt.
+static std::optional<int64_t> getDivConstant(AffineExpr expr, unsigned dimPos) {
+    auto binOp = dyn_cast<AffineBinaryOpExpr>(expr);
+    if (!binOp || binOp.getKind() != AffineExprKind::FloorDiv)
+        return std::nullopt;
+    auto dim = dyn_cast<AffineDimExpr>(binOp.getLHS());
+    auto cst = dyn_cast<AffineConstantExpr>(binOp.getRHS());
+    if (!dim || dim.getPosition() != dimPos || !cst)
+        return std::nullopt;
+    return cst.getValue();
+}
+
+// Matches the NCHW linalg.generic DepthToSpace pattern produced by
+// FoldNchwDepthToSpacePattern (or FoldNhwcDepthToSpacePattern after transpose wrapping):
+//
+//   ins(%input : tensor<NxCxHxWxT>) outs(%out : tensor<NxC_outxH'xW'xT>)
+//   indexing_maps = [
+//     (d0,d1,d2,d3) -> (d0, ((d2 mod bH)*bW + d3 mod bW)*C_out + d1,
+//                               d2 floordiv bH, d3 floordiv bW),
+//     (d0,d1,d2,d3) -> (d0, d1, d2, d3)
+//   ]
+//   body: linalg.yield %in
+//
+// Converts to torq_hl::DepthToSpaceOp.
+struct DepthToSpaceOpConversion : public OpConversionPattern<linalg::GenericOp> {
+
+    DepthToSpaceOpConversion(MLIRContext *context) : OpConversionPattern(context) {
+        setHasBoundedRewriteRecursion();
+    }
+
+    LogicalResult matchAndRewrite(
+        linalg::GenericOp srcOp, OpAdaptor adaptor, ConversionPatternRewriter &rewriter
+    ) const override {
+
+        // 1. Shape/rank checks
+        if (srcOp.getNumDpsInputs() != 1 || srcOp.getNumDpsInits() != 1)
+            return rewriter.notifyMatchFailure(srcOp, "Expected 1 input and 1 output");
+        if (srcOp.getNumLoops() != 4 || srcOp.getNumParallelLoops() != 4)
+            return rewriter.notifyMatchFailure(srcOp, "Expected 4 parallel loops");
+
+        auto inputType = dyn_cast<RankedTensorType>(srcOp.getInputs()[0].getType());
+        auto outputType = dyn_cast<RankedTensorType>(srcOp.getResult(0).getType());
+        if (!inputType || !outputType || inputType.getRank() != 4 || outputType.getRank() != 4)
+            return rewriter.notifyMatchFailure(srcOp, "Expected 4D input and output tensors");
+
+        // 2. Body must be a passthrough: linalg.yield %block_arg_0
+        auto &body = srcOp.getRegion().front();
+        auto yieldOp = dyn_cast<linalg::YieldOp>(body.getTerminator());
+        if (!yieldOp || yieldOp.getNumOperands() != 1 ||
+            yieldOp.getOperand(0) != body.getArgument(0))
+            return rewriter.notifyMatchFailure(srcOp, "Body must be yield-only passthrough");
+
+        // 3. Output indexing map must be identity
+        auto maps = srcOp.getIndexingMapsArray();
+        if (!maps[1].isIdentity())
+            return rewriter.notifyMatchFailure(srcOp, "Output map must be identity");
+
+        // 4. Parse block sizes from `d2 floordiv bH` and `d3 floordiv bW` in the input map
+        //    Input map: (d0,d1,d2,d3) -> (d0, C_expr, d2 floordiv bH, d3 floordiv bW)
+        AffineMap inputMap = maps[0];
+        auto maybeBH = getDivConstant(inputMap.getResult(2), /*dimPos=*/2);
+        auto maybeBW = getDivConstant(inputMap.getResult(3), /*dimPos=*/3);
+        if (!maybeBH || !maybeBW)
+            return rewriter.notifyMatchFailure(
+                srcOp, "Input map results[2,3] are not (d2 floordiv bH, d3 floordiv bW)"
+            );
+        int64_t bH = *maybeBH;
+        int64_t bW = *maybeBW;
+
+        // 5. Verify dimension 0 maps to d0
+        auto dim0 = dyn_cast<AffineDimExpr>(inputMap.getResult(0));
+        if (!dim0 || dim0.getPosition() != 0)
+            return rewriter.notifyMatchFailure(srcOp, "Input map result[0] must be d0");
+
+        // 6. Verify DepthToSpace shape relationships
+        auto inputShape = inputType.getShape();   // [N, C, H, W]
+        auto outputShape = outputType.getShape(); // [N, C_out, H', W']
+        int64_t C = inputShape[1];
+        int64_t H = inputShape[2];
+        int64_t W = inputShape[3];
+        int64_t H_out = outputShape[2];
+        int64_t W_out = outputShape[3];
+        int64_t C_out = outputShape[1];
+
+        if (H_out != H * bH || W_out != W * bW)
+            return rewriter.notifyMatchFailure(
+                srcOp, "Output spatial dims do not match block size"
+            );
+
+        if (C != bH * bW * C_out)
+            return rewriter.notifyMatchFailure(srcOp, "DepthToSpace channel dimension mismatch");
+
+        // square blocks.
+        if (bH != bW)
+            return rewriter.notifyMatchFailure(srcOp, "Non-square block size not supported");
+
+        int64_t blockSize = bH;
+        if (blockSize != 2)
+            return rewriter.notifyMatchFailure(srcOp, "Depth2space only supports blockSize of 2");
+
+        // 7. Determine DCR vs CRD by rebuilding the expected input maps and comparing.
+        //
+        //   DCR: C = ((d2 mod bH) * bW + (d3 mod bW)) * C_out + d1
+        //   CRD: C = d1 * (bH * bW) + (d2 mod bH) * bW + (d3 mod bW)
+        //
+        //   Reconstruct both and pick the one that matches the actual map.
+        MLIRContext *ctx = rewriter.getContext();
+        auto d0 = getAffineDimExpr(0, ctx);
+        auto d1 = getAffineDimExpr(1, ctx);
+        auto d2 = getAffineDimExpr(2, ctx);
+        auto d3 = getAffineDimExpr(3, ctx);
+
+        // DCR: ((d2 mod bH)*bW + (d3 mod bW))*C_out + d1
+        AffineExpr dcrC = (d2 % bH * bW + d3 % bW) * C_out + d1;
+        AffineMap expectedDCR =
+            AffineMap::get(4, 0, {d0, dcrC, d2.floorDiv(bH), d3.floorDiv(bW)}, ctx);
+
+        // CRD: d1*(bH*bW) + (d2 mod bH)*bW + (d3 mod bW)
+        AffineExpr crdC = d1 * (bH * bW) + d2 % bH * bW + d3 % bW;
+        AffineMap expectedCRD =
+            AffineMap::get(4, 0, {d0, crdC, d2.floorDiv(bH), d3.floorDiv(bW)}, ctx);
+
+        torq_hl::DepthToSpaceModeEnum d2sMode;
+        if (inputMap == expectedDCR) {
+            d2sMode = torq_hl::DepthToSpaceModeEnum::DCR;
+        }
+        else if (inputMap == expectedCRD) {
+            d2sMode = torq_hl::DepthToSpaceModeEnum::CRD;
+        }
+        else {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Input map does not match DCR or CRD DepthToSpace pattern"
+            );
+        }
+
+        // 8. Only integer element types supported by hardware kernel
+        auto elementType = inputType.getElementType();
+        if (!elementType.isInteger())
+            return rewriter.notifyMatchFailure(srcOp, "Only integer element types supported");
+
+        int dtype_size = elementType.getIntOrFloatBitWidth() / 8;
+        const auto wram_width = 32 / dtype_size;
+        const auto num_inputs = 2;
+
+        // 9. Emit torq_hl::DepthToSpaceOp
+        auto d2sOp = torq_hl::DepthToSpaceOp::create(
+            rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
+            blockSize, d2sMode,
+            createI8Const(
+                rewriter, srcOp, genD2SWeights(wram_width),
+                llvm::ArrayRef<int64_t>{wram_width * num_inputs}
+            ),
+            srcOp.getInputs()[0]
+        );
+
+        rewriter.replaceOp(srcOp, d2sOp.getOutput());
+        return success();
     }
 };
 
@@ -2200,6 +2363,7 @@ void populateLinalgToTorqHLPatterns(
     populateTrigPatterns(context, patterns);
 
     patterns.insert<TransposeOpConversion>(context);
+    patterns.insert<DepthToSpaceOpConversion>(context);
     patterns.insert<FillOpConversion>(context);
 
     patterns.insert<TensorPadOpConversion>(context);

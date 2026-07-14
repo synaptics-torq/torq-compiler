@@ -50,26 +50,24 @@ static void biasScale_inflate(Value &biases, int64_t inner_on, T biasValue, T sc
     auto padCh = (inflated_out_ch - out_ch) / 2;
 
     OpBuilder builder(biases.getContext());
+
+    builder.setInsertionPointAfterValue(biases);
+
+    auto padTensorType = RankedTensorType::get({padCh}, biasType.getElementType());
+
+    DenseElementsAttr biasAttr =
+        DenseElementsAttr::get(padTensorType, llvm::SmallVector<T>(padCh, biasValue));
+    auto padBiasV = arith::ConstantOp::create(builder, biases.getLoc(), biasAttr);
+
+    DenseElementsAttr scaleAttr =
+        DenseElementsAttr::get(padTensorType, llvm::SmallVector<T>(padCh, scaleValue));
+    auto padScaleV = arith::ConstantOp::create(builder, biases.getLoc(), scaleAttr);
+
+    // Create inflated empty tensor after constants are placed
     auto inflatedBias =
         tensor::EmptyOp::create(builder, biases.getLoc(), shape, biasType.getElementType());
 
-    // Inflate the biases tensor by padding biasValue and scaleValue at the end in interleaved
-    // fashion
-    builder.setInsertionPointAfterValue(biases);
-
-    DenseElementsAttr biasAttr = DenseElementsAttr::get(
-        RankedTensorType::get({padCh}, biasType.getElementType()),
-        llvm::SmallVector<T>(padCh, biasValue)
-    );
-    auto padBiasV =
-        arith::ConstantOp::create(builder, biases.getLoc(), biasType.getElementType(), biasAttr);
-
-    DenseElementsAttr scaleAttr = DenseElementsAttr::get(
-        RankedTensorType::get({padCh}, biasType.getElementType()),
-        llvm::SmallVector<T>(padCh, scaleValue)
-    );
-    auto padScaleV =
-        arith::ConstantOp::create(builder, biases.getLoc(), biasType.getElementType(), scaleAttr);
+    // Insert original bias/scale data at [0..out_ch) with stride=1
     auto iOp = tensor::InsertSliceOp::create(
                    builder, biases.getLoc(), biases, inflatedBias,
                    /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(0)},
@@ -78,18 +76,21 @@ static void biasScale_inflate(Value &biases, int64_t inner_on, T biasValue, T sc
     )
                    .getResult();
 
+    // Insert pad bias values at [out_ch .. out_ch+padCh) with stride=1
     iOp = tensor::InsertSliceOp::create(
               builder, biases.getLoc(), padBiasV, iOp,
               /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch)},
               /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(padCh)},
-              /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+              /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(1)}
     )
               .getResult();
+
+    // Insert pad scale values at [out_ch+padCh .. inflated_out_ch) with stride=1
     iOp = tensor::InsertSliceOp::create(
               builder, biases.getLoc(), padScaleV, iOp,
-              /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch + 1)},
+              /*offsets=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(out_ch + padCh)},
               /*sizes=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(padCh)},
-              /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+              /*strides=*/ArrayRef<OpFoldResult>{builder.getIndexAttr(1)}
     )
               .getResult();
 
@@ -464,7 +465,6 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
                 op.setOperand(1, weights);
                 op.setOperand(2, biases);
             });
-
             return success();
         }
 

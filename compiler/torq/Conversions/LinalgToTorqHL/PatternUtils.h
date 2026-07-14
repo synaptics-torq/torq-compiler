@@ -159,7 +159,9 @@ Operation *getFuseGroupOutputOp(Operation *op, IntegerAttr fuseGroupAttr);
 // - return padding info if found and update value to the source tensor
 // - return null padding if not found
 // Update value to the input of the folded operations
-PaddingInfo foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw = false);
+PaddingInfo foldBackwardPadding(
+    Value &value, PatternRewriter &rewriter, bool nchw = false, Value outputValue = nullptr
+);
 
 // Peel tensor.expand_shape / tensor.collapse_shape when this is the sole user.
 // Does not change ScaleInfo. Returns true if peeled.

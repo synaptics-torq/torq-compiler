@@ -44,7 +44,7 @@ LogicalResult dwNHWCInput(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewrit
     const uint32_t width = input_shape[2];
 
     const uint32_t ksize_x = weight_shape[2];
-    const uint32_t ksize_y = weight_shape[1];
+    const uint32_t ksize_y = weight_shape[0];
     const uint32_t channels = input_shape[3];
 
     assert(ksize_y == height && ksize_x == width);

@@ -1141,6 +1141,163 @@ class BfloatRsqrtPattern : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
+// Pattern to fold NHWC DepthToSpace (expand_shape → transpose → collapse_shape)
+// into a single linalg.generic with computed indexing map.
+//
+// Matches:
+//   %expanded = tensor.expand_shape %input [[0], [1], [2], [3, 4, 5]]
+//                 : tensor<NxHxWxC> into tensor<NxHxWx(bH)x(bW)x(C_out)>
+//   %transposed = linalg.transpose ins(%expanded) permutation = [0, 1, 3, 2, 4, 5]
+//                 : tensor<NxHxWx(bH)x(bW)x(C_out)> into tensor<NxHx(bH)xWx(bW)x(C_out)>
+//   %collapsed = tensor.collapse_shape %transposed [[0], [1, 2], [3, 4], [5]]
+//                 : tensor<NxHx(bH)xWx(bW)x(C_out)> into tensor<Nx(H')x(W')x(C_out)>
+//
+// Replaces with:
+//   transpose NHWC -> NCHW
+//   %result = linalg.generic with computed indexing map (NCHW)
+//   transpose NCHW -> NHWC
+//
+struct FoldNhwcDepthToSpacePattern : public OpRewritePattern<tensor::CollapseShapeOp> {
+    FoldNhwcDepthToSpacePattern(MLIRContext *context)
+        : OpRewritePattern<tensor::CollapseShapeOp>(context, /*benefit=*/10) {
+        setDebugName("FoldNhwcDepthToSpacePattern");
+    }
+
+    LogicalResult
+    matchAndRewrite(tensor::CollapseShapeOp collapseOp, PatternRewriter &rewriter) const override {
+        // Check collapse pattern: [[0], [1, 2], [3, 4], [5]]
+        auto collapseIndices = collapseOp.getReassociationIndices();
+        if (collapseIndices.size() != 4 || collapseIndices[0] != ArrayRef<int64_t>{0} ||
+            collapseIndices[1] != ArrayRef<int64_t>{1, 2} ||
+            collapseIndices[2] != ArrayRef<int64_t>{3, 4} ||
+            collapseIndices[3] != ArrayRef<int64_t>{5}) {
+            return rewriter.notifyMatchFailure(
+                collapseOp, "Not NHWC DepthToSpace collapse pattern"
+            );
+        }
+
+        // Get transpose op
+        auto transposeOp = collapseOp.getSrc().getDefiningOp<linalg::TransposeOp>();
+        if (!transposeOp)
+            return rewriter.notifyMatchFailure(collapseOp, "Input not from transpose");
+
+        // Check transpose permutation: [0, 1, 3, 2, 4, 5]
+        auto perm = transposeOp.getPermutation();
+        if (perm != ArrayRef<int64_t>{0, 1, 3, 2, 4, 5})
+            return rewriter.notifyMatchFailure(collapseOp, "Not NHWC DepthToSpace transpose");
+
+        // Get expand op
+        auto expandOp = transposeOp.getOperand(0).getDefiningOp<tensor::ExpandShapeOp>();
+        if (!expandOp)
+            return rewriter.notifyMatchFailure(collapseOp, "Transpose input not from expand");
+
+        // Check expand pattern: [[0], [1], [2], [3, 4, 5]]
+        auto expandIndices = expandOp.getReassociationIndices();
+        if (expandIndices.size() != 4 || expandIndices[0] != ArrayRef<int64_t>{0} ||
+            expandIndices[1] != ArrayRef<int64_t>{1} || expandIndices[2] != ArrayRef<int64_t>{2} ||
+            expandIndices[3] != ArrayRef<int64_t>{3, 4, 5}) {
+            return rewriter.notifyMatchFailure(collapseOp, "Not NHWC DepthToSpace expand pattern");
+        }
+
+        // Get input and output types
+        auto inputType = dyn_cast<RankedTensorType>(expandOp.getOperand(0).getType());
+        auto outputType = dyn_cast<RankedTensorType>(collapseOp.getResult().getType());
+        if (!inputType || !outputType || inputType.getRank() != 4 || outputType.getRank() != 4)
+            return rewriter.notifyMatchFailure(collapseOp, "Expected 4D tensors");
+
+        auto inputShape = inputType.getShape();   // [N, H, W, C] NHWC
+        auto outputShape = outputType.getShape(); // [N, H', W', C_out] NHWC
+        auto expandedShape = cast<RankedTensorType>(expandOp.getResult().getType()).getShape();
+        // expandedShape = [N, H, W, bH, bW, C_out]
+
+        int64_t N = inputShape[0];
+        int64_t H = inputShape[1];
+        int64_t W = inputShape[2];
+        int64_t C = inputShape[3];
+
+        int64_t bH = expandedShape[3];
+        int64_t bW = expandedShape[4];
+        int64_t C_out = expandedShape[5];
+
+        int64_t H_out = outputShape[1];
+        int64_t W_out = outputShape[2];
+
+        // Verify relationships
+        if (C != bH * bW * C_out || H_out != bH * H || W_out != bW * W) {
+            return rewriter.notifyMatchFailure(collapseOp, "DepthToSpace dimension mismatch");
+        }
+
+        MLIRContext *ctx = rewriter.getContext();
+        Location loc = collapseOp.getLoc();
+        Type elemType = inputType.getElementType();
+
+        // Step 1: Transpose input NHWC -> NCHW
+        Value nchwInput =
+            transposeValue(expandOp.getOperand(0), Permutation::nhwc2nchw(), loc, rewriter);
+
+        // Step 2: Build indexing maps for NCHW DepthToSpace
+        // Output: (d0, d1, d2, d3) -> (N, C_out, H', W')
+        // Input: (d0, d1, d2, d3) -> (N, C, H, W) where:
+        //   - N = d0
+        //   - C = ((d2 mod bH) * bW + (d3 mod bW)) * C_out + d1
+        //   - H = d2 floordiv bH
+        //   - W = d3 floordiv bW
+
+        auto d0 = getAffineDimExpr(0, ctx);
+        auto d1 = getAffineDimExpr(1, ctx);
+        auto d2 = getAffineDimExpr(2, ctx);
+        auto d3 = getAffineDimExpr(3, ctx);
+
+        auto blockH = d2 % bH;
+        auto blockW = d3 % bW;
+        auto blockIdx = blockH * bW + blockW;
+        auto cIdx = blockIdx * C_out + d1;
+
+        auto hIdx = d2.floorDiv(bH);
+        auto wIdx = d3.floorDiv(bW);
+
+        AffineMap inputMap = AffineMap::get(4, 0, {d0, cIdx, hIdx, wIdx}, ctx);
+        AffineMap outputMap = AffineMap::getMultiDimIdentityMap(4, ctx);
+
+        SmallVector<AffineMap> indexingMaps = {inputMap, outputMap};
+        SmallVector<utils::IteratorType> iteratorTypes(4, utils::IteratorType::parallel);
+
+        // Create output tensor in NCHW
+        auto nchwOutputShape = SmallVector<int64_t>{N, C_out, H_out, W_out};
+        Value nchwOutputInit = tensor::EmptyOp::create(rewriter, loc, nchwOutputShape, elemType);
+
+        // Create linalg.generic for DepthToSpace in NCHW
+        auto genericOp = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{nchwOutputInit.getType()}, ValueRange{nchwInput},
+            ValueRange{nchwOutputInit}, indexingMaps, iteratorTypes,
+            [&](OpBuilder &b, Location l, ValueRange args) {
+                linalg::YieldOp::create(b, l, args[0]);
+            }
+        );
+
+        // Step 3: Transpose output NCHW -> NHWC
+        Value nhwcOutput =
+            transposeValue(genericOp.getResult(0), Permutation::nchw2nhwc(), loc, rewriter);
+
+        rewriter.replaceOp(collapseOp, nhwcOutput);
+
+        // Clean up unused transpose and expand ops
+        if (transposeOp.getResult().use_empty())
+            rewriter.eraseOp(transposeOp);
+        if (expandOp.getResult().use_empty())
+            rewriter.eraseOp(expandOp);
+
+        LLVM_DEBUG({
+            llvm::dbgs() << "[FoldDepthToSpace] Folded NHWC DepthToSpace pattern:\n";
+            llvm::dbgs() << "  Input: " << inputType << "\n";
+            llvm::dbgs() << "  Output: " << outputType << "\n";
+            llvm::dbgs() << "  Block size: " << bH << "x" << bW << "\n";
+        });
+
+        return success();
+    }
+};
+
 void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet &patterns) {
     patterns.insert<TensorBitcastPattern>(context);
     patterns.insert<BfloatGenericErfPattern>(context);
@@ -1154,6 +1311,7 @@ void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet 
     patterns.insert<BfloatSqrtPattern>(context);
     patterns.insert<BfloatRsqrtPattern>(context);
     patterns.insert<CanonicalizeBF16CastComparePattern>(context);
+    patterns.insert<FoldNhwcDepthToSpacePattern>(context);
 }
 
 } // namespace mlir::syna::torq

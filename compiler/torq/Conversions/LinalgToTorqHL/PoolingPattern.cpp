@@ -154,7 +154,7 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
         const std::vector<int32_t> bias = {0};
         const std::vector<int32_t> scale = {1};
 
-        PaddingInfo padInfo = foldBackwardPadding(input, rewriter, IsNCHW);
+        PaddingInfo padInfo = foldBackwardPadding(input, rewriter, IsNCHW, srcOp.getResult(0));
 
         auto kernel = srcOp.getInputs()[1];
         auto kernelsShape = mlir::cast<RankedTensorType>(kernel.getType()).getShape();
@@ -528,7 +528,7 @@ struct PoolingNchwSumOpToDW2DConversion : public OpRewritePattern<linalg::Poolin
             return rewriter.notifyMatchFailure(linalgOp, "Only bf16 supported");
         }
 
-        PaddingInfo padInfo = foldBackwardPadding(input0, rewriter, true);
+        PaddingInfo padInfo = foldBackwardPadding(input0, rewriter, true, linalgOp.getResult(0));
 
         // Look for downstream elementwise mulf/divf generic that applies a scale.
         auto [scaleValue, fusedGenericOp] = tryExtractFusedScale(output);

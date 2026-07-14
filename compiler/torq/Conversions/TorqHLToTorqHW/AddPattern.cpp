@@ -53,6 +53,11 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
     }
     for (size_t i = 0; i < params.input1Shape.size(); ++i) {
         if (params.input1Shape[i] != params.outputShape[i]) {
+            // Special case: when output segmentation is enabled, the height dimension
+            // can be larger by 1 (e.g., input = 1x64x33x64xi8 and output = 1x64x34x64xi8).
+            if (i == 2 && addOp.getSegmentOutput() &&
+                params.input1Shape[i] + 1 == params.outputShape[i])
+                continue;
             return addOp.emitError()
                    << "Input and output shapes must match, got input shape: "
                    << params.input1Shape[i] << " and output shape: " << params.outputShape[i];
