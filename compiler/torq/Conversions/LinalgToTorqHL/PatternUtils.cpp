@@ -1381,7 +1381,7 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
         int64_t outputH = outputShape[hDim];
         int64_t outputW = outputShape[wDim];
 
-        if (outputH >= inputH || outputW >= inputW) {
+        if (outputH > inputH || outputW > inputW) {
             LLVM_DEBUG({
                 llvm::dbgs() << "[foldBackwardPadding] Skipping: output spatial dims (" << outputH
                              << "x" << outputW << ") >= padding_input spatial dims (" << inputH
