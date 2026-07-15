@@ -827,6 +827,70 @@ def create_boards_control(control_file: str | None, backend: str | None = None, 
     raise ValueError(f"Unknown board control backend: {resolved_backend}")
 
 
+def clear_jenkins_queue():
+    jenkins_url = os.environ.get("JENKINS_URL", "").rstrip("/")
+    jenkins_job = os.environ.get("JENKINS_JOB", "")
+    user = os.environ.get("JENKINS_USER", "")
+    token = os.environ.get("JENKINS_API_TOKEN", "")
+
+    if not jenkins_url or not user or not token:
+        raise Exception("Missing Jenkins credentials in environment variables, please set JENKINS_URL, JENKINS_USER, and JENKINS_API_TOKEN")
+
+    if not jenkins_job:
+        raise Exception("Missing Jenkins job name in environment variable JENKINS_JOB")
+
+    queue_url = f"{jenkins_url}/queue/api/json?tree=items[id,stuck,why,task[name,url]]"
+    res = requests.get(queue_url, auth=(user, token))
+
+    if res.status_code != 200:
+        raise Exception(f"Failed to query Jenkins queue, status code: {res.status_code}, response: {res.text}")
+
+    queue_items = res.json().get("items", [])
+    job_path = f"/job/{jenkins_job}/"
+    matching_items = []
+
+    for item in queue_items:
+        task = item.get("task") or {}
+        task_url = (task.get("url") or "").rstrip("/")
+        task_name = task.get("name") or ""
+
+        if task_name == jenkins_job or job_path in task_url:
+            matching_items.append(item)
+
+    if not matching_items:
+        print(f"No queued items found for job '{jenkins_job}'")
+        return
+
+    canceled_count = 0
+    failed_count = 0
+    cancel_url = f"{jenkins_url}/queue/cancelItem"
+
+    for item in matching_items:
+        queue_id = item.get("id")
+        if queue_id is None:
+            failed_count += 1
+            print("Skipping queue item with missing id")
+            continue
+
+        cancel_res = requests.post(cancel_url, params={"id": queue_id}, auth=(user, token))
+
+        # Jenkins typically returns 302 after successful cancel.
+        if cancel_res.status_code in (200, 201, 202, 204, 302):
+            canceled_count += 1
+            print(f"Canceled queue item id={queue_id}")
+        else:
+            failed_count += 1
+            print(
+                f"Failed to cancel queue item id={queue_id}, "
+                f"status code: {cancel_res.status_code}, response: {cancel_res.text}"
+            )
+
+    print(
+        f"Queue cancel summary for job '{jenkins_job}': "
+        f"canceled={canceled_count}, failed={failed_count}, total={len(matching_items)}"
+    )
+
+
 
 def main():
     parser = argparse.ArgumentParser(description="Script to create and manage Torq boards using Jenkins or local ADB devices.")
@@ -870,6 +934,8 @@ def main():
 
     force_release_parser = subcommands.add_parser("force-release", help="Force release a board by build ID, this can be used if the control file is lost or corrupted", parents=[backend_parent])
     force_release_parser.add_argument("--build-id", required=True, help="The build ID to force release")
+
+    subcommands.add_parser("clear-jenkins-queue", help="Clear all queued board creation requests in Jenkins, this can be used to cancel all pending requests")
 
     args = parser.parse_args()
 
@@ -969,6 +1035,9 @@ def main():
         if not isinstance(control, JenkinsBoardsControl):
             raise Exception("force-release is only supported for the Jenkins backend")
         control.force_release_build(args.build_id)
+
+    elif args.command == "clear-jenkins-queue":
+        clear_jenkins_queue()
 
     else:
         raise Exception(f"Unknown command {args.command}")
