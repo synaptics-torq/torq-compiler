@@ -36,7 +36,9 @@ jobs:
 
     timeout-minutes: 50 # this is not enough in case there is a lot of contention on astra machina but we can't increase it as codebuild kills the job at 60 mins anyways
     
-    concurrency: astra_machina_sl # only one job at a time can take control of the boards
+    concurrency:
+      group: astra_machina_sl # only one job at a time can take control of the boards
+      queue: max
 
     env:
       RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
