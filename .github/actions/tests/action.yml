@@ -240,7 +240,7 @@ runs:
         JENKINS_URL: ${{ inputs.jenkins_url }}
         JENKINS_JOB: ${{ inputs.jenkins_job }}
       run: |
-        python3 -m torq.utils.boards setup-for-ci \
+        python3 -u -m torq.utils.boards setup-for-ci \
             --control-file bench-control.json \
             --local-runner-path ${{github.workspace}}/release/tools/astra-sl-torq-run-module \
             --local-ko-path ${{github.workspace}}/release/lib/syna_npu.ko \
@@ -296,7 +296,7 @@ runs:
         JENKINS_URL: ${{ inputs.jenkins_url }}
         JENKINS_JOB: ${{ inputs.jenkins_job }}
       run: |
-        python3 -m torq.utils.boards release \
+        python3 -u -m torq.utils.boards release \
             --control-file bench-control.json
 
     - name: Create compressed test data cache artifact
