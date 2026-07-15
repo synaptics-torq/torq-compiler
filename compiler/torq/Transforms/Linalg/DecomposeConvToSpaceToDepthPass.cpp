@@ -190,7 +190,8 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
         Value s2dInput = getSpaceToDepth(input, bH, bW, rewriter);
         Value s2dFilter = getSpaceToDepth(filter, bH, bW, rewriter);
 
-        setCompileTimeConstAttr(s2dFilter.getDefiningOp());
+        s2dFilter =
+            createCompileTimeConstOp(s2dFilter.getDefiningOp(), rewriter).value_or(s2dFilter);
 
         // ------------------------------------------------------------------ //
         // 3. New conv with reduced kernel and absorbed stride.

@@ -3115,34 +3115,6 @@ FailureOr<Value> createNewBias(
     return bias;
 }
 
-static void reduceBodyYield(OpBuilder &b, Location loc, ValueRange args) {
-    linalg::YieldOp::create(b, loc, ArrayRef<Value>{args[0]});
-}
-
-static void reduceBodyExtYield(OpBuilder &b, Location loc, ValueRange args) {
-    Value y = arith::ExtSIOp::create(b, loc, b.getI32Type(), args[0]);
-    linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
-}
-
-static void reduceBodyTruncYield(OpBuilder &b, Location loc, ValueRange args) {
-    // Warning: the assumption is that even if the bias type is 64bits, the actual value fits 32bits
-    Value y = arith::TruncIOp::create(b, loc, b.getI32Type(), args[0]);
-    linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
-}
-
-static void reduceBodyExtFYield(OpBuilder &b, Location loc, ValueRange args) {
-    // Bias element type may already be f32 (e.g. quantized convolutions whose
-    // rescale tail is in f32). ExtFOp requires different source/result types,
-    // so only emit it when widening from a narrower float type.
-    if (args[0].getType().isF32()) {
-        linalg::YieldOp::create(b, loc, ArrayRef<Value>{args[0]});
-    }
-    else {
-        Value y = arith::ExtFOp::create(b, loc, b.getF32Type(), args[0]);
-        linalg::YieldOp::create(b, loc, ArrayRef<Value>{y});
-    }
-}
-
 FailureOr<Value> computeBias(
     FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp, int biasChDim
 ) {
@@ -3177,7 +3149,7 @@ FailureOr<Value> computeBias(
 
     Value bias = *maybeBias;
     auto biasTy = dyn_cast<ShapedType>(bias.getType());
-    // All non-channel dims will be reduced
+    // All non-channel dims will be collapsed to 1D
     SmallVector<int64_t> outputShape{biasTy.getShape()[channelDim]};
     if (outputShape != biasShape) {
         LLVM_DEBUG({ llvm::dbgs() << "computeBias: init and output shape mismatch\n"; });
@@ -3187,25 +3159,54 @@ FailureOr<Value> computeBias(
     if (biasTy.getRank() == 2) {
         channelDim = biasChDim;
     }
-    // Reduce across all non-channel dims to produce per-channel bias.
-    SmallVector<int64_t, 4> reduceD;
-    reduceD.reserve(biasTy.getRank() - 1);
-    for (int i = 0; i < biasTy.getRank(); ++i) {
-        if (i != channelDim)
-            reduceD.push_back(i);
-    }
 
     Type biasElTy = biasTy.getElementType();
-    auto reduceBody = biasElTy.isFloat()       ? reduceBodyExtFYield
-                      : biasElTy.isInteger(32) ? reduceBodyYield
-                      : biasElTy.isInteger(64) ? reduceBodyTruncYield
-                                               : reduceBodyExtYield;
 
     Type torqBiasTy = biasElTy.isFloat() ? (Type)builder.getF32Type() : (Type)builder.getI32Type();
-    Value empty = tensor::EmptyOp::create(builder, loc, biasShape, torqBiasTy).getResult();
-    bias = linalg::ReduceOp::create(builder, loc, bias, empty, reduceD, reduceBody).getResult(0);
-    setCompileTimeConstAttr(bias.getDefiningOp());
 
+    // Rank-reducing slice: fix index 0 on all non-channel dims (values are uniform there).
+    SmallVector<OpFoldResult> offsets(biasTy.getRank(), builder.getIndexAttr(0));
+    SmallVector<OpFoldResult> sizes(biasTy.getRank(), builder.getIndexAttr(1));
+    SmallVector<OpFoldResult> strides(biasTy.getRank(), builder.getIndexAttr(1));
+    sizes[biasChDim] = builder.getIndexAttr(outputShape[0]);
+
+    bias = tensor::ExtractSliceOp::create(
+               builder, loc, RankedTensorType::get(outputShape, biasElTy), bias, offsets, sizes,
+               strides
+    )
+               .getResult();
+
+    // Cast element type to the accumulator type used by the hardware (f32 or i32).
+    if (biasElTy != torqBiasTy) {
+        auto castTy = RankedTensorType::get(outputShape, torqBiasTy);
+        auto initTensor =
+            tensor::EmptyOp::create(builder, loc, ArrayRef<int64_t>(outputShape), torqBiasTy)
+                .getResult();
+        AffineMap identityMap = builder.getMultiDimIdentityMap(1);
+        auto genericOp = linalg::GenericOp::create(
+            builder, loc, TypeRange{castTy}, ValueRange{bias}, ValueRange{initTensor},
+            ArrayRef<AffineMap>{identityMap, identityMap},
+            SmallVector<utils::IteratorType, 1>{utils::IteratorType::parallel},
+            [&](OpBuilder &b, Location nestedLoc, ValueRange args) {
+                Value castResult;
+                if (biasElTy.isFloat())
+                    castResult =
+                        arith::ExtFOp::create(b, nestedLoc, torqBiasTy, args[0]).getResult();
+                else if (biasElTy.isInteger(64))
+                    // Warning: assumes 64-bit bias values fit in 32 bits
+                    castResult =
+                        arith::TruncIOp::create(b, nestedLoc, torqBiasTy, args[0]).getResult();
+                else
+                    castResult =
+                        arith::ExtSIOp::create(b, nestedLoc, torqBiasTy, args[0]).getResult();
+                linalg::YieldOp::create(b, nestedLoc, ArrayRef<Value>{castResult});
+            }
+        );
+        bias = genericOp.getResult(0);
+    }
+
+    IRRewriter irRewriter(builder.getContext());
+    bias = createCompileTimeConstOp(bias.getDefiningOp(), irRewriter).value_or(bias);
     return bias;
 }
 
@@ -3608,8 +3609,8 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
     )
               .getResult();
 
-    biasScale = iOp;
-    setCompileTimeConstAttr(biasScale.getDefiningOp());
+    IRRewriter irRewriter(builder.getContext());
+    biasScale = createCompileTimeConstOp(iOp.getDefiningOp(), irRewriter).value_or(iOp);
     return biasScale;
 }
 
@@ -3698,10 +3699,7 @@ FailureOr<Value> buildWeightWithZp(Value weights, Value weightZp, PatternRewrite
                 linalg::YieldOp::create(b, loc, ArrayRef<Value>{sub});
             }
         ).getResult(0);
-    weights = rescaledWeights;
-    // Mark as compile-time-const so later passes can fold/use it as static data.
-    setCompileTimeConstAttr(weights.getDefiningOp());
-    return weights;
+    return rescaledWeights;
 }
 
 static Attribute getConstantSplatAttr(mlir::Value val) {

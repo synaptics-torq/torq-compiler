@@ -94,9 +94,8 @@ static void biasScale_inflate(Value &biases, int64_t inner_on, T biasValue, T sc
     )
               .getResult();
 
-    biases = iOp;
-
-    setCompileTimeConstAttr(biases.getDefiningOp());
+    IRRewriter irRewriter(builder.getContext());
+    biases = createCompileTimeConstOp(iOp.getDefiningOp(), irRewriter).value_or(iOp);
 }
 
 // Convert weights from OI[HW] to OI[HW]O layout
@@ -121,8 +120,7 @@ static mlir::Value weights_OIHW_to_OIHWO(
     auto packedWeights =
         linalg::PackOp::create(rewriter, loc, weights, empty, innerDimsPos, innerTiles, zeroVal);
 
-    setCompileTimeConstAttr(packedWeights);
-    return packedWeights.getResult();
+    return createCompileTimeConstOp(packedWeights, rewriter).value_or(packedWeights.getResult());
 }
 
 // FIXME: remove and use createI8Const from CoversionUtils.h
@@ -318,8 +316,7 @@ static mlir::Value weights_swap_even_odd(
     auto res =
         tensor::InsertSliceOp::create(rewriter, loc, oddExtract, r1, ins1Off, ins1Sz, insStride);
 
-    setCompileTimeConstAttr(res);
-    return res.getResult();
+    return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
 }
 
 // Insert a dimension of size 1 at the specified position
@@ -337,8 +334,7 @@ weights_insert_dimension(PatternRewriter &rewriter, Location loc, Value weights,
     newShape.insert(newShape.begin() + insertDim, 1);
     auto newTy = RankedTensorType::get(newShape, wtRankedTy.getElementType());
     auto res = tensor::ExpandShapeOp::create(rewriter, loc, newTy, weights, reassoc);
-    setCompileTimeConstAttr(res);
-    return res.getResult();
+    return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
 }
 
 // Pack depthwise 1D weights from [Ch, Kh, Kw] to [(Ch/32), Kh, Kw, 32]
@@ -372,8 +368,7 @@ static mlir::Value weights_ChHW_to_ChHW32(
 
     auto res = linalg::PackOp::create(rewriter, loc, weights, empty, innerDimsPos, innerTiles);
 
-    setCompileTimeConstAttr(res);
-    return res.getResult();
+    return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
 }
 
 // Pad the specified dimension to padDimAlignment with 0s at the end
@@ -405,8 +400,7 @@ static mlir::Value weights_pad_with_zero(
     SmallVector<OpFoldResult> insSz = sizes;
     auto res =
         tensor::InsertSliceOp::create(rewriter, loc, weights, paddedEmpty, insOff, insSz, strides);
-    setCompileTimeConstAttr(res);
-    return res.getResult();
+    return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
 }
 
 template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePattern<ConvOpT> {
@@ -512,7 +506,7 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
                           weights, reassoc
             )
                           .getResult();
-            setCompileTimeConstAttr(weights.getDefiningOp());
+            weights = createCompileTimeConstOp(weights.getDefiningOp(), rewriter).value_or(weights);
 
             // Expand dimensions 1 weights using a memref::ExpandShapeOp
             weightShape[1] = weightShape[1] * sh;
@@ -523,7 +517,7 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
                           reassoc
             )
                           .getResult();
-            setCompileTimeConstAttr(weights.getDefiningOp());
+            weights = createCompileTimeConstOp(weights.getDefiningOp(), rewriter).value_or(weights);
 
             // Segment input rown in sh groups (even/odd rows for sh == 2) and reshape accordingly
             insertSegmentationOp(op, rewriter, sh, 0);

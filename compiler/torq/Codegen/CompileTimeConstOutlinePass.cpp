@@ -316,10 +316,11 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
         //   5. Build new empty-shell loop nest (with initTensor iter-arg) and move
         //      the pruned ops into it.
         //   6. Wire insert-slice at innermost, propagate upward, extract in original.
-
-        if (!isCompileTimeConst(op)) {
+        if (!isCompileTimeConstAttr(op)) {
+            LLVM_DEBUG(llvm::dbgs() << "Op is not marked as compile-time-const: "; op->dump(););
             return failure();
         }
+
         LLVM_DEBUG(llvm::dbgs() << "Op to compute inside ForOp: "; op->dump(););
 
         // Collect the full loop nest (innermost first).
@@ -360,9 +361,6 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
         //    clone the original def-chain ops into the new shells, wire insert.
         // -------------------------------------------------------------------
         // Remove compile-time-const attrs before building to avoid re-matching.
-        for (auto *origOp : origDefChain)
-            removeCompileTimeConstAttr(origOp);
-
         Value constV;
         {
             OpBuilder::InsertionGuard g(rewriter);
@@ -458,7 +456,9 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
                 for (auto *chainOp : orderedChain) {
                     if (chainOp->getBlock() != origBody)
                         continue;
-                    rewriter.clone(*chainOp, moveMapping);
+                    auto cloneOp = rewriter.clone(*chainOp, moveMapping);
+                    removeCompileTimeConstAttr(cloneOp
+                    ); // Cloning keeps the original attr, remove it to avoid re-matching.
                 }
             }
             Value lastV = moveMapping.lookup(op->getResult(0));
@@ -471,8 +471,8 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
             propagateResultsUpward(rewriter, loc, newCloneLoops);
 
             LoopLikeOpInterface outermostClone = newCloneLoops[0];
-            setCompileTimeConstAttr(outermostClone.getOperation());
-            constV = outermostClone.getOperation()->getResult(0);
+            constV = createCompileTimeConstOp(outermostClone.getOperation(), rewriter)
+                         .value_or(outermostClone.getOperation()->getResult(0));
             assert(
                 succeeded(verify(constV.getDefiningOp())) && "Expected defining op for const result"
             );
@@ -495,15 +495,22 @@ class CompileTimeConstOutlinePass
     using CompileTimeConstOutlineBase::CompileTimeConstOutlineBase;
 
     void runOnOperation() override {
-        SmallVector<Operation *> opsToProcess;
         auto funcOp = getOperation();
-        funcOp->walk([&](Operation *op) {
-            if (!isCompileTimeConst(op)) {
-                return WalkResult::advance();
+        LLVM_DEBUG(llvm::dbgs() << "Running CompileTimeConstOutlinePass on function: "
+                                << funcOp.getName() << "\n";);
+        auto valuesToProcess = collectAllCompileTimeConstOps(funcOp);
+        SmallVector<Operation *> opsToProcess;
+        for (auto val : valuesToProcess) {
+            if (auto defOp = val.getDefiningOp()) {
+                opsToProcess.push_back(defOp);
+                setCompileTimeConstAttr(defOp);
+                LLVM_DEBUG({
+                    llvm::dbgs() << "Collecting op to compute: ";
+                    defOp->dump();
+                });
             }
-            opsToProcess.push_back(op);
-            return WalkResult::advance();
-        });
+        }
+
         RewritePatternSet patterns(&getContext());
         patterns.add<ConvertOpInsideForOpRewriter>(&getContext());
 

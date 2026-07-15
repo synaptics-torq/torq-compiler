@@ -1,7 +1,16 @@
 #include "torq/Utils/ExecutorAssignment.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/IR/Operation.h"
+#include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Utils/ComputeConstants.h"
 
+#include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Operation.h"
+#include "llvm/Support/Debug.h"
+
+using namespace mlir::iree_compiler;
 namespace mlir::syna::torq {
 
 static std::string EXECUTOR_ATTR_NAME = "torq-executor";
@@ -58,27 +67,29 @@ Operation *getDefiningOpForBlockArg(BlockArgument bArg) {
     return parentOp->getOperand(bArg.getArgNumber()).getDefiningOp();
 }
 
-void setCompileTimeConstAttr(Operation *op) {
-    if (!op)
-        return;
+bool isCompileTimeConst(Operation *op);
+SmallVector<Value> cloneCompileTimeConst(Operation *op, IRRewriter &rewriter);
 
-    op->setAttr(COMPILE_TIME_CONST_ATTR_NAME, BoolAttr::get(op->getContext(), true));
-    setTargetExecutorAttr(op, torq_hl::Executor::Host);
-    SmallVector<Operation *, 4> worklist{op};
+FailureOr<Value> createCompileTimeConstOp(Operation *maybeConstOp, RewriterBase &rewriter) {
+    if (!maybeConstOp)
+        return failure();
+
+    setTargetExecutorAttr(maybeConstOp, torq_hl::Executor::Host);
+    SmallVector<Operation *, 4> worklist{maybeConstOp};
     llvm::DenseSet<Operation *> visited;
-    SmallVector<Operation *, 4> opsOfInterest;
+    DenseSet<Operation *> opsOfInterest;
     while (!worklist.empty()) {
         Operation *currentOp = worklist.pop_back_val();
         visited.insert(currentOp);
 
-        // Collect all ops nested inside the regions of `op` into `result`.
+        // Collect all ops nested inside the regions of `currentOp` into `opsOfInterest`.
         // This ensures that ops inside scf.for / scf.forall bodies are also marked
         // as host executor when the parent loop is a compile-time-const op.
         for (Region &region : currentOp->getRegions()) {
             for (Block &block : region.getBlocks()) {
                 for (Operation &nestedOp : block.getOperations()) {
                     if (visited.insert(&nestedOp).second) {
-                        opsOfInterest.push_back(&nestedOp);
+                        opsOfInterest.insert(&nestedOp);
                         worklist.push_back(&nestedOp);
                     }
                 }
@@ -97,27 +108,115 @@ void setCompileTimeConstAttr(Operation *op) {
                     continue;
             }
 
+            // the value depends on the input, we cannot compute this
+            if (isa<IREE::TensorExt::DispatchTensorLoadOp, IREE::HAL::InterfaceBindingSubspanOp>(
+                    defOp
+                )) {
+                return failure();
+            }
+
             if (!visited.insert(defOp).second)
                 continue;
 
-            opsOfInterest.push_back(defOp);
+            opsOfInterest.insert(defOp);
             worklist.push_back(defOp);
         }
     }
+    setTargetExecutorAttr(maybeConstOp, torq_hl::Executor::Host);
     for (Operation *op : opsOfInterest) {
-        if (op->hasAttr(COMPILE_TIME_CONST_ATTR_NAME) && op->hasOneUse()) {
-            op->removeAttr(COMPILE_TIME_CONST_ATTR_NAME);
+        if (auto compileConstOp = dyn_cast<torq_hl::CompileInputToConstOp>(op)) {
+            if (!compileConstOp.getInput().getDefiningOp()) {
+                removeCompileTimeConst(op, rewriter);
+                continue;
+            }
+            setTargetExecutorAttr(
+                compileConstOp.getInput().getDefiningOp(), torq_hl::Executor::Host
+            );
+            if (op->hasOneUse()) {
+                removeCompileTimeConst(op, rewriter);
+                continue;
+            }
+            for (auto clone : cloneCompileTimeConst(op, rewriter)) {
+                if (opsOfInterest.contains(clone.use_begin()->getOwner())) {
+                    removeCompileTimeConst(clone.getDefiningOp(), rewriter);
+                }
+            }
+            continue;
         }
         setTargetExecutorAttr(op, torq_hl::Executor::Host);
     }
+    RewriterBase::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointAfter(maybeConstOp);
+    auto constOp = torq_hl::CompileInputToConstOp::create(
+        rewriter, maybeConstOp->getLoc(), maybeConstOp->getResult(0).getType(),
+        maybeConstOp->getResult(0)
+    );
+    return constOp.getOutput();
 }
 
+SmallVector<Value> cloneCompileTimeConst(Operation *op, RewriterBase &rewriter) {
+    auto constOp = dyn_cast<torq_hl::CompileInputToConstOp>(op);
+    if (!constOp)
+        return {op->getResult(0)};
+
+    Value input = constOp.getInput();
+    Value output = constOp.getOutput();
+
+    // Snapshot use pointers before modifying the list; iterating output.getUses()
+    // while calling use.set() invalidates the iterator (each set() moves the use
+    // out of output's linked list), causing only the first use to be processed.
+    SmallVector<OpOperand *> uses;
+    for (OpOperand &use : output.getUses())
+        uses.push_back(&use);
+
+    RewriterBase::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointAfter(op);
+    SmallVector<Value> clonedOutputs;
+    for (OpOperand *use : uses) {
+        auto cloneOp =
+            torq_hl::CompileInputToConstOp::create(rewriter, op->getLoc(), input.getType(), input);
+        use->set(cloneOp.getOutput());
+        clonedOutputs.push_back(cloneOp.getOutput());
+    }
+    return clonedOutputs;
+}
+
+void removeCompileTimeConst(Operation *op, RewriterBase &rewriter) {
+    auto constOp = dyn_cast<torq_hl::CompileInputToConstOp>(op);
+    if (!constOp)
+        return;
+
+    Value input = constOp.getInput();
+
+    rewriter.replaceOp(op, ValueRange{input});
+}
+
+bool isCompileTimeConst(Operation *op) { return isa<torq_hl::CompileInputToConstOp>(op); }
+
+SmallVector<Value> collectAllCompileTimeConstOps(Operation *op) {
+    SmallVector<Value> valuesToProcess;
+    op->walk([&](Operation *op) {
+        if (!isCompileTimeConst(op)) {
+            return WalkResult::advance();
+        }
+
+        Operation *compileOp = op;
+        while (auto tOp = dyn_cast_or_null<torq_hl::CompileInputToConstOp>(compileOp)) {
+            compileOp = tOp.getInput().getDefiningOp();
+        }
+        if (compileOp) {
+            valuesToProcess.push_back(compileOp->getResult(0));
+        }
+        return WalkResult::advance();
+    });
+    return valuesToProcess;
+}
+
+void setCompileTimeConstAttr(Operation *op) {
+    op->setAttr(COMPILE_TIME_CONST_ATTR_NAME, BoolAttr::get(op->getContext(), true));
+}
+
+bool isCompileTimeConstAttr(Operation *op) { return op->hasAttr(COMPILE_TIME_CONST_ATTR_NAME); }
 void removeCompileTimeConstAttr(Operation *op) { op->removeAttr(COMPILE_TIME_CONST_ATTR_NAME); }
 
-bool isCompileTimeConst(Operation *op) {
-    auto attr = op->getAttr(COMPILE_TIME_CONST_ATTR_NAME);
-    if (!attr)
-        return false;
-    return mlir::cast<BoolAttr>(attr).getValue();
-}
 } // namespace mlir::syna::torq

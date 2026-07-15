@@ -292,7 +292,8 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
                 }
             ).getResult(0);
         if (succeeded(outlineAndReturnOps(indices))) {
-            setCompileTimeConstAttr(scaledIndices.getDefiningOp());
+            scaledIndices = createCompileTimeConstOp(scaledIndices.getDefiningOp(), rewriter)
+                                .value_or(scaledIndices);
         }
         return success();
     }
@@ -345,7 +346,8 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         );
         valuesTensorType = cast<RankedTensorType>(valuesTensor.getType());
         if (valuesAreConstant) {
-            setCompileTimeConstAttr(valuesTensor.getDefiningOp());
+            valuesTensor = createCompileTimeConstOp(valuesTensor.getDefiningOp(), rewriter)
+                               .value_or(valuesTensor);
         }
         return success();
     }
@@ -406,7 +408,8 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
     ) const {
         Location loc = srcOp.getLoc();
         Value packedTable = buildPackedTable(rewriter, loc, cstData, /*signExtend=*/true);
-        setCompileTimeConstAttr(packedTable.getDefiningOp());
+        packedTable =
+            createCompileTimeConstOp(packedTable.getDefiningOp(), rewriter).value_or(packedTable);
         auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
         rewriter.replaceOpWithNewOp<syna::torq_hl::TableOp>(
             srcOp, resultType, createInitTensor(srcOp, rewriter, resultType),
@@ -452,7 +455,7 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         )
                       .getResult();
 
-        setCompileTimeConstAttr(rotated.getDefiningOp());
+        rotated = createCompileTimeConstOp(rotated.getDefiningOp(), rewriter).value_or(rotated);
         auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
         rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
             srcOp, outType, createInitTensor(srcOp, rewriter, outType), rotated, input
@@ -536,7 +539,8 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         bool valuesAreConstant = succeeded(maybeConst);
 
         if (valuesAreConstant) {
-            setCompileTimeConstAttr(valuesTensor.getDefiningOp());
+            valuesTensor = createCompileTimeConstOp(valuesTensor.getDefiningOp(), rewriter)
+                               .value_or(valuesTensor);
         }
         if (!valuesAreConstant) {
             LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteAsDynamicGather\n");
@@ -661,7 +665,8 @@ class I16ExtractTableOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         Location loc = srcOp.getLoc();
         Value packedTable = buildPackedTable(rewriter, loc, tableTensor, /*signExtend=*/false);
-        setCompileTimeConstAttr(packedTable.getDefiningOp());
+        packedTable =
+            createCompileTimeConstOp(packedTable.getDefiningOp(), rewriter).value_or(packedTable);
 
         auto resultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
         LLVM_DEBUG(llvm::dbgs() << "[I16ExtractTableOpPattern] SUCCESS: emitting TableOp\n");

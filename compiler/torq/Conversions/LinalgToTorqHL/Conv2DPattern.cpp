@@ -107,8 +107,7 @@ static FailureOr<Value> expandWeightsForDilation(
         }
     );
 
-    setCompileTimeConstAttr(genericOp);
-    return genericOp.getResult(0);
+    return createCompileTimeConstOp(genericOp, rewriter).value_or(genericOp.getResult(0));
 }
 
 // Helper function to convert tensor.insert_slice with stride > 1 to InterleavedInsertOp
@@ -422,8 +421,13 @@ Value preConversionWeights(
             transposedWeights, reassoc
         );
     }
-    setCompileTimeConstAttr(transposedWeights.getDefiningOp());
-    return transposedWeights;
+    auto cOp = createCompileTimeConstOp(transposedWeights.getDefiningOp(), rewriter)
+                   .value_or(transposedWeights);
+    LLVM_DEBUG({
+        llvm::dbgs() << "Created compile-time constant for weights\n";
+        cOp.getDefiningOp()->dump();
+    });
+    return cOp;
 }
 
 static Value postConversion(
@@ -516,6 +520,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             return rewriter.notifyMatchFailure(convOp, "Conv2D match failed");
         }
 
+        LLVM_DEBUG(llvm::dbgs() << "Matched Conv2D/DepthwiseConv2D\n";);
         // Recover values used by the rewrite half.
         bool isDepthwise = isLinalgDW(convOp.getOperation());
         Value input = convOp.image();

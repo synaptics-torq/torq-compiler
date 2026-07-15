@@ -36,25 +36,15 @@ class CompileTimeConstComputePass
     using CompileTimeConstComputeBase::CompileTimeConstComputeBase;
 
     void runOnOperation() override {
-        SmallVector<Value> valuesToProcess;
-
         auto funcOp = getOperation();
+        auto valuesToProcess = collectAllCompileTimeConstOps(funcOp);
         funcOp->walk([&](Operation *op) {
-            if (op->getNumResults() != 1) {
-                LLVM_DEBUG({
-                    llvm::dbgs(
-                    ) << "Skipping compile-time const op with unsupported result count: ";
-                    op->dump();
-                });
-                return WalkResult::advance();
-            }
-
             if (!isCompileTimeConst(op)) {
                 return WalkResult::advance();
             }
-
-            valuesToProcess.push_back(op->getResult(0));
-            return WalkResult::advance();
+            IRRewriter rewriter(op->getContext());
+            removeCompileTimeConst(op, rewriter);
+            return WalkResult::skip();
         });
 
         if (valuesToProcess.empty()) {

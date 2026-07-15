@@ -298,7 +298,7 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
 
         // Mark filter as compile-time constant if applicable
         if (filter.getDefiningOp()) {
-            setCompileTimeConstAttr(filter.getDefiningOp());
+            filter = createCompileTimeConstOp(filter.getDefiningOp(), rewriter).value_or(filter);
         }
 
         // Create torq_hl.conv1d operation (outputs 5D [N, F, 1, Ow, Kw])

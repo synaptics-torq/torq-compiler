@@ -225,7 +225,7 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
             weights = transposeValue(weights, SmallVector<int64_t>{1, 0}, loc, rewriter);
         }
         if (auto wDef = weights.getDefiningOp()) {
-            setCompileTimeConstAttr(wDef);
+            weights = createCompileTimeConstOp(wDef, rewriter).value_or(weights);
         }
 
         // Build the torq_hl.fully_connected:

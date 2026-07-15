@@ -8,6 +8,7 @@
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
+#include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ExecutorAssignment.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -27,25 +28,24 @@ class CompileTimeConstStubsPass
     using CompileTimeConstStubsBase::CompileTimeConstStubsBase;
 
     void runOnOperation() override {
-        SmallVector<Operation *> opsToProcess;
         auto funcOp = getOperation();
+        auto valuesToProcess = collectAllCompileTimeConstOps(funcOp);
         funcOp->walk([&](Operation *op) {
             if (!isCompileTimeConst(op)) {
                 return WalkResult::advance();
             }
-            opsToProcess.push_back(op);
-            return WalkResult::advance();
+            IRRewriter rewriter(op->getContext());
+            removeCompileTimeConst(op, rewriter);
+            return WalkResult::skip();
         });
-
         OpBuilder builder(&getContext());
 
-        for (auto op : opsToProcess) {
-            builder.setInsertionPoint(op);
+        for (auto val : valuesToProcess) {
+            builder.setInsertionPoint(val.getDefiningOp());
 
-            OpResult val = op->getResult(0);
             ShapedType shapeType = cast<mlir::ShapedType>(val.getType());
 
-            auto emptyOp = tensor::EmptyOp::create(builder, op->getLoc(), shapeType, {});
+            auto emptyOp = tensor::EmptyOp::create(builder, val.getLoc(), shapeType, {});
             val.replaceAllUsesWith(emptyOp.getResult());
         }
     }

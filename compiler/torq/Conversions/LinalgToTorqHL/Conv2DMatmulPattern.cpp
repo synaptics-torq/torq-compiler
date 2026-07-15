@@ -146,8 +146,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
             }
         }
         // Weights may become static payload.
-        setCompileTimeConstAttr(weights.getDefiningOp());
-        return weights;
+        return createCompileTimeConstOp(weights.getDefiningOp(), rewriter).value_or(weights);
     }
 
     Value postConversion(Value output, PatternRewriter &rewriter, bool isNCHW, bool isFC) const {

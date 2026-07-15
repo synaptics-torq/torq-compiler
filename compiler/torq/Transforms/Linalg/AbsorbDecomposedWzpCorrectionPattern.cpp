@@ -130,11 +130,12 @@ struct AbsorbWzpCorrectionPattern : public RewritePattern {
                 );
             }
         );
-        setCompileTimeConstAttr(adjustedOp);
+        auto adjustedConst =
+            createCompileTimeConstOp(adjustedOp, rewriter).value_or(adjustedOp.getResult(0));
 
         // Swap the weight operand and fix the block arg type.
         rewriter.modifyOpInPlace(convAnchor, [&]() {
-            convAnchor->setOperand(1, adjustedOp.getResult(0));
+            convAnchor->setOperand(1, adjustedConst);
             if (!convAnchor->getRegions().empty()) {
                 Block &body = convAnchor->getRegion(0).front();
                 if (body.getNumArguments() > 1)

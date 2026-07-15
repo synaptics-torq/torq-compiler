@@ -1017,4 +1017,16 @@ def TorqHL_DepthToSpaceOp: TorqHL_LayerOp<"DepthToSpace"> {
   ));
 }
 
+def TorqHL_CompileInputToConstOp: TorqHL_Op<"compile_input_to_const"> {
+  let summary = "Mark a value as a compile-time constant";
+  let description = [{
+    Wraps the result of an operation to mark it as a compile-time constant,
+    indicating that it should be evaluated on the host at compile time.
+    The output type is the same as the input type.
+  }];
+
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$output);
+}
+
 #endif // TORQHL_DIALECT_IR_TORQHLOPS

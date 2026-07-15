@@ -515,6 +515,13 @@ FailureOr<SmallVector<DenseElementsAttr>> computeValueFromOps(
     Location loc, ArrayRef<Value> values, ArrayRef<SmallVector<Operation *>> opsSets,
     llvm::ArrayRef<Value> assumeZero
 ) {
+    LLVM_DEBUG({
+        llvm::dbgs() << "Computing values from operations:\n";
+        for (auto value : values) {
+            llvm::dbgs() << "Value: ";
+            value.dump();
+        }
+    });
     if (values.empty() || values.size() != opsSets.size()) {
         return failure();
     }
@@ -561,7 +568,7 @@ FailureOr<SmallVector<Operation *>>
 outlineAndReturnOps(Value value, bool recursive, llvm::ArrayRef<Value> assumeZero) {
 
     LLVM_DEBUG({
-        llvm::dbgs() << "Trying to compute value of:\n";
+        llvm::dbgs() << "Collecting ops to compute for value:\n";
         value.dump();
     });
 
@@ -684,7 +691,11 @@ outlineAndReturnOps(Value value, bool recursive, llvm::ArrayRef<Value> assumeZer
                 }
 
                 if (operandOp->isProperAncestor(currentOp)) {
-                    LLVM_DEBUG({ llvm::dbgs() << "Operand and Parent stuck in cycle\n"; });
+                    LLVM_DEBUG({
+                        llvm::dbgs() << "Operand and Parent stuck in cycle\n";
+                        operandOp->dump();
+                        currentOp->dump();
+                    });
                     return WalkResult::interrupt();
                 }
 
