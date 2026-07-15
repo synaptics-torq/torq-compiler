@@ -165,11 +165,10 @@ runs:
       run: |
         tar -zxf release.tar.gz
 
-    - name: Setup python virtualenv with on release files
+    - name: Setup python virtualenv with release files
       shell: bash
       if: ${{ inputs.release_artifact_id != 'none' }}
       run: |
-        pip install -r ${{github.workspace}}/release/python/requirements.txt
 
         pip install ${{github.workspace}}/release/python/iree_tf
         pip install ${{github.workspace}}/release/python/iree_tflite
@@ -198,11 +197,6 @@ runs:
         ${{github.workspace}}/python
         ${{github.workspace}}/extras/python
         EOF
-
-    - name: Install boto3
-      shell: bash
-      run: |
-        pip3 install boto3
 
     - name: Download precomputed test cache
       if: ${{ inputs.precomputed_cache != '' }}

@@ -112,11 +112,6 @@ jobs:
           protected_role_arn: ${{ vars.MAIN_BRANCH_ROLE_ARN }}
           non_protected_role_arn: ${{ vars.PULL_REQUEST_ROLE_ARN }}
 
-      - name: Configure python venv for host build and test
-        working-directory: /workspace/code
-        run: |
-          ./scripts/configure_python.sh /workspace/venv /workspace/build
-
       - name: Download mpact simulation library from cache
         uses: actions/cache/restore@v5
         with:

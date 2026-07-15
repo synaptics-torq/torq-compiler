@@ -31,6 +31,7 @@ RUN python3 -m venv /workspace/venv
 ENV PATH="/workspace/venv/bin:$PATH"
 
 RUN /workspace/venv/bin/pip install -r /code/requirements.txt && \
+    /workspace/venv/bin/pip install boto3 && \
     rm -rf /root/.cache
 
 ENTRYPOINT ["bash", "-c", "/actions-runner/run.sh --jitconfig ${GH_JIT_CONFIG}" ]
