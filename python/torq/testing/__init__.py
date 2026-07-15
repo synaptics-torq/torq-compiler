@@ -44,6 +44,13 @@ try:
 except ImportError:
     print("Warning: iree not available, skipping iree test support")
 
+# Add Torq Turbine (fork of iree-turbine) plugin only if iree.turbine is available
+try:
+    import iree.turbine
+    pytest_plugins.append("torq.testing.torch_turbine")
+except ImportError:
+    print("Warning: torq-turbine not available, skipping torch_turbine test support")
+
 # Add tensorflow plugin only if the right tensorflow version is available
 try:
     import tensorflow

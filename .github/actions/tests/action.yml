@@ -173,6 +173,10 @@ runs:
 
         pip install ${{github.workspace}}/release/python/iree_tf
         pip install ${{github.workspace}}/release/python/iree_tflite
+        # torq-turbine declares deps on torq-compiler and torq-runtime, but in
+        # CI those are provided via the iree.pth below, not PyPI. Install with
+        # --no-deps so pip does not try to fetch torq-compiler/runtime.
+        pip install --no-deps ${{github.workspace}}/release/python/torq_turbine-*.whl
 
         cat > $(python -c "import site; print(site.getsitepackages()[0])")/iree.pth << EOF
         ${{github.workspace}}/release/python/compiler

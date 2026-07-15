@@ -39,6 +39,9 @@ cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_
 cp -r ${BASE_DIR}/third_party/iree/integrations/tensorflow/python_projects/iree_tflite ${INSTALL_DIR}/python/
 cp ${BASE_DIR}/requirements.txt ${INSTALL_DIR}/python/requirements.txt
 
+# Torq turbine wheel built by the build job
+cp ${BASE_DIR}/dist/torq_turbine-*.whl ${INSTALL_DIR}/python/
+
 # Remove redundant copy of libIREECompiler.so from python bindings
 rm -f ${INSTALL_DIR}/python/compiler/iree/compiler/_mlir_libs/libIREECompiler.so
 

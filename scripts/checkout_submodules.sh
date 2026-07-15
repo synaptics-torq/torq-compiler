@@ -14,9 +14,9 @@ if [[ -n "${EXTRA_HEADER}" ]] ; then
 else
     USE_EXTRA_HEADER=()
 fi
-echo "Updating third_party/iree submodule..."
+echo "Updating submodules..."
 
-git "${USE_EXTRA_HEADER[@]}" submodule update --depth=1 --init third_party/iree tests/torq-model-configs
+git "${USE_EXTRA_HEADER[@]}" submodule update --depth=1 --init third_party/iree third_party/iree-turbine tests/torq-model-configs
 
 cd third_party/iree
 
