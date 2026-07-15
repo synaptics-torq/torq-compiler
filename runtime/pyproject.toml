@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright © 2025 Synaptics Incorporated.
 
+# NOTE: the runtime wheel is built with `--no-build-isolation` (see
+# scripts/build_runtime_wheel.sh), so pip does not install these `requires`;
+# they must be present in the active environment. `patchelf` is used by
+# setup.py to set the $ORIGIN RPATH when bundling the MPACT CSS simulator .so
+# into the x86 wheel, and is installed by build_runtime_wheel.sh.
 [build-system]
-requires = ["setuptools>=42", "wheel", "cmake", "ninja", "numpy>=2.0.0b1"]
+requires = ["setuptools>=42", "wheel", "cmake", "ninja", "numpy>=2.0.0b1", "patchelf>=0.17"]
 build-backend = "setuptools.build_meta"

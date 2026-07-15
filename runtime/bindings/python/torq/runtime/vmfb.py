@@ -157,6 +157,7 @@ class VMFBInferenceRunner(InferenceRunner):
         load_model_to_mem: bool = True,
         runtime_flags: Iterable[str] | None = None,
         device_outputs: bool = False,
+        torq_hw_type: str = "astra_machina",
     ):
         """InferenceRunner backed by the IREE runtime for ``.vmfb`` modules.
 
@@ -165,6 +166,9 @@ class VMFBInferenceRunner(InferenceRunner):
             function: Exported function name inside the module.
             device_uri: IREE device identifier.
             n_threads: Worker thread count.
+            torq_hw_type: Torq HW backend for the ``torq`` device. Defaults to
+                ``astra_machina`` (the SoC NPU); other backends such as ``sim``
+                (x86 CModel simulator) or ``aws_fpga`` must be set explicitly.
             load_method: ``"preload"`` copies into memory; ``"mmap"`` memory-maps the file.
             load_model_to_mem: Load model into memory during initialization.
             runtime_flags: Extra IREE runtime flags.
@@ -193,7 +197,7 @@ class VMFBInferenceRunner(InferenceRunner):
             self._logger.debug("Using %d threads for inference", n_threads)
         if device_uri == "torq":
             function = "main"
-            flags.add("--torq_hw_type=astra_machina")
+            flags.add(f"--torq_hw_type={torq_hw_type}")
         if runtime_flags:
             for flag in runtime_flags:
                 flags.add(flag)

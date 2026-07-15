@@ -31,8 +31,10 @@ Environment variables:
                                   built .so files.
 """
 
+import glob
 import os
 import shutil
+import subprocess
 import sys
 import sysconfig
 
@@ -93,7 +95,6 @@ def cmake_configure_and_build():
     cfg = os.getenv("CMAKE_BUILD_TYPE", "Release")
     cmake_args = [
         "-GNinja",
-        "-DTORQ_MPACT_SIMULATOR_LIB=OFF", # TODO: we need to enable this and package the MPACT lib
         "-DIREE_BUILD_PYTHON_BINDINGS=ON",
         "-DIREE_BUILD_COMPILER=OFF",
         "-DIREE_BUILD_SAMPLES=OFF",
@@ -128,6 +129,54 @@ def cmake_install():
         )
 
 
+MPACT_SIMULATOR_LIB = "libcoralnpu_simulator_mpact.so"
+
+
+def bundle_mpact_simulator_lib(runtime_libs_dir):
+    """Bundle the MPACT CSS simulator .so next to _runtime.so.
+
+    The x86 host build statically links the NPU CModel but *dynamically* links
+    the MPACT CSS simulator, so libcoralnpu_simulator_mpact.so must ship in the
+    wheel and be resolvable via $ORIGIN. Without it, `import iree.runtime` fails
+    with "libcoralnpu_simulator_mpact.so: cannot open shared object file".
+
+    Builds that don't link MPACT (e.g. SoC cross-compile with the simulator
+    disabled) are left untouched.
+    """
+    runtime_sos = glob.glob(os.path.join(runtime_libs_dir, "_runtime*.so"))
+    if not runtime_sos:
+        return
+    runtime_so = runtime_sos[0]
+
+    needed = subprocess.check_output(
+        ["patchelf", "--print-needed", runtime_so], text=True
+    )
+    if MPACT_SIMULATOR_LIB not in needed:
+        return
+
+    matches = glob.glob(
+        os.path.join(
+            TORQ_SOURCE_DIR, "third_party", "coralnpu-mpact", "*", MPACT_SIMULATOR_LIB
+        )
+    )
+    if not matches:
+        raise FileNotFoundError(
+            f"{runtime_so} links {MPACT_SIMULATOR_LIB} but it was not found under "
+            "third_party/coralnpu-mpact/. Provision it before building the wheel."
+        )
+    shutil.copy2(matches[0], runtime_libs_dir)
+
+    rpath = subprocess.check_output(
+        ["patchelf", "--print-rpath", runtime_so], text=True
+    ).strip()
+    entries = [p for p in rpath.split(":") if p]
+    if "$ORIGIN" not in entries:
+        entries.insert(0, "$ORIGIN")
+        subprocess.check_call(
+            ["patchelf", "--set-rpath", ":".join(entries), runtime_so]
+        )
+
+
 # ---------------------------------------------------------------------------
 # Setuptools command overrides
 # ---------------------------------------------------------------------------
@@ -138,6 +187,11 @@ class CMakeBuildPy(_build_py):
         if not PREBUILT_DIR:
             cmake_configure_and_build()
         cmake_install()
+
+        # Bundle the MPACT CSS simulator .so (if _runtime.so links it) into the
+        # cmake-install staging dir so it flows into the wheel via the copytree
+        # below and package_data.
+        bundle_mpact_simulator_lib(_RUNTIME_LIBS_DIR)
 
         # Copy the cmake-installed _runtime_libs into the setuptools build tree
         # so the native .so and CLI tools end up in the wheel.
@@ -288,6 +342,7 @@ setup(
             "iree-dump-module*",
             "iree-dump-parameters*",
             "iree-cpuinfo*",
+            "libcoralnpu_simulator_mpact.so",
         ],
         "torq._runtime_libs": [
             "torq-run-module*",
