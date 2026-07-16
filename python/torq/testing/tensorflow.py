@@ -1,3 +1,4 @@
+import copy
 from dataclasses import dataclass
 from functools import wraps
 import pytest
@@ -187,7 +188,11 @@ def keras_layer_data(case_config):
 
 @versioned_unhashable_object_fixture
 def layer_model(request, keras_layer_data):
-    return tf.keras.Model.from_config(keras_layer_data)
+    # tf.keras.Model.from_config mutates the config dict it is given, which
+    # corrupts the shared, cached keras_layer_data for subsequent tests and
+    # yields an unbuilt model that fails TFLite conversion. Pass a copy so each
+    # test reconstructs from a pristine config.
+    return tf.keras.Model.from_config(copy.deepcopy(keras_layer_data))
 
 
 def keras_model_fixture(fun):
