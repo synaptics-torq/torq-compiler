@@ -116,42 +116,6 @@ static Value addPerChannelBias(Value lhs, Value rhs, PatternRewriter &rewriter) 
                }
     ).getResult(0);
 }
-// Compute a (multiplier, shift) pair that approximates `scale` as
-//   scale ~= multiplier / 2^shift
-// The Torq convolution hardware requires the shift amount to be a multiple of
-// 4, so we choose the largest multiple-of-4 shift whose rounded multiplier still
-// fits in a signed 32-bit integer.  The scale is taken from the Q graph
-// (dequant_scale / quant_scale), so the shift is derived from the actual graph
-// constants rather than a hardcoded value.
-static bool computeMultiplierAndShift(double scale, int32_t &multiplier, int32_t &shift) {
-    if (scale == 0.0) {
-        multiplier = 0;
-        // Shift is irrelevant when the multiplier is zero, but keep it a
-        // hardware-legal multiple of 4.
-        shift = 28;
-        return true;
-    }
-    if (scale < 0.0)
-        return false;
-
-    // Largest multiple-of-4 shift supported by the current hardware encoding.
-    constexpr int32_t kMaxShift = 60;
-    for (int32_t s = kMaxShift; s >= 0; s -= 4) {
-        int64_t mult = std::llround(scale * static_cast<double>(1LL << s));
-        if (mult >= std::numeric_limits<int32_t>::min() &&
-            mult <= std::numeric_limits<int32_t>::max()) {
-            multiplier = static_cast<int32_t>(mult);
-            shift = s;
-            LLVM_DEBUG(llvm::dbgs() << "[QConv2dConvert] computeMultiplierAndShift scale=" << scale
-                                    << " multiplier=" << multiplier << " shift=" << shift << "\n";);
-            return true;
-        }
-    }
-    LLVM_DEBUG(llvm::dbgs() << "[QConv2dConvert] computeMultiplierAndShift failed for scale="
-                            << scale << "\n";);
-    return false;
-}
-
 static bool isElementwiseAddI32(linalg::GenericOp op) {
     if (!op || op.getNumDpsInputs() != 2 || op.getNumDpsInits() != 1)
         return false;

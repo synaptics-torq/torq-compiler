@@ -48,6 +48,8 @@ void populateLinalgToTorqHLPrePatterns(
 
     populateLinalgToTorqHLQEWBinaryPatterns(context, patterns, markFuseGroups);
 
+    populateLinalgToTorqHLQPoolingPatterns(context, patterns, markFuseGroups);
+
     // Conv1D-as-matmul → fully_connected with absorbed bias. Registered before
     // the generic Conv2DMatmulOpConversion; its higher pattern benefit lets it
     // win when the matmul has the Conv1D transpose/expand layout.
@@ -79,6 +81,15 @@ template <typename PoolingOpT, bool AllowBF16> static bool isPoolingSumLegal(Ope
     bool typeOk = outType.getElementType().isInteger();
     if constexpr (AllowBF16)
         typeOk = typeOk || outType.getElementType().isBF16();
+    // Quantized GlobalAveragePool is lowered as dq -> pooling_nchw_sum (f32) ->
+    // [divf/mulf scale] -> q.  Allow the Q fusion pattern to see these f32
+    // global pooling ops; non-quantized f32 pooling will simply remain
+    // unconverted because the existing pooling patterns only accept integer
+    // or BF16 outputs.
+    if constexpr (std::is_same_v<PoolingOpT, linalg::PoolingNchwSumOp>) {
+        if (outType.getElementType().isF32())
+            typeOk = true;
+    }
     if (!typeOk)
         return true;
 

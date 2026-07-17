@@ -52,6 +52,10 @@ void populateLinalgToTorqHLClampPatterns(
 void populateLinalgToTorqHLPrePatternsLowPrio(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
+void populateLinalgToTorqHLQPoolingPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+
 void populateLinalgToTorqHLEWBinaryPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

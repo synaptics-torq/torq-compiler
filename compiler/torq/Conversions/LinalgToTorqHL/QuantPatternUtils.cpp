@@ -11,6 +11,12 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "llvm/Support/Debug.h"
+
+#include <cmath>
+#include <limits>
+
+#define DEBUG_TYPE "linalg-torq-quant-pattern-utils"
 
 namespace mlir::syna::torq {
 
@@ -423,6 +429,34 @@ bool matchQuantGeneric(linalg::GenericOp op, double &scale, double &zp, double &
             return true;
         }
     }
+    return false;
+}
+
+bool computeMultiplierAndShift(double scale, int32_t &multiplier, int32_t &shift) {
+    if (scale == 0.0) {
+        multiplier = 0;
+        // Shift is irrelevant when the multiplier is zero, but keep it a
+        // hardware-legal multiple of 4.
+        shift = 28;
+        return true;
+    }
+    if (scale < 0.0)
+        return false;
+
+    // Largest multiple-of-4 shift supported by the current hardware encoding.
+    constexpr int32_t kMaxShift = 60;
+    for (int32_t s = kMaxShift; s >= 0; s -= 4) {
+        int64_t mult = std::llround(scale * static_cast<double>(1LL << s));
+        if (mult >= std::numeric_limits<int32_t>::min() &&
+            mult <= std::numeric_limits<int32_t>::max()) {
+            multiplier = static_cast<int32_t>(mult);
+            shift = s;
+            LLVM_DEBUG(llvm::dbgs() << "[computeMultiplierAndShift] scale=" << scale
+                                    << " multiplier=" << multiplier << " shift=" << shift << "\n";);
+            return true;
+        }
+    }
+    LLVM_DEBUG(llvm::dbgs() << "[computeMultiplierAndShift] failed for scale=" << scale << "\n";);
     return false;
 }
 

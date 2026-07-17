@@ -92,4 +92,12 @@ std::optional<QuantInfo> matchQuantSigned(linalg::GenericOp op);
 // Match any supported quant linalg.generic.  Tries all registered flavors.
 bool matchQuantGeneric(linalg::GenericOp op, double &scale, double &zp, double &min, double &max);
 
+// Compute a (multiplier, shift) pair that approximates `scale` as
+//   scale ~= multiplier / 2^shift
+// The Torq hardware requires the shift amount to be a multiple of 4, so we
+// choose the largest multiple-of-4 shift whose rounded multiplier still fits
+// in a signed 32-bit integer.  Returns false for negative scales (which cannot
+// be represented) or if no shift fits.
+bool computeMultiplierAndShift(double scale, int32_t &multiplier, int32_t &shift);
+
 } // namespace mlir::syna::torq

@@ -9,6 +9,7 @@ set(sources
   Conv2DPattern.cpp
   QConv2DPattern.cpp
   QElementwiseBinaryPattern.cpp
+  QPoolingPattern.cpp
   QuantPatternUtils.cpp
   Conv2DMatmulPattern.cpp
   ElementWiseBinaryPattern.cpp
