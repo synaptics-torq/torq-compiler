@@ -66,10 +66,9 @@ jobs:
         uses: ./.github/actions/tests
         with:
           app_id: ${{ vars.CI_APP_ID }}
-          release_artifact_id: ${{ steps.get_artifact_id.outputs.ARTIFACT_ID }}
           app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           extra_repo: ${{ vars.EXTRAS_REPO }}
-          hf_token: ${{ secrets.HF_TOKEN }}          
+          hf_token: ${{ secrets.HF_TOKEN }}
           pytest_args: --version
 
       - name: Start ssh server

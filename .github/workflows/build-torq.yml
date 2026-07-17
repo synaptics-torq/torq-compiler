@@ -9,26 +9,6 @@ on:
         default: 'false'
         type: string
 
-    outputs:
-      compiler_wheel_artifact_id:
-        description: ID of the artifact with the compiler wheel to download
-        value: ${{ jobs.build.outputs.compiler_wheel_artifact_id }}
-
-      runtime_wheel_artifact_id:
-        description: ID of the artifact with the runtime wheel to download
-        value: ${{ jobs.build.outputs.runtime_wheel_artifact_id }}
-
-      user_manual_artifact_id:
-        description: ID of the artifact with the built user manual to download
-        value: ${{ jobs.build_docs.outputs.user_manual_artifact_id }}
-      
-      website_artifact_id:
-        description: ID of the artifact with the built website to download
-        value: ${{ jobs.build_docs.outputs.website_artifact_id }}
-      release_artifact_id:
-        description: ID of the artifact with the built release
-        value: ${{ jobs.assemble_release.outputs.release_artifact_id }}
-
     secrets:
       HF_TOKEN:
         required: true
@@ -73,11 +53,6 @@ jobs:
       SCCACHE_S3_KEY_PREFIX: clang-build
 
     timeout-minutes: 50 # ensure build jobs fail before CodeBuild kills the runners
-
-    outputs:
-      compiler_wheel_artifact_id: ${{ steps.upload_compiler_wheel.outputs.artifact-id }}
-      runtime_wheel_artifact_id: ${{ steps.upload_runtime_wheel.outputs.artifact-id }}
-      turbine_wheel_artifact_id: ${{ steps.upload_turbine_wheel.outputs.artifact-id }}
 
     steps:
 
@@ -124,8 +99,6 @@ jobs:
           mkdir -p /workspace/code/third_party/coralnpu-mpact/x86_64-Linux
           tar -xzf ${{ needs.build_mpact.outputs.path }} --strip-components=1 -C /workspace/code/third_party/coralnpu-mpact/x86_64-Linux
 
-          find /workspace/code/third_party/coralnpu-mpact/x86_64-Linux
-
       - name: Configure build for host
         working-directory: /workspace/code
         run: |
@@ -139,56 +112,44 @@ jobs:
           sccache --start-server
           cmake --build . --target torq
           sccache --show-stats
-      - name: Set tag variable
+
+      - name: Compute wheel version variable
         id: vars
-        working-directory: /workspace/code
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            REF_NAME=${{ github.ref_name }}
-            echo "wheel_version=${REF_NAME#v}" >> $GITHUB_OUTPUT
-            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          else
-            TIMESTAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
-            COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
-            echo "wheel_version=0.dev0+${TIMESTAMP}.g${COMMIT}" >> $GITHUB_OUTPUT
-            echo "tag_name=${{ github.sha }}" >> $GITHUB_OUTPUT
-          fi
+        uses: ./code/.github/actions/wheel-version
+        with:
+          workdir: /workspace/code
 
       - name: Build runtime wheels
         working-directory: /workspace/code
-        run: |
-          # Needed for torq.build_tools discovery.
+        env:
+          TORQ_WHEEL_VERSION: ${{ steps.vars.outputs.wheel_version }}
+        run: |          
           source /workspace/venv/bin/activate
-
-          export TORQ_WHEEL_VERSION="${{ steps.vars.outputs.wheel_version }}"
-
           ./scripts/build_runtime_wheel.sh /workspace/build
 
       - name: Upload runtime wheels
         id: upload_runtime_wheel
         uses: actions/upload-artifact@v7
         with:
-          name: runtime-wheel
+          name: host-runtime-wheel
           path: /workspace/code/dist/torq_runtime-*.whl
-          retention-days: 30
+          retention-days: ${{ inputs.push == 'true' && 30 || 2 }}
 
       - name: Build compiler wheel
         working-directory: /workspace/code
-        run: |
-          # Needed for torq.build_tools discovery.
+        env:
+          TORQ_WHEEL_VERSION: ${{ steps.vars.outputs.wheel_version }}
+        run: |          
           source /workspace/venv/bin/activate
-
-          export TORQ_WHEEL_VERSION="${{ steps.vars.outputs.wheel_version }}"
-
           ./scripts/build_compiler_wheel.sh /workspace/build
 
       - name: Upload compiler wheel
         id: upload_compiler_wheel
         uses: actions/upload-artifact@v7
         with:
-          name: compiler-wheel
+          name: host-compiler-wheel
           path: /workspace/code/dist/torq_compiler-*.whl
-          retention-days: 30
+          retention-days: ${{ inputs.push == 'true' && 30 || 2 }}
 
       - name: Build torq-turbine wheel
         working-directory: /workspace/code
@@ -202,39 +163,23 @@ jobs:
         id: upload_turbine_wheel
         uses: actions/upload-artifact@v7
         with:
-          name: turbine-wheel
+          name: host-turbine-wheel
           path: /workspace/code/dist/torq_turbine-*.whl
-          retention-days: 30
+          retention-days: ${{ inputs.push == 'true' && 30 || 2 }}
 
-      - name: Package host build for release assembly
-        working-directory: /workspace
-        run: |
-          cp /workspace/code/third_party/coralnpu-mpact/x86_64-Linux/libcoralnpu_simulator_mpact.so \
-             /workspace/build/third_party/iree/lib/
-          bash /workspace/code/scripts/package_host_release.sh /workspace/build /workspace/release-host
-          tar -C /workspace/release-host -czf host-release.tar.gz .
-
-      - name: Upload host build for release assembly
-        uses: actions/upload-artifact@v7
-        with:
-          name: host-release
-          path: /workspace/host-release.tar.gz
-          retention-days: 1
-
-      - name: Upload mpact simulation library as artifact
+      - name: Upload mpact simulation library
         uses: actions/upload-artifact@v7
         with:
           name: mpact-libs
           path: ${{ needs.build_mpact.outputs.path }}
-          retention-days: ${{ inputs.push == 'true' && 30 || 1 }}
+          retention-days: ${{ inputs.push == 'true' && 30 || 2 }}
 
-  build_docker:
-    name: Build release docker image
-    needs: assemble_release
-    uses: ./.github/workflows/build-docker-image-release.yml
-    with:
-      release_artifact_id: ${{ needs.assemble_release.outputs.release_artifact_id }}
-      push: ${{ inputs.push }}
+      - name: Upload torq_rt_cm
+        uses: actions/upload-artifact@v7
+        with:
+          name: torq-rt-cm
+          path: /workspace/build/third_party/torq-hw/rt/torq_rt_cm
+          retention-days: ${{ inputs.push == 'true' && 30 || 2 }}
 
   docker_image_builder_astra:
     name: Create Astra Builder docker
@@ -293,8 +238,31 @@ jobs:
       - name: Upload Astra build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: astra-release
+          name: astra-sl-release
           path: /workspace/astra-release.tar.gz
+          retention-days: 30
+
+      - name: Compute wheel version variable
+        id: vars
+        uses: ./code/.github/actions/wheel-version
+        with:
+          workdir: /workspace/code
+
+      - name: Build runtime wheel for Astra machina
+        working-directory: /workspace/code
+        env:
+          TORQ_WHEEL_VERSION: ${{ steps.vars.outputs.wheel_version }}
+          PYTHONPATH: /workspace/code/python
+        run: |          
+          source /workspace/venv/bin/activate          
+          ./scripts/build_runtime_wheel.sh /workspace/build /workspace/build-astra-sl astra_machina poky
+
+      - name: Upload runtime wheel for Astra machina
+        id: upload_runtime_wheel_astra
+        uses: actions/upload-artifact@v7
+        with:
+          name: astra-sl-runtime-wheel
+          path: /workspace/code/dist/torq_runtime-*.whl
           retention-days: 30
 
       - name: Upload KO dependencies as artifact
@@ -303,61 +271,3 @@ jobs:
           name: ko-dependencies
           path: ${{ needs.build_ko_dependencies.outputs.path }}
           retention-days: ${{ inputs.push == 'true' && 30 || 1 }}
-
-  assemble_release:
-    name: Assemble and upload release
-    needs: [build, build_astra]
-    runs-on: ubuntu-latest
-    outputs:
-      release_artifact_id: ${{ steps.upload_release.outputs.artifact-id }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          path: code
-          lfs: true
-
-      - name: Download host release package
-        uses: actions/download-artifact@v4
-        with:
-          name: host-release
-          path: .
-
-      - name: Download Astra release package
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: astra-release
-          path: .
-
-      - name: Merge release packages
-        run: |
-          mkdir -p release
-          tar -xzf host-release.tar.gz  -C release
-          if [ -f astra-release.tar.gz ]; then tar -xzf astra-release.tar.gz -C release; fi
-
-      - name: Install minimal python deps for release assembly
-        run: |
-          python3 -m pip install --upgrade --target assemble_deps huggingface_hub
-
-      - name: Gather release files
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          PYTHONPATH=assemble_deps ./code/scripts/assemble_release_docker.sh release
-
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "${{ github.ref_name }}" > release/VERSION
-          else
-            echo "${{ github.sha }}" > release/VERSION
-          fi
-
-          tar -zcf release.tar.gz release
-
-      - name: Upload release files
-        id: upload_release
-        uses: actions/upload-artifact@v7
-        with:
-          name: release
-          path: release.tar.gz
-          retention-days: 30

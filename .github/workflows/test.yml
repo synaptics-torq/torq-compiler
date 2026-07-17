@@ -49,7 +49,6 @@ jobs:
     needs: build
     uses: ./.github/workflows/test-build.yml
     with:
-      release_artifact_id: ${{ needs.build.outputs.release_artifact_id }}
       test_cmodel: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'skip-test-cmodel')) }}
       test_astra_machina_sl: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && !contains(github.event.pull_request.labels.*.name, 'test-astra-machina-sl')) }}
       test_aws_fpga: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && !contains(github.event.pull_request.labels.*.name, 'test-aws')) }}

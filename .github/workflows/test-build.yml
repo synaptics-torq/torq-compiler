@@ -4,10 +4,6 @@ on:
   
   workflow_call:
     inputs:
-      release_artifact_id:
-        description: ID of the artifact with the built release
-        required: true
-        type: string
       test_cmodel:
         required: false
         default: true
@@ -60,7 +56,6 @@ jobs:
     uses: ./.github/workflows/test-cmodel.yml
     with:
       docker_image_tests_name: ${{ needs.docker_image_tests.outputs.image_name }}
-      release_artifact_id: ${{ inputs.release_artifact_id }}
     secrets:
       CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -72,7 +67,6 @@ jobs:
     uses: ./.github/workflows/test-aws-fpga.yml
     with:
       docker_image_fpga_tests_name: ${{ needs.docker_image_fpga_tests.outputs.image_name }}
-      release_artifact_id: ${{ inputs.release_artifact_id }}
     secrets:
       CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -84,7 +78,6 @@ jobs:
     uses: ./.github/workflows/test-astra-machina-sl.yml
     with:
       docker_image_tests_name: ${{ needs.docker_image_tests.outputs.image_name }}
-      release_artifact_id: ${{ inputs.release_artifact_id }}
     secrets:
       CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}

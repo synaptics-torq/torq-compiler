@@ -2,21 +2,11 @@ name: Build Documentation
 
 on:
   workflow_call:
-    outputs:
-      user_manual_artifact_id:
-        description: ID of the artifact with the built user manual
-        value: ${{ jobs.doc_build.outputs.user_manual_artifact_id }}
-      website_artifact_id:
-        description: ID of the artifact with the built website
-        value: ${{ jobs.doc_build.outputs.website_artifact_id }}
 
 jobs:
   doc_build:
     name: Build
     runs-on: ubuntu-latest
-    outputs:
-      user_manual_artifact_id: ${{ steps.upload_user_manual.outputs.artifact-id }}
-      website_artifact_id: ${{ steps.upload_website.outputs.artifact-id }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

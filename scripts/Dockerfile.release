@@ -1,31 +1,23 @@
 FROM ubuntu:24.04
 
 # Copy release package list from release
-COPY apt-packages.txt /opt/release/
+COPY apt-packages.txt /packages.txt
 
 # Install dependencies
 RUN apt-get update && \
-    xargs -a /opt/release/apt-packages.txt apt-get install -y --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
+    xargs -a /packages.txt apt-get install -y --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/* /packages.txt
 
-# Setup venv first to favor caching (this would be done by the setup.sh script)
-COPY python/requirements.txt /
-RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install -r /requirements.txt && rm /requirements.txt
+# Create and activate a virtual environment for the wheel install
+RUN python3 -m venv /venv
+ENV PATH="/venv/bin:$PATH"
 
-# Copy release files
-COPY . /opt/release
+# Copy requirements.txt from the dev tree
+COPY requirements.txt /requirements.txt
 
-# Perform the release setup
-RUN /opt/release/setup.sh /opt/venv
+# Install dependencies that were used to test the wheels
+RUN pip3 install --no-cache-dir -r /requirements.txt
 
-
-# After copying, set executable permissions for all files in /opt/release/scripts
-RUN chmod a+x /opt/release/scripts/*
-
-# Make /opt/release writable for all users
-RUN chmod -R a+w /opt/release
-
-# Setup PATH and LD_LIBRARY_PATH as if the user enabled the venv
-# so that it is not required to activate the venv when using the docker
-ENV PATH="/opt/venv/bin:/opt/release/tools:/opt/release/scripts:$PATH"
-ENV LD_LIBRARY_PATH="/opt/release/lib"
+# Install x86_64 wheels
+RUN --mount=type=bind,source=dist,target=/tmp/dist,ro \
+    pip3 install --no-cache-dir /tmp/dist/*x86_64.whl

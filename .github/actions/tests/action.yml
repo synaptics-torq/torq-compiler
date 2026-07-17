@@ -2,10 +2,10 @@ description: Run Torq compiler tests
 
 inputs:
 
-  release_artifact_id:
-    description: 'ID of the artifact with the built release'
-    default: 'none'
-    required: false
+  release_run_id:
+    description: 'Run ID of the artifact with the built release'
+    default: ${{ github.run_id }}
+    required: true
 
   hf_token:
     description: 'HuggingFace Token'
@@ -151,48 +151,53 @@ runs:
 
         python -m pip install -r "$REQ_FILE"
 
-    - name: Download the compiler and runtime
+    - name: Download the host compiler wheel
       uses: actions/download-artifact@v8
-      if: ${{ inputs.release_artifact_id != 'none' }}
+      if: ${{ inputs.release_run_id != 'none' }}
       with:
-        artifact-ids: ${{ inputs.release_artifact_id }}
-        path: .
+        run-id: ${{ inputs.release_run_id }}
+        name: host-compiler-wheel
+        path: wheels
         github-token: ${{ steps.generate_token.outputs.token }}
 
-    - name: Extract the compiler and runtime
-      if: ${{ inputs.release_artifact_id != 'none' }}
+    - name: Download the host runtime wheel
+      uses: actions/download-artifact@v8
+      if: ${{ inputs.release_run_id != 'none' }}
+      with:
+        run-id: ${{ inputs.release_run_id }}
+        name: host-runtime-wheel
+        path: wheels
+        github-token: ${{ steps.generate_token.outputs.token }}
+
+    - name: Download the host turbine wheel
+      uses: actions/download-artifact@v8
+      if: ${{ inputs.release_run_id != 'none' }}
+      with:
+        run-id: ${{ inputs.release_run_id }}
+        name: host-turbine-wheel
+        path: wheels
+        github-token: ${{ steps.generate_token.outputs.token }}
+
+    - name: Download torq-cm-rt
+      uses: actions/download-artifact@v8
+      if: ${{ inputs.release_run_id != 'none' }}
+      with:
+        run-id: ${{ inputs.release_run_id }}
+        name: torq-rt-cm
+        path: ${{ github.workspace }}
+
+    - name: Restoring permissions for torq-rt-cm
       shell: bash
       run: |
-        tar -zxf release.tar.gz
+        chmod +x torq_rt_cm
 
     - name: Setup python virtualenv with release files
       shell: bash
-      if: ${{ inputs.release_artifact_id != 'none' }}
       run: |
+        pip install wheels/*
 
-        pip install ${{github.workspace}}/release/python/iree_tf
-        pip install ${{github.workspace}}/release/python/iree_tflite
-        # torq-turbine declares deps on torq-compiler and torq-runtime, but in
-        # CI those are provided via the iree.pth below, not PyPI. Install with
-        # --no-deps so pip does not try to fetch torq-compiler/runtime.
-        pip install --no-deps ${{github.workspace}}/release/python/torq_turbine-*.whl
-
-        cat > $(python -c "import site; print(site.getsitepackages()[0])")/iree.pth << EOF
-        ${{github.workspace}}/release/python/compiler
-        ${{github.workspace}}/release/python/runtime
-        EOF
-
-        # add development libraries which are not included in the release
-        cat > $(python -c "import site; print(site.getsitepackages()[0])")/torq.pth << EOF
-        ${{github.workspace}}/python
-        EOF
-
-    - name: Setup python virtualenv using checkout files
-      shell: bash
-      if: ${{ inputs.release_artifact_id == 'none' }}
-      run: |
-        pip install -r ${{github.workspace}}/requirements.txt
-        
+        # we add the python directories from the checkout because they are not fully
+        # packaged into wheels (testing infra notably)
         cat > $(python -c "import site; print(site.getsitepackages()[0])")/torq.pth << EOF
         ${{github.workspace}}/python
         ${{github.workspace}}/extras/python
@@ -225,6 +230,20 @@ runs:
         tar -zxf cache.tar.gz
         rm cache.tar.gz
 
+    - name: Download astra release
+      if: ${{ inputs.use_bench == 'true' }}
+      uses: actions/download-artifact@v8
+      with:
+        run-id: ${{ inputs.release_run_id }}
+        name: astra-sl-release
+
+    - name: Extract astra release
+      if: ${{ inputs.use_bench == 'true' }}
+      shell: bash
+      run: |
+        mkdir -p release
+        tar -C release -xzf astra-release.tar.gz
+
     - name: Setup bench
       if: ${{ inputs.use_bench == 'true' }}
       shell: bash
@@ -243,19 +262,13 @@ runs:
     - name: Run pytest
       shell: bash
       env:
-        LD_LIBRARY_PATH: ${{github.workspace}}/release/lib/
-        TORQ_RUN_MODULE: ${{github.workspace}}/release/tools/torq-run-module
-        TORQ_RT_CM: ${{github.workspace}}/release/tools/torq_rt_cm
-        TORQ_COMPILE: ${{github.workspace}}/release/tools/torq-compile
-        IREE_RUN_MODULE: ${{github.workspace}}/release/tools/iree-run-module
-        IREE_COMPILE: ${{github.workspace}}/release/tools/iree-compile
-        IREE_OPT: ${{github.workspace}}/release/tools/iree-opt
         HF_TOKEN: ${{ inputs.hf_token }}
         TORQ_PERF_SERVER: ${{ inputs.torq_perf_server }}
         TORQ_PERF_SERVER_TOKEN: ${{ inputs.torq_perf_server_token }}
         TORQ_PERF_BATCH_NAME: ${{ inputs.batch_name }}
         S3_HF_CACHE_BUCKET_NAME: ${{ inputs.s3_hf_cache_bucket }}
         S3_HF_CACHE_DIR: ${{ inputs.s3_hf_cache_dir }}
+        TORQ_RT_CM: ${{ github.workspace }}/torq_rt_cm
         JENKINS_USER: ${{ inputs.jenkins_user }}
         JENKINS_API_TOKEN: ${{ inputs.jenkins_api_token }}
         JENKINS_URL: ${{ inputs.jenkins_url }}

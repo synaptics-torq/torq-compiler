@@ -1,0 +1,29 @@
+description: Compute wheel version
+
+inputs:
+  workdir:
+    description: The working directory to use for the action
+    default: ${{ github.workspace }}
+    required: true
+
+outputs:
+  wheel_version:
+    description: The version of the wheel to be built
+    value: ${{ steps.vars.outputs.wheel_version }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Compute wheel version
+      id: vars
+      shell: bash
+      working-directory: ${{ inputs.workdir }}
+      run: |
+        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          REF_NAME=${{ github.ref_name }}
+          echo "wheel_version=${REF_NAME#v}" >> $GITHUB_OUTPUT
+        else
+          TIMESTAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
+          COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+          echo "wheel_version=0.dev0+${TIMESTAMP}.g${COMMIT}" >> $GITHUB_OUTPUT            
+        fi

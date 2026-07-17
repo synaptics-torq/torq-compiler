@@ -6,10 +6,6 @@ on:
       docker_image_tests_name:
         type: string
         required: true
-      release_artifact_id:
-        description: ID of the artifact with the built release
-        required: true
-        type: string
     secrets:
       CI_APP_PRIVATE_KEY:
         required: true
@@ -72,7 +68,6 @@ jobs:
           app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           extra_repo: ${{ vars.EXTRAS_REPO }}
           hf_token: ${{ secrets.HF_TOKEN }}
-          release_artifact_id: ${{ inputs.release_artifact_id }}
           pytest_args: >-
             -m ci -n 18 --dist worksteal --show-capture=no --tb=short
             --torq-chips ${{ matrix.chip_group }}

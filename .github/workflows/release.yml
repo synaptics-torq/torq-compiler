@@ -35,8 +35,7 @@ jobs:
     needs: build
     if: ${{ vars.DISABLE_TESTS != 'true' }}
     uses: ./.github/workflows/test-build.yml
-    with:
-      release_artifact_id: ${{ needs.build.outputs.release_artifact_id }}
+    with:      
       push_images: ${{ github.ref == 'refs/heads/main' }}
     secrets:
       CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -50,6 +49,9 @@ jobs:
     
     permissions:
       contents: write
+      packages: write
+      attestations: write
+      id-token: write
     
     outputs:
       tag_name: ${{ steps.upload_assets.outputs.tag_name }}
@@ -58,35 +60,82 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download release artifact
-        uses: actions/download-artifact@v8
-        with:
-          artifact-ids: ${{ needs.build.outputs.release_artifact_id }}
-          path: dist
-
       - name: Download user documentation
         uses: actions/download-artifact@v8
         with:
-          artifact-ids: ${{ needs.build.outputs.user_manual_artifact_id }}
+          name: user-manual
           path: dist/user_manual
 
       - name: Download full documentation
         uses: actions/download-artifact@v8
         with:
-          artifact-ids: ${{ needs.build.outputs.website_artifact_id }}
+          name: website
           path: dist/website
 
-      - name: Download runtime wheel
+      - name: Download host runtime wheel
         uses: actions/download-artifact@v8
         with:
-          artifact-ids: ${{ needs.build.outputs.runtime_wheel_artifact_id }}
+          name: host-runtime-wheel
+          path: dist
+
+      - name: Download Astra SL runtime wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: astra-sl-runtime-wheel
+          path: dist
+
+      - name: Download host turbine wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: host-turbine-wheel
           path: dist
 
       - name: Download compiler wheel
         uses: actions/download-artifact@v8
         with:
-          artifact-ids: ${{ needs.build.outputs.compiler_wheel_artifact_id }}
+          name: host-compiler-wheel
           path: dist
+
+      - name: Docker meta (generate tags & labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}/compiler          
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Prepare release docker build context
+        run: |
+          mkdir -p docker/dist
+          cp dist/*x86_64.whl docker/dist/
+          cp scripts/apt-packages.txt docker/
+          cp requirements.txt docker/
+          cp scripts/Dockerfile.release docker/Dockerfile
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.github_token }}
+      
+      - name: Build and push release docker
+        uses: docker/build-push-action@v7
+        with:
+          context: docker
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}/compiler:latest
+          cache-to: type=inline
 
       - name: Compress the user manual as a zip
         run: |
