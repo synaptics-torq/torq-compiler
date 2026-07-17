@@ -234,7 +234,7 @@ size_t ndlCycle(MemNdlAttr attr) {
             lWriteSize *= dim.getCount();
             break;
         case torq_hw::DimType::S:
-            if (dim.getTag() == torq_hw::MemDimTag::X) {
+            if (dim.getTag() == torq_hw::MemDimTag::B || dim.getTag() == torq_hw::MemDimTag::X) {
                 xLineSize *= dim.getCount();
                 usingSdims = true;
             }
