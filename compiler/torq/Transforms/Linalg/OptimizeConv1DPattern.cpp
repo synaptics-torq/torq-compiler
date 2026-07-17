@@ -1176,7 +1176,184 @@ struct FoldConvBiasIntoReducePattern : public OpRewritePattern<linalg::ReduceOp>
     }
 };
 
+/// Sink a static tensor.extract_slice past an elementwise linalg.generic whose every
+/// input is an identically-parameterised extract_slice, i.e. rewrite
+///   elementwise(slice(a), slice(b), ...) -> slice(elementwise(a, b, ...)).
+///
+/// A strided ConvTranspose lowers to a conv whose output is a few columns wider than the real
+/// result; the epilogue is `conv -> extract_slice(Ow+k -> Ow) -> addf(per-channel bias) -> truncf`.
+/// The crop drops the extra ConvTranspose columns and may also absorb a downstream slice the
+/// compiler folded in here, so it can shrink the width by more than one element. That slice
+/// between the conv result and the bias add stops the bias/truncf from fusing into the conv
+/// epilogue (matmul or native conv1d), leaving an fp32 add with no NPU lowering that is illegal
+/// under --torq-disable-host. Slicing commutes with positional elementwise ops, so moving it
+/// below the add/truncf makes the conv->add->truncf chain contiguous again for the downstream
+/// epilogue fusion.
+struct SinkExtractSliceThroughElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
+    using OpRewritePattern::OpRewritePattern;
+
+    struct SliceInputsInfo {
+        tensor::ExtractSliceOp firstSlice;
+        RankedTensorType srcType;
+        RankedTensorType resultType;
+        SmallVector<int64_t> staticSizes;
+        SmallVector<Value> sources;
+    };
+
+    LogicalResult
+    checkElementwiseSignature(linalg::GenericOp genericOp, PatternRewriter &rewriter) const {
+        // Target the ConvTranspose bias epilogue elementwise(slice(a), slice(b), ...): a binary
+        // (or wider) op whose operands are all the same crop. A single-input crop is just a
+        // rescale/cast/copy on a sliced tensor (very common in conv backbones, e.g. per-channel
+        // requantize after a channel split); sinking those does nothing for bias fusion and only
+        // risks reshaping unrelated epilogues, so require at least two inputs.
+        if (genericOp.getNumResults() != 1 || genericOp.getNumDpsInputs() < 2) {
+            return rewriter.notifyMatchFailure(genericOp, "need single result and >=2 inputs");
+        }
+
+        // Elementwise: every iterator parallel and every indexing map an identity.
+        if (!llvm::all_of(genericOp.getIteratorTypesArray(), [](utils::IteratorType t) {
+                return t == utils::IteratorType::parallel;
+            })) {
+            return rewriter.notifyMatchFailure(genericOp, "not all-parallel");
+        }
+        for (AffineMap m : genericOp.getIndexingMapsArray()) {
+            if (!m.isIdentity()) {
+                return rewriter.notifyMatchFailure(genericOp, "non-identity indexing map");
+            }
+        }
+        return success();
+    }
+
+    LogicalResult collectSliceInputs(
+        linalg::GenericOp genericOp, PatternRewriter &rewriter, SliceInputsInfo &sliceInfo
+    ) const {
+        // Every input must be an extract_slice with identical, fully-static slice parameters
+        // taken from an equally-shaped source: slicing the same region from each operand commutes
+        // with the positional elementwise body. Collect the slice sources as we validate.
+        auto firstSlice = genericOp.getDpsInputs().front().getDefiningOp<tensor::ExtractSliceOp>();
+        if (!firstSlice) {
+            return rewriter.notifyMatchFailure(genericOp, "inputs are not extract_slice");
+        }
+        auto srcType = cast<RankedTensorType>(firstSlice.getSource().getType());
+        if (!srcType.hasStaticShape() ||
+            llvm::any_of(firstSlice.getStaticOffsets(), ShapedType::isDynamic) ||
+            llvm::any_of(firstSlice.getStaticSizes(), ShapedType::isDynamic) ||
+            llvm::any_of(firstSlice.getStaticStrides(), ShapedType::isDynamic)) {
+            return rewriter.notifyMatchFailure(genericOp, "dynamic slice");
+        }
+
+        SmallVector<Value> sources;
+        sources.reserve(genericOp.getNumDpsInputs());
+        for (Value in : genericOp.getDpsInputs()) {
+            auto s = in.getDefiningOp<tensor::ExtractSliceOp>();
+            if (!s) {
+                return rewriter.notifyMatchFailure(genericOp, "input is not extract_slice");
+            }
+            if (s.getSource().getType() != srcType ||
+                s.getStaticOffsets() != firstSlice.getStaticOffsets() ||
+                s.getStaticSizes() != firstSlice.getStaticSizes() ||
+                s.getStaticStrides() != firstSlice.getStaticStrides()) {
+                return rewriter.notifyMatchFailure(genericOp, "mismatched slice params");
+            }
+            sources.push_back(s.getSource());
+        }
+
+        sliceInfo.firstSlice = firstSlice;
+        sliceInfo.srcType = srcType;
+        sliceInfo.resultType = cast<RankedTensorType>(genericOp.getResult(0).getType());
+        sliceInfo.staticSizes.assign(
+            firstSlice.getStaticSizes().begin(), firstSlice.getStaticSizes().end()
+        );
+        sliceInfo.sources = std::move(sources);
+        return success();
+    }
+
+    LogicalResult checkConvEpilogueSliceShapeAndSources(
+        linalg::GenericOp genericOp, PatternRewriter &rewriter, SliceInputsInfo &sliceInfo
+    ) const {
+        // Only sink genuine convolution epilogues: the crop must keep every source dimension
+        // except exactly one (the spatial width), and at least one sliced source must be a
+        // convolution result. The dropped-column count is left unbounded because a strided
+        // ConvTranspose's extra columns plus any folded-in downstream slice can remove more than
+        // one element. Requiring a convolution source keeps this scoped to conv+bias epilogues
+        // (where the bias fuses into the conv) and, together with the identical slice-parameter
+        // check above, excludes unrelated backbone crops such as channel splits.
+        // getStaticSizes() is indexed by source dimension (rank reduction only drops unit result
+        // dims), so it lines up with the source shape here.
+        int64_t shrunkDims = 0;
+        for (auto [sliceSize, srcDim] :
+             llvm::zip_equal(sliceInfo.staticSizes, sliceInfo.srcType.getShape())) {
+            if (sliceSize != srcDim) {
+                ++shrunkDims;
+            }
+        }
+        if (shrunkDims != 1) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "slice does not crop exactly one dimension"
+            );
+        }
+        if (llvm::none_of(sliceInfo.sources, [](Value src) {
+                return src.getDefiningOp<linalg::ConvolutionOpInterface>() != nullptr;
+            })) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "no convolution source to fuse the bias into"
+            );
+        }
+        return success();
+    }
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
+        if (failed(checkElementwiseSignature(genericOp, rewriter))) {
+            return failure();
+        }
+
+        SliceInputsInfo sliceInfo;
+        if (failed(collectSliceInputs(genericOp, rewriter, sliceInfo))) {
+            return failure();
+        }
+        if (failed(checkConvEpilogueSliceShapeAndSources(genericOp, rewriter, sliceInfo))) {
+            return failure();
+        }
+
+        auto loc = genericOp.getLoc();
+        Type outElemType = sliceInfo.resultType.getElementType();
+        auto newResultType = RankedTensorType::get(sliceInfo.srcType.getShape(), outElemType);
+
+        Value newInit =
+            tensor::EmptyOp::create(rewriter, loc, sliceInfo.srcType.getShape(), outElemType)
+                .getResult();
+
+        int64_t rank = sliceInfo.srcType.getRank();
+        auto identityMap = AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext());
+        SmallVector<AffineMap> maps(sliceInfo.sources.size() + 1, identityMap);
+        SmallVector<utils::IteratorType> iterators(rank, utils::IteratorType::parallel);
+
+        auto newGeneric = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{newResultType}, ValueRange(sliceInfo.sources),
+            ValueRange{newInit}, maps, iterators
+        );
+        rewriter.cloneRegionBefore(
+            genericOp.getRegion(), newGeneric.getRegion(), newGeneric.getRegion().end()
+        );
+
+        // Re-apply the original (possibly rank-reducing) slice on the elementwise result.
+        Value newSlice = tensor::ExtractSliceOp::create(
+            rewriter, loc, sliceInfo.resultType, newGeneric.getResult(0),
+            sliceInfo.firstSlice.getMixedOffsets(), sliceInfo.firstSlice.getMixedSizes(),
+            sliceInfo.firstSlice.getMixedStrides()
+        );
+        rewriter.replaceOp(genericOp, newSlice);
+        return success();
+    }
+};
+
 void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &patterns) {
+    // Move the ConvTranspose trailing-column slice below its elementwise bias/truncf epilogue
+    // so the bias fuses into the conv (needed for both the matmul and native conv1d paths).
+    patterns.insert<SinkExtractSliceThroughElementwisePattern>(context);
+
     // Raise 1x1 matmul-as-conv to linalg.matmul before the NHWC->NCHW pass.
     patterns.insert<Conv2D1x1NhwcHwcfToMatmulPattern>(context);
 
