@@ -43,11 +43,11 @@ namespace {
 // - otherwise, peel one iteration from the start and one from the end.
 // - simplify the min/max ops in the loop, after the peeling.
 bool peelLoop(IRRewriter &rewriter, mlir::scf::ForOp forOp) {
-    SmallVector<Value> dynamicShapes = torq::collectDynamicShapes(forOp.getRegion());
-    if (dynamicShapes.empty()) {
+    Value indVar = forOp.getInductionVar();
+    if (!torq::hasReachableDynamicShape(indVar, forOp)) {
         return false;
     }
-    LLVM_DEBUG({ llvm::dbgs() << "found dynamic shapes, peeling loop.\n"; });
+    LLVM_DEBUG({ llvm::dbgs() << "found dynamic shapes reachable from indVar, peeling loop.\n"; });
 
     Value lb = forOp.getLowerBound();
     Value ub = forOp.getUpperBound();

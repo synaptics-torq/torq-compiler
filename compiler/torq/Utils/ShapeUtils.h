@@ -22,6 +22,11 @@ namespace mlir::syna::torq {
 // Return a collection of all the Values with dynamic shapes in region.
 SmallVector<mlir::Value> collectDynamicShapes(mlir::Region &region);
 
+/// Walk forward from val within scopeOp, propagating strictly through scalar
+/// or index results. Returns true if any reachable operation produces a dynamic
+/// shape tensor result.
+bool hasReachableDynamicShape(mlir::Value val, mlir::Operation *scopeOp);
+
 LogicalResult collapseShapeWithDim(Value &input, int dim, PatternRewriter &rewriter);
 
 LogicalResult collapseValue(

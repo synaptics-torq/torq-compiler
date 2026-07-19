@@ -544,6 +544,48 @@ SmallVector<mlir::Value> collectDynamicShapes(mlir::Region &region) {
     return dynamic;
 }
 
+bool hasReachableDynamicShape(mlir::Value val, mlir::Operation *scopeOp) {
+    SmallVector<Value> worklist;
+    DenseSet<Value> visited;
+
+    worklist.push_back(val);
+    visited.insert(val);
+
+    while (!worklist.empty()) {
+        Value currentVal = worklist.pop_back_val();
+        for (Operation *userOp : currentVal.getUsers()) {
+            if (!scopeOp->isAncestor(userOp)) {
+                continue;
+            }
+
+            for (Value result : userOp->getResults()) {
+                if (auto tensorType = mlir::dyn_cast<TensorType>(result.getType())) {
+                    if (!tensorType.hasStaticShape()) {
+                        if (auto extractSliceOp = mlir::dyn_cast<tensor::ExtractSliceOp>(userOp)) {
+                            if (llvm::is_contained(extractSliceOp.getSizes(), currentVal)) {
+                                return true;
+                            }
+                        }
+                        else {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            for (Value result : userOp->getResults()) {
+                if (result.getType().isIntOrIndexOrFloat()) {
+                    if (visited.insert(result).second) {
+                        worklist.push_back(result);
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 bool checkIdentityLikeMaps(linalg::GenericOp op) {
     for (auto [operandIdx, map] : llvm::enumerate(op.getIndexingMapsArray())) {
         if (map.isIdentity())
