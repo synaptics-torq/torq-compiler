@@ -641,7 +641,10 @@ static bool tracesToConstantWeight(Value v) {
         if (isa<arith::ConstantOp>(def))
             return true;
         // Look through pure layout/cast ops that just reshape or retype weights.
-        if (isa<linalg::TransposeOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp>(def)) {
+        // extract_slice appears when a grouped conv splits its constant filter
+        // into per-group channel slices before the transpose.
+        if (isa<linalg::TransposeOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
+                tensor::ExtractSliceOp>(def)) {
             v = def->getOperand(0);
             continue;
         }
