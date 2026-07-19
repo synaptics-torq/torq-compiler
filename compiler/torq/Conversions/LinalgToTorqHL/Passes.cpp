@@ -246,6 +246,12 @@ class LinalgToTorqHLPreConversionPass
         // cause the entire pattern to be rolled back.
         target.addDynamicallyLegalOp<linalg::GenericOp>(
             [](linalg::GenericOp op) -> std::optional<bool> {
+                // QConv2D synthesizes Host-routed generics (zp-correction
+                // reduce/mul, bias+correction add) that are resolved later by
+                // CompileTimeConstComputePass.  These are the only Host-marked
+                // linalg.generic ops in the pre-conversion target.
+                if (isHostOrCssExecutor(op))
+                    return true;
                 if (op.getNumDpsInputs() != 1 || op.getNumDpsInits() != 1 ||
                     !op.getRegion().hasOneBlock())
                     return std::nullopt;
