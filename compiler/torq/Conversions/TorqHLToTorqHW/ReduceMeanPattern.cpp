@@ -23,7 +23,13 @@ ReduceMeanPattern::transform(torq_hl::ReduceMeanOp op, PatternRewriter &rewriter
     auto input_shape = input_type.getShape();
 
     uint32_t input_channel, height, width;
-    input_channel = input_shape[1];
+    // Fold the batch dim (input_shape[0]) into the channel loop. The kernel treats each
+    // channel as an independent reduction over H (and W); batch (N) and channel (C) are both
+    // non-reduced outer dims of a contiguous NCHW input, so the N*C outer positions form one
+    // contiguous channel range with the same per-frame stride. Previously input_shape[0] was
+    // ignored entirely, so any N>1 (e.g. LayerNorm's [162,1,512] -> reduce_mean on [162,1,512,1])
+    // mis-addressed across batch elements. For the common N==1 case this is a no-op.
+    input_channel = input_shape[0] * input_shape[1];
     height = input_shape[2];
     width = input_shape[3];
 
@@ -39,6 +45,16 @@ ReduceMeanPattern::transform(torq_hl::ReduceMeanOp op, PatternRewriter &rewriter
 
     auto input_strides = getEncodedStridesElements(input_type);
     uint32_t row_stride = input_strides[2];
+
+    // The N*C channel fold above assumes N is contiguous over C (stepping one channel
+    // advances exactly one HxW frame). Holds for the materialized NCHW input reduce_mean
+    // receives; assert so a future non-contiguous producer fails loudly instead of
+    // silently mis-addressing across the batch.
+    assert(
+        (input_shape[0] == 1 ||
+         input_strides[0] == static_cast<int64_t>(input_shape[1]) * input_strides[1]) &&
+        "reduce_mean batch fold requires N contiguous over C"
+    );
 
     LData input({input_channel, {height, row_stride}, blockCount, blockSize}, DType::bf16);
     LData weight({1}, weightType);
