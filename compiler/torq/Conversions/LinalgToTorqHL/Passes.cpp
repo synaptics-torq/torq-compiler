@@ -45,9 +45,8 @@ void populateLinalgToTorqHLPrePatterns(
     populateLinalgToTorqHLConv2DPatterns(context, patterns, markFuseGroups);
 
     populateLinalgToTorqHLQConv2DPatterns(context, patterns, markFuseGroups);
-
+    populateLinalgToTorqHLQMatmulPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLQEWBinaryPatterns(context, patterns, markFuseGroups);
-
     populateLinalgToTorqHLQPoolingPatterns(context, patterns, markFuseGroups);
 
     // Conv1D-as-matmul → fully_connected with absorbed bias. Registered before

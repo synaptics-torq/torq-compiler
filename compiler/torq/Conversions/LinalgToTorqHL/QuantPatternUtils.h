@@ -25,6 +25,8 @@
 #pragma once
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/IR/Location.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
 
 #include <optional>
@@ -99,5 +101,33 @@ bool matchQuantGeneric(linalg::GenericOp op, double &scale, double &zp, double &
 // in a signed 32-bit integer.  Returns false for negative scales (which cannot
 // be represented) or if no shift fits.
 bool computeMultiplierAndShift(double scale, int32_t &multiplier, int32_t &shift);
+
+// Deferred constant-resolution helpers.
+//
+// These builders emit the zero-point correction / scale_bias chains as
+// Host-marked linalg ops instead of folding them eagerly in the pattern.  The
+// Host-marked ops survive the pre-conversion target and are resolved later by
+// CompileTimeConstOutlinePass / CompileTimeConstComputePass (the "JIT"
+// constant pipeline).  Shared by the quantized weighted-op patterns
+// (QConv2D, QMatmul, ...).
+
+// Extract a scalar i32 constant from a value defined by arith.constant.
+std::optional<int32_t> getScalarI32Const(Value v);
+
+// Compute -inputZp * sum(adjustedWeights) per output channel.  adjustedWeights
+// are already sign-adjusted for weight_zp, so this term cancels the input_zp
+// offset introduced by keeping the input tensor in its as-quantized (unsigned)
+// form.  Works for any rank: all non-output-channel dims are reduced.
+Value computeInputZpCorrection(Value adjustedWeights, int32_t inputZp, PatternRewriter &rewriter);
+
+// Add two per-channel i32 bias tensors (Host-marked, folded at compile time).
+Value addPerChannelBias(Value lhs, Value rhs, PatternRewriter &rewriter);
+
+// Build a {C*2} i32 scale_bias tensor by interleaving a dynamic per-channel
+// i32 bias (shape {C}) with a scalar multiplier.  The result layout is
+// [bias_0, mult, bias_1, mult, ...].
+Value buildDynamicInterleavedBiasScale(
+    Value bias, int32_t multiplier, Location loc, PatternRewriter &rewriter
+);
 
 } // namespace mlir::syna::torq

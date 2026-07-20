@@ -9,6 +9,7 @@
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
+#include "torq/Conversions/LinalgToTorqHL/QuantPatternUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
@@ -42,6 +43,31 @@
 
 namespace mlir::syna::torq {
 
+// A QDQ quantized matmul chain: i8 x i8 -> i32 matmul followed by the
+// accumulator dequant, possibly through the input-zp correction combine.
+// These chains are owned by QMatmulToFCConvert (QMatmulPattern.cpp);
+// Conv2DMatmulOpConversion must not convert them.
+bool isQuantizedMatmulChain(linalg::MatmulOp op) {
+    auto outTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!outTy || !outTy.getElementType().isInteger(32))
+        return false;
+    Value result = op.getResult(0);
+    if (!result.hasOneUse())
+        return false;
+    auto user = dyn_cast<linalg::GenericOp>(*result.getUsers().begin());
+    if (!user)
+        return false;
+    double scale;
+    int32_t zp;
+    if (matchDequantGeneric(user, scale, zp))
+        return true;
+    Value userResult = user.getResult(0);
+    if (!userResult.hasOneUse())
+        return false;
+    auto nextUser = dyn_cast<linalg::GenericOp>(*userResult.getUsers().begin());
+    return nextUser && matchDequantGeneric(nextUser, scale, zp);
+}
+
 // NCHW pattern
 // Input NCHW, weight OIXY, Ouput NCHW
 // %cst_1 is weights
@@ -55,6 +81,7 @@ namespace mlir::syna::torq {
 // %transposed is weights transposed from OxI to IxO
 // %7 = linalg.matmul ins(%collapsed, %transposed : tensor<3136x144xi8>, tensor<144x24xi8>) outs(%6
 // : tensor<3136x24xi32>) -> tensor<3136x24xi32>
+
 struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
   private:
     const int _channelDim;
@@ -233,6 +260,15 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         // stays as linalg.matmul and MarkHostExecutorPass routes it to the host.
         if (lhsType.getElementType().isF32() || rhsType.getElementType().isF32()) {
             return rewriter.notifyMatchFailure(srcOp, "Matmul with F32 input not supported on NPU");
+        }
+
+        // QDQ quantized chains are owned by QMatmulToFCConvert; leave them
+        // alone.  When that pattern declines (unsupported chain), the matmul
+        // stays for the host/fallback path instead of a broken fusion here.
+        if (isQuantizedMatmulChain(srcOp)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "quantized matmul handled by QMatmulToFCConvert"
+            );
         }
 
         // Build fusion plan and compute bias/scale using PatternUtils helpers

@@ -35,94 +35,6 @@ namespace mlir::syna::torq {
 
 namespace {
 
-std::optional<int32_t> getScalarI32Const(Value v) {
-    auto cst = v.getDefiningOp<arith::ConstantOp>();
-    if (!cst)
-        return std::nullopt;
-    auto ia = dyn_cast<IntegerAttr>(cst.getValue());
-    if (!ia)
-        return std::nullopt;
-    return static_cast<int32_t>(ia.getInt());
-}
-
-// Compute -inputZp * sum(adjustedWeights) per output channel. adjustedWeights
-// are already sign-adjusted for weight_zp, so this term cancels the input_zp
-// offset introduced by keeping the input tensor in its as-quantized (unsigned)
-// form.
-Value computeInputZpCorrection(Value adjustedWeights, int32_t inputZp, PatternRewriter &rewriter) {
-    auto wTy = cast<RankedTensorType>(adjustedWeights.getType());
-    auto loc = adjustedWeights.getLoc();
-    auto i32Ty = rewriter.getI32Type();
-    SmallVector<int64_t> biasShape{wTy.getShape()[0]};
-    auto reduceInitTy = RankedTensorType::get(biasShape, i32Ty);
-    auto reduceInit =
-        arith::ConstantOp::create(rewriter, loc, reduceInitTy, rewriter.getZeroAttr(reduceInitTy))
-            .getResult();
-
-    SmallVector<int64_t> reduceDims;
-    for (int64_t i = 1; i < wTy.getRank(); ++i)
-        reduceDims.push_back(i);
-
-    auto reduceOp = linalg::ReduceOp::create(
-        rewriter, loc, adjustedWeights, reduceInit, reduceDims,
-        [](OpBuilder &b, Location loc, ValueRange args) {
-            auto toI32 = [&](Value v) -> Value {
-                if (v.getType() == b.getI32Type())
-                    return v;
-                return arith::ExtSIOp::create(b, loc, b.getI32Type(), v);
-            };
-            auto extL = toI32(args[0]);
-            auto extR = toI32(args[1]);
-            auto sum = arith::AddIOp::create(b, loc, extL, extR);
-            linalg::YieldOp::create(b, loc, ArrayRef<Value>{sum});
-        }
-    );
-    // The correction chain is folded later by CompileTimeConstComputePass, so it
-    // must be routable to the Host: an unmarked linalg op is illegal in the
-    // pre-conversion target and makes applyPartialConversion roll back the whole
-    // QConv2D rewrite.
-    setTargetExecutorAttr(reduceOp, torq_hl::Executor::Host);
-    auto sumW = reduceOp.getResult(0);
-
-    auto zpConst = arith::ConstantOp::create(rewriter, loc, rewriter.getI32IntegerAttr(-inputZp));
-    auto mulInit = tensor::EmptyOp::create(rewriter, loc, biasShape, i32Ty).getResult();
-    auto mulOp = linalg::GenericOp::create(
-        rewriter, loc, mulInit.getType(), ValueRange{sumW, zpConst}, ValueRange{mulInit},
-        SmallVector<AffineMap>{
-            rewriter.getMultiDimIdentityMap(1), AffineMap::get(1, 0, {}, rewriter.getContext()),
-            rewriter.getMultiDimIdentityMap(1)
-        },
-        SmallVector<utils::IteratorType>{utils::IteratorType::parallel},
-        [](OpBuilder &b, Location loc, ValueRange args) {
-            auto mul = arith::MulIOp::create(b, loc, args[0], args[1]);
-            linalg::YieldOp::create(b, loc, ArrayRef<Value>{mul});
-        }
-    );
-    setTargetExecutorAttr(mulOp, torq_hl::Executor::Host);
-    return mulOp.getResult(0);
-}
-
-// Add two per-channel i32 bias tensors.
-Value addPerChannelBias(Value lhs, Value rhs, PatternRewriter &rewriter) {
-    auto ty = cast<RankedTensorType>(lhs.getType());
-    auto loc = lhs.getLoc();
-    auto init =
-        tensor::EmptyOp::create(rewriter, loc, ty.getShape(), ty.getElementType()).getResult();
-    auto addOp = linalg::GenericOp::create(
-        rewriter, loc, ty, ValueRange{lhs, rhs}, ValueRange{init},
-        SmallVector<AffineMap>{
-            rewriter.getMultiDimIdentityMap(1), rewriter.getMultiDimIdentityMap(1),
-            rewriter.getMultiDimIdentityMap(1)
-        },
-        SmallVector<utils::IteratorType>{utils::IteratorType::parallel},
-        [](OpBuilder &b, Location loc, ValueRange args) {
-            auto sum = arith::AddIOp::create(b, loc, args[0], args[1]);
-            linalg::YieldOp::create(b, loc, ArrayRef<Value>{sum});
-        }
-    );
-    setTargetExecutorAttr(addOp, torq_hl::Executor::Host);
-    return addOp.getResult(0);
-}
 static bool isElementwiseAddI32(linalg::GenericOp op) {
     if (!op || op.getNumDpsInputs() != 2 || op.getNumDpsInits() != 1)
         return false;
@@ -147,43 +59,6 @@ Value extractBiasOperand(linalg::GenericOp addOp, Value convOutput) {
     if (auto broadcastOp = biasOperand.getDefiningOp<linalg::BroadcastOp>())
         biasOperand = broadcastOp.getInput();
     return biasOperand;
-}
-
-// Build a {C*2} i32 scale_bias tensor by interleaving a dynamic per-channel
-// i32 bias (shape {C}) with a scalar multiplier. The result layout is
-// [bias_0, mult, bias_1, mult, ...].
-Value buildDynamicInterleavedBiasScale(
-    Value bias, int32_t multiplier, Location loc, PatternRewriter &rewriter
-) {
-    auto biasTy = dyn_cast<RankedTensorType>(bias.getType());
-    if (!biasTy || biasTy.getRank() != 1 || biasTy.getElementType() != rewriter.getI32Type())
-        return nullptr;
-    int64_t C = biasTy.getShape()[0];
-    if (ShapedType::isDynamic(C))
-        return nullptr;
-
-    SmallVector<int32_t> multVals(C, multiplier);
-    auto multTy = RankedTensorType::get({C}, rewriter.getI32Type());
-    auto multCst =
-        arith::ConstantOp::create(rewriter, loc, multTy, rewriter.getI32TensorAttr(multVals))
-            .getResult();
-
-    auto sbTy = RankedTensorType::get({C * 2}, rewriter.getI32Type());
-    auto init =
-        tensor::EmptyOp::create(rewriter, loc, sbTy.getShape(), sbTy.getElementType()).getResult();
-    // Place biases at even offsets (stride 2) and scales at odd offsets (stride 2)
-    // so the final layout is [bias_0, mult, bias_1, mult, ...].
-    auto withBias = tensor::InsertSliceOp::create(
-        rewriter, loc, bias, init, SmallVector<OpFoldResult>{rewriter.getIndexAttr(0)},
-        SmallVector<OpFoldResult>{rewriter.getIndexAttr(C)},
-        SmallVector<OpFoldResult>{rewriter.getIndexAttr(2)}
-    );
-    auto scaleBias = tensor::InsertSliceOp::create(
-        rewriter, loc, multCst, withBias, SmallVector<OpFoldResult>{rewriter.getIndexAttr(1)},
-        SmallVector<OpFoldResult>{rewriter.getIndexAttr(C)},
-        SmallVector<OpFoldResult>{rewriter.getIndexAttr(2)}
-    );
-    return scaleBias;
 }
 
 struct QConv2dConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
