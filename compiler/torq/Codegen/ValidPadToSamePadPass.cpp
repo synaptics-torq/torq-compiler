@@ -274,7 +274,7 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
             // swap if the W axis is already top/left-heavy to keep both axes consistent.
             newPads[LRTBDim::Top] = total_pad_h / 2;
             newPads[LRTBDim::Bottom] = total_pad_h - newPads[LRTBDim::Top];
-            if (pads[LRTBDim::Left] > pads[LRTBDim::Right]) {
+            if (pads[LRTBDim::Left] > pads[LRTBDim::Right] && stride_offset) {
                 std::swap(newPads[LRTBDim::Top], newPads[LRTBDim::Bottom]);
             }
         }
@@ -288,7 +288,7 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
             // Distribute W SAME padding symmetrically, swap if H axis is top/left-heavy.
             newPads[LRTBDim::Left] = total_pad_w / 2;
             newPads[LRTBDim::Right] = total_pad_w - newPads[LRTBDim::Left];
-            if (pads[LRTBDim::Top] > pads[LRTBDim::Bottom]) {
+            if (pads[LRTBDim::Top] > pads[LRTBDim::Bottom] && stride_offset) {
                 std::swap(newPads[LRTBDim::Left], newPads[LRTBDim::Right]);
             }
         }
