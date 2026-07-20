@@ -237,12 +237,177 @@ struct QGlobalAveragePoolConvert : public OpRewritePattern<linalg::PoolingNchwSu
     }
 };
 
+template <typename PoolingOpType, bool IsNCHW>
+struct QMaxPoolConvert : public OpRewritePattern<PoolingOpType> {
+  private:
+    const bool _markFuseGroups;
+
+    // Match the DQ -> (optional pad) -> MaxPool -> Q chain.
+    LogicalResult matchQMaxPoolChain(
+        PoolingOpType poolOp, PatternRewriter &rewriter, linalg::GenericOp &dequantOp,
+        DequantInfo &dInfo, Value &dequantInput, RankedTensorType &dequantInputType,
+        linalg::GenericOp &quantOp, QuantInfo &qInfo, PaddingInfo &padInfo, tensor::PadOp &padOp,
+        linalg::FillOp &fillOp
+    ) const {
+        if (poolOp.getInputs().size() != 2 || poolOp.getResults().size() != 1)
+            return rewriter.notifyMatchFailure(poolOp, "unexpected operand/result count");
+
+        Value originalPoolInput = poolOp.getInputs()[0];
+        Value poolOutput = poolOp.getResultTensors()[0];
+
+        auto poolInputType = dyn_cast<RankedTensorType>(originalPoolInput.getType());
+        if (!poolInputType || !poolInputType.getElementType().isF32())
+            return rewriter.notifyMatchFailure(poolOp, "pool input is not f32");
+
+        padOp = originalPoolInput.getDefiningOp<tensor::PadOp>();
+        fillOp = poolOp.getOutputs()[0].template getDefiningOp<linalg::FillOp>();
+
+        // Fold any tensor.pad that precedes the pool.
+        Value poolInput = originalPoolInput;
+        padInfo = foldBackwardPadding(poolInput, rewriter, IsNCHW, poolOutput);
+        if (padInfo.lrtbPad.empty())
+            return rewriter.notifyMatchFailure(poolOp, "failed to fold padding");
+
+        // The pad source must be a dequant generic.
+        dequantOp = dyn_cast<linalg::GenericOp>(poolInput.getDefiningOp());
+        if (!dequantOp || !matchDequantGeneric(dequantOp, dInfo.scale, dInfo.zp) ||
+            !dequantOp->getResult(0).hasOneUse())
+            return rewriter.notifyMatchFailure(poolOp, "failed to match Q dequant");
+
+        dequantInput = dequantOp.getInputs()[0];
+        dequantInputType = dyn_cast<RankedTensorType>(dequantInput.getType());
+        if (!dequantInputType || !dequantInputType.getElementType().isInteger(8))
+            return rewriter.notifyMatchFailure(poolOp, "dequant input must be int8");
+
+        // Pool output must feed a single quant generic.
+        if (!poolOutput.hasOneUse())
+            return rewriter.notifyMatchFailure(poolOp, "pool output has multiple uses");
+
+        quantOp = dyn_cast<linalg::GenericOp>(*poolOutput.getUsers().begin());
+        if (!quantOp || !matchQuantGeneric(quantOp, qInfo.scale, qInfo.zp, qInfo.min, qInfo.max))
+            return rewriter.notifyMatchFailure(poolOp, "failed to match Q quant");
+
+        // Direct int8 MaxPool is valid when input/output quant params match.
+        if (dInfo.scale != qInfo.scale)
+            return rewriter.notifyMatchFailure(poolOp, "mismatched quant scales");
+        if (dInfo.zp != static_cast<int32_t>(std::llround(qInfo.zp)))
+            return rewriter.notifyMatchFailure(poolOp, "mismatched quant zero points");
+
+        // The pad fill value must be the minimum representable int8 value,
+        // which is also the typical zero-point (-128).
+        if (dInfo.zp != static_cast<int32_t>(std::llround(qInfo.min)))
+            return rewriter.notifyMatchFailure(
+                poolOp, "zero-point must equal output min for maxpool padding"
+            );
+
+        return success();
+    }
+
+    // Emit torq_hl.maxpool2d and replace the matched chain.
+    LogicalResult rewriteQMaxPoolChain(
+        PoolingOpType poolOp, linalg::GenericOp dequantOp, const DequantInfo &dInfo,
+        Value dequantInput, RankedTensorType dequantInputType, linalg::GenericOp quantOp,
+        const QuantInfo &qInfo, const PaddingInfo &padInfo, tensor::PadOp padOp,
+        linalg::FillOp fillOp, PatternRewriter &rewriter
+    ) const {
+        Location loc = poolOp.getLoc();
+
+        auto strides = attrValuesAsVec(poolOp.getStrides());
+        auto kernelType = dyn_cast<RankedTensorType>(poolOp.getInputs()[1].getType());
+        auto kernelShape = kernelType.getShape();
+
+        // Transpose input to NCHW if the pool is NHWC.
+        Value transposedInput = dequantInput;
+        if constexpr (!IsNCHW) {
+            transposedInput = transposeValue(dequantInput, Permutation::nhwc2nchw(), loc, rewriter);
+        }
+
+        auto quantOutputType = dyn_cast<RankedTensorType>(quantOp.getResult(0).getType());
+        RankedTensorType hwOutputType = quantOutputType;
+        if constexpr (!IsNCHW) {
+            hwOutputType = transposeType(quantOutputType, Permutation::nhwc2nchw());
+        }
+
+        const std::vector<int32_t> bias = {0};
+        const std::vector<int32_t> scale = {1};
+        Value weightConst = createI8Const(
+            rewriter, poolOp, std::vector<int8_t>{1}, llvm::ArrayRef<int64_t>{1, 1, 1, 1}
+        );
+        Value biasScaleConst = createI32Const(rewriter, poolOp, interleave(bias, scale));
+
+        int32_t outputMin = static_cast<int32_t>(std::llround(qInfo.min));
+        int32_t outputMax = static_cast<int32_t>(std::llround(qInfo.max));
+
+        rewriter.setInsertionPoint(quantOp);
+
+        auto maxpoolOp = torq_hl::MaxPool2dOp::create(
+            rewriter, loc, hwOutputType, createInitTensor(poolOp, rewriter, hwOutputType),
+            /*input_zp=*/dInfo.zp, outputMin, outputMax, strides, padInfo.lrtbPad, kernelShape,
+            weightConst, biasScaleConst, transposedInput, /*segment_output=*/false
+        );
+
+        Value result = maxpoolOp.getOutput();
+        if constexpr (!IsNCHW) {
+            result = transposeValue(result, Permutation::nchw2nhwc(), loc, rewriter);
+        }
+
+        rewriter.replaceOp(quantOp, result);
+        rewriter.eraseOp(poolOp);
+        rewriter.eraseOp(dequantOp);
+        if (padOp)
+            rewriter.eraseOp(padOp);
+        if (fillOp)
+            rewriter.eraseOp(fillOp);
+        return success();
+    }
+
+  public:
+    using OpRewritePattern<PoolingOpType>::OpRewritePattern;
+    QMaxPoolConvert(MLIRContext *context, bool markFuseGroups)
+        : OpRewritePattern<PoolingOpType>(context, /*benefit=*/2), _markFuseGroups(markFuseGroups) {
+    }
+
+    LogicalResult matchAndRewrite(PoolingOpType poolOp, PatternRewriter &rewriter) const override {
+        if (_markFuseGroups && isMarkedFuseGroup(poolOp))
+            return rewriter.notifyMatchFailure(poolOp, "already marked");
+
+        linalg::GenericOp dequantOp, quantOp;
+        DequantInfo dInfo;
+        QuantInfo qInfo;
+        Value dequantInput;
+        RankedTensorType dequantInputType;
+        PaddingInfo padInfo;
+        tensor::PadOp padOp = nullptr;
+        linalg::FillOp fillOp = nullptr;
+        if (failed(matchQMaxPoolChain(
+                poolOp, rewriter, dequantOp, dInfo, dequantInput, dequantInputType, quantOp, qInfo,
+                padInfo, padOp, fillOp
+            )))
+            return failure();
+
+        if (_markFuseGroups) {
+            auto fuseGroupAttr = poolOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
+            if (!fuseGroupAttr)
+                return rewriter.notifyMatchFailure(poolOp, "missing fuse group id");
+            markFuseGroupBackward(quantOp.getResult(0), {dequantInput}, rewriter, fuseGroupAttr);
+            return success();
+        }
+
+        return rewriteQMaxPoolChain(
+            poolOp, dequantOp, dInfo, dequantInput, dequantInputType, quantOp, qInfo, padInfo,
+            padOp, fillOp, rewriter
+        );
+    }
+};
+
 } // namespace
 
 void populateLinalgToTorqHLQPoolingPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
     patterns.insert<QGlobalAveragePoolConvert>(context, markFuseGroups);
+    patterns.insert<QMaxPoolConvert<linalg::PoolingNchwMaxOp, true>>(context, markFuseGroups);
+    patterns.insert<QMaxPoolConvert<linalg::PoolingNhwcMaxOp, false>>(context, markFuseGroups);
 }
 
 } // namespace mlir::syna::torq
