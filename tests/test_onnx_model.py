@@ -11,20 +11,35 @@ from torq.testing.onnx import generate_onnx_layers_from_file, _has_bf16_matmul, 
 from torq.testing.iree import llvmcpu_reference_results
 from torq.testing.iree import  list_files
 
-'''
-Any onnx model under tests/testdata/dev_ops, tests/testdata/onnx_models
-could be tested with full model and all their layers
+"""ONNX model layer/full-model test harness.
 
-To see all the test cases:
-pytest tests/test_onnx_model.py -v -s --collect-only
+Any ONNX model under ``tests/testdata/dev_ops`` or ``tests/testdata/onnx_models``
+can be tested layer-by-layer or as a full model.
 
-run the full model:
-pytest tests/test_onnx_model.py -v -s [filename.stem]_full_model
+Basic usage:
 
-run layer by layer:
-pytest tests/test_onnx_model.py -v -s [filename.stem]_layer_[layername]
-for example: pytest tests/test_onnx_model.py -v -s mbv2.quant_layer_DequantizeLinear_306
-'''
+    # List all generated cases
+    pytest tests/test_onnx_model.py -v -s --collect-only
+
+    # Run the full model
+    pytest tests/test_onnx_model.py -v -s [filename.stem]_full_model
+
+    # Run a single extracted layer
+    pytest tests/test_onnx_model.py -v -s [filename.stem]_layer_[layername]
+    # e.g. pytest tests/test_onnx_model.py -v -s mbv2.quant_layer_DequantizeLinear_306
+
+Quantization:
+
+    This test already supports the shared ONNX quantization flags.  To run the
+    same cases under int8 quantization, pass ``--quantize`` (and usually
+    ``--full-integer`` so graph I/O remain int8):
+
+        pytest tests/test_onnx_model.py -v -s --quantize --full-integer --quant-format=qdq
+
+    With ``--quant-format=qoperator`` the model is rewritten to use native
+    quantized ops such as ``QLinearConv`` instead of QDQ nodes.
+    
+"""
 
 @pytest.fixture
 def case_config(request, chip_config):

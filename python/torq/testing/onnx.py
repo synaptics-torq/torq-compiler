@@ -1412,6 +1412,8 @@ def onnx_quant_config(request):
     """Return quantization config for version hashing.
 
     This ensures cache invalidation when --quantize or its sub-options change.
+    Test modules can override this fixture locally to force quantization without
+    mutating the global pytest config object.
     """
     return {
         "quantize": request.config.getoption("--quantize", default=False),
@@ -1431,16 +1433,20 @@ def onnx_quantized_model_file(
     Uses the original ONNX model as the source. If quantization is disabled,
     the original model is copied to the versioned location.
 
+    The actual settings are taken from the ``onnx_quant_config`` fixture, so
+    individual test modules can override them without touching the global
+    pytest config.
+
     Note: onnx_model_file is a Path object
     (versioned_generated_file_fixture unwraps VersionedFile to Path).
     """
     import shutil
 
-    use_quantize = request.config.getoption("--quantize", default=False)
-    per_channel = request.config.getoption("--per-channel", default=False)
-    full_integer = request.config.getoption("--full-integer", default=False)
-    quant_format = request.config.getoption("--quant-format", default="qdq")
-    quant_dtype = request.config.getoption("--quant-dtype", default="A8W8")
+    use_quantize = onnx_quant_config["quantize"]
+    per_channel = onnx_quant_config["per_channel"]
+    full_integer = onnx_quant_config["full_integer"]
+    quant_format = onnx_quant_config["quant_format"]
+    quant_dtype = onnx_quant_config["quant_dtype"]
 
     source_path = onnx_model_file
 
@@ -1476,15 +1482,15 @@ def onnx_quantized_model_file(
 def onnx_mlir_model_file(request, versioned_file, onnx_model_file, onnx_bf16_model_file, onnx_bf16_config, onnx_quantized_model_file, onnx_quant_config):
     """Convert ONNX model to MLIR with enhanced error diagnostics.
 
-    Uses quantized model if --quantize is enabled, otherwise BF16 model if
-    --auto-convert-bf16 is enabled, otherwise uses the original model.
+    Uses quantized model if enabled by ``onnx_quant_config``, otherwise BF16
+    model if --auto-convert-bf16 is enabled, otherwise uses the original model.
     This ensures the compiler receives the correctly converted model based on
     user options.
 
     Note: onnx_model_file, onnx_bf16_model_file, and onnx_quantized_model_file
     are Path objects (versioned_generated_file_fixture unwraps VersionedFile to Path).
     """
-    use_quantize = request.config.getoption("--quantize", default=False)
+    use_quantize = onnx_quant_config["quantize"]
     use_bf16 = request.config.getoption("--auto-convert-bf16", default=False)
 
     if use_quantize:
@@ -1703,7 +1709,7 @@ from .numpy import (
 
 
 @versioned_unhashable_object_fixture
-def composite_reference_results(request, input_data):
+def composite_reference_results(request, input_data, onnx_quant_config):
     """
     Generate reference using a chained fallback strategy:
     1. ONNXRuntime (fastest, most accurate for f32)
@@ -1711,14 +1717,15 @@ def composite_reference_results(request, input_data):
     3. llvmcpu fallback (IREE reference compilation)
     4. torch fallback (last resort for bf16 models with unsupported ops)
 
-    When --quantize is enabled, the ONNXRuntime reference runs the quantized
+    When quantization is enabled (via --quantize or by overriding the
+    ``onnx_quant_config`` fixture), the ONNXRuntime reference runs the quantized
     ONNX model (via onnx_quantized_model_file) so the TORQ compiled output is
     compared against the same quantized integer graph instead of the original
     FP32 model.
     """
     # Try ONNX-based paths first if an ONNX model is available.
     try:
-        use_quantize = request.config.getoption("--quantize", default=False)
+        use_quantize = onnx_quant_config["quantize"]
         if use_quantize:
             onnx_model_file = request.getfixturevalue("onnx_quantized_model_file")
         else:
