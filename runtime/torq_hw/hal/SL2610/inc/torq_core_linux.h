@@ -24,8 +24,10 @@
 #include <linux/mutex.h>
 #include <linux/interrupt.h>
 #include <linux/ktime.h>
-#include <linux/atomic.h>
 
+#include <linux/atomic.h>
+#include <linux/devfreq.h>
+#include <linux/ktime.h>
 #include "torq_kernel_uapi.h"
 
 #define TORQ_IOCTL_WAIT_BITMASK_NSS 0
@@ -102,6 +104,8 @@ struct torq_module {
     /* Inference time statistics */
     atomic64_t total_inference_time_us;
     ktime_t inference_start;
+
+    struct torq_devfreq *devfreq_data;
 };
 
 struct torq_network {

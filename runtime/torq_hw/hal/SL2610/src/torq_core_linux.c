@@ -4,6 +4,7 @@
 #include "torq_core_linux.h"
 #include "torq_kernel_log.h"
 #include "torq_reg_define.h"
+#include "torq_devfreq.h"
 
 #define SYNA_NPU_DEV_NAME "torq"
 #define IOVA_ALIGN 4096
@@ -1214,7 +1215,7 @@ static void torq_remove(struct platform_device *pdev)
         sysfs_remove_group(&torq_dev->misc_dev.this_device->kobj, &torq_stats_group);
         misc_deregister(&torq_dev->misc_dev);
     }
-
+    torq_devfreq_exit(torq_dev);
     platform_set_drvdata(pdev, NULL);
 }
 
@@ -1262,13 +1263,17 @@ static int torq_probe(struct platform_device *pdev)
     torq_dev->pdev = pdev;
     torq_dev->iommu_device = &torq_dev->pdev->dev;
 
+    ret = torq_devfreq_init(torq_dev);
+    if (ret)
+        goto err_clear_drvdata;
+
     /* get default dma domain of connected smmu */
     torq_dev->default_domain = iommu_get_domain_for_dev(torq_dev->iommu_device);
     if (!torq_dev->default_domain) {
         KLOGE("No default IOMMU domain found, check iommu config in dts");
-        return -ENODEV;
+        ret = -ENODEV;
+        goto err_devfreq;
     }
-
     platform_set_drvdata(pdev, torq_dev);
 
     init_completion(&torq_dev->job_completion);
@@ -1277,14 +1282,15 @@ static int torq_probe(struct platform_device *pdev)
     torq_dev->job_irq = platform_get_irq_byname(pdev, "job");
     if (torq_dev->job_irq < 0) {
         KLOGE("Failed to get SYNPU IRQ: %d", torq_dev->job_irq);
-	return torq_dev->job_irq;
+        ret = torq_dev->job_irq;
+        goto err_devfreq;
     }
 
     ret = devm_request_irq(&pdev->dev, torq_dev->job_irq, torq_synpu_irq_handler,
                            IRQF_SHARED, "torq-npu-irq", torq_dev);
     if (ret) {
         KLOGE("Failed to request TORQ IRQ %d: %d", torq_dev->job_irq, ret);
-        return ret;
+        goto err_devfreq;
     }
     KLOGI("Registered IRQs: NPU:%d", torq_dev->job_irq);
 
@@ -1294,10 +1300,10 @@ static int torq_probe(struct platform_device *pdev)
     torq_dev->misc_dev.fops = &torq_fops;
     torq_dev->misc_dev.minor = MISC_DYNAMIC_MINOR;
 
-    if (misc_register(&torq_dev->misc_dev) < 0) {
+    ret = misc_register(&torq_dev->misc_dev);
+    if (ret < 0) {
         KLOGE("cannot register character device");
-        torq_remove(pdev);
-        return -1;
+        goto err_devfreq;
     }
 
     torq_dev->misc_registered = true;
@@ -1310,6 +1316,12 @@ static int torq_probe(struct platform_device *pdev)
 
     KLOGI("NPU driver loaded");
     return 0;
+
+err_devfreq:
+    torq_devfreq_exit(torq_dev);
+err_clear_drvdata:
+    platform_set_drvdata(pdev, NULL);
+    return ret;
 }
 
 static const struct of_device_id torq_of_match[] = {

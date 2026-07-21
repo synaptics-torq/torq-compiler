@@ -3,7 +3,7 @@
 
 obj-m += syna_npu.o
 
-syna_npu-y += src/torq_core_linux.o
+syna_npu-y += src/torq_core_linux.o src/torq_devfreq.o
 
 # Include paths:
 ccflags-y += -I$(src)/inc
