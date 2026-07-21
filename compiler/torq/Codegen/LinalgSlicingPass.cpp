@@ -9,6 +9,7 @@
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqHw.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -16,6 +17,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/TilingInterface.h"
@@ -36,10 +38,6 @@
 namespace mlir::syna::torq {
 
 namespace {
-
-// A unit attribute, used to track the main operation over the multiple tiling
-// and unrolling the pass does.
-const std::string TORQ_LINALG_SLICING = "torq-linalg-slicing";
 
 const int64_t kGrouping = 4;
 const int64_t kMinElementsForSlicing = 2000;
@@ -90,18 +88,32 @@ int64_t getSlicingTileSize(int64_t domainSize, int64_t grouping) {
     return domainSize / TorqHw::get().getSliceCount();
 }
 
-scf::SCFTileAndFuseOptions::ControlFnTy getControlFn(IntegerAttr fuseGroup) {
-    return [fuseGroup](
-               mlir::tensor::ExtractSliceOp, OpResult producerOpResult, bool
+scf::SCFTileAndFuseOptions::ControlFnTy getControlFn(IntegerAttr fuseGroup, size_t slicingIter) {
+    return [fuseGroup, slicingIter](
+               mlir::tensor::ExtractSliceOp sliceOp, OpResult producerOpResult,
+               bool isDestinationOperand
            ) -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
-        if (!fuseGroup)
-            return std::nullopt;
-
         auto producerGroups =
             producerOpResult.getOwner()->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
         if (producerGroups && llvm::is_contained(producerGroups, fuseGroup)) {
             return scf::SCFTileAndFuseOptions::ControlFnResult{false};
         }
+
+        if (auto padOp = dyn_cast<tensor::PadOp>(producerOpResult.getOwner())) {
+            auto staticOffsets = sliceOp.getStaticOffsets();
+            if (slicingIter < staticOffsets.size() &&
+                ShapedType::isDynamic(staticOffsets[slicingIter])) {
+                auto lowPads = padOp.getStaticLow();
+                auto highPads = padOp.getStaticHigh();
+                if (slicingIter < lowPads.size() && slicingIter < highPads.size() &&
+                    lowPads[slicingIter] == 0 && highPads[slicingIter] == 0) {
+                    return scf::SCFTileAndFuseOptions::ControlFnResult{false};
+                }
+            }
+        }
+
+        if (!fuseGroup)
+            return std::nullopt;
 
         return std::nullopt;
     };
@@ -134,7 +146,7 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuse(
     scf::SCFTileAndFuseOptions options;
     options.tilingOptions.setTileSizes(tileSizes);
     options.tilingOptions.setLoopType(loopType);
-    options.setFusionControlFn(getControlFn(fuseGroup));
+    options.setFusionControlFn(getControlFn(fuseGroup, slicingIter));
 
     FailureOr<scf::SCFTileAndFuseResult> tiledResults =
         scf::tileConsumerAndFuseProducersUsingSCF(rewriter, rootTi, options);
@@ -181,8 +193,6 @@ void peelAndSliceToSize(
         return;
     }
 
-    op->setAttr(TORQ_LINALG_SLICING, rewriter.getUnitAttr());
-
     auto tiledResults =
         tileAndFuse(rewriter, op, tileSize, slicingIter, scf::SCFTilingOptions::LoopType::ForOp);
     if (failed(tiledResults)) {
@@ -191,32 +201,11 @@ void peelAndSliceToSize(
     }
     assert(tiledResults->loops.size() == 1);
 
-    SmallVector<Operation *, 2> clonedOps{2, nullptr};
-
-    if (failed(loopUnrollByFactor(
-            cast<scf::ForOp>(tiledResults->loops[0]), 2,
-            [&](unsigned i, Operation *clonedOp, OpBuilder) {
-                assert(0 <= i && i < 2);
-                if (clonedOp->hasAttr(TORQ_LINALG_SLICING)) {
-                    clonedOp->removeAttr(TORQ_LINALG_SLICING);
-                    clonedOps[i] = clonedOp;
-                }
-            }
-        ))) {
+    if (failed(loopUnrollByFactor(cast<scf::ForOp>(tiledResults->loops[0]), 2))) {
         LLVM_DEBUG(assert(false));
         op->emitError("failed to peel");
         return;
     }
-
-    assert(llvm::all_of(clonedOps, [](Operation *op) { return op; }) && "expected two clones");
-
-    // Slice the first tile.
-    sliceToSize(rewriter, clonedOps[0], tileSize, iterDomCount, slicingIter, grouping);
-
-    // Peel and slice the second tile.
-    peelAndSliceToSize(
-        rewriter, clonedOps[1], domainSize - tileSize, iterDomCount, slicingIter, grouping
-    );
 }
 
 LogicalResult
@@ -344,6 +333,11 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
+        // Host-executed elementwise ops are compile-time helper/rescale paths
+        // and should not be tiled/sliced.
+        if (getTargetExecutor(genericOp) == torq_hl::Executor::Host)
+            return rewriter.notifyMatchFailure(genericOp, "host-executed operation");
+
         // If this op is part of a fuse group but is NOT the principal op, skip
         // it — the principal op drives tiling for the whole group.
         // Standalone elementwise ops (no fuse-group attr) are allowed through.
