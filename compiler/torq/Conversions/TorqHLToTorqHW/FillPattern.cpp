@@ -21,11 +21,9 @@ LogicalResult FillPattern::transform(torq_hl::FillOp op, PatternRewriter &rewrit
 
     // The tensor to be filled can have any number of dimensions with any stride
     // Note: padding areas are not filled
-    auto output_type = llvm::dyn_cast<MemRefType>(op.getInit().getType());
     int32_t val = op.getValue();
-    assert(val >= -32768 && val <= 65535 && "Fill value out of range");
-    Slice slice;
-    LData output(output_type);
+    Slice slice("Fill");
+    LData output(op.getInit());
     output.fuse(output.denseDims());
     // For sub-word types (i8, i16, bf16), widen to int32 when the fused dense dim is
     // exactly divisible by the factor (4 for i8, 2 for i16/bf16). Divide the last dim
@@ -54,20 +52,38 @@ LogicalResult FillPattern::transform(torq_hl::FillOp op, PatternRewriter &rewrit
             output.setElementType(DType::int32);
         }
     }
+#define TORQ_TEST_MULTI_DEQW 0
+#if TORQ_TEST_MULTI_DEQW
+    // Test implementation showing how to take advantage of multiple DEQW in a single kernel.
+    assert(output.shape().size() == 1);
+    int n1 = output.dim(0) / 3;
+    int n2 = n1;
+    int n3 = output.dim(0) - n2 - n1;
+    For(auto ov = slice.iterate(n1)) { slice.store(output[ov], val); }
+    output.setOffset(n1);
+    For(auto ov = slice.iterate(n2)) { slice.store(output[ov], val); }
+    output.setOffset(n1 + n2);
+    For(auto ov = slice.iterate(n3)) { slice.store(output[ov], val); }
+#else
     int vectorSize = slice.act.width(output.elementType());
     For(auto ndd = slice.iterate(output.dims(0, -1))) {
         For(auto ov = slice.iterate(div_ceil(output.dim(-1), vectorSize))) {
             slice.append(output[ndd], val);
         }
     }
+#endif
 
     rewriter.replaceOpWithNewOp<SliceTaskOp>(
-        op,                                      // Operation to replace
-        "fill",                                  // Task name
-        ValueRange{},                            // Input tensor
-        ValueRange{},                            // Weights
-        ValueRange{},                            // BiasScale tensor,
-        ValueRange{op.getInit()},                // Output tensor initializer
+        op,           // Operation to replace
+        slice.name(), // Task name
+        ValueRange{}, // Input tensor
+        ValueRange{}, // Weights
+        ValueRange{}, // BiasScale tensor,
+#if TORQ_TEST_MULTI_DEQW
+        ValueRange{op.getInit(), op.getInit(), op.getInit()}, // Output tensor initializer
+#else
+        ValueRange{op.getInit()}, // Output tensor initializer
+#endif
         ValueRange{},                            // Symbols
         slice.getCfgAttr(rewriter.getContext()), // Slice configuration
         slice.getNdls()

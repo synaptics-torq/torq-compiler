@@ -291,11 +291,11 @@ template <class T> class DataT : public Data {
 // Data in LRAM
 class LData : public DataT<LData> {
     using DataT::DataT;
+    LData(const MemRefType &type);
 
   public:
     LData(const Shape &shape, DType elementType) : DataT(shape, elementType) {}
     LData(const Shape &shape, DType elementType, int offs) : DataT(shape, elementType, offs) {}
-    LData(const MemRefType &type);
     LData(const Value value);
     static std::string name() { return "LData"; }
 

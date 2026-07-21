@@ -97,49 +97,70 @@ static void convert(const torq_hw::RegNdlAttr attr, RegNdl &ndl) {
     }
 }
 
+static MemNdl::Type ndlTypeToMemNdlType(NdlType type) {
+    MemNdl::Type memNdlType;
+    switch (type) {
+    case NdlType::DEDR:
+        memNdlType = MemNdl::Type::DEDR;
+        break;
+    case NdlType::DEWR:
+        memNdlType = MemNdl::Type::DEWR;
+        break;
+    case NdlType::DEBR:
+        memNdlType = MemNdl::Type::DEBR;
+        break;
+    case NdlType::DEQW:
+        memNdlType = MemNdl::Type::DEQW;
+        break;
+    default:
+        assert(false);
+        break;
+    }
+    return memNdlType;
+}
+
 void convert(
     Operation *op, IRMapping &mapping, const ArrayRef<MemNdlAttr> &ndls, NdlType type,
-    int64_t index, int64_t setId, MemNdl &memNdl, ArrayAttr symbolValuesAttr,
+    int64_t setId, std::vector<MemNdl> &memNdls, ArrayAttr symbolValuesAttr,
     Operation::operand_range buffers, int64_t byteAlignment = 0
 ) {
+    MemNdl::Type memNdlType = ndlTypeToMemNdlType(type);
 
-    if (buffers.size() == 0) {
-        return;
-    }
+    for (auto index = 0; index < buffers.size(); index++) {
+        const auto &b{buffers[index]};
+        auto buffer = mapping.lookup(b);
+        auto ndl = getNdl(ndls, type, index, setId);
+        if (!ndl)
+            continue;
+        MemNdl memNdl(memNdlType, setId);
+        convert(*ndl, memNdl, symbolValuesAttr);
 
-    auto buffer = mapping.lookup(*(buffers.begin()));
+        auto bufferType = dyn_cast<MemRefType>(buffer.getType());
 
-    auto ndl = getNdl(ndls, type, index, setId);
+        if (!bufferType) {
+            llvm::errs() << "FATAL: Buffer is not of MemRefType.\n";
+            llvm::errs() << "Buffer: " << buffer << "\n";
+            llvm::report_fatal_error("Buffer is not of MemRefType");
+        }
 
-    if (!ndl)
-        return;
+        auto addr = getLramAddress(buffer, getMemRefTypeOffsetBytes(bufferType) + ndl->getOffset());
 
-    convert(*ndl, memNdl, symbolValuesAttr);
+        if (!addr.has_value()) {
+            llvm::errs() << "FATAL: Unable to get base address.\n";
+            llvm::errs() << "Buffer: " << buffer << "\n";
+            llvm::errs() << "NDL info:\n";
+            llvm::errs() << "  Type: " << stringifyNdlType(type) << "\n";
+            llvm::errs() << "  Index: " << index << ", SetId: " << setId << "\n";
+            llvm::errs() << "  Offset: " << ndl->getOffset() << "\n";
+            llvm::report_fatal_error("Unable to get base address");
+        }
 
-    auto bufferType = dyn_cast<MemRefType>(buffer.getType());
+        memNdl.setBaseAddress(addr.value());
 
-    if (!bufferType) {
-        llvm::errs() << "FATAL: Buffer is not of MemRefType.\n";
-        llvm::errs() << "Buffer: " << buffer << "\n";
-        llvm::report_fatal_error("Buffer is not of MemRefType");
-    }
-
-    auto addr = getLramAddress(buffer, getMemRefTypeOffsetBytes(bufferType) + ndl->getOffset());
-
-    if (!addr.has_value()) {
-        llvm::errs() << "FATAL: Unable to get base address.\n";
-        llvm::errs() << "Buffer: " << buffer << "\n";
-        llvm::errs() << "NDL info:\n";
-        llvm::errs() << "  Type: " << stringifyNdlType(type) << "\n";
-        llvm::errs() << "  Index: " << index << ", SetId: " << setId << "\n";
-        llvm::errs() << "  Offset: " << ndl->getOffset() << "\n";
-        llvm::report_fatal_error("Unable to get base address");
-    }
-
-    memNdl.setBaseAddress(addr.value());
-
-    if (byteAlignment && (addr.value() % byteAlignment) != 0) {
-        llvm::report_fatal_error("buffer + offset has wrong alignment");
+        if (byteAlignment && (addr.value() % byteAlignment) != 0) {
+            llvm::report_fatal_error("buffer + offset has wrong alignment");
+        }
+        memNdls.push_back(std::move(memNdl));
     }
 }
 
@@ -233,15 +254,12 @@ static SliceTask toSliceTask(syna::torq_hw::SliceTaskOp op, IRMapping &mapping) 
     const auto &memNdls = op.getMemNdls();
 
     convert(*getNdl(memNdls, NdlType::REF), task.ref, symbolValuesAttr);
-
-    convert(op, mapping, memNdls, NdlType::DEDR, 0, 0, task.dedr, symbolValuesAttr, op.getD());
-
-    convert(op, mapping, memNdls, NdlType::DEDR, 0, 1, task.dedr1, symbolValuesAttr, op.getDx());
-
-    convert(op, mapping, memNdls, NdlType::DEWR, 0, 0, task.dewr, symbolValuesAttr, op.getW());
-    convert(op, mapping, memNdls, NdlType::DEBR, 0, 0, task.debr, symbolValuesAttr, op.getB());
-    convert(op, mapping, memNdls, NdlType::DEBR, 0, 1, task.debr1, symbolValuesAttr, op.getBx());
-    convert(op, mapping, memNdls, NdlType::DEQW, 0, 0, task.deqw, symbolValuesAttr, op.getQ());
+    convert(op, mapping, memNdls, NdlType::DEDR, 0, task.dedr, symbolValuesAttr, op.getD());
+    convert(op, mapping, memNdls, NdlType::DEDR, 1, task.dedr1, symbolValuesAttr, op.getDx());
+    convert(op, mapping, memNdls, NdlType::DEWR, 0, task.dewr, symbolValuesAttr, op.getW());
+    convert(op, mapping, memNdls, NdlType::DEBR, 0, task.debr, symbolValuesAttr, op.getB());
+    convert(op, mapping, memNdls, NdlType::DEBR, 1, task.debr1, symbolValuesAttr, op.getBx());
+    convert(op, mapping, memNdls, NdlType::DEQW, 0, task.deqw, symbolValuesAttr, op.getQ());
 
     if (op.getW().empty() && !weightsBypasssed) {
         llvm::report_fatal_error("Weights are not bypassed but no weight buffer is provided");

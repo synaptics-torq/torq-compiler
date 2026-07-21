@@ -228,12 +228,12 @@ class SliceTask : public TorqCfg {
     std::vector<MemNdl> memndls;
     std::vector<RegNdl> regndls;
 
-    MemNdl dedr{MemNdl::DEDR};
-    MemNdl dedr1{MemNdl::DEDR, 1};
-    MemNdl dewr{MemNdl::DEWR};
-    MemNdl debr{MemNdl::DEBR};
-    MemNdl debr1{MemNdl::DEBR, 1};
-    MemNdl deqw{MemNdl::DEQW};
+    std::vector<MemNdl> dedr;
+    std::vector<MemNdl> dedr1;
+    std::vector<MemNdl> dewr;
+    std::vector<MemNdl> debr;
+    std::vector<MemNdl> debr1;
+    std::vector<MemNdl> deqw;
     /// Fixed register based NDLs
     RegNdl acbw{RegNdl::ACBW};
     RegNdl acbr{RegNdl::ACBR};

@@ -19,18 +19,11 @@ namespace mlir::syna::torq {
 // Convert tensor encoding.
 template <>
 LogicalResult ConvertPattern::transform(torq_hl::ConvertOp op, PatternRewriter &rewriter) const {
-    auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
-
-    // Check that the input/output tensors are compatible
-    auto output_type = llvm::cast<MemRefType>(op.getInit().getType());
-    if (input_type.getShape() != output_type.getShape()) {
-        return op.emitError("Input and output tensors must have the same shape");
-    }
-
     // The input and output can have any number of dimensions with any stride
     Slice slice("convert");
-    LData input(input_type);
-    LData output(output_type);
+    LData input(op.getInput());
+    LData output(op.getInit());
+    assert(input.dims() == output.dims() && "Input and output tensors must have the same shape");
 
     For(auto ii = slice.iterate(input.dims())) {
         IData idata = slice.iram.load(input[ii]);

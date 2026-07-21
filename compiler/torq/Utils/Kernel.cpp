@@ -2061,6 +2061,10 @@ void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
 }
 
 void SlicePrivate::ref(const LData &data) {
+    if (_ndls.getMemNdl(NdlType::REF)) {
+        // REF NDL must be generated only once
+        return;
+    }
     MemNdlDimsData refNdlDims;
     if (_outputChannelHeight || _outputChannelWidth) {
         refNdlDims.push_back({DimType::H, MemDimTag::X, _outputChannelWidth, 0});

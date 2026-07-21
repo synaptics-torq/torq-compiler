@@ -118,10 +118,12 @@ string SliceTask::toLogStr() const {
     ostringstream os;
     os << "CFG " << toSliceLogStr(d->cfg) << "\n";
     os << ref.toLogStr() << "\n";
-    const MemNdl *memNdls[6] = {&dedr, &dedr1, &dewr, &debr, &debr1, &deqw};
-    for (const auto ndl : memNdls) {
-        if (!ndl->empty())
-            os << ndl->toLogStr() << "\n";
+    const std::vector<MemNdl> *memNdls[6] = {&dedr, &dedr1, &dewr, &debr, &debr1, &deqw};
+    for (const auto ndlList : memNdls) {
+        for (const auto &ndl : *ndlList) {
+            if (!ndl.empty())
+                os << ndl.toLogStr() << "\n";
+        }
     }
     const RegNdl *regNdls[10] = {&acbw, &acbr, &acpw, &acpr, &cedw,
                                  &cedr, &ceww, &cewr, &cepr, &aldw};
@@ -487,22 +489,28 @@ bool SliceTask::write(
     if (ref.write(h, 0, 0) < 0) {
         return false;
     }
-    const MemNdl *memNdls[6] = {&dedr, &dedr1, &dewr, &debr, &debr1, &deqw};
+    const std::vector<MemNdl> *memNdls[6] = {&dedr, &dedr1, &dewr, &debr, &debr1, &deqw};
 
     totalNdlSize = 0;
 
-    for (const auto ndl : memNdls) {
-        if (ndl->empty()) {
-            // Skip serialization of unused NDLs
-            continue;
+    for (const auto ndlList : memNdls) {
+        bool first = true;
+        for (const auto &ndl : *ndlList) {
+            if (ndl.empty()) {
+                // Skip serialization of unused NDLs
+                continue;
+            }
+            auto ndlSize = first ? ndl.write(h, lramAddr, xramAddr)
+                                 : ndl.write(h, TORQ_LADDR_APPEND, TORQ_XADDR_APPEND);
+
+            if (ndlSize < 0) {
+                return ndlSize;
+            }
+            first = false;
+            xramAddr += ndlSize;
+            lramAddr += ndlSize;
+            totalNdlSize += ndlSize;
         }
-        auto ndlSize = ndl->write(h, lramAddr, xramAddr);
-        if (ndlSize < 0) {
-            return ndlSize;
-        }
-        xramAddr += ndlSize;
-        lramAddr += ndlSize;
-        totalNdlSize += ndlSize;
     }
     const RegNdl *regNdls[10] = {&acbw, &acbr, &acpw, &acpr, &cedw,
                                  &cedr, &ceww, &cewr, &cepr, &aldw};

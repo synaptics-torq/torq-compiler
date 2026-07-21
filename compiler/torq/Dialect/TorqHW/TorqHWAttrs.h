@@ -100,7 +100,7 @@ struct Ndls {
     add(NdlType type, MemNdlDimsData dims, int64_t offset = 0, int64_t set_id = 0,
         uint8_t sync_mode = 0, uint8_t sync_nhd = 0) {
         int64_t index = 0;
-        for (size_t i = memNdls.size() - 1; i <= 0; i--) {
+        for (int i = memNdls.size() - 1; i >= 0; i--) {
             if (memNdls[i].type == type && memNdls[i].set_id == set_id) {
                 index = memNdls[i].index + 1;
                 break;
