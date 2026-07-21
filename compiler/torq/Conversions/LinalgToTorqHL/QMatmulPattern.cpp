@@ -261,7 +261,11 @@ Value matchDequantizedBiasConst(Value v, double dequantScale) {
     if (!sitofpVal || !scaleVal)
         return nullptr;
     auto maybeScale = getQGenericFloatConstant(scaleVal, genOp);
-    if (!maybeScale || *maybeScale != dequantScale)
+    if (!maybeScale)
+        return nullptr;
+    // Both scales are a_scale * b_scale, but f64->f32 rounding can make the
+    // two constants differ slightly. Use a small tolerance.
+    if (std::fabs(*maybeScale - dequantScale) > 1e-9 * std::fmax(1.0, std::fabs(dequantScale)))
         return nullptr;
     return constOperand;
 }

@@ -102,7 +102,7 @@ isValidDequantShape(linalg::GenericOp op, RankedTensorType &inTy, RankedTensorTy
 
 // Signed integer dequant:
 // linalg.generic body (zp = 0):
-//   arith.extsi(%in) -> arith.sitofp -> arith.mulf(%scale)
+//   [arith.extsi(%in)] -> arith.sitofp -> arith.mulf(%scale)
 // linalg.generic body (zp != 0):
 //   arith.extsi(%in) -> arith.subi(%zp) -> arith.sitofp -> arith.mulf(%scale)
 std::optional<DequantInfo> matchDequantSigned(linalg::GenericOp op) {
@@ -176,8 +176,9 @@ std::optional<DequantInfo> matchDequantSigned(linalg::GenericOp op) {
 //
 // ONNX INT4 QDQ quantized models produce unsigned dequant with a float
 // zero-point (already scaled):
-//   arith.extui(%in) -> arith.uitofp -> arith.mulf(%scale)                    (zp = 0)
-//   arith.extui(%in) -> arith.uitofp -> arith.subf(%fp_zp) -> arith.mulf(%scale)  (zp != 0)
+//   [arith.extui(%in)] -> arith.uitofp -> arith.mulf(%scale)                    (zp = 0)
+//   [arith.extui(%in)] -> arith.uitofp -> arith.subf(%fp_zp) -> arith.mulf(%scale)  (zp != 0)
+// The extui is optional: i32 inputs are already wide enough.
 //
 // The float zero-point is converted back to the integer convention used by
 // TORQ HL: int_zp = round(fpZp / scale).
@@ -234,11 +235,11 @@ std::optional<DequantInfo> matchDequantUnsigned(linalg::GenericOp op) {
         }
     }
 
-    auto extui = uifpIn.getDefiningOp<arith::ExtUIOp>();
-    if (!extui)
-        return std::nullopt;
+    Value inner = uifpIn;
+    if (auto extui = uifpIn.getDefiningOp<arith::ExtUIOp>())
+        inner = extui.getIn();
 
-    auto inputArg = dyn_cast<BlockArgument>(extui.getIn());
+    auto inputArg = dyn_cast<BlockArgument>(inner);
     if (!inputArg || inputArg.getOwner() != op.getBody())
         return std::nullopt;
 

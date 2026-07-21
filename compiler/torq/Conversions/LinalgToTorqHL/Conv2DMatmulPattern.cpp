@@ -198,7 +198,8 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         return initTensor;
     }
 
-    Value replaceWithTorqMatmul(linalg::MatmulOp srcOp, PatternRewriter &rewriter) const {
+    FailureOr<Value>
+    replaceWithTorqMatmul(linalg::MatmulOp srcOp, PatternRewriter &rewriter) const {
         // Fallback rewrite when no fusible conv/fc chain is present:
         // emit plain torq_hl.matmul with neutral bias/scale parameters.
         auto outTy = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
@@ -217,7 +218,13 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         // explicitly.
         FailureOr<Value> resultVal =
             addInitToResult(srcOp.getOutputs().front(), matMulOp.getResult(0), rewriter);
-        assert(succeeded(resultVal) && "failed to add init value");
+        if (failed(resultVal)) {
+            // Crash in debug builds so the failure is noticed immediately, but
+            // fall back gracefully in release builds.
+            assert(succeeded(resultVal) && "failed to add init value");
+            rewriter.eraseOp(matMulOp);
+            return rewriter.notifyMatchFailure(srcOp, "failed to add init value; falling back");
+        }
 
         rewriter.replaceOp(srcOp, *resultVal);
 
@@ -282,8 +289,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                 );
                 return success();
             }
-            replaceWithTorqMatmul(srcOp, rewriter);
-            return success();
+            return replaceWithTorqMatmul(srcOp, rewriter);
         }
 
         // If there is an expand_shape user, use it to determine 4D output shape
@@ -367,23 +373,20 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         FailureOr<Value> biasV =
             computeBiasForMatmul(*fusionPlanOr, channelDim, optionalWeightZpV, isFC);
         if (failed(biasV)) {
-            replaceWithTorqMatmul(srcOp, rewriter);
-            return success();
+            return replaceWithTorqMatmul(srcOp, rewriter);
         }
 
         ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, srcOp);
         biasV = computeRescaleInfo(*fusionPlanOr, *biasV, scInfo);
         if (failed(biasV)) {
-            replaceWithTorqMatmul(srcOp, rewriter);
-            return success();
+            return replaceWithTorqMatmul(srcOp, rewriter);
         }
 
         if (!isAllZerosTensor(srcOp.getOutputs().front())) {
             // TODO: if the init is not all-zeros, we can still use FC/Conv as below.
             // If the init is some fill with constant, we can add it to the bias.
             // Otherwise we need to add torq_hl.add.
-            replaceWithTorqMatmul(srcOp, rewriter);
-            return success();
+            return replaceWithTorqMatmul(srcOp, rewriter);
         }
 
         // Erase in reverse order to avoid invalidating users while pruning folded tail ops.

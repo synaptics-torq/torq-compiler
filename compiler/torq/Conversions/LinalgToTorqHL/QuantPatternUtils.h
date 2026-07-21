@@ -60,14 +60,14 @@ struct DequantInfo {
 // Signed integer dequant:
 //   (input - zp) * scale
 // represented as either:
-//   arith.extsi -> arith.sitofp -> arith.mulf(scale)
+//   [arith.extsi] -> arith.sitofp -> arith.mulf(scale)
 // or with an intermediate arith.subi(zp) before sitofp.
 std::optional<DequantInfo> matchDequantSigned(linalg::GenericOp op);
 
 // Unsigned integer dequant (ONNX INT4 QDQ with block_size):
 //   (input - fp_zp) * scale
 // represented as:
-//   arith.extui -> arith.uitofp -> (arith.subf(fp_zp)) -> arith.mulf(scale)
+//   [arith.extui] -> arith.uitofp -> (arith.subf(fp_zp)) -> arith.mulf(scale)
 std::optional<DequantInfo> matchDequantUnsigned(linalg::GenericOp op);
 
 // Match any supported dequant linalg.generic.  Tries all registered flavors.
