@@ -11,6 +11,7 @@ set(sources
   QMatmulPattern.cpp
   QElementwiseBinaryPattern.cpp
   QPoolingPattern.cpp
+  QSigmoidPattern.cpp
   QuantPatternUtils.cpp
   Conv2DMatmulPattern.cpp
   ElementWiseBinaryPattern.cpp

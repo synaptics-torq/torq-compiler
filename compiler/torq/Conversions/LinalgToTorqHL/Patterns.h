@@ -34,6 +34,9 @@ void populateLinalgToTorqHLQMatmulPatterns(
 void populateLinalgToTorqHLQEWBinaryPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
+void populateLinalgToTorqHLQSigmoidPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
 void populateLinalgToTorqHLConv2DMatmulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
