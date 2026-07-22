@@ -415,7 +415,7 @@ int torq_devfreq_init(struct torq_module *torq_dev)
 
 	tdf->devfreq = devm_devfreq_add_device(dev,
 					      &torq_devfreq_profile,
-					      "performace",
+					      "userspace",
 					      NULL);
 	if (IS_ERR(tdf->devfreq)) {
 		ret = PTR_ERR(tdf->devfreq);
