@@ -10,6 +10,7 @@ set(sources
   QConv2DPattern.cpp
   QMatmulPattern.cpp
   QElementwiseBinaryPattern.cpp
+  QMulDivPattern.cpp
   QPoolingPattern.cpp
   QSigmoidPattern.cpp
   QuantPatternUtils.cpp

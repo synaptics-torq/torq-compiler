@@ -48,6 +48,7 @@ void populateLinalgToTorqHLPrePatterns(
     populateLinalgToTorqHLQMatmulPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLQEWBinaryPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLQPoolingPatterns(context, patterns, markFuseGroups);
+    populateLinalgToTorqHLQMulDivPatterns(context, patterns, markFuseGroups);
 
     populateLinalgToTorqHLQSigmoidPatterns(context, patterns, markFuseGroups);
 
