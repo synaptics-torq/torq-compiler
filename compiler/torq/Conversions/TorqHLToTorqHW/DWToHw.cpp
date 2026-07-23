@@ -94,7 +94,7 @@ static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
     // Since Kh=1 for depthwise 1D, fuse last 3 dims then reshape
     int kw = weight.dim(3); // Kernel width
     weight.fuse(4);
-    weight.reshapeDim(1, {kw, outChVectSize}, false);
+    weight.reshapeDim(1, {kw, outChVectSize});
 
     Slice slice("DepthwiseConv1dStride1");
 
@@ -103,9 +103,9 @@ static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
     const int32_t actBlockCount = div_ceil(outChVectSize, actBlockSize);
 
     // Reshape tensors to split channels into [Ch_outer, outChVectSize]
-    input.reshapeDim(channelDim, {-1, outChVectSize}, true);
-    output.reshapeDim(channelDim, {-1, outChVectSize}, true);
-    biasScale.reshapeDim(0, {-1, actBlockCount, actBlockSize, sbWidth}, true);
+    input.forceReshapeDim(channelDim, {-1, outChVectSize});
+    output.reshapeDim(channelDim, {-1, outChVectSize});
+    biasScale.reshapeDim(0, {-1, actBlockCount, actBlockSize, sbWidth});
 
     int chOuterCount = weight.dim(0);
 
@@ -213,11 +213,11 @@ static torq_hw::SliceTaskOp lowerDwStride2ToHw(
     // For standard depthwise convs each group contains exactly 1 input channel.
     int inChGroupSize = weight.dim(Weight::IC);
     assert(input.dim(Dim::C) % inChGroupSize == 0 && "Input channels not multiple of group");
-    input.reshapeDim(Dim::C, {-1, inChGroupSize}, false);
+    input.reshapeDim(Dim::C, {-1, inChGroupSize});
     // Shape: [N, C, CInGroup, RowQuadrant, ColQuadrant, Vectors, vectSize]
 
     // Split the C dimension into CVectors and CItems
-    input.reshapeDim(In::CVectors, {-1, outChVectSize}, true);
+    input.forceReshapeDim(In::CVectors, {-1, outChVectSize});
     // Shape: [N, CVectors, CItems, CInGroup, RowQuadrant, ColQuadrant, Vectors, vectSize]
 
     // Add additional dimension to scan over the kernelDim.h input rows
@@ -239,13 +239,13 @@ static torq_hw::SliceTaskOp lowerDwStride2ToHw(
     input.getShape()[In::ColQuadrant].tag = ShapeItem::Tag::KernelCols;
 
     // Reshape output to match the processing layout
-    output.reshapeDim(Dim::C, {-1, outChVectSize}, true);
+    output.reshapeDim(Dim::C, {-1, outChVectSize});
     if (op.getSegmentOutput()) {
         output.partitionByIndexParity2D();
     }
 
     // Reshape biasScale to match the processing layout
-    biasScale.reshapeDim(0, {-1, outChVectSize, biasScaleWidth(input.elementType())}, true);
+    biasScale.reshapeDim(0, {-1, outChVectSize, biasScaleWidth(input.elementType())});
 
     // If start_pos we have to iterate the corresponding quadrant in reverse order,
     // but the starting offset and stride must be tweaked so we can't use the standard reverse()
@@ -368,10 +368,10 @@ static torq_hw::SliceTaskOp lowerToHw(
     // For standard depthwise convs each group contains exactly 1 input channel.
     int inChGroupSize = weight.dim(Weight::IC);
     assert(input.dim(Dim::C) % inChGroupSize == 0 && "Input channels not multiple of group");
-    input.reshapeDim(Dim::C, {-1, inChGroupSize}, false);
+    input.reshapeDim(Dim::C, {-1, inChGroupSize});
 
     // Split the C dimension into CVectors and CItems
-    input.reshapeDim(In::CVectors, {-1, outChVectSize}, true);
+    input.forceReshapeDim(In::CVectors, {-1, outChVectSize});
 
     // Add additional dimension to scan over the kernelDim.h input rows
     int rowSize = output.dim(Dim::W);
@@ -383,13 +383,13 @@ static torq_hw::SliceTaskOp lowerToHw(
     input.insertDim(In::KernelColGroups, colGroupsDim);
 
     // Reshape output to match the processing layout
-    output.reshapeDim(Dim::C, {-1, outChVectSize}, true);
+    output.reshapeDim(Dim::C, {-1, outChVectSize});
     if (op.getSegmentOutput()) {
         output.partitionByIndexParity2D();
     }
 
     // Reshape biasScale to match the processing layout
-    biasScale.reshapeDim(0, {-1, outChVectSize, biasScaleWidth(input.elementType())}, true);
+    biasScale.reshapeDim(0, {-1, outChVectSize, biasScaleWidth(input.elementType())});
 
     // Main processing loops. Instead of processing one input vector at a time, we load multiple
     // vectors in iram from neighboring channels. The number of vectors loaded is equal to the

@@ -47,9 +47,8 @@ static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewri
     const auto wType = weight.elementType();
     const int weightVectSize = weight.dim(Weight::OCElement);
     const int actVectSize = std::min(weightVectSize, slice.act.width(wType, inType, true));
-    biasScale.reshapeDim(
-        0, {-1, (int)div_ceil(weightVectSize, actVectSize), actVectSize, biasScaleWidth(inType)},
-        true
+    biasScale.forceReshapeDim(
+        0, {-1, (int)div_ceil(weightVectSize, actVectSize), actVectSize, biasScaleWidth(inType)}
     );
 
     For(auto batch = slice.iterate(input.dim(In::N))) {

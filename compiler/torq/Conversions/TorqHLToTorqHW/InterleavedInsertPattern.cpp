@@ -88,7 +88,7 @@ lowerToHw(torq_hl::InterleavedInsertOp op, PatternRewriter &rewriter, Value task
     // Add an explicit stride dimension to the output after H dimension
     // This allows us to explicitly index into stride positions (e.g., [0, 1] for stride-2)
     // output.insertDim(Out::Stride, {strideValue});
-    output.reshapeDim(Out::H, {output.dim(Out::H) / strideValue, strideValue}, true);
+    output.reshapeDim(Out::H, {output.dim(Out::H) / strideValue, strideValue});
 
     // Main processing loops
     // InterleavedInsert performs data reorganization with stride-based interleaving

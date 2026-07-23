@@ -919,9 +919,15 @@ LData &LData::subviewDim(int dimIndex, int offset, int count) {
     return *this;
 }
 
-LData &LData::reshapeDim(int dimIndex, const std::vector<int> &newDims, bool allowNonMultiple) {
+LData &LData::reshapeDim(int dimIndex, const std::vector<int> &newDims) {
     dimIndex = normalizeIndex(dimIndex);
-    torq::reshapeDim(*this, dimIndex, newDims, allowNonMultiple);
+    torq::reshapeDim(*this, dimIndex, newDims, false);
+    return *this;
+}
+
+LData &LData::forceReshapeDim(int dimIndex, const std::vector<int> &newDims) {
+    dimIndex = normalizeIndex(dimIndex);
+    torq::reshapeDim(*this, dimIndex, newDims, true);
     return *this;
 }
 
@@ -3399,13 +3405,19 @@ reshapeDim(LData &data, int dimIndex, const std::vector<int> &sizes, bool allowN
             assert(false && "Reshape size mismatch");
         }
         implicitDimSize = div_ceil(data.dim(dimIndex), itemCount);
+        itemCount *= implicitDimSize;
     }
-    else if ((allowNonMultiple && itemCount > data.dim(dimIndex)) ||
-             (!allowNonMultiple && itemCount != data.dim(dimIndex))) {
+    else if (!allowNonMultiple && itemCount != data.dim(dimIndex)) {
         llvm::errs() << "Reshape size mismatch: dimension " << dimIndex << " has size "
                      << data.dim(dimIndex) << " but reshape sizes have total size " << itemCount
                      << "\n";
         assert(false && "Reshape size mismatch");
+    }
+    if (dimIndex > 0 && !data.shape()[dimIndex - 1].stride.hasVal() &&
+        itemCount != data.dim(dimIndex)) {
+        // Upper dimension is using natural stride but we just changed the number of items
+        // so we now have to specify the stride explicitely
+        data.getShape()[dimIndex - 1].stride = computeStride(data.shape(), dimIndex - 1);
     }
 
     // Remove dimension to reshape

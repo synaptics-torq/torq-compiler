@@ -333,8 +333,12 @@ class LData : public DataT<LData> {
     // newDims: new dimensions that will replace the specified one, if one of them is -1
     // its size is inferred from the size of the original dimension and the other new dimensions
     // asserts if the product of the new dimensions is not equal to the size of the original one
-    // unless allowNonMultiple is true
-    LData &reshapeDim(int dimIndex, const std::vector<int> &newDims, bool allowNonMultiple = false);
+    LData &reshapeDim(int dimIndex, const std::vector<int> &newDims);
+
+    // Same as reshapeDim() but don't assert if size changes.
+    // In this case the stride of the dimension above (if any) is kept to the previous element count
+    // Should never be applied to output tensors as their size might go beyond the allocated memory
+    LData &forceReshapeDim(int dimIndex, const std::vector<int> &newDims);
 
     // Insert a new dimension at the specified index (negative is intended relative to the end)
     LData &insertDim(int dimIndex, const ShapeItem &item);

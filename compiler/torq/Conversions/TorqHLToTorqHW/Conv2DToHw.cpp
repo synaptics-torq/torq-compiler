@@ -141,13 +141,13 @@ static torq_hw::SliceTaskOp lowerToHw(
     input.insertDim(In::KernelColGroups, colGroupsDim);
 
     // Reshape output to match the processing layout
-    output.reshapeDim(Dim::C, {-1, outChVectSize}, true);
+    output.reshapeDim(Dim::C, {-1, outChVectSize});
     if (op.getSegmentOutput()) {
         output.partitionByIndexParity2D();
     }
 
     // Reshape biasScale to match the processing layout
-    biasScale.reshapeDim(0, {-1, outChVectSize, biasScaleWidth(input.elementType())}, true);
+    biasScale.reshapeDim(0, {-1, outChVectSize, biasScaleWidth(input.elementType())});
 
     For(auto batch = slice.iterate(input.dim(In::N))) {
         For(auto ocv = slice.iterate(output.dim(Out::CVectors))) {

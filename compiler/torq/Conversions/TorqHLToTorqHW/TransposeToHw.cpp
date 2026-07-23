@@ -99,18 +99,20 @@ static Slice convertBlock(torq_hl::TransposeOp op, PatternRewriter &rewriter) {
     const int linesInBlock = 8;
     const int transposeBlockSize = blocksInGroup * linesInBlock;
     int vectorSize = transposeBlockSize / sizeofType(elementType);
-    input.reshapeDim(Dim::H, {-1, blocksInGroup, linesInBlock / 2, 2}, true).vectorize(vectorSize);
+    input.forceReshapeDim(Dim::H, {-1, blocksInGroup, linesInBlock / 2, 2}).vectorize(vectorSize);
     // Move the vectors dimension just after the HBlocks, so that we can load multiple lines at once
     input.moveDim(Vectorized::Vectors, In::Vectors);
 
     if (elementSize == 2) {
         // Write out chunks of 32 int16, 1 chunk per cycle (64 bytes total)
-        output.reshapeDim(Dim::H, {-1, transposeBlockSize / elementSize}, true);
+        // FIXME: don't use force
+        output.forceReshapeDim(Dim::H, {-1, transposeBlockSize / elementSize});
         output.vectorize(transposeBlockSize);
     }
     else {
         // Write out chunks of 32 int8, 2 chunks in nearby lines per cycle (64 bytes total)
-        output.reshapeDim(Dim::H, {-1, transposeBlockSize / 2, 2}, true);
+        // FIXME: don't use force
+        output.forceReshapeDim(Dim::H, {-1, transposeBlockSize / 2, 2});
         output.vectorize(transposeBlockSize);
         output.moveDim(-2, Out::Vectors);
     }

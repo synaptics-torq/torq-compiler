@@ -39,7 +39,7 @@ segmentToQuadrants(torq_hl::SegmentationOp op, PatternRewriter &rewriter) {
         input.getShape()[In::W].count += input.dim(In::W) % 2;
 
         // Reorganize rows in pairs (even/odd) and vectorize each row separately
-        input.reshapeDim(In::H, {-1, 2}, true).vectorize(vectorSize);
+        input.forceReshapeDim(In::H, {-1, 2}).vectorize(vectorSize);
 
         For(auto batch = slice.iterate(input.dim(In::N))) {
             For(auto ch = slice.iterate(input.dim(In::C))) {
@@ -97,8 +97,8 @@ segmentHDim(torq_hl::SegmentationOp op, PatternRewriter &rewriter, int hSegments
 
     // Partition the input and output lines according to the desired number of segments
     assert(input.dim(In::H) % hSegments == 0 && "Row count not multiple of hSegments");
-    input.reshapeDim(In::H, {-1, hSegments}, false);
-    output.reshapeDim(In::H, {hSegments, -1}, false);
+    input.reshapeDim(In::H, {-1, hSegments});
+    output.reshapeDim(In::H, {hSegments, -1});
 
     For(auto batch = slice.iterate(input.dim(In::N))) {
         For(auto ch = slice.iterate(input.dim(In::C))) {
