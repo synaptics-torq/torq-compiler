@@ -91,8 +91,7 @@ struct QSigmoidConvert : public OpRewritePattern<linalg::GenericOp> {
         Value dequantInput = sigmoidOp.getInputs()[0];
         auto dequantOp = dyn_cast<linalg::GenericOp>(dequantInput.getDefiningOp());
         DequantInfo dInfo;
-        if (!dequantOp || !matchDequantGeneric(dequantOp, dInfo.scale, dInfo.zp) ||
-            !dequantOp->getResult(0).hasOneUse())
+        if (!dequantOp || !matchDequantGeneric(dequantOp, dInfo.scale, dInfo.zp))
             return rewriter.notifyMatchFailure(sigmoidOp, "failed to match dequant generic");
 
         Value input = dequantOp.getInputs()[0];

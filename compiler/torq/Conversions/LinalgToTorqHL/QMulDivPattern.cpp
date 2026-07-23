@@ -105,8 +105,7 @@ std::optional<DequantSource> findQuantizedDequantSource(Value v) {
     while (true) {
         if (auto dequant = dyn_cast_or_null<linalg::GenericOp>(v.getDefiningOp())) {
             DequantInfo info;
-            if (matchDequantGeneric(dequant, info.scale, info.zp) &&
-                dequant->getResult(0).hasOneUse()) {
+            if (matchDequantGeneric(dequant, info.scale, info.zp)) {
                 return DequantSource{dequant, dequant.getInputs()[0], info};
             }
             // Not a dequant generic: it may be an identity broadcast generic, so
