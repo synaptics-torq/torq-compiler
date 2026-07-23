@@ -1,5 +1,81 @@
 # Release Notes
 
+## Version 2.1.0 (2026-07-31)
+
+### General Notes
+
+This release is heavily focused on robustness and production readiness, with dense compiler and CI improvements in addition to feature work.
+
+#### Link with Astra-SDK build system
+
+Astra-SDK for Synaptics SL2610 SoC family is automatically retrieving the source code from this [github repo](https://github.com/synaptics-torq/torq-compiler/).
+
+In the same way that Torq framework v2.0.x was released to support [Astra-SDK v2.4.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.4.0), v2.1.x is supporting [Astra-SDK v2.5.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.5.0).
+
+#### release packages and new pip wheels
+
+We don't produce nor use the release tarball anymore (release.tar.gz); this tarball contained the binary elements of the release compiled for Ubuntu-24.04. Instead we recommended to use the various PIP wheel packages:
+
+- astra-sl-release: contains the binary runtime for the SL2610 board:
+   - lib/syna_npu.ko: precompiled Linux kernel module for Torq NPU
+   - tool/astra-sl-torq-run-module: precompiled userspace command for Torq runtime
+- astra-sl-runtime-wheel: PIP wheel package of Torq Runtime for SL2610 AstraMachina board.
+- host-compiler-wheel: PIP wheel package of Torq Compiler supporting x86-64 Ubuntu 24.04
+- host-runtime-wheel: PIP wheel package of Torq Runtime for Host based simulation (x86-64 Ubuntu 24.04)
+- host-turbine-wheel: new Python backend based on iree-turbine (supporting only Host based Ahead-Of-Time compilation)
+
+#### About performance of compiled models
+
+In terms of performance v2.1.0 may not as good as v2.0.0 for some models. While this is one of the major focus of this release the reason for this potential regression is the switch to generic linalg-slicing pass instead of homemade torq_hl-slicing (slicing is process of parallelisation between 2 slices - aka MAC engines - available in SL2610 SoCs). This new slicing pass is going to offer a nice boost in performance on the SL2610 AstrMachina or Google-Coral board but if you see any performance issue or regression this can be mitigated by disabling slicing using the compiler option **--torq-disable-slicing**.
+
+Moreover, if you are using an official Astra image v2.5.x you will see a nice boost of performance thanks to the increased default frequency of the Torq NPU from 800MHz to 1GHz by default (this is governed by the newly introduced devfreq support).
+
+
+### Torq Compiler v2.1 changes since vs v2.0.0:
+
+#### Highlights
+- Major Slicing improvements (parallelization across our 2 MAC engines - aka Slices).
+- Major expansion of quantized model support (Especially ONNX int8 quantized models).
+- Added int4 and int8 block quantization support, validated with Google Gemma3 LLM.
+- Added torq-turbine, a new PyTorch backend using forked iree-turbine.
+- Broad compiler correctness fixes across lowering and codegen paths.
+- Runtime improvements for x86 and Linux SL2610.
+- Significant CI, release pipeline, and test reliability upgrades.
+
+#### Added
+- ONNX int8 quantization support.
+- int4/int8 block quantization support for LLM-oriented workflows.
+- New quantized lowerings (torch-onnx path), including Quantized MaxPool, GEMM, GlobalAveragePool and ElementWise Add.
+- torq-turbine test/backend path using forked iree-turbine.
+- Linux NPU devfreq support for SL2610.
+- CI support for versioned release tags and version-branch synchronization workflows.
+
+#### Changed
+- Compiler pipeline behavior around elementwise coalescing and slicing.
+- QConv2D behavior to defer constant resolution to JIT in relevant flows.
+- EK-related behavior in HDIM and append/modulo paths.
+- Runtime Python behavior with x86 CModel inference enablement and improved version checks.
+- CI/release architecture toward cache/artifact-driven workflows, split Astra build jobs, and more wheel-based test execution.
+
+#### Fixed
+- Grouped 1x1 conv miscompile via matmul-as-conv.
+- ConvTranspose fp32 bias-add lowering failures on NPU.
+- ReduceMean batch-dimension handling.
+- valid-to-same padding bug.
+- Rank-0 scalar broadcast in elementwise binary ops.
+- Clamp epilogue marking issue.
+- Gather lowering issue.
+- Depthwise stride-2 and asymmetric SAME-padding miscompile issues.
+- InstanceNormalization pure NSS lowering issue.
+- NDL cycle estimation issues.
+- Shared-config corruption in Keras layer tests.
+- Torchvision and test dependency robustness issues.
+- SoC build kernel-module configuration issue.
+- CI issues around release tests, docker build handling, and status report execution.
+
+**Full Changelog**: https://github.com/synaptics-torq/torq-compiler/compare/v2.0.0...v2.1.0_beta
+
+
 ## Version 2.0.0 (2026-06-20)
 
 This is the second major release of the Torq Framework.
