@@ -2359,6 +2359,7 @@ void populateLinalgToTorqHLPatterns(
     // order they are added to the pattern list.
     populateSigmoidPatterns(context, patterns);
     populateExpPatterns(context, patterns);
+    populateTanhPatterns(context, patterns);
     populateSoftmaxPatterns(context, patterns);
     populateGeluPatterns(context, patterns);
     populateTrigPatterns(context, patterns);

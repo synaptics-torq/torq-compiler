@@ -24,6 +24,7 @@ set(sources
   ReduceMeanPattern.cpp
   SigmoidPattern.cpp
   ExpPattern.cpp
+  TanhPattern.cpp
   SoftmaxPattern.cpp
   TensorToTorqOrLinalgPattern.cpp
   TrigPattern.cpp

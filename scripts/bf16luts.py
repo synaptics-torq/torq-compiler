@@ -313,6 +313,12 @@ if __name__ == "__main__":
     print("sigmoid of positive")
     approximate_function(sigmoid, negative=False)
 
+    from torch import tanh
+    print("tanh of negative")
+    approximate_function(tanh, negative=True)
+    print("tanh of positive")
+    approximate_function(tanh, negative=False)
+
     from torch import exp
     print("exp of negative")
     approximate_function(exp, negative=True)

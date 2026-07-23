@@ -94,6 +94,8 @@ void populateSigmoidPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateExpPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+void populateTanhPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 void populateGeluPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateLinalgToTorqHLMulPatterns(
