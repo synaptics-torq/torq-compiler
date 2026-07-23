@@ -12,17 +12,24 @@ from .models.keras_pooling import *
 from .models.keras_sig_tanh_relu import *
 from .models.keras_softmax import *
 from .models.keras_transpose import *
+from .models.keras_EMZA75_conv2D import *
+from .models.keras_EMZA70_conv2D import *
+from .models.keras_NNR301_conv2D import *
+from .models.keras_nnr301_convTranspose import *
+from .models.keras_MobileNetV2_conv2D import *
+from .models.keras_AudioVision_Depthwise import *
 from torq.testing.comparison import compare_test_results
 from torq.testing.cases import Case
 from .keras_known_failures import should_skip
 
 
 
-def _add_quantization_and_markers(cases, marker_name):
+def _add_quantization_and_markers(cases, marker_name, int8_only=False):
     """Helper to add quantization variants with markers to test cases."""
     result = []
+    quantization_modes = [False] if int8_only else [False, True]
     for case in cases:
-        for quantize_to_int16 in [False, True]:
+        for quantize_to_int16 in quantization_modes:
             quant_suffix = "_int16" if quantize_to_int16 else "_int8"
             new_data = case.data.copy()
             new_data["quantize_to_int16"] = quantize_to_int16
@@ -76,6 +83,12 @@ def get_test_cases():
     test_cases.extend(_add_quantization_and_markers(get_keras_sig_tanh_relu_test_cases(), "activation"))
     test_cases.extend(_add_quantization_and_markers(get_keras_softmax_test_cases(), "softmax"))
     test_cases.extend(_add_quantization_and_markers(get_keras_transpose_test_cases(), "transpose"))
+    test_cases.extend(_add_quantization_and_markers(get_emza75_conv2d_test_cases(), "emza75_conv2d"))
+    test_cases.extend(_add_quantization_and_markers(get_emza70_conv2d_test_cases(), "emza70_conv2d"))
+    test_cases.extend(_add_quantization_and_markers(get_nnr301_conv2d_test_cases(), "nnr301_conv2d"))
+    test_cases.extend(_add_quantization_and_markers(get_nnr301_convtranspose_test_cases(), "nnr301_convtranspose"))
+    test_cases.extend(_add_quantization_and_markers(get_mobilenetv2_conv2d_test_cases(), "mobilenetv2_conv2d"))
+    test_cases.extend(_add_quantization_and_markers(get_audio_vision_depthwise_test_cases(), "audio_vision_depthwise", int8_only=True))
 
     return test_cases
 
