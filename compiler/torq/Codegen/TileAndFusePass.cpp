@@ -62,6 +62,7 @@
 #include <cassert>
 #include <cstdint>
 #include <iomanip>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <tuple>
@@ -176,6 +177,12 @@ bool isSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize) {
 }
 
 int64_t makeSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize) {
+    // A non-positive size is already invalid (e.g. the "too small" sentinel that
+    // makeByteAlignedTileSize returns when composed via getFixpointF below); pass
+    // it through instead of searching (and tripping the assert).
+    if (tileSize <= 0)
+        return tileSize;
+
     // Adjust tileSize downwards until both the common tile size and the
     // remainder tile size are SDIM-friendly. This preserves the
     // memory-fit invariant because we only shrink the tile.
@@ -190,11 +197,107 @@ int64_t makeSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize) {
     return tileSize;
 }
 
+// The number of sub-byte values that together occupy a whole number of bytes
+// for `type`, i.e. the tile-size granularity that keeps every tile boundary
+// byte-aligned. For widths that divide a byte this is just values-per-byte
+// (i1 -> 8, i2 -> 4, i4 -> 2). For widths that don't (i6) it is the smallest
+// group that lands on a byte boundary: 4 i6 values = 24 bits = 3 bytes -> 4.
+// Returns 1 for anything that is not a sub-byte integer (>= 8 bits), as those
+// already fill whole bytes and need no sub-byte alignment.
+int64_t typeValuesPerByte(Type type) {
+    auto shapedType = dyn_cast<ShapedType>(type);
+    if (!shapedType)
+        return 1;
+    auto intType = dyn_cast<IntegerType>(shapedType.getElementType());
+    if (!intType)
+        return 1;
+    unsigned width = intType.getWidth();
+    if (width == 0 || width >= 8)
+        return 1;
+    // Smallest number of values whose total bits are a multiple of 8, so a tile
+    // that is a multiple of it always starts and ends on a byte boundary.
+    return 8 / std::gcd(8u, width);
+}
+
+// How many sub-byte values are packed into a single byte for `op` and the
+// producers that get tiled together with it.
+//
+// Some quantized weights use sub-byte integer types: e.g. i4 packs 2 values per
+// byte, i2 packs 4, i1 packs 8. The matmul itself works on the *dequantized*
+// (bf16) weight, so the sub-byte types live on its producers (the dequant
+// generic and the reshape ops upstream). We therefore look back through the
+// producers feeding `op`, not just `op` itself.
+//
+// The walk is bounded to `op`'s fuse group: we only follow a producer that
+// shares the fuse group, so we stay inside this tile and never wander into the
+// activation input or another matmul's tile. The leaf operand types are still
+// inspected before that check, so the packed weight is counted even though its
+// binding/load is outside the group.
+//
+// Returns 1 when nothing sub-byte is found (meaning "every value already fills a
+// whole byte, no alignment needed"). When several sub-byte widths are present we
+// keep the largest pack factor, because that's the strictest alignment.
+int64_t getSubByteValuesPerByte(Operation *op) {
+    int64_t valuesPerByte = 1;
+
+    SmallVector<Operation *> queue = {op};
+    DenseSet<Operation *> visitedOps = {op};
+
+    while (!queue.empty()) {
+        Operation *currentOp = queue.pop_back_val();
+
+        for (Value operand : currentOp->getOperands()) {
+            valuesPerByte = std::max(valuesPerByte, typeValuesPerByte(operand.getType()));
+
+            Operation *producerOp = operand.getDefiningOp();
+            if (!producerOp || visitedOps.contains(producerOp))
+                continue;
+
+            // Stay inside this tile: only follow producers that share `op`'s
+            // fuse group. Anything else (the activation input, another tile)
+            // hands `op` a finished value and does not constrain it.
+            if (!checkShareFuseGroup(op, producerOp))
+                continue;
+
+            visitedOps.insert(producerOp);
+            queue.push_back(producerOp);
+        }
+    }
+
+    return valuesPerByte;
+}
+
+// Round a tile size DOWN so it covers a whole number of bytes for sub-byte
+// types.
+//
+// Sub-byte values are packed two-or-more to a byte (i4 -> 2 per byte). The DMA
+// can only address whole bytes, so a tile that started on an odd value would
+// begin "half a byte in", which the descriptor can't express (this is what
+// broke bufferization). We avoid that by keeping every tile size a multiple of
+// `valuesPerByte`; tile starts are multiples of the tile size, so byte-aligned
+// tile sizes give byte-aligned tile boundaries.
+//
+// We only ever round *down* (shrinking keeps the "fits in memory" guarantee).
+// When `size` is smaller than one whole byte's worth of values (0 < size <
+// valuesPerByte) there is no byte-aligned tile that small, so we return 0 to
+// signal "too small".
+int64_t makeByteAlignedTileSize(int64_t valuesPerByte, int64_t domainSize, int64_t size) {
+    if (valuesPerByte <= 1 || domainSize < valuesPerByte || size <= 0)
+        return size;
+    int64_t remainder = size % valuesPerByte;
+    if (remainder == 0)
+        return size;
+    // size - remainder is 0 exactly when size < valuesPerByte, i.e. too small
+    // to hold one whole byte's worth of values. We return that 0 as-is.
+    return size - remainder;
+}
+
 struct TilingInfo {
     // Iteration domains that can be tiled, in the order they should be tiled.
     llvm::SmallSetVector<int64_t, 4> tilingOrder;
 
-    // Downward size adjustments per iter domain index.
+    // Downward size adjustments per iter domain index. May return 0 to signal
+    // that the requested size is too small to be a valid (byte-aligned) tile.
     llvm::SmallVector<std::function<int64_t(int64_t)>, 4> adjustSize;
 };
 
@@ -222,6 +325,34 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
         tilingInfo.adjustSize.push_back([=](int64_t size) {
             return makeSdimFriendlyTileSize(domainSize, size);
         });
+    }
+
+    // If any sub-byte (e.g. i4) weight feeds this op, the innermost tiled
+    // dimension must be byte-aligned (a multiple of values-per-byte) so the DMA
+    // never sees a half-byte offset. Only the contiguous (innermost) axis is
+    // packed; the outer dimensions step over whole rows, so they are already
+    // byte-aligned for any tile size.
+    int64_t valuesPerByte = getSubByteValuesPerByte(tilingInterfaceOp);
+    if (valuesPerByte > 1 && !tilingInfo.tilingOrder.empty()) {
+        auto getFixpointF = [](std::function<int64_t(int64_t)> f1,
+                               std::function<int64_t(int64_t)> f2) {
+            return [=](int64_t size) {
+                int64_t newSize = f2(f1(size));
+                while (newSize != size) {
+                    size = newSize;
+                    newSize = f2(f1(size));
+                }
+                return newSize;
+            };
+        };
+
+        int64_t innerDim = tilingInfo.tilingOrder.back();
+        auto domainSize = (*iterDomainConstSizes)[innerDim];
+        auto makeByteAligned = [=](int64_t size) {
+            return makeByteAlignedTileSize(valuesPerByte, domainSize, size);
+        };
+        tilingInfo.adjustSize[innerDim] =
+            getFixpointF(makeByteAligned, tilingInfo.adjustSize[innerDim]);
     }
 
     /**********************************************************************************************
@@ -267,6 +398,22 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
      * }
      */
     return tilingInfo;
+}
+
+// The smallest tile size a domain can be cut down to (always > 0). We scan
+// upward for the first size that `adjustSize` leaves unchanged. `adjustSize` is
+// shrink-only, so `adjustSize(size) == size` holds exactly when `size` is
+// already a valid tile: for normal types that's 1; for sub-byte types the
+// too-small sizes return 0 (!= size, so skipped) and the first fixed point is
+// one byte's worth of values (2 for i4). We derive it from `adjustSize` rather
+// than hardcoding, so it stays correct if `adjustSize` ever gains further
+// constraints. Fall back to the full domain if nothing smaller is valid.
+int64_t getSmallestTileSize(const TilingInfo &tilingInfo, int64_t domain, int64_t domainSize) {
+    for (int64_t size = 1; size < domainSize; ++size) {
+        if (tilingInfo.adjustSize[domain](size) == size)
+            return size;
+    }
+    return domainSize;
 }
 
 // Try to compute the int value of sizeFoldResult. If the value is not a
@@ -682,6 +829,12 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
 
         int64_t tileSize = div_ceil(iterDomainSize, midFactor);
         tileSize = tilingInfo.adjustSize[domain](tileSize);
+        // adjustSize returns 0 when the probed size is below one byte's worth of
+        // values (sub-byte types). The smallest valid tile is known to fit (a
+        // precondition of this search), so clamp up to it rather than write 0
+        // (which the tiling API would misread as "don't tile / full domain").
+        if (tileSize == 0)
+            tileSize = getSmallestTileSize(tilingInfo, domain, iterDomainSize);
 
         sizes[domain] = rewriter.getIndexAttr(tileSize);
 
@@ -704,6 +857,9 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
 
     int64_t tileSize = div_ceil(iterDomainSize, maxFactor);
     tileSize = tilingInfo.adjustSize[domain](tileSize);
+    // See the note above: never leave a 0 ("too small") as the final tile size.
+    if (tileSize == 0)
+        tileSize = getSmallestTileSize(tilingInfo, domain, iterDomainSize);
 
     sizes[domain] = rewriter.getIndexAttr(tileSize);
 
@@ -734,17 +890,19 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
 
     IRRewriter rewriter(moduleOp->getContext());
 
-    OpFoldResult one = getAsIndexOpFoldResult(rewriter.getContext(), 1);
-
-    // Shrink pass: set domains to 1, one by one, until the tile fits.
+    // Shrink pass: set domains to their smallest valid tile, one by one, until
+    // the tile fits. The smallest valid tile is usually 1, but for sub-byte
+    // (e.g. i4) dimensions it is one byte's worth of values (2 for i4), because
+    // a width-1 sub-byte slice can't be addressed on a byte boundary.
     ArrayRef<int64_t>::iterator tilingDomainIter;
     for (tilingDomainIter = tilingInfo.tilingOrder.begin();
          tilingDomainIter != tilingInfo.tilingOrder.end(); ++tilingDomainIter) {
         int64_t domain = *tilingDomainIter;
-        if (isOneInteger(sizes[domain]))
+        int64_t minTileSize = getSmallestTileSize(tilingInfo, domain, iterDomainSizes[domain]);
+        if (getConstantIntValue(sizes[domain]) == minTileSize)
             continue;
 
-        sizes[domain] = one;
+        sizes[domain] = rewriter.getIndexAttr(minTileSize);
         tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
             return LogicalResult::failure();
@@ -1126,9 +1284,13 @@ void TileAndFusePass::tileAndFuse(
         TileAndFuseProducersFuseMode::MaxProducers) {
 
         SmallVector<OpFoldResult> smallestTileSizes(iterDomainSizes);
-        auto one = getAsIndexOpFoldResult(&getContext(), 1);
         for (auto dim : tilingInfo.tilingOrder) {
-            smallestTileSizes[dim] = one;
+            // Smallest valid tile per domain: 1 normally, but one byte's worth of
+            // values for sub-byte (e.g. i4) dimensions, so we never form a
+            // width-1 sub-byte slice that can't sit on a byte boundary.
+            smallestTileSizes[dim] = rewriter.getIndexAttr(
+                getSmallestTileSize(tilingInfo, dim, (*iterDomainConstSizes)[dim])
+            );
         }
 
         FailureOr<scf::SCFTileAndFuseResult> tiledResults = tileAndFuseToSize(
