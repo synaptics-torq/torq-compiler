@@ -43,6 +43,7 @@ from torq.gen_config._utils import (
     extract_line_numbers_from_mlir,
     parse_diff_metrics,
 )
+from torq.gen_config._utils_mac import compute_model_mac_details
 from torq.gen_config.core import (
     DEFAULT_TOLERANCE,
     EXECUTOR_ORDER,
@@ -55,6 +56,7 @@ from torq.gen_config.core import (
     extract_model_name_from_case_name,
     get_compiler_config_path,
     get_config_path,
+    get_mac_debug_config_path,
     get_recommended_executor,
     get_subgraph_suffix_from_case_name,
     get_tolerance,
@@ -62,6 +64,7 @@ from torq.gen_config.core import (
     load_config,
     save_compiler_config,
     save_config,
+    save_mac_debug_config,
     update_config_with_results,
 )
 from torq.testing.quantize_onnx import (
@@ -366,6 +369,19 @@ def _get_layer_id_from_case(case) -> str:
     )
 
 
+def _compute_layer_mac_info(case) -> Optional[Dict[str, Any]]:
+    """Compute MAC count plus per-node metadata for a layer Case's ONNX model."""
+    if case is None or not hasattr(case, "data") or case.data is None:
+        return None
+    model_wrapper = case.data
+    model = model_wrapper.model if hasattr(model_wrapper, 'model') else model_wrapper
+    try:
+        return compute_model_mac_details(model)
+    except Exception as e:
+        _discovery_log(f"[MacCount] Failed to compute MAC details: {e}")
+        return None
+
+
 def _build_duplicate_layer_map(cases) -> Dict[str, str]:
     """Build a mapping from duplicate layer_id to source layer_id.
 
@@ -512,6 +528,7 @@ def _update_json_with_results(
         discovery_state.full_mlir_locations,
         recommend_by_timing,
         discovery_state.orig_indices,
+        discovery_state.mac_counts,
     )
 
 
@@ -571,6 +588,15 @@ def _save_discovery_results(
     output_dir = _opt(config, "--output-dir", "--gen-config-output")
     compiler_path = get_compiler_config_path(model_name, output_dir, subgraph_suffix)
     save_compiler_config(compiler_path, json_data, model_name)
+
+    # Generate MAC-count debug JSON with per-node metadata used to compute MACs
+    mac_debug_path = get_mac_debug_config_path(model_name, output_dir, subgraph_suffix)
+    save_mac_debug_config(
+        mac_debug_path,
+        discovery_state.mac_counts,
+        discovery_state.mac_details,
+        model_name,
+    )
 
 def _extract_max_diff(error_msg: str) -> Optional[Dict[str, float]]:
     """Extract max differences from comparison error message."""
@@ -1133,6 +1159,8 @@ def save_progress(request, layer_executor_case):
             _discovery_state.node_indices.clear()
             _discovery_state.full_mlir_locations.clear()
             _discovery_state.recommended_executors.clear()
+            _discovery_state.mac_counts.clear()
+            _discovery_state.mac_details.clear()
         save_progress._last_model = current_model
 
     yield
@@ -1278,7 +1306,8 @@ def executor_discovery(
         return
 
     # Layer mode: record metadata first so duplicates also get correct
-    # node_index, orig_index and mlir_location in the JSON output.
+    # node_index, orig_index, mlir_location, and MAC count in the JSON output.
+    mac_info = _compute_layer_mac_info(case)
     discovery_state.record_metadata(
         layer_id=layer_id,
         node_index=node_index,
@@ -1289,6 +1318,8 @@ def executor_discovery(
             if onnx_mlir_model_file and hasattr(onnx_mlir_model_file, 'file_path')
             else None
         ),
+        mac_count=mac_info["mac_count"] if mac_info else None,
+        mac_details=mac_info,
     )
 
     # Short-circuit duplicate layers: copy results from source layer

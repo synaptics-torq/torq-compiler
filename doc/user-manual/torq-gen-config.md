@@ -15,7 +15,8 @@ A guide for finding the best execution configuration (NSS/CSS/Host) for each ope
 4. [Handling Issues](#4-handling-issues)
 5. [Auto-Converting FP32 Models to BF16](#5-auto-converting-fp32-models-to-bf16)
 6. [ONNX to MLIR Mapping Mechanism](#6-onnx-to-mlir-mapping-mechanism)
-7. [Command Reference](#7-command-reference)
+7. [TFLite Model Support](#7-tflite-model-support)
+8. [Command Reference](#8-command-reference)
 
 ---
 
@@ -36,10 +37,13 @@ Different operations work better on different executors. For example, convolutio
 ### How It Works
 
 ```
-ONNX Model → Extract Layers → Test NSS/CSS/Host → Get Recommended Executor → Save JSON → Run Full Model
+Model (ONNX / TFLite) → Extract Layers → Test NSS/CSS/Host → Get Recommended Executor → Save JSON → Run Full Model
 ```
 
-`torq-gen-config` accepts ONNX (`.onnx`) models.
+`torq-gen-config` accepts ONNX (`.onnx`) and TFLite (`.tflite`) models. The
+correct test entry point is auto-selected from the model extension, so the same
+commands work for both frontends. See [TFLite Model Support](#7-tflite-model-support)
+for TFLite-specific details.
 
 ### Example: SqueezeNet 1.0
 
@@ -885,17 +889,111 @@ If you see warnings like `COUNT MISMATCH` or `OP TYPE MISMATCHES` during discove
 
 ---
 
-## 7. Command Reference
+## 7. TFLite Model Support
+
+`torq-gen-config` runs the same discover → view → run workflow on TFLite
+(`.tflite`) models. The report JSON, compiler JSON, status semantics, and
+`recommended_executor` logic are identical to the ONNX flow — only the model
+frontend differs.
+
+### Running TFLite Discovery
+
+The CLI auto-detects the model type from its extension and selects the matching
+test entry point:
+
+| Model extension | Test entry point |
+|-----------------|------------------|
+| `.onnx` | `tests/test_onnx_gen_config.py` |
+| `.tflite` | `tests/test_tflite_gen_config.py` |
+
+No extra flags are required — pass a `.tflite` file to `--model` exactly as you
+would an ONNX model:
+
+```bash
+# Discover (auto-selects the TFLite entry point)
+torq-gen-config discover \
+    --model ./models/three_layer_nss_css_host.tflite \
+    --output-dir ./results \
+    --skip-mode
+
+# View results
+torq-gen-config view --model ./models/three_layer_nss_css_host.tflite --output-dir ./results
+
+# Run full model with discovered assignments
+torq-gen-config run --model ./models/three_layer_nss_css_host.tflite --output-dir ./results
+
+# Or using pytest directly
+pytest tests/test_tflite_gen_config.py \
+    -v -k "_layer_" \
+    --model-path=./models/three_layer_nss_css_host.tflite \
+    --output-dir=./results \
+    --skip-mode --recompute-cache
+```
+
+When `--model` is omitted, TFLite models are discovered from the `dev_ops/` and
+`tflite_models/` directories.
+
+### Layer Identity
+
+TFLite layers are keyed by operator name and index: `{OP_NAME}_{op_index}`.
+For example:
+
+```
+CONV_2D_0        # first CONV_2D op
+DEQUANTIZE_1     # DEQUANTIZE op at index 1
+CONV_2D_2        # CONV_2D op at index 2
+```
+
+These IDs are used everywhere a layer ID is expected (`view`, `edit`, `-k`
+filters).
+
+### TFLite → TOSA Mapping
+
+Full-model executor assignment relies on matching MLIR `line:column` locations
+in the compiler pass. TFLite models are lowered to the **TOSA dialect** by
+`tosa-converter-for-tflite` (the same converter the compiler consumes), where a
+single TFLite op typically expands into several TOSA ops:
+
+```
+CONV_2D   →  tosa.conv2d + tosa.rescale + tosa.clamp
+```
+
+Each TFLite layer is mapped to its **primary compute TOSA op** location on a
+best-effort, position-based basis (e.g. `CONV_2D` → `conv2d`, `FULLY_CONNECTED`
+→ `matmul`, `AVERAGE_POOL_2D` → `avg_pool2d`). Ops without a known primary
+mapping fall back to the next unconsumed non-structural TOSA op. Structural glue
+ops (`reshape`, `transpose`, `cast`, `const`) are skipped when locating a
+layer's compute op.
+
+If this greedy match cannot find a stable compute op for a layer, discovery can
+still emit the per-layer results for that TFLite operator, but the full-model
+assignment JSON will not contain a `line:column` location for it. That usually
+means the TFLite→TOSA lowering changed and the primary-op mapping table needs to
+be updated for that operator.
+
+Unlike the ONNX flow, TFLite discovery does not use `--quantize` /
+`--auto-convert-bf16` — quantization is already baked into the `.tflite` model.
+TFLite discovery also does not currently implement `--subgraph-from`,
+`--subgraph-to`, or `--dedup-layers`.
+
+---
+
+## 8. Command Reference
 
 ### torq-gen-config CLI
 
 The recommended way to interact with the discovery system.
 
+For TFLite models, the ONNX-only discovery flags `--auto-convert-bf16`,
+`--save-bf16-model`, `--subgraph-from`, `--subgraph-to`, `--dedup-layers`,
+`--quantize`, `--per-channel`, `--full-integer`, and `--quant-format` are not
+implemented.
+
 #### `discover` — Run executor discovery
 
 | Option | Description |
 |--------|-------------|
-| `--model` | Path to ONNX model (**required**) |
+| `--model` | Path to ONNX (`.onnx`) or TFLite (`.tflite`) model (**required**) |
 | `--output-dir` | Directory for generated JSON (default: current directory) |
 | `--test-file` | Path to `test_onnx_gen_config.py` (auto-detected) |
 | `--skip-mode` | Stop after first success per layer |
@@ -942,9 +1040,11 @@ torq-gen-config discover --model model.onnx --skip-mode -- -s -v --tb=short
 
 #### `run` — Run full model test
 
+For TFLite models, the BF16 and quantization flags below remain ONNX-only.
+
 | Option | Description |
 |--------|-------------|
-| `--model` | Path to ONNX model (**required**) |
+| `--model` | Path to ONNX (`.onnx`) or TFLite (`.tflite`) model (**required**) |
 | `--output-dir` | Directory where config JSON is located |
 | `--test-file` | Path to `test_onnx_gen_config.py` (auto-detected) |
 | `--auto-convert-bf16` | Convert FP32 model to BF16 |

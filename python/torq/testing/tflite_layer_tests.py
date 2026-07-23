@@ -89,6 +89,8 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
 
     max_layers = metafunc.config.getoption("--tflite-layer-test-max-layers")
     force_extract = metafunc.config.getoption("--tflite-layer-test-force-extract")
+    recompute_cache = metafunc.config.getoption("--recompute-cache", default=False)
+    regenerate_layers = force_extract or recompute_cache
 
     # when using pytest xdist multiple processes will be trying to run this in parallel
     # we want to make sure the first that gets here computes the stuff and the other ones
@@ -100,7 +102,7 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
         # Check for cached cases file (fast path - no TF import needed)
         cases_cache_file = layers_dir / "_cases_cache.json"
 
-        if cases_cache_file.exists() and not force_extract:
+        if cases_cache_file.exists() and not regenerate_layers:
             try:
                 with open(cases_cache_file, 'r') as f:
                     cached_cases = json_mod.load(f)
@@ -110,7 +112,10 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
                     if max_layers > 0 and len(result) >= max_layers + 1:  # +1 for full model
                         break
                     result.append(TFLiteLayerCase(**c))
-                print(f"Loaded {len(result)} cached cases for {model_name} (use --tflite-layer-test-force-extract to regenerate)")
+                print(
+                    f"Loaded {len(result)} cached cases for {model_name} "
+                    "(use --recompute-cache or --tflite-layer-test-force-extract to regenerate)"
+                )
                 return result
             except Exception as e:
                 print(f"Cache load failed for {model_name}: {e}")
@@ -122,7 +127,7 @@ def generate_tflite_layer_cases(model_name:str, tflite_path: Path, metafunc) -> 
             str(tflite_path),
             str(layers_dir),
             max_layers=max_layers,
-            force=force_extract
+            force=regenerate_layers
         )
 
         for result in extraction_results:

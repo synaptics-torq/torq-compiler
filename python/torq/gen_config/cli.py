@@ -36,6 +36,7 @@ from torq.testing.quantize_onnx import (
 
 
 DEFAULT_TEST_FILE = "tests/test_onnx_gen_config.py"
+TFLITE_TEST_FILE = "tests/test_tflite_gen_config.py"
 
 # CLI → pytest flag mapping.
 # Each entry: (pytest_flag_template, argparse_attr, is_bool).
@@ -103,13 +104,20 @@ def _find_project_root() -> Path:
     return cwd
 
 
+def _default_test_file(project_root: Path, model_path: str) -> str:
+    """Select the discovery test file based on the model file extension."""
+    if str(model_path).lower().endswith(".tflite"):
+        return str(project_root / TFLITE_TEST_FILE)
+    return str(project_root / DEFAULT_TEST_FILE)
+
+
 def _resolve_test_and_model(args: argparse.Namespace) -> Tuple[str, str]:
     """Resolve test file path and model path from CLI args."""
     project_root = _find_project_root()
-    test_file = args.test_file or str(project_root / DEFAULT_TEST_FILE)
     model_path = args.model
     if not Path(model_path).exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
+    test_file = args.test_file or _default_test_file(project_root, model_path)
     return test_file, model_path
 
 
@@ -534,7 +542,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         p.add_argument(
             "--model",
             required=True,
-            help="Path to the model (ONNX .onnx, Torch .pt/.pth, or .py)",
+            help="Path to the model (ONNX .onnx, TFLite .tflite, Torch .pt/.pth, or .py)",
         )
         p.add_argument(
             "--output-dir",
@@ -542,7 +550,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         p.add_argument(
             "--test-file",
-            help="Path to the test entry point (default: inferred from model type)",
+            help="Path to the discovery test file (defaults by model type: "
+            "test_onnx_gen_config.py, test_tflite_gen_config.py, or inferred for Torch)",
         )
         p.add_argument(
             "--auto-convert-bf16",

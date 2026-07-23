@@ -449,6 +449,171 @@ class TFLiteLayerExtractor:
 
         return True
 
+    def extract_layers_as_tflite(self, op_indices: List[int], output_path: Path) -> bool:
+        """
+        Extract a contiguous group of operators as a single standalone TFLite model.
+
+        Slices the given operators (e.g. the first N of the model) out of the
+        FlatBuffer, preserving quantization parameters, builtin options, and all
+        tensor/buffer data. Subgraph inputs are the tensors consumed by the group
+        but produced outside it (excluding constants); subgraph outputs are the
+        tensors produced by the group that are not consumed within it.
+
+        Args:
+            op_indices: Operator indices (in subgraph order) to include.
+            output_path: Path to write the new TFLite model.
+
+        Returns:
+            True on success, False otherwise.
+        """
+        if not op_indices:
+            return False
+
+        src_model = self.model_obj
+        src_subgraph = src_model.subgraphs[0]
+        try:
+            src_ops = [src_subgraph.operators[i] for i in op_indices]
+        except IndexError:
+            print(f"  Error: operator index out of range in {op_indices}")
+            return False
+
+        try:
+            return self._build_layers_flatbuffer(src_ops, output_path)
+        except Exception as e:
+            print(f"  Error extracting layer range {op_indices}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _build_layers_flatbuffer(self, src_ops: List, output_path: Path) -> bool:
+        """Build a standalone TFLite model from a list of source operators."""
+        src_model = self.model_obj
+        src_subgraph = src_model.subgraphs[0]
+
+        # -- Collect all tensor indices used, in order of first appearance ----
+        all_tensor_indices: List[int] = []
+        for op in src_ops:
+            for idx in list(op.inputs) + list(op.outputs):
+                if idx >= 0 and idx not in all_tensor_indices:
+                    all_tensor_indices.append(idx)
+        tensor_remap = {old: new for new, old in enumerate(all_tensor_indices)}
+
+        # -- Collect needed buffers and build buffer remap -------------------
+        new_buffers = [tflite_schema.BufferT()]  # buffer 0 = empty sentinel
+        buffer_remap = {0: 0}
+        for old_tidx in all_tensor_indices:
+            old_bidx = src_subgraph.tensors[old_tidx].buffer
+            if old_bidx not in buffer_remap:
+                buffer_remap[old_bidx] = len(new_buffers)
+                src_buf = src_model.buffers[old_bidx]
+                new_buf = tflite_schema.BufferT()
+                new_buf.data = copy.copy(src_buf.data) if src_buf.data is not None else None
+                new_buf.offset = src_buf.offset
+                new_buf.size = src_buf.size
+                new_buffers.append(new_buf)
+
+        # -- Build new tensors (deep copy with remapped buffer index) --------
+        new_tensors = []
+        for old_tidx in all_tensor_indices:
+            t = copy.deepcopy(src_subgraph.tensors[old_tidx])
+            t.buffer = buffer_remap[src_subgraph.tensors[old_tidx].buffer]
+            new_tensors.append(t)
+
+        # -- Build deduplicated operator codes and remap --------------------
+        opcode_remap: Dict[int, int] = {}
+        new_opcodes = []
+        for op in src_ops:
+            if op.opcodeIndex not in opcode_remap:
+                opcode_remap[op.opcodeIndex] = len(new_opcodes)
+                new_opcodes.append(copy.deepcopy(src_model.operatorCodes[op.opcodeIndex]))
+
+        # -- Build new operators with remapped indices ----------------------
+        new_ops = []
+        produced = set()
+        for op in src_ops:
+            new_op = copy.deepcopy(op)
+            new_op.opcodeIndex = opcode_remap[op.opcodeIndex]
+            new_op.inputs = np.array(
+                [tensor_remap[i] if i >= 0 else i for i in op.inputs], dtype=np.int32
+            )
+            new_op.outputs = np.array(
+                [tensor_remap[i] if i >= 0 else i for i in op.outputs], dtype=np.int32
+            )
+            new_ops.append(new_op)
+            for o in op.outputs:
+                if o >= 0:
+                    produced.add(o)
+
+        # -- Subgraph inputs: consumed tensors produced outside the group,
+        #    excluding constants (tensors that carry buffer data). ----------
+        subgraph_inputs = []
+        seen_inputs = set()
+        for op in src_ops:
+            for old_idx in op.inputs:
+                if old_idx < 0 or old_idx in produced:
+                    continue
+                new_idx = tensor_remap[old_idx]
+                if new_idx in seen_inputs:
+                    continue
+                src_buf = src_model.buffers[src_subgraph.tensors[old_idx].buffer]
+                is_constant = src_buf.data is not None and len(src_buf.data) > 0
+                if not is_constant:
+                    subgraph_inputs.append(new_idx)
+                    seen_inputs.add(new_idx)
+
+        # -- Subgraph outputs: produced tensors not consumed within the group
+        #    (dangling), falling back to the last operator's outputs. -------
+        consumed_within = set()
+        for op in src_ops:
+            for i in op.inputs:
+                if i >= 0:
+                    consumed_within.add(i)
+        dangling = [
+            o for op in src_ops for o in op.outputs
+            if o >= 0 and o not in consumed_within
+        ]
+        if not dangling:
+            dangling = [o for o in src_ops[-1].outputs if o >= 0]
+        subgraph_outputs = [tensor_remap[o] for o in dict.fromkeys(dangling)]
+
+        # -- Assemble new subgraph and model --------------------------------
+        new_subgraph = tflite_schema.SubGraphT()
+        new_subgraph.tensors = new_tensors
+        new_subgraph.operators = new_ops
+        new_subgraph.inputs = np.array(subgraph_inputs, dtype=np.int32)
+        new_subgraph.outputs = np.array(subgraph_outputs, dtype=np.int32)
+        new_subgraph.name = src_subgraph.name
+
+        new_model = tflite_schema.ModelT()
+        new_model.version = src_model.version
+        new_model.operatorCodes = new_opcodes
+        new_model.subgraphs = [new_subgraph]
+        new_model.buffers = new_buffers
+        new_model.description = b"Extracted layer range"
+        new_model.metadata = None
+        new_model.metadataBuffer = None
+        new_model.signatureDefs = None
+
+        # -- Serialize -------------------------------------------------------
+        builder = flatbuffers.Builder(1024 * 1024)
+        packed = new_model.Pack(builder)
+        builder.Finish(packed, b"TFL3")
+        new_model_buf = builder.Output()
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(bytes(new_model_buf))
+
+        try:
+            import tensorflow as tf
+            interp = tf.lite.Interpreter(model_path=str(output_path))
+            interp.allocate_tensors()
+        except Exception as e:
+            print(f"  Warning: extracted model verification failed: {e}")
+
+        return True
+
 
 
 class TFLiteTensorOutputExporter:

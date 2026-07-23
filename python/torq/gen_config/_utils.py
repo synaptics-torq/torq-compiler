@@ -64,6 +64,45 @@ def extract_line_numbers_from_mlir(
     return result
 
 
+def extract_tosa_line_numbers_from_mlir(
+    mlir_file: Path, skip_constants: bool = True
+) -> List[Tuple[str, str]]:
+    """Extract (op_type, line:column) tuples from a TOSA MLIR file in order.
+
+    The MLIR produced by ``tosa-converter-for-tflite`` prints one op per line as
+    either ``%N = tosa.<op> ...`` or ``%N = "tosa.<op>"() ...``. The column that
+    the C++ ExecutorAssignmentPass matches on is the 1-based position of the op
+    mnemonic (e.g. ``%24 = tosa.conv2d`` -> ``line:11``).
+
+    Args:
+        mlir_file: Path to the TOSA MLIR file.
+        skip_constants: If True, skip ``tosa.const`` and ``tosa.const_shape`` ops.
+
+    Returns:
+        List of (op_type, "line:column") tuples in order of appearance.
+    """
+    if not mlir_file.exists():
+        return []
+
+    try:
+        content = mlir_file.read_text()
+    except Exception:
+        return []
+
+    result: List[Tuple[str, str]] = []
+    for line_num, line_content in enumerate(content.split("\n"), start=1):
+        match = re.search(r'%\S+\s*=\s*"?(tosa\.([A-Za-z0-9_]+))"?', line_content)
+        if not match:
+            continue
+        op_type = match.group(2)
+        if skip_constants and op_type in ("const", "const_shape"):
+            continue
+        column = match.start(1) + 1
+        result.append((op_type, f"{line_num}:{column}"))
+
+    return result
+
+
 def parse_diff_metrics(error_msg: str) -> Dict[str, Any]:
     """Parse numerical comparison metrics from an error message.
 

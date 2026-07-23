@@ -39,6 +39,10 @@ class ExecutorDiscoveryState:
         self.recommended_executors: Dict[str, str] = {}
         # Subgraph suffix for the current model (e.g., "subgraph_0_7")
         self.subgraph_suffix: Optional[str] = None
+        # layer_id -> multiply-accumulate count computed from the ONNX layer
+        self.mac_counts: Dict[str, int] = {}
+        # layer_id -> per-node metadata used to compute the MAC count
+        self.mac_details: Dict[str, Any] = {}
 
     def record_result(
         self,
@@ -72,6 +76,8 @@ class ExecutorDiscoveryState:
         mlir_location: Optional[str] = None,
         full_mlir_location: Optional[str] = None,
         mlir_file: Optional[Path] = None,
+        mac_count: Optional[int] = None,
+        mac_details: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record metadata for a layer."""
         if node_index is not None:
@@ -84,6 +90,10 @@ class ExecutorDiscoveryState:
             self.full_mlir_locations[layer_id] = full_mlir_location
         if mlir_file:
             self.mlir_files[layer_id] = mlir_file
+        if mac_count is not None:
+            self.mac_counts[layer_id] = mac_count
+        if mac_details is not None:
+            self.mac_details[layer_id] = mac_details
 
     def load_from_json(self, json_data: Dict[str, Any]) -> None:
         """Load existing results from JSON data (for skip mode consistency)."""
@@ -112,6 +122,9 @@ class ExecutorDiscoveryState:
             recommended = op_data.get("recommended_executor")
             if recommended is not None:
                 self.recommended_executors[layer_id] = recommended
+            mac_count = op_data.get("mac_count")
+            if mac_count is not None and layer_id not in self.mac_counts:
+                self.mac_counts[layer_id] = mac_count
 
         if loaded_count > 0:
             _discovery_log(f"Loaded {loaded_count} cached results from existing JSON")

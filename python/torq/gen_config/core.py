@@ -128,6 +128,58 @@ def save_compiler_config(
     _discovery_log(f"[CompilerJSON] Saved {len(compiler_data['op_assignments'])} assignment(s) to {path}")
 
 
+def get_mac_debug_config_path(
+    model_name: str,
+    output_dir: Optional[str] = None,
+    subgraph_suffix: Optional[str] = None,
+) -> Path:
+    """Get path to the MAC-count debug JSON file."""
+    if subgraph_suffix:
+        filename = f"torq_gen_config_{model_name}_{subgraph_suffix}_mac_debug.json"
+    else:
+        filename = f"torq_gen_config_{model_name}_mac_debug.json"
+    return Path(output_dir) / filename if output_dir else Path(filename)
+
+
+def generate_mac_debug_config(
+    mac_counts: Dict[str, int],
+    mac_details: Dict[str, Any],
+    model_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the MAC-count debug config from recorded per-layer MAC metadata.
+
+    The debug JSON records, for each layer, the total MAC count and the
+    per-node shapes/formula used to derive it::
+
+        {"ops": {"Conv_x": {"mac_count": 123,
+                             "mac_breakdown": [ {op_type, shapes, formula}, ... ]}}}
+    """
+    ops: Dict[str, Any] = {}
+    for layer_id in sorted(set(mac_counts) | set(mac_details)):
+        details = mac_details.get(layer_id) or {}
+        entry: Dict[str, Any] = {
+            "mac_count": mac_counts.get(layer_id, details.get("mac_count", 0)),
+            "mac_breakdown": details.get("nodes", []),
+        }
+        ops[layer_id] = entry
+    result: Dict[str, Any] = {"ops": ops}
+    if model_name is not None:
+        result["model_name"] = model_name
+    return result
+
+
+def save_mac_debug_config(
+    path: Path,
+    mac_counts: Dict[str, int],
+    mac_details: Dict[str, Any],
+    model_name: Optional[str] = None,
+) -> None:
+    """Generate and save the MAC-count debug config."""
+    debug_data = generate_mac_debug_config(mac_counts, mac_details, model_name)
+    save_config(path, debug_data)
+    _discovery_log(f"[MacDebugJSON] Saved MAC metadata for {len(debug_data['ops'])} op(s) to {path}")
+
+
 def _get_json_path(
     config, model_name: Optional[str] = None, subgraph_suffix: Optional[str] = None
 ) -> Path:
@@ -231,6 +283,7 @@ def update_config_with_results(
     full_mlir_locations: Dict[str, str],
     recommend_by_timing: bool = False,
     orig_indices: Optional[Dict[str, int]] = None,
+    mac_counts: Optional[Dict[str, int]] = None,
 ) -> None:
     """Update JSON data with discovery results and line numbers."""
     if "ops" not in json_data:
@@ -251,6 +304,10 @@ def update_config_with_results(
             orig_index = orig_indices.get(layer_id)
             if orig_index is not None:
                 json_data["ops"][layer_id]["_orig_index"] = orig_index
+        if mac_counts is not None:
+            mac_count = mac_counts.get(layer_id)
+            if mac_count is not None:
+                json_data["ops"][layer_id]["mac_count"] = mac_count
 
         full_mlir_location = full_mlir_locations.get(layer_id)
         if full_mlir_location and re.match(r"^\d+:\d+$", full_mlir_location):
