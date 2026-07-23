@@ -65,6 +65,10 @@ void populateLinalgToTorqHLQPoolingPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
 
+void populateLinalgToTorqHLQReducePatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+
 void populateLinalgToTorqHLEWBinaryPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

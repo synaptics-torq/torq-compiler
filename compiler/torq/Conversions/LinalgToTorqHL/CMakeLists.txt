@@ -13,6 +13,7 @@ set(sources
   QMulDivPattern.cpp
   QPoolingPattern.cpp
   QSigmoidPattern.cpp
+  QReducePattern.cpp
   QuantPatternUtils.cpp
   Conv2DMatmulPattern.cpp
   ElementWiseBinaryPattern.cpp
