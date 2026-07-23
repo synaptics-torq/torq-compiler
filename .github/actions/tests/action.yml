@@ -257,7 +257,7 @@ runs:
             --control-file bench-control.json \
             --local-runner-path ${{github.workspace}}/release/tools/astra-sl-torq-run-module \
             --local-ko-path ${{github.workspace}}/release/lib/syna_npu.ko \
-            --build-version 202605200846
+            --build-version 202607182301
 
     - name: Run pytest
       shell: bash
