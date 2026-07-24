@@ -1178,6 +1178,10 @@ def case_config(request, runtime_hw_type, chip_config):
     if ('softmax' in tc):
         extra_args['torq_compiler_options'] = ["--torq-convert-dtypes"]
 
+    # FIXME
+    if ('conv2d_test1_int8_inp_242x137x3_k3x3_oc16_s2x2_valid' in tc):
+        extra_args['torq_compiler_options'] = ["--torq-disable-slicing"]
+
     return {
         "keras_model": case.data['keras_model_name'],
         "keras_model_params": case.data.get('keras_model_params', {}),

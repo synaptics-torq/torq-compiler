@@ -662,22 +662,27 @@ Value convertScalarToRankedTensor(Value &input, Location loc, PatternRewriter &r
     return input_new;
 }
 
+llvm::cl::opt<bool> clLowerDWUsingNdlKernel(
+    "torq-dw-ndl", llvm::cl::desc("Lower depthwise using NDL kenels"), llvm::cl::init(false)
+);
+
 // Check if the Conv2DOp can be lowered using EK kernel
 bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
     auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
     int kh = weightShape[2];
     int kw = weightShape[3];
-    int32_t pad_left = op.getPad()[0];
-    int32_t pad_right = op.getPad()[1];
-    if (pad_left != kw / 2 || pad_right != kw / 2) {
-        // Not supported by HW
+    int stride = op.getStride()[0];
+
+    if (clLowerDWUsingNdlKernel) {
+        llvm::errs() << "Warning: lowering DW using NDL kernel!\n";
         return false;
     }
-    int stride = op.getStride()[0]; // FIXME: consider all stride values
-    if (stride != 1 || kh > 7 || kw > 7) {
-        // Not supported by this HW
+
+    // Common HW/kernel limitations.
+    if (stride > 2 || kh > 7 || kw > 7) {
         return false;
     }
+
     if (weightShape.size() == 5 && weightShape[4] > 4) {
         // Not supported by this EK kernel
         return false;
@@ -685,10 +690,6 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
 
     return true;
 }
-
-llvm::cl::opt<bool> clLowerDWUsingNdlKernel(
-    "torq-dw-ndl", llvm::cl::desc("Lower depthwise using NDL kenels"), llvm::cl::init(false)
-);
 
 // Check if the DepthwiseConv2DOp can be lowered using EK kernel
 bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {

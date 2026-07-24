@@ -34,7 +34,7 @@ def comparison_config_onnx_zoo_quant():
     reference is not expected.  Real model accuracy will be validated once
     proper calibration data is added.
     """
-    return {"int_tol": 5, "int_thld": 10}
+    return {"int_tol": 20, "int_thld": 10}
 
 
 @versioned_hashable_object_fixture

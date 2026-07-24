@@ -1884,7 +1884,22 @@ void SlicePrivate::cepr(const PData &pdata) {
         // int wSteps = div_ceil(kw, 2);
         // assert(accumulationCount == hSteps * wSteps && "Invalid accumulation count for stride
         // 2");
-        accumulationCount = kh * kw;
+        if (_cfg.alu_op0_mode[0] == ALUOp0Mode::MUL) {
+            // Conv2d / depthwise stride-2: kernel loops iterate over full kh and kw, plus IC.
+            // innerIterCount = IC * kh * qr(2) * qc(2) * kw = IC * kh * kw * 4.
+            // Divide out the 4 quadrant iterations to get the true count IC * kh * kw.
+            // Example: Conv2d IC=3, 3x3 → innerIterCount=108, accumulationCount=27
+            // Example: DW     IC=1, 3x3 → innerIterCount=36,  accumulationCount=9
+            int input_channels = accumulationCount / (kh * kw * 4);
+            accumulationCount = kh * kw * input_channels;
+        }
+        else {
+            // MaxPool (DBYP/MAX) stride-2: kernel loops use div_ceil(kh,2) and div_ceil(kw,2),
+            // so innerIterCount != IC * kh * kw * 4. The correct value is kh * kw (the true
+            // number of valid kernel positions; HW skips the spurious quadrant steps).
+            // Example: MaxPool 3x3 → innerIterCount=16, accumulationCount=9
+            accumulationCount = kh * kw;
+        }
     }
     ceprDims.push_back({DimType::H, RegDimTag::N, accumulationCount});
     ceprDims.push_back({DimType::H, RegDimTag::T, outerIterCount(_stackCopy, _pram.loadNesting)});
@@ -2043,7 +2058,8 @@ void SlicePrivate::dewr(const LData &data) {
         MemNdlDimsData dewr;
         int skipCount = 0;
         for (const MemNdlDimData &d : _ndls.getMemNdl(NdlType::DEWR)->dims) {
-            if (d.type == DimType::H && d.tag == MemDimTag::O && d.count == 2 && skipCount++ < 2)
+            if (d.type == DimType::H && d.tag == MemDimTag::O && d.count == 2 &&
+                d.getIntStride().value_or(-1) == 0 && skipCount++ < 2)
                 continue;
             dewr.push_back(d);
         }
