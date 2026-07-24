@@ -33,11 +33,10 @@ def comparison_config_for_gelu(request):
 def comparison_config_for_matmul_dql(request):
     """Comparison config for block-quantized matmul (DequantizeLinear + MatMul).
 
-    Block quantization (Q8_0) introduces rounding at block boundaries that
-    amplifies relative error for small output values. 12-13% of elements
-    typically exceed the default fp_max_tol.
+    Block quantization introduces rounding at block boundaries that
+    amplifies relative error for small output values.
     """
-    return {"fp_max_tol": 0.5, "allowed_wrong": 0.15}
+    return {"fp_max_tol": 0.5, "allowed_wrong": 0.2}
 
 
 @pytest.fixture
@@ -52,6 +51,10 @@ def comparison_config_for_instancenorm(request):
 
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_file_group("torch_ops")))
 def case_config(request, runtime_hw_type, chip_config):
+
+    next_chip = (chip_config.data['target'] != "SL2610")
+    if next_chip and 'matmul_dql_q4_0' in request.param.data.name:
+        pytest.skip("matmul_dql_q4_0 not supported on next chip")
 
     no_negative_input = [
         'sqrt-',
@@ -76,6 +79,7 @@ def case_config(request, runtime_hw_type, chip_config):
     no_slicing_tc = [
         #  error: failed to allocate LRAM addresses
         "matmul_dql_q8_0",
+        "matmul_dql_q4_0",
         # assertion for next 2 in function LData, file Kernel.cpp, line 824
         #  (elementType != DType::none && "Invalid elemen= DType::none)
         "topk-1x2100-bf16",

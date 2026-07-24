@@ -412,17 +412,29 @@ FailureOr<Value> buildReductionDimBias(
         return failure();
     }
 
-    std::vector<APInt> paddedBiasValues(
-        ShapedType::getNumElements(biasShape), APInt(zeroPointElementType.getWidth(), 0)
-    );
+    // The bias is the negated zero point. Negating in the zero point's native
+    // width overflows for the most-negative value (e.g. i4: -(-8) wraps back to
+    // -8 instead of +8), which corrupts every block using that zero point. Only
+    // sub-byte zero points are at risk, so widen those to 8 bits before negating;
+    // 8-bit and wider zero points already have room and are left unchanged.
+    // getIntegerConstantValues returns the raw bit pattern, so sign-extend for
+    // signed zero points and zero-extend for unsigned ones.
+    bool zeroPointUnsigned = usesUnsignedIntegerZeroPoint(anchorOp);
+    unsigned biasWidth = zeroPointElementType.getWidth();
+    if (biasWidth < 8)
+        biasWidth = 8;
+    auto biasElementType = rewriter.getIntegerType(biasWidth);
+
+    std::vector<APInt> paddedBiasValues(ShapedType::getNumElements(biasShape), APInt(biasWidth, 0));
     std::vector<APInt> negatedBiasValues;
     negatedBiasValues.reserve(maybeBiasValues->size());
     for (APInt value : *maybeBiasValues) {
-        negatedBiasValues.push_back(-value);
+        APInt widened = zeroPointUnsigned ? value.zext(biasWidth) : value.sext(biasWidth);
+        negatedBiasValues.push_back(-widened);
     }
     copyPaddedBiasValues(paddedBiasValues, negatedBiasValues);
 
-    auto biasType = RankedTensorType::get(biasShape, zeroPointConstType.getElementType());
+    auto biasType = RankedTensorType::get(biasShape, biasElementType);
     auto biasAttr = DenseIntElementsAttr::get(biasType, paddedBiasValues);
     Value bias = arith::ConstantOp::create(rewriter, loc, biasType, biasAttr);
 
