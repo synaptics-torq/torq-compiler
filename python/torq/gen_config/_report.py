@@ -84,6 +84,19 @@ def _generate_report_sections(
             "recommended_executor": discovery_state.recommended_executors.get(layer_id),
         }
 
+    # Layers skipped by --skip-ops (or set to recommended_executor=null) have no
+    # executor results, but they should still appear in the report so the user
+    # can see they were handled by the full-model path.
+    for layer_id in set(discovery_state.node_indices) | set(discovery_state.orig_indices) | set(discovery_state.locations):
+        if layer_id not in ops:
+            ops[layer_id] = {
+                "executors": {},
+                "_node_index": discovery_state.node_indices.get(layer_id),
+                "_orig_index": discovery_state.orig_indices.get(layer_id),
+                "mlir_location": discovery_state.locations.get(layer_id),
+                "recommended_executor": discovery_state.recommended_executors.get(layer_id),
+            }
+
     summary, critical_failures, rows = _build_report_from_ops(ops)
 
     sections: Dict[str, List[str]] = {

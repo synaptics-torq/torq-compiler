@@ -95,6 +95,12 @@ def pytest_addoption(parser):
         "Valid values: nss, css, host. Can be combined with --skip-mode.",
     )
     parser.addoption(
+        "--skip-ops",
+        default=None,
+        help="Comma-separated list of ONNX op types to skip during discovery (e.g., 'MaxPool,Add'). "
+        "Skipped layers are recorded in the JSON with recommended_executor set to null.",
+    )
+    parser.addoption(
         "--model-dir",
         default=None,
         help="Directory to scan for *.onnx models during folder discovery. "

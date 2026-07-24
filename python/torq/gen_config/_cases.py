@@ -315,6 +315,59 @@ def _get_skipped_executors(config) -> set:
         return {e.strip().lower() for e in skip_executors_option.split(",")}
     return set()
 
+
+def _get_skipped_ops(config) -> set:
+    """Get set of ONNX op types to skip from --skip-ops option."""
+    skip_ops_option = config.getoption("--skip-ops", default=None)
+    if skip_ops_option:
+        return {op.strip().lower() for op in skip_ops_option.split(",")}
+    return set()
+
+
+def _get_op_type_from_layer_id(layer_id: str) -> Optional[str]:
+    """Extract ONNX op type from a layer_id such as 'MaxPool_/foo/MaxPool_output_0'."""
+    if not layer_id:
+        return None
+    parts = layer_id.split("_", 1)
+    return parts[0] if parts else None
+
+
+# Tracks layers skipped by --skip-ops so their JSON entries are written once.
+_skipped_op_layers: Dict[str, Dict[str, Any]] = {}
+
+
+def _record_skipped_op_in_json(
+    config,
+    layer_id: str,
+    model_name: str,
+    subgraph_suffix: Optional[str],
+    node_index: Optional[int] = None,
+    orig_index: Optional[int] = None,
+    full_mlir_location: Optional[str] = None,
+) -> None:
+    """Ensure a skipped op has a JSON entry with recommended_executor=None."""
+    json_data = _load_json(config, model_name, subgraph_suffix)
+    ops = json_data.setdefault("ops", {})
+    if layer_id not in ops:
+        ops[layer_id] = {"executors": {}}
+    op_data = ops[layer_id]
+    op_data["recommended_executor"] = None
+
+    if node_index is not None:
+        op_data["_node_index"] = node_index
+    if orig_index is not None:
+        op_data["_orig_index"] = orig_index
+    if full_mlir_location and re.match(r"^\d+:\d+$", full_mlir_location):
+        op_data["mlir_location"] = full_mlir_location
+
+    json_name = model_name if not subgraph_suffix else f"{model_name}_{subgraph_suffix}"
+    _save_json(config, json_name, json_data)
+
+    output_dir = _opt(config, "--output-dir", "--gen-config-output")
+    compiler_path = get_compiler_config_path(model_name, output_dir, subgraph_suffix)
+    save_compiler_config(compiler_path, json_data, model_name)
+
+
 def _get_model_from_wrapper(model_wrapper):
     """Return the underlying onnx.ModelProto from a wrapper or raw model."""
     return model_wrapper.model if hasattr(model_wrapper, 'model') else model_wrapper
@@ -443,6 +496,7 @@ def _maybe_skip_executor(
     model_name: Optional[str],
     subgraph_suffix: Optional[str] = None,
     discovery_state: ExecutorDiscoveryState = _discovery_state,
+    layer_executor_case: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Skip remaining executors for a layer if one already succeeded.
 
@@ -456,11 +510,32 @@ def _maybe_skip_executor(
         model_name: Name of the model
         subgraph_suffix: Optional suffix for subgraph-specific JSON
         discovery_state: Discovery state instance (defaults to global singleton).
+        layer_executor_case: Optional case metadata dict used by --skip-ops.
     """
     # Check if this executor should be skipped entirely (--skip-executors option)
     skipped_executors = _get_skipped_executors(request.config)
     if executor in skipped_executors:
         pytest.skip(f"Executor '{executor}' is in --skip-executors list")
+
+    # Skip whole op types on request (--skip-ops option).  Record the layer in
+    # the JSON with recommended_executor=None so the compiler leaves it
+    # unassigned and the full-model pattern can handle it.
+    skipped_ops = _get_skipped_ops(request.config)
+    op_type = _get_op_type_from_layer_id(layer_id)
+    if op_type and op_type.lower() in skipped_ops:
+        if layer_id not in _skipped_op_layers:
+            _skipped_op_layers[layer_id] = {}
+            case_meta = layer_executor_case or {}
+            _record_skipped_op_in_json(
+                request.config,
+                layer_id,
+                model_name,
+                subgraph_suffix,
+                node_index=case_meta.get("node_index"),
+                orig_index=case_meta.get("orig_index"),
+                full_mlir_location=case_meta.get("full_mlir_location"),
+            )
+        pytest.skip(f"Layer {layer_id} op type '{op_type}' is in --skip-ops list")
 
     skip_mode = _opt(request.config, "--skip-mode", "--executor-skip-mode", default=False)
     if not skip_mode or not layer_id or not model_name:
@@ -577,6 +652,14 @@ def _save_discovery_results(
                 if first_success_idx is not None:
                     for exc in EXECUTOR_ORDER[first_success_idx + 1:]:
                         executors.pop(exc, None)
+
+    # Per-layer extraction strips QDQ around MaxPool, so the layer appears as
+    # float32 and discovery cannot recommend a valid executor. Leave it unset
+    # and let the full-model C++ pattern fuse the MaxPool QDQ chain instead.
+    if not is_subgraph and config.getoption("--quantize", default=False):
+        for layer_id, op_data in json_data.get("ops", {}).items():
+            if layer_id.startswith("MaxPool_"):
+                op_data["recommended_executor"] = None
 
     if model_name:
         json_data["model_name"] = model_name
@@ -999,9 +1082,15 @@ def pytest_generate_tests(metafunc):
     if not files:
         return
 
+    _skipped_op_layers.clear()
+
     skipped_executors = _get_skipped_executors(metafunc.config)
     if skipped_executors:
         _discovery_log(f"[SkipExecutors] Will skip executors: {sorted(skipped_executors)}")
+
+    skipped_ops = _get_skipped_ops(metafunc.config)
+    if skipped_ops:
+        _discovery_log(f"[SkipOps] Will skip op types: {sorted(skipped_ops)}")
 
     onnx_to_mlir_map = _precompute_mlir_mappings(files, metafunc.config)
 

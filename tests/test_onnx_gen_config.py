@@ -57,7 +57,7 @@ def case_config(request, tmp_path, layer_executor_case, chip_config):
     # Early skip check: skip before expensive fixture setup (compilation)
     model_name = _extract_model_name_from_case(case)
     subgraph_suffix = _get_subgraph_suffix(case) if is_subgraph else None
-    _maybe_skip_executor(request, layer_id, executor, model_name, subgraph_suffix)
+    _maybe_skip_executor(request, layer_id, executor, model_name, subgraph_suffix, layer_executor_case=layer_executor_case)
 
     # Full model / full subgraph mode: executor assignments provided by fixture
     if executor == "discovered":

@@ -44,6 +44,7 @@ TFLITE_TEST_FILE = "tests/test_tflite_gen_config.py"
 _DISCOVER_FLAGS = [
     ("--skip-mode",      "skip_mode",           True),
     ("--skip-executors={v}",      "skip_executors",      False),
+    ("--skip-ops={v}",            "skip_ops",            False),
     ("--auto-convert-bf16",       "auto_convert_bf16",   True),
     ("--save-bf16-model={v}",     "save_bf16_model",     False),
     ("--subgraph-from={v}",       "subgraph_from",       False),
@@ -578,6 +579,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     discover_parser.add_argument(
         "--skip-executors",
         help="Comma-separated list of executors to skip (e.g., nss,css)",
+    )
+    discover_parser.add_argument(
+        "--skip-ops",
+        help="Comma-separated list of ONNX op types to skip (e.g., MaxPool,Add). "
+        "Skipped layers get recommended_executor=null in the JSON.",
     )
     discover_parser.add_argument(
         "--save-bf16-model", help="Save converted BF16 model to path"
