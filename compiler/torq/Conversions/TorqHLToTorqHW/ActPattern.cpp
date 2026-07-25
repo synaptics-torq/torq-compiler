@@ -109,8 +109,6 @@ FailureOr<ActConfig> configureActivation(
     }
     else if (opName == "f2i") {
         config.mode = torq_hw::ACTMode::F2I;
-        config.clipMin = 0xff800000;
-        config.clipMax = 0x7f800000;
     }
     else if (opName == "i2i") {
         config.mode = torq_hw::ACTMode::ACT;

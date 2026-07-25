@@ -59,6 +59,64 @@ bool isLogicNotOp(Operation *op, std::string &failReason) {
     return false;
 }
 
+static Value
+broadcastConstantToMatch(Value constantValue, Value referenceValue, PatternRewriter &rewriter) {
+    auto constOp = constantValue.getDefiningOp<arith::ConstantOp>();
+    if (!constOp) {
+        return {};
+    }
+
+    auto referenceType = dyn_cast<RankedTensorType>(referenceValue.getType());
+    if (!referenceType || !referenceType.hasStaticShape()) {
+        return {};
+    }
+
+    auto constantType = dyn_cast<RankedTensorType>(constantValue.getType());
+    if (constantType == referenceType) {
+        return constantValue;
+    }
+
+    Attribute scalarAttr;
+    Attribute constAttr = constOp.getValue();
+    if (auto denseAttr = dyn_cast<DenseElementsAttr>(constAttr)) {
+        if (denseAttr.getType() == referenceType) {
+            return constantValue;
+        }
+        if (!denseAttr.isSplat() && denseAttr.getNumElements() != 1) {
+            return {};
+        }
+        scalarAttr = denseAttr.getValues<Attribute>()[0];
+    }
+    else if (isa<IntegerAttr, FloatAttr>(constAttr)) {
+        scalarAttr = constAttr;
+    }
+    else {
+        return {};
+    }
+
+    if (auto intAttr = dyn_cast<IntegerAttr>(scalarAttr)) {
+        auto elementType = dyn_cast<IntegerType>(referenceType.getElementType());
+        if (!elementType) {
+            return {};
+        }
+        scalarAttr = IntegerAttr::get(elementType, intAttr.getValue());
+    }
+    else if (auto floatAttr = dyn_cast<FloatAttr>(scalarAttr)) {
+        auto elementType = dyn_cast<FloatType>(referenceType.getElementType());
+        if (!elementType) {
+            return {};
+        }
+        scalarAttr = FloatAttr::get(elementType, floatAttr.getValue());
+    }
+    else {
+        return {};
+    }
+
+    auto splatAttr = SplatElementsAttr::get(referenceType, scalarAttr);
+    return arith::ConstantOp::create(rewriter, constOp.getLoc(), referenceType, splatAttr)
+        .getResult();
+}
+
 class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -236,6 +294,15 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         if (swapInputs) {
             std::swap(input0, input1);
         }
+        // if either one of the input is a constant, we need to broadcast it to match the other
+        // input shape
+        if (auto broadcastedInput0 = broadcastConstantToMatch(input0, input1, rewriter)) {
+            input0 = broadcastedInput0;
+        }
+        if (auto broadcastedInput1 = broadcastConstantToMatch(input1, input0, rewriter)) {
+            input1 = broadcastedInput1;
+        }
+
         auto newElementWiseOp = torq_hl::ElementWiseBinaryOp::create(
             rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
             opType, input0, input1, isUnsigned

@@ -53,15 +53,18 @@
 
 #include "PassesDetail.h"
 
+#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/LayoutTransformUtils.h"
+#include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 
@@ -83,8 +86,10 @@ namespace mlir::syna::torq {
 /// Example: if kDim = 10, stride = 4, inputDim = 80, maxKernel = 7,
 /// then b = 2 is valid because 10 % 2 == 0, 4 % 2 == 0, 80 % 2 == 0,
 /// kDim / b = 5 <= 7, and stride / b = 2 <= 2.
-static int64_t selectBlock(int64_t kDim, int64_t stride, int64_t inputDim, int64_t maxKernel) {
-    if (kDim <= maxKernel && stride <= 2)
+static int64_t selectBlock(
+    int64_t kDim, int64_t stride, int64_t inputDim, int64_t maxKernel, int64_t maxStride = 2
+) {
+    if (kDim <= maxKernel && stride <= maxStride)
         return 1; // already within HW limit, no decomposition needed
 
     int64_t best = 1;
@@ -98,7 +103,7 @@ static int64_t selectBlock(int64_t kDim, int64_t stride, int64_t inputDim, int64
             continue;
         if (kDim / b > maxKernel)
             continue; // reduction not sufficient
-        if (stride / b > 2)
+        if (stride / b > maxStride)
             continue; // reduction not sufficient (only s1 & s2 are supported by hardware)
         best = b;
         break;
@@ -160,12 +165,27 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
 
         // the max kernel size supported by the hardware is 7x7
         int64_t maxK = 7;
+        // only s1 and s2 are supported by hardware
+        int64_t maxStride = 2;
 
-        // Determine per-axis block sizes independently.
+        if (kH <= maxK && kW <= maxK && sH <= maxStride && sW <= maxStride && sH == sW)
+            return rewriter.notifyMatchFailure(
+                convOp, "no S2D decomposition needed (kernel and stride already within HW limit)"
+            );
+        // Determine per-axis block sizes independently BEFORE mutating IR.
         // Width axis: absorb sW into bW.
-        int64_t bW = selectBlock(kW, sW, W, maxK);
-        // Height axis: absorb sH into bH.
-        int64_t bH = selectBlock(kH, sH, H, maxK);
+        bool widthPad = W % sW;
+        bool heightPad = H % sH;
+        // Max decompose stride is set to 1
+        maxStride = 1;
+        const int64_t pH = (H + sH - 1) / sH * sH;
+        const int64_t pW = (W + sW - 1) / sW * sW;
+
+        // Predict padded kernel sizes (same as weights_pad_with_zero) without emitting ops.
+        const int64_t paddedKH = align_ceil(kH, sH);
+        const int64_t paddedKW = align_ceil(kW, sW);
+        int64_t bW = selectBlock(paddedKW, sW, pW, maxK, maxStride);
+        int64_t bH = selectBlock(paddedKH, sH, pH, maxK, maxStride);
 
         if (bH == 1 && bW == 1)
             return rewriter.notifyMatchFailure(
@@ -178,6 +198,10 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
                          << " sW=" << sW << " -> bH=" << bH << " bW=" << bW << "\n"
         );
 
+        // Pad weights only after we know decomposition will proceed.
+        filter = weights_pad_with_zero(rewriter, loc, filter, 2, sH);
+        filter = weights_pad_with_zero(rewriter, loc, filter, 3, sW);
+
         // ------------------------------------------------------------------ //
         // 1. SpaceToDepth on input:  [N, C, H, W] -> [N, C*bH*bW, H/bH, W/bW]
         // 2. SpaceToDepth on filter: [F, C, kH, kW] treated as [n=F, c=C, h=kH, w=kW]
@@ -187,27 +211,137 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
         // The channel ordering (c * bH*bW + bh * bW + bw) is identical for both,
         // so the convolution dot product is unchanged.
         // ------------------------------------------------------------------ //
-        Value s2dInput = getSpaceToDepth(input, bH, bW, rewriter);
         Value s2dFilter = getSpaceToDepth(filter, bH, bW, rewriter);
-
         s2dFilter =
             createCompileTimeConstOp(s2dFilter.getDefiningOp(), rewriter).value_or(s2dFilter);
 
+        // If input needs height or width padding (odd/unaligned dims), create a
+        // zero-filled tensor of the aligned shape and insert the original input
+        if (heightPad || widthPad) {
+            auto curInType = cast<RankedTensorType>(input.getType());
+            ArrayRef<int64_t> curShape = curInType.getShape();
+            SmallVector<int64_t> paddedInputShape = {curShape[0], curShape[1], pH, pW};
+            Value paddedInput =
+                createZeroFilledTensor(rewriter, loc, paddedInputShape, curInType.getElementType());
+            SmallVector<OpFoldResult> offsets(4, rewriter.getIndexAttr(0));
+            SmallVector<OpFoldResult> sizes =
+                getAsIndexOpFoldResult(rewriter.getContext(), curShape);
+            SmallVector<OpFoldResult> strides(4, rewriter.getIndexAttr(1));
+            input = tensor::InsertSliceOp::create(
+                        rewriter, loc, input, paddedInput, offsets, sizes, strides
+            )
+                        .getResult();
+        }
+
+        Value s2dInput = getSpaceToDepth(input, bH, bW, rewriter);
+
         // ------------------------------------------------------------------ //
         // 3. New conv with reduced kernel and absorbed stride.
-        //    stride: [sH/bH, sW/bW]   output shape unchanged: [N, F, oH, oW]
+        //    stride: [sH/bH, sW/bW]
+        //
+        // Build the fusion plan BEFORE emitting anything so that we know which
+        // ops (bias, rescale, clamp, …) are fused onto the conv result.  The
+        // plan walks forward from `output` and collects single-use elementwise
+        // ops.  We then rebuild the entire chain with bigger tensors (when the
+        // input was padded) and do exactly ONE extract_slice after the last
+        // fused op — so no fusion patterns see an extract_slice between them.
         // ------------------------------------------------------------------ //
         int64_t newSH = sH / bH;
         int64_t newSW = sW / bW;
-
         auto newStridesAttr = rewriter.getI64TensorAttr({newSH, newSW});
 
-        auto newConv = linalg::Conv2DNchwFchwOp::create(
-            rewriter, loc, outputType, ValueRange{s2dInput, s2dFilter}, ValueRange{output},
-            newStridesAttr, dilationsAttr
-        );
+        auto s2dInShape = cast<RankedTensorType>(s2dInput.getType()).getShape();
+        auto s2dFltShape = cast<RankedTensorType>(s2dFilter.getType()).getShape();
+        ArrayRef<int64_t> origOutShape = outputType.getShape(); // [N, F, oH, oW]
 
-        rewriter.replaceOp(convOp, newConv);
+        // Compute actual output spatial dims after the padded S2D conv.
+        int64_t newOH = (s2dInShape[2] - s2dFltShape[2]) / newSH + 1;
+        int64_t newOW = (s2dInShape[3] - s2dFltShape[3]) / newSW + 1;
+        bool outputPadded = (newOH != origOutShape[2] || newOW != origOutShape[3]);
+
+        // Collect the fusion chain (bias / rescale / clamp …) rooted at the
+        // original conv output.  We need this list BEFORE rewriting.
+        Value fusionAnchor = output;
+        FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(fusionAnchor);
+        SmallVector<Operation *> fusedOps;
+        if (succeeded(fusionPlanOr) && fusionPlanOr->isFusable())
+            fusedOps = fusionPlanOr->neededOps;
+
+        if (!outputPadded) {
+            // ---- Fast path: no padding, shapes unchanged -----------------
+            Value newConvResult = linalg::Conv2DNchwFchwOp::create(
+                                      rewriter, loc, outputType, ValueRange{s2dInput, s2dFilter},
+                                      ValueRange{output}, newStridesAttr, dilationsAttr
+            )
+                                      ->getResult(0);
+            rewriter.replaceOp(convOp, newConvResult);
+            return success();
+        }
+
+        // ---- Padded path: rebuild conv + fused ops with bigger shapes ----
+        //
+        // a) Conv into bigOutput.
+        SmallVector<int64_t> bigOutShape = {origOutShape[0], origOutShape[1], newOH, newOW};
+        Value bigOutput =
+            createZeroFilledTensor(rewriter, loc, bigOutShape, outputType.getElementType());
+        auto bigOutType = cast<RankedTensorType>(bigOutput.getType());
+        Value currentResult = linalg::Conv2DNchwFchwOp::create(
+                                  rewriter, loc, bigOutType, ValueRange{s2dInput, s2dFilter},
+                                  ValueRange{bigOutput}, newStridesAttr, dilationsAttr
+        )
+                                  ->getResult(0);
+
+        // b) Rebuild only the forward chain that consumes the conv result.
+        //    Auxiliary fused ops such as weight-side or constant-side producers
+        //    remain untouched even if they are part of the broader fusion plan.
+        llvm::SmallPtrSet<Operation *, 8> fusedOpSet(fusedOps.begin(), fusedOps.end());
+        Operation *terminalOp = convOp.getOperation();
+        Value prevOrigResult = convOp->getResult(0);
+        while (true) {
+            Operation *nextOp = nullptr;
+            for (Operation *user : prevOrigResult.getUsers()) {
+                if (fusedOpSet.contains(user)) {
+                    nextOp = user;
+                    break;
+                }
+            }
+            if (!nextOp)
+                break;
+
+            auto genericOp = dyn_cast<linalg::GenericOp>(nextOp);
+            if (!genericOp)
+                break;
+
+            SmallVector<Value> newInputs;
+            for (Value operand : genericOp.getInputs())
+                newInputs.push_back(operand == prevOrigResult ? currentResult : operand);
+
+            Value bigInit =
+                createZeroFilledTensor(rewriter, loc, bigOutShape, outputType.getElementType());
+            SmallVector<AffineMap> newMaps = genericOp.getIndexingMapsArray();
+            currentResult =
+                rebuildGenericWithNewLayout(rewriter, genericOp, newInputs, bigInit, newMaps);
+            terminalOp = nextOp;
+            prevOrigResult = nextOp->getResult(0);
+        }
+
+        // c) extract_slice from the final (possibly fused) big result back to
+        //    the original output shape — this is the only extract_slice.
+        SmallVector<OpFoldResult> sliceOffsets(4, rewriter.getIndexAttr(0));
+        SmallVector<OpFoldResult> sliceSizes =
+            getAsIndexOpFoldResult(rewriter.getContext(), origOutShape);
+        SmallVector<OpFoldResult> sliceStrides(4, rewriter.getIndexAttr(1));
+        Value finalResult =
+            tensor::ExtractSliceOp::create(
+                rewriter, loc, outputType, currentResult, sliceOffsets, sliceSizes, sliceStrides
+            )
+                .getResult();
+
+        // Replace the terminal op in the conv-result chain so downstream users
+        // see the sliced result shape.
+        rewriter.replaceOp(terminalOp, finalResult);
+        if (terminalOp != convOp.getOperation())
+            rewriter.replaceOp(convOp, convOp->getResult(0)); // keep SSA valid
         return success();
     }
 };

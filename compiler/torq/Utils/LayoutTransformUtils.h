@@ -76,6 +76,11 @@ bool isLayoutConversionTranspose(linalg::TransposeOp transposeOp);
 /// Preconditions (asserted): H % bH == 0, W % bW == 0.
 Value getSpaceToDepth(Value input, int64_t bH, int64_t bW, PatternRewriter &rewriter);
 
+/// Pad the specified tensor dimension to a given alignment with trailing zeros.
+Value weights_pad_with_zero(
+    PatternRewriter &rewriter, Location loc, Value weights, int padDim, int padDimAlignment
+);
+
 //===----------------------------------------------------------------------===//
 // Tensor Utilities
 //===----------------------------------------------------------------------===//

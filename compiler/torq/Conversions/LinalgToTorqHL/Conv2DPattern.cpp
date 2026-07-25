@@ -112,7 +112,19 @@ static FailureOr<Value> expandWeightsForDilation(
 
 // Helper function to convert tensor.insert_slice with stride > 1 to InterleavedInsertOp
 // and calculate padding for transposed convolution
-static mlir::FailureOr<Value> convertToInterleaved(
+namespace {
+
+// Result of lowering a strided insert_slice (transpose-conv upsample) to
+// InterleavedInsertOp. Border padding that is not HW-legal SAME stays as
+// fill+insert_slice around the interleaved tensor (VALID conv on padded input).
+struct InterleaveConversion {
+    Value interleaved;
+    PaddingInfo padInfo;
+};
+
+} // namespace
+
+static FailureOr<InterleaveConversion> convertToInterleaved(
     Value input, PatternRewriter &rewriter, Operation *parentOp, bool hasStridedInsertSlice
 ) {
     if (!hasStridedInsertSlice) {
@@ -143,6 +155,14 @@ static mlir::FailureOr<Value> convertToInterleaved(
         return failure();
     }
 
+    // Rank-4 NCHW insert_slice only (ConvTranspose upsample).
+    if (staticOffsets.size() != 4 || staticSizes.size() != 4) {
+        return failure();
+    }
+    if (ShapedType::isDynamicShape(staticOffsets) || ShapedType::isDynamicShape(staticSizes)) {
+        return failure();
+    }
+
     Value source = insertSliceOp.getSource();
     Value dest = insertSliceOp.getDest();
     auto sourceType = cast<RankedTensorType>(source.getType());
@@ -150,12 +170,6 @@ static mlir::FailureOr<Value> convertToInterleaved(
     auto destShape = destType.getShape();
     auto elemType = sourceType.getElementType();
     auto loc = input.getLoc();
-
-    // Calculate padding from insert_slice offsets
-    // Format: [left, right, top, bottom] for NCHW
-    int64_t topPadding = staticOffsets[interleavedDim];
-    int64_t interleavedSize = staticSizes[interleavedDim] * strideValue;
-    int64_t bottomPadding = destShape[interleavedDim] - topPadding - interleavedSize;
 
     // Build interleaved shape (output size after interleaving)
     SmallVector<int64_t> interleavedShape4D;
@@ -166,6 +180,18 @@ static mlir::FailureOr<Value> convertToInterleaved(
         else {
             interleavedShape4D.push_back(staticSizes[i]);
         }
+    }
+
+    // No padding on N/C for the upsample insert.
+    if (staticOffsets[0] != 0 || staticOffsets[1] != 0 || interleavedShape4D[0] != destShape[0] ||
+        interleavedShape4D[1] != destShape[1]) {
+        return failure();
+    }
+    // Interleaved spatial region must fit in the destination.
+    const int hDim = 2, wDim = 3;
+    if (staticOffsets[hDim] + interleavedShape4D[hDim] > destShape[hDim] ||
+        staticOffsets[wDim] + interleavedShape4D[wDim] > destShape[wDim]) {
+        return failure();
     }
 
     auto interleavedResultType = RankedTensorType::get(interleavedShape4D, elemType);
@@ -210,7 +236,6 @@ static mlir::FailureOr<Value> convertToInterleaved(
         return failure();
     }
 
-    // Create InterleavedInsertOp
     auto interleavedOp = torq_hl::InterleavedInsertOp::create(
         rewriter, loc, interleavedResultType, interleavedInit,
         rewriter.getI32IntegerAttr(strideValue), rewriter.getI32IntegerAttr(output_min),
@@ -219,60 +244,45 @@ static mlir::FailureOr<Value> convertToInterleaved(
 
     Value interleavedOutput = interleavedOp.getOutput();
 
-    // Apply padding to the interleaved output if needed
-    if (topPadding > 0 || bottomPadding > 0) {
-        // Build padded shape: add top and bottom padding to the interleaved dimension
-        SmallVector<int64_t> paddedShape4D = interleavedShape4D;
-        paddedShape4D[interleavedDim] = destShape[interleavedDim]; // Use original dest size
+    // Keep upsample border padding as fill+insert_slice when it is not a HW-legal
+    // SAME pad (common for ConvTranspose output_padding). TorqHL conv stays VALID
+    // (pad=0) on the padded tensor. ValidToSamePad only peels when pads are legal.
+    bool needsPad = false;
+    for (size_t i = 0; i < destShape.size(); ++i) {
+        if (interleavedShape4D[i] != destShape[i] || staticOffsets[i] != 0)
+            needsPad = true;
+    }
 
+    PaddingInfo padInfo{{0, 0, 0, 0}, 0};
+    if (needsPad) {
+        SmallVector<int64_t> paddedShape4D(destShape.begin(), destShape.end());
         Value paddedInit = tensor::EmptyOp::create(rewriter, loc, paddedShape4D, elemType);
+        Value zeroVal =
+            arith::ConstantOp::create(rewriter, loc, rewriter.getZeroAttr(elemType)).getResult();
+        auto fillOp =
+            linalg::FillOp::create(rewriter, loc, ValueRange{zeroVal}, ValueRange{paddedInit});
 
-        // Fill with zeros
-        TypedAttr fillValue;
-        if (elemType.isBF16()) {
-            fillValue = rewriter.getIntegerAttr(rewriter.getIntegerType(16), 0);
-        }
-        else if (elemType.isInteger(8)) {
-            fillValue = rewriter.getIntegerAttr(rewriter.getIntegerType(8), 0);
-        }
-        else if (elemType.isInteger(16)) {
-            fillValue = rewriter.getIntegerAttr(rewriter.getIntegerType(16), 0);
-        }
-        else {
-            fillValue = rewriter.getZeroAttr(elemType);
-        }
-
-        Value fillValueAsValue = arith::ConstantOp::create(rewriter, loc, fillValue);
-        auto fillOp = linalg::FillOp::create(
-            rewriter, loc, ValueRange{fillValueAsValue}, ValueRange{paddedInit}
-        );
-
-        // Insert the interleaved output at the correct offset
-        SmallVector<OpFoldResult> offsets(paddedShape4D.size(), rewriter.getIndexAttr(0));
-        offsets[interleavedDim] = rewriter.getIndexAttr(topPadding);
-
+        SmallVector<OpFoldResult> offsets;
         SmallVector<OpFoldResult> sizes;
-        for (int64_t dim : interleavedShape4D) {
-            sizes.push_back(rewriter.getIndexAttr(dim));
+        SmallVector<OpFoldResult> strides;
+        for (size_t i = 0; i < paddedShape4D.size(); ++i) {
+            offsets.push_back(rewriter.getIndexAttr(staticOffsets[i]));
+            sizes.push_back(rewriter.getIndexAttr(interleavedShape4D[i]));
+            strides.push_back(rewriter.getIndexAttr(1));
         }
-
-        SmallVector<OpFoldResult> strides(paddedShape4D.size(), rewriter.getIndexAttr(1));
 
         interleavedOutput = tensor::InsertSliceOp::create(
             rewriter, loc, interleavedOutput, fillOp.getResult(0), offsets, sizes, strides
         );
-
         LLVM_DEBUG({
-            llvm::dbgs() << "Applied padding [" << topPadding << ", " << bottomPadding
-                         << "] to InterleavedInsertOp output\n";
+            llvm::dbgs() << "Kept tensor pad around InterleavedInsert, dest shape [";
+            llvm::interleaveComma(paddedShape4D, llvm::dbgs());
+            llvm::dbgs() << "]\n";
         });
     }
 
-    LLVM_DEBUG({
-        llvm::dbgs(
-        ) << "Converted strided insert_slice to InterleavedInsertOp with padding applied\n";
-    });
-    return interleavedOutput;
+    LLVM_DEBUG({ llvm::dbgs() << "Converted strided insert_slice to InterleavedInsertOp\n"; });
+    return InterleaveConversion{interleavedOutput, padInfo};
 }
 
 template <class LinalgConvOp>
@@ -562,12 +572,58 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         auto finalType = cast<RankedTensorType>(output.getType());
 
         bool isNchw = _2DNchwChw;
-        // NOW that all validation passed (including weight creation),
-        // convert strided insert_slice to InterleavedInsertOp OR fold backward padding
+        // Convert strided insert_slice (transpose-conv upsample) to InterleavedInsertOp
+        // plus optional tensor border pad (when pads are not HW-legal SAME).
         PaddingInfo padInfo{{0, 0, 0, 0}, 0};
-        if (failed(convertToInterleaved(input, rewriter, convOp, hasStridedInsertSlice))) {
-            // Fallback to regular padding if conversion failed
-            // foldBackwardPadding will check if output >= padding_input and skip folding
+        // An even-kw ConvTranspose whose upsample border needs no W padding requires a VALID
+        // (unpadded) W dimension. The interleaved/EK conv path cannot express that: EK SAME for
+        // even kw forces an asymmetric (0,1)/(1,0) W pad, which the kernel mis-executes. Keep such
+        // cases on the plain strided-insert path (foldBackwardPadding) instead.
+        //
+        // OPTIMIZATION OPPORTUNITY (perf, not correctness): the interleaved/EK path materializes
+        // the stride-interleaved tensor and convolves it. For strided ConvTranspose upsamples with
+        // a low input-channel count, this is slower than the strided-insert path, which does less
+        // work when the interleaved zeros dominate the compute. Such low-channel upsamples could be
+        // routed to foldBackwardPadding to run faster. The strided-insert path, however, does not
+        // scale in compile time as the input-channel count grows (high-channel upsamples can time
+        // out), so high-channel upsamples must stay on the EK path. Splitting the two cleanly needs
+        // a real cost model rather than a fixed channel threshold, so it is intentionally left out
+        // here.
+        bool forceBackwardPad = false;
+        if (hasStridedInsertSlice && isNchw) {
+            if (auto ins = input.getDefiningOp<tensor::InsertSliceOp>()) {
+                auto offs = ins.getStaticOffsets();
+                auto szs = ins.getStaticSizes();
+                auto destSh = cast<RankedTensorType>(ins.getDest().getType()).getShape();
+                auto wsh = cast<RankedTensorType>(weights.getType()).getShape();
+                if (offs.size() == 4 && szs.size() == 4 && wsh.size() == 4 &&
+                    !ShapedType::isDynamic(offs[3]) && !ShapedType::isDynamic(szs[3])) {
+                    int64_t wLeft = offs[3];
+                    int64_t wRight = destSh[3] - offs[3] - szs[3];
+                    int64_t kw = wsh[3];
+                    if (wLeft == 0 && wRight == 0 && (kw % 2 == 0))
+                        forceBackwardPad = true;
+                }
+            }
+        }
+
+        if (hasStridedInsertSlice && !forceBackwardPad) {
+            Operation *oldInsertOp = input.getDefiningOp<tensor::InsertSliceOp>();
+            FailureOr<InterleaveConversion> interleaved =
+                convertToInterleaved(input, rewriter, convOp, true);
+            if (succeeded(interleaved)) {
+                input = interleaved->interleaved;
+                padInfo = interleaved->padInfo;
+                // Interleaved result matches the original insert_slice type; replace it.
+                // The next canonicalizer DCEs the now-dead zero-fill.
+                if (oldInsertOp && input.getType() == oldInsertOp->getResult(0).getType())
+                    rewriter.replaceOp(oldInsertOp, input);
+            }
+            else {
+                padInfo = foldBackwardPadding(input, rewriter, isNchw, output);
+            }
+        }
+        else {
             padInfo = foldBackwardPadding(input, rewriter, isNchw, output);
         }
 
@@ -653,6 +709,11 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             }
             auto torqOut = postConversion(outV, _dataPerm, isNchw, isDW1DStride1, rewriter);
             rewriter.replaceOp(output.getDefiningOp(), torqOut);
+
+            // insert_slice was replaced above (its dead fill is DCE'd by canonicalize);
+            // just erase the now-unused linalg conv.
+            if (convOp->use_empty())
+                rewriter.eraseOp(convOp);
         }
         return success();
     }
@@ -815,10 +876,13 @@ struct InterleavedInsertSlicePattern : public OpRewritePattern<tensor::InsertSli
                 createI16Const(rewriter, insertSliceOp, weightsData, llvm::ArrayRef<int64_t>{2});
         }
         else if (elemType.isBF16()) {
-            // For bf16 input, use bf16 weights (0x3f80 = 1.0, 0x0000 = 0.0)
-            std::vector<int16_t> weightsData = {0x3f80, 0x0000};
+            // Weight type must match bf16 input (not i16 bit-pattern const).
+            const llvm::fltSemantics &bf16 = llvm::APFloat::BFloat();
+            std::vector<llvm::APFloat> weightsData = {
+                llvm::APFloat(bf16, "1.0"), llvm::APFloat(bf16, "0.0")
+            };
             weights =
-                createI16Const(rewriter, insertSliceOp, weightsData, llvm::ArrayRef<int64_t>{2});
+                createFConst(rewriter, insertSliceOp, weightsData, llvm::ArrayRef<int64_t>{2});
         }
         else {
             return rewriter.notifyMatchFailure(

@@ -519,7 +519,8 @@ template <typename OpTy> LogicalResult prepareParams(BinaryOpParams<OpTy> &P) {
     P.type2 = llvm::dyn_cast<MemRefType>(P.input2.getType());
     P.outputType = llvm::dyn_cast<MemRefType>(P.init.getType());
 
-    assert(P.type1.getElementType() == P.type2.getElementType() && "Input types must match");
+    // Scalar rhs is folded into weights/scale_bias, so type2 may differ from
+    // type1; the non-scalar path enforces the match where input2 is used.
     P.inputElementType = P.type1.getElementType();
     P.inputElementSize = P.inputElementType.getIntOrFloatBitWidth() / 8;
 

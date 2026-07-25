@@ -7,6 +7,7 @@
 #include "torq/Utils/LayoutTransformUtils.h"
 
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -148,6 +149,34 @@ Value getSpaceToDepth(Value input, int64_t bH, int64_t bW, PatternRewriter &rewr
     );
 
     return out;
+}
+
+Value weights_pad_with_zero(
+    PatternRewriter &rewriter, Location loc, Value weights, int padDim, int padDimAlignment
+) {
+    auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
+    SmallVector<int64_t> shape(wtRankedTy.getShape());
+    const int rank = shape.size();
+    assert(padDim < rank && "weight pad with zero: padDim exceeds rank\n");
+    int paddedDimSize = align_ceil(shape[padDim], padDimAlignment);
+    if (paddedDimSize == shape[padDim]) {
+        return weights;
+    }
+
+    SmallVector<OpFoldResult> sizes = getAsIndexOpFoldResult(rewriter.getContext(), shape);
+    auto paddedShape = shape;
+    paddedShape[padDim] = paddedDimSize;
+    SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
+    Value paddedEmpty =
+        tensor::EmptyOp::create(rewriter, loc, paddedShape, wtRankedTy.getElementType());
+    auto zeroAttr = rewriter.getZeroAttr(wtRankedTy.getElementType());
+    Value zeroVal = arith::ConstantOp::create(rewriter, loc, wtRankedTy.getElementType(), zeroAttr);
+    paddedEmpty = linalg::FillOp::create(rewriter, loc, zeroVal, paddedEmpty).getResult(0);
+    SmallVector<OpFoldResult> insOff(rank, rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> insSz = sizes;
+    auto res =
+        tensor::InsertSliceOp::create(rewriter, loc, weights, paddedEmpty, insOff, insSz, strides);
+    return res.getResult();
 }
 
 } // namespace mlir::syna::torq

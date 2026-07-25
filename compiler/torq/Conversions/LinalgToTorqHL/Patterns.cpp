@@ -1922,6 +1922,108 @@ struct BroadcastOpConversion : public OpRewritePattern<linalg::BroadcastOp> {
     }
 };
 
+// Matches the SpaceToDepth-style segmentation chain:
+//   %expanded = tensor.expand_shape %input [[0], [1], [2, 3], [4, 5]]
+//   %transposed = linalg.transpose %expanded permutation = [0, 1, 3, 5, 2, 4]
+//   %collapsed = tensor.collapse_shape %transposed [[0], [1, 2, 3], [4], [5]]
+// and lowers it (when w_segments == 1) to:
+//   %seg = torq_hl.segmentation(..., %input)
+//   %reshape = tensor.reshape %seg -> collapsed result type
+//
+// Root is CollapseShapeOp so dialect-conversion replaceOp targets the matched op.
+class SegmentationTransposeOpConversion : public OpRewritePattern<tensor::CollapseShapeOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    static bool hasSegmentationExpandReassociation(tensor::ExpandShapeOp expandOp) {
+        auto reassociation = expandOp.getReassociationIndices();
+        return reassociation.size() == 4 && reassociation[0].size() == 1 &&
+               reassociation[0][0] == 0 && reassociation[1].size() == 1 &&
+               reassociation[1][0] == 1 && reassociation[2].size() == 2 &&
+               reassociation[2][0] == 2 && reassociation[2][1] == 3 &&
+               reassociation[3].size() == 2 && reassociation[3][0] == 4 && reassociation[3][1] == 5;
+    }
+
+    static bool hasSegmentationCollapseReassociation(tensor::CollapseShapeOp collapseOp) {
+        auto reassociation = collapseOp.getReassociationIndices();
+        return reassociation.size() == 4 && reassociation[0].size() == 1 &&
+               reassociation[0][0] == 0 && reassociation[1].size() == 3 &&
+               reassociation[1][0] == 1 && reassociation[1][1] == 2 && reassociation[1][2] == 3 &&
+               reassociation[2].size() == 1 && reassociation[2][0] == 4 &&
+               reassociation[3].size() == 1 && reassociation[3][0] == 5;
+    }
+
+    static bool hasSegmentationPermutation(linalg::TransposeOp transposeOp) {
+        return transposeOp.getPermutation() == ArrayRef<int64_t>{0, 1, 3, 5, 2, 4};
+    }
+
+    static Value staticTensorReshape(
+        Value tensor, mlir::ArrayRef<int64_t> shape, PatternRewriter &rewriter, const Location &loc
+    ) {
+        auto tensorType = dyn_cast<RankedTensorType>(tensor.getType());
+        auto newType = RankedTensorType::get(shape, tensorType.getElementType());
+        auto shapeType = RankedTensorType::get({(int)shape.size()}, rewriter.getIndexType());
+        auto shapeAttr = DenseIntElementsAttr::get(shapeType, shape);
+        Value shapeConst = arith::ConstantOp::create(rewriter, loc, shapeAttr);
+        return tensor::ReshapeOp::create(rewriter, loc, newType, tensor, shapeConst).getResult();
+    }
+
+    LogicalResult
+    matchAndRewrite(tensor::CollapseShapeOp collapseOp, PatternRewriter &rewriter) const override {
+        if (!hasSegmentationCollapseReassociation(collapseOp)) {
+            return rewriter.notifyMatchFailure(collapseOp, "Not a segmentation collapse_shape");
+        }
+
+        auto transposeOp = collapseOp.getSrc().getDefiningOp<linalg::TransposeOp>();
+        if (!transposeOp || !hasSegmentationPermutation(transposeOp)) {
+            return rewriter.notifyMatchFailure(collapseOp, "Expected segmentation transpose");
+        }
+
+        Value expandedInput = transposeOp.getInput();
+        auto expandOp = expandedInput.getDefiningOp<tensor::ExpandShapeOp>();
+        if (!expandOp || !hasSegmentationExpandReassociation(expandOp)) {
+            return rewriter.notifyMatchFailure(
+                collapseOp, "Expected segmentation-style tensor.expand_shape"
+            );
+        }
+
+        auto inputType = dyn_cast<RankedTensorType>(expandOp.getSrc().getType());
+        auto expandedType = dyn_cast<RankedTensorType>(expandOp.getResultType());
+        auto outputType = dyn_cast<RankedTensorType>(collapseOp.getResultType());
+        if (!inputType || !expandedType || !outputType || !inputType.hasStaticShape() ||
+            !expandedType.hasStaticShape() || !outputType.hasStaticShape() ||
+            inputType.getRank() != 4 || expandedType.getRank() != 6) {
+            return rewriter.notifyMatchFailure(
+                collapseOp, "Expected static segmentation expand/transpose layout"
+            );
+        }
+
+        int64_t hSegments = expandedType.getShape()[3];
+        int64_t wSegments = expandedType.getShape()[5];
+        // TODO: we can support the wSegments > 1, we need to add support in the kernel code
+        if (hSegments <= 0 || wSegments > 1) {
+            return rewriter.notifyMatchFailure(collapseOp, "Invalid segmentation factors");
+        }
+
+        auto dummyWeights = createI8Const(
+            rewriter, collapseOp, std::vector<int8_t>{1}, llvm::ArrayRef<int64_t>{1, 1, 1, 1}
+        );
+        auto dummyScaleBias =
+            createIConst(rewriter, collapseOp, std::vector<APInt>{APInt(32, 0), APInt(32, 1)});
+
+        auto segmentationOp = torq_hl::SegmentationOp::create(
+            rewriter, expandOp.getLoc(), inputType, createInitTensor(expandOp, rewriter, inputType),
+            rewriter.getI32IntegerAttr(hSegments), rewriter.getI32IntegerAttr(wSegments),
+            dummyWeights.getResult(), dummyScaleBias.getResult(), expandOp.getSrc()
+        );
+        auto output = staticTensorReshape(
+            segmentationOp.getOutput(), outputType.getShape(), rewriter, collapseOp.getLoc()
+        );
+        rewriter.replaceOp(collapseOp, output);
+        return success();
+    }
+};
+
 // rescale various cases
 // ui8 -> i8
 // %5 = arith.extui %in : i8 to i32
@@ -2393,6 +2495,7 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<ReinterpretCastOpPattern>(context);
 
     patterns.insert<GenericToBroadcastOpConversion>(context);
+    patterns.insert<SegmentationTransposeOpConversion>(context);
     patterns.insert<ResizeNearestNeighborOpConversion>(context);
     populateLinalgToTorqHLExpandWeightsPatterns(context, patterns);
 }

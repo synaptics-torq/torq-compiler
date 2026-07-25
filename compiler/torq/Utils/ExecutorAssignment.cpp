@@ -67,17 +67,18 @@ Operation *getDefiningOpForBlockArg(BlockArgument bArg) {
     return parentOp->getOperand(bArg.getArgNumber()).getDefiningOp();
 }
 
-bool isCompileTimeConst(Operation *op);
-SmallVector<Value> cloneCompileTimeConst(Operation *op, IRRewriter &rewriter);
-
 FailureOr<Value> createCompileTimeConstOp(Operation *maybeConstOp, RewriterBase &rewriter) {
     if (!maybeConstOp)
         return failure();
 
-    setTargetExecutorAttr(maybeConstOp, torq_hl::Executor::Host);
+    // The requested value is already behind a compile-time-constant boundary.
+    if (auto existing = dyn_cast<torq_hl::CompileInputToConstOp>(maybeConstOp))
+        return existing.getOutput();
+
     SmallVector<Operation *, 4> worklist{maybeConstOp};
     llvm::DenseSet<Operation *> visited;
     DenseSet<Operation *> opsOfInterest;
+    SmallVector<std::pair<OpOperand *, Value>> boundaryBypasses;
     while (!worklist.empty()) {
         Operation *currentOp = worklist.pop_back_val();
         visited.insert(currentOp);
@@ -96,10 +97,19 @@ FailureOr<Value> createCompileTimeConstOp(Operation *maybeConstOp, RewriterBase 
             }
         }
 
-        for (Value operand : currentOp->getOperands()) {
-            Operation *defOp = operand.getDefiningOp();
+        for (OpOperand &operand : currentOp->getOpOperands()) {
+            // Walk through any existing boundaries to the real producer so this cone
+            // is a clean host chain; record the operand so it can be rewired below.
+            Value definingValue = operand.get();
+            while (auto boundary = definingValue.getDefiningOp<torq_hl::CompileInputToConstOp>()) {
+                definingValue = boundary.getInput();
+            }
+            if (definingValue != operand.get())
+                boundaryBypasses.emplace_back(&operand, definingValue);
+
+            Operation *defOp = definingValue.getDefiningOp();
             if (!defOp) {
-                auto bArg = dyn_cast<BlockArgument>(operand);
+                auto bArg = dyn_cast<BlockArgument>(definingValue);
                 if (!bArg)
                     continue;
 
@@ -122,27 +132,20 @@ FailureOr<Value> createCompileTimeConstOp(Operation *maybeConstOp, RewriterBase 
             worklist.push_back(defOp);
         }
     }
+    // Rewire in-cone operands past existing boundaries in place. The boundary and
+    // its other consumers stay untouched, avoiding nested boundaries without
+    // deleting shared IR during dialect conversion.
+    for (auto &bypass : boundaryBypasses) {
+        OpOperand *operand = bypass.first;
+        Value definingValue = bypass.second;
+        rewriter.modifyOpInPlace(operand->getOwner(), [&]() { operand->set(definingValue); });
+    }
     setTargetExecutorAttr(maybeConstOp, torq_hl::Executor::Host);
     for (Operation *op : opsOfInterest) {
-        if (auto compileConstOp = dyn_cast<torq_hl::CompileInputToConstOp>(op)) {
-            if (!compileConstOp.getInput().getDefiningOp()) {
-                removeCompileTimeConst(op, rewriter);
-                continue;
-            }
-            setTargetExecutorAttr(
-                compileConstOp.getInput().getDefiningOp(), torq_hl::Executor::Host
-            );
-            if (op->hasOneUse()) {
-                removeCompileTimeConst(op, rewriter);
-                continue;
-            }
-            for (auto clone : cloneCompileTimeConst(op, rewriter)) {
-                if (opsOfInterest.contains(clone.use_begin()->getOwner())) {
-                    removeCompileTimeConst(clone.getDefiningOp(), rewriter);
-                }
-            }
+        // Bypassed boundaries can remain when they were collected as region-nested
+        // ops; leave their executor assignment untouched.
+        if (isa<torq_hl::CompileInputToConstOp>(op))
             continue;
-        }
         setTargetExecutorAttr(op, torq_hl::Executor::Host);
     }
     RewriterBase::InsertionGuard guard(rewriter);
@@ -152,33 +155,6 @@ FailureOr<Value> createCompileTimeConstOp(Operation *maybeConstOp, RewriterBase 
         maybeConstOp->getResult(0)
     );
     return constOp.getOutput();
-}
-
-SmallVector<Value> cloneCompileTimeConst(Operation *op, RewriterBase &rewriter) {
-    auto constOp = dyn_cast<torq_hl::CompileInputToConstOp>(op);
-    if (!constOp)
-        return {op->getResult(0)};
-
-    Value input = constOp.getInput();
-    Value output = constOp.getOutput();
-
-    // Snapshot use pointers before modifying the list; iterating output.getUses()
-    // while calling use.set() invalidates the iterator (each set() moves the use
-    // out of output's linked list), causing only the first use to be processed.
-    SmallVector<OpOperand *> uses;
-    for (OpOperand &use : output.getUses())
-        uses.push_back(&use);
-
-    RewriterBase::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointAfter(op);
-    SmallVector<Value> clonedOutputs;
-    for (OpOperand *use : uses) {
-        auto cloneOp =
-            torq_hl::CompileInputToConstOp::create(rewriter, op->getLoc(), input.getType(), input);
-        use->set(cloneOp.getOutput());
-        clonedOutputs.push_back(cloneOp.getOutput());
-    }
-    return clonedOutputs;
 }
 
 void removeCompileTimeConst(Operation *op, RewriterBase &rewriter) {

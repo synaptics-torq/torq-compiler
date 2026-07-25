@@ -84,6 +84,9 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
     }
     else {
         // Case 3: Both inputs are non-scalar tensors.
+        // input2 is loaded as a data tensor here, so element types must match.
+        if (params.type1.getElementType() != params.type2.getElementType())
+            return addOp.emitError("Add input element types must match");
         // The two tensors must have the same shape and strides.
         // Skip stride mismatch check for batch dimension (dim 0) if batch size is 1,
         // since differing strides won't affect computation in that case.

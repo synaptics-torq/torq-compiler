@@ -13,7 +13,6 @@ void setTargetExecutorAttr(Operation *op, torq_hl::Executor executor);
 void removeCompileTimeConst(Operation *op, RewriterBase &rewriter);
 FailureOr<Value> createCompileTimeConstOp(Operation *op, RewriterBase &rewriter);
 bool isCompileTimeConst(Operation *op);
-SmallVector<Value> cloneCompileTimeConst(Operation *op, RewriterBase &rewriter);
 SmallVector<Value> collectAllCompileTimeConstOps(Operation *op);
 void setCompileTimeConstAttr(Operation *op);
 bool isCompileTimeConstAttr(Operation *op);

@@ -14,6 +14,7 @@
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
+#include "torq/Utils/LayoutTransformUtils.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -371,38 +372,6 @@ static mlir::Value weights_ChHW_to_ChHW32(
     return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
 }
 
-// Pad the specified dimension to padDimAlignment with 0s at the end
-static mlir::Value weights_pad_with_zero(
-    PatternRewriter &rewriter, Location loc, Value weights, int padDim, int padDimAlignment
-) {
-    auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
-    SmallVector<int64_t> shape(wtRankedTy.getShape());
-    const int rank = shape.size();
-    assert(padDim < rank && "weight pad with zero: padDim exceeds rank\n");
-    int paddedDimSize = align_ceil(shape[padDim], padDimAlignment);
-    if (paddedDimSize == shape[padDim]) {
-        return weights;
-    }
-
-    SmallVector<OpFoldResult> sizes = getAsIndexOpFoldResult(rewriter.getContext(), shape);
-    auto paddedShape = shape;
-    paddedShape[padDim] = paddedDimSize;
-    SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
-    // Create empty padded tensor
-    Value paddedEmpty =
-        tensor::EmptyOp::create(rewriter, loc, paddedShape, wtRankedTy.getElementType());
-    // Fill with zeros
-    auto zeroAttr = rewriter.getZeroAttr(wtRankedTy.getElementType());
-    Value zeroVal = arith::ConstantOp::create(rewriter, loc, wtRankedTy.getElementType(), zeroAttr);
-    paddedEmpty = linalg::FillOp::create(rewriter, loc, zeroVal, paddedEmpty).getResult(0);
-    // Insert original weights into padded tensor
-    SmallVector<OpFoldResult> insOff(rank, rewriter.getIndexAttr(0));
-    SmallVector<OpFoldResult> insSz = sizes;
-    auto res =
-        tensor::InsertSliceOp::create(rewriter, loc, weights, paddedEmpty, insOff, insSz, strides);
-    return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
-}
-
 template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePattern<ConvOpT> {
   public:
     using OpRewritePattern<ConvOpT>::OpRewritePattern;
@@ -446,6 +415,8 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
             }
             else {
                 weights = weights_pad_with_zero(rewriter, op.getLoc(), weights, 3, parallel_outs);
+                weights =
+                    createCompileTimeConstOp(weights.getDefiningOp(), rewriter).value_or(weights);
             }
 
             auto biasType = mlir::cast<RankedTensorType>(biases.getType());
@@ -506,7 +477,6 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
                           weights, reassoc
             )
                           .getResult();
-            weights = createCompileTimeConstOp(weights.getDefiningOp(), rewriter).value_or(weights);
 
             // Expand dimensions 1 weights using a memref::ExpandShapeOp
             weightShape[1] = weightShape[1] * sh;
