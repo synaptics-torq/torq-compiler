@@ -676,18 +676,6 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
     auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
     int kh = weightShape[2];
     int kw = weightShape[3];
-    int32_t pad_left = op.getPad()[0];
-    int32_t pad_right = op.getPad()[1];
-    // EK only supports a symmetric border, so odd widths only. Even kernels have an
-    // asymmetric SAME border the EK kernel mis-executes (regressed ConvTranspose).
-    if (kw % 2 == 0) {
-        return false;
-    }
-    int32_t kernLeft = (kw - 1) / 2;
-    if (pad_left != kernLeft || pad_right != kernLeft) {
-        return false;
-    }
-
     int stride = op.getStride()[0];
     // Common HW/kernel limitations.
     if (stride > 2 || kh > 7 || kw > 7) {
