@@ -633,7 +633,8 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     // requires a context to be constructed (and is not copy constructable).
     // Hence, we delay the construction until its first use, and we don't copy
     // it (will be constructed again in the new pass).
-    std::unique_ptr<PassManager> assignAddressesPipeline_;
+    std::unique_ptr<PassManager> assignAddressesPipelineOptimized_;
+    std::unique_ptr<PassManager> assignAddressesPipelineNotOptimized_;
 
     // Holds all the untiled ops we have already tiled, so we don't tile them
     // again.
@@ -647,11 +648,11 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     void runOnOperation() override;
 
   private:
-    void initPipeline(MLIRContext *context);
+    void initPipelines(MLIRContext *context);
 
-    llvm::LogicalResult runAssignAddressesPipeline(ModuleOp moduleOp);
+    llvm::LogicalResult runAssignAddressesPipeline(ModuleOp moduleOp, bool optimizeForTileAndFuse);
 
-    llvm::FailureOr<bool> checkModuleFitsInMemory(ModuleOp moduleOp);
+    llvm::FailureOr<bool> checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTileAndFuse);
 
     llvm::FailureOr<bool> checkTileFitsInMemory(
         ModuleOp moduleOp, const TilingInfo &tilingInfo, ArrayRef<OpFoldResult> offsets,
@@ -687,60 +688,85 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     );
 };
 
-void TileAndFusePass::initPipeline(MLIRContext *context) {
-    if (assignAddressesPipeline_ == nullptr) {
-        assignAddressesPipeline_ = std::make_unique<PassManager>(context);
+void TileAndFusePass::initPipelines(MLIRContext *context) {
+    if (assignAddressesPipelineOptimized_ == nullptr) {
+        assignAddressesPipelineOptimized_ = std::make_unique<PassManager>(context);
 
-        if (failed(applyPassManagerCLOptions(*assignAddressesPipeline_)))
+        if (failed(applyPassManagerCLOptions(*assignAddressesPipelineOptimized_)))
             assert(false);
 
-        addPassesPostTileAndFuseUpToAssignLramAddresses(*assignAddressesPipeline_, true);
+        addPassesPostTileAndFuseUpToAssignLramAddresses(*assignAddressesPipelineOptimized_, true);
+    }
+
+    if (assignAddressesPipelineNotOptimized_ == nullptr) {
+        assignAddressesPipelineNotOptimized_ = std::make_unique<PassManager>(context);
+
+        if (failed(applyPassManagerCLOptions(*assignAddressesPipelineNotOptimized_)))
+            assert(false);
+
+        addPassesPostTileAndFuseUpToAssignLramAddresses(
+            *assignAddressesPipelineNotOptimized_, false
+        );
     }
 }
 
-llvm::LogicalResult TileAndFusePass::runAssignAddressesPipeline(ModuleOp moduleOp) {
-    initPipeline(moduleOp->getContext());
+llvm::LogicalResult
+TileAndFusePass::runAssignAddressesPipeline(ModuleOp moduleOp, bool optimizeForTileAndFuse) {
+    initPipelines(moduleOp->getContext());
 
-    LLVM_DEBUG({
-        llvm::dbgs() << "*** Running the pipeline for: " << moduleOp.getName() << "\n";
-        auto result = assignAddressesPipeline_->run(moduleOp);
+    LLVM_DEBUG(llvm::dbgs() << "*** Running the pipeline for: " << moduleOp.getName() << "\n");
+
+    auto result = llvm::failure();
+    if (optimizeForTileAndFuse)
+        result = assignAddressesPipelineOptimized_->run(moduleOp);
+    else
+        result = assignAddressesPipelineNotOptimized_->run(moduleOp);
+
+    LLVM_DEBUG(
         llvm::dbgs() << "*** pipeline finished (" << (succeeded(result) ? "succeeded" : "failed")
-                     << ")\n";
-        return result;
-    });
+                     << ")\n"
+    );
 
-    return assignAddressesPipeline_->run(moduleOp);
+    return result;
 }
 
 // NB: moduleOp is mutated by this function, and can't be used again.
-llvm::FailureOr<bool> TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp) {
+llvm::FailureOr<bool>
+TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTileAndFuse) {
     bool failure = false;
     bool memoryOverflow = false;
-    mlir::ScopedDiagnosticHandler diagHandler(
-        moduleOp->getContext(),
-        [&](mlir::Diagnostic &diag) -> LogicalResult {
-            if (memoryOverflow) {
-                // If we already saw the OUT_OF_MEMORY_MESSAGE, suppress all messages.
-                return llvm::success();
-            }
 
-            if (diag.str() == OUT_OF_MEMORY_MESSAGE) {
-                memoryOverflow = true;
-                // Signal that we are handling this issue (don't print error message).
-                return llvm::success();
-            }
-
-            // Something else (other than the expected memory overflow) bad happened.
-            failure = true;
-            diag.append(
-                " (encountered while running the pipeline to checking if a tile fits in memory)"
-            );
-            // Signal that we are not handling this issue (error message will be printed).
-            return llvm::failure();
+    auto diagHandler = [&](mlir::Diagnostic &diag) -> LogicalResult {
+        if (memoryOverflow) {
+            // If we already saw the OUT_OF_MEMORY_MESSAGE, suppress all messages.
+            return llvm::success();
         }
+
+        if (diag.str() == OUT_OF_MEMORY_MESSAGE) {
+            memoryOverflow = true;
+            // Signal that we are handling this issue (don't print error message).
+            return llvm::success();
+        }
+
+        // Something else (other than the expected memory overflow) bad happened.
+        failure = true;
+        diag.append(" (encountered while running the pipeline to checking if a tile fits in memory)"
+        );
+        // Signal that we are not handling this issue (error message will be printed).
+        return llvm::failure();
+    };
+
+    using DiagHandlerFn = std::function<LogicalResult(mlir::Diagnostic &)>;
+
+    mlir::ScopedDiagnosticHandler diagHandlerRAII(
+        moduleOp->getContext(), (optimizeForTileAndFuse ? DiagHandlerFn(diagHandler)
+                                                        : DiagHandlerFn([&](mlir::Diagnostic &) {
+                                                              failure = true;
+                                                              return llvm::failure();
+                                                          }))
     );
 
-    if (failed(runAssignAddressesPipeline(moduleOp))) {
+    if (failed(runAssignAddressesPipeline(moduleOp, optimizeForTileAndFuse))) {
         if (memoryOverflow)
             return false;
 
@@ -799,7 +825,7 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
         arg.replaceAllUsesWith(size);
     }
 
-    return checkModuleFitsInMemory(*fixedModuleOp);
+    return checkModuleFitsInMemory(*fixedModuleOp, true);
 }
 
 // Binary-search for the largest tile size along a single iteration domain that fits in memory.
@@ -1378,7 +1404,7 @@ void TileAndFusePass::tileAndFuse(
         OwningOpRef<ModuleOp> moduleOp =
             extractOpsForMemoryCheck("check_tiling_succeeded", tiledOp);
 
-        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp);
+        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp, false);
         assert(succeeded(opFitsInMemory));
         assert(*opFitsInMemory);
     });
@@ -1407,7 +1433,7 @@ void TileAndFusePass::runOnOperation() {
 
         // Check if tiOp already fits in memory.
         OwningOpRef<ModuleOp> moduleOp = extractOpsForMemoryCheck("check_needs_tiling", tiOp);
-        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp);
+        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp, true);
         if (failed(opFitsInMemory)) {
             tiOp->emitWarning(
                 "tile-and-fuse: initial memory overflow check failed, skipping this operation."

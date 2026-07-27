@@ -349,7 +349,7 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
         if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
             samepadOp = TorqConvPoolOp::create(
                 rewriter, loc, new_output_type, ConvInit.getResult(), op.getInputZp(),
-                op.getOutputMin(), op.getOutputMax(), op.getStride(), op.getPad(), op.getKernel(),
+                op.getOutputMin(), op.getOutputMax(), op.getStride(), newPadAttr, op.getKernel(),
                 op.getWeights(), op.getScaleBias(), op.getInput()
             );
         }
@@ -952,7 +952,8 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         auto padTensor = tensor::EmptyOp::create(rewriter, loc, paddedShape, elemType);
 
         Value convInput = padTensor.getResult();
-        if ((pads[LRTBDim::Top] || pads[LRTBDim::Bottom]) || !convertToSame) {
+        if ((pads[LRTBDim::Top] || pads[LRTBDim::Bottom]) || pads[LRTBDim::Left] ||
+            !convertToSame) {
             const int32_t encodedPadValue = op.getInputZp();
             TypedAttr fillAttr;
             if (auto intType = llvm::dyn_cast<IntegerType>(elemType)) {
@@ -980,11 +981,12 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         auto outputElType = outputType.getElementType();
         auto newOutputType = RankedTensorType::get(convOutShape, outputElType);
         auto newInitTensor = tensor::EmptyOp::create(rewriter, loc, convOutShape, outputElType);
+        auto newPadsAttr = rewriter.getDenseI64ArrayAttr(newPads);
         TorqConvPoolOp newOp;
         if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
             newOp = TorqConvPoolOp::create(
                 rewriter, loc, newOutputType, newInitTensor, op.getInputZp(), op.getOutputMin(),
-                op.getOutputMax(), op.getStride(), op.getPad(), op.getKernel(), op.getWeights(),
+                op.getOutputMax(), op.getStride(), newPadsAttr, op.getKernel(), op.getWeights(),
                 op.getScaleBias(), insertOp
             );
         }
@@ -992,9 +994,8 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
             newOp = TorqConvPoolOp::create(
                 rewriter, loc, newOutputType, newInitTensor, op.getInputZp(), op.getWeightZp(),
                 op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
-                op.getGroups(), rewriter.getDenseI64ArrayAttr(newPads), op.getStride(),
-                op.getDilation(), op.getVectorizationMode(), op.getWeights(), op.getScaleBias(),
-                insertOp
+                op.getGroups(), newPadsAttr, op.getStride(), op.getDilation(),
+                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), insertOp
             );
         }
 

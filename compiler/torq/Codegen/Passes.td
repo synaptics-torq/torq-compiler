@@ -406,12 +406,12 @@ def UnrollDynamicShapeLoop :
 
 }
 
-def ReplaceForLoopsWithFirstIteration :
-    InterfacePass<"torq-replace-for-loops-with-first-iteration",
+def ReplaceForLoopsWithMidIteration :
+    InterfacePass<"torq-replace-for-loops-with-mid-iteration",
          "mlir::FunctionOpInterface"> {
-  let summary = "Intended to run from inside the Tile and Fuse pass. Replace scf.for loops with thier first iteration.";
+  let summary = "Intended to run from inside the Tile and Fuse pass. Replace scf.for loops with their middle iteration.";
   let constructor =
-      "mlir::syna::torq::createReplaceForLoopsWithFirstIterationPass()";
+      "mlir::syna::torq::createReplaceForLoopsWithMidIterationPass()";
 
   let dependentDialects = [
         "linalg::LinalgDialect",

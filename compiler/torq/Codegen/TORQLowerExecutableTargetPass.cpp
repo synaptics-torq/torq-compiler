@@ -482,10 +482,10 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
     auto &funcPm = pipeline.nest<func::FuncOp>();
 
     funcPm.addPass(createCanonicalizerPass());
-    funcPm.addPass(createPeelTileLoopsPass());
     if (optimizeForTileAndFuse) {
-        funcPm.addPass(createReplaceForLoopsWithFirstIterationPass());
+        funcPm.addPass(createReplaceForLoopsWithMidIterationPass());
     }
+    funcPm.addPass(createPeelTileLoopsPass());
 
     addPostTileAndFuseLoweringPasses(funcPm, optimizeForTileAndFuse);
 

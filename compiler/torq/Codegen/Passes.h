@@ -100,7 +100,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createPeelTileLoopsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollDynamicShapeLoopPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createReplaceForLoopsWithFirstIterationPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createReplaceForLoopsWithMidIterationPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileReductionForLramPass();
 
