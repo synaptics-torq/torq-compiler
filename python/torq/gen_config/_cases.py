@@ -1174,7 +1174,7 @@ def torq_compiler_options(request, case_config):
     cmds = case_config.get("torq_compiler_options", [])
 
     if request.config.getoption("--extra-torq-compiler-options"):
-        cmds.extend(request.config.getoption("--extra-torq-compiler-options").split(" "))
+        cmds.extend(request.config.getoption("--extra-torq-compiler-options").split())
 
     if request.config.getoption("--trace-buffers"):
         cmds.append("--torq-enable-buffer-debug-info")

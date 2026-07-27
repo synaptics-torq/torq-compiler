@@ -584,7 +584,7 @@ def base_torq_compiler_options(request, case_config):
     cmds = case_config.get("torq_compiler_options", [])
 
     if request.config.getoption("--extra-torq-compiler-options"):
-        cmds.extend(request.config.getoption("--extra-torq-compiler-options").split(" "))
+        cmds.extend(request.config.getoption("--extra-torq-compiler-options").split())
     
     if request.config.getoption("--trace-buffers"):
         cmds.append('--torq-enable-buffer-debug-info')
@@ -871,7 +871,7 @@ def torq_runtime_options(request, case_config):
     cmds = case_config.get("torq_runtime_options", [])
 
     if request.config.getoption("--extra-torq-runtime-options"):
-        cmds.extend(request.config.getoption("--extra-torq-runtime-options").split(" "))
+        cmds.extend(request.config.getoption("--extra-torq-runtime-options").split())
 
     return cmds
 
@@ -1182,7 +1182,7 @@ def llvmcpu_compiler_options(request, case_config):
     cmds = case_config.get("llvmcpu_compiler_options", [])
 
     if request.config.getoption("--llvmcpu-compiler-options"):
-        cmds.extend(request.config.getoption("--llvmcpu-compiler-options").split(" "))
+        cmds.extend(request.config.getoption("--llvmcpu-compiler-options").split())
 
     return cmds
 
@@ -1191,7 +1191,7 @@ def llvmcpu_runtime_options(request, case_config):
     cmds = case_config.get("llvmcpu_runtime_options", [])
 
     if request.config.getoption("--llvmcpu-runtime-options"):
-        cmds.extend(request.config.getoption("--llvmcpu-runtime-options").split(" "))
+        cmds.extend(request.config.getoption("--llvmcpu-runtime-options").split())
 
     return cmds
 

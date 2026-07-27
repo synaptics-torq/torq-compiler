@@ -31,7 +31,7 @@ def case_config(instantiated_mlir_path: Path, compiler_args_variant: tuple[str, 
     compiler_options = list(extra_args)
     if request.config.getoption("--extra-torq-compiler-options", default=None):
         compiler_options.extend(
-            request.config.getoption("--extra-torq-compiler-options").split(" ")
+            request.config.getoption("--extra-torq-compiler-options").split()
         )
 
     return {
