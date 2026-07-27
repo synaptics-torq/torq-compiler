@@ -1727,9 +1727,9 @@ def composite_reference_results(request, input_data, onnx_quant_config):
     try:
         use_quantize = onnx_quant_config["quantize"]
         if use_quantize:
-            onnx_model_file = request.getfixturevalue("onnx_quantized_model_file")
+            onnx_model_file = request.getfixturevalue("onnx_quantized_model_file").file_path
         else:
-            onnx_model_file = request.getfixturevalue("onnx_model_file")
+            onnx_model_file = request.getfixturevalue("onnx_model_file").file_path
         onnx_model = onnx.load(str(onnx_model_file))
 
         # 1. Try ONNXRuntime first
