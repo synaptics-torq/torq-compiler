@@ -82,7 +82,7 @@ static llvm::cl::opt<bool> clDisableSeg(
     llvm::cl::desc("Disable fusion of segmentation operations with producer"), llvm::cl::init(false)
 );
 
-static llvm::cl::opt<bool> clDisableSlicing(
+llvm::cl::opt<bool> clDisableSlicing(
     "torq-disable-slicing", llvm::cl::desc("disable slicing"), llvm::cl::init(false)
 );
 
@@ -111,7 +111,7 @@ int64_t getLramSizeBasedOnBudget(bool optimizeForTileAndFuse) {
 }
 
 void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTileAndFuse) {
-    if (!clDisableSlicing) {
+    if (!clDisableSlicing && TorqHw::get().getSliceCount() > 1) {
         // Group each pure-elementwise chain (erf/tanh/mul) before slicing, so the
         // chain slices as one scf.forall and its middle values stay in LRAM.
         funcPm.addPass(createCoalesceElementwiseChainsPass());

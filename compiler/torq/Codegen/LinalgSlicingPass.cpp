@@ -39,7 +39,6 @@ namespace mlir::syna::torq {
 
 namespace {
 
-const int64_t kGrouping = 4;
 const int64_t kMinElementsForSlicing = 2000;
 
 // Return tile size for peeling.
@@ -270,13 +269,13 @@ peelAndSlice(PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64
     return success();
 }
 
-template <class Conv2DOp> struct Conv2DPattern : public OpRewritePattern<Conv2DOp> {
+template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
     size_t slicingIter_;
 
-    Conv2DPattern(MLIRContext *context, size_t slicingIter)
-        : OpRewritePattern<Conv2DOp>(context), slicingIter_(slicingIter) {}
+    ConvPattern(MLIRContext *context, size_t slicingIter)
+        : OpRewritePattern<ConvOp>(context), slicingIter_(slicingIter) {}
 
-    LogicalResult matchAndRewrite(Conv2DOp conv2DOp, PatternRewriter &rewriter) const override {
+    LogicalResult matchAndRewrite(ConvOp conv2DOp, PatternRewriter &rewriter) const override {
         // TODO: not all conv2ds are part of a pattern fuse group.
         if (!isFuseGroupPrincipalOp(conv2DOp)) {
             return rewriter.notifyMatchFailure(conv2DOp, "not the principal operation");
@@ -427,19 +426,35 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
 
         RewritePatternSet patterns(context);
 
-        patterns.add<Conv2DPattern<linalg::Conv2DNhwcHwcfOp>>(context, 3);
-        patterns.add<Conv2DPattern<linalg::Conv2DNchwFchwOp>>(context, 1);
+        patterns.add<ConvPattern<linalg::Conv2DNhwcHwcfOp>>(
+            context, SlicingIterationDomainIndex::Conv2DNhwcHwcfOp
+        );
+        patterns.add<ConvPattern<linalg::Conv2DNchwFchwOp>>(
+            context, SlicingIterationDomainIndex::Conv2DNchwFchwOp
+        );
 
-        patterns.add<Conv2DPattern<linalg::DepthwiseConv2DNhwcHwcOp>>(context, 3);
-        patterns.add<Conv2DPattern<linalg::DepthwiseConv2DNchwChwOp>>(context, 1);
+        patterns.add<ConvPattern<linalg::DepthwiseConv2DNhwcHwcOp>>(
+            context, SlicingIterationDomainIndex::DepthwiseConv2DNhwcHwcOp
+        );
+        patterns.add<ConvPattern<linalg::DepthwiseConv2DNchwChwOp>>(
+            context, SlicingIterationDomainIndex::DepthwiseConv2DNchwChwOp
+        );
+
+        patterns.add<ConvPattern<linalg::PoolingNhwcMaxOp>>(
+            context, SlicingIterationDomainIndex::PoolingNhwcMaxOp
+        );
+        patterns.add<ConvPattern<linalg::PoolingNchwMaxOp>>(
+            context, SlicingIterationDomainIndex::PoolingNchwMaxOp
+        );
+        patterns.add<ConvPattern<linalg::PoolingNcwMaxOp>>(
+            context, SlicingIterationDomainIndex::PoolingNcwMaxOp
+        );
 
         // Batch matmul: slice on the largest parallel output dimension
         patterns.add<BatchMatmulPattern>(context);
 
         // Elementwise generic ops: dynamically slice on leftmost non-unit dim
         patterns.add<ElementwisePattern>(context);
-
-        // patterns.add<FullyConnectedPattern>(ctx);
 
         FrozenRewritePatternSet frozenPatterns(std::move(patterns));
 

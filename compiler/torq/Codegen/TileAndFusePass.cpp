@@ -74,6 +74,8 @@ using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
+extern llvm::cl::opt<bool> clDisableSlicing;
+
 namespace {
 
 enum class TileAndFuseProducersFuseMode {
@@ -296,6 +298,11 @@ struct TilingInfo {
     // Iteration domains that can be tiled, in the order they should be tiled.
     llvm::SmallSetVector<int64_t, 4> tilingOrder;
 
+    // Minimal tile size per iter domain index. This is a best effort constraint: we only use it for
+    // the root (consumer), and if after shrinking all dims the op still does not fit, we will
+    // ignore minSize and shrink further.
+    llvm::SmallVector<int64_t, 4> minSize;
+
     // Downward size adjustments per iter domain index. May return 0 to signal
     // that the requested size is too small to be a valid (byte-aligned) tile.
     llvm::SmallVector<std::function<int64_t(int64_t)>, 4> adjustSize;
@@ -318,6 +325,38 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
     std::optional<SmallVector<int64_t>> iterDomainConstSizes =
         getConstantIntValues(iterDomainSizes);
     assert(iterDomainConstSizes && "iteration domain sizes are not constants");
+
+    Operation *principalOp = isMarkedFuseGroup(tilingInterfaceOp)
+                                 ? getFuseGroupPrincipalOpBackward(tilingInterfaceOp)
+                                 : tilingInterfaceOp;
+    assert(principalOp != nullptr && "could not find the principal op of the fuse group");
+
+    tilingInfo.minSize.append(loopIteratorTypes.size(), 1);
+    if (!clDisableSlicing && TorqHw::get().getSliceCount() > 1) {
+        if (isa<linalg::Conv2DNhwcHwcfOp>(principalOp)) {
+            tilingInfo.minSize[SlicingIterationDomainIndex::Conv2DNhwcHwcfOp] = 2 * kGrouping;
+        }
+        else if (isa<linalg::Conv2DNchwFchwOp>(principalOp)) {
+            tilingInfo.minSize[SlicingIterationDomainIndex::Conv2DNchwFchwOp] = 2 * kGrouping;
+        }
+        else if (isa<linalg::DepthwiseConv2DNhwcHwcOp>(principalOp)) {
+            tilingInfo.minSize[SlicingIterationDomainIndex::DepthwiseConv2DNhwcHwcOp] =
+                2 * kGrouping;
+        }
+        else if (isa<linalg::DepthwiseConv2DNchwChwOp>(principalOp)) {
+            tilingInfo.minSize[SlicingIterationDomainIndex::DepthwiseConv2DNchwChwOp] =
+                2 * kGrouping;
+        }
+        else if (isa<linalg::PoolingNhwcMaxOp>(principalOp)) {
+            tilingInfo.minSize[SlicingIterationDomainIndex::PoolingNhwcMaxOp] = 2 * kGrouping;
+        }
+        else if (isa<linalg::PoolingNchwMaxOp>(principalOp)) {
+            tilingInfo.minSize[SlicingIterationDomainIndex::PoolingNchwMaxOp] = 2 * kGrouping;
+        }
+        else if (isa<linalg::PoolingNcwMaxOp>(principalOp)) {
+            tilingInfo.minSize[SlicingIterationDomainIndex::PoolingNcwMaxOp] = 2 * kGrouping;
+        }
+    }
 
     tilingInfo.adjustSize.reserve(loopIteratorTypes.size());
     for (size_t index = 0; index < loopIteratorTypes.size(); ++index) {
@@ -855,12 +894,7 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
 
         int64_t tileSize = div_ceil(iterDomainSize, midFactor);
         tileSize = tilingInfo.adjustSize[domain](tileSize);
-        // adjustSize returns 0 when the probed size is below one byte's worth of
-        // values (sub-byte types). The smallest valid tile is known to fit (a
-        // precondition of this search), so clamp up to it rather than write 0
-        // (which the tiling API would misread as "don't tile / full domain").
-        if (tileSize == 0)
-            tileSize = getSmallestTileSize(tilingInfo, domain, iterDomainSize);
+        assert(tileSize != 0); // assuming the initial maxFactor was valid
 
         sizes[domain] = rewriter.getIndexAttr(tileSize);
 
@@ -883,9 +917,7 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
 
     int64_t tileSize = div_ceil(iterDomainSize, maxFactor);
     tileSize = tilingInfo.adjustSize[domain](tileSize);
-    // See the note above: never leave a 0 ("too small") as the final tile size.
-    if (tileSize == 0)
-        tileSize = getSmallestTileSize(tilingInfo, domain, iterDomainSize);
+    assert(tileSize != 0); // assuming the initial maxFactor was valid
 
     sizes[domain] = rewriter.getIndexAttr(tileSize);
 
@@ -916,30 +948,50 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
 
     IRRewriter rewriter(moduleOp->getContext());
 
+    ArrayRef<int64_t>::iterator tilingDomainIter;
+
     // Shrink pass: set domains to their smallest valid tile, one by one, until
     // the tile fits. The smallest valid tile is usually 1, but for sub-byte
     // (e.g. i4) dimensions it is one byte's worth of values (2 for i4), because
     // a width-1 sub-byte slice can't be addressed on a byte boundary.
-    ArrayRef<int64_t>::iterator tilingDomainIter;
-    for (tilingDomainIter = tilingInfo.tilingOrder.begin();
-         tilingDomainIter != tilingInfo.tilingOrder.end(); ++tilingDomainIter) {
-        int64_t domain = *tilingDomainIter;
-        int64_t minTileSize = getSmallestTileSize(tilingInfo, domain, iterDomainSizes[domain]);
-        if (getConstantIntValue(sizes[domain]) == minTileSize)
-            continue;
+    auto shrinkPass = [&](bool fallback) {
+        for (tilingDomainIter = tilingInfo.tilingOrder.begin();
+             tilingDomainIter != tilingInfo.tilingOrder.end(); ++tilingDomainIter) {
+            int64_t domain = *tilingDomainIter;
 
-        sizes[domain] = rewriter.getIndexAttr(minTileSize);
-        tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
-        if (failed(tileFits))
-            return LogicalResult::failure();
-        if (*tileFits)
-            break;
-    }
+            int64_t minTileSize =
+                fallback ? getSmallestTileSize(tilingInfo, domain, iterDomainSizes[domain])
+                         : tilingInfo.minSize[domain];
+            if (getConstantIntValue(sizes[domain]) == minTileSize)
+                continue;
 
-    if (tilingDomainIter == tilingInfo.tilingOrder.end()) {
-        consumerOp->emitWarning("tile-and-fuse: operation can't be tiled: no more domains to tile");
-        LLVM_DEBUG(assert(false));
+            sizes[domain] = rewriter.getIndexAttr(minTileSize);
+            tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
+            if (failed(tileFits))
+                return LogicalResult::failure();
+
+            if (*tileFits)
+                return LogicalResult::success();
+        }
         return LogicalResult::failure();
+    };
+
+    // We try the shrinking pass twice, once with the preferred minSize, and if that is not small
+    // enough, we try again with 1's.
+    if (shrinkPass(false).failed()) {
+        if (tilingDomainIter != tilingInfo.tilingOrder.end())
+            return LogicalResult::failure();
+
+        if (shrinkPass(true).failed()) {
+            if (tilingDomainIter != tilingInfo.tilingOrder.end())
+                return LogicalResult::failure();
+
+            consumerOp->emitWarning(
+                "tile-and-fuse: operation can't be tiled: no more domains to tile"
+            );
+            LLVM_DEBUG(assert(false));
+            return LogicalResult::failure();
+        }
     }
 
     // Grow-back pass: inflate domains forced to 1 above back to larger tiles
