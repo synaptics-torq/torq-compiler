@@ -2099,13 +2099,21 @@ class SegmentationTransposeOpConversion : public OpRewritePattern<tensor::Collap
 // multiplier into the generic body, leaving the count at 1.
 static int getRescaleScaleCount(linalg::GenericOp genericOp, tosa::ApplyScaleOp applyScaleOp) {
     if (auto multArg = dyn_cast<BlockArgument>(applyScaleOp.getMultiplier())) {
-        if (auto multType =
-                dyn_cast<RankedTensorType>(genericOp.getMatchingOpOperand(multArg)->get().getType()
-                )) {
-            return multType.getNumElements();
+        if (auto operand = genericOp.getMatchingOpOperand(multArg)) {
+            if (auto multType = dyn_cast<RankedTensorType>(operand->get().getType())) {
+                return multType.getNumElements();
+            }
         }
     }
     return 1;
+}
+
+static SmallVector<int64_t> invertPermutation(llvm::ArrayRef<int64_t> perm) {
+    SmallVector<int64_t> inv(perm.size());
+    for (size_t i = 0; i < perm.size(); ++i) {
+        inv[perm[i]] = static_cast<int64_t>(i);
+    }
+    return inv;
 }
 
 struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
@@ -2142,7 +2150,8 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
     LogicalResult emitRescale(
         linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input,
         RankedTensorType outputType, const MultiplierShiftInfo &ms, int scaleValuesCount,
-        int32_t inputZp, int32_t outputZp, int32_t outputMin, int32_t outputMax
+        int32_t inputZp, int32_t outputZp, int32_t outputMin, int32_t outputMax,
+        tosa::ApplyScaleOp applyScaleOp
     ) const {
         const int32_t shiftFactor = *llvm::min_element(ms.shift);
         const std::vector<int32_t> scale = compute_scale(ms.multiplier, ms.shift, shiftFactor);
@@ -2155,14 +2164,40 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
         // Per-channel scale_bias is a [channels, 2] table and needs the channel on the innermost
         // dimension; per-tensor is the single 1-D [2] pair broadcast to every element.
-        Value scaleBiasConst;
+        // If the channel dimension is not already innermost, transpose input/output so the FMA
+        // sees a channel-innermost layout and transpose the result back.
+        int64_t channelDim = outputType.getRank() - 1;
+        bool needsTranspose = false;
+        SmallVector<int64_t> perm;
         if (scaleValuesCount > 1) {
-            const int64_t channelDim = outputType.getRank() - 1;
+            if (auto multArg = dyn_cast<BlockArgument>(applyScaleOp.getMultiplier())) {
+                auto indexingMaps = srcOp.getIndexingMapsArray();
+                if (multArg.getArgNumber() < static_cast<int>(indexingMaps.size())) {
+                    auto multMap = indexingMaps[multArg.getArgNumber()];
+                    if (multMap.getNumResults() == 1) {
+                        if (auto dimExpr = dyn_cast<AffineDimExpr>(multMap.getResult(0))) {
+                            channelDim = dimExpr.getPosition();
+                        }
+                    }
+                }
+            }
             if (outputType.getDimSize(channelDim) != scaleValuesCount) {
                 return rewriter.notifyMatchFailure(
-                    srcOp, "per-channel rescale expects the scale count on the innermost dimension"
+                    srcOp, "per-channel rescale scale count does not match any dimension"
                 );
             }
+            needsTranspose = channelDim != outputType.getRank() - 1;
+            if (needsTranspose) {
+                for (int64_t i = 0; i < outputType.getRank(); ++i) {
+                    if (i != channelDim)
+                        perm.push_back(i);
+                }
+                perm.push_back(channelDim);
+            }
+        }
+
+        Value scaleBiasConst;
+        if (scaleValuesCount > 1) {
             scaleBiasConst = createI32Const(
                 rewriter, srcOp, scaleBias, llvm::ArrayRef<int64_t>{scaleValuesCount, 2}
             );
@@ -2173,6 +2208,22 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
         Value weightConst =
             createI8Const(rewriter, srcOp, llvm::ArrayRef<int8_t>{1}, llvm::ArrayRef<int64_t>{1});
+
+        if (needsTranspose) {
+            Value transposedInput = transposeValue(input, perm, srcOp.getLoc(), rewriter);
+            RankedTensorType transposedOutputType = transposeType(outputType, perm);
+            Value transposedInit = createInitTensor(srcOp, rewriter, transposedOutputType);
+            auto fmaOp = torq_hl::FMAOp::create(
+                rewriter, srcOp.getLoc(), transposedOutputType, transposedInit, outputZp, outputMin,
+                outputMax, shiftFactor, weightConst, scaleBiasConst, transposedInput
+            );
+            Value output = transposeValue(
+                fmaOp.getOutput(), invertPermutation(perm), srcOp.getLoc(), rewriter
+            );
+            rewriter.replaceOp(srcOp, output);
+            return success();
+        }
+
         auto fmaOp = torq_hl::FMAOp::create(
             rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
             outputZp, outputMin, outputMax, shiftFactor, weightConst, scaleBiasConst, input
@@ -2349,7 +2400,7 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
         return emitRescale(
             srcOp, rewriter, input, outputType, ms, scaleValuesCount, input_zp, outputZp, outputMin,
-            outputMax
+            outputMax, applyScaleOp
         );
     }
 };

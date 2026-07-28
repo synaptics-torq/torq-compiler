@@ -379,7 +379,8 @@ MultiplierShiftInfo getMultiplierAndShift(
 
         multiplier = attrValuesAsVec<int32_t>(*mulConstV);
         if (multiplier.size() != scaleValuesCount) {
-            genericOp.emitError() << "multiplier unexpected size:" << multiplier.size() << "\n";
+            genericOp.emitError() << "multiplier unexpected size:" << multiplier.size()
+                                  << " expected:" << scaleValuesCount << "\n";
             return {};
         }
     }
@@ -1038,6 +1039,23 @@ ScaleClampInfo foldForwardScaleClamp(
 
     if (!applyScaleOp) {
         LLVM_DEBUG({ llvm::dbgs() << "matching error addOp.getLhs() is not an ApplyScale!\n"; });
+        return {};
+    }
+
+    auto multiplier = applyScaleOp.getMultiplier();
+    int actualScaleCount = 1;
+    if (auto multArg = dyn_cast<BlockArgument>(multiplier)) {
+        if (auto operand = genericOp.getMatchingOpOperand(multArg)) {
+            if (auto multTy = dyn_cast<RankedTensorType>(operand->get().getType())) {
+                actualScaleCount = multTy.getNumElements();
+            }
+        }
+    }
+    if (actualScaleCount != scaleValuesCount) {
+        LLVM_DEBUG({
+            llvm::dbgs() << "foldForwardScaleClamp: rescale has " << actualScaleCount
+                         << " scale values, caller expects " << scaleValuesCount << "\n";
+        });
         return {};
     }
 
