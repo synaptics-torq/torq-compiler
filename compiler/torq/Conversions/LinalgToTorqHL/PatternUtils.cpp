@@ -40,6 +40,7 @@
 #include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/TargetSelect.h"
 
+#include <cmath>
 #include <deque>
 #include <numeric>
 #include <optional>
@@ -927,6 +928,30 @@ struct FuseBiasMatcher {
         return FuseBiasMatcher{bias, minVal, maxVal};
     }
 };
+
+double operandRange(Value input, int32_t zeroPoint) {
+    const unsigned bits = cast<RankedTensorType>(input.getType()).getElementTypeBitWidth();
+    return static_cast<double>(uint64_t(1) << bits) + std::abs(static_cast<double>(zeroPoint));
+}
+
+int maximizeScaleShift(
+    int minShift, double multiplier0, double multiplier1, double range0, double range1
+) {
+    constexpr int maxScaleShift = 30; // keeps 1 << shift within int range
+    int shift = minShift;
+    while (shift < maxScaleShift) {
+        const auto factor = static_cast<double>(1U << (shift + 1));
+        const double weight0 = std::abs(multiplier0) * factor;
+        const double weight1 = std::abs(multiplier1) * factor;
+        if (weight0 > std::numeric_limits<int16_t>::max() ||
+            weight1 > std::numeric_limits<int16_t>::max() ||
+            weight0 * range0 + weight1 * range1 > std::numeric_limits<int32_t>::max()) {
+            break;
+        }
+        ++shift;
+    }
+    return shift;
+}
 
 ScaleClampInfo foldForwardScaleClamp(
     Value &value, int scaleValuesCount, int shift8b, int shift16b, bool isElementWiseOp

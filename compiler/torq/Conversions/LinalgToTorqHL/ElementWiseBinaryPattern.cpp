@@ -29,9 +29,40 @@
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "llvm/Support/Debug.h"
 
+#include <cmath>
+
 #define DEBUG_TYPE "linalg-torq-elementwsie-binary-pattern"
 
 namespace mlir::syna::torq {
+
+// True when alignInputToOutputShape has to materialize `input` at the output shape, which is
+// the cost the caller weighs. Compares shapes rather than element counts so that a reshape is
+// not mistaken for a copy, and so that operands the alignment cannot handle at all (a mismatch
+// in a non-unit axis, e.g. tensor<2x3> against tensor<3x2>) are caught here instead of forming
+// a torq_hl.add with mismatched operands.
+// Rank padding with leading unit axes is a reshape, and scalars fold into the ACT bias, so
+// neither counts.
+static bool needsBroadcastMaterialization(Value input, RankedTensorType outType) {
+    auto inType = dyn_cast<RankedTensorType>(input.getType());
+    if (!inType || !inType.hasStaticShape() || !outType.hasStaticShape()) {
+        return false;
+    }
+    ArrayRef<int64_t> inShape = inType.getShape();
+    ArrayRef<int64_t> outShape = outType.getShape();
+    if (llvm::all_of(inShape, [](int64_t dim) { return dim == 1; })) {
+        return false;
+    }
+    if (inShape.size() > outShape.size()) {
+        return true;
+    }
+    // Right-aligned, matching alignInputToOutputShape: the leading axes the input lacks are a
+    // reshape only when the output has them unit sized.
+    const size_t leadingPad = outShape.size() - inShape.size();
+    if (llvm::any_of(outShape.take_front(leadingPad), [](int64_t dim) { return dim != 1; })) {
+        return true;
+    }
+    return inShape != outShape.drop_front(leadingPad);
+}
 
 struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
   public:
@@ -376,6 +407,10 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         return true;
     }
 
+    static bool isSixteenBit(Value input) {
+        return cast<RankedTensorType>(input.getType()).getElementTypeBitWidth() == 16;
+    }
+
     EltwiseBinaryConvert(
         MLIRContext *context, int shift8b, int shift16b, OpType opType, bool markFuseGroups
     )
@@ -455,11 +490,39 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                foldBackwardRescale(input1, scaleInput1)) {
         }
 
+        // Fusing approximates both input scales with i16 weights and materializes any
+        // broadcast operand at the full output shape (broadcastProcessing below), which for a
+        // per-channel bias repeats per op and dominates runtime. Hand those to the unfused
+        // lowering: it keeps the operand small and rescales exactly with 32-bit multipliers.
+        // Full tensors have nothing to materialize, so fusing stays the cheaper trade.
+        auto scaledOutType = cast<RankedTensorType>(output.getType());
+        if (outType.getElementType().isInteger(32) &&
+            scaledOutType.getElementType().isInteger(16) &&
+            (needsBroadcastMaterialization(input0, outType) ||
+             needsBroadcastMaterialization(input1, outType))) {
+            return rewriter.notifyMatchFailure(
+                eltOp, "Broadcast operand: keep i32 op and i16 requantization separate"
+            );
+        }
+
         // Compute scale and bias vectors
         const double outputScale = scInfo.scaleDouble[0];
         double multiplier0 = outputScale * scaleInput0.scale;
         double multiplier1 = outputScale * scaleInput1.scale;
-        int scaleFactor = 1 << scInfo.scaleShift;
+        // Growing the shift and rounding the weights below is restricted to 16-bit operands:
+        // that is where a small multiplier lands on an i16 weight with only a handful of
+        // significant bits (0.0197 becomes 80 at the fixed shift of 12, a 0.7% error). 8-bit
+        // multipliers stay well conditioned, so the gain there is marginal and not worth
+        // perturbing the results of an already validated corpus.
+        const bool refineScale = isSixteenBit(input0) && isSixteenBit(input1);
+        int scaleShift = scInfo.scaleShift;
+        if (refineScale) {
+            scaleShift = maximizeScaleShift(
+                scaleShift, multiplier0, multiplier1, operandRange(input0, scaleInput0.zp),
+                operandRange(input1, scaleInput1.zp)
+            );
+        }
+        const int scaleFactor = 1 << scaleShift;
 
         if (multiplier0 * scaleFactor > std::numeric_limits<int16_t>::max() ||
             multiplier0 * scaleFactor < std::numeric_limits<int16_t>::min() ||
@@ -481,10 +544,24 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         alignInputToOutputShape(input0, output, rewriter);
         alignInputToOutputShape(input1, output, rewriter);
 
-        auto weight0 = doubleToInt<int16_t>(multiplier0 * scaleFactor);
-        auto bias0 = -doubleToInt<int32_t>(multiplier0 * scaleFactor * scaleInput0.zp);
-        int16_t weight1 = doubleToInt<int16_t>(multiplier1 * scaleFactor) * sign;
-        int32_t bias1 = -doubleToInt<int32_t>(multiplier1 * scaleFactor * scaleInput1.zp) * sign;
+        // Rounding to nearest matters because doubleToInt truncates, which throws away up to a
+        // full LSB of the multiplier. 8-bit keeps that truncation, see refineScale above.
+        auto toFixedPoint = [refineScale](double value) {
+            return refineScale ? std::round(value) : value;
+        };
+        int16_t weight0 = doubleToInt<int16_t>(toFixedPoint(multiplier0 * scaleFactor));
+        int16_t weight1 = doubleToInt<int16_t>(toFixedPoint(multiplier1 * scaleFactor)) * sign;
+        int32_t bias0, bias1;
+        if (refineScale) {
+            // Deriving the bias from the weight cancels the zero point exactly, which rounding
+            // the whole product does not.
+            bias0 = -weight0 * scaleInput0.zp;
+            bias1 = -weight1 * scaleInput1.zp;
+        }
+        else {
+            bias0 = -doubleToInt<int32_t>(multiplier0 * scaleFactor * scaleInput0.zp);
+            bias1 = -doubleToInt<int32_t>(multiplier1 * scaleFactor * scaleInput1.zp) * sign;
+        }
 
         int32_t scalarValue0 = 0;
         bool input0IsScalar =
@@ -499,7 +576,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         }
 
         if (input0IsScalar) {
-            double scaleFactor = (1 << scInfo.scaleShift);
             weight0 = 0;
             // instead of using the ALU to perform the operation
             // we use the ACT bias to perform the operation:
@@ -522,24 +598,23 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             //   bias0 = ( (input0 - zp0) * inputScale0 * outputScale * ( 1 << actShift ))
             //   bias1 = - sign * zp1 * weight1
             //   actScale = 1
-            //   actShift = outputScaleInfo.scaleShift
+            //   actShift = scaleShift
             //   actZp = outputZp
-            bias0 = doubleToInt<int32_t>(
+            bias0 = doubleToInt<int32_t>(toFixedPoint(
                 (scalarValue0 - scaleInput0.zp) * scaleInput0.scale * scaleFactor * outputScale
-            );
+            ));
 
             input0 = input1;
         }
         else if (input1IsScalar) {
-            double scaleFactor = (1 << scInfo.scaleShift);
             // force weight1 is 0, input0 * weight0 + input1 * 0
             weight1 = 0;
 
             // Read above comment for the detailed explanation of the formula
-            bias1 = doubleToInt<int32_t>(
+            bias1 = doubleToInt<int32_t>(toFixedPoint(
                 (scalarValue1 - scaleInput1.zp) * scaleInput1.scale * scaleFactor * sign *
                 outputScale
-            );
+            ));
             input1 = input0;
         }
 
@@ -561,8 +636,8 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         outType = cast<RankedTensorType>(output.getType());
         auto torqOp = TorqEltOp::create(
             rewriter, loc, outType, createInitTensor(eltOp, rewriter, outType), opName,
-            /* input zp not needed */ 0, scInfo.zp, scInfo.min, scInfo.max, scInfo.scaleShift,
-            torqWeights, biasScale, input0, input1
+            /* input zp not needed */ 0, scInfo.zp, scInfo.min, scInfo.max, scaleShift, torqWeights,
+            biasScale, input0, input1
         );
 
         rewriter.replaceOp(output.getDefiningOp(), torqOp.getOutput());
@@ -584,8 +659,13 @@ void populateLinalgToTorqHLEWBinaryPatterns(
     // before the remaining patterns (eg addition)
     // Note: using benefit to control the order of application is not enough since this
     // only works for patterns that are applied to the same op
+    // sh8b is used as is; sh16b is only a floor, maximizeScaleShift grows it per operation.
+    // FIXME the 16b floor is unvalidated: maximizeScaleShift only tests shift + 1, and the
+    // caller checks the i16 weight bound but not the accumulator, so with 16-bit operands
+    // and both multipliers >= 4 a shift of 12 overflows the i32 accumulator undetected.
+    // 8-bit operands have 8 more bits of headroom and cannot reach it.
     int sh8b = 12;
-    int sh16b = 12; // FIXME 16b shift?
+    int sh16b = 12;
     patterns.insert<EltwiseBinaryConvert>(
         context, sh8b, sh16b, EltwiseBinaryConvert::ADD_OP, markFuseGroups
     );

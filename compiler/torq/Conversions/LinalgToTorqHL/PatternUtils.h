@@ -238,6 +238,19 @@ FailureOr<Value> getDilatedWts(
     PatternRewriter &rewriter
 );
 
+// Loose upper bound on the magnitude an element of `input` can reach once its zero point is
+// subtracted, covering both the signed and unsigned reading of the element type.
+double operandRange(Value input, int32_t zeroPoint);
+
+// Return the largest scale shift, starting from minShift, for which both multipliers still fit
+// a fixed-point int16 weight and their weighted operands still fit an int32 accumulator.
+// A unit that evaluates (w0 * d0 + w1 * d1) >> shift keeps only as many fractional bits of the
+// multipliers as the shift allows, so too small a shift quantizes the smaller multiplier
+// coarsely enough to show up on the output.
+int maximizeScaleShift(
+    int minShift, double multiplier0, double multiplier1, double range0, double range1
+);
+
 // Deduce ScaleClampInfo forward
 // scaleValuesCount is the expected number of scale values
 // shift8b is the shift amount of the scale values for 8bits computations
