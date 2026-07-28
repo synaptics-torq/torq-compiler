@@ -29,6 +29,8 @@ typedef struct iree_hal_torq_native_executable_t {
   // binary data the executable flat buffer
   void *program;
 
+  iree_allocator_t program_allocator;
+
   // the torq executable associated with this executable
   void *torq_executable;
 

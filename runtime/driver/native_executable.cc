@@ -59,8 +59,16 @@ iree_status_t iree_hal_torq_native_executable_create(
   executable->torq_executable = nullptr;
   executable->program = nullptr;
 
-  executable->program = malloc(executable_params->executable_data.data_length);
-  memcpy(executable->program, executable_params->executable_data.data, executable_params->executable_data.data_length);
+  if (iree_all_bits_set(executable_params->caching_mode,
+                        IREE_HAL_EXECUTABLE_CACHING_MODE_ALIAS_PROVIDED_DATA)) {
+    executable->program = (void*)executable_params->executable_data.data;
+    executable->program_allocator = iree_allocator_null();
+  } else {
+    status = iree_allocator_clone(host_allocator,
+                                  executable_params->executable_data,
+                                  &executable->program);
+    executable->program_allocator = host_allocator;
+  }
 
   if (executable_params->constant_count > 0) {
     uint32_t* target_constants =
@@ -119,9 +127,7 @@ static void iree_hal_torq_native_executable_destroy(
     delete static_cast<synaptics::TorqExecutable*>(executable->torq_executable);   
   }
 
-  if (executable->program) {
-    free(executable->program);
-  }
+  iree_allocator_free(executable->program_allocator, executable->program);
 
   iree_allocator_free(host_allocator, executable);
 
