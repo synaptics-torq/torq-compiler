@@ -313,9 +313,13 @@ Value convertGenericOpToNchw(
 // Returns true if this op is a supported NHWC anchor op.
 // Add new op types here when extending support.
 bool isSupportedNhwcAnchorOp(Operation *op) {
-    // For depthwise conv, skip conversion if the kernel is a "full spatial" kernel
-    // (i.e. filter H == input H or filter W == input W), as those are handled
-    // separately and should not be converted to NCHW here.
+    // For depthwise conv, skip conversion only if the kernel is a "full spatial"
+    // kernel in BOTH dims (i.e. filter H == input H AND filter W == input W), as
+    // those are handled separately by the NHWC isDepthwiseKernelShape() matcher in
+    // Conv2DPattern.cpp, which itself requires both dims to match. If only one
+    // spatial dim happens to match the full input extent, fall through to NCHW
+    // conversion (via transpose) so it can be picked up by the NCHW isKerSmall()
+    // matcher instead.
     if (auto dwOp = dyn_cast<linalg::DepthwiseConv2DNhwcHwcOp>(op)) {
         Value filter = dwOp.getInputs()[1];
         Value input = dwOp.getInputs()[0];
@@ -324,7 +328,7 @@ bool isSupportedNhwcAnchorOp(Operation *op) {
         if (filterType && inputType) {
             auto filterShape = filterType.getShape(); // [H, W, C]
             auto inputShape = inputType.getShape();   // [N, H, W, C]
-            if (filterShape[0] == inputShape[1] || filterShape[1] == inputShape[2]) {
+            if (filterShape[0] == inputShape[1] && filterShape[1] == inputShape[2]) {
                 return false;
             }
         }
