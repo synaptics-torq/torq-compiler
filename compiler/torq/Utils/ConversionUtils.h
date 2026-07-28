@@ -288,6 +288,18 @@ interleave(const std::vector<int32_t> &a, const std::vector<int32_t> &b, bool br
 
 std::vector<APInt>
 interleave(const std::vector<APInt> &a, const std::vector<APInt> &b, bool broadcast_b = true);
+
+/// Write the interleaved sequence a[0], b[0], a[1], b[1], ... to \p out and return the advanced
+/// output iterator. The two ranges must have equal length (enforced by llvm::zip_equal). Unlike
+/// interleave() this allocates nothing; the caller owns the output storage.
+template <typename T, typename OutputIt>
+OutputIt interleave_into(ArrayRef<T> a, ArrayRef<T> b, OutputIt out) {
+    for (auto &&[av, bv] : llvm::zip_equal(a, b)) {
+        *out++ = av;
+        *out++ = bv;
+    }
+    return out;
+}
 std::vector<int64_t>
 per_channel_sum(const std::vector<int8_t> &weights_values, int on, int in, int hn, int wn);
 

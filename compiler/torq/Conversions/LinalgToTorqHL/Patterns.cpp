@@ -2094,6 +2094,20 @@ class SegmentationTransposeOpConversion : public OpRewritePattern<tensor::Collap
 //     linalg.yield %63 : i32
 //   } -> tensor<1x21x1024xi32>
 
+// A per-channel rescale carries its multiplier as a channel-indexed operand, so the number of
+// distinct scale values is that operand's element count. A per-tensor rescale folds a scalar
+// multiplier into the generic body, leaving the count at 1.
+static int getRescaleScaleCount(linalg::GenericOp genericOp, tosa::ApplyScaleOp applyScaleOp) {
+    if (auto multArg = dyn_cast<BlockArgument>(applyScaleOp.getMultiplier())) {
+        if (auto multType =
+                dyn_cast<RankedTensorType>(genericOp.getMatchingOpOperand(multArg)->get().getType()
+                )) {
+            return multType.getNumElements();
+        }
+    }
+    return 1;
+}
+
 struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -2119,6 +2133,54 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         return failure();
     }
 
+    // Lower a matched integer rescale to a single torq_hl.fma. The hardware ACT applies one shift
+    // with per-channel multipliers, so normalize the TOSA shifts to a common shift (the minimum)
+    // and rescale each multiplier to it, mirroring the fused conv/matmul path; for a per-tensor
+    // rescale (one scale value) this is just the multiplier and shift as-is. scale_bias is the 1-D
+    // [2] pair for per-tensor, or a [channels, 2] table for per-channel (which FMAPattern loads per
+    // channel block).
+    LogicalResult emitRescale(
+        linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input,
+        RankedTensorType outputType, const MultiplierShiftInfo &ms, int scaleValuesCount,
+        int32_t inputZp, int32_t outputZp, int32_t outputMin, int32_t outputMax
+    ) const {
+        const int32_t shiftFactor = *llvm::min_element(ms.shift);
+        const std::vector<int32_t> scale = compute_scale(ms.multiplier, ms.shift, shiftFactor);
+        const SmallVector<int32_t> bias(scaleValuesCount, -inputZp);
+
+        SmallVector<int32_t> scaleBias(2 * scaleValuesCount);
+        interleave_into(
+            llvm::ArrayRef<int32_t>(bias), llvm::ArrayRef<int32_t>(scale), scaleBias.begin()
+        );
+
+        // Per-channel scale_bias is a [channels, 2] table and needs the channel on the innermost
+        // dimension; per-tensor is the single 1-D [2] pair broadcast to every element.
+        Value scaleBiasConst;
+        if (scaleValuesCount > 1) {
+            const int64_t channelDim = outputType.getRank() - 1;
+            if (outputType.getDimSize(channelDim) != scaleValuesCount) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "per-channel rescale expects the scale count on the innermost dimension"
+                );
+            }
+            scaleBiasConst = createI32Const(
+                rewriter, srcOp, scaleBias, llvm::ArrayRef<int64_t>{scaleValuesCount, 2}
+            );
+        }
+        else {
+            scaleBiasConst = createI32Const(rewriter, srcOp, scaleBias);
+        }
+
+        Value weightConst =
+            createI8Const(rewriter, srcOp, llvm::ArrayRef<int8_t>{1}, llvm::ArrayRef<int64_t>{1});
+        auto fmaOp = torq_hl::FMAOp::create(
+            rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
+            outputZp, outputMin, outputMax, shiftFactor, weightConst, scaleBiasConst, input
+        );
+        rewriter.replaceOp(srcOp, fmaOp.getOutput());
+        return success();
+    }
+
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
         // TODO: this code could be reimplemented using foldForwardScaleClamp
@@ -2128,10 +2190,15 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             );
         }
 
+        // A per-tensor rescale has a single data input; the multiplier/shift are scalar
+        // constants folded into the body. A per-channel rescale additionally carries its
+        // multiplier and/or shift as channel-indexed operands (up to two extra inputs), which
+        // getMultiplierAndShift resolves via the apply_scale block arguments below.
         const int dpsInputCount = srcOp.getNumDpsInputs();
-        if (dpsInputCount > 1) {
+        if (dpsInputCount > 3) {
             return rewriter.notifyMatchFailure(
-                srcOp, "Expected exactly one or zero(const) input tensor for RescaleOpConversion"
+                srcOp, "Expected at most a data input plus per-channel multiplier/shift for "
+                       "RescaleOpConversion"
             );
         }
 
@@ -2256,7 +2323,9 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             );
         }
 
-        auto ms = getMultiplierAndShift(srcOp, applyScaleOp, 1);
+        int scaleValuesCount = getRescaleScaleCount(srcOp, applyScaleOp);
+
+        auto ms = getMultiplierAndShift(srcOp, applyScaleOp, scaleValuesCount);
         if (!ms) {
             return rewriter.notifyMatchFailure(
                 srcOp, "Failed to get multiplier and shift from apply_scale operation"
@@ -2272,38 +2341,16 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             }
         }
 
-        // FMA in hardware implements quantized rescale as:
-        //   output = (((input_value - input_zp) * scale) >> shift) + outputZP
-        // We model this as:
-        //   ALU operation: input_value * weight, with weight = 1
-        //   ACT operation: ((ALU_output + bias) * scale) >> shift + outputZP
-        // where:
-        //   bias  = -input_zp
-        //   scale = multiplier
-        //   shift = shiftFactor
-        int32_t shiftFactor = ms.shift[0];
-        int32_t bias_data = -input_zp;
-        int8_t weight_data = 1;
-        std::vector<int8_t> weights = {weight_data};
-        const std::vector<int32_t> bias = {bias_data};
-        const std::vector<int32_t> scale = {ms.multiplier[0]};
-
         LLVM_DEBUG({
-            llvm::dbgs() << "rescale params : input_zp: " << input_zp << ", "
-                         << "outputZp: " << outputZp << ", outputMin: " << outputMin << ", "
-                         << "outputMax: " << outputMax << ", shiftFactor: " << shiftFactor << ", "
-                         << "weight_data: " << weight_data << ", bias_data: " << bias_data << "\n";
+            llvm::dbgs() << "rescale params : input_zp: " << input_zp << ", outputZp: " << outputZp
+                         << ", outputMin: " << outputMin << ", outputMax: " << outputMax
+                         << ", channels: " << scaleValuesCount << "\n";
         });
 
-        auto fmaOp = torq_hl::FMAOp::create(
-            rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
-            outputZp, outputMin, outputMax, shiftFactor,
-            createI8Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
-            createI32Const(rewriter, srcOp, interleave(bias, scale)), input
+        return emitRescale(
+            srcOp, rewriter, input, outputType, ms, scaleValuesCount, input_zp, outputZp, outputMin,
+            outputMax
         );
-        rewriter.replaceOp(srcOp, fmaOp.getOutput());
-
-        return success();
     }
 };
 
