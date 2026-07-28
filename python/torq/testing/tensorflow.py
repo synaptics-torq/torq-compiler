@@ -4,7 +4,6 @@ from functools import wraps
 import pytest
 import tensorflow as tf
 import numpy as np
-import subprocess
 import json
 
 from .versioned_fixtures import versioned_generated_file_fixture, versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture
@@ -132,8 +131,11 @@ def tflite_model_file(request, case_config):
 
 @versioned_generated_file_fixture("mlir")
 def tflite_mlir_model_file(request, versioned_file, tflite_model_file):
+    # Workaround until tosa-converter-for-tflite ships MR 95 (quantized Abs with
+    # mismatched scales). See torq.testing.tflite_abs_workaround.
+    from .tflite_abs_workaround import convert_tflite_to_tosa_mlir_with_abs_workaround
 
-    subprocess.check_call(["tosa-converter-for-tflite", "--text", str(tflite_model_file), "-o", str(versioned_file)])
+    convert_tflite_to_tosa_mlir_with_abs_workaround(tflite_model_file, versioned_file)
 
 @versioned_hashable_object_fixture
 def tflite_quantization_params(case_config):
