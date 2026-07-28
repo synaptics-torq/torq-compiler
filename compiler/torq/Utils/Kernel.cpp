@@ -1215,7 +1215,7 @@ int SlicePrivate::addMemNdlDims(
     bool useSDims = appendBlockSize >= 0;
     Shape dataDims = data.shape();
     const Indexes &ix = data.indexes();
-    auto elementSize = sizeofType(data.elementType());
+    const auto elementSize = sizeofType(data.elementType());
     int busWidth = getBusWidth(type, data.elementType());
     const int sgGroupsMax = getBusScatterGather(type);
     auto block = useSDims ? SGBlockInfo{appendBlockSize}
@@ -1396,22 +1396,23 @@ int SlicePrivate::addMemNdlDims(
         int denseCnt = denseElementCount(sdimsShape);
         assert(denseCnt != 0 && "SDIM can't handle empty tensors");
         if (denseCnt > 0) {
-            if (elementSize == 4) {
+            int sdElementSize = elementSize;
+            if (sdElementSize == 4) {
                 // HW doesn't support elementSize == 4 but if the output is dense we can adjust
                 // the data type and the count accordingly
                 denseCnt *= 2;
-                elementSize = 2;
-                ndlDims.back().count = elementSize;
+                sdElementSize = 2;
+                ndlDims.back().count = sdElementSize;
             }
 
             // Sequential write to a dense subtensor
             auto cntPair = decomposeIntoTwoFactors(denseCnt);
             assert(cntPair.first != -1 && "SDIM dense count is a prime number too large");
             // For optimal performance put the bigger factor in the X dimension
-            ndlDims.push_back({DimType::S, MemDimTag::X, cntPair.second, elementSize});
+            ndlDims.push_back({DimType::S, MemDimTag::X, cntPair.second, sdElementSize});
             if (cntPair.first > 1) {
                 ndlDims.push_back(
-                    {DimType::S, MemDimTag::Y, cntPair.first, elementSize * cntPair.second}
+                    {DimType::S, MemDimTag::Y, cntPair.first, sdElementSize * cntPair.second}
                 );
             }
         }
@@ -1533,7 +1534,9 @@ void SlicePrivate::addDims(
             ndlDims.push_back({DimType::H, tag, repeatCount});
             prevDimIsRepeat = true;
         }
-        else {
+        else if (loopIterCount > 1) {
+            // We ignore strided loops with only one iteration since they are useless and strided
+            // tags very limited.
             if (fuseW && strideTagIx) {
                 auto &wDim = ndlDims.back();
                 assert(wDim.count * wDim.stride == strideVal && "Cannot fuse");
@@ -1752,8 +1755,16 @@ void SlicePrivate::ceww(const WData &wdata) {
     Shape shape = wdata.subShape();
     // assert(shape.size() <= 1 && "WData shape must be up to 1 for now");
     const int weightSize = sizeofType(wdata.elementType());
-    const int weightBlockSize = denseElementCount(shape);
-    assert(weightBlockSize > 0 && "Block empty or not dense");
+    int weightBlockSize = denseElementCount(shape);
+
+    assert(weightBlockSize != 0 && "Block empty");
+    bool loadMultiple = false;
+    if (weightBlockSize < 0) {
+        // Non-dense block: only rank 2 supported for now
+        assert(shape.size() == 2);
+        weightBlockSize = shape[1].count;
+        loadMultiple = true;
+    }
 
     // Generate CEWW to load the data from DEWR to WRAM
     // TODO: check that the data fits WRAM and that dataShape has natural strides
@@ -1761,6 +1772,11 @@ void SlicePrivate::ceww(const WData &wdata) {
     regDims.push_back({DimType::L, RegDimTag::B, weightSize, 1});               // One element
     regDims.push_back({DimType::L, RegDimTag::D, weightBlockSize, weightSize}); // Block
     regDims.push_back({DimType::L, RegDimTag::G});                              // No group
+
+    if (loadMultiple) {
+        // Add extra HDIM to load multiple blocks
+        regDims.push_back({DimType::H, RegDimTag::S, shape[0].count, weightBlockSize});
+    }
 
     // Repeat for as many times as DEWR
     auto dewr = _ndls.getMemNdl(NdlType::DEWR);
@@ -2327,8 +2343,14 @@ PData SlicePrivate::aluProductAccumulate(
     DType resType = isInt(dataType) ? (resUnsigned ? DType::uint32 : DType::int32) : DType::fp32;
     Shape pramShape = {actBlockCount, {actBlockSize, (HwInfo::pdat_width / sizeofType(resType))}};
     if (outer) {
-        // In this case pram.shape becomes 4D
-        pramShape.insert(pramShape.begin(), weightBlockSize);
+        // In this case pram.shape becomes 3D
+        int outerStride = HwInfo::max_input * (HwInfo::pdat_width / sizeofType(resType));
+        pramShape.insert(pramShape.begin(), ShapeItem(weightBlockSize, Stride(outerStride)));
+        if (pramShape[0].count > 1 && pramShape[1].count > 1) {
+            // ACPR can't handle two strided dimensions, so we are forced to use a dense dim[1]
+            // This will add "junk" data that hopefully will be thrown away later by DEQW SDIMs.
+            pramShape[1].count = outerStride / pramShape[2].count;
+        }
     }
 
     PData pdata(pramShape, resType);
@@ -2888,6 +2910,16 @@ const char *WRam::name() const { return "WRam"; }
 int WRam::size() const {
     // WRam can store up to 36 elements
     return HwInfo::wram_seg_width + 4;
+}
+
+int WRam::transposeWidth() const {
+    // Maximum width (number of columns) supported by transpose operation
+    return 8;
+}
+
+int WRam::transposeHeight() const {
+    // Maximum height (number of rows) supported by transpose operation
+    return 4;
 }
 
 // Determine the weight memory format

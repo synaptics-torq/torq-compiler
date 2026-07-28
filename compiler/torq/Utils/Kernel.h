@@ -490,6 +490,12 @@ class WRam : public SliceRam {
 
     const char *name() const override;
     int size() const override;
+
+    // The only width (number of columns) supported by transpose operation
+    int transposeWidth() const;
+
+    // The only height (number of rows) supported by transpose operation
+    int transposeHeight() const;
 };
 
 // Bias & Scale RAM
