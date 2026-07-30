@@ -1028,6 +1028,11 @@ def generate_torch_layers_from_model(model, example_inputs, node_groups=None, de
             record = trace.get(name, {})
             layer_input_shapes = record.get("input", [])
             layer_output_shapes = record.get("output", [])
+            # Skip submodules that are never executed by the model's forward,
+            # e.g. empty identity branches in ShuffleNet. They have no recorded
+            # input shapes and cannot be exported/tested standalone.
+            if not layer_input_shapes:
+                continue
 
         if dedup:
             key = type(module).__name__
@@ -1198,13 +1203,16 @@ def _load_torch_metadata_cases(manifest: dict, model_loader_key: str):
     """Build TorchLayerCase objects from a metadata-only manifest."""
     cases = []
     for entry in manifest.get("cases", []):
+        layer_input_shapes = entry.get("layer_input_shapes", [])
+        if not entry.get("is_full_model", False) and not layer_input_shapes:
+            continue
         cases.append(TorchLayerCase(
             name=entry["name"],
             data={
                 "layer_name": entry["layer_name"],
                 "model_loader_key": model_loader_key,
                 "is_full_model": entry["is_full_model"],
-                "layer_input_shapes": entry.get("layer_input_shapes", []),
+                "layer_input_shapes": layer_input_shapes,
                 "layer_output_shapes": entry.get("layer_output_shapes", []),
             },
             layer_name=entry["layer_name"],
@@ -1288,13 +1296,18 @@ def torch_layer_model_data(request, case_config):
     if submodule is None:
         raise ValueError(f"Layer '{layer_name}' not found in model")
 
-    # Build example inputs from recorded shapes (random data is fine for export)
-    # Use bfloat16 to match the target hardware precision.
+    target_dtype = torch.bfloat16
+    for t in list(model.parameters()) + list(model.buffers()):
+        if t.is_floating_point():
+            target_dtype = t.dtype
+            break
+
+    # Build example inputs from recorded shapes using the model's dtype.
     example_inputs = []
     for shape in layer_input_shapes:
         if shape is None:
             continue
-        example_inputs.append(torch.randn(*shape, dtype=torch.bfloat16))
+        example_inputs.append(torch.randn(*shape, dtype=target_dtype))
 
     if not example_inputs:
         raise ValueError(f"No input shapes available for layer '{layer_name}'")

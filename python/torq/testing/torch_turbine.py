@@ -12,6 +12,8 @@ using ``iree.turbine.aot`` instead of the raw ``FxImporter`` path used by
 machinery from ``torq.testing.torch``.
 """
 
+import contextlib
+
 import torch
 import pytest
 
@@ -31,6 +33,33 @@ except ImportError as _turbine_import_err:
     _TURBINE_IMPORT_ERR = _turbine_import_err
 
 
+@contextlib.contextmanager
+def _bfloat16_numpy_workaround():
+    """Temporarily allow np.array() on bfloat16 tensors.
+
+    IREE Turbine's AOT exporter calls ``np.array(detached_tensor)`` when
+    lifting constants to ``util.global`` ops.  NumPy does not support
+    bfloat16, so for bf16 tensors we return a uint16 view of the same raw
+    bits.  The exported MLIR type stays bf16, and the byte buffer is
+    interpreted correctly by ``DenseResourceElementsAttr.get_from_buffer``.
+    """
+    original_array = torch.Tensor.__array__
+
+    def _patched_array(self, *args, **kwargs):
+        if self.dtype == torch.bfloat16:
+            t = self.view(torch.uint16)
+            if kwargs.get("copy"):
+                t = t.contiguous().clone()
+            return t.numpy()
+        return original_array(self, *args, **kwargs)
+
+    torch.Tensor.__array__ = _patched_array
+    try:
+        yield
+    finally:
+        torch.Tensor.__array__ = original_array
+
+
 def export_submodule_with_turbine(submodule, example_inputs):
     """Export a torch.nn.Module to Torch MLIR using IREE Turbine.
 
@@ -43,11 +72,12 @@ def export_submodule_with_turbine(submodule, example_inputs):
     """
     if not _HAS_TURBINE:
         raise ImportError(
-            "torq-turbine is required for torch_turbine export. "
-            "Install it with: pip install torq-turbine"
+            "iree-turbine is required for torch_turbine export. "
+            "Install it with: pip install iree-turbine"
         ) from _TURBINE_IMPORT_ERR
 
-    export_output = _aot.export(submodule, args=example_inputs)
+    with _bfloat16_numpy_workaround():
+        export_output = _aot.export(submodule, args=example_inputs)
     return str(export_output.mlir_module)
 
 
@@ -65,13 +95,18 @@ def torch_turbine_layer_model_data(request, case_config):
     if submodule is None:
         raise ValueError(f"Layer '{layer_name}' not found in model")
 
-    # Build random example inputs from recorded shapes.  Use bfloat16 to match
-    # the target hardware precision used by the FxImporter path.
+    target_dtype = torch.bfloat16
+    for t in list(model.parameters()) + list(model.buffers()):
+        if t.is_floating_point():
+            target_dtype = t.dtype
+            break
+
+    # Build random example inputs from recorded shapes using the model's dtype.
     example_inputs = []
     for shape in layer_input_shapes:
         if shape is None:
             continue
-        example_inputs.append(torch.randn(*shape, dtype=torch.bfloat16))
+        example_inputs.append(torch.randn(*shape, dtype=target_dtype))
 
     if not example_inputs:
         raise ValueError(f"No input shapes available for layer '{layer_name}'")

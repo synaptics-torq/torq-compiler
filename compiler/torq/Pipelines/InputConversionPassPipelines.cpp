@@ -88,6 +88,11 @@ void registerTosaTransformPassPipeline() {
 
 void buildTorchTransformPassPipeline(OpPassManager &passManager) {
 
+    // Large constants from iree-turbine are represented as util.global constants.
+    // Convert them to torch.vtensor.literal so the torch backend pipeline sees the
+    // same IR shape as a non-externalized export.
+    passManager.addPass(mlir::syna::torq_hl::createConvertUtilGlobalsToTorchLiteralsPass());
+
     // Inline DenseResourceElementsAttr to DenseElementsAttr.
     //
     // The IREE FX importer emits bf16 constants as e.g.

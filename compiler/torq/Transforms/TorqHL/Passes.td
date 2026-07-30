@@ -68,6 +68,28 @@ def TorqHLFoldTableConstant :
   ];
 }
 
+def ConvertUtilGlobalsToTorchLiterals :
+    Pass<"torq-convert-util-globals-to-torch-literals", "mlir::ModuleOp"> {
+
+  let summary = "Convert util.global constants to torch.vtensor.literal";
+
+  let description = [{
+    Folds util.global constants consumed by torch_c.from_builtin_tensor into
+    torch.vtensor.literal ops. This allows iree-turbine's parameter
+    externalization output to be processed by the standard torch backend
+    pipeline, which expects torch tensor literals rather than util.global
+    loads.
+  }];
+
+  let constructor =
+      "mlir::syna::torq_hl::createConvertUtilGlobalsToTorchLiteralsPass()";
+
+  let dependentDialects = [
+        "::mlir::BuiltinDialect",
+    ];
+
+}
+
 def InlineDenseResources :
     Pass<"torq-inline-dense-resources", "mlir::ModuleOp"> {
 

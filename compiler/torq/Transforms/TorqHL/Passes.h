@@ -35,6 +35,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>>
 createFormDispatchRegionsPass(bool disableDispatchFusion = false);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHLFoldTableConstantPass();
+std::unique_ptr<OperationPass<ModuleOp>> createConvertUtilGlobalsToTorchLiteralsPass();
 std::unique_ptr<OperationPass<ModuleOp>> createInlineDenseResourcesPass();
 
 //----------------------------------------------------------------------------//

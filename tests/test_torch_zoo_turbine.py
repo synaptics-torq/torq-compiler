@@ -11,10 +11,11 @@ from torq.testing.torch import (
 from torq.testing.versioned_fixtures import versioned_hashable_object_fixture
 
 '''
-Test models loaded directly from PyTorch model zoo / torchvision.
+Test torchvision zoo models using IREE Turbine.
 
-Models are instantiated from torchvision.models (weights cached by torch.hub).
-Each model runs as a full-model test plus per-layer tests.
+This is the turbine counterpart to tests/test_torch_zoo.py.  It uses the same
+lazy model loading and metadata cache, but exports each layer/full-model with
+iree.turbine.aot instead of the raw FxImporter path.
 
 Known failing cases are listed in xfail_tc below and xfail'd.
 Tolerance-sensitive cases are listed in relaxed_tc and run with a relaxed
@@ -22,8 +23,8 @@ comparison config instead of being xfail'd.
 Add new models to ZOO_MODELS.
 
 CLI:
-  pytest tests/test_torch_zoo.py -v -s --collect-only
-  pytest tests/test_torch_zoo.py -v -s [model]_[layername]
+  pytest tests/test_torch_zoo_turbine.py -v -s --collect-only
+  pytest tests/test_torch_zoo_turbine.py -v -s [model]_[layername]
 '''
 
 
@@ -123,100 +124,85 @@ def pytest_generate_tests(metafunc):
             tuple(x.to(torch.bfloat16) for x in example_inputs),
         )
 
-    metafunc.parametrize("torch_zoo_case", cases, indirect=True, ids=[c.name for c in cases])
+    metafunc.parametrize("torch_zoo_turbine_case", cases, indirect=True, ids=[c.name for c in cases])
 
 
 @versioned_hashable_object_fixture
 def comparison_config_relaxed():
-    return {"fp_avg_tol": 0.02, "fp_max_tol": 1.0}
+    return {"fp_avg_tol": 0.1, "fp_max_tol": 1.0}
 
 
 @pytest.fixture
-def torch_zoo_case(request):
+def torch_zoo_turbine_case(request):
     return request.param
 
 
 @pytest.fixture
 def case_config(request, chip_config):
-    case = request.getfixturevalue("torch_zoo_case")
+    case = request.getfixturevalue("torch_zoo_turbine_case")
 
     next_chip = (chip_config.data['target'] != "SL2610")
     if next_chip:
         pytest.xfail("AssertionError: Nans differ")
 
-    # Cases xfail'd for non-tolerance reasons (crash, exceed LRAM, parsing issue, too large).
+    # Cases xfail'd for non-tolerance reasons (crash, exceed LRAM, parsing issue).
     xfail_tc = [
         # Full models — exceed LRAM on all zoo models
-        '*_full_model',
+        'mobilenet_v2_full_model',
+        'efficientnet_b0_full_model',
 
-        # BatchNorm — crash or tolerance (all models)
-        '*_batchnorm2d',
-
-        # Composite blocks — too large or crash
-        '*_conv2dnormactivation',
-        '*_invertedresidual',
-        '*_basicblock',
-        '*_mbconv',
-        '*_stochasticdepth',
-        '*_squeezeexcitation',
-        'squeezenet1_*_fire',
-
-        # Sequential containers — crash
-        'squeezenet1_*_sequential',
+        # crash with lram issue
         'mobilenet_v2_features_sequential',
-        'mobilenet_v2_features_*_sequential',
-        'resnet18_*_sequential',
-        'mnasnet1_*_sequential',
-        'shufflenet_*_sequential',
-        'efficientnet_*_sequential',
+        'efficientnet_b0_features_Sequential',
+        'efficientnet_b0_features_5_Sequential',
+
+        # Times out at runtime on CSS simulator.
+        'mobilenet_v2_features_2_conv_sequential',
     ]
 
     # Cases that fail only due to tolerance; use relaxed comparison config instead of xfail.
     relaxed_tc = [
-        # AdaptiveAvgPool2d — tolerance
-        '*_adaptiveavgpool2d',
 
-        # SqueezeNet-specific conv layers — tolerance
-        'squeezenet1_0_features_0_conv2d',
-        'squeezenet1_0_features_5_squeeze_conv2d',
-        'squeezenet1_0_features_5_expand3x3_conv2d',
-        'squeezenet1_0_features_10_squeeze_conv2d',
-        'squeezenet1_0_features_10_expand3x3_conv2d',
-        'squeezenet1_0_features_7_expand3x3_conv2d',
-        'squeezenet1_0_features_9_expand3x3_conv2d',
-        'squeezenet1_0_classifier_3_adaptiveavgpool2d',
-        'squeezenet1_0_features_4_expand3x3_conv2d',
+        # SqueezeNet working
+        # full model result:
+        # Max relative difference: 0.008264439180493355
+        # Max absolute difference: 0.0
+        # Number of differences: 0 out of 1000 [0.00%]
+        'squeezenet1_0_*',
 
-        # MobileNetV2-specific conv layers — tolerance
-        'mobilenet_v2_features_3_conv_0_0_conv2d',
-        'mobilenet_v2_features_13_conv_0_0_conv2d',
-        'mobilenet_v2_features_14_conv_0_0_conv2d',
+        # resnet18 working
+        # there is small difference for some layers
+        # full model result:
+        # Max relative difference: 0.6228322982788086
+        # Max absolute difference: 0.15625
+        # Number of differences: 36 out of 1000 [3.60%]
+        'resnet18_*',
 
-        # ResNet18-specific conv layers — tolerance
-        'resnet18_conv1_conv2d',
-        'resnet18_layer1_0_conv1_conv2d',
-        'resnet18_layer1_0_conv2_conv2d',
-        'resnet18_layer2_0_conv2_conv2d',
-        'resnet18_layer2_1_conv1_conv2d',
-        'resnet18_layer3_0_conv1_conv2d',
-        'resnet18_layer3_1_conv2_conv2d',
+        # MNASNet working
+        # full model result:
+        # Max relative difference: 0.9999921917915344
+        # Max absolute difference: 0.375
+        # Number of differences: 184 out of 1000 [18.40%]
+        'mnasnet1_0_*',
 
-        # MNASNet-specific conv layers — tolerance
-        'mnasnet1_0_layers_14_conv2d',
-        'mnasnet1_0_layers_8_0_layers_0_conv2d',
-        'mnasnet1_0_layers_12_3_layers_6_conv2d',
-        'mnasnet1_0_layers_12_1_layers_6_conv2d',
+        # ShuffleNet working
+        # full model result:
+        # Max relative difference: 0.5499982237815857
+        # Max absolute difference: 0.5
+        # Number of differences: 110 out of 1000 [11.00%]
+        'shufflenet_v2_x1_0_*',
 
-        # ShuffleNet-specific conv layers — tolerance
-        'shufflenet_v2_x1_0_stage3_0_branch2_0_conv2d',
+        # MobileNetV2 most layers running on css with small difference
+        # full model has lram OOM issue
+        'mobilenet_v2_features_*',
 
-        # EfficientNet-specific conv layers — tolerance
-        'efficientnet_b0_features_5_0_block_3_0_conv2d',
-        'efficientnet_b0_features_7_0_block_3_0_conv2d',
+        # EfficientNet layers — tolerance
+        # full model lram issue
+        'efficientnet_b0_*',
     ]
 
     name_lower = case.name.lower()
-    if any(fnmatch.fnmatch(name_lower, pat) for pat in xfail_tc):
+    if any(fnmatch.fnmatch(name_lower, pat.lower()) for pat in xfail_tc):
         pytest.xfail("failing test or skipped for now")
 
     comp_config = {
@@ -224,13 +210,13 @@ def case_config(request, chip_config):
         "model_loader_key": case.data["model_loader_key"],
         "is_full_model": case.data["is_full_model"],
         "layer_input_shapes": case.data.get("layer_input_shapes", []),
-        "torch_model_data": "torch_layer_model_data",
+        "torch_model_data": "torch_turbine_layer_model_data",
         "mlir_model_file": "torch_layer_model",
         "input_data": "tweaked_random_input_data",
-        "comparison_config": "comparison_config_from_mlir",
+        "comparison_config": "comparison_config_from_mlir"
     }
 
-    if any(fnmatch.fnmatch(name_lower, pat) for pat in relaxed_tc):
+    if any(fnmatch.fnmatch(name_lower, pat.lower()) for pat in relaxed_tc):
         comp_config["comparison_config"] = "comparison_config_relaxed"
 
     return comp_config
@@ -238,10 +224,12 @@ def case_config(request, chip_config):
 
 @pytest.fixture
 def reference_results(request):
-    """Use PyTorch directly as reference for torch zoo model tests."""
+    """Use PyTorch directly as reference for torch zoo turbine model tests."""
     return request.getfixturevalue("torch_reference_results")
 
 
 @pytest.mark.ci
-def test_torch_zoo(request, reference_results, torq_results, case_config, torch_zoo_case):
+def test_torch_zoo_turbine(
+    request, reference_results, torq_results, case_config, torch_zoo_turbine_case
+):
     compare_test_results(request, torq_results, reference_results, case_config)

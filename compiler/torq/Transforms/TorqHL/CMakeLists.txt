@@ -1,4 +1,5 @@
 set(sources
+    ConvertUtilGlobalsToTorchLiteralsPass.cpp
     FormDispatchRegionsPass.cpp
     InlineDenseResourcesPass.cpp
     Passes.cpp
@@ -33,6 +34,8 @@ set(deps
     iree::compiler::Dialect::Util::IR
     iree::compiler::Dialect::Util::Transforms
     iree::compiler::Utils
+    iree::compiler::plugins::input::Torch::torch-mlir::TorchConversionDialectIR
+    iree::compiler::plugins::input::Torch::torch-mlir::TorchDialectIR
     iree::target::torq::Conversions::LinalgToTorqHL::LinalgToTorqHL
     iree::target::torq::Conversions::TorqHLToTorqHW
 )
