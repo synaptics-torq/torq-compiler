@@ -159,13 +159,8 @@ struct QElementwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         if (!matchElementwiseAddBody(addOp, inputIdx0, inputIdx1))
             return rewriter.notifyMatchFailure(addOp, "not an elementwise add");
 
-        Value addOutput = addOp.getResult(0);
-        if (!addOutput.hasOneUse())
-            return rewriter.notifyMatchFailure(addOp, "add output has multiple uses");
-
-        auto quantOp = dyn_cast<linalg::GenericOp>(*addOutput.getUsers().begin());
-        QuantInfo qInfo;
-        if (!quantOp || !matchQuantGeneric(quantOp, qInfo.scale, qInfo.zp, qInfo.min, qInfo.max))
+        QuantizedOpChain chain;
+        if (failed(matchOutputQuantization(addOp.getResult(0), rewriter, chain)))
             return rewriter.notifyMatchFailure(addOp, "failed to match Q quant");
 
         Value dequantInput0 = addOp.getInputs()[inputIdx0];
@@ -192,19 +187,19 @@ struct QElementwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(addOp, "missing fuse group id");
             markFuseGroupBackward(
-                quantOp.getResult(0), {dequant0.getInputs()[0], dequant1.getInputs()[0]}, rewriter,
-                fuseGroupAttr
+                chain.quantOp.getResult(0), {dequant0.getInputs()[0], dequant1.getInputs()[0]},
+                rewriter, fuseGroupAttr
             );
             return success();
         }
 
-        if (qInfo.scale == 0.0)
+        if (chain.outputInfo.scale == 0.0)
             return rewriter.notifyMatchFailure(addOp, "quant scale is zero");
 
         int16_t m0, m1;
         int32_t shift;
         if (!computeSharedMultiplierAndShift(
-                dInfo0.scale, dInfo1.scale, qInfo.scale, m0, m1, shift
+                dInfo0.scale, dInfo1.scale, chain.outputInfo.scale, m0, m1, shift
             ))
             return rewriter.notifyMatchFailure(addOp, "failed to compute multiplier/shift");
 
@@ -217,12 +212,12 @@ struct QElementwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             bias64, std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()
         ));
 
-        int32_t outputZp = static_cast<int32_t>(std::llround(qInfo.zp));
-        int32_t outputMin = static_cast<int32_t>(std::llround(qInfo.min));
-        int32_t outputMax = static_cast<int32_t>(std::llround(qInfo.max));
+        int32_t outputZp = static_cast<int32_t>(std::llround(chain.outputInfo.zp));
+        int32_t outputMin = static_cast<int32_t>(std::llround(chain.outputInfo.min));
+        int32_t outputMax = static_cast<int32_t>(std::llround(chain.outputInfo.max));
 
         Location loc = addOp.getLoc();
-        auto outTy = dyn_cast<RankedTensorType>(quantOp.getResult(0).getType());
+        auto outTy = dyn_cast<RankedTensorType>(chain.quantOp.getResult(0).getType());
         if (!outTy)
             return rewriter.notifyMatchFailure(addOp, "expected ranked output type");
 
@@ -232,9 +227,9 @@ struct QElementwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         Value scaleBias = createI32Const(rewriter, addOp, biasScale);
 
         OpBuilder::InsertionGuard g(rewriter);
-        rewriter.setInsertionPoint(quantOp);
+        rewriter.setInsertionPoint(chain.quantOp);
         Value addResult = torq_hl::AddOp::create(
-                              rewriter, loc, outTy, quantOp.getDpsInitOperand(0)->get(),
+                              rewriter, loc, outTy, chain.quantOp.getDpsInitOperand(0)->get(),
                               rewriter.getStringAttr("add"),
                               /*input_zp=*/0, outputZp, outputMin, outputMax, shift, weights,
                               scaleBias, dequant0.getInputs()[0], dequant1.getInputs()[0],
@@ -242,7 +237,7 @@ struct QElementwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         )
                               .getOutput();
 
-        rewriter.replaceOp(quantOp, addResult);
+        rewriter.replaceOp(chain.quantOp, addResult);
         return success();
     }
 };

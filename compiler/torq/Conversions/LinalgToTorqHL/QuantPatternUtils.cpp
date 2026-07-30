@@ -172,6 +172,58 @@ std::optional<DequantInfo> matchDequantSigned(linalg::GenericOp op) {
     return DequantInfo{/*scale=*/*maybeScale, /*zp=*/extractedZp};
 }
 
+// Scale-one signed integer dequant:
+// linalg.generic body (zp = 0):
+//   [arith.extsi(%in)] -> arith.sitofp
+// linalg.generic body (zp != 0):
+//   arith.extsi(%in) -> arith.subi(%zp) -> arith.sitofp
+std::optional<DequantInfo> matchDequantScaleOne(linalg::GenericOp op) {
+    RankedTensorType inTy, outTy;
+    if (!isValidDequantShape(op, inTy, outTy))
+        return std::nullopt;
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+        return std::nullopt;
+    auto sitofp = yieldOp.getOperand(0).getDefiningOp<arith::SIToFPOp>();
+    if (!sitofp)
+        return std::nullopt;
+
+    Value sitofpIn = sitofp.getIn();
+    int32_t extractedZp = 0;
+    Value inner = sitofpIn;
+    if (auto subi = sitofpIn.getDefiningOp<arith::SubIOp>()) {
+        auto lhs = subi.getLhs();
+        auto rhs = subi.getRhs();
+        if (auto extsi = lhs.getDefiningOp<arith::ExtSIOp>()) {
+            inner = extsi.getIn();
+            auto maybeZp = getQGenericIntConstant(rhs, op);
+            if (!maybeZp)
+                return std::nullopt;
+            extractedZp = static_cast<int32_t>(*maybeZp);
+        }
+        else if (auto extsi = rhs.getDefiningOp<arith::ExtSIOp>()) {
+            inner = extsi.getIn();
+            auto maybeZp = getQGenericIntConstant(lhs, op);
+            if (!maybeZp)
+                return std::nullopt;
+            extractedZp = static_cast<int32_t>(*maybeZp);
+        }
+        else {
+            return std::nullopt;
+        }
+    }
+    else if (auto extsi = sitofpIn.getDefiningOp<arith::ExtSIOp>()) {
+        inner = extsi.getIn();
+    }
+
+    auto inputArg = dyn_cast<BlockArgument>(inner);
+    if (!inputArg || inputArg.getOwner() != op.getBody())
+        return std::nullopt;
+
+    return DequantInfo{/*scale=*/1.0, /*zp=*/extractedZp};
+}
+
 // Unsigned integer dequant (ONNX INT4 QDQ):
 //
 // ONNX INT4 QDQ quantized models produce unsigned dequant with a float
@@ -247,15 +299,16 @@ std::optional<DequantInfo> matchDequantUnsigned(linalg::GenericOp op) {
     return DequantInfo{/*scale=*/*maybeScale, /*zp=*/intZp};
 }
 
-// All registered dequant flavors, tried in order.  The first match wins.
-using DequantFlavorFn = std::optional<DequantInfo> (*)(linalg::GenericOp);
-static const DequantFlavorFn kDequantFlavors[] = {
+// All registered dequant variants, tried in order.  The first match wins.
+using DequantVariantFn = std::optional<DequantInfo> (*)(linalg::GenericOp);
+static const DequantVariantFn kDequantVariants[] = {
     matchDequantSigned,   // standard ONNX signed int8 QDQ
     matchDequantUnsigned, // ONNX unsigned INT4 QDQ (block_size path)
+    matchDequantScaleOne, // scale folded away by canonicalization
 };
 
 bool matchDequantGeneric(linalg::GenericOp op, double &scale, int32_t &zp) {
-    for (auto f : kDequantFlavors) {
+    for (auto f : kDequantVariants) {
         if (auto info = f(op)) {
             scale = info->scale;
             zp = info->zp;
@@ -287,8 +340,7 @@ isValidQuantShape(linalg::GenericOp op, RankedTensorType &inTy, RankedTensorType
 // are accepted:
 //   v = maxf(min_value, minf(max_value, data))
 //   v = minf(max_value, maxf(min_value, data))
-static bool
-extractQuantClampBounds(Value v, linalg::GenericOp op, double &min, double &max, Value &data) {
+bool extractQuantClampBounds(Value v, linalg::GenericOp op, double &min, double &max, Value &data) {
     arith::MaximumFOp maxf = nullptr;
     arith::MinimumFOp minf = nullptr;
     Value cur = v;
@@ -416,15 +468,62 @@ std::optional<QuantInfo> matchQuantSigned(linalg::GenericOp op) {
     return QuantInfo{scale, zp, min, max};
 }
 
-// All registered quant flavors, tried in order.  The first match wins.
-using QuantFlavorFn = std::optional<QuantInfo> (*)(linalg::GenericOp);
-static const QuantFlavorFn kQuantFlavors[] = {
-    matchQuantSigned, // standard ONNX signed int8 QDQ
-                      // Future: matchQuantUnsigned, etc.
+// Scale-one signed integer quant:
+// linalg.generic body:
+//   math.roundeven -> arith.addf(zp) -> arith.maximumf(min)
+//   -> arith.minimumf(max) -> arith.fptosi
+std::optional<QuantInfo> matchQuantScaleOne(linalg::GenericOp op) {
+    RankedTensorType inTy, outTy;
+    if (!isValidQuantShape(op, inTy, outTy))
+        return std::nullopt;
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+        return std::nullopt;
+    auto fptosi = yieldOp.getOperand(0).getDefiningOp<arith::FPToSIOp>();
+    if (!fptosi)
+        return std::nullopt;
+
+    double min, max;
+    Value chain;
+    if (!extractQuantClampBounds(fptosi.getIn(), op, min, max, chain))
+        return std::nullopt;
+
+    auto addf = chain.getDefiningOp<arith::AddFOp>();
+    if (!addf)
+        return std::nullopt;
+    auto maybeZp0 = getQGenericFloatConstant(addf.getLhs(), op);
+    auto maybeZp1 = getQGenericFloatConstant(addf.getRhs(), op);
+    Value roundVal;
+    double zp;
+    if (maybeZp0 && !maybeZp1) {
+        zp = *maybeZp0;
+        roundVal = addf.getRhs();
+    }
+    else if (maybeZp1 && !maybeZp0) {
+        zp = *maybeZp1;
+        roundVal = addf.getLhs();
+    }
+    else {
+        return std::nullopt;
+    }
+
+    if (!roundVal.getDefiningOp<math::RoundEvenOp>())
+        return std::nullopt;
+
+    return QuantInfo{/*scale=*/1.0, zp, min, max};
+}
+
+// All registered quant variants, tried in order.  The first match wins.
+using QuantVariantFn = std::optional<QuantInfo> (*)(linalg::GenericOp);
+static const QuantVariantFn kQuantVariants[] = {
+    matchQuantSigned,   // standard ONNX signed int8 QDQ
+    matchQuantScaleOne, // scale folded away by canonicalization
+                        // Future: matchQuantUnsigned, etc.
 };
 
 bool matchQuantGeneric(linalg::GenericOp op, double &scale, double &zp, double &min, double &max) {
-    for (auto f : kQuantFlavors) {
+    for (auto f : kQuantVariants) {
         if (auto info = f(op)) {
             scale = info->scale;
             zp = info->zp;
@@ -580,6 +679,70 @@ Value buildDynamicInterleavedBiasScale(
         SmallVector<OpFoldResult>{rewriter.getIndexAttr(2)}
     );
     return scaleBias;
+}
+
+// Return a non-null operation to attach diagnostics to. Prefer the defining op;
+// for block arguments fall back to the first user, which is always present when
+// these helpers are called from a pattern.
+static Operation *getDiagOp(Value candidate) {
+    if (Operation *op = candidate.getDefiningOp())
+        return op;
+    for (Operation *user : candidate.getUsers())
+        return user;
+    return nullptr;
+}
+
+LogicalResult
+matchInputQuantization(Value candidate, PatternRewriter &rewriter, QuantizedOpChain &chain) {
+    Operation *anchor = getDiagOp(candidate);
+    chain.inputDequantOp = dyn_cast_or_null<linalg::GenericOp>(candidate.getDefiningOp());
+    if (!chain.inputDequantOp || !chain.inputDequantOp->getResult(0).hasOneUse())
+        return rewriter.notifyMatchFailure(anchor, "failed to match input Q dequant");
+    if (!matchDequantGeneric(chain.inputDequantOp, chain.inputInfo.scale, chain.inputInfo.zp))
+        return rewriter.notifyMatchFailure(
+            chain.inputDequantOp, "not a recognized input Q dequant"
+        );
+    return success();
+}
+
+LogicalResult
+matchOutputDequantization(Value candidate, PatternRewriter &rewriter, QuantizedOpChain &chain) {
+    Operation *anchor = getDiagOp(candidate);
+    if (!candidate.hasOneUse())
+        return rewriter.notifyMatchFailure(anchor, "output candidate has multiple uses");
+
+    chain.outputDequantOp = dyn_cast<linalg::GenericOp>(*candidate.getUsers().begin());
+    if (!chain.outputDequantOp || !chain.outputDequantOp->getResult(0).hasOneUse())
+        return rewriter.notifyMatchFailure(
+            chain.outputDequantOp ? chain.outputDequantOp.getOperation() : anchor,
+            "failed to match output Q dequant"
+        );
+    if (!matchDequantGeneric(
+            chain.outputDequantOp, chain.outputDequantInfo.scale, chain.outputDequantInfo.zp
+        ))
+        return rewriter.notifyMatchFailure(
+            chain.outputDequantOp, "not a recognized output Q dequant"
+        );
+
+    return success();
+}
+
+LogicalResult
+matchOutputQuantization(Value candidate, PatternRewriter &rewriter, QuantizedOpChain &chain) {
+    Operation *anchor = getDiagOp(candidate);
+    if (!candidate.hasOneUse())
+        return rewriter.notifyMatchFailure(anchor, "quant input has multiple uses");
+
+    chain.quantOp = dyn_cast<linalg::GenericOp>(*candidate.getUsers().begin());
+    if (!chain.quantOp || !matchQuantGeneric(
+                              chain.quantOp, chain.outputInfo.scale, chain.outputInfo.zp,
+                              chain.outputInfo.min, chain.outputInfo.max
+                          ))
+        return rewriter.notifyMatchFailure(
+            chain.quantOp ? chain.quantOp.getOperation() : anchor, "failed to match Q quant"
+        );
+
+    return success();
 }
 
 } // namespace mlir::syna::torq

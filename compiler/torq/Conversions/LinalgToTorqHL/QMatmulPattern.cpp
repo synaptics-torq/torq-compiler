@@ -302,39 +302,34 @@ struct QMatmulToFCConvert : public OpRewritePattern<linalg::MatmulOp> {
   private:
     const bool _markFuseGroups;
 
-    // Match the dequant -> (optional bias add) -> quant chain that follows the
-    // matmul (or the optional zp-correction combine).  On success the chain
-    // ops and the requant parameters are populated.
+    // Match the quantized matmul output rescale chain:
+    //   matmul (i32) -> [zp-correction combine] -> DQ (f32) -> [bias add] -> Q (i8)
+    // The caller handles the optional zp-correction combine before calling this
+    // helper.  This helper uses the split output-DQ/output-Q matchers so it can
+    // inspect and consume the optional bias add between the DQ and Q.
     LogicalResult matchQGemmQuantChain(
-        linalg::MatmulOp matmulOp, Value chain, PatternRewriter &rewriter,
-        linalg::GenericOp &dequantOp, double &dequantScale, linalg::GenericOp &biasAddOp,
-        Value &bias, linalg::GenericOp &quantOp, double &quantScale, double &quantZp,
-        double &quantMin, double &quantMax
+        linalg::MatmulOp matmulOp, Value chain, PatternRewriter &rewriter, QuantizedOpChain &qChain,
+        linalg::GenericOp &biasAddOp, Value &bias
     ) const {
-        dequantOp = getSingleGenericUser(chain);
-        int32_t dequantZp = 0;
-        if (!dequantOp || !matchDequantGeneric(dequantOp, dequantScale, dequantZp) ||
-            dequantZp != 0) {
+        if (failed(matchOutputDequantization(chain, rewriter, qChain)))
             return rewriter.notifyMatchFailure(matmulOp, "failed to match Q dequant");
-        }
 
-        Value dqResult = dequantOp.getResult(0);
+        if (qChain.outputDequantInfo.zp != 0)
+            return rewriter.notifyMatchFailure(matmulOp, "output DQ zero-point must be zero");
+
+        Value dqResult = qChain.outputDequantOp.getResult(0);
         Value tail = dqResult;
         if (auto user = getSingleGenericUser(dqResult)) {
-            if (Value biasConst = extractBiasFromAddGeneric(user, dqResult, dequantScale)) {
+            if (Value biasConst =
+                    extractBiasFromAddGeneric(user, dqResult, qChain.outputDequantInfo.scale)) {
                 biasAddOp = user;
                 bias = biasConst;
                 tail = user.getResult(0);
             }
         }
-        if (!tail.hasOneUse()) {
-            return rewriter.notifyMatchFailure(matmulOp, "chain has multiple uses before quant");
-        }
 
-        quantOp = dyn_cast<linalg::GenericOp>(*tail.getUsers().begin());
-        if (!quantOp || !matchQuantGeneric(quantOp, quantScale, quantZp, quantMin, quantMax)) {
+        if (failed(matchOutputQuantization(tail, rewriter, qChain)))
             return rewriter.notifyMatchFailure(matmulOp, "failed to match Q quant");
-        }
         return success();
     }
 
@@ -370,19 +365,18 @@ struct QMatmulToFCConvert : public OpRewritePattern<linalg::MatmulOp> {
     // Emit torq_hl.fully_connected and replace the matched chain.
     LogicalResult rewriteQGemmChain(
         linalg::MatmulOp matmulOp, linalg::GenericOp combineOp, Value weightSum,
-        linalg::GenericOp dequantOp, linalg::GenericOp biasAddOp, linalg::GenericOp quantOp,
-        Value input, Value torqWeights, Value scaleBias, int32_t inputZp, int32_t shift,
-        double quantZp, double quantMin, double quantMax, PatternRewriter &rewriter
+        QuantizedOpChain &qChain, linalg::GenericOp biasAddOp, Value input, Value torqWeights,
+        Value scaleBias, int32_t inputZp, int32_t shift, PatternRewriter &rewriter
     ) const {
         Location loc = matmulOp.getLoc();
-        Value fcInit = quantOp.getDpsInitOperand(0)->get();
+        Value fcInit = qChain.quantOp.getDpsInitOperand(0)->get();
         auto fcOutTy = cast<RankedTensorType>(fcInit.getType());
 
-        int32_t outputZp = static_cast<int32_t>(std::llround(quantZp));
-        int32_t outputMin = static_cast<int32_t>(std::llround(quantMin));
-        int32_t outputMax = static_cast<int32_t>(std::llround(quantMax));
+        int32_t outputZp = static_cast<int32_t>(std::llround(qChain.outputInfo.zp));
+        int32_t outputMin = static_cast<int32_t>(std::llround(qChain.outputInfo.min));
+        int32_t outputMax = static_cast<int32_t>(std::llround(qChain.outputInfo.max));
 
-        rewriter.setInsertionPoint(quantOp);
+        rewriter.setInsertionPoint(qChain.quantOp);
         Value fcResult = torq_hl::FullyConnectedOp::create(
                              rewriter, loc, fcOutTy, fcInit, inputZp, /*weight_zp=*/0, outputZp,
                              outputMin, outputMax, shift, torq_hl::VectorizationModeEnum::None,
@@ -395,10 +389,12 @@ struct QMatmulToFCConvert : public OpRewritePattern<linalg::MatmulOp> {
         rewriter.replaceOp(matmulOp, matmulOp.getDpsInitOperand(0)->get());
         if (combineOp)
             rewriter.replaceOp(combineOp, combineOp.getDpsInitOperand(0)->get());
-        rewriter.replaceOp(dequantOp, dequantOp.getDpsInitOperand(0)->get());
+        rewriter.replaceOp(
+            qChain.outputDequantOp, qChain.outputDequantOp.getDpsInitOperand(0)->get()
+        );
         if (biasAddOp)
             rewriter.replaceOp(biasAddOp, biasAddOp.getDpsInitOperand(0)->get());
-        rewriter.replaceOp(quantOp, fcResult);
+        rewriter.replaceOp(qChain.quantOp, fcResult);
         if (weightSum)
             eraseIfDead(weightSum, rewriter);
 
@@ -464,30 +460,25 @@ struct QMatmulToFCConvert : public OpRewritePattern<linalg::MatmulOp> {
             return rewriter.notifyMatchFailure(matmulOp, "matmul result has multiple uses");
         }
 
-        linalg::GenericOp dequantOp = nullptr;
+        QuantizedOpChain qChain;
         linalg::GenericOp biasAddOp = nullptr;
-        linalg::GenericOp quantOp = nullptr;
-        double dequantScale, quantScale, quantZp, quantMin, quantMax;
         Value bias = nullptr;
-        if (failed(matchQGemmQuantChain(
-                matmulOp, chain, rewriter, dequantOp, dequantScale, biasAddOp, bias, quantOp,
-                quantScale, quantZp, quantMin, quantMax
-            ))) {
+        if (failed(matchQGemmQuantChain(matmulOp, chain, rewriter, qChain, biasAddOp, bias))) {
             return failure();
         }
 
         if (_markFuseGroups) {
             markFuseGroupBackward(
-                quantOp.getResult(0), {input, rhs}, rewriter,
+                qChain.quantOp.getResult(0), {input, rhs}, rewriter,
                 matmulOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();
         }
 
-        if (quantScale == 0.0) {
+        if (qChain.outputInfo.scale == 0.0) {
             return rewriter.notifyMatchFailure(matmulOp, "quant scale is zero");
         }
-        double scaleFactor = dequantScale / quantScale;
+        double scaleFactor = qChain.inputScale() / qChain.outputInfo.scale;
         int32_t multiplier, shift;
         if (!computeMultiplierAndShift(scaleFactor, multiplier, shift)) {
             return rewriter.notifyMatchFailure(matmulOp, "failed to compute multiplier/shift");
@@ -501,7 +492,7 @@ struct QMatmulToFCConvert : public OpRewritePattern<linalg::MatmulOp> {
         // extract_slice is defined after dequantOp (just before the bias
         // dequant), so inserting earlier would violate dominance for the
         // bias+correction add.
-        rewriter.setInsertionPoint(quantOp);
+        rewriter.setInsertionPoint(qChain.quantOp);
         Location loc = matmulOp.getLoc();
 
         // Bring the weights to [O, K] when the constant was pre-transposed.
@@ -521,8 +512,8 @@ struct QMatmulToFCConvert : public OpRewritePattern<linalg::MatmulOp> {
         }
 
         return rewriteQGemmChain(
-            matmulOp, combineOp, weightSum, dequantOp, biasAddOp, quantOp, input, torqWeights,
-            scaleBias, inputZp, shift, quantZp, quantMin, quantMax, rewriter
+            matmulOp, combineOp, weightSum, qChain, biasAddOp, input, torqWeights, scaleBias,
+            inputZp, shift, rewriter
         );
     }
 };

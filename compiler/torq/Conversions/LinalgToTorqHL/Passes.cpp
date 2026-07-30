@@ -82,15 +82,15 @@ template <typename PoolingOpT, bool AllowBF16> static bool isPoolingSumLegal(Ope
     bool typeOk = outType.getElementType().isInteger();
     if constexpr (AllowBF16)
         typeOk = typeOk || outType.getElementType().isBF16();
-    // Quantized GlobalAveragePool is lowered as dq -> pooling_nchw_sum (f32) ->
-    // [divf/mulf scale] -> q.  Allow the Q fusion pattern to see these f32
-    // global pooling ops; non-quantized f32 pooling will simply remain
-    // unconverted because the existing pooling patterns only accept integer
-    // or BF16 outputs.
+
+    // Quantized AveragePool/GlobalAveragePool chains lower the pool itself to
+    // f32 because it sits between DQ and Q generics.  Let the Q fusion patterns
+    // handle NCHW f32 pooling for both global and local cases.
     if constexpr (std::is_same_v<PoolingOpT, linalg::PoolingNchwSumOp>) {
         if (outType.getElementType().isF32())
             typeOk = true;
     }
+
     if (!typeOk)
         return true;
 
@@ -118,6 +118,14 @@ template <typename PoolingOpT, bool AllowBF16> static bool isPoolingSumLegal(Ope
     // by PoolingNchwSumOpConversion, local pooling by PoolingNchwSumOpToDW2DConversion).
     if (outType.getElementType().isBF16())
         return false;
+
+    // Quantized AveragePool/GlobalAveragePool chains lower the pool itself to
+    // f32 because it sits between DQ and Q generics.  Mark NCHW f32 pooling
+    // illegal so the Q fusion patterns can convert both global and local cases.
+    if constexpr (std::is_same_v<PoolingOpT, linalg::PoolingNchwSumOp>) {
+        if (outType.getElementType().isF32())
+            return false;
+    }
 
     // For integer types, only global pooling (kernel == whole frame) is supported.
     return kernelShape[0] != inputShape[hIdx] || kernelShape[1] != inputShape[wIdx];

@@ -207,13 +207,8 @@ struct QMulDivConvert : public OpRewritePattern<linalg::GenericOp> {
                 mulOp, "quantized div is not supported yet (needs reciprocal LUT)"
             );
 
-        Value mulOutput = mulOp.getResult(0);
-        if (!mulOutput.hasOneUse())
-            return rewriter.notifyMatchFailure(mulOp, "mul output has multiple uses");
-
-        auto quantOp = dyn_cast<linalg::GenericOp>(*mulOutput.getUsers().begin());
-        QuantInfo qInfo;
-        if (!quantOp || !matchQuantGeneric(quantOp, qInfo.scale, qInfo.zp, qInfo.min, qInfo.max))
+        QuantizedOpChain chain;
+        if (failed(matchOutputQuantization(mulOp.getResult(0), rewriter, chain)))
             return rewriter.notifyMatchFailure(mulOp, "failed to match Q quant");
 
         Value mulDivInput0 = mulOp.getInputs()[inputIdx0];
@@ -238,16 +233,16 @@ struct QMulDivConvert : public OpRewritePattern<linalg::GenericOp> {
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(mulOp, "missing fuse group id");
             markFuseGroupBackward(
-                quantOp.getResult(0), {source0->quantizedInput, source1->quantizedInput}, rewriter,
-                fuseGroupAttr
+                chain.quantOp.getResult(0), {source0->quantizedInput, source1->quantizedInput},
+                rewriter, fuseGroupAttr
             );
             return success();
         }
 
-        if (qInfo.scale == 0.0)
+        if (chain.outputInfo.scale == 0.0)
             return rewriter.notifyMatchFailure(mulOp, "quant scale is zero");
 
-        double combinedScale = dInfo0.scale * dInfo1.scale / qInfo.scale;
+        double combinedScale = dInfo0.scale * dInfo1.scale / chain.outputInfo.scale;
         int32_t multiplier;
         int32_t shift;
         if (!computeMultiplierAndShift(combinedScale, multiplier, shift))
@@ -256,17 +251,17 @@ struct QMulDivConvert : public OpRewritePattern<linalg::GenericOp> {
         LLVM_DEBUG(llvm::dbgs() << "[QMulDivConvert] combinedScale=" << combinedScale
                                 << " multiplier=" << multiplier << " shift=" << shift << "\n";);
 
-        int32_t outputZp = static_cast<int32_t>(std::llround(qInfo.zp));
-        int32_t outputMin = static_cast<int32_t>(std::llround(qInfo.min));
-        int32_t outputMax = static_cast<int32_t>(std::llround(qInfo.max));
+        int32_t outputZp = static_cast<int32_t>(std::llround(chain.outputInfo.zp));
+        int32_t outputMin = static_cast<int32_t>(std::llround(chain.outputInfo.min));
+        int32_t outputMax = static_cast<int32_t>(std::llround(chain.outputInfo.max));
 
         Location loc = mulOp.getLoc();
-        auto outTy = dyn_cast<RankedTensorType>(quantOp.getResult(0).getType());
+        auto outTy = dyn_cast<RankedTensorType>(chain.quantOp.getResult(0).getType());
         if (!outTy)
             return rewriter.notifyMatchFailure(mulOp, "expected ranked output type");
 
         OpBuilder::InsertionGuard g(rewriter);
-        rewriter.setInsertionPoint(quantOp);
+        rewriter.setInsertionPoint(chain.quantOp);
 
         // Subtract each input's zero-point and widen to i16 (zp=0 becomes a cast).
         Value lhs = subtractZeroPoint(rewriter, mulOp, source0->quantizedInput, dInfo0.zp);
@@ -280,12 +275,12 @@ struct QMulDivConvert : public OpRewritePattern<linalg::GenericOp> {
 
         Value mulResult =
             torq_hl::MulOp::create(
-                rewriter, loc, outTy, createInitTensor(quantOp, rewriter, outTy), outputZp,
+                rewriter, loc, outTy, createInitTensor(chain.quantOp, rewriter, outTy), outputZp,
                 outputMin, outputMax, scaleBias, static_cast<int8_t>(shift), lhs, rhs
             )
                 .getResult(0);
 
-        rewriter.replaceOp(quantOp, mulResult);
+        rewriter.replaceOp(chain.quantOp, mulResult);
         return success();
     }
 };

@@ -28,6 +28,7 @@
 
 #include <cmath>
 #include <optional>
+#include <tuple>
 
 #define DEBUG_TYPE "linalg-torq-q-conv2d-pattern"
 
@@ -64,7 +65,7 @@ Value extractBiasOperand(linalg::GenericOp addOp, Value convOutput) {
 // Set the insertion point to after the latest defining op among the given
 // values, or after fallbackOp when no value has a defining op in the same
 // block.  This ensures every consumed value dominates the ops created next.
-static void setInsertionPointAfterLatest(
+void setInsertionPointAfterLatest(
     PatternRewriter &rewriter, Operation *fallbackOp, ArrayRef<Value> values
 ) {
     Operation *latest = fallbackOp;
@@ -130,67 +131,117 @@ Value buildQConvScaleBias(
     return scaleBias;
 }
 
-struct QConv2dConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
+// Shared helper: match the output rescale chain for a quantized conv/depthwise
+// conv: (i32 result) -> DQ -> Q.  The caller is responsible for walking past
+// any allowed intermediate ops (bias add, collapse_shape, etc.) to obtain the
+// value that feeds the DQ.
+LogicalResult
+matchConvRescaleChain(Value chain, PatternRewriter &rewriter, QuantizedOpChain &qChain) {
+    if (failed(matchOutputDequantization(chain, rewriter, qChain)))
+        return failure();
+    if (failed(matchOutputQuantization(qChain.outputDequantOp->getResult(0), rewriter, qChain)))
+        return failure();
+    return success();
+}
+
+// Validate that the quantized conv has an i32 accumulator and extract the
+// scalar input/weight zero points.
+LogicalResult getConvQuantizationParams(
+    Operation *op, PatternRewriter &rewriter, int32_t &inputZp, int32_t &weightZp
+) {
+    auto convOutTy = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+    if (!convOutTy || !convOutTy.getElementType().isInteger(32)) {
+        return rewriter.notifyMatchFailure(op, "expected i32 conv output");
+    }
+    auto maybeInputZp = getScalarI32Const(op->getOperand(2));
+    auto maybeWeightZp = getScalarI32Const(op->getOperand(3));
+    if (!maybeInputZp || !maybeWeightZp) {
+        return rewriter.notifyMatchFailure(op, "input/weight zp not constant scalar");
+    }
+    inputZp = *maybeInputZp;
+    weightZp = *maybeWeightZp;
+    return success();
+}
+
+// Compute the final multiplier/shift from the quant chain's effective input
+// scale and output scale.
+LogicalResult computeConvMultiplierAndShift(
+    Operation *op, const QuantizedOpChain &qChain, PatternRewriter &rewriter, int32_t &multiplier,
+    int32_t &shift
+) {
+    if (qChain.outputInfo.scale == 0.0) {
+        return rewriter.notifyMatchFailure(op, "quant scale is zero");
+    }
+    double scaleFactor = qChain.inputScale() / qChain.outputInfo.scale;
+    if (!computeMultiplierAndShift(scaleFactor, multiplier, shift)) {
+        return rewriter.notifyMatchFailure(op, "failed to compute multiplier/shift");
+    }
+    return success();
+}
+
+// Round the quant chain's output zp/min/max to i32 for the torq_hl op.
+std::tuple<int32_t, int32_t, int32_t> getRoundedOutputQuantParams(const QuantizedOpChain &qChain) {
+    return {
+        static_cast<int32_t>(std::llround(qChain.outputInfo.zp)),
+        static_cast<int32_t>(std::llround(qChain.outputInfo.min)),
+        static_cast<int32_t>(std::llround(qChain.outputInfo.max))
+    };
+}
+
+// Apply pre-conversion weight processing (permutation, weight-zp correction,
+// sign-adjustment) for a quantized conv/depthwise conv.
+Value prepareQConvWeights(
+    Operation *op, Value weights, int32_t weightZp, bool isDepthwise, PatternRewriter &rewriter
+) {
+    std::optional<Value> optionalWeightZpV;
+    if (weightZp != 0)
+        optionalWeightZpV = op->getOperand(3);
+    ScaleClampInfo dummyScInfo;
+    return preConversionWeights(
+        weights, Permutation::none(), optionalWeightZpV, dummyScInfo, rewriter, isDepthwise
+    );
+}
+
+// Build the scale_bias tensor and place it after the latest of its operands
+// so every consumed value dominates it.
+Value buildQConvScaleBiasWithPlacement(
+    PatternRewriter &rewriter, Location loc, RankedTensorType convOutTy, Value bias,
+    Value torqWeights, int32_t inputZp, int32_t multiplier, Operation *insertAfter
+) {
+    setInsertionPointAfterLatest(rewriter, insertAfter, {bias, torqWeights});
+    return buildQConvScaleBias(loc, convOutTy, bias, torqWeights, inputZp, multiplier, rewriter);
+}
+
+std::vector<int64_t> getQConvStrides(Operation *op) {
+    if (auto nchw = dyn_cast<linalg::Conv2DNchwFchwQOp>(op))
+        return attrValuesAsVec(nchw.getStrides());
+    return attrValuesAsVec(cast<linalg::Conv2DNgchwGfchwQOp>(op).getStrides());
+}
+
+std::vector<int64_t> applyQConvDilations(Operation *op, Value &weights, PatternRewriter &rewriter) {
+    std::vector<int64_t> dilations;
+    if (auto nchw = dyn_cast<linalg::Conv2DNchwFchwQOp>(op)) {
+        auto vals = nchw.getDilations().getValues<int64_t>();
+        dilations.assign(vals.begin(), vals.end());
+    }
+    else {
+        auto vals = cast<linalg::Conv2DNgchwGfchwQOp>(op).getDilations().getValues<int64_t>();
+        dilations.assign(vals.begin(), vals.end());
+    }
+    auto mWts = getDilatedWts(weights, dilations, /*isDW1DStride1=*/false, rewriter);
+    if (!failed(mWts))
+        weights = *mWts;
+    return dilations;
+}
+
+struct QConv2DConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
   private:
     const bool _markFuseGroups;
 
-    // Match the dequant -> quant chain that follows the conv (or the optional
-    // bias add).  On success `dequantOp` and `quantOp` are populated together
-    // with their scales/zero-points.
-    LogicalResult matchQConv2DQuantChain(
-        linalg::Conv2DNchwFchwQOp convOp, Value chain, PatternRewriter &rewriter,
-        linalg::GenericOp &dequantOp, double &dequantScale, linalg::GenericOp &quantOp,
-        double &quantScale, double &quantZp, double &quantMin, double &quantMax
-    ) const {
-        if (!chain.hasOneUse()) {
-            LLVM_DEBUG(
-                llvm::dbgs()
-                << "[QConv2dConvert] chain does not have single use before dequant, uses: "
-                << std::distance(chain.getUsers().begin(), chain.getUsers().end()) << "\n"
-            );
-            return rewriter.notifyMatchFailure(
-                convOp, "chain does not have single use before dequant"
-            );
-        }
-        dequantOp = dyn_cast<linalg::GenericOp>(*chain.getUsers().begin());
-        int32_t ignoredDequantZp = 0;
-        if (!dequantOp || !matchDequantGeneric(dequantOp, dequantScale, ignoredDequantZp)) {
-            if (dequantOp)
-                LLVM_DEBUG(
-                    llvm::dbgs() << "[QConv2dConvert] failed to match Q dequant, user: "
-                                 << *chain.getUsers().begin() << "\n"
-                );
-            return rewriter.notifyMatchFailure(convOp, "failed to match Q dequant");
-        }
-        Value dequantResult = dequantOp->getResult(0);
-        if (!dequantResult.hasOneUse()) {
-            LLVM_DEBUG(
-                llvm::dbgs() << "[QConv2dConvert] dequant result has "
-                             << std::distance(
-                                    dequantResult.getUsers().begin(), dequantResult.getUsers().end()
-                                )
-                             << " uses\n"
-            );
-            return rewriter.notifyMatchFailure(convOp, "dequant result has multiple uses");
-        }
-
-        quantOp = dyn_cast<linalg::GenericOp>(*dequantResult.getUsers().begin());
-        if (!quantOp || !matchQuantGeneric(quantOp, quantScale, quantZp, quantMin, quantMax)) {
-            if (quantOp)
-                LLVM_DEBUG(
-                    llvm::dbgs() << "[QConv2dConvert] failed to match Q quant, user: "
-                                 << *dequantResult.getUsers().begin() << "\n"
-                );
-            return rewriter.notifyMatchFailure(convOp, "failed to match Q quant");
-        }
-        return success();
-    }
-
     LogicalResult rewriteQConv2DChain(
-        linalg::Conv2DNchwFchwQOp convOp, linalg::GenericOp addOp, linalg::GenericOp dequantOp,
-        linalg::GenericOp quantOp, Value input, Value torqWeights, Value scaleBias,
-        const PaddingInfo &padInfo, int32_t inputZp, int32_t multiplier, int32_t shift,
-        double quantZp, double quantMin, double quantMax, PatternRewriter &rewriter
+        linalg::Conv2DNchwFchwQOp convOp, linalg::GenericOp addOp, QuantizedOpChain &qChain,
+        Value input, Value torqWeights, Value scaleBias, const PaddingInfo &padInfo,
+        int32_t inputZp, int32_t shift, PatternRewriter &rewriter
     ) const {
         Location loc = convOp.getLoc();
 
@@ -200,33 +251,27 @@ struct QConv2dConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
             }
         }
         LLVM_DEBUG(
-            llvm::dbgs() << "[QConv2dConvert] padding info lrtb=[" << padInfo.lrtbPad[0] << ","
+            llvm::dbgs() << "[QConv2DConvert] padding info lrtb=[" << padInfo.lrtbPad[0] << ","
                          << padInfo.lrtbPad[1] << "," << padInfo.lrtbPad[2] << ","
                          << padInfo.lrtbPad[3] << "]\n"
         );
 
-        auto dilations = convOp.getDilations().getValues<int64_t>();
-        std::vector<int64_t> finalDilationVec(dilations.begin(), dilations.end());
         Value dilatedWeights = torqWeights;
-        auto mWts = getDilatedWts(torqWeights, finalDilationVec, /*isDW1DStride1=*/false, rewriter);
-        if (!failed(mWts))
-            dilatedWeights = *mWts;
+        std::vector<int64_t> finalDilationVec =
+            applyQConvDilations(convOp, dilatedWeights, rewriter);
+        std::vector<int64_t> strideVec = getQConvStrides(convOp);
 
-        std::vector<int64_t> strideVec = attrValuesAsVec(convOp.getStrides());
-
-        Value convInit = quantOp.getDpsInitOperand(0)->get();
+        Value convInit = qChain.quantOp.getDpsInitOperand(0)->get();
         auto outTy = cast<RankedTensorType>(convInit.getType());
 
-        int32_t outputZp = static_cast<int32_t>(std::llround(quantZp));
-        int32_t outputMin = static_cast<int32_t>(std::llround(quantMin));
-        int32_t outputMax = static_cast<int32_t>(std::llround(quantMax));
+        auto [outputZp, outputMin, outputMax] = getRoundedOutputQuantParams(qChain);
 
         LLVM_DEBUG(
-            llvm::dbgs() << "[QConv2dConvert] creating torq_hl.conv2d, outTy=" << outTy << "\n"
+            llvm::dbgs() << "[QConv2DConvert] creating torq_hl.conv2d, outTy=" << outTy << "\n"
         );
         {
             OpBuilder::InsertionGuard g(rewriter);
-            rewriter.setInsertionPoint(quantOp);
+            rewriter.setInsertionPoint(qChain.quantOp);
 
             Value convResult = torq_hl::Conv2DOp::create(
                                    rewriter, loc, outTy, convInit, inputZp, /*weight_zp=*/0,
@@ -240,9 +285,11 @@ struct QConv2dConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
             rewriter.replaceOp(convOp, convOp.getDpsInitOperand(0)->get());
             if (addOp)
                 rewriter.replaceOp(addOp, addOp.getDpsInitOperand(0)->get());
-            rewriter.replaceOp(dequantOp, dequantOp.getDpsInitOperand(0)->get());
-            rewriter.replaceOp(quantOp, convResult);
-            LLVM_DEBUG(llvm::dbgs() << "[QConv2dConvert] replaced Q chain with torq_hl.conv2d\n");
+            rewriter.replaceOp(
+                qChain.outputDequantOp, qChain.outputDequantOp.getDpsInitOperand(0)->get()
+            );
+            rewriter.replaceOp(qChain.quantOp, convResult);
+            LLVM_DEBUG(llvm::dbgs() << "[QConv2DConvert] replaced Q chain with torq_hl.conv2d\n");
         }
 
         return success();
@@ -250,79 +297,56 @@ struct QConv2dConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
 
   public:
     using OpRewritePattern::OpRewritePattern;
-    QConv2dConvert(MLIRContext *context, bool markFuseGroups, PatternBenefit benefit = 1)
+    QConv2DConvert(MLIRContext *context, bool markFuseGroups, PatternBenefit benefit = 1)
         : OpRewritePattern<linalg::Conv2DNchwFchwQOp>(context, benefit),
           _markFuseGroups(markFuseGroups) {}
 
     LogicalResult
     matchAndRewrite(linalg::Conv2DNchwFchwQOp convOp, PatternRewriter &rewriter) const override {
-        LLVM_DEBUG(llvm::dbgs() << "[QConv2dConvert] matching conv: " << convOp << "\n");
+        LLVM_DEBUG(llvm::dbgs() << "[QConv2DConvert] matching conv: " << convOp << "\n");
         TorqStructuredOpMatcher<linalg::Conv2DNchwFchwQOp> matcher;
         if (!matcher.addPredicate(notMarkedFuseGroupIf(_markFuseGroups)).match(convOp)) {
             return rewriter.notifyMatchFailure(convOp, "Q conv match failed");
         }
 
-        Value convOutput = convOp->getResult(0);
-        auto convOutTy = dyn_cast<RankedTensorType>(convOutput.getType());
-        if (!convOutTy || !convOutTy.getElementType().isInteger(32)) {
-            LLVM_DEBUG(
-                llvm::dbgs() << "[QConv2dConvert] expected i32 conv output, got: "
-                             << convOutput.getType() << "\n"
-            );
-            return rewriter.notifyMatchFailure(convOp, "expected i32 conv output");
-        }
-
-        auto maybeInputZp = getScalarI32Const(convOp->getOperand(2));
-        auto maybeWeightZp = getScalarI32Const(convOp->getOperand(3));
-        if (!maybeInputZp || !maybeWeightZp) {
-            LLVM_DEBUG(llvm::dbgs() << "[QConv2dConvert] input/weight zp not constant scalar\n");
-            return rewriter.notifyMatchFailure(convOp, "input/weight zp not constant scalar");
-        }
-        int32_t inputZp = *maybeInputZp;
-        int32_t weightZp = *maybeWeightZp;
+        int32_t inputZp, weightZp;
+        if (failed(getConvQuantizationParams(convOp, rewriter, inputZp, weightZp)))
+            return failure();
 
         Value bias = nullptr;
         linalg::GenericOp addOp = nullptr;
-        Value chain = convOutput;
-        if (convOutput.hasOneUse()) {
-            auto user = dyn_cast<linalg::GenericOp>(*convOutput.getUsers().begin());
+        Value chain = convOp->getResult(0);
+        if (chain.hasOneUse()) {
+            auto user = dyn_cast<linalg::GenericOp>(*chain.getUsers().begin());
             if (user && isElementwiseAddI32(user)) {
                 addOp = user;
-                bias = extractBiasOperand(user, convOutput);
+                bias = extractBiasOperand(user, chain);
                 chain = user->getResult(0);
-                LLVM_DEBUG(llvm::dbgs() << "[QConv2dConvert] found bias add\n");
+                LLVM_DEBUG(llvm::dbgs() << "[QConv2DConvert] found bias add\n");
             }
             else {
                 LLVM_DEBUG(
-                    llvm::dbgs() << "[QConv2dConvert] conv output user is not add: "
-                                 << *convOutput.getUsers().begin() << "\n"
+                    llvm::dbgs() << "[QConv2DConvert] conv output user is not add: "
+                                 << *chain.getUsers().begin() << "\n"
                 );
             }
         }
         else {
             LLVM_DEBUG(
-                llvm::dbgs() << "[QConv2dConvert] conv output has "
-                             << std::distance(
-                                    convOutput.getUsers().begin(), convOutput.getUsers().end()
-                                )
+                llvm::dbgs() << "[QConv2DConvert] conv output has "
+                             << std::distance(chain.getUsers().begin(), chain.getUsers().end())
                              << " uses\n"
             );
         }
 
-        linalg::GenericOp dequantOp;
-        double dequantScale;
-        linalg::GenericOp quantOp;
-        double quantScale, quantZp, quantMin, quantMax;
-        if (failed(matchQConv2DQuantChain(
-                convOp, chain, rewriter, dequantOp, dequantScale, quantOp, quantScale, quantZp,
-                quantMin, quantMax
-            ))) {
-            return failure();
+        QuantizedOpChain qChain;
+        if (failed(matchConvRescaleChain(chain, rewriter, qChain))) {
+            return rewriter.notifyMatchFailure(convOp, "failed to match conv Q chain");
         }
 
         Value input = convOp->getOperand(0);
         Value weightsValue = convOp->getOperand(1);
-        Value output = quantOp->getResult(0);
+        Value output = qChain.quantOp->getResult(0);
 
         // Fold backward padding so the pad op (if any) is included in the fusion
         // group and the conv can use hardware padding.
@@ -336,42 +360,24 @@ struct QConv2dConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
             return success();
         }
 
-        if (quantScale == 0.0) {
-            return rewriter.notifyMatchFailure(convOp, "quant scale is zero");
-        }
-        double scaleFactor = dequantScale / quantScale;
         int32_t multiplier, shift;
-        if (!computeMultiplierAndShift(scaleFactor, multiplier, shift)) {
-            return rewriter.notifyMatchFailure(convOp, "failed to compute multiplier/shift");
-        }
-        LLVM_DEBUG(
-            llvm::dbgs() << "[QConv2dConvert] multiplier=" << multiplier << " shift=" << shift
-                         << "\n"
-        );
+        if (failed(computeConvMultiplierAndShift(convOp, qChain, rewriter, multiplier, shift)))
+            return failure();
 
-        std::optional<Value> optionalWeightZpV;
-        if (weightZp != 0)
-            optionalWeightZpV = convOp->getOperand(3);
-        ScaleClampInfo dummyScInfo;
-        Value torqWeights = preConversionWeights(
-            weightsValue, Permutation::none(), optionalWeightZpV, dummyScInfo, rewriter,
-            /*isDepthwise=*/false
-        );
+        Value torqWeights =
+            prepareQConvWeights(convOp, weightsValue, weightZp, /*isDepthwise=*/false, rewriter);
 
-        // Insert the scale/correction chain after the latest of its operands
-        // (bias and torqWeights) so every consumed value dominates it.
-        setInsertionPointAfterLatest(rewriter, dequantOp, {bias, torqWeights});
-
-        Value scaleBias = buildQConvScaleBias(
-            convOp.getLoc(), convOutTy, bias, torqWeights, inputZp, multiplier, rewriter
+        auto convOutTy = dyn_cast<RankedTensorType>(convOp->getResult(0).getType());
+        Value scaleBias = buildQConvScaleBiasWithPlacement(
+            rewriter, convOp.getLoc(), convOutTy, bias, torqWeights, inputZp, multiplier,
+            qChain.outputDequantOp
         );
         if (!scaleBias) {
             return rewriter.notifyMatchFailure(convOp, "failed to build scale_bias");
         }
 
         return rewriteQConv2DChain(
-            convOp, addOp, dequantOp, quantOp, input, torqWeights, scaleBias, padInfo, inputZp,
-            multiplier, shift, quantZp, quantMin, quantMax, rewriter
+            convOp, addOp, qChain, input, torqWeights, scaleBias, padInfo, inputZp, shift, rewriter
         );
     }
 };
@@ -595,32 +601,6 @@ Value collapseDepthwiseWeights(Value weights, PatternRewriter &rewriter) {
         .getResult();
 }
 
-// Match dequant -> quant on the collapsed conv output.
-LogicalResult matchDepthwiseQuantChain(
-    linalg::Conv2DNgchwGfchwQOp convOp, linalg::GenericOp &dequantOp, double &dequantScale,
-    linalg::GenericOp &quantOp, double &quantScale, double &quantZp, double &quantMin,
-    double &quantMax
-) {
-    Value chain = convOp->getResult(0);
-    if (chain.hasOneUse()) {
-        if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(*chain.getUsers().begin()))
-            chain = collapse.getResult();
-    }
-    if (!chain.hasOneUse())
-        return failure();
-    dequantOp = dyn_cast<linalg::GenericOp>(*chain.getUsers().begin());
-    int32_t ignoredZp = 0;
-    if (!dequantOp || !matchDequantGeneric(dequantOp, dequantScale, ignoredZp))
-        return failure();
-    Value dequantResult = dequantOp->getResult(0);
-    if (!dequantResult.hasOneUse())
-        return failure();
-    quantOp = dyn_cast<linalg::GenericOp>(*dequantResult.getUsers().begin());
-    if (!quantOp || !matchQuantGeneric(quantOp, quantScale, quantZp, quantMin, quantMax))
-        return failure();
-    return success();
-}
-
 struct QDepthwiseConv2DConvert : public OpRewritePattern<linalg::Conv2DNgchwGfchwQOp> {
   private:
     const bool _markFuseGroups;
@@ -643,43 +623,35 @@ struct QDepthwiseConv2DConvert : public OpRewritePattern<linalg::Conv2DNgchwGfch
         if (!isDepthwiseNgchwGfchwQ(convOp))
             return rewriter.notifyMatchFailure(convOp, "not a depthwise grouped conv");
 
-        auto convOutTy = dyn_cast<RankedTensorType>(convOp->getResult(0).getType());
-        if (!convOutTy || !convOutTy.getElementType().isInteger(32))
-            return rewriter.notifyMatchFailure(convOp, "expected i32 conv output");
-
-        auto maybeInputZp = getScalarI32Const(convOp->getOperand(2));
-        auto maybeWeightZp = getScalarI32Const(convOp->getOperand(3));
-        if (!maybeInputZp || !maybeWeightZp)
-            return rewriter.notifyMatchFailure(convOp, "input/weight zp not constant scalar");
-        int32_t inputZp = *maybeInputZp;
-        int32_t weightZp = *maybeWeightZp;
+        int32_t inputZp, weightZp;
+        if (failed(getConvQuantizationParams(convOp, rewriter, inputZp, weightZp)))
+            return failure();
 
         Value bias = extractDepthwiseBias(convOp);
 
-        linalg::GenericOp dequantOp, quantOp;
-        double dequantScale, quantScale, quantZp, quantMin, quantMax;
-        if (failed(matchDepthwiseQuantChain(
-                convOp, dequantOp, dequantScale, quantOp, quantScale, quantZp, quantMin, quantMax
-            ))) {
-            return rewriter.notifyMatchFailure(convOp, "failed to match Q quant chain");
+        QuantizedOpChain qChain;
+        Value chain = convOp->getResult(0);
+        if (chain.hasOneUse()) {
+            if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(*chain.getUsers().begin()))
+                chain = collapse.getResult();
+        }
+        if (failed(matchConvRescaleChain(chain, rewriter, qChain))) {
+            return rewriter.notifyMatchFailure(convOp, "failed to match depthwise Q chain");
         }
 
         if (_markFuseGroups) {
             markFuseGroupBackward(
-                quantOp->getResult(0), {convOp.getInputs()[0], convOp.getInputs()[1]}, rewriter,
-                convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                qChain.quantOp->getResult(0), {convOp.getInputs()[0], convOp.getInputs()[1]},
+                rewriter, convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();
         }
 
-        if (quantScale == 0.0)
-            return rewriter.notifyMatchFailure(convOp, "quant scale is zero");
-        double scaleFactor = dequantScale / quantScale;
         int32_t multiplier, shift;
-        if (!computeMultiplierAndShift(scaleFactor, multiplier, shift))
-            return rewriter.notifyMatchFailure(convOp, "failed to compute multiplier/shift");
+        if (failed(computeConvMultiplierAndShift(convOp, qChain, rewriter, multiplier, shift)))
+            return failure();
 
-        Value outputInit = quantOp.getDpsInitOperand(0)->get();
+        Value outputInit = qChain.quantOp.getDpsInitOperand(0)->get();
 
         PaddingInfo padInfo;
         Value input = prepareDepthwiseInput(convOp, outputInit, rewriter, padInfo);
@@ -690,52 +662,40 @@ struct QDepthwiseConv2DConvert : public OpRewritePattern<linalg::Conv2DNgchwGfch
         if (!weights)
             return rewriter.notifyMatchFailure(convOp, "failed to collapse depthwise weights");
 
-        std::optional<Value> optionalWeightZpV;
-        if (weightZp != 0)
-            optionalWeightZpV = convOp->getOperand(3);
-        ScaleClampInfo dummyScInfo;
-        Value torqWeights = preConversionWeights(
-            weights, Permutation::none(), optionalWeightZpV, dummyScInfo, rewriter,
-            /*isDepthwise=*/true
-        );
+        Value torqWeights =
+            prepareQConvWeights(convOp, weights, weightZp, /*isDepthwise=*/true, rewriter);
 
-        // Insert the scale/correction chain after the latest of its operands
-        // (bias and torqWeights) so every consumed value dominates it.
-        setInsertionPointAfterLatest(rewriter, dequantOp, {bias, torqWeights});
-        Value scaleBias = buildQConvScaleBias(
-            convOp.getLoc(), convOutTy, bias, torqWeights, inputZp, multiplier, rewriter
+        auto convOutTy = dyn_cast<RankedTensorType>(convOp->getResult(0).getType());
+        Value scaleBias = buildQConvScaleBiasWithPlacement(
+            rewriter, convOp.getLoc(), convOutTy, bias, torqWeights, inputZp, multiplier,
+            qChain.outputDequantOp
         );
         if (!scaleBias)
             return rewriter.notifyMatchFailure(convOp, "failed to build scale_bias");
 
         auto outTy = cast<RankedTensorType>(outputInit.getType());
-        int32_t outputZp = static_cast<int32_t>(std::llround(quantZp));
-        int32_t outputMin = static_cast<int32_t>(std::llround(quantMin));
-        int32_t outputMax = static_cast<int32_t>(std::llround(quantMax));
+        auto [outputZp, outputMin, outputMax] = getRoundedOutputQuantParams(qChain);
 
-        auto dilations = convOp.getDilations().getValues<int64_t>();
-        std::vector<int64_t> finalDilationVec(dilations.begin(), dilations.end());
-        auto mWts = getDilatedWts(torqWeights, finalDilationVec, /*isDW1DStride1=*/false, rewriter);
-        if (!failed(mWts))
-            torqWeights = *mWts;
-
-        std::vector<int64_t> strideVec = attrValuesAsVec(convOp.getStrides());
+        Value dilatedWeights = torqWeights;
+        std::vector<int64_t> finalDilationVec =
+            applyQConvDilations(convOp, dilatedWeights, rewriter);
+        std::vector<int64_t> strideVec = getQConvStrides(convOp);
 
         {
             OpBuilder::InsertionGuard g(rewriter);
-            rewriter.setInsertionPoint(quantOp);
+            rewriter.setInsertionPoint(qChain.quantOp);
             int32_t groups = static_cast<int32_t>(convOutTy.getShape()[1]);
             Value convResult =
                 torq_hl::DepthwiseConv2DOp::create(
                     rewriter, convOp.getLoc(), outTy, outputInit, inputZp,
                     /*weight_zp=*/0, outputZp, outputMin, outputMax, shift, groups, padInfo.lrtbPad,
-                    strideVec, finalDilationVec, torq_hl::VectorizationModeEnum::None, torqWeights,
-                    scaleBias, input, /*nhwc_input=*/false, /*segment_output=*/false,
-                    /*is_dw1d_stride1=*/false
+                    strideVec, finalDilationVec, torq_hl::VectorizationModeEnum::None,
+                    dilatedWeights, scaleBias, input, /*nhwc_input=*/false,
+                    /*segment_output=*/false, /*is_dw1d_stride1=*/false
                 )
                     .getResult(0);
             rewriter.replaceOp(convOp, convOp.getDpsInitOperand(0)->get());
-            rewriter.replaceOp(quantOp, convResult);
+            rewriter.replaceOp(qChain.quantOp, convResult);
         }
         return success();
     }
@@ -746,7 +706,7 @@ struct QDepthwiseConv2DConvert : public OpRewritePattern<linalg::Conv2DNgchwGfch
 void populateLinalgToTorqHLQConv2DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-    patterns.insert<QConv2dConvert>(context, markFuseGroups);
+    patterns.insert<QConv2DConvert>(context, markFuseGroups);
     patterns.insert<QDepthwiseConv2DConvert>(context, markFuseGroups);
 }
 

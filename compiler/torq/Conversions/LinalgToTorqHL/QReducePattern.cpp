@@ -100,24 +100,25 @@ struct QReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
     }
 
     // Match the full DQ -> sum -> div -> Q chain rooted at the mean generic.
+    // The caller handles the sum/mean generics in the middle; the shared helpers
+    // match the DQ and Q.
     LogicalResult matchQReduceMeanChain(
         linalg::GenericOp meanOp, PatternRewriter &rewriter, linalg::GenericOp &sumOp,
-        linalg::GenericOp &dequantOp, DequantInfo &dInfo, linalg::GenericOp &quantOp,
-        QuantInfo &qInfo, Value &dequantInput, int64_t &numChannels, double &reducedElements
+        QuantizedOpChain &chain, Value &dequantInput, int64_t &numChannels, double &reducedElements
     ) const {
         if (failed(matchMeanGeneric(meanOp, sumOp, reducedElements, rewriter)))
             return failure();
 
         // Match dequant feeding the sum reduction.
-        dequantOp = sumOp.getInputs()[0].getDefiningOp<linalg::GenericOp>();
-        if (!dequantOp || !matchDequantGeneric(dequantOp, dInfo.scale, dInfo.zp))
+        Value dequantValue = sumOp.getInputs()[0];
+        if (failed(matchInputQuantization(dequantValue, rewriter, chain)))
             return rewriter.notifyMatchFailure(meanOp, "failed to match Q dequant");
 
-        auto dequantResultType = dyn_cast<ShapedType>(dequantOp.getResult(0).getType());
+        auto dequantResultType = dyn_cast<ShapedType>(chain.inputDequantOp.getResult(0).getType());
         if (!dequantResultType || !dequantResultType.getElementType().isF32())
             return rewriter.notifyMatchFailure(meanOp, "dequant output must be f32");
 
-        dequantInput = dequantOp.getInputs()[0];
+        dequantInput = chain.inputDequantOp.getInputs()[0];
         auto inputType = dyn_cast<RankedTensorType>(dequantInput.getType());
         if (!inputType || !inputType.getElementType().isInteger(8) || inputType.getRank() != 4)
             return rewriter.notifyMatchFailure(meanOp, "dequant input must be 4-D int8");
@@ -131,13 +132,8 @@ struct QReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             std::llround(reducedElements) != expectedReducedElements)
             return rewriter.notifyMatchFailure(meanOp, "divisor does not match H*W");
 
-        // Match quant consuming the mean output (directly, possibly through shape casts).
-        Value quantInput = meanOp.getResult(0);
-        if (!quantInput.hasOneUse())
-            return rewriter.notifyMatchFailure(meanOp, "mean output must have single use");
-
-        quantOp = dyn_cast<linalg::GenericOp>(*quantInput.getUsers().begin());
-        if (!quantOp || !matchQuantGeneric(quantOp, qInfo.scale, qInfo.zp, qInfo.min, qInfo.max))
+        // Match quant consuming the mean output.
+        if (failed(matchOutputQuantization(meanOp.getResult(0), rewriter, chain)))
             return rewriter.notifyMatchFailure(meanOp, "failed to match Q quant");
 
         return success();
@@ -164,15 +160,13 @@ struct QReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         if (_markFuseGroups && isMarkedFuseGroup(meanOp))
             return rewriter.notifyMatchFailure(meanOp, "already marked");
 
-        linalg::GenericOp sumOp, dequantOp, quantOp;
-        DequantInfo dInfo;
-        QuantInfo qInfo;
+        linalg::GenericOp sumOp;
+        QuantizedOpChain chain;
         Value dequantInput;
         int64_t numChannels;
         double reducedElements;
         if (failed(matchQReduceMeanChain(
-                meanOp, rewriter, sumOp, dequantOp, dInfo, quantOp, qInfo, dequantInput,
-                numChannels, reducedElements
+                meanOp, rewriter, sumOp, chain, dequantInput, numChannels, reducedElements
             )))
             return failure();
 
@@ -180,16 +174,18 @@ struct QReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             auto fuseGroupAttr = meanOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(meanOp, "missing fuse group id");
-            markFuseGroupBackward(quantOp.getResult(0), {dequantInput}, rewriter, fuseGroupAttr);
+            markFuseGroupBackward(
+                chain.quantOp.getResult(0), {dequantInput}, rewriter, fuseGroupAttr
+            );
             return success();
         }
 
-        if (qInfo.scale == 0.0)
+        if (chain.outputInfo.scale == 0.0)
             return rewriter.notifyMatchFailure(meanOp, "quant scale is zero");
 
         // Combined rescale: input_scale / (reduced_elements * output_scale).
         double avgScale = 1.0 / reducedElements;
-        double rescaleRatio = dInfo.scale * avgScale / qInfo.scale;
+        double rescaleRatio = chain.inputInfo.scale * avgScale / chain.outputInfo.scale;
 
         int32_t multiplier, shift;
         if (!computeMultiplierAndShift(rescaleRatio, multiplier, shift))
@@ -199,7 +195,8 @@ struct QReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
                                 << " shift=" << shift << " reducedElements=" << reducedElements
                                 << " avgScale=" << avgScale << "\n";);
 
-        int32_t bias32 = -static_cast<int32_t>(reducedElements * static_cast<int64_t>(dInfo.zp));
+        int32_t bias32 =
+            -static_cast<int32_t>(reducedElements * static_cast<int64_t>(chain.inputInfo.zp));
         Value scaleBias = buildScaleBias(meanOp, numChannels, multiplier, bias32, rewriter);
 
         Location loc = meanOp.getLoc();
@@ -209,7 +206,7 @@ struct QReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         // ReduceMean over HxW produces [N, C, 1, 1] in NCHW, i.e. [N, 1, 1, C] in NHWC.
         auto dequantInputType = cast<RankedTensorType>(dequantInput.getType());
         auto inputShape = dequantInputType.getShape();
-        auto quantResultType = cast<RankedTensorType>(quantOp.getResult(0).getType());
+        auto quantResultType = cast<RankedTensorType>(chain.quantOp.getResult(0).getType());
         auto nhwcOutputType = RankedTensorType::get(
             {inputShape[0], 1, 1, inputShape[1]}, quantResultType.getElementType()
         );
@@ -218,17 +215,17 @@ struct QReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             rewriter, meanOp, std::vector<int8_t>{1}, llvm::ArrayRef<int64_t>{1, 1, 1, 1}
         );
 
-        int32_t outputZp = static_cast<int32_t>(std::llround(qInfo.zp));
-        int32_t outputMin = static_cast<int32_t>(std::llround(qInfo.min));
-        int32_t outputMax = static_cast<int32_t>(std::llround(qInfo.max));
+        int32_t outputZp = static_cast<int32_t>(std::llround(chain.outputInfo.zp));
+        int32_t outputMin = static_cast<int32_t>(std::llround(chain.outputInfo.min));
+        int32_t outputMax = static_cast<int32_t>(std::llround(chain.outputInfo.max));
 
         OpBuilder::InsertionGuard g(rewriter);
-        rewriter.setInsertionPoint(quantOp);
+        rewriter.setInsertionPoint(chain.quantOp);
 
         auto avgPoolOp = torq_hl::AvgPool2DOp::create(
             rewriter, loc, nhwcOutputType, createInitTensor(meanOp, rewriter, nhwcOutputType),
-            /*input_zp=*/dInfo.zp, outputZp, outputMin, outputMax, shift, weights, scaleBias,
-            nhwcInput
+            /*input_zp=*/chain.inputInfo.zp, outputZp, outputMin, outputMax, shift, weights,
+            scaleBias, nhwcInput
         );
 
         Value torqOut = transposeValue(avgPoolOp.getOutput(), nchwToNhwc.reverse(), loc, rewriter);
@@ -241,10 +238,10 @@ struct QReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             );
         }
 
-        rewriter.replaceOp(quantOp, torqOut);
+        rewriter.replaceOp(chain.quantOp, torqOut);
         rewriter.eraseOp(meanOp);
         rewriter.eraseOp(sumOp);
-        rewriter.eraseOp(dequantOp);
+        rewriter.eraseOp(chain.inputDequantOp);
         return success();
     }
 };

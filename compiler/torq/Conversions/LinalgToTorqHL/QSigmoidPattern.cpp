@@ -79,24 +79,16 @@ struct QSigmoidConvert : public OpRewritePattern<linalg::GenericOp> {
         if (!matchSigmoidGeneric(sigmoidOp))
             return rewriter.notifyMatchFailure(sigmoidOp, "not a sigmoid generic");
 
-        Value sigmoidOutput = sigmoidOp.getResult(0);
-        if (!sigmoidOutput.hasOneUse())
-            return rewriter.notifyMatchFailure(sigmoidOp, "sigmoid output has multiple uses");
-
-        auto quantOp = dyn_cast<linalg::GenericOp>(*sigmoidOutput.getUsers().begin());
-        QuantInfo qInfo;
-        if (!quantOp || !matchQuantGeneric(quantOp, qInfo.scale, qInfo.zp, qInfo.min, qInfo.max))
+        QuantizedOpChain chain;
+        if (failed(matchOutputQuantization(sigmoidOp.getResult(0), rewriter, chain)))
             return rewriter.notifyMatchFailure(sigmoidOp, "failed to match quant generic");
 
-        Value dequantInput = sigmoidOp.getInputs()[0];
-        auto dequantOp = dyn_cast<linalg::GenericOp>(dequantInput.getDefiningOp());
-        DequantInfo dInfo;
-        if (!dequantOp || !matchDequantGeneric(dequantOp, dInfo.scale, dInfo.zp))
+        if (failed(matchInputQuantization(sigmoidOp.getInputs()[0], rewriter, chain)))
             return rewriter.notifyMatchFailure(sigmoidOp, "failed to match dequant generic");
 
-        Value input = dequantOp.getInputs()[0];
+        Value input = chain.inputDequantOp.getInputs()[0];
         auto inputType = dyn_cast<RankedTensorType>(input.getType());
-        auto outputType = dyn_cast<RankedTensorType>(quantOp.getResult(0).getType());
+        auto outputType = dyn_cast<RankedTensorType>(chain.quantOp.getResult(0).getType());
         if (!inputType || !outputType || !inputType.getElementType().isInteger(8) ||
             !outputType.getElementType().isInteger(8)) {
             return rewriter.notifyMatchFailure(sigmoidOp, "expected i8 input/output");
@@ -106,18 +98,19 @@ struct QSigmoidConvert : public OpRewritePattern<linalg::GenericOp> {
             auto fuseGroupAttr = sigmoidOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(sigmoidOp, "missing fuse group id");
-            markFuseGroupBackward(quantOp.getResult(0), {input}, rewriter, fuseGroupAttr);
+            markFuseGroupBackward(chain.quantOp.getResult(0), {input}, rewriter, fuseGroupAttr);
             return success();
         }
 
-        if (qInfo.scale == 0.0)
+        if (chain.outputInfo.scale == 0.0)
             return rewriter.notifyMatchFailure(sigmoidOp, "quant scale is zero");
 
-        LLVM_DEBUG(llvm::dbgs() << "[QSigmoidConvert] input_scale=" << dInfo.scale
-                                << " input_zp=" << dInfo.zp << " output_scale=" << qInfo.scale
-                                << " output_zp=" << qInfo.zp << "\n";);
+        LLVM_DEBUG(llvm::dbgs() << "[QSigmoidConvert] input_scale=" << chain.inputInfo.scale
+                                << " input_zp=" << chain.inputInfo.zp
+                                << " output_scale=" << chain.outputInfo.scale
+                                << " output_zp=" << chain.outputInfo.zp << "\n";);
 
-        SmallVector<int32_t> tableValues = buildSigmoidTable(dInfo, qInfo);
+        SmallVector<int32_t> tableValues = buildSigmoidTable(chain.inputInfo, chain.outputInfo);
         Value packedTable =
             createI32Const(rewriter, sigmoidOp, tableValues, llvm::ArrayRef<int64_t>{256});
 
@@ -128,16 +121,16 @@ struct QSigmoidConvert : public OpRewritePattern<linalg::GenericOp> {
 
         Location loc = sigmoidOp.getLoc();
         OpBuilder::InsertionGuard g(rewriter);
-        rewriter.setInsertionPoint(quantOp);
+        rewriter.setInsertionPoint(chain.quantOp);
 
         Value tableResult =
             torq_hl::TableOp::create(
-                rewriter, loc, outputType, createInitTensor(quantOp, rewriter, outputType),
+                rewriter, loc, outputType, createInitTensor(chain.quantOp, rewriter, outputType),
                 scaleBias, input, packedTable, nullptr
             )
                 .getResult(0);
 
-        rewriter.replaceOp(quantOp, tableResult);
+        rewriter.replaceOp(chain.quantOp, tableResult);
         return success();
     }
 };
