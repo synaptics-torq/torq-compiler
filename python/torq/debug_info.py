@@ -58,13 +58,13 @@ class InvocationEventData:
 
 def parse_profiling_log(profiling_file: str) -> List[InvocationEventData]:
     """
-    Parse the profiling log produced by the runtime (with --torq_profile_host) and return 
+    Parse the profiling log produced by the runtime (with --torq_profile_host) and return
     a list of InvocationEventData objects representing the events in the log.
     """
 
 
     profiling_data = pd.read_csv(profiling_file, sep=',')
-    
+
     invocations = {}
 
     for _, row in profiling_data.iterrows():
@@ -82,7 +82,7 @@ def parse_profiling_log(profiling_file: str) -> List[InvocationEventData]:
             action_id=int(row['action_id']),
             event=row['event'],
             timestamp_ns=int(row['timestamp_us']) * 1000)
-        
+
         invocation_data.event_data.append(entry)
 
     return invocations.values()
@@ -126,13 +126,13 @@ def generate_action_profiling_data(raw_entries: List[EventData]) -> OrderedDict[
 
     result = {}
 
-    for entry in raw_entries:        
+    for entry in raw_entries:
 
         action_name, event_type = entry.event.rsplit("_", 1)
 
         action_entry = result.get(entry.action_id)
 
-        if action_entry is None:          
+        if action_entry is None:
 
             action_entry = ActionProfilingData(
                 action_id=entry.action_id,
@@ -144,12 +144,12 @@ def generate_action_profiling_data(raw_entries: List[EventData]) -> OrderedDict[
             result[entry.action_id] = action_entry
 
         if event_type == "BEGIN":
-            action_entry.start_time_ns = entry.timestamp_ns            
+            action_entry.start_time_ns = entry.timestamp_ns
         elif event_type == "END":
             action_entry.end_time_ns = entry.timestamp_ns
         else:
             raise ValueError(f"Unknown event type {event_type} in profiling log")
-    
+
     return result
 
 
@@ -162,14 +162,14 @@ class ActionDebugInfo:
         self.workunit = None
 
     @property
-    def is_start_nss_action(self) -> bool:        
+    def is_start_nss_action(self) -> bool:
         return self.operation.name == "torq_hl.start_program" and str(self.operation.operands[0].type) == "!torq_hl.invocation<nss>"
 
     @property
     def nss_program(self) -> Optional[Value]:
         if not self.is_start_nss_action:
             return None
-        
+
         invocation = self.operation.operands[0]
         return invocation.owner.operands[0].owner
 
@@ -177,26 +177,26 @@ class ActionDebugInfo:
     def nss_invocation_args(self) -> Optional[List[Value]]:
         if not self.is_start_nss_action:
             return None
-        
-        args_offset = 1 + self.operation.attributes["operandSegmentSizes"][1]        
+
+        args_offset = 1 + self.operation.attributes["operandSegmentSizes"][1]
         return self.operation.operands[args_offset:]
 
     @property
     def action_id(self) -> int:
         return self.operation.attributes["torq-action-id"].value
-    
+
     @property
     def start_time_ns(self) -> Optional[int]:
         return self.dispatch.get_operation_start_time_ns(self.operation)
-        
+
     @property
     def end_time_ns(self) -> Optional[int]:
-        return self.dispatch.get_operation_end_time_ns(self.operation)        
+        return self.dispatch.get_operation_end_time_ns(self.operation)
 
     @property
     def total_time_ns(self) -> Optional[int]:
         return _safe_total_time_ns(self.start_time_ns, self.end_time_ns)
-    
+
     @property
     def location(self) -> Location:
         return self.operation.location
@@ -215,11 +215,34 @@ class Executor(Enum):
     HAL = "HAL"
 
 
+def _optional_int_attr(operation: Operation, name: str) -> Optional[int]:
+    if name in operation.attributes:
+        return operation.attributes[name].value
+    return None
+
+
+def _dma_data_annotations(
+    src: Value, dst: Value, src_address: Optional[int], dst_address: Optional[int]
+) -> Dict[str, str]:
+    """Detail-panel entries (source/dest memref type and address) for a DMA transfer."""
+    result = {}
+
+    result["source"] = str(src.type)
+    if src_address is not None:
+        result["source address"] = hex(src_address)
+
+    result["dest"] = str(dst.type)
+    if dst_address is not None:
+        result["dest address"] = hex(dst_address)
+
+    return result
+
+
 class WorkUnitDebugInfo(ABC):
     """
     A work unit is a unit of execution on a given executor (e.g. Slice / NSS CFG / Host )
 
-    A work unit starts at a given start_time, is ready at a given ready_time and 
+    A work unit starts at a given start_time, is ready at a given ready_time and
     releases the executor at a given end_time.
     """
 
@@ -242,9 +265,14 @@ class WorkUnitDebugInfo(ABC):
         return self.start_operation.location
 
     @property
+    def annotations(self) -> Dict[str, str]:
+        """Key/value details shown in the profiler's slice detail panel."""
+        return {}
+
+    @property
     def start_time_ns(self) -> Optional[int]:
         return self.dispatch.get_operation_start_time_ns(self.start_operation)
-    
+
     @property
     def end_time_ns(self) -> Optional[int]:
         return self.dispatch.get_operation_end_time_ns(self.end_operation)
@@ -252,7 +280,7 @@ class WorkUnitDebugInfo(ABC):
     @property
     def total_time_ns(self) -> Optional[int]:
         return _safe_total_time_ns(self.start_time_ns, self.end_time_ns)
-    
+
     @property
     def ready_time_ns(self) -> Optional[int]:
         """
@@ -265,15 +293,15 @@ class WorkUnitDebugInfo(ABC):
 
         if start_time is not None and async_duration is not None:
             return start_time + async_duration
-        
+
         return None
-    
+
     @classmethod
     def pretty_name(cls):
         if hasattr(cls, "_pretty_name"):
             return cls._pretty_name
-        
-        name = cls.__name__.replace("WorkUnitDebugInfo", "")        
+
+        name = cls.__name__.replace("WorkUnitDebugInfo", "")
         cls._pretty_name = re.sub(r'([A-Z])', r' \1', name).strip()
 
         return cls._pretty_name
@@ -288,7 +316,7 @@ class HostProgramWorkUnitDebugInfo(WorkUnitDebugInfo):
     @property
     def invocation(self) -> Value:
         return self.start_operation.operands[0]
-    
+
     @property
     def executor(self) -> Executor:
         return Executor.HOST
@@ -309,7 +337,7 @@ class HalWorkUnitDebugInfo(WorkUnitDebugInfo):
 
 
 class NssProgramWorkUnitDebugInfo(WorkUnitDebugInfo):
-    
+
     def __init__(self, dispatch, start_operation, end_operation):
         super().__init__(dispatch, start_operation, end_operation)
         self.slice_used = [False, False]
@@ -346,7 +374,7 @@ class NssProgramWorkUnitDebugInfo(WorkUnitDebugInfo):
 
     @property
     def job_id(self) -> Optional[int]:
-        invocation = self.start_operation.operands[0]        
+        invocation = self.start_operation.operands[0]
         return invocation.owner.operation.attributes["torq-job-id"].value
 
     @property
@@ -366,14 +394,14 @@ class NssProgramWorkUnitDebugInfo(WorkUnitDebugInfo):
 
 
 class NssCfgWorkUnitDebugInfo(WorkUnitDebugInfo):
-    
+
     def __init__(self, dispatch, task_op):
         super().__init__(dispatch, task_op, task_op)
-    
+
     @property
     def executor(self) -> Executor:
         return Executor.NSS_CFG
-    
+
     @property
     def task_id(self) -> int:
         return self.start_operation.attributes["torq-task-id"].value
@@ -381,23 +409,23 @@ class NssCfgWorkUnitDebugInfo(WorkUnitDebugInfo):
     @property
     def pretty_print(self):
         return f"{self.pretty_name()} | Task: {self.task_id} | " + self.dispatch.debug_info.pretty_print_location(self.location)
-    
+
 
 class NssManagedWorkUnitDebugInfo(WorkUnitDebugInfo):
     """
     Work units that are managed by the NSS are started and stopped
-    by operations inside a torq_hw.nss_task operation so the 
-    start_time/end_time is found differently than other 
-    work units where the timing is directly on the start 
+    by operations inside a torq_hw.nss_task operation so the
+    start_time/end_time is found differently than other
+    work units where the timing is directly on the start
     and end operations (e.g. host programs and host copies)
     """
 
     @property
     def start_time_ns(self) -> Optional[int]:
         return self.dispatch.get_operation_start_time_ns(self.start_operation.parent)
-    
+
     @property
-    def end_time_ns(self) -> Optional[int]:        
+    def end_time_ns(self) -> Optional[int]:
         return self.dispatch.get_operation_end_time_ns(self.end_operation.parent)
 
 
@@ -422,45 +450,97 @@ class SliceProgramWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
     def invocation_name(self) -> str:
         invocation = self.dispatch.resolve_argument(self.start_operation, 0)
         return invocation.owner.attributes["name"].value[len("slice_program_torq_hl.") :]
-    
+
     @property
     def pretty_print(self):
         return f"{self.pretty_name()} | {self.invocation_name}"
 
+    @property
+    def annotations(self) -> Dict[str, str]:
+        result = {"location": self.dispatch.debug_info.pretty_print_location(self.location)}
+        program_address = _optional_int_attr(self.start_operation, "program_address")
+        if program_address is not None:
+            result["program address"] = hex(program_address)
+        return result
+
 
 class CdmaWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
 
+    # cdma_start operand order follows its op definition: (dest, src).
     def is_from_dtcm(self) -> bool:
-        input_operand = self.start_operation.operands[0]        
+        input_operand = self.start_operation.operands[1]
         return "mem_space = dtcm" in str(input_operand.type.memory_space)
 
 
     def is_from_itcm(self) -> bool:
-        input_operand = self.start_operation.operands[0]        
+        input_operand = self.start_operation.operands[1]
         return "mem_space = itcm" in str(input_operand.type.memory_space)
 
 
     def is_to_dtcm(self) -> bool:
-        output_operand = self.start_operation.operands[1]        
+        output_operand = self.start_operation.operands[0]
         return "mem_space = dtcm" in str(output_operand.type.memory_space)
 
     def is_to_itcm(self) -> bool:
-        output_operand = self.start_operation.operands[1]        
+        output_operand = self.start_operation.operands[0]
         return "mem_space = itcm" in str(output_operand.type.memory_space)
 
     @property
     def executor(self) -> Executor:
         return Executor.CDMA
 
+    @property
+    def annotations(self) -> Dict[str, str]:
+        op = self.start_operation
+        if len(op.operands) < 2:
+            return {}
+        return _dma_data_annotations(
+            src=op.operands[1], dst=op.operands[0],
+            src_address=_optional_int_attr(op, "src_address"),
+            dst_address=_optional_int_attr(op, "dest_address"),
+        )
 
-class DmaInWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
+
+class NdmaWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
+    """NDMA in/out work unit. The moved memrefs and addresses live on the sibling
+    *_cfg op, not the *_start op, so annotations are read from there."""
+
+    _cfg_op_name: Optional[str] = None
+
+    @property
+    def cfg_op(self) -> Optional[Operation]:
+        task = self.start_operation.parent
+        if task is None:
+            return None
+        for op in task.regions[0].blocks[0].operations:
+            if op.name == self._cfg_op_name:
+                return op
+        return None
+
+    @property
+    def annotations(self) -> Dict[str, str]:
+        cfg = self.cfg_op
+        if cfg is None:
+            return {}
+        return _dma_data_annotations(
+            src=cfg.operands[0], dst=cfg.operands[1],
+            src_address=_optional_int_attr(cfg, "read_address"),
+            dst_address=_optional_int_attr(cfg, "write_address"),
+        )
+
+
+class DmaInWorkUnitDebugInfo(NdmaWorkUnitDebugInfo):
+
+    _cfg_op_name = "torq_hw.dma_in_cfg"
 
     @property
     def executor(self) -> Executor:
         return Executor.DMA_IN
 
 
-class DmaOutWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
+class DmaOutWorkUnitDebugInfo(NdmaWorkUnitDebugInfo):
+
+    _cfg_op_name = "torq_hw.dma_out_cfg"
 
     @property
     def executor(self) -> Executor:
@@ -487,12 +567,12 @@ class OriginalLocationDebugInfo:
 
 
 class BlockDebugInfo:
-    
+
     def __init__(self, dispatch: 'DispatchDebugInfo', block: Block, args: List[Value]):
         self.dispatch = dispatch
         self.block = block
         self.args = args
-    
+
     def get_argument(self, value: Value) -> Value:
         try:
             arg = BlockArgument(value)
@@ -579,32 +659,32 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
                 self.dispatch = op
                 break
         else:
-            raise ValueError("Dispatch function not found in module")                
+            raise ValueError("Dispatch function not found in module")
 
         # maps (block, arg_num) where block is a block of an NSS program to the value
         # that is passed to it when the program is executed
         self.block_arg_to_value = {}
-        self.actions = self._load_actions()                        
+        self.actions = self._load_actions()
         self.nss_blocks_info = {}
         self._load_nss_blocks_info()
         self.workunits = self._load_host_workunits()
         self.original_locations = self._load_original_locations()
 
     def _load_actions(self) -> OrderedDict[int, ActionDebugInfo]:
-        actions = []                
+        actions = []
         for region in self.dispatch.operation.regions:
             for block in region:
                 for op in block.operations:
-                    if "torq-action-id" in op.operation.attributes:                        
-                        action = ActionDebugInfo(self, op)                        
-                        actions.append(action)                        
+                    if "torq-action-id" in op.operation.attributes:
+                        action = ActionDebugInfo(self, op)
+                        actions.append(action)
 
-        return OrderedDict([(x.action_id, x) for x in sorted(actions, key=lambda a: a.action_id)])        
+        return OrderedDict([(x.action_id, x) for x in sorted(actions, key=lambda a: a.action_id)])
 
 
     def _load_nss_blocks_info(self):
         for action in self.actions.values():
-            
+
             if not action.is_start_nss_action:
                 continue
 
@@ -616,7 +696,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
             finished = False
 
             while not finished:
-                for op in block_info.block.operations:                    
+                for op in block_info.block.operations:
                     if op.name == "torq_hl.next":
                         next_block_args = []
 
@@ -658,7 +738,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
                     self._load_nss_workunits(invocation, workunits, pending)
                 else:
                     raise ValueError(f"Unknown invocation type {invocation_type} at action id {action.action_id}")
-                
+
                 action.workunit = workunit
 
                 workunits.append(workunit)
@@ -667,7 +747,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
 
                 invocation = action.operation.operands[0]
                 invocation_type = str(invocation.type)
-                
+
                 if invocation_type == "!torq_hl.invocation<host>":
                     workunit = pending.host_program
                     pending.host_program = None
@@ -725,17 +805,17 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
                         pending.slice_programs[workunit.executor_instance_id] = workunit
                         pending.nss_program.slice_used[workunit.executor_instance_id] = True
                         pending.nss_program.related_workunits.add(workunit)
-                        
+
                     for dma_in_start in self._get_task_operations_of_type(op, "torq_hw.dma_in_start"):
                         pending.dma_in = DmaInWorkUnitDebugInfo(self, dma_in_start, None)
                         pending.nss_program.dma_in_used = True
                         pending.nss_program.related_workunits.add(pending.dma_in)
-                        
+
                     for dma_out_start in self._get_task_operations_of_type(op, "torq_hw.dma_out_start"):
                         pending.dma_out = DmaOutWorkUnitDebugInfo(self, dma_out_start, None)
                         pending.nss_program.dma_out_used = True
                         pending.nss_program.related_workunits.add(pending.dma_out)
-                        
+
                     for cdma_start in self._get_task_operations_of_type(op, "torq_hw.cdma_start"):
                         pending.cdma = CdmaWorkUnitDebugInfo(self, cdma_start, None)
                         pending.nss_program.cdma_used = True
@@ -792,7 +872,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
 
         for workunit in self.workunits:
 
-            original_location = workunit.location            
+            original_location = workunit.location
 
             all_locations = loc_utils.extract_all_file_locations(str(original_location))
 
@@ -803,7 +883,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
                 if debug_info is None:
                     debug_info = OriginalLocationDebugInfo(self, file_location)
                     original_locations_debug_info[file_location] = debug_info
-                
+
                 debug_info.workunits[workunit] = None
 
         # return a list of original locations sorted by filename and then line and column number to ensure a deterministic order
@@ -833,7 +913,7 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
 
         # Annotate the action operations with the timing data from the profiling log
         for action_id, profile_data in actions_profile.items():
-            
+
             # the action id may be -1 if the log inforamtion corresponds to DISPATCH_{BEGIN/END} event
             if action_id == -1:
                 continue
@@ -1078,8 +1158,8 @@ class DebugInfo:
 
         with open(dispatch_file, 'rb') as mlir_file:
             mlir_content = mlir_file.read()
-            
-        module = Module.parse(mlir_content, context=self.context)    
+
+        module = Module.parse(mlir_content, context=self.context)
 
         self._dispatches[dispatch_name] = DispatchDebugInfo(self, module)
 
@@ -1111,22 +1191,22 @@ class DebugInfo:
                 return ploc.name.strip('"')
             else:
                 return loc_str
-        
+
         return pretty_print_parsed_location(ploc)
 
-    def _extract_operator(self, line_no: int, line: str): 
+    def _extract_operator(self, line_no: int, line: str):
         line = line.strip()
 
         if not line:
             return None
-        
+
         # Remove result assignment (e.g., "%0 = ...")
         if "=" in line:
             lhs = line.split("=", 1)[0].strip()
             # Only split if the LHS looks like a result definition (starts with % or ()
             if lhs.startswith("%") or lhs.startswith("("):
                 line = line.split("=", 1)[1].strip()
-        
+
         # Handle torch.operator "..." pattern (covers ONNX and other operators)
         if line.startswith('torch.operator '):
             match = re.search(r'"([^"]+)"', line)
@@ -1138,7 +1218,7 @@ class DebugInfo:
             match = re.search(r'"([^"]+)"', line)
             if match:
                 return match.group(1) + "@L" + str(line_no)
-            
+
         elif line.startswith('tosa.'):
             # Return the first token (e.g., "tosa.conv2d")
             return line.split()[0] + "@L" + str(line_no)
@@ -1166,6 +1246,6 @@ class DebugInfo:
             operator = self._extract_operator(int(file_location.line), line)
 
             if operator is not None:
-                operators.append(operator)            
+                operators.append(operator)
 
         return operators

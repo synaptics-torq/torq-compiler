@@ -68,12 +68,13 @@ def format_time_duration(ns):
 class PerfettoEvent:
     """Represents a single trace event with timing information."""
         
-    tuuid: str    
+    tuuid: str
     function: str
     start_time: int
     end_time: int
     category: Optional[str] = None
     correlation_id: Optional[str] = None
+    annotations: Optional[dict] = None
 
 
 class PerfettoTraceWriter:
@@ -155,6 +156,13 @@ class PerfettoTraceWriter:
         # Color hint
         if event.category is not None:
             track_event.categories.append(event.category)
+
+        # Attach detail-panel key/values to the slice's begin event
+        if event_type == perfetto.TrackEvent.Type.TYPE_SLICE_BEGIN and event.annotations:
+            for key, value in event.annotations.items():
+                annotation = track_event.debug_annotations.add()
+                annotation.name = str(key)
+                annotation.string_value = str(value)
 
         # we need to upgrade perfetto
         #if event.correlation_id is not None:
@@ -787,15 +795,15 @@ def _get_compile_time_range(dispatch, start_op, end_op):
     return start_ns, end_ns, duration_ns
 
 
-def _emit_compile_event(trace_writer, tuuid, details, event_start, event_end, async_duration_ns=None):
+def _emit_compile_event(trace_writer, tuuid, details, event_start, event_end, async_duration_ns=None, annotations=None):
     """Emit a compile-time event, splitting into active + WAITING if async duration is shorter."""
     duration = event_end - event_start
     if async_duration_ns is not None and async_duration_ns < duration:
         ready_time = event_start + async_duration_ns
-        trace_writer.add_event(PerfettoEvent(tuuid, details, event_start, ready_time))
+        trace_writer.add_event(PerfettoEvent(tuuid, details, event_start, ready_time, annotations=annotations))
         trace_writer.add_event(PerfettoEvent(tuuid, "WAITING", ready_time, event_end))
     else:
-        trace_writer.add_event(PerfettoEvent(tuuid, details, event_start, event_end))
+        trace_writer.add_event(PerfettoEvent(tuuid, details, event_start, event_end, annotations=annotations))
 
 
 def _log_compile_time_traces(trace_writer, dispatch):
@@ -852,7 +860,8 @@ def _log_compile_time_traces(trace_writer, dispatch):
                 compile_info = dispatch.get_compile_time_info(workunit.start_operation)
                 async_dur = compile_info.async_duration_ns if compile_info else None
                 _emit_compile_event(trace_writer, track_uuids[0], workunit.pretty_print,
-                                    runtime_start, runtime_start + compile_duration, async_dur)
+                                    runtime_start, runtime_start + compile_duration, async_dur,
+                                    annotations=workunit.annotations)
             continue
 
         # NSS-managed workunits: get timing from parent nss_task op
@@ -910,7 +919,8 @@ def _log_compile_time_traces(trace_writer, dispatch):
 
         compile_info = dispatch.get_compile_time_info(workunit.start_operation)
         async_dur = compile_info.async_duration_ns if compile_info else None
-        _emit_compile_event(trace_writer, tuuid, workunit.pretty_print, event_start, event_end, async_dur)
+        _emit_compile_event(trace_writer, tuuid, workunit.pretty_print, event_start, event_end, async_dur,
+                            annotations=workunit.annotations)
 
 def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
     """
@@ -1003,12 +1013,12 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
         ready_time_ns = workunit.ready_time_ns
 
         if ready_time_ns is not None:
-            event = PerfettoEvent(tuuid, details, start_time_ns, ready_time_ns)
+            event = PerfettoEvent(tuuid, details, start_time_ns, ready_time_ns, annotations=workunit.annotations)
             trace_writer.add_event(event)
             event = PerfettoEvent(tuuid, "WAITING", ready_time_ns, end_time_ns)
             trace_writer.add_event(event)
         else:
-            event = PerfettoEvent(tuuid, details, start_time_ns, end_time_ns)
+            event = PerfettoEvent(tuuid, details, start_time_ns, end_time_ns, annotations=workunit.annotations)
             trace_writer.add_event(event)
 
         # if this is a NSS program workunit, also log events on the busy tracks for each hardware component used
@@ -1205,7 +1215,7 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
                 workunit_track = trace_writer.add_thread_descriptor(original_lines_process, track_label)
                 workunits_tracks[type(workunit)] = workunit_track
             
-            event = PerfettoEvent(workunit_track, details, start_time_ns, end_time_ns, correlation_id=type(workunit).__name__)            
+            event = PerfettoEvent(workunit_track, details, start_time_ns, end_time_ns, correlation_id=type(workunit).__name__, annotations=workunit.annotations)
             trace_writer.add_event(event)
 
     if operator_total_times:
