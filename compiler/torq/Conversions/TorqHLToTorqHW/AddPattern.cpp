@@ -244,7 +244,21 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     LData weights(op.getWeights());
     LData biasScale(op.getScaleBias());
     assert(weights.dim(0) == 2);
-    assert(biasScale.dim(0) == biasScaleWidth(input.elementType()));
+
+    // A per-channel scale_bias arrives as the 2-D [channels, pairWidth] table. Serving it needs
+    // the channel dimension blocked and the BRAM reloaded per block, the way FMAPattern /
+    // Conv2DToHw / DWToHw do; the single load below would read only the first block. This was an
+    // assert, which a release build compiles out and then reads past the table, so check it.
+    if (biasScale.dims().size() != 1) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "add: per-channel scale_bias needs blocked BRAM loads, not supported\n"
+        );
+        return failure();
+    }
+    if (biasScale.dim(0) != biasScaleWidth(input.elementType())) {
+        LLVM_DEBUG(llvm::dbgs() << "add: unexpected scale_bias width\n");
+        return failure();
+    }
 
     // Dimensions of the input data for processing
     struct In : Vectorized {
