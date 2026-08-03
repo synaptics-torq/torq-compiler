@@ -91,7 +91,9 @@ def check_board_liveness(
     immediately if the board cannot be reached so that the pytest session
     fails fast before any tests are collected or run.
     """
-    runner = remote_command_runner_factory(board_addr)
+    runner = remote_command_runner_factory(
+        board_addr, timeout, ssh_multiplex=True, ssh_port=port, ssh_private_key=private_key
+    )
     try:
         runner.run_cmd("true")
     except RemoteCommandError as exc:
