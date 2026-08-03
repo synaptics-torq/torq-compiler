@@ -86,6 +86,9 @@ struct Ndls {
     }
 
     const RegNdlData *getRegNdl(NdlType type, size_t index = 0, int64_t set_id = 0) const {
+        if (index != 0) {
+            return nullptr;
+        }
         for (auto &ndl : regNdls) {
             if (ndl.type == type && ndl.set_id == set_id) {
                 return &ndl;
