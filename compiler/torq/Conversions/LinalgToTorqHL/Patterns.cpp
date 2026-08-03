@@ -2476,6 +2476,130 @@ struct GenericToBroadcastOpConversion : public OpRewritePattern<linalg::GenericO
     }
 };
 
+// [#1760] Decomposition of a permute+broadcast copy `linalg.generic` into a
+// `torq_hl.transpose` followed by a `torq_hl.broadcast`.
+struct TransposeBroadcastInfo {
+    SmallVector<int64_t> perm;      // input dims reordered into ascending output order
+    SmallVector<int64_t> bcastDims; // output dims to insert (empty => pure permutation)
+};
+
+// [#1760] Recognize a copy-only `linalg.generic` whose input indexing map both
+// *permutes* its kept axes and *drops* others (a broadcast). Such ops arise from
+// NHWC->NCHW layout conversion of `tosa.add` broadcast operands (e.g. input map
+// (d0,d2,d1), identity output) and match neither `GenericToBroadcastOpConversion`
+// (isaBroadcastOpInterface requires monotonically-increasing kept dims, i.e. no
+// permutation) nor `TransposeOpConversion` (only the named `linalg.transpose`). On
+// a match, return the permutation and broadcast dims that realize it as
+// transpose+broadcast; a pure broadcast (monotonic projection) is left to
+// GenericToBroadcastOpConversion.
+static FailureOr<TransposeBroadcastInfo> matchTransposeBroadcastGeneric(linalg::GenericOp genericOp
+) {
+    // Structural: a copy body (yield of the input element), all-parallel,
+    // single input/output, identity output map.
+    if (!genericOp.isAllParallelLoops() || !genericOp.isSingleInputOutput() ||
+        !genericOp.isSingleYieldOp()) {
+        return failure();
+    }
+    auto maps = genericOp.getIndexingMapsArray();
+    if (maps.size() != 2 || !maps[1].isIdentity()) {
+        return failure();
+    }
+    Block *body = genericOp.getBody();
+    auto yieldOp = dyn_cast<linalg::YieldOp>(body->back());
+    if (!yieldOp || yieldOp.getNumOperands() != 1 ||
+        yieldOp.getOperand(0) != body->getArgument(0)) {
+        return failure();
+    }
+
+    // The input map must be a projected permutation: each result a distinct dim
+    // id, with no symbols or compound exprs (isProjectedPermutation covers this).
+    AffineMap srcMap = maps[0];
+    int64_t outRank = maps[1].getNumResults();
+    if (!srcMap.isProjectedPermutation()) {
+        return failure();
+    }
+    SmallVector<int64_t> pos; // pos[j] = output dim fed by input dim j
+    for (AffineExpr e : srcMap.getResults()) {
+        pos.push_back(cast<AffineDimExpr>(e).getPosition());
+    }
+    // A monotonically-increasing projection is a pure broadcast, already handled
+    // by GenericToBroadcastOpConversion (its dims are distinct, so is_sorted means
+    // strictly increasing). Only act on a permutation.
+    if (llvm::is_sorted(pos)) {
+        return failure();
+    }
+    if (!isa<RankedTensorType>(genericOp.getDpsInputOperand(0)->get().getType()) ||
+        !isa<RankedTensorType>(genericOp.getDpsInitOperand(0)->get().getType())) {
+        return failure();
+    }
+
+    // kept = sorted output dims fed by the input; the rest are broadcast.
+    SmallVector<int64_t> kept(pos.begin(), pos.end());
+    llvm::sort(kept);
+    TransposeBroadcastInfo info;
+    for (int64_t d = 0; d < outRank; ++d) {
+        if (!llvm::is_contained(kept, d)) {
+            info.bcastDims.push_back(d);
+        }
+    }
+    // Transpose permutation: order input dims so their kept output targets
+    // ascend. Rank each input dim by its target's position among the sorted kept
+    // dims (yielding a permutation of [0, inputRank)), then invert it so that
+    // perm[k] is the input dim feeding the k-th kept output dim.
+    Permutation rankByTarget(pos.size());
+    for (size_t j = 0; j < pos.size(); ++j) {
+        rankByTarget[j] = llvm::lower_bound(kept, pos[j]) - kept.begin();
+    }
+    info.perm = rankByTarget.reverse();
+    return info;
+}
+
+// [#1760] Realize a permute+broadcast copy `linalg.generic` (see
+// matchTransposeBroadcastGeneric) by splitting it into a `torq_hl.transpose`
+// (kept dims into ascending output order) followed by a `torq_hl.broadcast`
+// (insert the dropped dims).
+struct GenericToTransposeBroadcastOpConversion : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
+        auto info = matchTransposeBroadcastGeneric(genericOp);
+        if (failed(info)) {
+            return rewriter.notifyMatchFailure(genericOp, "not a permute+broadcast copy generic");
+        }
+
+        Location loc = genericOp.getLoc();
+        Value src = genericOp.getDpsInputOperand(0)->get();
+        auto inType = cast<RankedTensorType>(src.getType());
+        auto outType = cast<RankedTensorType>(genericOp.getDpsInitOperand(0)->get().getType());
+
+        // Transpose the kept dims into ascending output order.
+        SmallVector<int64_t> tShape(info->perm.size());
+        for (size_t k = 0; k < info->perm.size(); ++k) {
+            tShape[k] = inType.getShape()[info->perm[k]];
+        }
+        auto tType = RankedTensorType::get(tShape, inType.getElementType());
+        Value transposed =
+            torq_hl::TransposeOp::create(
+                rewriter, loc, tType, createInitTensor(genericOp, rewriter, tType), info->perm, src
+            )
+                .getOutput();
+
+        if (info->bcastDims.empty()) {
+            // Pure permutation (no dropped dim): the transpose is the result.
+            rewriter.replaceOp(genericOp, transposed);
+            return success();
+        }
+        auto bcast = torq_hl::BroadcastOp::create(
+            rewriter, loc, outType, createInitTensor(genericOp, rewriter, outType), info->bcastDims,
+            transposed
+        );
+        rewriter.replaceOp(genericOp, bcast.getResults());
+        return success();
+    }
+};
+
 // Input will always be in NCHW format
 struct ResizeNearestNeighborOpConversion : public OpRewritePattern<linalg::GenericOp> {
   public:
@@ -2593,6 +2717,7 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<ReinterpretCastOpPattern>(context);
 
     patterns.insert<GenericToBroadcastOpConversion>(context);
+    patterns.insert<GenericToTransposeBroadcastOpConversion>(context);
     patterns.insert<SegmentationTransposeOpConversion>(context);
     patterns.insert<ResizeNearestNeighborOpConversion>(context);
     populateLinalgToTorqHLExpandWeightsPatterns(context, patterns);
