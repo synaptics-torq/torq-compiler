@@ -99,29 +99,66 @@ static void biasScale_inflate(Value &biases, int64_t inner_on, T biasValue, T sc
     biases = createCompileTimeConstOp(iOp.getDefiningOp(), irRewriter).value_or(iOp);
 }
 
-// Convert weights from OI[HW] to OI[HW]O layout
-// The number of output channels must be a multiple of inner_on
+// Convert weights from OI[KhKw] to OI[KhKw]O layout via reshape + transpose.
+// Equivalent to linalg.pack with innerDimsPos=[0] and innerTiles=[inner_on], but expressed
+// as expand_shape + linalg.transpose so NSS can execute the transpose in hardware.
+// The number of output channels must be a multiple of inner_on.
 // inner_on: number of channels to be moved in the inner dimension
 static mlir::Value weights_OIHW_to_OIHWO(
     PatternRewriter &rewriter, mlir::Location loc, Value weights, int inner_on, Type ty
 ) {
-    llvm::SmallVector<int64_t> innerDimsPos(1, 0);
-    llvm::SmallVector<OpFoldResult> innerTiles(1, OpFoldResult(rewriter.getIndexAttr(inner_on)));
+    auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
+    SmallVector<int64_t> shape(wtRankedTy.getShape()); // [O, I, H, W]
+    auto elemTy = wtRankedTy.getElementType();
+
+    const int64_t O = shape[0], I = shape[1], H = shape[2], W = shape[3];
+    const int64_t paddedO = align_ceil(O, static_cast<int64_t>(inner_on));
+    const int64_t O_outer = paddedO / inner_on;
 
     mlir::OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointAfterValue(weights);
-    auto empty = linalg::PackOp::createDestinationTensor(
-        rewriter, loc, weights, innerTiles, innerDimsPos, {}
+
+    // Match linalg.pack semantics: when O is not a multiple of inner_on,
+    // pad channels with zeros before tiling/transposing.
+    Value packedInput = weights;
+    if (paddedO != O) {
+        SmallVector<int64_t> paddedShape = {paddedO, I, H, W};
+        Value paddedEmpty = tensor::EmptyOp::create(rewriter, loc, paddedShape, elemTy);
+        auto zeroAttr = rewriter.getZeroAttr(ty);
+        Value zeroVal = arith::ConstantOp::create(rewriter, loc, ty, zeroAttr);
+        paddedEmpty = linalg::FillOp::create(rewriter, loc, zeroVal, paddedEmpty).getResult(0);
+
+        SmallVector<OpFoldResult> insOff(4, rewriter.getIndexAttr(0));
+        SmallVector<OpFoldResult> insSz = getAsIndexOpFoldResult(rewriter.getContext(), shape);
+        SmallVector<OpFoldResult> insStride(4, rewriter.getIndexAttr(1));
+        packedInput = tensor::InsertSliceOp::create(
+                          rewriter, loc, weights, paddedEmpty, insOff, insSz, insStride
+        )
+                          .getResult();
+        packedInput =
+            createCompileTimeConstOp(packedInput.getDefiningOp(), rewriter).value_or(packedInput);
+    }
+
+    // Step 1: ExpandShape [O, I, H, W] -> [O/N, N, I, H, W]
+    // 32x5x3x3 --> 8x4x5x3x3  (for inner_on=4)
+    SmallVector<ReassociationIndices> reassoc = {{0, 1}, {2}, {3}, {4}};
+    SmallVector<int64_t> expandedShape = {O_outer, (int64_t)inner_on, I, H, W};
+    Value expanded = tensor::ExpandShapeOp::create(
+        rewriter, loc, RankedTensorType::get(expandedShape, elemTy), packedInput, reassoc
     );
-    auto zeroAttr = rewriter.getZeroAttr(ty);
-    auto zeroVal = arith::ConstantOp::create(rewriter, loc, ty, zeroAttr);
+    expanded = createCompileTimeConstOp(expanded.getDefiningOp(), rewriter).value_or(expanded);
 
-    // tensor.PackOp %weights { inner_tiles = [inner_on], inner_dims_pos = [0] }
-    // 32x5x3x3 --> 8x5x3x3x4  (for inner_on=4)
-    auto packedWeights =
-        linalg::PackOp::create(rewriter, loc, weights, empty, innerDimsPos, innerTiles, zeroVal);
+    // Step 2: Transpose [O/N, N, I, H, W] -> [O/N, I, H, W, N]  perm = [0, 2, 3, 4, 1]
+    // 8x4x5x3x3 --> 8x5x3x3x4  (for inner_on=4)
+    SmallVector<int64_t> transposedShape = {O_outer, I, H, W, (int64_t)inner_on};
+    auto transposedType = RankedTensorType::get(transposedShape, elemTy);
+    Value initTensor = tensor::EmptyOp::create(rewriter, loc, transposedShape, elemTy);
+    SmallVector<int64_t> perm = {0, 2, 3, 4, 1};
+    auto permAttr = rewriter.getDenseI64ArrayAttr(perm);
+    auto transposeOp =
+        torq_hl::TransposeOp::create(rewriter, loc, transposedType, initTensor, permAttr, expanded);
 
-    return createCompileTimeConstOp(packedWeights, rewriter).value_or(packedWeights.getResult());
+    return createCompileTimeConstOp(transposeOp, rewriter).value_or(transposeOp.getOutput());
 }
 
 // FIXME: remove and use createI8Const from CoversionUtils.h
@@ -526,51 +563,6 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
     }
 };
 
-class FullyConnectedKernelSelection : public OpRewritePattern<torq_hl::FullyConnectedOp> {
-  public:
-    using OpRewritePattern::OpRewritePattern;
-
-    LogicalResult matchAndRewrite(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) const {
-
-        // kernel already selected
-        if (op.getVectorizationMode() != torq_hl::VectorizationModeEnum::None) {
-            return failure();
-        }
-
-        Value weights = op.getWeights();
-        auto weightTy = mlir::cast<RankedTensorType>(weights.getType());
-        auto vectorizationMode = getVectorizationMode(op);
-
-        auto outputElementType = op.getInit().getType().getElementType();
-        // FIXME: the test below should be improved to avoid hardcoding these values
-        int parallel_outs = outputElementType.getIntOrFloatBitWidth() <= 8 ? 64 : 32;
-
-        // Round down to the nearest supported parallel_outs value based on weightShape
-        // (_64x4=4, _32x8=8, _16x16=16, _32x32=32) plus 1 for no packing.
-        static constexpr int kValidParallelOuts[] = {32, 16, 8, 4, 1};
-        auto weightShape = weightTy.getShape();
-        if (!weightShape.empty() && weightShape[0] < parallel_outs) {
-            for (int v : kValidParallelOuts) {
-                if (v <= static_cast<int>(weightShape[0])) {
-                    parallel_outs = v;
-                    break;
-                }
-            }
-        }
-
-        weights = weights_OIHW_to_OIHWO(
-            rewriter, op.getLoc(), weights, parallel_outs, weightTy.getElementType()
-        );
-
-        // FIXME: use createI8Const from CoversionUtils.h
-        rewriter.modifyOpInPlace(op, [&]() {
-            op.setVectorizationMode(vectorizationMode);
-            op.setOperand(1, weights);
-        });
-        return success();
-    }
-};
-
 class MaxPool2dKernelSelectionOp : public OpRewritePattern<torq_hl::MaxPool2dOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -614,7 +606,6 @@ void KernelSelectionPass::runOnOperation() {
 
     patterns.add<ConvLikeKernelSelection<torq_hl::Conv2DOp>>(ctx);
     patterns.add<ConvLikeKernelSelection<torq_hl::DepthwiseConv2DOp>>(ctx);
-    patterns.add<FullyConnectedKernelSelection>(ctx);
     patterns.add<MaxPool2dKernelSelectionOp>(ctx);
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {

@@ -145,11 +145,6 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         Value weights, std::optional<Value> weightZpV, ScaleClampInfo &scInfo,
         PatternRewriter &rewriter, bool isNCHW, bool isFC
     ) const {
-        if (!isNCHW || isFC) {
-            // Canonicalize weights to [O, I] orientation expected by downstream lowering.
-            weights =
-                transposeValue(weights, SmallVector<int64_t, 4>{1, 0}, weights.getLoc(), rewriter);
-        }
         auto weightTy = cast<RankedTensorType>(weights.getType());
         assert(weightTy.getRank() == 2 && "Expected weights to be 2D after collapsing from 4D");
 
@@ -370,8 +365,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
 
         // Compute per-channel bias value and scale/clamp info from fused chain
         std::optional<Value> optionalWeightZpV;
-        FailureOr<Value> biasV =
-            computeBiasForMatmul(*fusionPlanOr, channelDim, optionalWeightZpV, isFC);
+        FailureOr<Value> biasV = computeBiasForMatmul(*fusionPlanOr, channelDim, optionalWeightZpV);
         if (failed(biasV)) {
             return replaceWithTorqMatmul(srcOp, rewriter);
         }
@@ -447,17 +441,10 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                 // If the output was expanded beyond rank 2 (e.g. by an
                 // absorbed ExpandShapeOp), collapse to rank 2 for the FC op
                 // and expand back afterwards.
-                RankedTensorType fcType = finalType;
-                if (finalType.getRank() > 2) {
-                    auto shape = finalType.getShape();
-                    int64_t batchDims = 1;
-                    for (int i = 0; i < finalType.getRank() - 1; ++i)
-                        batchDims *= shape[i];
-                    fcType = RankedTensorType::get(
-                        {batchDims, shape[finalType.getRank() - 1]}, finalType.getElementType()
-                    );
-                    initTensor = createInitTensor(*output.getDefiningOp(), rewriter, fcType);
-                }
+                RankedTensorType fcType = dyn_cast<RankedTensorType>(srcOp.getResult(0).getType());
+                RankedTensorType fcInitType =
+                    RankedTensorType::get(fcType.getShape(), finalType.getElementType());
+                initTensor = createInitTensor(*output.getDefiningOp(), rewriter, fcInitType);
                 auto fcOp = torq_hl::FullyConnectedOp::create(
                     rewriter, loc, fcType, initTensor, input_zp,
                     0, // weight zp
@@ -465,12 +452,20 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                     torq_hl::VectorizationModeEnum::None, torqWeights, *biasV, input
                 );
                 torqOut = fcOp.getResult(0);
-                if (fcType != finalType) {
-                    auto reassoc =
-                        getReassociationIndicesForCollapse(finalType.getShape(), fcType.getShape());
-                    assert(reassoc && "Failed to get reassociation for FC expand");
-                    torqOut =
-                        tensor::ExpandShapeOp::create(rewriter, loc, finalType, torqOut, *reassoc);
+
+                if (fusionPlanOr->includedExpandShape) {
+                    auto expandOp = cast<tensor::ExpandShapeOp>(*fusionPlanOr->includedExpandShape);
+                    auto reassoc = expandOp.getReassociationIndices();
+                    auto expandType = cast<RankedTensorType>(expandOp.getType());
+
+                    torqOut = tensor::ExpandShapeOp::create(
+                                  rewriter, loc,
+                                  RankedTensorType::get(
+                                      expandType.getShape(), fcInitType.getElementType()
+                                  ),
+                                  torqOut, reassoc
+                    )
+                                  .getResult();
                 }
             }
             rewriter.replaceOp(output.getDefiningOp(), torqOut);

@@ -136,6 +136,11 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp);
 // Return true iff op is already marked as part of a fuse group.
 bool isMarkedFuseGroup(Operation *op);
 
+// A QDQ quantized matmul chain (i8 x i8 -> i32 matmul, dequant/requant
+// epilogue). Owned by QMatmulToFCConvert (QMatmulPattern.cpp); other
+// linalg::MatmulOp patterns must check this and decline to avoid racing it.
+bool isQuantizedMatmulChain(linalg::MatmulOp op);
+
 // `TorqStructuredOpMatcher::addPredicate` helper: reject ops already marked
 // as part of a fuse group when `active` is true (typically `_markFuseGroups`).
 // Used to gate discovery-mode patterns from re-marking already-marked ops.
@@ -190,24 +195,23 @@ bool foldForwardPerChannelAdd(
 // Build a fusion plan rooted at `value` by selecting a terminal fusible result
 // and collecting intermediate operations needed to reconstruct that chain.
 // On success, `fusionPlan.anchor` and `fusionPlan.neededOps` are populated.
-FailureOr<FusionPlan> createFusionPlan(Value value);
+FailureOr<FusionPlan>
+createFusionPlan(Value value, std::optional<int64_t> knownChannelDim = std::nullopt);
 
 // Convenience wrapper for createFusionPlan that also updates the defining op of `value`
 // to the terminal fused result, so that subsequent patterns can match against it.
-FailureOr<FusionPlan> buildFusionPlanAndRebindOutput(Value &value);
+FailureOr<FusionPlan>
+buildFusionPlanAndRebindOutput(Value &value, std::optional<int64_t> knownChannelDim = std::nullopt);
 
 // Build per-channel bias from the fusion plan rooted at `fusionPlan.anchor`.
 // Optionally surfaces folded weight zero-point through `optionalWeightZp`.
 // `biasChDim` can override the channel dimension used for reduction.
-FailureOr<Value> computeBias(
-    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp,
-    int biasChDim = -1
-);
+FailureOr<Value>
+computeBias(FusionPlan &fusionPlan, int biasChDim, std::optional<Value> &optionalWeightZp);
 // Convenience wrapper for matmul-like cases, selecting bias channel mapping
 // based on `channelDim`.
-FailureOr<Value> computeBiasForMatmul(
-    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp, bool isFC
-);
+FailureOr<Value>
+computeBiasForMatmul(FusionPlan &fusionPlan, int biasChDim, std::optional<Value> &optionalWeightZp);
 
 // Extract scale/clamp/zero-point info from the trailing rescale pattern in
 // `fusionPlan` and interleave scale into `biasScale` for NPU consumption.

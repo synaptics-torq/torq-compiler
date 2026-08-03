@@ -570,7 +570,8 @@ bool isTorqReduceSumOp(Operation *op, std::string &failReason) {
     }
 
     auto reduceBodyOp = yieldOp.getOperand(0).getDefiningOp();
-    if (!isa<arith::AddIOp>(reduceBodyOp) && !isa<arith::AddFOp>(reduceBodyOp)) {
+    if (!isa_and_nonnull<arith::AddIOp>(reduceBodyOp) &&
+        !isa_and_nonnull<arith::AddFOp>(reduceBodyOp)) {
         failReason = "Not a sum reduction (expected arith.addf or arith.addi)";
         return false;
     }
@@ -2656,6 +2657,182 @@ struct ResizeNearestNeighborOpConversion : public OpRewritePattern<linalg::Gener
     }
 };
 
+struct Im2ColOpConversion : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
+        LLVM_DEBUG({
+            llvm::dbgs() << "\n[Im2ColOpConversion] Attempting to match:\n";
+            genericOp.dump();
+        });
+
+        if (genericOp.getNumDpsInputs() != 1 || genericOp.getNumDpsInits() != 1) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: expected 1 input and 1 init, got "
+                             << genericOp.getNumDpsInputs() << " input(s) and "
+                             << genericOp.getNumDpsInits() << " init(s)\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected exactly one input and one init tensor for Im2ColOpConversion"
+            );
+        }
+        if (genericOp.getIndexingMapsArray().size() != 2) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: expected 2 indexing maps, got "
+                             << genericOp.getIndexingMapsArray().size() << "\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected exactly 2 indexing maps for Im2ColOpConversion"
+            );
+        }
+        auto body = genericOp.getBody();
+        if (body->getOperations().size() > 1) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: body has "
+                             << body->getOperations().size() << " ops, expected 1\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected exactly one operation in the body for Im2ColOpConversion"
+            );
+        }
+        if (!isa<linalg::YieldOp>(body->getOperations().front())) {
+            LLVM_DEBUG(
+                llvm::dbgs()
+                << "[Im2ColOpConversion] Rejected: body's only op is not linalg.yield\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp,
+                "Expected linalg.yield as the only operation in the body for Im2ColOpConversion"
+            );
+        }
+
+        auto inputMap = genericOp.getIndexingMapsArray()[0];
+        auto outputMap = genericOp.getIndexingMapsArray()[1];
+
+        LLVM_DEBUG({
+            llvm::dbgs() << "[Im2ColOpConversion] Input map:  " << inputMap << "\n";
+            llvm::dbgs() << "[Im2ColOpConversion] Output map: " << outputMap << "\n";
+        });
+
+        if (!outputMap.isIdentity()) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: output map is not identity\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected output indexing map to be non-identity for Im2ColOpConversion"
+            );
+        }
+        if (inputMap.getNumResults() != 2) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: input map has "
+                             << inputMap.getNumResults() << " results, expected 2\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected input indexing map to have 2 results for Im2ColOpConversion"
+            );
+        }
+
+        // Checking whether the input map has a format (d0, d1) -> (d0 floordiv k, d0 mod kernelSize
+        // + d1 * stride)
+        auto binaryExpr1 = dyn_cast<AffineBinaryOpExpr>(inputMap.getResult(0));
+        auto binaryExpr2 = dyn_cast<AffineBinaryOpExpr>(inputMap.getResult(1));
+        if (!binaryExpr1 || !binaryExpr2) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: input map results are not binary "
+                             << "expressions, result(0) kind="
+                             << (binaryExpr1 ? "valid" : "invalid")
+                             << ", result(1) kind=" << (binaryExpr2 ? "valid" : "invalid") << "\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected input indexing map results to be binary expressions for "
+                           "Im2ColOpConversion"
+            );
+        }
+        if (binaryExpr1.getKind() != AffineExprKind::FloorDiv ||
+            binaryExpr2.getKind() != AffineExprKind::Add) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: input map result(0) kind="
+                             << static_cast<int>(binaryExpr1.getKind())
+                             << " (expected FloorDiv), result(1) kind="
+                             << static_cast<int>(binaryExpr2.getKind()) << " (expected Add)\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected input indexing map with format (d0, d1) -> (d0 floordiv k, d0 "
+                           "mod kernelSize + d1 * stride) for Im2ColOpConversion"
+            );
+        }
+
+        // Extracting the kernel size from the first binary expression
+        auto kernelSizeExpr = binaryExpr1.getRHS();
+        auto kernelSizeConst = cast<AffineConstantExpr>(kernelSizeExpr);
+        int64_t kernelSize = kernelSizeConst.getValue();
+        LLVM_DEBUG(
+            llvm::dbgs() << "[Im2ColOpConversion] Extracted kernelSize=" << kernelSize << "\n"
+        );
+
+        auto expr2 = binaryExpr2.getLHS();
+        auto modExpr = cast<AffineBinaryOpExpr>(expr2);
+        if (modExpr.getKind() != AffineExprKind::Mod) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: LHS of Add is not Mod (kind="
+                             << static_cast<int>(modExpr.getKind()) << ")\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected the left-hand side of the second binary expression to be a "
+                           "mod operation for Im2ColOpConversion"
+            );
+        }
+        auto modConst = cast<AffineConstantExpr>(modExpr.getRHS());
+        int modValue = modConst.getValue();
+        LLVM_DEBUG(llvm::dbgs() << "[Im2ColOpConversion] Extracted modValue=" << modValue << "\n");
+        if (kernelSize != modValue) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: kernelSize(" << kernelSize
+                             << ") != modValue(" << modValue << ")\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected kernel size to match the mod value for Im2ColOpConversion"
+            );
+        }
+
+        auto strideExpr = dyn_cast<AffineBinaryOpExpr>(binaryExpr2.getRHS());
+        if (strideExpr && strideExpr.getKind() != AffineExprKind::Mul) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[Im2ColOpConversion] Rejected: RHS of Add is not Mul (kind="
+                             << static_cast<int>(strideExpr.getKind()) << ")\n"
+            );
+            return rewriter.notifyMatchFailure(
+                genericOp, "Expected the right-hand side of the second binary expression to be a "
+                           "multiplication for Im2ColOpConversion"
+            );
+        }
+
+        int strideValue = 1;
+        if (strideExpr) {
+            auto strideConst = cast<AffineConstantExpr>(strideExpr.getRHS());
+            strideValue = strideConst.getValue();
+        }
+        LLVM_DEBUG(
+            llvm::dbgs() << "[Im2ColOpConversion] Extracted stride=" << strideValue
+                         << ", dilation=1, kernelWidth=" << kernelSize << "\n"
+        );
+
+        auto torqIm2ColOp = syna::torq_hl::Im2ColOp::create(
+            rewriter, genericOp.getLoc(), genericOp.getResultTypes(),
+            genericOp.getDpsInitOperand(0)->get(), genericOp.getDpsInputOperand(0)->get(),
+            strideValue, 1, kernelSize
+        );
+        LLVM_DEBUG({
+            llvm::dbgs() << "[Im2ColOpConversion] Successfully created torq_hl.im2col:\n";
+            torqIm2ColOp.dump();
+        });
+        rewriter.replaceOp(genericOp, torqIm2ColOp.getResults());
+        return success();
+    }
+};
+
 void populateLinalgToTorqHLPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
@@ -2720,6 +2897,7 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<GenericToTransposeBroadcastOpConversion>(context);
     patterns.insert<SegmentationTransposeOpConversion>(context);
     patterns.insert<ResizeNearestNeighborOpConversion>(context);
+    patterns.insert<Im2ColOpConversion>(context);
     populateLinalgToTorqHLExpandWeightsPatterns(context, patterns);
 }
 

@@ -185,7 +185,8 @@ def TorqHL_FullyConnectedOp: TorqHL_LayerOp<"fully_connected"> {
     TorqHL_VectorizationModeEnum:$vectorization_mode,
     TensorOrMemref:$weights,
     TensorOrMemref:$scale_bias,
-    TensorOrMemref:$input
+    TensorOrMemref:$input,
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$is_batch_scaled
   ));
 }
 

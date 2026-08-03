@@ -559,6 +559,10 @@ struct FusionPlan {
     Operation *anchor;
     llvm::SmallVector<Operation *> neededOps;
     llvm::SmallVector<Operation *> opsToFuse;
+    std::optional<Operation *> includedExpandShape;
+    std::optional<Operation *> includedTranspose;
+    std::optional<Operation *> includedCollapseShape;
+    std::optional<int64_t> channelDim;
 
     Value getFusedOutput() const {
         if (neededOps.empty()) {
@@ -579,4 +583,7 @@ Value createClonedBlock(
     OpBuilder &builder, FusionPlan &fusionPlan, llvm::SmallVectorImpl<Operation *> &values,
     int fusionStartIdx, int fusionEndIdx, llvm::SmallVectorImpl<Operation *> &opsToDelete
 );
+
+Value getDefaultBiasScale(Operation *srcOp, RankedTensorType opType, PatternRewriter &rewriter);
+
 } // namespace mlir::syna::torq

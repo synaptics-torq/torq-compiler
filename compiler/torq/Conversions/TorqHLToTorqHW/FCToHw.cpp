@@ -24,25 +24,33 @@ struct Out {
 };
 
 struct Weight {
-    enum { OCVect, IC, OCElement };
+    enum { IC, OCVect, OCElement };
 };
 
 struct BiasScale {
     enum { OCVect, ActVect, ActItems, Items };
 };
 
-static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) {
+// Per-output-channel bias/scale kernel.
+//
+// Expected tensor layouts:
+//   input    : [N, IC]
+//   weight   : [IC, OCVect, OCElement]   where OCElement = alu.iWidth(wType, inType)
+//   biasScale: [OCVect, ceil(OCElement/actVectSize), actVectSize, biasScaleWidth(inType)]
+//   output   : [N, OC]
+//
+// Each output-channel vector (OCVect) has its own bias/scale entry, applied after
+// the IC reduction.
+static torq_hw::SliceTaskOp
+lowerToHwPerChannel(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) {
 
-    // Wrap operands in LData (same as conv)
     LData input(op.getInput());
     LData output(op.getInit());
     LData weight(op.getWeights());
+    Slice slice("fc");
+    weight.forceReshapeDim(1, {-1, slice.alu.iWidth(weight.elementType(), input.elementType())});
     LData biasScale(op.getScaleBias());
 
-    // Create a Slice for FC
-    Slice slice("fc");
-
-    // Reshape biasScale to match processing layout
     const auto inType = input.elementType();
     const auto wType = weight.elementType();
     const int weightVectSize = weight.dim(Weight::OCElement);
@@ -54,15 +62,11 @@ static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewri
     For(auto batch = slice.iterate(input.dim(In::N))) {
         For(auto ocv = slice.iterate(weight.dim(Weight::OCVect))) {
             PData pdata;
-            // Reduce over input channels
             For(auto icv = slice.iterate(input.dim(In::IC))) {
-                // Load weights to IRAM and input to WRAM (to compute multiple out at the same time)
-                IData fcWeights = slice.iram.load(weight[ocv][icv]);
+                IData fcWeights = slice.iram.load(weight[icv][ocv]);
                 WData fcInput = slice.wram.load(input[batch][icv]);
                 pdata = slice.alu.scalarProductAccumulate(fcWeights, fcInput);
             }
-
-            // Apply biaas and scale
             For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                 BData bdata = slice.bram.load(biasScale[ocv][av]);
                 QData res = slice.act.rescaleClamp(
@@ -80,6 +84,70 @@ static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewri
         rewriter, op.getLoc(), slice.name(), op.getWeights(), op.getInput(), op.getScaleBias(),
         op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
     );
+}
+
+// Batch-scaled bias/scale kernel.
+//
+// Expected tensor layouts:
+//   input    : [N, IC]
+//   weight   : [IC, OCVect, OCElement]   where OCElement = alu.iWidth(wType, inType)
+//   biasScale: [N, biasScaleWidth(inType)]  (one entry per batch element, shared across
+//              all output channels). When isSingleBias is true, biasScale has shape
+//              [1, biasScaleWidth(inType)] and is broadcast to match N.
+//   output   : [N, OC]
+//
+// Used when op.getIsBatchScaled() is set, or when a single bias (biasScale.dim(0)==1)
+// is broadcast over the whole batch.
+static torq_hw::SliceTaskOp
+lowerToHwBatchScaled(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, bool isSingleBias) {
+
+    LData input(op.getInput());
+    LData output(op.getInit());
+    LData weight(op.getWeights());
+    Slice slice("fc");
+    weight.forceReshapeDim(1, {-1, slice.alu.iWidth(weight.elementType(), input.elementType())});
+    LData biasScale(op.getScaleBias());
+
+    biasScale.forceReshapeDim(0, {-1, biasScaleWidth(input.elementType())});
+    if (isSingleBias)
+        biasScale.broadcastAs(output, 1);
+
+    For(auto batch = slice.iterate(input.dim(In::N))) {
+        For(auto ocv = slice.iterate(weight.dim(Weight::OCVect))) {
+            PData pdata;
+            For(auto icv = slice.iterate(input.dim(In::IC))) {
+                IData fcWeights = slice.iram.load(weight[icv][ocv]);
+                WData fcInput = slice.wram.load(input[batch][icv]);
+                pdata = slice.alu.scalarProductAccumulate(fcWeights, fcInput);
+            }
+            BData bdata = slice.bram.load(biasScale[batch]);
+            For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                QData res = slice.act.rescaleClamp(
+                    pdata[av], bdata, op.getShiftFactor(), op.getOutputZp(), op.getOutputMin(),
+                    op.getOutputMax()
+                );
+                slice.append(output[batch], res);
+            }
+        }
+    }
+
+    // Pass weights first (IData) and input second (WData) so the runtime maps them
+    // to the expected memories for FC lowering.
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getWeights(), op.getInput(), op.getScaleBias(),
+        op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+    );
+}
+
+static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) {
+    LData biasScale(op.getScaleBias());
+    bool isSingleBias =
+        (biasScale.shape().size() == 1 || biasScale.shape().size() == 2) && biasScale.dim(0) == 1;
+    bool isBatchScaled = op.getIsBatchScaled() || isSingleBias;
+
+    if (isBatchScaled)
+        return lowerToHwBatchScaled(op, rewriter, isSingleBias);
+    return lowerToHwPerChannel(op, rewriter);
 }
 
 LogicalResult convertToHw(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) {

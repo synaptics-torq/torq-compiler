@@ -132,6 +132,16 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
 
     funcPm.addPass(createCanonicalizerPass());
 
+    if (optimizeForTileAndFuse) {
+        funcPm.addPass(createCompileTimeConstStubsPass());
+        funcPm.addPass(createCanonicalizerPass());
+    }
+    else {
+        funcPm.addPass(createCompileTimeConstOutlinePass());
+        funcPm.addPass(createCompileTimeConstComputePass());
+        funcPm.addPass(createCanonicalizerPass());
+    }
+
     funcPm.addPass(createMarkHostExecutorPass());
 
     // lower arith ops to torq_hl

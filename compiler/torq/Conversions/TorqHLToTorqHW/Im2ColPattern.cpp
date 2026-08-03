@@ -57,11 +57,11 @@ LogicalResult Im2ColPattern::transform(torq_hl::Im2ColOp op, PatternRewriter &re
 
     Slice slice("im2col");
 
-    // Windowed view of the input: dims [Ow, C, Kw] with affine (possibly overlapping) strides.
-    //   element[ow][c][kw] = base + ow*stride + c*W + kw*dilation
+    // Windowed view of the input: dims [C, Ow, Kw] with affine (possibly overlapping) strides.
+    //   element[c][ow][kw] = base + c*W + ow*stride + kw*dilation
     LData input(
-        {{outputWidth, stride * inWidthStride},
-         {channels, inChannelStride},
+        {{channels, inChannelStride},
+         {outputWidth, stride * inWidthStride},
          {kernelWidth, dilation * inWidthStride}},
         elementType
     );
@@ -76,11 +76,13 @@ LogicalResult Im2ColPattern::transform(torq_hl::Im2ColOp op, PatternRewriter &re
 
     For(auto ow = slice.iterate(outputWidth)) {
         For(auto c = slice.iterate(channels)) {
-            // Load the full kw window for this (ow, c) and copy it through the ALU/ACT bypass.
-            IData idata = slice.iram.load(input[ow][c]);
-            PData pdata = slice.alu.load(idata);
-            QData res = slice.act.load(pdata);
-            slice.store(output[ow][c], res);
+            For(auto kw = slice.iterate(kernelWidth)) {
+                // Load the full kw window for this (ow, c) and copy it through the ALU/ACT bypass.
+                IData idata = slice.iram.load(input[c][ow][kw]);
+                PData pdata = slice.alu.load(idata);
+                QData res = slice.act.load(pdata);
+                slice.store(output[ow][c][kw], res);
+            }
         }
     }
 

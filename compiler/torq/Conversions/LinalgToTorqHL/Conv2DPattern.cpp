@@ -377,7 +377,8 @@ static Value preConversion(
 }
 
 static Value createOutput(
-    Value output, Permutation dataPerm, PatternRewriter &rewriter, bool isNchw, bool isDW1DStride1
+    Value output, Permutation dataPerm, PatternRewriter &rewriter, bool isNchw, bool isDW1DStride1,
+    std::optional<Operation *> collapseShapeOp
 ) {
     // Create init tensor in the same normalized layout expected by the Torq op.
     if (!isNchw && isDW1DStride1) {
@@ -390,6 +391,11 @@ static Value createOutput(
         dataPerm = Permutation::nhwc2nchw().reverse();
     }
     auto outTy = mlir::cast<RankedTensorType>(output.getType());
+    if (collapseShapeOp && outTy.getRank() == 3) {
+        auto collapseShape = cast<tensor::CollapseShapeOp>(collapseShapeOp.value());
+        auto collapseSrcTy = cast<RankedTensorType>(collapseShape.getSrc().getType());
+        outTy = RankedTensorType::get(collapseSrcTy.getShape(), outTy.getElementType());
+    }
     auto torqOutType = transposeType(outTy, dataPerm);
     auto newOutput = createInitTensor(output, rewriter, torqOutType);
     return newOutput;
@@ -563,8 +569,8 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         });
 
         DominanceInfo dom(convOp->template getParentOfType<FunctionOpInterface>());
-        FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output);
-        if (failed(fusionPlanOr) || !fusionPlanOr->isFusable()) {
+        FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output, _channelDim);
+        if (failed(fusionPlanOr)) {
             return rewriter.notifyMatchFailure(
                 convOp, "Failed to compute fusion group for per-channel add"
             );
@@ -646,10 +652,12 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         std::optional<Value> optionalWeightZpV;
 
         ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, convOp);
+
         FailureOr<Value> biasV =
             computeBiasAndRescaleInfo(*fusionPlanOr, _channelDim, optionalWeightZpV, scInfo);
         if (failed(biasV)) {
-            return rewriter.notifyMatchFailure(convOp, "Failed to compute bias for fused conv");
+            LLVM_DEBUG({ llvm::dbgs() << "computeBias: no bias found, setting zero bias\n"; });
+            biasV = getDefaultBiasScale(convOp, finalType, rewriter);
         }
         for (auto &op : llvm::reverse(fusionPlanOr->opsToFuse)) {
             if (op->use_empty()) {
@@ -678,7 +686,9 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         // Generate torq_hl op with input/output in the expected format
         input = preConversion(input, _dataPerm, loc, rewriter, isNchw, isDW1DStride1);
         bool nhwcInput = (!isNchw && _dataPerm == Permutation::none()) || isDW1DStride1;
-        auto newConvOutput = createOutput(output, _dataPerm, rewriter, isNchw, isDW1DStride1);
+        auto newConvOutput = createOutput(
+            output, _dataPerm, rewriter, isNchw, isDW1DStride1, fusionPlanOr->includedCollapseShape
+        );
         auto torqOutType = newConvOutput.getType();
 
         {
@@ -708,6 +718,22 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                         .getResult(0);
             }
             auto torqOut = postConversion(outV, _dataPerm, isNchw, isDW1DStride1, rewriter);
+
+            if (fusionPlanOr->includedCollapseShape) {
+                auto collapseOp =
+                    cast<tensor::CollapseShapeOp>(*fusionPlanOr->includedCollapseShape);
+                auto reassoc = collapseOp.getReassociationIndices();
+                auto collapseType = cast<RankedTensorType>(collapseOp.getType());
+                torqOut = tensor::CollapseShapeOp::create(
+                              rewriter, loc,
+                              RankedTensorType::get(
+                                  collapseType.getShape(),
+                                  cast<RankedTensorType>(torqOut.getType()).getElementType()
+                              ),
+                              torqOut, reassoc
+                )
+                              .getResult();
+            }
             rewriter.replaceOp(output.getDefiningOp(), torqOut);
 
             // insert_slice was replaced above (its dead fill is DCE'd by canonicalize);

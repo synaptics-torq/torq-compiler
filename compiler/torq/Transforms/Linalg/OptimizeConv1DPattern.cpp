@@ -15,6 +15,7 @@
 #include "torq/Utils/TorqUtils.h"
 
 #include "algorithm"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -75,10 +76,31 @@ static bool im2ColFitsInLram(int64_t C, int64_t W, int64_t Ow, int64_t Kw, Type 
     return bytes <= getLramTilingBudget();
 }
 
+// Elementwise f32 -> bf16 truncf as a parallel linalg.generic; rank is taken from `value`.
+static Value emitTruncfToBF16(PatternRewriter &rewriter, Location loc, Value value) {
+    auto srcType = cast<RankedTensorType>(value.getType());
+    int64_t rank = srcType.getRank();
+    auto bf16Type = rewriter.getBF16Type();
+    auto resultType = RankedTensorType::get(srcType.getShape(), bf16Type);
+    Value init = tensor::EmptyOp::create(rewriter, loc, srcType.getShape(), bf16Type).getResult();
+    auto identityMap = AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext());
+    SmallVector<utils::IteratorType> iterators(rank, utils::IteratorType::parallel);
+
+    auto generic = linalg::GenericOp::create(
+        rewriter, loc, TypeRange{resultType}, ValueRange{value}, ValueRange{init},
+        ArrayRef<AffineMap>{identityMap, identityMap}, iterators,
+        [&](OpBuilder &b, Location l, ValueRange args) {
+            auto truncf = arith::TruncFOp::create(b, l, bf16Type, args[0]);
+            linalg::YieldOp::create(b, l, truncf.getResult());
+        }
+    );
+    return generic.getResult(0);
+}
+
 // Emit the im2col unfold ([Ow, C*Kw]) as an affine-map linalg.generic marked torq.im2col.
 // Used when the NDL im2col op is too large to stay LRAM-resident: MarkHostExecutorPass routes
 // the marked generic to the host (torq_hl.im2col is not tileable).
-static Value emitHostIm2Col(
+static Value emitIm2Col(
     PatternRewriter &rewriter, Location loc, Value input, int64_t C, int64_t W, int64_t Kw,
     int64_t Ow, int64_t stride, int64_t dilation, RankedTensorType unfoldedType
 ) {
@@ -91,56 +113,36 @@ static Value emitHostIm2Col(
     auto collapsedInput = tensor::CollapseShapeOp::create(
         rewriter, loc, collapsedInputType, input, ArrayRef<ReassociationIndices>{{0, 1}, {2}}
     );
+    // if (stride == 1 && dilation == 1) {
+    //     return collapsedInput.getResult();
+    // }
 
     // (d0=Ow, d1=C*Kw) -> (d1/Kw, d0*stride + (d1%Kw)*dilation)
-    auto dim0 = rewriter.getAffineDimExpr(0);
-    auto dim1 = rewriter.getAffineDimExpr(1);
-    auto channelIdx = dim1.floorDiv(rewriter.getAffineConstantExpr(Kw));
-    auto kernelIdx = dim1 % rewriter.getAffineConstantExpr(Kw);
-    auto inputPosExpr = dim0 * rewriter.getAffineConstantExpr(stride) +
-                        kernelIdx * rewriter.getAffineConstantExpr(dilation);
-
-    SmallVector<AffineExpr> unfoldIndexExprs = {channelIdx, inputPosExpr};
-    auto unfoldIndexMap = AffineMap::get(2, 0, unfoldIndexExprs, rewriter.getContext());
-    auto outputIndexMap = AffineMap::getMultiDimIdentityMap(2, rewriter.getContext());
-
     auto unfoldedInit = tensor::EmptyOp::create(rewriter, loc, unfoldedType.getShape(), elemType);
+
+    auto [d0, d1] = std::make_tuple(rewriter.getAffineDimExpr(0), rewriter.getAffineDimExpr(1));
+    auto [KwExpr, strideExpr, dilationExpr] = std::make_tuple(
+        rewriter.getAffineConstantExpr(Kw), rewriter.getAffineConstantExpr(stride),
+        rewriter.getAffineConstantExpr(dilation)
+    );
+
+    auto outputIndexMap = AffineMap::getMultiDimIdentityMap(2, rewriter.getContext());
+    // (d0=Ow, d1=C*Kw) -> (d1/Kw, d0*stride + (d1%Kw)*dilation)
+    auto inputIndexMap = AffineMap::get(
+        2, 0, {d1.floorDiv(KwExpr), d1 % KwExpr * dilationExpr + d0 * strideExpr},
+        rewriter.getContext()
+    );
     SmallVector<utils::IteratorType> iteratorTypes(2, utils::IteratorType::parallel);
 
     auto im2col = linalg::GenericOp::create(
         rewriter, loc, TypeRange{unfoldedType}, ValueRange{collapsedInput.getResult()},
-        ValueRange{unfoldedInit}, ArrayRef<AffineMap>{unfoldIndexMap, outputIndexMap},
-        iteratorTypes,
+        ValueRange{unfoldedInit}, ArrayRef<AffineMap>{inputIndexMap, outputIndexMap}, iteratorTypes,
         [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
             linalg::YieldOp::create(nestedBuilder, nestedLoc, blockArgs[0]);
         }
     );
-    im2col->setAttr("torq.im2col", rewriter.getBoolAttr(true));
+
     return im2col.getResult(0);
-}
-
-// Emit the im2col unfold ([Ow, C*Kw]) as torq_hl.im2col: the hardware lowering reads sliding input
-// windows via an affine DEDR NDL and writes the unfolded layout via DEQW.
-static Value emitIm2Col(
-    PatternRewriter &rewriter, Location loc, Value input, int64_t C, int64_t W, int64_t Kw,
-    int64_t Ow, int64_t stride, int64_t dilation, RankedTensorType unfoldedType
-) {
-    auto elemType = unfoldedType.getElementType();
-
-    // Collapse [N,C,W] -> [C,W]; the op addresses input[c, ow*stride + kw*dilation].
-    auto collapsedInputType = RankedTensorType::get({C, W}, elemType);
-    auto collapsedInput = tensor::CollapseShapeOp::create(
-        rewriter, loc, collapsedInputType, input, ArrayRef<ReassociationIndices>{{0, 1}, {2}}
-    );
-
-    auto unfoldedInit = tensor::EmptyOp::create(rewriter, loc, unfoldedType.getShape(), elemType);
-
-    auto im2col = torq_hl::Im2ColOp::create(
-        rewriter, loc, TypeRange{unfoldedType}, unfoldedInit.getResult(),
-        collapsedInput.getResult(), rewriter.getI64IntegerAttr(stride),
-        rewriter.getI64IntegerAttr(dilation), rewriter.getI64IntegerAttr(Kw)
-    );
-    return im2col.getOutput();
 }
 
 // Largest output-column block whose windowed im2col (sliced input window + unfolded patches)
@@ -397,89 +399,6 @@ static Value emitTiledNativeConv1d(
     return result;
 }
 
-// Build the [Ow, F] conv1d matmul result by tiling im2col + matmul along the output width.
-// Each block slices the minimal input window it reads, runs torq_hl.im2col on that window,
-// and matmuls into the corresponding rows of the result.
-static Value emitTiledIm2ColConv1dMatmul(
-    PatternRewriter &rewriter, Location loc, Value input, Value transposedFilter, int64_t C,
-    int64_t Kw, int64_t Ow, int64_t F, int64_t stride, int64_t dilation, int64_t blockOw,
-    Type elemType, Type outElemType
-) {
-    int64_t K = C * Kw;
-    Value zero = createZeroConstant(rewriter, loc, outElemType);
-    Value result =
-        tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{Ow, F}, outElemType).getResult();
-
-    for (int64_t ow0 = 0; ow0 < Ow; ow0 += blockOw) {
-        int64_t curOw = std::min(blockOw, Ow - ow0);
-        int64_t w0 = ow0 * stride;
-        int64_t windowW = (curOw - 1) * stride + (Kw - 1) * dilation + 1;
-
-        // Slice the input window [1, C, w0 : w0 + windowW] this block reads from.
-        auto sliceType = RankedTensorType::get({1, C, windowW}, elemType);
-        Value inputSlice = tensor::ExtractSliceOp::create(
-            rewriter, loc, sliceType, input,
-            SmallVector<OpFoldResult>{
-                rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(w0)
-            },
-            SmallVector<OpFoldResult>{
-                rewriter.getIndexAttr(1), rewriter.getIndexAttr(C), rewriter.getIndexAttr(windowW)
-            },
-            SmallVector<OpFoldResult>{
-                rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)
-            }
-        );
-
-        // Offsets are window-relative, so this is a full unfold over the slice with W = windowW.
-        auto blockUnfoldedType = RankedTensorType::get({curOw, K}, elemType);
-        Value blockUnfolded = emitIm2Col(
-            rewriter, loc, inputSlice, C, windowW, Kw, curOw, stride, dilation, blockUnfoldedType
-        );
-
-        // matmul [curOw, C*Kw] x [C*Kw, F] -> [curOw, F]
-        auto blockMatmulType = RankedTensorType::get({curOw, F}, outElemType);
-        auto blockInit = linalg::FillOp::create(
-            rewriter, loc, zero,
-            tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{curOw, F}, outElemType)
-                .getResult()
-        );
-        auto blockMatmul = linalg::MatmulOp::create(
-            rewriter, loc, TypeRange{blockMatmulType}, ValueRange{blockUnfolded, transposedFilter},
-            ValueRange{blockInit.getResult(0)}
-        );
-
-        // Write this block's rows into the [Ow, F] result.
-        result = tensor::InsertSliceOp::create(
-            rewriter, loc, blockMatmul.getResults()[0], result,
-            SmallVector<OpFoldResult>{rewriter.getIndexAttr(ow0), rewriter.getIndexAttr(0)},
-            SmallVector<OpFoldResult>{rewriter.getIndexAttr(curOw), rewriter.getIndexAttr(F)},
-            SmallVector<OpFoldResult>{rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)}
-        );
-    }
-    return result;
-}
-
-// Elementwise f32 -> bf16 truncf as a parallel linalg.generic; rank is taken from `value`.
-static Value emitTruncfToBF16(PatternRewriter &rewriter, Location loc, Value value) {
-    auto srcType = cast<RankedTensorType>(value.getType());
-    int64_t rank = srcType.getRank();
-    auto bf16Type = rewriter.getBF16Type();
-    auto resultType = RankedTensorType::get(srcType.getShape(), bf16Type);
-    Value init = tensor::EmptyOp::create(rewriter, loc, srcType.getShape(), bf16Type).getResult();
-    auto identityMap = AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext());
-    SmallVector<utils::IteratorType> iterators(rank, utils::IteratorType::parallel);
-
-    auto generic = linalg::GenericOp::create(
-        rewriter, loc, TypeRange{resultType}, ValueRange{value}, ValueRange{init},
-        ArrayRef<AffineMap>{identityMap, identityMap}, iterators,
-        [&](OpBuilder &b, Location l, ValueRange args) {
-            auto truncf = arith::TruncFOp::create(b, l, bf16Type, args[0]);
-            linalg::YieldOp::create(b, l, truncf.getResult());
-        }
-    );
-    return generic.getResult(0);
-}
-
 // Reroute a fused f32->bf16 truncf generic's users back to its f32 input and erase it, so a
 // later stage re-materialises the cast where it belongs. Clears `truncfOp` so it can't be reused.
 static void dropTruncf(PatternRewriter &rewriter, linalg::GenericOp &truncfOp) {
@@ -489,7 +408,6 @@ static void dropTruncf(PatternRewriter &rewriter, linalg::GenericOp &truncfOp) {
 }
 
 /// Optimization pattern for linalg.conv_1d operation.
-
 struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
     using OpRewritePattern::OpRewritePattern;
 
@@ -535,6 +453,9 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         int64_t stride = strides[0];     // Stride value
         int64_t dilation = dilations[0]; // Dilation value
 
+        if (stride <= 2 && dilation == 1) {
+            return rewriter.notifyMatchFailure(convOp, "Converting to Conv2d is better");
+        }
         // Steps 1-3: im2col (unfold input patches into [Ow, C*Kw]) + matmul -> [Ow, F].
         //
         // The unfold is torq_hl.im2col (affine NDL window read -> unfolded buffer). The op is not
@@ -545,12 +466,13 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
         auto outputElemType = outputType.getElementType();
         int64_t W = inputShape[2];
 
-        // Filter: [F, C, Kw] -> [F, C*Kw] -> [C*Kw, F] (transpose the filter rather than the
-        // im2col output so the matmul lands directly in [Ow, F]).
+        // Filter: [F, C, Kw] -> [F, C*Kw] -> transpose -> [C*Kw, F].
         auto reshapedFilterType = RankedTensorType::get({F, C * Kw}, filterType.getElementType());
         auto reshapedFilter = tensor::CollapseShapeOp::create(
             rewriter, loc, reshapedFilterType, filter, ArrayRef<ReassociationIndices>{{0}, {1, 2}}
         );
+        // Transpose filter [F, K] -> [K, F] so the matmul is im2col[Ow,K] x filterT[K,F] -> [Ow,F].
+        // The transpose folds into the constant weight at canonicalization time.
         auto transposedFilterInit = tensor::EmptyOp::create(
             rewriter, loc, ArrayRef<int64_t>{C * Kw, F}, filterType.getElementType()
         );
@@ -575,39 +497,27 @@ struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1
                 .getResults()[0];
         };
 
-        Value matmulResult;
-        if (im2ColFitsInLram(C, W, Ow, Kw, elemType)) {
-            auto unfoldedType = RankedTensorType::get({Ow, C * Kw}, elemType);
-            matmulResult = emitMatmul(
-                emitIm2Col(rewriter, loc, input, C, W, Kw, Ow, stride, dilation, unfoldedType)
-            );
-        }
-        else if (int64_t blockOw = computeIm2ColBlockOw(C, W, Ow, Kw, stride, dilation, elemType)) {
-            matmulResult = emitTiledIm2ColConv1dMatmul(
-                rewriter, loc, input, transposedFilter, C, Kw, Ow, F, stride, dilation, blockOw,
-                elemType, outputElemType
-            );
-        }
-        else {
-            auto unfoldedType = RankedTensorType::get({Ow, C * Kw}, elemType);
-            matmulResult = emitMatmul(
-                emitHostIm2Col(rewriter, loc, input, C, W, Kw, Ow, stride, dilation, unfoldedType)
-            );
-        }
+        auto unfoldedType = RankedTensorType::get({Ow, C * Kw}, elemType);
 
-        // Transpose result [Ow, F] -> [F, Ow]
-        auto transposedResultInit =
-            tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{F, Ow}, outputElemType);
-        auto transposedResult = linalg::TransposeOp::create(
-            rewriter, loc, matmulResult, transposedResultInit, ArrayRef<int64_t>{1, 0}
+        Value matmulResult = emitMatmul(
+            emitIm2Col(rewriter, loc, input, C, W, Kw, Ow, stride, dilation, unfoldedType)
         );
+        // Transpose [Ow, F] -> [F, Ow] so Conv1DMatmulToTorqHlFCPattern detects the transpose
+        // and correctly emits is_batch_scaled=false (per-output-channel bias on OC=F).
+        auto transposedMatmulInit =
+            tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{F, Ow}, outputElemType);
+        Value transposedMatmul =
+            linalg::TransposeOp::create(
+                rewriter, loc, matmulResult, transposedMatmulInit, ArrayRef<int64_t>{1, 0}
+            )
+                .getResults()[0];
 
         // Step 4: expand [F, Ow] -> [N, F, Ow]
         if (N == 1) {
             SmallVector<int64_t> expandedShape = {N, F, Ow};
             auto expandedType = RankedTensorType::get(expandedShape, outputElemType);
             auto expandedResult = tensor::ExpandShapeOp::create(
-                rewriter, loc, expandedType, transposedResult.getResults()[0],
+                rewriter, loc, expandedType, transposedMatmul,
                 ArrayRef<ReassociationIndices>{{0, 1}, {2}}
             );
 
@@ -774,10 +684,18 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
         Value filter = convOp.getInputs()[1];
         Value output = convOp.getOutputs()[0];
 
+        // Get attributes
+        auto stridesAttr = convOp.getStrides();
+        auto dilationsAttr = convOp.getDilations();
+
         // Get types and shapes
         auto inputType = cast<RankedTensorType>(input.getType());
         auto filterType = cast<RankedTensorType>(filter.getType());
         auto outputType = cast<RankedTensorType>(output.getType());
+
+        if (stridesAttr.getValues<int64_t>()[0] > 2 || dilationsAttr.getValues<int64_t>()[0] > 1) {
+            return rewriter.notifyMatchFailure(convOp, "strides/dilations must be 1D");
+        }
 
         // Add extra dimension (1) to input as W: [N,C,W] -> [N,C,W,1]
         // Need to use proper reassociation indices
@@ -809,10 +727,6 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
 
         auto expandedOutput =
             tensor::ExpandShapeOp::create(rewriter, loc, expandedOutputType, output, outputReassoc);
-
-        // Get attributes
-        auto stridesAttr = convOp.getStrides();
-        auto dilationsAttr = convOp.getDilations();
 
         // Convert 1D strides/dilations to 2D (add 1 as width dimension)
         SmallVector<int64_t> strides2d = {stridesAttr.getValues<int64_t>()[0]};
@@ -938,17 +852,9 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         int64_t Kw = filterShape[2];
         int64_t Ow = outputShape[2];
 
-        // Pointwise convs lower to a fully_connected that runs efficiently on the
-        // NPU, so leave them to the matmul path when only non-pointwise convs were
-        // requested (see populateOptimizeConv1DPatterns).
-        if (onlyNonPointwise && Kw == 1) {
-            return rewriter.notifyMatchFailure(convOp, "pointwise conv handled by matmul path");
-        }
-
         int64_t W = inputShape[2];
         auto elemType = inputType.getElementType();
         auto filterElemType = filterType.getElementType();
-        Type computeElemType = rewriter.getF32Type();
 
         SmallVector<int64_t> strides = llvm::to_vector<4>(
             llvm::map_range(convOp.getStrides(), [](APInt v) { return v.getSExtValue(); })
@@ -956,12 +862,19 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         SmallVector<int64_t> dilations = llvm::to_vector<4>(
             llvm::map_range(convOp.getDilations(), [](APInt v) { return v.getSExtValue(); })
         );
+
         int64_t stride = strides[0];
         int64_t dilation = dilations[0];
 
-        int64_t blockOw = computeGenericConv1dBlockOw(
-            N, C, F, Ow, Kw, stride, dilation, elemType, filterElemType, computeElemType
-        );
+        // Pointwise convs lower to a fully_connected that runs efficiently on the
+        // NPU, so leave them to the matmul path when only non-pointwise convs were
+        // requested (see populateOptimizeConv1DPatterns).
+        if (stride > 2 || dilation > 1 || Kw > 7) {
+            return rewriter.notifyMatchFailure(
+                convOp, "Condition handled by matmul path: stride > 2 || dilation > 1 || Kw > 7"
+            );
+        }
+
         // A single-channel conv lowers to an all-parallel generic that downstream tile-and-fuse
         // can tile at any size, so emit it untiled and skip Ow tiling: for a large Ow/Kw the
         // per-block budget would otherwise force a tiny blockOw and explode into thousands of
@@ -969,14 +882,6 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         // untiled intermediate cannot be tiled downstream, so it keeps the LRAM-aware Ow tiling
         // (the matmul path can't take over either: its C*Kw contraction overflows the HW
         // accumulate block).
-        if (C == 1) {
-            blockOw = Ow;
-        }
-        else if (blockOw == 0) {
-            return rewriter.notifyMatchFailure(
-                convOp, "conv too large for native conv1d; use im2col/matmul path"
-            );
-        }
 
         auto outputElemType = outputType.getElementType();
 
@@ -1006,36 +911,25 @@ struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv
         SmallVector<ReassociationIndices> inputReassoc = {{0}, {1}, {2, 3}};
         Value reduced4D;
 
-        if (blockOw >= Ow) {
-            // Single LRAM-resident generic + kw reduce.
-            auto input4DType = RankedTensorType::get({N, C, 1, W}, elemType);
-            Value input4D =
-                tensor::ExpandShapeOp::create(rewriter, loc, input4DType, input, inputReassoc);
+        // Single LRAM-resident generic + kw reduce.
+        auto input4DType = RankedTensorType::get({N, C, 1, W}, elemType);
+        Value input4D =
+            tensor::ExpandShapeOp::create(rewriter, loc, input4DType, input, inputReassoc);
 
-            Value genericResult = emitGenericConv1dBlock(
-                rewriter, loc, input4D, filter4D, N, F, Ow, Kw, stride, dilation
-            );
+        Value genericResult = emitGenericConv1dBlock(
+            rewriter, loc, input4D, filter4D, N, F, Ow, Kw, stride, dilation
+        );
 
-            Value reduceInput = genericResult;
-            // Memory-optimized: truncate the [N,F,1,Ow,Kw] generic to bf16 before the reduce.
-            if (clConv1dTruncateForReduce && truncfGenericOp) {
-                reduceInput = emitTruncfToBF16(rewriter, loc, genericResult);
-            }
-            if (truncfGenericOp) {
-                dropTruncf(rewriter, truncfGenericOp);
-            }
-
-            reduced4D = emitKwReduceBlock(rewriter, loc, reduceInput, N, F, Ow);
+        Value reduceInput = genericResult;
+        // Memory-optimized: truncate the [N,F,1,Ow,Kw] generic to bf16 before the reduce.
+        if (clConv1dTruncateForReduce && truncfGenericOp) {
+            reduceInput = emitTruncfToBF16(rewriter, loc, genericResult);
         }
-        else {
-            // Ow-tiled native conv1d: each block runs generic + kw reduce on a sliced input window.
-            if (truncfGenericOp) {
-                dropTruncf(rewriter, truncfGenericOp);
-            }
-            reduced4D = emitTiledNativeConv1d(
-                rewriter, loc, input, filter4D, N, C, F, Ow, Kw, stride, dilation, blockOw, elemType
-            );
+        if (truncfGenericOp) {
+            dropTruncf(rewriter, truncfGenericOp);
         }
+
+        reduced4D = emitKwReduceBlock(rewriter, loc, reduceInput, N, F, Ow);
 
         // Collapse [N, F, 1, Ow] -> [N, F, Ow]
         Type reduceOutputType = rewriter.getF32Type();
@@ -1369,14 +1263,8 @@ void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &pat
         clConv1dAsMatmul = true;
     }
 
-    if (clConv1dAsMatmul) {
-        patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
-    }
     if (clConv1dToGenericConv1D) {
         patterns.insert<Conv1DNcwFcwToGenericConv1DPattern>(context);
-    }
-    if (clConv1dToConv2D) {
-        patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
     }
 
     // A non-pointwise (Kw > 1) conv1d that the matmul/im2col path cannot lower on-NPU --
@@ -1387,9 +1275,8 @@ void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &pat
     // fp32 host bias-add. Pointwise convs already lower to an efficient fully_connected, so
     // they keep the path selected above. The native path only matches bf16 data/weights (see
     // Conv1DNcwFcwToGenericConv1DPattern); other dtypes fall back to the matmul/im2col path.
-    patterns.insert<Conv1DNcwFcwToGenericConv1DPattern>(
-        context, /*benefit=*/2, /*onlyNonPointwise=*/true
-    );
+    patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
+    patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
     patterns.insert<FoldConvBiasIntoReducePattern>(context);
 }
 

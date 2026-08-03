@@ -146,10 +146,24 @@ Value transposeInputWithPad(
 // AffineDimExpr(1) (NCHW channel).  All other expressions are unchanged.
 AffineMap remapChannelDim(AffineMap map, MLIRContext *ctx) {
     SmallVector<AffineExpr> results;
+    unsigned oldChannelDim = 0;
+    unsigned newChannelDim = 0;
+    if (map.getNumDims() == 4) {
+        oldChannelDim = 3;
+        newChannelDim = 1;
+    }
+    else if (map.getNumDims() == 3) {
+        oldChannelDim = 2;
+        newChannelDim = 0;
+    }
+    else {
+        return map;
+    }
+
     for (auto expr : map.getResults()) {
         auto dim = dyn_cast<AffineDimExpr>(expr);
-        if (dim && dim.getPosition() == 3)
-            results.push_back(getAffineDimExpr(1, ctx));
+        if (dim && dim.getPosition() == oldChannelDim)
+            results.push_back(getAffineDimExpr(newChannelDim, ctx));
         else
             results.push_back(expr);
     }
@@ -171,6 +185,8 @@ AffineMap remapChannelDim(AffineMap map, MLIRContext *ctx) {
 AffineMap nchwMap(AffineMap origMap, MLIRContext *ctx) {
     if (origMap.getNumResults() == 4)
         return AffineMap::getMultiDimIdentityMap(4, ctx);
+    if (origMap.getNumResults() == 3)
+        return AffineMap::getMultiDimIdentityMap(3, ctx);
     return remapChannelDim(origMap, ctx);
 }
 
@@ -186,8 +202,8 @@ bool nchwRelabelWouldBeInvalid(ArrayRef<Operation *> ops) {
         if (!genericOp)
             continue;
         for (AffineMap map : genericOp.getIndexingMapsArray()) {
-            // 4D maps become the identity (nchwMap), which is always valid.
-            if (map.getNumResults() == 4)
+            // 4D/3D feature maps become identity under this conversion path.
+            if (map.getNumResults() == 4 || map.getNumResults() == 3)
                 continue;
             AffineMap relabeled = remapChannelDim(map, map.getContext());
             SmallVector<unsigned, 4> dims;
@@ -232,14 +248,21 @@ Value convertGenericOpToNchw(
             newInp = it->second;
         }
         else {
-            // Input not in valMap - check if it's a 4D NHWC tensor that needs transposing
+            // Input not in valMap - check if it's an NHWC/HWC tensor that needs transposing
             auto inpType = dyn_cast<RankedTensorType>(inp.getType());
-            if (inpType && inpType.getRank() == 4 && isZeroFilledTensor(inp)) {
-                // 4D zero-filled NHWC constant/fill → transpose to NCHW
+            if (inpType && (inpType.getRank() == 4 || inpType.getRank() == 3) &&
+                isZeroFilledTensor(inp)) {
+                // Zero-filled NHWC/HWC constant/fill -> recreate in NCHW/CHW shape.
                 SmallVector<int64_t> nchwShape = nhwcToNchwShape(inpType.getShape());
                 newInp = createZeroFilledTensor(
                     builder, genericOp.getLoc(), nchwShape, inpType.getElementType()
                 );
+            }
+            else if (inpType && inpType.getRank() == 4) {
+                newInp = transposeValue(inp, Permutation::nhwc2nchw(), genericOp.getLoc(), builder);
+            }
+            else if (inpType && inpType.getRank() == 3) {
+                newInp = transposeValue(inp, Permutation::hwc2chw(), genericOp.getLoc(), builder);
             }
             else {
                 // Keep as-is (1D channel tensors, non-zero tensors, etc.)
@@ -294,9 +317,16 @@ Value convertGenericOpToNchw(
         );
     }
     else {
-        // Transpose the original init to preserve its values
-        newOutInit =
-            transposeValue(origOutInit, Permutation::nhwc2nchw(), genericOp.getLoc(), builder);
+        // Transpose the original init to preserve its values. Use a rank-aware
+        // permutation: rank-4 NHWC->NCHW, rank-3 HWC->CHW, otherwise unchanged.
+        SmallVector<int64_t> outPerm;
+        if (origOutType.getRank() == 4)
+            outPerm = Permutation::nhwc2nchw();
+        else if (origOutType.getRank() == 3)
+            outPerm = Permutation::hwc2chw();
+        else
+            outPerm = Permutation::none();
+        newOutInit = transposeValue(origOutInit, outPerm, genericOp.getLoc(), builder);
     }
 
     return rebuildGenericWithNewLayout(builder, genericOp, newInputs, newOutInit, newMaps);

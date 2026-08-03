@@ -16,6 +16,9 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
 
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "linalg-torq-conv1d-matmul-pattern"
 namespace mlir::syna::torq {
 
 namespace {
@@ -91,16 +94,58 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         : OpRewritePattern(context, /*benefit=*/2), _shift8b(shift8b), _shift16b(shift16b),
           _markFuseGroups(markFuseGroups) {}
 
+    Value replaceWithTorqMatmul(linalg::MatmulOp srcOp, PatternRewriter &rewriter) const {
+        // Fallback rewrite when no fusible conv/fc chain is present:
+        // emit plain torq_hl.matmul with neutral bias/scale parameters.
+        LLVM_DEBUG(
+            llvm::dbgs() << "[" DEBUG_TYPE "] Falling back to torq_hl.matmul for: " << srcOp << "\n"
+        );
+        auto outTy = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
+        auto [outMin, outMax] = getDTypeRange(outTy.getElementType());
+
+        const std::vector<int32_t> bias = {0};
+        const std::vector<int32_t> scale = {1};
+        Value biasScale = createI32Const(rewriter, srcOp, interleave(bias, scale));
+
+        auto matMulOp = torq_hl::MatMulOp::create(
+            rewriter, srcOp->getLoc(), outTy, createInitTensor(srcOp, rewriter, outTy), 0, outMin,
+            outMax, 0, biasScale, srcOp.getOperand(0), srcOp.getOperand(1)
+        );
+
+        // linalg::MatmulOp is accumulating, but torq_hl::MatmulOp is not, so we do the addition
+        // explicitly.
+        FailureOr<Value> resultVal =
+            addInitToResult(srcOp.getOutputs().front(), matMulOp.getResult(0), rewriter);
+        assert(succeeded(resultVal) && "failed to add init value");
+
+        rewriter.replaceOp(srcOp, *resultVal);
+
+        return *resultVal;
+    }
+
     LogicalResult
     matchAndRewrite(linalg::MatmulOp matmulOp, PatternRewriter &rewriter) const override {
+        LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Attempting match on: " << matmulOp << "\n");
+
         if (_markFuseGroups && isMarkedFuseGroup(matmulOp)) {
+            LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Skipping already-marked fuse group\n");
             return rewriter.notifyMatchFailure(matmulOp, "Already marked");
+        }
+
+        // QDQ quantized chains are owned by QMatmulToFCConvert. This pattern has
+        // higher benefit and is tried first on every linalg.matmul, so without
+        // this check it can spuriously match a quantized FC matmul and
+        // permanently steal it from QMatmulToFCConvert.
+        if (isQuantizedMatmulChain(matmulOp)) {
+            return rewriter.notifyMatchFailure(
+                matmulOp, "quantized matmul handled by QMatmulToFCConvert"
+            );
         }
 
         auto loc = matmulOp.getLoc();
 
         Value im2col = matmulOp.getInputs()[0];
-        Value transposedFilter = matmulOp.getInputs()[1];
+        Value weights = matmulOp.getInputs()[1];
         Value matmulResult = matmulOp.getResult(0);
 
         auto matmulType = dyn_cast<RankedTensorType>(matmulResult.getType());
@@ -109,167 +154,175 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         }
         int64_t Ow = matmulType.getShape()[0];
         int64_t F = matmulType.getShape()[1];
+        LLVM_DEBUG(
+            llvm::dbgs() << "[" DEBUG_TYPE "] Matmul output shape: [" << Ow << ", " << F << "]\n"
+        );
 
         auto im2colType = dyn_cast<RankedTensorType>(im2col.getType());
-        auto transposedFilterType = dyn_cast<RankedTensorType>(transposedFilter.getType());
-        if (!im2colType || !transposedFilterType || !im2colType.hasStaticShape() ||
-            !transposedFilterType.hasStaticShape() || im2colType.getRank() != 2 ||
-            transposedFilterType.getRank() != 2) {
+        auto weightsType = dyn_cast<RankedTensorType>(weights.getType());
+        if (!im2colType || !weightsType || !im2colType.hasStaticShape() ||
+            !weightsType.hasStaticShape() || im2colType.getRank() != 2 ||
+            weightsType.getRank() != 2) {
             return rewriter.notifyMatchFailure(matmulOp, "Expected static 2D matmul inputs");
         }
         int64_t K = im2colType.getShape()[1];
 
-        // Recover [F, K] weights. Canonicalization may fold the introduced
-        // transpose into a constant, leaving the matmul RHS already in [K, F].
-        auto filterTransposeOp = transposedFilter.getDefiningOp<linalg::TransposeOp>();
-        Value weights = transposedFilter;
-        bool transposeWeightsForFC = true;
-        if (filterTransposeOp) {
-            if (!hasPermutation(filterTransposeOp, {1, 0})) {
-                return rewriter.notifyMatchFailure(
-                    matmulOp, "Expected 2D linalg.transpose feeding matmul rhs"
-                );
-            }
-            weights = filterTransposeOp.getInput();
-            transposeWeightsForFC = false;
-        }
+        // Recover [K, F] weights. Canonicalization folds the filter transpose into the
+        // constant, so the matmul RHS lands directly as [K, F].
 
-        auto weightsType = dyn_cast<RankedTensorType>(weights.getType());
-        if (transposeWeightsForFC) {
-            if (!hasStaticShape(weightsType, {K, F})) {
-                return rewriter.notifyMatchFailure(
-                    matmulOp, "Unexpected transposed weights layout"
-                );
-            }
-        }
-        else if (!hasStaticShape(weightsType, {F, K})) {
+        if (!hasStaticShape(weightsType, {K, F})) {
             return rewriter.notifyMatchFailure(matmulOp, "Unexpected weights layout");
         }
+        LLVM_DEBUG(
+            llvm::dbgs() << "[" DEBUG_TYPE "] Weights shape: [" << K << ", " << F
+                         << "], im2col shape: [" << Ow << ", " << K << "]\n"
+        );
 
-        // Walk forward through the post-matmul layout chain:
-        //   matmul[Ow,F] -> linalg.transpose[F,Ow] -> tensor.expand_shape[N,F,Ow]
-        Value forwardWalk = matmulResult;
-        auto matmulTransposeOp = getSingleUser<linalg::TransposeOp>(forwardWalk);
-        if (!matmulTransposeOp || !hasPermutation(matmulTransposeOp, {1, 0})) {
-            return rewriter.notifyMatchFailure(
-                matmulOp, "Expected post-matmul 2D linalg.transpose"
+        // Build fusion plan and compute bias/scale using PatternUtils helpers
+        auto output = matmulOp.getResult(0);
+        LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Building fusion plan\n");
+        FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output);
+        if (failed(fusionPlanOr) || !fusionPlanOr->isFusable()) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[" DEBUG_TYPE "] Fusion plan not fusable"
+                             << (failed(fusionPlanOr) ? " (failed to build)" : "") << "\n"
             );
-        }
-        forwardWalk = matmulTransposeOp.getResults()[0];
-
-        // An expand_shape may be present between the transpose and elementwise
-        // chain. After it, F lives at dim 1 of [N, F, Ow]; without it, F lives
-        // at dim 0 of [F, Ow].
-        bool hasExpandShape = false;
-        if (auto expandOp = getSingleUser<tensor::ExpandShapeOp>(forwardWalk)) {
-            if (!hasConv1DExpandReassociation(expandOp)) {
-                return rewriter.notifyMatchFailure(
-                    matmulOp, "Unexpected post-transpose expand_shape reassociation"
+            if (_markFuseGroups) {
+                // Discovery-only mode: mark the chain and defer material rewrite.
+                LLVM_DEBUG(
+                    llvm::dbgs() << "[" DEBUG_TYPE "] Marking fuse group (non-fusable path)\n"
                 );
+                markFuseGroupBackward(
+                    output, {im2col, weights}, rewriter,
+                    matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                );
+                return success();
             }
-            forwardWalk = expandOp.getResult();
-            hasExpandShape = true;
+            replaceWithTorqMatmul(matmulOp, rewriter);
+            return success();
+        }
+        LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Fusion plan built successfully\n");
+
+        RankedTensorType finalType = cast<RankedTensorType>(output.getType());
+        // Compute per-channel bias value and scale/clamp info from fused chain
+        std::optional<Value> optionalWeightZpV;
+        ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, output.getDefiningOp());
+
+        FailureOr<Value> biasV = computeBiasAndRescaleInfo(
+            *fusionPlanOr, fusionPlanOr->channelDim.value(), optionalWeightZpV, scInfo
+        );
+        if (failed(biasV)) {
+            LLVM_DEBUG({ llvm::dbgs() << "computeBias: no bias found, setting zero bias\n"; });
+            biasV = getDefaultBiasScale(matmulOp, finalType, rewriter);
+            fusionPlanOr->channelDim = 0; // default to batch dim for zero bias
         }
 
-        auto preFoldType = dyn_cast<RankedTensorType>(forwardWalk.getType());
-        if (!preFoldType || !preFoldType.hasStaticShape()) {
-            return rewriter.notifyMatchFailure(
-                matmulOp, "non-static ranked tensor after layout walk"
-            );
-        }
-        if (hasExpandShape) {
-            auto preFoldShape = preFoldType.getShape();
-            if (preFoldType.getRank() != 3 || preFoldShape[1] != F || preFoldShape[2] != Ow) {
-                return rewriter.notifyMatchFailure(matmulOp, "Unexpected expand_shape layout");
-            }
-        }
+        LLVM_DEBUG(
+            llvm::dbgs() << "[" DEBUG_TYPE "] Scale/clamp info: zp=" << scInfo.zp
+                         << " min=" << scInfo.min << " max=" << scInfo.max
+                         << " shift=" << scInfo.scaleShift << "\n"
+        );
 
-        const int channelDim = hasExpandShape ? 1 : 0;
-
-        // Capture per-channel bias along F (biasVec starts at all-zeros).
-        bool isInt = preFoldType.getElementType().isInteger();
-        VectorIntOrFloat biasVec(F, isInt);
-        Value foldStart = forwardWalk;
-        while (foldForwardPerChannelAdd(forwardWalk, channelDim, biasVec)) {
-            // Keep folding chained bias adds into biasVec.
-        }
-
-        // Absorb a trailing truncf and any clamp. For float anchors, scale data
-        // may remain empty even when `forwardWalk` advances past truncf/clamp.
-        ScaleClampInfo scInfo = foldForwardScaleClamp(forwardWalk, F, _shift8b, _shift16b);
-
-        // If neither bias nor truncf/clamp was absorbed, there is nothing to
-        // fuse, so fall through to the default Conv2DMatmulOpConversion.
-        if (forwardWalk == foldStart) {
-            return rewriter.notifyMatchFailure(matmulOp, "No bias or truncf to fuse");
-        }
-        if (isInt && !scInfo) {
-            return rewriter.notifyMatchFailure(
-                matmulOp, "Expected integer scale/clamp after Conv1D matmul"
-            );
-        }
-
-        Type fcElemType = cast<RankedTensorType>(forwardWalk.getType()).getElementType();
+        Type fcElemType = finalType.getElementType();
 
         if (_markFuseGroups) {
+            LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Marking fuse group (fusable path)\n");
             markFuseGroupBackward(
-                forwardWalk, {im2col, weights}, rewriter,
+                output, {im2col, weights}, rewriter,
                 matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();
         }
 
+        for (auto &op : llvm::reverse(fusionPlanOr->opsToFuse)) {
+            if (op->use_empty()) {
+                // Remove now-dead ops from fused tail after bias/scale extraction.
+                rewriter.eraseOp(op);
+            }
+        }
         // Mark filter constants as compile-time const so they can be packed
         // into the static section.
-        if (transposeWeightsForFC) {
-            weights = transposeValue(weights, SmallVector<int64_t>{1, 0}, loc, rewriter);
-        }
         if (auto wDef = weights.getDefiningOp()) {
             weights = createCompileTimeConstOp(wDef, rewriter).value_or(weights);
         }
 
-        // Build the torq_hl.fully_connected:
-        //   input   : [Ow, K]
-        //   weights : [F,  K]
-        //   bias    : [F] for float, interleaved bias/scale [2*F] for integer
-        //   output  : [Ow, F] in fcElemType
-        auto fcOutType = RankedTensorType::get({Ow, F}, fcElemType);
-        Value fcInit = createInitTensor(matmulOp, rewriter, fcOutType);
+        {
+            rewriter.setInsertionPoint(output.getDefiningOp());
+            // Build the torq_hl.fully_connected:
+            //   $input   (input_slot) : im2col [Ow, K]   → N=Ow, IC=K
+            //   $weights (weight_slot): filterT [K, F]   → IC=K, OC=F
+            //   $bias                 : [F] for float, interleaved bias/scale [2*F] for integer
+            //   output                : [Ow, F] in fcElemType
+            // is_batch_scaled=false so bias applies per-OC=F (per-output-channel).
+            LLVM_DEBUG(
+                llvm::dbgs() << "[" DEBUG_TYPE "] Emitting torq_hl.fully_connected: [" << Ow << ", "
+                             << F << "] elem=" << fcElemType << " expand_shape="
+                             << (fusionPlanOr->includedExpandShape ? "yes" : "no") << "\n"
+            );
+            auto fcOutType = RankedTensorType::get({Ow, F}, fcElemType);
+            Value fcInit = createInitTensor(matmulOp, rewriter, fcOutType);
 
-        Value biasValue =
-            isInt ? createConst(interleave(biasVec.ints, scInfo.scaleNpu), rewriter, loc)
-                  : createConst(biasVec.floats, rewriter, loc);
+            bool isBatchBias = fusionPlanOr->channelDim.value() == 0;
+            if (fusionPlanOr->includedExpandShape) {
+                LLVM_DEBUG(
+                    llvm::dbgs() << "[" DEBUG_TYPE
+                                    "] Checking expand_shape reassociation for channel dim\n"
+                );
+                // If there is an expand_shape, the channel dim is not necessarily the first dim of
+                // the fully_connected output. Check the expand_shape reassociation to see if the
+                // channel dim is the first or second dim of the expanded output.
+                auto expandOp = cast<tensor::ExpandShapeOp>(*fusionPlanOr->includedExpandShape);
+                auto reassoc = expandOp.getReassociationIndices();
+                if (reassoc[0].size() >= 2 && reassoc[0][0] == 0 && reassoc[0][1] == 1) {
+                    isBatchBias = fusionPlanOr->channelDim.value() == 0 ||
+                                  fusionPlanOr->channelDim.value() == 1;
+                }
+            }
+            if (fusionPlanOr->includedTranspose) {
+                isBatchBias = !isBatchBias;
+            }
 
-        // scInfo carries the default output attributes plus any folded
-        // truncf/clamp data, so the FC op can consume it unconditionally.
-        auto fcOp = torq_hl::FullyConnectedOp::create(
-            rewriter, loc, fcOutType, fcInit, /*inputZp=*/0, /*weightZp=*/0, scInfo.zp, scInfo.min,
-            scInfo.max, scInfo.scaleShift, torq_hl::VectorizationModeEnum::None, weights, biasValue,
-            im2col
-        );
-        Value finalResult = fcOp.getResult(0); // [Ow, F]
+            // scInfo carries the default output attributes plus any folded
+            // truncf/clamp data, so the FC op can consume it unconditionally.
+            auto fcOp = torq_hl::FullyConnectedOp::create(
+                rewriter, loc, fcOutType, fcInit, /*inputZp=*/0, /*weightZp=*/0, scInfo.zp,
+                scInfo.min, scInfo.max, scInfo.scaleShift, torq_hl::VectorizationModeEnum::None,
+                weights, *biasV, im2col, isBatchBias
+            );
+            Value finalResult = fcOp.getResult(0); // [Ow, F]
 
-        // Rebuild the original output layout.
-        // First transpose [Ow, F] -> [F, Ow].
-        finalResult = transposeValue(finalResult, SmallVector<int64_t>{1, 0}, loc, rewriter);
+            // Rebuild the original output layout.
+            if (fusionPlanOr->includedTranspose) {
+                auto transposeOp = cast<linalg::TransposeOp>(*fusionPlanOr->includedTranspose);
+                auto perm = Permutation(transposeOp.getPermutation());
+                finalResult = transposeValue(finalResult, perm, loc, rewriter);
+            }
 
-        // Optionally re-expand to [N, F, Ow] when the upstream chain had one.
-        if (hasExpandShape) {
-            int64_t N = preFoldType.getShape()[0];
-            auto expandedTy = RankedTensorType::get({N, F, Ow}, fcElemType);
-            finalResult = tensor::ExpandShapeOp::create(
-                              rewriter, loc, expandedTy, finalResult,
-                              ArrayRef<ReassociationIndices>{{0, 1}, {2}}
-            ).getResult();
+            if (fusionPlanOr->includedExpandShape) {
+                auto expandOp = cast<tensor::ExpandShapeOp>(*fusionPlanOr->includedExpandShape);
+                auto reassoc = expandOp.getReassociationIndices();
+                auto expandType = cast<RankedTensorType>(expandOp.getType());
+
+                finalResult =
+                    tensor::ExpandShapeOp::create(
+                        rewriter, loc, RankedTensorType::get(expandType.getShape(), fcElemType),
+                        finalResult, reassoc
+                    )
+                        .getResult();
+            }
+
+            // Replace the bottom-most fused op (truncf or bias add) with the new
+            // FC + transpose + expand chain. The matmul, the post-matmul transpose
+            // and the expand_shape become dead and are DCE'd by the canonicalizer
+            // that runs at the end of the pre-conversion pass.
+            LLVM_DEBUG(
+                llvm::dbgs() << "[" DEBUG_TYPE "] Successfully replaced Conv1D matmul [" << F
+                             << ", " << Ow << "] (K=" << K << ") with torq_hl.fully_connected\n"
+            );
+            rewriter.replaceOp(output.getDefiningOp(), finalResult);
+
+            return success();
         }
-
-        // Replace the bottom-most fused op (truncf or bias add) with the new
-        // FC + transpose + expand chain. The matmul, the post-matmul transpose
-        // and the expand_shape become dead and are DCE'd by the canonicalizer
-        // that runs at the end of the pre-conversion pass.
-        rewriter.replaceOp(forwardWalk.getDefiningOp(), finalResult);
-
-        return success();
     }
 };
 

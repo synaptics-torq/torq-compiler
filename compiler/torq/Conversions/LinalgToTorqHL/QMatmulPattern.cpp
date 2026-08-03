@@ -431,17 +431,16 @@ struct QMatmulToFCConvert : public OpRewritePattern<linalg::MatmulOp> {
         int64_t O = outTy.getShape()[1];
         int64_t K = inTy.getShape()[1];
 
-        // Canonicalize weights to the [O, K] orientation expected by the FC op.
-        // The decomposition transposes constant [O, K] weights to [K, O] for
-        // the matmul.  When the transpose survives as an op, peel it to recover
-        // the original layout; when it was folded into the constant, transpose
-        // back during the rewrite.
-        Value weights = rhs;
+        // Recover an [O, K] view of the weights, needed below for the input
+        // zero-point correction (reduces over K, keeps O). The decomposition
+        // transposes constant [O, K] weights to [K, O] for the matmul; peel
+        // the transpose if it survived, otherwise transpose rhs back below.
+        Value weightsOMajor = rhs;
         if (auto transposeOp = rhs.getDefiningOp<linalg::TransposeOp>())
-            weights = transposeOp.getInput();
-        auto weightsTy = cast<RankedTensorType>(weights.getType());
-        bool transposeWeights = weightsTy.getShape()[0] != O;
-        if (transposeWeights && (weightsTy.getShape()[1] != O || weightsTy.getShape()[0] != K)) {
+            weightsOMajor = transposeOp.getInput();
+        auto weightsTy = cast<RankedTensorType>(weightsOMajor.getType());
+        bool needsTranspose = weightsTy.getShape()[0] != O;
+        if (needsTranspose && (weightsTy.getShape()[1] != O || weightsTy.getShape()[0] != K)) {
             return rewriter.notifyMatchFailure(matmulOp, "unexpected weight layout");
         }
 
@@ -495,18 +494,23 @@ struct QMatmulToFCConvert : public OpRewritePattern<linalg::MatmulOp> {
         rewriter.setInsertionPoint(qChain.quantOp);
         Location loc = matmulOp.getLoc();
 
-        // Bring the weights to [O, K] when the constant was pre-transposed.
-        if (transposeWeights)
-            weights = transposeValue(weights, SmallVector<int64_t, 4>{1, 0}, loc, rewriter);
+        // Bring the weights to [O, K] for the zero-point correction below,
+        // when the constant was pre-transposed.
+        if (needsTranspose)
+            weightsOMajor =
+                transposeValue(weightsOMajor, SmallVector<int64_t, 4>{1, 0}, loc, rewriter);
 
         ScaleClampInfo dummyScInfo;
+        // torq_hl.fully_connected wants its `weights` operand in [K, O]
+        // (reduction-dim major), like the Conv1D/Conv2D-as-FC lowerings.
+        // `rhs` is already [K, O] per linalg.matmul semantics, so use it as-is.
         Value torqWeights = preConversionWeights(
-            weights, Permutation::none(), /*weightZpV=*/std::nullopt, dummyScInfo, rewriter,
+            rhs, Permutation::none(), /*weightZpV=*/std::nullopt, dummyScInfo, rewriter,
             /*isDepthwise=*/false
         );
 
         Value scaleBias =
-            buildQGemmScaleBias(bias, torqWeights, inputZp, multiplier, O, loc, rewriter);
+            buildQGemmScaleBias(bias, weightsOMajor, inputZp, multiplier, O, loc, rewriter);
         if (!scaleBias) {
             return rewriter.notifyMatchFailure(matmulOp, "failed to build scale_bias");
         }

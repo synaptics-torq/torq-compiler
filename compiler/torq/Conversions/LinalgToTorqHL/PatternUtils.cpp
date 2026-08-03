@@ -2769,82 +2769,6 @@ Value makeElementWiseBinary(
         .getOutput();
 }
 
-FailureOr<Value> pickGroupResultInt8(Value value) {
-    // Follow single-use chain forward until we hit an int rescale/clamp boundary,
-    // which defines the terminal value for fusion planning.
-    while (true) {
-        auto *userOp = getSingleUser(value);
-        if (!userOp) {
-            // Ambiguous fanout: stop to avoid planning across multiple consumers.
-            return failure();
-        }
-        if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
-            value = genericOp.getResult(0);
-            for (auto &op : genericOp.getRegion().getOps()) {
-                if (isa<linalg::YieldOp>(op)) {
-                    continue;
-                }
-                if (isa<tosa::ApplyScaleOp>(op) || isa<arith::TruncIOp>(op) ||
-                    isa<arith::MaxSIOp>(op) || isa<arith::MinSIOp>(op)) {
-                    // Found quantized rescale tail (apply_scale + clamp/trunc).
-                    return value;
-                }
-            }
-        }
-        else if (isa<tensor::ExpandShapeOp>(userOp)) {
-            // Shape-only op: keep walking through the transformed value.
-            value = userOp->getResult(0);
-        }
-        else {
-            // Non-target user kind: current value is the best terminal point.
-            return value;
-        }
-    }
-    return value;
-}
-
-FailureOr<Value> pickGroupResultFloat(Value value) {
-    // Float path mirrors int path but uses float rescale/clamp markers.
-    while (true) {
-        auto *userOp = getSingleUser(value);
-        if (!userOp) {
-            return failure();
-        }
-        if (auto genericOp = dyn_cast<linalg::GenericOp>(userOp)) {
-            value = genericOp.getResult(0);
-            for (auto &op : genericOp.getRegion().getOps()) {
-                if (isa<linalg::YieldOp>(op)) {
-                    continue;
-                }
-                if (isa<arith::TruncFOp>(op) || isa<arith::MaximumFOp>(op) ||
-                    isa<arith::MinimumFOp>(op)) {
-                    // Found float rescale tail (clamp/trunc boundary).
-                    return value;
-                }
-            }
-        }
-        else if (isa<tensor::ExpandShapeOp>(userOp)) {
-            value = userOp->getResult(0);
-        }
-        else {
-            return value;
-        }
-    }
-    return value;
-}
-
-FailureOr<Value> pickGroupResult(Value value) {
-    // Dispatch terminal-value selection by element type family.
-    auto valueType = dyn_cast<ShapedType>(value.getType()).getElementType();
-    if (valueType.isInteger()) {
-        return pickGroupResultInt8(value);
-    }
-    if (valueType.isBF16() || valueType.isF32()) {
-        return pickGroupResultFloat(value);
-    }
-    return failure();
-}
-
 bool isSingleTensorReductionOp(linalg::LinalgOp linalgOp) {
     // Keep only simple reductions that are safe to include in fusion clone:
     // one input, one init/output, projected-permutation indexing.
@@ -2864,7 +2788,7 @@ bool isSingleTensorReductionOp(linalg::LinalgOp linalgOp) {
     return true;
 }
 
-bool shouldInclude(Operation *op, Value value) {
+bool shouldInclude(Operation *op) {
     // Allow-list of ops that are considered fusible/supporting for bias/scale
     // extraction. Anything else becomes a traversal boundary.
     if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
@@ -2899,11 +2823,293 @@ bool shouldInclude(Operation *op, Value value) {
     return false;
 }
 
+FailureOr<Value> pickGroupResultInt8(Value value) {
+    // Follow single-use chain forward until we hit an int rescale/clamp boundary,
+    // which defines the terminal value for fusion planning.
+    while (true) {
+        if (!value.hasOneUse()) {
+            // Ambiguous fanout: stop to avoid planning across multiple consumers.
+            return failure();
+        }
+        auto userOp = value.getUsers().begin();
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
+            value = genericOp.getResult(0);
+            for (auto &op : genericOp.getRegion().getOps()) {
+                if (isa<linalg::YieldOp>(op)) {
+                    continue;
+                }
+                if (isa<tosa::ApplyScaleOp>(op) || isa<arith::TruncIOp>(op) ||
+                    isa<arith::MaxSIOp>(op) || isa<arith::MinSIOp>(op)) {
+                    // Found quantized rescale tail (apply_scale + clamp/trunc).
+                    return value;
+                }
+            }
+        }
+        else if (shouldInclude(*userOp)) {
+            // Shape-only op: keep walking through the transformed value.
+            value = (*userOp)->getResult(0);
+        }
+        else {
+            // Non-target user kind: current value is the best terminal point.
+            return value;
+        }
+    }
+    return value;
+}
+
+FailureOr<Value> pickGroupResultFloat(Value value) {
+    // Float path mirrors int path but uses float rescale/clamp markers.
+    while (true) {
+        if (!value.hasOneUse()) {
+            return failure();
+        }
+        auto userOp = value.getUsers().begin();
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
+            value = genericOp.getResult(0);
+            for (auto &op : genericOp.getRegion().getOps()) {
+                if (isa<linalg::YieldOp>(op)) {
+                    continue;
+                }
+                if (isa<arith::TruncFOp>(op) || isa<arith::MaximumFOp>(op) ||
+                    isa<arith::MinimumFOp>(op)) {
+                    // Found float rescale tail (clamp/trunc boundary).
+                    return value;
+                }
+            }
+        }
+        else if (shouldInclude(*userOp)) {
+            value = (*userOp)->getResult(0);
+        }
+        else {
+            return value;
+        }
+    }
+    return value;
+}
+
+FailureOr<Value> pickGroupResult(Value value) {
+    // Dispatch terminal-value selection by element type family.
+    auto valueType = dyn_cast<ShapedType>(value.getType()).getElementType();
+    if (valueType.isInteger()) {
+        return pickGroupResultInt8(value);
+    }
+    if (valueType.isBF16() || valueType.isF32()) {
+        return pickGroupResultFloat(value);
+    }
+    return failure();
+}
+
 // Support functions for fusion plan
 LogicalResult computeGroup(Value value, Value groupResult, SmallVector<Operation *> &opsToGroup);
 
-FailureOr<FusionPlan> buildFusionPlanAndRebindOutput(Value &value) {
-    auto plan = createFusionPlan(value);
+bool isRescaleF32(Operation *op) {
+    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
+        for (auto &op : genericOp.getRegion().getOps()) {
+            if (isa<arith::TruncFOp>(op) || isa<arith::MaximumFOp>(op) ||
+                isa<arith::MinimumFOp>(op)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool isRescaleInt(Operation *op) {
+    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
+        for (auto &op : genericOp.getRegion().getOps()) {
+            if (isa<tosa::ApplyScaleOp>(op) || isa<arith::TruncIOp>(op) ||
+                isa<arith::MaxSIOp>(op) || isa<arith::MinSIOp>(op)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool isRescale(Operation *op) {
+    auto shapedType = dyn_cast<ShapedType>(op->getResult(0).getType());
+    if (!shapedType) {
+        return false;
+    }
+    auto valueType = shapedType.getElementType();
+    if (valueType.isInteger()) {
+        return isRescaleInt(op);
+    }
+    if (valueType.isBF16() || valueType.isF32()) {
+        return isRescaleF32(op);
+    }
+    return false;
+}
+
+LogicalResult findPerChannelBiasDimsFromRescale(Operation *rescaleOp, int64_t &biasChDim) {
+    // Heuristic: Look for tosa.apply_scale op in the rescale body, which may indicate per-channel
+    // quantization axis
+    auto applyScaleOps = rescaleOp->getRegion(0).getOps<tosa::ApplyScaleOp>();
+    if (applyScaleOps.empty()) {
+        LLVM_DEBUG(
+            llvm::dbgs()
+            << "[findPerChannelBiasDimsFromRescale] no tosa.apply_scale ops found -> failure\n"
+        );
+        return failure();
+    }
+    auto applyScaleOp = *applyScaleOps.begin();
+    auto scale = applyScaleOp.getMultiplier();
+    int argPos = 0;
+    if (auto scaleBArg = mlir::dyn_cast<BlockArgument>(scale)) {
+        scale = scaleBArg.getOwner()->getParentOp()->getOperand(scaleBArg.getArgNumber());
+        argPos = scaleBArg.getArgNumber();
+    }
+    auto scaleType = dyn_cast<RankedTensorType>(scale.getType());
+
+    // If the scale or multiplier is a 1D tensor, we can infer the bias channel from the iterator
+    // indexing of the apply_scale op
+    if (scaleType && scaleType.getRank() != 1) {
+        LLVM_DEBUG(
+            llvm::dbgs()
+            << "[findPerChannelBiasDimsFromRescale] scale is not 1D tensor -> cannot infer bias "
+               "channel dim -> failure\n"
+        );
+        return failure();
+    }
+    else if (!scaleType && !isa<arith::ConstantOp>(scale.getDefiningOp())) {
+        LLVM_DEBUG(
+            llvm::dbgs()
+            << "[findPerChannelBiasDimsFromRescale] scale is not a tensor or constant -> cannot "
+               "infer bias channel dim -> failure\n"
+        );
+        return failure();
+    }
+
+    auto indexingMaps = applyScaleOp->getParentOfType<linalg::GenericOp>().getIndexingMapsArray();
+    auto dimExprs = indexingMaps[argPos].getResults();
+    auto dimExpr = cast<AffineDimExpr>(dimExprs[0]);
+    biasChDim = dimExpr.getPosition();
+    LLVM_DEBUG(
+        llvm::dbgs() << "[findPerChannelBiasDimsFromRescale] found biasChDim=" << biasChDim
+                     << " -> success\n"
+    );
+    return success();
+}
+
+LogicalResult findPerChannelBiasDimsFromBroadcast(FusionPlan &fusionPlan, int64_t &biasChDim) {
+
+    // Heuristic: Look for linalg.generic ops which are not in candidates and have broadcast
+    // semantics, which may indicate channel bias expanded to the full dimension of the input
+    for (auto op : fusionPlan.neededOps) {
+        LLVM_DEBUG(llvm::dbgs() << "[findPerChannelBiasDimsFromBroadcast] checking op: ";
+                   op->print(llvm::dbgs()); llvm::dbgs() << "\n";);
+        if (isRescale(op)) {
+            LLVM_DEBUG(llvm::dbgs()
+                           << "[findPerChannelBiasDimsFromBroadcast] skipping rescale op: ";
+                       op->print(llvm::dbgs()); llvm::dbgs() << "\n";);
+            continue;
+        }
+        if (auto bcast = dyn_cast<linalg::BroadcastOp>(op)) {
+            auto bcastDims = bcast.getDimensions();
+            auto bcastType = cast<RankedTensorType>(bcast.getType(0));
+            for (int i = 0; i < bcastType.getRank(); i++) {
+                if (!llvm::is_contained(bcastDims, i)) {
+                    biasChDim = i;
+                    LLVM_DEBUG(
+                        llvm::dbgs() << "[findPerChannelBiasDimsFromBroadcast] found biasChDim="
+                                     << biasChDim << " from linalg.broadcast -> success\n"
+                    );
+                    return success();
+                }
+            }
+            return failure();
+        }
+        auto genericOp = dyn_cast<linalg::GenericOp>(op);
+        if (!genericOp) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[findPerChannelBiasDimsFromBroadcast] op is not a linalg.generic, "
+                                "skipping\n"
+            );
+            continue;
+        }
+        auto bcastDims = isaBroadcastOpInterface(genericOp);
+        if (!bcastDims) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[findPerChannelBiasDimsFromBroadcast] op is not a "
+                                "broadcast op, skipping\n"
+            );
+            continue;
+        }
+        LLVM_DEBUG({
+            llvm::dbgs() << "[findPerChannelBiasDimsFromBroadcast] broadcast dims: [";
+            for (auto d : *bcastDims)
+                llvm::dbgs() << d << " ";
+            llvm::dbgs() << "]\n";
+        });
+        llvm::SmallVector<int64_t> nonBcastDims;
+        // Identify dims not involved in broadcasting (i.e. potential bias channel dim)
+        for (int i = 0; i < genericOp.getNumLoops(); i++) {
+            if (!llvm::is_contained(*bcastDims, i)) {
+                nonBcastDims.push_back(i);
+            }
+        }
+        LLVM_DEBUG({
+            llvm::dbgs() << "[findPerChannelBiasDimsFromBroadcast] non-broadcast dims: [";
+            for (auto d : nonBcastDims)
+                llvm::dbgs() << d << " ";
+            llvm::dbgs() << "]\n";
+        });
+        if (nonBcastDims.size() == 1) {
+            biasChDim = nonBcastDims[0];
+            LLVM_DEBUG(
+                llvm::dbgs() << "[findPerChannelBiasDimsFromBroadcast] found biasChDim="
+                             << biasChDim << " -> success\n"
+            );
+            return success();
+        }
+        // TODO if the bias channel is ambiguously broadcast like a single value is
+        // broadcasted to all dims then we need to handle that case as well, for now we skip
+        // it since it's less likely to be correct to pick any particular dim as the bias
+        // channel
+        LLVM_DEBUG(
+            llvm::dbgs() << "[findPerChannelBiasDimsFromBroadcast] all dims are broadcast, "
+                            "no bias channel dim -> skipping\n"
+        );
+    }
+    return failure();
+}
+
+LogicalResult findPerChannelBiasDims(FusionPlan &fusionPlan, int64_t &biasChDim) {
+    // Hueristic: Look for evidence of per-channel bias in the fusion plan, either from rescale ops
+    // or broadcast patterns, and infer the bias channel dimension if possible. If we find a rescale
+    // op, we prioritize the bias channel dim inferred from its apply_scale pattern, as it is more
+    // directly tied to quantization semantics. If not, we look for broadcast patterns in
+    // linalg.generic ops as a secondary signal.
+    LLVM_DEBUG(llvm::dbgs() << "[findPerChannelBiasDims] starting\n");
+    biasChDim = -1;
+    auto finalOpV = fusionPlan.getFusedOutput();
+    bool foundRescale = isRescale(finalOpV.getDefiningOp());
+    if (foundRescale) {
+        auto foundBiasChDimFromRescale =
+            findPerChannelBiasDimsFromRescale(finalOpV.getDefiningOp(), biasChDim);
+        if (succeeded(foundBiasChDimFromRescale)) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[findPerChannelBiasDims] using rescale-derived biasChDim="
+                             << biasChDim << " -> success\n"
+            );
+            return success();
+        }
+    }
+    auto foundBiasChDimFromBcast = findPerChannelBiasDimsFromBroadcast(fusionPlan, biasChDim);
+    if (succeeded(foundBiasChDimFromBcast)) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "[findPerChannelBiasDims] using broadcast-derived biasChDim="
+                         << biasChDim << " -> success\n"
+        );
+        return success();
+    }
+    LLVM_DEBUG(llvm::dbgs() << "[findPerChannelBiasDims] all heuristics exhausted -> failure\n");
+    return failure();
+}
+
+FailureOr<FusionPlan>
+buildFusionPlanAndRebindOutput(Value &value, std::optional<int64_t> knownChannelDim) {
+    auto plan = createFusionPlan(value, knownChannelDim);
     if (failed(plan)) {
         return failure();
     }
@@ -2912,7 +3118,7 @@ FailureOr<FusionPlan> buildFusionPlanAndRebindOutput(Value &value) {
     return *plan;
 }
 
-FailureOr<FusionPlan> createFusionPlan(Value value) {
+FailureOr<FusionPlan> createFusionPlan(Value value, std::optional<int64_t> knownChannelDim) {
     // Build a backward fusion plan rooted at `value`.
     // The plan captures operations between `value` (anchor) and a selected terminal
     // result (`groupResult`) that are eligible for cloning/folding later.
@@ -2949,6 +3155,47 @@ FailureOr<FusionPlan> createFusionPlan(Value value) {
         });
     }
 
+    auto op = fusionPlan.anchor;
+    if (fusionPlan.isFusable()) {
+        do {
+            op = *op->getUsers().begin();
+            if (isa<tensor::ExpandShapeOp>(op)) {
+                fusionPlan.includedExpandShape = op;
+            }
+            if (isa<linalg::TransposeOp>(op)) {
+                fusionPlan.includedTranspose = op;
+            }
+            if (isa<tensor::CollapseShapeOp>(op)) {
+                fusionPlan.includedCollapseShape = op;
+            }
+        } while (op->getResult(0) != *groupResult);
+    }
+    if (knownChannelDim.has_value()) {
+        fusionPlan.channelDim = *knownChannelDim;
+        LLVM_DEBUG(
+            llvm::dbgs() << "createFusionPlan using provided channelDim: " << fusionPlan.channelDim
+                         << "\n"
+        );
+    }
+    else {
+        int64_t biasChDim;
+        if (succeeded(findPerChannelBiasDims(fusionPlan, biasChDim))) {
+            fusionPlan.channelDim = biasChDim;
+        }
+        else if (!isRescale(groupResult->getDefiningOp())) {
+            // The channel dim doesn't matter here since NCHW and NHWC behaves same for non bias
+            // cases
+            return failure();
+        }
+        else {
+            fusionPlan.channelDim = -1; // -1 indicates that we couldn't find a bias channel dim,
+                                        // but we still want to proceed with the fusion plan
+            LLVM_DEBUG(
+                llvm::dbgs() << "createFusionPlan could not find bias channel dim, setting to -1\n"
+            );
+        }
+    }
+
     return fusionPlan;
 }
 
@@ -2972,7 +3219,7 @@ LogicalResult computeGroup(Value anchor, Value groupResult, SmallVector<Operatio
         visited.insert(defOp);
 
         // Stop expansion through non-allowlisted ops (except anchor itself).
-        if (v != anchor && !shouldInclude(defOp, v)) {
+        if (v != anchor && !shouldInclude(defOp)) {
             continue;
         }
         if (v == anchor) {
@@ -3014,41 +3261,6 @@ LogicalResult computeGroup(Value anchor, Value groupResult, SmallVector<Operatio
         }
     });
     return success();
-}
-
-bool isRescaleF32(Operation *op) {
-    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
-        for (auto &op : genericOp.getRegion().getOps()) {
-            if (isa<arith::TruncFOp>(op) || isa<arith::MaximumFOp>(op) ||
-                isa<arith::MinimumFOp>(op)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool isRescaleInt(Operation *op) {
-    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
-        for (auto &op : genericOp.getRegion().getOps()) {
-            if (isa<tosa::ApplyScaleOp>(op) || isa<arith::TruncIOp>(op) ||
-                isa<arith::MaxSIOp>(op) || isa<arith::MinSIOp>(op)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool isRescale(Operation *op) {
-    auto valueType = dyn_cast<ShapedType>(op->getResult(0).getType()).getElementType();
-    if (valueType.isInteger()) {
-        return isRescaleInt(op);
-    }
-    if (valueType.isBF16() || valueType.isF32()) {
-        return isRescaleF32(op);
-    }
-    return false;
 }
 
 FailureOr<Value> getWeightZp(Value bias, OpBuilder &builder) {
@@ -3120,6 +3332,10 @@ FailureOr<Value> createNewBias(
     FusionPlan &fusionPlan, OpBuilder &builder, llvm::SmallVectorImpl<Operation *> &opsToDelete,
     std::optional<Value> &optionalWeightZp
 ) {
+    if (fusionPlan.isFusable() == false) {
+        LLVM_DEBUG(llvm::dbgs() << "createNewBias: fusionPlan is not fusable -> failure\n");
+        return failure();
+    }
     // Builds a per-channel bias tensor from a fusion plan by cloning the relevant
     // subgraph, optionally extracting weight zero-point information, normalizing
     // shape (including inverse collapse when needed), and reducing non-channel
@@ -3158,20 +3374,11 @@ FailureOr<Value> createNewBias(
     return bias;
 }
 
-FailureOr<Value> computeBias(
-    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp, int biasChDim
-) {
+FailureOr<Value>
+computeBias(FusionPlan &fusionPlan, int biasChDim, std::optional<Value> &optionalWeightZp) {
+    LLVM_DEBUG({ llvm::dbgs() << "computeBias: biasChDim=" << biasChDim << "\n"; });
     auto firstOp = fusionPlan.anchor;
-    auto firstOpResult = firstOp->getResult(0);
-    auto firstOpResultType = dyn_cast<ShapedType>(firstOpResult.getType());
     auto loc = firstOp->getLoc();
-    biasChDim = biasChDim < 0 ? channelDim : biasChDim;
-    SmallVector<int64_t> biasShape{firstOpResultType.getShape()[biasChDim]};
-
-    if (!firstOpResultType) {
-        LLVM_DEBUG({ llvm::dbgs() << "computeBias: first op result is not ShapedType\n"; });
-        return failure();
-    }
 
     auto parentRegion = fusionPlan.anchor->getParentRegion();
     auto owner = parentRegion->getParentOp();
@@ -3182,28 +3389,16 @@ FailureOr<Value> computeBias(
     builder.setInsertionPoint(firstOp);
     auto maybeBias = createNewBias(fusionPlan, builder, opsToDelete, optionalWeightZp);
     if (failed(maybeBias)) {
-        auto biasType = RankedTensorType::get(
-            biasShape, firstOpResultType.getElementType().isFloat()
-                           ? (Type)Float32Type::get(owner->getContext())
-                           : (Type)IntegerType::get(owner->getContext(), 32)
-        );
-        return arith::ConstantOp::create(builder, loc, builder.getZeroAttr(biasType)).getResult();
+        return failure();
     }
 
     Value bias = *maybeBias;
     auto biasTy = dyn_cast<ShapedType>(bias.getType());
-    // All non-channel dims will be collapsed to 1D
-    if (biasTy.getRank() == 2) {
-        channelDim = biasChDim;
-    }
-    SmallVector<int64_t> outputShape{biasTy.getShape()[channelDim]};
-    if (outputShape != biasShape) {
-        LLVM_DEBUG({ llvm::dbgs() << "computeBias: init and output shape mismatch\n"; });
-        return failure();
-    }
+
+    // All non-channel dims will be collapsed to produce a 1D per-channel bias.
+    SmallVector<int64_t> outputShape{biasTy.getShape()[biasChDim]};
 
     Type biasElTy = biasTy.getElementType();
-
     Type torqBiasTy = biasElTy.isFloat() ? (Type)builder.getF32Type() : (Type)builder.getI32Type();
 
     // Rank-reducing slice: fix index 0 on all non-channel dims (values are uniform there).
@@ -3484,6 +3679,9 @@ FailureOr<Value>
 computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scInfo) {
     // Parse the terminal rescale generic and reconstruct explicit scale/clamp metadata.
     // The goal is to materialize per-channel scale values and interleave them with biasScale.
+    if (fusionPlan.isFusable() == false) {
+        return failure();
+    }
     auto lastOp = fusionPlan.neededOps.back();
     if (!isRescale(lastOp)) {
         LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: last op is not a rescale op\n"; });
@@ -3657,41 +3855,16 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
 }
 
 FailureOr<Value> computeBiasForMatmul(
-    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp, bool isFC
+    FusionPlan &fusionPlan, int biasChDim, std::optional<Value> &optionalWeightZp
 ) {
-    auto anchor = fusionPlan.anchor;
-    auto anchorTy = anchor ? dyn_cast<ShapedType>(anchor->getResult(0).getType()) : nullptr;
-    if (isFC && anchorTy &&
-        (anchorTy.getElementType().isBF16() || anchorTy.getElementType().isF32())) {
-        // Floating-point matmul/fc lowering keeps explicit post-op adds in the graph.
-        // Using fusion-derived bias here can accidentally capture dynamic activation
-        // tensors (e.g. truncated matmul outputs) instead of static per-channel bias.
-        // Use neutral bias and let the explicit add op carry the real bias.
-        int64_t biasDim = anchorTy.getShape().size() > 1 ? anchorTy.getShape()[1] : 1;
-        OpBuilder builder(anchor->getContext());
-        builder.setInsertionPoint(anchor);
-        auto zeroBiasTy = RankedTensorType::get(
-            {biasDim}, anchorTy.getElementType().isFloat()
-                           ? (Type)Float32Type::get(anchor->getContext())
-                           : (Type)IntegerType::get(anchor->getContext(), 32)
-        );
-        Value bias =
-            arith::ConstantOp::create(builder, anchor->getLoc(), builder.getZeroAttr(zeroBiasTy));
-        optionalWeightZp.reset();
-        return bias;
-    }
-
-    if (channelDim > 1) {
-        return computeBias(fusionPlan, channelDim, optionalWeightZp, 1);
-    }
-    return computeBias(fusionPlan, channelDim, optionalWeightZp, 0);
+    return computeBias(fusionPlan, biasChDim, optionalWeightZp);
 }
 
 FailureOr<Value> computeBiasAndRescaleInfo(
-    FusionPlan &fusionPlan, int channelDim, std::optional<Value> &optionalWeightZp,
+    FusionPlan &fusionPlan, int biasChDim, std::optional<Value> &optionalWeightZp,
     ScaleClampInfo &scInfo
 ) {
-    auto maybeBias = computeBias(fusionPlan, channelDim, optionalWeightZp);
+    auto maybeBias = computeBias(fusionPlan, biasChDim, optionalWeightZp);
     if (failed(maybeBias)) {
         return failure();
     }

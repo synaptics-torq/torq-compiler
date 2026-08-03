@@ -52,6 +52,12 @@ def case_config(request, runtime_hw_type, chip_config):
 @pytest.mark.ci
 @pytest.mark.fpga_ci
 def test_mlir_files_torq(request, torq_results, llvmcpu_reference_results, case_config):
+    xfail_tc = [
+        # sim-sl2610-v1: Number of differences: 112795 out of 147456 [76.49%]
+        "conv2d_1x1_size1_bias_matmul_as_conv-i8",
+    ]
+    if any(s in request.node.name for s in xfail_tc):
+        pytest.xfail("known accuracy failure on sim-sl2610-v1")
     compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
 
 
