@@ -571,14 +571,14 @@ def TorqHL_LoadOp: TorqHL_Op<"load"> {
   }];
 
   let arguments = (ins
-    AnyMemRef:$output,
-    AnyMemRef:$input,
+    Arg<AnyMemRef, "LRAM destination", [MemWrite]>:$output,
+    Arg<AnyMemRef, "XRAM source", [MemRead]>:$input,
     DenseI64ArrayAttr:$input_strides_bytes,
     DenseI64ArrayAttr:$shape,
     I64Attr:$element_size_bytes,
     DefaultValuedOptionalAttr<BoolAttr, "false">:$unsafe
   );
-  
+
   let hasCanonicalizer = 1;
 
   let hasVerifier = 1;
@@ -593,8 +593,8 @@ def TorqHL_HostCopyOp: TorqHL_Op<"host_copy"> {
   let summary = "Copy between memrefs using the host";
 
   let arguments = (ins
-    AnyMemRef:$output,
-    AnyMemRef:$input,
+    Arg<AnyMemRef, "copy destination", [MemWrite]>:$output,
+    Arg<AnyMemRef, "copy source", [MemRead]>:$input,
     DenseI64ArrayAttr:$input_strides_bytes,
     DenseI64ArrayAttr:$output_strides_bytes,
     DenseI64ArrayAttr:$shape,
@@ -623,7 +623,8 @@ def TorqHL_DynamicHostCopyOp : TorqHL_Op<"dynamic_host_copy"> {
     counts memref elements).
   }];
 
-    let arguments = (ins AnyMemRef:$output, AnyMemRef:$input,
+    let arguments = (ins Arg<AnyMemRef, "copy destination", [MemWrite]>:$output,
+        Arg<AnyMemRef, "copy source", [MemRead]>:$input,
         DenseI64ArrayAttr:$input_strides_bytes,
         DenseI64ArrayAttr:$output_strides_bytes, DenseI64ArrayAttr:$shape,
         I64Attr:$element_size_bytes,
@@ -649,14 +650,14 @@ def TorqHL_StoreOp: TorqHL_Op<"store"> {
   }];
 
   let arguments = (ins
-    AnyMemRef:$output,
-    AnyMemRef:$input,
+    Arg<AnyMemRef, "XRAM destination", [MemWrite]>:$output,
+    Arg<AnyMemRef, "LRAM source", [MemRead]>:$input,
     DenseI64ArrayAttr:$output_strides_bytes,
     DenseI64ArrayAttr:$shape,
     I64Attr:$element_size_bytes,
     DefaultValuedOptionalAttr<BoolAttr, "false">:$unsafe
   );
-  
+
   let hasCanonicalizer = 1;
 
   let hasVerifier = 1;
