@@ -23,6 +23,7 @@
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Utils/Utils.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Attributes.h"
@@ -581,6 +582,43 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         // Convert strided insert_slice (transpose-conv upsample) to InterleavedInsertOp
         // plus optional tensor border pad (when pads are not HW-legal SAME).
         PaddingInfo padInfo{{0, 0, 0, 0}, 0};
+
+        // Large-kernel depthwise "same" conv: the DW HW forges implicit boundary zeros only up
+        // to a ~7-row halo (HW requires pad_top in {0, kernel_top}, and kernel_top > 7
+        // miscomputes the frame edges on silicon). Keep the padding explicit as a valid conv
+        // (pad_top = 0) so the HW reads real zeros, and add a tail read-margin: the DEDR starts
+        // kernel_top before the data (baseOffset) and reads a full max_input tile, so the last
+        // tile would over-read the same-padded buffer. See synaptics-torq/torq-compiler-dev#1954.
+        bool handledLargeKernelDw = false;
+        if (isNchw && isDepthwise && !isDW1DStride1) {
+            auto wShape = cast<RankedTensorType>(weights.getType()).getShape();
+            int64_t kH = wShape[wShape.size() - 2]; // depthwise filter is [C, kH, kW]
+            int64_t kernelTop = (kH - 1) / 2;
+            auto inShape = cast<RankedTensorType>(input.getType()).getShape();
+            auto outShape = cast<RankedTensorType>(output.getType()).getShape();
+            if (kernelTop > 7 && inShape[heightDim] == outShape[heightDim] + kH - 1) {
+                // out_frame rounds the output up to max_input (<= 64) tiles; size the margin so
+                // the last tile's read (baseOffset kernel_top + a full aligned frame) fits.
+                int64_t outH = outShape[heightDim];
+                int64_t alignedOutH = ((outH + 63) / 64) * 64;
+                int64_t margin = kernelTop + (alignedOutH - outH);
+                auto inTy = cast<RankedTensorType>(input.getType());
+                SmallVector<int64_t> newShape(inShape.begin(), inShape.end());
+                newShape[heightDim] += margin;
+                OpBuilder::InsertionGuard g(rewriter);
+                rewriter.setInsertionPoint(convOp);
+                Value zero = arith::ConstantOp::create(
+                    rewriter, loc, cast<TypedAttr>(rewriter.getZeroAttr(inTy.getElementType()))
+                );
+                input = tensor::createPadHighOp(
+                            RankedTensorType::get(newShape, inTy.getElementType()), input, zero,
+                            /*nofold=*/false, loc, rewriter
+                )
+                            .getResult();
+                handledLargeKernelDw = true;
+            }
+        }
+
         // An even-kw ConvTranspose whose upsample border needs no W padding requires a VALID
         // (unpadded) W dimension. The interleaved/EK conv path cannot express that: EK SAME for
         // even kw forces an asymmetric (0,1)/(1,0) W pad, which the kernel mis-executes. Keep such
@@ -613,7 +651,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             }
         }
 
-        if (hasStridedInsertSlice && !forceBackwardPad) {
+        if (!handledLargeKernelDw && hasStridedInsertSlice && !forceBackwardPad) {
             Operation *oldInsertOp = input.getDefiningOp<tensor::InsertSliceOp>();
             FailureOr<InterleaveConversion> interleaved =
                 convertToInterleaved(input, rewriter, convOp, true);
@@ -629,7 +667,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                 padInfo = foldBackwardPadding(input, rewriter, isNchw, output);
             }
         }
-        else {
+        else if (!handledLargeKernelDw) {
             padInfo = foldBackwardPadding(input, rewriter, isNchw, output);
         }
 
@@ -935,10 +973,16 @@ struct InterleavedInsertSlicePattern : public OpRewritePattern<tensor::InsertSli
 };
 
 // Checker methods for convolutions with input: NHWC, weights: HWC(F) or NCHW, weights: (F)CHW
+//
+// maxKerHW matches the per-axis cap in hasEkLoweringConv. It used to be 9, which let a kernel
+// of 8 or 9 match and then be refused by the EK lowering, leaving it to the hand-rolled
+// Conv2DPattern body: a 9x9 valid bf16 conv came out wrong on 99.4% of its elements. Matching
+// only what EK can lower sends that band to the host instead, slower but correct. The 9 was
+// introduced in the first commit and carried no recorded rationale.
 static bool
 isKerSmall(int kernelHIndex, ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape) {
     int kernelWIndex = kernelHIndex + 1;
-    int maxKerHW = 9;
+    int maxKerHW = 7;
     return inputShape.size() == 4 && kernelShape.size() >= 3 &&
            kernelShape[kernelHIndex] <= maxKerHW && kernelShape[kernelWIndex] <= maxKerHW;
 }
@@ -951,13 +995,42 @@ static bool isDepthwiseKernelShape(
            kernelShape[kernelHIndex] == inputShape[1] && kernelShape[kernelWIndex] == inputShape[2];
 }
 
+// A 2D depthwise conv is limited to a small per-axis kernel, but a genuine 1D depthwise
+// (one spatial extent == 1 with a unit kernel there) can take a large kernel on the other
+// axis, which the EK lowering walks in alukw-wide column groups. The high-level match must
+// admit those, otherwise the op falls back to the host. Layout here is NCHW input [N,C,H,W]
+// and depthwise weights [C,kH,kW].
+//
+// maxKer2D matches the per-axis cap in hasEkLoweringConv, and going wider is not free. When
+// it was 9, a 2D kernel of 8 or 9 matched here and was then refused by the EK lowering, so it
+// fell through to the hand-rolled DWPattern body, which gets it wrong: a 9x9 valid bf16
+// depthwise differed from the reference almost everywhere. Keeping the two in step sends that
+// band to the host instead, slower but correct. Widening either limit again means teaching EK
+// the band first; depthwise_conv2d_k9_valid guards the numerics.
+static bool isDepthwiseKerOk(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape) {
+    if (inputShape.size() != 4 || kernelShape.size() < 3) {
+        return false;
+    }
+    const int64_t inH = inputShape[2], inW = inputShape[3];
+    const int64_t kH = kernelShape[1], kW = kernelShape[2];
+    constexpr int64_t maxKer2D = 7;
+    constexpr int64_t maxKer1D = 1024;
+    if (inH == 1 && kH == 1) {
+        return kW <= maxKer1D; // 1D depthwise along W
+    }
+    if (inW == 1 && kW == 1) {
+        return kH <= maxKer1D; // 1D depthwise along H
+    }
+    return kH <= maxKer2D && kW <= maxKer2D;
+}
+
 void populateLinalgToTorqHLConv2DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
     // NHWC Conv/Depthwise are converted to NCHW at linalg stage
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNchwChwOp, torq_hl::DepthwiseConv2DOp>>(
         context, 1, Permutation::none(), Permutation::none(), 20, 12,
-        [](auto i, auto w) { return isKerSmall(1, i, w); }, markFuseGroups, true
+        [](auto i, auto w) { return isDepthwiseKerOk(i, w); }, markFuseGroups, true
     );
     patterns.insert<Conv2dConvert<linalg::DepthwiseConv2DNhwcHwcOp, torq_hl::DepthwiseConv2DOp>>(
         context, 3, Permutation::none(), Permutation::none(), 20, 12,

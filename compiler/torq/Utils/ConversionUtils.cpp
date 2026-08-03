@@ -704,8 +704,24 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
     const int kh = weightShape[2];
     const int kw = weightShape[3];
 
-    // Common HW/kernel limitations.
-    if (kh > 7 || kw > 7) {
+    // Common HW/kernel limitations. The >7 cap belongs to the implicit padding halo, not to
+    // the kernel: the HW forges the boundary zeros itself and the width travels in the 2-bit
+    // knl_l/knl_r CE fields, so a 7-wide kernel asks for the maximum 3 per side and a 9-wide
+    // one asks for 4. A valid conv forges nothing, and the kernel loops already walk the
+    // kernel in alukw-wide column groups.
+    //
+    // isValidConv is fragile: ValidPadToSamePadPass runs first, so a zero pad here means that
+    // pass declined this kernel, not that the user wrote a valid conv. Widening its cap
+    // (#2160) flips this to false and drops large 1D kernels back onto the NDL path.
+    //
+    // Only a genuine 1D depthwise is admitted past the cap: there the kernel spans a single
+    // row (or column) so the halo never grows past what a column group carries. A 2D kernel
+    // of 8 or 9 stays on the NDL path, which is where it has always been handled.
+    const auto inShape = cast<ShapedType>(op.getInput().getType()).getShape(); // NCHW
+    const bool is1D =
+        inShape.size() == 4 && ((inShape[2] == 1 && kh == 1) || (inShape[3] == 1 && kw == 1));
+    const bool isValidConv = llvm::all_of(op.getPad(), [](int64_t p) { return p == 0; });
+    if ((kh > 7 || kw > 7) && !(isValidConv && is1D)) {
         return false;
     }
 

@@ -23,7 +23,17 @@ CLI examples:
 
 
 def pytest_generate_tests(metafunc):
-    files = list_files("torch_models", ".pt", False)
+    # Bundle files (.pt/.pth) carry their own weights; standalone .py modules
+    # define the model in source so no binary needs to be committed. Prefer a
+    # bundle when both exist for a stem (the .py is then only a pickle helper),
+    # and skip generator scripts.
+    bundle_files = list_files("torch_models", ".pt", False) + list_files("torch_models", ".pth", False)
+    bundle_stems = {f.stem for f in bundle_files}
+    py_files = [
+        f for f in list_files("torch_models", ".py", False)
+        if not f.name.startswith("generate_") and f.stem not in bundle_stems
+    ]
+    files = bundle_files + py_files
 
     if not files:
         return

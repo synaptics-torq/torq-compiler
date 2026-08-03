@@ -40,7 +40,9 @@ if torch:
     }
 
 
-_TORCH_LAYER_CACHE_VERSION = 1
+# Bump when the cached case shape changes; v2 qualifies case names with the
+# model file stem.
+_TORCH_LAYER_CACHE_VERSION = 2
 
 # Registry for lazy model loaders (used by tests that avoid keeping the model
 # object in every pytest-xdist worker during collection, e.g. torchvision zoo
@@ -1138,6 +1140,11 @@ def generate_torch_layers_from_file(filepath, example_inputs=None, node_groups=N
       - PyTorch files (.pt, .pth) containing a bundle dict:
         ``torch.save({"model": model, "example_inputs": inputs}, path)``.
 
+    Case names are derived from the model structure alone, so every file would
+    contribute a case called "full_model". They are qualified with the file stem
+    (``<stem>_full_model``, ``<stem>_<layer>_<LayerClass>``) so that ids stay
+    unique and selectable with ``-k <stem>`` once more than one model is present.
+
     When ``cache`` is provided (pytest's ``config.cache``), the extracted layer
     metadata is cached on disk and shared across pytest-xdist workers. The first
     worker performs the potentially expensive forward-hook trace; subsequent
@@ -1170,13 +1177,17 @@ def generate_torch_layers_from_file(filepath, example_inputs=None, node_groups=N
             # pytest-xdist workers do not all keep the full model in memory.
             model_path = str(filepath)
             for c in cases:
+                c.name = f"{filepath.stem}_{c.name}"
                 c.data["model_path"] = model_path
                 c.data.pop("model", None)
             _save_torch_layer_cache(key_dir, filepath, cases, node_groups, dedup)
             return cases
 
     model, example_inputs = _load_torch_model_and_inputs(filepath, example_inputs)
-    return generate_torch_layers_from_model(model, example_inputs, node_groups, dedup)
+    cases = generate_torch_layers_from_model(model, example_inputs, node_groups, dedup)
+    for c in cases:
+        c.name = f"{filepath.stem}_{c.name}"
+    return cases
 
 
 def _save_torch_metadata_cache(key_dir: Path, model_version: str, cases, node_groups, dedup):
