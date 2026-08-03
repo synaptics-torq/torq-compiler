@@ -35,6 +35,7 @@
 #include "mlir/Pass/PassManager.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
@@ -1357,6 +1358,102 @@ static LogicalResult foldTensorPad(
     return success();
 }
 
+// If `val` is a unit-dim expand_shape of a static tensor.pad, rewrite it to
+// expand_shape(unpadded_source) and report the pad offsets at the conv-input rank. This
+// folds an even-kernel "same" conv's asymmetric pad (total pad k-1 is odd), which ONNX
+// emits before the conv1d->2d reshape (pad -> expand_shape -> conv) where it would
+// otherwise stay un-folded and be mis-lowered on the NSS path.
+static LogicalResult peelPadUnderUnitExpand(
+    Value &val, PatternRewriter &rewriter, SmallVector<int64_t> &above, SmallVector<int64_t> &below,
+    Value &fillValue
+) {
+    auto expandOp = val.getDefiningOp<tensor::ExpandShapeOp>();
+    if (!expandOp || !expandOp.getResult().hasOneUse()) {
+        return failure();
+    }
+    auto padOp = expandOp.getSrc().getDefiningOp<tensor::PadOp>();
+    if (!padOp || !padOp.getResult().hasOneUse()) {
+        return failure();
+    }
+
+    // Only static padding.
+    SmallVector<int64_t> low, high;
+    for (OpFoldResult v : padOp.getMixedLowPad()) {
+        auto c = getConstantIntValue(v);
+        if (!c) {
+            return failure();
+        }
+        low.push_back(*c);
+    }
+    for (OpFoldResult v : padOp.getMixedHighPad()) {
+        auto c = getConstantIntValue(v);
+        if (!c) {
+            return failure();
+        }
+        high.push_back(*c);
+    }
+
+    auto reassoc = expandOp.getReassociationIndices();
+    auto resultShape = cast<RankedTensorType>(expandOp.getResult().getType()).getShape();
+    auto padSrcType = cast<RankedTensorType>(padOp.getSource().getType());
+    auto padSrcShape = padSrcType.getShape();
+    int64_t resultRank = resultShape.size();
+
+    above.assign(resultRank, 0);
+    below.assign(resultRank, 0);
+    SmallVector<int64_t> newResultShape(resultRank, 1);
+
+    // Map each source dim to the single non-unit dim of its expand group.
+    for (auto [srcDim, group] : llvm::enumerate(reassoc)) {
+        int64_t realDim = -1;
+        for (int64_t d : group) {
+            if (resultShape[d] != 1) {
+                if (realDim != -1) {
+                    return failure();
+                }
+                realDim = d;
+            }
+        }
+        if (realDim == -1) {
+            // Whole group is unit-sized; it must not be padded.
+            if (low[srcDim] != 0 || high[srcDim] != 0) {
+                return failure();
+            }
+            realDim = group.front();
+        }
+        above[realDim] = low[srcDim];
+        below[realDim] = high[srcDim];
+        newResultShape[realDim] = padSrcShape[srcDim];
+    }
+
+    // Re-expand the unpadded source at the conv-input rank.
+    auto newType = RankedTensorType::get(newResultShape, padSrcType.getElementType());
+    Value newExpand = tensor::ExpandShapeOp::create(
+        rewriter, expandOp.getLoc(), newType, padOp.getSource(), reassoc
+    );
+
+    auto yieldOp = cast<tensor::YieldOp>(padOp.getBody()->getTerminator());
+    fillValue = yieldOp.getValue();
+    val = newExpand;
+    return success();
+}
+
+// Two fill values are the same border iff they resolve to the same constant. Values
+// that cannot be resolved to a constant are treated as different (conservative: they
+// would fail the later constant-fill check anyway).
+static bool sameFillConstant(Value a, Value b) {
+    if (a == b) {
+        return true;
+    }
+    if (auto ai = getConstIntValue(a), bi = getConstIntValue(b); ai && bi) {
+        return *ai == *bi;
+    }
+    if (auto af = getFloatValue(a), bf = getFloatValue(b); af && bf) {
+        return *af == *bf;
+    }
+    return false;
+}
+
 PaddingInfo
 foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value outputValue) {
     // Process any extract_slice op and check there is no dynamic slice extraction
@@ -1383,8 +1480,71 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
     SmallVector<int64_t> padOffsetsBelow;
     Value fillValue;
 
-    if (failed(foldTensorPad(val, padOffsetsAbove, padOffsetsBelow, fillValue))) {
-        if (failed(foldLinalgFillTensorInsert(val, padOffsetsAbove, padOffsetsBelow, fillValue))) {
+    // peelPadUnderUnitExpand materializes a new expand_shape while the fold is still
+    // being validated below. Any bailout (return {}) leaves the caller's `value`
+    // untouched, so erase those ops on the way out unless the fold commits.
+    SmallVector<Operation *> peeledOps;
+    llvm::scope_exit eraseUncommittedPeels([&] {
+        for (Operation *op : llvm::reverse(peeledOps)) {
+            if (op->use_empty()) {
+                rewriter.eraseOp(op);
+            }
+        }
+    });
+
+    // Fold a chain of backward pads into one offset set, peeling a unit-dim reshape
+    // between conv and pad (the asymmetric case; see peelPadUnderUnitExpand).
+    bool usedReshapePeel = false;
+    {
+        int64_t rank = cast<RankedTensorType>(val.getType()).getRank();
+        padOffsetsAbove.assign(rank, 0);
+        padOffsetsBelow.assign(rank, 0);
+        bool foundPad = false;
+        // Whether a border-adding pad has already fixed the fill value. A second
+        // border pad with a different fill cannot be one PaddingInfo.
+        bool haveBorderFill = false;
+        while (true) {
+            SmallVector<int64_t> above, below;
+            Value fv;
+            bool folded = succeeded(foldTensorPad(val, above, below, fv)) ||
+                          succeeded(foldLinalgFillTensorInsert(val, above, below, fv));
+            if (!folded) {
+                if (failed(peelPadUnderUnitExpand(val, rewriter, above, below, fv))) {
+                    break;
+                }
+                usedReshapePeel = true;
+                if (Operation *peeled = val.getDefiningOp()) {
+                    peeledOps.push_back(peeled);
+                }
+            }
+            if (above.size() != padOffsetsAbove.size()) {
+                // A reshape changed the rank between two pads: unsupported.
+                return {};
+            }
+            bool allZero = llvm::all_of(above, [](int64_t x) { return x == 0; }) &&
+                           llvm::all_of(below, [](int64_t x) { return x == 0; });
+            for (size_t i = 0; i < above.size(); ++i) {
+                padOffsetsAbove[i] += above[i];
+                padOffsetsBelow[i] += below[i];
+            }
+            // Compose the fill across the chain. A border-adding pad fixes the fill;
+            // if a later border pad disagrees, the composed border is ambiguous and
+            // cannot be represented by a single PaddingInfo, so bail. A zero-width
+            // pad only supplies a fallback fill.
+            if (!allZero) {
+                if (haveBorderFill && !sameFillConstant(fillValue, fv)) {
+                    LLVM_DEBUG({ llvm::dbgs() << "Conflicting fill values across pads\n"; });
+                    return {};
+                }
+                fillValue = fv;
+                haveBorderFill = true;
+            }
+            else if (!fillValue) {
+                fillValue = fv;
+            }
+            foundPad = true;
+        }
+        if (!foundPad) {
             return {};
         }
     }
@@ -1455,6 +1615,35 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
     int32_t bottom = padOffsetsBelow[hDim];
     int32_t right = padOffsetsBelow[wDim];
 
+    // The conv HW forces the "same" split (kernel_before/after = floor/ceil((k-1)/2)) on
+    // any padded side, so only fold an asymmetric pad matching that split; one it cannot
+    // reproduce (e.g. [7,9] on k=17) must stay un-folded. Scoped to the reshape-peel path
+    // so the direct-fold path (incl. strided 2D convs/pools) is unchanged.
+    if (usedReshapePeel && outputValue && (top != bottom || left != right)) {
+        auto inShape = cast<RankedTensorType>(val.getType()).getShape();
+        auto outShape = cast<RankedTensorType>(outputValue.getType()).getShape();
+        auto matchesNaturalSplit = [](int64_t inSz, int64_t outSz, int32_t before, int32_t after) {
+            if (before == after) {
+                return true;
+            }
+            int64_t effKernel = inSz + before + after - outSz + 1;
+            if (effKernel < 1) {
+                return false;
+            }
+            int32_t natBefore = (effKernel - 1) / 2;
+            int32_t natAfter = effKernel - 1 - natBefore;
+            return before == natBefore && after == natAfter;
+        };
+        if (!matchesNaturalSplit(inShape[hDim], outShape[hDim], top, bottom) ||
+            !matchesNaturalSplit(inShape[wDim], outShape[wDim], left, right)) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "[foldBackwardPadding] asymmetric pad does not match the HW "
+                                "same-padding split; not folding\n";
+            });
+            return {};
+        }
+    }
+
     // TODO: see above; this should be removed.
     // If we found extract_slice ops we have to update them.
     // We currently need to support only horizontal slice extraction (used for tiling)
@@ -1508,6 +1697,12 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
 
     // Update value to fold the padding
     value = val;
+
+    // The fold committed: keep the peel the folded value now points to (it is still
+    // use_empty here since the caller rewires it after we return), but let the
+    // scope-exit guard drop any intermediate peels left dead by a chained fold.
+    Operation *committed = value.getDefiningOp();
+    llvm::erase_if(peeledOps, [&](Operation *op) { return op == committed; });
 
     return PaddingInfo{{left, right, top, bottom}, maybeFillValue.value()};
 }
