@@ -16,6 +16,10 @@
 
 namespace mlir::syna {
 
+namespace torq_hw {
+class SliceTaskOp;
+};
+
 namespace torq {
 
 class Slice;
@@ -299,6 +303,17 @@ class LData : public DataT<LData> {
     LData(const Value value);
     static std::string name() { return "LData"; }
 
+    LData operator[](IterVar index) const {
+        LData subData = DataT<LData>::operator[](index);
+        subData._value = _value;
+        return subData;
+    }
+    LData operator[](const Indexes &ixs) const {
+        LData subData = DataT<LData>::operator[](ixs);
+        subData._value = _value;
+        return subData;
+    }
+
     // Dimension manipulation methods
 
     // Return the number of contiguous dense dimensions at the end of the data shape
@@ -365,6 +380,13 @@ class LData : public DataT<LData> {
     // Reorganize the last two dimensions into 4 quadrants containing elements
     // with even-even, even-odd, odd-even and odd-odd indexes respectively
     LData &partitionByIndexParity2D();
+
+    // Get the MLIR Value associated to this data (if any)
+    Value value() const { return _value; }
+
+  private:
+    // MLIR Value (if any) associated to this data
+    Value _value{};
 };
 
 // Data in IRAM
@@ -774,6 +796,10 @@ class Slice {
 
     // Get the NDLs
     const torq_hw::Ndls &getNdls() const;
+
+    // Create a SliceTaskOp for this slice
+    torq_hw::SliceTaskOp
+    createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange symbols = {}) const;
 
     // Subunits, each has its own instruction set
     IRam iram;

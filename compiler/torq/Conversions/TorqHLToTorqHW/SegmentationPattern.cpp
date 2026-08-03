@@ -72,10 +72,7 @@ segmentToQuadrants(torq_hl::SegmentationOp op, PatternRewriter &rewriter) {
         }
     }
 
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
-        op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 // Segment H dimension to the specified number of segments
@@ -115,10 +112,7 @@ segmentHDim(torq_hl::SegmentationOp op, PatternRewriter &rewriter, int hSegments
         }
     }
 
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
-        op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 template <>

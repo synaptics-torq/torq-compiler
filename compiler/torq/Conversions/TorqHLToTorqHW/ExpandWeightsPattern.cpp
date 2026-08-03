@@ -75,15 +75,7 @@ static FailureOr<SliceTaskOp> createBlockExpandWithoutBias(
         }
     }
 
-    return SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), ValueRange{op.getScale()}, // Input tensor
-        ValueRange{op.getInput()},                                      // Weights
-        ValueRange{},                                                   // BiasScale tensor
-        ValueRange{op.getInit()},                                       // Output tensor initializer
-        ValueRange{},                                                   // Symbols
-        slice.getCfgAttr(rewriter.getContext()),                        // Slice configuration
-        slice.getNdls()                                                 // NDLs
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 // Expand kernel for block-wise expand_weights with bias.
@@ -142,16 +134,7 @@ createBlockExpandWithBias(torq_hl::ExpandWeightsOp op, PatternRewriter &rewriter
         }
     }
 
-    auto newOp = SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), ValueRange{op.getScale()}, // Input tensor
-        ValueRange{op.getInput()},                                      // Weights
-        ValueRange{op.getBias()},                                       // Bias tensor
-        ValueRange{op.getInit()},                                       // Output tensor initializer
-        ValueRange{},                                                   // Symbols
-        slice.getCfgAttr(rewriter.getContext()),                        // Slice configuration
-        slice.getNdls()                                                 // NDLs
-    );
-    return newOp;
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 template <>

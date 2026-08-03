@@ -334,6 +334,12 @@ struct SliceCfg {
     }
 };
 
+static void debugTensor(const char *name, const LData &data) {
+    LLVM_DEBUG(llvm::dbgs() << name << ": ";
+               if (data.value()) { llvm::dbgs() << LData(data.value()); } llvm::dbgs()
+               << " -> " << LData(data.shape(), data.elementType()) << "\n";);
+}
+
 static void debugData(const Data &data) { LLVM_DEBUG(llvm::dbgs() << data << "\n"); }
 
 // Return the number of elements in the last dimension of the shape or 1 if the shape is empty
@@ -831,7 +837,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Data &shape) {
     return os;
 }
 
-LData::LData(Value value) : LData(cast<MemRefType>(value.getType())) {}
+LData::LData(Value value) : LData(cast<MemRefType>(value.getType())) { _value = value; }
 
 LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
     const DType elementType = getDType(type.getElementType());
@@ -1008,6 +1014,8 @@ struct SlicePrivate {
         DType elementType{DType::none};
         // Loop nesting level at the point the RAM is loaded
         int loadNesting = -1;
+        // MLIR values used to load (store) this RAM
+        SmallVector<Value> values;
     };
 
     // Constructor
@@ -2657,14 +2665,17 @@ static int32_t extendPadValue(int32_t value, DType type) {
 }
 
 void Slice::append(const LData &output, const QData &data) {
+    debugTensor("QTensor", output);
     assert(data.indexes().size() == 0 && "QData can't be indexed during append");
     assert(data.shape().size() == 1 && "Unexpected QData rank during append");
     checkTypeCompatibility(output, data);
     d->deqw(output, backDimCount(data.subShape()));
     d->ref(output);
+    d->_pram.values.push_back(output.value());
 }
 
 void Slice::append(const LData &output, int value) {
+    debugTensor("QTensor", output);
     // Check that no values loaded in RAM by mistake
     if (d->_iram.loadNesting >= 0 || d->_wram.loadNesting >= 0 || d->_bram.loadNesting >= 0) {
         llvm::errs() << "Error: values loaded in memory not used";
@@ -2680,17 +2691,21 @@ void Slice::append(const LData &output, int value) {
     d->_cfg.pad_value = extendPadValue(value, output.elementType());
     d->deqw(output, act.width(output.elementType()));
     d->ref(output);
+    d->_pram.values.push_back(output.value());
 }
 
 void Slice::store(const LData &output, const QData &data) {
+    debugTensor("QTensor", output);
     assert(data.indexes().size() == 0 && "QData can't be indexed during store");
     assert(data.shape().size() == 1 && "Unexpected QData rank during store");
     checkCompatibility(output, data);
     d->deqw(output);
     d->ref(output);
+    d->_pram.values.push_back(output.value());
 }
 
 void Slice::store(const LData &output, int value) {
+    debugTensor("QTensor", output);
     // Check that no values loaded in RAM by mistake
     if (d->_iram.loadNesting >= 0 || d->_wram.loadNesting >= 0 || d->_bram.loadNesting >= 0) {
         llvm::errs() << "Error: values loaded in memory not used";
@@ -2708,7 +2723,9 @@ void Slice::store(const LData &output, int value) {
     d->_cfg.pad_value = extendPadValue(value, output.elementType());
     d->deqw(output);
     d->ref(output);
+    d->_pram.values.push_back(output.value());
 }
+
 int Slice::scatter() const { return getBusScatterGather(NdlType::DEQW); }
 
 void Slice::setKernel(const LRTBDim &lrtb) { d->_cfg.kernel = lrtb; }
@@ -2867,6 +2884,33 @@ const torq_hw::Ndls &Slice::getNdls() const {
     return d->_ndls;
 }
 
+// Verify that all the Values in the range are non-null
+static const ValueRange &checkNonNull(const ValueRange &range) {
+    for (auto v : range) {
+        // This may happen if the corresponding LData was not created directly from a Value
+        // (e.g. created with the LData(Shape, DType) constructor instead of LData(Value))
+        assert(v && "LData has no associated Value");
+    }
+    return range;
+}
+
+torq_hw::SliceTaskOp
+Slice::createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange symbols) const {
+    auto sliceTaskOp = SliceTaskOp::create(
+        builder,
+        loc,                              // Operation to replace
+        name(),                           // Task name
+        checkNonNull(d->_iram.values),    // Input tensor
+        checkNonNull(d->_wram.values),    // Weights
+        checkNonNull(d->_bram.values),    // BiasScale tensor
+        checkNonNull(d->_pram.values),    // Output tensor initializer
+        symbols,                          // Symbols used to compute the NDLs
+        getCfgAttr(builder.getContext()), // Slice configuration
+        getNdls()
+    );
+    return sliceTaskOp;
+}
+
 //
 // Memory Units
 //
@@ -2887,10 +2931,12 @@ const char *IRam::name() const { return "IRam"; }
 int IRam::size() const { return HwInfo::iram_seg_width * HwInfo::iram_seg; }
 
 IData IRam::load(const LData &data) {
+    debugTensor("ITensor", data);
     d->dedr(data);
 
     d->_iram.loadNesting = d->_forStack.size();
     d->_iram.elementType = data.elementType();
+    d->_iram.values.push_back(data.value());
 
     Shape iramShape = data.subShape();
     auto idata = IData(iramShape, data.elementType());
@@ -2981,6 +3027,7 @@ static WeightFormat getWeightMemoryFormat(DType memType, DType dstType) {
 }
 
 WData WRam::load(const LData &data, DType dstType) {
+    debugTensor("WTensor", data);
     DType inMemWType = data.elementType();
     if (dstType == DType::none) {
         // Use deduced weight type if any, or use default deduction from the in-memory type
@@ -2993,6 +3040,7 @@ WData WRam::load(const LData &data, DType dstType) {
 
     d->_wram.loadNesting = d->_forStack.size();
     d->_wram.elementType = dstType;
+    d->_wram.values.push_back(data.value());
 
     assert(!isCompressed(dstType) && "Compressed weights must be expanded on load");
 
@@ -3013,6 +3061,7 @@ int BRam::width() const {
 }
 
 BData BRam::load(const LData &data) {
+    debugTensor("BTensor", data);
     DType elType = data.elementType();
     assert(elType == DType::fp32 || elType == DType::int32 || elType == DType::uint32);
 
@@ -3025,7 +3074,7 @@ BData BRam::load(const LData &data) {
 
     d->_bram.loadNesting = d->_forStack.size();
     d->_bram.elementType = elType;
-
+    d->_bram.values.push_back(data.value());
     auto bdata = BData(data.subShape(), data.elementType());
     d->acbw(bdata);
 

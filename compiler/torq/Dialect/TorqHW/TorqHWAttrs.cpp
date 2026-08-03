@@ -203,14 +203,18 @@ llvm::raw_ostream &printNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::
 }
 
 static void printRegNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::Ndls &ndls) {
-    if (auto ndl = ndls.getRegNdl(type)) {
-        printNdl(os, type, ndl);
+    for (auto ndl : ndls.regNdls) {
+        if (ndl.type == type) {
+            printNdl(os, type, &ndl);
+        }
     }
 }
 
 static void printMemNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::Ndls &ndls) {
-    if (auto ndl = ndls.getMemNdl(type)) {
-        printNdl(os, type, ndl);
+    for (auto ndl : ndls.memNdls) {
+        if (ndl.type == type) {
+            printNdl(os, type, &ndl);
+        }
     }
 }
 

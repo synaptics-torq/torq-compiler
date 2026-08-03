@@ -304,19 +304,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
 
     auto input1Addr = GetAddressOp::create(params.rewriter, params.loc, params.input1).getAddress();
     auto input2Addr = GetAddressOp::create(params.rewriter, params.loc, params.input2).getAddress();
-    auto sliceTaskOp = SliceTaskOp::create(
-        params.rewriter,
-        params.loc,                               // Operation to replace
-        slice.name(),                             // Task name
-        ValueRange{params.input1, params.input2}, // Input tensor
-        ValueRange{op.getWeights()},              // Weights
-        ValueRange{op.getScaleBias()},            // BiasScale tensor
-        ValueRange{op.getInit()},                 // Output tensor initializer
-        ValueRange{input1Addr, input2Addr},       // Symbols used to compute the NDLs
-        slice.getCfgAttr(params.ctx),             // Slice configuration
-        slice.getNdls()
-    );
-    return sliceTaskOp;
+    return slice.createSliceTaskOp(params.rewriter, params.loc, {input1Addr, input2Addr});
 }
 
 } // namespace mlir::syna::torq

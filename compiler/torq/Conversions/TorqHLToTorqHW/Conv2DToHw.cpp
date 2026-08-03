@@ -361,10 +361,7 @@ static torq_hw::SliceTaskOp lowerToHw(
         }
     }
 
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
-        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {

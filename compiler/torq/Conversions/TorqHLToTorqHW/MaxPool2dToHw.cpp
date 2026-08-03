@@ -76,10 +76,7 @@ static torq_hw::SliceTaskOp lowerMaxPool1DToHw(
         }
     }
 
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
-        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 // Pool along W only (kh==1, kw>1) by splitting the dense W dimension into [outputWidth, kw].
@@ -153,10 +150,7 @@ static torq_hw::SliceTaskOp lowerMaxPool1DHorizontalToHw(
         }
     }
 
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
-        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 static torq_hw::SliceTaskOp lowerMaxPool2DToHw(
@@ -226,10 +220,7 @@ static torq_hw::SliceTaskOp lowerMaxPool2DToHw(
         }
     }
 
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
-        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(

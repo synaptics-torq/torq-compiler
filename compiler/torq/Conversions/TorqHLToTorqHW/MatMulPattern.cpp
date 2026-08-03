@@ -90,15 +90,7 @@ static torq_hw::SliceTaskOp lowerToMatmul(
     }
 
     LLVM_DEBUG(llvm::dbgs() << "Lowered to matmul kernel: " << "\n");
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op->getLoc(), slice.name(),
-        op.getInput2(),                          // Input tensor
-        op.getInput1(),                          // Weights
-        op.getScaleBias(),                       // BiasScale tensor
-        op.getInit(),                            // Output tensor initializer
-        slice.getCfgAttr(rewriter.getContext()), // Slice configuration
-        slice.getNdls()                          // NDLs
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 static torq_hw::SliceTaskOp lowerToFastMatmul(
@@ -213,15 +205,7 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     }
 
     LLVM_DEBUG(llvm::dbgs() << "Lowered to fast matmul kernel: " << "\n");
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op->getLoc(), slice.name(),
-        op.getInput2(),                          // Input tensor
-        op.getInput1(),                          // Weights
-        op.getScaleBias(),                       // BiasScale tensor
-        taskInitTensor,                          // Output tensor initializer
-        slice.getCfgAttr(rewriter.getContext()), // Slice configuration
-        slice.getNdls()                          // NDLs
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 // This kernel supports matmul, dot product and matrix-vector multiplication

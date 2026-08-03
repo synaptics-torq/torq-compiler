@@ -78,12 +78,7 @@ lowerToHwPerChannel(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) {
         }
     }
 
-    // Pass weights first (IData) and input second (WData) so the runtime maps them
-    // to the expected memories for FC lowering.
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), op.getWeights(), op.getInput(), op.getScaleBias(),
-        op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 // Batch-scaled bias/scale kernel.
