@@ -142,32 +142,56 @@ Value transposeInputWithPad(
     return result;
 }
 
-// In an indexing map, replace AffineDimExpr(3) (NHWC channel) with
-// AffineDimExpr(1) (NCHW channel).  All other expressions are unchanged.
-AffineMap remapChannelDim(AffineMap map, MLIRContext *ctx) {
-    SmallVector<AffineExpr> results;
-    unsigned oldChannelDim = 0;
-    unsigned newChannelDim = 0;
-    if (map.getNumDims() == 4) {
-        oldChannelDim = 3;
-        newChannelDim = 1;
-    }
-    else if (map.getNumDims() == 3) {
-        oldChannelDim = 2;
-        newChannelDim = 0;
-    }
-    else {
-        return map;
-    }
+// Relabel the loop dims of an indexing map from NHWC to NCHW loop order.
+//
+// convertGenericOpToNchw physically transposes 4D tensors and gives them the
+// identity map, so the loop iteration space is reinterpreted as NCHW: the same
+// physical axis lives at a different loop position.  A non-4D (broadcast /
+// per-channel) input map is written in terms of the old NHWC loop dims and must
+// be relabeled so it still indexes the same axis:
+//
+//   axis   NHWC loop dim   NCHW loop dim
+//   N          d0              d0
+//   H          d1              d2
+//   W          d2              d3
+//   C          d3              d1
+//
+// A per-channel vector map (d3) becomes (d1); a scalar broadcast that
+// PromoteScalarsTo1D pinned to a spatial unit dim (d1) becomes (d2).  Relabeling
+// only the channel (d3->d1) left spatial-pinned maps wrong, producing invalid IR.
+//
+// A 3-dim-domain map has no fixed NHWC/HWC loop-order convention across the
+// callers that build one (e.g. a filter zero-point reduction's domain may put
+// the channel dim first, not last) so only the known channel position (2) is
+// relabeled (2->0); other positions are left as-is rather than guessing a full
+// permutation.
+AffineMap remapNhwcDimsToNchw(AffineMap map, MLIRContext *ctx) {
+    // NHWC loop position -> NCHW loop position.
+    static constexpr unsigned nhwcToNchwDim[4] = {0, 2, 3, 1};
 
-    for (auto expr : map.getResults()) {
-        auto dim = dyn_cast<AffineDimExpr>(expr);
-        if (dim && dim.getPosition() == oldChannelDim)
-            results.push_back(getAffineDimExpr(newChannelDim, ctx));
-        else
-            results.push_back(expr);
+    if (map.getNumDims() == 4) {
+        SmallVector<AffineExpr> results;
+        for (auto expr : map.getResults()) {
+            auto dim = dyn_cast<AffineDimExpr>(expr);
+            if (dim && dim.getPosition() < 4)
+                results.push_back(getAffineDimExpr(nhwcToNchwDim[dim.getPosition()], ctx));
+            else
+                results.push_back(expr);
+        }
+        return AffineMap::get(map.getNumDims(), map.getNumSymbols(), results, ctx);
     }
-    return AffineMap::get(map.getNumDims(), map.getNumSymbols(), results, ctx);
+    if (map.getNumDims() == 3) {
+        SmallVector<AffineExpr> results;
+        for (auto expr : map.getResults()) {
+            auto dim = dyn_cast<AffineDimExpr>(expr);
+            if (dim && dim.getPosition() == 2)
+                results.push_back(getAffineDimExpr(0, ctx));
+            else
+                results.push_back(expr);
+        }
+        return AffineMap::get(map.getNumDims(), map.getNumSymbols(), results, ctx);
+    }
+    return map;
 }
 
 // Build the correct NCHW indexing map for a given original NHWC map.
@@ -179,7 +203,7 @@ AffineMap remapChannelDim(AffineMap map, MLIRContext *ctx) {
 //            Both indexed as (d0,d1,d2,d3) but data layout differs.
 //
 // For 1D per-channel tensors (bias, scale, zero-point vectors):
-//   Remap d3 (NHWC channel position) → d1 (NCHW channel position).
+//   Relabel loop dims from NHWC to NCHW order (see remapNhwcDimsToNchw).
 //   Example: bias shape [64], map (d3) in NHWC → map (d1) in NCHW
 //            because channel dimension moved from position 3 to position 1.
 AffineMap nchwMap(AffineMap origMap, MLIRContext *ctx) {
@@ -187,36 +211,7 @@ AffineMap nchwMap(AffineMap origMap, MLIRContext *ctx) {
         return AffineMap::getMultiDimIdentityMap(4, ctx);
     if (origMap.getNumResults() == 3)
         return AffineMap::getMultiDimIdentityMap(3, ctx);
-    return remapChannelDim(origMap, ctx);
-}
-
-// After the NHWC→NCHW relabel (d3→d1, see remapChannelDim) a broadcast generic's
-// indexing map can become invalid.  A matmul lowered to a 1x1 conv carries an
-// input-zero-point correction broadcast with map (d1,d2,d3) over a [1,1,C] tensor;
-// relabeling d3→d1 collapses it to (d1,d2,d1), where d1 repeats.  The rebuilt
-// generic then fails verification ("dimension #2 to be 1, but found C").  Detect
-// such a non-injective relabel so the caller can leave the cluster in NHWC. (#1828)
-bool nchwRelabelWouldBeInvalid(ArrayRef<Operation *> ops) {
-    for (Operation *op : ops) {
-        auto genericOp = dyn_cast<linalg::GenericOp>(op);
-        if (!genericOp)
-            continue;
-        for (AffineMap map : genericOp.getIndexingMapsArray()) {
-            // 4D/3D feature maps become identity under this conversion path.
-            if (map.getNumResults() == 4 || map.getNumResults() == 3)
-                continue;
-            AffineMap relabeled = remapChannelDim(map, map.getContext());
-            SmallVector<unsigned, 4> dims;
-            for (AffineExpr expr : relabeled.getResults())
-                if (auto dim = dyn_cast<AffineDimExpr>(expr))
-                    dims.push_back(dim.getPosition());
-            for (unsigned i = 0; i + 1 < dims.size(); ++i)
-                for (unsigned j = i + 1; j < dims.size(); ++j)
-                    if (dims[i] == dims[j])
-                        return true;
-        }
-    }
-    return false;
+    return remapNhwcDimsToNchw(origMap, ctx);
 }
 
 // Convert a linalg.generic op from NHWC to NCHW layout.
@@ -617,22 +612,6 @@ void convertNhwcOpToNchwOp(FunctionOpInterface funcOp) {
                 llvm::dbgs() << "[nhwc→nchw]   " << anchorOp->getName()
                              << " standalone (no fusion)\n"
             );
-        }
-
-        // A matmul lowered to a 1x1 conv (1x1 spatial output) can carry broadcast
-        // operands — e.g. an input-zero-point correction with map (d1,d2,d3) over a
-        // [1,1,C] tensor — whose NHWC→NCHW d3→d1 relabel collapses to an invalid
-        // (non-injective) map and fails verification.  NCHW gives a 1x1-spatial conv
-        // no benefit, so leave the whole cluster in NHWC instead. (#1828)
-        auto outTy = dyn_cast<RankedTensorType>(anchorOp->getResult(0).getType());
-        bool is1x1Spatial =
-            outTy && outTy.getRank() == 4 && outTy.getShape()[1] == 1 && outTy.getShape()[2] == 1;
-        if (is1x1Spatial && nchwRelabelWouldBeInvalid(neededOps)) {
-            LLVM_DEBUG(
-                llvm::dbgs() << "[nhwc→nchw]   skipping matmul-as-conv (unsafe broadcast relabel) "
-                             << anchorOp->getName() << "\n"
-            );
-            continue;
         }
 
         clusters.push_back({anchorOp, neededOps, outOp});

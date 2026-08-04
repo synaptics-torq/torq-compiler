@@ -294,6 +294,42 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         if (inTy.getShape() == outTy.getShape()) {
             return false;
         }
+
+        // foldBackwardShapeCast peels pure reshapes (expand/collapse, no data
+        // reordering) off the operand.  That can leave it element-count-equal to
+        // the output but at a rank the broadcast/rank-pad logic below cannot reach
+        // (it only *adds* leading dims, inRank <= outRank).  Example: a 1x1-conv
+        // result [15,1,1,256] whose reshape to [1,15,256] was folded away.  Since
+        // the peeled cast never reordered data, restore the consumer's shape with
+        // an equivalent reshape (collapse to 1-D, expand to the output shape).
+        if (inTy.hasStaticShape() && outTy.hasStaticShape() && inTy.getRank() >= outTy.getRank() &&
+            mlir::computeProduct(inTy.getShape()) == mlir::computeProduct(outTy.getShape())) {
+            Value flat = input;
+            if (inTy.getRank() != 1) {
+                SmallVector<ReassociationIndices> toFlat(1);
+                for (int64_t i = 0; i < inTy.getRank(); ++i)
+                    toFlat[0].push_back(i);
+                flat = tensor::CollapseShapeOp::create(
+                    rewriter, input.getLoc(),
+                    RankedTensorType::get(
+                        {mlir::computeProduct(inTy.getShape())}, inTy.getElementType()
+                    ),
+                    input, toFlat
+                );
+            }
+            if (outTy.getRank() == 1) {
+                input = flat;
+            }
+            else {
+                SmallVector<ReassociationIndices> toOut(1);
+                for (int64_t i = 0; i < outTy.getRank(); ++i)
+                    toOut[0].push_back(i);
+                input = tensor::ExpandShapeOp::create(rewriter, input.getLoc(), outTy, flat, toOut)
+                            .getResult();
+            }
+            return true;
+        }
+
         if (inTy.getRank() > outTy.getRank() || inTy.getRank() == 0) {
             return false;
         }

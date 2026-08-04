@@ -5,14 +5,15 @@
 //
 // raise-to-matmul intentionally skips constant-weight filters (only activation x
 // activation 1x1 convs are raised), so this conv reaches ConvertNhwcOpToNchw.
-// There the d3->d1 channel relabel collapsed the correction map to (d1,d2,d1) --
-// a non-injective map -- and compilation failed with
+// There a channel-only d3->d1 relabel collapsed the correction map to (d1,d2,d1)
+// -- a non-injective map -- and compilation failed with
 //   'linalg.generic' op inferred input/output operand #0 has shape's dimension
 //   #2 to be 1, but found C
 //
-// The fix detects that a 1x1-spatial (matmul-as-conv) cluster would produce an
-// invalid NCHW relabel and leaves the whole cluster in NHWC (NCHW gives a
-// 1x1-spatial conv no benefit). This case must compile and match the CPU reference.
+// The fix applies the full NHWC->NCHW loop-dim permutation (d1->d2, d2->d3,
+// d3->d1) so the correction map relabels to (d2,d3,d1) -- still injective -- and
+// the cluster converts to NCHW, fusing into a single torq_hl.conv2d. This case
+// must compile and match the CPU reference.
 module attributes {tf_saved_model.semantics} {
   func.func @main(%arg0: tensor<8x16xi8> {ml_program.identifier = "serving_default_input_0:0", tf_saved_model.index_path = ["input_0"]}) -> (tensor<8x32xi8> {ml_program.identifier = "StatefulPartitionedCall_0:0", tf_saved_model.index_path = ["output_0"]}) attributes {tf_saved_model.exported_names = ["serving_default"]} {
     %in_shape = tosa.const_shape  {values = dense<[8, 1, 1, 16]> : tensor<4xindex>} : () -> !tosa.shape<4>
