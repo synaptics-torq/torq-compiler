@@ -49,6 +49,34 @@ def comparison_config_for_instancenorm(request):
     return {"fp_max_tol": 2e-2, "allowed_wrong": 1e-3}
 
 
+@pytest.fixture
+def comparison_config_for_qdq_dequant(request):
+    """int8 QDQ dequant zp regression (deq_min_i8, qdq_min_i8): residual is bf16 MulOp rounding."""
+    return {"fp_max_tol": 0.2, "allowed_wrong": 0.06}
+
+
+@pytest.fixture
+def comparison_config_for_qdq_conv_tiled(request):
+    """Tiled int8 QDQ conv W-shift regression (conv1d_307_qdq_tiled): residual is bf16 requant rounding."""
+    return {"fp_max_tol": 0.2, "allowed_wrong": 0.02}
+
+
+@pytest.fixture
+def comparison_config_for_qdq_conv_295(request):
+    """Legacy-path tiled int8 QDQ conv (conv1d_295_qdq_tiled, kw=11). Its 1x64x6401 output spans a
+    wide dynamic range (~1.0 down to ~1e-4), so the near-zero tail's bf16 requant rounding trips the
+    relative-error metric on a few percent of elements, and the exact fraction varies by chip requant
+    (e.g. ~2.0% on sr200 vs less on sl2610). Loosened accordingly -- a real W-shift regression is ~80%
+    wrong, nowhere near this floor."""
+    return {"fp_max_tol": 0.2, "allowed_wrong": 0.05}
+
+
+@pytest.fixture
+def comparison_config_for_qdq_izp(request):
+    """int8 QDQ conv input-zero-point bias-fold regression (conv_izp_i8): residual is bf16 requant rounding."""
+    return {"fp_max_tol": 0.2, "allowed_wrong": 0.06}
+
+
 @pytest.fixture(params=get_test_cases_from_files(list_mlir_file_group("torch_ops")))
 def case_config(request, runtime_hw_type, chip_config):
 
@@ -130,6 +158,31 @@ def case_config(request, runtime_hw_type, chip_config):
     # --torq-disable-css would orphan those scalar ops and break serialization.
     if 'gather-dynamic-indices' in request.param.data.name:
         extra_args["torq_compiler_options"] = ["--torq-disable-host"]
+
+    # int8 QDQ dequant zp regression: force onto NSS so a dropped-zp regression fails loudly.
+    if any(s in request.param.data.name for s in ['deq_min_i8', 'qdq_min_i8']):
+        extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
+        extra_args["comparison_config"] = "comparison_config_for_qdq_dequant"
+
+    # Tiled int8 QDQ conv W-shift regression: force onto NSS so the wide conv tiles along W.
+    # Two variants guard the two conv lowering paths: conv1d_307 (kw=7) goes through the EK
+    # kernel (Conv2DToHw.cpp); conv1d_295 (kw=11) fails hasEkLoweringConv (kw>7) and takes the
+    # legacy Conv2DPattern.cpp path, whose baseOffset W-correction is what the fix restores.
+    # Without that fix conv1d_295 is ~80% wrong; keep both so neither path can regress silently.
+    if 'conv1d_307_qdq_tiled' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
+        extra_args["comparison_config"] = "comparison_config_for_qdq_conv_tiled"
+
+    if 'conv1d_295_qdq_tiled' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
+        extra_args["comparison_config"] = "comparison_config_for_qdq_conv_295"
+
+    # int8 QDQ conv input-zero-point regression: force onto NSS. The nonzero izp (si8 -23)
+    # must fold into the bias via computeInputZpCorrection (NSS hardware does not subtract
+    # izp); if that regresses, the NSS output diverges from the llvmcpu reference and fails.
+    if 'conv_izp_i8' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
+        extra_args["comparison_config"] = "comparison_config_for_qdq_izp"
 
     return {
         "mlir_model_file": "static_mlir_model_file",

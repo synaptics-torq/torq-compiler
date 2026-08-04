@@ -209,6 +209,7 @@ LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &re
     if (ksize_x > 1 || ksize_y > 1) {
         // Not clear why we have to overwrite the padding values here.
         // Don't overwrite pad_left and/or pad_top if padding disabled.
+        int32_t orig_pad_left = pad_left; // capture before it is overwritten to 1
         pad_left = 1;
         pad_right = 1;
         if (pad_top) {
@@ -221,7 +222,13 @@ LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &re
             // NPU always starts fetching data kernel_top rows before the beginning of the data.
             // If no top padding, we need to add an offset to start fetching from the beginning
             // of the frame.
-            baseOffset = kernel_top * input_strides[2];
+            baseOffset += kernel_top * input_strides[2];
+        }
+        if (orig_pad_left == 0) {
+            // W analogue of the H offset above: interior W-tiles carry real halo data
+            // (pad_left == 0), so advance the read start by kernel_left to cancel the NPU's
+            // fixed pre-fetch (else every interior tile shifts right by kernel_left).
+            baseOffset += kernel_left * input_strides[3];
         }
     }
 

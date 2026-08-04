@@ -211,8 +211,8 @@ struct DequantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(op, "compile-time constant");
 
         double scale;
-        int32_t ignoredZp = 0;
-        if (!matchDequantGeneric(op, scale, ignoredZp))
+        int32_t zp = 0;
+        if (!matchDequantGeneric(op, scale, zp))
             return rewriter.notifyMatchFailure(op, "not a PT2E dequant generic");
 
         // Discovery mode: mark standalone dequantize generics as tile/fuse groups.
@@ -246,15 +246,17 @@ struct DequantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
         // Convert the i8 input directly to bf16 for the multiply.
         Value bf16Input = createActOp(rewriter, *op, "i2f", input, bf16Type);
 
-        // MulOp: bf16_input * scale
+        // MulOp: bf16_input * scale + bias, bias = -zp*scale  =>  affine dequant (q-zp)*scale.
         Value mulInit = createInitTensor(op, rewriter, bf16Type);
-        Value zeroBias = createFloatScalarConst(rewriter, *op, rewriter.getF32Type(), 0.0);
+        Value zpBias = createFloatScalarConst(
+            rewriter, *op, rewriter.getF32Type(), -static_cast<double>(zp) * scale
+        );
         Value scaleConst = createFloatScalarConst(rewriter, *op, rewriter.getBF16Type(), scale);
         Value mulOut =
             torq_hl::MulOp::create(
                 rewriter, loc, bf16Type, mulInit, rewriter.getI32IntegerAttr(0),
                 rewriter.getI32IntegerAttr(0xff800000), rewriter.getI32IntegerAttr(0x7f800000),
-                zeroBias, rewriter.getI8IntegerAttr(0), bf16Input, scaleConst
+                zpBias, rewriter.getI8IntegerAttr(0), bf16Input, scaleConst
             )
                 .getOutput();
 
