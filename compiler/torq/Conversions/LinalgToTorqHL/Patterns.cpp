@@ -2154,9 +2154,39 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         int32_t inputZp, int32_t outputZp, int32_t outputMin, int32_t outputMax,
         tosa::ApplyScaleOp applyScaleOp
     ) const {
-        const int32_t shiftFactor = *llvm::min_element(ms.shift);
-        const std::vector<int32_t> scale = compute_scale(ms.multiplier, ms.shift, shiftFactor);
-        const SmallVector<int32_t> bias(scaleValuesCount, -inputZp);
+        int32_t shiftFactor = *llvm::min_element(ms.shift);
+        SmallVector<int32_t> bias(scaleValuesCount, -inputZp);
+        int8_t weightData = 1;
+        std::vector<int32_t> scale;
+
+        // A negative shift is a scale-up (left shift by -shiftFactor). The ACT right-shift
+        // (act_rsh) is an unsigned 6-bit hardware field and cannot go negative, so fold the left
+        // shift into the ALU weight and bias, which are both applied before the ACT shift: with
+        // weight = 2^k and bias = -inputZp * 2^k the FMA computes
+        //   ((input - inputZp) * 2^k * multiplier) >> 0
+        // i.e. the same value as ((input - inputZp) * multiplier) >> (-k). Only a per-tensor
+        // rescale can be folded this way (a per-channel scale-up would need a per-channel weight,
+        // which the FMA lacks); the weight is int8, so k <= 6 (2^7 overflows int8).
+        if (shiftFactor < 0) {
+            if (scaleValuesCount != 1) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "negative per-channel rescale shift cannot fold into int8 weight"
+                );
+            }
+            int leftShift = -shiftFactor;
+            if (leftShift > 6) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "rescale scale-up shift too large to fold into int8 weight"
+                );
+            }
+            weightData = static_cast<int8_t>(1 << leftShift);
+            bias[0] = -inputZp * (1 << leftShift);
+            shiftFactor = 0;
+            scale = {ms.multiplier[0]};
+        }
+        else {
+            scale = compute_scale(ms.multiplier, ms.shift, shiftFactor);
+        }
 
         SmallVector<int32_t> scaleBias(2 * scaleValuesCount);
         interleave_into(
@@ -2207,8 +2237,9 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             scaleBiasConst = createI32Const(rewriter, srcOp, scaleBias);
         }
 
-        Value weightConst =
-            createI8Const(rewriter, srcOp, llvm::ArrayRef<int8_t>{1}, llvm::ArrayRef<int64_t>{1});
+        Value weightConst = createI8Const(
+            rewriter, srcOp, llvm::ArrayRef<int8_t>{weightData}, llvm::ArrayRef<int64_t>{1}
+        );
 
         if (needsTranspose) {
             Value transposedInput = transposeValue(input, perm, srcOp.getLoc(), rewriter);
