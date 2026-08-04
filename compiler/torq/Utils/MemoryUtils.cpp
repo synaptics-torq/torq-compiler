@@ -19,6 +19,26 @@ int64_t getElementSizeBytes(ShapedType shapedType) {
 
 int64_t getScalarSizeBytes(Type type) { return torq::div_ceil(type.getIntOrFloatBitWidth(), 8); }
 
+// Convert an element offset into a packed backing buffer to a byte offset.
+//
+// Sub-byte types (e.g. i4) pack multiple values per byte, so the byte offset is
+// element_offset * bitwidth / 8, NOT element_offset * ceil(bitwidth/8). Using the
+// byte-rounded element size (getElementSizeBytes) over-counts for sub-byte types
+// (i4 rounds 4 bits up to 1 byte), which advances a tiled DMA to the wrong tile.
+// Byte-aligned sub-byte tiling guarantees the product is a whole number of bytes.
+static int64_t elementOffsetToBytes(int64_t elementOffset, Type elementType) {
+    // TODO: Remove this constant treatment of i1 as 1 byte as soon as Torq backend
+    // switches to properly materializing i1 tensors from 1 byte to 1 bit.
+    int64_t bitWidth = elementType.getIntOrFloatBitWidth();
+    if (bitWidth == 1) {
+        bitWidth = 8; // Treat i1 as 1 byte for now
+    }
+
+    int64_t offsetBits = elementOffset * bitWidth;
+    assert(offsetBits % 8 == 0 && "sub-byte element offset is not byte-aligned");
+    return torq::div_ceil(offsetBits, 8);
+}
+
 size_t getShapeTypeDataSize(mlir::ShapedType type) {
     auto shape = type.getShape();
     if (shape.empty()) {
@@ -86,10 +106,10 @@ int64_t getMemRefTypeOffsetBytes(MemRefType memRefType) {
                 realOffset += coords[i] * stridesAttr.getStrides()[i];
             }
 
-            return realOffset * getElementSizeBytes(memRefType);
+            return elementOffsetToBytes(realOffset, memRefType.getElementType());
         }
 
-        return offset * getElementSizeBytes(memRefType);
+        return elementOffsetToBytes(offset, memRefType.getElementType());
     }
 
     return 0;

@@ -91,10 +91,26 @@ def case_config(request, chip_config):
          **extra_args
     }
 
-    torq_compiler_options = ["--torq-convert-dtypes", "--torq-convert-io-dtype"]
+    torq_compiler_options = [
+        "--torq-convert-dtypes",
+        "--torq-convert-io-dtype",
+        "--torq-disable-slicing",
+        "--torq-enable-split-constants-optimization",
+        "--torq-enable-annotate-tied-operands",
+    ]
     nss_layers = ["layer_MatMul"]
     if any(s in request.node.name for s in nss_layers):
         torq_compiler_options += ["--torq-disable-css", "--torq-disable-host"]
+
+    # The next-group hardware needs a larger NSS program-size
+    # budget than the default SL2610; bump it only for those chips.
+    next_chip = chip_config.data["target"] != "SL2610"
+    if next_chip:
+        # 0x939E00 == 9674240 bytes (~9.23 MB); str() keeps the CLI value decimal.
+        torq_compiler_options += ["--torq-max-nss-programs-size", str(0x939E00)]
+        # These larger compiles need more than the default 300s compiler timeout.
+        comp_config["torq_compiler_timeout"] = 1000
+
     comp_config["torq_compiler_options"] = torq_compiler_options
 
     if "Gelu" in request.node.name:
@@ -108,15 +124,19 @@ def case_config(request, chip_config):
     if "layer_ReduceMean" in request.node.name:
         comp_config["comparison_config"] = "comparison_config_relaxed"
 
-    if "full_model" in request.node.name:
+    # The FP32 `source_full_model`, the pre-quantized `hybrid_int4_int8_full_model`,
+    # and every extracted hybrid component (`hybrid_*`) share this branch.  They
+    # all decode through (a slice of) the real transformer, so they need valid
+    # control inputs and realistic activation magnitudes: position_ids is a decode
+    # index (not free data), and the default random range (-40, 40) both picks an
+    # invalid position and inflates activations far beyond real hidden-state/KV
+    # magnitudes, which artificially amplifies precision loss vs the reference.
+    # Use a valid decode position and a realistic range, mirroring the Moonshine
+    # decoder full-model harness.  Tolerances reuse comparison_config_full_model:
+    # it is relaxed enough for the hybrid's TORQ-vs-llvmcpu same-graph diffs while
+    # still gating correctness.
+    if "full_model" in request.node.name or "hybrid" in request.node.name:
         comp_config["comparison_config"] = "comparison_config_full_model"
-        # The full-model decode path needs valid control inputs and realistic
-        # activation magnitudes.  position_ids is a decode index (not free data),
-        # and the default random range (-40, 40) both picks an invalid position and
-        # inflates activations far beyond real hidden-state/KV magnitudes, which
-        # artificially amplifies bf16 precision loss vs the fp32 reference.  Use a
-        # valid decode position and a realistic range, mirroring the Moonshine
-        # decoder full-model harness.
         comp_config["input_data"] = "gemma3_full_model_input_data"
         comp_config["tweaked_input_data_range"] = (-2, 2)
 
@@ -160,16 +180,65 @@ def pytest_generate_tests(metafunc):
         )
     )
 
+    # Also test the pre-quantized hybrid decoder.  This model already carries
+    # bf16/int4/int8 layers, so it is fed through the pipeline as-is (see
+    # onnx_fake_quantize_config) and compared against the IREE llvmcpu backend
+    # (see reference_results) instead of ONNXRuntime, which cannot execute int4.
+    hybrid_model = get_hf_model_file(
+        metafunc.config.cache, "Synaptics/gemma-3-270m-it", "onnx/model_hybrid_int4_int8.onnx"
+    )
+
+    # Split the hybrid model into its architectural components (embed_scale,
+    # decoder_block, final_norm, lm_head) and test each as a WHOLE subgraph.  We
+    # deliberately do not run generate_onnx_layers_from_file on them: that would
+    # decompose each component into individual ops and, on this quantized graph,
+    # emit meaningless standalone QuantizeLinear/DequantizeLinear "layer" tests.
+    # extract_representative_components cuts at architectural boundaries and runs
+    # onnx.checker on every output, so each component is a valid standalone model
+    # with its quant/dequant pairs kept intact; running it end-to-end
+    # (is_full_model=True) exercises the real quantized compute.
+    hybrid_components_dir = metafunc.config.cache.mkdir("hybrid_components")
+    hybrid_marker = hybrid_components_dir / ".extracted"
+    with FileLock(str(hybrid_components_dir / "lock")):
+        if not hybrid_marker.exists():
+            extract_representative_components(hybrid_model, hybrid_components_dir)
+            hybrid_marker.touch()
+
+    for comp_path in sorted(hybrid_components_dir.glob("*.onnx")):
+        cases.append(
+            OnnxLayerCase(
+                name=f"hybrid_{comp_path.stem}",
+                data=ModelWithMetadata(path=str(comp_path)),
+                is_full_model=True,
+            )
+        )
+
+    # Full end-to-end hybrid decoder.
+    cases.append(
+        OnnxLayerCase(
+            name="hybrid_int4_int8_full_model",
+            data=ModelWithMetadata(path=hybrid_model),
+            is_full_model=True,
+        )
+    )
+
     metafunc.parametrize("onnx_layer_model", cases, indirect=True)
 
 @versioned_hashable_object_fixture
-def onnx_fake_quantize_config():
-    # Always fake-quantize FP32/INT64 weights to BF16/INT32 for these models.
+def onnx_fake_quantize_config(request):
+    # Always fake-quantize FP32/INT64 weights to BF16/INT32 for these models,
+    # except the hybrid model which already carries bf16/int4/int8 weights.
+    if "hybrid" in request.node.name:
+        return {"fake_quantize": False}
     return {"fake_quantize": True}
 
 
 @pytest.fixture
 def reference_results(request, onnx_layer_model):
+    # ONNXRuntime cannot execute the hybrid model's int4 ops; compare TORQ against
+    # the IREE llvmcpu backend running the same quantized graph instead.
+    if "hybrid" in request.node.name:
+        return request.getfixturevalue("llvmcpu_reference_results")
     return request.getfixturevalue("onnx_reference_results")
 
 

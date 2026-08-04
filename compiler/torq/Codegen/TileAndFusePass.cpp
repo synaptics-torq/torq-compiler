@@ -308,6 +308,22 @@ struct TilingInfo {
     llvm::SmallVector<std::function<int64_t(int64_t)>, 4> adjustSize;
 };
 
+// The smallest tile size a domain can be cut down to (always > 0). We scan
+// upward for the first size that `adjustSize` leaves unchanged. `adjustSize` is
+// shrink-only, so `adjustSize(size) == size` holds exactly when `size` is
+// already a valid tile: for normal types that's 1; for sub-byte types the
+// too-small sizes return 0 (!= size, so skipped) and the first fixed point is
+// one byte's worth of values (2 for i4). We derive it from `adjustSize` rather
+// than hardcoding, so it stays correct if `adjustSize` ever gains further
+// constraints. Fall back to the full domain if nothing smaller is valid.
+int64_t getSmallestTileSize(const TilingInfo &tilingInfo, int64_t domain, int64_t domainSize) {
+    for (int64_t size = 1; size < domainSize; ++size) {
+        if (tilingInfo.adjustSize[domain](size) == size)
+            return size;
+    }
+    return domainSize;
+}
+
 TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
     TilingInfo tilingInfo;
 
@@ -392,6 +408,16 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
         };
         tilingInfo.adjustSize[innerDim] =
             getFixpointF(makeByteAligned, tilingInfo.adjustSize[innerDim]);
+
+        // Also raise the *minimum* tile size for this dim, mirroring the conv/pool
+        // minSize handling above. The shrink pass in fitTileToMemory seeds each
+        // domain directly from minSize (bypassing adjustSize), so without this it
+        // would try a width-1 sub-byte tile (e.g. 640x1xi4) that the DMA can't
+        // address on a byte boundary. getSmallestTileSize returns the smallest
+        // byte-aligned, SDIM-friendly tile for this dim (2 for i4).
+        tilingInfo.minSize[innerDim] = std::max(
+            tilingInfo.minSize[innerDim], getSmallestTileSize(tilingInfo, innerDim, domainSize)
+        );
     }
 
     /**********************************************************************************************
@@ -437,22 +463,6 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
      * }
      */
     return tilingInfo;
-}
-
-// The smallest tile size a domain can be cut down to (always > 0). We scan
-// upward for the first size that `adjustSize` leaves unchanged. `adjustSize` is
-// shrink-only, so `adjustSize(size) == size` holds exactly when `size` is
-// already a valid tile: for normal types that's 1; for sub-byte types the
-// too-small sizes return 0 (!= size, so skipped) and the first fixed point is
-// one byte's worth of values (2 for i4). We derive it from `adjustSize` rather
-// than hardcoding, so it stays correct if `adjustSize` ever gains further
-// constraints. Fall back to the full domain if nothing smaller is valid.
-int64_t getSmallestTileSize(const TilingInfo &tilingInfo, int64_t domain, int64_t domainSize) {
-    for (int64_t size = 1; size < domainSize; ++size) {
-        if (tilingInfo.adjustSize[domain](size) == size)
-            return size;
-    }
-    return domainSize;
 }
 
 // Try to compute the int value of sizeFoldResult. If the value is not a

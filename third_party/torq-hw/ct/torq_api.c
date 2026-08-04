@@ -1289,7 +1289,11 @@ static int _reg_ndl_desc_gen(torq_wrap_t *wrap, uint32_t tag, int set_id, torq_n
         assert(set_id==0);
         r = _parse_reg_dims(wrap, cmd, &dims); assert(r>=0);
         assert(dims.bn==2 || dims.bn==4 || dims.bn==8);
-        assert(dims.dn==1 || dims.dn==4 || dims.dn==8 || dims.dn==16);
+        // [torq-compiler change BEGIN]
+        // Required this dn==2 bias read for Expand Weight kernel. This will be updated in the next release from HW team.
+        // BEFORE: assert(dims.dn==1 || dims.dn==4 || dims.dn==8 || dims.dn==16);
+        assert(dims.dn==1 || dims.dn==2 || dims.dn==4 || dims.dn==8 || dims.dn==16);
+        // [torq-compiler change END]
         assert(dims.gn==1);
         wrap->regs.SLC0.DE_REGS.DE_ACT.a_glb = dims.bn==8?0:1;
         wrap->regs.SLC0.DE_REGS.DE_ACT.b_size = dims.bn==2?0:1;
