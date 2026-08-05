@@ -41,6 +41,7 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/EncodingUtils.h"
+#include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqHw.h"
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -69,23 +70,11 @@ namespace mlir::syna::torq {
 
 namespace {
 
-// Follow view-like producers (memref.subview / cast / reinterpret_cast) down to
-// the root memref value, so that aliasing views resolve to the same base.
-static Value getBaseBuffer(Value v) {
-    while (auto viewOp = v.getDefiningOp<ViewLikeOpInterface>()) {
-        Value src = viewOp.getViewSource();
-        if (src == v)
-            break;
-        v = src;
-    }
-    return v;
-}
-
 // Map a value used inside a program body back to the index of the program's
 // block argument it originates from (following views). std::nullopt if it is
 // not derived from a block argument of `body`.
 static std::optional<unsigned> blockArgIndexOf(Value v, Block &body) {
-    v = getBaseBuffer(v);
+    v = getViewBase(v);
     if (auto ba = dyn_cast<BlockArgument>(v))
         if (ba.getOwner() == &body)
             return ba.getArgNumber();
@@ -351,7 +340,7 @@ static unsigned dedupBlock(
             w.clear();
             appendWrites(&op, progCache, w);
             for (Value v : w)
-                writtenBases.insert(getBaseBuffer(v));
+                writtenBases.insert(getViewBase(v));
         }
     }
 
@@ -368,9 +357,9 @@ static unsigned dedupBlock(
         if (!writes.empty()) {
             SmallVector<Value> toDrop;
             for (Value v : writes) {
-                Value wb = getBaseBuffer(v);
+                Value wb = getViewBase(v);
                 for (auto &kv : resident)
-                    if (getBaseBuffer(kv.first) == wb)
+                    if (getViewBase(kv.first) == wb)
                         toDrop.push_back(kv.first);
             }
             for (Value k : toDrop)
@@ -389,7 +378,7 @@ static unsigned dedupBlock(
             sameLoadShape(ld, it->second)) {
             candidates.push_back({ld, it->second.getOutput(), dst});
         }
-        else if (!writtenBases.contains(getBaseBuffer(dst))) {
+        else if (!writtenBases.contains(getViewBase(dst))) {
             // Only anchor on a buffer that is never written.
             resident[src] = ld;
         }

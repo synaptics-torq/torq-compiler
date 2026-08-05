@@ -23,7 +23,6 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
-#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
@@ -645,18 +644,6 @@ static torq_hl::LoadOp matchWholeBufferReadOnlyLoad(
     return load;
 }
 
-// Follow view-like producers (memref.subview / cast / reinterpret_cast) down to
-// the root memref value, so an XRAM source subview resolves to its base buffer.
-static Value getBaseBuffer(Value v) {
-    while (auto viewOp = v.getDefiningOp<ViewLikeOpInterface>()) {
-        Value src = viewOp.getViewSource();
-        if (src == v)
-            break;
-        v = src;
-    }
-    return v;
-}
-
 // For a read-only buffer loaded whole and then sliced per-invocation with
 // memref.subview (a weight), replace each subview use with a fresh load of only the
 // matching sub-region from the original XRAM source, then drop the now-dead
@@ -784,7 +771,7 @@ static void revertSharedReadOnlyReuses(FunctionOpInterface funcOp) {
         // load; moving the reads to the later consumers would leave them reading a
         // freed buffer. Find the source buffer's dealloc so we can sink it past the
         // reloaded reads below.
-        Value srcBase = getBaseBuffer(load.getInput());
+        Value srcBase = getViewBase(load.getInput());
         memref::DeallocOp srcDealloc = nullptr;
         for (Operation *u : srcBase.getUsers())
             if (auto dc = dyn_cast<memref::DeallocOp>(u))

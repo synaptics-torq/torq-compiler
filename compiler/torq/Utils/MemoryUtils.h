@@ -54,6 +54,10 @@ bool isDerivedMemRefOperation(Operation *op);
 // Returns the operand of op from for which the operations is creating an alias
 OpOperand &getDerivedMemRefBase(Operation *op);
 
+// Given a memref value, return the "base" value by skipping over all
+// ViewLikeOpInterface ops (if any) in the reverse use-def chain.
+Value getViewBase(Value value);
+
 // Returns the alignment possible with the bytes based on the type
 int getAlignmentByType(int bytes, mlir::Type type);
 

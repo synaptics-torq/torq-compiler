@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 namespace mlir::syna {
 
@@ -341,35 +342,37 @@ LogicalResult setAddress(Value value, int64_t address) {
 }
 
 bool isDerivedMemRefOperation(Operation *op) {
-    return isa<
-        memref::SubViewOp, memref::ExpandShapeOp, memref::ReinterpretCastOp,
-        memref::MemorySpaceCastOp, memref::CollapseShapeOp, memref::ReshapeOp>(op);
+    auto viewOp = dyn_cast<ViewLikeOpInterface>(op);
+    return viewOp && isa<MemRefType>(viewOp.getViewSource().getType()) &&
+           isa<MemRefType>(viewOp.getViewDest().getType());
 }
 
 OpOperand &getDerivedMemRefBase(Operation *op) {
 
-    if (auto subviewOp = dyn_cast<memref::SubViewOp>(op)) {
-        return subviewOp.getSourceMutable();
-    }
-    else if (auto expandShapeOp = dyn_cast<memref::ExpandShapeOp>(op)) {
-        return expandShapeOp.getSrcMutable();
-    }
-    else if (auto collapseShapeOp = dyn_cast<memref::CollapseShapeOp>(op)) {
-        return collapseShapeOp.getSrcMutable();
-    }
-    else if (auto reinterpretCast = dyn_cast<memref::ReinterpretCastOp>(op)) {
-
-        return reinterpretCast.getSourceMutable();
-    }
-    else if (auto memorySpaceCast = dyn_cast<memref::MemorySpaceCastOp>(op)) {
-        return memorySpaceCast.getSourceMutable();
-    }
-    else if (auto reshapeOp = dyn_cast<memref::ReshapeOp>(op)) {
-        return reshapeOp.getSourceMutable();
-    }
-    else {
+    if (!isDerivedMemRefOperation(op)) {
         llvm::report_fatal_error("not a derived memref operation");
     }
+
+    Value source = cast<ViewLikeOpInterface>(op).getViewSource();
+    for (OpOperand &operand : op->getOpOperands()) {
+        if (operand.get() == source) {
+            return operand;
+        }
+    }
+
+    llvm_unreachable("view source is not an operand of the view operation");
+}
+
+Value getViewBase(Value value) {
+    while (auto viewOp = value.getDefiningOp<ViewLikeOpInterface>()) {
+        // a view op may produce results other than the view itself, which are not
+        // aliases of the source (e.g. memref.extract_strided_metadata sizes)
+        if (value != viewOp.getViewDest()) {
+            break;
+        }
+        value = viewOp.getViewSource();
+    }
+    return value;
 }
 
 int getAlignmentByType(int bytes, mlir::Type type) {

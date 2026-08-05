@@ -15,6 +15,7 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -69,13 +70,13 @@ void AddDeallocationPass::runOnOperation() {
 
         // check if the operations is creating an alias and track it accordingly
         if (isDerivedMemRefOperation(op)) {
-            auto &baseMemRef = getDerivedMemRefBase(op);
+            auto viewOp = cast<ViewLikeOpInterface>(op);
 
             // the base memref may be an alias of an allocation
-            auto baseMemRefAllocation = aliases.at(baseMemRef.get());
+            auto baseMemRefAllocation = aliases.at(viewOp.getViewSource());
 
             // mark the output of the operation to be an alias of the original allocation
-            aliases[op->getResult(0)] = baseMemRefAllocation;
+            aliases[viewOp.getViewDest()] = baseMemRefAllocation;
         }
         else {
             // track all the memref results as aliases of itself
