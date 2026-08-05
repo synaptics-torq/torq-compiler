@@ -60,11 +60,7 @@ LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter
         }
     }
 
-    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-        op, slice.name(), op.getInput1(), op.getInput2(), op.getScaleBias(), op.getInit(),
-        slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
-
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
     return success();
 }
 

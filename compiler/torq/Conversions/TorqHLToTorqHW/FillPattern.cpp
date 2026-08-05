@@ -73,22 +73,7 @@ LogicalResult FillPattern::transform(torq_hl::FillOp op, PatternRewriter &rewrit
     }
 #endif
 
-    rewriter.replaceOpWithNewOp<SliceTaskOp>(
-        op,           // Operation to replace
-        slice.name(), // Task name
-        ValueRange{}, // Input tensor
-        ValueRange{}, // Weights
-        ValueRange{}, // BiasScale tensor,
-#if TORQ_TEST_MULTI_DEQW
-        ValueRange{op.getInit(), op.getInit(), op.getInit()}, // Output tensor initializer
-#else
-        ValueRange{op.getInit()}, // Output tensor initializer
-#endif
-        ValueRange{},                            // Symbols
-        slice.getCfgAttr(rewriter.getContext()), // Slice configuration
-        slice.getNdls()
-    );
-
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
     return success();
 }
 

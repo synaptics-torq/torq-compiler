@@ -32,13 +32,13 @@ def get_channel_count(tensor):
         return tensor.shape[0]
     return 1
 
-def get_channel(tensor, channel):
+def get_channel(tensor, batch_index, channel):
     # Assume NCW or NCHW... format
     if len(tensor.shape) == 1:
         return tensor
     elif len(tensor.shape) == 2:
         return tensor[channel]
-    return tensor[0, channel, ...]
+    return tensor[batch_index, channel, ...]
 
 def print_tensor(tensor):
     items_per_row = 32 if tensor_dtype in [np.int8, np.uint8, np.bool_] else 16
@@ -71,6 +71,7 @@ def print_tensor(tensor):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-o', '--dst', help='Destination image file')
+    parser.add_argument('-b', '--batch', help='Batch to visualize', type=int, default=0)
     parser.add_argument('-c', '--channel', help='Channel to visualize', type=int, default=None)
     parser.add_argument('-a', '--all', help='Print all elements', action='store_true')
     parser.add_argument('-t', '--transpose', help='Transpose NHWC to NCHW', action='store_true')
@@ -92,6 +93,8 @@ def main():
         msg = "second"
         args.src[0] = args.ref
         args.ref = None
+
+    batch_index = args.batch
 
     # Load numpy array(s) from file
     tensor = load_data(str(args.src[0]))
@@ -135,10 +138,10 @@ def main():
     # Check for non-null channels
     mismatch_channels = {}
     for i in range(get_channel_count(tensor)):
-        abs_diff = np.abs(get_channel(tensor, i))
+        abs_diff = np.abs(get_channel(tensor, batch_index, i))
         max_abs_diff = np.max(abs_diff)
         if np.isnan(max_abs_diff) or max_abs_diff > args.delta:
-            channel_data = get_channel(tensor, i)
+            channel_data = get_channel(tensor, batch_index, i)
             l2 = np.sqrt(np.sum(np.square(channel_data * 1.0)) / channel_data.size)
             mismatch_channels[i] = (float(l2), float(max_abs_diff))
 
@@ -163,9 +166,9 @@ def main():
         mismatch_channels = {args.channel: 0}
 
     np.set_printoptions(threshold=np.inf if args.all else 64 * 32, linewidth=(100000 if args.nowrap else 200))
-    channel_data = get_channel(tensor, 0)
+    channel_data = get_channel(tensor, batch_index, 0)
     for channel in mismatch_channels.keys():
-        channel_data = get_channel(tensor, channel)
+        channel_data = get_channel(tensor, batch_index, channel)
         print(f"Channel {channel} {msg}:")
         if channel_data.size > 64 * 32 and not args.all:
             print(channel_data)

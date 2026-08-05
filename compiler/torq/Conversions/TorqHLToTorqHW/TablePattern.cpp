@@ -33,7 +33,6 @@ LogicalResult TablePattern::transform(torq_hl::TableOp op, PatternRewriter &rewr
         enum { NonDenseDims };
     };
 
-    auto ctx = op.getContext();
     LData input(op.getInput());
     LData output(op.getInit());
     LData biasScale(op.getScaleBias());
@@ -66,11 +65,7 @@ LogicalResult TablePattern::transform(torq_hl::TableOp op, PatternRewriter &rewr
         }
     }
 
-    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-        op, slice.name(), op.getInput(), ValueRange{}, op.getScaleBias(), op.getInit(),
-        ValueRange{}, slice.getCfgAttr(ctx), slice.getNdls()
-    );
-
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
     return success();
 }
 

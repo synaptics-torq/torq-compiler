@@ -47,18 +47,7 @@ LogicalResult ConvertPattern::transform(torq_hl::ConvertOp op, PatternRewriter &
         }
     }
 
-    rewriter.replaceOpWithNewOp<SliceTaskOp>(
-        op,
-        slice.name(),                            // Operation to replace
-        ValueRange{op.getInput()},               // Input tensor
-        ValueRange{},                            // Weights
-        ValueRange{},                            // BiasScale tensor,
-        ValueRange{op.getInit()},                // Output tensor initializer
-        ValueRange{},                            // Symbols
-        slice.getCfgAttr(rewriter.getContext()), // Slice configuration
-        slice.getNdls()                          // NDLs
-    );
-
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
     return success();
 }
 

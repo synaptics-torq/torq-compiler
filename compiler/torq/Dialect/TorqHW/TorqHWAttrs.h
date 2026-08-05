@@ -34,14 +34,7 @@ struct MemNdlDimData {
     MemNdlDimData(DimType type, MemDimTag tag, int64_t count = 1, int64_t stride = 0)
         : type(type), tag(tag), count(count), strideInt_(stride) {}
 
-    AffineMapAttr getStrideAttr(int numSyms, MLIRContext *context) const {
-        if (expr_.has_value()) {
-            return AffineMapAttr::get(AffineMap::get(numSyms, 0, *expr_));
-        }
-        else {
-            return AffineMapAttr::get(AffineMap::getConstantMap(strideInt_.value(), context));
-        }
-    }
+    AffineMapAttr getStrideAttr(int numSyms, MLIRContext *context) const;
 
     std::optional<int64_t> getIntStride() const { return strideInt_; }
     std::optional<AffineExpr> getExprStride() const { return expr_; }
@@ -73,47 +66,17 @@ struct RegNdlData {
 };
 
 struct Ndls {
-    const MemNdlData *getMemNdl(NdlType type, size_t index = 0, int64_t set_id = 0) const {
-        for (auto &ndl : memNdls) {
-            if (ndl.type == type && ndl.index == index && ndl.set_id == set_id) {
-                return &ndl;
-            }
-        }
-        return nullptr;
-    }
-    MemNdlData *getMemNdl(NdlType type, size_t index = 0, int64_t set_id = 0) {
-        return const_cast<MemNdlData *>(std::as_const(*this).getMemNdl(type, index, set_id));
-    }
+    const MemNdlData *getMemNdl(NdlType type, size_t index = 0, int64_t set_id = 0) const;
+    MemNdlData *getMemNdl(NdlType type, size_t index = 0, int64_t set_id = 0);
 
-    const RegNdlData *getRegNdl(NdlType type, size_t index = 0, int64_t set_id = 0) const {
-        if (index != 0) {
-            return nullptr;
-        }
-        for (auto &ndl : regNdls) {
-            if (ndl.type == type && ndl.set_id == set_id) {
-                return &ndl;
-            }
-        }
-        return nullptr;
-    }
-    RegNdlData *getRegNdl(NdlType type, size_t index = 0, int64_t set_id = 0) {
-        return const_cast<RegNdlData *>(std::as_const(*this).getRegNdl(type, index, set_id));
-    }
+    const RegNdlData *getRegNdl(NdlType type, size_t index = 0, int64_t set_id = 0) const;
+    RegNdlData *getRegNdl(NdlType type, size_t index = 0, int64_t set_id = 0);
+
     void
     add(NdlType type, MemNdlDimsData dims, int64_t offset = 0, int64_t set_id = 0,
-        uint8_t sync_mode = 0, uint8_t sync_nhd = 0) {
-        int64_t index = 0;
-        for (int i = memNdls.size() - 1; i >= 0; i--) {
-            if (memNdls[i].type == type && memNdls[i].set_id == set_id) {
-                index = memNdls[i].index + 1;
-                break;
-            }
-        }
-        memNdls.push_back({type, dims, index, offset, set_id, sync_mode, sync_nhd});
-    }
-    void add(NdlType type, RegNdlDimsData dims, int64_t set_id = 0) {
-        regNdls.push_back({type, dims, set_id});
-    }
+        uint8_t sync_mode = 0, uint8_t sync_nhd = 0);
+    void add(NdlType type, RegNdlDimsData dims, int64_t set_id = 0);
+
     SmallVector<MemNdlData> memNdls;
     SmallVector<RegNdlData> regNdls;
 };

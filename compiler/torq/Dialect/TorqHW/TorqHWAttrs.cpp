@@ -297,4 +297,60 @@ RegNdlAttr RegNdlAttr::get(::mlir::MLIRContext *context, RegNdlData ndl) {
     return Base::get(context, ndl.type, dimAttrs, ndl.set_id);
 }
 
+AffineMapAttr MemNdlDimData::getStrideAttr(int numSyms, MLIRContext *context) const {
+    if (expr_.has_value()) {
+        return AffineMapAttr::get(AffineMap::get(numSyms, 0, *expr_));
+    }
+    else {
+        return AffineMapAttr::get(AffineMap::getConstantMap(strideInt_.value(), context));
+    }
+}
+
+const MemNdlData *Ndls::getMemNdl(NdlType type, size_t index, int64_t set_id) const {
+    for (auto &ndl : memNdls) {
+        if (ndl.type == type && ndl.index == index && ndl.set_id == set_id) {
+            return &ndl;
+        }
+    }
+    return nullptr;
+}
+
+MemNdlData *Ndls::getMemNdl(NdlType type, size_t index, int64_t set_id) {
+    return const_cast<MemNdlData *>(std::as_const(*this).getMemNdl(type, index, set_id));
+}
+
+const RegNdlData *Ndls::getRegNdl(NdlType type, size_t index, int64_t set_id) const {
+    if (index != 0) {
+        return nullptr;
+    }
+    for (auto &ndl : regNdls) {
+        if (ndl.type == type && ndl.set_id == set_id) {
+            return &ndl;
+        }
+    }
+    return nullptr;
+}
+
+RegNdlData *Ndls::getRegNdl(NdlType type, size_t index, int64_t set_id) {
+    return const_cast<RegNdlData *>(std::as_const(*this).getRegNdl(type, index, set_id));
+}
+
+void Ndls::add(
+    NdlType type, MemNdlDimsData dims, int64_t offset, int64_t set_id, uint8_t sync_mode,
+    uint8_t sync_nhd
+) {
+    int64_t index = 0;
+    for (int i = memNdls.size() - 1; i >= 0; i--) {
+        if (memNdls[i].type == type && memNdls[i].set_id == set_id) {
+            index = memNdls[i].index + 1;
+            break;
+        }
+    }
+    memNdls.push_back({type, dims, index, offset, set_id, sync_mode, sync_nhd});
+}
+
+void Ndls::add(NdlType type, RegNdlDimsData dims, int64_t set_id) {
+    regNdls.push_back({type, dims, set_id});
+}
+
 } // namespace mlir::syna::torq_hw

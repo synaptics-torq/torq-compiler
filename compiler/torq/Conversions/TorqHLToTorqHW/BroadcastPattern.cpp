@@ -27,7 +27,8 @@ static LData expandDims(const LData &input, const LData &output, ArrayRef<int64_
         return input;
     }
     assert(input.shape().size() + dimensions.size() == output.shape().size());
-    LData expanded({}, input.elementType());
+    LData expanded(input);
+    expanded.setShape({});
     int inputIx = 0;
     int dimensionsIx = 0;
     for (size_t outDim = 0; outDim < output.shape().size(); outDim++) {
@@ -75,16 +76,7 @@ BroadcastPattern::transform(torq_hl::BroadcastOp op, PatternRewriter &rewriter) 
         }
     }
 
-    rewriter.replaceOpWithNewOp<SliceTaskOp>(
-        op,                        // Operation to replace
-        slice.name(),              // Operation name
-        ValueRange{op.getInput()}, // Input tensor
-        ValueRange{},              // Weights
-        ValueRange{},              // BiasScale tensor,
-        ValueRange{op.getInit()},  // Output tensor initializer
-        ValueRange{},              // Symbols
-        slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
     return success();
 }
 
