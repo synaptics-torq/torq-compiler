@@ -323,6 +323,8 @@ class PhysicalMemory {
 
     int totalPhysicalBufferSize() const { return pool_.usedSize(); }
 
+    int usableSize() const { return pool_.usableSize(); }
+
     int defragCount() const { return defragCount_; }
 
     int swapOutCount() const { return swapOutCount_; }
@@ -947,6 +949,16 @@ LogicalResult VirtualBuffer::initialize() {
     return success();
 }
 
+static LogicalResult
+emitAllocationFailure(Operation *op, VirtualMemory &vm, const Twine &what, int64_t sizeBytes) {
+    int64_t freeBytes =
+        vm.physicalMemory.usableSize() - vm.physicalMemory.totalPhysicalBufferSize();
+    return op->emitError() << "cannot allocate " << what << " (" << sizeBytes
+                           << " B): " << freeBytes << " B free. "
+                           << (sizeBytes > freeBytes ? "too large (capacity)"
+                                                     : "not contiguous (fragmentation)");
+}
+
 } // namespace
 
 // go over the full function and replace virtual values with physical values
@@ -1090,7 +1102,12 @@ LogicalResult convertVirtualToPhysicalMemRefs(
                 }
             });
 
-            return op->emitError("unable to free enough space for results and operands");
+            int pinned = vm.physicalMemory.totalPinnedSize();
+            int required = swapInSize + resultsSize;
+            int usable = vm.physicalMemory.usableSize();
+            return op->emitError()
+                   << "cannot allocate op (pinned " << pinned << " B + required " << required
+                   << " B): exceeds " << usable << " B usable (capacity)";
         }
 
         // unpin all the pinned virtual allocations to allow defragmentation
@@ -1113,9 +1130,11 @@ LogicalResult convertVirtualToPhysicalMemRefs(
             auto maybePhysicalValue = vm.swapIn(virtualValue, rewriter, op->getLoc());
 
             if (failed(maybePhysicalValue)) {
-                llvm::dbgs() << "Failed to swap in operand for operation: ";
-                virtualValue.dump();
-                return op->emitError("unable to swap in operand");
+                LLVM_DEBUG(virtualValue.dump());
+                return emitAllocationFailure(
+                    op, vm, "operand",
+                    getEncodedTotalSizeBytes(cast<MemRefType>(virtualValue.getType()))
+                );
             }
         }
 
@@ -1123,11 +1142,10 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         for (auto result : memrefResults) {
             if (failed(vm.addAllocation(result))) {
                 vm.physicalMemory.clearSpillProtect();
-                llvm::dbgs() << "Failed to allocate result for operation: ";
-                result.dump();
-                return op->emitError(
-                    "unable to allocate space for result # " +
-                    std::to_string(result.getResultNumber())
+                LLVM_DEBUG(result.dump());
+                return emitAllocationFailure(
+                    op, vm, "result #" + Twine(result.getResultNumber()),
+                    getEncodedTotalSizeBytes(cast<MemRefType>(result.getType()))
                 );
             }
         }
