@@ -59,9 +59,10 @@ def case_config(request, tmp_path, layer_executor_case, chip_config):
     subgraph_suffix = _get_subgraph_suffix(case) if is_subgraph else None
     _maybe_skip_executor(request, layer_id, executor, model_name, subgraph_suffix, layer_executor_case=layer_executor_case)
 
-    # Full model / full subgraph mode: executor assignments provided by fixture
+    # Full model / full subgraph mode: executor assignments provided by fixture.
+    # The compiler runs with the default max-producers fuse mode; it falls back
+    # to only-patterns per op when the fused producers can't fit in LRAM.
     if executor == "discovered":
-        base_config["torq_compiler_options"] = ["--torq-tile-and-fuse-producers-fuse-mode=only-patterns"]
         return base_config
 
     # Layer mode: assign executor to the entire layer
@@ -81,7 +82,6 @@ def case_config(request, tmp_path, layer_executor_case, chip_config):
     elif executor == "host":
         compiler_options.extend(["--torq-disable-slices", "--torq-disable-css"])
 
-    compiler_options.append("--torq-tile-and-fuse-producers-fuse-mode=only-patterns")
     base_config["torq_compiler_options"] = compiler_options
     return base_config
 

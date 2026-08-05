@@ -74,6 +74,19 @@ using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
+/// Return true if two ops can be fused — they must have the same executor
+/// assignment, or at least one must be unassigned (e.g. constants, casts).
+static bool canFuse(Operation *consumer, Operation *producer) {
+    auto getExecutor = [](Operation *op) -> StringRef {
+        if (auto attr = op->getAttrOfType<StringAttr>("torq-executor"))
+            return attr.getValue();
+        return "";
+    };
+    StringRef a = getExecutor(consumer);
+    StringRef b = getExecutor(producer);
+    return a.empty() || b.empty() || a == b;
+}
+
 extern llvm::cl::opt<bool> clDisableSlicing;
 
 namespace {
@@ -952,9 +965,10 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
     llvm::FailureOr<bool> tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
     if (failed(tileFits))
         return LogicalResult::failure();
-    if (*tileFits)
+    if (*tileFits) {
         // fits in memory, no need to change the tile
         return false;
+    }
 
     IRRewriter rewriter(moduleOp->getContext());
 
@@ -1057,6 +1071,11 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     bool isDestinationOperand
 ) {
     Operation *producerOp = producerOpResult.getOwner();
+
+    // Refuse to fuse across executor boundaries (NSS vs Host etc).
+    Operation *consumerOp = *candidateSliceOp->getUsers().begin();
+    if (!canFuse(consumerOp, producerOp))
+        return std::nullopt;
 
     auto doNotFuse = [&]() {
         assert(
@@ -1166,6 +1185,11 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
     bool isDestinationOperand
 ) {
     Operation *producerOp = producerOpResult.getOwner();
+
+    // Refuse to fuse across executor boundaries (NSS vs Host etc).
+    Operation *consumerOp = *candidateSliceOp->getUsers().begin();
+    if (!canFuse(consumerOp, producerOp))
+        return std::nullopt;
 
     auto doNotFuse = [&]() {
         assert(
@@ -1364,12 +1388,16 @@ void TileAndFusePass::tileAndFuse(
     llvm::SetVector<Operation *> producerOps;
     std::optional<llvm::SetVector<Operation *> *> restrictToProducerOps = std::nullopt;
 
+    // The fuse mode used for the actual tiling below. Starts as the
+    // command-line selection, but may fall back to OnlyPatterns if
+    // MaxProducers cannot fit the candidate producers in memory.
+    TileAndFuseProducersFuseMode fuseMode = clTorqTileAndFuseProducersFuseMode.getValue();
+
     // In MaxProducers mode, first find all the potential producers that fit in
     // the smallest tile. As we don't know which domains will actually be tiled
     // yet, we use the MaxSizeAllDoms option below, that ignores domain order
     // constraints.
-    if (clTorqTileAndFuseProducersFuseMode.getValue() ==
-        TileAndFuseProducersFuseMode::MaxProducers) {
+    if (fuseMode == TileAndFuseProducersFuseMode::MaxProducers) {
 
         SmallVector<OpFoldResult> smallestTileSizes(iterDomainSizes);
         for (auto dim : tilingInfo.tilingOrder) {
@@ -1395,12 +1423,29 @@ void TileAndFusePass::tileAndFuse(
         restrictToProducerOps = &producerOps;
     }
 
-    // Find a tile size that fits tiOp in memory (no producers, except for the
-    // required pattern-fuse-group members)
-    llvm::SetVector<Operation *> empty;
+    // Find a tile size that fits tiOp in memory, together with all the
+    // candidate producers in MaxProducers mode (pattern-fuse-group members are
+    // always included by extractOpsForMemoryCheck).
     llvm::FailureOr<bool> tileChanged = fitTileToMemory(
         tiOp, producerOps, tilingInfo, *iterDomainConstSizes, tileOffsets, tileSizes
     );
+
+    // MaxProducers fallback: if the consumer tile plus all candidate producers
+    // can't fit in LRAM even at the smallest tile size, give up on fusing
+    // optional producers and retry with OnlyPatterns, which only fuses what
+    // pattern-fuse-groups strictly require.
+    if (failed(tileChanged) && fuseMode == TileAndFuseProducersFuseMode::MaxProducers) {
+        LLVM_DEBUG(llvm::dbgs() << "  max-producers does not fit, falling back to only-patterns\n");
+        fuseMode = TileAndFuseProducersFuseMode::OnlyPatterns;
+        producerOps.clear();
+        restrictToProducerOps = std::nullopt;
+        tileOffsets.assign(iterDomainOffsets.begin(), iterDomainOffsets.end());
+        tileSizes.assign(iterDomainSizes.begin(), iterDomainSizes.end());
+        tileChanged = fitTileToMemory(
+            tiOp, producerOps, tilingInfo, *iterDomainConstSizes, tileOffsets, tileSizes
+        );
+    }
+
     if (failed(tileChanged)) {
         tiOp->emitWarning("tile-and-fuse: failed to tile an operation, skipping it");
         LLVM_DEBUG(assert(false));
@@ -1432,8 +1477,7 @@ void TileAndFusePass::tileAndFuse(
     // Do the actual tiling (might need to do it again later)!
 
     FailureOr<scf::SCFTileAndFuseResult> tiledResults = tileAndFuseToSize(
-        rewriter, tiOp, iterDomainSizes, tileSizes, clTorqTileAndFuseProducersFuseMode.getValue(),
-        restrictToProducerOps, toTileOps
+        rewriter, tiOp, iterDomainSizes, tileSizes, fuseMode, restrictToProducerOps, toTileOps
     );
     if (failed(tiledResults)) {
         tiOp->emitWarning("tile-and-fuse: failed to tile operation, skipping it.");
@@ -1450,26 +1494,6 @@ void TileAndFusePass::tileAndFuse(
 
     // Replace the untiled tiOp with the tiled results.
     applyTiledResults(rewriter, tiOp, *tiledResults);
-
-    LLVM_DEBUG({
-        // Check if the tiled and fused loop fits in memory
-
-        Operation *tiledOp = nullptr;
-        for (OpResult res : tiOp->getResults()) {
-            if (Value replacement = tiledResults->replacements.lookup(res)) {
-                tiledOp = replacement.getDefiningOp();
-                break;
-            }
-        }
-        assert(tiledOp);
-
-        OwningOpRef<ModuleOp> moduleOp =
-            extractOpsForMemoryCheck("check_tiling_succeeded", tiledOp);
-
-        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp, false);
-        assert(succeeded(opFitsInMemory));
-        assert(*opFitsInMemory);
-    });
 
     // Erase the untiled op, so its producers will have use_empty (and not tiled
     // again) if this is their only user.

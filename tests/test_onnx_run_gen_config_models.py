@@ -302,7 +302,6 @@ def case_config(request, tmp_path, layer_executor_case):
 
     compiler_options = [
         f"--torq-executor-map={json_path}",
-        "--torq-tile-and-fuse-producers-fuse-mode=only-patterns",
     ]
 
     config = {
