@@ -141,10 +141,6 @@ def torch_zoo_turbine_case(request):
 def case_config(request, chip_config):
     case = request.getfixturevalue("torch_zoo_turbine_case")
 
-    next_chip = (chip_config.data['target'] != "SL2610")
-    if next_chip:
-        pytest.xfail("AssertionError: Nans differ")
-
     # Cases xfail'd for non-tolerance reasons (crash, exceed LRAM, parsing issue).
     xfail_tc = [
         # Full models — exceed LRAM on all zoo models
