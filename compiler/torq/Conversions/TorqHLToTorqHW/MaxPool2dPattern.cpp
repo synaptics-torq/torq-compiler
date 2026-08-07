@@ -170,7 +170,7 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
             NdlType::DEDR,
             {{DimType::L, MemDimTag::B, ddat_width, 1},
              {DimType::L, MemDimTag::A, max_input + step_adj, ddat_width},
-             {DimType::H, MemDimTag::I, ksize_x_split, ksize_x_max},
+             {DimType::H, MemDimTag::I, ksize_x_split, ksize_x_max * ddat_width},
              {DimType::H, MemDimTag::J, ksize_y, input_shape[3] * ddat_width},
              {DimType::H, MemDimTag::A, total_px_block, max_input * ddat_width},
              {DimType::H, MemDimTag::G, max_out_channels, input_strides[1] * ddat_width},
