@@ -50,6 +50,12 @@ using MemNdlDimsData = SmallVector<MemNdlDimData>;
 using RegNdlDimsData = SmallVector<RegNdlDimData>;
 
 struct MemNdlData {
+    MemNdlData(
+        NdlType type, MemNdlDimsData dims, int64_t offset = 0, int64_t set_id = 0,
+        uint8_t sync_mode = 0, uint8_t sync_nhd = 0
+    )
+        : type(type), dims(dims), index(0), offset(offset), set_id(set_id), sync_mode(sync_mode),
+          sync_nhd(sync_nhd) {}
     NdlType type;
     MemNdlDimsData dims;
     int64_t index;
@@ -60,6 +66,8 @@ struct MemNdlData {
 };
 
 struct RegNdlData {
+    RegNdlData(NdlType type, RegNdlDimsData dims, int64_t set_id = 0)
+        : type(type), dims(dims), set_id(set_id) {}
     NdlType type;
     RegNdlDimsData dims;
     int64_t set_id;
@@ -74,8 +82,15 @@ struct Ndls {
 
     void
     add(NdlType type, MemNdlDimsData dims, int64_t offset = 0, int64_t set_id = 0,
-        uint8_t sync_mode = 0, uint8_t sync_nhd = 0);
-    void add(NdlType type, RegNdlDimsData dims, int64_t set_id = 0);
+        uint8_t sync_mode = 0, uint8_t sync_nhd = 0) {
+        add(MemNdlData(type, dims, offset, set_id, sync_mode, sync_nhd));
+    }
+    void add(NdlType type, RegNdlDimsData dims, int64_t set_id = 0) {
+        add(RegNdlData(type, dims, set_id));
+    }
+
+    void add(const MemNdlData &ndl);
+    void add(const RegNdlData &ndl);
 
     SmallVector<MemNdlData> memNdls;
     SmallVector<RegNdlData> regNdls;

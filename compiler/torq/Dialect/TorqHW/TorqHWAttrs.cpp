@@ -335,22 +335,18 @@ RegNdlData *Ndls::getRegNdl(NdlType type, size_t index, int64_t set_id) {
     return const_cast<RegNdlData *>(std::as_const(*this).getRegNdl(type, index, set_id));
 }
 
-void Ndls::add(
-    NdlType type, MemNdlDimsData dims, int64_t offset, int64_t set_id, uint8_t sync_mode,
-    uint8_t sync_nhd
-) {
+void Ndls::add(const MemNdlData &ndl) {
     int64_t index = 0;
     for (int i = memNdls.size() - 1; i >= 0; i--) {
-        if (memNdls[i].type == type && memNdls[i].set_id == set_id) {
+        if (memNdls[i].type == ndl.type && memNdls[i].set_id == ndl.set_id) {
             index = memNdls[i].index + 1;
             break;
         }
     }
-    memNdls.push_back({type, dims, index, offset, set_id, sync_mode, sync_nhd});
+    memNdls.push_back(ndl);
+    memNdls.back().index = index;
 }
 
-void Ndls::add(NdlType type, RegNdlDimsData dims, int64_t set_id) {
-    regNdls.push_back({type, dims, set_id});
-}
+void Ndls::add(const RegNdlData &ndl) { regNdls.push_back(ndl); }
 
 } // namespace mlir::syna::torq_hw

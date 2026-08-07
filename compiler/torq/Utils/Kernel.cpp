@@ -987,6 +987,31 @@ LData &LData::broadcastAs(const LData &other, int numDims) {
     return *this;
 }
 
+LData &LData::bitCast(DType newType) {
+    DType prevType = elementType();
+    int prevSize = sizeofTypeBits(prevType);
+    int newSize = sizeofTypeBits(newType);
+    setElementType(newType);
+    if (prevSize == newSize) {
+        return *this;
+    }
+    assert(!shape().empty() && "Bitcast requires same size for scalars");
+    assert(denseDims() > 0 && "Bitcast requires same size for dense last dim");
+    int factor = max(newSize / prevSize, 1);
+    assert(shape().back().count % factor == 0 && "Last dim not multiple of new type size");
+
+    getShape().back().count = shape().back().count * prevSize / newSize;
+    // Adjust all the strides above the last dimension
+    for (int i = 0; i < shape().size() - 1; ++i) {
+        auto &stride = getShape()[i].stride;
+        if (stride.intVal.has_value()) {
+            assert(stride.intVal.value() % factor == 0 && "Stride not multiple of new type size");
+            stride.intVal = stride.intVal.value() * prevSize / newSize;
+        }
+    }
+    return *this;
+}
+
 LData &LData::partitionByIndexParity1D() {
     torq::partitionByIndexParity1D(*this);
     return *this;
@@ -1062,7 +1087,7 @@ struct SlicePrivate {
     );
     int actWidth(DType iType, DType wType, bool biasScalePerItem);
 
-    void memNdl(NdlType ndlType, const LData &data, int appendBlockSize = -1);
+    MemNdlData memNdl(NdlType ndlType, const LData &data, int appendBlockSize = -1);
     void dedr(const LData &data);
     void dewr(const LData &data);
     void debr(const LData &data);
@@ -1943,7 +1968,7 @@ void SlicePrivate::cepr(const PData &pdata) {
     _ndls.add(NdlType::CEPR, ceprDims);
 }
 
-void SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSize) {
+MemNdlData SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSize) {
     MemNdlDimsData ndlDims;
     int offset = addMemNdlDims(ndlType, ndlDims, data, appendBlockSize);
     if (sizeofTypeBits(data.elementType()) < 8) {
@@ -1966,7 +1991,7 @@ void SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSiz
         }
     }
 
-    _ndls.add(ndlType, ndlDims, offset);
+    return MemNdlData(ndlType, ndlDims, offset);
 }
 
 // Check that no read in `ndl` crosses a `bankBytes`-byte memory-bank boundary.
@@ -2069,10 +2094,10 @@ static void verifyNdlBankAlignment(const MemNdlData *ndl, int64_t bankBytes) {
 #endif
 }
 
-void SlicePrivate::dedr(const LData &data) { memNdl(NdlType::DEDR, data); }
+void SlicePrivate::dedr(const LData &data) { _ndls.add(memNdl(NdlType::DEDR, data)); }
 
 void SlicePrivate::dewr(const LData &data) {
-    memNdl(NdlType::DEWR, data);
+    MemNdlData ndlData = memNdl(NdlType::DEWR, data);
     if (_cfg.stride == 2) {
         // Adjust DEWR
         // In stride 2 mode the ALU automatically select the kernel part (quadrant) to use while
@@ -2081,29 +2106,31 @@ void SlicePrivate::dewr(const LData &data) {
         // Remove the innermost O2:0,O2:0 due to input segment handling
         MemNdlDimsData dewr;
         int skipCount = 0;
-        for (const MemNdlDimData &d : _ndls.getMemNdl(NdlType::DEWR)->dims) {
+        for (const MemNdlDimData &d : ndlData.dims) {
             if (d.type == DimType::H && d.tag == MemDimTag::O && d.count == 2 &&
                 d.getIntStride().value_or(-1) == 0 && skipCount++ < 2)
                 continue;
             dewr.push_back(d);
         }
         assert(skipCount >= 2 && "Input quadrants loops not found");
-        _ndls.getMemNdl(NdlType::DEWR)->dims = dewr;
+        ndlData.dims = dewr;
     }
+    _ndls.add(ndlData);
 }
 
 void SlicePrivate::debr(const LData &data) {
-    memNdl(NdlType::DEBR, data);
+    MemNdlData ndlData = memNdl(NdlType::DEBR, data);
 
     // TORQ fetches bias from LRAM in B-bus in fixed 8-byte banks and can only read whole
     // banks, so make sure no bias read crosses a bank boundary for any H-index
     // combination.
     constexpr int64_t kLramBankBytes = 8;
-    verifyNdlBankAlignment(_ndls.getMemNdl(NdlType::DEBR), kLramBankBytes);
+    verifyNdlBankAlignment(&ndlData, kLramBankBytes);
+    _ndls.add(ndlData);
 }
 
 void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
-    memNdl(NdlType::DEQW, output, appendBlockSize);
+    _ndls.add(memNdl(NdlType::DEQW, output, appendBlockSize));
 }
 
 void SlicePrivate::ref(const LData &data) {

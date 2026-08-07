@@ -241,9 +241,9 @@ class Data {
     // Get data element type
     DType elementType() const;
 
-    // Change data element type
-    // Provide a different view on the data, no actual data conversion is performed.
-    // Note: this is like C casting, use responsibly
+    // Set data element type
+    // Low-level operation, no actual data conversion or adjustment is performed, use responsibly
+    // Note: use bitCast() to change the type of an existing tensor while preserving the content
     void setElementType(DType elType);
 
     // Get current indexes
@@ -372,6 +372,15 @@ class LData : public DataT<LData> {
     // If numDims >= 0, only the first numDims dimensions are broadcast.
     // Asserts if the shapes are not compatible for broadcasting
     LData &broadcastAs(const LData &other, int numDims = -1);
+
+    // Change the data type of the tensor.
+    // Provide a different view of the tensor data by reinterpreting the binary representation
+    // as elements of the new type, no actual data conversion is performed (similar to C++ bit_cast)
+    // The number of elements in the last dimension and all strides are adjusted accordingly.
+    // asserts if the last dimension does not have a size multiple of the new type size.
+    // asserts if any stride is not multiple of the new type size.
+    // for scalar tensors or with non-dense last dim, newType size must be == current type size.
+    LData &bitCast(DType newType);
 
     // Reorganize the last dimension into two sub-blocks containing elements
     // with even and odd indexes respectively

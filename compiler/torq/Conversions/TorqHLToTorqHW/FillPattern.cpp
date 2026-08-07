@@ -43,13 +43,7 @@ LogicalResult FillPattern::transform(torq_hl::FillOp op, PatternRewriter &rewrit
                 val &= 0xFFFF;
                 val = val | (val << 16);
             }
-            Shape &shape = output.getShape();
-            shape.back().count /= factor;
-            for (int i = 0; i < (int)shape.size() - 1; ++i) {
-                if (shape[i].stride.intVal.has_value())
-                    shape[i].stride.intVal = shape[i].stride.intVal.value() / factor;
-            }
-            output.setElementType(DType::int32);
+            output.bitCast(DType::int32);
         }
     }
 #define TORQ_TEST_MULTI_DEQW 0
