@@ -27,6 +27,7 @@ iree_cc_library(
     UnrollStaticScfForLoopsPass.cpp
     TorqAnnotateTorqResourcesPass.cpp
     ConvertNhwcOpToNchwPass.cpp
+    FoldUnitExtentWrapperPass.cpp
     RaiseSoftmaxOpPattern.cpp
     OptimizeElementwiseBinaryOpPattern.cpp
     OptimizeSelectOpPattern.cpp

@@ -110,6 +110,30 @@ def ConvertNhwcOpToNchw :
     ];
 }
 
+def FoldUnitExtentWrapper :
+    InterfacePass<"torq-fold-unit-extent-wrapper",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Folds IREE 3.10's rank-5 depthwise reshape wrapper back to rank-4";
+
+    let description = [{
+        Folds the cosmetic tensor.expand_shape / linalg.generic / tensor.collapse_shape
+        triple that IREE 3.10's hwcm decomposition wraps around a multiplier-M=1
+        depthwise (rank 4 -> 5 -> 4) into a single rank-4 linalg.generic.
+
+        Runs immediately before torq-convert-nhwc-op-to-nchw so that the 4D-only
+        NHWC->NCHW conversion always sees a uniform rank-4 chain. See #1412.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createFoldUnitExtentWrapperPass()";
+
+    let dependentDialects = [
+        "linalg::LinalgDialect",
+        "tensor::TensorDialect"
+    ];
+}
+
 def OptimizeLinalgForTorq :
     InterfacePass<"torq-optimize-linalg-for-torq",
                   "mlir::FunctionOpInterface"> {

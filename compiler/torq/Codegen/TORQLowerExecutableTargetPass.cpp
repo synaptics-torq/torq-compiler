@@ -329,6 +329,9 @@ void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
     // optimize linalg ops for torq
     // this pass use some tags from tile-and-fuse mark pass
     funcPm.addPass(createOptimizeLinalgForTorqPass());
+    // Fold IREE 3.10's rank-5 depthwise reshape wrapper to rank-4 so the
+    // 4D-only NHWC->NCHW conversion below sees a uniform rank-4 chain (#1412).
+    funcPm.addPass(createFoldUnitExtentWrapperPass());
     // Convert NHWC conv/pool/depthwise NHWC to NCHW
     funcPm.addPass(createConvertNhwcOpToNchwPass());
     funcPm.addPass(createCanonicalizerPass());

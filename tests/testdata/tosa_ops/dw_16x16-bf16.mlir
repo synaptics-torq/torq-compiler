@@ -1,3 +1,4 @@
+// TORQ_FP_MAX_TOL: 0.05
 module attributes {tf_saved_model.semantics} {
   func.func @main(%arg0: tensor<1x16x16x2xbf16> {ml_program.identifier = "serving_default_input_0:0", tf_saved_model.index_path = ["input_0"]}) -> (tensor<1x16x16x2xbf16> {ml_program.identifier = "StatefulPartitionedCall_1:0", tf_saved_model.index_path = ["output_0"]}) attributes {tf_saved_model.exported_names = ["serving_default"]} {
     %0 = "tosa.const"() <{values = dense<[1.100000e+01, 2.200000e+01]> : tensor<2xbf16>}> : () -> tensor<2xbf16>
