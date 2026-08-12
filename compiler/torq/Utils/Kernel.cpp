@@ -1009,6 +1009,14 @@ LData &LData::bitCast(DType newType) {
             stride.intVal = stride.intVal.value() * prevSize / newSize;
         }
     }
+
+    // Adjust offset
+    if (offset() % factor != 0) {
+        llvm::errs() << "Error: offset " << offset() << " not multiple of new type size\n";
+        assert(false && "Offset not multiple of new type size");
+    }
+    setOffset(offset() * prevSize / newSize);
+
     return *this;
 }
 
