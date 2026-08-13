@@ -9,6 +9,7 @@
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLAttrs.h"
+#include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -77,14 +78,10 @@ namespace mlir::syna::torq {
 /// Return true if two ops can be fused — they must have the same executor
 /// assignment, or at least one must be unassigned (e.g. constants, casts).
 static bool canFuse(Operation *consumer, Operation *producer) {
-    auto getExecutor = [](Operation *op) -> StringRef {
-        if (auto attr = op->getAttrOfType<StringAttr>("torq-executor"))
-            return attr.getValue();
-        return "";
-    };
-    StringRef a = getExecutor(consumer);
-    StringRef b = getExecutor(producer);
-    return a.empty() || b.empty() || a == b;
+    // Ops without an executor assignment can fuse with anything.
+    if (!consumer->hasAttr("torq-executor") || !producer->hasAttr("torq-executor"))
+        return true;
+    return getTargetExecutor(consumer) == getTargetExecutor(producer);
 }
 
 extern llvm::cl::opt<bool> clDisableSlicing;
@@ -1512,6 +1509,12 @@ void TileAndFusePass::runOnOperation() {
     // walk. We first construct a queue, and than iterate over it.
     SmallVector<TilingInterface> orderTi;
     funcOp.walk<WalkOrder::PostOrder, ReverseIterator>([&](TilingInterface tiOp) {
+        // Ops assigned to a non-NPU executor (e.g. Host) don't run on the NPU,
+        // so LRAM fit is meaningless for them: skip both the fit check and
+        // tiling. Unassigned ops (no attr) default to the NPU path.
+        if (getTargetExecutor(tiOp) == torq_hl::Executor::Host)
+            return;
+
         // For pattern-fuse-groups, we only tile from the bottom most op, to make
         // sure the whole group is tiled together.
         if (isMarkedFuseGroup(tiOp) && !isFuseGroupOutput(tiOp))

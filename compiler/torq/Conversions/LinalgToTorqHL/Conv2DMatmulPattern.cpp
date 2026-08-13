@@ -68,6 +68,24 @@ bool isQuantizedMatmulChain(linalg::MatmulOp op) {
     return nextUser && matchDequantGeneric(nextUser, scale, zp);
 }
 
+// Return the matmul RHS operand in the canonical [K, N] orientation expected by
+// the torq_hl matmul/FullyConnected lowerings. A linalg.matmul may address its
+// RHS through a transposed indexing map ((d0, d1, d2) -> (d1, d2)) when the
+// producer pre-transposed the weight constant instead of materializing a
+// linalg.transpose (e.g. an ONNX Gemm with transB=1). In that case the [N, K]
+// operand must be transposed explicitly; for a constant RHS the canonicalizer
+// folds the transpose back into a transposed constant.
+static Value getCanonicalMatmulRhs(linalg::MatmulOp srcOp, PatternRewriter &rewriter) {
+    Value rhs = srcOp.getInputs()[1];
+    auto indexingMaps = srcOp.getIndexingMapsArray();
+    if (indexingMaps.size() == 3 && indexingMaps[1].getNumResults() == 2 &&
+        indexingMaps[1].getResult(0) == getAffineDimExpr(1, srcOp.getContext()) &&
+        indexingMaps[1].getResult(1) == getAffineDimExpr(2, srcOp.getContext())) {
+        return transposeValue(rhs, SmallVector<int64_t, 4>{1, 0}, srcOp.getLoc(), rewriter);
+    }
+    return rhs;
+}
+
 // NCHW pattern
 // Input NCHW, weight OIXY, Ouput NCHW
 // %cst_1 is weights
@@ -194,7 +212,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
     }
 
     FailureOr<Value>
-    replaceWithTorqMatmul(linalg::MatmulOp srcOp, PatternRewriter &rewriter) const {
+    replaceWithTorqMatmul(linalg::MatmulOp srcOp, Value rhs, PatternRewriter &rewriter) const {
         // Fallback rewrite when no fusible conv/fc chain is present:
         // emit plain torq_hl.matmul with neutral bias/scale parameters.
         auto outTy = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
@@ -206,7 +224,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
 
         auto matMulOp = torq_hl::MatMulOp::create(
             rewriter, srcOp->getLoc(), outTy, createInitTensor(srcOp, rewriter, outTy), 0, outMin,
-            outMax, 0, biasScale, srcOp.getOperand(0), srcOp.getOperand(1)
+            outMax, 0, biasScale, srcOp.getOperand(0), rhs
         );
 
         // linalg::MatmulOp is accumulating, but torq_hl::MatmulOp is not, so we do the addition
@@ -273,6 +291,15 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
             );
         }
 
+        // Canonicalize a transposed-B RHS map ((d0, d1, d2) -> (d1, d2), e.g.
+        // an ONNX Gemm transB=1 weight kept in [N, K] orientation) to the
+        // [K, N] orientation the FC and torq_hl.matmul lowerings expect.
+        // Only done in material-rewrite mode: fuse-group discovery must not
+        // create new ops.
+        if (!_markFuseGroups) {
+            rhs = getCanonicalMatmulRhs(srcOp, rewriter);
+        }
+
         // Build fusion plan and compute bias/scale using PatternUtils helpers
         FailureOr<FusionPlan> fusionPlanOr = buildFusionPlanAndRebindOutput(output);
         if (failed(fusionPlanOr) || !fusionPlanOr->isFusable()) {
@@ -284,7 +311,7 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                 );
                 return success();
             }
-            return replaceWithTorqMatmul(srcOp, rewriter);
+            return replaceWithTorqMatmul(srcOp, rhs, rewriter);
         }
 
         // If there is an expand_shape user, use it to determine 4D output shape
@@ -367,20 +394,20 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         std::optional<Value> optionalWeightZpV;
         FailureOr<Value> biasV = computeBiasForMatmul(*fusionPlanOr, channelDim, optionalWeightZpV);
         if (failed(biasV)) {
-            return replaceWithTorqMatmul(srcOp, rewriter);
+            return replaceWithTorqMatmul(srcOp, rhs, rewriter);
         }
 
         ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, srcOp);
         biasV = computeRescaleInfo(*fusionPlanOr, *biasV, scInfo);
         if (failed(biasV)) {
-            return replaceWithTorqMatmul(srcOp, rewriter);
+            return replaceWithTorqMatmul(srcOp, rhs, rewriter);
         }
 
         if (!isAllZerosTensor(srcOp.getOutputs().front())) {
             // TODO: if the init is not all-zeros, we can still use FC/Conv as below.
             // If the init is some fill with constant, we can add it to the bias.
             // Otherwise we need to add torq_hl.add.
-            return replaceWithTorqMatmul(srcOp, rewriter);
+            return replaceWithTorqMatmul(srcOp, rhs, rewriter);
         }
 
         // Erase in reverse order to avoid invalidating users while pruning folded tail ops.
