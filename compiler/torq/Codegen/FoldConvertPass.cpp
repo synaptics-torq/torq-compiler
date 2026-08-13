@@ -20,9 +20,30 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-fold-convert"
+
+// Budget for the residency guard in SwapExtractAndConvert, as a percentage of LRAM. It limits
+// how much extra LRAM the swap keeps live. See the comment at that guard. 100 turns it off.
+//
+// We picked the default from measurement. It is above what a winning bf16 conv block needs, and
+// well below the point where a full model runs out of LRAM. With this default, every full model
+// we measured compiles and runs faster.
+//
+// The percentage is for the chip we tuned on. A smaller LRAM gets a smaller share. See
+// kSwapExtractAndConvertTunedLramSize.
+static llvm::cl::opt<int64_t> clSwapExtractAndConvertMaxWastePercent(
+    "torq-swap-extract-convert-max-waste-percent",
+    llvm::cl::desc("Max extra LRAM residency the SwapExtractAndConvert pattern may add, as a "
+                   "percentage of the LRAM size, on the chip the default was tuned on"),
+    llvm::cl::init(12)
+);
+
+// The LRAM size of the chip we tuned the percentage on. A chip with less LRAM than this gets a
+// smaller share. The residency guard says why.
+static constexpr int64_t kSwapExtractAndConvertTunedLramSize = 512 * 1024;
 
 namespace mlir::syna::torq {
 
@@ -400,7 +421,8 @@ class FoldLramToLramConversionChain : public OpRewritePattern<torq_hl::ConvertOp
 // %2 = convert(%1)
 class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
   public:
-    using OpRewritePattern::OpRewritePattern;
+    SwapExtractAndConvert(MLIRContext *ctx, int64_t lramSize)
+        : OpRewritePattern(ctx), lramSize_(lramSize) {}
 
     LogicalResult matchAndRewrite(torq_hl::ConvertOp op, PatternRewriter &rewriter) const override {
 
@@ -426,6 +448,18 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
             return failure();
         }
 
+        if (auto rejection = checkSliceIsOneBlock(extractOp)) {
+            return reject(op, rewriter, *rejection);
+        }
+
+        if (auto rejection = checkConsumers(extractOp)) {
+            return reject(op, rewriter, *rejection);
+        }
+
+        if (auto rejection = checkResidency(op, extractOp)) {
+            return reject(op, rewriter, *rejection);
+        }
+
         // we insert the swapped operation at the location of the extract op
         // so that we are sure the operands of the extract op are available
         rewriter.setInsertionPoint(extractOp);
@@ -444,8 +478,208 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
         rewriter.replaceOp(extractOp, postConvert);
         rewriter.eraseOp(op);
 
+        LLVM_DEBUG(llvm::dbgs() << "SwapExtractAndConvert: applied\n");
+
         return success();
     }
+
+  private:
+    // Why a guard turned the swap down: a short tag for the debug log, and a reason for the
+    // pattern driver. A guard returns nothing when it lets the swap through.
+    struct Rejection {
+        const char *tag;
+        const char *reason;
+    };
+
+    static LogicalResult
+    reject(torq_hl::ConvertOp op, PatternRewriter &rewriter, Rejection rejection) {
+        LLVM_DEBUG(llvm::dbgs() << "SwapExtractAndConvert: blocked (" << rejection.tag << ")\n");
+        return rewriter.notifyMatchFailure(op, rejection.reason);
+    }
+
+    // Kernels join dimensions before they read a tensor. The conv, the depthwise conv and the max
+    // pool kernel all join H with W. This works only when the inner one is taken whole. If it is
+    // not, the rows do not sit next to each other in memory. Then torq::fuse gives up and stops
+    // with "Could not fuse the requested number of dimensions".
+    //
+    // A slice is safe when it cuts one dimension and takes every inner dimension whole. A halo
+    // slab does this. A channel cut does this too. Those are the shapes this pattern is for. A
+    // slice that cuts H and W at the same time is not safe. It breaks the conv kernels
+    // (test_keras_app.py, the nasnetmobile separable conv layers). We saw this only on a chip with
+    // small LRAM, where the compiler tiles both directions.
+    //
+    // We look at the slice, not at the consumer. Blocking every conv would block the halo slabs
+    // too, and those are the case this pattern wins on.
+    static std::optional<Rejection> checkSliceIsOneBlock(tensor::ExtractSliceOp extractOp) {
+
+        ArrayRef<int64_t> parentShape = extractOp.getSource().getType().getShape();
+        SmallVector<OpFoldResult> sizes = extractOp.getMixedSizes();
+        SmallVector<OpFoldResult> strides = extractOp.getMixedStrides();
+
+        // true once we have passed a dimension that the slice cuts
+        bool pastCut = false;
+
+        for (auto [dim, parentExtent] : llvm::enumerate(parentShape)) {
+
+            std::optional<int64_t> size = getConstantIntValue(sizes[dim]);
+            std::optional<int64_t> stride = getConstantIntValue(strides[dim]);
+
+            if (!size || !stride || ShapedType::isDynamic(parentExtent)) {
+                return Rejection{"dynamic slice", "slice is not static"};
+            }
+
+            // a stride above one leaves holes inside the dimension
+            if (*stride != 1) {
+                return Rejection{"stride", "slice skips elements"};
+            }
+
+            bool whole = (*size == parentExtent);
+
+            if (pastCut && !whole) {
+                return Rejection{"not contiguous", "slice cuts more than one dimension"};
+            }
+
+            pastCut = pastCut || !whole;
+        }
+
+        return std::nullopt;
+    }
+
+    // After the swap the kernel reads a strided LRAM subview instead of a dense buffer. Three
+    // kernels cannot do that, and one more gets too big from it.
+    //
+    // The kernel is not the direct user of the extract_slice. The chain is
+    // convert ; extract_slice ; convert ; kernel, so the kernel is two or more hops away. So we
+    // follow every torq_hl.convert and check every consumer, not only the first one. One buffer
+    // can feed more than one kernel (measured: fma and then table).
+    static std::optional<Rejection> checkConsumers(tensor::ExtractSliceOp extractOp) {
+
+        SmallVector<Operation *> worklist(
+            extractOp.getResult().getUsers().begin(), extractOp.getResult().getUsers().end()
+        );
+        SmallPtrSet<Operation *, 8> visited;
+
+        while (!worklist.empty()) {
+            Operation *consumer = worklist.pop_back_val();
+            if (!visited.insert(consumer).second) {
+                continue;
+            }
+
+            // A two-tensor torq_hl.add reads both inputs in one traversal. Its NDL gets an extra
+            // dimension of size 2, and the stride of that dimension is the gap between the two
+            // input addresses. This only works when both inputs have the same strides. If they
+            // differ, AddPattern.cpp stops with "Add input strides must matchh". A scalar rhs is
+            // safe, because that path checks isDenseInMemory() first.
+            if (auto addOp = dyn_cast<torq_hl::AddOp>(consumer)) {
+                if (!addOp.getRhsIsScalar()) {
+                    return Rejection{"add", "consumer is a two-tensor torq_hl.add"};
+                }
+            }
+
+            // torq_hl.elementwisebinary and torq_hl.elementwiseshift read their operands the same
+            // way, so they need the same thing. Neither of them has the scalar path that add has.
+            // Both stop with "Input strides must match" -- see ElementWiseBinaryPattern.cpp and
+            // ElementWiseShiftPattern.cpp. The binary one also compares the inputs against the
+            // output ("Input and output strides must match"). So slicing both operands the same
+            // way is not enough, because the init is still dense.
+            //
+            // This really happens. An i16 tosa.clamp lowers its min side to elementwisebinary
+            // MAXIMUM and hits it (test_keras_ops.py, model004_conv_3x3_valid_bias_int16).
+            if (isa<torq_hl::ElementWiseBinaryOp, torq_hl::ElementWiseShiftOp>(consumer)) {
+                return Rejection{"elementwise", "consumer needs its operands to share strides"};
+            }
+
+            // torq_hl.call_program runs an outlined program, and its code lives in DTCM, which is
+            // small. Handing it a subview instead of a dense buffer makes that code bigger. Two
+            // keras_ops depthwise int8 cases went a few hundred bytes over the DTCM limit this way
+            // (dw023_NNR_301..., dw025_NNR_301..., both reported as "Failed to allocate DTCM
+            // addresses"). Those cases were hidden behind an xfail until it was lifted. The conv
+            // blocks this pattern targets never feed a call_program, so skipping these costs
+            // nothing there.
+            if (isa<torq_hl::CallProgramOp>(consumer)) {
+                return Rejection{"call_program", "consumer is a torq_hl.call_program"};
+            }
+
+            // look through converts: the kernel is behind the convert back to LRAM
+            if (isa<torq_hl::ConvertOp>(consumer)) {
+                for (Value res : consumer->getResults()) {
+                    worklist.append(res.getUsers().begin(), res.getUsers().end());
+                }
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    // Without the swap the consumer reads a small dense buffer, the size of the slice, and the
+    // parent can move to XRAM and be freed. With the swap the consumer reads a subview, so the
+    // whole parent has to stay live while the kernel runs. The allocator counts an alias at the
+    // size of its root. That is on purpose, and a comment in VirtualMemory.cpp explains why.
+    //
+    // So the swap trades DMA for `parent - slice` bytes of peak LRAM. This is a good trade for a
+    // halo slab, where the parent is only a little bigger than the slice. It is a bad trade for a
+    // channel cut, where the parent is several times bigger. With too many bad trades the
+    // allocator runs out of room and fails with "unable to free enough space for results and
+    // operands".
+    std::optional<Rejection>
+    checkResidency(torq_hl::ConvertOp op, tensor::ExtractSliceOp extractOp) const {
+
+        auto srcTy = dyn_cast<RankedTensorType>(op.getInput().getType());
+        auto sliceTy = dyn_cast<RankedTensorType>(extractOp.getResult().getType());
+        if (!srcTy || !sliceTy || !srcTy.hasStaticShape() || !sliceTy.hasStaticShape()) {
+            return Rejection{"dynamic shape", "dynamic shape, cannot size the residency"};
+        }
+
+        int64_t elemBytes = llvm::divideCeil(srcTy.getElementTypeBitWidth(), 8);
+        int64_t parentBytes = srcTy.getNumElements() * elemBytes;
+        int64_t sliceBytes = sliceTy.getNumElements() * elemBytes;
+        int64_t extraBytes = parentBytes - sliceBytes;
+        int64_t budget = residencyBudget();
+
+        LLVM_DEBUG(
+            llvm::dbgs() << "SwapExtractAndConvert: residency parent=" << parentBytes << " slice="
+                         << sliceBytes << " extra=" << extraBytes << " budget=" << budget
+                         << " lram=" << lramSize_ << " type=" << srcTy << "\n"
+        );
+
+        if (extraBytes > budget) {
+            return Rejection{"residency", "parent would pin too much extra LRAM"};
+        }
+
+        return std::nullopt;
+    }
+
+    // How many bytes of extra LRAM one swap may pin.
+    //
+    // The budget is a share of LRAM. A chip with less LRAM gets a smaller share.
+    //
+    // A model does not get smaller when the memory does. It runs the same layers in half the room.
+    // So it already sits closer to the ceiling. It has less room to give away. The same share is
+    // too much there. Two int8 layer models ran out of LRAM on a 256 KB chip. Both were fine on a
+    // 512 KB chip.
+    //
+    // So we scale the share by this LRAM size over the tuned one, squared. One factor was not
+    // enough. Half the LRAM then gets a quarter of the share. The budget itself drops to an
+    // eighth, because that quarter is a share of an LRAM that is half as big. On the two chips we
+    // have that is 12% of 512 KB and 3% of 256 KB, so 62 KB against 8 KB.
+    //
+    // A chip with the tuned size or more keeps the plain percentage.
+    int64_t residencyBudget() const {
+
+        int64_t budget = (lramSize_ * clSwapExtractAndConvertMaxWastePercent) / 100;
+
+        // The ratio is at most one here, so this cannot grow the budget. It also cannot overflow:
+        // the guard keeps lramSize_ under the tuned size, and the tuned size cubed still fits in
+        // an int64_t.
+        if (lramSize_ < kSwapExtractAndConvertTunedLramSize) {
+            budget = (budget * lramSize_ * lramSize_) /
+                     (kSwapExtractAndConvertTunedLramSize * kSwapExtractAndConvertTunedLramSize);
+        }
+
+        return budget;
+    }
+
+    int64_t lramSize_;
 };
 
 //
@@ -679,12 +913,16 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<KeepConcatInLram>(ctx, this->lramSize);
     patterns.add<FoldDuplicateConversion>(ctx);
 
-#if 0
-    // This pattern creates a situation where elementwise ops have inputs with different
-    // encodings (strides), which is not supported yet. So we disable it for now.
-    // It can be re-enabled once we support elementwise ops with different input encodings.
-    patterns.add<SwapExtractAndConvert>(ctx);
-#endif
+    // This pattern used to be disabled here with `#if 0`. The reason given at that time was:
+    //
+    //   This pattern creates a situation where elementwise ops have inputs with different
+    //   encodings (strides), which is not supported yet.
+    //
+    // Three kernels need matching strides: a two-tensor torq_hl.add, torq_hl.elementwisebinary
+    // and torq_hl.elementwiseshift. The pattern now skips the rewrite when one of them consumes
+    // the slice. A second guard limits the extra LRAM the swap keeps live, which is what broke
+    // efficientnetb0. Both guards are inside the pattern, each with its own comment.
+    patterns.add<SwapExtractAndConvert>(ctx, this->lramSize);
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
         return signalPassFailure();
