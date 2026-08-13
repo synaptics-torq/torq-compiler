@@ -12,7 +12,7 @@ on:
         value: ${{ jobs.build.outputs.path }}
 
 env:
-  MPACT_REF: 2e1097cb199ec6511c4990cbf3cead46443b3fc4
+  MPACT_REF: 0a38048f69a391dd01cda461bf6c32641aa89062
 
 jobs:
 
