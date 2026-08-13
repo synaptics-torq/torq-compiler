@@ -497,6 +497,21 @@ def LinalgSlicing :
     ];
 }
 
+def BufferizePeeledForallInPlace :
+           InterfacePass<"torq-bufferize-peeled-forall-in-place",
+                         "mlir::FunctionOpInterface"> {
+    let summary = "Point a peeled slice-head forall's tensor.empty init at its output "
+                  "destination so it bufferizes in place (drops a redundant copy).";
+
+    let constructor =
+        "mlir::syna::torq::createBufferizePeeledForallInPlacePass()";
+
+    let dependentDialects = [
+        "tensor::TensorDialect",
+        "scf::SCFDialect"
+    ];
+}
+
 def AddDeallocation :
     InterfacePass<"torq-add-deallocation",
          "mlir::FunctionOpInterface"> {

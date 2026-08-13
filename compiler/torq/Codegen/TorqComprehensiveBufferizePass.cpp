@@ -40,6 +40,8 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "Passes.h"
+
 #define DEBUG_TYPE "torq-bufferize"
 
 using mlir::bufferization::BufferizationOptions;
@@ -326,6 +328,10 @@ void addTorqComprehensiveBufferizePasses(
     std::optional<BufferizationOptions::DefaultMemorySpaceFn> memSpaceFn
 ) {
     funcPassManager.addPass(createEliminateEmptyTensorsPass());
+    // EliminateEmptyTensors points a peeled slice head's insert at the output but
+    // leaves the head forall init on the orphaned tensor.empty, forcing a temp +
+    // copy. Point it at the output so the forall bufferizes in place.
+    funcPassManager.addPass(createBufferizePeeledForallInPlacePass());
     funcPassManager.addPass(bufferization::createEmptyTensorToAllocTensorPass());
     funcPassManager.addPass(createIREEComprehensiveBufferizePass(allocationFn, memCpyFn, memSpaceFn)
     );

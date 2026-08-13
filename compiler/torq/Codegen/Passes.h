@@ -55,6 +55,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createEliminateRedundantLram
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollForallLoopsPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createBufferizePeeledForallInPlacePass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createScheduleSliceProgramsPass();
 
 std::unique_ptr<OperationPass<ModuleOp>>

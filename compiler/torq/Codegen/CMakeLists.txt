@@ -13,6 +13,7 @@ set(sources
     AttachX86CpuObjectsPass.cpp
     ExecutorAssignmentPass.cpp
     BufferizationUtils.cpp
+    BufferizePeeledForallInPlacePass.cpp
     CheckCssStackSizePass.cpp
     CoalesceElementwiseChainsPass.cpp
     CompileCpuProgramsPass.cpp
