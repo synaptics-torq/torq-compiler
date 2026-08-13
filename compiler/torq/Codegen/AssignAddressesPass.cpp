@@ -69,7 +69,7 @@ namespace {
 // check if we peak memory usage exceeds the pool size before ever trying to find addresses
 // (we may later fail allocation even if peak usage is below the pool size)
 static LogicalResult
-checkPeakMemoryUsage(Operation *parentOp, torq_hl::MemorySpace memSpace, int memSize) {
+checkPeakMemoryUsage(FunctionOpInterface funcOp, torq_hl::MemorySpace memSpace, int memSize) {
 
     int currentMemUsage = 0;
     int peakMemUsage = 0;
@@ -80,7 +80,7 @@ checkPeakMemoryUsage(Operation *parentOp, torq_hl::MemorySpace memSpace, int mem
     DenseSet<Value> peakAllocatedValues;
 
     DenseSet<Value> allocatedValues;
-    for (auto &op : parentOp->getRegion(0).getOps()) {
+    for (auto &op : funcOp.getFunctionBody().getOps()) {
         if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
 
             if (getEncodingMemorySpace(allocOp.getType()) != memSpace) {
@@ -243,15 +243,15 @@ static LogicalResult setDerivedMemrefAddress(Operation *op) {
 }
 
 static LogicalResult
-allocateAddresses(Operation *parentOp, Pool &pool, torq_hl::MemorySpace memSpace) {
+allocateAddresses(FunctionOpInterface funcOp, Pool &pool, torq_hl::MemorySpace memSpace) {
 
-    auto status = checkPeakMemoryUsage(parentOp, memSpace, pool.usableSize());
+    auto status = checkPeakMemoryUsage(funcOp, memSpace, pool.usableSize());
 
     if (failed(status)) {
         return status;
     }
 
-    for (auto &op : parentOp->getRegion(0).getOps()) {
+    for (auto &op : funcOp.getFunctionBody().getOps()) {
         if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
 
             if (getEncodingMemorySpace(allocOp.getType()) != memSpace) {

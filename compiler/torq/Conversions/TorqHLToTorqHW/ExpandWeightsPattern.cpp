@@ -15,21 +15,6 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
 
-static FailureOr<int> getBlockSize(torq_hl::ExpandWeightsOp op) {
-    auto blockSizeAttr = op->getAttrOfType<IntegerAttr>("block_size");
-    if (!blockSizeAttr) {
-        op.emitError("expected block_size attribute for expand_weights");
-        return failure();
-    }
-
-    int64_t blockSize = blockSizeAttr.getInt();
-    if (blockSize <= 0) {
-        op.emitError("expected positive block_size for expand_weights");
-        return failure();
-    }
-    return static_cast<int>(blockSize);
-}
-
 // Expand kernel for block-wise expand_weights without bias.
 //
 // This Kernel compute the following elementwise formula on the input
@@ -141,11 +126,10 @@ template <>
 LogicalResult
 ExpandWeightsPattern::transform(torq_hl::ExpandWeightsOp op, PatternRewriter &rewriter) const {
 
-    FailureOr<int> maybeBlockSize = getBlockSize(op);
-    if (failed(maybeBlockSize)) {
-        return failure();
+    int blockSize = op.getBlockSize();
+    if (blockSize <= 0) {
+        return op.emitOpError("expected positive block_size for expand_weights");
     }
-    int blockSize = *maybeBlockSize;
 
     FailureOr<SliceTaskOp> expandWeightsTask =
         op.getBias() ? createBlockExpandWithBias(op, rewriter, blockSize)

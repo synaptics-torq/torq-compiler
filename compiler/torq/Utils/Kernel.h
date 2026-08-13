@@ -38,7 +38,7 @@ struct Stride {
     Stride(AffineExpr stride) : exprVal(stride) {}
     bool hasVal() const { return intVal.has_value() || exprVal.has_value(); }
     bool operator==(const Stride &other) const {
-        return intVal.value() == other.intVal && exprVal.value() == other.exprVal;
+        return intVal == other.intVal && exprVal == other.exprVal;
     }
 
     std::optional<int> intVal{};

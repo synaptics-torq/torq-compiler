@@ -81,41 +81,21 @@ static std::optional<unsigned> blockArgIndexOf(Value v, Block &body) {
     return std::nullopt;
 }
 
-// Append the memref values a single op writes: DPS inits (KernelInterface),
-// torq_hl.store/load/host_copy outputs, and explicit MemoryEffects writes. An op
-// that is not understood conservatively contributes all of its memref operands,
-// so a write is never missed.
+// Append the memref values a single op writes, taken from its declared memory
+// effects. An op that is not understood conservatively contributes all of its
+// memref operands, so a write is never missed.
 static void collectWrittenValues(Operation *op, SmallVectorImpl<Value> &out) {
-    bool understood = false;
-    if (auto dps = dyn_cast<DestinationStyleOpInterface>(op)) {
-        for (OpOperand &init : dps.getDpsInitsMutable())
-            out.push_back(init.get());
-        understood = true;
-    }
-    if (auto st = dyn_cast<torq_hl::StoreOp>(op)) {
-        out.push_back(st.getOutput());
-        understood = true;
-    }
-    if (auto ld = dyn_cast<torq_hl::LoadOp>(op)) {
-        out.push_back(ld.getOutput());
-        understood = true;
-    }
-    if (auto hc = dyn_cast<torq_hl::HostCopyOp>(op)) {
-        out.push_back(hc.getOutput());
-        understood = true;
-    }
     if (auto eff = dyn_cast<MemoryEffectOpInterface>(op)) {
         SmallVector<MemoryEffects::EffectInstance> effects;
         eff.getEffects(effects);
         for (auto &e : effects)
             if (isa<MemoryEffects::Write>(e.getEffect()) && e.getValue())
                 out.push_back(e.getValue());
-        understood = true;
+        return;
     }
-    if (!understood)
-        for (Value o : op->getOperands())
-            if (isa<MemRefType>(o.getType()))
-                out.push_back(o);
+    for (Value o : op->getOperands())
+        if (isa<MemRefType>(o.getType()))
+            out.push_back(o);
 }
 
 // Indices of a program's block arguments that the program body may write.

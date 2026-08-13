@@ -301,8 +301,7 @@ class TrigOpPattern : public OpRewritePattern<linalg::GenericOp> {
         else
             out = maybeInvert(q23, buildCos(op, rewriter, input));
         rewriter.replaceOp(op, out);
-        printf("Replaced trig op\n");
-        fflush(stdout);
+        LLVM_DEBUG(llvm::dbgs() << "Replaced trig op\n");
         return success();
     }
 };
