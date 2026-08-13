@@ -48,7 +48,7 @@ You can use **either** of the following approaches:
 
 - Create an ephemeral Docker container that uses the prebuilt image:
     ```bash
-    $ docker run --rm -it -v $(pwd):$(pwd) -w $(pwd) -u $(id -u):$(id -g) ghcr.io/synaptics-torq/torq-compiler/compiler:main
+    $ docker run --rm -it -v $(pwd):$(pwd) -w $(pwd) -u $(id -u):$(id -g) ghcr.io/synaptics-torq/torq-compiler/compiler:latest
     ```
     The container will have access to the contents of your current directory.
 
