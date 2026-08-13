@@ -152,9 +152,10 @@ class XramToXramHostCopyPattern : public OpRewritePattern<torq_hl::HostCopyOp> {
         auto nonUnitDim = llvm::find_if(shape, [&](int64_t dim) { return dim > 1; });
         if (nonUnitDim == shape.end()) {
             // All dimensions are unit, but the total size exceeds the budget which shouldn't happen
-            // since the base case should have handled it. Just return failure since we don't know
-            // how to split further.
+            // since the base case should have handled it. Decline so the host_copy stays and the
+            // host performs the copy (falling through here would read past the shape array).
             assert(false && "unexpectedly found non-dense memref with only unit dimensions");
+            return failure();
         }
         int64_t dimIdx = std::distance(shape.begin(), nonUnitDim);
         int64_t dimShape = *nonUnitDim;
@@ -179,7 +180,9 @@ class XramToXramHostCopyPattern : public OpRewritePattern<torq_hl::HostCopyOp> {
         for (int64_t i = 0; i < rank; ++i)
             strides.push_back(rewriter.getIndexAttr(1));
 
-        int rowSize = maxChunkSizeBytes / chunkSize;
+        // When a single row exceeds the budget the division yields 0; clamp to 1 so the loop
+        // advances — the extent-1 slice recurses and splits over the next non-unit dimension.
+        int64_t rowSize = std::max<int64_t>(1, maxChunkSizeBytes / chunkSize);
         SmallVector<OpFoldResult> offsets(rank, rewriter.getIndexAttr(0));
         for (int64_t row = 0; row < dimShape; row += rowSize) {
             offsets[dimIdx] = rewriter.getIndexAttr(row);
