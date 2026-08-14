@@ -481,6 +481,13 @@ Value matchExpandShapeOp(Value value) {
     auto reassociations = expandOp.getReassociationIndices();
     int inputRank = inputType.getRank();
 
+    // This pattern only matches adding a trailing dim to a rank >= 1 input
+    // (e.g. [B,N] -> [B,N,1]); a rank-0 source (e.g. scalar -> <1xT>) has no
+    // "last group" to check below.
+    if (inputRank == 0) {
+        return nullptr;
+    }
+
     // Verify the reassociation groups: [[0], [1], ..., [n-1], [n, n+1]]
     // Should have (inputRank) groups total
     if (reassociations.size() != inputRank) {

@@ -429,11 +429,32 @@ broadcastInputs(linalg::LinalgOp srcOp, SmallVectorImpl<Value> &inputs, PatternR
             return failure();
         }
         auto shape = type.getShape();
+
+        broadcastDims[it.index()] = getBroadcastDimsFromMap(indexingMaps[it.index()], outputMap);
+
+        // Every result in this input's indexing map is dim-independent (a
+        // constant), e.g. a constant-indexed <1x...x1xT> tensor feeding a
+        // lower-rank/scalar op via a map like `() -> (0)`, or broadcasting
+        // fully into every output dim via a map like `(d0,d1) -> (0)`. Either
+        // way this operand is conceptually a scalar wrapped in unit dims that
+        // don't align with any real output dim. Collapse it to a true rank-0
+        // value up front so the reshape/broadcast logic below sees a
+        // genuine scalar, same as it already would for a rank-0 source.
+        bool isFullyConstantMap = broadcastDims[it.index()].size() == outputMap.getNumDims();
+        if (isFullyConstantMap && !shape.empty()) {
+            if (!llvm::all_of(shape, [](int64_t d) { return d == 1; }))
+                return failure();
+            inputs[it.index()] = tensor::CollapseShapeOp::create(
+                rewriter, it.value().getLoc(), it.value(), ArrayRef<ReassociationIndices>{}
+            );
+            type = cast<RankedTensorType>(inputs[it.index()].getType());
+            shape = type.getShape();
+        }
+
         if (shape.size() > outputShape.size()) {
             assert(false && "Input shape size is larger than output shape size");
         }
 
-        broadcastDims[it.index()] = getBroadcastDimsFromMap(indexingMaps[it.index()], outputMap);
         if (broadcastDims[it.index()].empty()) {
             continue;
         }

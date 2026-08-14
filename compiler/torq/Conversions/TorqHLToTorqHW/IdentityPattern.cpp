@@ -193,6 +193,22 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
         };
         LData input(op.getInput());
         LData output(op.getInit());
+        // Identity expects input and output tensor ranks to match. In some cases this is not
+        // satisfied (rank-1 vs scalar), e.g. a bit-cast of a <1xbf16> scalar constant into a
+        // rank-0 i16, so we adjust the tensor shape. A rank-0 memref is a single-element
+        // buffer; the loop nest below indexes the output with the input's non-dense dims, so a
+        // rank-0 operand paired with a rank-1 one would index the output with more iteration
+        // variables than its shape has dims. Give a scalar operand an explicit unit dim so both
+        // sides agree on the number of non-dense dims.
+        if (input.shape().empty()) {
+            input.insertDim(0, ShapeItem{1});
+        }
+        if (output.shape().empty()) {
+            output.insertDim(0, ShapeItem{1});
+        }
+        // Identity is not a reshape: input and output must have matching ranks and shapes.
+        // After the scalar-to-unit-dim adjustment above, verify no shape mismatch remains.
+        assert(input.dims() == output.dims() && "Identity in/out shapes must match");
         // FIXME: In some cases this op is also used as a bit-cast bf16 -> i16 or i16 -> bf16.
         // For now, we can handle this case as i16 since it's just a bypass.
         if (input.elementType() == DType::bf16 || output.elementType() == DType::bf16) {
