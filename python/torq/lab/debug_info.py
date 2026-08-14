@@ -13,10 +13,10 @@ from collections import OrderedDict
 from enum import Enum
 from abc import ABC, abstractmethod
 import re
-import torq.utils.location as loc_utils
+import torq.lab.location as loc_utils
 
 
-logger = logging.getLogger("torq.model_profiler.annotation")
+logger = logging.getLogger("torq.lab.debug_info")
 
 # Clock frequency in MHz for cycle-to-time conversion
 CLOCK_FREQ_MHZ = 800

@@ -20,7 +20,7 @@ except ImportError:
     torch = None
     F = None
 
-from .cache_utils import atomic_write_json_manifest
+from torq.lab.manifest import atomic_write_json_manifest
 from .cases import Case
 from .versioned_fixtures import (
     versioned_unhashable_object_fixture,

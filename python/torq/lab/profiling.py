@@ -1,12 +1,50 @@
+# Copyright 2026 Synaptics Inc.
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+"""Host-profile annotation and Perfetto-trace helpers for torq.lab.
+
+The heavy dependencies (pandas, the perfetto protobuf bindings, XlsxWriter)
+ship only with the ``torq-compiler[profile]`` extra, so they are imported
+lazily and guarded by ``_require_profile_deps`` -- ``import torq.lab`` and
+local compile/run stay usable without the extra installed.
+"""
+
+from __future__ import annotations
 
 import logging
+import shutil
+from pathlib import Path
 
-import pandas as pd
-from torq.model_profiler import perfetto_logger
-from .debug_info import DebugInfo, ActionDebugInfo, NssProgramWorkUnitDebugInfo, HalDispatchDebugInfo, CombinedDispatchDebugInfo, BaseDispatchDebugInfo, parse_profiling_log
+from torq.lab.types import LabError
+
+logger = logging.getLogger("torq.lab.profiling")
+
+try:  # dependencies come from the torq-compiler [profile] extra
+    import pandas as pd
+    from torq.lab.model_profiler import perfetto_logger
+    from torq.lab.debug_info import (
+        ActionDebugInfo,
+        BaseDispatchDebugInfo,
+        CombinedDispatchDebugInfo,
+        DebugInfo,
+        HalDispatchDebugInfo,
+        NssProgramWorkUnitDebugInfo,
+        parse_profiling_log,
+    )
+except ImportError:  # pragma: no cover - exercised only without the extra
+    pd = None
 
 
-logger = logging.getLogger("torq.performance")
+def _require_profile_deps():
+    """Raise a clear error when the optional profiling dependencies are absent."""
+    if pd is None:
+        raise LabError(
+            "Profiling requires the torq-compiler [profile] extra "
+            "(pandas, XlsxWriter, protobuf). Install 'torq-compiler[profile]'."
+        )
 
 
 _DESIRED_COLUMNS = [
@@ -65,7 +103,7 @@ def _to_tabular_data(data: ActionDebugInfo):
     }
 
 
-def _build_action_dataframe(debug_info: BaseDispatchDebugInfo) -> pd.DataFrame:
+def _build_action_dataframe(debug_info: BaseDispatchDebugInfo) -> "pd.DataFrame":
     """Build a DataFrame from the actions in a dispatch debug info container."""
     rows = [_to_tabular_data(x) for x in debug_info.actions.values()]
     return pd.DataFrame(rows, columns=_DESIRED_COLUMNS)
@@ -78,11 +116,11 @@ def _write_perfetto_trace(debug_info: BaseDispatchDebugInfo, perfetto_file: str)
 
     trace_writer = perfetto_logger.PerfettoTraceWriter(perfetto_file)
     perfetto_logger.log_runtime_profile_data(trace_writer, debug_info)
-    
+
     # Compute Metrics and Render Overview
     metrics_result = perfetto_logger.compute_runtime_metrics(debug_info)
     perfetto_logger.render_overview_tracks("Host Profile", metrics_result['overall_start'], metrics_result['metrics'], trace_writer)
-    
+
     trace_writer.close()
     logger.debug(f"Perfetto trace complete: {perfetto_file}")
 
@@ -139,6 +177,8 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files):
     and outputs this data to the specified output files (Excel, CSV or Perfetto trace).
     """
 
+    _require_profile_deps()
+
     logger.debug(f"Annotating host profile from {profile_file}")
 
     invocation_data = parse_profiling_log(profile_file)
@@ -161,7 +201,7 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files):
     if has_hal_events:
         combined_dispatch_debug_info.add_dispatch(hal_dispatch_debug_info)
 
-    
+
     measurements = _write_dispatch_outputs(combined_dispatch_debug_info, output_files)
 
     if len(measurements) == 1:
@@ -170,3 +210,60 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files):
         print("Warning: Multiple measurement sets found, but only one can be returned.")
         print(measurements)
         return None
+
+
+# ---------------------------------------------------------------------------
+# torq.lab orchestration helpers
+#
+# Thin wrappers used by ModelPipeline to produce the run/compile profiling
+# artifacts under ``<work-dir>/profiles/``. Each requires the [profile] extra.
+# ---------------------------------------------------------------------------
+
+
+def annotate_run_profile(debug_dir, host_profile_csv, out_dir) -> dict:
+    """Annotate a runtime host profile against compile-time debug info.
+
+    Writes ``annotated_profile.xlsx`` and ``trace.pb`` into ``out_dir`` and
+    returns a dict with their paths.
+    """
+    _require_profile_deps()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    annotated = out_dir / "annotated_profile.xlsx"
+    trace = out_dir / "trace.pb"
+    annotate_host_profile_from_files(
+        str(debug_dir), str(host_profile_csv), [str(annotated), str(trace)]
+    )
+    return {"annotated": annotated, "trace": trace}
+
+
+def write_compile_trace(debug_dir, out_dir) -> list:
+    """Generate compile-time Perfetto trace(s) into ``out_dir``.
+
+    ``convert_to_perfetto`` writes one ``<dispatch>.pb`` per dispatch into a
+    directory; they are moved into ``out_dir`` with a ``_compile`` suffix so the
+    HTML report tags them as compile-time traces. Returns the produced paths.
+    """
+    _require_profile_deps()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    staging = out_dir / "_compile_trace"
+    perfetto_logger.convert_to_perfetto(str(debug_dir), str(staging))
+    produced = []
+    for pb in sorted(staging.glob("*.pb")):
+        dest = out_dir / f"{pb.stem}_compile.pb"
+        shutil.move(str(pb), str(dest))
+        produced.append(dest)
+    shutil.rmtree(staging, ignore_errors=True)
+    return produced
+
+
+def write_perfetto_report(pb_files, out_html) -> Path:
+    """Render a self-contained HTML viewer for the given Perfetto ``.pb`` files."""
+    _require_profile_deps()
+    from torq.lab.model_profiler.generate_perfetto_combined_report import generate_html
+
+    out_html = Path(out_html)
+    html = generate_html([Path(p) for p in pb_files])
+    out_html.write_text(html, encoding="utf-8")
+    return out_html

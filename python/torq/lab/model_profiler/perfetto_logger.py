@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
-from torq.debug_info import DebugInfo, DispatchDebugInfo, HostCopyWorkUnitDebugInfo, HostProgramWorkUnitDebugInfo, HalWorkUnitDebugInfo, NssProgramWorkUnitDebugInfo, NssCfgWorkUnitDebugInfo, \
+from torq.lab.debug_info import DebugInfo, DispatchDebugInfo, HostCopyWorkUnitDebugInfo, HostProgramWorkUnitDebugInfo, HalWorkUnitDebugInfo, NssProgramWorkUnitDebugInfo, NssCfgWorkUnitDebugInfo, \
                                 DmaInWorkUnitDebugInfo, DmaOutWorkUnitDebugInfo, CdmaWorkUnitDebugInfo, SliceProgramWorkUnitDebugInfo, CssProgramWorkUnitDebugInfo
 
-import torq.debug_info
+import torq.lab.debug_info as torq_debug_info
 
 
 # =============================================================================
@@ -815,13 +815,13 @@ def _log_compile_time_traces(trace_writer, dispatch):
     compile_npu_process = trace_writer.add_process_descriptor("NPU Task Breakdown")
 
     compile_workunits_track_names = OrderedDict([
-        (torq.debug_info.NssProgramWorkUnitDebugInfo, ["NSS Programs (Compile)"]),
-        (torq.debug_info.NssCfgWorkUnitDebugInfo, ["NSS CFG Tasks (Compile)"]),
-        (torq.debug_info.CdmaWorkUnitDebugInfo, ["CDMA (Compile)"]),
-        (torq.debug_info.DmaInWorkUnitDebugInfo, ["NDMA In (Compile)"]),
-        (torq.debug_info.DmaOutWorkUnitDebugInfo, ["NDMA Out (Compile)"]),
-        (torq.debug_info.SliceProgramWorkUnitDebugInfo, ["Slice 0 (Compile)", "Slice 1 (Compile)"]),
-        (torq.debug_info.CssProgramWorkUnitDebugInfo, ["CSS (Compile)"]),
+        (torq_debug_info.NssProgramWorkUnitDebugInfo, ["NSS Programs (Compile)"]),
+        (torq_debug_info.NssCfgWorkUnitDebugInfo, ["NSS CFG Tasks (Compile)"]),
+        (torq_debug_info.CdmaWorkUnitDebugInfo, ["CDMA (Compile)"]),
+        (torq_debug_info.DmaInWorkUnitDebugInfo, ["NDMA In (Compile)"]),
+        (torq_debug_info.DmaOutWorkUnitDebugInfo, ["NDMA Out (Compile)"]),
+        (torq_debug_info.SliceProgramWorkUnitDebugInfo, ["Slice 0 (Compile)", "Slice 1 (Compile)"]),
+        (torq_debug_info.CssProgramWorkUnitDebugInfo, ["CSS (Compile)"]),
     ])
 
     compile_workunits_tracks = {}
@@ -865,7 +865,7 @@ def _log_compile_time_traces(trace_writer, dispatch):
             continue
 
         # NSS-managed workunits: get timing from parent nss_task op
-        if isinstance(workunit, torq.debug_info.NssManagedWorkUnitDebugInfo):
+        if isinstance(workunit, torq_debug_info.NssManagedWorkUnitDebugInfo):
             has_parent_start = workunit.start_operation is not None and hasattr(workunit.start_operation, 'parent')
             has_parent_end = workunit.end_operation is not None and hasattr(workunit.end_operation, 'parent')
             if not has_parent_start or not has_parent_end:
@@ -883,7 +883,7 @@ def _log_compile_time_traces(trace_writer, dispatch):
             if parent_nss.start_time_ns is None:
                 continue
 
-        elif isinstance(workunit, torq.debug_info.NssCfgWorkUnitDebugInfo):
+        elif isinstance(workunit, torq_debug_info.NssCfgWorkUnitDebugInfo):
             time_range = _get_compile_time_range(dispatch, workunit.start_operation, workunit.end_operation)
             if time_range is None:
                 continue
@@ -936,16 +936,16 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
 
     # track names for each type of workload
     workunits_track_names = OrderedDict([
-        (torq.debug_info.HalWorkUnitDebugInfo, ["HAL"]),
-        (torq.debug_info.NssProgramWorkUnitDebugInfo, ["NSS Programs"]),
-        (torq.debug_info.NssCfgWorkUnitDebugInfo, ["NSS CFG Tasks"]),
-        (torq.debug_info.HostProgramWorkUnitDebugInfo, ["Host Programs"]),
-        (torq.debug_info.HostCopyWorkUnitDebugInfo, ["Host Copy"]),
-        (torq.debug_info.CdmaWorkUnitDebugInfo, ["CDMA"]),
-        (torq.debug_info.DmaInWorkUnitDebugInfo, ["NDMA In"]),
-        (torq.debug_info.DmaOutWorkUnitDebugInfo, ["NDMA Out"]),
-        (torq.debug_info.SliceProgramWorkUnitDebugInfo, ["Slice 0", "Slice 1"]),
-        (torq.debug_info.CssProgramWorkUnitDebugInfo, ["CSS"]),
+        (torq_debug_info.HalWorkUnitDebugInfo, ["HAL"]),
+        (torq_debug_info.NssProgramWorkUnitDebugInfo, ["NSS Programs"]),
+        (torq_debug_info.NssCfgWorkUnitDebugInfo, ["NSS CFG Tasks"]),
+        (torq_debug_info.HostProgramWorkUnitDebugInfo, ["Host Programs"]),
+        (torq_debug_info.HostCopyWorkUnitDebugInfo, ["Host Copy"]),
+        (torq_debug_info.CdmaWorkUnitDebugInfo, ["CDMA"]),
+        (torq_debug_info.DmaInWorkUnitDebugInfo, ["NDMA In"]),
+        (torq_debug_info.DmaOutWorkUnitDebugInfo, ["NDMA Out"]),
+        (torq_debug_info.SliceProgramWorkUnitDebugInfo, ["Slice 0", "Slice 1"]),
+        (torq_debug_info.CssProgramWorkUnitDebugInfo, ["CSS"]),
     ])
 
     # stores track process and thread for each workunit type track
@@ -959,8 +959,8 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
 
         process = host_process
 
-        if issubclass(workunit_type, torq.debug_info.NssManagedWorkUnitDebugInfo) or \
-           workunit_type == torq.debug_info.NssCfgWorkUnitDebugInfo:
+        if issubclass(workunit_type, torq_debug_info.NssManagedWorkUnitDebugInfo) or \
+           workunit_type == torq_debug_info.NssCfgWorkUnitDebugInfo:
             process = npu_process
 
         for track_name in track_names:

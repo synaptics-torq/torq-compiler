@@ -8,7 +8,7 @@ import tensorflow as tf
 import numpy as np
 
 
-from torq.testing.cache_utils import atomic_write_json_file
+from torq.lab.manifest import atomic_write_json_file
 from torq.testing.tensorflow import run_with_tflite
 
 # Import the direct TFLite layer extractor (preserves quantization)

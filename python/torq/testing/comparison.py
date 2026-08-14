@@ -2,6 +2,8 @@
 import numpy as np
 from pathlib import Path
 
+from torq.lab.compare import DEFAULT_COMPARISON_CONFIG, compare_outputs
+
 """
 
 This module provides utilities to compare test results of inference.
@@ -9,46 +11,19 @@ This module provides utilities to compare test results of inference.
 Comparisons use some criterias to determine if two outputs are equivalent
 tweaked to account for inaccuracies due to floating point and quantization.
 
+The numeric core lives in ``torq.lab.compare.compare_outputs``; this module is
+the pytest shell around it: it resolves the per-case config from fixtures, saves
+the tensors under ``tmpdir`` for the diff tooling, prints the per-tensor metrics
+(the gen_config accuracy pipeline parses these stdout lines), and asserts.
+
 """
 
 TOPDIR = Path(__file__).parent.parent.parent.parent
 
-def check_nans(arr1, arr2):
-    nan1 = np.isnan(arr1)
-    nan2 = np.isnan(arr2)
-    if not (nan1 == nan2).all():
-        if nan2.any() and not nan2.all():
-            print(f"Nan positions (expected): {nan2}")
-        if nan1.any() and not nan1.all():
-            print(f"Nan positions (observed): {nan1}")
-        if not nan2.any():
-            print(f"No Nan expected")
-
-        assert False, "Nans differ."
-
-    arr1 = arr1.copy()
-    arr2 = arr2.copy()
-    # Replace NaNs with 0 so that we don't break comparison
-    # Skip if no NaNs to avoid errors with integer arrays
-    if nan1.any():
-        arr1[nan1] = 0
-    if nan2.any():
-        arr2[nan2] = 0
-    return arr1, arr2
-
 
 def compare_test_results(request, observed_result, reference_results, case_config):
 
-    comparison_config = {"int_tol": 1,
-                        "int_thld": 1,
-                        "fp_avg_tol": 1e-2,
-                        "fp_max_tol": 1e-2,
-                        "use_abs_tol_gate": False,
-                        "fp_abs_tol_frac": 0.0,
-                        "epsilon": 1e-6,
-                        "allow_all_zero": False,
-                        "allowed_wrong": 0,
-                        "skip_nan_check": False }
+    comparison_config = dict(DEFAULT_COMPARISON_CONFIG)
 
     if 'comparison_config' in case_config:
         configuration_overrides = request.getfixturevalue(case_config['comparison_config'])
@@ -77,62 +52,20 @@ def compare_results(request, observed_outputs, expected_outputs, comparison_conf
 
         assert observed_output.size == expected_output.size
 
-        actual_observed_output = observed_output
-        actual_expected_output = expected_output
         print("To display the difference between expected and observed tensor run:")
         print(f"{TOPDIR}/scripts/diff-tensor.py {observed_output_path} {expected_output_path}")
         print("or")
         print(f"cd {TOPDIR} && streamlit run webapps/buffer_diff/buffer_diff.py {observed_output_path} {expected_output_path}")
-        np.save(str(observed_output_path), actual_observed_output)
-        np.save(str(expected_output_path), actual_expected_output)
+        np.save(str(observed_output_path), observed_output)
+        np.save(str(expected_output_path), expected_output)
 
-        if not comparison_config["skip_nan_check"]:
-            observed_output, expected_output = check_nans(observed_output, expected_output)
+    result = compare_outputs(observed_outputs, expected_outputs, config=comparison_config)
 
-        # Guard against accidentally returning an all-zero tensor when we expect meaningful data.
-        # If the reference is also all-zero (by value), allow an all-zero observed output.
-        if not comparison_config["allow_all_zero"]:
-            expected_is_all_zero = np.all(expected_output == 0)
-            if not expected_is_all_zero:
-                assert np.any(observed_output != 0), "Output is 0 always"
+    for tensor in result.tensors:
+        if tensor.max_rel_diff is not None:
+            print(f'Max relative difference: {tensor.max_rel_diff}')
+        print(f"Max absolute difference: {tensor.max_abs_diff}")
+        pct = (tensor.num_diffs / tensor.size * 100) if tensor.size else 0.0
+        print(f"Number of differences: {tensor.num_diffs} out of {tensor.size} [{pct:.2f}%]")
 
-        if (np.issubdtype(expected_output.dtype, bool)):
-            # abs_diff means the number of differences when dypte is boolean
-            abs_diff = differences = np.sum(expected_output != observed_output)
-        else:
-            abs_diff = np.abs(expected_output.astype(np.float32)-observed_output.astype(np.float32))
-            raw_abs_diff = abs_diff
-            if (np.issubdtype(expected_output.dtype, np.integer)):
-                differences = abs_diff > comparison_config['int_tol']
-            else:
-                scale = np.abs(expected_output) + np.abs(observed_output) + comparison_config['epsilon']
-                rel_diff = abs_diff / scale
-                # force 0/0 -> 0
-                # DM: avoid TypeError: 'numpy.float32' object does not support item assignment
-                # rel_diff[abs_diff == 0] = 0
-                differences = rel_diff > comparison_config['fp_avg_tol']
-                print(f'Max relative difference: {np.max(rel_diff)}')
-            abs_diff = differences*abs_diff
-
-        num_diffs = np.sum(differences)
-        difference_summary = f"Number of differences: {num_diffs} out of {observed_output.size} [{num_diffs / observed_output.size * 100:.2f}%]"
-
-        print(f"Max absolute difference: {np.max(abs_diff)}")
-        print(difference_summary)
-
-        if not comparison_config["skip_nan_check"]:
-            if (np.issubdtype(expected_output.dtype, np.integer) or np.issubdtype(expected_output.dtype, bool)):
-                assert (np.max(abs_diff) <= comparison_config['int_thld']) and not (abs_diff != 0).sum(), difference_summary
-            else:
-                if comparison_config['use_abs_tol_gate']:
-                    # An element counts as "wrong" only if it exceeds BOTH the relative tolerance
-                    # and an absolute tolerance scaled to the tensor's dynamic range.  This keeps
-                    # the check sensitive to real numerical drift while ignoring near-zero
-                    # cancellation outputs, where small (bf16 ULP-sized) absolute error produces a
-                    # large relative difference.  Opt-in via use_abs_tol_gate so existing callers
-                    # keep the pure relative gate unchanged.
-                    abs_tol = comparison_config['fp_abs_tol_frac'] * np.max(np.abs(expected_output.astype(np.float32)))
-                    wrong = ((rel_diff > comparison_config['fp_max_tol']) & (raw_abs_diff > abs_tol)).sum()
-                else:
-                    wrong = (rel_diff > comparison_config['fp_max_tol']).sum()
-                assert wrong / rel_diff.size <= comparison_config['allowed_wrong'], difference_summary
+    assert result.passed, result.reason

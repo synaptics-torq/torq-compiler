@@ -1,8 +1,4 @@
-import onnx
-from onnx import numpy_helper, TensorProto
-
 from .versioned_fixtures import versioned_hashable_object_fixture
-from .dtype_utils import cast_round_trip, ConvertIODTypesPolicy
 
 
 def pytest_addoption(parser):
@@ -26,19 +22,3 @@ def onnx_fake_quantize_config(request):
     when the cache is reused (CI runs without ``--recompute-cache``).
     """
     return {"fake_quantize": bool(request.config.getoption("--fake-quantize", default=False))}
-
-
-def onnx_fake_quantize(model: onnx.ModelProto) -> onnx.ModelProto:
-    for init in model.graph.initializer:
-        if init.data_type not in (TensorProto.FLOAT, TensorProto.INT64, TensorProto.UINT64):
-            continue
-        data = numpy_helper.to_array(init).copy()
-        down_dtype = ConvertIODTypesPolicy.convert_io_dtype(data.dtype)
-        new_data = cast_round_trip(data, down_dtype, data.dtype)
-        new_init = numpy_helper.from_array(new_data, init.name)
-        init.CopyFrom(new_init)
-    try:
-        model = onnx.shape_inference.infer_shapes(model)
-    except Exception:
-        pass
-    return model

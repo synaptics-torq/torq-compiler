@@ -1,7 +1,7 @@
 from filelock import FileLock
 import subprocess
 from contextlib import contextmanager
-from ..utils.remote_runner import SSHCommandRunner
+from torq.lab.transport import SSHCommandRunner
 
 def load_bitstream(agfi, bandwidth, force=False, runner: SSHCommandRunner | None = None):
 

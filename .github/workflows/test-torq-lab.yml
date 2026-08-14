@@ -1,0 +1,49 @@
+name: Test torq-lab
+
+# Dedicated runner for the torq.lab library: its hardware-free unit tests and the
+# wheel packaging check. Kept separate from the C model / Astra / FPGA test lanes
+# so generic-library validation is not conflated with the model test suite.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test_torq_lab:
+    name: torq.lab unit tests and packaging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download compiler wheel
+        # Same-run artifact uploaded by the build job; download by name (no token
+        # or actions:read scope required).
+        uses: actions/download-artifact@v8
+        with:
+          name: host-compiler-wheel
+          path: wheels
+
+      - name: Verify torq.lab is packaged in the wheel
+        run: |
+          scripts/verify_torq_lab_wheel.sh "$(find wheels -name 'torq_compiler-*.whl' | head -1)"
+
+      - name: Run torq.lab unit tests against the packaged wheel
+        run: |
+          python -m venv .labvenv
+          . .labvenv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install "$(find wheels -name 'torq_compiler-*.whl' | head -1)" pytest
+          # torq.lab (incl. its transport) and iree come from the installed wheel.
+          # The torq.testing plugin is not part of the wheel, so clear the repo
+          # addopts (which loads it) and disable it for this hardware-free run.
+          python -m pytest tests/test_lab_*.py -o addopts= -p no:torq.testing -v

@@ -50,7 +50,7 @@ from threading import Lock
 
 # Add parent directory to path to import from python/torq
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
-from torq.utils.report_generator import ReportGenerator, ensure_log_in_common_location, get_display_stage
+from torq.lab.reporting import ReportGenerator, ensure_log_in_common_location, get_display_stage
 
 # Global variables to track processes and thread safety
 current_process = None

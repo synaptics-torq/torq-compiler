@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-from typing import List
 import atexit
 import logging
 import signal
@@ -18,21 +16,32 @@ import json
 from torq.utils.boards import create_boards_control
 
 try:
-    from iree.compiler.ir import Context, Module
+    import iree.compiler.ir  # noqa: F401  # gate: skip iree-based tests when iree is unavailable
 except ImportError:
     pytest.skip("iree package not available, skipping iree based tests", allow_module_level=True)
 
-from .aws_fpga import FpgaSession, RemoteFpgaSession
-from .dtype_utils import (
+# torq.lab owns the generic, pytest-independent compile/run helpers. Re-use them
+# here so pytest and release users exercise one shared implementation.
+from torq.lab.types import TensorType, MlirIoSpec
+from torq.lab.io import (
     get_dtype,
-    convert_io_dtypes_policy,
+    is_float_type,
+    create_output_args,
+    create_output_paths,
+    load_outputs,
+    parse_mlir_io_spec,
+    parse_func_name,
 )
+
+from .aws_fpga import FpgaSession, RemoteFpgaSession
+from .dtype_utils import convert_io_dtypes_policy
 from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
-from torq.performance import annotate_host_profile_from_files
-from torq.testing.performance import record_measurements, measure_time, append_measurements, append_measurement, clear_measurements
-from torq.model_profiler.generate_perfetto_combined_report import generate_html
+from torq.lab.profiling import annotate_host_profile_from_files
+from torq.lab.metrics import measure_time, append_measurements, clear_measurements
+from torq.testing.performance import record_measurements
+from torq.lab.model_profiler.generate_perfetto_combined_report import generate_html
 
 logger = logging.getLogger("torq.testing.iree")
 
@@ -264,143 +273,9 @@ def iree_opt():
     return _find_iree_tool('IREE_OPT', 'iree-opt')
 
 
-def create_output_args(output_path_root, output_specs):
-    """
-    Creates the output command line args to invoke torq-run-module
-    """    
-
-    output_args = []
-
-    for output_path in create_output_paths(output_path_root, output_specs):
-        output_args.append(f'--output=@{output_path}')
-
-    return output_args
-
-
-def create_output_paths(output_path_root, output_specs):
-    """
-    Creates the paths for the outputs of torq-run-module
-    """    
-    
-    output_paths = []
-
-    for idx, tensor_type in enumerate(output_specs):
-        output_path = f'{output_path_root}/output_{idx}.bin'
-        output_paths.append(output_path)
-
-    return output_paths
-
-
-def load_outputs(output_specs, output_paths):
-    """
-    Reads the data saved as outputs from torq-run-module
-    """
-    output_data = []
-
-    for idx, tensor_type in enumerate(output_specs): 
-        with open(output_paths[idx], 'rb') as f:
-            data = np.frombuffer(f.read(), dtype=get_dtype(tensor_type.fmt)
-                                 ).reshape(tensor_type.shape)
-            output_data.append(data)
-            
-    return output_data
-
-
-def is_float_type(dtype):
-    """
-    Returns true if the given dtype is a floating point type (either numpy native or bfloat16)
-    """
-    dtype = np.dtype(dtype)
-    return np.issubdtype(dtype, np.floating) or dtype == np.dtype(ml_dtypes.bfloat16)
-
-
-@dataclass
-class TensorType:    
-    """
-    Represents the type of a tensor input or output of an MLIR model
-    """
-
-    shape: List[int]
-    fmt: str
-    
-    def to_arg(self):
-        return "x".join([str(x) for x in self.shape] + [self.fmt])
-
-    @staticmethod
-    def from_string(spec):
-        *shape_str, fmt = spec.split('x')
-        shape = [int(s) for s in shape_str]
-        return TensorType(shape, fmt)
-
-
-@dataclass
-class MlirIoSpec:
-    inputs: List[TensorType]
-    outputs: List[TensorType]
-
-
 @versioned_cached_data_fixture
 def mlir_io_spec(request, mlir_model_file):
-
-    with open(mlir_model_file, 'r') as mlir_file:
-        mlir_content = mlir_file.read()
-
-    module = Module.parse(mlir_content, Context())
-    for op in module.body.operations:
-        input_types = []
-        output_types = []
-
-        for region in op.regions:
-            for block in region.blocks:
-                for arg in block.arguments:
-                    input_types.append(str(arg.type))
-
-                for inner_op in block.operations:
-                    if inner_op.name == "func.return":
-                        for i, operand in enumerate(inner_op.operands):
-                            output_types.append(str(operand.type))
-
-    input_specs = []
-    output_specs = []
-
-    def get_torch_specs(input):
-        match = re.match(r"!torch\.vtensor<\[(.*)\],(\w+)>", input)
-
-        if match and match.group(1) == '':
-            shape = []
-        else:
-            def parse_dim(d):
-                return 1 if d == '?' else int(d)
-            shape = [parse_dim(x) for x in match.group(1).split(',')] if match else None
-
-        if match:
-            dtype = match.group(2)
-            return TensorType(shape, dtype)
-        else:
-            return None
-
-    def get_tosa_specs(input):
-        match = re.match(r"tensor<([^>]+)>", input)
-        if match:
-            return TensorType.from_string(match.group(1))
-        else:
-            return None
-
-    for t in input_types:
-        input_specs.append(get_torch_specs(t))
-    for t in output_types:
-        output_specs.append(get_torch_specs(t))
-
-    if None in input_specs or None in output_specs:
-        input_specs = []
-        output_specs = []
-
-        for t in input_types:
-            input_specs.append(get_tosa_specs(t))
-        for t in output_types:
-            output_specs.append(get_tosa_specs(t))
-
-    return MlirIoSpec(inputs=input_specs, outputs=output_specs)
+    return parse_mlir_io_spec(mlir_model_file)
 
 
 @pytest.fixture
@@ -815,7 +690,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
             print(f"✓ Copied compile profile CSV: {dest_csv}")
                     
         # Generate Perfetto .pb file from compile time profile            
-        from torq.model_profiler.perfetto_logger import convert_to_perfetto
+        from torq.lab.model_profiler.perfetto_logger import convert_to_perfetto
         
         # Use a temp directory for pb generation, then move files to parent with _compile suffix
         temp_pb_dir = compile_time_profiling_output_dir / f'{request.node.name}_compile_temp'
@@ -893,23 +768,7 @@ def torq_runtime_timeout(request, case_config):
 
 @versioned_unhashable_object_fixture
 def torq_mlir_func_name(mlir_model_file):
-    with open(mlir_model_file, 'r') as mlir_file:
-        mlir_content = mlir_file.read()
-
-    all_lines = mlir_content.split('\n')
-    func_name = "main"
-    for line in all_lines:
-        if re.match(r'^\s*(func.func).*', line):
-            m = re.search(r'@(\w+)\s*\(', line)
-            if m:
-                func_name = m.group(1)
-                break
-            m = re.search(r'@"([^"]+)"\s*\(', line)
-            if m:
-                func_name = m.group(1)
-                break
-    #print(f"Detected MLIR function name: {func_name}")
-    return func_name
+    return parse_func_name(mlir_model_file)
 
 
 @versioned_hashable_object_fixture

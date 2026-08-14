@@ -7,7 +7,7 @@ making it reusable across different test suites.
 
 Usage:
     # As a module
-    from helpers.report_generator import ReportGenerator
+    from torq.lab.reporting import ReportGenerator
     generator = ReportGenerator(json_data)
     generator.generate_html_report()
     generator.generate_text_report()

@@ -33,7 +33,7 @@ from abc import ABC, abstractmethod
 
 from pathlib import Path
 
-from .remote_runner import remote_command_runner_factory
+from torq.lab.transport import remote_command_runner_factory
 
 
 BOARD_USER = "root"

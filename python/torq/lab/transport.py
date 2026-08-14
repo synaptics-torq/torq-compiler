@@ -198,7 +198,7 @@ class SSHCommandRunner(RemoteCommandRunner):
                 self._format_cmd(e.cmd),
                 self._format_output(e.stdout),
             ) from e
-        
+
     def copy_files(self, src: str, dst: str, recursive: bool = False, board_dst: bool = False, verbose: bool = False) -> None:
         cmd = ["scp"]
         if recursive:

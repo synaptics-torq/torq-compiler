@@ -14,6 +14,7 @@ css_host_fallback.md
 custom_hw.md
 debug_tips.md
 torq-gen-config.md
+torq_lab.md
 torq-synap-integration.md
 appendices.md
 release_notes.md

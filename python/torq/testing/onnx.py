@@ -17,7 +17,7 @@ from onnx import helper, numpy_helper, shape_inference, TensorProto, AttributePr
 from torq.testing.cases import Case
 from torq.testing.hf import get_hf_model_file
 
-from .cache_utils import atomic_write_json_manifest
+from torq.lab.manifest import atomic_write_json_manifest
 from .versioned_fixtures import (
     versioned_cached_data_fixture,
     versioned_generated_file_fixture,
@@ -26,10 +26,8 @@ from .versioned_fixtures import (
     versioned_unhashable_object_fixture,
     VersionedUncachedData,
 )
-from .quantization import (
-    onnx_fake_quantize_config,
-    onnx_fake_quantize
-)
+from torq.lab.quantization import onnx_fake_quantize
+from .quantization import onnx_fake_quantize_config
 
 from torq.testing.quantize_onnx import (
     add_onnx_quantization_options,

@@ -185,6 +185,20 @@ class CMakeBuildPy(_build_py):
         if os.path.isdir(iree_tf_src):
             shutil.copytree(iree_tf_src, os.path.join(iree_tools_dst, "tf"))
 
+        # Copy the torq.lab pure-Python library into the wheel. Its source lives
+        # under python/torq/lab (outside the cmake install tree copied above), so
+        # the build_py override must stage it explicitly.
+        torq_lab_src = os.path.join(TORQ_SOURCE_DIR, "python", "torq", "lab")
+        torq_lab_dst = os.path.join(target_dir, "torq", "lab")
+        if os.path.isdir(torq_lab_src):
+            if os.path.exists(torq_lab_dst):
+                shutil.rmtree(torq_lab_dst)
+            shutil.copytree(
+                torq_lab_src,
+                torq_lab_dst,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+
 
 _MANYLINUX_GLIBC = "2_28"
 
@@ -232,13 +246,21 @@ torq_packages = find_namespace_packages(
     ],
 )
 
+# torq.lab lives under python/torq/lab (not compiler/bindings/python). Package it
+# into the compiler wheel so it imports without the checkout .pth.
+TORQ_LAB_PYTHON_DIR = os.path.join(TORQ_SOURCE_DIR, "python")
+torq_lab_packages = find_namespace_packages(
+    where=TORQ_LAB_PYTHON_DIR,
+    include=["torq.lab", "torq.lab.*"],
+)
+
 # iree.tools.tf wrappers
 iree_tools_packages = find_namespace_packages(
     where=IREE_TF_PYTHON_DIR,
     include=["iree.tools.tf*"],
 )
 
-packages = iree_packages + torq_packages + iree_tools_packages
+packages = iree_packages + torq_packages + torq_lab_packages + iree_tools_packages
 
 # ---------------------------------------------------------------------------
 # setup()
@@ -276,6 +298,8 @@ setup(
         # Torq sources are discovered directly so metadata generation does not
         # depend on stale cmake install contents.
         "torq": os.path.join("bindings", "python", "torq"),
+        # torq.lab source lives outside the compiler bindings tree.
+        "torq.lab": os.path.join(TORQ_SOURCE_DIR, "python", "torq", "lab"),
         # iree.tools.tf from the IREE submodule
         "iree.tools.tf": os.path.join(IREE_TF_PYTHON_DIR, "iree", "tools", "tf"),
     },
@@ -298,6 +322,7 @@ setup(
         "console_scripts": [
             "torq-compile = torq.compiler.tools.binaries:main",
             "torq-gen-config = torq.gen_config.cli:main",
+            "torq-lab = torq.lab.cli:main",
             "iree-compile = iree.compiler.tools.scripts.iree_compile.__main__:main",
             "iree-opt = iree.compiler.tools.scripts.iree_opt.__main__:main",
             "iree-import-tf = iree.tools.tf.scripts.iree_import_tf.__main__:main [tf]",
@@ -307,17 +332,29 @@ setup(
     install_requires=[
         "numpy",
         "sympy",
+        # Required by torq.lab IO helpers for bf16 support (pinned in requirements.txt).
+        "ml_dtypes>=0.4.0",
     ],
     # IMPORTANT: dependencies must be synced with ./requirements.txt
     extras_require={
         "onnx": [
             "onnx==1.19.1",
+            # torq.lab.decoder_components_extractor uses onnx_graphsurgeon.
+            "onnx_graphsurgeon==0.6.1",
         ],
         "tflite": [
             "tosa-converter-for-tflite==2026.2.0",
         ],
         "tf": [
             "tensorflow==2.18.1",
+        ],
+        # Optional profiling path (torq.lab.profiling / torq.lab.model_profiler).
+        # Kept out of install_requires so the base wheel stays lean; the helpers
+        # raise a clear LabError when this extra is not installed.
+        "profile": [
+            "pandas",
+            "XlsxWriter",
+            "protobuf",
         ],
     },
 )

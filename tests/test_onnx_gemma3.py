@@ -11,7 +11,7 @@ from torq.testing.onnx import (
 )
 from torq.testing.hf import get_hf_model_file
 from torq.testing.iree import get_dtype
-from torq.testing.decoder_components_extractor import extract_representative_components
+from torq.lab.decoder_components_extractor import extract_representative_components
 
 from torq.testing.versioned_fixtures import versioned_hashable_object_fixture, versioned_cached_data_fixture
 

@@ -11,7 +11,7 @@ import tempfile
 import time as _time
 from pathlib import Path, PurePosixPath
 
-from ..utils.remote_runner import (
+from torq.lab.transport import (
     RemoteCommandError,
     _is_adb_address,
     remote_command_runner_factory,
