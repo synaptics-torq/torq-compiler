@@ -36,6 +36,16 @@ float decodeEncodedFloatPadValue(int32_t encodedPadValue) {
     return llvm::bit_cast<float>(static_cast<uint32_t>(encodedPadValue));
 }
 
+// Fill attribute for the encoded pad value (raw int, or bit-cast float) in elemType.
+// Returns null for unsupported element types.
+TypedAttr makePadFillAttr(Builder &b, Type elemType, int32_t encodedPadValue) {
+    if (auto intType = llvm::dyn_cast<IntegerType>(elemType))
+        return b.getIntegerAttr(intType, encodedPadValue);
+    if (auto floatType = llvm::dyn_cast<FloatType>(elemType))
+        return b.getFloatAttr(floatType, decodeEncodedFloatPadValue(encodedPadValue));
+    return nullptr;
+}
+
 // Returns true if the H padding does NOT match either valid hardware same-pad variant.
 // Hardware always pads with kernel_top/kernel_bottom rows regardless of stride.
 // For asymmetric kernels two orderings are valid: (top,bot)=(kernel_top,kernel_bottom) or swapped.
@@ -954,18 +964,9 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         Value convInput = padTensor.getResult();
         if ((pads[LRTBDim::Top] || pads[LRTBDim::Bottom]) || pads[LRTBDim::Left] ||
             !convertToSame) {
-            const int32_t encodedPadValue = op.getInputZp();
-            TypedAttr fillAttr;
-            if (auto intType = llvm::dyn_cast<IntegerType>(elemType)) {
-                fillAttr = rewriter.getIntegerAttr(intType, encodedPadValue);
-            }
-            else if (auto floatType = llvm::dyn_cast<FloatType>(elemType)) {
-                fillAttr =
-                    rewriter.getFloatAttr(floatType, decodeEncodedFloatPadValue(encodedPadValue));
-            }
-            else {
+            TypedAttr fillAttr = makePadFillAttr(rewriter, elemType, op.getInputZp());
+            if (!fillAttr)
                 return failure();
-            }
             auto fillConst = arith::ConstantOp::create(rewriter, loc, fillAttr);
             auto fillOp = linalg::FillOp::create(
                 rewriter, loc, ValueRange{fillConst}, ValueRange{padTensor.getResult()}
@@ -1021,6 +1022,122 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
     }
 };
 
+// The stride-2 maxpool descriptor encodes both axes' window phase in one stride_offset, so a
+// pool whose top-pad phase differs from its left-pad phase (e.g. pad=[1,0,0,1] from H-tiling
+// an odd-height pool) lowers to silently wrong output. Normalize: grow the mismatched axis
+// with pad-value rows until its leading pad reaches the kernel center, then re-crop.
+class ConvertMixedPadPhasePoolPattern : public OpRewritePattern<torq_hl::MaxPool2dOp> {
+  public:
+    using OpRewritePattern<torq_hl::MaxPool2dOp>::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) const override {
+        auto inputType = llvm::dyn_cast<RankedTensorType>(op.getInput().getType());
+        auto outputType = llvm::dyn_cast<RankedTensorType>(op.getOutput().getType());
+        if (!inputType || !outputType || inputType.getRank() != 4)
+            return failure();
+
+        auto strides = op.getStride();
+        auto kernel = op.getKernel();
+        auto pads = op.getPad();
+        if (strides.size() != 2 || kernel.size() != 2 || pads.size() != 4)
+            return failure();
+        if (strides[0] != 2 || strides[1] != 2)
+            return failure();
+
+        const int64_t centerY = (kernel[0] - 1) / 2;
+        const int64_t centerX = (kernel[1] - 1) / 2;
+        const bool phaseX = pads[LRTBDim::Left] != centerX;
+        const bool phaseY = pads[LRTBDim::Top] != centerY;
+        if (phaseX == phaseY)
+            return failure();
+
+        int64_t axis, k, padBeginIdx, padEndIdx;
+        if (phaseY) {
+            axis = NCHW::H;
+            k = kernel[0];
+            padBeginIdx = LRTBDim::Top;
+            padEndIdx = LRTBDim::Bottom;
+        }
+        else {
+            axis = NCHW::W;
+            k = kernel[1];
+            padBeginIdx = LRTBDim::Left;
+            padEndIdx = LRTBDim::Right;
+        }
+        const int64_t center = (k - 1) / 2;
+        const int64_t growBegin = center - pads[padBeginIdx];
+        if (growBegin <= 0)
+            return failure(); // leading pad beyond the kernel center: not handled
+
+        auto shape = inputType.getShape();
+        SmallVector<int64_t, 4> paddedShape(shape.begin(), shape.end());
+        paddedShape[axis] += growBegin;
+        paddedShape[axis] += paddedShape[axis] % 2; // quadrant layout needs even extents
+
+        SmallVector<int64_t, 4> newPads(pads.begin(), pads.end());
+        newPads[padBeginIdx] = center;
+
+        auto origOutShape = outputType.getShape();
+        SmallVector<int64_t, 4> newOutShape(origOutShape.begin(), origOutShape.end());
+        newOutShape[axis] =
+            (paddedShape[axis] + newPads[padBeginIdx] + newPads[padEndIdx] - k) / 2 + 1;
+        // Growing the leading edge shifts every output window by growBegin positions.
+        const int64_t extractOffset = growBegin;
+        if (newOutShape[axis] < origOutShape[axis] + extractOffset)
+            return failure();
+
+        auto elemType = inputType.getElementType();
+        Location loc = op.getLoc();
+
+        TypedAttr fillAttr = makePadFillAttr(rewriter, elemType, op.getInputZp());
+        if (!fillAttr)
+            return failure();
+
+        auto padTensor = tensor::EmptyOp::create(rewriter, loc, paddedShape, elemType);
+        auto fillConst = arith::ConstantOp::create(rewriter, loc, fillAttr);
+        auto fillOp = linalg::FillOp::create(
+            rewriter, loc, ValueRange{fillConst}, ValueRange{padTensor.getResult()}
+        );
+
+        SmallVector<OpFoldResult> offsets(4, rewriter.getIndexAttr(0));
+        offsets[axis] = rewriter.getIndexAttr(growBegin);
+        SmallVector<OpFoldResult> sizes;
+        for (int64_t dim : shape)
+            sizes.push_back(rewriter.getIndexAttr(dim));
+        auto insertOp = tensor::InsertSliceOp::create(
+            rewriter, loc, op.getInput(), fillOp.getResult(0), offsets, sizes,
+            SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
+        );
+
+        auto newOutputType = RankedTensorType::get(newOutShape, outputType.getElementType());
+        auto newInitTensor =
+            tensor::EmptyOp::create(rewriter, loc, newOutShape, outputType.getElementType());
+        auto newOp = torq_hl::MaxPool2dOp::create(
+            rewriter, loc, newOutputType, newInitTensor, op.getInputZp(), op.getOutputMin(),
+            op.getOutputMax(), op.getStride(), rewriter.getDenseI64ArrayAttr(newPads),
+            op.getKernel(), op.getWeights(), op.getScaleBias(), insertOp
+        );
+
+        SmallVector<int64_t, 4> extractOffsets(4, 0);
+        extractOffsets[axis] = extractOffset;
+        rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
+            op, newOp.getOutput(),
+            createVector(
+                {extractOffsets[0], extractOffsets[1], extractOffsets[2], extractOffsets[3]},
+                rewriter
+            ),
+            createVector(
+                {origOutShape[NCHW::N], origOutShape[NCHW::C], origOutShape[NCHW::H],
+                 origOutShape[NCHW::W]},
+                rewriter
+            ),
+            createVector({1, 1, 1, 1}, rewriter)
+        );
+        return success();
+    }
+};
+
 class ValidToSamePadPass : public impl::ValidToSamePadPassBase<ValidToSamePadPass> {
   public:
     using ValidToSamePadPassBase<ValidToSamePadPass>::ValidToSamePadPassBase;
@@ -1061,6 +1178,7 @@ void ValidToSamePadPass::runOnOperation() {
         patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
 
         // Register patterns for MaxPool2dOp
+        patterns.add<ConvertMixedPadPhasePoolPattern>(ctx);
         patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::MaxPool2dOp>>(ctx);
         patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::MaxPool2dOp>>(ctx);
         patterns.add<EliminateTrailingConvRowPattern<torq_hl::MaxPool2dOp>>(ctx);

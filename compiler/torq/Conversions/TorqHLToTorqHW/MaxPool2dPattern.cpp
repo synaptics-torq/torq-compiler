@@ -93,6 +93,20 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
     int32_t pad_right = op.getPad()[1];
     int32_t pad_top = op.getPad()[2];
     int32_t pad_bottom = op.getPad()[3];
+
+    // A single stride_offset cannot encode different H and W window phases (e.g. pad=[1,0,0,1]
+    // from H-tiling an odd-height pool) and would corrupt silently; ValidToSamePadPass
+    // normalizes these, so fail loudly if one slips through. Deliberately keyed on stride[0]
+    // alone (the descriptor assumes square strides throughout): a mixed-phase stride-[2,1]
+    // pool is not normalized by the pass and must also land here, not lower silently.
+    if (stride == 2 &&
+        ((pad_left != (weight_shape[1] - 1) / 2) != (pad_top != (weight_shape[0] - 1) / 2))) {
+        return op.emitError("stride-2 maxpool with mixed H/W pad phase (pad=[")
+               << op.getPad()[0] << "," << op.getPad()[1] << "," << op.getPad()[2] << ","
+               << op.getPad()[3] << "]) is not lowerable; ValidToSamePadPass should have "
+               << "normalized it";
+    }
+
     int32_t stride_offset = (stride == 2) ? 1 : 0;
 
     if (stride == 2 && pad_left == pad_top && pad_left == (weight_shape[1] - 1) / 2) {
