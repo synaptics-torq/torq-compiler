@@ -509,6 +509,7 @@ class IRam : public SliceRam {
 // Weight RAM
 class WRam : public SliceRam {
     using SliceRam::SliceRam;
+    WData load(const LData &data, DType type, bool transpose);
 
   public:
     // Load the WRAM with (weights) data
@@ -519,13 +520,18 @@ class WRam : public SliceRam {
     // uncompressed type if the input not used.
     WData load(const LData &data, DType type = DType::none);
 
+    // Same as load() but transposes the data tensor
+    // Only rank-2 with dense inner dimension supported, asserts otherwise
+    // data[0] must <= transposeHeight() and data[1] must be <= transposeWidth()
+    WData transpose(const LData &data, DType type = DType::none);
+
     const char *name() const override;
     int size() const override;
 
-    // The only width (number of columns) supported by transpose operation
+    // The maximum width (number of columns) supported by transpose operation in WData
     int transposeWidth() const;
 
-    // The only height (number of rows) supported by transpose operation
+    // The maximum height (number of rows) supported by transpose operation in WData
     int transposeHeight() const;
 };
 

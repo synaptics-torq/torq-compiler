@@ -17,7 +17,7 @@
 namespace mlir::syna::torq {
 
 static torq_hw::SliceTaskOp lowerToMatmul(
-    torq_hl::MatMulOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset, int chCount
+    torq_hl::MatMulOp op, PatternRewriter &rewriter, Value init, int rowOffset, int rowCount
 ) {
     struct MatA { // Loaded as weights
         enum { Batch, M, K };
@@ -31,7 +31,7 @@ static torq_hw::SliceTaskOp lowerToMatmul(
 
     LData matA(op.getInput1());
     LData matB(op.getInput2());
-    LData output(op.getInit());
+    LData output(init);
     LData biasScale(op.getScaleBias());
 
     auto rankA = matA.shape().size();
@@ -62,8 +62,8 @@ static torq_hw::SliceTaskOp lowerToMatmul(
 
     Slice slice("matmul");
 
-    output.subviewDim(MatC::M, chOffset, chCount);
-    matA.subviewDim(MatA::M, chOffset, chCount);
+    output.subviewDim(MatC::M, rowOffset, rowCount);
+    matA.subviewDim(MatA::M, rowOffset, rowCount);
 
     matB.vectorize(slice.alu.iWidth(matB.elementType(), matA.elementType()));
 
@@ -94,11 +94,11 @@ static torq_hw::SliceTaskOp lowerToMatmul(
 }
 
 static torq_hw::SliceTaskOp lowerToFastMatmul(
-    torq_hl::MatMulOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset, int chCount
+    torq_hl::MatMulOp op, PatternRewriter &rewriter, Value init, int rowOffset, int rowCount
 ) {
     struct MatA { // Loaded as weights
         enum { Batch, M, K };
-        enum { RowGroups = 1, ColGroups, RowBlock, ColBlock }; // After reshaping
+        enum { RowGroups = 1, RowBlock, ColGroups, ColBlock }; // After reshaping
     };
     struct MatB : Vectorized { // Loaded as input data
         enum { Batch, K, N };
@@ -109,7 +109,7 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
 
     LData matA(op.getInput1());
     LData matB(op.getInput2());
-    LData output(op.getInit());
+    LData output(init);
     LData biasScale(op.getScaleBias());
 
     auto rankA = matA.shape().size();
@@ -138,37 +138,24 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     Slice slice("matmul-fast");
     matA.broadcastAs(output, 1);
     matB.broadcastAs(output, 1);
-    // Get subview of output, weight and biasScale tensors for the given output channel offset and
-    // count
-    output.subviewDim(MatC::M, chOffset, chCount);
-    matA.subviewDim(MatA::M, chOffset, chCount);
+    // Get subview of output, weight and biasScale tensors for the given output row offset and count
+    output.subviewDim(MatC::M, rowOffset, rowCount);
+    matA.subviewDim(MatA::M, rowOffset, rowCount);
 
     int aluWidth = slice.alu.iWidth(matB.elementType(), matA.elementType());
     int rowChunks = aluWidth / slice.wram.transposeWidth();
     int outRowVectSize = slice.wram.transposeHeight();
-
-    if (rowChunks == matA.dim(MatA::K)) {
-        // Corner case: this would make us loading a dense tensor to WRAM instead of using S:4
-        // and the data will not be transposed. For now just load smaller chunks so we are sure
-        // they will be loaded in multiple steps.
-        // The case where matA.dim(MatA::K) == 1 works because the transpose of [4,1] is == [4]
-        rowChunks -= 1;
-    }
+    // int outRowVectSize = std::min(slice.wram.transposeHeight(), output.dim(MatC::M));
 
     // Find the largest divisor of K that is less than or equal to rowChunks
-    if (matA.dim(MatA::K) < rowChunks)
-        rowChunks = 1;
-    else {
-        while (matA.dim(MatA::K) % rowChunks != 0 && rowChunks > 1) {
-            rowChunks--;
-        }
+    while (matA.dim(MatA::K) % rowChunks != 0 && rowChunks > 1) {
+        rowChunks--;
     }
 
     output.reshapeDim(MatC::M, {-1, outRowVectSize});
 
     matA.reshapeDim(MatA::K, {-1, rowChunks});      // Split each row in rowChunks
     matA.reshapeDim(MatA::M, {-1, outRowVectSize}); // Split rows in groups of outRowVectSize
-    // Shape: [Batch, M_outer, M_inner, K_outer, K_inner]
 
     matB.vectorize(aluWidth);
     matB.reshapeDim(MatB::K, {-1, rowChunks}); // Split rows in rowChunks
@@ -176,15 +163,11 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     BData bdata = slice.bram.load(biasScale);
     For(auto batch = slice.iterate(matA.dim(MatA::Batch))) {
         For(auto im = slice.iterate(output.dim(MatA::RowGroups))) { // row groups in matA
-            For(auto in =
-                    slice.iterate(matB.dim(MatB::Vectors))) { // col vectors in matB (N/vectSize)
+            For(auto in = slice.iterate(matB.dim(MatB::Vectors))) { // col vects in matB: N/vectSize
                 PData pdata;
-                For(auto ik = slice.iterate(matA.dim(MatA::RowBlock))
+                For(auto ik = slice.iterate(matA.dim(MatA::ColGroups))
                 ) { // col groups in matA == row groups in matB
-
-                    WData wdata = slice.wram.load(matA[batch][im][":"][ik]);
-                    // Reshape wdata (we should actually transpose!)
-                    wdata.setShape({wdata.dim(1), wdata.dim(0)});
+                    WData wdata = slice.wram.transpose(matA[batch][im][":"][ik]);
                     For(auto ikk = slice.iterate(wdata.dim(0))
                     ) { // cols in group in matA == rows in group in matB
                         IData idata = slice.iram.load(matB[batch][ik][ikk][in]);
@@ -213,24 +196,24 @@ template <>
 LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &rewriter) const {
     Value initValue = op.getInit();
     auto wDims = LData(op.getInput1()).dims();
-    int outRowVectSize = 4;
+    int outRowVectSize = Slice().wram.transposeHeight();
     int outRowCount = wDims.size() == 1 ? 1 : wDims.size() == 2 ? wDims[0] : wDims[1];
     torq_hw::SliceTaskOp hwOp;
 
-    // Force to normal matmul
-
-    if (int peeledOutRow = outRowCount % outRowVectSize) {
-        // Compute 64x1 at a time
-        if (!(hwOp =
-                  lowerToMatmul(op, rewriter, initValue, outRowCount - peeledOutRow, peeledOutRow)
-            )) {
+    if (int peeledRows = outRowCount % outRowVectSize) {
+        // For one single output row (M == 1) fast matmul has no advantage at all,
+        // so use normal matmul which may be marginally more efficient loading one weight at a time.
+        hwOp =
+            peeledRows > 0
+                ? lowerToMatmul(op, rewriter, initValue, outRowCount - peeledRows, peeledRows)
+                : lowerToFastMatmul(op, rewriter, initValue, outRowCount - peeledRows, peeledRows);
+        if (!hwOp) {
             return failure();
         }
         initValue = hwOp.getQ()[0];
-        outRowCount -= peeledOutRow;
+        outRowCount -= peeledRows;
     }
     if (outRowCount > 0) {
-        // Compute 64x4 at a time
         if (!(hwOp = lowerToFastMatmul(op, rewriter, initValue, 0, outRowCount))) {
             return failure();
         }

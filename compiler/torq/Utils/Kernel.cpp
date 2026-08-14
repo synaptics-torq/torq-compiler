@@ -125,7 +125,8 @@ static bool isEvenOddSplit(const Shape &dims, SGBlockInfo &block) {
 //
 // The shape must be dense, or have up to sgGroups non-contiguous groups.
 // In this latter case, the non-contiguous groups can only happen in dims[0]
-static SGBlockInfo sgElementCount(const Shape &dims, int busWidthItems, int sgMax = -1) {
+static SGBlockInfo
+sgElementCount(const Shape &dims, int busWidthItems, int sgMax = -1, bool fuse = true) {
     if (dims.empty()) {
         return {};
     }
@@ -141,7 +142,7 @@ static SGBlockInfo sgElementCount(const Shape &dims, int busWidthItems, int sgMa
 
     //  If the first dimension has a non-natural stride get the stride and the number of groups
     const auto &dim = dims[isRank3 ? 1 : 0];
-    if (dim.stride.exprVal.has_value() ||
+    if (dim.stride.exprVal.has_value() || !fuse ||
         (dim.stride.intVal.has_value() && dim.stride.intVal.value() != count)) {
         // Non-natural stride specified
         if (sgMax >= 0 && dim.count <= sgMax && count <= busWidthItems / dim.count) {
@@ -1057,7 +1058,8 @@ struct SlicePrivate {
     // Add dimensions to a mem-based NDL according to the data shape and iteration variables
     // return the NDL offset
     int addMemNdlDims(
-        NdlType type, torq_hw::MemNdlDimsData &dims, const Data &data, int appendBlockSize = -1
+        NdlType type, torq_hw::MemNdlDimsData &dims, const Data &data, bool fuse,
+        int appendBlockSize = -1
     );
 
     // Add dimensions to a reg-based NDL according to the data shape and iteration variables
@@ -1094,10 +1096,12 @@ struct SlicePrivate {
         int actClipMax, torq_hw::ACTMode actMode
     );
     int actWidth(DType iType, DType wType, bool biasScalePerItem);
+    int wramTransposeHeight() const { return 4; }
+    int wramTransposeWidth() const { return 8; }
 
-    MemNdlData memNdl(NdlType ndlType, const LData &data, int appendBlockSize = -1);
+    MemNdlData memNdl(NdlType ndlType, const LData &data, bool fuse, int appendBlockSize = -1);
     void dedr(const LData &data);
-    void dewr(const LData &data);
+    void dewr(const LData &data, bool fuse);
     void debr(const LData &data);
     void deqw(const LData &output, int appendBlockSize = -1);
 
@@ -1107,7 +1111,7 @@ struct SlicePrivate {
     void cedw(const IData &idata);
 
     void cewr(const WData &wdata, bool outer = false, bool repeatWeight = false);
-    void ceww(const WData &wdata);
+    void ceww(const WData &wdata, bool transpose);
 
     void acbr(const BData &bdata);
     void acbw(const BData &bdata);
@@ -1250,8 +1254,13 @@ static void compactHDims(NdlType type, torq_hw::MemNdlDimsData &ndlDims) {
     }
 }
 
+static MemNdlDimData makeMemNdlDimData(DimType type, MemDimTag tag, int cnt, Stride s, int elSize) {
+    return s.exprVal.has_value() ? MemNdlDimData(type, tag, cnt, s.exprVal.value())
+                                 : MemNdlDimData(type, tag, cnt, s.intVal.value() * elSize);
+}
+
 int SlicePrivate::addMemNdlDims(
-    NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data, int appendBlockSize
+    NdlType type, torq_hw::MemNdlDimsData &ndlDims, const Data &data, bool fuse, int appendBlockSize
 ) {
     bool useSDims = appendBlockSize >= 0;
     Shape dataDims = data.shape();
@@ -1259,8 +1268,10 @@ int SlicePrivate::addMemNdlDims(
     const auto elementSize = sizeofType(data.elementType());
     int busWidth = getBusWidth(type, data.elementType());
     const int sgGroupsMax = getBusScatterGather(type);
-    auto block = useSDims ? SGBlockInfo{appendBlockSize}
-                          : sgElementCount(data.subShape(), busWidth / elementSize, sgGroupsMax);
+    // For DEWR, don't fuse contiguous dimensions if this data is supposed to be transposed
+    auto block = useSDims
+                     ? SGBlockInfo{appendBlockSize}
+                     : sgElementCount(data.subShape(), busWidth / elementSize, sgGroupsMax, fuse);
     assert(block.size && "Block empty or not dense");
     assert(ix.size() <= dataDims.size());
     int offset = data.offset();
@@ -1287,18 +1298,9 @@ int SlicePrivate::addMemNdlDims(
     );
     if (block.sgGroups > 1) {
         if (block.size > 1 && !block.isEvenOddSplit) {
-            if (block.stride.exprVal.has_value()) {
-                ndlDims.push_back(
-                    {DimType::L, MemDimTag::G, block.sgGroups, block.stride.exprVal.value()}
-                );
-            }
-            else {
-                assert(block.stride.intVal.has_value());
-                ndlDims.push_back(
-                    {DimType::L, MemDimTag::G, block.sgGroups,
-                     block.stride.intVal.value() * elementSize}
-                );
-            }
+            ndlDims.push_back(makeMemNdlDimData(
+                DimType::L, MemDimTag::G, block.sgGroups, block.stride, elementSize
+            ));
         }
         else {
             // Use DEQW even-odd split mode
@@ -1318,18 +1320,9 @@ int SlicePrivate::addMemNdlDims(
 
     // Generate an extra HDIM to load the entire size of the indexed data block
     if (block.outerGroups > 1) {
-        if (block.outerStride.exprVal.has_value()) {
-            ndlDims.push_back(
-                {DimType::H, MemDimTag::V, block.outerGroups, block.outerStride.exprVal.value()}
-            );
-        }
-        else {
-            assert(block.outerStride.intVal.has_value());
-            ndlDims.push_back(
-                {DimType::H, MemDimTag::V, block.outerGroups,
-                 block.outerStride.intVal.value() * elementSize}
-            );
-        }
+        ndlDims.push_back(makeMemNdlDimData(
+            DimType::H, MemDimTag::V, block.outerGroups, block.outerStride, elementSize
+        ));
     }
 
     // Generate additional HDIMs from loops
@@ -1765,14 +1758,15 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
         cewrDims.push_back({DimType::L, RegDimTag::J, sizeofType(_iram.elementType), 0});
     }
 
-    auto repeat = 1;
     if (outer) {
         // Distribute the weights over all the MACs
         // It should be possible to do this by default but for some reason the HWAPI doesn't support
         // this if we also have an higher lever S with a stride that doesn't match:
         // (ss==0 || ss==g*b)
         // Not clear if this is an HW limitation or API limitation.
-        repeat = weightBlockSize;
+        auto repeat = weightBlockSize;
+        // static const int sValidGroupCount[] = {1, 4, 8, 16, 0};  // FIXME
+        // repeat = roundUp(repeat, sValidGroupCount);
         cewrDims.push_back({DimType::L, RegDimTag::G, repeat, weightSize});
     }
 
@@ -1792,15 +1786,16 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
     _ndls.add(NdlType::CEWR, cewrDims);
 }
 
-void SlicePrivate::ceww(const WData &wdata) {
+void SlicePrivate::ceww(const WData &wdata, bool transpose) {
     Shape shape = wdata.subShape();
     // assert(shape.size() <= 1 && "WData shape must be up to 1 for now");
     const int weightSize = sizeofType(wdata.elementType());
-    int weightBlockSize = denseElementCount(shape);
+    // In case of transpose never fuse the 1st dimension even if dense because we need to use S dim
+    int weightBlockSize = denseElementCount(shape, shape.size() - transpose);
 
     assert(weightBlockSize != 0 && "Block empty");
     bool loadMultiple = false;
-    if (weightBlockSize < 0) {
+    if (weightBlockSize < 0 || transpose) {
         // Non-dense block: only rank 2 supported for now
         assert(shape.size() == 2);
         weightBlockSize = shape[1].count;
@@ -1816,7 +1811,17 @@ void SlicePrivate::ceww(const WData &wdata) {
 
     if (loadMultiple) {
         // Add extra HDIM to load multiple blocks
-        regDims.push_back({DimType::H, RegDimTag::S, shape[0].count, weightBlockSize});
+        int sn = shape[0].count;
+        if (transpose) {
+            assert(sn <= wramTransposeHeight() && "Transpose not supported");
+            // Force Sn to the only value performing transpose
+            sn = wramTransposeHeight();
+        }
+        else {
+            // This S count is special, will transpose data
+            assert(sn != wramTransposeHeight() && "Transpose will take place for this block count");
+        }
+        regDims.push_back({DimType::H, RegDimTag::S, sn, weightBlockSize});
     }
 
     // Repeat for as many times as DEWR
@@ -1976,9 +1981,10 @@ void SlicePrivate::cepr(const PData &pdata) {
     _ndls.add(NdlType::CEPR, ceprDims);
 }
 
-MemNdlData SlicePrivate::memNdl(NdlType ndlType, const LData &data, int appendBlockSize) {
+MemNdlData
+SlicePrivate::memNdl(NdlType ndlType, const LData &data, bool fuse, int appendBlockSize) {
     MemNdlDimsData ndlDims;
-    int offset = addMemNdlDims(ndlType, ndlDims, data, appendBlockSize);
+    int offset = addMemNdlDims(ndlType, ndlDims, data, fuse, appendBlockSize);
     if (sizeofTypeBits(data.elementType()) < 8) {
         assert(ndlType == NdlType::DEWR && "Compressed types only supported for DEWR");
         int bitWidth = sizeofTypeBits(data.elementType());
@@ -2102,10 +2108,10 @@ static void verifyNdlBankAlignment(const MemNdlData *ndl, int64_t bankBytes) {
 #endif
 }
 
-void SlicePrivate::dedr(const LData &data) { _ndls.add(memNdl(NdlType::DEDR, data)); }
+void SlicePrivate::dedr(const LData &data) { _ndls.add(memNdl(NdlType::DEDR, data, true)); }
 
-void SlicePrivate::dewr(const LData &data) {
-    MemNdlData ndlData = memNdl(NdlType::DEWR, data);
+void SlicePrivate::dewr(const LData &data, bool fuse) {
+    MemNdlData ndlData = memNdl(NdlType::DEWR, data, fuse);
     if (_cfg.stride == 2) {
         // Adjust DEWR
         // In stride 2 mode the ALU automatically select the kernel part (quadrant) to use while
@@ -2127,7 +2133,7 @@ void SlicePrivate::dewr(const LData &data) {
 }
 
 void SlicePrivate::debr(const LData &data) {
-    MemNdlData ndlData = memNdl(NdlType::DEBR, data);
+    MemNdlData ndlData = memNdl(NdlType::DEBR, data, true);
 
     // TORQ fetches bias from LRAM in B-bus in fixed 8-byte banks and can only read whole
     // banks, so make sure no bias read crosses a bank boundary for any H-index
@@ -2138,7 +2144,7 @@ void SlicePrivate::debr(const LData &data) {
 }
 
 void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
-    _ndls.add(memNdl(NdlType::DEQW, output, appendBlockSize));
+    _ndls.add(memNdl(NdlType::DEQW, output, true, appendBlockSize));
 }
 
 void SlicePrivate::ref(const LData &data) {
@@ -3007,15 +3013,9 @@ int WRam::size() const {
     return HwInfo::wram_seg_width + 4;
 }
 
-int WRam::transposeWidth() const {
-    // Maximum width (number of columns) supported by transpose operation
-    return 8;
-}
+int WRam::transposeWidth() const { return d->wramTransposeWidth(); }
 
-int WRam::transposeHeight() const {
-    // Maximum height (number of rows) supported by transpose operation
-    return 4;
-}
+int WRam::transposeHeight() const { return d->wramTransposeHeight(); }
 
 // Determine the weight memory format
 // Asserts if in-memory weight type not compatible with the destination (wbus) weight type
@@ -3061,7 +3061,7 @@ static WeightFormat getWeightMemoryFormat(DType memType, DType dstType) {
     return wMemFmt;
 }
 
-WData WRam::load(const LData &data, DType dstType) {
+WData WRam::load(const LData &data, DType dstType, bool transpose) {
     debugTensor("WTensor", data);
     DType inMemWType = data.elementType();
     if (dstType == DType::none) {
@@ -3071,7 +3071,7 @@ WData WRam::load(const LData &data, DType dstType) {
     }
     d->_cfg.weight_format = getWeightMemoryFormat(inMemWType, dstType);
 
-    d->dewr(data);
+    d->dewr(data, !transpose);
 
     d->_wram.loadNesting = d->_forStack.size();
     d->_wram.elementType = dstType;
@@ -3080,9 +3080,24 @@ WData WRam::load(const LData &data, DType dstType) {
     assert(!isCompressed(dstType) && "Compressed weights must be expanded on load");
 
     auto wdata = WData(data.subShape(), dstType);
-    d->ceww(wdata);
+    d->ceww(wdata, transpose);
 
     checkLoadSize(wdata);
+    return wdata;
+}
+
+WData WRam::load(const LData &data, DType dstType) { return load(data, dstType, false); }
+
+WData WRam::transpose(const LData &data, DType dstType) {
+    Shape shape = data.subShape();
+    int rank = shape.size();
+    assert(rank == 2 && "Transpose only supported for rank 2");
+    assert(shape[0].count <= transposeHeight() && "Transpose not supported");
+    int innerSize = denseElementCount(shape, rank - 1);
+    assert(innerSize > 0 && innerSize <= transposeWidth() && "Transpose not supported");
+
+    WData wdata = load(data, dstType, true);
+    wdata.setShape({wdata.dim(1), wdata.dim(0)});
     return wdata;
 }
 
