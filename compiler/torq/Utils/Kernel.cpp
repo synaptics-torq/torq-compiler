@@ -1097,7 +1097,7 @@ struct SlicePrivate {
     );
     int actWidth(DType iType, DType wType, bool biasScalePerItem);
     int wramTransposeHeight() const { return 4; }
-    int wramTransposeWidth() const { return 8; }
+    int wramTransposeWidth(DType type) const { return 8 / sizeofType(toUncompressed(type)); }
 
     MemNdlData memNdl(NdlType ndlType, const LData &data, bool fuse, int appendBlockSize = -1);
     void dedr(const LData &data);
@@ -3013,7 +3013,7 @@ int WRam::size() const {
     return HwInfo::wram_seg_width + 4;
 }
 
-int WRam::transposeWidth() const { return d->wramTransposeWidth(); }
+int WRam::transposeWidth(DType type) const { return d->wramTransposeWidth(type); }
 
 int WRam::transposeHeight() const { return d->wramTransposeHeight(); }
 
@@ -3094,10 +3094,11 @@ WData WRam::transpose(const LData &data, DType dstType) {
     assert(rank == 2 && "Transpose only supported for rank 2");
     assert(shape[0].count <= transposeHeight() && "Transpose not supported");
     int innerSize = denseElementCount(shape, rank - 1);
-    assert(innerSize > 0 && innerSize <= transposeWidth() && "Transpose not supported");
+    assert(innerSize > 0 && "Transpose not supported for non-dense inner dimension");
 
     WData wdata = load(data, dstType, true);
     wdata.setShape({wdata.dim(1), wdata.dim(0)});
+    assert(innerSize <= transposeWidth(wdata.elementType()) && "Inner dim too big to transpose");
     return wdata;
 }
 

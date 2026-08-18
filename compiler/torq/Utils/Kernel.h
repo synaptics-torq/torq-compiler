@@ -528,10 +528,10 @@ class WRam : public SliceRam {
     const char *name() const override;
     int size() const override;
 
-    // The maximum width (number of columns) supported by transpose operation in WData
-    int transposeWidth() const;
+    // The maximum width (number of columns) supported by transpose operation for the given type
+    int transposeWidth(DType type) const;
 
-    // The maximum height (number of rows) supported by transpose operation in WData
+    // The maximum height (number of rows) supported by transpose operation
     int transposeHeight() const;
 };
 

@@ -142,10 +142,9 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     output.subviewDim(MatC::M, rowOffset, rowCount);
     matA.subviewDim(MatA::M, rowOffset, rowCount);
 
-    int aluWidth = slice.alu.iWidth(matB.elementType(), matA.elementType());
-    int rowChunks = aluWidth / slice.wram.transposeWidth();
     int outRowVectSize = slice.wram.transposeHeight();
     // int outRowVectSize = std::min(slice.wram.transposeHeight(), output.dim(MatC::M));
+    int rowChunks = slice.wram.transposeWidth(matA.elementType());
 
     // Find the largest divisor of K that is less than or equal to rowChunks
     while (matA.dim(MatA::K) % rowChunks != 0 && rowChunks > 1) {
@@ -157,7 +156,7 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     matA.reshapeDim(MatA::K, {-1, rowChunks});      // Split each row in rowChunks
     matA.reshapeDim(MatA::M, {-1, outRowVectSize}); // Split rows in groups of outRowVectSize
 
-    matB.vectorize(aluWidth);
+    matB.vectorize(slice.alu.iWidth(matB.elementType(), matA.elementType()));
     matB.reshapeDim(MatB::K, {-1, rowChunks}); // Split rows in rowChunks
 
     BData bdata = slice.bram.load(biasScale);
