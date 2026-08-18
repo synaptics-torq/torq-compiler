@@ -22,6 +22,12 @@ while [[ $# -gt 0 ]]; do
       PACKAGE_PATH="$2"
       shift 2
       ;;
+    --help)
+      echo "Usage: $0 [--use-gerrit] [--package-path <path>]"
+      echo "  --use-gerrit: Use Synaptics Gerrit for source checkout instead of public GitHub repositories."
+      echo "  --package-path <path>: Specify the path to save the packaged kernel artifacts (default: ${PACKAGE_PATH})."
+      exit 0
+      ;;
     *)
       echo "Unknown option: $1"
       exit 1
@@ -29,17 +35,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# we reference commit ids so that we can ensure we don't need to change the reference
+# when we switch from pulling from private gerrit to public github.
+KERNEL_COMMIT=822c418972646f73b3771a92fb78ab09a343897b
+DRIVER_COMMIT=bb8b58e4b342f23efc6bc4a3fe931388ef811efe
+
 if [[ $USE_GERRIT -eq 1 ]]; then
   SYNA_GERRIT_USER=$(id -n -u)
   LINUX_REPO_URL="ssh://${SYNA_GERRIT_USER}@sc-debu-git.synaptics.com:29420/astra/linux/main"
-  LINUX_DRIVER_REPO_URL="ssh://${SYNA_GERRIT_USER}@sc-debu-git.synaptics.com:29420/debu/common/linux-driver/synaptics"
-  KERNEL_BRANCH="dev_branch/linux/v6_12/master"
-  DRIVER_BRANCH="dev_branch/master"
+  LINUX_DRIVER_REPO_URL="ssh://${SYNA_GERRIT_USER}@sc-debu-git.synaptics.com:29420/debu/common/linux-driver/synaptics"  
 else
-  LINUX_REPO_URL="https://github.com/synaptics-astra/linux_6_12-main"
-  LINUX_DRIVER_REPO_URL="https://github.com/synaptics-astra/linux_6_12-drivers-synaptics"
-  KERNEL_BRANCH="scarthgap_6.12_v2.3.0"
-  DRIVER_BRANCH="scarthgap_6.12_v2.3.0"
+  LINUX_REPO_URL=https://github.com/synaptics-astra/linux_6_12-main
+  LINUX_DRIVER_REPO_URL=https://github.com/synaptics-astra/linux_6_12-drivers-synaptics
 fi
 
 SYNA_KERNEL_CHECKOUT=${THIRDPARTY_PREBUILTS_SOC_KERNEL}/main
@@ -56,9 +63,22 @@ else
     if [ -d "main" ]; then
       rm -rf main
     fi
-    git clone --depth=1 --branch ${KERNEL_BRANCH} ${LINUX_REPO_URL} main
-    cd main/drivers/
-    git clone --depth=1 --branch ${DRIVER_BRANCH} ${LINUX_DRIVER_REPO_URL} synaptics
+
+    git init main
+
+    cd main
+    git remote add origin "${LINUX_REPO_URL}"
+    git fetch --depth=1 origin "${KERNEL_COMMIT}"
+    git checkout FETCH_HEAD
+    
+    cd drivers
+
+    git init synaptics
+
+    cd synaptics
+    git remote add origin "${LINUX_DRIVER_REPO_URL}"
+    git fetch --depth=1 origin "${DRIVER_COMMIT}"
+    git checkout FETCH_HEAD
 
     # configure kernel to build the kernel module against it and pack the required headers/Makefiles/scripts
     cd ${SYNA_KERNEL_CHECKOUT}

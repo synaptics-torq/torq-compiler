@@ -256,9 +256,8 @@ runs:
         python3 -u -m torq.utils.boards setup-for-ci \
             --control-file bench-control.json \
             --local-runner-path ${{github.workspace}}/release/tools/astra-sl-torq-run-module \
-            --build-version 202607241030 \
-            # FIXME: disable kernel module reload until SLSDK 2.5 is out
-            # --local-ko-path ${{github.workspace}}/release/lib/syna_npu.ko
+            --build-version 202608082301 \
+            --local-ko-path ${{github.workspace}}/release/lib/syna_npu.ko
 
     - name: Run pytest
       shell: bash
