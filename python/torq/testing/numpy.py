@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 import numpy as np
 import onnx
 import onnxruntime
@@ -41,6 +44,47 @@ def numpy_matmul_reference_results(input_data, mlir_io_spec):
 
     output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
     result = np.matmul(input_data[0], input_data[1])
+    return [result.astype(output_dtype)]
+
+
+def _parse_uniform_bf16_constant(mlir_model_file):
+    """Extract (value, shape) from a uniform bf16 dense constant in an MLIR file.
+
+    The const-weight matmul repro cases bake the weight as
+    ``dense<6.250000e-02> : tensor<768x3072xbf16>``, so the golden can be
+    computed directly in numpy instead of routing through the llvm-cpu
+    reference (whose bf16 accumulation differs from the fp32 accumulation the
+    NSS kernels actually use).
+    """
+    text = Path(str(mlir_model_file)).read_text()
+    match = re.search(r"dense<([0-9.eE+-]+)>\s*:\s*tensor<([0-9x]+)xbf16>", text)
+    if not match:
+        raise ValueError(f"no uniform bf16 constant found in {mlir_model_file}")
+    value = float(match.group(1))
+    shape = [int(dim) for dim in match.group(2).split("x")]
+    return value, shape
+
+
+@versioned_unhashable_object_fixture
+def numpy_matmul_const_weight_reference_results(input_data, mlir_io_spec, mlir_model_file):
+    """Compute a uniform-const-weight matmul reference in fp32, round once to bf16.
+
+    The model has a single external input (the activation); the weight is a
+    uniform bf16 constant parsed out of the MLIR. Accumulating in fp32 and
+    rounding the output once matches what the NSS matmul kernels do, so this is
+    a genuine numpy golden for the K-split repros (whose bf16 chunk-boundary
+    rounding is what we want to compare, not an llvm-cpu bf16-accumulated one).
+    """
+    from .iree import get_dtype
+
+    data = input_data.data if hasattr(input_data, "data") else input_data
+    assert len(data) == 1
+    assert len(mlir_io_spec.outputs) == 1
+
+    output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
+    value, shape = _parse_uniform_bf16_constant(mlir_model_file)
+    weight = np.full(shape, value, dtype=np.float32)
+    result = np.matmul(data[0].astype(np.float32, copy=False), weight)
     return [result.astype(output_dtype)]
 
 

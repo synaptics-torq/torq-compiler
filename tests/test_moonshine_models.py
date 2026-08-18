@@ -99,17 +99,21 @@ def case_config(request, chip_config):
     activation_noise_cases = [
         "decoder_float_layer_Sigmoid_107",
         "encoder_float_layer_InstanceNormalization_15",
-        "encoder_float_layer_MatMul_36",
         "encoder_float_layer_Softmax_112",
     ]
     if any(case in request.node.name for case in activation_noise_cases):
         comp_config["comparison_config"] = "comparison_config_for_activation_noise"
 
+    # MatMul layers that go through TileAndFuse's K-split accumulate the K-chunk
+    # partial sums in bf16. Near-zero outputs (cancellation) then show a large
+    # relative error but a tiny absolute error, so use the bf16 abs-gate config.
     bf16_gemm_cases = [
         "decoder_float_layer_Gemm_103",
         "decoder_float_layer_Gemm_111",
         "encoder_float_layer_Gemm_127",
         "encoder_float_layer_Gemm_135",
+        "encoder_float_layer_MatMul_36",
+        "encoder_float_layer_MatMul_53",
     ]
     if any(case in request.node.name for case in bf16_gemm_cases):
         comp_config["comparison_config"] = "comparison_config_for_bf16_gemm"

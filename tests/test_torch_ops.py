@@ -100,6 +100,12 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'cos-coarse' in request.param.name:
         extra_args["tweaked_input_data_range"] = 0, 12
 
+    # The K-split matmul case accumulates chunk partials in bf16; keep inputs
+    # positive so cancellation noise doesn't dominate the comparison (the
+    # TORQ_* tolerance directives in the .mlir cover the residual rounding).
+    if 'matmul-1x128x3072x768' in request.param.data.name:
+        extra_args["tweaked_input_data_range"] = 0, 2
+
     no_slicing_tc = [
         #  error: failed to allocate LRAM addresses
         "matmul_dql_q8_0",
@@ -208,6 +214,11 @@ def _is_instancenorm_case(case_config):
     return mlir_file is not None and "instancenorm" in mlir_file.name.lower()
 
 
+def _is_const_weight_matmul_case(case_config):
+    mlir_file = case_config.get("static_mlir_model_file")
+    return mlir_file is not None and "matmul-1x128x" in mlir_file.name.lower()
+
+
 @pytest.fixture
 def reference_results(request, case_config):
     if _is_gelu_case(case_config):
@@ -218,6 +229,9 @@ def reference_results(request, case_config):
 
     if _is_instancenorm_case(case_config):
         return request.getfixturevalue("numpy_instancenorm_reference_results")
+
+    if _is_const_weight_matmul_case(case_config):
+        return request.getfixturevalue("numpy_matmul_const_weight_reference_results")
 
     try:
         return request.getfixturevalue("llvmcpu_reference_results")

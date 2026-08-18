@@ -178,6 +178,17 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
                          << "], im2col shape: [" << Ow << ", " << K << "]\n"
         );
 
+        bool preserveInit = false;
+        Value matmulInit = matmulOp.getDpsInits()[0];
+        if (!isAllZerosTensor(matmulInit)) {
+            auto initType = dyn_cast<RankedTensorType>(matmulInit.getType());
+            if (!initType || !initType.getElementType().isBF16()) {
+                replaceWithTorqMatmul(matmulOp, rewriter);
+                return success();
+            }
+            preserveInit = true;
+        }
+
         // Build fusion plan and compute bias/scale using PatternUtils helpers
         auto output = matmulOp.getResult(0);
         LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Building fusion plan\n");
@@ -290,6 +301,12 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
                 weights, *biasV, im2col, isBatchBias
             );
             Value finalResult = fcOp.getResult(0); // [Ow, F]
+
+            if (preserveInit) {
+                FailureOr<Value> accumulated = addInitToResult(matmulInit, finalResult, rewriter);
+                assert(succeeded(accumulated) && "failed to add bf16 init");
+                finalResult = *accumulated;
+            }
 
             // Rebuild the original output layout.
             if (fusionPlanOr->includedTranspose) {

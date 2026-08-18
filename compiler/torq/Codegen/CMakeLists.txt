@@ -56,6 +56,7 @@ set(sources
     TORQLowerExecutableTargetPass.cpp
     TorqComprehensiveBufferizePass.cpp
     TileAndFusePass.cpp
+    TileAndFuseUtils.cpp
     TilingUtils.cpp
     UnrollForallLoopsPass.cpp
     UnrollLoopPass.cpp

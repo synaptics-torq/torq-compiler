@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "PassesDetail.h"
+#include "TileAndFuseUtils.h"
 #include "TilingUtils.h"
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
@@ -126,6 +127,13 @@ static llvm::cl::opt<unsigned> clTorqTileAndFuseDistanceLimit(
     "torq-tile-and-fuse-distance-limit",
     llvm::cl::desc("Limit the (linalg) distance of producers that are fused (use 0 for no limit)."),
     llvm::cl::init(0) // Default value
+);
+
+static llvm::cl::opt<bool> clDisableFitShrinkReorder(
+    "torq-disable-fit-shrink-reorder",
+    llvm::cl::desc("Disable reduction-aware domain ordering in fitTileToMemory's shrink pass "
+                   "(fall back to legacy tilingOrder shrinking)"),
+    llvm::cl::init(false) // Default value
 );
 
 const std::string TORQ_TNF_DISTANCE = "torq-tnf-distance";
@@ -304,36 +312,6 @@ int64_t makeByteAlignedTileSize(int64_t valuesPerByte, int64_t domainSize, int64
     return size - remainder;
 }
 
-struct TilingInfo {
-    // Iteration domains that can be tiled, in the order they should be tiled.
-    llvm::SmallSetVector<int64_t, 4> tilingOrder;
-
-    // Minimal tile size per iter domain index. This is a best effort constraint: we only use it for
-    // the root (consumer), and if after shrinking all dims the op still does not fit, we will
-    // ignore minSize and shrink further.
-    llvm::SmallVector<int64_t, 4> minSize;
-
-    // Downward size adjustments per iter domain index. May return 0 to signal
-    // that the requested size is too small to be a valid (byte-aligned) tile.
-    llvm::SmallVector<std::function<int64_t(int64_t)>, 4> adjustSize;
-};
-
-// The smallest tile size a domain can be cut down to (always > 0). We scan
-// upward for the first size that `adjustSize` leaves unchanged. `adjustSize` is
-// shrink-only, so `adjustSize(size) == size` holds exactly when `size` is
-// already a valid tile: for normal types that's 1; for sub-byte types the
-// too-small sizes return 0 (!= size, so skipped) and the first fixed point is
-// one byte's worth of values (2 for i4). We derive it from `adjustSize` rather
-// than hardcoding, so it stays correct if `adjustSize` ever gains further
-// constraints. Fall back to the full domain if nothing smaller is valid.
-int64_t getSmallestTileSize(const TilingInfo &tilingInfo, int64_t domain, int64_t domainSize) {
-    for (int64_t size = 1; size < domainSize; ++size) {
-        if (tilingInfo.adjustSize[domain](size) == size)
-            return size;
-    }
-    return domainSize;
-}
-
 TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
     TilingInfo tilingInfo;
 
@@ -473,29 +451,6 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
      * }
      */
     return tilingInfo;
-}
-
-// Try to compute the int value of sizeFoldResult. If the value is not a
-// constant, try to evaluate it at the first iteration of the surrounding loops.
-llvm::FailureOr<int64_t> computeSizeAtFirstIteration(OpFoldResult sizeFoldResult) {
-    if (std::optional<int64_t> constSize = getConstantIntValue(sizeFoldResult))
-        return *constSize;
-
-    assert(isa<Value>(sizeFoldResult) && "expected a Value");
-    Value sizeValue = cast<Value>(sizeFoldResult);
-
-    llvm::DenseMap<Value, Attribute> computedValuse;
-    auto result = computeValueAtFirstIteration(sizeValue, computedValuse);
-    if (failed(result)) {
-        sizeValue.getDefiningOp()->emitWarning(
-            "can't compute producers tile size (unexpected operation type; "
-            "expected affine.min/max/apply)"
-        );
-        LLVM_DEBUG(assert(false && "unexpected operation"));
-        return llvm::failure();
-    }
-
-    return cast<IntegerAttr>(*result).getInt();
 }
 
 // Add to `ops` all the ops that need to be cloned to support `op` and
@@ -971,15 +926,35 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
 
     ArrayRef<int64_t>::iterator tilingDomainIter;
 
+    // Domains actually shrunk, in shrink order, for the grow-back bookkeeping.
+    SmallVector<int64_t> shrinkHistory;
+    // Set when a shrink pass bailed out because the fit check itself failed
+    // (as opposed to sweeping every domain without finding a fit).
+    bool fitCheckFailed = false;
+
     // Shrink pass: set domains to their smallest valid tile, one by one, until
     // the tile fits. The smallest valid tile is usually 1, but for sub-byte
     // (e.g. i4) dimensions it is one byte's worth of values (2 for i4), because
     // a width-1 sub-byte slice can't be addressed on a byte boundary.
+    //
+    // Domain order: by default computeShrinkOrderByReduction() picks the domain
+    // whose shrink removes the most group operand bytes first (e.g. the N dim
+    // of a matmul, which sizes the weight tile, rather than the M dim, which
+    // does not index the weights); --torq-disable-fit-shrink-reorder restores
+    // the legacy tilingOrder.
     auto shrinkPass = [&](bool fallback) {
-        for (tilingDomainIter = tilingInfo.tilingOrder.begin();
-             tilingDomainIter != tilingInfo.tilingOrder.end(); ++tilingDomainIter) {
-            int64_t domain = *tilingDomainIter;
+        shrinkHistory.clear();
+        fitCheckFailed = false;
 
+        SmallVector<int64_t> order(tilingInfo.tilingOrder.begin(), tilingInfo.tilingOrder.end());
+        if (!clDisableFitShrinkReorder) {
+            if (std::optional<SmallVector<int64_t>> reordered = computeShrinkOrderByReduction(
+                    consumerOp, producerOps, tilingInfo, iterDomainSizes, sizes, fallback
+                ))
+                order = std::move(*reordered);
+        }
+
+        for (int64_t domain : order) {
             int64_t minTileSize =
                 fallback ? getSmallestTileSize(tilingInfo, domain, iterDomainSizes[domain])
                          : tilingInfo.minSize[domain];
@@ -987,9 +962,12 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
                 continue;
 
             sizes[domain] = rewriter.getIndexAttr(minTileSize);
+            shrinkHistory.push_back(domain);
             tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
-            if (failed(tileFits))
+            if (failed(tileFits)) {
+                fitCheckFailed = true;
                 return LogicalResult::failure();
+            }
 
             if (*tileFits)
                 return LogicalResult::success();
@@ -1000,11 +978,11 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
     // We try the shrinking pass twice, once with the preferred minSize, and if that is not small
     // enough, we try again with 1's.
     if (shrinkPass(false).failed()) {
-        if (tilingDomainIter != tilingInfo.tilingOrder.end())
+        if (fitCheckFailed)
             return LogicalResult::failure();
 
         if (shrinkPass(true).failed()) {
-            if (tilingDomainIter != tilingInfo.tilingOrder.end())
+            if (fitCheckFailed)
                 return LogicalResult::failure();
 
             consumerOp->emitWarning(
@@ -1013,6 +991,20 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
             LLVM_DEBUG(assert(false));
             return LogicalResult::failure();
         }
+    }
+
+    // Position the grow-back iterator at the last (in tilingOrder) shrunk
+    // domain, so the reverse walk below covers every shrunk domain regardless
+    // of the order the shrink pass picked them in. When the shrink pass used
+    // the legacy order this is exactly the domain it stopped at.
+    {
+        size_t lastPosition = 0;
+        for (int64_t domain : shrinkHistory) {
+            auto pos = llvm::find(tilingInfo.tilingOrder, domain);
+            lastPosition =
+                std::max(lastPosition, (size_t)std::distance(tilingInfo.tilingOrder.begin(), pos));
+        }
+        tilingDomainIter = tilingInfo.tilingOrder.begin() + lastPosition;
     }
 
     // Grow-back pass: inflate domains forced to 1 above back to larger tiles
@@ -1501,6 +1493,12 @@ void TileAndFusePass::runOnOperation() {
     LLVM_DEBUG(llvm::dbgs() << "Tile and Fuse - START\n");
 
     FunctionOpInterface funcOp = getOperation();
+
+    // Reduction split phase: K-chunk LRAM-oversized matmuls before the parallel
+    // fit. The split is unrolled (no scf.for), so the fit-check below stays
+    // loop-free. Matmuls that cannot be K-split are marked for Host execution.
+    if (auto func = dyn_cast<func::FuncOp>(funcOp.getOperation()))
+        splitOversizedMatmulsAlongK(func);
 
     // Walk on all the TilingInterface ops in the function, in reverse order of
     // appearance. This guarantees that when we tile an op, we have already
