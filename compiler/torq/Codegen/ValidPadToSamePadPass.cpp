@@ -962,8 +962,15 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         auto padTensor = tensor::EmptyOp::create(rewriter, loc, paddedShape, elemType);
 
         Value convInput = padTensor.getResult();
-        if ((pads[LRTBDim::Top] || pads[LRTBDim::Bottom]) || pads[LRTBDim::Left] ||
-            !convertToSame) {
+        // A fill is only needed when the grown buffer exposes border samples the kernel would
+        // otherwise read as garbage. With no original top/bottom pad, every valid H sample sits
+        // inside the kernel window, so no top/bottom fill is required; likewise, when the computed
+        // left/right SAME pad already equals the original pad, every valid W sample is covered and
+        // no W fill is required. Only when either of these differs must we fill with the pad value.
+        bool needFill = pads[LRTBDim::Top] || pads[LRTBDim::Bottom] ||
+                        (pads[LRTBDim::Left] != newPads[LRTBDim::Left]) ||
+                        (pads[LRTBDim::Right] != newPads[LRTBDim::Right]);
+        if (needFill) {
             TypedAttr fillAttr = makePadFillAttr(rewriter, elemType, op.getInputZp());
             if (!fillAttr)
                 return failure();

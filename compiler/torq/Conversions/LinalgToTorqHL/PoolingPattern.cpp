@@ -235,19 +235,6 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
         Value result =
             applyOutputTranspose<IsNCHW>(maxpoolOp.getOutput(), srcResultType, loc, rewriter);
 
-        Value initVal = srcOp.getOutputs().front();
-
-        if (!isAllMinimumTensor(initVal)) {
-            auto resultType = dyn_cast<RankedTensorType>(result.getType());
-
-            result = torq_hl::ElementWiseBinaryOp::create(
-                         rewriter, srcOp.getLoc(), resultType,
-                         createInitTensor(srcOp, rewriter, resultType),
-                         torq_hl::ElementwiseOpEnum::MAXIMUM, result, initVal, /*isUnsigned=*/false
-            )
-                         .getResult(0);
-        }
-
         rewriter.replaceOp(output.getDefiningOp(), result);
 
         return success();
