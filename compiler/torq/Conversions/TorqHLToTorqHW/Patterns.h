@@ -61,6 +61,7 @@ typedef OpPattern<torq_hl::FMAOp> FMAPattern;
 typedef OpPattern<torq_hl::ExpandWeightsOp> ExpandWeightsPattern;
 typedef OpPattern<torq_hl::FillOp> FillPattern;
 typedef OpPattern<torq_hl::ReduceOp> ReducePattern;
+typedef OpPattern<torq_hl::DeriveQuantParamsOp> DeriveQuantParamsPattern;
 typedef OpPattern<torq_hl::ScatterOp> ScatterPattern;
 typedef OpPattern<torq_hl::ResizeNearestNeighborOp> ResizeNearestNeighborPattern;
 

@@ -459,8 +459,11 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
     auto codeType = cast<MemRefType>(createInvocationOp.getCodeSections()[0].getType());
     uint32_t programSize = getEncodedTotalSizeBytes(codeType);
 
-    // we use 0x900 bytes for CFGs, the rest is for NDLs
-    uint32_t cfgSize = 0x900;
+    // Default programs use 0x900 bytes for CFGs, the rest for NDLs. A larger-than-default
+    // code section (currently only from torq_hl.derive_quant_params) spends its extra bytes
+    // on CFG space, keeping a fixed 0xB00 NDL reserve. Default programs are
+    // untouched (0xA00*2 - 0xB00 == 0x900).
+    uint32_t cfgSize = programSize > 0xA00 * 2 ? programSize - 0xB00 : 0x900;
 
     if (programSize <= cfgSize) {
         return createInvocationOp->emitOpError("Program size too small to fit CFGs instructions");

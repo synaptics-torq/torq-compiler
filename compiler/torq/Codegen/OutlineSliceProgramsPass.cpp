@@ -38,7 +38,11 @@ static void outlineOp(int idx, Operation *op, OpBuilder builder) {
     // FIXME: here we should defer computing the size until we compile the Program
     // The size should be enough to store a CFG/SYN task and the required NDLs
     // Note: this has to be kept in sync with the size in getProgramSize()
-    int size = 0xA00 * 2;
+
+    // torq_hl.derive_quant_params expands to ~10 slice_tasks in one body (one of which
+    // carries the 256-entry reciprocal mantissa LUT), so it needs a larger code section
+    // than the default single-task budget.
+    int size = isa<torq_hl::DeriveQuantParamsOp>(op) ? 0xA00 * 4 : 0xA00 * 2;
 
     // allocate some lram that will contain the code
 

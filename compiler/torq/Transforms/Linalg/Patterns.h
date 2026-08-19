@@ -25,6 +25,8 @@ void populateOptimizeMatmuOpPatterns(MLIRContext *ctx, RewritePatternSet &patter
 
 void populateRaiseSoftmaxOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+void populateRaiseDynamicQuantizeOpPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 void populateOptimizeArithElementwiseBinaryOpPatterns(
     MLIRContext *ctx, RewritePatternSet &patterns
 );

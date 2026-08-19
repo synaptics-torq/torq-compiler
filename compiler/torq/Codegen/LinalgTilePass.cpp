@@ -678,8 +678,15 @@ template <typename OpTy> struct TensorOpConversion : public OpRewritePattern<OpT
     }
 };
 
+// The reduce write descriptor (CEPW n_size) can encode at most 1<<16 elements
+// per reduction, so a single tile's reduction length must not exceed this
+// regardless of how much LRAM is available. Reference:
+// third_party/torq-hw/ct/torq_api.c:1448 _reg_ndl_desc_gen: Assertion
+// `n>=1 && n<=(1<<16)` failed.
+static constexpr int64_t kMaxReduceTileElements = 1 << 16;
+
 /// Tile reduction dimensions of linalg.generic ops whose reduction input
-/// exceeds LRAM.
+/// exceeds LRAM, or whose reduction length exceeds the reduce descriptor limit.
 class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReductionForLramPass> {
   public:
     using TileReductionForLramBase<TileReductionForLramPass>::TileReductionForLramBase;
@@ -716,11 +723,19 @@ class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReduc
                 return;
             }
 
-            if (*totalBytes > lramSize) {
+            // Tile when the operands exceed LRAM, or when the reduction is longer
+            // than the reduce descriptor can encode (>1<<16) even if it fits LRAM
+            // — otherwise the untiled reduce trips the n<=(1<<16) NDL assertion.
+            int64_t reductionSize = genericOp.getStaticLoopRanges()[reductionDims[0]];
+            bool exceedsDescriptor =
+                reductionSize != ShapedType::kDynamic && reductionSize > kMaxReduceTileElements;
+
+            if (*totalBytes > lramSize || exceedsDescriptor) {
                 LLVM_DEBUG({
                     llvm::dbgs(
                     ) << "TileReductionForLram: selected op for reduction tiling; totalBytes="
-                      << *totalBytes << " lramSize=" << lramSize << "\n";
+                      << *totalBytes << " lramSize=" << lramSize
+                      << " reductionSize=" << reductionSize << "\n";
                 });
                 opsToTile.push_back(genericOp);
             }
@@ -803,13 +818,6 @@ class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReduc
         }
         if (reductionSize <= 1)
             return failure();
-
-        // The reduce write descriptor (CEPW n_size) can encode at most 1<<16 elements per
-        // reduction, so a single tile's reduction length must not exceed this regardless of how
-        // much LRAM is available. Reference:
-        // third_party/torq-hw/ct/torq_api.c:L1444: _reg_ndl_desc_gen: Assertion `n>=1 &&
-        // n<=(1<<16)' failed
-        constexpr int64_t kMaxReduceTileElements = 1 << 16;
 
         // Repeatedly halve the reduction tile size until the estimated memory requirement fits in
         // LRAM and the tile is within the hardware reduce descriptor limit.

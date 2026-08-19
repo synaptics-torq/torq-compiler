@@ -114,6 +114,53 @@ static Value foldQuantGenericToConstant(
     return arith::ConstantOp::create(rewriter, op.getLoc(), outTy, attr).getResult();
 }
 
+// Emit the shared quantize datapath: bf16_input * recipScale + zpBias, then
+// round-and-clamp to the integer output range [minI, maxI].  The multiplier
+// (recipScale, bf16) and bias (zpBias, f32) are supplied as scalar tensor
+// values so both the constant and the runtime-scale paths share this code.
+static Value emitQuantizeChain(
+    PatternRewriter &rewriter, linalg::GenericOp op, Value input, Value recipScale, Value zpBias,
+    int32_t minI, int32_t maxI, RankedTensorType outTy
+) {
+    auto inTy = cast<RankedTensorType>(input.getType());
+    Type elemType = inTy.getElementType();
+    auto shape = inTy.getShape();
+    Location loc = op.getLoc();
+
+    // MulOp only supports bf16 floating-point, so do the scaling in bf16.
+    auto bf16Type = RankedTensorType::get(shape, rewriter.getBF16Type());
+    auto i32Type = RankedTensorType::get(shape, rewriter.getI32Type());
+
+    Value scaledInput = input;
+    if (elemType.isF32()) {
+        scaledInput = createActOp(rewriter, *op, "f2f", input, bf16Type);
+    }
+
+    // MulOp: bf16_input * recipScale + zpBias
+    Value mulInit = createInitTensor(op, rewriter, bf16Type);
+    Value mulOut =
+        torq_hl::MulOp::create(
+            rewriter, loc, bf16Type, mulInit, rewriter.getI32IntegerAttr(0),
+            rewriter.getI32IntegerAttr(0xff800000), rewriter.getI32IntegerAttr(0x7f800000), zpBias,
+            rewriter.getI8IntegerAttr(0), scaledInput, recipScale
+        )
+            .getOutput();
+
+    // ActOp f2i: bf16 -> int32 (round to nearest even)
+    Value f2iOut = createActOp(rewriter, *op, "f2i", mulOut, i32Type);
+
+    // FMAOp: int32 -> i8 clamp to [minI, maxI]
+    Value fmaInit = createInitTensor(op, rewriter, outTy);
+    Value weights = createI8Const(rewriter, op, {1}, llvm::ArrayRef<int64_t>{1});
+    Value biasScale = createI32Const(rewriter, op, interleave({0}, {1}));
+    return torq_hl::FMAOp::create(
+               rewriter, loc, outTy, fmaInit, rewriter.getI32IntegerAttr(0),
+               rewriter.getI32IntegerAttr(minI), rewriter.getI32IntegerAttr(maxI),
+               rewriter.getI32IntegerAttr(0), weights, biasScale, f2iOut
+    )
+        .getOutput();
+}
+
 struct QuantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
     const bool _markFuseGroups;
 
@@ -125,7 +172,14 @@ struct QuantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(op, "compile-time constant");
 
         double scale, zp, min, max;
-        if (!matchQuantGeneric(op, scale, zp, min, max))
+        bool isConst = matchQuantGeneric(op, scale, zp, min, max);
+
+        // DynamicQuantizeLinear supplies scale/zp as runtime scalars.
+        Value rtInvScale, rtZp;
+        double rtMin = 0.0, rtMax = 0.0;
+        bool isRuntime = !isConst && matchQuantRuntime(op, rtInvScale, rtZp, rtMin, rtMax);
+
+        if (!isConst && !isRuntime)
             return rewriter.notifyMatchFailure(op, "not a PT2E quant generic");
 
         // Discovery mode: mark standalone quantize generics as tile/fuse groups.
@@ -140,8 +194,21 @@ struct QuantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
         }
 
         Value input = op.getInputs()[0];
-        auto inTy = cast<RankedTensorType>(input.getType());
         auto outTy = cast<RankedTensorType>(op.getResult(0).getType());
+
+        if (isRuntime) {
+            // Convert the bf16 zero-point to the f32 bias the MulOp BRAM path
+            // expects; the reciprocal scale is already bf16 (WRAM multiplier).
+            auto zpTy = cast<RankedTensorType>(rtZp.getType());
+            auto zpF32Ty = RankedTensorType::get(zpTy.getShape(), rewriter.getF32Type());
+            Value zpBias = createActOp(rewriter, *op, "f2f", rtZp, zpF32Ty);
+            Value fmaOut = emitQuantizeChain(
+                rewriter, op, input, rtInvScale, zpBias, static_cast<int32_t>(std::llround(rtMin)),
+                static_cast<int32_t>(std::llround(rtMax)), outTy
+            );
+            rewriter.replaceOp(op, fmaOut);
+            return success();
+        }
 
         // Fold constant rescales (e.g., Q bias scale adjustments) so they do not
         // survive into tile-and-fuse as generics operating on constants.
@@ -153,48 +220,13 @@ struct QuantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
         if (!outTy.getElementType().isInteger(8))
             return rewriter.notifyMatchFailure(op, "non-i8 output without constant input");
 
-        Type elemType = inTy.getElementType();
-        auto shape = inTy.getShape();
-        Location loc = op.getLoc();
-
-        // MulOp only supports bf16 floating-point, so do the scaling in bf16.
-        auto bf16Type = RankedTensorType::get(shape, rewriter.getBF16Type());
-        auto i32Type = RankedTensorType::get(shape, rewriter.getI32Type());
-
-        Value scaledInput = input;
-        if (elemType.isF32()) {
-            scaledInput = createActOp(rewriter, *op, "f2f", input, bf16Type);
-        }
-
-        // MulOp: bf16_input * (1/scale) + zp
-        Value mulInit = createInitTensor(op, rewriter, bf16Type);
         Value recipScaleConst =
             createFloatScalarConst(rewriter, *op, rewriter.getBF16Type(), 1.0 / scale);
         Value zpBias = createFloatScalarConst(rewriter, *op, rewriter.getF32Type(), zp);
-        Value mulOut =
-            torq_hl::MulOp::create(
-                rewriter, loc, bf16Type, mulInit, rewriter.getI32IntegerAttr(0),
-                rewriter.getI32IntegerAttr(0xff800000), rewriter.getI32IntegerAttr(0x7f800000),
-                zpBias, rewriter.getI8IntegerAttr(0), scaledInput, recipScaleConst
-            )
-                .getOutput();
-
-        // ActOp f2i: bf16 -> int32
-        Value f2iOut = createActOp(rewriter, *op, "f2i", mulOut, i32Type);
-
-        // FMAOp: int32 -> i8 clamp to [min, max]
-        int32_t min_i = static_cast<int32_t>(std::llround(min));
-        int32_t max_i = static_cast<int32_t>(std::llround(max));
-        Value fmaInit = createInitTensor(op, rewriter, outTy);
-        Value weights = createI8Const(rewriter, op, {1}, llvm::ArrayRef<int64_t>{1});
-        Value biasScale = createI32Const(rewriter, op, interleave({0}, {1}));
-        Value fmaOut = torq_hl::FMAOp::create(
-                           rewriter, loc, outTy, fmaInit, rewriter.getI32IntegerAttr(0),
-                           rewriter.getI32IntegerAttr(min_i), rewriter.getI32IntegerAttr(max_i),
-                           rewriter.getI32IntegerAttr(0), weights, biasScale, f2iOut
-        )
-                           .getOutput();
-
+        Value fmaOut = emitQuantizeChain(
+            rewriter, op, input, recipScaleConst, zpBias, static_cast<int32_t>(std::llround(min)),
+            static_cast<int32_t>(std::llround(max)), outTy
+        );
         rewriter.replaceOp(op, fmaOut);
         return success();
     }

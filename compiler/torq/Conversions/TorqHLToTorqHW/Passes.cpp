@@ -78,6 +78,7 @@ void ConvertSliceProgramToTorqHwPass::runOnOperation() {
     patterns.add<ExpandWeightsPattern>(ctx);
     patterns.add<FillPattern>(ctx);
     patterns.add<ReducePattern>(ctx);
+    patterns.add<DeriveQuantParamsPattern>(ctx);
     patterns.add<ScatterPattern>(ctx);
 
     patterns.add<ActPattern>(ctx);

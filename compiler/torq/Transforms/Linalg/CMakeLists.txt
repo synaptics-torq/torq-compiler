@@ -30,6 +30,7 @@ iree_cc_library(
     RaiseResizeNearestNeighborPass.cpp
     FoldUnitExtentWrapperPass.cpp
     RaiseSoftmaxOpPattern.cpp
+    RaiseDynamicQuantizePattern.cpp
     OptimizeElementwiseBinaryOpPattern.cpp
     OptimizeSelectOpPattern.cpp
     DecomposeLinalgOpsPattern.cpp

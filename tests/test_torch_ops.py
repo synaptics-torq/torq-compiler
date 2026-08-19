@@ -119,6 +119,14 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in request.param.data.name for s in no_slicing_tc):
         extra_args["torq_compiler_options"].append("--torq-disable-slicing")
 
+    # ONNX DynamicQuantizeLinear tensors are always f32, so DQL is only reachable
+    # in a bf16 pipeline via --torq-convert-dtypes.
+    if 'dynamicquantize' in request.param.data.name:
+        extra_args["torq_compiler_options"].extend([
+            "--torq-convert-dtypes", "--torq-convert-io-dtype",
+            "--torq-disable-host", "--torq-disable-css",
+        ])
+
 
     # Option Test for conv1d with truncf before reduce (memory-optimized mode) to maintain easily
     # This enables --torq-conv1d-truncate-for-reduce to test bf16 reduce input

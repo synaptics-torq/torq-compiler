@@ -745,4 +745,81 @@ matchOutputQuantization(Value candidate, PatternRewriter &rewriter, QuantizedOpC
     return success();
 }
 
+// Return the scalar tensor operand feeding block argument `v` of `op`, or null
+// if `v` is not a runtime scalar block argument.
+static Value getRuntimeScalarOperand(Value v, linalg::GenericOp op) {
+    auto blockArg = dyn_cast<BlockArgument>(v);
+    if (!blockArg || blockArg.getOwner() != op.getBody())
+        return nullptr;
+    unsigned idx = blockArg.getArgNumber();
+    if (idx >= op.getNumDpsInputs())
+        return nullptr;
+    Value operand = op.getDpsInputOperand(idx)->get();
+    auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
+    if (!tensorType || tensorType.getNumElements() != 1)
+        return nullptr;
+    if (getQFloatScalar(operand))
+        return nullptr; // compile-time constant -> not the runtime path
+    return operand;
+}
+
+// Unsigned runtime quant (DynamicQuantizeLinear):
+//   mulf(x, %inv_scale) -> addf(%zp) -> (math.roundeven) -> maximumf(min)
+//   -> minimumf(max) -> arith.fptoui
+// where %inv_scale and %zp are scalar tensor operands (not constants). Unlike
+// the constant flavors, scale/zp cannot be folded to doubles, so they are
+// returned as SSA operands.
+bool matchQuantRuntime(linalg::GenericOp op, Value &invScale, Value &zp, double &min, double &max) {
+    if (!op || op.getNumDpsInputs() < 2 || op.getNumDpsInits() != 1)
+        return false;
+    if (!op.getRegion().hasOneBlock())
+        return false;
+    auto inTy = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
+    auto outTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!inTy || !outTy)
+        return false;
+    if (!outTy.getElementType().isInteger(8))
+        return false;
+    if (!inTy.getElementType().isBF16() && !inTy.getElementType().isF32())
+        return false;
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+        return false;
+    auto fptoui = yieldOp.getOperand(0).getDefiningOp<arith::FPToUIOp>();
+    if (!fptoui)
+        return false;
+
+    Value chain;
+    if (!extractQuantClampBounds(fptoui.getIn(), op, min, max, chain))
+        return false;
+
+    // Rounding is optional: the HW f2i epilogue rounds regardless, so the
+    // linalg body may or may not carry an explicit roundeven.
+    if (auto roundOp = chain.getDefiningOp<math::RoundEvenOp>())
+        chain = roundOp.getOperand();
+
+    // addf(mul, %zp): one operand is the scalar zero-point.
+    auto addf = chain.getDefiningOp<arith::AddFOp>();
+    if (!addf)
+        return false;
+    Value mulVal;
+    if ((zp = getRuntimeScalarOperand(addf.getLhs(), op)))
+        mulVal = addf.getRhs();
+    else if ((zp = getRuntimeScalarOperand(addf.getRhs(), op)))
+        mulVal = addf.getLhs();
+    else
+        return false;
+
+    // mulf(x, %inv_scale): one operand is the scalar reciprocal scale.
+    auto mulf = mulVal.getDefiningOp<arith::MulFOp>();
+    if (!mulf)
+        return false;
+    if ((invScale = getRuntimeScalarOperand(mulf.getLhs(), op)))
+        return true;
+    if ((invScale = getRuntimeScalarOperand(mulf.getRhs(), op)))
+        return true;
+    return false;
+}
+
 } // namespace mlir::syna::torq

@@ -33,6 +33,7 @@ set(sources
     TablePattern.cpp
     TransposePattern.cpp
     ReducePattern.cpp
+    DeriveQuantParamsPattern.cpp
     ElementWiseBinaryPattern.cpp
     ElementWiseUnaryPattern.cpp
     ElementWiseShiftPattern.cpp

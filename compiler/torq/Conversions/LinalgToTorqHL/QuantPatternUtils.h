@@ -304,4 +304,13 @@ Value buildDynamicInterleavedBiasScale(
     Value bias, int32_t multiplier, Location loc, PatternRewriter &rewriter
 );
 
+// Match a runtime-scale/zp unsigned quantize linalg.generic (DynamicQuantizeLinear):
+//   mulf(x, %inv_scale) -> addf(%zp) -> (math.roundeven) -> maximumf(min)
+//   -> minimumf(max) -> arith.fptoui
+// Unlike the constant flavors above, the scale and zero-point are *runtime* SSA
+// scalars (derived from a reduction over the input) and cannot be folded to
+// doubles, so they are returned as operands: `invScale` is the reciprocal scale
+// (1/scale) and `zp` the unrounded zero-point.
+bool matchQuantRuntime(linalg::GenericOp op, Value &invScale, Value &zp, double &min, double &max);
+
 } // namespace mlir::syna::torq

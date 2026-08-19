@@ -246,6 +246,53 @@ def TorqHL_ReduceOp: TorqHL_LayerOp<"reduce"> {
   ));
 }
 
+def TorqHL_DeriveQuantParamsOp: TorqHL_LayerOp<"derive_quant_params"> {
+  let summary = "Derive dynamic-quantize scale/zero-point from a min/max pair";
+  let description = [{
+    Compute the per-tensor DynamicQuantizeLinear parameters from the reduced
+    min and max of the input, as a single kernel.
+    Lowers to a short sequence of slice_tasks inside one program body.
+
+    Operands:
+    [outputs]
+      * `init`: <11xbf16>, slots for holding final and intermediate results.
+    [runtime tensors]
+      * `min_x`, `max_x`: <1xbf16>, the reduced min and max of the tensor being quantized.
+    [compile-time constants]
+      * `mul_weight`: <2xbf16> {255.0, 1/255}, the quantized range and its inverse as WRAM
+        weights (for uint8 output).
+      * `sub_scale_bias`: <2xi32> {bias, scale} = {-0x7E80, -1}. The ACT affine pair that
+        computes the exponent term of the bf16 reciprocal, `(bits16(v) + bias) * scale`,
+        i.e. `0x7E80 - bits16(v)`, where bits16(v) is the bf16 bit pattern read as i16.
+      * `table_scale_bias`: <2xi32> {bias, scale} = {-128, 128}. The ACT affine pair that
+        maps the low byte of bits16(v) to an index into the reciprocal's 256-entry mantissa
+        LUT (the LUT itself is a constant of the lowering; entries are packed as int8 << 8).
+
+      max_adj     = max(max_x, 0)
+      neg_min_adj = max(-min_x, 0)                    // = -min(min_x, 0)
+      range_safe  = max(max_adj + neg_min_adj, eps)   // eps = 1e-12, div-by-zero guard
+      inv_scale   = recip(range_safe) * mul_weight[0] // = 255 / range_safe (approx, see below)
+      scale       = range_safe * mul_weight[1]        // = range_safe / 255, ONNX's y_scale
+      zp          = neg_min_adj * inv_scale           // unrounded, in [0, 255]
+
+    The outputs land in `init[0]` = inv_scale, `init[1]` = zp, `init[2]` = scale.
+    See DeriveQuantParamsPattern.cpp for full slot layout.
+    NOTE:
+    `scale` and `inv_scale` are each correctly rounded, but they are rounded *separately*, so
+    they are not exact inverses: `scale * inv_scale = 1 + eps` with eps measured over all bf16
+    ranges at median 0.5 and max 1.7 bf16 ULP (0.2% / 0.65%), and exactly 1.0 for only 1.6% of
+    inputs.
+  }];
+
+  let arguments = !con(commonArgs, (ins
+    TensorOrMemref:$min_x,
+    TensorOrMemref:$max_x,
+    TensorOrMemref:$sub_scale_bias,
+    TensorOrMemref:$table_scale_bias,
+    TensorOrMemref:$mul_weight
+  ));
+}
+
 def TorqHL_ElementWiseBinaryOp: TorqHL_LayerOp<"elementwisebinary"> {
   let summary = "Elementwise Binary operator";
   let description = [{

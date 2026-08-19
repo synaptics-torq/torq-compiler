@@ -751,6 +751,10 @@ std::unique_ptr<OperationPass<ModuleOp>> createTorqConvertAllDTypesPass() {
 void buildTorqTypeConversionPipeline(OpPassManager &passManager) {
     if (clConvertDtypes) {
         passManager.addPass(createTorqConvertAllDTypesPass());
+        // Canonicalize the converted IR before dispatch formation.
+        // Otherwise, the dtype conversion leaves the rebuilt scalar constants at
+        // function scope, producing a dominance violation ("operand does not dominate this use").
+        passManager.addPass(mlir::createCanonicalizerPass());
     }
 }
 

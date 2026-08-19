@@ -978,12 +978,15 @@ static torq_hl::ReduceOp emitTorqReduce(
     );
 }
 
+// A reduction generic may have one output (the common case) or two — a combined
+// min+max reduce (DynamicQuantizeLinear) yields both bounds from a single pass
+// over the input. Each output carries its own combine op, init and result type.
 struct GenericReductionInfo {
     Value input;
-    Value init;
-    RankedTensorType resultType;
+    SmallVector<Value> inits;
+    SmallVector<RankedTensorType> resultTypes;
+    SmallVector<std::string> opNames;
     int64_t axis;
-    std::string opName;
 };
 
 static FailureOr<GenericReductionInfo>
@@ -996,22 +999,13 @@ getGenericReductionInfo(linalg::GenericOp srcOp, PatternRewriter &rewriter) {
         return failure();
     }
 
-    if (srcOp.getNumDpsInits() != 1) {
+    unsigned numInits = srcOp.getNumDpsInits();
+    if (numInits < 1 || numInits > 2) {
         return failure();
     }
 
     auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
-    if (!yieldOp) {
-        return failure();
-    }
-
-    auto reduceBodyOp = yieldOp.getOperand(0).getDefiningOp();
-    if (!reduceBodyOp) {
-        return failure();
-    }
-
-    auto opName = getReduceOpName(reduceBodyOp);
-    if (failed(opName)) {
+    if (!yieldOp || yieldOp.getNumOperands() != numInits) {
         return failure();
     }
 
@@ -1032,12 +1026,43 @@ getGenericReductionInfo(linalg::GenericOp srcOp, PatternRewriter &rewriter) {
         return failure();
     }
 
-    Value init = srcOp.getDpsInitOperand(0)->get();
+    GenericReductionInfo info;
+    info.input = srcOp.getInputs()[0];
+    info.axis = static_cast<int64_t>(*reductionAxis);
+    for (unsigned i = 0; i < numInits; ++i) {
+        auto reduceBodyOp = yieldOp.getOperand(i).getDefiningOp();
+        if (!reduceBodyOp) {
+            return failure();
+        }
+        auto opName = getReduceOpName(reduceBodyOp);
+        if (failed(opName)) {
+            return failure();
+        }
+        info.opNames.push_back(*opName);
+        info.inits.push_back(srcOp.getDpsInitOperand(i)->get());
+        info.resultTypes.push_back(cast<RankedTensorType>(srcOp.getResultTypes()[i]));
+    }
 
-    return GenericReductionInfo{
-        srcOp.getInputs()[0], init, cast<RankedTensorType>(srcOp.getResultTypes()[0]),
-        static_cast<int64_t>(*reductionAxis), *opName
-    };
+    return info;
+}
+
+/// Combine a tiled reduction's per-tile partial with the running accumulator
+/// (an scf.for iter_arg) using the reduction's own semantics: max/min fold with
+/// an elementwise MAX/MIN, everything else (sum, ...) with an additive combine.
+static FailureOr<Value> mergeReductionPartial(
+    linalg::GenericOp srcOp, Value init, Value partial, StringRef opName, PatternRewriter &rewriter
+) {
+    if (opName == "reduce_max") {
+        return makeElementWiseBinary(
+            srcOp, rewriter, init, partial, torq_hl::ElementwiseOpEnum::MAXIMUM
+        );
+    }
+    if (opName == "reduce_min") {
+        return makeElementWiseBinary(
+            srcOp, rewriter, init, partial, torq_hl::ElementwiseOpEnum::MINIMUM
+        );
+    }
+    return addInitToResult(init, partial, rewriter);
 }
 
 static bool isScfAccumulator(Value value) {
@@ -1064,38 +1089,40 @@ struct GenericReductionConversion : public OpRewritePattern<linalg::GenericOp> {
         LLVM_DEBUG({
             llvm::dbgs() << "\nGenericReductionConversion: Reduce source op:\n";
             srcOp.dump();
-            llvm::dbgs() << "\nGenericReductionConversion: Reduction init:\n";
-            info->init.dump();
         });
-        if (auto blockArg = dyn_cast<BlockArgument>(info->init)) {
-            LLVM_DEBUG({
-                llvm::dbgs() << "arg index=" << blockArg.getArgNumber() << "\n";
-                llvm::dbgs() << "owner op:\n";
-                blockArg.getOwner()->getParentOp()->dump();
-            });
-        }
 
         const std::vector<int32_t> bias = {0};
         const std::vector<int32_t> scale = {1};
-
         Value scaleBias = createI32Const(rewriter, srcOp, interleave(bias, scale));
-        auto reduceOp = emitTorqReduce(
-            rewriter, srcOp, info->resultType, info->opName, info->axis, scaleBias,
-            /*outputMin*/ 0, /*outputMax*/ 0, info->input
-        );
 
-        if (!isScfAccumulator(info->init)) {
-            rewriter.replaceOp(srcOp, reduceOp.getResult(0));
-            return success();
-        }
-
-        FailureOr<Value> accumulated = addInitToResult(info->init, reduceOp.getResult(0), rewriter);
-        if (failed(accumulated)) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "failed to accumulate tiled reduction into scf iter_arg"
+        // Emit one torq_hl.reduce per output. For a combined min+max reduce both
+        // reduces read the same `input`; block-local load dedup collapses that to
+        // a single DMA per tile, so min and max share one streaming pass.
+        SmallVector<Value> results;
+        results.reserve(info->inits.size());
+        for (auto [i, init] : llvm::enumerate(info->inits)) {
+            auto reduceOp = emitTorqReduce(
+                rewriter, srcOp, info->resultTypes[i], info->opNames[i], info->axis, scaleBias,
+                /*outputMin*/ 0, /*outputMax*/ 0, info->input
             );
+            Value result = reduceOp.getResult(0);
+
+            // When tiled, the reduce produces a per-tile partial that must fold
+            // into the scf.for accumulator with the reduction's own combine op.
+            if (isScfAccumulator(init)) {
+                FailureOr<Value> merged =
+                    mergeReductionPartial(srcOp, init, result, info->opNames[i], rewriter);
+                if (failed(merged)) {
+                    return rewriter.notifyMatchFailure(
+                        srcOp, "failed to accumulate tiled reduction into scf iter_arg"
+                    );
+                }
+                result = *merged;
+            }
+            results.push_back(result);
         }
-        rewriter.replaceOp(srcOp, *accumulated);
+
+        rewriter.replaceOp(srcOp, results);
         return success();
     }
 };

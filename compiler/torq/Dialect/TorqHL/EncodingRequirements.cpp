@@ -447,6 +447,8 @@ KernelEncoding TableOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ReduceOp::getKernelEncoding() { return getNoEncoding(); }
 
+KernelEncoding DeriveQuantParamsOp::getKernelEncoding() { return getNoEncoding(); }
+
 KernelEncoding ElementWiseShiftOp::getKernelEncoding() {
     return {
         {},
