@@ -108,4 +108,12 @@ void populateLinalgToTorqHLExtractPatterns(
 
 void populateLinalgToTorqHLExpandWeightsPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+// Raises the nearest-neighbour resize gather (a data-dependent tensor.extract
+// linalg.generic emitted by the ONNX importer) to a broadcast + collapse_shape
+// so it runs on NSS. Must run before dispatch formation / tile-and-fuse, where
+// the gather is still a clean rank-4 generic.
+void populateResizeNearestNeighborRaisingPatterns(
+    MLIRContext *context, RewritePatternSet &patterns
+);
+
 } // namespace mlir::syna::torq

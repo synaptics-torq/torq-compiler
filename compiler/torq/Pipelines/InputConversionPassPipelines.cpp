@@ -9,8 +9,12 @@
 #include "torq/Conversions/LinalgToTorqHL/Passes.h"
 #include "torq/Conversions/TosaToLinalg/Passes.h"
 #include "torq/Conversions/TosaToTorqHL/Passes.h"
+#include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Transforms/Linalg/Passes.h"
 #include "torq/Transforms/TorqHL/Passes.h"
+
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 
 #include "compiler/plugins/input/StableHLO/Conversion/Passes.h"
 #include "compiler/plugins/input/TOSA/InputConversion/Passes.h"
@@ -127,6 +131,13 @@ void buildTorchTransformPassPipeline(OpPassManager &passManager) {
 
     // apply Torq-specific type conversion
     buildTorqTypeConversionPipeline(passManager);
+
+    // Raise nearest-neighbour resize gathers to a broadcast + collapse_shape so
+    // they run on NSS. This must happen before dispatch formation / tile-and-fuse:
+    // afterwards the gather is squeezed and channel-tiled inside an scf.forall and
+    // can no longer be recognised, and would fall to a CSS host kernel that
+    // overflows the NSS instruction/data TCM.
+    passManager.addNestedPass<func::FuncOp>(createRaiseResizeNearestNeighborPass());
 
     // annotate tied operands for in-place buffer reuse
     if (clAnnotateTiedOperands)

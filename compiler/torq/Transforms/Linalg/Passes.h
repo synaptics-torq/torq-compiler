@@ -29,6 +29,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeLinalgForTorqP
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvertNhwcOpToNchwPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createRaiseResizeNearestNeighborPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldUnitExtentWrapperPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeTransposeLayoutPass();

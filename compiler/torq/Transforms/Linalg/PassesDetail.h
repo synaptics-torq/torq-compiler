@@ -15,12 +15,14 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
+#include "torq/Dialect/TorqHL/TorqHLDialect.h"
 
 namespace mlir::syna::torq {
 
 #define GEN_PASS_DECL
 
 #define GEN_PASS_DEF_CONVERTNHWCOPTONCHW
+#define GEN_PASS_DEF_RAISERESIZENEARESTNEIGHBOR
 #define GEN_PASS_DEF_FOLDUNITEXTENTWRAPPER
 #define GEN_PASS_DEF_FOLDCONSTANTS
 #define GEN_PASS_DEF_GENERALIZELINALGNAMEDOPS

@@ -2633,6 +2633,272 @@ struct GenericToTransposeBroadcastOpConversion : public OpRewritePattern<linalg:
 };
 
 // Input will always be in NCHW format
+// Walk the backward slice of `v` within a linalg body, collecting which
+// linalg.index loop dims it depends on and whether a math.floor is on the path.
+// Used to recognise a nearest-neighbour gather: the N/C indices are copied
+// straight from their loop dim while the H/W indices are floor(loopdim / scale).
+static void analyzeGatherIndex(
+    Value v, llvm::SmallDenseSet<int64_t> &dims, bool &hasFloor,
+    llvm::SmallPtrSetImpl<Operation *> &visited
+) {
+    Operation *def = v.getDefiningOp();
+    if (!def) {
+        return; // block argument or externally-defined constant
+    }
+    if (auto idxOp = dyn_cast<linalg::IndexOp>(def)) {
+        dims.insert(idxOp.getDim());
+        return;
+    }
+    if (isa<math::FloorOp>(def)) {
+        hasFloor = true;
+    }
+    if (!visited.insert(def).second) {
+        return;
+    }
+    for (Value operand : def->getOperands()) {
+        analyzeGatherIndex(operand, dims, hasFloor, visited);
+    }
+}
+
+// Raises the nearest-neighbour resize form emitted by the ONNX importer to a
+// broadcast + collapse_shape (a tileable op that runs on NSS) instead of leaving
+// it as a data-dependent gather that falls to a CSS host kernel (which then overflows
+// the NSS instruction/data TCM). The importer emits an all-parallel
+// linalg.generic whose body computes h_src = floor(h_out / scale) and
+// w_src = floor(w_out / scale) and does a single tensor.extract from the input.
+// By the time this pass runs the op is already inside a dispatch and the unit
+// batch dim has been squeezed off the gather source, so the rank-4 NCHW output
+// gathers from a rank-3 [C, H, W] source; we expand that back to rank 4 for the
+// NSS op.
+struct ResizeNearestNeighborGatherConversion : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
+
+        if (genericOp.getNumResults() != 1) {
+            return rewriter.notifyMatchFailure(genericOp, "expected a single result");
+        }
+        auto outTy = dyn_cast<RankedTensorType>(genericOp.getResult(0).getType());
+        // Only rank-4 NCHW upsampling is supported by the NSS resize.
+        if (!outTy || outTy.getRank() != 4) {
+            return rewriter.notifyMatchFailure(genericOp, "expected a rank-4 result");
+        }
+        if (genericOp.getNumParallelLoops() != genericOp.getNumLoops()) {
+            return rewriter.notifyMatchFailure(genericOp, "expected all-parallel loops");
+        }
+
+        Block &body = genericOp.getRegion().front();
+
+        // The body must be a pure gather: exactly one tensor.extract and the
+        // yield must return its result directly (an interpolating resize such as
+        // bilinear has several extracts feeding a weighted sum).
+        tensor::ExtractOp extractOp;
+        int extractCount = 0;
+        for (Operation &op : body.without_terminator()) {
+            if (auto e = dyn_cast<tensor::ExtractOp>(op)) {
+                extractOp = e;
+                extractCount++;
+            }
+        }
+        if (extractCount != 1 || !extractOp) {
+            return rewriter.notifyMatchFailure(genericOp, "expected exactly one tensor.extract");
+        }
+        auto yieldOp = cast<linalg::YieldOp>(body.getTerminator());
+        if (yieldOp.getNumOperands() != 1 || yieldOp.getOperand(0) != extractOp.getResult()) {
+            return rewriter.notifyMatchFailure(genericOp, "yield must return the extracted value");
+        }
+
+        // The gather source is the resize input: rank 3 (batch squeezed) or 4,
+        // static, and defined outside the generic body.
+        Value src = extractOp.getTensor();
+        auto srcTy = dyn_cast<RankedTensorType>(src.getType());
+        int64_t srcRank = srcTy ? srcTy.getRank() : 0;
+        if (!srcTy || !srcTy.hasStaticShape() || srcRank < 3 || srcRank > 4) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "expected a rank 3/4 static gather source"
+            );
+        }
+        if (Operation *srcDef = src.getDefiningOp()) {
+            if (genericOp->isProperAncestor(srcDef)) {
+                return rewriter.notifyMatchFailure(genericOp, "gather source defined inside body");
+            }
+        }
+
+        auto indices = extractOp.getIndices();
+        if (static_cast<int64_t>(indices.size()) != srcRank) {
+            return rewriter.notifyMatchFailure(genericOp, "extract indices must match source rank");
+        }
+
+        // Resolve the static output shape. Before dispatch formation the generic
+        // result is dynamic (tensor<1x8x?x?>) and cast to a static shape by a
+        // downstream tensor.cast; use that cast to recover the concrete extents.
+        RankedTensorType staticOutTy;
+        if (outTy.hasStaticShape()) {
+            staticOutTy = outTy;
+        }
+        else {
+            for (Operation *user : genericOp.getResult(0).getUsers()) {
+                if (auto castOp = dyn_cast<tensor::CastOp>(user)) {
+                    auto ct = dyn_cast<RankedTensorType>(castOp.getType());
+                    if (ct && ct.hasStaticShape() && ct.getRank() == 4) {
+                        staticOutTy = ct;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!staticOutTy) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "could not determine static output shape"
+            );
+        }
+
+        auto depsOf = [](Value v, bool &hasFloor) {
+            llvm::SmallDenseSet<int64_t> dims;
+            llvm::SmallPtrSet<Operation *, 16> visited;
+            analyzeGatherIndex(v, dims, hasFloor, visited);
+            return dims;
+        };
+        auto subsetOf = [](const llvm::SmallDenseSet<int64_t> &s, int64_t k) {
+            for (int64_t x : s) {
+                if (x != k) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        // The output rank is 4 (NCHW); the (4 - srcRank) leading output dims are
+        // the squeezed unit dims and must have extent 1. Source dim i aligns with
+        // output dim i + leadingUnit. The trailing two source dims (H, W) must be
+        // floor-downscaled from their loop dim; the rest (batch/channel) copied.
+        int64_t leadingUnit = 4 - srcRank;
+        auto oShape = staticOutTy.getShape();
+        auto inShape = srcTy.getShape();
+        for (int64_t i = 0; i < leadingUnit; i++) {
+            if (oShape[i] != 1) {
+                return rewriter.notifyMatchFailure(genericOp, "squeezed leading dim is not unit");
+            }
+        }
+        for (int64_t i = 0; i < srcRank; i++) {
+            // Walk each extract index backwards: `deps` is the set of loop dims it is
+            // computed from, `hasFloor` whether a math.floor lies on that path. A
+            // spatial (H/W) index must be a floor-downscale of exactly its own output
+            // dim; a batch/channel index must be an identity read of its own dim
+            // (same extent, no floor -- a floor-downscale with unchanged extent would
+            // silently read the wrong channel if treated as identity).
+            int64_t outDim = i + leadingUnit;
+            bool hasFloor = false;
+            auto deps = depsOf(indices[i], hasFloor);
+            bool isSpatial = (i >= srcRank - 2);
+            if (isSpatial) {
+                if (!subsetOf(deps, outDim) || !deps.count(outDim) || !hasFloor) {
+                    return rewriter.notifyMatchFailure(
+                        genericOp, "H/W index is not a floor downscale"
+                    );
+                }
+            }
+            else {
+                if (hasFloor || !subsetOf(deps, outDim)) {
+                    return rewriter.notifyMatchFailure(
+                        genericOp, "batch/channel index not identity"
+                    );
+                }
+                if (inShape[i] != oShape[outDim]) {
+                    return rewriter.notifyMatchFailure(genericOp, "batch/channel extent changed");
+                }
+            }
+        }
+
+        int64_t srcH = inShape[srcRank - 2], srcW = inShape[srcRank - 1];
+        int64_t outH = oShape[2], outW = oShape[3];
+        if (srcH == 0 || srcW == 0 || outH % srcH != 0 || outW % srcW != 0) {
+            return rewriter.notifyMatchFailure(genericOp, "output is not an integer upscale");
+        }
+        int64_t scaleH = outH / srcH, scaleW = outW / srcW;
+        if (scaleH != scaleW || scaleH < 2) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "expected a uniform integer upscale >= 2"
+            );
+        }
+
+        // The NSS resize works on rank-4 tensors; re-expand a squeezed source.
+        Value src4 = src;
+        if (srcRank < 4) {
+            SmallVector<int64_t> expandedShape(leadingUnit, 1);
+            expandedShape.append(inShape.begin(), inShape.end());
+            auto expandedTy = RankedTensorType::get(expandedShape, srcTy.getElementType());
+            // group the extra leading unit dims with the first real source dim
+            SmallVector<ReassociationIndices> reassoc;
+            ReassociationIndices first;
+            for (int64_t i = 0; i <= leadingUnit; i++) {
+                first.push_back(i);
+            }
+            reassoc.push_back(first);
+            for (int64_t i = leadingUnit + 1; i < 4; i++) {
+                reassoc.push_back({i});
+            }
+            src4 = tensor::ExpandShapeOp::create(
+                       rewriter, genericOp.getLoc(), expandedTy, src, reassoc
+            )
+                       .getResult();
+        }
+
+        // Express the integer nearest-neighbour upsample as a broadcast + reshape
+        // rather than a monolithic torq_hl.ResizeNearestNeighbor. A broadcast is a
+        // tileable linalg op (raised to torq_hl.broadcast, which runs on NSS and
+        // works for any element type), so tile-and-fuse can split large resizes to
+        // fit LRAM -- the resize op has no TilingInterface and would overflow LRAM
+        // whole. For src [N,C,H,W] and scale s the output element [n,c,oh,ow] with
+        // oh = h*s+hs, ow = w*s+ws equals src[n,c,h,w] (independent of hs,ws), so
+        // broadcasting src into [N,C,H,s,W,s] and collapsing to [N,C,H*s,W*s] is
+        // exactly floor-asymmetric nearest upsampling.
+        Location loc = genericOp.getLoc();
+        auto elemTy = srcTy.getElementType();
+        int64_t nDim = oShape[0], cDim = oShape[1];
+        SmallVector<int64_t> bcastShape = {nDim, cDim, srcH, scaleH, srcW, scaleW};
+        auto bcastTy = RankedTensorType::get(bcastShape, elemTy);
+        Value bcastInit = tensor::EmptyOp::create(rewriter, loc, bcastShape, elemTy).getResult();
+
+        // input map (n,c,h,hs,w,ws) -> (n,c,h,w) drops the two scale dims; output
+        // map is the 6-D identity. This is the projected-permutation form the
+        // GenericToBroadcastOpConversion recognises.
+        MLIRContext *ctx = rewriter.getContext();
+        AffineMap inMap = AffineMap::get(
+            6, 0,
+            {rewriter.getAffineDimExpr(0), rewriter.getAffineDimExpr(1),
+             rewriter.getAffineDimExpr(2), rewriter.getAffineDimExpr(4)},
+            ctx
+        );
+        AffineMap outMap = rewriter.getMultiDimIdentityMap(6);
+        SmallVector<utils::IteratorType> iterators(6, utils::IteratorType::parallel);
+        auto bcastOp = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{bcastTy}, ValueRange{src4}, ValueRange{bcastInit},
+            ArrayRef<AffineMap>{inMap, outMap}, iterators,
+            [](OpBuilder &b, Location l, ValueRange args) {
+                linalg::YieldOp::create(b, l, args[0]);
+            }
+        );
+
+        // collapse [N,C,H,s,W,s] -> [N,C,H*s,W*s]
+        SmallVector<ReassociationIndices> collapseReassoc = {{0}, {1}, {2, 3}, {4, 5}};
+        Value result = tensor::CollapseShapeOp::create(
+                           rewriter, loc, staticOutTy, bcastOp.getResult(0), collapseReassoc
+        )
+                           .getResult();
+
+        // Re-wrap to the generic's (possibly dynamic) result type so existing
+        // users -- e.g. the downstream tensor.cast -- stay well-typed.
+        if (staticOutTy != outTy) {
+            result = tensor::CastOp::create(rewriter, loc, outTy, result).getResult();
+        }
+        rewriter.replaceOp(genericOp, result);
+        return success();
+    }
+};
+
 struct ResizeNearestNeighborOpConversion : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -2863,6 +3129,12 @@ struct Im2ColOpConversion : public OpRewritePattern<linalg::GenericOp> {
         return success();
     }
 };
+
+void populateResizeNearestNeighborRaisingPatterns(
+    MLIRContext *context, RewritePatternSet &patterns
+) {
+    patterns.insert<ResizeNearestNeighborGatherConversion>(context);
+}
 
 void populateLinalgToTorqHLPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups

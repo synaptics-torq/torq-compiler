@@ -311,4 +311,28 @@ def TorqAnnotateTorqResources : Pass<"torq-annotate-torq-resources", "mlir::Modu
     ];
 }
 
+def RaiseResizeNearestNeighbor :
+    InterfacePass<"torq-raise-resize-nearest-neighbor", "mlir::FunctionOpInterface"> {
+
+    let summary = "Raise nearest-neighbor resize gathers to broadcast+collapse (NSS)";
+
+    let description = [{
+        The ONNX importer lowers nearest-neighbor Resize to a data-dependent
+        tensor.extract gather inside a linalg.generic. The gather has no
+        TilingInterface, so it falls to a CSS host kernel and overflows ITCM.
+        Rewrite integer upscales as a broadcast + tensor.collapse_shape (each
+        pixel repeated into an s x s block), which is tileable and runs on NSS.
+        Must run before dispatch formation, while the gather is still a clean
+        rank-4 linalg.generic.
+    }];
+
+    let constructor = "mlir::syna::torq::createRaiseResizeNearestNeighborPass()";
+
+    let dependentDialects = [
+        "mlir::linalg::LinalgDialect",
+        "mlir::tensor::TensorDialect",
+        "mlir::syna::torq_hl::TorqHLDialect"
+    ];
+}
+
 #endif // IREE_CODEGEN_SYNPHL_TO_HW_PASSES
