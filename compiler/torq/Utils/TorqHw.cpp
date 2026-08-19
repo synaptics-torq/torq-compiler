@@ -13,7 +13,7 @@ namespace mlir::syna::torq {
 
 llvm::SmallVector<TorqHw, 1> hwTypes = {TorqHw(
     "SL2610", 0x0, "Synaptics SL2610 SoC family", 512 * 1024, 2, "coral_v1", "nss_v1", 8, 0.65,
-    "aarch64-unknown-linux-gnu", "generic", "+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse,+sve"
+    "aarch64-unknown-linux-gnu", "generic", "+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse,+fullfp16"
 )};
 
 #define TORQ_CUSTOM_FORMAT                                                                         \
