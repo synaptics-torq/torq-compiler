@@ -40,6 +40,8 @@ class OptimizeLinalgForTorqPass
 
         populateOptimizeElementwiseBinaryOpPatterns(ctx, patterns);
 
+        populateOptimizePowPatterns(ctx, patterns);
+
         populateRaiseSoftmaxOpPatterns(ctx, patterns);
 
         populateRaiseDynamicQuantizeOpPatterns(ctx, patterns);

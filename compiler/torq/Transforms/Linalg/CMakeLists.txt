@@ -44,6 +44,7 @@ iree_cc_library(
     FuseReluClampWithTruncfPattern.cpp
     CommonStandardizationPatterns.cpp
     DecomposeConvToSpaceToDepthPass.cpp
+    OptimizePowOpPattern.cpp
   DEPS
     ::PassesIncGen
     MLIRArithDialect

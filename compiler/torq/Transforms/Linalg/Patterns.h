@@ -31,6 +31,8 @@ void populateOptimizeArithElementwiseBinaryOpPatterns(
     MLIRContext *ctx, RewritePatternSet &patterns
 );
 
+void populateOptimizePowPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 void populateCastI32MulPatterns(FunctionOpInterface funcOp, IRRewriter &rewriter);
 
 void populateSwishActivationPatterns(MLIRContext *context, RewritePatternSet &patterns);
