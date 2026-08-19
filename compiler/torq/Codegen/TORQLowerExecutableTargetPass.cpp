@@ -256,6 +256,18 @@ void addNssUpToAssignLramAddresses(OpPassManager &pm, bool optimizeForTileAndFus
     // Canonicalize to fold constants and types after the loop unrolling in the previous pass
     funcPm.addPass(createCanonicalizerPass());
 
+    // Lower slice ProgramOp bodies to TorqHW before deallocation/addressing.
+    // Kept here so memory-management passes run after the op form is stabilized.
+    //
+    // Skipped for the tile-and-fuse memory-fit trial
+    if (!optimizeForTileAndFuse) {
+        funcPm.addNestedPass<torq_hl::ProgramOp>(createConvertSliceProgramToTorqHwPass());
+
+        if (clEnableTorqProfiling) {
+            funcPm.addPass(createAnnotateDmaAndSliceCyclesPass());
+        }
+    }
+
     if (!clFromPreBufferizedIR) {
         funcPm.addPass(createAddDeallocationPass());
     }
@@ -270,9 +282,6 @@ void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
 
         // assign addresses to DTCM, ITCM, and XRAM
         funcPm.addPass(createAssignDtcmItcmXramAddressesPass());
-
-        // lower torq_hl operation inside torq_hl::ProgramOp to torq_hw operations
-        funcPm.addNestedPass<torq_hl::ProgramOp>(createConvertSliceProgramToTorqHwPass());
 
         // compile slice programs
         funcPm.addPass(createCompileSliceInvocationsPass());

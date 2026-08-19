@@ -22,6 +22,7 @@ iree_cc_library(
     ShapeUtils.cpp
     ExecutorAssignment.cpp
     StorageUtils.cpp
+    DmaProfilingUtils.cpp
   HDRS
     MemoryUtils.h
     PassProgressUtils.h

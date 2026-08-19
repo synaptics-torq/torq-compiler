@@ -90,6 +90,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgSlicingPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAddDeallocationPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createAnnotateDmaAndSliceCyclesPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createProfilingPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createKernelSelectionPass();

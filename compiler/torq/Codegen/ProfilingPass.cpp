@@ -23,6 +23,7 @@
 #include "torq/Dialect/TorqHW/TorqHWOps.h"
 #include "torq/Transforms/TorqHL/Passes.h"
 #include "torq/Transforms/TorqHL/PassesDetail.h"
+#include "torq/Utils/DmaProfilingUtils.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -42,11 +43,6 @@
 static llvm::cl::opt<std::string> clTorqProfilingDump(
     "torq-dump-profiling", llvm::cl::desc("Dump profiling information to specified path"),
     llvm::cl::init("")
-);
-
-static llvm::cl::opt<bool> clTorqDisableNdlCycleCheck(
-    "torq-disable-ndl-cycle-check", llvm::cl::desc("Disable NDL cycle match checks in profiling"),
-    llvm::cl::init(true)
 );
 
 using namespace std;
@@ -104,14 +100,8 @@ struct ProfStruct {
     SliceTimeline sliceTimeline;
     CSSTimeline cssTimeline;
 
-    std::string currentDmaInLoc;
-    std::string currentDmaOutLoc;
-
-    uint64_t currentDmaInCycles;
-    uint64_t currentDmaOutCycles;
-
-    uint64_t currentDmaInBytes;
-    uint64_t currentDmaOutBytes;
+    uint64_t currentDmaInBytes{0};
+    uint64_t currentDmaOutBytes{0};
 
     int nextTaskIndex{0};
 
@@ -210,240 +200,15 @@ LogicalResult ProfilingPass::memProfiling(mlir::FunctionOpInterface funcOp) {
     return success();
 }
 
-size_t ndlCycle(RegNdlAttr attr) {
-    size_t cycle = 1;
-    for (auto dim : attr.getDims()) {
-        if (dim.getType() == torq_hw::DimType::H) {
-            cycle *= dim.getCount();
-        }
-    }
-    return cycle;
-}
-
-size_t ndlCycle(MemNdlAttr attr) {
-    size_t cycle = 1;
-    uint32_t lWriteSize = 1;
-    uint32_t xLineSize = 1;
-    bool usingSdims = false;
-    for (auto dim : attr.getDims()) {
-        switch (dim.getType()) {
-        case torq_hw::DimType::H:
-            cycle *= dim.getCount();
-            break;
-        case torq_hw::DimType::L:
-            lWriteSize *= dim.getCount();
-            break;
-        case torq_hw::DimType::S:
-            if (dim.getTag() == torq_hw::MemDimTag::B || dim.getTag() == torq_hw::MemDimTag::X) {
-                xLineSize *= dim.getCount();
-                usingSdims = true;
-            }
-            break;
-        }
-    }
-
-    // Use of SDIMs (DEQW) with small line-size (X-dim) can add overhead to the cycle count.
-    // Use an approximation to account for this overhead which is normally negligible
-    // except for very small line sizes.
-    if (usingSdims) {
-        if (xLineSize < lWriteSize) {
-            // Each low-level write is split into multiple cycles
-            cycle = cycle * div_ceil(lWriteSize, xLineSize);
-        }
-        else {
-            // Determine the number of writes crossing X-boundary (will require one extra cycle)
-            size_t g = std::gcd(lWriteSize, xLineSize);
-            size_t misalignmentPeriod = (lWriteSize - 1) / g;
-            size_t crossingWrites = (cycle * g / xLineSize) * misalignmentPeriod;
-            cycle += crossingWrites;
-        }
-    }
-
-    return cycle;
-}
-
-// Helper to convert mlir::Attribute to string using LLVM's raw_string_ostream
-std::string attrToString(mlir::Attribute attr) {
-    std::string str;
-    llvm::raw_string_ostream os(str);
-    attr.print(os);
-    return os.str();
-}
-
 LogicalResult ProfilingPass::cycleProfiling(mlir::FunctionOpInterface funcOp) {
-    auto ctx = funcOp.getContext();
-
-    funcOp.walk([&](torq_hw::SliceTaskOp sliceTaskOp) {
-        map<NdlType, mlir::Attribute> memNdlsAttr;
-        map<NdlType, mlir::Attribute> regNdlsAttr;
-
-        map<NdlType, size_t> memNdlCycles;
-        for (auto &ndl : sliceTaskOp.getMemNdls()) {
-            memNdlCycles[ndl.getType()] += ndlCycle(ndl);
-            memNdlsAttr[ndl.getType()] = ndl;
-        }
-
-        map<NdlType, size_t> regNdlCycles;
-        for (auto &ndl : sliceTaskOp.getRegNdls()) {
-            regNdlCycles[ndl.getType()] = ndlCycle(ndl);
-            regNdlsAttr[ndl.getType()] = ndl;
-        }
-
-        // Cycle calculations
-        size_t dedr = memNdlCycles[NdlType::DEDR];
-        size_t dewr = memNdlCycles[NdlType::DEWR];
-        size_t debr = memNdlCycles[NdlType::DEBR];
-        size_t deqw = memNdlCycles[NdlType::DEQW];
-        size_t cedw = regNdlCycles[NdlType::CEDW];
-        size_t cedr = regNdlCycles[NdlType::CEDR];
-        size_t ceww = regNdlCycles[NdlType::CEWW];
-        size_t cewr = regNdlCycles[NdlType::CEWR];
-        size_t cepr = regNdlCycles[NdlType::CEPR];
-        size_t acbw = regNdlCycles[NdlType::ACBW];
-        size_t acbr = regNdlCycles[NdlType::ACBR];
-        size_t acpr = regNdlCycles[NdlType::ACPR];
-
-        size_t d_bus_cycle = std::max({dedr, cedw, cedr});
-        size_t w_bus_cycle = std::max({dewr, ceww, cewr});
-        size_t parallel_d_w_cycle = std::max(d_bus_cycle, w_bus_cycle);
-
-        size_t b_bus_cycle = std::max({debr, acbw, acbr});
-        size_t q_bus_cycle = std::max(deqw, acpr);
-        size_t parallel_b_q_cycle = std::max(b_bus_cycle, q_bus_cycle);
-
-        size_t p_bus_cycle = cepr;
-
-        size_t curMaxCycle = std::max({parallel_d_w_cycle, parallel_b_q_cycle, p_bus_cycle});
-
-        totalCycle = std::max(totalCycle, curMaxCycle);
-
-        auto ndlCycles = NdlCyclesAttr::get(
-            ctx, dedr, dewr, debr, deqw, cedw, cedr, ceww, cewr, cepr, acbw, acbr, acpr
-        );
-
-        auto sliceProgramOp = sliceTaskOp->getParentOfType<torq_hl::ProgramOp>();
-        IRRewriter rewriter(ctx);
-        Block &block = sliceProgramOp->getRegion(0).front();
-        rewriter.setInsertionPointToStart(&block);
-
-        size_t sliceMemSize = 0;
-        std::ostringstream shapeSstr;
-
-        for (auto [idx, operand] : llvm::enumerate(sliceTaskOp->getOperands())) {
-            auto memreftype = dyn_cast<MemRefType>(operand.getType());
-            if (!memreftype)
-                continue;
-
-            int memssize = getEncodedTotalSizeBytes(memreftype);
-            auto shape = memreftype.getShape();
-            sliceMemSize += memssize;
-
-            if (idx > 0)
-                shapeSstr << "+";
-            for (size_t i = 0; i < shape.size(); i++) {
-                shapeSstr << shape[i];
-                if (i < shape.size() - 1)
-                    shapeSstr << "x";
-            }
-        }
-
-        torq_hw::SliceProfilingOp::create(
-            rewriter, sliceTaskOp.getLoc(), sliceMemSize, shapeSstr.str(), curMaxCycle, ndlCycles
-        );
-
-        if (!clTorqDisableNdlCycleCheck) {
-            // NDL Cycle Match Checks
-            bool isNdlCycleMatch = true;
-            auto loc = sliceTaskOp.getLoc();
-            auto opName = sliceTaskOp.getOpName();
-
-            if (cewr != 0 && cepr != 0 && cewr != cepr) {
-                llvm::errs() << "\n"
-                             << opName << " cewr != cepr: " << cewr << " vs " << cepr << " at "
-                             << toString(loc) << "\n";
-                llvm::errs() << " cewr : " << regNdlsAttr[NdlType::CEWR] << "\n";
-                llvm::errs() << " cepr : " << regNdlsAttr[NdlType::CEPR] << "\n";
-                isNdlCycleMatch = false;
-            }
-
-            if (deqw != 0 && acbr != 0 && deqw != acbr) {
-                llvm::errs() << "\n"
-                             << opName << " deqw != acbr: " << deqw << " vs " << acbr << " at "
-                             << toString(loc) << "\n";
-                llvm::errs() << " deqw : " << memNdlsAttr[NdlType::DEQW] << "\n";
-                llvm::errs() << " acbr : " << regNdlsAttr[NdlType::ACBR] << "\n";
-                isNdlCycleMatch = false;
-            }
-
-            if (cepr != 0 && cedr != 0 && cepr != cedr) {
-                llvm::errs() << "\n"
-                             << opName << " cepr != cedr: " << cepr << " vs " << cedr << " at "
-                             << toString(loc) << "\n";
-                llvm::errs() << " cepr : " << regNdlsAttr[NdlType::CEPR] << "\n";
-                llvm::errs() << " cedr : " << regNdlsAttr[NdlType::CEDR] << "\n";
-                isNdlCycleMatch = false;
-            }
-
-            if (!isNdlCycleMatch) {
-                llvm::errs() << " ref : " << memNdlsAttr[NdlType::REF] << "\n";
-                // TODO : Enable assert after issues are fixed
-                // Keeping the assert commented to avoid test infra failures
-                // assert(false && "NDL cycle check failed");
-            }
-        }
-
+    // Slice-task cycle/memory annotation is now handled by
+    // torq-annotate-dma-and-slice-cycles. This pass only consumes those ops.
+    funcOp.walk([&](torq_hw::SliceProfilingOp profOp) {
+        totalCycle = std::max<size_t>(totalCycle, profOp.getMaxCycle());
         return WalkResult::advance();
     });
 
     return success();
-}
-
-// Returns the total DMA transfer size in BYTES.
-//
-// DMA NDL dims are constructed in bytes, not elements: the innermost contiguous
-// dim is a byte count (contiguousElementsSizeBytes) and any outer dims are plain
-// repeat counts (see createNdl and the StoreOp/LoadOp lowering in
-// TorqHLToTorqHW/Patterns.cpp). The product of the dim counts is therefore
-// already the total transfer size in bytes.
-static uint64_t getDmaNdlTransferBytes(torq_hw::DmaNdlAttr ndl) {
-    if (!ndl) {
-        return 0;
-    }
-
-    uint64_t bytes = 1;
-    for (auto dim : ndl.getDims()) {
-        bytes *= static_cast<uint64_t>(dim.getCount());
-    }
-    return bytes;
-}
-
-/// Compute MTU (Maximum Transfer Unit) efficiency for AXI burst transfers.
-///
-/// Each AXI burst transfers (1 << mtu) beats of 16 bytes each. Every burst
-/// incurs a fixed setup overhead on the AXI bus:
-///
-///   Cycle 1:   ARVALID  – master sends the address
-///   Cycle 2:   ARREADY  – interconnect / DDR controller accepts the request
-///   Cycle 3-6: DDR latency – row open / column access / data fetch
-///   Cycle 7:   first 16 B data beat arrives
-///   Cycle 8+:  continuous 16 B per cycle
-///
-/// As MTU increases, the setup overhead is amortised over more data beats:
-///
-///   MTU 2  (4 beats)  => [setup] 16B 16B 16B 16B              [setup] ...
-///   MTU 3  (8 beats)  => [setup] 16B 16B 16B 16B 16B 16B 16B 16B  [setup] ...
-///   MTU 4  (16 beats) => [setup] 16B x16                          [setup] ...
-///
-/// MTU efficiency captures this overhead:
-///
-///   mtu_efficiency = 2^mtu / (2^mtu + delta)
-///
-/// where delta models the per-burst setup penalty in beat-equivalent cycles
-/// (address phase + DDR latency). delta is typically in the range [1, 3];
-/// we default to 1.5.
-static double mtuEfficiency(unsigned mtu, double delta = 1.5) {
-    double beats = static_cast<double>(1u << mtu);
-    return beats / (beats + delta);
 }
 
 static LogicalResult
@@ -457,52 +222,51 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
     });
 
     std::string asyncDurationAttrName = "torq-async-duration-cycles";
+    std::string asyncBytesAttrName = "torq-async-bytes";
 
     Builder builder(op->getContext());
 
-    // DMA cycle estimation:
-    //   cycles = total_bytes / (theoretical_throughput * dma_factor * mtu_efficiency)
-    //
-    // getDmaThroughputBytesPerCycle() already returns theoretical * dma_factor.
-    // We multiply by the MTU efficiency for each direction separately.
-    //
-    // TODO: Currently we model DMA as unidirectional (in or out, not both
-    // simultaneously). Once bidirectional DMA support is available, the
-    // estimation formula must account for shared bandwidth between
-    // concurrent DMA in and DMA out transfers.
-    const double baseThroughput = TorqHw::get().getDmaThroughputBytesPerCycle();
-    const double dmaInEffectiveThroughput = baseThroughput * mtuEfficiency(clDmaInMtu);
-    const double dmaOutEffectiveThroughput = baseThroughput * mtuEfficiency(clDmaOutMtu);
-
-    // DMA in config contains reference to slice_program op
+    // DMA cfg ops: store write/read NDL for use by corresponding start ops
     if (auto dmaInCfgOp = dyn_cast<torq_hw::DmaInCfgOp>(op)) {
-        prof.currentDmaInBytes = getDmaNdlTransferBytes(dmaInCfgOp.getWriteNdl());
-        prof.currentDmaInCycles =
-            (uint64_t)std::ceil(prof.currentDmaInBytes / dmaInEffectiveThroughput);
-        prof.currentDmaInLoc = toString(dmaInCfgOp.getLoc());
+        prof.currentDmaInBytes = dmaNdlTransferBytes(dmaInCfgOp.getWriteNdl());
     }
     else if (auto dmaOutCfgOp = dyn_cast<torq_hw::DmaOutCfgOp>(op)) {
-        prof.currentDmaOutBytes = getDmaNdlTransferBytes(dmaOutCfgOp.getReadNdl());
-        prof.currentDmaOutCycles =
-            (uint64_t)std::ceil(prof.currentDmaOutBytes / dmaOutEffectiveThroughput);
-        prof.currentDmaOutLoc = toString(dmaOutCfgOp.getLoc());
+        prof.currentDmaOutBytes = dmaNdlTransferBytes(dmaOutCfgOp.getReadNdl());
     }
-    // Add the dma time to the timeline
+    // Add the dma time to the timeline and annotate the start op
     else if (auto dmaInStartOp = dyn_cast<torq_hw::DmaInStartOp>(op)) {
+        if (prof.currentDmaInBytes == 0) {
+            return op->emitError() << "no preceding torq_hw.dma_in_cfg to size this transfer";
+        }
+
+        uint64_t bytes = prof.currentDmaInBytes;
+        uint64_t cycles = estimateDmaCycles(bytes, dmaThroughputBytesPerCycle(clDmaInMtu));
+
+        dmaInStartOp->setAttr(asyncBytesAttrName, builder.getI64IntegerAttr(bytes));
+        dmaInStartOp->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(cycles));
+
         // TODO: check if there is a concurrent dma out and compute the bandwidth if shared
         prof.addToDmaTimeline(
-            taskId, DmaType::In, prof.timestamp, prof.timestamp + prof.currentDmaInCycles,
-            toString(dmaInStartOp.getLoc()), prof.currentDmaInBytes
+            taskId, DmaType::In, prof.timestamp, prof.timestamp + cycles,
+            toString(dmaInStartOp.getLoc()), bytes
         );
-        op->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(prof.currentDmaInCycles));
     }
     else if (auto dmaOutStartOp = dyn_cast<torq_hw::DmaOutStartOp>(op)) {
+        if (prof.currentDmaOutBytes == 0) {
+            return op->emitError() << "no preceding torq_hw.dma_out_cfg to size this transfer";
+        }
+
+        uint64_t bytes = prof.currentDmaOutBytes;
+        uint64_t cycles = estimateDmaCycles(bytes, dmaThroughputBytesPerCycle(clDmaOutMtu));
+
+        dmaOutStartOp->setAttr(asyncBytesAttrName, builder.getI64IntegerAttr(bytes));
+        dmaOutStartOp->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(cycles));
+
         // TODO: check if there is a concurrent dma in and compute the bandwidth if shared
         prof.addToDmaTimeline(
-            taskId, DmaType::Out, prof.timestamp, prof.timestamp + prof.currentDmaOutCycles,
-            toString(dmaOutStartOp.getLoc()), prof.currentDmaOutBytes
+            taskId, DmaType::Out, prof.timestamp, prof.timestamp + cycles,
+            toString(dmaOutStartOp.getLoc()), bytes
         );
-        op->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(prof.currentDmaOutCycles));
     }
     // Update the timestamp based on the end of dma operation.
     // If the timestamp is less than the end of dma, update the timestamp to the end of dma.
@@ -519,23 +283,17 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
         }
     }
     else if (auto cdmaStartOp = dyn_cast<torq_hw::CDMAStartOp>(op)) {
+        uint64_t bytes = cdmaTransferBytes(cdmaStartOp.getSrc());
+        if (bytes == 0) {
+            return op->emitError() << "cannot determine CDMA transfer size";
+        }
+        uint64_t cycles = estimateCdmaCycles(bytes);
+
+        cdmaStartOp->setAttr(asyncBytesAttrName, builder.getI64IntegerAttr(bytes));
+        cdmaStartOp->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(cycles));
+
         auto srcType = cdmaStartOp.getSrc().getType();
         auto dstType = cdmaStartOp.getDest().getType();
-        uint64_t bytes = getEncodedDataSizeElements(srcType);
-
-        double factor = 1.0;
-        auto hw = TorqHw::get();
-        std::string css = hw.getCSSConfigName();
-        std::string nss = hw.getNSSConfigName();
-
-        if (css == "coral_v1" && nss == "nss_v1") {
-            factor = 0.36;
-        }
-        else {
-            factor = 0.8;
-        }
-
-        uint64_t cycles = std::max((uint64_t)1, (uint64_t)std::ceil(bytes / (16.0 * factor)));
 
         DmaType type = DmaType::CdmaLramToDtcm;
         auto srcSpace = getEncodingMemorySpace(srcType);
@@ -558,7 +316,6 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
             taskId, type, prof.timestamp, prof.timestamp + cycles, toString(cdmaStartOp.getLoc()),
             bytes
         );
-        op->setAttr(asyncDurationAttrName, builder.getI64IntegerAttr(cycles));
     }
     else if (isa<torq_hw::CDMAWaitOp>(op)) {
         uint64_t lastTimeStamp = 0;

@@ -525,6 +525,16 @@ def AddDeallocation :
 
 }
 
+def AnnotateDmaAndSliceCycles :
+        InterfacePass<"torq-annotate-dma-and-slice-cycles", "mlir::FunctionOpInterface"> {
+    let summary = "Annotate DMA/CDMA transfers and slice tasks with estimated cycles/bytes";
+    let constructor = "mlir::syna::torq::createAnnotateDmaAndSliceCyclesPass()";
+    let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect",
+        "syna::torq_hw::TorqHWDialect"
+    ];
+}
+
 def Profiling:
     InterfacePass<"torq-profiling", "mlir::FunctionOpInterface"> {
         let summary = "Torq profiling pass";

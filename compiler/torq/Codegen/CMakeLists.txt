@@ -6,6 +6,7 @@
 
 set(sources
     AnalyzeTensorSizesPass.cpp
+    AnnotateDmaAndSliceCyclesPass.cpp
     AddDeallocationPass.cpp
     AssignAddressesPass.cpp
     AssignObjectsIdentifiersPass.cpp
