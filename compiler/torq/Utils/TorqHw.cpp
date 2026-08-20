@@ -142,28 +142,12 @@ static llvm::cl::opt<TorqHw, false, TorqHwParser> clTorqHw(
                    "custom target specification as " TORQ_CUSTOM_FORMAT)
 );
 
-static llvm::cl::opt<bool> clEnableCSSForQemu(
-    "torq-css-qemu", llvm::cl::desc("Create CSS binaries suitable for QEMU emulation"),
-    llvm::cl::init(false)
-);
-
 static std::optional<TorqHw> instance{std::nullopt};
 
 const TorqHw &TorqHw::get() {
 
     if (!instance.has_value()) {
-
-        if (clEnableCSSForQemu) {
-            instance = TorqHw(
-                clTorqHw.getName(), clTorqHw.getHwId(), clTorqHw.getDescription(),
-                clTorqHw.getLramSize(), clTorqHw.getSliceCount(),
-                clTorqHw.getCSSConfigName() + "_qemu", clTorqHw.getNSSConfigName(),
-                clTorqHw.getDmaTheoreticalBytesPerCycle(), clTorqHw.getDmaFactor()
-            );
-        }
-        else {
-            instance = clTorqHw;
-        }
+        instance = clTorqHw;
     }
 
     return *instance;

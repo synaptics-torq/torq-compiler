@@ -152,15 +152,6 @@ VMFBInferenceRunner(
 | `device_outputs` | `bool` | `False` | If `True`, `infer()` returns on-device `DeviceArray` objects instead of NumPy arrays, avoiding device-to-host transfers. Useful for pipelines where outputs are fed back as inputs (e.g. KV-cache in autoregressive decoding). |
 | `torq_hw_type` | `str` | `"astra_machina"` | Torq HW backend for the `torq` device. Defaults to `astra_machina` (the SoC NPU). Other backends such as `sim` (x86 CModel simulator) or `aws_fpga` must be set explicitly, and must be compiled into the installed runtime wheel. |
 
-```{note}
-Running a model on the host simulator (`torq_hw_type="sim"`) requires a CSS (RISC-V co-processor) simulation backend **only if the model contains CSS ops**. The NPU CModel is built into the wheel, but CSS ops are executed by a separate backend that is not bundled:
-
-- **QEMU (default):** `qemu-system-riscv32` must be installed and on `PATH`. If it is missing, execution aborts when the first CSS op runs.
-- **MPACT:** available only if the wheel was built with the MPACT simulator library; select it with `runtime_flags=["--torq_enable_mpact_simulation"]`.
-
-Models compiled without CSS ops (e.g. with `--torq-disable-css`) run on the simulator with no external dependency.
-```
-
 **Properties:**
 
 | Property | Type | Description |

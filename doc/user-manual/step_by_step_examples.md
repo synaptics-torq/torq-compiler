@@ -117,7 +117,6 @@ To compile for the current host machine (e.g., for testing without device hardwa
 
 ```{code} shell
 $ torq-compile mobilenetv2.mlir \
-    --torq-css-qemu \
     --torq-target-host-triple=native \
     -o mobilenetv2.vmfb
 ```

@@ -39,11 +39,9 @@ def build_compile_command(config, tool, vmfb_path, debug_dir, phases_dir, compil
     if config.dump_phases:
         cmds.append(f"--dump-compilation-phases-to={phases_dir}")
 
-    # The cmodel/qemu host needs native host binaries with a special memory map.
-    if config.runtime_hw_type == "sim":
-        cmds.extend(["--torq-target-host-triple=native", "--torq-css-qemu"])
-    elif config.runtime_hw_type == "aws_fpga":
-        cmds.append("--torq-target-host-triple=native")
+    # The cmodel/fpga host needs native host binaries
+    if config.runtime_hw_type in ["sim", "aws_fpga"]:
+        cmds.extend(["--torq-target-host-triple=native"])    
 
     cmds += list(config.compiler_options)
 

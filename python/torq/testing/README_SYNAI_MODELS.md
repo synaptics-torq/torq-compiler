@@ -74,8 +74,6 @@ python test_synai_models.py -t 1 --dry-run
 # Set timeout (default: 180 seconds)
 python test_synai_models.py -t 1 --timeout 300
 
-# Skip killing qemu processes
-python test_synai_models.py -t 1 --no-kill-qemu
 ```
 
 ## Pipeline

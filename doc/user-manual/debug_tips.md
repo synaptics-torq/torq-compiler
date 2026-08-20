@@ -79,11 +79,4 @@ a producer fits in the current tile size.
   to the compiler invocation. With this command the compiler will also print the linking command line used to generate the binary
   file. By executing the command line without the ``--oformat=binary`` parameter it is possible to get a elf binary.
 
-- To debug an instruction fault in a CSS task you can add the flag ``--torq_qemu_trace_instructions`` to the runtime and then inspect 
-  the ``/tmp/qemu_trace_XXXX`` produced during the execution.
-
-- To print additional logs during execution of qemu based emulation use the flag ``--torq_qemu_verbose``.
-
-- To kill an execution that hang during CSS emulation on qemu use the keystrokes ``Ctrl-A X`` (these keystrokes are consumed by qemu emulator).
-
 - To run the compiler in single threaded mode we add the option ``--mlir-disable-threading``

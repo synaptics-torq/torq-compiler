@@ -20,8 +20,7 @@ Usage:
     ./test_synai_models.py -t 1-5               # Process model001 through model005
     ./test_synai_models.py -t 1,3-5,8           # Process model001, model003, model004, model005, model008
     ./test_synai_models.py -t 40 --dry-run      # Print commands without executing for model040
-    ./test_synai_models.py --timeout 300        # Set command timeout to 300 seconds (default is 180)
-    ./test_synai_models.py --no-kill-qemu       # Skip killing qemu-system-riscv processes (kills by default)
+    ./test_synai_models.py --timeout 300        # Set command timeout to 300 seconds (default is 180)    
     ./test_synai_models.py -j 4                 # Use 4 parallel workers
     ./test_synai_models.py -j 1                 # Run sequentially (1 worker)
     ./test_synai_models.py --parallel 8         # Use 8 parallel workers
@@ -88,10 +87,6 @@ def signal_handler(sig, frame):
             kill_process_and_children(current_process)
         except:
             pass
-    
-    # Final cleanup of QEMU processes
-    print("Performing final cleanup...")
-    check_and_kill_qemu_processes()
     
     print("Exiting.")
     sys.exit(1)
@@ -362,7 +357,7 @@ def find_output_files(model_dir):
     return sorted(output_files)
 
 def kill_process_and_children(proc):
-    """Kill a process and all its child processes. Also kill any qemu-system-riscv processes."""
+    """Kill a process and all its child processes. """
     try:
         # Get the process group ID
         pgid = os.getpgid(proc.pid)
@@ -379,46 +374,7 @@ def kill_process_and_children(proc):
                     print(f"Process forcefully killed with SIGKILL")
         except:
             pass
-            
-        # Also check for and kill any qemu-system-riscv processes
-        try:
-            # Find qemu-system-riscv processes
-            qemu_check_cmd = "ps -ef | grep qemu-system-ris | grep -v grep"
-            qemu_result = subprocess.run(qemu_check_cmd, shell=True, text=True, capture_output=True)
-            
-            if qemu_result.stdout.strip():
-                print("Found qemu-system-riscv processes, attempting to terminate them:")
-                print(qemu_result.stdout.strip())
-                
-                # Extract PIDs
-                qemu_pids = []
-                for line in qemu_result.stdout.strip().split('\n'):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        try:
-                            pid = int(parts[1])
-                            qemu_pids.append(pid)
-                        except ValueError:
-                            continue
-                
-                # Kill each qemu process
-                for pid in qemu_pids:
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                        print(f"Sent SIGTERM to qemu process with PID: {pid}")
-                        
-                        # Check if it's still running after a short wait
-                        time.sleep(1)
-                        try:
-                            os.kill(pid, 0)  # This will raise an error if the process doesn't exist
-                            os.kill(pid, signal.SIGKILL)
-                            print(f"Sent SIGKILL to qemu process with PID: {pid}")
-                        except OSError:
-                            print(f"qemu process with PID {pid} successfully terminated")
-                    except OSError as e:
-                        print(f"Error killing qemu process {pid}: {e}")
-        except Exception as e:
-            print(f"Error checking for qemu processes: {e}")
+                    
     except Exception as e:
         print(f"Error while killing process {proc.pid}: {e}")
         # Fallback: try to kill just the main process
@@ -779,47 +735,6 @@ def process_tflite_file(tflite_file, dry_run=False, timeout=180):
     # Return success status, failure stage, and max difference if applicable
     return (is_success, failure_stage if not is_success else None, model_max_diff if 'model_max_diff' in locals() else None)
 
-def check_and_kill_qemu_processes():
-    """Check for and kill any qemu-system-riscv processes that might be running."""
-    try:
-        qemu_check_cmd = "ps -ef | grep qemu-system-ris | grep -v grep"
-        qemu_result = subprocess.run(qemu_check_cmd, shell=True, text=True, capture_output=True)
-        
-        if qemu_result.stdout.strip():
-            print("\nFound lingering qemu-system-riscv processes, cleaning up:")
-            print(qemu_result.stdout.strip())
-            
-            qemu_pids = []
-            for line in qemu_result.stdout.strip().split('\n'):
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        pid = int(parts[1])
-                        qemu_pids.append(pid)
-                    except ValueError:
-                        continue
-            
-            for pid in qemu_pids:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    print(f"Sent SIGTERM to qemu process with PID: {pid}")
-                    
-                    time.sleep(1)
-                    try:
-                        os.kill(pid, 0)
-                        os.kill(pid, signal.SIGKILL)
-                        print(f"Sent SIGKILL to qemu process with PID: {pid}")
-                    except OSError:
-                        print(f"qemu process with PID {pid} successfully terminated")
-                except OSError as e:
-                    print(f"Error killing qemu process {pid}: {e}")
-            
-            return len(qemu_pids)
-        return 0
-    except Exception as e:
-        print(f"Error checking for qemu processes: {e}")
-        return 0
-
 def main():
     parser = argparse.ArgumentParser(description='Process TFLite models from Hugging Face synai_models repository through IREE pipeline.')
     parser.add_argument('-t', '--targets', type=str, 
@@ -827,9 +742,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true',
                        help='Print commands without executing them')
     parser.add_argument('--timeout', type=int, default=180,
-                       help='Maximum execution time (in seconds) for each command (default: 180)')
-    parser.add_argument('--no-kill-qemu', action='store_true',
-                       help='Skip checking for and killing any lingering qemu-system-riscv processes')
+                       help='Maximum execution time (in seconds) for each command (default: 180)')    
     parser.add_argument('-j', '--parallel', type=int, default=None,
                        help='Number of parallel workers (default: use all available CPU cores)')
     parser.add_argument('--cache-dir', type=str,
@@ -852,14 +765,7 @@ def main():
         print(f"Using {num_workers} parallel worker(s)")
     
     args.num_workers = num_workers
-    
-    # Check for and kill any lingering qemu processes
-    if not args.no_kill_qemu:
-        killed_count = check_and_kill_qemu_processes()
-        if killed_count > 0:
-            print(f"Killed {killed_count} lingering qemu processes before starting")
-            print("-" * 80)
-    
+        
     # Parse target model numbers if provided
     target_numbers = None
     if args.targets and args.targets.lower() != "all":
@@ -1169,13 +1075,7 @@ def main():
         html_path = report_generator.generate_html_report(json_file_path=json_data_path)
         print(f"\nHTML report generated: {html_path}")
         print(f"View the report in a web browser: file://{html_path}")
-    
-    # Final cleanup
-    if not args.no_kill_qemu and not is_exiting:
-        killed_count = check_and_kill_qemu_processes()
-        if killed_count > 0:
-            print(f"\nCleaned up {killed_count} lingering qemu processes at exit")
-            
+                
     if is_exiting:
         print("\nScript execution was interrupted by user (Ctrl+C).")
 

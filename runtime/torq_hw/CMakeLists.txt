@@ -35,7 +35,6 @@ if (TORQ_ENABLE_SIMULATOR)
       src/TorqSimulator.h
       src/TorqSimulator.cpp
       src/TorqHw.cpp
-      src/QemuCSSSimulation.cpp
   )
   list(APPEND torq_deps iree::hal::local::executable_library)
 

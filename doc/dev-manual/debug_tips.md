@@ -98,20 +98,6 @@
   $ streamlit run apps/buffer_diff/buffer_diff.py PATH/TO/TENSOR1 PATH/TO/TENSOR2
   ```
 
-- To use a debugger to debug CSS task running on qemu add the option ``--torq_qemu_debug=PORT_NUMBER`` to the runtime then use ``gdb-multiarch`` from
-  your distribution to connect to it:
-
-  ```{code}
-  $ gdb-multiarch
-
-  $ (gdb) target remote :1090
-  ```
-
-- After killing a model emulation the terminal is corrupted (characters are not echo-ed back). This is due to qemu disabling echo and being aborted. To restore the pseudoterminal use the command ``stty echo``.
-
-- To dump ELF files with symbols for all the CSS programs use the parameter  ``--torq-create-css-symbols=PATH`` of the compiler, these ELF files can be
-  used to debug on qemu
-
 - To analyze the code size of CSS tasks dump the elf files as specified above and then use the following command:
 
   ```{code} shell
@@ -126,7 +112,7 @@
 - To compare the output and the IR of two branches of the code base you can use the following script:
 
   ```{code} shell
-  $ ./scripts/compare_builds.sh wip/goodbranch wip/badbranch pytest tests/test_css_qemu.py -k matmul
+  $ ./scripts/compare_builds.sh wip/goodbranch wip/badbranch pytest tests/test_css_mpact.py -k matmul
   ```
 
   The script automatically checks out the branches, compiles them and runs the provided pytest command with the `--debug-ir` option pointing to `tmp/comparison`.

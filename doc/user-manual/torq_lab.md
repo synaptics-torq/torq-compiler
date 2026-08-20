@@ -85,7 +85,7 @@ $ torq-lab compare model.mlir \
 
 | `--runtime-hw-type` | Runs on                                   | Compile flags added                                       |
 |---------------------|-------------------------------------------|-----------------------------------------------------------|
-| `sim` (default)     | the cmodel, under QEMU on this host       | `--torq-target-host-triple=native --torq-css-qemu`        |
+| `sim` (default)     | the cmodel and mpact simulation           | `--torq-target-host-triple=native`                        |
 | `aws_fpga`          | an AWS FPGA instance                      | `--torq-target-host-triple=native`                        |
 | `astra_machina`     | an Astra Machina board                    | none — the default (board) target triple is used          |
 

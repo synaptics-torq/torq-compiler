@@ -6,7 +6,6 @@
 
 #include "TorqSimulator.h"
 #include "MpactCSSSimulation.h"
-#include "QemuCSSSimulation.h"
 
 #include "torq_cm.h"
 #include "css_sw/common/css_sw_reg_inc.h"
@@ -20,8 +19,6 @@
 #include <cstring>
 #include <iostream>
 
-IREE_FLAG(bool, torq_enable_mpact_simulation, false, "Enable MPACT CSS simulation")
-
 using namespace std;
 
 namespace synaptics {
@@ -33,16 +30,8 @@ bool TorqSimulator::open() {
 
     simulator_fun simulator;
 
-    if (FLAG_torq_enable_mpact_simulation) {
-        #ifdef TORQ_MPACT_SIMULATOR
-        simulator = &run_cpu_mpact_binary;
-        #else
-        cerr << "MPACT simulation is not supported" << endl;
-        return false;
-        #endif
-    } else {
-        simulator = &run_cpu_qemu_binary;        
-    }
+#ifdef TORQ_MPACT_SIMULATOR
+    simulator = &run_cpu_mpact_binary;
 
     torq_cm__set_css_cpu_code(cm, simulator);
     
@@ -53,6 +42,11 @@ bool TorqSimulator::open() {
 
     _open_timer.start();
     return true;
+#else
+    cerr << "Simulation is not supported" << endl;
+    return false;
+#endif
+
 }
 
 void TorqSimulator::setDumpDirectory(std::string dump_dir) {
