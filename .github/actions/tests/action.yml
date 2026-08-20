@@ -256,7 +256,7 @@ runs:
         python3 -u -m torq.utils.boards setup-for-ci \
             --control-file bench-control.json \
             --local-runner-path ${{github.workspace}}/release/tools/astra-sl-torq-run-module \
-            --build-version 202608082301 \
+            --build-version $(cat scripts/astra_build_version.txt) \
             --local-ko-path ${{github.workspace}}/release/lib/syna_npu.ko
 
     - name: Run pytest

@@ -96,6 +96,12 @@ jobs:
           name: host-compiler-wheel
           path: dist
 
+      - name: Download astra release package        
+        uses: actions/download-artifact@v8
+        with:          
+          name: astra-sl-release
+          path: dist
+
       - name: Docker meta (generate tags & labels)
         id: meta
         uses: docker/metadata-action@v6
