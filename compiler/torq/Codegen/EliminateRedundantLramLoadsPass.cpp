@@ -202,7 +202,14 @@ static int64_t computePeakLramUsage(const llvm::DenseMap<Value, LramInterval> &i
         events.push_back({kv.second.begin, kv.second.size});
         events.push_back({kv.second.end + 1, -kv.second.size});
     }
-    llvm::sort(events, [](auto &a, auto &b) { return a.first < b.first; });
+    // At equal indices apply the frees (negative deltas) before the allocations:
+    // a buffer whose interval ends at i is gone before one that begins at i+1
+    // exists, so counting them together would double-count back-to-back buffers.
+    // llvm::sort is not stable, so without the tie-break the order is arbitrary
+    // and the transient double-count inflates the peak nondeterministically.
+    llvm::sort(events, [](auto &a, auto &b) {
+        return a.first < b.first || (a.first == b.first && a.second < b.second);
+    });
     int64_t cur = 0, peak = 0;
     for (auto &e : events) {
         cur += e.second;
@@ -251,6 +258,18 @@ filterByLramSize(Block &block, ArrayRef<ReuseCandidate> candidates, int64_t lram
             kept.push_back(c); // not LRAM-tracked: lramSize irrelevant
             continue;
         }
+        // A dst interval contained in keep's interval disappears without
+        // extending keep, so the fold can only lower the peak: accept it
+        // unconditionally. This is the duplicate-operand case (two loads of the
+        // same source feeding one start_program), where refusing the merge
+        // leaves an op that needs both copies resident at once.
+        if (dstIt->second.begin >= keepIt->second.begin &&
+            dstIt->second.end <= keepIt->second.end) {
+            intervals.erase(c.dst);
+            kept.push_back(c);
+            continue;
+        }
+
         // Tentatively fold dst into keep (keep stays resident until dst's last
         // use, dst's buffer disappears); accept only if the peak stays <= ceiling.
         int oldEnd = keepIt->second.end;
@@ -262,6 +281,13 @@ filterByLramSize(Block &block, ArrayRef<ReuseCandidate> candidates, int64_t lram
             kept.push_back(c);
         }
         else {
+            LLVM_DEBUG({
+                llvm::dbgs() << "filterByLramSize: REJECT reuse of " << c.keep << " keepInterval=["
+                             << keepIt->second.begin << "," << oldEnd << "] dstInterval=["
+                             << dstInterval.begin << "," << dstInterval.end
+                             << "] peak=" << computePeakLramUsage(intervals)
+                             << " ceiling=" << ceiling << "\n";
+            });
             keepIt->second.end = oldEnd; // revert: this buffer keeps streaming
             intervals[c.dst] = dstInterval;
         }

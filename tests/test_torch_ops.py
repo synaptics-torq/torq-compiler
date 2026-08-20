@@ -113,7 +113,11 @@ def case_config(request, runtime_hw_type, chip_config):
         # assertion for next 2 in function LData, file Kernel.cpp, line 824
         #  (elementType != DType::none && "Invalid elemen= DType::none)
         "topk-1x2100-bf16",
-        "topk-1x2100-indices-only-bf16"
+        "topk-1x2100-indices-only-bf16",
+        # LRAM-limit regression pinned to the no-slicing path used for real
+        # models (the sliced path fails this shape for an unrelated
+        # pre-existing reason: an LRAM fragmentation failure).
+        "erf_mlp_dup_lram_load_bf16",
     ]
     extra_args["torq_compiler_options"] = []
     if any(s in request.param.data.name for s in no_slicing_tc):
