@@ -1,7 +1,10 @@
 name: Build Kernel module dependencies
 
 on:
-  workflow_call:    
+  workflow_call:
+    secrets:
+      LINUX_KERNEL_SSH_KEY:
+        required: true
     outputs:
       cache_key:
         description: Cache key of the built artifact
@@ -16,7 +19,11 @@ jobs:
 
   build:    
     name: Build
-    runs-on: ubuntu-latest
+
+    # we build on AWS to ensure we can access internal resources, we use a default image to avoid dependencies
+    runs-on:
+      - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
+        image:ubuntu-7.0
 
     outputs:
       cache-key: ${{ steps.gen_vars.outputs.cache_key }}
@@ -46,11 +53,18 @@ jobs:
 
         # install the dependencies instead of using the CI docker to avoid circular dependencies between 
         # the docker image and the kernel module artifacts
+        # zstd is used to compress the cache artifact by the action/cache plugin, and is not installed by default on ubuntu 22.04
         sudo apt-get update
-        sudo apt-get install -y binutils-arm-linux-gnueabihf gcc-aarch64-linux-gnu flex bison bc
+        sudo apt-get install -y binutils-arm-linux-gnueabihf gcc-aarch64-linux-gnu flex bison bc zstd
 
     - name: Build Kernel Module dependenencies
       if: steps.lookup_cache.outputs.cache-hit != 'true'
+      env:
+        LINUX_REPO_URL: ${{ vars.LINUX_REPO_URL }}
+        LINUX_DRIVER_REPO_URL: ${{ vars.LINUX_DRIVER_REPO_URL }}
+        LINUX_KERNEL_SSH_KEY: ${{ secrets.LINUX_KERNEL_SSH_KEY }}
+        LINUX_KERNEL_SSH_OPTIONS: ${{ vars.LINUX_KERNEL_SSH_OPTIONS }}
+        LINUX_KERNEL_SSH_HOST_KEY: ${{ vars.LINUX_KERNEL_SSH_HOST_KEY }}
       run: |
         scripts/setup_soc_ko_build_deps.sh    
 

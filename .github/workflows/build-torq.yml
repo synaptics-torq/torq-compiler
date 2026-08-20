@@ -12,6 +12,8 @@ on:
     secrets:
       HF_TOKEN:
         required: true
+      LINUX_KERNEL_SSH_KEY:
+        required: true
 
 permissions:
   contents: read
@@ -34,6 +36,8 @@ jobs:
   build_ko_dependencies:
     name: Build KO dependencies
     uses: ./.github/workflows/build-ko-dependencies.yml
+    secrets:
+      LINUX_KERNEL_SSH_KEY: ${{ secrets.LINUX_KERNEL_SSH_KEY }}
 
   build_docs:    
     name: Build documentation

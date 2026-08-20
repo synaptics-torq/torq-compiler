@@ -29,6 +29,7 @@ jobs:
       push: true
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      LINUX_KERNEL_SSH_KEY: ${{ secrets.LINUX_KERNEL_SSH_KEY }}
 
   test:
     name: Test release

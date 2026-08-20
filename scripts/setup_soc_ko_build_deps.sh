@@ -40,13 +40,30 @@ done
 KERNEL_COMMIT=822c418972646f73b3771a92fb78ab09a343897b
 DRIVER_COMMIT=bb8b58e4b342f23efc6bc4a3fe931388ef811efe
 
+if [[ -n ${LINUX_KERNEL_SSH_KEY:-} ]]; then
+  echo "Using provided SSH key for Linux kernel checkout."
+  LINUX_KERNEL_SSH_KEY_FILE=$(mktemp)
+  trap 'rm -f "${LINUX_KERNEL_SSH_KEY_FILE}"' EXIT
+  chmod 600 "${LINUX_KERNEL_SSH_KEY_FILE}"
+  printf '%s\n' "${LINUX_KERNEL_SSH_KEY}" > "${LINUX_KERNEL_SSH_KEY_FILE}"
+  export GIT_SSH_COMMAND="ssh ${LINUX_KERNEL_SSH_OPTIONS} -i ${LINUX_KERNEL_SSH_KEY_FILE} -o IdentitiesOnly=yes"
+
+  if [[ -n ${LINUX_KERNEL_SSH_HOST_KEY:-} ]]; then
+    echo "Using provided SSH host key for Linux kernel checkout."
+    LINUX_KERNEL_SSH_HOST_KEY_FILE=$(mktemp)
+    chmod 600 "${LINUX_KERNEL_SSH_HOST_KEY_FILE}"
+    printf '%s\n' "${LINUX_KERNEL_SSH_HOST_KEY}" > "${LINUX_KERNEL_SSH_HOST_KEY_FILE}"
+    export GIT_SSH_COMMAND="${GIT_SSH_COMMAND} -o UserKnownHostsFile=${LINUX_KERNEL_SSH_HOST_KEY_FILE} -o StrictHostKeyChecking=yes"
+  fi
+fi
+
 if [[ $USE_GERRIT -eq 1 ]]; then
   SYNA_GERRIT_USER=$(id -n -u)
   LINUX_REPO_URL="ssh://${SYNA_GERRIT_USER}@sc-debu-git.synaptics.com:29420/astra/linux/main"
   LINUX_DRIVER_REPO_URL="ssh://${SYNA_GERRIT_USER}@sc-debu-git.synaptics.com:29420/debu/common/linux-driver/synaptics"  
 else
-  LINUX_REPO_URL=https://github.com/synaptics-astra/linux_6_12-main
-  LINUX_DRIVER_REPO_URL=https://github.com/synaptics-astra/linux_6_12-drivers-synaptics
+  LINUX_REPO_URL="${LINUX_REPO_URL:-https://github.com/synaptics-astra/linux_6_12-main}"
+  LINUX_DRIVER_REPO_URL="${LINUX_DRIVER_REPO_URL:-https://github.com/synaptics-astra/linux_6_12-drivers-synaptics}"
 fi
 
 SYNA_KERNEL_CHECKOUT=${THIRDPARTY_PREBUILTS_SOC_KERNEL}/main
