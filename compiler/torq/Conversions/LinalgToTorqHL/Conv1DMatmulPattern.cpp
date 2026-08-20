@@ -142,6 +142,23 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
             );
         }
 
+        // f16/f32/f64 matmuls are not supported on the NPU (only bf16 and
+        // integer). Return early so the op stays as linalg.matmul and
+        // MarkHostExecutorPass routes it to the host. This mirrors
+        // Conv2DMatmulOpConversion and is needed because this pattern has
+        // higher benefit and is tried first on every linalg.matmul.
+        auto isUnsupportedFloat = [](Type elemTy) {
+            return elemTy.isF16() || elemTy.isF32() || elemTy.isF64();
+        };
+        auto lhsType = dyn_cast<RankedTensorType>(matmulOp.getInputs()[0].getType());
+        auto rhsType = dyn_cast<RankedTensorType>(matmulOp.getInputs()[1].getType());
+        if ((lhsType && isUnsupportedFloat(lhsType.getElementType())) ||
+            (rhsType && isUnsupportedFloat(rhsType.getElementType()))) {
+            return rewriter.notifyMatchFailure(
+                matmulOp, "Matmul with unsupported float input (f16/f32/f64) on NPU"
+            );
+        }
+
         auto loc = matmulOp.getLoc();
 
         Value im2col = matmulOp.getInputs()[0];
