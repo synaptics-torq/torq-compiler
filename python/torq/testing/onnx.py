@@ -13,6 +13,13 @@ import onnx
 import onnxruntime
 import pytest
 from onnx import helper, numpy_helper, shape_inference, TensorProto, AttributeProto
+from .convert_onnx import (
+    is_model_bf16,
+    convert_fp32_to_bf16,
+    is_model_int32,
+    convert_int64_to_int32,
+    _fix_batch_dimension_to_one,
+)
 
 from torq.testing.cases import Case
 from torq.testing.hf import get_hf_model_file
@@ -1349,14 +1356,6 @@ def onnx_source_model_file(request, onnx_model):
     return None
 
 
-def is_model_bf16(model: onnx.ModelProto) -> bool:
-    """Check if model is already in BF16 format."""
-    return any(
-        init.data_type == TensorProto.BFLOAT16
-        for init in model.graph.initializer
-    )
-
-
 @versioned_hashable_object_fixture
 def onnx_bf16_config(request):
     """Return BF16 conversion config for version hashing.
@@ -1401,6 +1400,57 @@ def onnx_bf16_model_file(request, versioned_file, onnx_model_file, onnx_bf16_con
     # Save converted model
     onnx.save(converted_model, str(versioned_file))
     print(f"[BF16] Saved to: {versioned_file}")
+
+    return versioned_file
+
+
+@versioned_hashable_object_fixture
+def onnx_int32_config(request):
+    """Return INT32 conversion config for version hashing.
+
+    This ensures cache invalidation when --auto-convert-int32 flag changes.
+    """
+    return {
+        "auto_convert_int32": request.config.getoption("--auto-convert-int32", default=False)
+    }
+
+
+@versioned_generated_file_fixture("onnx_int32")
+def onnx_int32_model_file(request, versioned_file, onnx_bf16_model_file, onnx_int32_config):
+    """Convert INT64 tensors in an ONNX model to INT32 if --auto-convert-int32 is enabled.
+
+    Chained after the BF16 step so that when both conversions are enabled the
+    order is bf16 first, then int32. Always saves to versioned_file location
+    (the decorator always returns versioned_file).
+
+    Note: onnx_bf16_model_file is a Path (versioned_generated_file_fixture
+    unwraps VersionedFile).
+    """
+    import shutil
+    use_int32 = onnx_int32_config["auto_convert_int32"]
+
+    if not use_int32:
+        # No conversion - pass the (possibly BF16-converted) model through
+        print(f"[INT32] Conversion disabled, copying model to {versioned_file}")
+        shutil.copy(str(onnx_bf16_model_file), str(versioned_file))
+        return versioned_file
+
+    # Load the model
+    model = onnx.load(str(onnx_bf16_model_file))
+
+    # Check if there is anything to convert
+    if is_model_int32(model):
+        print(f"[INT32] Model has no INT64 tensors, copying to {versioned_file}")
+        shutil.copy(str(onnx_bf16_model_file), str(versioned_file))
+        return versioned_file
+
+    # Convert INT64 -> INT32
+    print(f"[INT32] Converting INT64 tensors in {onnx_bf16_model_file.name} to INT32...")
+    converted_model = convert_int64_to_int32(model)
+
+    # Save converted model
+    onnx.save(converted_model, str(versioned_file))
+    print(f"[INT32] Saved to: {versioned_file}")
 
     return versioned_file
 
@@ -1477,23 +1527,30 @@ def onnx_quantized_model_file(
 
 
 @versioned_generated_file_fixture("mlir")
-def onnx_mlir_model_file(request, versioned_file, onnx_model_file, onnx_bf16_model_file, onnx_bf16_config, onnx_quantized_model_file, onnx_quant_config):
+def onnx_mlir_model_file(request, versioned_file, onnx_model_file, onnx_bf16_model_file, onnx_bf16_config, onnx_int32_model_file, onnx_int32_config, onnx_quantized_model_file, onnx_quant_config):
     """Convert ONNX model to MLIR with enhanced error diagnostics.
 
-    Uses quantized model if enabled by ``onnx_quant_config``, otherwise BF16
-    model if --auto-convert-bf16 is enabled, otherwise uses the original model.
-    This ensures the compiler receives the correctly converted model based on
-    user options.
+    Uses quantized model if enabled by ``onnx_quant_config``, otherwise the
+    INT32 model if --auto-convert-int32 is enabled (it chains the BF16 step,
+    so bf16 conversion is applied first when both flags are set), otherwise
+    the BF16 model if --auto-convert-bf16 is enabled, otherwise the original
+    model. This ensures the compiler receives the correctly converted model
+    based on user options.
 
-    Note: onnx_model_file, onnx_bf16_model_file, and onnx_quantized_model_file
-    are Path objects (versioned_generated_file_fixture unwraps VersionedFile to Path).
+    Note: onnx_model_file, onnx_bf16_model_file, onnx_int32_model_file, and
+    onnx_quantized_model_file are Path objects (versioned_generated_file_fixture
+    unwraps VersionedFile to Path).
     """
     use_quantize = onnx_quant_config["quantize"]
     use_bf16 = request.config.getoption("--auto-convert-bf16", default=False)
+    use_int32 = onnx_int32_config["auto_convert_int32"]
 
     if use_quantize:
         model_path = onnx_quantized_model_file
         print(f"[Quantize] Using quantized model for MLIR conversion: {model_path}")
+    elif use_int32:
+        model_path = onnx_int32_model_file
+        print(f"[INT32] Using INT32 model for MLIR conversion: {model_path}")
     elif use_bf16:
         model_path = onnx_bf16_model_file
         print(f"[BF16] Using BF16 model for MLIR conversion: {model_path}")
@@ -1589,93 +1646,6 @@ def get_full_model(model_file):
     return inferred_model
 
 
-
-# ---- BF16 conversion ----
-
-def _float32_to_bfloat16(arr: np.ndarray) -> np.ndarray:
-    """Convert float32 numpy array to bfloat16 (stored as uint16)."""
-    arr_uint32 = arr.view(np.uint32)
-    arr_bf16 = (arr_uint32 >> 16).astype(np.uint16)
-    return arr_bf16
-
-
-def _fix_batch_dimension_to_one(model: onnx.ModelProto) -> int:
-    """Fix dynamic batch dimensions (?, -1) to 1 for all inputs, outputs, and value_info."""
-    modified_count = 0
-    for value_info in list(model.graph.input) + list(model.graph.output) + list(model.graph.value_info):
-        tensor_type = value_info.type.tensor_type
-        if tensor_type.HasField('shape') and len(tensor_type.shape.dim) > 0:
-            first_dim = tensor_type.shape.dim[0]
-            if first_dim.HasField('dim_param'):
-                first_dim.ClearField('dim_param')
-                first_dim.dim_value = 1
-                modified_count += 1
-            elif not first_dim.HasField('dim_value'):
-                first_dim.dim_value = 1
-                modified_count += 1
-    return modified_count
-
-
-def convert_fp32_to_bf16(model: onnx.ModelProto) -> onnx.ModelProto:
-    """Convert FP32 ONNX model to BF16 format.
-
-    Returns the converted model and prints accuracy metrics.
-    """
-    import copy
-    model = copy.deepcopy(model)  # Don't modify original
-
-    # Fix batch dimension
-    batch_fixed = _fix_batch_dimension_to_one(model)
-    if batch_fixed > 0:
-        print(f"[BF16] Fixed {batch_fixed} input(s) to have batch=1")
-
-    total_count = 0
-    max_error = 0.0
-
-    # Convert initializers (weights)
-    for init in model.graph.initializer:
-        if init.data_type != TensorProto.FLOAT:
-            continue
-
-        # Get FP32 data
-        if init.raw_data:
-            fp32_data = np.frombuffer(init.raw_data, dtype=np.float32).copy()
-        elif init.float_data:
-            fp32_data = np.array(init.float_data, dtype=np.float32)
-        else:
-            continue
-
-        # Convert to BF16
-        bf16_data = _float32_to_bfloat16(fp32_data)
-
-        # Track error
-        total_count += len(fp32_data)
-        fp32_back = (bf16_data.astype(np.uint32) << 16).view(np.float32)
-        max_error = max(max_error, np.max(np.abs(fp32_data - fp32_back)))
-
-        # Replace data
-        init.raw_data = bf16_data.tobytes()
-        init.float_data[:] = []
-        init.data_type = TensorProto.BFLOAT16
-
-    # Run shape inference
-    try:
-        model = onnx.shape_inference.infer_shapes(model)
-    except Exception:
-        pass
-
-    # Update input/output types
-    for value_info in list(model.graph.input) + list(model.graph.output):
-        if value_info.type.tensor_type.elem_type == TensorProto.FLOAT:
-            value_info.type.tensor_type.elem_type = TensorProto.BFLOAT16
-
-    # Update intermediate value_info types
-    for value_info in model.graph.value_info:
-        if value_info.type.tensor_type.elem_type == TensorProto.FLOAT:
-            value_info.type.tensor_type.elem_type = TensorProto.BFLOAT16
-
-    print(f"[BF16] Converted {total_count} weight values, max error: {max_error:.6f}")
-    return model
 
 @pytest.fixture
 def onnx_layer_model(request):

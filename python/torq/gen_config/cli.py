@@ -46,6 +46,7 @@ _DISCOVER_FLAGS = [
     ("--skip-executors={v}",      "skip_executors",      False),
     ("--skip-ops={v}",            "skip_ops",            False),
     ("--auto-convert-bf16",       "auto_convert_bf16",   True),
+    ("--auto-convert-int32",      "auto_convert_int32",  True),
     ("--save-bf16-model={v}",     "save_bf16_model",     False),
     ("--subgraph-from={v}",       "subgraph_from",       False),
     ("--subgraph-to={v}",         "subgraph_to",         False),
@@ -65,6 +66,7 @@ _DISCOVER_FLAGS = [
 
 _RUN_FLAGS = [
     ("--auto-convert-bf16",       "auto_convert_bf16",   True),
+    ("--auto-convert-int32",      "auto_convert_int32",  True),
     ("--debug-ir={v}",            "debug_ir",            False),
     ("--recompute-cache",         "recompute_cache",     True),
     ("--gen-config-log-file={v}", "log_file",            False),
@@ -164,6 +166,13 @@ def cmd_discover(args: argparse.Namespace) -> int:
         )
         return 1
 
+    if getattr(args, "auto_convert_int32", False) and args.quantize:
+        print(
+            "Error: --auto-convert-int32 and --quantize are mutually exclusive.",
+            file=sys.stderr,
+        )
+        return 1
+
     extra_args = _build_extra_args(args, _DISCOVER_FLAGS)
 
     return _run_pytest(
@@ -186,6 +195,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.auto_convert_bf16 and args.quantize:
         print(
             "Error: --auto-convert-bf16 and --quantize are mutually exclusive.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if getattr(args, "auto_convert_int32", False) and args.quantize:
+        print(
+            "Error: --auto-convert-int32 and --quantize are mutually exclusive.",
             file=sys.stderr,
         )
         return 1
@@ -558,6 +574,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             "--auto-convert-bf16",
             action="store_true",
             help="Automatically convert FP32 models to BF16",
+        )
+        p.add_argument(
+            "--auto-convert-int32",
+            action="store_true",
+            help="Automatically convert INT64 ONNX tensors to INT32 "
+            "(applied after --auto-convert-bf16 when both are enabled)",
         )
         p.add_argument("--log-file", help="Redirect output to log file")
         p.add_argument(

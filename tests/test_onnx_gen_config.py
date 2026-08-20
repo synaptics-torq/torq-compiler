@@ -6,6 +6,61 @@ try:
 except ImportError:
     pytest.skip("iree package not available", allow_module_level=True)
 
+
+def _gather_indices_input_range(case):
+    """Valid index range for Gather layers with a constant table.
+
+    Discovery feeds random integer inputs drawn from (-40, 40) by default. For
+    a Gather whose constant table has fewer rows along the gathered axis (e.g.
+    BERT token_type_embeddings with 2 rows) that produces out-of-bounds
+    indices, which is undefined behaviour - the compiled host gather reads out
+    of bounds and can segfault. When every runtime (non-initializer) input of
+    the layer is the indices tensor of a Gather with a constant table,
+    restrict the generated indices to [0, table_dim). Returns None when the
+    range should not be overridden.
+    """
+    try:
+        model = case.data.model
+    except Exception:
+        return None
+
+    graph = model.graph
+    initializers = {init.name: init for init in graph.initializer}
+
+    # The table of an extracted Gather layer is typically listed both as an
+    # initializer and as a graph input; only non-initializer inputs are
+    # actually driven with random data.
+    runtime_inputs = {inp.name for inp in graph.input if inp.name not in initializers}
+    if not runtime_inputs:
+        return None
+
+    table_dim = None
+    for node in graph.node:
+        if node.op_type != "Gather" or len(node.input) < 2:
+            continue
+        data_name, indices_name = node.input[0], node.input[1]
+        # Table must be a constant and indices must be a runtime input.
+        if data_name not in initializers or indices_name not in runtime_inputs:
+            return None
+        axis = next((attr.i for attr in node.attribute if attr.name == "axis"), 0)
+        dims = initializers[data_name].dims
+        if not dims:
+            return None
+        dim = dims[axis % len(dims)]
+        table_dim = dim if table_dim is None else min(table_dim, dim)
+        runtime_inputs.discard(indices_name)
+
+    if table_dim is None or table_dim <= 0:
+        return None
+
+    # Do not clamp if some runtime input is not a gather indices tensor:
+    # the single range would apply to that input as well.
+    if runtime_inputs:
+        return None
+
+    return (0, table_dim)
+
+
 """
 ONNX Executor Discovery Test Entry Point
 
@@ -53,6 +108,12 @@ def case_config(request, tmp_path, layer_executor_case, chip_config):
         "input_data": "tweaked_random_input_data",
         "comparison_config": "comparison_config_for_executor_discovery",
     }
+
+    # Keep Gather indices in bounds so random inputs cannot trigger
+    # out-of-bounds table accesses (UB / segfault in host-compiled code).
+    gather_range = _gather_indices_input_range(case)
+    if gather_range is not None:
+        base_config["tweaked_input_data_range"] = gather_range
 
     # Early skip check: skip before expensive fixture setup (compilation)
     model_name = _extract_model_name_from_case(case)

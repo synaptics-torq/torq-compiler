@@ -124,6 +124,13 @@ def pytest_addoption(parser):
         help="Save converted BF16 model to specified path (requires --auto-convert-bf16)",
     )
     parser.addoption(
+        "--auto-convert-int32",
+        action="store_true",
+        default=False,
+        help="Automatically convert INT64 ONNX tensors to INT32 for testing "
+        "(applied after --auto-convert-bf16 when both are enabled)",
+    )
+    parser.addoption(
         "--subgraph-from",
         default=None,
         help="Start op name for subgraph extraction "

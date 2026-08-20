@@ -777,6 +777,23 @@ def _maybe_apply_bf16_conversion(model, f: Path, auto_convert: bool, save_path: 
     return converted
 
 
+def _maybe_apply_int32_conversion(model, f: Path, auto_convert: bool) -> Any:
+    """Apply INT64->INT32 conversion to a model if requested.
+
+    Mirrors _maybe_apply_bf16_conversion. Call it after the BF16 step so the
+    order is bf16 first, then int32, when both conversions are enabled.
+    Returns the (possibly converted) model.
+    """
+    if not auto_convert:
+        return model
+    from torq.testing.onnx import convert_int64_to_int32, is_model_int32
+    if is_model_int32(model):
+        _discovery_log(f"[INT32] Model {f.name} has no INT64 tensors")
+        return model
+    _discovery_log(f"[INT32] Converting INT64 tensors in {f.name} to INT32...")
+    return convert_int64_to_int32(model)
+
+
 def _maybe_apply_quantization(
     model,
     quantize: bool,
@@ -829,6 +846,7 @@ def _generate_subgraph_cases(f: Path, config) -> List[Case]:
     subgraph_from = config.getoption("--subgraph-from")
     subgraph_to = config.getoption("--subgraph-to")
     auto_convert_bf16 = config.getoption("--auto-convert-bf16", default=False)
+    auto_convert_int32 = config.getoption("--auto-convert-int32", default=False)
     save_bf16_path = config.getoption("--save-bf16-model", default=None)
     quantize = config.getoption("--quantize", default=False)
     per_channel = config.getoption("--per-channel", default=False)
@@ -841,6 +859,7 @@ def _generate_subgraph_cases(f: Path, config) -> List[Case]:
 
     full_model = get_full_model(str(f))
     full_model = _maybe_apply_bf16_conversion(full_model, f, auto_convert_bf16, save_bf16_path)
+    full_model = _maybe_apply_int32_conversion(full_model, f, auto_convert_int32)
 
     # Build name -> index mapping from the (possibly BF16 but not yet quantized)
     # full model so indices match the original ONNX node positions.
@@ -951,6 +970,7 @@ def _generate_subgraph_cases(f: Path, config) -> List[Case]:
 def _generate_layer_cases(f: Path, config) -> List[Case]:
     """Generate test cases in normal layer-extraction mode."""
     auto_convert_bf16 = config.getoption("--auto-convert-bf16", default=False)
+    auto_convert_int32 = config.getoption("--auto-convert-int32", default=False)
     save_bf16_path = config.getoption("--save-bf16-model", default=None)
     quantize = config.getoption("--quantize", default=False)
     per_channel = config.getoption("--per-channel", default=False)
@@ -960,10 +980,12 @@ def _generate_layer_cases(f: Path, config) -> List[Case]:
     if _is_torch_model(f):
         raise ValueError(f"Torch models are not supported in this branch: {f}")
 
-    if auto_convert_bf16 and not quantize:
-        # Original BF16-only path: convert full model, then extract layers.
+    if (auto_convert_bf16 or auto_convert_int32) and not quantize:
+        # Non-quantized conversion path: convert the full model (bf16 first,
+        # then int32), then extract layers.
         model = get_full_model(str(f))
         model = _maybe_apply_bf16_conversion(model, f, auto_convert_bf16, save_bf16_path)
+        model = _maybe_apply_int32_conversion(model, f, auto_convert_int32)
         layers = generate_onnx_layers_from_model(model, node_groups=None, dedup=False, quantize=False)
         return [
             Case(f"{f.stem}_{key}", layer)
@@ -974,7 +996,7 @@ def _generate_layer_cases(f: Path, config) -> List[Case]:
         # Quantize path: extract layers from the original full model first, then
         # quantize each layer individually so per-layer tests use their own
         # calibration data and the ONNX-to-MLIR mapping stays tied to the
-        # original op positions. BF16 conversion is mutually exclusive with
+        # original op positions. BF16/INT32 conversion is mutually exclusive with
         # quantization at the CLI level.
         source_model_path = str(f)
         model = get_full_model(str(f))
