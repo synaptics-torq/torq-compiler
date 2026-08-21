@@ -30,6 +30,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Iterators.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
@@ -1089,6 +1090,13 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     if (auto distanceAttr = producerOp->getAttrOfType<mlir::IntegerAttr>(TORQ_TNF_DISTANCE))
         distance = distanceAttr.getSInt();
 
+    // Must come before the operand-slice computation below: slicing fails for some producers
+    // (e.g. a reduction), and doNotFuse() on a group member the driver cannot skip loops forever.
+    if (isMarkedFuseGroup(producerOp) && !isFuseGroupOutput(producerOp)) {
+        setSourcesDistance(producerOp, distance);
+        return fuseAndDoNotYieldProducer;
+    }
+
     // Get the producer's operand tiles
     SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
     if (failed(producerTi.getIterationDomainTileFromResultTile(
@@ -1108,11 +1116,6 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     assert(
         mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
     );
-
-    if (isMarkedFuseGroup(producerOp) && !isFuseGroupOutput(producerOp)) {
-        setSourcesDistance(producerOp, distance);
-        return fuseAndDoNotYieldProducer;
-    }
 
     TilingInfo tilingInfo = getTilingInfo(producerTi);
 
@@ -1206,6 +1209,12 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
     if (auto distanceAttr = producerOp->getAttrOfType<mlir::IntegerAttr>(TORQ_TNF_DISTANCE))
         distance = distanceAttr.getSInt();
 
+    // Before the operand-slice computation below, as in fuseControlMaxSize.
+    if (isMarkedFuseGroup(producerOp) && !isFuseGroupOutput(producerOp)) {
+        setSourcesDistance(producerOp, distance);
+        return fuseAndDoNotYieldProducer;
+    }
+
     SmallVector<OpFoldResult> mappedOffsets, mappedSizes;
     if (failed(producerTi.getIterationDomainTileFromResultTile(
             rewriter, producerOpResult.getResultNumber(), candidateSliceOp.getMixedOffsets(),
@@ -1224,11 +1233,6 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
     assert(
         mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
     );
-
-    if (isMarkedFuseGroup(producerOp) && !isFuseGroupOutput(producerOp)) {
-        setSourcesDistance(producerOp, distance);
-        return fuseAndDoNotYieldProducer;
-    }
 
     TilingInfo tilingInfo = getTilingInfo(producerTi);
 
@@ -1489,6 +1493,199 @@ void TileAndFusePass::tileAndFuse(
     assert(tiOp->use_empty() && "tiled operation still has users");
 }
 
+// Match the reduction body shape every ONNX-imported reduction has: a single two-operand combine
+// op (addf, maximumf, ...) reading the block arguments, plus the yield. Returns the combine op, or
+// null for anything more exotic. This contract is what lets rewriteKeepdimsFuseGroupReduction
+// rebuild the body at a wider accumulator type instead of retyping arbitrary cloned ops.
+static Operation *matchSingleCombineReduction(linalg::GenericOp op) {
+    if (op.getInputs().size() != 1 || op.getOutputs().size() != 1)
+        return nullptr;
+    if (!llvm::is_contained(op.getIteratorTypesArray(), utils::IteratorType::reduction))
+        return nullptr;
+
+    Block &body = op.getRegion().front();
+    Operation *combine = &body.front();
+    auto yield = cast<linalg::YieldOp>(body.getTerminator());
+    if (body.getOperations().size() != 2 || combine->getNumOperands() != 2 ||
+        combine->getNumResults() != 1 || yield.getOperand(0) != combine->getResult(0) ||
+        !llvm::all_of(combine->getOperands(), llvm::IsaPred<BlockArgument>))
+        return nullptr;
+    return combine;
+}
+
+// Split a keepdims output map into kept positions (AffineDimExpr) and dropped ones
+// (AffineConstantExpr(0) at a unit dim). Fails on any other result form, and when nothing is
+// dropped (the map is already a projected permutation) or nothing is kept.
+static LogicalResult splitKeepdimsOutputMap(
+    AffineMap outMap, RankedTensorType outType, SmallVector<int64_t> &keptPos,
+    SmallVector<AffineExpr> &keptExprs
+) {
+    for (int64_t i = 0; i < (int64_t)outMap.getNumResults(); ++i) {
+        AffineExpr e = outMap.getResult(i);
+        if (auto c = dyn_cast<AffineConstantExpr>(e)) {
+            if (c.getValue() != 0 || outType.getDimSize(i) != 1)
+                return failure();
+        }
+        else if (isa<AffineDimExpr>(e)) {
+            keptPos.push_back(i);
+            keptExprs.push_back(e);
+        }
+        else {
+            return failure();
+        }
+    }
+    if (keptExprs.empty() || (int64_t)keptExprs.size() == outType.getRank())
+        return failure();
+    return success();
+}
+
+// Reassociation between the keepdims shape and the reduced shape: each kept dim starts a group;
+// dropped unit dims join the current group (or the first, if they precede any kept dim), so every
+// group holds exactly one kept dim.
+static SmallVector<ReassociationIndices>
+keepdimsReassociation(ArrayRef<int64_t> keptPos, int64_t rank) {
+    SmallVector<ReassociationIndices> reassoc(keptPos.size());
+    int64_t g = -1;
+    for (int64_t i = 0; i < rank; ++i) {
+        if (llvm::is_contained(keptPos, i))
+            ++g;
+        reassoc[g < 0 ? 0 : g].push_back(i);
+    }
+    return reassoc;
+}
+
+// Elementwise extf/truncf cast built as a linalg.generic so it tiles with the fuse group; the
+// direction is inferred from the element widths.
+static linalg::GenericOp
+createTileableCast(IRRewriter &rewriter, Location loc, Value src, RankedTensorType dstType) {
+    Type srcElem = cast<RankedTensorType>(src.getType()).getElementType();
+    Type dstElem = dstType.getElementType();
+    bool extend = dstElem.getIntOrFloatBitWidth() > srcElem.getIntOrFloatBitWidth();
+    AffineMap idMap = rewriter.getMultiDimIdentityMap(dstType.getRank());
+    SmallVector<utils::IteratorType> parIters(dstType.getRank(), utils::IteratorType::parallel);
+    Value empty = tensor::EmptyOp::create(rewriter, loc, dstType.getShape(), dstElem);
+    return linalg::GenericOp::create(
+        rewriter, loc, TypeRange{dstType}, ValueRange{src}, ValueRange{empty},
+        ArrayRef<AffineMap>{idMap, idMap}, parIters,
+        [&](OpBuilder &b, Location l, ValueRange args) {
+            Value v = extend ? arith::ExtFOp::create(b, l, dstElem, args[0]).getResult()
+                             : arith::TruncFOp::create(b, l, dstElem, args[0]).getResult();
+            linalg::YieldOp::create(b, l, v);
+        }
+    );
+}
+
+// Recreate op's reduction with the reduced (non-keepdims) output map, rebuilding the combine op at
+// the accumulator type and widening the incoming element when the accumulator is wider.
+static linalg::GenericOp createReducedReduction(
+    IRRewriter &rewriter, Location loc, linalg::GenericOp op, Operation *combine, Value init,
+    RankedTensorType accType, AffineMap reducedOutMap
+) {
+    Type accTy = accType.getElementType();
+    Block &body = op.getRegion().front();
+    AffineMap inMap = op.getIndexingMapsArray().front();
+    auto buildBody = [&](OpBuilder &b, Location l, ValueRange args) {
+        Value in = args[0].getType() == accTy
+                       ? args[0]
+                       : arith::ExtFOp::create(b, l, accTy, args[0]).getResult();
+        IRMapping map;
+        map.map(body.getArgument(0), in);
+        map.map(body.getArgument(1), args[1]);
+        SmallVector<Value> operands;
+        for (Value v : combine->getOperands())
+            operands.push_back(map.lookup(v));
+        OperationState st(
+            combine->getLoc(), combine->getName().getStringRef(), operands, {accTy},
+            combine->getAttrs()
+        );
+        linalg::YieldOp::create(b, l, b.create(st)->getResult(0));
+    };
+    return linalg::GenericOp::create(
+        rewriter, loc, TypeRange{accType}, op.getInputs(), ValueRange{init},
+        ArrayRef<AffineMap>{inMap, reducedOutMap}, op.getIteratorTypesArray(), buildBody
+    );
+}
+
+// A keepdims reduction (e.g. an SE-block global-average-pool) has constant result positions in its
+// output map, e.g. (d0,d1,d2,d3) -> (d0,d1,0,0). That is not a projected permutation, so upstream's
+// linalg TilingInterface refuses to tile it, and tile-and-fuse then aborts at fuseControlMax*. The
+// interface is registered by upstream IREE before the plugin loads and cannot be overridden, so
+// rewrite the op into a non-keepdims reduction (a projected permutation) plus a tensor.expand_shape
+// back to the keepdims shape. Scoped to fuse-group members: a standalone keepdims reduction is
+// never tiled, so leave its accumulation order untouched.
+static LogicalResult rewriteKeepdimsFuseGroupReduction(IRRewriter &rewriter, linalg::GenericOp op) {
+    if (!isMarkedFuseGroup(op))
+        return failure();
+    Operation *combine = matchSingleCombineReduction(op);
+    if (!combine)
+        return failure();
+
+    auto outType = dyn_cast<RankedTensorType>(op.getOutputs()[0].getType());
+    if (!outType)
+        return failure();
+    AffineMap outMap = op.getIndexingMapsArray().back();
+    SmallVector<int64_t> keptPos;
+    SmallVector<AffineExpr> keptExprs;
+    if (failed(splitKeepdimsOutputMap(outMap, outType, keptPos, keptExprs)))
+        return failure();
+
+    Location loc = op.getLoc();
+    rewriter.setInsertionPoint(op);
+
+    SmallVector<int64_t> reducedShape;
+    for (int64_t p : keptPos)
+        reducedShape.push_back(outType.getDimSize(p));
+    Type elemTy = outType.getElementType();
+    auto reducedType = RankedTensorType::get(reducedShape, elemTy);
+    AffineMap reducedOutMap =
+        AffineMap::get(outMap.getNumDims(), 0, keptExprs, rewriter.getContext());
+    SmallVector<ReassociationIndices> reassoc = keepdimsReassociation(keptPos, outType.getRank());
+
+    // Tiling changes the order and grouping of the sum. bf16 cannot accumulate thousands of values
+    // (summing 6400 values at magnitude ~6400 has an ulp of ~32 -> ~70% error), so accumulate
+    // narrow floats in f32 and truncate back; f32/f64/int already accumulate at full width.
+    Type accTy = isa<FloatType>(elemTy) && elemTy.getIntOrFloatBitWidth() < 32
+                     ? rewriter.getF32Type()
+                     : elemTy;
+    auto accType = RankedTensorType::get(reducedShape, accTy);
+
+    SmallVector<Operation *> newOps;
+    // Widening the init (rather than seeding zero) preserves its value: 0 for a sum, -inf for a
+    // max.
+    Value init =
+        tensor::CollapseShapeOp::create(rewriter, loc, reducedType, op.getOutputs()[0], reassoc);
+    if (accTy != elemTy) {
+        auto initW = createTileableCast(rewriter, loc, init, accType);
+        newOps.push_back(initW);
+        init = initW.getResult(0);
+    }
+
+    linalg::GenericOp reduceOp =
+        createReducedReduction(rewriter, loc, op, combine, init, accType, reducedOutMap);
+    newOps.push_back(reduceOp);
+    Value reduceResult = reduceOp.getResult(0);
+
+    if (accTy != elemTy) {
+        auto truncOp = createTileableCast(rewriter, loc, reduceResult, reducedType);
+        newOps.push_back(truncOp);
+        reduceResult = truncOp.getResult(0);
+    }
+
+    auto expanded = tensor::ExpandShapeOp::create(rewriter, loc, outType, reduceResult, reassoc);
+    newOps.push_back(expanded);
+
+    // Every new op keeps the group markers so the group still tiles as one unit
+    // (isFuseGroupOutput walks def-use chains looking for members).
+    if (Attribute fg = op->getAttr(TORQ_FUSE_GROUP))
+        for (Operation *nop : newOps)
+            nop->setAttr(TORQ_FUSE_GROUP, fg);
+    if (Attribute fgId = op->getAttr(TORQ_FUSE_GROUP_ID))
+        reduceOp->setAttr(TORQ_FUSE_GROUP_ID, fgId);
+
+    rewriter.replaceOp(op, expanded.getResult());
+    return success();
+}
+
 void TileAndFusePass::runOnOperation() {
     LLVM_DEBUG(llvm::dbgs() << "Tile and Fuse - START\n");
 
@@ -1536,6 +1733,26 @@ void TileAndFusePass::runOnOperation() {
     });
 
     DenseSet<TilingInterface> toTileOps(orderTi.begin(), orderTi.end());
+
+    // Only groups that don't fit (their output op landed in orderTi) are about to be tiled, so only
+    // those need their keepdims reductions rewritten; groups that fit keep their accumulation
+    // order.
+    {
+        IRRewriter rewriter(funcOp.getContext());
+        for (TilingInterface tiOp : orderTi) {
+            Operation *outputOp = tiOp.getOperation();
+            if (!isMarkedFuseGroup(outputOp))
+                continue;
+            SmallVector<linalg::GenericOp> members;
+            funcOp.walk([&](linalg::GenericOp genericOp) {
+                if (genericOp.getOperation() != outputOp &&
+                    checkShareFuseGroup(genericOp, outputOp))
+                    members.push_back(genericOp);
+            });
+            for (linalg::GenericOp genericOp : members)
+                (void)rewriteKeepdimsFuseGroupReduction(rewriter, genericOp);
+        }
+    }
 
     untiledTiledOps_.reserve(orderTi.size());
 

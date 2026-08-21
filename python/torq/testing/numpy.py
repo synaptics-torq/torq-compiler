@@ -1,9 +1,11 @@
 import re
 from pathlib import Path
 
+import ml_dtypes
 import numpy as np
 import onnx
 import onnxruntime
+from onnx import numpy_helper, TensorProto
 
 from .versioned_fixtures import versioned_unhashable_object_fixture
 
@@ -138,3 +140,56 @@ def numpy_reference_results(request, onnx_model_file, input_data):
         llvmcpu_reference_results = request.getfixturevalue("llvmcpu_reference_results").data
         print(f"Warning: Numpy reference failed, falling back to llvmcpu: {e}")
         return llvmcpu_reference_results
+
+
+def _cast_bf16_model_to_fp32(model):
+    """Return a copy of an ONNX model with all bf16 initializers and tensor types
+    cast to fp32 so onnxruntime (which has no bf16 kernels) can execute it. Used to
+    build a reference for full bf16 models that ORT/numpy/llvm-cpu cannot run."""
+    import copy
+
+    m = copy.deepcopy(model)
+    graph = m.graph
+    for init in graph.initializer:
+        if init.data_type == TensorProto.BFLOAT16:
+            dims = list(init.dims)
+            arr = np.frombuffer(init.raw_data, dtype=ml_dtypes.bfloat16).astype(np.float32)
+            if dims:
+                arr = arr.reshape(dims)
+            init.CopyFrom(numpy_helper.from_array(arr, init.name))
+    for vi in list(graph.input) + list(graph.output) + list(graph.value_info):
+        if vi.type.HasField("tensor_type") and vi.type.tensor_type.elem_type == TensorProto.BFLOAT16:
+            vi.type.tensor_type.elem_type = TensorProto.FLOAT
+    for node in graph.node:
+        if node.op_type == "Cast":
+            for attr in node.attribute:
+                if attr.name == "to" and attr.i == TensorProto.BFLOAT16:
+                    attr.i = TensorProto.FLOAT
+    return m
+
+
+def _run_ort_fp32(onnx_model, input_data):
+    """Cast a bf16 model to fp32 and run it through onnxruntime, casting inputs to
+    fp32 as needed. Returns the outputs rounded back to bf16 precision so the
+    comparison against the (bf16) torq result is bf16-vs-bf16."""
+    fp32_model = _cast_bf16_model_to_fp32(onnx_model)
+    ort_session = onnxruntime.InferenceSession(fp32_model.SerializeToString())
+    ort_inputs = {}
+    for i, inp in enumerate(ort_session.get_inputs()):
+        data = input_data[i]
+        if hasattr(data, "astype"):
+            data = data.astype(np.float32)
+        ort_inputs[inp.name] = data
+    outputs = ort_session.run(None, ort_inputs)
+    return [np.asarray(o).astype(ml_dtypes.bfloat16).astype(np.float32) for o in outputs]
+
+
+@versioned_unhashable_object_fixture
+def bf16_onnx_fp32_reference_results(mlir_model_file, input_data):
+    """Reference for a bf16 torch_ops model whose ops the llvm-cpu/torch references
+    cannot run (e.g. a full backbone whose bf16 MaxPool trips 'util.initializer'
+    legalization on llvm-cpu). Requires a sibling <name>.onnx next to the .mlir: cast
+    it to fp32, run onnxruntime, round back to bf16. Wired in tests/test_torch_ops.py."""
+    onnx_path = Path(str(mlir_model_file)).with_suffix(".onnx")
+    model = onnx.load(str(onnx_path))
+    return _run_ort_fp32(model, input_data)

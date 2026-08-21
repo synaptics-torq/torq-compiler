@@ -342,6 +342,11 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         addCommonTargetExecutablePreprocessingPasses(functionPassManager);
     }
 
+    // Fold constant expressions (e.g. an f32 constant truncated to bf16, as the importer emits for
+    // HardSigmoid's alpha) before the bf16 conversions below. Left in place, such a truncf reaches
+    // LLVM as an fptrunc that lowers to a __truncsfbf2 libcall, which the CSS runtime lacks.
+    modulePassManager.addPass(createCanonicalizerPass());
+
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
 
     // Decompose tensor.concat to insert_slice form first, then tie the
@@ -385,7 +390,15 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass)
         // (HAL, IREE, Linalg, CF) -> LLVM
-        .addPass(arith::createArithExpandOpsPass)
+        // includeBf16 expands bf16 <-> f32 conversions into integer bit manipulation. Without it
+        // the RISC-V backend emits compiler-rt calls (__truncsfbf2, __extendbfsf2), and compiler-rt
+        // is only linked for mabi=ilp32 (see CssLinker), so on an ilp32f target such as coral_v2
+        // any bf16 conversion reaching a CSS kernel fails to link with an undefined symbol.
+        .addPass([]() {
+            arith::ArithExpandOpsPassOptions options;
+            options.includeBf16 = true;
+            return arith::createArithExpandOpsPass(options);
+        })
         .addPass(memref::createExpandOpsPass)
         .addPass(memref::createFoldMemRefAliasOpsPass)
         .addPass(createEmulateNarrowTypePass)
