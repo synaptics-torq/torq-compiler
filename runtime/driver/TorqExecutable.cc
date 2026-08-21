@@ -21,6 +21,7 @@ using synaptics::io::FLAG_torq_step_by_step;
 using synaptics::io::FLAG_torq_clear_memory;
 using synaptics::dump::FLAG_torq_dump_bus_logs;
 using synaptics::io::FLAG_torq_explicit_dmabuf_sync;
+using synaptics::io::FLAG_torq_enable_css_logs;
 
 
 namespace synaptics {
@@ -693,6 +694,12 @@ iree_status_t TorqExecutable::initialize() {
   }
 
   torq_ = newTorqHw(FLAG_torq_hw_type, xram_base, xram_size);
+
+  if (FLAG_torq_enable_css_logs) {
+    torq_->setCssDebugBufferCallback([](const char *logMessage, int logMessageSize, void *userData) {
+      fwrite(logMessage, 1, logMessageSize, stdout);
+    }, nullptr);
+  }
 
   if (!torq_.get()) {
       return iree_make_status(IREE_STATUS_INTERNAL, "failed to instantiate TorqHw");

@@ -33,10 +33,14 @@ enum torq_hw_id {
 #define TORQ_IOCTL_ATTACH_BINDING  _IOWR(TORQ_IOCTL_MAGIC, 9, struct torq_attach_binding_req)
 #define TORQ_IOCTL_DETACH_BINDING  _IOWR(TORQ_IOCTL_MAGIC, 10, struct torq_detach_binding_req)
 #define TORQ_IOCTL_GET_HW_INFO     _IOWR(TORQ_IOCTL_MAGIC, 11, struct torq_get_hw_info_req)
+#define TORQ_IOCTL_READ_CSS_DEBUG_BUFFER \
+                                   _IOWR(TORQ_IOCTL_MAGIC, 12, struct torq_read_css_debug_buffer_req)
 
 /* 32bit compact IOCTL commands */
 #define TORQ_IOCTL_WRITE_LRAM_32   _IOWR(TORQ_IOCTL_MAGIC, 7, struct torq_write_lram_req_32compat)
 #define TORQ_IOCTL_READ_LRAM_32    _IOWR(TORQ_IOCTL_MAGIC, 8, struct torq_read_lram_req_32compat)
+#define TORQ_IOCTL_READ_CSS_DEBUG_BUFFER_32 \
+                                   _IOWR(TORQ_IOCTL_MAGIC, 12, struct torq_read_css_debug_buffer_req_32compat)
 
 /* IOCTL Data Structures */
 struct torq_create_network_req {
@@ -112,6 +116,18 @@ struct torq_read_lram_req_32compat {
 
 struct torq_get_hw_info_req {
     unsigned int hw_id;            /* Output: Hardware ID */
+};
+
+struct torq_read_css_debug_buffer_req {
+    unsigned int network_id;       /* Network ID */
+    unsigned int size;             /* In: buffer capacity, Out: bytes read */
+    void *data;                    /* Destination buffer */
+};
+
+struct torq_read_css_debug_buffer_req_32compat {
+    unsigned int network_id;       /* Network ID */
+    unsigned int size;             /* In: buffer capacity, Out: bytes read */
+    unsigned int data;             /* 32bit destination buffer pointer value */
 };
 
 #ifdef __cplusplus

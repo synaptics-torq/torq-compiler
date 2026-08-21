@@ -11,6 +11,15 @@
 #define NPU_RESET_INTERVAL 10
 #define TORQ_IRQ_TIMEOUT_MS 5000
 
+/* CSS debug ring buffer layout in DTCM */
+#define CSS_DEBUG_BUFFER_SIZE       16
+#define CSS_DEBUG_BUFFER_DATA_SIZE  (CSS_DEBUG_BUFFER_SIZE - 8)
+#define CSS_DEBUG_BUFFER_BASE       (REG_ADDR__SYNPU_HV_DTCM + REG_SIZE__SYNPU_HV_DTCM - CSS_DEBUG_BUFFER_SIZE)
+#define CSS_DEBUG_BUFFER_WRITE_ADDR (CSS_DEBUG_BUFFER_BASE)
+#define CSS_DEBUG_BUFFER_READ_ADDR  (CSS_DEBUG_BUFFER_BASE + 4)
+#define CSS_DEBUG_BUFFER_DATA_ADDR  (CSS_DEBUG_BUFFER_BASE + 8)
+
+
 static int torq_attach_binding(struct torq_file_inst *inst, struct torq_attach_binding_req *req);
 static int torq_detach_binding(struct torq_file_inst *inst, struct torq_detach_binding_req *req);
 
@@ -99,6 +108,92 @@ static irqreturn_t torq_synpu_irq_handler(int irq, void *ptr)
     return IRQ_HANDLED;
 }
 
+static const char *torq_riscv_mcause_reason(uint32_t cause)
+{
+    switch (cause) {
+    case 0:
+        return "instruction address misaligned";
+    case 1:
+        return "instruction access fault";
+    case 2:
+        return "illegal instruction";
+    case 3:
+        return "breakpoint";
+    case 4:
+        return "load address misaligned";
+    case 5:
+        return "load access fault";
+    case 6:
+        return "store/AMO address misaligned";
+    case 7:
+        return "store/AMO access fault";
+    case 8:
+        return "environment call from U-mode";
+    case 9:
+        return "environment call from S-mode";
+    case 11:
+        return "environment call from M-mode";
+    case 12:
+        return "instruction page fault";
+    case 13:
+        return "load page fault";
+    case 15:
+        return "store/AMO page fault";
+    default:
+        return "unknown or implementation-defined cause";
+    }
+}
+
+static void torq_dump_register_status(struct torq_module *torq_dev)
+{
+    uint32_t nss_status;
+    uint32_t cpu_status;
+    uint32_t cpu_pcstart;
+    uint32_t cpu_csr[8];
+    uint64_t mcycle;
+    uint64_t minstret;
+    int index;
+
+    nss_status = readl(torq_dev->reg_map + RA_(NSS,STATUS));
+    cpu_status = readl(torq_dev->reg_map +
+                       REG_ADDR__SYNPU_HV_CPU_REGS + REG_ADDR__TORQ_CPU_REGS_STATUS);
+    cpu_pcstart = readl(torq_dev->reg_map +
+                        REG_ADDR__SYNPU_HV_CPU_REGS + REG_ADDR__TORQ_CPU_REGS_PCSTART);
+
+    for (index = 0; index < ARRAY_SIZE(cpu_csr); index++) {
+        cpu_csr[index] = readl(torq_dev->reg_map +
+                               REG_ADDR__SYNPU_HV_CPU_REGS +
+                               REG_ADDR__TORQ_CPU_REGS_CSR_0 + index * sizeof(uint32_t));
+    }
+
+    mcycle = ((uint64_t)cpu_csr[5] << 32) | cpu_csr[4];
+    minstret = ((uint64_t)cpu_csr[7] << 32) | cpu_csr[6];
+
+    KLOGE("Register status: NSS=0x%x (NSS=%u XR=%u XW=%u SLC0=%u SLC1=%u), "
+          "CPU=0x%x (HALTED=%u FAULT=%u), PCSTART=0x%x",
+          nss_status,
+          (nss_status >> REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_NSS) & 1,
+          (nss_status >> REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_XR) & 1,
+          (nss_status >> REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_XW) & 1,
+          (nss_status >> REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_SLC0) & 1,
+          (nss_status >> REG_FIELD_POS__SYNPU_NSS_REGS_STATUS_SLC1) & 1,
+          cpu_status,
+          (cpu_status >> REG_FIELD_POS__TORQ_CPU_REGS_STATUS_HALTED) & 1,
+          (cpu_status >> REG_FIELD_POS__TORQ_CPU_REGS_STATUS_FAULT) & 1,
+          cpu_pcstart);
+    KLOGE("RISC-V exported CSRs: PC=0x%x mepc=0x%x mtval=0x%x mcause=0x%x",
+          cpu_csr[0], cpu_csr[1], cpu_csr[2], cpu_csr[3]);
+    KLOGE("RISC-V counters: mcycle=0x%llx minstret=0x%llx",
+          (unsigned long long)mcycle, (unsigned long long)minstret);
+
+    if ((cpu_status >> REG_FIELD_POS__TORQ_CPU_REGS_STATUS_FAULT) & 1) {
+        KLOGE("RISC-V CPU fault: %s (cause=%u, interrupt=%u, mepc=0x%x, mtval=0x%x)",
+              torq_riscv_mcause_reason(cpu_csr[3] & 0x7fffffff),
+              cpu_csr[3] & 0x7fffffff, cpu_csr[3] >> 31,
+              cpu_csr[1], cpu_csr[2]);
+    }
+}
+
 static int torq_detach_network_domain(struct torq_module *torq_dev, struct torq_network *net)
 {
     int ret;
@@ -119,6 +214,9 @@ static int torq_detach_network_domain(struct torq_module *torq_dev, struct torq_
     }
 
     torq_dev->active_network = NULL;
+    mutex_lock(&torq_dev->css_debug_lock);
+    torq_dev->active_inst = NULL;
+    mutex_unlock(&torq_dev->css_debug_lock);
     KLOGI("hardware released from network %d usage", net->network_id);
 
     return ret;
@@ -205,6 +303,11 @@ static void torq_commit_lram_to_hw(void __iomem *lram_base, uint32_t addr,
     uint32_t lram_update;
     uint32_t aligned_addr, offset, mask;
 
+    if (addr + size > REG_SIZE__SYNPU_HV_LRAM) {
+        KLOGE("Attempt to write beyond LRAM size: addr=0x%x, size=%zu", addr, size);
+        return;
+    }
+
     /* Handle unaligned start */
     if (addr & 0x3) {
         aligned_addr = addr & ~0x03;
@@ -258,7 +361,7 @@ static void torq_commit_network_lram(struct torq_module *torq_dev, struct torq_n
             KLOGI("Loading segment %d: %zu bytes at offset 0x%x",
                   segment_count, segment->size, segment->addr);
             /* Copy segment data to hardware at the specified address */
-            torq_commit_lram_to_hw(torq_dev->reg_map, segment->addr, segment->data, segment->size);
+            torq_commit_lram_to_hw(torq_dev->reg_map + REG_ADDR__SYNPU_HV_LRAM, segment->addr, segment->data, segment->size);
             segment_count++;
         }
 
@@ -269,8 +372,13 @@ static void torq_commit_network_lram(struct torq_module *torq_dev, struct torq_n
 
 static int torq_add_lram_segment(struct torq_network *net, unsigned int addr,
                                  size_t size, const void *data)
-{
+{    
     struct torq_lram_segment *segment;
+
+    if (addr + size > REG_SIZE__SYNPU_HV_LRAM) {
+        KLOGE("Attempt to add LRAM segment beyond LRAM size: addr=0x%x, size=%zu", addr, size);
+        return -EINVAL;
+    }
 
     segment = kzalloc(sizeof(*segment), GFP_KERNEL);
     if (!segment) {
@@ -461,6 +569,12 @@ static int torq_start_network(struct torq_file_inst *inst, struct torq_start_net
     net->lram_cached = true;
     torq_commit_network_lram(torq_dev, net);
 
+    mutex_lock(&torq_dev->css_debug_lock);
+    torq_dev->active_inst = inst;
+    writel(0, torq_dev->reg_map + CSS_DEBUG_BUFFER_WRITE_ADDR);
+    writel(0, torq_dev->reg_map + CSS_DEBUG_BUFFER_READ_ADDR);
+    mutex_unlock(&torq_dev->css_debug_lock);
+
     /* reset the module before starting new network */
     reset_control_assert(torq_dev->core_rst);
     udelay(NPU_RESET_INTERVAL);
@@ -544,6 +658,7 @@ static int torq_wait_network(struct torq_file_inst *inst, struct torq_wait_netwo
 
     if (ret == 0) {
         KLOGE("Job timeout on network %d after %d ms", req->network_id, TORQ_IRQ_TIMEOUT_MS);
+        torq_dump_register_status(torq_dev);
         return -ETIMEDOUT;
     }
 
@@ -721,6 +836,111 @@ static int torq_read_lram(struct torq_file_inst *inst, struct torq_read_lram_req
 
     return 0;
 }
+
+static void torq_read_mem_from_hw(void __iomem *reg_base, uint32_t addr,
+                                  uint8_t *data, size_t size)
+{
+    uint32_t offset = addr & 0x3;
+    uint32_t aligned_addr = addr & ~0x03;
+    uint32_t word;
+    size_t chunk;
+
+    /* we can only read aligned 32-bit words */
+    while (size) {
+        word = readl(reg_base + aligned_addr);
+        chunk = min(size, (size_t)(4 - offset));
+        memcpy(data, (uint8_t *)&word + offset, chunk);
+        size -= chunk;
+        data += chunk;
+        aligned_addr += 4;
+        offset = 0;
+    }
+}
+
+/* Runs without the device/instance locks so logs can be drained while a job is in flight */
+static int torq_read_css_debug_buffer(struct torq_file_inst *inst,
+                                      struct torq_read_css_debug_buffer_req *req)
+{
+    struct torq_module *torq_dev = inst->torq_device;
+    uint32_t write_count;
+    uint32_t read_count;
+    size_t capacity;
+    size_t copied = 0;
+    size_t chunk;
+    uint8_t *buf;
+    int ret = 0;
+
+    if (!req->data || req->size == 0) {
+        KLOGE("Invalid CSS debug buffer read parameters");
+        return -EINVAL;
+    }
+
+    capacity = min_t(size_t, (size_t)req->size, (size_t)CSS_DEBUG_BUFFER_DATA_SIZE);
+    buf = kmalloc(capacity, GFP_KERNEL);
+    if (!buf) {
+        return -ENOMEM;
+    }
+
+    mutex_lock(&torq_dev->css_debug_lock);
+
+    /* only the instance currently owning the hardware may touch the debug buffer */
+    if (!torq_dev->active_network || torq_dev->active_inst != inst) {
+        mutex_unlock(&torq_dev->css_debug_lock);
+        kfree(buf);
+        return -ENODEV;
+    }
+
+    write_count = readl(torq_dev->reg_map + CSS_DEBUG_BUFFER_WRITE_ADDR);
+    read_count = readl(torq_dev->reg_map + CSS_DEBUG_BUFFER_READ_ADDR);
+
+    if (write_count > CSS_DEBUG_BUFFER_DATA_SIZE || read_count > CSS_DEBUG_BUFFER_DATA_SIZE) {
+        KLOGE("Invalid CSS debug buffer counters (write: %u, read: %u)", write_count, read_count);
+        mutex_unlock(&torq_dev->css_debug_lock);
+        kfree(buf);
+        return -EIO;
+    }
+
+    if (write_count == read_count) {
+        mutex_unlock(&torq_dev->css_debug_lock);
+        kfree(buf);
+        req->size = 0;
+        return 0;
+    }
+
+    /* The write counter wrapped, drain up to the end of the ring first */
+    if (write_count < read_count) {
+        chunk = min(capacity, (size_t)(CSS_DEBUG_BUFFER_DATA_SIZE - read_count));
+        torq_read_mem_from_hw(torq_dev->reg_map, CSS_DEBUG_BUFFER_DATA_ADDR + read_count,
+                              buf, chunk);
+        copied += chunk;
+        read_count += chunk;
+        if (read_count == CSS_DEBUG_BUFFER_DATA_SIZE) {
+            read_count = 0;
+        }
+    }
+
+    if (read_count < write_count && copied < capacity) {
+        chunk = min(capacity - copied, (size_t)(write_count - read_count));
+        torq_read_mem_from_hw(torq_dev->reg_map, CSS_DEBUG_BUFFER_DATA_ADDR + read_count,
+                              buf + copied, chunk);
+        copied += chunk;
+        read_count += chunk;
+    }
+
+    if (copy_to_user(req->data, buf, copied)) {
+        KLOGE("Failed to copy CSS debug buffer data to user space");
+        ret = -EFAULT;
+    } else {
+        writel(read_count, torq_dev->reg_map + CSS_DEBUG_BUFFER_READ_ADDR);
+        req->size = copied;
+    }
+
+    mutex_unlock(&torq_dev->css_debug_lock);
+
+    kfree(buf);
+    return ret;
+}
+
 
 static int torq_iommu_map_sg_at_offset(struct iommu_domain *domain, dma_addr_t iova,
                                        struct sg_table *sgt, size_t byte_offset,
@@ -986,6 +1206,19 @@ static long torq_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     else if (copy_from_user(&data, (void __user *)arg, _IOC_SIZE(cmd)))
         return -EFAULT;
 
+    /* handled outside the instance lock so it can run while a job is being waited on */
+    if (cmd == TORQ_IOCTL_READ_CSS_DEBUG_BUFFER) {
+        ret = torq_read_css_debug_buffer(inst, &data.css_debug_buffer_read_request);
+        if (ret)
+            return ret;
+
+        if (copy_to_user((void __user *)arg, &data, _IOC_SIZE(cmd))) {
+            KLOGE("error copying css debug buffer details back to user");
+            return -EFAULT;
+        }
+        return 0;
+    }
+
     mutex_lock(&inst->inst_mutex);
     if (REQUIRE_DEVICE_LOCK(cmd)) {
         mutex_lock(&inst->torq_device->device_lock);
@@ -1079,6 +1312,8 @@ static long torq_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long
     struct torq_write_lram_req_32compat lram_write_32;
     struct torq_read_lram_req lram_read_64;
     struct torq_read_lram_req_32compat lram_read_32;
+    struct torq_read_css_debug_buffer_req debug_read_64;
+    struct torq_read_css_debug_buffer_req_32compat debug_read_32;    
     int ret = 0;
 
     switch (cmd) {
@@ -1108,6 +1343,25 @@ static long torq_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long
             mutex_lock(&inst->inst_mutex);
             ret = torq_read_lram(inst, &lram_read_64);
             mutex_unlock(&inst->inst_mutex);
+        break;
+
+        case TORQ_IOCTL_READ_CSS_DEBUG_BUFFER_32:
+            if (copy_from_user(&debug_read_32, (void __user *)arg, _IOC_SIZE(cmd))) {
+                KLOGE("error copying css debug buffer request from user\n");
+                return -EFAULT;
+            }
+            debug_read_64.network_id = debug_read_32.network_id;
+            debug_read_64.size = debug_read_32.size;
+            debug_read_64.data = compat_ptr(debug_read_32.data);
+            ret = torq_read_css_debug_buffer(inst, &debug_read_64);
+            if (ret)
+                break;
+
+            debug_read_32.size = debug_read_64.size;
+            if (copy_to_user((void __user *)arg, &debug_read_32, _IOC_SIZE(cmd))) {
+                KLOGE("error copying css debug buffer details back to user\n");
+                ret = -EFAULT;
+            }
         break;
 
         default:
@@ -1258,6 +1512,7 @@ static int torq_probe(struct platform_device *pdev)
 
     mutex_init(&torq_dev->files_mutex);
     mutex_init(&torq_dev->device_lock);
+    mutex_init(&torq_dev->css_debug_lock);
     INIT_LIST_HEAD(&torq_dev->files);
 
     torq_dev->pdev = pdev;

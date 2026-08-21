@@ -906,7 +906,7 @@ class DtcmTilePass : public impl::DtcmTileBase<DtcmTilePass> {
 
         RewritePatternSet tilePatterns(ctx);
 
-        const uint32_t cssMem = HwInfo::dtcm_size - HwInfo::css_stack_size - 32;
+        const uint32_t cssMem = HwInfo::dtcm_size - HwInfo::css_reserved_dtcm_size - 32;
         tilePatterns.add<TileLinalgOpOperation>(ctx, cssMem, torq_hl::Executor::CSS);
         tilePatterns.add<CheckSortOpMemory>(ctx, cssMem, torq_hl::Executor::CSS);
 

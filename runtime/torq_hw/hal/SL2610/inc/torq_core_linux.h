@@ -55,6 +55,7 @@ union torq_ioctl_arg {
     struct torq_attach_binding_req attach_binding_request;
     struct torq_detach_binding_req detach_binding_request;
     struct torq_get_hw_info_req get_hw_info_request;
+    struct torq_read_css_debug_buffer_req css_debug_buffer_read_request;
 };
 
 struct torq_binding_entry {
@@ -75,6 +76,7 @@ struct torq_module {
     struct list_head files;
     struct mutex files_mutex;
     struct mutex device_lock; /* Mutex for device level access from instances */
+    struct mutex css_debug_lock; /* Mutex for the CSS debug buffer in DTCM */
 
     /* device register base and size */
     void __iomem *reg_map;
@@ -96,6 +98,7 @@ struct torq_module {
     bool misc_registered;
 
     struct torq_network *active_network; /* Currently attached network */
+    struct torq_file_inst *active_inst;  /* File instance owning the attached network */
 
     int job_irq;
     struct completion job_completion;

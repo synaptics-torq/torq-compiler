@@ -29,6 +29,7 @@ const char* FLAG_torq_hw_type      = DEF_HW_TYPE;
 bool        FLAG_torq_step_by_step = false;
 bool        FLAG_torq_clear_memory = false;
 bool        FLAG_torq_explicit_dmabuf_sync = false;
+bool        FLAG_torq_enable_css_logs = false;
 
 #if IREE_FLAGS_ENABLE_CLI == 1
 IREE_STATIC_INITIALIZER(iree_flag_register_torq_hw_type) {
@@ -55,6 +56,12 @@ IREE_STATIC_INITIALIZER(iree_flag_register_torq_explicit_dmabuf_sync) {
                      iree_make_cstring_view("torq_explicit_dmabuf_sync"),
                      iree_make_cstring_view("Explicitly sync cached zero-copy DMA-BUF bindings in userspace instead of relying on kernel attach/detach"));
 }
+IREE_STATIC_INITIALIZER(iree_flag_register_torq_enable_css_logs) {
+  iree_flag_register(__FILE__, __LINE__, IREE_FLAG_TYPE_bool,
+                     (void*)&FLAG_torq_enable_css_logs, NULL, NULL,
+                     iree_make_cstring_view("torq_enable_css_logs"),
+                     iree_make_cstring_view("Enable reading of CSS logs"));
+}
 #endif  // IREE_FLAGS_ENABLE_CLI
 
 #else  // !IREE_FILE_IO_ENABLE
@@ -63,6 +70,7 @@ const char* FLAG_torq_hw_type      = DEF_HW_TYPE;
 bool        FLAG_torq_step_by_step = false;
 bool        FLAG_torq_clear_memory = false;
 bool        FLAG_torq_explicit_dmabuf_sync = false;
+bool        FLAG_torq_enable_css_logs = false;
 
 #endif  // IREE_FILE_IO_ENABLE
 

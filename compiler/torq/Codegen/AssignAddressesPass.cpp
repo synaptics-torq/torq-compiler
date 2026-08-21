@@ -915,7 +915,7 @@ class AssignDtcmItcmXramAddressesPass
     void runOnOperation() override {
         auto funcOp = getOperation();
 
-        Pool dtcmPool(HwInfo::dtcm_size - HwInfo::css_stack_size, 0, 4);
+        Pool dtcmPool(HwInfo::dtcm_size - HwInfo::css_reserved_dtcm_size, 0, 4);
 
         if (failed(allocateAddresses(funcOp, dtcmPool, syna::torq_hl::MemorySpace::Dtcm))) {
             emitError(funcOp->getLoc()) << "Failed to allocate DTCM addresses";

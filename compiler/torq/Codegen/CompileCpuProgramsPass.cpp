@@ -178,6 +178,9 @@ class CssLinker {
         }
 
         command.push_back("--defsym __stack_size=" + std::to_string(HwInfo::css_stack_size));
+        command.push_back(
+            "--defsym __debug_buffer_size=" + std::to_string(HwInfo::css_debug_buffer_size)
+        );
 
         /* setup the right memory addresses depending on the target */
 

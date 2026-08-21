@@ -288,6 +288,35 @@ bool TorqAstraMachina::readLram(uint32_t addr, size_t size, void *dataOut) const
     return true;
 }
 
+void TorqAstraMachina::consumeCssDebugBuffer() {
+
+    if (!_networkActive || !isCssDebugBufferCallbackEnabled()) {
+        return;
+    }
+
+    uint8_t payload[256];
+
+    // the driver returns at most one contiguous chunk per call, loop until the ring is drained
+    while (true) {
+        struct torq_read_css_debug_buffer_req req {};
+        req.network_id = _networkId;
+        req.size = sizeof(payload);
+        req.data = payload;
+
+        if (ioctl(_torqDevNode, TORQ_IOCTL_READ_CSS_DEBUG_BUFFER, &req) < 0) {
+            cerr << "CSS debug buffer read IOCTL failed: " << strerror(errno) << endl;
+            return;
+        }        
+
+        if (req.size == 0) {
+            return;
+        }
+
+        logCssMessage(reinterpret_cast<const char *>(payload), req.size);
+    }
+
+}
+
 bool TorqAstraMachina::setupXramSpace() {
     // don't *need* a temp copy, defensive move in-case `torq_hw_device_buffer_allocate() fails
     TorqDeviceBuffer xramBuffer{};
@@ -528,7 +557,13 @@ bool TorqAstraMachina::wait(bool nssCfg, bool slice1Cfg, bool slice2Cfg, bool dm
     if (slice1Cfg) waitBits |= (1 << TORQ_IOCTL_WAIT_BITMASK_SLC_0);
     if (slice2Cfg) waitBits |= (1 << TORQ_IOCTL_WAIT_BITMASK_SLC_1);
 
-    if (!waitNetwork(waitBits)) {
+    startCssDebugBufferPolling();
+
+    bool result = waitNetwork(waitBits);
+
+    stopCssDebugBufferPolling();
+
+    if (!result) {
         cerr << "Failed to wait for network job completion" << endl;
         return false;
     }

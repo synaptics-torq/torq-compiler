@@ -78,6 +78,7 @@ class TorqAstraMachina: public TorqHw {
     bool readReg32(uint32_t addr, uint32_t & data) const override;
     bool writeLram32(uint32_t addr, uint32_t data) override;
     bool readLram32(uint32_t addr, uint32_t & data) const override;
+    void consumeCssDebugBuffer() override;
     void alignXram();
 
     bool createNetwork();

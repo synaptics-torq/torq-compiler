@@ -4,35 +4,12 @@
 
 #ifdef CSS_HW_CORALNPU
 
-#define print(x)
-#define printInt(x)
-
 static inline void halt() {
     // this is a special CoralNPU instruction that halts the cpu
     asm volatile(".word 0x08000073");
 }
 #endif
 #ifdef CSS_HW_QEMU
-
-static inline void print(char *data) {
-    int uart = 0x10000000;
-
-    for (int i = 0; data[i] != '\0'; i++) {
-        *(volatile char *)(uart) = data[i];
-    }
-}
-
-static inline void printInt(unsigned int val) {
-    int uart = 0x10000000;
-    char hexChars[] = "0123456789ABCDEF";
-
-    *(volatile char *)(uart) = '0';
-    *(volatile char *)(uart) = 'x';
-
-    for (int pos = 7; pos >= 0; pos--) {
-        *(volatile char *)(uart) = hexChars[(val >> (pos * 4)) & 0xF];
-    }
-}
 
 static inline void halt() {
 
@@ -49,6 +26,108 @@ static inline void halt() {
     while (1) {
     };
 }
+
+#endif
+
+// #define CSS_ENABLE_PRINT_DEBUG_BUFFER
+
+#ifdef CSS_ENABLE_PRINT_REGISTER
+
+static inline void printToRegister(char *data) {
+    int uart = 0x10000000;
+
+    for (int i = 0; data[i] != '\0'; i++) {
+        *(volatile char *)(uart) = data[i];
+    }
+}
+
+static inline void printIntToRegister(unsigned int val) {
+    int uart = 0x10000000;
+    char hexChars[] = "0123456789ABCDEF";
+
+    *(volatile char *)(uart) = '0';
+    *(volatile char *)(uart) = 'x';
+
+    for (int pos = 7; pos >= 0; pos--) {
+        *(volatile char *)(uart) = hexChars[(val >> (pos * 4)) & 0xF];
+    }
+}
+
+#endif
+
+#ifdef CSS_ENABLE_PRINT_DEBUG_BUFFER
+
+extern char __debug_buffer_start[];
+extern char __debug_buffer_end[];
+
+struct print_buffer {
+    uint32_t write_index;
+    uint32_t read_index;
+    uint8_t buffer[];
+};
+
+static void printDataToBuffer(const uint8_t *data, size_t size) {
+    volatile struct print_buffer *print_buf = (volatile struct print_buffer *)&__debug_buffer_start;
+    const uint32_t capacity =
+        ((uint32_t)&__debug_buffer_end - (uint32_t)&__debug_buffer_start -
+         sizeof(struct print_buffer));
+
+    for (uint32_t i = 0; i < size; ++i) {
+        uint32_t write = print_buf->write_index;
+        uint32_t next = (write + 1) % capacity;
+
+        // Busy loop until reader advances read_index and frees one slot.
+        while (next == print_buf->read_index) {
+        }
+
+        print_buf->buffer[write] = data[i];
+
+        // Ensure payload write is globally ordered before publishing write_index.
+        asm volatile("fence rw, w" ::: "memory");
+
+        print_buf->write_index = next;
+
+        // Ensure write_index write is globally ordered before next payload write.
+        asm volatile("fence rw, w" ::: "memory");
+    }
+}
+
+static inline void printIntToBuffer(unsigned int val) {
+    int uart = 0x10000000;
+    uint8_t hexChars[] = "0123456789ABCDEF";
+
+    printDataToBuffer((const uint8_t *)"0x", 2);
+
+    for (int pos = 7; pos >= 0; pos--) {
+        printDataToBuffer(&hexChars[(val >> (pos * 4)) & 0xF], 1);
+    }
+}
+
+static void printToBuffer(char *data) {
+    uint32_t len = 0;
+    while (data[len] != '\0') {
+        len++;
+    }
+
+    printDataToBuffer((const uint8_t *)data, len);
+}
+
+#endif
+
+#if defined(CSS_ENABLE_PRINT_DEBUG_BUFFER)
+
+#define print(x) printToBuffer(x)
+#define printInt(x) printIntToBuffer(x)
+
+#elif defined(CSS_ENABLE_PRINT_REGISTER)
+
+#define print(x) printToRegister(x)
+#define printInt(x) printIntToRegister(x)
+
+#else
+
+#define print(x)
+#define printInt(x)
 
 #endif
 

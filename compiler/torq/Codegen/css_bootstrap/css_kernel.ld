@@ -5,7 +5,9 @@ __itcm_size  = 0x00002000;
 __dtcm_size  = 0x00008000;
 __css_regs_size = 0x00001000;
 
-__stack_pointer = __dtcm_start + __dtcm_size;
+__debug_buffer_start = __dtcm_start + __dtcm_size - __debug_buffer_size;
+__debug_buffer_end = __debug_buffer_start + __debug_buffer_size;
+__stack_pointer = __dtcm_start + __dtcm_size - __debug_buffer_size;
 __stack_start = __stack_pointer - __stack_size;
 
 ENTRY(_start)

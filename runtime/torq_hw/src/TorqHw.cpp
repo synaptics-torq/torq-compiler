@@ -26,10 +26,13 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
-#include <thread>
 #include <cstdint>
+#include <vector>
+#include <thread>
 
 using namespace std;
 
@@ -123,6 +126,19 @@ bool TorqHw::detachBinding(
     return readXram(xramAddr, size, data);
 }
 
+constexpr uint32_t cssDebugBufferDataSize = 16 - 8; // 16 bytes total, 8 bytes for read/write counters, 8 bytes for payload
+constexpr uint32_t cssDebugBufferDtcmAddr = REG_SIZE__TORQ_HV_DTCM - cssDebugBufferDataSize - 8; // 8 bytes for read/write counters
+constexpr uint32_t cssDebugBufferWriteAddr = cssDebugBufferDtcmAddr;
+constexpr uint32_t cssDebugBufferReadAddr = cssDebugBufferDtcmAddr + 4;
+constexpr uint32_t cssDebugBufferDataAddr = cssDebugBufferDtcmAddr + 8;
+
+void TorqHw::setupCssDebugBuffer() {
+    uint32_t zero = 0;
+    writeDtcm(cssDebugBufferWriteAddr, sizeof(uint32_t), &zero);
+    writeDtcm(cssDebugBufferReadAddr, sizeof(uint32_t), &zero);
+    _css_debug_buffer_read_count = 0;
+}
+
 bool TorqHw::start(uint32_t lramAddr) {
 #ifdef TORQ_DEVICE_DEBUG
     uint32_t reg{};
@@ -138,6 +154,10 @@ bool TorqHw::start(uint32_t lramAddr) {
     printf("Before START NSS_STATUS: %08x CFG: %08x\n", reg, cfg);
 #endif
 
+    if (isCssDebugBufferCallbackEnabled()) {                
+        setupCssDebugBuffer();        
+    }
+
     _start_timer.start();
 
     writeReg32(RA_(NSS,CFG), RF_LSH(NSS,CFG_LINK_EN, 1) | RF_BMSK_LSH(NSS,CFG_DESC, lramAddr));  // set NSS CFG descriptor address
@@ -152,7 +172,85 @@ bool TorqHw::start(uint32_t lramAddr) {
     return true;
 }
 
-bool TorqHw::wait(bool nssCfg, bool slice1Cfg, bool slice2Cfg, bool dmaInCfg, bool dmaOutCfg) {
+void TorqHw::consumeCssDebugBuffer() {
+    
+    uint32_t debugWriteCount = 0;
+
+    if (!readDtcm(cssDebugBufferWriteAddr, sizeof(debugWriteCount), &debugWriteCount)) {
+        LOGE << "Failed to read debug write counter";        
+        return;
+    }
+    
+    const int available = debugWriteCount - _css_debug_buffer_read_count;
+
+    if (available == 0) {
+        return;
+    }
+
+    // the write pointer wrapped, we first read everything from the read pointer to the end of the buffer
+    if (available < 0) {
+        // read all data from read counter to end of the buffer
+        const int bytesToRead = cssDebugBufferDataSize - _css_debug_buffer_read_count;
+        std::vector<uint8_t> payload(bytesToRead);
+        if (!readDtcm(cssDebugBufferDataAddr + _css_debug_buffer_read_count, bytesToRead, payload.data())) {
+            LOGE << "Failed to read debug buffer (first chunk)";
+            return;
+        }
+        logCssMessage(reinterpret_cast<const char *>(payload.data()), bytesToRead);
+        _css_debug_buffer_read_count = 0;
+    }
+    
+    // read all data from the read counter to the write counter (we now are sure it's below the write pointer)
+    if (available != 0) {
+        const int bytesToRead = debugWriteCount - _css_debug_buffer_read_count;
+        std::vector<uint8_t> payload(bytesToRead);
+        if (!readDtcm(cssDebugBufferDataAddr + _css_debug_buffer_read_count, bytesToRead, payload.data())) {
+            LOGE << "Failed to read debug buffer (second chunk)";
+            return;
+        }
+        logCssMessage(reinterpret_cast<const char *>(payload.data()), bytesToRead);
+        _css_debug_buffer_read_count += bytesToRead;
+    }
+
+    if (!writeDtcm(cssDebugBufferReadAddr, sizeof(_css_debug_buffer_read_count), &_css_debug_buffer_read_count)) {
+        LOGE << "Failed to update debug read counter";
+    }
+
+}
+
+void TorqHw::startCssDebugBufferPolling() {
+
+    if (!isCssDebugBufferCallbackEnabled()) {
+        return;
+    }
+
+    _css_debug_buffer_polling = true;
+
+    // we need a thread because in simulation readReg32 hangs till the device is done
+    _css_debug_buffer_thread = std::thread([this]() {
+
+        while (_css_debug_buffer_polling) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            consumeCssDebugBuffer();
+        }
+
+        // make sure we consume any remaining logs after the wait is finished
+        consumeCssDebugBuffer();
+    });
+}
+
+void TorqHw::stopCssDebugBufferPolling() {
+
+    if (!_css_debug_buffer_thread.joinable()) {
+        return;
+    }
+
+    _css_debug_buffer_polling = false;
+    _css_debug_buffer_thread.join();
+}
+
+
+bool TorqHw::wait(bool nssCfg, bool slice1Cfg, bool slice2Cfg, bool dmaInCfg, bool dmaOutCfg) {    
 
     _wait_timer.start();
 
@@ -171,18 +269,25 @@ bool TorqHw::wait(bool nssCfg, bool slice1Cfg, bool slice2Cfg, bool dmaInCfg, bo
 
     const auto timeout = waitTimeout();
 
+    startCssDebugBufferPolling();
+
+    bool result = true;
+
     uint32_t reg{};
-    while (1) {
+    while (1) {        
+
         if (!readReg32(RA_(NSS,STATUS), reg)) {
             LOGE << "Cannot read from NSS STATUS";
-            return false;
+            result = false;
+            break;
         }
 
         auto wait_duration = getTimeSinceWait();
         if (wait_duration > timeout) {
             LOGE << wait_duration << "(us) Timeout waiting for interrupt";
             printNssRegs();
-            return false;
+            result = false;
+            break;
         }
 
         // poll status
@@ -215,7 +320,11 @@ bool TorqHw::wait(bool nssCfg, bool slice1Cfg, bool slice2Cfg, bool dmaInCfg, bo
         }
 
     }
-    return true;
+
+    // drain any remaining logs
+    stopCssDebugBufferPolling();
+
+    return result;
 }
 
 bool TorqHw::end() {
@@ -324,12 +433,22 @@ bool TorqHw::readLram(uint32_t addr, size_t size, void *dataOut) const
             }
         }
     }
-    return 0;
+    return true;
+}
+
+bool TorqHw::writeDtcm(uint32_t addr, size_t size, const void *dataIn) {
+    assert(addr + size <= REG_SIZE__TORQ_HV_DTCM && "DTCM address out of range");
+    return writeLram(REG_ADDR__TORQ_HV_DTCM + addr, size, dataIn);
 }
 
 bool TorqHw::readDtcm(uint32_t addr, size_t size, void *dataOut) const {
     assert(addr + size <= REG_SIZE__TORQ_HV_DTCM && "DTCM address out of range");
     return readLram(REG_ADDR__TORQ_HV_DTCM + addr, size, dataOut);
+}
+
+bool TorqHw::writeItcm(uint32_t addr, size_t size, const void *dataIn) {
+    assert(addr + size <= REG_SIZE__TORQ_HV_ITCM && "ITCM address out of range");
+    return writeLram(REG_ADDR__TORQ_HV_ITCM + addr, size, dataIn);
 }
 
 bool TorqHw::readItcm(uint32_t addr, size_t size, void *dataOut) const {

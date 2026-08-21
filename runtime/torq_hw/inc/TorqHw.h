@@ -11,10 +11,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <string>
-#include <atomic>
+#include <thread>
 
 #ifdef ENABLE_ASTRA_MACHINA
 #define DEF_HW_TYPE "astra_machina"
@@ -25,6 +26,8 @@
 namespace synaptics {
 
 using TorqDeviceBuffer = torq_hw_device_buffer_t;
+
+typedef void (*CssDebugBufferCallback)(const char *logMessage, int logMessageSize, void *userData);
 
 /// Virtual interface to lowest-level Torq driver
 class TorqHw {
@@ -80,9 +83,13 @@ class TorqHw {
     /// write dataIn to LRAM, only for debugging purpose
     virtual bool writeLram(uint32_t addr, size_t size, const void *dataIn);
     /// read data from LRAM, only for debugging purpose
-    virtual bool readLram(uint32_t addr, size_t size, void *dataOut) const;
+    virtual bool readLram(uint32_t addr, size_t size, void *dataOut) const;    
+    /// write data to DTCM, only for debugging purpose
+    bool writeDtcm(uint32_t addr, size_t size, const void *dataIn);
     /// read data from DTCM, only for debugging purpose
     bool readDtcm(uint32_t addr, size_t size, void *dataOut) const;
+    /// write data to ITCM, only for debugging purpose
+    bool writeItcm(uint32_t addr, size_t size, const void *dataIn);
     /// read data from ITCM, only for debugging purpose
     bool readItcm(uint32_t addr, size_t size, void *dataOut) const;
     /// set the directory for dumping trace data, only for debugging purpose and not always implemented by all hardware types
@@ -130,6 +137,15 @@ class TorqHw {
 
     void printNssRegs();
 
+    void setCssDebugBufferCallback(CssDebugBufferCallback callback, void *userData) {
+        _css_debug_buffer_callback = callback;
+        _css_debug_buffer_callback_user_data = userData;
+    }
+
+    bool isCssDebugBufferCallbackEnabled() const {
+        return _css_debug_buffer_callback != nullptr;
+    }
+
   private:
     /// wait for interrupt
     virtual bool wfi() = 0;
@@ -144,6 +160,12 @@ class TorqHw {
     /// read data from XRAM
     virtual bool readLram32(uint32_t addr, uint32_t &data) const = 0;
 
+    CssDebugBufferCallback _css_debug_buffer_callback{nullptr};
+    void *_css_debug_buffer_callback_user_data{nullptr};
+    uint32_t _css_debug_buffer_read_count{0};
+    std::thread _css_debug_buffer_thread;
+    std::atomic<bool> _css_debug_buffer_polling{false};
+
   protected:
     /// Torq hardware type
     const Type _type{Type::UNDEFINED};
@@ -156,6 +178,24 @@ class TorqHw {
     Timer _wait_timer;
 
     bool _isAcquired{false};
+
+    void logCssMessage(const char *logMessage, int logMessageSize) {
+        if (_css_debug_buffer_callback) {
+            _css_debug_buffer_callback(logMessage, logMessageSize, _css_debug_buffer_callback_user_data);
+        }
+    }
+
+    /// poll the debug buffer in DTCM for new messages and call the log callback if set
+    virtual void consumeCssDebugBuffer();
+
+    /// start polling the debug buffer in the background, does nothing if no callback is set
+    void startCssDebugBufferPolling();
+
+    /// stop the background polling and consume any remaining messages
+    void stopCssDebugBufferPolling();
+
+    /// setup the debug buffer in DTCM
+    void setupCssDebugBuffer();
 };
 
 std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr, size_t xram_size);
