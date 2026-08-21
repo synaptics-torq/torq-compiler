@@ -28,12 +28,7 @@ typedef void (*simulator_fun)(void *);
 bool TorqSimulator::open() {
     cm = torq_cm_open(_xram.data(), _xramStartAddr, _xram.size());
 
-    simulator_fun simulator;
-
-#ifdef TORQ_MPACT_SIMULATOR
-    simulator = &run_cpu_mpact_binary;
-
-    torq_cm__set_css_cpu_code(cm, simulator);
+    torq_cm__set_css_cpu_code(cm, &run_cpu_mpact_binary);
     
     if (!cm) {
         cerr << "Failed to open CModel" << endl;
@@ -42,11 +37,6 @@ bool TorqSimulator::open() {
 
     _open_timer.start();
     return true;
-#else
-    cerr << "Simulation is not supported" << endl;
-    return false;
-#endif
-
 }
 
 void TorqSimulator::setDumpDirectory(std::string dump_dir) {

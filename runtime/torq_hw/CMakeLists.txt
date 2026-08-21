@@ -30,20 +30,6 @@ set(include_dirs
 )
 
 if (TORQ_ENABLE_SIMULATOR)
-  list(APPEND torq_defs "ENABLE_SIMULATOR=1")
-  list(APPEND torq_srcs
-      src/TorqSimulator.h
-      src/TorqSimulator.cpp
-      src/TorqHw.cpp
-  )
-  list(APPEND torq_deps iree::hal::local::executable_library)
-
-  # Note: that doesn´t work for some obscure EXPORT problem
-  # target_link_libraries(torq_hw_TorqHw PRIVATE torq_cm)
-  # so we need to add the include directories and the library manually instead
-  list(APPEND include_dirs ${TORQ_SIMULATOR_INC_DIR})
-  list(APPEND torq_deps ${TORQ_SIMULATOR_LIB})
-
   set(TORQ_MPACT_SIMULATOR_LIB
     ${IREE_TORQ_SOURCE_DIR}/third_party/coralnpu-mpact/${CMAKE_HOST_SYSTEM_PROCESSOR}-${CMAKE_HOST_SYSTEM_NAME}/libcoralnpu_simulator_mpact.so
       CACHE FILEPATH "Path to the mpact simulator shared library")
@@ -53,11 +39,26 @@ if (TORQ_ENABLE_SIMULATOR)
       CACHE PATH "Path to the mpact simulator include directory")
   
   if(EXISTS ${TORQ_MPACT_SIMULATOR_LIB} AND EXISTS ${TORQ_MPACT_SIMULATOR_INC_DIR})
+
+    list(APPEND torq_defs "ENABLE_SIMULATOR=1")
+    list(APPEND torq_srcs
+        src/TorqSimulator.h
+        src/TorqSimulator.cpp
+        src/TorqHw.cpp
+    )
+    list(APPEND torq_deps iree::hal::local::executable_library)
+
+    # Note: that doesn´t work for some obscure EXPORT problem
+    # target_link_libraries(torq_hw_TorqHw PRIVATE torq_cm)
+    # so we need to add the include directories and the library manually instead
+    list(APPEND include_dirs ${TORQ_SIMULATOR_INC_DIR})
+    list(APPEND torq_deps ${TORQ_SIMULATOR_LIB})
+
     message(STATUS "Using mpact simulator library: ${TORQ_MPACT_SIMULATOR_LIB}")
     list(APPEND include_dirs ${TORQ_MPACT_SIMULATOR_INC_DIR})
     list(APPEND torq_srcs src/MpactCSSSimulation.cpp)
     list(APPEND torq_deps ${TORQ_MPACT_SIMULATOR_LIB})
-    list(APPEND torq_defs "TORQ_MPACT_SIMULATOR=1")
+
   else()
     message(WARNING "mpact simulator library or include directory not found. mpact simulation will be disabled.")
   endif()
