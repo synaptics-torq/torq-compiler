@@ -101,6 +101,59 @@ If you are using a different environment you can use a Docker image:
    $ cd torq-compiler
    ```
 
+## Download pre-built or build mpact library
+
+To enable CSS simulation on the host you need the mpact library.
+
+You can obtain the pre-built library for Ubuntu compatible 
+with the code in main branch with the following steps:
+
+1. (optional) If you work on a private fork setup gh client tool the (see [official documentation](https://github.com/cli/cli/blob/trunk/docs/install_linux.md#installing-gh-on-linux-and-bsd])).
+
+2. (optional) Log in to github:
+
+   ```{code} shell
+   $ gh auth login
+   ```
+
+3. Download mpact and uncompress library:
+
+   ```{code} shell
+   ./scripts/setup_mpact.sh
+   ```
+
+To build mpact from sources use the following steps:
+
+1. Clone our fork:
+
+   ```{code} shell
+   git clone http://github.com/synaptics-torq/coralnpu-mpact   
+   ```
+
+2. Checkout the commit listed in `.github/workflows/build-mpact.yml`:
+  
+   ```{code} shell
+   git checkout ${MPACT_REF}
+   ```
+
+3. Install bazelisk (see the [official documentation](https://github.com/bazelbuild/bazelisk))
+
+4. Build MPACT with bazel:
+
+   ```{code} shell
+   cd coralnpu-mpact
+   bazel build sim/hw_sim:libcoralnpu_simulator_mpact.so
+   ```
+
+In order to use the manually built version of mpact set the following CMake
+variables in the CMakeCache.txt file of the tree you will create in the next 
+step as follows:
+
+```{code} shell
+TORQ_MPACT_SIMULATOR_INC_DIR:PATH=YOUR_MPACT_DIR/sim/hw_sim
+TORQ_MPACT_SIMULATOR_LIB:FILEPATH=YOUR_MPACT_DIR/coralnpu-mpact/bazel-bin/sim/hw_sim/libcoralnpu_simulator_mpact.so
+```
+
 ## Build compiler and runtime for host
 
 1. Setup a python virtual environment with the packages required for development:

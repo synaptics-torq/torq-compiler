@@ -103,6 +103,12 @@ jobs:
           name: astra-sl-release
           path: dist
 
+      - name: Download mpact simulation library
+        uses: actions/download-artifact@v8
+        with:
+          name: mpact
+          path: dist
+
       - name: Docker meta (generate tags & labels)
         id: meta
         uses: docker/metadata-action@v6
@@ -197,6 +203,13 @@ jobs:
 
           # remove old wheel assets since we will change their name
           gh release view "$TAG_NAME" --json assets --jq '.assets[] | select(.name | endswith(".whl")) | .name' |
+          while IFS= read -r asset; do
+            echo "Deleting asset: $asset"
+            gh release delete-asset "$TAG_NAME" "$asset" --yes
+          done
+
+          # remove old mpact asset since we may change its name
+          gh release view "$TAG_NAME" --json assets --jq '.assets[] | select(.name | contains("coralnpu-mpact-simulator-")) | .name' |
           while IFS= read -r asset; do
             echo "Deleting asset: $asset"
             gh release delete-asset "$TAG_NAME" "$asset" --yes

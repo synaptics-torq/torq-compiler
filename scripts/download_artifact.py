@@ -9,6 +9,7 @@ import json
 import os
 import zipfile
 import stat
+from fnmatch import fnmatch
 
 
 def find_repo():
@@ -90,15 +91,20 @@ def get_token(repo):
         return os.environ.get("GITHUB_TOKEN")
 
     # not found, try to get a token from the gh CLI
+
+    # check that the user is authenticated with gh CLI    
+    try:
+        subprocess.check_output(["gh", "auth", "status"], text=True)
+    except Exception as e:
+        raise RuntimeError(f"Please make sure gh CLI is installed and working correctly and you are authenticated")
+
+    # obtain a token from the gh CLI
     try:
         token = subprocess.check_output(
             ["gh", "auth", "token", "--hostname", "github.com"], text=True
         ).strip()
-
     except Exception as e:
-        raise RuntimeError(
-            f"Failed to get GitHub token from environment or gh CLI: {e}"
-        )
+        raise RuntimeError(f"Failed to get GitHub token from environment or gh CLI: {e}")
         
     # verify the token
     status_code, body = _github_get(f"https://api.github.com/repos/{repo}/releases", token=token)
@@ -110,7 +116,8 @@ def get_token(repo):
 
     return token
 
-def get_artifact_url(repo, token, release_version, artifact_name):
+
+def get_artifact_url(repo, token, release_version, artifact_name, glob=False):
     """
     Get the download URL for the artifact for the given release version and artifact name.
     """
@@ -128,14 +135,20 @@ def get_artifact_url(repo, token, release_version, artifact_name):
     release_info = json.loads(body.decode("utf-8"))
 
     for asset in release_info.get("assets", []):
-        if asset["name"] == artifact_name:
+
+        if glob:            
+            match = fnmatch(asset["name"], artifact_name)
+        else:
+            match = asset["name"] == artifact_name
+
+        if match:
             if token:
                 # return the API url for the asset, which requires authentication, instead of the browser download URL, 
                 # which does not work with token authentication
-                return f"https://api.github.com/repos/{repo}/releases/assets/{asset['id']}"
+                return asset["name"], f"https://api.github.com/repos/{repo}/releases/assets/{asset['id']}"
             else:
                 # return the browser download URL if no token is needed, since it is simpler and does not require authentication
-                return asset["browser_download_url"]
+                return asset["name"], asset["browser_download_url"]
 
     raise RuntimeError(f"Could not find artifact {artifact_name} in release {release_version} of {repo}")
 
@@ -198,6 +211,7 @@ def main():
     argparser.add_argument("--repo", type=str, default=None, help="The name of the repository to download the artifact from. If not specified, it will be inferred from the location of this script.")
     argparser.add_argument("--release-version", type=str, default="snapshot", help="The name of the release to download the artifact from. Defaults to 'snapshot' which is a special release that is updated on each commit to main. Can also specify a specific release tag (e.g. 'v2.20.0').")
     argparser.add_argument("artifact_name", type=str, help="The name of the artifact to download.")
+    argparser.add_argument("--glob", action="store_true", help="Whether to treat the artifact name as a glob pattern. If set, the first matching artifact will be downloaded.")
     argparser.add_argument("--extract", action="store_true", help="Whether to extract the artifact if it is a zip file. If not set, the artifact will be saved as-is to the output directory.")
     argparser.add_argument("--output-dir", type=str, required=True, help="Directory to download and extract the artifact to.")
 
@@ -220,7 +234,7 @@ def main():
         print("Private repository, using GitHub token for authentication")
     
     # get the relase aritfact url
-    artifact_url = get_artifact_url(remote_repo, token, args.release_version, args.artifact_name)
+    artifact_name, artifact_url = get_artifact_url(remote_repo, token, args.release_version, args.artifact_name, glob=args.glob)
 
     print("Downloading artifact from URL: ", artifact_url)
 
@@ -229,7 +243,7 @@ def main():
         extract_artifact(artifact_url, token, args.output_dir)
     else:
         # download the artifact and save it as-is
-        save_artifact(artifact_url, token, args.output_dir, args.artifact_name)
+        save_artifact(artifact_url, token, args.output_dir, artifact_name)
 
 
 if __name__ == "__main__":

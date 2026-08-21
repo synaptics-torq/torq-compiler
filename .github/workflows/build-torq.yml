@@ -185,6 +185,13 @@ jobs:
           path: /workspace/build/third_party/torq-hw/rt/torq_rt_cm
           retention-days: ${{ inputs.push == 'true' && 30 || 2 }}
 
+      - name: Upload mpact
+        uses: actions/upload-artifact@v7
+        if: ${{ inputs.push }}
+        with:
+          name: mpact
+          path: ${{ needs.build_mpact.outputs.path }}
+
   docker_image_builder_astra:
     name: Create Astra Builder docker
     uses: ./.github/workflows/build-docker-image-builder-astra.yml
