@@ -150,6 +150,15 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'instancenorm' in request.param.data.name:
         extra_args["comparison_config"] = "comparison_config_for_instancenorm"
 
+    # Force the bf16-stash LayerNormalization (bert shape) onto the NSS/slice
+    # path: the model carries stash_type=BFLOAT16 so torch-mlir decomposes it
+    # directly in bf16 (no f32 cone), avoiding the need for a compiler demote.
+    if 'layernorm-nss' in request.param.data.name:
+        extra_args["torq_compiler_options"] = [
+            "--torq-disable-host",
+            "--torq-disable-css",
+        ]
+
     # Force the Conv1D-as-matmul -> fully_connected lowering tests to run on
     # the NSS/slice path so they fail loudly if a future change silently routes
     # them to the host/CSS fallback.

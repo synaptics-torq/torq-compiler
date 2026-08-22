@@ -1646,6 +1646,21 @@ def get_full_model(model_file):
     return inferred_model
 
 
+    # LayerNormalization with stash_type=FLOAT (1) would decompose to an
+    # internal f32 cone (mean/variance reductions + normalize) that the NSS
+    # executor cannot lower. Retarget the stash to BFLOAT16 (16) so
+    # torch-mlir computes it directly in bf16 and no f32 cone is created.
+    ln_count = 0
+    for node in model.graph.node:
+        if node.op_type != "LayerNormalization":
+            continue
+        for attr in node.attribute:
+            if attr.name == "stash_type" and attr.i == TensorProto.FLOAT:
+                attr.i = TensorProto.BFLOAT16
+                ln_count += 1
+    if ln_count:
+        print(f"[BF16] Retargeted {ln_count} LayerNormalization stash_type to bf16")
+
 
 @pytest.fixture
 def onnx_layer_model(request):
