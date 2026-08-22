@@ -21,6 +21,27 @@ iree_cc_binary(
 
 iree_cc_binary(
     NAME
+        torq-mlir-query
+    SRCS
+        "torq-mlir-query.cc"
+    DEPS
+        MLIRIR
+        MLIRQueryLib
+        MLIRSupport
+        iree::compiler::Tools::init_passes_and_dialects
+        iree::compiler::bindings::c::headers
+        iree::target::torq::Utils
+        iree::target::torq::Dialect::TorqHL::Dialect
+        iree::target::torq::Dialect::TorqHW::Dialect
+        MLIRTosaDialect
+        iree::compiler::plugins::input::Torch::torch-mlir::TorchConversionDialectIR
+        iree::compiler::plugins::input::Torch::torch-mlir::TorchDialectIR
+        iree::compiler::plugins::input::Torch::torch-mlir-dialects::TMTensorDialectIR
+    SETUP_INSTALL_RPATH
+)
+
+iree_cc_binary(
+    NAME
       torq-compile
     SRCS
       "torq-compile-main.cc"
