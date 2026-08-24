@@ -10,7 +10,7 @@ mkdir -p ${MPACT_DIR}
 
 echo "Downloading MPACT artifacts to ${MPACT_DIR}..."
 
-${BASE_DIR}/scripts/download_artifact.py --repo synaptics-torq/torq-compiler-stage --output-dir ${MPACT_DIR} --glob coralnpu-mpact-simulator*.tar.gz
+${BASE_DIR}/scripts/download_artifact.py --output-dir ${MPACT_DIR} --glob coralnpu-mpact-simulator*.tar.gz
 
 echo "Extracting MPACT artifacts to ${MPACT_DIR}..."
 
