@@ -242,7 +242,8 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         if (failed(biasV)) {
             LLVM_DEBUG({ llvm::dbgs() << "computeBias: no bias found, setting zero bias\n"; });
             biasV = getDefaultBiasScale(matmulOp, finalType, rewriter);
-            fusionPlanOr->channelDim = 0; // default to batch dim for zero bias
+            // Default to the channel dim for zero bias, matching getDefaultBiasScale's sizing.
+            fusionPlanOr->channelDim = 1;
         }
 
         LLVM_DEBUG(
