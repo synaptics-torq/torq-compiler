@@ -23,6 +23,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
@@ -141,102 +142,40 @@ checkPeakMemoryUsage(FunctionOpInterface funcOp, torq_hl::MemorySpace memSpace, 
 
 static LogicalResult setDerivedMemrefAddress(Operation *op) {
 
-    int64_t baseAddress;
+    assert(isDerivedMemRefOperation(op) && "expected a derived memref op");
+    auto viewOp = cast<ViewLikeOpInterface>(op);
 
-    if (auto subviewOp = dyn_cast<memref::SubViewOp>(op)) {
-        auto maybeBaseAddress = getAddress(subviewOp.getSource());
-
-        if (!maybeBaseAddress) {
-            return subviewOp.emitError("source does not have an address assigned");
-        }
-
-        baseAddress = *maybeBaseAddress;
-    }
-    else if (auto expandShapeOp = dyn_cast<memref::ExpandShapeOp>(op)) {
-        auto maybeBaseAddress = getAddress(expandShapeOp.getSrc());
-
-        if (!maybeBaseAddress) {
-            return expandShapeOp.emitError("source does not have an address assigned");
-        }
-
-        baseAddress = *maybeBaseAddress;
-    }
-    else if (auto reinterpretCast = dyn_cast<memref::ReinterpretCastOp>(op)) {
-
+    // A reinterpret_cast shares its source's address, so it must not add an offset of its
+    // own (that would have to be folded in here, which is unsupported).
+    if (auto reinterpretCast = dyn_cast<memref::ReinterpretCastOp>(op)) {
         for (int i = 0; i < reinterpretCast.getResultRank(); i++) {
             if (reinterpretCast.isDynamicOffset(i) || reinterpretCast.isDynamicSize(i)) {
-                return subviewOp.emitError("dynamic offsets or sizes not supported");
+                return reinterpretCast.emitOpError("dynamic offsets or sizes not supported");
             }
-
             if (reinterpretCast.getStaticOffset(i) != 0) {
-                return subviewOp.emitError("non-zero static offsets not supported");
+                return reinterpretCast.emitOpError("non-zero static offsets not supported");
             }
         }
-
-        auto maybeBaseAddress = getAddress(reinterpretCast.getSource());
-
-        if (!maybeBaseAddress) {
-            return reinterpretCast.emitError("source does not have an address assigned");
-        }
-
-        baseAddress = *maybeBaseAddress;
     }
-    else if (auto memorySpaceCast = dyn_cast<memref::MemorySpaceCastOp>(op)) {
+
+    if (auto memorySpaceCast = dyn_cast<memref::MemorySpaceCastOp>(op)) {
         auto srcSpace = getEncodingMemorySpace(memorySpaceCast.getSource().getType());
         auto dstSpace = getEncodingMemorySpace(memorySpaceCast.getDest().getType());
 
         // casts with different spaces are not supported for the moment
         if (srcSpace != dstSpace) {
-            return memorySpaceCast.emitError(
+            return memorySpaceCast.emitOpError(
                 "memory space cast with different source and destination spaces not supported"
             );
         }
-
-        auto maybeBaseAddress = getAddress(memorySpaceCast.getSource());
-
-        if (!maybeBaseAddress) {
-            return memorySpaceCast.emitError("source does not have an address assigned");
-        }
-
-        baseAddress = *maybeBaseAddress;
-    }
-    else if (auto collapseShapeOp = dyn_cast<memref::CollapseShapeOp>(op)) {
-
-        auto maybeBaseAddress = getAddress(collapseShapeOp.getSrc());
-
-        if (!maybeBaseAddress) {
-            return memorySpaceCast.emitError("src does not have an address assigned");
-        }
-
-        baseAddress = *maybeBaseAddress;
-    }
-    else if (auto expandShapeOp = dyn_cast<memref::ExpandShapeOp>(op)) {
-
-        auto maybeBaseAddress = getAddress(expandShapeOp.getSrc());
-
-        if (!maybeBaseAddress) {
-            return memorySpaceCast.emitError("src does not have an address assigned");
-        }
-
-        baseAddress = *maybeBaseAddress;
-    }
-    else if (auto reshapeOp = dyn_cast<memref::ReshapeOp>(op)) {
-        auto maybeBaseAddress = getAddress(reshapeOp.getSource());
-
-        if (!maybeBaseAddress) {
-            return reshapeOp.emitError("source does not have an address assigned");
-        }
-
-        baseAddress = *maybeBaseAddress;
-    }
-    else {
-        return op->emitError() << "not a derived memref operation";
     }
 
-    // set the base address on the operation since the result memref type already contains the
-    // offset
-    if (failed(setAddress(op, baseAddress))) {
-        return op->emitError() << "failed to set address";
+    auto maybeBaseAddress = getAddress(viewOp.getViewSource());
+    if (!maybeBaseAddress) {
+        return op->emitOpError("source does not have an address assigned");
+    }
+    if (failed(setAddress(op, *maybeBaseAddress))) {
+        return op->emitOpError("failed to set address");
     }
 
     return success();
