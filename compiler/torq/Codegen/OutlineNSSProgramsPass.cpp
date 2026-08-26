@@ -466,7 +466,8 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
         builder, loc,
         /* invocation = */ createInvocationOp.getInvocation(),
         /* code_sections = */ ValueRange{lramProgramAlloc},
-        /* args = */ startInputs
+        /* args = */ startInputs,
+        /* arg_accesses = */ nullptr
     );
 
     SmallVector<Type> waitOutputTypes;

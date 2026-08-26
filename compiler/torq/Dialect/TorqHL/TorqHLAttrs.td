@@ -24,6 +24,22 @@ class TorqHL_I32EnumAttr<string name, string description, string mnemonic,
   let assemblyFormat = "`<` $value `>`";
 }
 
+// Modeled on IREE's Stream_ResourceAccessBitfieldAttr.
+def TorqHL_ArgAccess_None : I32BitEnumAttrCase<"None", 0x0000>;
+def TorqHL_ArgAccess_Read : I32BitEnumAttrCase<"Read", 0x0001>;
+def TorqHL_ArgAccess_Write : I32BitEnumAttrCase<"Write", 0x0002>;
+def TorqHL_ArgAccessBitfieldAttr :
+    I32BitEnumAttr<"ArgAccessBitfield", "program argument access kind", [
+      TorqHL_ArgAccess_None,
+      TorqHL_ArgAccess_Read,
+      TorqHL_ArgAccess_Write,
+    ]> {
+  let cppNamespace = "::mlir::syna::torq_hl";
+}
+def TorqHL_ArgAccessArrayAttr :
+    TypedArrayAttrBase<TorqHL_ArgAccessBitfieldAttr,
+                       "program argument access array attribute">;
+
 def TorqHL_MemorySpace_Host : I32EnumAttrCase<"Host", 5, "host">;
 def TorqHL_MemorySpace_Itcm : I32EnumAttrCase<"Itcm", 4, "itcm">;
 def TorqHL_MemorySpace_Dtcm : I32EnumAttrCase<"Dtcm", 3, "dtcm">;

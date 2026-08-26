@@ -22,6 +22,13 @@ void getLayerOpEffects(
     Operation *op, SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects
 );
 
+// Derives how an op accesses `value` from the op's declared memory effects. A
+// non-buffer value has no access (None); a partial-region write reports Read as
+// well, since the unwritten part of the previous contents stays observable.
+ArgAccessBitfield getValueAccessFromEffects(
+    ArrayRef<SideEffects::EffectInstance<MemoryEffects::Effect>> effects, Value value
+);
+
 } // namespace mlir::syna::torq_hl
 
 #define GET_OP_CLASSES

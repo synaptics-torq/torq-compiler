@@ -19,6 +19,12 @@ include "mlir/IR/Traits.td"
 include "mlir/Dialect/Linalg/IR/LinalgInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 
+// Marks a layer op whose init is updated instead of replaced: the prior init
+// contents are read, or merely left in place by a partial write (e.g. scatter
+// writes only the scattered elements). An op without this trait declares its
+// init a pure output, fully overwritten without reading; consumers may then
+// drop the init's prior contents, so an op that writes only part of its init
+// must take this trait.
 def UpdateInPlaceTrait: NativeOpTrait<"UpdateInPlaceTrait">;
 
 def TensorOrMemref :
@@ -892,13 +898,21 @@ def TorqHl_GetBlockOp: TorqHL_Op<"get_block"> {
 
 }
 
-def TorqHl_StartProgramOp: TorqHL_Op<"start_program", [AttrSizedOperandSegments]> {
+def TorqHl_StartProgramOp: TorqHL_Op<"start_program", [
+    AttrSizedOperandSegments, DeclareOpInterfaceMethods<TorqHL_AsyncAccessOpInterface>]> {
   let summary = "Starts execution of an invocation";
+
+  let description = [{
+    `arg_accesses` holds, for each entry of `args`, how the program accesses
+    that argument. When absent, every argument must be assumed both read and
+    written.
+  }];
 
   let arguments = (ins
     TorqHL_Invocation:$invocation,
     Variadic<AnyMemRef>:$code_sections,
-    Variadic<MemRefOrInvocation>:$args
+    Variadic<MemRefOrInvocation>:$args,
+    OptionalAttr<TorqHL_ArgAccessArrayAttr>:$arg_accesses
   );
 
   let assemblyFormat = [{

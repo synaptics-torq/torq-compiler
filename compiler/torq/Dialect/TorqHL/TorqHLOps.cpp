@@ -250,6 +250,27 @@ void StartProgramOp::getCanonicalizationPatterns(RewritePatternSet &results, MLI
     results.add<OpMemRefCastFolder<StartProgramOp>>(context);
 }
 
+void StartProgramOp::getAsyncAccesses(SmallVectorImpl<AsyncAccess> &accesses) {
+
+    // the program reads its code sections
+    for (auto codeSection : getCodeSections()) {
+        accesses.push_back({ArgAccessBitfield::Read, cast<TypedValue<MemRefType>>(codeSection)});
+    }
+
+    // without access information every argument may be read and written
+    auto argAccesses = getArgAccessesAttr();
+    for (auto [index, arg] : llvm::enumerate(getArgs())) {
+        if (!isa<MemRefType>(arg.getType())) {
+            continue;
+        }
+        auto access = argAccesses ? cast<ArgAccessBitfieldAttr>(argAccesses[index]).getValue()
+                                  : ArgAccessBitfield::Read | ArgAccessBitfield::Write;
+        if (access != ArgAccessBitfield::None) {
+            accesses.push_back({access, cast<TypedValue<MemRefType>>(arg)});
+        }
+    }
+}
+
 // removes conversions from T to T
 class FoldNoOpConversion : public OpRewritePattern<ConvertOp> {
   public:
@@ -670,6 +691,30 @@ void mlir::syna::torq_hl::getLayerOpEffects(
     }
 }
 
+ArgAccessBitfield mlir::syna::torq_hl::getValueAccessFromEffects(
+    ArrayRef<SideEffects::EffectInstance<MemoryEffects::Effect>> effects, Value value
+) {
+    auto access = ArgAccessBitfield::None;
+    if (!isa<MemRefType>(value.getType())) {
+        return access;
+    }
+    for (auto &effect : effects) {
+        if (effect.getValue() != value) {
+            continue;
+        }
+        if (isa<MemoryEffects::Read>(effect.getEffect())) {
+            access = access | ArgAccessBitfield::Read;
+        }
+        if (isa<MemoryEffects::Write>(effect.getEffect())) {
+            access = access | ArgAccessBitfield::Write;
+            if (!effect.getEffectOnFullRegion()) {
+                access = access | ArgAccessBitfield::Read;
+            }
+        }
+    }
+    return access;
+}
+
 LogicalResult mlir::syna::torq_hl::NextOp::verify() {
 
     if (getSuccessor()->getNumArguments() != getArguments().size()) {
@@ -680,6 +725,12 @@ LogicalResult mlir::syna::torq_hl::NextOp::verify() {
 }
 
 LogicalResult mlir::syna::torq_hl::StartProgramOp::verify() {
+
+    if (auto argAccesses = getArgAccessesAttr()) {
+        if (argAccesses.size() != getArgs().size()) {
+            return emitOpError("arg_accesses size must match the number of arguments");
+        }
+    }
 
     auto invocation = getInvocation().getDefiningOp<CreateInvocationOp>();
 

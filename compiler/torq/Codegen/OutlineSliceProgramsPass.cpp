@@ -99,8 +99,20 @@ static void outlineOp(int idx, Operation *op, OpBuilder builder) {
         builder, loc,
         /* bound_program = */ createInvocationOp.getInvocation(),
         /* code_sections = */ ValueRange{lramCodeSection},
-        /* args = */ op->getOperands()
+        /* args = */ op->getOperands(),
+        /* arg_accesses = */ nullptr
     );
+
+    if (auto memEffectsOp = dyn_cast<MemoryEffectOpInterface>(op)) {
+        SmallVector<MemoryEffects::EffectInstance> effects;
+        memEffectsOp.getEffects(effects);
+        SmallVector<Attribute> argAccesses;
+        for (auto operandValue : op->getOperands()) {
+            auto access = torq_hl::getValueAccessFromEffects(effects, operandValue);
+            argAccesses.push_back(torq_hl::ArgAccessBitfieldAttr::get(ctx, access));
+        }
+        startOp.setArgAccessesAttr(builder.getArrayAttr(argAccesses));
+    }
 
     torq_hl::WaitProgramOp::create(builder, loc, TypeRange{}, startOp.getInvocation());
 

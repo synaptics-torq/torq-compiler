@@ -12,6 +12,8 @@
 
 #include "mlir/IR/OpDefinition.h"
 
+#include "torq/Dialect/TorqHL/TorqHLAttrs.h"
+
 namespace mlir::syna::torq_hl {
 
 struct KernelTensorEncoding {
@@ -29,6 +31,13 @@ struct KernelEncoding {
     SmallVector<KernelInputEncoding> inputEncodings;
     KernelTensorEncoding outputEncoding;
     SmallVector<std::pair<unsigned, unsigned>> equalEncodingOperands{};
+};
+
+// One buffer access performed by an op's asynchronous execution window.
+// Modeled on IREE Stream's AsyncAccessRange.
+struct AsyncAccess {
+    ArgAccessBitfield access = ArgAccessBitfield::None;
+    TypedValue<MemRefType> buffer;
 };
 
 } // namespace mlir::syna::torq_hl

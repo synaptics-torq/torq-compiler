@@ -148,10 +148,24 @@ class VirtualObject {
 class VirtualBuffer : public VirtualObject {
     int size_;
     std::optional<PhysicalBuffer *> maybePhysicalBuffer_;
+
+    // Copy of the buffer data in the swap space. Retained across swap in and
+    // freed when the swapped-in buffer is written. So when non-null, it is up
+    // to date and swapping out can skip the store.
     Value swappedOutValue_;
 
   public:
     virtual VirtualBuffer &root() override { return *this; }
+
+    // free the retained swapped out buffer; called before the contents change
+    void freeSwappedOutValue(IRRewriter &rewriter, Location loc) {
+        assert(!isSwappedOut() && "the swapped out buffer holds the only copy");
+        if (!swappedOutValue_) {
+            return;
+        }
+        memref::DeallocOp::create(rewriter, loc, swappedOutValue_);
+        swappedOutValue_ = nullptr;
+    }
 
     virtual void pin() override;
 
@@ -307,6 +321,10 @@ class PhysicalMemory {
     Pool &pool_;
     int defragCount_ = 0;
     int swapOutCount_ = 0;
+    int skippedSwapOutStoreCount_ = 0;
+    int droppedSwapOutCount_ = 0;
+    int64_t droppedSwapOutBytes_ = 0;
+    int skippedSwapInLoadCount_ = 0;
 
     // Buffers the spill-on-fragmentation path must not swap out: the operands of the
     // op currently being processed (they are non-pinned during result allocation but
@@ -328,6 +346,23 @@ class PhysicalMemory {
     int defragCount() const { return defragCount_; }
 
     int swapOutCount() const { return swapOutCount_; }
+
+    void noteSkippedSwapOutStore() { skippedSwapOutStoreCount_++; }
+
+    int skippedSwapOutStoreCount() const { return skippedSwapOutStoreCount_; }
+
+    void noteDroppedSwapOut(int64_t bytes) {
+        droppedSwapOutCount_++;
+        droppedSwapOutBytes_ += bytes;
+    }
+
+    int droppedSwapOutCount() const { return droppedSwapOutCount_; }
+
+    int64_t droppedSwapOutBytes() const { return droppedSwapOutBytes_; }
+
+    void noteSkippedSwapInLoad() { skippedSwapInLoadCount_++; }
+
+    int skippedSwapInLoadCount() const { return skippedSwapInLoadCount_; }
 
     void pin(PhysicalBuffer &object) {
         auto pinCount = pinnedBuffers_[&object];
@@ -648,9 +683,12 @@ class VirtualMemory {
 
     int getNextId() { return nextId++; }
 
-    // deallocates the virtual buffer, this doesn't actually introduce the deallocate
-    // operation in the IR but just updates the internal state of the virtual memory system
-    Value deallocate(Value virtualValue) {
+    // deallocates the virtual buffer: updates the internal state of the virtual
+    // memory system and returns the value the existing deallocate operation must
+    // target (a retained swappedOutValue_ gets its own deallocation). A null
+    // return means nothing needs deallocation (the contents were dropped at swap
+    // out) and the deallocate operation must be erased.
+    Value deallocate(Value virtualValue, IRRewriter &rewriter) {
 
         LLVM_DEBUG({
             llvm::dbgs() << "Deallocate virtual value ";
@@ -664,6 +702,7 @@ class VirtualMemory {
             physicalValue = virtualBuffer.swappedOutValue();
         }
         else {
+            virtualBuffer.freeSwappedOutValue(rewriter, virtualValue.getLoc());
             auto &physicalObject = virtualBuffer.physicalBuffer();
             physicalValue = physicalObject.value();
             physicalMemory.remove(virtualBuffer);
@@ -702,6 +741,10 @@ class VirtualMemory {
         LLVM_DEBUG({ physicalMemory.miniDump(); });
 
         return success();
+    }
+
+    void freeSwappedOutValue(Value virtualValue, IRRewriter &rewriter, Location loc) {
+        virtualObjects.getVirtualObject(virtualValue).root().freeSwappedOutValue(rewriter, loc);
     }
 
     // updates the last used timestamp of the virtual value
@@ -789,11 +832,34 @@ class VirtualMemory {
         LLVM_DEBUG({ physicalMemory.miniDump(); });
     }
 
+    // returns whether the buffer's current contents are dead: no access at or
+    // after the op being processed observes them, either because the next
+    // access fully overwrites them or because no access remains
+    bool contentsDead(Value rootValue) const {
+        auto it = bufferAccessSchedule.find(rootValue);
+        if (it == bufferAccessSchedule.end()) {
+            return true;
+        }
+        const auto *access = llvm::lower_bound(
+            it->second, currentOpIndex,
+            [](const std::pair<unsigned, bool> &access, unsigned opIndex) {
+                return access.first < opIndex;
+            }
+        );
+        return access == it->second.end() || access->second;
+    }
+
   public:
     VirtualObjects virtualObjects;
     PhysicalMemory physicalMemory;
     const torq_hl::MemorySpace memorySpace;
     const torq_hl::MemorySpace swapMemSpace;
+
+    // ordered (op index, previous contents discarded) accesses per allocation
+    DenseMap<Value, SmallVector<std::pair<unsigned, bool>>> bufferAccessSchedule;
+
+    // index (into the processed op list) of the op currently being processed
+    unsigned currentOpIndex = 0;
 
   private:
     int nextId = 0;
@@ -853,18 +919,18 @@ VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, bool allowDefragment) 
         physicalValueOp->setAttr(VIRTUAL_OBJECT_ID_ATTR_NAME, rewriter.getIndexArrayAttr({id()}));
     }
 
-    // swap in the value by overwriting all the eventual alignment bytes in the newly allocated
-    // physical buffer
-    torq_hl::LoadOp::create(
-        rewriter, loc, physicalValueOp, swappedOutValue_, SmallVector<int64_t>{},
-        SmallVector<int64_t>{}, getEncodedTotalSizeBytes(physicalValueOp.getType()), true
-    );
-
-    // deallocate the buffer from which we just swapped in the data
-    memref::DeallocOp::create(rewriter, loc, swappedOutValue_);
-
-    // drop reference to the swapped out value
-    swappedOutValue_ = nullptr;
+    if (swappedOutValue_) {
+        // swap in the value by overwriting all the eventual alignment bytes in the newly
+        // allocated physical buffer
+        torq_hl::LoadOp::create(
+            rewriter, loc, physicalValueOp, swappedOutValue_, SmallVector<int64_t>{},
+            SmallVector<int64_t>{}, getEncodedTotalSizeBytes(physicalValueOp.getType()), true
+        );
+    }
+    else {
+        // the contents were dropped at swap out: there is nothing to load
+        vm().physicalMemory.noteSkippedSwapInLoad();
+    }
 
     // create the physical buffer
     auto ret = vm().physicalMemory.add(*this, physicalValueOp, allowDefragment);
@@ -892,37 +958,58 @@ void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc) {
         value().dump();
     });
 
-    auto physicalValueType = cast<MemRefType>(value().getType());
+    // the contents are dead: free the retained swapped out buffer, skip the
+    // store, and later swap back in without loading
+    if (vm().contentsDead(value())) {
 
-    // allocate a memref where to swap out the value
-    auto physicalValueEncoding = getEncoding(physicalValueType);
-    auto swappedOutEncoding =
-        cloneEncodingWithNewMemorySpace(physicalValueEncoding, vm().swapMemSpace);
+        LLVM_DEBUG(llvm::dbgs() << "Buffer contents are dead, dropping them\n");
 
-    auto swappedOutType = createMemRefTypeWithEncoding(physicalValueType, swappedOutEncoding);
-    auto swappedOutAllocOp = memref::AllocOp::create(rewriter, loc, swappedOutType);
+        freeSwappedOutValue(rewriter, loc);
+        vm().physicalMemory.noteDroppedSwapOut(size());
+    }
+    // the retained swapped out buffer is still up to date: skip the store
+    else if (swappedOutValue_) {
 
-    swappedOutValue_ = swappedOutAllocOp;
+        LLVM_DEBUG(llvm::dbgs() << "Buffer contents unchanged, skipping the store\n");
 
-    if (clAnnotateVirtualBufferIds) {
-        rewriter.modifyOpInPlace(swappedOutAllocOp, [&]() {
-            swappedOutAllocOp->setAttr("torq-swap-out-buffer", rewriter.getUnitAttr());
+        vm().physicalMemory.noteSkippedSwapOutStore();
+    }
+    else {
+        auto physicalValueType = cast<MemRefType>(value().getType());
+
+        // allocate a memref where to swap out the value
+        auto physicalValueEncoding = getEncoding(physicalValueType);
+        auto swappedOutEncoding =
+            cloneEncodingWithNewMemorySpace(physicalValueEncoding, vm().swapMemSpace);
+
+        auto swappedOutType = createMemRefTypeWithEncoding(physicalValueType, swappedOutEncoding);
+        auto swappedOutAllocOp = memref::AllocOp::create(rewriter, loc, swappedOutType);
+
+        swappedOutValue_ = swappedOutAllocOp;
+
+        if (clAnnotateVirtualBufferIds) {
+            rewriter.modifyOpInPlace(swappedOutAllocOp, [&]() {
+                swappedOutAllocOp->setAttr("torq-swap-out-buffer", rewriter.getUnitAttr());
+            });
+
+            swappedOutAllocOp->setAttr(
+                VIRTUAL_OBJECT_ID_ATTR_NAME, rewriter.getIndexArrayAttr({id()})
+            );
+        }
+
+        LLVM_DEBUG({
+            llvm::dbgs() << "Created swapped out buffer ";
+            swappedOutAllocOp.dump();
         });
 
-        swappedOutAllocOp->setAttr(VIRTUAL_OBJECT_ID_ATTR_NAME, rewriter.getIndexArrayAttr({id()}));
+        // swap out the value by overwriting all the eventual alignment bytes in the newly
+        // allocated swap out buffer
+        torq_hl::StoreOp::create(
+            rewriter, loc, swappedOutValue_, (*maybePhysicalBuffer_)->value(),
+            SmallVector<int64_t>{}, SmallVector<int64_t>{},
+            getEncodedTotalSizeBytes(swappedOutType), true
+        );
     }
-
-    LLVM_DEBUG({
-        llvm::dbgs() << "Created swapped out buffer ";
-        swappedOutAllocOp.dump();
-    });
-
-    // swap out the value by overwriting all the eventual alignment bytes in the newly allocated
-    // swap out buffer
-    torq_hl::StoreOp::create(
-        rewriter, loc, swappedOutValue_, (*maybePhysicalBuffer_)->value(), SmallVector<int64_t>{},
-        SmallVector<int64_t>{}, getEncodedTotalSizeBytes(swappedOutType), true
-    );
 
     // make sure all the aliases pointing to the physical buffer are invalidated
     for (auto &alias : aliases()) {
@@ -959,6 +1046,91 @@ emitAllocationFailure(Operation *op, VirtualMemory &vm, const Twine &what, int64
                                                      : "not contiguous (fragmentation)");
 }
 
+// Collect the buffer accesses `op` may perform, normalized to AsyncAccess.
+static void collectBufferAccesses(Operation *op, SmallVectorImpl<torq_hl::AsyncAccess> &accesses) {
+
+    if (auto asyncAccessOp = dyn_cast<torq_hl::AsyncAccessOpInterface>(op)) {
+        asyncAccessOp.getAsyncAccesses(accesses);
+        return;
+    }
+
+    if (auto memEffectsOp = dyn_cast<MemoryEffectOpInterface>(op)) {
+        SmallVector<MemoryEffects::EffectInstance> effects;
+        memEffectsOp.getEffects(effects);
+
+        // a write effect not attached to a value could touch anything: fall back
+        // to the conservative path below
+        bool hasUnattributedWrite = llvm::any_of(effects, [](const auto &effect) {
+            return isa<MemoryEffects::Write>(effect.getEffect()) && !effect.getValue();
+        });
+
+        if (!hasUnattributedWrite) {
+            SetVector<Value> accessedValues;
+            for (auto &effect : effects) {
+                Value value = effect.getValue();
+                if (value && isa<MemRefType>(value.getType())) {
+                    accessedValues.insert(value);
+                }
+            }
+            for (auto value : accessedValues) {
+                auto access = torq_hl::getValueAccessFromEffects(effects, value);
+                if (access != torq_hl::ArgAccessBitfield::None) {
+                    accesses.push_back({access, cast<TypedValue<MemRefType>>(value)});
+                }
+            }
+            return;
+        }
+    }
+
+    // no usable effect information: assume the op may read and write any operand
+    for (auto operand : op->getOperands()) {
+        if (isa<MemRefType>(operand.getType())) {
+            accesses.push_back(
+                {torq_hl::ArgAccessBitfield::Read | torq_hl::ArgAccessBitfield::Write,
+                 cast<TypedValue<MemRefType>>(operand)}
+            );
+        }
+    }
+}
+
+// Precompute, for every allocation in `memorySpace`, the ordered list of the
+// function's accesses to it, so eviction can ask whether any remaining access
+// observes a buffer's current contents.
+static void buildBufferAccessSchedule(
+    ArrayRef<Operation *> ops, torq_hl::MemorySpace memorySpace,
+    DenseMap<Value, SmallVector<std::pair<unsigned, bool>>> &schedule
+) {
+    for (auto [index, op] : llvm::enumerate(ops)) {
+        if (isa<memref::DeallocOp>(op) || isDerivedMemRefOperation(op)) {
+            continue;
+        }
+
+        SmallVector<torq_hl::AsyncAccess> accesses;
+        collectBufferAccesses(op, accesses);
+
+        // aggregate per root allocation: the previous contents are discarded
+        // only if the whole allocation is accessed Write-without-Read and no
+        // other access of the op observes it
+        llvm::MapVector<Value, bool> rootDiscards;
+        for (auto &access : accesses) {
+            if (getEncodingMemorySpace(access.buffer.getType()) != memorySpace) {
+                continue;
+            }
+            Value root = getViewBase(access.buffer);
+            bool discards =
+                access.access == torq_hl::ArgAccessBitfield::Write && access.buffer == root;
+            auto [it, inserted] = rootDiscards.try_emplace(root, discards);
+            if (!inserted) {
+                it->second = it->second && discards;
+            }
+        }
+
+        for (auto &[root, discards] : rootDiscards) {
+            schedule[root].emplace_back(index, discards);
+        }
+    }
+}
+
 } // namespace
 
 // go over the full function and replace virtual values with physical values
@@ -980,10 +1152,14 @@ LogicalResult convertVirtualToPhysicalMemRefs(
 
     llvm::MapVector<Value, SmallVector<Value>> invocationToVirtual;
 
+    buildBufferAccessSchedule(ops, memorySpace, vm.bufferAccessSchedule);
+
     // process every operation that we found to map any memref operand or result from virtual
     // to physical value. Use pinning and swap-in to make sure all operands are present before
     // the operation and there is enough space to allocate the result
-    for (auto op : ops) {
+    for (auto [opIndex, op] : llvm::enumerate(ops)) {
+
+        vm.currentOpIndex = opIndex;
 
         LLVM_DEBUG({
             llvm::dbgs() << "------------\n";
@@ -999,7 +1175,14 @@ LogicalResult convertVirtualToPhysicalMemRefs(
             }
 
             // update the dealloc to deallocate the current value (it may be swapped out or not)
-            deallocOp.getMemrefMutable().set(vm.deallocate(deallocOp.getMemref()));
+            rewriter.setInsertionPoint(deallocOp);
+            auto physicalValue = vm.deallocate(deallocOp.getMemref(), rewriter);
+            if (physicalValue) {
+                deallocOp.getMemrefMutable().set(physicalValue);
+            }
+            else {
+                rewriter.eraseOp(deallocOp);
+            }
 
             continue;
         }
@@ -1031,6 +1214,18 @@ LogicalResult convertVirtualToPhysicalMemRefs(
                 continue;
             }
             memrefOperands.push_back(&opOperand);
+        }
+
+        // capture the buffers the op may write while the operands still hold the
+        // virtual values (they are replaced with physical values below)
+        SmallVector<torq_hl::AsyncAccess> bufferAccesses;
+        collectBufferAccesses(op, bufferAccesses);
+        SmallVector<Value> writtenOperands;
+        for (auto &access : bufferAccesses) {
+            if (bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write) &&
+                getEncodingMemorySpace(access.buffer.getType()) == memorySpace) {
+                writtenOperands.push_back(access.buffer);
+            }
         }
 
         // find all the memref outputs of the operation
@@ -1176,6 +1371,12 @@ LogicalResult convertVirtualToPhysicalMemRefs(
             memRefOperand->set(vm.getPhysicalValue(memRefOperand->get()));
         }
 
+        // a start_program writes between the start and its wait, but the buffers
+        // stay pinned until the wait, so freeing here is equivalent
+        for (auto writtenOperand : writtenOperands) {
+            vm.freeSwappedOutValue(writtenOperand, rewriter, op->getLoc());
+        }
+
         // special case for start op: save the list of pinned virtual values
         // so that we don't touch them till the corresponding wait is executed
         if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(op)) {
@@ -1204,6 +1405,13 @@ LogicalResult convertVirtualToPhysicalMemRefs(
     if (clPrintStatistics) {
         llvm::dbgs() << "Total defragmentations: " << vm.physicalMemory.defragCount() << "\n";
         llvm::dbgs() << "Total swap outs: " << vm.physicalMemory.swapOutCount() << "\n";
+        llvm::dbgs() << "Total swap-out stores skipped (clean buffers): "
+                     << vm.physicalMemory.skippedSwapOutStoreCount() << "\n";
+        llvm::dbgs() << "Swap outs dropped (contents dead): "
+                     << vm.physicalMemory.droppedSwapOutCount() << " ("
+                     << vm.physicalMemory.droppedSwapOutBytes() << " bytes)\n";
+        llvm::dbgs() << "Swap-in loads skipped (dropped contents): "
+                     << vm.physicalMemory.skippedSwapInLoadCount() << "\n";
     }
 
     return success();

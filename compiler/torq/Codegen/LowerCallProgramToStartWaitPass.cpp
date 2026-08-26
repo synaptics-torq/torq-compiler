@@ -180,8 +180,21 @@ lowerCallProgramOp(RewriterBase &rewriter, torq_hl::CallProgramOp callOp, Value 
         rewriter, callOp.getLoc(),
         /* invocation = */ createInvocationOp.getInvocation(),
         /* code_sections = */ startOpCodeSections,
-        /* args = */ argValues
+        /* args = */ argValues,
+        /* arg_accesses = */ nullptr
     );
+
+    // args is [inits..., inputs...];
+    // inits -> write + possible read
+    // inputs -> read
+    SmallVector<Attribute> argAccesses;
+    for (size_t i = 0, n = argValues.size(); i < n; ++i) {
+        auto access = i < callOp.getInits().size()
+                          ? torq_hl::ArgAccessBitfield::Read | torq_hl::ArgAccessBitfield::Write
+                          : torq_hl::ArgAccessBitfield::Read;
+        argAccesses.push_back(torq_hl::ArgAccessBitfieldAttr::get(ctx, access));
+    }
+    startOp.setArgAccessesAttr(rewriter.getArrayAttr(argAccesses));
 
     torq_hl::WaitProgramOp::create(rewriter, callOp.getLoc(), TypeRange{}, startOp.getInvocation());
 
