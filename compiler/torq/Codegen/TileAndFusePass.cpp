@@ -313,7 +313,7 @@ int64_t makeByteAlignedTileSize(int64_t valuesPerByte, int64_t domainSize, int64
     return size - remainder;
 }
 
-TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
+TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp, int64_t sliceCount) {
     TilingInfo tilingInfo;
 
     auto loopIteratorTypes = tilingInterfaceOp.getLoopIteratorTypes();
@@ -337,29 +337,34 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp) {
     assert(principalOp != nullptr && "could not find the principal op of the fuse group");
 
     tilingInfo.minSize.append(loopIteratorTypes.size(), 1);
-    if (!clDisableSlicing && TorqHw::get().getSliceCount() > 1) {
+    if (!clDisableSlicing && sliceCount > 1) {
         if (isa<linalg::Conv2DNhwcHwcfOp>(principalOp)) {
-            tilingInfo.minSize[SlicingIterationDomainIndex::Conv2DNhwcHwcfOp] = 2 * kGrouping;
+            tilingInfo.minSize[SlicingIterationDomainIndex::Conv2DNhwcHwcfOp] =
+                sliceCount * kGrouping;
         }
         else if (isa<linalg::Conv2DNchwFchwOp>(principalOp)) {
-            tilingInfo.minSize[SlicingIterationDomainIndex::Conv2DNchwFchwOp] = 2 * kGrouping;
+            tilingInfo.minSize[SlicingIterationDomainIndex::Conv2DNchwFchwOp] =
+                sliceCount * kGrouping;
         }
         else if (isa<linalg::DepthwiseConv2DNhwcHwcOp>(principalOp)) {
             tilingInfo.minSize[SlicingIterationDomainIndex::DepthwiseConv2DNhwcHwcOp] =
-                2 * kGrouping;
+                sliceCount * kGrouping;
         }
         else if (isa<linalg::DepthwiseConv2DNchwChwOp>(principalOp)) {
             tilingInfo.minSize[SlicingIterationDomainIndex::DepthwiseConv2DNchwChwOp] =
-                2 * kGrouping;
+                sliceCount * kGrouping;
         }
         else if (isa<linalg::PoolingNhwcMaxOp>(principalOp)) {
-            tilingInfo.minSize[SlicingIterationDomainIndex::PoolingNhwcMaxOp] = 2 * kGrouping;
+            tilingInfo.minSize[SlicingIterationDomainIndex::PoolingNhwcMaxOp] =
+                sliceCount * kGrouping;
         }
         else if (isa<linalg::PoolingNchwMaxOp>(principalOp)) {
-            tilingInfo.minSize[SlicingIterationDomainIndex::PoolingNchwMaxOp] = 2 * kGrouping;
+            tilingInfo.minSize[SlicingIterationDomainIndex::PoolingNchwMaxOp] =
+                sliceCount * kGrouping;
         }
         else if (isa<linalg::PoolingNcwMaxOp>(principalOp)) {
-            tilingInfo.minSize[SlicingIterationDomainIndex::PoolingNcwMaxOp] = 2 * kGrouping;
+            tilingInfo.minSize[SlicingIterationDomainIndex::PoolingNcwMaxOp] =
+                sliceCount * kGrouping;
         }
     }
 
@@ -658,7 +663,13 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
   public:
     TileAndFusePass() {}
 
-    TileAndFusePass(const TileAndFusePass &pass) : TileAndFuseBase(pass) {}
+    explicit TileAndFusePass(const TileAndFuseOptions &options) {
+        this->sliceCount = options.sliceCount;
+    }
+
+    TileAndFusePass(const TileAndFusePass &pass) : TileAndFuseBase(pass) {
+        this->sliceCount = pass.sliceCount;
+    }
 
     void runOnOperation() override;
 
@@ -1117,7 +1128,7 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
         mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
     );
 
-    TilingInfo tilingInfo = getTilingInfo(producerTi);
+    TilingInfo tilingInfo = getTilingInfo(producerTi, this->sliceCount);
 
     if (!toTileOps.contains(producerTi) && !isa<linalg::FillOp>(producerOp)) {
         return doNotFuse();
@@ -1174,7 +1185,7 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
 std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProducers(
     IRRewriter &rewriter, std::optional<llvm::SetVector<Operation *> *> producerOps,
     mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
-    bool isDestinationOperand
+    bool isDestinationOperand, int64_t sliceCount
 ) {
     Operation *producerOp = producerOpResult.getOwner();
 
@@ -1234,7 +1245,7 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
         mappedSizes.size() == iterSizes.size() && "expected mapped and iter sizes to be the same"
     );
 
-    TilingInfo tilingInfo = getTilingInfo(producerTi);
+    TilingInfo tilingInfo = getTilingInfo(producerTi, sliceCount);
 
     for (size_t index = 0; index < iterSizes.size(); ++index) {
         if (mappedSizes[index] != iterSizes[index]) {
@@ -1308,7 +1319,8 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
         fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                               OpResult producerOpResult, bool isDestinationOperand) {
             return fuseControlMaxProducers(
-                rewriter, producerOps, candidateSliceOp, producerOpResult, isDestinationOperand
+                rewriter, producerOps, candidateSliceOp, producerOpResult, isDestinationOperand,
+                this->sliceCount
             );
         };
         break;
@@ -1376,7 +1388,7 @@ void TileAndFusePass::tileAndFuse(
     // Will hold the new tile size
     SmallVector<OpFoldResult> tileOffsets(iterDomainOffsets), tileSizes(iterDomainSizes);
 
-    TilingInfo tilingInfo = getTilingInfo(tiOp);
+    TilingInfo tilingInfo = getTilingInfo(tiOp, this->sliceCount);
 
     llvm::SetVector<Operation *> producerOps;
     std::optional<llvm::SetVector<Operation *> *> restrictToProducerOps = std::nullopt;
@@ -1779,8 +1791,8 @@ void TileAndFusePass::runOnOperation() {
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass() {
-    return std::make_unique<TileAndFusePass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass(int64_t sliceCount) {
+    return std::make_unique<TileAndFusePass>(TileAndFuseOptions{sliceCount});
 }
 
 } // namespace mlir::syna::torq

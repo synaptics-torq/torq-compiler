@@ -394,6 +394,12 @@ def TileAndFuse :
   let constructor =
       "mlir::syna::torq::createTileAndFusePass()";
 
+  let options = [
+      Option<"sliceCount", "slice-count", "int64_t",
+             /*default=*/"0",
+             "Number of hardware slices available for slicing">
+  ];
+
   let dependentDialects = [
         "linalg::LinalgDialect",
     ];
@@ -509,6 +515,12 @@ def LinalgSlicing :
 
     let constructor =
         "mlir::syna::torq::createLinalgSlicingPass()";
+
+    let options = [
+        Option<"sliceCount", "slice-count", "int64_t",
+               /*default=*/"0",
+               "Number of hardware slices available for slicing">
+    ];
 
     let dependentDialects = [
         "linalg::LinalgDialect",

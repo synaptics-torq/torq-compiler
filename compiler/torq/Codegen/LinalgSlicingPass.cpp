@@ -10,7 +10,6 @@
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/ExecutorAssignment.h"
-#include "torq/Utils/TorqHw.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
@@ -42,17 +41,18 @@ namespace {
 const int64_t kMinElementsForSlicing = 2000;
 
 // Return tile size for peeling.
-int64_t getPeelingTileSize(int64_t domainSize, int64_t grouping) {
+int64_t getPeelingTileSize(int64_t domainSize, int64_t grouping, int64_t sliceCount) {
     assert(domainSize > grouping);
+    assert(sliceCount > 0);
 
     // We want to split the domain into two or three tiles, the first tile
     // should be divisible by grouping so it can utilize multiple slices at the
     // same time, and the second tile is whatever is left.
     int64_t remainder;
-    if (domainSize >= TorqHw::get().getSliceCount() * grouping) {
+    if (domainSize >= sliceCount * grouping) {
         // If we have enough rows, the first tile will utilize all the
         // slices, and we might need to sub-tile the second tile, later.
-        remainder = domainSize % (TorqHw::get().getSliceCount() * grouping);
+        remainder = domainSize % (sliceCount * grouping);
     }
     else {
         // If there are not enough rows to utilize all the slices, the
@@ -65,15 +65,16 @@ int64_t getPeelingTileSize(int64_t domainSize, int64_t grouping) {
 }
 
 // Return tile size for slicing.
-int64_t getSlicingTileSize(int64_t domainSize, int64_t grouping) {
+int64_t getSlicingTileSize(int64_t domainSize, int64_t grouping, int64_t sliceCount) {
     assert(domainSize % grouping == 0);
     assert(domainSize >= grouping);
+    assert(sliceCount > 0);
 
     // We need to tile the rows evenly between the slices. We assume the peeling
     // was done to guarantee that now the rows can be properly distributed
     // between the slices without a remainder.
 
-    if (domainSize < TorqHw::get().getSliceCount() * grouping) {
+    if (domainSize < sliceCount * grouping) {
         // Not enough rows to utilize all slices, so only some of them will
         // get a tile of size grouping.
         return grouping;
@@ -81,10 +82,10 @@ int64_t getSlicingTileSize(int64_t domainSize, int64_t grouping) {
 
     // We have enough rows to utilize all slices.
 
-    assert(domainSize % (TorqHw::get().getSliceCount() * grouping) == 0);
+    assert(domainSize % (sliceCount * grouping) == 0);
 
     // This tile size will be a multiple of grouping.
-    return domainSize / TorqHw::get().getSliceCount();
+    return domainSize / sliceCount;
 }
 
 scf::SCFTileAndFuseOptions::ControlFnTy getControlFn(IntegerAttr fuseGroup, size_t slicingIter) {
@@ -164,9 +165,9 @@ FailureOr<scf::SCFTileAndFuseResult> tileAndFuse(
 
 void sliceToSize(
     PatternRewriter &rewriter, Operation *op, int64_t domainSize, size_t iterDomCount,
-    size_t slicingIter, int64_t grouping
+    size_t slicingIter, int64_t grouping, int64_t sliceCount
 ) {
-    int64_t tileSize = getSlicingTileSize(domainSize, grouping);
+    int64_t tileSize = getSlicingTileSize(domainSize, grouping, sliceCount);
     if (tileSize == domainSize)
         return;
 
@@ -180,15 +181,15 @@ void sliceToSize(
 
 void peelAndSliceToSize(
     PatternRewriter &rewriter, Operation *op, int64_t domainSize, size_t iterDomCount,
-    size_t slicingIter, int64_t grouping
+    size_t slicingIter, int64_t grouping, int64_t sliceCount
 ) {
     if (domainSize < 2 * grouping)
         return;
 
-    int64_t tileSize = getPeelingTileSize(domainSize, grouping);
+    int64_t tileSize = getPeelingTileSize(domainSize, grouping, sliceCount);
 
     if (tileSize == domainSize) {
-        sliceToSize(rewriter, op, domainSize, iterDomCount, slicingIter, grouping);
+        sliceToSize(rewriter, op, domainSize, iterDomCount, slicingIter, grouping, sliceCount);
         return;
     }
 
@@ -207,8 +208,10 @@ void peelAndSliceToSize(
     }
 }
 
-LogicalResult
-peelAndSlice(PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64_t grouping) {
+LogicalResult peelAndSlice(
+    PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64_t grouping,
+    int64_t sliceCount
+) {
     // Do nothing if the containing operation is a forall (already sliced)
     if (op->getParentOfType<scf::ForallOp>())
         return rewriter.notifyMatchFailure(op, "already sliced");
@@ -263,7 +266,7 @@ peelAndSlice(PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64
     }
 
     peelAndSliceToSize(
-        rewriter, op, domainSize, iterDomainConstSizes->size(), slicingIter, grouping
+        rewriter, op, domainSize, iterDomainConstSizes->size(), slicingIter, grouping, sliceCount
     );
 
     return success();
@@ -271,9 +274,10 @@ peelAndSlice(PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64
 
 template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
     size_t slicingIter_;
+    int64_t sliceCount_;
 
-    ConvPattern(MLIRContext *context, size_t slicingIter)
-        : OpRewritePattern<ConvOp>(context), slicingIter_(slicingIter) {}
+    ConvPattern(MLIRContext *context, size_t slicingIter, int64_t sliceCount)
+        : OpRewritePattern<ConvOp>(context), slicingIter_(slicingIter), sliceCount_(sliceCount) {}
 
     LogicalResult matchAndRewrite(ConvOp conv2DOp, PatternRewriter &rewriter) const override {
         // TODO: not all conv2ds are part of a pattern fuse group.
@@ -281,7 +285,7 @@ template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
             return rewriter.notifyMatchFailure(conv2DOp, "not the principal operation");
         }
 
-        return peelAndSlice(rewriter, conv2DOp, slicingIter_, kGrouping);
+        return peelAndSlice(rewriter, conv2DOp, slicingIter_, kGrouping, sliceCount_);
     }
 }; // class Conv2DPattern
 
@@ -290,7 +294,10 @@ template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
 // For batch_matmul A[batch, M, K] x B[batch, K, N] -> C[batch, M, N],
 // we slice B along N (and correspondingly C along N).
 struct BatchMatmulPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
-    using OpRewritePattern<linalg::BatchMatmulOp>::OpRewritePattern;
+    int64_t sliceCount_;
+
+    BatchMatmulPattern(MLIRContext *context, int64_t sliceCount)
+        : OpRewritePattern<linalg::BatchMatmulOp>(context), sliceCount_(sliceCount) {}
 
     LogicalResult
     matchAndRewrite(linalg::BatchMatmulOp matmulOp, PatternRewriter &rewriter) const override {
@@ -321,14 +328,17 @@ struct BatchMatmulPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
         if (!slicingIter)
             return rewriter.notifyMatchFailure(matmulOp, "no suitable output dimension to slice");
 
-        return peelAndSlice(rewriter, matmulOp, *slicingIter, kGrouping);
+        return peelAndSlice(rewriter, matmulOp, *slicingIter, kGrouping, sliceCount_);
     }
 }; // class BatchMatmulPattern
 
 // Elementwise pattern for linalg.generic ops. Picks the leftmost non-unit
 // dimension to slice on, keeping inner dimensions contiguous in memory.
 struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
-    using OpRewritePattern<linalg::GenericOp>::OpRewritePattern;
+    int64_t sliceCount_;
+
+    ElementwisePattern(MLIRContext *context, int64_t sliceCount)
+        : OpRewritePattern<linalg::GenericOp>(context), sliceCount_(sliceCount) {}
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
@@ -406,7 +416,7 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
         if (!slicingIter)
             return rewriter.notifyMatchFailure(genericOp, "no dimension to slice");
 
-        return peelAndSlice(rewriter, genericOp, *slicingIter, kGrouping);
+        return peelAndSlice(rewriter, genericOp, *slicingIter, kGrouping, sliceCount_);
     }
 }; // class ElementwisePattern
 
@@ -415,8 +425,19 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
 
     LinalgSlicingPass() { canonicalizer_.addPass(mlir::createCanonicalizerPass()); }
 
+    explicit LinalgSlicingPass(const LinalgSlicingOptions &options) {
+        this->sliceCount = options.sliceCount;
+        canonicalizer_.addPass(mlir::createCanonicalizerPass());
+    }
+
+    LinalgSlicingPass(const LinalgSlicingPass &pass)
+        : impl::LinalgSlicingBase<LinalgSlicingPass>(pass) {
+        this->sliceCount = pass.sliceCount;
+        canonicalizer_.addPass(mlir::createCanonicalizerPass());
+    }
+
     void runOnOperation() override {
-        if (TorqHw::get().getSliceCount() < 2)
+        if (this->sliceCount < 2)
             return;
 
         LLVM_DEBUG(llvm::dbgs() << "Linalg Slicing - START\n");
@@ -427,34 +448,35 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
         RewritePatternSet patterns(context);
 
         patterns.add<ConvPattern<linalg::Conv2DNhwcHwcfOp>>(
-            context, SlicingIterationDomainIndex::Conv2DNhwcHwcfOp
+            context, SlicingIterationDomainIndex::Conv2DNhwcHwcfOp, this->sliceCount
         );
         patterns.add<ConvPattern<linalg::Conv2DNchwFchwOp>>(
-            context, SlicingIterationDomainIndex::Conv2DNchwFchwOp
+            context, SlicingIterationDomainIndex::Conv2DNchwFchwOp, this->sliceCount
         );
 
         patterns.add<ConvPattern<linalg::DepthwiseConv2DNhwcHwcOp>>(
-            context, SlicingIterationDomainIndex::DepthwiseConv2DNhwcHwcOp
+            context, SlicingIterationDomainIndex::DepthwiseConv2DNhwcHwcOp, this->sliceCount
         );
         patterns.add<ConvPattern<linalg::DepthwiseConv2DNchwChwOp>>(
-            context, SlicingIterationDomainIndex::DepthwiseConv2DNchwChwOp
+            context, SlicingIterationDomainIndex::DepthwiseConv2DNchwChwOp, this->sliceCount
         );
 
         patterns.add<ConvPattern<linalg::PoolingNhwcMaxOp>>(
-            context, SlicingIterationDomainIndex::PoolingNhwcMaxOp
+            context, SlicingIterationDomainIndex::PoolingNhwcMaxOp, this->sliceCount
         );
         patterns.add<ConvPattern<linalg::PoolingNchwMaxOp>>(
-            context, SlicingIterationDomainIndex::PoolingNchwMaxOp
+            context, SlicingIterationDomainIndex::PoolingNchwMaxOp, this->sliceCount
         );
         patterns.add<ConvPattern<linalg::PoolingNcwMaxOp>>(
-            context, SlicingIterationDomainIndex::PoolingNcwMaxOp
+            context, SlicingIterationDomainIndex::PoolingNcwMaxOp, this->sliceCount
         );
 
         // Batch matmul: slice on the largest parallel output dimension
-        patterns.add<BatchMatmulPattern>(context);
+        patterns.add<BatchMatmulPattern>(context, this->sliceCount);
 
+        // TODO: support matmul too
         // Elementwise generic ops: dynamically slice on leftmost non-unit dim
-        patterns.add<ElementwisePattern>(context);
+        patterns.add<ElementwisePattern>(context, this->sliceCount);
 
         FrozenRewritePatternSet frozenPatterns(std::move(patterns));
 
@@ -496,8 +518,8 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
 // 16 channels (64 = 4*8*2 = S*G*2), second chunk will be 24 channels that will
 // be sliced into 3 slices of 8 channels (24 = 3*8 = k*G, where 0 < k < S), and
 // the last chunk will be 4 channels (4 = 92-64-24).
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgSlicingPass() {
-    return std::make_unique<LinalgSlicingPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgSlicingPass(int64_t sliceCount) {
+    return std::make_unique<LinalgSlicingPass>(LinalgSlicingOptions{sliceCount});
 }
 
 } // namespace mlir::syna::torq

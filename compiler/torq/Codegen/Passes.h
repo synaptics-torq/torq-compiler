@@ -88,7 +88,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createSegmentNSSProgramsPass
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignNSSProgramsAddressesPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgSlicingPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgSlicingPass(int64_t sliceCount = 0);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAddDeallocationPass();
 
@@ -100,7 +100,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createKernelSelectionPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveAddressesPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass(int64_t sliceCount = 0);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createPeelTileLoopsPass();
 
