@@ -44,7 +44,7 @@ def generate_cases():
                                                         "--iree-dispatch-creation-enable-elementwise-fusion=false", 
                                                         "--iree-preprocessing-enable-elementwise-fusion=false"])
 
-    test_files = [x for x in list_mlir_files("tosa_ops") if "softmax-1x1000xi8.mlir" == x.name]
+    test_files = [x for x in list_mlir_files("tosa_ops_host_css") if "softmax-1x1000xi8.mlir" == x.name]
 
     for case_data in test_files:
         case_config = heterogeneous_case.copy()

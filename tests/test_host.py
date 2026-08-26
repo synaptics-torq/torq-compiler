@@ -25,19 +25,23 @@ def get_test_cases():
     test_cases = []
 
     for name in [("tosa_ops", "matmul-notile"),
-                 ("tosa_ops", "softmax-1x1000xi8"),
+                 ("tosa_ops_host_css", "softmax-1x1000xi8"),
                  ("arith_ops", "trunci"),
-                 ("arith_ops", "extui"),
-                 ("torch_ops", "instancenorm")]:
+                 ("arith_ops", "extui")]:
         
         test_cases.append(Case("_".join(name), {
             "mlir_model_file": "static_mlir_model_file",
             "static_mlir_model_file": str(MODELS_DIR / name[0] / (name[1] + ".mlir"))
         }))
 
+    test_cases.append(Case("torch_ops_instancenorm", {
+        "mlir_model_file": "static_mlir_model_file",
+        "static_mlir_model_file": str(MODELS_DIR / "torch_ops" / "instancenorm.mlir"),
+    }))
+
     test_cases.append(Case("torch_ops_equal", {
         "mlir_model_file": "static_mlir_model_file",
-        "static_mlir_model_file": str(MODELS_DIR / "torch_ops" / "equal.mlir"),
+        "static_mlir_model_file": str(MODELS_DIR / "torch_ops_host_css" / "equal.mlir"),
         "input_data": "equal_input_data"
     }))
 

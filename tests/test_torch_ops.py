@@ -1,7 +1,7 @@
 import pytest
 
 from torq.testing.comparison import compare_test_results
-from torq.testing.iree import list_mlir_file_group
+from torq.testing.iree import MODELS_DIR, list_mlir_file_group
 from torq.testing.cases import get_test_cases_from_files
 
 
@@ -123,6 +123,16 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in request.param.data.name for s in no_slicing_tc):
         extra_args["torq_compiler_options"].append("--torq-disable-slicing")
 
+    # Force in-tree torch_ops cases onto the NSS/slice path so we fail loudly
+    # if a future change silently routes them to the host/CSS fallback.
+    # torch_ops_host_css/ and extras testdata are exempted (parent.name ==
+    # "torch_ops" also matches extras/tests/testdata/torch_ops).
+    # Per-case blocks below may replace this list when they need different flags.
+    if request.param.data.parent.resolve() == (MODELS_DIR / "torch_ops").resolve():
+        extra_args["torq_compiler_options"].extend([
+            "--torq-disable-host", "--torq-disable-css",
+        ])
+
     # ONNX DynamicQuantizeLinear tensors are always f32, so DQL is only reachable
     # in a bf16 pipeline via --torq-convert-dtypes.
     if 'dynamicquantize' in request.param.data.name:
@@ -130,7 +140,6 @@ def case_config(request, runtime_hw_type, chip_config):
             "--torq-convert-dtypes", "--torq-convert-io-dtype",
             "--torq-disable-host", "--torq-disable-css",
         ])
-
 
     # Option Test for conv1d with truncf before reduce (memory-optimized mode) to maintain easily
     # This enables --torq-conv1d-truncate-for-reduce to test bf16 reduce input
@@ -164,9 +173,6 @@ def case_config(request, runtime_hw_type, chip_config):
     # them to the host/CSS fallback.
     if 'conv1d_matmul_bf16_' in request.param.data.name:
         extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
-    
-    if any(host_mlir in request.param.data.name for host_mlir in ['conv2d-host.mlir', 'mul-i64-scalar.mlir', 'constantshape.mlir']):
-        extra_args["torq_compiler_options"] = ["--torq-disable-slices", "--torq-disable-css"]
 
     if 'softmax-1x2xbf16.mlir' in request.param.data.name:
         extra_args["torq_compiler_options"] = ["--torq-disable-css", "--torq-disable-host"]
@@ -210,6 +216,10 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'conv_izp_i8' in request.param.data.name:
         extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
         extra_args["comparison_config"] = "comparison_config_for_qdq_izp"
+
+    # i64 scalar mul must run on host without slice lowering (see torch_ops_host_css/).
+    if 'mul-i64-scalar.mlir' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-slices", "--torq-disable-css"]
 
     return {
         "mlir_model_file": "static_mlir_model_file",

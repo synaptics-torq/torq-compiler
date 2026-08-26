@@ -18,7 +18,9 @@ def get_test_cases():
     for name in ["matmul-notile", "softmax-1x1000xi8"]:
         test_cases.append(Case("tosa_" + name, {
             "mlir_model_file": "static_mlir_model_file",
-            "static_mlir_model_file": MODELS_DIR / "tosa_ops" / (name + ".mlir")
+            "static_mlir_model_file": MODELS_DIR / (
+                "tosa_ops_host_css" if name == "softmax-1x1000xi8" else "tosa_ops"
+            ) / (name + ".mlir")
         }))
 
     for name in ["tensor_pad"]:

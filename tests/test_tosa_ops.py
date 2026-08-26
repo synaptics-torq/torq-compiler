@@ -1,11 +1,18 @@
 import pytest
 
 from torq.testing.comparison import compare_test_results
-from torq.testing.iree import list_mlir_files, chip_config
+from torq.testing.iree import MODELS_DIR, list_mlir_files
 from torq.testing.cases import get_test_cases_from_files
 
 
-@pytest.fixture(params=get_test_cases_from_files(list_mlir_files("tosa_ops")))
+# Cases that genuinely need the host/CSS fallback live under tosa_ops_host_css/
+# and are exempted from the NSS-only forcing applied to every other tosa_ops case.
+HOST_CSS_DIR = "tosa_ops_host_css"
+
+
+@pytest.fixture(params=get_test_cases_from_files(
+    list_mlir_files("tosa_ops") + list_mlir_files(HOST_CSS_DIR)
+))
 def case_config(request, runtime_hw_type, chip_config):
 
     aws_fpga = (runtime_hw_type.data == "aws_fpga")
@@ -38,6 +45,15 @@ def case_config(request, runtime_hw_type, chip_config):
         # Identity op is expected to be a no-op, we need to enforce conversion to TorqHL to see
         # the benefits of the pattern and also to test some special features of the ALU and ACT blocks.
         extra_args["torq_compiler_options"].append("--torq-enable-tosa-identity=true")
+
+    # Force in-tree tosa_ops cases onto the NSS/slice path so we fail loudly
+    # if a future change silently routes them to the host/CSS fallback.
+    # tosa_ops_host_css/ and extras/tests/testdata/tosa_ops are exempted
+    # (parent.name == "tosa_ops" also matches extras).
+    if request.param.data.parent.resolve() == (MODELS_DIR / "tosa_ops").resolve():
+        extra_args["torq_compiler_options"].extend([
+            "--torq-disable-host", "--torq-disable-css",
+        ])
 
     # Note: "yolov8_block_mul_rescale" might need "--torq-tile-and-fuse-producers-fuse-mode=max-producers"
 
