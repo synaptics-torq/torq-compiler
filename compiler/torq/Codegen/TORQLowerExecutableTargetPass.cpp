@@ -211,7 +211,9 @@ void addCpuPasses(OpPassManager &pm) {
     funcPm.addPass(createCanonicalizerPass());
 }
 
-void addNssUpToAssignLramAddresses(OpPassManager &pm, bool optimizeForTileAndFuse = false) {
+void addNssUpToAssignLramAddresses(
+    OpPassManager &pm, bool optimizeForTileAndFuse = false, bool isRealPipeline = false
+) {
     auto &funcPm = pm.nest<func::FuncOp>();
 
     if (!clFromPreBufferizedIR) {
@@ -270,6 +272,12 @@ void addNssUpToAssignLramAddresses(OpPassManager &pm, bool optimizeForTileAndFus
 
     if (!clFromPreBufferizedIR) {
         funcPm.addPass(createAddDeallocationPass());
+    }
+
+    // Only the real pipeline recovers: a probe throws its result away, so the DMA this
+    // costs would buy nothing there and would hide it from the tile choice.
+    if (isRealPipeline) {
+        funcPm.addPass(createRecoverLramResidencyPass());
     }
 
     // assign addresses to all allocations
@@ -366,7 +374,7 @@ void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
 
     // NB: do not add passes after Tile and Fuse here, place them in
     // addPassesPostTileAndFuseUpToAssignLramAddresses, so T&F can use them too.
-    addPassesPostTileAndFuseUpToAssignLramAddresses(pm, false);
+    addPassesPostTileAndFuseUpToAssignLramAddresses(pm, false, /*isRealPipeline=*/true);
     addNssPostAssignLramAddressesPasses(pm);
 }
 
@@ -496,7 +504,7 @@ struct TORQLowerExecutableTargetPass
 } // namespace
 
 void addPassesPostTileAndFuseUpToAssignLramAddresses(
-    OpPassManager &pipeline, bool optimizeForTileAndFuse
+    OpPassManager &pipeline, bool optimizeForTileAndFuse, bool isRealPipeline
 ) {
     // NB: This is the post-tiling pipeline used by TileAndFusePass for its memory-fit
     // simulation. It must match exactly what happens after TileAndFuse in the real
@@ -515,7 +523,7 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
         addCpuPasses(pipeline);
     }
 
-    addNssUpToAssignLramAddresses(pipeline, optimizeForTileAndFuse);
+    addNssUpToAssignLramAddresses(pipeline, optimizeForTileAndFuse, isRealPipeline);
 }
 
 std::unique_ptr<OperationPass<ModuleOp>> createTORQLowerExecutableTargetPass() {

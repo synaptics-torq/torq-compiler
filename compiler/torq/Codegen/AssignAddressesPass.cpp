@@ -839,6 +839,25 @@ static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
     return ok;
 }
 
+// Reduce peak LRAM residency in functions whose address allocation would otherwise
+// fail. Added only to the real pipeline: the tile-fit probe cannot see the DMA this
+// costs, so it would pick a tile that only fits because of it.
+class RecoverLramResidencyPass : public impl::RecoverLramResidencyBase<RecoverLramResidencyPass> {
+  public:
+    RecoverLramResidencyPass() = default;
+    RecoverLramResidencyPass(const RecoverLramResidencyPass &pass) {}
+
+    void runOnOperation() override {
+        auto funcOp = getOperation();
+
+        if (!clFailureDrivenRecovery || lramAllocationSucceeds(funcOp))
+            return;
+
+        revertSharedReadOnlyReuses(funcOp);
+        narrowReadOnlyWeightLoads(funcOp);
+    }
+};
+
 class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramAddressesPass> {
   public:
     AssignLramAddressesPass() = default;
@@ -850,15 +869,6 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
     // looking for the right tile size (so they are not real errors).
     void runOnOperation() override {
         auto funcOp = getOperation();
-
-        // In functions that would otherwise fail LRAM allocation, reduce peak
-        // residency before assigning addresses (confined to where it helps; see the
-        // flag): revert load-CSE reuses that keep a shared buffer resident, and
-        // narrow whole-buffer read-only weight loads into per-use sub-loads.
-        if (clFailureDrivenRecovery && !lramAllocationSucceeds(funcOp)) {
-            revertSharedReadOnlyReuses(funcOp);
-            narrowReadOnlyWeightLoads(funcOp);
-        }
 
         LogicalResult result = llvm::failure();
 
@@ -939,6 +949,10 @@ class AssignDtcmItcmXramAddressesPass
 };
 
 } // namespace
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createRecoverLramResidencyPass() {
+    return std::make_unique<RecoverLramResidencyPass>();
+}
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignLramAddressesPass() {
     return std::make_unique<AssignLramAddressesPass>();

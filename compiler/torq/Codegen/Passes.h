@@ -45,6 +45,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createMapBindingsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerArithConstantsPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createRecoverLramResidencyPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignLramAddressesPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignDtcmItcmXramAddressesPass();
@@ -146,8 +148,12 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkHostExecutorPass()
 // so much about the result of the computation. For example, if all the
 // iterations of an scf::ForOp have the same memory requirements, we can reduce
 // it to a single iteration.
+// Builds the tile-fit probe pipeline by default. `isRealPipeline` says the result is
+// kept rather than thrown away, which is what makes failure-driven recovery worth its
+// DMA; a probe that recovered would report a tile as fitting when it only fits because
+// of that DMA.
 void addPassesPostTileAndFuseUpToAssignLramAddresses(
-    OpPassManager &pipeline, bool optimizeForTileAndFuse = false
+    OpPassManager &pipeline, bool optimizeForTileAndFuse = false, bool isRealPipeline = false
 );
 
 //----------------------------------------------------------------------------//

@@ -339,6 +339,26 @@ def ResolveInvocationArguments :
 
 }
 
+def RecoverLramResidency :
+    InterfacePass<"torq-recover-lram-residency",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Reduce peak LRAM residency in functions whose address allocation would fail";
+  let description = [{
+    Runs immediately before `torq-assign-lram-addresses`, and only in the real
+    pipeline: the tile-fit probe pipelines that TileAndFuse builds must not include
+    it, because the probe only reports "fits" or "does not fit" and would therefore
+    pick a tile that only fits thanks to the extra DMA these transforms cost.
+  }];
+  let constructor =
+      "mlir::syna::torq::createRecoverLramResidencyPass()";
+
+  let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect",
+        "bufferization::BufferizationDialect",
+        "mlir::memref::MemRefDialect"
+    ];
+}
+
 def AssignLramAddresses :
     InterfacePass<"torq-assign-lram-addresses",
          "mlir::FunctionOpInterface"> {
