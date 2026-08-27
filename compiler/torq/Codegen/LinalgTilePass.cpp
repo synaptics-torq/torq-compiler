@@ -730,15 +730,33 @@ class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReduc
             bool exceedsDescriptor =
                 reductionSize != ShapedType::kDynamic && reductionSize > kMaxReduceTileElements;
 
-            if (*totalBytes > lramSize || exceedsDescriptor) {
+            if (*totalBytes <= lramSize && !exceedsDescriptor)
+                return;
+
+            // If the op cannot fit even at a reduction tile of 1, only parallel tiling can
+            // help: skip it (failing would poison tile-and-fuse's fits-in-memory probe).
+            // TODO: an op that exceeds the descriptor limit but cannot fit LRAM at any
+            // reduction tile is also skipped here; it needs a descriptor-only tiling mode.
+            FailureOr<int64_t> floorBytes =
+                estimateTiledOperandBytes(genericOp, reductionDims[0], 1);
+            if (failed(floorBytes) || *floorBytes > lramSize) {
                 LLVM_DEBUG({
                     llvm::dbgs(
-                    ) << "TileReductionForLram: selected op for reduction tiling; totalBytes="
-                      << *totalBytes << " lramSize=" << lramSize
-                      << " reductionSize=" << reductionSize << "\n";
+                    ) << "TileReductionForLram: skipping op that cannot fit at any reduction "
+                         "tile; floorBytes="
+                      << (succeeded(floorBytes) ? std::to_string(*floorBytes) : "unknown")
+                      << " lramSize=" << lramSize << "\n";
                 });
-                opsToTile.push_back(genericOp);
+                return;
             }
+
+            LLVM_DEBUG({
+                llvm::dbgs(
+                ) << "TileReductionForLram: selected op for reduction tiling; totalBytes="
+                  << *totalBytes << " lramSize=" << lramSize << " reductionSize=" << reductionSize
+                  << "\n";
+            });
+            opsToTile.push_back(genericOp);
         });
 
         IRRewriter rewriter(&getContext());
