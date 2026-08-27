@@ -11,7 +11,7 @@ apt-get update
 # file: is used by the toolchain extraction script
 # adb can be useful to connect to the astra board from inside the docker
 # graphviz imagemagick : these are for building the documentation
-apt-get install -y cmake ninja-build clang lld llvm wget curl git git-lfs clang-format-18 \
+apt-get install -y cmake ninja-build clang lld llvm wget curl git git-lfs gh clang-format-18 \
                          python3-pip python3-dev python3-venv python3-setuptools \
                          libc6-dev-armhf-cross libgcc-s1-armhf-cross libgcc-13-dev-armhf-cross libstdc++-13-dev-armhf-cross binutils-arm-linux-gnueabihf \
                          libstdc++-13-dev-arm64-cross \

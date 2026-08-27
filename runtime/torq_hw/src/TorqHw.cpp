@@ -107,8 +107,8 @@ std::unique_ptr<TorqHw> newTorqHw(std::string hw_type, uint32_t xram_start_addr,
         return std::unique_ptr<TorqHw>(new TorqAstraMachina(xram_start_addr, xram_size));
     }
 #endif
-    assert(false && "Unsupported TorqHw type");
     LOGE << hw_type << ": Torq Hardware not supported";
+    assert(false && "Unsupported TorqHw type");
     return nullptr;
 }
 
