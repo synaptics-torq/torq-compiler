@@ -21,6 +21,9 @@ namespace mlir::syna::torq {
 
 extern const std::string TORQ_FUSE_GROUP_ID;
 extern const std::string TORQ_FUSE_GROUP;
+// Marks a generic rewritten from a batch-invariant-weight batch_matmul
+// (replaceBatchMatmulWithBroadcastGeneric): still a matmul to the tiling heuristics.
+extern const std::string TORQ_BROADCAST_MATMUL;
 
 // Input Scale Information
 struct ScaleInfo {

@@ -1096,6 +1096,7 @@ static LogicalResult replaceBatchMatmulWithBroadcastGeneric(
             linalg::YieldOp::create(b, loc, add);
         }
     );
+    genericOp->setAttr(TORQ_BROADCAST_MATMUL, rewriter.getUnitAttr());
 
     rewriter.replaceOp(srcOp, genericOp.getResults());
     return success();

@@ -97,6 +97,13 @@ llvm::FailureOr<int64_t> computeSizeAtFirstIteration(OpFoldResult sizeFoldResult
 // nullopt and the caller keeps the legacy order. Convs bail out here naturally
 // (their reduction dims share extents with parallel dims), so their tile
 // shapes are unchanged.
+// Named matmuls plus the generics replaceBatchMatmulWithBroadcastGeneric marks:
+// matmuls to every tiling heuristic, but invisible to isa<>.
+static bool isMatmulLikeOp(Operation *op) {
+    return isa<linalg::MatmulOp, linalg::BatchMatmulOp, linalg::ContractOp>(op) ||
+           op->hasAttr(TORQ_BROADCAST_MATMUL);
+}
+
 std::optional<SmallVector<int64_t>> computeShrinkOrderByReduction(
     Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
     ArrayRef<int64_t> iterDomainSizes, ArrayRef<OpFoldResult> sizes, bool fallback
@@ -104,15 +111,19 @@ std::optional<SmallVector<int64_t>> computeShrinkOrderByReduction(
     // Scope the reorder strictly to matmul-family groups — the case it was
     // designed for. For all other ops the extent-matching heuristic is not
     // worth the risk; keep the legacy order.
-    bool hasMatmul = isa<linalg::MatmulOp, linalg::BatchMatmulOp, linalg::ContractOp>(consumerOp);
+    bool hasMatmul = isMatmulLikeOp(consumerOp);
     if (!hasMatmul) {
         for (Operation *producer : producerOps) {
-            if (isa<linalg::MatmulOp, linalg::BatchMatmulOp, linalg::ContractOp>(producer)) {
+            if (isMatmulLikeOp(producer)) {
                 hasMatmul = true;
                 break;
             }
         }
     }
+    LLVM_DEBUG(
+        llvm::dbgs() << "shrink-order: hasMatmul=" << hasMatmul << " for " << consumerOp->getName()
+                     << "\n"
+    );
     if (!hasMatmul)
         return std::nullopt;
 
@@ -120,16 +131,23 @@ std::optional<SmallVector<int64_t>> computeShrinkOrderByReduction(
     DenseMap<int64_t, int64_t> extentToDomain;
     for (int64_t domain : tilingInfo.tilingOrder) {
         auto [it, inserted] = extentToDomain.try_emplace(iterDomainSizes[domain], domain);
-        if (!inserted)
+        if (!inserted) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "shrink-order: bail duplicate extent " << iterDomainSizes[domain]
+                             << "\n"
+            );
             return std::nullopt;
+        }
     }
 
     // Current candidate tile size per consumer domain (0 means untiled: full).
     SmallVector<int64_t> curSizes;
     for (const OpFoldResult &size : sizes) {
         llvm::FailureOr<int64_t> maybeSize = computeSizeAtFirstIteration(size);
-        if (failed(maybeSize))
+        if (failed(maybeSize)) {
+            LLVM_DEBUG(llvm::dbgs() << "shrink-order: bail curSizes\n");
             return std::nullopt;
+        }
         int64_t value = *maybeSize;
         curSizes.push_back(value > 0 ? value : std::numeric_limits<int64_t>::max());
     }
@@ -141,6 +159,7 @@ std::optional<SmallVector<int64_t>> computeShrinkOrderByReduction(
 
     SmallVector<Operation *> groupOps(producerOps.begin(), producerOps.end());
     groupOps.push_back(consumerOp);
+    SmallPtrSet<Operation *, 8> groupOpSet(groupOps.begin(), groupOps.end());
 
     // Estimated group operand bytes when `shrinkDomain` is forced to its
     // minimum (or the current candidate sizes when shrinkDomain == -1).
@@ -175,12 +194,30 @@ std::optional<SmallVector<int64_t>> computeShrinkOrderByReduction(
                 Value value = operand.get();
                 if (!seen.insert(value).second)
                     continue;
+                // An in-group operand aliases its producer's init (e.g. a fill
+                // feeding the accumulator); counting it double-weights output dims.
+                if (Operation *def = value.getDefiningOp(); def && groupOpSet.contains(def))
+                    continue;
                 auto type = dyn_cast<RankedTensorType>(value.getType());
-                if (!type || !type.hasStaticShape())
+                if (!type) {
+                    // Scalar operand (e.g. a fill value): fixed bytes; don't
+                    // void the whole estimate over it.
+                    if (!isa<ShapedType>(value.getType()))
+                        continue;
+                    return std::nullopt;
+                }
+                if (!type.hasStaticShape())
                     return std::nullopt;
                 AffineMap map = linalgOp.getMatchingIndexingMap(&operand);
                 int64_t elements = 1;
                 for (auto [resultIndex, expr] : llvm::enumerate(map.getResults())) {
+                    // Constant-0 = broadcast unit dim: one element regardless of
+                    // tile. Other constants are unvalidated; keep the legacy bail.
+                    if (auto cstExpr = dyn_cast<AffineConstantExpr>(expr)) {
+                        if (cstExpr.getValue() != 0)
+                            return std::nullopt;
+                        continue;
+                    }
                     auto dimExpr = dyn_cast<AffineDimExpr>(expr);
                     if (!dimExpr)
                         return std::nullopt;
@@ -194,22 +231,36 @@ std::optional<SmallVector<int64_t>> computeShrinkOrderByReduction(
     };
 
     std::optional<int64_t> baseEstimate = estimateBytes(-1);
-    if (!baseEstimate)
+    if (!baseEstimate) {
+        LLVM_DEBUG(llvm::dbgs() << "shrink-order: bail baseEstimate\n");
         return std::nullopt;
+    }
 
     SmallVector<std::pair<int64_t, int64_t>> removedByDomain; // (removed bytes, domain)
     for (int64_t domain : tilingInfo.tilingOrder) {
         if (curSizes[domain] == minSizeOf(domain))
             continue; // already at minimum, shrink pass would skip it
         std::optional<int64_t> shrunk = estimateBytes(domain);
-        if (!shrunk || *shrunk > *baseEstimate)
+        if (!shrunk || *shrunk > *baseEstimate) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "shrink-order: bail estimate d" << domain
+                             << (shrunk ? " non-monotone" : " failed") << "\n"
+            );
             return std::nullopt; // estimate must be monotone shrink-only; bail
+        }
         removedByDomain.emplace_back(*baseEstimate - *shrunk, domain);
     }
 
     // Most bytes removed first; ties keep legacy tilingOrder (stable sort).
     llvm::stable_sort(removedByDomain, [](const auto &a, const auto &b) {
         return a.first > b.first;
+    });
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "shrink-order: base=" << *baseEstimate << " order:";
+        for (auto &[removed, domain] : removedByDomain)
+            llvm::dbgs() << " d" << domain << "(-" << removed << ")";
+        llvm::dbgs() << "\n";
     });
 
     SmallVector<int64_t> order;

@@ -55,6 +55,7 @@ namespace mlir::syna::torq {
 
 const std::string TORQ_FUSE_GROUP_ID = "torq-fuse-group-id";
 const std::string TORQ_FUSE_GROUP = "torq-fuse-group";
+const std::string TORQ_BROADCAST_MATMUL = "torq-broadcast-matmul";
 
 bool isI8Type(Value val, PatternRewriter &rewriter) {
     auto shapedType = dyn_cast<ShapedType>(val.getType());
