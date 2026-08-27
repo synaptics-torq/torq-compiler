@@ -33,7 +33,8 @@ def TensorOrMemref :
 class TorqHL_LayerOp<string mnemonic, list<Trait> traits = []>: 
         TorqHL_Op<mnemonic, !listconcat(traits, [
                               DeclareOpInterfaceMethods<KernelInterface, ["getKernelEncoding"]>,
-                              MemoryEffectsOpInterface])> {
+                              MemoryEffectsOpInterface,
+                              ConditionallySpeculatable])> {
   dag commonArgs = (ins
     TensorOrMemref:$init
   );
@@ -47,6 +48,10 @@ class TorqHL_LayerOp<string mnemonic, list<Trait> traits = []>:
 
     void getEffects(SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
       return getLayerOpEffects(getOperation(), effects);
+    }
+
+    ::mlir::Speculation::Speculatability getSpeculatability() {
+      return getLayerOpSpeculatability(getOperation());
     }
   }];
 }
@@ -1080,7 +1085,7 @@ def TorqHL_DepthToSpaceOp: TorqHL_LayerOp<"DepthToSpace"> {
   ));
 }
 
-def TorqHL_CompileInputToConstOp: TorqHL_Op<"compile_input_to_const"> {
+def TorqHL_CompileInputToConstOp: TorqHL_Op<"compile_input_to_const", [Pure]> {
   let summary = "Mark a value as a compile-time constant";
   let description = [{
     Wraps the result of an operation to mark it as a compile-time constant,

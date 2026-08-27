@@ -14,6 +14,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
 namespace mlir::syna::torq_hl {
@@ -28,6 +29,8 @@ void getLayerOpEffects(
 ArgAccessBitfield getValueAccessFromEffects(
     ArrayRef<SideEffects::EffectInstance<MemoryEffects::Effect>> effects, Value value
 );
+
+Speculation::Speculatability getLayerOpSpeculatability(Operation *op);
 
 } // namespace mlir::syna::torq_hl
 

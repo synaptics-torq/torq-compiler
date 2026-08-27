@@ -715,6 +715,21 @@ ArgAccessBitfield mlir::syna::torq_hl::getValueAccessFromEffects(
     return access;
 }
 
+Speculation::Speculatability mlir::syna::torq_hl::getLayerOpSpeculatability(Operation *op) {
+
+    if (!cast<DestinationStyleOpInterface>(op).hasPureTensorSemantics()) {
+        return Speculation::NotSpeculatable;
+    }
+
+    // gather/scatter use dynamic indices. Speculating them can result in UB.
+    // TODO: speculate if provably safe.
+    if (isa<GatherOp, ScatterOp>(op)) {
+        return Speculation::NotSpeculatable;
+    }
+
+    return Speculation::Speculatable;
+}
+
 LogicalResult mlir::syna::torq_hl::NextOp::verify() {
 
     if (getSuccessor()->getNumArguments() != getArguments().size()) {

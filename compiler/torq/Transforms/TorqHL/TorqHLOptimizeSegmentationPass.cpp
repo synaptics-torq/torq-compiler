@@ -10,11 +10,15 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/MemoryUtils.h"
 
+#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/AffineExpr.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -144,125 +148,79 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
     }
 };
 
-// Returns true if `v` is loop-invariant with respect to `forallOp`:
-// i.e., it does not transitively depend on any induction variable or
-// shared_outs block argument of the forall body.
-// `visited` prevents re-visiting values in cyclic/diamond graphs.
-static bool
-isLoopInvariant(Value v, scf::ForallOp forallOp, llvm::SmallPtrSetImpl<Value> &visited) {
-    if (!visited.insert(v).second)
-        return true; // already confirmed invariant
+// Collect the def-chain of `segOp` within `loopLike`.
+static LogicalResult collectInvariantChain(
+    LoopLikeOpInterface loopLike, torq_hl::SegmentationOp segOp, SetVector<Operation *> &chain
+) {
+    BackwardSliceOptions options;
+    options.inclusive = true;
+    // Region captures count as reads, so do not skip them when judging invariance.
+    options.omitUsesFromAbove = false;
+    options.filter = [&](Operation *op) { return loopLike->isProperAncestor(op); };
 
-    // Block arguments of the forall body (IVs + shared_outs) are loop-variant.
-    if (auto ba = dyn_cast<BlockArgument>(v))
-        return ba.getParentBlock() != forallOp.getBody();
+    if (failed(getBackwardSlice(segOp.getOperation(), &chain, options))) {
+        return failure();
+    }
 
-    Operation *defOp = v.getDefiningOp();
-    // Defined outside the forall — trivially invariant.
-    if (!forallOp->isProperAncestor(defOp))
+    for (Operation *op : chain) {
+        if (!isPure(op)) {
+            return failure();
+        }
+        for (Value operand : op->getOperands()) {
+            if (!loopLike.isDefinedOutsideOfLoop(operand) &&
+                !chain.contains(operand.getDefiningOp())) {
+                return failure();
+            }
+        }
+    }
+
+    return success();
+}
+
+// Whether `loopLike` might not run at all, either unknown or proven empty.
+// Hoisting out of such a loop would execute the chain it would have skipped.
+static bool mayHaveZeroTripCount(LoopLikeOpInterface loopLike) {
+    std::optional<SmallVector<OpFoldResult>> lowerBounds = loopLike.getLoopLowerBounds();
+    std::optional<SmallVector<OpFoldResult>> upperBounds = loopLike.getLoopUpperBounds();
+    std::optional<SmallVector<OpFoldResult>> steps = loopLike.getLoopSteps();
+    if (!lowerBounds || !upperBounds || !steps) {
         return true;
+    }
 
-    // Recursively check every operand of the defining op.
-    return llvm::all_of(defOp->getOperands(), [&](Value operand) {
-        return isLoopInvariant(operand, forallOp, visited);
+    return !llvm::all_of(llvm::zip_equal(*lowerBounds, *upperBounds, *steps), [](auto bounds) {
+        auto [lb, ub, step] = bounds;
+        std::optional<APInt> tripCount =
+            constantTripCount(lb, ub, step, /*isSigned=*/true, scf::computeUbMinusLb);
+        return tripCount && tripCount->isStrictlyPositive();
     });
 }
 
-// Recursively collect all ops inside `forallOp` that must be moved out to
-// make `v` available outside. Ops are inserted into `opsToMove` in
-// topological order (deepest dependency first → correct move order).
-static void
-collectOpsToHoist(Value v, scf::ForallOp forallOp, llvm::SetVector<Operation *> &opsToMove) {
-    if (isa<BlockArgument>(v))
+static void hoistInvariantSegmentations(LoopLikeOpInterface loopLike) {
+
+    if (mayHaveZeroTripCount(loopLike)) {
         return;
-    Operation *defOp = v.getDefiningOp();
-    if (!forallOp->isProperAncestor(defOp))
-        return; // already outside, nothing to collect
-    if (opsToMove.contains(defOp))
-        return; // already collected
-    // Recurse on operands first (depth-first → topo order).
-    for (Value operand : defOp->getOperands())
-        collectOpsToHoist(operand, forallOp, opsToMove);
-    opsToMove.insert(defOp);
-}
-
-// Hoists a SegmentationOp from inside a scf.forall to just before the forall.
-//
-// The pattern fires when all data operands (weights, scale_bias, input) are
-// loop-invariant — they do not transitively depend on any induction variable
-// or shared_outs arg of the forall. Any loop-invariant ops inside the forall
-// that produce those values are also moved out first (mini-LICM).
-// The init tensor is always recreated fresh outside the loop.
-//
-// Example:
-//   BEFORE:
-//     scf.forall (%iv = 0 to 8 step 4) {
-//         %empty         = tensor.empty()
-//         %filled        = torq_hl.fill(%empty)          // loop-invariant
-//         %inserted      = tensor.insert_slice ... into %filled  // loop-invariant
-//         %seg = torq_hl.segmentation(%inserted : 1x256x14x56)
-//         conv2d(..., %seg)
-//     }
-//
-//   AFTER:
-//     %empty    = tensor.empty()                         // hoisted
-//     %filled   = torq_hl.fill(%empty)                   // hoisted
-//     %inserted = tensor.insert_slice ... into %filled   // hoisted
-//     %seg      = torq_hl.segmentation(%inserted)        // hoisted
-//     scf.forall (%iv = 0 to 8 step 4) {
-//         conv2d(..., %seg)
-//     }
-class HoistSegmentationOutOfForallPattern : public OpRewritePattern<torq_hl::SegmentationOp> {
-  public:
-    using OpRewritePattern::OpRewritePattern;
-
-    LogicalResult
-    matchAndRewrite(torq_hl::SegmentationOp segOp, PatternRewriter &rewriter) const override {
-        // Only fire if the segmentation is inside a forall.
-        auto forallOp = segOp->getParentOfType<scf::ForallOp>();
-        if (!forallOp)
-            return failure();
-
-        // Check that weights, scale_bias and input are all loop-invariant.
-        // The init operand is excluded — we always recreate it outside.
-        auto checkInvariant = [&](Value v) -> bool {
-            llvm::SmallPtrSet<Value, 16> visited;
-            return isLoopInvariant(v, forallOp, visited);
-        };
-
-        if (!checkInvariant(segOp.getWeights()) || !checkInvariant(segOp.getScaleBias()) ||
-            !checkInvariant(segOp.getInput()))
-            return failure();
-
-        // Collect all ops inside the forall that need to move out,
-        // in topological order (dependencies before dependents).
-        llvm::SetVector<Operation *> opsToMove;
-        collectOpsToHoist(segOp.getWeights(), forallOp, opsToMove);
-        collectOpsToHoist(segOp.getScaleBias(), forallOp, opsToMove);
-        collectOpsToHoist(segOp.getInput(), forallOp, opsToMove);
-
-        // Move the collected ops out, then the segmentation itself.
-        // rewriter.moveOpBefore preserves operand dominance because we move
-        // in topological order and insert just before the forall.
-        for (Operation *op : opsToMove)
-            rewriter.moveOpBefore(op, forallOp);
-
-        // Recreate the init outside and build the hoisted segmentation.
-        rewriter.setInsertionPoint(forallOp);
-        Location loc = segOp->getLoc();
-        auto outputType = llvm::cast<RankedTensorType>(segOp.getOutput().getType());
-        Value newInit = tensor::EmptyOp::create(
-            rewriter, loc, outputType.getShape(), outputType.getElementType()
-        );
-        auto hoistedSeg = torq_hl::SegmentationOp::create(
-            rewriter, loc, outputType, newInit, segOp.getHSegmentsAttr(), segOp.getWSegmentsAttr(),
-            segOp.getWeights(), segOp.getScaleBias(), segOp.getInput()
-        );
-
-        rewriter.replaceOp(segOp, hoistedSeg.getOutput());
-        return success();
     }
-};
+
+    Block &body = loopLike.getLoopRegions().front()->front();
+    DenseSet<Operation *> hoistable;
+    for (auto segOp : body.getOps<torq_hl::SegmentationOp>()) {
+        SetVector<Operation *> chain;
+        if (succeeded(collectInvariantChain(loopLike, segOp, chain))) {
+            hoistable.insert(chain.begin(), chain.end());
+        }
+    }
+
+    if (hoistable.empty()) {
+        return;
+    }
+
+    moveLoopInvariantCode(
+        loopLike.getLoopRegions(),
+        [&](Value value, Region *) { return loopLike.isDefinedOutsideOfLoop(value); },
+        [&](Operation *op, Region *) { return hoistable.contains(op) && isPure(op); },
+        [&](Operation *op, Region *) { loopLike.moveOutOfLoop(op); }
+    );
+}
 
 class TorqHLOptimizeSegmentationPass
     : public impl::TorqHLOptimizeSegmentationBase<TorqHLOptimizeSegmentationPass> {
@@ -294,15 +252,9 @@ void TorqHLOptimizeSegmentationPass::runOnOperation() {
     }
 
     // Finally, hoist any SegmentationOp inside a scf.forall to just before the
-    // forall, provided its data operands (input, weights, scale_bias) are all
-    // loop-invariant. This ensures the segmentation runs once rather than once
-    // per iteration.
-    RewritePatternSet hoistPatterns(ctx);
-    hoistPatterns.add<HoistSegmentationOutOfForallPattern>(ctx);
-
-    if (failed(applyPatternsGreedily(getOperation(), std::move(hoistPatterns)))) {
-        return signalPassFailure();
-    }
+    // forall, provided its whole def-chain is loop-invariant. This ensures the
+    // segmentation runs once rather than once per iteration.
+    funcOp.walk([](scf::ForallOp forallOp) { hoistInvariantSegmentations(forallOp); });
 }
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHLOptimizeSegmentationPass() {
