@@ -145,6 +145,7 @@ class Serializer {
 
     iree_compiler::FlatbufferBuilder &_builder;
     SmallVector<iree_hal_torq_Segment_ref_t> _segments;
+    AddressResolver _addressResolver;
 
     int _nssBlockSize = 0;
     int _nssProgramCount = 0;
@@ -759,7 +760,7 @@ iree_hal_torq_BufferDebugInfo_ref_t Serializer::createBufferDebugInfo(
     auto memorySpace = getEncodingMemorySpace(buffer.getType());
 
     iree_hal_torq_BufferType_enum_t bufferType = toBufferType(memorySpace);
-    auto maybeAddress = getDataStartAddress(buffer);
+    auto maybeAddress = _addressResolver.getDataStartAddress(buffer);
 
     uint32_t address = maybeAddress.value_or(-1);
 
@@ -987,13 +988,13 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
             auto inputMemSpace = getEncodingMemorySpace(hostActionOp.getInput().getType());
             auto outputMemSpace = getEncodingMemorySpace(hostActionOp.getOutput().getType());
 
-            auto inputAddress = getDataStartAddress(hostActionOp.getInput());
+            auto inputAddress = _addressResolver.getDataStartAddress(hostActionOp.getInput());
             if (!inputAddress) {
                 op.emitOpError("Input buffer address is not set");
                 return failure();
             }
 
-            auto outputAddress = getDataStartAddress(hostActionOp.getOutput());
+            auto outputAddress = _addressResolver.getDataStartAddress(hostActionOp.getOutput());
             if (!outputAddress) {
                 op.emitOpError("Output buffer address is not set");
                 return failure();
@@ -1018,13 +1019,14 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
             auto inputMemSpace = getEncodingMemorySpace(dynamicHostCopyOp.getInput().getType());
             auto outputMemSpace = getEncodingMemorySpace(dynamicHostCopyOp.getOutput().getType());
 
-            auto inputAddress = getDataStartAddress(dynamicHostCopyOp.getInput());
+            auto inputAddress = _addressResolver.getDataStartAddress(dynamicHostCopyOp.getInput());
             if (!inputAddress) {
                 op.emitOpError("Input buffer address is not set");
                 return failure();
             }
 
-            auto outputAddress = getDataStartAddress(dynamicHostCopyOp.getOutput());
+            auto outputAddress =
+                _addressResolver.getDataStartAddress(dynamicHostCopyOp.getOutput());
             if (!outputAddress) {
                 op.emitOpError("Output buffer address is not set");
                 return failure();
@@ -1067,7 +1069,7 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
                     return failure();
                 }
 
-                auto maybeCodeAddress = getAddress(startOp.getCodeSections()[0]);
+                auto maybeCodeAddress = _addressResolver.getAddress(startOp.getCodeSections()[0]);
 
                 if (!maybeCodeAddress) {
                     op.emitOpError("Missing lram code address for start program");
@@ -1204,7 +1206,7 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
             }
         }
         else if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
-            auto maybeAddress = getAddress(allocOp.getResult());
+            auto maybeAddress = _addressResolver.getAddress(allocOp.getResult());
 
             if (!maybeAddress) {
                 return op.emitOpError("Missing xram address for alloc operation");

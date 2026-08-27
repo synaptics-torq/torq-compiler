@@ -45,8 +45,8 @@ class ResolveInvocationArgumentsPass
 // The code below assumes that it is possible to statically know which allocations
 // correspond to which arguments and code sections.
 static LogicalResult updateCreateInvocation(
-    torq_hl::StartProgramOp startProgramOp, InvocationValue currentInvocation,
-    const IRMapping &mapping
+    AddressResolver &resolver, torq_hl::StartProgramOp startProgramOp,
+    InvocationValue currentInvocation, const IRMapping &mapping
 ) {
 
     // in case the invocation is a argument of the current program
@@ -67,7 +67,7 @@ static LogicalResult updateCreateInvocation(
 
         auto sectionValue = mapping.lookup(section);
 
-        auto executorAddress = getAddress(sectionValue, 0);
+        auto executorAddress = resolver.getAddress(sectionValue);
 
         if (!executorAddress) {
             return startProgramOp.emitError() << "code section #" << idx << " must have address";
@@ -82,8 +82,6 @@ static LogicalResult updateCreateInvocation(
 
     // update the address for all the arguments
     SmallVector<Attribute> argAttrs;
-
-    AddressCache cache;
 
     for (auto [idx, arg] : llvm::enumerate(startProgramOp.getArgs())) {
 
@@ -148,7 +146,7 @@ static LogicalResult updateCreateInvocation(
                        << argValue;
             }
 
-            auto maybeStartAddress = getDataStartAddress(argValue, 0, nullptr, &cache);
+            auto maybeStartAddress = resolver.getDataStartAddress(argValue);
 
             if (!maybeStartAddress) {
                 return startProgramOp.emitError()
@@ -174,15 +172,14 @@ static LogicalResult updateCreateInvocation(
 }
 
 static LogicalResult updateWait(
-    torq_hl::WaitProgramOp waitProgramOp, InvocationValue currentInvocation,
-    InvocationReturns returnValues
+    AddressResolver &resolver, torq_hl::WaitProgramOp waitProgramOp,
+    InvocationValue currentInvocation, InvocationReturns returnValues
 ) {
 
     SmallVector<int64_t> executorArgsAddresses;
-    AddressCache cache;
     for (auto returnValue : returnValues) {
 
-        auto returnValueAddress = getAddress(returnValue, 0, nullptr, &cache);
+        auto returnValueAddress = resolver.getAddress(returnValue);
 
         if (returnValueAddress) {
             executorArgsAddresses.push_back(*returnValueAddress);
@@ -201,11 +198,18 @@ void ResolveInvocationArgumentsPass::runOnOperation() {
     auto funcOp = getOperation();
 
     WalkExecutionOptions options;
+    AddressResolver resolver;
 
     // simulate the whole function and update each invocation when we encounter a start_program op
     // and we know the actual addresses of the arguments and code sections
-    options.onStart = updateCreateInvocation;
-    options.onFinish = updateWait;
+    options.onStart = [&](torq_hl::StartProgramOp startProgramOp, InvocationValue invocation,
+                          const IRMapping &mapping) {
+        return updateCreateInvocation(resolver, startProgramOp, invocation, mapping);
+    };
+    options.onFinish = [&](torq_hl::WaitProgramOp waitProgramOp, InvocationValue invocation,
+                           InvocationReturns returnValues) {
+        return updateWait(resolver, waitProgramOp, invocation, returnValues);
+    };
 
     // Only recurse into NSS programs. CSS/Slice/Host programs are always
     // leaf programs — guaranteed by the program lowering pass which ensures

@@ -377,8 +377,8 @@ static Attribute getInvocationArgumentAttr(BlockArgument blockArg, InvocationVal
     return (*args)[blockArg.getArgNumber()];
 }
 
-std::optional<int64_t>
-getAddressFromInvocationArg(BlockArgument blockArg, int64_t offset, InvocationValue invocation) {
+static std::optional<int64_t>
+getAddressFromInvocationArg(BlockArgument blockArg, InvocationValue invocation) {
 
     if (invocation.getType().getExecutor() == torq_hl::Executor::CSS) {
         // if the executor is CSS the addresses we get are remapped into a single address space
@@ -400,14 +400,11 @@ getAddressFromInvocationArg(BlockArgument blockArg, int64_t offset, InvocationVa
 
     // the address in the invocation arguments is a start address, not a base address
     auto type = argBuffer.getMemrefType();
-    auto baseAddress = argBuffer.getAddress() - getMemRefTypeOffsetBytes(type);
-
-    return baseAddress + offset;
+    return argBuffer.getAddress() - getMemRefTypeOffsetBytes(type);
 }
 
-static std::optional<int64_t> getAddressFromGetBlockOp(
-    torq_hl::GetBlockOp getBlockOp, int64_t offset, InvocationValue invocation
-) {
+static std::optional<int64_t>
+getAddressFromGetBlockOp(torq_hl::GetBlockOp getBlockOp, InvocationValue invocation) {
 
     auto blockInvocation = simplifyBlockArguments(getBlockOp.getInvocation());
 
@@ -426,8 +423,7 @@ static std::optional<int64_t> getAddressFromGetBlockOp(
             return std::nullopt; // argument is not an invocation
         }
 
-        return argInvocation.getBlockAddresses()[getBlockOp.getBlockIndex().getZExtValue()] +
-               offset;
+        return argInvocation.getBlockAddresses()[getBlockOp.getBlockIndex().getZExtValue()];
     }
     // the invocation in the get_block op is value produced by a create_invocation op
     else if (auto blockCreateInvocationOp =
@@ -443,7 +439,7 @@ static std::optional<int64_t> getAddressFromGetBlockOp(
             return std::nullopt; // block index out of bounds
         }
 
-        return (*xramCodeAddresses)[getBlockOp.getBlockIndex().getZExtValue()] + offset;
+        return (*xramCodeAddresses)[getBlockOp.getBlockIndex().getZExtValue()];
     }
     // the invocation in the get_block op is the value produced by a descriptor op
     else if (auto blockDescriptorOp = blockInvocation.getDefiningOp<torq_hl::DescriptorOp>()) {
@@ -454,19 +450,19 @@ static std::optional<int64_t> getAddressFromGetBlockOp(
             return std::nullopt; // block index out of bounds
         }
 
-        return blockAddresses[getBlockOp.getBlockIndex().getZExtValue()] + offset;
+        return blockAddresses[getBlockOp.getBlockIndex().getZExtValue()];
     }
     else {
         return std::nullopt; // we don't support any other case
     }
 }
 
-// This function returns the addresss of a global memref that is accessed by a memref.get_global op
+// This function returns the address of a global memref that is accessed by a memref.get_global op
 static std::optional<int64_t>
-getAddressFromGetGlobal(memref::GetGlobalOp getGlobalOp, int64_t offset) {
+getAddressFromGetGlobal(memref::GetGlobalOp getGlobalOp, SymbolTableCollection &symbolTables) {
 
     // find the global memref corresponding to the get_global op by looking it up by name
-    auto globalOp = SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(
+    auto globalOp = symbolTables.lookupNearestSymbolFrom<memref::GlobalOp>(
         getGlobalOp, getGlobalOp.getNameAttr()
     );
 
@@ -480,31 +476,25 @@ getAddressFromGetGlobal(memref::GetGlobalOp getGlobalOp, int64_t offset) {
 
     switch (memorySpace) {
     case torq_hl::MemorySpace::Lram:
-        return getLramAddress(globalOp, offset);
+        return getLramAddress(globalOp);
     case torq_hl::MemorySpace::Dtcm:
-        return getDtcmAddress(globalOp, offset);
+        return getDtcmAddress(globalOp);
     case torq_hl::MemorySpace::Itcm:
-        return getItcmAddress(globalOp, offset);
+        return getItcmAddress(globalOp);
     case torq_hl::MemorySpace::Xram:
-        return getXramAddress(globalOp, offset);
+        return getXramAddress(globalOp);
     default:
         return std::nullopt; // unsupported memory space
     }
 }
 
-std::optional<int64_t>
-getAddress(Value value, int64_t offset, InvocationValue invocation, AddressCache *cache) {
+std::optional<int64_t> AddressResolver::getAddress(Value value, InvocationValue invocation) {
 
-    Value originalValue = value;
+    auto key = std::make_pair(value, invocation);
 
-    if (cache) {
-        auto it = cache->find(originalValue);
-        if (it != cache->end()) {
-            if (it->second) {
-                return *it->second + offset;
-            }
-            return std::nullopt;
-        }
+    auto it = addresses.find(key);
+    if (it != addresses.end()) {
+        return it->second;
     }
 
     // the value may be a block argument, if this is not the first block
@@ -513,9 +503,7 @@ getAddress(Value value, int64_t offset, InvocationValue invocation, AddressCache
     value = simplifyBlockArguments(value);
 
     if (!value) {
-        if (cache) {
-            (*cache)[originalValue] = std::nullopt;
-        }
+        addresses[key] = std::nullopt;
         return std::nullopt;
     }
 
@@ -523,13 +511,13 @@ getAddress(Value value, int64_t offset, InvocationValue invocation, AddressCache
     // directly
     std::optional<int64_t> result;
     if (auto blockArg = dyn_cast<BlockArgument>(value)) {
-        result = getAddressFromInvocationArg(blockArg, offset, invocation);
+        result = getAddressFromInvocationArg(blockArg, invocation);
     }
     else if (auto getBlockOp = dyn_cast<torq_hl::GetBlockOp>(value.getDefiningOp())) {
-        result = getAddressFromGetBlockOp(getBlockOp, offset, invocation);
+        result = getAddressFromGetBlockOp(getBlockOp, invocation);
     }
     else if (auto getGlobalOp = dyn_cast<memref::GetGlobalOp>(value.getDefiningOp())) {
-        result = getAddressFromGetGlobal(getGlobalOp, offset);
+        result = getAddressFromGetGlobal(getGlobalOp, symbolTables);
     }
 
     if (!result.has_value()) {
@@ -543,16 +531,16 @@ getAddress(Value value, int64_t offset, InvocationValue invocation, AddressCache
 
             switch (memorySpace) {
             case torq_hl::MemorySpace::Lram:
-                result = getLramAddress(value, offset);
+                result = getLramAddress(value);
                 break;
             case torq_hl::MemorySpace::Dtcm:
-                result = getDtcmAddress(value, offset);
+                result = getDtcmAddress(value);
                 break;
             case torq_hl::MemorySpace::Itcm:
-                result = getItcmAddress(value, offset);
+                result = getItcmAddress(value);
                 break;
             case torq_hl::MemorySpace::Xram:
-                result = getXramAddress(value, offset);
+                result = getXramAddress(value);
                 break;
             default:
                 result = std::nullopt; // unsupported memory space
@@ -560,21 +548,13 @@ getAddress(Value value, int64_t offset, InvocationValue invocation, AddressCache
         }
     }
 
-    if (cache) {
-        // Store base address (without offset) in cache, keyed by original value
-        if (result) {
-            (*cache)[originalValue] = *result - offset;
-        }
-        else {
-            (*cache)[originalValue] = std::nullopt;
-        }
-    }
+    addresses[key] = result;
 
     return result;
 }
 
 std::optional<int64_t>
-getDataStartAddress(Value value, int64_t offset, InvocationValue invocation, AddressCache *cache) {
+AddressResolver::getDataStartAddress(Value value, InvocationValue invocation) {
 
     MemRefType type = cast<MemRefType>(value.getType());
     // A data-dependent (dynamic) offset has no compile-time address. Report "no
@@ -583,71 +563,98 @@ getDataStartAddress(Value value, int64_t offset, InvocationValue invocation, Add
     if (memRefHasDynamicOffset(type)) {
         return std::nullopt;
     }
-    return getAddress(value, offset + getMemRefTypeOffsetBytes(type), invocation, cache);
+
+    auto baseAddress = getAddress(value, invocation);
+
+    if (!baseAddress) {
+        return std::nullopt;
+    }
+
+    return *baseAddress + getMemRefTypeOffsetBytes(type);
 }
 
-static std::optional<int64_t> getCssAddress(
-    Value value, int64_t offset, TypedValue<torq_hl::InvocationType> invocation, AddressCache *cache
-) {
-    auto memrefType = dyn_cast<MemRefType>(value.getType());
-
-    if (!memrefType) {
-        return std::nullopt;
-    }
-
-    auto memSpace = getEncodingMemorySpace(memrefType);
-
-    std::optional<int64_t> addr = getDataStartAddress(value, offset, invocation, cache);
-
-    int64_t baseAddress = 0;
-
-    switch (memSpace) {
-    case torq_hl::MemorySpace::Dtcm:
-        baseAddress = HwInfo::css_dtcm_base_address;
-        break;
-    case torq_hl::MemorySpace::Itcm:
-        baseAddress = HwInfo::css_itcm_base_address;
-        break;
-    default:
-        return std::nullopt;
-    }
-
-    if (!addr) {
-        return std::nullopt;
-    }
-
-    return baseAddress + addr.value();
-}
-
-std::optional<int64_t> getExecutorDataStartAddress(
-    torq_hl::Executor executor, Value value, int64_t offset, InvocationValue invocation,
-    AddressCache *cache
-) {
-
-    auto type = cast<MemRefType>(value.getType());
+// Returns the address at which the executor sees the start of the given memory space, or nullopt
+// if the executor cannot access that memory space
+static std::optional<int64_t>
+getExecutorBaseAddress(torq_hl::Executor executor, torq_hl::MemorySpace memorySpace) {
 
     switch (executor) {
     case torq_hl::Executor::CSS:
-        return getCssAddress(value, offset, invocation, cache);
+        switch (memorySpace) {
+        case torq_hl::MemorySpace::Dtcm:
+            return HwInfo::css_dtcm_base_address;
+        case torq_hl::MemorySpace::Itcm:
+            return HwInfo::css_itcm_base_address;
+        default:
+            return std::nullopt;
+        }
 
     case torq_hl::Executor::Host:
-        if (getEncodingMemorySpace(type) != torq_hl::MemorySpace::Xram) {
+        if (memorySpace != torq_hl::MemorySpace::Xram) {
             return std::nullopt;
         }
-        return getDataStartAddress(value, offset, invocation, cache);
+        return 0;
 
     case torq_hl::Executor::Slice:
-        if (getEncodingMemorySpace(type) != torq_hl::MemorySpace::Lram) {
+        if (memorySpace != torq_hl::MemorySpace::Lram) {
             return std::nullopt;
         }
-        return getDataStartAddress(value, offset, invocation, cache);
+        return 0;
 
     case torq_hl::Executor::NSS:
-        return getDataStartAddress(value, offset, invocation, cache);
+        return 0;
 
     default:
         llvm::report_fatal_error("unsupported executor");
     }
+}
+
+// Same as `getExecutorBaseAddress` for the CDMA
+static std::optional<int64_t> getCdmaBaseAddress(torq_hl::MemorySpace memorySpace) {
+
+    switch (memorySpace) {
+    case torq_hl::MemorySpace::Lram:
+        return HwInfo::cdma_lram_base_address;
+    case torq_hl::MemorySpace::Dtcm:
+        return HwInfo::cdma_dtcm_base_address;
+    case torq_hl::MemorySpace::Itcm:
+        return HwInfo::cdma_itcm_base_address;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<int64_t> AddressResolver::getExecutorDataStartAddress(
+    torq_hl::Executor executor, Value value, InvocationValue invocation
+) {
+    auto memorySpace = getEncodingMemorySpace(cast<MemRefType>(value.getType()));
+
+    auto baseAddress = getExecutorBaseAddress(executor, memorySpace);
+    auto dataStartAddress = getDataStartAddress(value, invocation);
+
+    if (!baseAddress || !dataStartAddress) {
+        return std::nullopt;
+    }
+
+    return *baseAddress + *dataStartAddress;
+}
+
+std::optional<int64_t>
+AddressResolver::getCdmaDataStartAddress(Value value, InvocationValue invocation) {
+    auto memorySpace = getEncodingMemorySpace(cast<MemRefType>(value.getType()));
+
+    auto baseAddress = getCdmaBaseAddress(memorySpace);
+    auto dataStartAddress = getDataStartAddress(value, invocation);
+
+    if (!baseAddress || !dataStartAddress) {
+        return std::nullopt;
+    }
+
+    return *baseAddress + *dataStartAddress;
+}
+
+std::optional<int64_t> getAddress(Value value, InvocationValue invocation) {
+    return AddressResolver().getAddress(value, invocation);
 }
 
 } // namespace mlir::syna::torq

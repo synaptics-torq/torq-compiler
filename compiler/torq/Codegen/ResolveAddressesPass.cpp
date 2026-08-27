@@ -36,67 +36,22 @@ class ResolveAddressesPass : public impl::ResolveAddressesBase<ResolveAddressesP
     void runOnOperation() override;
 };
 
-static FailureOr<int64_t> getCdmaDataStartAddress(
-    Value value, TypedValue<torq_hl::InvocationType> invocation, AddressCache *cache
-) {
-
-    auto memrefType = dyn_cast<MemRefType>(value.getType());
-    auto memSpace = getEncodingMemorySpace(memrefType);
-
-    std::optional<int64_t> addr = getDataStartAddress(value, 0, invocation, cache);
-
-    int64_t baseAddress = 0;
-
-    switch (memSpace) {
-    case torq_hl::MemorySpace::Lram:
-        baseAddress = mlir::syna::torq::HwInfo::cdma_lram_base_address;
-        break;
-    case torq_hl::MemorySpace::Dtcm:
-        baseAddress = mlir::syna::torq::HwInfo::cdma_dtcm_base_address;
-        break;
-    case torq_hl::MemorySpace::Itcm:
-        baseAddress = mlir::syna::torq::HwInfo::cdma_itcm_base_address;
-        break;
-    default:
-        return failure();
-    }
-
-    if (!addr) {
-        return failure();
-    }
-
-    return baseAddress + addr.value();
-}
-
-static FailureOr<int64_t> getNdmaDataStartAddress(
-    Value value, TypedValue<torq_hl::InvocationType> invocation, AddressCache *cache
-) {
-
-    auto address = getDataStartAddress(value, 0, invocation, cache);
-
-    if (!address) {
-        return failure();
-    }
-
-    return address.value();
-}
-
-template <typename OpT> static LogicalResult resolveDmaCfg(OpT op, AddressCache *cache) {
+template <typename OpT> static LogicalResult resolveDmaCfg(AddressResolver &resolver, OpT op) {
     if (op.getReadAddressAttr() && op.getWriteAddressAttr()) {
         return success();
     }
 
     auto nssInvocation = getNssInvocation(op);
 
-    auto maybeReadAddress = getNdmaDataStartAddress(op.getRead(), nssInvocation, cache);
+    auto maybeReadAddress = resolver.getDataStartAddress(op.getRead(), nssInvocation);
 
-    if (failed(maybeReadAddress)) {
+    if (!maybeReadAddress) {
         return op.emitError("unable to resolve read address of value of ") << op.getRead();
     }
 
-    auto maybeWriteAddress = getNdmaDataStartAddress(op.getWrite(), nssInvocation, cache);
+    auto maybeWriteAddress = resolver.getDataStartAddress(op.getWrite(), nssInvocation);
 
-    if (failed(maybeWriteAddress)) {
+    if (!maybeWriteAddress) {
         return op.emitError("unable to resolve write address of ") << op.getWrite();
     }
 
@@ -106,22 +61,22 @@ template <typename OpT> static LogicalResult resolveDmaCfg(OpT op, AddressCache 
     return success();
 }
 
-static LogicalResult resolveCDMAStart(torq_hw::CDMAStartOp op, AddressCache *cache) {
+static LogicalResult resolveCDMAStart(AddressResolver &resolver, torq_hw::CDMAStartOp op) {
     if (op.getDestAddress() && op.getSrcAddress()) {
         return success();
     }
 
     auto nssInvocation = getNssInvocation(op);
 
-    auto maybeSrcAddress = getCdmaDataStartAddress(op.getSrc(), nssInvocation, cache);
+    auto maybeSrcAddress = resolver.getCdmaDataStartAddress(op.getSrc(), nssInvocation);
 
-    if (failed(maybeSrcAddress)) {
+    if (!maybeSrcAddress) {
         return op.emitError("unable to resolve src address");
     }
 
-    auto maybeDestAddress = getCdmaDataStartAddress(op.getDest(), nssInvocation, cache);
+    auto maybeDestAddress = resolver.getCdmaDataStartAddress(op.getDest(), nssInvocation);
 
-    if (failed(maybeDestAddress)) {
+    if (!maybeDestAddress) {
         return op.emitError("unable to resolve dest address");
     }
 
@@ -131,23 +86,23 @@ static LogicalResult resolveCDMAStart(torq_hw::CDMAStartOp op, AddressCache *cac
     return success();
 }
 
-static LogicalResult resolveCSSStart(torq_hw::CSSStartOp op, AddressCache *cache) {
+static LogicalResult resolveCSSStart(AddressResolver &resolver, torq_hw::CSSStartOp op) {
     if (op.getProgramAddress() && op.getArgAddressesAddress()) {
         return success();
     }
 
     auto nssInvocation = getNssInvocation(op);
 
-    auto maybeProgramAddress = getExecutorDataStartAddress(
-        torq_hl::Executor::CSS, op.getProgram(), 0, nssInvocation, cache
+    auto maybeProgramAddress = resolver.getExecutorDataStartAddress(
+        torq_hl::Executor::CSS, op.getProgram(), nssInvocation
     );
 
     if (!maybeProgramAddress) {
         return op.emitError("unable to resolve program address");
     }
 
-    auto maybeArgAddress = getExecutorDataStartAddress(
-        torq_hl::Executor::CSS, op.getArgsAddresses(), 0, nssInvocation, cache
+    auto maybeArgAddress = resolver.getExecutorDataStartAddress(
+        torq_hl::Executor::CSS, op.getArgsAddresses(), nssInvocation
     );
 
     if (!maybeArgAddress) {
@@ -160,15 +115,15 @@ static LogicalResult resolveCSSStart(torq_hw::CSSStartOp op, AddressCache *cache
     return success();
 }
 
-static LogicalResult resolveSliceStart(torq_hw::SliceStartOp op, AddressCache *cache) {
+static LogicalResult resolveSliceStart(AddressResolver &resolver, torq_hw::SliceStartOp op) {
     if (op.getProgramAddress()) {
         return success();
     }
 
     auto nssInvocation = getNssInvocation(op);
 
-    auto maybeProgramAddress = getExecutorDataStartAddress(
-        torq_hl::Executor::Slice, op.getProgram(), 0, nssInvocation, cache
+    auto maybeProgramAddress = resolver.getExecutorDataStartAddress(
+        torq_hl::Executor::Slice, op.getProgram(), nssInvocation
     );
 
     if (!maybeProgramAddress) {
@@ -180,15 +135,15 @@ static LogicalResult resolveSliceStart(torq_hw::SliceStartOp op, AddressCache *c
     return success();
 }
 
-static LogicalResult resolveNext(torq_hl::NextOp op, AddressCache *cache) {
+static LogicalResult resolveNext(AddressResolver &resolver, torq_hl::NextOp op) {
     if (op.getLramAddress()) {
         return success();
     }
 
     auto nssInvocation = getNssInvocation(op);
 
-    auto maybeProgramAddress = getExecutorDataStartAddress(
-        torq_hl::Executor::NSS, op.getLramArea(), 0, nssInvocation, cache
+    auto maybeProgramAddress = resolver.getExecutorDataStartAddress(
+        torq_hl::Executor::NSS, op.getLramArea(), nssInvocation
     );
 
     if (!maybeProgramAddress) {
@@ -203,22 +158,24 @@ static LogicalResult resolveNext(torq_hl::NextOp op, AddressCache *cache) {
 void ResolveAddressesPass::runOnOperation() {
     auto funcOp = getOperation();
 
-    AddressCache cache;
+    AddressResolver resolver;
     LogicalResult result = success();
 
     auto walkResult = funcOp.walk([&](Operation *op) {
         TypeSwitch<Operation *>(op)
             .Case<torq_hw::DmaInCfgOp, torq_hw::DmaOutCfgOp>([&](auto dmaOp) {
-                result = resolveDmaCfg(dmaOp, &cache);
+                result = resolveDmaCfg(resolver, dmaOp);
             })
             .Case<torq_hw::CDMAStartOp>([&](auto cdmaOp) {
-                result = resolveCDMAStart(cdmaOp, &cache);
+                result = resolveCDMAStart(resolver, cdmaOp);
             })
-            .Case<torq_hw::CSSStartOp>([&](auto cssOp) { result = resolveCSSStart(cssOp, &cache); })
+            .Case<torq_hw::CSSStartOp>([&](auto cssOp) {
+                result = resolveCSSStart(resolver, cssOp);
+            })
             .Case<torq_hw::SliceStartOp>([&](auto sliceOp) {
-                result = resolveSliceStart(sliceOp, &cache);
+                result = resolveSliceStart(resolver, sliceOp);
             })
-            .Case<torq_hl::NextOp>([&](auto nextOp) { result = resolveNext(nextOp, &cache); });
+            .Case<torq_hl::NextOp>([&](auto nextOp) { result = resolveNext(resolver, nextOp); });
 
         if (failed(result))
             return WalkResult::interrupt();

@@ -57,38 +57,6 @@ class CompileNSSInvocationsPass
     void runOnOperation() override;
 };
 
-static FailureOr<uint32_t> getCssAddress(Value value) {
-
-    auto type = dyn_cast<MemRefType>(value.getType());
-
-    if (!type) {
-        return failure();
-    }
-
-    auto memSpace = getEncodingMemorySpace(type);
-
-    std::optional<int32_t> maybeProgramAddress;
-
-    switch (memSpace) {
-    case torq_hl::MemorySpace::Dtcm:
-        maybeProgramAddress =
-            getDtcmAddress(value, HwInfo::css_dtcm_base_address + getMemRefTypeOffsetBytes(type));
-        break;
-    case torq_hl::MemorySpace::Itcm:
-        maybeProgramAddress =
-            getItcmAddress(value, HwInfo::css_itcm_base_address + getMemRefTypeOffsetBytes(type));
-        break;
-    default:
-        return failure();
-    }
-
-    if (!maybeProgramAddress) {
-        return failure();
-    }
-
-    return maybeProgramAddress.value();
-}
-
 static void convert(const torq_hw::DmaNdlAttr attr, DmaNdl &ndl) {
     for (auto dim : attr.getDims())
         ndl.addDim(dim.getCount(), dim.getStride());
