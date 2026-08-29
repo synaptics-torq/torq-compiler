@@ -16,10 +16,11 @@
 #include "iree/hal/utils/caching_allocator.h"
 
 #include <stddef.h>
+#include <unistd.h>
 
 IREE_FLAG(
-    string, torq_device_allocator, "cpu",
-    "Allocator backing Torq device buffers: ['cpu', 'dmabuf']"
+    string, torq_device_allocator, "auto",
+    "Allocator backing Torq device buffers: ['auto', 'cpu', 'dmabuf']"
 );
 
 /// default caching parameters, can be fine-tuned for better performance
@@ -30,12 +31,11 @@ static const iree_device_size_t kTorqCachingMaxPoolCapacity =
 static const iree_host_size_t kTorqCachingMaxFreeAllocationCount = 32;
 
 static iree_status_t iree_hal_torq_create_allocator_from_flags(
-    iree_allocator_t host_allocator, iree_hal_allocator_t** out_allocator) {
+    iree_string_view_t allocator_name, iree_allocator_t host_allocator,
+    iree_hal_allocator_t** out_allocator) {
   IREE_ASSERT_ARGUMENT(out_allocator);
   *out_allocator = NULL;
 
-  iree_string_view_t allocator_name =
-      iree_make_cstring_view(FLAG_torq_device_allocator);
   if (iree_string_view_equal(allocator_name, IREE_SV("cpu"))) {
     return iree_hal_allocator_create_heap(iree_make_cstring_view("local"),
                                           host_allocator, host_allocator,
@@ -48,8 +48,8 @@ static iree_status_t iree_hal_torq_create_allocator_from_flags(
 
   return iree_make_status(
       IREE_STATUS_INVALID_ARGUMENT,
-      "unsupported --torq_device_allocator value '%.*s'; expected 'cpu' or "
-      "'dmabuf'",
+      "unsupported --torq_device_allocator value '%.*s'; expected 'auto', 'cpu' "
+      "or 'dmabuf'",
       (int)allocator_name.size, allocator_name.data);
 }
 
@@ -105,7 +105,14 @@ static iree_status_t iree_hal_torq_driver_factory_try_create(
   iree_hal_torq_device_params_initialize(&default_params);
 
   iree_string_view_t allocator_name =
-    iree_make_cstring_view(FLAG_torq_device_allocator);
+      iree_make_cstring_view(FLAG_torq_device_allocator);
+  if (iree_string_view_equal(allocator_name, IREE_SV("auto"))) {
+    // A heap that is missing or unreadable fails the allocation later, with no
+    // way back.
+    allocator_name = access(TORQ_HW_DMA_HEAP_NODE_CACHED, R_OK) == 0
+                         ? IREE_SV("dmabuf")
+                         : IREE_SV("cpu");
+  }
 
   if (iree_string_view_equal(allocator_name, IREE_SV("cpu"))) {
     default_params.is_dmabuf_mode = false;
@@ -127,9 +134,8 @@ static iree_status_t iree_hal_torq_driver_factory_try_create(
 
   iree_hal_allocator_t* device_allocator = NULL;
   if (iree_status_is_ok(status)) {
-    status =
-        iree_hal_torq_create_allocator_from_flags(host_allocator,
-                                                  &device_allocator);
+    status = iree_hal_torq_create_allocator_from_flags(
+        allocator_name, host_allocator, &device_allocator);
   }
   if (iree_status_is_ok(status)) {
     iree_hal_allocator_t* caching_allocator = NULL;
