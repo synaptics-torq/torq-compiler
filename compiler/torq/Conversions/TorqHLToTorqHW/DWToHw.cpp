@@ -183,8 +183,17 @@ static torq_hw::SliceTaskOp lowerDwStride2ToHw(
     slice.setStrideOffset(strideOffset);
     slice.setStride(stride);
 
-    slice.setOutputChannelShape(input.dim(Dim::H) / stride, input.dim(Dim::W) / stride);
+    slice.setOutputChannelShape(
+        std::max<int>(1, output.dim(Dim::H)), std::max<int>(1, output.dim(Dim::W))
+    );
 
+    // Stride-2 KW/KH>1 integer kernels need both L/R pad enables for the last odd
+    // column, even when the op's left pad is 0. Do not force this on float: FPGA
+    // then reads uninitialized bf16 (NaNs) on depthwise_conv1d stride-2.
+    if ((kernelDim.w > 1 || kernelDim.h > 1) && !isFloat(input.elementType())) {
+        pad.left = 1;
+        pad.right = 1;
+    }
     if (pad.top) {
         pad.top = kernelBorder.top;
     }
@@ -234,6 +243,11 @@ static torq_hw::SliceTaskOp lowerDwStride2ToHw(
     // Tag quandrants since the HW needs to be aware
     input.getShape()[In::RowQuadrant].tag = ShapeItem::Tag::KernelRows;
     input.getShape()[In::ColQuadrant].tag = ShapeItem::Tag::KernelCols;
+    // KH=1: only column parity (after C-splits so index is correct).
+    // KW=1 is left as-is: ColQuadrant stays 2, so CEPR/DEWR still use qc=2.
+    if (kernelDim.h == 1) {
+        input.getShape()[In::RowQuadrant].count = 1;
+    }
 
     // Reshape output to match the processing layout
     output.reshapeDim(Dim::C, {-1, outChVectSize});
@@ -248,7 +262,7 @@ static torq_hw::SliceTaskOp lowerDwStride2ToHw(
     // but the starting offset and stride must be tweaked so we can't use the standard reverse()
     // method. Instead we manually adjust the starting offset and stride of the quadrant dimensions.
     const int32_t start_pos_x = (-kernelBorder.left + strideOffset) & 1;
-    const int32_t start_pos_y = (-kernelBorder.top + strideOffset) & 1;
+    const int32_t start_pos_y = (kernelDim.h == 1) ? 0 : ((-kernelBorder.top + strideOffset) & 1);
     const int32_t kernel_left_even = (kernelBorder.left - strideOffset + 1) >> 1;
     const int32_t kernel_left_odd = kernelBorder.left - strideOffset - kernel_left_even;
     const int32_t kernel_top_even = (kernelBorder.top - strideOffset + 1) >> 1;
@@ -258,8 +272,14 @@ static torq_hw::SliceTaskOp lowerDwStride2ToHw(
     input.setOffset(input.offset() + (2 * start_pos_y + start_pos_x) * colQStride);
     input.getShape()[In::ColQuadrant].stride =
         colQStride * (start_pos_x == 0 ? 1 : -1) + kernel_left_even - kernel_left_odd;
-    input.getShape()[In::RowQuadrant].stride = rowQStride * (start_pos_y == 0 ? 1 : -1) +
-                                               output.dim(-1) * (kernel_top_even - kernel_top_odd);
+    if (kernelDim.h == 1) {
+        input.getShape()[In::RowQuadrant].stride = rowQStride;
+    }
+    else {
+        input.getShape()[In::RowQuadrant].stride =
+            rowQStride * (start_pos_y == 0 ? 1 : -1) +
+            output.dim(-1) * (kernel_top_even - kernel_top_odd);
+    }
 
     // Main processing loops. Instead of processing one input vector at a time, we load multiple
     // vectors in iram from neighboring channels. The number of vectors loaded is equal to the

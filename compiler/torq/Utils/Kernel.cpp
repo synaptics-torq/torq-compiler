@@ -1948,11 +1948,14 @@ void SlicePrivate::cepr(const PData &pdata) {
         // 2");
         if (_cfg.alu_op0_mode[0] == ALUOp0Mode::MUL) {
             // Conv2d / depthwise stride-2: kernel loops iterate over full kh and kw, plus IC.
-            // innerIterCount = IC * kh * qr(2) * qc(2) * kw = IC * kh * kw * 4.
-            // Divide out the 4 quadrant iterations to get the true count IC * kh * kw.
+            // innerIterCount = IC * kh * qr * qc * kw; qr=1 when KH=1 else qr=qc=2.
+            // KW=1 is not collapsed (ColQuadrant stays 2 in DWToHw), so qc stays 2
+            // and quadrantFactor stays 4. Only KH=1 drops a quadrant loop.
+            // Divide out the quadrant iterations to get the true count IC * kh * kw.
             // Example: Conv2d IC=3, 3x3 → innerIterCount=108, accumulationCount=27
             // Example: DW     IC=1, 3x3 → innerIterCount=36,  accumulationCount=9
-            int input_channels = accumulationCount / (kh * kw * 4);
+            int quadrantFactor = (kh == 1) ? 2 : 4;
+            int input_channels = accumulationCount / (kh * kw * quadrantFactor);
             accumulationCount = kh * kw * input_channels;
         }
         else {
@@ -2117,16 +2120,19 @@ void SlicePrivate::dewr(const LData &data, bool fuse) {
         // In stride 2 mode the ALU automatically select the kernel part (quadrant) to use while
         // we have to iterate explicitely over the 4 input quadrants. These iterations must not
         // appear in DEWR to avoid confusing the HW, so we remove them here.
-        // Remove the innermost O2:0,O2:0 due to input segment handling
+        // Remove the innermost O2:0 tags from input quadrant loops (one when KH=1).
+        // KW=1 still has ColQuadrant count=2, so both O-loops remain when KH!=1.
+        const int kh = _cfg.kernel.top + _cfg.kernel.bottom + 1;
+        const int expectedQuadrantLoops = (kh == 1) ? 1 : 2;
         MemNdlDimsData dewr;
         int skipCount = 0;
         for (const MemNdlDimData &d : ndlData.dims) {
             if (d.type == DimType::H && d.tag == MemDimTag::O && d.count == 2 &&
-                d.getIntStride().value_or(-1) == 0 && skipCount++ < 2)
+                d.getIntStride().value_or(-1) == 0 && skipCount++ < expectedQuadrantLoops)
                 continue;
             dewr.push_back(d);
         }
-        assert(skipCount >= 2 && "Input quadrants loops not found");
+        assert(skipCount >= expectedQuadrantLoops && "Input quadrants loops not found");
         ndlData.dims = dewr;
     }
     _ndls.add(ndlData);
