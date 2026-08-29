@@ -213,7 +213,7 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         else if (isa<arith::CmpFOp>(op)) {
             auto cmpFOp = dyn_cast<arith::CmpFOp>(op);
 
-            // TODO: add UNE, OLE
+            // TODO: add OLE
 
             auto predicate = cmpFOp.getPredicate();
 
@@ -230,6 +230,10 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
             }
             else if (predicate == arith::CmpFPredicate::OEQ) {
                 opType = torq_hl::ElementwiseOpEnum::EQUAL;
+            }
+            else if (predicate == arith::CmpFPredicate::UNE) {
+                opType = torq_hl::ElementwiseOpEnum::EQUAL;
+                isNegated = true;
             }
             else {
                 return rewriter.notifyMatchFailure(

@@ -1,4 +1,5 @@
 import pytest
+import numpy as np
 
 from torq.testing.comparison import compare_test_results
 from torq.testing.iree import MODELS_DIR, list_mlir_file_group
@@ -216,6 +217,9 @@ def case_config(request, runtime_hw_type, chip_config):
     if 'conv_izp_i8' in request.param.data.name:
         extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css"]
         extra_args["comparison_config"] = "comparison_config_for_qdq_izp"
+
+    if 'isnan' in request.param.data.name:
+        extra_args["torq_compiler_options"] = ["--torq-disable-host", "--torq-disable-css", "--torq-isnan-mode=remove"]
 
     # i64 scalar mul must run on host without slice lowering (see torch_ops_host_css/).
     if 'mul-i64-scalar.mlir' in request.param.data.name:

@@ -294,6 +294,19 @@ def DecomposeConvToSpaceToDepth :
     ];
 }
 
+def RemoveIsNan :
+    InterfacePass<"torq-remove-isnan",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Removes IsNaN checks from the graph";
+
+    let constructor = "mlir::syna::torq::createRemoveIsNanPass()";
+
+    let dependentDialects = [
+        "linalg::LinalgDialect"
+    ];
+}
+
 def TorqAnnotateTorqResources : Pass<"torq-annotate-torq-resources", "mlir::ModuleOp"> {
 
     let summary = "Annotates module with Torq stream.resources attribute";

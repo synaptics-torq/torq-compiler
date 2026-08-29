@@ -101,6 +101,21 @@ static llvm::cl::opt<bool> clEnableSplitConstantsOptimization(
     llvm::cl::desc("reduce constants to the actual slice that is being used"), llvm::cl::init(false)
 );
 
+enum class IsNanMode { Lower, Remove };
+
+static llvm::cl::opt<IsNanMode> clTorqIsNanMode(
+    "torq-isnan-mode", llvm::cl::desc("Choose how to handle IsNaN operations"),
+    llvm::cl::values(
+        clEnumValN(IsNanMode::Lower, "lower", "Lower IsNaN operations to comparisons"),
+        clEnumValN(
+            IsNanMode::Remove, "remove",
+            "Completely remove IsNaN checks: improves performance but risky; assumes graph never "
+            "contains IsNaN"
+        )
+    ),
+    llvm::cl::init(IsNanMode::Lower)
+);
+
 namespace {
 
 int64_t getLramSizeBasedOnBudget(bool optimizeForTileAndFuse) {
@@ -346,6 +361,10 @@ void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
     // optimize linalg ops for torq
     // this pass use some tags from tile-and-fuse mark pass
     funcPm.addPass(createOptimizeLinalgForTorqPass());
+    // remove IsNaN checks: improves performance but risky; assumes graph never contains IsNaN
+    if (clTorqIsNanMode.getValue() == IsNanMode::Remove) {
+        funcPm.addPass(createRemoveIsNanPass());
+    }
     // Fold IREE 3.10's rank-5 depthwise reshape wrapper to rank-4 so the
     // 4D-only NHWC->NCHW conversion below sees a uniform rank-4 chain (#1412).
     funcPm.addPass(createFoldUnitExtentWrapperPass());

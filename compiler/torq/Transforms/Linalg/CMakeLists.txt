@@ -45,6 +45,7 @@ iree_cc_library(
     CommonStandardizationPatterns.cpp
     DecomposeConvToSpaceToDepthPass.cpp
     OptimizePowOpPattern.cpp
+    RemoveIsNanPass.cpp
   DEPS
     ::PassesIncGen
     MLIRArithDialect
