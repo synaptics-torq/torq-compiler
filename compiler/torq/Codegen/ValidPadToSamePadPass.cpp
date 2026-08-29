@@ -195,9 +195,10 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
         if (!(has_valid_pad_h || has_valid_pad_w))
             return failure();
 
-        // Check if the dimensions with VALID padding have kernel size > 1
-        // Reject large kernels (>7x7) as they cannot be handled by hardware or software efficiently
-        if (ksize_h < 1 || ksize_w < 1 || ksize_h > 7 || ksize_w > 7)
+        // Check if the dimensions with VALID padding have kernel size > 1.
+        // The two axes have different limits; see the cap definitions for what sets each.
+        if (ksize_h < 1 || ksize_w < 1 || ksize_h > HwInfo::nss_max_kernel_height ||
+            ksize_w > HwInfo::nss_max_kernel_width)
             return failure();
 
         // Skip only when the conv input is directly interleaved_insert.
@@ -396,7 +397,7 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
 // Handles both cases:
 //   1. Direct: interleaved_insert -> conv (prevents explicit padding creation)
 //   2. Cleanup: interleaved_insert -> fill+insert_slice -> conv (removes explicit padding)
-// Only applies when kernel size <= 7 (hardware constraint).
+// Only applies within the per-axis kernel caps.
 template <class TorqConvPoolOp>
 class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvPoolOp> {
   public:
@@ -416,7 +417,7 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvP
         if (failed(getConvPoolKernelSize(op, ksize_h, ksize_w)))
             return failure();
 
-        if (ksize_h > 7 || ksize_w > 7)
+        if (ksize_h > HwInfo::nss_max_kernel_height || ksize_w > HwInfo::nss_max_kernel_width)
             return failure();
 
         int32_t stride_h = op.getStride()[0];
@@ -734,7 +735,7 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvPoo
         const int64_t ksize_h = weightShape[2];
         const int64_t ksize_w = weightShape[3];
 
-        if (ksize_h > 7 || ksize_w > 7)
+        if (ksize_h > HwInfo::nss_max_kernel_height || ksize_w > HwInfo::nss_max_kernel_width)
             return failure();
 
         auto offsets = insertSliceOp.getMixedOffsets();

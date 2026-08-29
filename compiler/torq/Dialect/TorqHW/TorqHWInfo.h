@@ -66,6 +66,15 @@ struct HwInfo {
         nss_max_program_size = 0x280,               // maximum size of a NSS program in bytes
         xram_nss_programs_size =
             0x800000, // size of the XRAM segment reserved for NSS programs in bytes
+
+        // The EK conv path is validated for kernels up to 7x7; beyond that the hardware's
+        // behaviour is not guaranteed. The axes are kept separate because their limits come from
+        // different places and may move independently: width is bound by the 2-bit knl_l / knl_r
+        // CE fields, height has no register behind it and is set by validation alone. Moving
+        // either needs a hardware run; the simulator does not model the failure.
+        // See synaptics-torq/torq-compiler-dev#2160.
+        nss_max_kernel_width = 7,
+        nss_max_kernel_height = 7,
     };
 };
 

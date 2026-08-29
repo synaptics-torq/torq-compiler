@@ -7,6 +7,7 @@
 #pragma once
 
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"

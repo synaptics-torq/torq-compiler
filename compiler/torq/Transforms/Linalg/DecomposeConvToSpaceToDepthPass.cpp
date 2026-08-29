@@ -163,12 +163,11 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
         if (dH != 1 || dW != 1)
             return rewriter.notifyMatchFailure(convOp, "dilation != 1 not supported");
 
-        // the max kernel size supported by the hardware is 7x7
-        int64_t maxK = 7;
         // only s1 and s2 are supported by hardware
         int64_t maxStride = 2;
 
-        if (kH <= maxK && kW <= maxK && sH <= maxStride && sW <= maxStride && sH == sW)
+        if (kH <= HwInfo::nss_max_kernel_height && kW <= HwInfo::nss_max_kernel_width &&
+            sH <= maxStride && sW <= maxStride && sH == sW)
             return rewriter.notifyMatchFailure(
                 convOp, "no S2D decomposition needed (kernel and stride already within HW limit)"
             );
@@ -184,8 +183,8 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
         // Predict padded kernel sizes (same as weights_pad_with_zero) without emitting ops.
         const int64_t paddedKH = align_ceil(kH, sH);
         const int64_t paddedKW = align_ceil(kW, sW);
-        int64_t bW = selectBlock(paddedKW, sW, pW, maxK, maxStride);
-        int64_t bH = selectBlock(paddedKH, sH, pH, maxK, maxStride);
+        int64_t bW = selectBlock(paddedKW, sW, pW, HwInfo::nss_max_kernel_width, maxStride);
+        int64_t bH = selectBlock(paddedKH, sH, pH, HwInfo::nss_max_kernel_height, maxStride);
 
         if (bH == 1 && bW == 1)
             return rewriter.notifyMatchFailure(

@@ -677,8 +677,9 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
     int kh = weightShape[2];
     int kw = weightShape[3];
     int stride = op.getStride()[0];
-    // Common HW/kernel limitations.
-    if (stride > 2 || kh > 7 || kw > 7) {
+    // Common HW/kernel limitations. The border zeros are forged by the data engine and each axis
+    // has its own limit on how wide a border it will forge; see the cap definitions.
+    if (stride > 2 || kw > HwInfo::nss_max_kernel_width || kh > HwInfo::nss_max_kernel_height) {
         return false;
     }
 
@@ -704,24 +705,22 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
     const int kh = weightShape[2];
     const int kw = weightShape[3];
 
-    // Common HW/kernel limitations. The >7 cap belongs to the implicit padding halo, not to
-    // the kernel: the HW forges the boundary zeros itself and the width travels in the 2-bit
-    // knl_l/knl_r CE fields, so a 7-wide kernel asks for the maximum 3 per side and a 9-wide
-    // one asks for 4. A valid conv forges nothing, and the kernel loops already walk the
-    // kernel in alukw-wide column groups.
+    // Common HW/kernel limitations; the two axes have different limits, see the Conv2DOp
+    // overload above for what sets each.
     //
     // isValidConv is fragile: ValidPadToSamePadPass runs first, so a zero pad here means that
-    // pass declined this kernel, not that the user wrote a valid conv. Widening its cap
-    // (#2160) flips this to false and drops large 1D kernels back onto the NDL path.
+    // pass declined this kernel, not that the user wrote a valid conv. Widening its cap flips
+    // this to false and drops large 1D kernels back onto the NDL path.
     //
-    // Only a genuine 1D depthwise is admitted past the cap: there the kernel spans a single
-    // row (or column) so the halo never grows past what a column group carries. A 2D kernel
-    // of 8 or 9 stays on the NDL path, which is where it has always been handled.
+    // A genuine 1D depthwise is exempt from both limits: with one spatial extent degenerate it
+    // takes lowerDw1dStride1ToHw, which never reaches convAdjustPadding and so is not bound by
+    // the forged halo at all.
     const auto inShape = cast<ShapedType>(op.getInput().getType()).getShape(); // NCHW
     const bool is1D =
         inShape.size() == 4 && ((inShape[2] == 1 && kh == 1) || (inShape[3] == 1 && kw == 1));
     const bool isValidConv = llvm::all_of(op.getPad(), [](int64_t p) { return p == 0; });
-    if ((kh > 7 || kw > 7) && !(isValidConv && is1D)) {
+    if (!(isValidConv && is1D) &&
+        (kw > HwInfo::nss_max_kernel_width || kh > HwInfo::nss_max_kernel_height)) {
         return false;
     }
 

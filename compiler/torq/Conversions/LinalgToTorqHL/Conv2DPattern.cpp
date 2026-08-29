@@ -43,7 +43,8 @@
 namespace mlir::syna::torq {
 
 static FailureOr<Value> expandWeightsForDilation(
-    Value weights, ArrayRef<int64_t> dilations, PatternRewriter &rewriter, int64_t maxKernelSize = 7
+    Value weights, ArrayRef<int64_t> dilations, PatternRewriter &rewriter, int64_t maxKernelH,
+    int64_t maxKernelW
 ) {
     auto weightType = mlir::cast<ShapedType>(weights.getType());
     auto shape = weightType.getShape();
@@ -56,7 +57,7 @@ static FailureOr<Value> expandWeightsForDilation(
     int64_t khNew = kh + (kh - 1) * (dh - 1);
     int64_t kwNew = kw + (kw - 1) * (dw - 1);
 
-    if (khNew > maxKernelSize || kwNew > maxKernelSize) {
+    if (khNew > maxKernelH || kwNew > maxKernelW) {
         LLVM_DEBUG(llvm::dbgs() << "Expanded kernel size exceeds limit\n");
         return failure();
     }
@@ -308,8 +309,9 @@ static bool checkDW1DStride1(LinalgConvOp convOp, Value weights, int channelDim)
         int64_t khExpanded = kh + (kh - 1) * (dh - 1);
         int64_t kwExpanded = kw + (kw - 1) * (dw - 1);
 
-        // Use 1D stride-1 path only if expanded kernel exceeds 7x7 (2D limit)
-        if (khExpanded > 7 || kwExpanded > 7) {
+        // Use 1D stride-1 path only if the expanded kernel exceeds the 2D limit
+        if (khExpanded > HwInfo::nss_max_kernel_height ||
+            kwExpanded > HwInfo::nss_max_kernel_width) {
             return true;
         }
     }
@@ -339,10 +341,12 @@ mlir::FailureOr<Value> getDilatedWts(
     // Materialize dilation into the weight tensor itself, then run with dilation=[1,1].
     SmallVector<int64_t> dilationVec(finalDilationVec.begin(), finalDilationVec.end());
 
-    auto maxKernelSize = isDW1DStride1 ? 1024 : 7;
+    const int64_t maxKernelH = isDW1DStride1 ? 1024 : HwInfo::nss_max_kernel_height;
+    const int64_t maxKernelW = isDW1DStride1 ? 1024 : HwInfo::nss_max_kernel_width;
 
     if (llvm::any_of(dilationVec, [](int64_t d) { return d > 1; })) {
-        auto expanded = expandWeightsForDilation(weights, dilationVec, rewriter, maxKernelSize);
+        auto expanded =
+            expandWeightsForDilation(weights, dilationVec, rewriter, maxKernelH, maxKernelW);
         if (failed(expanded)) {
             LLVM_DEBUG(llvm::dbgs() << "expanded kernel size exceeds 7x7 limit\n");
             return failure();
@@ -474,12 +478,68 @@ namespace {
 // Dilation is intentionally not checked here: dilations > 1 are folded into
 // the weight tensor by `getDilatedWts` later in the rewrite phase.
 static auto depthwiseStridesCapable() {
-    return [](auto op) {
+    return [](auto op) -> bool {
         if (!isLinalgDW(op.getOperation())) {
             return true;
         }
         auto strides = op.getStrides().template getValues<int64_t>();
         return !(strides[1] != 1 && (strides[0] > 2 || strides[0] != strides[1]));
+    };
+}
+
+// Padding that the rewrite will fold into the conv comes from a tensor.pad, or from a
+// linalg.fill written into by a tensor.insert_slice, feeding the image through any number of
+// extract_slice ops. This mirrors the detection in foldBackwardPadding without touching the IR,
+// so the matcher can decline before the rewrite starts replacing ops.
+static bool convImageIsPrePadded(Value image) {
+    Value v = image;
+    while (auto extractSliceOp = v.template getDefiningOp<tensor::ExtractSliceOp>()) {
+        v = extractSliceOp.getSource();
+    }
+    if (v.getDefiningOp<tensor::PadOp>()) {
+        return true;
+    }
+    if (auto insertSliceOp = v.getDefiningOp<tensor::InsertSliceOp>()) {
+        return insertSliceOp.getDest().getDefiningOp<linalg::FillOp>() != nullptr;
+    }
+    return false;
+}
+
+// A kernel taller than the width cap reaches the EK path only when the border is already in
+// memory and the stride is one that path takes.
+//
+// ValidToSamePadPass only reaches ops the pre-conversion already turned into torq_hl, so a conv
+// matched here has not been through it: a genuinely valid one arrives unpadded and
+// convAdjustPadding aborts on pad.left != kernelBorder.left. A stride above 2 is refused by
+// hasEkLoweringConv, which drops the op onto the hand-rolled body, and that body gets the frame
+// edges wrong without complaining. Neither was reachable while the axes shared one cap, and
+// this stays dormant while the height cap equals the width cap.
+static auto tallKernelIsLowerable() {
+    return [](auto op) -> bool {
+        Operation *rawOp = op.getOperation();
+        if (!isa<linalg::Conv2DNchwFchwOp, linalg::DepthwiseConv2DNchwChwOp>(rawOp)) {
+            return true;
+        }
+        // NCHW conv weights are [F,C,kH,kW]; NCHW depthwise weights are [C,kH,kW].
+        auto wShape = cast<RankedTensorType>(op.filter().getType()).getShape();
+        const int64_t kh = wShape[wShape.size() - 2];
+        const int64_t kw = wShape[wShape.size() - 1];
+        // Anything within the width cap was already reachable and is unaffected.
+        if (kh <= HwInfo::nss_max_kernel_width) {
+            return true;
+        }
+        // A genuine 1D depthwise takes lowerDw1dStride1ToHw, which never reaches
+        // convAdjustPadding, so no border has to be in memory for it.
+        auto inShape = cast<RankedTensorType>(op.image().getType()).getShape(); // NCHW
+        if (isa<linalg::DepthwiseConv2DNchwChwOp>(rawOp) && inShape.size() == 4 &&
+            ((inShape[2] == 1 && kh == 1) || (inShape[3] == 1 && kw == 1))) {
+            return true;
+        }
+        auto strides = op.getStrides().template getValues<int64_t>();
+        if (llvm::any_of(strides, [](int64_t s) { return s > 2; })) {
+            return false;
+        }
+        return convImageIsPrePadded(op.image());
     };
 }
 
@@ -532,6 +592,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         TorqStructuredOpMatcher<LinalgConvOp> matcher;
         if (!matcher.addPredicate(notMarkedFuseGroupIf(_markFuseGroups))
                  .addPredicate(depthwiseStridesCapable())
+                 .addPredicate(tallKernelIsLowerable())
                  .addPredicate(shapeMatchOrPass(_matchFn))
                  .match(convOp)) {
             return rewriter.notifyMatchFailure(convOp, "Conv2D match failed");
@@ -974,17 +1035,18 @@ struct InterleavedInsertSlicePattern : public OpRewritePattern<tensor::InsertSli
 
 // Checker methods for convolutions with input: NHWC, weights: HWC(F) or NCHW, weights: (F)CHW
 //
-// maxKerHW matches the per-axis cap in hasEkLoweringConv. It used to be 9, which let a kernel
-// of 8 or 9 match and then be refused by the EK lowering, leaving it to the hand-rolled
-// Conv2DPattern body: a 9x9 valid bf16 conv came out wrong on 99.4% of its elements. Matching
-// only what EK can lower sends that band to the host instead, slower but correct. The 9 was
-// introduced in the first commit and carried no recorded rationale.
+// This must admit exactly what hasEkLoweringConv admits: a kernel that matches here and is then
+// refused by the EK lowering falls through to the hand-rolled Conv2DPattern body, which gets the
+// frame edges wrong without complaining. Both limits live in ConversionUtils so the two cannot
+// drift apart. Input is NCHW here, so the frame width is inputShape[3].
 static bool
 isKerSmall(int kernelHIndex, ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape) {
     int kernelWIndex = kernelHIndex + 1;
-    int maxKerHW = 7;
-    return inputShape.size() == 4 && kernelShape.size() >= 3 &&
-           kernelShape[kernelHIndex] <= maxKerHW && kernelShape[kernelWIndex] <= maxKerHW;
+    if (inputShape.size() != 4 || kernelShape.size() < 3) {
+        return false;
+    }
+    const int64_t kH = kernelShape[kernelHIndex], kW = kernelShape[kernelWIndex];
+    return kW <= HwInfo::nss_max_kernel_width && kH <= HwInfo::nss_max_kernel_height;
 }
 
 static bool isDepthwiseKernelShape(
@@ -995,25 +1057,20 @@ static bool isDepthwiseKernelShape(
            kernelShape[kernelHIndex] == inputShape[1] && kernelShape[kernelWIndex] == inputShape[2];
 }
 
-// A 2D depthwise conv is limited to a small per-axis kernel, but a genuine 1D depthwise
-// (one spatial extent == 1 with a unit kernel there) can take a large kernel on the other
-// axis, which the EK lowering walks in alukw-wide column groups. The high-level match must
-// admit those, otherwise the op falls back to the host. Layout here is NCHW input [N,C,H,W]
-// and depthwise weights [C,kH,kW].
+// A genuine 1D depthwise (one spatial extent == 1 with a unit kernel there) takes a separate
+// lowering that is not bound by the forged halo, so it can carry a large kernel on the other
+// axis. The high-level match must admit those, otherwise the op falls back to the host.
+// Layout here is NCHW input [N,C,H,W] and depthwise weights [C,kH,kW].
 //
-// maxKer2D matches the per-axis cap in hasEkLoweringConv, and going wider is not free. When
-// it was 9, a 2D kernel of 8 or 9 matched here and was then refused by the EK lowering, so it
-// fell through to the hand-rolled DWPattern body, which gets it wrong: a 9x9 valid bf16
-// depthwise differed from the reference almost everywhere. Keeping the two in step sends that
-// band to the host instead, slower but correct. Widening either limit again means teaching EK
-// the band first; depthwise_conv2d_k9_valid guards the numerics.
+// The 2D case must admit exactly what hasEkLoweringConv admits, for the same reason as
+// isKerSmall: a kernel refused by EK lands on the hand-rolled DWPattern body and comes out
+// wrong. depthwise_conv2d_k9_valid guards the numerics.
 static bool isDepthwiseKerOk(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape) {
     if (inputShape.size() != 4 || kernelShape.size() < 3) {
         return false;
     }
     const int64_t inH = inputShape[2], inW = inputShape[3];
     const int64_t kH = kernelShape[1], kW = kernelShape[2];
-    constexpr int64_t maxKer2D = 7;
     constexpr int64_t maxKer1D = 1024;
     if (inH == 1 && kH == 1) {
         return kW <= maxKer1D; // 1D depthwise along W
@@ -1021,7 +1078,7 @@ static bool isDepthwiseKerOk(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> ker
     if (inW == 1 && kW == 1) {
         return kH <= maxKer1D; // 1D depthwise along H
     }
-    return kH <= maxKer2D && kW <= maxKer2D;
+    return kW <= HwInfo::nss_max_kernel_width && kH <= HwInfo::nss_max_kernel_height;
 }
 
 void populateLinalgToTorqHLConv2DPatterns(
