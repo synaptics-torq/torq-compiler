@@ -21,6 +21,7 @@ iree_cc_library(
     AnnotateTiedOperandsPass.cpp
     TypeConversionPasses.cpp
     FoldConstantsPass.cpp
+    PreCalcSiluI8Pattern.cpp
     GeneralizeLinalgNamedOpsPass.cpp
     OptimizeLinalgForTorqPass.cpp
     OptimizeTransposeLayoutPass.cpp

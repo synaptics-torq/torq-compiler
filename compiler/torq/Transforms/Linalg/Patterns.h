@@ -36,6 +36,7 @@ void populateOptimizePowPatterns(MLIRContext *context, RewritePatternSet &patter
 void populateCastI32MulPatterns(FunctionOpInterface funcOp, IRRewriter &rewriter);
 
 void populateSwishActivationPatterns(MLIRContext *context, RewritePatternSet &patterns);
+void populatePreCalcSiluI8Patterns(MLIRContext *context, RewritePatternSet &patterns);
 void populateMulPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateFuseReluClampWithTruncfPatterns(MLIRContext *ctx, RewritePatternSet &patterns);

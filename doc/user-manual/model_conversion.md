@@ -145,6 +145,22 @@ After converting a source model to MLIR, use [Step-by-Step Model Deployment Exam
 
 See the [Input Guide](./input_guide.md) for literal inputs, multiple inputs, `.npy` files, raw binary files, and image conversion.
 
+### Advanced Options
+
+#### Precomputing an i8 SiLU
+
+The compiler computes the multiply and the rescales of an i8 SiLU (`x * sigmoid(x)`) at compile time instead of at runtime, storing the results in the sigmoid table the graph already carries as a constant. This is on by default and affects i8 activations only.
+
+Pass `--torq-disable-precalc-silu-i8` to keep the multiply and the rescales at runtime:
+
+```{code} shell
+$ torq-compile model.mlir -o model.vmfb --torq-disable-precalc-silu-i8
+```
+
+```{important}
+The rewrite changes how LRAM is laid out, so `error: failed to allocate LRAM addresses` can appear on a model that used to compile. Disable it for that model rather than for the whole build.
+```
+
 ## References
 
 - [torch-mlir development guide](https://github.com/llvm/torch-mlir/blob/main/docs/development.md)
