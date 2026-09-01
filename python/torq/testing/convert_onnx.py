@@ -137,6 +137,33 @@ def convert_fp32_to_bf16(model: onnx.ModelProto) -> onnx.ModelProto:
             tensor.data_type = TensorProto.BFLOAT16
     if const_count:
         print(f"[BF16] Converted {const_count} Constant-node values")
+
+    # LayerNormalization with stash_type=FLOAT (1) would decompose to an
+    # internal f32 cone (mean/variance reductions + normalize) that the NSS
+    # executor cannot lower. Retarget the stash to BFLOAT16 (16) so
+    # torch-mlir computes it directly in bf16 and no f32 cone is created.
+    # stash_type defaults to FLOAT when the attribute is absent (e.g. bert's
+    # LNs carry no explicit stash_type), so add it in that case too.
+    ln_count = 0
+    for node in model.graph.node:
+        if node.op_type != "LayerNormalization":
+            continue
+        stash = None
+        for attr in node.attribute:
+            if attr.name == "stash_type":
+                stash = attr
+                break
+        if stash is None:
+            stash = node.attribute.add()
+            stash.name = "stash_type"
+            stash.type = onnx.AttributeProto.INT  # required by the ONNX checker
+            stash.i = TensorProto.FLOAT
+        if stash.i == TensorProto.FLOAT:
+            stash.i = TensorProto.BFLOAT16
+            ln_count += 1
+    if ln_count:
+        print(f"[BF16] Retargeted {ln_count} LayerNormalization stash_type to bf16")
+
     return model
 
 
