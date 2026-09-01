@@ -17,7 +17,7 @@ on:
 
 jobs:
 
-  build:    
+  build:
     name: Build
 
     # we build on AWS to ensure we can access internal resources, we use a default image to avoid dependencies
@@ -33,12 +33,19 @@ jobs:
 
     - name: Checkout actions and scripts
       uses: actions/checkout@v6
-      
+
     - name: Generate cache key and paths
       id: gen_vars
       run: |
         echo "cache_key=ko-deps-${{ hashFiles('.github/workflows/build-ko-dependencies.yml', 'scripts/setup_soc_ko_build_deps.sh') }}" >> $GITHUB_OUTPUT
         echo "path=third_party/runtimes-prebuilt/soc-kernel/syna-kernel-artifacts.tgz" >> $GITHUB_OUTPUT
+
+    - name: Install zstd
+      run: |
+        # zstd is used to compress the cache artifact by the action/cache plugin, and is not installed by default on ubuntu 22.04
+        # It must be installed before the cache lookup because actions/cache hashes the compression method into the cache version.
+        sudo apt-get update
+        sudo apt-get install -y zstd
 
     - id: lookup_cache
       uses: actions/cache/restore@v5
@@ -46,16 +53,14 @@ jobs:
         path: ${{ steps.gen_vars.outputs.path }}
         key: ${{ steps.gen_vars.outputs.cache_key }}
         lookup-only: true
-    
+
     - name: Install dependencies
       if: steps.lookup_cache.outputs.cache-hit != 'true'
       run: |
 
-        # install the dependencies instead of using the CI docker to avoid circular dependencies between 
+        # install the dependencies instead of using the CI docker to avoid circular dependencies between
         # the docker image and the kernel module artifacts
-        # zstd is used to compress the cache artifact by the action/cache plugin, and is not installed by default on ubuntu 22.04
-        sudo apt-get update
-        sudo apt-get install -y binutils-arm-linux-gnueabihf gcc-aarch64-linux-gnu flex bison bc zstd
+        sudo apt-get install -y binutils-arm-linux-gnueabihf gcc-aarch64-linux-gnu flex bison bc
 
     - name: Build Kernel Module dependenencies
       if: steps.lookup_cache.outputs.cache-hit != 'true'
@@ -66,7 +71,7 @@ jobs:
         LINUX_KERNEL_SSH_OPTIONS: ${{ vars.LINUX_KERNEL_SSH_OPTIONS }}
         LINUX_KERNEL_SSH_HOST_KEY: ${{ vars.LINUX_KERNEL_SSH_HOST_KEY }}
       run: |
-        scripts/setup_soc_ko_build_deps.sh    
+        scripts/setup_soc_ko_build_deps.sh
 
     - name: Upload to cache
       if: steps.lookup_cache.outputs.cache-hit != 'true'

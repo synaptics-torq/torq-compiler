@@ -1,7 +1,7 @@
 name: Build mpact
 
 on:
-  workflow_call:    
+  workflow_call:
     outputs:
       cache_key:
         description: Cache key of the built artifact
@@ -44,12 +44,12 @@ jobs:
 
       - name: Checkout coralnpu-mpact
         uses: actions/checkout@v6
-        if: steps.lookup_cache.outputs.cache-hit != true
+        if: steps.lookup_cache.outputs.cache-hit != 'true'
         with:
           repository: synaptics-torq/coralnpu-mpact
           ref: ${{ env.MPACT_REF }}
           path: coralnpu-mpact
-      
+
       - name: Build mpact simulation library
         if: steps.lookup_cache.outputs.cache-hit != 'true'
         run: |
@@ -70,4 +70,3 @@ jobs:
         with:
           path: ${{  steps.gen_vars.outputs.path }}
           key: ${{ steps.gen_vars.outputs.cache_key }}
-      
