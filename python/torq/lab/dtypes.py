@@ -18,7 +18,7 @@ import numpy as np
 from dataclasses import dataclass
 
 from torq.lab.io import get_dtype, get_type_name
-from torq.lab.types import LabError
+from torq.lab.types import LabError, MlirIoSpec, TensorType
 
 
 def cast_round_trip(data: np.ndarray, down_dtype: np.dtype, up_dtype: np.dtype):
@@ -62,6 +62,20 @@ class ConvertIODTypesPolicy:
 
     def should_convert_output(self, idx: int) -> bool:
         return self._should_convert(idx, self.outputs)
+
+    def convert_io_spec(self, spec: MlirIoSpec) -> MlirIoSpec:
+        """Return the VMFB I/O spec after this policy's conversions."""
+        inputs = [
+            TensorType(list(tensor.shape), self.convert_io_fmt(tensor.fmt))
+            if self.should_convert_input(idx) else tensor
+            for idx, tensor in enumerate(spec.inputs)
+        ]
+        outputs = [
+            TensorType(list(tensor.shape), self.convert_io_fmt(tensor.fmt))
+            if self.should_convert_output(idx) else tensor
+            for idx, tensor in enumerate(spec.outputs)
+        ]
+        return MlirIoSpec(inputs=inputs, outputs=outputs)
 
     def round_trip_inputs(self, inputs: list) -> list:
         """Round-trip reference *inputs* through their converted dtypes.

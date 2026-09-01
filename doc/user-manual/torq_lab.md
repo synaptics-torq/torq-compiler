@@ -71,6 +71,12 @@ Run a pre-compiled module with explicit inputs:
 $ torq-lab run model.vmfb --input-npy in0.npy --input-npy in1.npy
 ```
 
+Run a pre-compiled module with random inputs. `run` reads the sibling `.mlir` file for the entry function and I/O shapes. If the VMFB was compiled with `--torq-convert-dtypes --torq-convert-io-dtype`, declare that with `--convert-io-dtypes all` so the inputs and output layout use the VMFB's converted public dtypes:
+
+```bash
+$ torq-lab run model.vmfb --random-inputs --convert-io-dtypes all
+```
+
 Compile, run, and verify outputs against a golden reference:
 
 ```bash
@@ -118,6 +124,7 @@ See [Remote execution](#remote-execution) for the SSH and ADB address forms.
 | `--runtime-option OPT`     | Extra `torq-run-module` flag (repeatable).                        |
 | `--input-npy PATH`         | Input `.npy` file (repeatable).                                   |
 | `--random-inputs`          | Generate random inputs from the MLIR IO spec.                     |
+| `--convert-io-dtypes ...`  | Declare converted VMFB public I/O: `all`, selected `input:IDX` / `output:IDX`, or all except `!input:IDX` / `!output:IDX`. Must match the VMFB's compilation. |
 | `--expected-output-npy P`  | Expected output `.npy` for comparison (repeatable).               |
 | `--dump-ir`                | Dump IR after each pass into `<work-dir>/debug/ir`.               |
 | `--dump-phases`            | Dump compilation phases into `<work-dir>/phases`.                 |

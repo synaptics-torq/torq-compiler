@@ -89,6 +89,15 @@ def test_cli_compile_failure_returns_error(tmp_path, monkeypatch):
     assert "oops" in manifest["results"]["diagnostics"]
 
 
+def test_cli_run_rejects_mlir_model(fake_tools, caplog):
+    model = _write_model(fake_tools)
+
+    rc = cli.main(["run", str(model)])
+
+    assert rc == 1
+    assert f"torq-lab run {model.with_suffix('.vmfb')} [options]" in caplog.text
+
+
 @pytest.mark.parametrize("argv", [["--help"], ["compile", "--help"], ["compile-run", "--help"]])
 def test_cli_help(argv):
     with pytest.raises(SystemExit) as excinfo:

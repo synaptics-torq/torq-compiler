@@ -35,6 +35,7 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dump-phases", action="store_true", help="Dump compilation phases into <work-dir>/phases")
     parser.add_argument("--profile-compile", action="store_true", help="Enable compile-time profiling")
     parser.add_argument("--profile-runtime", action="store_true", help="Enable runtime host profiling")
+    parser.add_argument("--convert-io-dtypes", nargs="+", default=[], metavar="all|input:IDX|output:IDX|!input:IDX|!output:IDX", help="VMFB uses converted public I/O dtypes; must match its compilation")
     parser.add_argument("--input-npy", action="append", default=[], help="Input .npy file (repeatable)")
     parser.add_argument("--expected-output-npy", action="append", default=[], help="Expected output .npy for comparison (repeatable)")
     parser.add_argument("--random-inputs", action="store_true", help="Generate random inputs from the MLIR spec")
@@ -72,6 +73,7 @@ def _config_from_args(args) -> PipelineConfig:
         dump_phases=args.dump_phases,
         profile_compile=args.profile_compile,
         profile_runtime=args.profile_runtime,
+        convert_io_dtypes=list(args.convert_io_dtypes),
         random_inputs=args.random_inputs,
         input_npy=[Path(p) for p in args.input_npy],
         expected_output_npy=[Path(p) for p in args.expected_output_npy],
@@ -119,7 +121,15 @@ def _cmd_compile(args) -> int:
 
 
 def _cmd_run(args) -> int:
-    pipe = ModelPipeline(_config_from_args(args), _remote_from_args(args))
+    config = _config_from_args(args)
+    if config.model_path.suffix != ".vmfb":
+        logger.error(
+            "run requires a .vmfb model, got %s. Use: torq-lab run %s [options]",
+            config.model_path,
+            config.model_path.with_suffix(".vmfb"),
+        )
+        return _ERROR
+    pipe = ModelPipeline(config, _remote_from_args(args))
     try:
         run_result = pipe.run()
         comparison = pipe.compare(run_result)

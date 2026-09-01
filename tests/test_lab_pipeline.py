@@ -12,9 +12,11 @@ wiring tests; this file keeps only the behaviours a green end-to-end run would
 not catch: the compare gate reporting a failure, and the missing-spec guard.
 """
 
+import ml_dtypes
 import numpy as np
 import pytest
 
+from _lab_fake_tools import write_fake_compile, write_fake_run
 from torq.lab.pipeline import ModelPipeline
 from torq.lab.types import PipelineConfig, RunResult
 
@@ -44,3 +46,73 @@ def test_compare_flags_missing_outputs(tmp_path):
     result = ModelPipeline(config).compare(RunResult(command=[], outputs=[]))
     assert result is not None and not result.passed
     assert "number of outputs differ" in result.reason
+
+
+def test_compile_run_converts_public_io_dtypes(tmp_path, monkeypatch):
+    compile_tool = write_fake_compile(tmp_path / "tools")
+    run_tool = write_fake_run(tmp_path / "tools")
+    run_record = tmp_path / "run_argv.txt"
+    monkeypatch.setenv("TORQ_COMPILE", str(compile_tool))
+    monkeypatch.setenv("TORQ_RUN_MODULE", str(run_tool))
+    monkeypatch.setenv("FAKE_RUN_RECORD", str(run_record))
+    monkeypatch.setenv("FAKE_OUTPUT_SIZES", "8")  # 1x4xbf16
+
+    model = tmp_path / "model.mlir"
+    model.write_text("""
+module {
+  func.func @main(%arg0: tensor<1x4xf32>) -> tensor<1x4xf32> {
+    return %arg0 : tensor<1x4xf32>
+  }
+}
+""")
+    input_path = tmp_path / "input.npy"
+    np.save(input_path, np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32))
+    work_dir = tmp_path / "out"
+    config = PipelineConfig(
+        model_path=model,
+        work_dir=work_dir,
+        compiler_options=["--torq-convert-dtypes", "--torq-convert-io-dtype"],
+        input_npy=[input_path],
+    )
+
+    _, run_result = ModelPipeline(config).compile_run()
+
+    assert f"--input=1x4xbf16=@{work_dir / 'inputs' / 'in_rnd_0.bin'}" in run_record.read_text()
+    materialized_input = np.fromfile(
+        work_dir / "inputs" / "in_rnd_0.bin", dtype=ml_dtypes.bfloat16
+    )
+    assert np.array_equal(
+        materialized_input, np.array([1.0, 2.0, 3.0, 4.0], dtype=ml_dtypes.bfloat16)
+    )
+    assert run_result.outputs[0].dtype == np.dtype(ml_dtypes.bfloat16)
+
+
+def test_run_precompiled_vmfb_converts_public_io_dtypes(tmp_path, monkeypatch):
+    run_tool = write_fake_run(tmp_path / "tools")
+    run_record = tmp_path / "run_argv.txt"
+    monkeypatch.setenv("TORQ_RUN_MODULE", str(run_tool))
+    monkeypatch.setenv("FAKE_RUN_RECORD", str(run_record))
+    monkeypatch.setenv("FAKE_OUTPUT_SIZES", "8")  # 1x4xbf16
+
+    model = tmp_path / "model.mlir"
+    model.write_text("""
+module {
+  func.func @main(%arg0: tensor<1x4xf32>) -> tensor<1x4xf32> {
+    return %arg0 : tensor<1x4xf32>
+  }
+}
+""")
+    vmfb = model.with_suffix(".vmfb")
+    vmfb.write_bytes(b"FAKEVMFB")
+    work_dir = tmp_path / "out"
+    config = PipelineConfig(
+        model_path=vmfb,
+        work_dir=work_dir,
+        random_inputs=True,
+        convert_io_dtypes=["all"],
+    )
+
+    run_result = ModelPipeline(config).run()
+
+    assert f"--input=1x4xbf16=@{work_dir / 'inputs' / 'in_rnd_0.bin'}" in run_record.read_text()
+    assert run_result.outputs[0].dtype == np.dtype(ml_dtypes.bfloat16)

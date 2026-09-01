@@ -101,6 +101,7 @@ class PipelineConfig:
     dump_phases: bool = False
     profile_compile: bool = False
     profile_runtime: bool = False
+    convert_io_dtypes: List[str] = field(default_factory=list)
     random_inputs: bool = False
     input_npy: List[Path] = field(default_factory=list)
     expected_output_npy: List[Path] = field(default_factory=list)
@@ -124,6 +125,7 @@ class PipelineConfig:
             "dump_phases": self.dump_phases,
             "profile_compile": self.profile_compile,
             "profile_runtime": self.profile_runtime,
+            "convert_io_dtypes": list(self.convert_io_dtypes),
             "random_inputs": self.random_inputs,
             "input_npy": [_s(p) for p in self.input_npy],
             "expected_output_npy": [_s(p) for p in self.expected_output_npy],
@@ -158,6 +160,7 @@ class PipelineConfig:
             dump_phases=d.get("dump_phases", False),
             profile_compile=d.get("profile_compile", False),
             profile_runtime=d.get("profile_runtime", False),
+            convert_io_dtypes=list(d.get("convert_io_dtypes", [])),
             random_inputs=d.get("random_inputs", False),
             input_npy=[_p(p) for p in d.get("input_npy", [])],
             expected_output_npy=[_p(p) for p in d.get("expected_output_npy", [])],

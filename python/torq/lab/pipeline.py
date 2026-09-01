@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from torq.lab import io, tools
+from torq.lab.dtypes import ConvertIODTypesPolicy
 from torq.lab.types import (
     CompileResult,
     LabError,
@@ -25,7 +26,7 @@ from torq.lab.types import (
 
 def build_compile_command(config, tool, vmfb_path, debug_dir, phases_dir, compile_profile) -> List[str]:
     """Assemble the ``torq-compile`` command line from a PipelineConfig."""
-    cmds = [str(tool), str(config.model_path), "-o", str(vmfb_path)]
+    cmds = [str(tool), str(Path(config.model_path).resolve()), "-o", str(vmfb_path)]
     cmds.append(f"--torq-hw={config.chip}")
 
     if config.dump_ir:
@@ -84,7 +85,9 @@ class ModelPipeline:
     def __init__(self, config: PipelineConfig, remote: Optional[RemoteTarget] = None):
         self.config = config
         self.remote = remote
-        self.work_dir = Path(config.work_dir)
+        # Tools run with this directory as their cwd, so artifact paths must
+        # remain anchored to the caller's cwd rather than becoming nested.
+        self.work_dir = Path(config.work_dir).resolve()
         self.inputs_dir = self.work_dir / "inputs"
         self.outputs_dir = self.work_dir / "outputs"
         self.debug_dir = self.work_dir / "debug"
@@ -96,7 +99,7 @@ class ModelPipeline:
 
     def _vmfb_path(self) -> Path:
         if self.config.vmfb_path:
-            return Path(self.config.vmfb_path)
+            return Path(self.config.vmfb_path).resolve()
         return self.work_dir / "model.vmfb"
 
     def _spec_source(self) -> Optional[Path]:
@@ -114,7 +117,17 @@ class ModelPipeline:
             return io.parse_mlir_io_spec(src)
         return None
 
-    def _materialize_inputs(self, spec) -> Tuple[List[np.ndarray], List[Path]]:
+    def _convert_io_dtypes_policy(self) -> ConvertIODTypesPolicy:
+        if self.config.convert_io_dtypes:
+            return ConvertIODTypesPolicy.parse_from_args(self.config.convert_io_dtypes, True)
+        enabled = {"--torq-convert-dtypes", "--torq-convert-io-dtype"}.issubset(
+            self.config.compiler_options
+        )
+        return ConvertIODTypesPolicy.parse_from_args(["all"], enabled)
+
+    def _materialize_inputs(
+        self, spec, convert_io_dtypes_policy: ConvertIODTypesPolicy
+    ) -> Tuple[List[np.ndarray], List[Path]]:
         if self.config.input_npy:
             inputs = [np.load(p, allow_pickle=False) for p in self.config.input_npy]
         elif self.config.random_inputs:
@@ -125,6 +138,11 @@ class ModelPipeline:
             inputs = io.generate_random_inputs(spec)
         else:
             return [], []
+        inputs = [
+            data.astype(convert_io_dtypes_policy.convert_io_dtype(data.dtype))
+            if convert_io_dtypes_policy.should_convert_input(idx) else data
+            for idx, data in enumerate(inputs)
+        ]
         paths = io.write_inputs(inputs, self.inputs_dir)
         return inputs, paths
 
@@ -251,12 +269,14 @@ class ModelPipeline:
             io.parse_func_name(spec_src) if spec_src and spec_src.exists() else "main"
         )
 
-        inputs, input_paths = self._materialize_inputs(spec)
-        input_args = io.build_input_args(input_paths, inputs, spec) if inputs else []
+        convert_io_dtypes_policy = self._convert_io_dtypes_policy()
+        runtime_spec = convert_io_dtypes_policy.convert_io_spec(spec) if spec else None
+        inputs, input_paths = self._materialize_inputs(spec, convert_io_dtypes_policy)
+        input_args = io.build_input_args(input_paths, inputs, runtime_spec) if inputs else []
 
-        if spec is not None:
-            output_args = io.create_output_args(self.outputs_dir, spec.outputs)
-            output_paths = [Path(p) for p in io.create_output_paths(self.outputs_dir, spec.outputs)]
+        if runtime_spec is not None:
+            output_args = io.create_output_args(self.outputs_dir, runtime_spec.outputs)
+            output_paths = [Path(p) for p in io.create_output_paths(self.outputs_dir, runtime_spec.outputs)]
         else:
             output_args, output_paths = [], []
 
@@ -266,7 +286,7 @@ class ModelPipeline:
             host_profile = self.profiles_dir / "host_profile.csv"
 
         if self.remote is not None:
-            return self._run_remote(vmfb, func_name, input_args, input_paths, output_args, output_paths, spec)
+            return self._run_remote(vmfb, func_name, input_args, input_paths, output_args, output_paths, runtime_spec)
 
         tool = tools.find_run_tool(self.config.run_tool)
         cmds = build_run_command(
@@ -276,7 +296,7 @@ class ModelPipeline:
         proc = tools.run_tool(cmds, timeout=self.config.timeout, cwd=self.work_dir)
         wall = time.perf_counter() - start
 
-        outputs = io.load_outputs(spec.outputs, output_paths) if (spec and output_paths) else []
+        outputs = io.load_outputs(runtime_spec.outputs, output_paths) if (runtime_spec and output_paths) else []
         self._finalize_profiles()
         host, annotated, trace = self._collect_profiles()
         return RunResult(
