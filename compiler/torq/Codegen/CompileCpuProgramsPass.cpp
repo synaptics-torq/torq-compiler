@@ -23,7 +23,10 @@
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUDialect.h"
+#include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 
@@ -84,6 +87,13 @@ static llvm::cl::opt<std::string> clTargetHostCpuFeatures(
     "torq-target-host-cpu-features",
     llvm::cl::desc("Specify the target host cpu features for the host CPU of the target"),
     llvm::cl::init("")
+);
+
+static llvm::cl::opt<bool> clHostVectorize(
+    "torq-host-vectorize",
+    llvm::cl::desc("Run IREE's LLVMCPU configuration pipeline on host programs (strategy "
+                   "selection, tiling and vectorization) instead of pinning CPUDefault"),
+    llvm::cl::init(true)
 );
 
 namespace {
@@ -418,9 +428,71 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
     pipeline.nest<ModuleOp>().nest<LLVM::LLVMFuncOp>().addPass(createLLVMCPUUnfuseFMAOpsPass());
 }
 
+// The torq runtime invokes each host function exactly once with a zeroed
+// workgroup_state, so workgroup distribution must not survive codegen. Zero the
+// distribution tile sizes chosen by the configuration pipeline; the LLVMCPU
+// lowering treats all-zero workgroup tiles as distribution-disabled. The
+// upstream --iree-llvmcpu-disable-distribution flag has the same effect but is
+// global state that would leak into stock llvm-cpu variants compiled in the
+// same invocation.
+class ZeroDistributionTilesPass
+    : public PassWrapper<ZeroDistributionTilesPass, OperationPass<func::FuncOp>> {
+  public:
+    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ZeroDistributionTilesPass)
+
+    StringRef getArgument() const override { return "torq-zero-distribution-tiles"; }
+
+    void runOnOperation() override {
+        MLIRContext *ctx = &getContext();
+        getOperation()->walk([&](Operation *op) {
+            auto config = getLoweringConfig<IREE::CPU::LoweringConfigAttr>(op);
+            if (!config) {
+                return;
+            }
+            auto dict = config.getConfig();
+            auto dist = dict.getAs<IREE::Codegen::LoweringConfigTilingLevelAttr>("distribution");
+            if (!dist || llvm::all_of(dist.getSizes(), [](int64_t size) { return size == 0; })) {
+                return;
+            }
+            SmallVector<NamedAttribute> items(dict.getValue().begin(), dict.getValue().end());
+            SmallVector<int64_t> zeros(dist.getSizes().size(), 0);
+            for (auto &item : items) {
+                if (item.getName() == "distribution") {
+                    item.setValue(IREE::CPU::LoweringConfigAttr::getTilingLevelAttr(ctx, zeros));
+                }
+            }
+            setLoweringConfig(op, IREE::CPU::LoweringConfigAttr::get(ctx, items));
+        });
+    }
+};
+
 static void addHostLoweringPasses(OpPassManager &pipeline) {
 
     OpPassManager &modulePassManager = pipeline.nest<ModuleOp>();
+
+    if (clHostVectorize) {
+
+        // Convert tensor.pad to linalg ops before strategy selection. IREE
+        // cannot compile tensor.pad in isolation (it lowers to
+        // iree_linalg_ext.map_scatter which is rejected outside workgroups).
+        modulePassManager.addNestedPass<func::FuncOp>(createConvertTensorPadToLinalgPass());
+        modulePassManager.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+        modulePassManager.addNestedPass<func::FuncOp>(createCSEPass());
+
+        // the configuration half torq skips today: strategy + lowering configs
+        buildLLVMCPUCodegenConfigurationPassPipeline(pipeline);
+
+        pipeline.nest<ModuleOp>().addNestedPass<func::FuncOp>(
+            std::make_unique<ZeroDistributionTilesPass>()
+        );
+
+        buildLLVMCPUCodegenPassPipeline(pipeline, false);
+
+        // FIXME: here we unfuse the FMA ops to keep the code size small but
+        // there may be better ways to do this
+        pipeline.nest<ModuleOp>().nest<LLVM::LLVMFuncOp>().addPass(createLLVMCPUUnfuseFMAOpsPass());
+        return;
+    }
 
     {
         FunctionLikeNest functionPassManager(modulePassManager);
@@ -540,6 +612,46 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
             IREE::HAL::LLVMTarget::create(hostTriple, hostCpu, hostFeatures, false, status);
         if (status != IREE::HAL::ResolveCPUAndCPUFeaturesStatus::OK) {
             return variantOp.emitError() << getMessage(status, hostTriple);
+        }
+
+        if (clHostVectorize && variantOp.getTarget().getBackend() == "llvm-host") {
+
+            MLIRContext *ctx = variantOp.getContext();
+            Builder b(ctx);
+
+            // KernelDispatch requires a populated target configuration
+            // (native_vector_size etc.); LLVMTarget::create does not fill the
+            // target-machine-derived fields, loadFromConfigAttr does.
+            SmallVector<NamedAttribute> baseItems;
+            maybeTarget->storeToConfigAttrs(ctx, baseItems);
+            maybeTarget = IREE::HAL::LLVMTarget::loadFromConfigAttr(
+                variantOp.getLoc(), b.getDictionaryAttr(baseItems), *maybeTarget
+            );
+            if (!maybeTarget) {
+                return failure();
+            }
+
+            SmallVector<NamedAttribute> configItems;
+            maybeTarget->storeToConfigAttrs(ctx, configItems);
+            configItems.emplace_back(
+                b.getStringAttr(IREE::Encoding::kEncodingResolverAttrName),
+                IREE::CPU::CPUEncodingResolverAttr::get(ctx, {})
+            );
+
+            auto oldTarget = variantOp.getTarget();
+            variantOp.setTargetAttr(b.getAttr<IREE::HAL::ExecutableTargetAttr>(
+                oldTarget.getBackend(), oldTarget.getFormat(), b.getDictionaryAttr(configItems)
+            ));
+
+            // the CPUDefault pinned by OutlineCpuPrograms would make strategy
+            // selection skip the function
+            variantOp.getInnerModule().walk([](func::FuncOp funcOp) {
+                auto info = getTranslationInfo(funcOp);
+                if (info && info.getDispatchLoweringPassPipeline() ==
+                                IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault) {
+                    eraseTranslationInfo(funcOp);
+                }
+            });
         }
     }
     else {

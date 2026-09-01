@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 import numpy as np
 
@@ -72,3 +74,23 @@ def case_config(request):
 @pytest.mark.ci
 def test_mlir_files(request, torq_results, llvmcpu_reference_results, case_config):    
     compare_test_results(request, torq_results, llvmcpu_reference_results, case_config)
+
+
+@pytest.mark.ci
+def test_host_vectorize_emits_vector_ops(torq_compiler, tmp_path):
+
+    cmds = [str(torq_compiler.file_path),
+            str(MODELS_DIR / "tosa_ops" / "matmul-notile.mlir"),
+            "-o", str(tmp_path / "model.vmfb"),
+            "--torq-hw=SL2610", "--torq-target-host-triple=native",
+            "--torq-disable-slices", "--torq-disable-css",
+            "--mlir-print-ir-after=iree-codegen-generic-vectorization"]
+
+    # the flag off restores the legacy CPUDefault path, so the vectorization pass never runs
+    baseline = subprocess.run(cmds + ["--torq-host-vectorize=false"],
+                              capture_output=True, text=True, check=True)
+    assert "IR Dump After" not in baseline.stderr, baseline.stderr
+
+    vectorized = subprocess.run(cmds, capture_output=True, text=True, check=True)
+    assert "IR Dump After" in vectorized.stderr, vectorized.stderr
+    assert "vector." in vectorized.stderr, vectorized.stderr
