@@ -119,6 +119,11 @@ def case_config(request, runtime_hw_type, chip_config):
         # models (the sliced path fails this shape for an unrelated
         # pre-existing reason: an LRAM fragmentation failure).
         "erf_mlp_dup_lram_load_bf16",
+        # LRAM-limit regression pinned to the no-slicing path used for real
+        # models (the sliced path splits the same reduction across slices and
+        # has an unrelated pre-existing numeric mismatch at this width).
+        "reducemean_wide_kept_dims_bf16",
+
     ]
     extra_args["torq_compiler_options"] = []
     if any(s in request.param.data.name for s in no_slicing_tc):

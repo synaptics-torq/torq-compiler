@@ -733,17 +733,17 @@ class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReduc
             if (*totalBytes <= lramSize && !exceedsDescriptor)
                 return;
 
-            // If the op cannot fit even at a reduction tile of 1, only parallel tiling can
-            // help: skip it (failing would poison tile-and-fuse's fits-in-memory probe).
+            // If the op cannot fit even with every loop tiled to 1, tiling cannot help:
+            // skip it (failing would poison tile-and-fuse's fits-in-memory probe).
             // TODO: an op that exceeds the descriptor limit but cannot fit LRAM at any
-            // reduction tile is also skipped here; it needs a descriptor-only tiling mode.
-            FailureOr<int64_t> floorBytes =
-                estimateTiledOperandBytes(genericOp, reductionDims[0], 1);
+            // tile is also skipped here; it needs a descriptor-only tiling mode.
+            SmallVector<int64_t> unitTileSizes(genericOp.getNumLoops(), 1);
+            FailureOr<int64_t> floorBytes = estimateTiledOperandBytes(genericOp, unitTileSizes);
             if (failed(floorBytes) || *floorBytes > lramSize) {
                 LLVM_DEBUG({
                     llvm::dbgs(
-                    ) << "TileReductionForLram: skipping op that cannot fit at any reduction "
-                         "tile; floorBytes="
+                    ) << "TileReductionForLram: skipping op that cannot fit at any tile; "
+                         "floorBytes="
                       << (succeeded(floorBytes) ? std::to_string(*floorBytes) : "unknown")
                       << " lramSize=" << lramSize << "\n";
                 });
@@ -784,9 +784,10 @@ class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReduc
         return totalBytes;
     }
 
-    FailureOr<int64_t> estimateTiledOperandBytes(
-        linalg::GenericOp genericOp, unsigned reductionDim, int64_t tileSize
-    ) {
+    /// Estimate the total operand bytes of \p genericOp when its iteration
+    /// domain is tiled to \p tileSizes (one entry per loop dimension).
+    FailureOr<int64_t>
+    estimateTiledOperandBytes(linalg::GenericOp genericOp, ArrayRef<int64_t> tileSizes) {
         int64_t estimatedBytes = 0;
 
         for (OpOperand &operand : genericOp->getOpOperands()) {
@@ -805,10 +806,8 @@ class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReduc
             for (auto [i, expr] : llvm::enumerate(map.getResults())) {
                 int64_t dimSize = tensorType.getDimSize(i);
                 if (auto dimExpr = dyn_cast<AffineDimExpr>(expr)) {
-                    if (dimExpr.getPosition() == reductionDim) {
-                        numElements *= tileSize;
-                        continue;
-                    }
+                    numElements *= std::min(dimSize, tileSizes[dimExpr.getPosition()]);
+                    continue;
                 }
                 numElements *= dimSize;
             }
@@ -837,53 +836,109 @@ class TileReductionForLramPass : public impl::TileReductionForLramBase<TileReduc
         if (reductionSize <= 1)
             return failure();
 
-        // Repeatedly halve the reduction tile size until the estimated memory requirement fits in
-        // LRAM and the tile is within the hardware reduce descriptor limit.
-        int64_t tileSize = reductionSize;
+        // All loop ranges are needed to estimate tiled operand sizes below. Static operand
+        // shapes (checked by the caller's estimateOperandBytes) imply static loop ranges,
+        // but guard anyway.
+        if (llvm::any_of(loopRanges, [](int64_t range) { return range == ShapedType::kDynamic; })) {
+            LLVM_DEBUG({
+                llvm::dbgs() << "TileReductionForLram: cannot tile op with dynamic loop ranges\n";
+            });
+            return failure();
+        }
+
+        // Phase 1: repeatedly halve only the reduction tile size until the estimated memory
+        // requirement fits in LRAM and the tile is within the hardware reduce descriptor limit.
+        SmallVector<int64_t> tileSizes(loopRanges.begin(), loopRanges.end());
         bool fitsInLram = false;
 
-        while (tileSize > 1) {
-            tileSize = std::max(tileSize / 2, int64_t(1));
+        while (tileSizes[reductionDim] > 1) {
+            tileSizes[reductionDim] = std::max(tileSizes[reductionDim] / 2, int64_t(1));
 
-            FailureOr<int64_t> estimatedBytes =
-                estimateTiledOperandBytes(genericOp, reductionDim, tileSize);
+            FailureOr<int64_t> estimatedBytes = estimateTiledOperandBytes(genericOp, tileSizes);
             if (failed(estimatedBytes))
                 return failure();
 
             LLVM_DEBUG({
-                llvm::dbgs() << "TileReductionForLram: candidate tileSize=" << tileSize
-                             << " estimatedBytes=" << *estimatedBytes << " lramSize=" << lramSize
-                             << "\n";
+                llvm::dbgs() << "TileReductionForLram: candidate tileSize="
+                             << tileSizes[reductionDim] << " estimatedBytes=" << *estimatedBytes
+                             << " lramSize=" << lramSize << "\n";
             });
 
-            if (*estimatedBytes <= lramSize && tileSize <= kMaxReduceTileElements) {
+            if (*estimatedBytes <= lramSize && tileSizes[reductionDim] <= kMaxReduceTileElements) {
                 fitsInLram = true;
                 break;
             }
         }
 
+        // Phase 2: reduction-only tiling cannot fit. This happens when the kept (parallel)
+        // dimensions alone exceed LRAM, e.g. a [1,160,3,608] bf16 reduction over the size-3
+        // axis: even with a reduction tile of 1 the full-width input slice plus the untiled
+        // output do not fit. Tile the parallel dimensions as well: start from the full
+        // domain (keeping the reduction dimension whole if possible, for a single-pass
+        // accumulation) and repeatedly halve the largest tile dimension until it fits.
+        if (!fitsInLram) {
+            tileSizes.assign(loopRanges.begin(), loopRanges.end());
+            tileSizes[reductionDim] = std::min(reductionSize, kMaxReduceTileElements);
+
+            while (true) {
+                FailureOr<int64_t> estimatedBytes = estimateTiledOperandBytes(genericOp, tileSizes);
+                if (failed(estimatedBytes))
+                    return failure();
+
+                LLVM_DEBUG({
+                    llvm::dbgs() << "TileReductionForLram: candidate tileSizes=(";
+                    llvm::interleaveComma(tileSizes, llvm::dbgs());
+                    llvm::dbgs() << ") estimatedBytes=" << *estimatedBytes
+                                 << " lramSize=" << lramSize << "\n";
+                });
+
+                if (*estimatedBytes <= lramSize) {
+                    fitsInLram = true;
+                    break;
+                }
+
+                // Halve the largest tile dimension. If every dimension is already at 1,
+                // the op cannot be made to fit.
+                auto largestIt = llvm::max_element(tileSizes);
+                if (*largestIt <= 1)
+                    break;
+                *largestIt = *largestIt / 2;
+            }
+        }
+
         if (!fitsInLram) {
             LLVM_DEBUG({
-                llvm::dbgs() << "TileReductionForLram: failed to find reduction tile that fits "
+                llvm::dbgs() << "TileReductionForLram: failed to find a tile that fits "
                                 "in LRAM\n";
             });
             return failure();
         }
 
         unsigned numLoops = genericOp.getNumLoops();
-        SmallVector<OpFoldResult> tileSizes(numLoops, rewriter.getIndexAttr(0));
-        tileSizes[reductionDim] = rewriter.getIndexAttr(tileSize);
+        SmallVector<OpFoldResult> tileSizesOfr(numLoops, rewriter.getIndexAttr(0));
+        bool tilesReductionDim = false;
+        for (unsigned dim = 0; dim < numLoops; ++dim) {
+            if (tileSizes[dim] < loopRanges[dim]) {
+                tileSizesOfr[dim] = rewriter.getIndexAttr(tileSizes[dim]);
+                if (dim == reductionDim)
+                    tilesReductionDim = true;
+            }
+        }
 
         LLVM_DEBUG({
             llvm::dbgs() << "TileReductionForLram: tiling reductionDim=" << reductionDim
-                         << " reductionSize=" << reductionSize << " tileSize=" << tileSize << "\n";
+                         << " reductionSize=" << reductionSize << " tileSizes=(";
+            llvm::interleaveComma(tileSizes, llvm::dbgs());
+            llvm::dbgs() << ")\n";
         });
 
-        // Create a loop to accumulate partial results into the same output buffer.
         scf::SCFTilingOptions options;
-        options.setTileSizes(tileSizes);
-        options.setReductionTilingStrategy(ReductionTilingStrategy::FullReduction);
-        options.setReductionDims({reductionDim});
+        options.setTileSizes(tileSizesOfr);
+        if (tilesReductionDim) {
+            // Create a loop to accumulate partial results into the same output buffer.
+            options.setReductionTilingStrategy(ReductionTilingStrategy::FullReduction);
+            options.setReductionDims({reductionDim});
+        }
 
         rewriter.setInsertionPoint(genericOp);
         FailureOr<scf::SCFTilingResult> tilingResult =
