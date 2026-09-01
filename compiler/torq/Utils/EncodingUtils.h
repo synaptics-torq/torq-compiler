@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 
@@ -15,10 +16,13 @@ struct EncodingRequirements {
     SmallVector<int64_t> stridesAlign{};
     int64_t paddingAlign = 0;
     bool onlyDense = false;
+    // number of innermost dims that must be dense: one contiguous block with natural strides,
+    // not cut by a slice
+    int64_t denseInnerDims = 0;
 
     torq_hl::TensorEncodingRequirementsAttr toAttr(MLIRContext *ctx) const {
         return torq_hl::TensorEncodingRequirementsAttr::get(
-            ctx, memorySpace, stridesAlign, paddingAlign, onlyDense
+            ctx, memorySpace, stridesAlign, paddingAlign, onlyDense, denseInnerDims
         );
     }
 
@@ -26,7 +30,7 @@ struct EncodingRequirements {
         return {
             attr.getMemSpace(),
             SmallVector<int64_t>(attr.getStridesAlign().begin(), attr.getStridesAlign().end()),
-            attr.getPaddingAlign(), attr.getOnlyDense()
+            attr.getPaddingAlign(), attr.getOnlyDense(), attr.getDenseInnerDims()
         };
     }
 };
@@ -69,6 +73,20 @@ bool checkTypeMatchesEncodingRequirements(
 
 // return true if the given type matches the given encoding requirements
 bool checkTypeMatchesEncodingRequirements(ShapedType type, EncodingRequirements requirements);
+
+// return true if the given value matches the given encoding requirements. Unlike the type check
+// this also looks at how the value was produced: a tensor.extract_slice keeps the encoding of its
+// source but not its layout, so it fails a dense-inner-dims requirement when it cuts inside the
+// dense block
+bool checkValueMatchesEncodingRequirements(
+    Value value, torq_hl::TensorEncodingRequirementsAttr requirements
+);
+bool checkValueMatchesEncodingRequirements(Value value, EncodingRequirements requirements);
+
+// return true if the slice keeps the innermost `denseInnerDims` dims of its source dense: a cut
+// of the outermost dim of the block only shortens the block, a cut of any dim inside it leaves
+// the block rows apart in memory
+bool sliceKeepsInnerDimsDense(tensor::ExtractSliceOp extractOp, int64_t denseInnerDims);
 
 // return the default encoding attribute
 torq_hl::TensorEncodingAttr getDefaultEncoding(ShapedType type);

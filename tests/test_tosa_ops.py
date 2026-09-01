@@ -28,6 +28,11 @@ def case_config(request, runtime_hw_type, chip_config):
         # conv2d_1x1_size1_bias_matmul_as_conv-i8.mlir:23:11: error: expected 5 offset values, got 4
         # Assertion failed: (succeeded(verify(constV.getDefiningOp())) && "Expected defining op for const result"), function matchAndRewrite, file CompileTimeConstOutlinePass.cpp, line 444.
         "conv2d_1x1_size1_bias_matmul_as_conv-i8",
+        # Single-slice tile-and-fuse must W-tile the conv+depthwise group so the
+        # depthwise input becomes a W-subview of the producer tile (the regression
+        # this test guards); with slicing the work is split before tiling and the
+        # subview never forms.
+        "conv_s2_dw_w_subview-bf16",
     ]
 
     extra_args["torq_compiler_options"] = []

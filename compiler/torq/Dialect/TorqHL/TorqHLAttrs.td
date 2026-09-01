@@ -143,6 +143,11 @@ def TorqHL_TensorEncodingRequirementsAttr : AttrDef<TorqHL_Dialect, "TensorEncod
       The only_dense flag indicates that only dense layouts are allowed that match the
       required strides.
 
+      The dense_inner_dims value is the number of innermost dimensions that must be dense:
+      one contiguous block with natural strides, and no slice that cuts any dimension inside
+      the block. Kernels that fuse the innermost dimensions into one scan need this. E.g.
+      dense_inner_dims = 2 on a NCHW tensor requires the H-W plane to be dense.
+
     }];
     let mnemonic = "enc_req";
     let parameters = (
@@ -154,11 +159,13 @@ def TorqHL_TensorEncodingRequirementsAttr : AttrDef<TorqHL_Dialect, "TensorEncod
         // Padding alignment requirement (in elements) if not 0
         OptionalParameter<"int64_t">: $padding_align,
         // Only dense layout are allowed
-        OptionalParameter<"bool">: $only_dense
+        OptionalParameter<"bool">: $only_dense,
+        // Number of innermost dimensions that must be dense
+        OptionalParameter<"int64_t">: $dense_inner_dims
     );
 
     let cppNamespace = "::mlir::syna::torq_hl";
-    let assemblyFormat = "`mem_space` `=` $mem_space (`strides_align` `=` `[` $strides_align^ `]` )? (`padding_align` `=` $padding_align^)? (`only_dense` `=` $only_dense^)?";
+    let assemblyFormat = "`mem_space` `=` $mem_space (`strides_align` `=` `[` $strides_align^ `]` )? (`padding_align` `=` $padding_align^)? (`only_dense` `=` $only_dense^)? (`dense_inner_dims` `=` $dense_inner_dims^)?";
 
 }
 

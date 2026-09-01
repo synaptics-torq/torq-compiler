@@ -324,9 +324,22 @@ bool checkTypeMatchesEncodingRequirements(ShapedType type, EncodingRequirements 
         }
     }
 
-    // check strides
     auto strides = getEncodedStridesElements(type);
 
+    // check that the innermost dims that must be dense form one contiguous block: their
+    // strides are the natural ones
+    if (requirements.denseInnerDims > 0 && type.hasStaticShape() &&
+        strides.size() == type.getRank()) {
+        for (int64_t i = type.getRank() - 1, natural = 1;
+             i >= 0 && i >= type.getRank() - requirements.denseInnerDims; i--) {
+            if (strides[i] != natural) {
+                return false;
+            }
+            natural *= type.getDimSize(i);
+        }
+    }
+
+    // check strides
     if (!requirements.stridesAlign.empty()) {
         if (strides.size() != type.getRank()) {
             return false;
@@ -347,6 +360,48 @@ bool checkTypeMatchesEncodingRequirements(ShapedType type, EncodingRequirements 
                 }
             }
             // align == 0 means no alignment required
+        }
+    }
+
+    return true;
+}
+
+// see EncodingUtils.h
+bool sliceKeepsInnerDimsDense(tensor::ExtractSliceOp extractOp, int64_t denseInnerDims) {
+    ArrayRef<int64_t> sourceShape = extractOp.getSourceType().getShape();
+    SmallVector<OpFoldResult> sizes = extractOp.getMixedSizes();
+    SmallVector<OpFoldResult> strides = extractOp.getMixedStrides();
+
+    for (int64_t i = sourceShape.size() - 1;
+         i >= 0 && i >= int64_t(sourceShape.size()) - (denseInnerDims - 1); i--) {
+        std::optional<int64_t> size = getConstantIntValue(sizes[i]);
+        std::optional<int64_t> stride = getConstantIntValue(strides[i]);
+        if (!size || !stride || *stride != 1 || *size != sourceShape[i]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool checkValueMatchesEncodingRequirements(
+    Value value, torq_hl::TensorEncodingRequirementsAttr requirements
+) {
+    return checkValueMatchesEncodingRequirements(
+        value, EncodingRequirements::fromAttr(requirements)
+    );
+}
+
+bool checkValueMatchesEncodingRequirements(Value value, EncodingRequirements requirements) {
+    if (!checkTypeMatchesEncodingRequirements(cast<ShapedType>(value.getType()), requirements)) {
+        return false;
+    }
+
+    // a slice of a matching tensor still matches unless it cuts inside the dense block
+    for (auto extractOp = value.getDefiningOp<tensor::ExtractSliceOp>(); extractOp;
+         extractOp = extractOp.getSource().getDefiningOp<tensor::ExtractSliceOp>()) {
+        if (!sliceKeepsInnerDimsDense(extractOp, requirements.denseInnerDims)) {
+            return false;
         }
     }
 

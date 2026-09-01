@@ -69,7 +69,7 @@ findEarliestCompatibleAncestor(TypedValue<ShapedType> val, EncodingRequirements 
     }
 
     // otherwise check if the input of the parent op is itself compatible and return that
-    if (checkTypeMatchesEncodingRequirements(parentConvertOp.getInput().getType(), reqs)) {
+    if (checkValueMatchesEncodingRequirements(parentConvertOp.getInput(), reqs)) {
         return parentConvertOp.getInput();
     }
 
@@ -94,7 +94,7 @@ static void findCandidatesForValue(
         llvm::dbgs() << "\n";
     });
 
-    if (checkTypeMatchesEncodingRequirements(value.getType(), req)) {
+    if (checkValueMatchesEncodingRequirements(value, req)) {
         LLVM_DEBUG({ llvm::dbgs() << "    Value matches requirements\n"; });
         candidates.push_back(value);
     }
@@ -598,6 +598,23 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
             // nothing there.
             if (isa<torq_hl::CallProgramOp>(consumer)) {
                 return Rejection{"call_program", "consumer is a torq_hl.call_program"};
+            }
+
+            // A kernel that needs its innermost dims dense cannot read a slice that cuts
+            // inside that block: after the swap the kernel would read the strided subview
+            // directly (the round-trip fold removes the converts around the slice), and
+            // torq::fuse stops with "Could not fuse the requested number of dimensions".
+            if (auto kernel = dyn_cast<torq_hl::KernelInterface>(consumer)) {
+                auto kernelEncoding = kernel.getKernelEncoding();
+                int64_t denseInnerDims = kernelEncoding.outputEncoding.denseInnerDims;
+                for (auto &input : kernelEncoding.inputEncodings) {
+                    denseInnerDims = std::max(denseInnerDims, input.encoding.denseInnerDims);
+                }
+                if (denseInnerDims > 1 && !sliceKeepsInnerDimsDense(extractOp, denseInnerDims)) {
+                    return Rejection{
+                        "dense inner dims", "consumer kernel needs the sliced dims dense"
+                    };
+                }
             }
 
             // look through converts: the kernel is behind the convert back to LRAM

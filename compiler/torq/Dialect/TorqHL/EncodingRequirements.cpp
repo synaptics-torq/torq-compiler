@@ -16,7 +16,10 @@
 namespace mlir::syna::torq_hl {
 
 EncodingRequirements toTensorEncodingRequirementsAttr(KernelTensorEncoding reqs) {
-    return {torq_hl::MemorySpace::Lram, reqs.stridesAlign, reqs.paddingAlign};
+    return {
+        torq_hl::MemorySpace::Lram, reqs.stridesAlign, reqs.paddingAlign, /* onlyDense = */ false,
+        reqs.denseInnerDims
+    };
 }
 
 KernelTensorEncoding getOperandEncoding(const KernelEncoding &encoding, OpOperand &opOperand) {
@@ -124,8 +127,16 @@ FailureOr<bool> encodeKernelInputOutputs(
 
         auto inEncoding = inEncodingsReqs[opOperand.getOperandNumber()];
 
-        if (checkTypeMatchesEncodingRequirements(inType, inEncoding)) {
+        if (checkValueMatchesEncodingRequirements(opOperand.get(), inEncoding)) {
             operandEncodings.push_back(getEncoding(inType));
+        }
+        else if (checkTypeMatchesEncodingRequirements(inType, inEncoding)) {
+            // the type is fine but the value is a slice that cuts inside a dense block: copy it
+            // into a fresh dense buffer. Spell the natural strides out so the copy has a type of
+            // its own and is not folded away as a no-op conversion.
+            EncodingRequirements explicitEncoding = inEncoding;
+            explicitEncoding.stridesAlign.assign(inType.getRank(), 0);
+            operandEncodings.push_back(createAlignedEncoding(inType, explicitEncoding));
         }
         else {
             operandEncodings.push_back(createAlignedEncoding(inType, inEncoding));
@@ -499,13 +510,24 @@ KernelEncoding TransposeReshapeOp::getKernelEncoding() {
     return {{}, outEncoding};
 }
 
+// The NCHW conv, depthwise conv and max pool kernels fuse H and W into one scan, so the H-W
+// plane of the input and of the output must be dense: the rows of a W-cut slice do not sit
+// next to each other in memory
+template <typename OpT> static KernelEncoding withDenseHWPlane(OpT op, KernelEncoding encoding) {
+    KernelTensorEncoding inputEncoding;
+    inputEncoding.denseInnerDims = 2;
+    encoding.inputEncodings.push_back({op.getInputMutable().getOperandNumber(), inputEncoding});
+    encoding.outputEncoding.denseInnerDims = 2;
+    return encoding;
+}
+
 KernelEncoding MaxPool2dOp::getKernelEncoding() {
     if (torq::hasEkLoweringMaxPool(*this)) {
-        return getDefault1InputEncoding(*this);
+        return withDenseHWPlane(*this, getDefault1InputEncoding(*this));
     }
 
     auto resultType = cast<RankedTensorType>(this->getResult(0).getType());
-    return {{}, defaultEncoding(resultType, 4)};
+    return withDenseHWPlane(*this, {{}, defaultEncoding(resultType, 4)});
 }
 
 KernelEncoding SegmentationOp::getKernelEncoding() { return getNoEncoding(); }
@@ -539,11 +561,15 @@ KernelEncoding ReduceMeanOp::getKernelEncoding() {
 }
 
 KernelEncoding Conv2DOp::getKernelEncoding() {
-    return torq::hasEkLoweringConv(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
+    auto encoding =
+        torq::hasEkLoweringConv(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
+    return getNhwcInput() ? encoding : withDenseHWPlane(*this, encoding);
 }
 
 KernelEncoding DepthwiseConv2DOp::getKernelEncoding() {
-    return torq::hasEkLoweringConv(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
+    auto encoding =
+        torq::hasEkLoweringConv(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
+    return getNhwcInput() || getIsDw1dStride1() ? encoding : withDenseHWPlane(*this, encoding);
 }
 
 KernelEncoding FullyConnectedOp::getKernelEncoding() { return getNoEncoding(); }

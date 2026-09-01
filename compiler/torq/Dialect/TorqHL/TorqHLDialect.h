@@ -20,6 +20,9 @@ struct KernelTensorEncoding {
     SmallVector<int64_t> stridesAlign{};
     int64_t paddingAlign = 0;
     bool denseOnly = false;
+    // number of innermost dims the kernel needs dense: one contiguous block with natural
+    // strides, not cut by a slice
+    int64_t denseInnerDims = 0;
 };
 
 struct KernelInputEncoding {
