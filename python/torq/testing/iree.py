@@ -243,6 +243,24 @@ def chip_config(request):
     return config
 
 
+def _run_with_group_kill(*popenargs, timeout=None, **kwargs):
+    """Like subprocess.check_call, but kills the whole process group on timeout so
+    helpers spawned by the tool (e.g. the qemu CSS simulator) do not outlive it."""
+
+    proc = subprocess.Popen(*popenargs, start_new_session=True, **kwargs)
+    try:
+        retcode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        raise
+    if retcode:
+        raise subprocess.CalledProcessError(retcode, popenargs[0])
+
+
 def _find_iree_tool(env_var, tool_name):
     """Find IREE tool binary, checking environment variable first, then BUILD_DIR fallback."""
 
@@ -663,7 +681,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     print("Compiling for TORQ with: " + " ".join(cmds))
 
     with measure_time(versioned_dir, 'compilation_time'):
-        subprocess.check_call(cmds, cwd=str(versioned_dir), timeout=torq_compiler_timeout)
+        _run_with_group_kill(cmds, cwd=str(versioned_dir), timeout=torq_compiler_timeout)
 
     # save the size of the model
     model_stats = compute_model_stats(model_file, versioned_dir)
@@ -853,14 +871,14 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
 
         with measure_time(versioned_dir, 'e2e_inference_time'):
             print("Running for TORQ with: " + " ".join(run_cmd))
-            subprocess.check_call(run_cmd, timeout=torq_runtime_timeout)
+            _run_with_group_kill(run_cmd, timeout=torq_runtime_timeout)
 
         # the re-run the module with the benchmark tool if benchmarking is enabled, this will generate a benchmark.json
         if benchmark_output_dir is not None:            
             benchmark_file = versioned_dir / 'benchmark.json'
             benchmark_cmd = [str(torq_benchmark), "--benchmark_out=" + str(benchmark_file), "--benchmark_out_format=json", *cmds]
             print("Running benchmark for TORQ with: " + " ".join(benchmark_cmd))
-            subprocess.check_call(benchmark_cmd, timeout=torq_runtime_timeout)
+            _run_with_group_kill(benchmark_cmd, timeout=torq_runtime_timeout)
     
     remote_addr = request.config.getoption("--torq-addr")
     remote_port = request.config.getoption("--torq-port")
