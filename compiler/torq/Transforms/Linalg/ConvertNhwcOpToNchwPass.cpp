@@ -206,10 +206,14 @@ AffineMap remapNhwcDimsToNchw(AffineMap map, MLIRContext *ctx) {
 //   Relabel loop dims from NHWC to NCHW order (see remapNhwcDimsToNchw).
 //   Example: bias shape [64], map (d3) in NHWC → map (d1) in NCHW
 //            because channel dimension moved from position 3 to position 1.
+//
+// Only a 3-loop map with 3 results is HWC (the depthwise filter). In a 4-loop
+// domain, 3 results mean a rank-3 NHWC broadcast (1x1xC over W when H=1); it
+// keeps its 4 dims, since a 3-dim identity there would not match the loop count.
 AffineMap nchwMap(AffineMap origMap, MLIRContext *ctx) {
     if (origMap.getNumResults() == 4)
         return AffineMap::getMultiDimIdentityMap(4, ctx);
-    if (origMap.getNumResults() == 3)
+    if (origMap.getNumDims() == 3 && origMap.getNumResults() == 3)
         return AffineMap::getMultiDimIdentityMap(3, ctx);
     return remapNhwcDimsToNchw(origMap, ctx);
 }
@@ -234,6 +238,11 @@ Value convertGenericOpToNchw(
     SmallVector<Value> newInputs;
     SmallVector<AffineMap> newMaps;
 
+    // All maps of a generic share one loop domain: a 3-loop domain is HWC (the
+    // depthwise filter), whereas in a 4-loop domain a rank-3 operand is an NHWC
+    // broadcast (H=1 bias / weight-zp correction is 1x1xC over W), not HWC.
+    const bool isHwcDomain = genericOp.getNumLoops() == 3;
+
     for (auto [i, inp] : llvm::enumerate(genericOp.getInputs())) {
         auto it = valMap.find(inp);
         Value newInp;
@@ -245,7 +254,7 @@ Value convertGenericOpToNchw(
         else {
             // Input not in valMap - check if it's an NHWC/HWC tensor that needs transposing
             auto inpType = dyn_cast<RankedTensorType>(inp.getType());
-            if (inpType && (inpType.getRank() == 4 || inpType.getRank() == 3) &&
+            if (inpType && (inpType.getRank() == 4 || (inpType.getRank() == 3 && isHwcDomain)) &&
                 isZeroFilledTensor(inp)) {
                 // Zero-filled NHWC/HWC constant/fill -> recreate in NCHW/CHW shape.
                 SmallVector<int64_t> nchwShape = nhwcToNchwShape(inpType.getShape());
@@ -256,11 +265,12 @@ Value convertGenericOpToNchw(
             else if (inpType && inpType.getRank() == 4) {
                 newInp = transposeValue(inp, Permutation::nhwc2nchw(), genericOp.getLoc(), builder);
             }
-            else if (inpType && inpType.getRank() == 3) {
+            else if (inpType && inpType.getRank() == 3 && isHwcDomain) {
                 newInp = transposeValue(inp, Permutation::hwc2chw(), genericOp.getLoc(), builder);
             }
             else {
-                // Keep as-is (1D channel tensors, non-zero tensors, etc.)
+                // Keep as-is: 1D channel vectors, and rank-3 NHWC broadcasts
+                // (H=1 1x1xC) whose loop dims are remapped below.
                 newInp = inp;
             }
         }

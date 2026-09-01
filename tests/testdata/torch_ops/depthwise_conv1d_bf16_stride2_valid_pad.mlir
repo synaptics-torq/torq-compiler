@@ -1,3 +1,8 @@
+// Depthwise Conv1D, KW=3, stride 2, ONNX pads [0, 1] (right-only VALID).
+// tensor.pad grows W 128→129 (odd); ConvertOddDimensionStrideConvPattern then
+// grows the expanded H=129 to 130. The appended row must hold the pad value:
+// left as tensor.empty it reads stale SRAM on FPGA and one bf16 output comes
+// back NaN. The simulator zero-initializes, so this only fails on hardware.
 module {
   func.func @part38_graph(%arg0: !torch.vtensor<[1,32,128],bf16>) -> !torch.vtensor<[1,32,64],bf16> attributes {torch.onnx_meta.ir_version = 7 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
     %0 = torch.operator "onnx.Constant"() {torch.onnx.value = dense_resource<_model.cnn_1d_block3.depthwise_conv.conv.bias_bf16_part38_init0> : tensor<32xbf16>} : () -> !torch.vtensor<[32],bf16> 

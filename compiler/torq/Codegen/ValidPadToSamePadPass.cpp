@@ -916,8 +916,22 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         }
 
         // Keep a valid conv valid: the grown buffer uses zero padding, not SAME.
-        if (keepValid)
+        if (keepValid) {
             newPads.assign(pads.begin(), pads.end());
+        }
+        else {
+            // totalSamePad + stride_offset swap is only for axes we grew.
+            // Growing odd H must not rewrite even-W pads: the swap turns
+            // [0,1,0,0] (right=1) into [1,0,0,0] and enables a left halo.
+            if (!oddHeight) {
+                newPads[LRTBDim::Top] = pads[LRTBDim::Top];
+                newPads[LRTBDim::Bottom] = pads[LRTBDim::Bottom];
+            }
+            if (!oddWidth) {
+                newPads[LRTBDim::Left] = pads[LRTBDim::Left];
+                newPads[LRTBDim::Right] = pads[LRTBDim::Right];
+            }
+        }
 
         // A VALID conv is emulated on the SAME-padded (grown) buffer. Relative to the
         // kernel centre, the original VALID window starts `centre - pad` samples in; the
@@ -963,12 +977,13 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         auto padTensor = tensor::EmptyOp::create(rewriter, loc, paddedShape, elemType);
 
         Value convInput = padTensor.getResult();
-        // A fill is only needed when the grown buffer exposes border samples the kernel would
-        // otherwise read as garbage. With no original top/bottom pad, every valid H sample sits
-        // inside the kernel window, so no top/bottom fill is required; likewise, when the computed
-        // left/right SAME pad already equals the original pad, every valid W sample is covered and
-        // no W fill is required. Only when either of these differs must we fill with the pad value.
-        bool needFill = pads[LRTBDim::Top] || pads[LRTBDim::Bottom] ||
+        // Fill the grown buffer when either:
+        // - keepValid: 1D stride-2 VALID growth used to skip fill; the extra row was
+        //   tensor.empty and FPGA read it as NaN (C-model zeros it).
+        // - the original pads/halo changed, so the kernel can see the new border.
+        // Do not fill every odd-H/W 2D stride-2 rewrite: that added extra NSS/DMA on
+        // MBv2 tiles that already had a defined halo.
+        bool needFill = keepValid || pads[LRTBDim::Top] || pads[LRTBDim::Bottom] ||
                         (pads[LRTBDim::Left] != newPads[LRTBDim::Left]) ||
                         (pads[LRTBDim::Right] != newPads[LRTBDim::Right]);
         if (needFill) {
