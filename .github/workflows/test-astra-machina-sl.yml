@@ -26,15 +26,17 @@ jobs:
   test_astra_machina_sl:    
     name: Test on Astra Machina SL
 
-    runs-on:
-      - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-        image:custom-linux-${{ inputs.docker_image_tests_name }}
+    runs-on: astra-machina-sl
 
     timeout-minutes: 50 # this is not enough in case there is a lot of contention on astra machina but we can't increase it as codebuild kills the job at 60 mins anyways
     
     concurrency:
       group: astra_machina_sl # only one job at a time can take control of the boards
       queue: max
+
+    container:
+      image: ${{ inputs.docker_image_tests_name }}
+      options: ${{ vars.ASTRA_MACHINA_SL_DOCKER_OPTIONS }}
 
     env:
       RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}

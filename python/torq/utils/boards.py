@@ -333,7 +333,7 @@ class JenkinsBoardsControl(BoardsControl):
             self._write_control_data_locked(f, data)
 
 
-    def create_boards(self, build_version, force=False):
+    def create_boards(self, build_version, force=False, location="SJ"):
         """
         Requests Jenkins to create a board with the given public key. The board creation will be queued.
         """
@@ -361,7 +361,8 @@ class JenkinsBoardsControl(BoardsControl):
                 "UUID": data["board_uuid"],
                 "PublicKey": data["board_public_key"],
                 "ForceUpdate": str(force).lower(),
-                "BuildVersion": build_version
+                "BuildVersion": build_version,
+                "Location": location
                 }
 
             res = requests.post(trigger_url, data=payload, auth=(self.user, self.token))

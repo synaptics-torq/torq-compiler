@@ -199,8 +199,8 @@ runs:
         # we add the python directories from the checkout because they are not fully
         # packaged into wheels (testing infra notably)
         cat > $(python -c "import site; print(site.getsitepackages()[0])")/torq.pth << EOF
-        ${{github.workspace}}/python
-        ${{github.workspace}}/extras/python
+        $(pwd)/python
+        $(pwd)/extras/python
         EOF
 
     - name: Download precomputed test cache
@@ -255,9 +255,9 @@ runs:
       run: |
         python3 -u -m torq.utils.boards setup-for-ci \
             --control-file bench-control.json \
-            --local-runner-path ${{github.workspace}}/release/tools/astra-sl-torq-run-module \
+            --local-runner-path release/tools/astra-sl-torq-run-module \
             --build-version $(cat scripts/astra_build_version.txt) \
-            --local-ko-path ${{github.workspace}}/release/lib/syna_npu.ko
+            --local-ko-path release/lib/syna_npu.ko
 
     - name: Run pytest
       shell: bash
@@ -278,7 +278,7 @@ runs:
         set -x
 
         if [[ ${{ inputs.use_bench }} == 'true' ]]; then
-          CONTROL_PARAMS="--torq-bench-control-file ${{github.workspace}}/bench-control.json"
+          CONTROL_PARAMS="--torq-bench-control-file bench-control.json"
         fi
 
         if pytest $CONTROL_PARAMS --no-phases-dump ${{ inputs.pytest_args }}; then
