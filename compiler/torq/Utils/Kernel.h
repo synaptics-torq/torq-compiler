@@ -533,6 +533,10 @@ class WRam : public SliceRam {
 
     // The maximum height (number of rows) supported by transpose operation
     int transposeHeight() const;
+
+    // The type the weights are held in once loaded, which for a compressed weight is the
+    // expanded type deduced from the input type (see load()). DType::none until deduced.
+    DType weightType() const;
 };
 
 // Bias & Scale RAM

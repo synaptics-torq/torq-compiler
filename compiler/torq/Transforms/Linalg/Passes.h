@@ -19,6 +19,7 @@ std::unique_ptr<OperationPass<ModuleOp>> createTorqDemoteF32ToBF16Pass();
 std::unique_ptr<OperationPass<ModuleOp>> createTorqConvertF16ToBF16Pass();
 std::unique_ptr<OperationPass<ModuleOp>> createTorqDemoteI64ToI32Pass();
 std::unique_ptr<OperationPass<ModuleOp>> createTorqConvertAllDTypesPass();
+std::unique_ptr<OperationPass<ModuleOp>> createTorqNarrowWeightConstPass();
 //===---------------------------------------------------------------------===//
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConstantsPass();

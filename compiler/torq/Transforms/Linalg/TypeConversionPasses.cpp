@@ -11,6 +11,9 @@
 #include "iree/compiler/Utils/ConversionUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -730,6 +733,126 @@ class TorqConvertAllDTypesPass : public impl::TorqConvertAllDTypesBase<TorqConve
     }
 };
 
+// True if `gen` is a pure per-element signed-integer->float widening: one input, one
+// init, identity maps, all-parallel, body is just `yield(sitofp(arg0))`.
+//
+// Signed only: an unsigned (uitofp) weight would narrow to a signless sub-byte int that
+// the W-bus expand reads back as signed (getWeightMemoryFormat keys off the dtype),
+// corrupting values >= 2^(w-1).
+static bool isPureSIToFPWiden(linalg::GenericOp gen) {
+    if (gen.getNumDpsInputs() != 1 || gen.getNumDpsInits() != 1 || gen.getNumResults() != 1)
+        return false;
+    for (AffineMap m : gen.getIndexingMapsArray())
+        if (!m.isIdentity())
+            return false;
+    for (utils::IteratorType it : gen.getIteratorTypesArray())
+        if (it != utils::IteratorType::parallel)
+            return false;
+    Block &body = gen.getRegion().front();
+    if (body.getNumArguments() != 2)
+        return false;
+    auto yield = dyn_cast<linalg::YieldOp>(body.getTerminator());
+    if (!yield || yield.getNumOperands() != 1)
+        return false;
+    auto sitofp = yield.getOperand(0).getDefiningOp<arith::SIToFPOp>();
+    return sitofp && sitofp.getIn() == body.getArgument(0);
+}
+
+// True if `v`, through reshape casts, feeds operand 0 (the weight / matA slot) of a
+// linalg contraction the W-bus peel handles: batch_matmul / dot / matvec / the
+// broadcast-batch-matmul generic, but NOT a plain 2D linalg.matmul (that lowers to
+// fully_connected and never peels the weight). Narrowing a weight the peel won't take
+// leaves a standalone sitofp(i2) unpack that codegen can't place -> abort.
+static bool feedsMatmulWeightOperand(Value v) {
+    for (OpOperand &use : v.getUses()) {
+        Operation *user = use.getOwner();
+        if (isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp>(user)) {
+            if (feedsMatmulWeightOperand(user->getResult(0)))
+                return true;
+            continue;
+        }
+        auto linalgOp = dyn_cast<linalg::LinalgOp>(user);
+        if (linalgOp && use.getOperandNumber() == 0 && !isa<linalg::MatmulOp>(user) &&
+            linalg::isaContractionOpInterface(linalgOp))
+            return true;
+    }
+    return false;
+}
+
+class TorqNarrowWeightConstPass
+    : public impl::TorqNarrowWeightConstBase<TorqNarrowWeightConstPass> {
+  public:
+    using TorqNarrowWeightConstBase::TorqNarrowWeightConstBase;
+
+    void runOnOperation() override {
+        // Collect candidates first; we mutate the IR (new const + retype) after the walk.
+        SmallVector<linalg::GenericOp> candidates;
+        getOperation().walk([&](linalg::GenericOp gen) {
+            if (isPureSIToFPWiden(gen))
+                candidates.push_back(gen);
+        });
+
+        for (linalg::GenericOp gen : candidates) {
+            auto inTy = dyn_cast<RankedTensorType>(gen.getDpsInputs()[0].getType());
+            if (!inTy)
+                continue;
+            auto inElem = dyn_cast<IntegerType>(inTy.getElementType());
+            if (!inElem)
+                continue;
+            // The W-bus weight expand only targets bf16 (getWeightMemoryFormat rejects
+            // int->f32), so only a bf16 weight cast can be narrowed.
+            Type outElem = cast<RankedTensorType>(gen.getResult(0).getType()).getElementType();
+            if (!outElem.isBF16())
+                continue;
+            // Only narrow a constant actually consumed as a matmul weight operand; see
+            // feedsMatmulWeightOperand for why narrowing anything else is pointless/worse.
+            if (!feedsMatmulWeightOperand(gen.getResult(0)))
+                continue;
+            auto cstOp = gen.getDpsInputs()[0].getDefiningOp<arith::ConstantOp>();
+            if (!cstOp)
+                continue;
+            auto dense = dyn_cast<DenseIntElementsAttr>(cstOp.getValue());
+            // A splat would already constant-fold to a dense float; nothing to gain.
+            if (!dense || dense.isSplat())
+                continue;
+
+            // Signed bits needed for the widest value (getSignificantBits counts the sign
+            // bit). Bail on the first value that exceeds i4 (fast reject for the common
+            // non-narrowable constant).
+            unsigned needBits = 0;
+            bool fits = true;
+            for (const APInt &v : dense.getValues<APInt>()) {
+                unsigned bits = v.getSignificantBits();
+                if (bits > 4) {
+                    fits = false;
+                    break;
+                }
+                needBits = std::max(needBits, bits);
+            }
+            unsigned width = !fits ? 0 : (needBits <= 2 ? 2 : 4);
+            if (width == 0 || width >= inElem.getWidth())
+                continue; // does not fit i2/i4, or would not actually narrow
+
+            OpBuilder builder(cstOp);
+            // Packed weights use signless sub-byte ints; the sitofp keeps the signedness,
+            // matching how the matmul lowering reads the weight. Truncating to the low
+            // `width` bits is the correct 2's-complement re-encoding.
+            auto narrowElem = IntegerType::get(&getContext(), width);
+            auto narrowCst = builder.create<arith::ConstantOp>(
+                cstOp.getLoc(),
+                dense.mapValues(narrowElem, [width](const APInt &v) { return v.trunc(width); })
+            );
+
+            // Rewire the widening generic to read the narrowed constant; the
+            // int->float cast now widens iW -> float, which the W-bus expand path handles.
+            gen.setOperand(0, narrowCst);
+            gen.getRegion().front().getArgument(0).setType(narrowElem);
+            if (cstOp->use_empty())
+                cstOp->erase();
+        }
+    }
+};
+
 } // namespace
 
 std::unique_ptr<OperationPass<ModuleOp>> createTorqDemoteF32ToBF16Pass() {
@@ -748,6 +871,10 @@ std::unique_ptr<OperationPass<ModuleOp>> createTorqConvertAllDTypesPass() {
     return std::make_unique<TorqConvertAllDTypesPass>();
 }
 
+std::unique_ptr<OperationPass<ModuleOp>> createTorqNarrowWeightConstPass() {
+    return std::make_unique<TorqNarrowWeightConstPass>();
+}
+
 void buildTorqTypeConversionPipeline(OpPassManager &passManager) {
     if (clConvertDtypes) {
         passManager.addPass(createTorqConvertAllDTypesPass());
@@ -756,6 +883,9 @@ void buildTorqTypeConversionPipeline(OpPassManager &passManager) {
         // function scope, producing a dominance violation ("operand does not dominate this use").
         passManager.addPass(mlir::createCanonicalizerPass());
     }
+    // Narrow small integer weight constants to packed sub-byte before dispatch
+    // formation so the narrowed weight flows into the matmul dispatch.
+    passManager.addPass(createTorqNarrowWeightConstPass());
 }
 
 } // namespace mlir::syna::torq

@@ -52,6 +52,72 @@ Value stripTensorShapeCasts(Value value) {
     return value;
 }
 
+// If `value` (after shape casts) is a pure per-element sitofp->float widening of
+// an integer weight (i8/i4/i2), return the integer source tensor; else null. Lets
+// a weight-first quant matmul feed the packed weight to the matA/WRAM slot for
+// W-bus expand (weight_format=SI) instead of streaming a materialized bf16 weight.
+// Sub-byte widths are additionally bit-unpacked by the DEWR load (Kernel.cpp memNdl).
+//
+// Only the weight operand (input1 -> matA/WRAM) is peeled: the W-bus integer expand
+// exists on the WRAM path only (getWeightMemoryFormat), so a sub-byte weight on input2
+// (matB/IRAM data) could not be expanded. Operand roles are fixed by torq_hl.matmul, so
+// the peelable weight is always input1.
+Value peelSiToFpWeightCast(Value value) {
+    auto genericOp = stripTensorShapeCasts(value).getDefiningOp<linalg::GenericOp>();
+    if (!genericOp || genericOp.getNumDpsInputs() != 1 || genericOp.getNumDpsInits() != 1 ||
+        !genericOp.isAllParallelLoops()) {
+        return {};
+    }
+    auto maps = genericOp.getIndexingMapsArray();
+    if (maps.size() != 2 || !maps[0].isIdentity() || !maps[1].isIdentity()) {
+        return {};
+    }
+    auto inType = dyn_cast<RankedTensorType>(genericOp.getInputs()[0].getType());
+    auto inIntType = inType ? dyn_cast<IntegerType>(inType.getElementType()) : nullptr;
+    unsigned width = inIntType ? inIntType.getWidth() : 0;
+    if (width != 8 && width != 4 && width != 2) {
+        return {};
+    }
+    auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1) {
+        return {};
+    }
+    auto sitofpOp = yieldOp.getOperand(0).getDefiningOp<arith::SIToFPOp>();
+    if (!sitofpOp) {
+        return {};
+    }
+    auto arg = dyn_cast<BlockArgument>(sitofpOp.getIn());
+    if (!arg || arg.getArgNumber() != 0) {
+        return {};
+    }
+    return genericOp.getInputs()[0];
+}
+
+// Add the sitofp weight-cast producer chain (shape casts + the sitofp generic) to
+// the matmul fuse group so TileAndFuse pulls the dequant into the matmul tile
+// (W-bus expand) instead of tiling it as its own bf16-materializing loop.
+void markSiToFpWeightCastFuseGroup(
+    Value value, PatternRewriter &rewriter, const std::optional<IntegerAttr> &fuseGroupAttr
+) {
+    Value base = value;
+    while (true) {
+        if (auto expandOp = base.getDefiningOp<tensor::ExpandShapeOp>()) {
+            markOpFuseGroup(expandOp, rewriter, fuseGroupAttr);
+            base = expandOp.getSrc();
+            continue;
+        }
+        if (auto collapseOp = base.getDefiningOp<tensor::CollapseShapeOp>()) {
+            markOpFuseGroup(collapseOp, rewriter, fuseGroupAttr);
+            base = collapseOp.getSrc();
+            continue;
+        }
+        break;
+    }
+    if (auto genericOp = base.getDefiningOp<linalg::GenericOp>()) {
+        markOpFuseGroup(genericOp, rewriter, fuseGroupAttr);
+    }
+}
+
 arith::ConstantOp getConstantLikeTensorOp(Value value) {
     while (true) {
         if (auto constOp = value.getDefiningOp<arith::ConstantOp>()) {
@@ -852,6 +918,13 @@ struct BroadcastBatchMatmulGenericRewrite : public OpRewritePattern<linalg::Gene
         Value input2 = srcOp.getInputs()[1]; // rhs
 
         if (_markFuseGroups) {
+            // Fuse a weight-first sitofp weight-cast into the matmul tile. input1 only:
+            // it is the matA/WRAM weight slot (see peelSiToFpWeightCast); input2 is data.
+            if (peelSiToFpWeightCast(input1)) {
+                markSiToFpWeightCastFuseGroup(
+                    input1, rewriter, srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                );
+            }
             markFuseGroupBackward(
                 srcOp.getResult(0),
                 // NB: we intentionally don't include the init operand in the list below. This makes
@@ -860,6 +933,12 @@ struct BroadcastBatchMatmulGenericRewrite : public OpRewritePattern<linalg::Gene
                 srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();
+        }
+
+        // Weight-first quant matmul: feed the packed int weight straight to the
+        // matA/WRAM slot for W-bus expand (see peelSiToFpWeightCast).
+        if (Value intWeight = peelSiToFpWeightCast(input1)) {
+            input1 = intWeight;
         }
 
         const std::vector<int32_t> bias = {0};
@@ -931,6 +1010,13 @@ template <typename OpTy> struct MatmulOpRewrite final : public OpRewritePattern<
 
         if (_markFuseGroups) {
             // maybeFold* already marked the upstream fusible ops, except for the init.
+            // A weight-first sitofp cast is not handled by maybeFold*, so mark it here.
+            if (peelSiToFpWeightCast(srcOp.getOperand(0))) {
+                markSiToFpWeightCastFuseGroup(
+                    srcOp.getOperand(0), rewriter,
+                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                );
+            }
             markFuseGroupBackward(
                 srcOp.getResult(0),
                 // NB: we intentionally don't include the init operand in the list below. This makes
@@ -939,6 +1025,14 @@ template <typename OpTy> struct MatmulOpRewrite final : public OpRewritePattern<
                 srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
             );
             return success();
+        }
+
+        // Weight-first quant matmul: feed the packed int weight to the matA/WRAM slot
+        // for W-bus expand (see peelSiToFpWeightCast). The dequant scale stays as the
+        // downstream mul (scale-after-matmul). Only operand 0 is the weight slot:
+        // operand 1 is the IRAM/data slot and cannot carry an int weight vs a bf16 input.
+        if (Value intWeight = peelSiToFpWeightCast(lhs)) {
+            lhs = intWeight;
         }
 
         const std::vector<int32_t> bias = {0};

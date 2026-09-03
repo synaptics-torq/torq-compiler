@@ -68,9 +68,10 @@ static llvm::cl::opt<bool> clEnableBufferDebugInfo(
     llvm::cl::init(false)
 );
 
-// Keep this in sync with TorqHL storage-size calculation: i4 is packed, while
-// the other sub-byte integer types are not routed through this bit-packed path.
-static bool shouldPackSubByteIntegerBitWidth(int64_t bitWidth) { return bitWidth == 4; }
+// i2/i4 bit-packed (4/2 per byte). Keep in sync with getStorageBitWidth.
+static bool shouldPackSubByteIntegerBitWidth(int64_t bitWidth) {
+    return bitWidth == 4 || bitWidth == 2;
+}
 
 static int64_t computePackedSubByteIntegerSize(int64_t elementCount, int64_t bitWidth) {
     return (elementCount * bitWidth + 7) / 8;
@@ -773,9 +774,11 @@ iree_hal_torq_BufferDebugInfo_ref_t Serializer::createBufferDebugInfo(
     if (buffer.getType().getElementType().isInteger(1)) {
         elementType = iree_hal_torq_ElementType_I1;
     }
-    else if (buffer.getType().getElementType().isInteger(2) ||
-             buffer.getType().getElementType().isInteger(6)) {
-        assert(false && "i2/i6 dtype requires support to materialize this data type");
+    else if (buffer.getType().getElementType().isInteger(2)) {
+        elementType = iree_hal_torq_ElementType_I2;
+    }
+    else if (buffer.getType().getElementType().isInteger(6)) {
+        assert(false && "i6 dtype requires support to materialize this data type");
     }
     else if (buffer.getType().getElementType().isInteger(4)) {
         elementType = iree_hal_torq_ElementType_I4;

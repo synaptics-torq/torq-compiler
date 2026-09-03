@@ -55,6 +55,36 @@ def TorqConvertAllDTypes : Pass<"torq-convert-all-dtypes", "mlir::ModuleOp"> {
   let dependentDialects = ["arith::ArithDialect"];
 }
 
+def TorqNarrowWeightConst : Pass<"torq-narrow-weight-const", "mlir::ModuleOp"> {
+  let summary =
+      "Narrows a signed-integer constant consumed by a sitofp weight cast to a sub-byte type";
+  let description = [{
+    Matches a linalg.generic that is a pure per-element `sitofp(iN constant) -> float`
+    widening (identity maps, all-parallel, body just the cast) and, when every constant
+    value fits a narrower packed sub-byte type (i2 [-2,1] / i4 [-8,7]), rewrites the
+    constant and the cast's input to that type.
+
+    The rewrite is local and value-preserving because the constant's only consumer is
+    the widening cast, which absorbs the narrower input width; the packed constant stays
+    a signless sub-byte int and the sitofp keeps the signedness.
+
+    Signed only. An unsigned (uitofp) weight is left alone: the W-bus weight expand keys
+    signedness off the weight dtype, so a signless sub-byte int is read back as signed
+    and large unsigned values are corrupted.
+
+    Gated to constants consumed as a matmul weight operand (operand 0 of a linalg
+    contraction, through reshape casts). That is the only consumer that rides the
+    Torq W-bus expand path (DEWR bit-stride load + on-load expand to bf16), which
+    streams the packed sub-byte weight instead of i8/bf16 and cuts weight DMA.
+    Narrowing a constant consumed anywhere else is pointless or worse: the cast would
+    stay a standalone unpack that materializes the full bf16 weight to XRAM and
+    reloads it, discarding the packing's DMA saving. Runs before dispatch formation so
+    a narrowed weight flows into the matmul dispatch.
+  }];
+  let constructor = "mlir::syna::torq::createTorqNarrowWeightConstPass()";
+  let dependentDialects = ["arith::ArithDialect", "linalg::LinalgDialect"];
+}
+
 //===---------------------------------------------------------------------===//
 
 def FoldConstants :

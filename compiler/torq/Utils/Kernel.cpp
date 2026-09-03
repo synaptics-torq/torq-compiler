@@ -398,7 +398,13 @@ int sizeofType(DType type) {
 }
 
 DType getDType(mlir::Type mlirType) {
-    if (mlirType.isUnsignedInteger(4)) {
+    if (mlirType.isUnsignedInteger(2)) {
+        return DType::uint2;
+    }
+    else if (mlirType.isInteger(2)) {
+        return DType::int2;
+    }
+    else if (mlirType.isUnsignedInteger(4)) {
         return DType::uint4;
     }
     else if (mlirType.isInteger(4)) {
@@ -3022,6 +3028,8 @@ int WRam::size() const {
 int WRam::transposeWidth(DType type) const { return d->wramTransposeWidth(type); }
 
 int WRam::transposeHeight() const { return d->wramTransposeHeight(); }
+
+DType WRam::weightType() const { return d->_wram.elementType; }
 
 // Determine the weight memory format
 // Asserts if in-memory weight type not compatible with the destination (wbus) weight type

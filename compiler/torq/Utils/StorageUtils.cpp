@@ -12,8 +12,9 @@
 namespace mlir::syna {
 
 int64_t getStorageBitWidth(int64_t elementBitWidth) {
-    if (elementBitWidth == 4) {
-        return 4;
+    // i2/i4 bit-packed end-to-end; others round up to a byte.
+    if (elementBitWidth == 4 || elementBitWidth == 2) {
+        return elementBitWidth;
     }
     return torq::div_ceil(elementBitWidth, 8) * 8;
 }

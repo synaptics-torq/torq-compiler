@@ -144,7 +144,10 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
 
     int outRowVectSize = slice.wram.transposeHeight();
     // int outRowVectSize = std::min(slice.wram.transposeHeight(), output.dim(MatC::M));
-    int rowChunks = slice.wram.transposeWidth(matA.elementType());
+    // The transposable width is bound by the type the weights occupy in WRAM, which is the
+    // expanded type when the in-memory weight is compressed or narrower than the input type.
+    int inputWidth = slice.alu.iWidth(matB.elementType(), matA.elementType());
+    int rowChunks = slice.wram.transposeWidth(slice.wram.weightType());
 
     // Find the largest divisor of K that is less than or equal to rowChunks
     while (matA.dim(MatA::K) % rowChunks != 0 && rowChunks > 1) {
@@ -156,7 +159,7 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     matA.reshapeDim(MatA::K, {-1, rowChunks});      // Split each row in rowChunks
     matA.reshapeDim(MatA::M, {-1, outRowVectSize}); // Split rows in groups of outRowVectSize
 
-    matB.vectorize(slice.alu.iWidth(matB.elementType(), matA.elementType()));
+    matB.vectorize(inputWidth);
     matB.reshapeDim(MatB::K, {-1, rowChunks}); // Split rows in rowChunks
 
     BData bdata = slice.bram.load(biasScale);
