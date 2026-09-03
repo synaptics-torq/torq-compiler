@@ -146,9 +146,16 @@ static FailureOr<InterleaveConversion> convertToInterleaved(
     int64_t strideValue = 1;
     for (size_t i = 0; i < staticStrides.size(); ++i) {
         if (staticStrides[i] > 1) {
+            if (interleavedDim >= 0) {
+                // More than one strided dimension (a 2-D ConvTranspose upsample,
+                // e.g. stride 2x2): InterleavedInsertOp expands rows along a single
+                // axis, so lowering here would silently drop the second axis'
+                // interleave and scramble the conv input. Keep such cases on the
+                // plain strided-insert path.
+                return failure();
+            }
             interleavedDim = i;
             strideValue = staticStrides[i];
-            break;
         }
     }
 
