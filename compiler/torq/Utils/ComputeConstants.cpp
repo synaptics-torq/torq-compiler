@@ -1,5 +1,6 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
@@ -88,6 +89,12 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
     if (values.empty() || values.size() != opsSets.size()) {
         return failure();
     }
+
+    // The Codegen dialect's attribute uniquers must be initialized before
+    // creating TranslationInfoAttr below; under --compile-to=input (or any
+    // pipeline that never reaches the translation phase) the dialect has not
+    // been loaded yet.
+    context->getOrLoadDialect<IREE::Codegen::IREECodegenDialect>();
 
     OpBuilder builder(topModuleOp);
 
