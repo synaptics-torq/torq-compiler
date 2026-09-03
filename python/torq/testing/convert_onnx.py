@@ -191,8 +191,10 @@ def _convert_int64_tensor_data(tensor: TensorProto, name: str, stats: dict) -> b
 
     Fails (raises ValueError) if any value falls outside the int32 range:
     silently truncating out-of-range values would corrupt the model, so this
-    is a hard correctness gate rather than a warning. Returns True when the
-    tensor was converted.
+    is a hard correctness gate rather than a warning. The sole exception is
+    the INT64_MIN/INT64_MAX sentinel pair: transformer attention masks use
+    them as -inf/+inf proxies, and clamping them to INT32_MIN/INT32_MAX
+    preserves that role exactly. Returns True when the tensor was converted.
     """
     if tensor.data_type != TensorProto.INT64:
         return False
@@ -206,6 +208,17 @@ def _convert_int64_tensor_data(tensor: TensorProto, name: str, stats: dict) -> b
         return False
 
     if values.size:
+        # Clamp exact int64 sentinels before the range gate (see docstring).
+        sentinel_mask = (values == np.int64(2**63 - 1)) | (values == np.int64(-(2**63)))
+        if sentinel_mask.any():
+            values = values.copy()
+            values[values == np.int64(2**63 - 1)] = np.int64(2**31 - 1)
+            values[values == np.int64(-(2**63))] = np.int64(-(2**31))
+            stats["sentinel_clamped_tensors"] = stats.get("sentinel_clamped_tensors", 0) + 1
+            print(
+                f"[INT32] tensor '{name}': clamped {int(sentinel_mask.sum())} "
+                f"INT64_MIN/MAX sentinel value(s) to INT32_MIN/MAX"
+            )
         v_min, v_max = int(values.min()), int(values.max())
         if v_max >= 2**31 or v_min < -(2**31):
             raise ValueError(
@@ -494,7 +507,9 @@ def convert_int64_to_int32(model: onnx.ModelProto) -> onnx.ModelProto:
         graph.node.extend(new_nodes)
     repair_count = len(repairs)
 
-    print(f"[INT32] Converted {stats['tensor_count']} tensors, max |value|: {stats['max_abs']}")
+    sentinel_count = stats.get("sentinel_clamped_tensors", 0)
+    sentinel_note = f", {sentinel_count} sentinel-clamped" if sentinel_count else ""
+    print(f"[INT32] Converted {stats['tensor_count']} tensors, max |value|: {stats['max_abs']}{sentinel_note}")
     print(f"[INT32] Retargeted {cast_count} Cast node(s), "
           f"updated {type_count} tensor type annotation(s), "
           f"inserted {repair_count} Cast-to-int64 repair node(s)")
