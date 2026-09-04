@@ -105,11 +105,10 @@ def case_config(request, chip_config):
     # The next-group hardware needs a larger NSS program-size
     # budget than the default SL2610; bump it only for those chips.
     next_chip = chip_config.data["target"] != "SL2610"
-    if next_chip:
-        # 0x939E00 == 9674240 bytes (~9.23 MB); str() keeps the CLI value decimal.
-        torq_compiler_options += ["--torq-max-nss-programs-size", str(0x939E00)]
-        # These larger compiles need more than the default 300s compiler timeout.
-        comp_config["torq_compiler_timeout"] = 1000
+
+    # These larger compiles need more than the default 300s compiler timeout.
+    comp_config["torq_compiler_timeout"] = 1000
+    torq_compiler_options += ["--torq-max-nss-programs-size", str(0xA7B200)]
 
     comp_config["torq_compiler_options"] = torq_compiler_options
 

@@ -295,6 +295,26 @@ class FoldNoOpConversion : public OpRewritePattern<ConvertOp> {
     }
 };
 
+class FoldBufferizedSelfCopy : public OpRewritePattern<ConvertOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(ConvertOp op, PatternRewriter &rewriter) const override {
+
+        // only applies to the bufferized (memref) form
+        if (op.getOutput()) {
+            return failure();
+        }
+
+        if (op.getInput() != op.getInit()) {
+            return failure();
+        }
+
+        rewriter.eraseOp(op);
+        return success();
+    }
+};
+
 // removes conversions from dense xram to no encoding since it's the same
 // encoding, this can be done only if we can change the type on the producer
 // of the input value (we cannot change the downstream operations because there
@@ -382,6 +402,7 @@ class FoldXramToDefaultConversion : public OpRewritePattern<ConvertOp> {
 
 void ConvertOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context) {
     results.add<FoldNoOpConversion>(context);
+    results.add<FoldBufferizedSelfCopy>(context);
     results.add<FoldXramToDefaultConversion>(context);
 }
 

@@ -763,7 +763,7 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             computeBiasAndRescaleInfo(*fusionPlanOr, _channelDim, optionalWeightZpV, scInfo);
         if (failed(biasV)) {
             LLVM_DEBUG({ llvm::dbgs() << "computeBias: no bias found, setting zero bias\n"; });
-            biasV = getDefaultBiasScale(convOp, finalType, rewriter);
+            biasV = getDefaultBiasScale(convOp, finalType, rewriter, 1);
         }
         for (auto &op : llvm::reverse(fusionPlanOr->opsToFuse)) {
             if (op->use_empty()) {

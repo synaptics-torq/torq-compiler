@@ -167,7 +167,6 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
     funcPm.addPass(createLinalgToTorqHLConversionPass());
     funcPm.addPass(createCanonicalizerPass());
 
-    // op segment output feature enabled by default, disabled it for cross-check
     if (!clDisableSeg) {
         funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
     }
@@ -186,6 +185,16 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
     auto lramSize = getLramSizeBasedOnBudget(optimizeForTileAndFuse);
     funcPm.addPass(createFoldConvertPass(lramSize));
     funcPm.addPass(createCanonicalizerPass());
+
+    // Tile TorqHL ops with large inputs before encoding so the tiled ops receive
+    // the same encoding as all other ops.  The pass inline-unrolls its loops so
+    // all tensor shapes are static by the time EncodeTensorsPass runs.
+    if (!optimizeForTileAndFuse) {
+        funcPm.addPass(createTorqHLTileLargeInputsPass());
+        // Tiling leaves each tile slicing a whole-tensor torq_hl.convert; swap
+        // that to only convert the slice each tile actually reads.
+        funcPm.addPass(createSwapConvertExtractSlicePass());
+    }
 }
 
 void addCpuPasses(OpPassManager &pm) {

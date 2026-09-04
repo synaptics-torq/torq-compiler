@@ -990,16 +990,22 @@ void FusionPlan::dump() const {
     }
 }
 
-Value getDefaultBiasScale(Operation *srcOp, RankedTensorType opType, PatternRewriter &rewriter) {
+Value getDefaultBiasScale(
+    Operation *srcOp, RankedTensorType opType, PatternRewriter &rewriter, int biasDim
+) {
     Value biasV;
     if (opType.getElementType().isFloat()) {
-        const std::vector<APFloat> bias(opType.getShape()[1], APFloat(0.0f));
-        biasV = createFConst(rewriter, *srcOp, bias, llvm::ArrayRef<int64_t>{opType.getShape()[1]});
+        const std::vector<APFloat> bias(opType.getShape()[biasDim], APFloat(0.0f));
+        biasV = createFConst(
+            rewriter, *srcOp, bias, llvm::ArrayRef<int64_t>{opType.getShape()[biasDim]}
+        );
     }
     else {
-        const std::vector<int32_t> bias(opType.getShape()[1], 0);
-        const std::vector<int32_t> scale(opType.getShape()[1], 1);
-        biasV = createI32Const(rewriter, *srcOp, interleave(bias, scale), opType.getShape()[1] * 2);
+        const std::vector<int32_t> bias(opType.getShape()[biasDim], 0);
+        const std::vector<int32_t> scale(opType.getShape()[biasDim], 1);
+        biasV = createI32Const(
+            rewriter, *srcOp, interleave(bias, scale), opType.getShape()[biasDim] * 2
+        );
     }
     return biasV;
 }

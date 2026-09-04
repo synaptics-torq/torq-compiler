@@ -55,6 +55,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createOutlineSliceProgramsPa
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createEliminateRedundantLramLoadsPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createMergeEmptyTensorPairsPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollForallLoopsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createBufferizePeeledForallInPlacePass();
@@ -109,6 +111,10 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollDynamicShapeLoop
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createReplaceForLoopsWithMidIterationPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileReductionForLramPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHLTileLargeInputsPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createSwapConvertExtractSlicePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createDtcmTilePass();
 

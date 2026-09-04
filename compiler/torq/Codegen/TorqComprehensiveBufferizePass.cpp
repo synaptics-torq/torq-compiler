@@ -39,6 +39,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
+#include "torq/Codegen/Passes.h"
 
 #include "Passes.h"
 
@@ -332,6 +333,10 @@ void addTorqComprehensiveBufferizePasses(
     // leaves the head forall init on the orphaned tensor.empty, forcing a temp +
     // copy. Point it at the output so the forall bufferizes in place.
     funcPassManager.addPass(createBufferizePeeledForallInPlacePass());
+    // EliminateEmptyTensorsPass cannot redirect a tensor.empty() whose only
+    // path to an insert_slice goes through an extract_slice (see
+    // MergeEmptyTensorPairsPass.cpp for why); merge those leftover pairs here.
+    funcPassManager.addPass(createMergeEmptyTensorPairsPass());
     funcPassManager.addPass(bufferization::createEmptyTensorToAllocTensorPass());
     funcPassManager.addPass(createIREEComprehensiveBufferizePass(allocationFn, memCpyFn, memSpaceFn)
     );

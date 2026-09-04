@@ -8,6 +8,7 @@ set(headers
 
 set(sources
   BufferizationInterfaces.cpp
+  TilingInterfaces.cpp
   TorqHLAttrs.cpp
   TorqHLDialect.cpp
   TorqHLOps.cpp
@@ -22,6 +23,7 @@ set(deps
     iree::compiler::Dialect::HAL::IR::HALDialect
     MLIRControlFlowInterfaces
     MLIRIR
+    MLIRArithDialect
     MLIRLinalgDialect
     MLIRParser
     MLIRSCFDialect
@@ -55,7 +57,6 @@ if(TORQ_ENABLE_TORQ_GENERIC)
   list(APPEND sources
     GenericOp.cpp
     GenericOpBufferizableInterface.cpp
-    TilingInterfaces.cpp
   )
   list(APPEND defines ENABLE_TORQ_GENERIC)
 endif()

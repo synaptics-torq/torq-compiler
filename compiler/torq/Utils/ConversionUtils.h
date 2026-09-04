@@ -603,6 +603,8 @@ Value createClonedBlock(
     int fusionStartIdx, int fusionEndIdx, llvm::SmallVectorImpl<Operation *> &opsToDelete
 );
 
-Value getDefaultBiasScale(Operation *srcOp, RankedTensorType opType, PatternRewriter &rewriter);
+Value getDefaultBiasScale(
+    Operation *srcOp, RankedTensorType opType, PatternRewriter &rewriter, int biasDim
+);
 
 } // namespace mlir::syna::torq

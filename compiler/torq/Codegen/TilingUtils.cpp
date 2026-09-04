@@ -162,11 +162,25 @@ void rewriteAffineOpInLoop(RewriterBase &rewriter, LoopLikeOpInterface loopOp) {
     for (auto [iv, lb, ub, step] : llvm::zip_equal(ivs, lbs, ubs, steps)) {
         std::optional<APInt> tripCount =
             constantTripCount(lb, ub, step, /*isSigned=*/true, scf::computeUbMinusLb);
-        if (!tripCount || tripCount->getSExtValue() < 2)
+        if (!tripCount)
             continue;
 
         int64_t lbVal = *getConstantIntValue(lb);
         int64_t stepVal = *getConstantIntValue(step);
+
+        if (tripCount->getSExtValue() == 1) {
+            // Single-trip loop: IV is always exactly lb.
+            // Express as two inequalities (lb ≤ iv and iv ≤ lb) so that
+            // canonicalizeMinMaxOp can prove affine.min/max expressions are
+            // constant across the loop body.
+            constraints.appendDimVar({iv});
+            constraints.addInequality({1, -lbVal}); // iv - lb >= 0
+            constraints.addInequality({-1, lbVal}); // lb - iv >= 0
+            continue;
+        }
+
+        if (tripCount->getSExtValue() < 2)
+            continue;
 
         constraints.appendDimVar({iv});
         constraints.addInequality({-1, (lbVal + stepVal * (tripCount->getSExtValue() - 1))});

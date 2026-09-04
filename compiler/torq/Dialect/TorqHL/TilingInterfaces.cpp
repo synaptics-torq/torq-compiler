@@ -32,9 +32,162 @@
 
 using namespace mlir;
 using namespace mlir::linalg;
+using namespace mlir::syna;
 
 //===----------------------------------------------------------------------===//
-// Utility methods for implementation of Tiling Interface for Linalg ops
+// Shared helpers used by every TorqHL TilingInterface model
+//===----------------------------------------------------------------------===//
+
+/// Extract a ranked-tensor slice.  Stride is always 1 on every dimension.
+static Value makeSlice(
+    OpBuilder &b, Location loc, Value tensor, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes
+) {
+    SmallVector<OpFoldResult> strides(offsets.size(), b.getIndexAttr(1));
+    return tensor::ExtractSliceOp::create(b, loc, tensor, offsets, sizes, strides);
+}
+
+/// Size of dimension `d` of a tensor as an OpFoldResult (folds when static).
+static OpFoldResult dimOf(OpBuilder &b, Location loc, Value tensor, unsigned d) {
+    return b.createOrFold<tensor::DimOp>(loc, tensor, d);
+}
+
+/// Full iteration range for dimension `d` of `tensor`: [0, size, 1].
+static Range fullRange(OpBuilder &b, Location loc, Value tensor, unsigned d) {
+    return {b.getIndexAttr(0), dimOf(b, loc, tensor, d), b.getIndexAttr(1)};
+}
+
+/// Extract a constant from an OpFoldResult, falling back to `fallback`.
+/// Used for computing Conv2D padding adjustments that must remain static.
+static int64_t getConstOrFallback(OpFoldResult ofr, int64_t fallback) {
+    if (std::optional<int64_t> v = getConstantIntValue(ofr))
+        return *v;
+    return fallback;
+}
+
+/// Compute the tile of `scaleBias` that corresponds to tiling `channelCount`
+/// output channels at [chanOff, chanOff+chanSz).
+///
+/// `scaleBias.dim(0)` may equal `channelCount` (float: one value per channel)
+/// or `channelCount * factor` (quantized: `factor` values per channel, e.g.
+/// factor=2 for interleaved int8 scale+bias).  In both cases the tile starts
+/// at `chanOff * factor` and has size `chanSz * factor`.  If `dim(0)` is not
+/// an exact multiple of `channelCount` the tensor is returned unchanged.
+static Value sliceScaleBias(
+    OpBuilder &b, Location loc, Value scaleBias, int64_t channelCount, OpFoldResult chanOff,
+    OpFoldResult chanSz
+) {
+    auto sbTy = cast<RankedTensorType>(scaleBias.getType());
+    int64_t sbDim0 = sbTy.getDimSize(0);
+    if (sbDim0 % channelCount != 0)
+        return scaleBias;
+
+    int64_t factor = sbDim0 / channelCount;
+    AffineExpr d0;
+    bindDims(b.getContext(), d0);
+    // Scale the channel offset/size by the interleaving factor.
+    OpFoldResult sbOff0 = affine::makeComposedFoldedAffineApply(b, loc, d0 * factor, {chanOff});
+    OpFoldResult sbSz0 = affine::makeComposedFoldedAffineApply(b, loc, d0 * factor, {chanSz});
+
+    SmallVector<OpFoldResult> sbOffs(sbTy.getRank(), b.getIndexAttr(0));
+    SmallVector<OpFoldResult> sbSzs;
+    sbOffs[0] = sbOff0;
+    sbSzs.push_back(sbSz0);
+    for (unsigned d = 1; d < (unsigned)sbTy.getRank(); ++d)
+        sbSzs.push_back(dimOf(b, loc, scaleBias, d));
+    return makeSlice(b, loc, scaleBias, sbOffs, sbSzs);
+}
+
+//===----------------------------------------------------------------------===//
+// Conv2D spatial input window helper
+//
+// Given an output-space tile [outOff, outOff+outSz) along one spatial dim,
+// compute:
+//   - The corresponding input slice start and size (after clamping to [0, inDimSz)).
+//   - The new padding values for the tiled op.
+//
+// The math (all values are in element coordinates):
+//
+//   in_start_unc = outOff * stride - padLow              (may be negative)
+//   in_end_unc   = (outOff + outSz - 1) * stride
+//                + (kernelSz - 1) * dilation + 1 - padLow
+//
+//   in_start = max(0, in_start_unc)                      (clamp to valid input)
+//   in_end   = min(inDimSz, in_end_unc)
+//   in_size  = in_end - in_start
+//
+//   new_padLow  = max(0, -in_start_unc)                  (= max(0, padLow - outOff*stride))
+//   new_padHigh = max(0, in_end_unc - inDimSz)
+//
+// When outOff == 0 and outSz == H_out (i.e., no spatial tiling), these simplify
+// to the original pad values — so the formula is always safe to apply.
+//
+// NOTE: new_padLow and new_padHigh are returned as static constants when
+// outOff / outSz are constants (the common case after PeelTileLoopsPass).
+// When they are dynamic (SCF loop IVs), getConstOrFallback preserves the
+// original padding, which is correct for N / C_out tiling where spatial
+// offsets stay at 0 / full-range.
+//===----------------------------------------------------------------------===//
+struct SpatialSlice {
+    OpFoldResult start; // clamped input start
+    OpFoldResult size;  // clamped input size
+    int64_t newPadLow;  // updated padding on the low side
+    int64_t newPadHigh; // updated padding on the high side
+};
+
+static SpatialSlice computeSpatialSlice(
+    OpBuilder &b, Location loc, OpFoldResult outOff, OpFoldResult outSz, int64_t stride,
+    int64_t dilation, int64_t padLow, int64_t padHigh, int64_t kernelSz, int64_t inDimSz
+) {
+    MLIRContext *ctx = b.getContext();
+    AffineExpr d0, d1;
+    bindDims(ctx, d0, d1);
+
+    // in_start_unc = d0 * stride - padLow
+    OpFoldResult inStartUnc =
+        affine::makeComposedFoldedAffineApply(b, loc, d0 * stride - padLow, {outOff});
+
+    // in_end_unc = (d0 + d1 - 1) * stride + (kernelSz - 1) * dilation + 1 - padLow
+    int64_t kernelSpan = (kernelSz - 1) * dilation + 1;
+    OpFoldResult inEndUnc = affine::makeComposedFoldedAffineApply(
+        b, loc, (d0 + d1 - 1) * stride + kernelSpan - padLow, {outOff, outSz}
+    );
+
+    // in_start = max(0, in_start_unc)
+    AffineMap maxZeroMap = AffineMap::get(1, 0, {getAffineConstantExpr(0, ctx), d0}, ctx);
+    Value inStartUncVal = getValueOrCreateConstantIndexOp(b, loc, inStartUnc);
+    Value inStart = affine::AffineMaxOp::create(b, loc, maxZeroMap, inStartUncVal);
+
+    // in_end = min(inDimSz, in_end_unc)
+    AffineMap minMap = AffineMap::get(1, 0, {getAffineConstantExpr(inDimSz, ctx), d0}, ctx);
+    Value inEndUncVal = getValueOrCreateConstantIndexOp(b, loc, inEndUnc);
+    Value inEnd = affine::AffineMinOp::create(b, loc, minMap, inEndUncVal);
+
+    Value inSize = arith::SubIOp::create(b, loc, inEnd, inStart);
+
+    // new_padLow  = max(0, padLow - outOff * stride)
+    //             = max(0, -in_start_unc)
+    int64_t newPadLow =
+        getConstOrFallback(inStartUnc, 0) < 0 ? -getConstOrFallback(inStartUnc, 0) : 0;
+    // Tighten: keep original pad when outOff is not statically 0.
+    if (std::optional<int64_t> offConst = getConstantIntValue(outOff))
+        newPadLow = std::max(int64_t(0), padLow - *offConst * stride);
+    else
+        newPadLow = padLow; // dynamic offset: fall back to original
+
+    int64_t newPadHigh = 0;
+    if (std::optional<int64_t> offConst = getConstantIntValue(outOff)) {
+        if (std::optional<int64_t> szConst = getConstantIntValue(outSz)) {
+            int64_t endUnc = (*offConst + *szConst - 1) * stride + kernelSpan - padLow;
+            newPadHigh = std::max(int64_t(0), endUnc - inDimSz);
+        }
+    }
+
+    return {getAsOpFoldResult(inStart), getAsOpFoldResult(inSize), newPadLow, newPadHigh};
+}
+
+//===----------------------------------------------------------------------===//
+// External Model for implementing `TilingInterface` for `LinalgOp`s.
 //===----------------------------------------------------------------------===//
 
 /// Return the SSA values that represent the data point accessed using a given
@@ -483,8 +636,322 @@ struct LinalgOpPartialReductionInterface
 
 } // namespace
 
+//===----------------------------------------------------------------------===//
+// TilingInterface for torq_hl::MatMulOp
+//
+// input1/input2/init are 2D [M,K]/[K,N]/[M,N], or 3D with a leading batch dim
+// [B,M,K]/[B,K,N]/[B,M,N] (B is usually 1). numBatchDims = init.rank() - 2.
+//
+// Iteration domain: numBatchDims + 2 dims, all parallel
+//   dim [0, numBatchDims)  — batch (parallel), full range every tile
+//   dim numBatchDims       — M (parallel) : init.dim(numBatchDims) = input1.dim(numBatchDims)
+//   dim numBatchDims + 1   — N (parallel) : init.dim(numBatchDims+1) = input2.dim(numBatchDims+1)
+//
+// K (the shared contraction dimension, the last dim of input1/input2) is a
+// reduction that is never tiled; the full K range is included in every tile.
+//
+// Operand slicing for tile [b0:b0+bSz, m0:m0+mSz, n0:n0+nSz] (batch elided if numBatchDims==0):
+//   input1 [.., M, K]  → [.., m0:m0+mSz, 0:K]   (slice batch/M, keep full K)
+//   input2 [.., K, N]  → [.., 0:K, n0:n0+nSz]   (slice batch, keep full K, slice N)
+//   scale_bias         → [n0:n0+nSz] if dim0==N,  (per-output-channel)
+//                        unchanged if global scalar
+//   init   [.., M, N]  → [.., m0:m0+mSz, n0:n0+nSz]
+//===----------------------------------------------------------------------===//
+struct MatMulOpTilingInterface
+    : public TilingInterface::ExternalModel<MatMulOpTilingInterface, torq_hl::MatMulOp> {
+
+    SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
+        auto mm = cast<torq_hl::MatMulOp>(op);
+        int64_t rank = cast<RankedTensorType>(mm.getInit().getType()).getRank();
+        return SmallVector<utils::IteratorType>(rank, utils::IteratorType::parallel);
+    }
+
+    SmallVector<Range> getIterationDomain(Operation *op, OpBuilder &b) const {
+        auto mm = cast<torq_hl::MatMulOp>(op);
+        Location loc = op->getLoc();
+        int64_t rank = cast<RankedTensorType>(mm.getInit().getType()).getRank();
+        SmallVector<Range> ranges;
+        for (int64_t d = 0; d < rank; ++d)
+            ranges.push_back(fullRange(b, loc, mm.getInit(), d));
+        return ranges;
+    }
+
+    FailureOr<TilingResult> getTiledImplementation(
+        Operation *op, OpBuilder &b, ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes
+    ) const {
+        auto mm = cast<torq_hl::MatMulOp>(op);
+        Location loc = op->getLoc();
+        OpFoldResult zero = b.getIndexAttr(0);
+
+        auto initTy = cast<RankedTensorType>(mm.getInit().getType());
+        unsigned numBatchDims = initTy.getRank() - 2;
+
+        OpFoldResult mOff = offsets[numBatchDims], nOff = offsets[numBatchDims + 1];
+        OpFoldResult mSz = sizes[numBatchDims], nSz = sizes[numBatchDims + 1];
+
+        // K is the reduction dimension — always take the full slice.
+        OpFoldResult kSz = dimOf(b, loc, mm.getInput1(), numBatchDims + 1);
+
+        // A batch dim may broadcast (operand size 1) even where the iteration
+        // domain (from init) is larger, so clamp to [0, 1) there instead of
+        // slicing past the operand's actual size.
+        auto clampBatchDims = [&](Value operand) {
+            auto ty = cast<RankedTensorType>(operand.getType());
+            SmallVector<OpFoldResult> batchOffsets, batchSizes;
+            for (unsigned d = 0; d < numBatchDims; ++d) {
+                if (ty.getDimSize(d) == 1) {
+                    batchOffsets.push_back(zero);
+                    batchSizes.push_back(b.getIndexAttr(1));
+                }
+                else {
+                    batchOffsets.push_back(offsets[d]);
+                    batchSizes.push_back(sizes[d]);
+                }
+            }
+            return std::make_pair(batchOffsets, batchSizes);
+        };
+
+        auto [batchOffsets1, batchSizes1] = clampBatchDims(mm.getInput1());
+        SmallVector<OpFoldResult> input1Offsets = batchOffsets1;
+        input1Offsets.append({mOff, zero});
+        SmallVector<OpFoldResult> input1Sizes = batchSizes1;
+        input1Sizes.append({mSz, kSz});
+        Value tiledInput1 = makeSlice(b, loc, mm.getInput1(), input1Offsets, input1Sizes);
+
+        auto [batchOffsets2, batchSizes2] = clampBatchDims(mm.getInput2());
+        SmallVector<OpFoldResult> input2Offsets = batchOffsets2;
+        input2Offsets.append({zero, nOff});
+        SmallVector<OpFoldResult> input2Sizes = batchSizes2;
+        input2Sizes.append({kSz, nSz});
+        Value tiledInput2 = makeSlice(b, loc, mm.getInput2(), input2Offsets, input2Sizes);
+
+        int64_t outN = initTy.getDimSize(numBatchDims + 1);
+        Value tiledSB = sliceScaleBias(b, loc, mm.getScaleBias(), outN, nOff, nSz);
+
+        Value tiledInit = makeSlice(b, loc, mm.getInit(), offsets, sizes);
+
+        auto tiledOp = torq_hl::MatMulOp::create(
+            b, loc, tiledInit.getType(), tiledInit, mm.getOutputZpAttr(), mm.getOutputMinAttr(),
+            mm.getOutputMaxAttr(), mm.getShiftAttr(), tiledSB, tiledInput1, tiledInput2
+        );
+        return TilingResult{{tiledOp}, SmallVector<Value>(tiledOp->getResults())};
+    }
+
+    LogicalResult getResultTilePosition(
+        Operation *, OpBuilder &, unsigned, ArrayRef<OpFoldResult> offsets,
+        ArrayRef<OpFoldResult> sizes, SmallVector<OpFoldResult> &resultOffsets,
+        SmallVector<OpFoldResult> &resultSizes
+    ) const {
+        // Output tile position equals the full (batch + [M, N]) iteration domain tile.
+        resultOffsets = llvm::to_vector(offsets);
+        resultSizes = llvm::to_vector(sizes);
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
+// TilingInterface for torq_hl::FullyConnectedOp
+//
+// Semantically the same as MatMul:
+//   output[M, N] = input[M, K] * weights[K, N]
+//
+// Iteration domain: 2D — [M (parallel), N (parallel)]
+// The K reduction is never tiled.
+//
+// Operand slicing for tile [m0:m0+mSz, n0:n0+nSz]:
+//   input   [M, K]  → [m0:m0+mSz, 0:K]
+//   weights [K, N]  → [0:K, n0:n0+nSz]   (FC weights are already [K, N], reduction-dim major)
+//   scale_bias      → [n0:n0+nSz] if per-channel, unchanged otherwise
+//   init    [M, N]  → [m0:m0+mSz, n0:n0+nSz]
+//===----------------------------------------------------------------------===//
+struct FullyConnectedOpTilingInterface
+    : public TilingInterface::ExternalModel<
+          FullyConnectedOpTilingInterface, torq_hl::FullyConnectedOp> {
+
+    SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
+        return {utils::IteratorType::parallel, utils::IteratorType::parallel};
+    }
+
+    SmallVector<Range> getIterationDomain(Operation *op, OpBuilder &b) const {
+        auto fc = cast<torq_hl::FullyConnectedOp>(op);
+        Location loc = op->getLoc();
+        return {fullRange(b, loc, fc.getInit(), 0), fullRange(b, loc, fc.getInit(), 1)};
+    }
+
+    FailureOr<TilingResult> getTiledImplementation(
+        Operation *op, OpBuilder &b, ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes
+    ) const {
+        auto fc = cast<torq_hl::FullyConnectedOp>(op);
+        Location loc = op->getLoc();
+        OpFoldResult zero = b.getIndexAttr(0);
+
+        OpFoldResult mOff = offsets[0], nOff = offsets[1];
+        OpFoldResult mSz = sizes[0], nSz = sizes[1];
+        OpFoldResult kSz = dimOf(b, loc, fc.getInput(), 1);
+
+        Value tiledInput = makeSlice(b, loc, fc.getInput(), {mOff, zero}, {mSz, kSz});
+        Value tiledWeights = makeSlice(b, loc, fc.getWeights(), {zero, nOff}, {kSz, nSz});
+
+        int64_t outN = cast<RankedTensorType>(fc.getInit().getType()).getDimSize(1);
+        Value tiledSB = sliceScaleBias(b, loc, fc.getScaleBias(), outN, nOff, nSz);
+
+        Value tiledInit = makeSlice(b, loc, fc.getInit(), {mOff, nOff}, {mSz, nSz});
+
+        auto tiledOp = torq_hl::FullyConnectedOp::create(
+            b, loc, tiledInit.getType(), tiledInit, fc.getInputZpAttr(), fc.getWeightZpAttr(),
+            fc.getOutputZpAttr(), fc.getOutputMinAttr(), fc.getOutputMaxAttr(),
+            fc.getShiftFactorAttr(), fc.getVectorizationModeAttr(), tiledWeights, tiledSB,
+            tiledInput, fc.getIsBatchScaledAttr()
+        );
+        return TilingResult{{tiledOp}, SmallVector<Value>(tiledOp->getResults())};
+    }
+
+    LogicalResult getResultTilePosition(
+        Operation *, OpBuilder &, unsigned, ArrayRef<OpFoldResult> offsets,
+        ArrayRef<OpFoldResult> sizes, SmallVector<OpFoldResult> &resultOffsets,
+        SmallVector<OpFoldResult> &resultSizes
+    ) const {
+        resultOffsets = {offsets[0], offsets[1]};
+        resultSizes = {sizes[0], sizes[1]};
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
+// TilingInterface for torq_hl::Conv2DOp  (NCHW layout)
+//
+// Iteration domain: 7D
+//   dim 0 — N     (parallel)  : batch        — init.dim(0)
+//   dim 1 — C_out (parallel)  : out channels — init.dim(1)
+//   dim 2 — H_out (parallel)  : output rows  — init.dim(2)
+//   dim 3 — W_out (parallel)  : output cols  — init.dim(3)
+//   dim 4 — C_in  (reduction) : in channels  — weights.dim(1)
+//   dim 5 — KH    (reduction) : kernel rows  — weights.dim(2)
+//   dim 6 — KW    (reduction) : kernel cols  — weights.dim(3)
+//
+// Tiling parallel dims only (scf::tileUsingSCF sets reduction tile sizes to 0,
+// meaning the full reduction range is retained in each parallel tile).
+//
+// Spatial tiling (H_out, W_out) — see computeSpatialSlice above for the
+// input window formula.  The Conv2DOp `pad` attribute is adjusted per tile
+// to reflect what portion of the virtual padded input each tile actually sees.
+//===----------------------------------------------------------------------===//
+struct Conv2DOpTilingInterface
+    : public TilingInterface::ExternalModel<Conv2DOpTilingInterface, torq_hl::Conv2DOp> {
+
+    SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
+        return {
+            utils::IteratorType::parallel,  // N
+            utils::IteratorType::parallel,  // C_out
+            utils::IteratorType::parallel,  // H_out
+            utils::IteratorType::parallel,  // W_out
+            utils::IteratorType::reduction, // C_in
+            utils::IteratorType::reduction, // KH
+            utils::IteratorType::reduction, // KW
+        };
+    }
+
+    SmallVector<Range> getIterationDomain(Operation *op, OpBuilder &b) const {
+        auto conv = cast<torq_hl::Conv2DOp>(op);
+        Location loc = op->getLoc();
+        Value init = conv.getInit(), weights = conv.getWeights();
+        return {
+            fullRange(b, loc, init, 0),    // N
+            fullRange(b, loc, init, 1),    // C_out
+            fullRange(b, loc, init, 2),    // H_out
+            fullRange(b, loc, init, 3),    // W_out
+            fullRange(b, loc, weights, 1), // C_in
+            fullRange(b, loc, weights, 2), // KH
+            fullRange(b, loc, weights, 3), // KW
+        };
+    }
+
+    FailureOr<TilingResult> getTiledImplementation(
+        Operation *op, OpBuilder &b, ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes
+    ) const {
+        auto conv = cast<torq_hl::Conv2DOp>(op);
+        Location loc = op->getLoc();
+        OpFoldResult zero = b.getIndexAttr(0);
+
+        // offsets/sizes index the 7D iteration domain.
+        OpFoldResult nOff = offsets[0], nSz = sizes[0];
+        OpFoldResult coOff = offsets[1], coSz = sizes[1];
+        OpFoldResult hOff = offsets[2], hSz = sizes[2];
+        OpFoldResult wOff = offsets[3], wSz = sizes[3];
+
+        auto weightTy = cast<RankedTensorType>(conv.getWeights().getType());
+
+        // weights [C_out, C_in, KH, KW, ...]: dim 0 may store C_out directly, or
+        // C_out/packingFactor with `packingFactor` channels interleaved into a
+        // trailing dim (e.g. vectorization_mode packs 4 channels together, so
+        // dim0 holds C_out/4 groups).  Divide the C_out offset/size by that
+        // factor before slicing dim 0, so we never slice past dim0's actual size.
+        Value weights = conv.getWeights();
+        int64_t wRank = weightTy.getRank();
+        int64_t cOutFull = cast<RankedTensorType>(conv.getInit().getType()).getDimSize(1);
+        int64_t weightDim0 = weightTy.getDimSize(0);
+        if (cOutFull % weightDim0 != 0) {
+            return op->emitError() << "C_out (" << cOutFull
+                                   << ") must be an exact multiple of the weight's dim0 size ("
+                                   << weightDim0 << ")";
+        }
+        int64_t packingFactor = cOutFull / weightDim0;
+
+        OpFoldResult wgtOff0 = coOff, wgtSz0 = coSz;
+        if (packingFactor > 1) {
+            AffineExpr d0;
+            bindDims(b.getContext(), d0);
+            wgtOff0 =
+                affine::makeComposedFoldedAffineApply(b, loc, d0.floorDiv(packingFactor), {coOff});
+            wgtSz0 =
+                affine::makeComposedFoldedAffineApply(b, loc, d0.floorDiv(packingFactor), {coSz});
+        }
+
+        SmallVector<OpFoldResult> wgtOff(wRank, zero), wgtSz;
+        wgtOff[0] = wgtOff0;
+        wgtSz.push_back(wgtSz0);
+        for (int64_t d = 1; d < wRank; ++d)
+            wgtSz.push_back(dimOf(b, loc, weights, d));
+        Value tiledWeights = makeSlice(b, loc, weights, wgtOff, wgtSz);
+
+        // scale_bias: slice proportionally to the C_out tile — handles both
+        // float (dim0 == C_out) and quantized int8 (dim0 == C_out * 2, i.e.
+        // interleaved scale+bias per channel).
+        Value tiledSB = sliceScaleBias(b, loc, conv.getScaleBias(), cOutFull, coOff, coSz);
+
+        // init (output) [N, C_out, H_out, W_out]
+        Value tiledInit =
+            makeSlice(b, loc, conv.getInit(), {nOff, coOff, hOff, wOff}, {nSz, coSz, hSz, wSz});
+
+        auto tiledOp = torq_hl::Conv2DOp::create(
+            b, loc, tiledInit.getType(), tiledInit, conv.getInputZpAttr(), conv.getWeightZpAttr(),
+            conv.getOutputZpAttr(), conv.getOutputMinAttr(), conv.getOutputMaxAttr(),
+            conv.getShiftFactorAttr(), conv.getGroupsAttr(), conv.getPadAttr(),
+            conv.getStrideAttr(), conv.getDilationAttr(), conv.getVectorizationModeAttr(),
+            tiledWeights, tiledSB, conv.getInput(), conv.getNhwcInputAttr(),
+            conv.getSegmentOutputAttr()
+        );
+        return TilingResult{{tiledOp}, SmallVector<Value>(tiledOp->getResults())};
+    }
+
+    LogicalResult getResultTilePosition(
+        Operation *, OpBuilder &, unsigned, ArrayRef<OpFoldResult> offsets,
+        ArrayRef<OpFoldResult> sizes, SmallVector<OpFoldResult> &resultOffsets,
+        SmallVector<OpFoldResult> &resultSizes
+    ) const {
+        // Result tile = [N, C_out, H_out, W_out] parallel dims.
+        resultOffsets = {offsets[0], offsets[1], offsets[2], offsets[3]};
+        resultSizes = {sizes[0], sizes[1], sizes[2], sizes[3]};
+        return success();
+    }
+};
+
 void mlir::syna::torq_hl::registerTilingInterfaceExternalModels(DialectRegistry &registry) {
     registry.addExtension(+[](MLIRContext *ctx, mlir::syna::torq_hl::TorqHLDialect *dialect) {
+        torq_hl::MatMulOp::attachInterface<MatMulOpTilingInterface>(*ctx);
+        torq_hl::FullyConnectedOp::attachInterface<FullyConnectedOpTilingInterface>(*ctx);
+        torq_hl::Conv2DOp::attachInterface<Conv2DOpTilingInterface>(*ctx);
+
 #ifdef ENABLE_TORQ_GENERIC
         // this matches what is promised in TorqHLDialect::initialize
         torq_hl::GenericOp::attachInterface<LinalgOpTilingInterface<torq_hl::GenericOp>>(*ctx);

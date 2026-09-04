@@ -29,10 +29,13 @@ set(sources
     CreateGlobalsPass.cpp
     EliminateRedundantLramLoadsPass.cpp
     EncodeTensorsPass.cpp
+    MergeEmptyTensorPairsPass.cpp
     FoldConvertPass.cpp
     KernelSelectionPass.cpp
     LinalgSlicingPass.cpp
     LinalgTilePass.cpp
+    TorqHLTilePass.cpp
+    SwapConvertExtractSlicePass.cpp
     LowerArithConstantsPass.cpp
     LowerCallProgramToStartWaitPass.cpp
     LowerHostCopiesToNpuPass.cpp

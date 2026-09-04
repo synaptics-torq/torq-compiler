@@ -465,6 +465,49 @@ def TileReductionForLram:
     ];
 }
 
+def TorqHLTileLargeInputs:
+    InterfacePass<"torq-hl-tile-large-inputs",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Tile TorqHL ops whose input tensors exceed a size threshold";
+
+    let description = [{
+        After TorqHL conversion, tiles ops (conv, matmul, pool) whose any single
+        input tensor element count exceeds --torq-hl-tile-input-size-threshold,
+        using a fixed tile size per parallel domain.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createTorqHLTileLargeInputsPass()";
+
+    let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect",
+        "::mlir::scf::SCFDialect"
+    ];
+}
+
+def SwapConvertExtractSlice:
+    InterfacePass<"torq-swap-convert-extract-slice",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Swap extract_slice(convert) to convert(extract_slice)";
+
+    let description = [{
+        After tiling, a tile's extract_slice often reads from a torq_hl.convert
+        that converted its whole source tensor up front. Slices the conversion's
+        pre-conversion input instead, so only the region a tile actually reads is
+        ever converted.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createSwapConvertExtractSlicePass()";
+
+    let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect",
+        "::mlir::tensor::TensorDialect"
+    ];
+}
+
 def DtcmTile:
     InterfacePass<"torq-dtcm-tile",
                   "mlir::FunctionOpInterface"> {
@@ -626,6 +669,15 @@ def EliminateRedundantLramLoads :
         let constructor = "mlir::syna::torq::createEliminateRedundantLramLoadsPass()";
         let dependentDialects = [
             "syna::torq_hl::TorqHLDialect"
+        ];
+}
+
+def MergeEmptyTensorPairs :
+    InterfacePass<"torq-merge-empty-tensor-pairs", "mlir::FunctionOpInterface"> {
+        let summary = "Merge sibling tensor.empty pairs left behind by EliminateEmptyTensorsPass";
+        let constructor = "mlir::syna::torq::createMergeEmptyTensorPairsPass()";
+        let dependentDialects = [
+            "tensor::TensorDialect"
         ];
 }
 

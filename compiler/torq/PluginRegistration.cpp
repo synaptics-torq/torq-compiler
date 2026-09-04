@@ -66,9 +66,9 @@ struct TORQSession : public PluginSession<
         registry.insert<mlir::syna::torq_hl::TorqHLDialect>();
         registry.insert<mlir::syna::torq_hw::TorqHWDialect>();
         torq_hl::registerBufferizationInterfaceExternalModels(registry);
+        torq_hl::registerTilingInterfaceExternalModels(registry);
 #ifdef ENABLE_TORQ_GENERIC
         torq_hl::registerGenericOpBufferizableOpInterfaceExternalModel(registry);
-        torq_hl::registerTilingInterfaceExternalModels(registry);
 #endif // ENABLE_TORQ_GENERIC
 
         // These are used for JIT compilation of constant manipulation functions
