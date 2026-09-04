@@ -6,7 +6,7 @@
 
 """ONNX fake-quantization helpers.
 
-Pure ONNX-model transforms (no pytest). Requires the ``onnx`` extra.
+Pure ONNX-model transforms. Requires the ``onnx`` extra.
 """
 
 import onnx

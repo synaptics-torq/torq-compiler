@@ -22,7 +22,6 @@ from torq.gen_config.core import (
     _discovery_log,
     _get_json_path,
     _load_json,
-    _opt,
 )
 from torq.gen_config._state import ExecutorDiscoveryState
 
@@ -154,7 +153,7 @@ def _print_final_report(config, discovery_state: ExecutorDiscoveryState):
     summary = discovery_state.get_summary()
     critical_failures = _get_all_critical_failures(discovery_state)
 
-    model_path = _opt(config, "--model", "--model-path")
+    model_path = config.model_path
     model_name = Path(model_path).stem if model_path else "unknown"
     subgraph_suffix = getattr(discovery_state, "subgraph_suffix", None)
     json_path = _get_json_path(config, model_name, subgraph_suffix)

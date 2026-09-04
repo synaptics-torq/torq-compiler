@@ -6,9 +6,9 @@
 
 """Core reusable logic for TORQ executor config generation.
 
-This module contains pytest-independent helpers for JSON I/O, executor
-recommendation, and report formatting so they can be imported by both the
-CLI and the pytest-based discovery engine.
+This module contains helpers for JSON I/O, executor
+recommendation, and report formatting shared by the CLI and the standalone
+discovery engine.
 """
 
 import json
@@ -21,24 +21,22 @@ DEFAULT_TOLERANCE = {"fp_avg_tol": 0.01, "fp_max_tol": 0.01}
 EXECUTOR_ORDER = ["nss", "css", "host"]
 TIMING_PRECISION = 3  # Decimal places for timing values
 
+# Process-wide verbosity lives in torq.lab.logging (shared with the ONNX
+# helpers in torq.lab); the CLI's discover/run entry points set it from
+# --verbose. Re-exported here so existing torq.gen_config.core users keep
+# working.
+from torq.lab.logging import is_verbose, set_verbose
+
 
 def _discovery_log(msg: str) -> None:
-    """Write discovery diagnostic output to stderr."""
+    """Write essential discovery output to stderr (always shown)."""
     print(msg, file=sys.stderr)
 
 
-def _opt(config, short: str, legacy: str, default=None):
-    """Check short (canonical) option first, then legacy alias."""
-    try:
-        val = config.getoption(short, default=None)
-        if val is not None and val != default:
-            return val
-    except ValueError:
-        pass
-    try:
-        return config.getoption(legacy, default=default)
-    except ValueError:
-        return default
+def _discovery_vlog(msg: str) -> None:
+    """Write detailed discovery output to stderr (only with --verbose)."""
+    if is_verbose():
+        print(msg, file=sys.stderr)
 
 
 def is_line_column_format(location: str) -> bool:
@@ -65,7 +63,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         try:
             with open(path) as f:
                 data = json.load(f)
-            _discovery_log(f"[ExecutorJSON] Loaded {len(data.get('ops', {}))} op(s) from {path}")
+            _discovery_vlog(f"[ExecutorJSON] Loaded {len(data.get('ops', {}))} op(s) from {path}")
             return data
         except Exception as e:
             _discovery_log(f"[ExecutorJSON] Error loading {path}: {e}")
@@ -125,7 +123,7 @@ def save_compiler_config(
     """Generate and save the compiler-format config from *discovery_data*."""
     compiler_data = generate_compiler_config(discovery_data, model_name)
     save_config(path, compiler_data)
-    _discovery_log(f"[CompilerJSON] Saved {len(compiler_data['op_assignments'])} assignment(s) to {path}")
+    _discovery_vlog(f"[CompilerJSON] Saved {len(compiler_data['op_assignments'])} assignment(s) to {path}")
 
 
 def get_mac_debug_config_path(
@@ -177,16 +175,16 @@ def save_mac_debug_config(
     """Generate and save the MAC-count debug config."""
     debug_data = generate_mac_debug_config(mac_counts, mac_details, model_name)
     save_config(path, debug_data)
-    _discovery_log(f"[MacDebugJSON] Saved MAC metadata for {len(debug_data['ops'])} op(s) to {path}")
+    _discovery_vlog(f"[MacDebugJSON] Saved MAC metadata for {len(debug_data['ops'])} op(s) to {path}")
 
 
 def _get_json_path(
     config, model_name: Optional[str] = None, subgraph_suffix: Optional[str] = None
 ) -> Path:
     """Get path to executor assignments JSON file."""
-    output_dir = _opt(config, "--output-dir", "--gen-config-output")
+    output_dir = config.output_dir
     if model_name is None:
-        model_path = _opt(config, "--model", "--model-path")
+        model_path = config.model_path
         model_name = Path(model_path).stem if model_path else "auto_discovered"
     return get_config_path(model_name, output_dir, subgraph_suffix)
 

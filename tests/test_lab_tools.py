@@ -66,11 +66,22 @@ def test_path_fallback(tmp_path, monkeypatch):
     onpath = _make_exe(tmp_path / "bin", name="torq-run-module")
     monkeypatch.setenv("PATH", str(onpath.parent) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setattr(tools, "_runtime_packaged_dirs", list)
+    monkeypatch.setattr(tools, "_dev_tree_tool_dirs", list)
     assert tools.find_run_tool() == str(onpath)
+
+
+def test_dev_tree_before_path(tmp_path, monkeypatch):
+    devtree = _make_exe(tmp_path / "build" / "runtime" / "tools")
+    onpath = _make_exe(tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(onpath.parent) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.setattr(tools, "_compiler_packaged_dirs", list)
+    monkeypatch.setattr(tools, "_dev_tree_tool_dirs", lambda: [str(devtree.parent)])
+    assert tools.find_compile_tool() == str(devtree)
 
 
 def test_not_found(monkeypatch):
     monkeypatch.setattr(tools, "_compiler_packaged_dirs", list)
+    monkeypatch.setattr(tools, "_dev_tree_tool_dirs", list)
     monkeypatch.setenv("PATH", "")
     with pytest.raises(FileNotFoundError):
         tools.find_compile_tool()

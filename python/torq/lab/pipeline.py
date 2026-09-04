@@ -135,7 +135,9 @@ class ModelPipeline:
                 raise LabError(
                     "--random-inputs requires an MLIR spec source to know input shapes/dtypes"
                 )
-            inputs = io.generate_random_inputs(spec)
+            inputs = io.generate_random_inputs(
+                spec, seed=self.config.input_seed, ranges=self.config.input_ranges
+            )
         else:
             return [], []
         inputs = [

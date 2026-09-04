@@ -13,6 +13,8 @@
 7. [How to Add a New Model Format](#7-how-to-add-a-new-model-format)
 8. [How to Add a New CLI Subcommand](#8-how-to-add-a-new-cli-subcommand)
 9. [Testing Architecture](#9-testing-architecture)
+10. [Standalone CLI Options](#10-standalone-cli-options)
+11. [TFLite Discovery (Removed)](#11-tflite-discovery-removed)
 
 ---
 
@@ -24,16 +26,22 @@ layer of a model should run on. It produces two JSON files:
 - **Report JSON** — complete discovery data for humans and tools
 - **Compiler JSON** — minimal assignments consumed by the C++ `ExecutorAssignmentPass`
 
-The system is split into three layers:
+The system has a single entry path — the standalone CLI:
 
 ```
-CLI (cli.py) ───(subprocess)───► pytest ───► discovery.py
-                                                  ├── _state.py
-                                                  ├── _report.py
-                                                  ├── _cases.py
-                                                  ├── _utils.py
-                                                  └── core.py
+CLI (cli.py) ───(in-process)───► _runner.py ───► torq.lab (compile/run/compare)
+                                      ├── _options.py   (DiscoveryConfig)
+                                      ├── _cache.py     (versioned artifact cache)
+                                      ├── _state.py
+                                      ├── _report.py
+                                      ├── _onnx.py / _convert_onnx.py
+                                      └── core.py
 ```
+
+`discover` and `run` call `_runner.run_discovery()` /
+`_runner.run_full_model()` in-process, so the CLI runs standalone from an
+installed wheel with no source checkout. The standalone engine is the only
+path, and discovery is ONNX-only.
 
 ---
 
@@ -41,31 +49,39 @@ CLI (cli.py) ───(subprocess)───► pytest ───► discovery.py
 
 ```
 python/torq/gen_config/
-├── __init__.py          Empty (all imports go through discovery.py)
+├── __init__.py          Package init; exposes the CLI `main` lazily (PEP 562
+│                        __getattr__) so submodule imports stay cheap.
 ├── __main__.py          Entry for `python -m torq.gen_config`
 │
-├── cli.py               CLI entry point (argparse + subprocess orchestration)
+├── cli.py               CLI entry point (argparse; discover/run call
+│                        _runner.py in-process)
 ├── view.py              Human-readable report viewer (standalone script)
 │
 ├── core.py              Shared utilities: JSON I/O, recommendation, tolerance,
-│                        timing, report computation. No pytest dependency.
+│                        timing, report computation.
 ├── _utils.py            MLIR parsing, diff metrics, table formatting.
+├── _utils_mac.py        Per-layer MAC count computation (ONNX), plus a TFLite
+│                        helper kept for the torq.testing shim.
 │
 ├── _state.py            ExecutorDiscoveryState class + global singleton.
-│                        Accumulates results during a pytest session.
+│                        Accumulates results during a discovery run.
 ├── _report.py           Report generation: sections, final report, JSON persistence.
 │                        Format-agnostic — works with any ExecutorDiscoveryState.
-├── _cases.py            ONNX-specific: pytest fixtures, test parametrization,
-│                        executor_discovery(), BF16 conversion, subgraph extraction.
 │
-├── quantize_onnx.py     ONNX QDQ/QOperator quantization helpers.
-│
-├── discovery.py         PUBLIC ENTRY POINT. Re-exports from _state, _report,
-│                        and _cases. Everything outside gen_config/ imports
-│                        from here.
-│
-└── pytest_plugin.py     Pytest hooks: option registration, log redirection,
-                         terminal progress, error recording.
+├── _options.py          DiscoveryConfig dataclass: every discover/run option
+│                        as a plain typed field.
+│                        from_argparse() maps the CLI namespace onto it.
+├── _cache.py            Content-versioned artifact cache. Root is always
+│                        absolute (tools run with a different CWD).
+└── _runner.py           Standalone engine: case generation, skip/dedup,
+                         compile+run+compare loop, incremental JSON, reports.
+                         Driven by cli.py.
+
+    (ONNX layer/subgraph extraction, ONNX dtype conversions, ONNX
+     quantization, the TFLite FlatBuffer layer extractor, the Case
+     container and the verbosity flag live in torq.lab: onnx.py,
+     convert_onnx.py, quantize_onnx.py, tflite.py, types.py, logging.py —
+     re-exported by torq.testing for the in-tree test framework.)
 ```
 
 ### Responsibility split
@@ -74,21 +90,21 @@ python/torq/gen_config/
 |--------|---------|:---:|
 | `core.py` | JSON I/O, recommendation, tolerance | No |
 | `_utils.py` | MLIR line numbers, diff parsing, table formatting | No |
+| `_utils_mac.py` | MAC counts per layer | **Yes** (ONNX) |
 | `_state.py` | Accumulate discovery results in memory | No |
 | `_report.py` | Generate human-readable reports from state | No |
-| `_cases.py` | ONNX fixtures, hooks, test generation | **Yes** |
-| `quantize_onnx.py` | ONNX quantization (QDQ / QOperator) | **Yes** |
-| `cli.py` | argparse, subprocess, user-facing commands | No |
+| `_options.py` | `DiscoveryConfig` option container | No |
+| `_cache.py` | Versioned artifact cache | No |
+| `_runner.py` | Standalone discovery/run engine | **Yes** (ONNX) |
+| `torq.lab` (`onnx`, `convert_onnx`, `quantize_onnx`, `tflite`, `types`, `logging`) | ONNX extraction/conversion/quantization, TFLite layer extraction, `Case`, verbosity | **Yes** (ONNX) |
+| `cli.py` | argparse, user-facing commands (in-process) | No |
 | `view.py` | Pretty-print report / compiler JSONs | No |
-| `discovery.py` | Public re-export facade | No |
-| `pytest_plugin.py` | Pytest option registration, log redirection | No |
 
 ### Key helpers in `core.py`
 
 | Function | Purpose | Used by |
 |----------|---------|---------|
-| `_opt(config, short, legacy, default)` | Resolve pytest option aliases (canonical name first, then legacy fallback). Enables smooth option renaming without breaking existing CLI invocations. | `pytest_plugin.py`, `_cases.py` |
-| `_build_report_from_ops(ops)` | Shared report computation: given an `ops` dict, returns `(summary, critical_failures, rows)`. Used by both live discovery (`_report.py`) and JSON editing (`cli.py`) without circular imports. | `_report.py`, `cli.py` |
+| `_build_report_from_ops(ops)` | Shared report computation: given an `ops` dict, returns `(summary, critical_failures, rows)`. Used by both live discovery (`_report.py`) and JSON editing (`cli.py`, via `generate_final_report_text()`) without circular imports. | `_report.py`, `cli.py` |
 
 ---
 
@@ -99,52 +115,54 @@ python/torq/gen_config/
                         │ _utils   │
                         └────┬─────┘
                              │
-                   ┌─────────┼──────────┐
-                   │         │          │
-              ┌────▼───┐  ┌─▼────┐  ┌──▼────┐
-              │  core  │  │ view │  │pytest_│
-              └───┬────┘  └──────┘  │plugin │
-                  │                 └───┬───┘
-      ┌───────────┼───────────┐       │
-      │           │           │       │
-  ┌───▼───┐  ┌────▼───┐  ┌────▼──────▼───────┐
-  │ _state│  │_report │  │    _cases     │ ← ONNX-specific
-  └───┬───┘  └───┬────┘  └───────┬───────────┘
-      │          │               │
-      │          │       ┌───────┴───────┐
-      │          │       │               │
-      │          │   ┌───▼─────┐         │
-      │          │   │quantize │         │
-      │          │   │_onnx    │         │
-      └────┬─────┴───┴────┬────┴─────────┘
+                   ┌─────────┴──────────┐
+                   │                    │
+              ┌────▼───┐           ┌───▼────┐
+              │  core  │           │  view  │
+              └───┬────┘           └────────┘
+                  │
+      ┌───────────┼───────────┐
+      │           │           │
+  ┌───▼───┐  ┌────▼───┐  ┌────▼─────────┐     ┌─────────┐ ┌────────┐
+  │ _state│  │_report │  │    _runner   │◄────│ _options │ │ _cache │
+  └───┬───┘  └───┬────┘  └───────┬──────┘     └─────────┘ └────────┘
+      │          │               │  (also: _utils_mac, torq.lab)
+      │          │       ┌────────┴───────┐
+      │          │       │                │
+      │          │  ┌────▼─────┐     ┌────▼─────┐
+      │          │  │lab.quant │     │ lab.onnx │
+      │          │  │ize_onnx  │     └──────────┘
+      │          │  └──────────┘
+      └────┬─────┴───┴────┬────┘
            │              │
-      ┌────▼──────────────▼──────────────┐
-      │            discovery.py          │ ← public facade
-      └────┬─────────────────────────────┘
-           │
-      ┌────▼────────────┐
-      │ external callers│
-      │ test_onnx_gen_  │
-      │ config.py       │
-      └─────────────────┘
+      ┌────▼──────────────▼──────┐
+      │          cli.py          │ ◄── torq-gen-config /
+      └──────────────────────────┘     python -m torq.gen_config
+                                        (imports _runner lazily, in-process)
 ```
 
 **Rules:**
 
-1. `core.py` depends only on `_utils.py` and stdlib — it has no pytest or
+1. `core.py` depends only on `_utils.py` and stdlib — it has no
    model-format dependencies. One import from `_utils` is deferred (inside a
    function) to avoid a circular dependency.
-2. `_report.py` does **not** import from `_cases.py` — no circular dependency.
-3. `_cases.py` is the only format-specific module. It imports from
-   `_state`, `_report`, `core`, and `_utils`.
-4. `discovery.py` is a pure re-export facade. It imports from `_state`,
-   `_report`, and `_cases`. No logic lives here.
-5. Everything outside `gen_config/` imports from `discovery.py` only.
-   No external code imports `_state`, `_report`, or `_cases` directly.
-6. `quantize_onnx.py` is a helper used by `_cases.py`; it is not imported by
-   `discovery.py`.
-7. `view.py` and `pytest_plugin.py` are internal utilities that import from
-   `_utils` (and `core` for the plugin). They are not part of the public API.
+2. `_runner.py` holds the discovery/run engine; the ONNX-specific extraction
+   and conversion live in `torq.lab.onnx` / `torq.lab.convert_onnx`,
+   quantization in `torq.lab.quantize_onnx`.
+3. No module in the package may import the test framework (`torq.testing`)
+   — this is enforced by `scripts/verify_torq_wheel.sh`, which checks the
+   packaged modules for test-framework imports and asserts that importing
+   the CLI does not pull them into `sys.modules`.
+4. `torq.lab.quantize_onnx` is the quantization helper used by `_runner.py`
+   and `cli.py`.
+5. `view.py` is an internal utility that imports from `_utils`; it is not
+   part of the public API (the CLI is the public surface).
+6. `torq.testing` keeps thin compatibility shims (`quantize_onnx.py`,
+   `convert_onnx.py`, `tflite_layer_extractor.py`, `cases.py`) that
+   re-export from `torq.lab`; nothing imports the other way.
+7. The TFLite FlatBuffer layer extractor lives in `torq.lab.tflite` as a
+   utility (used by the `_utils_mac.py` TFLite MAC helper and the
+   `torq.testing` shim); it plays no role in discovery.
 
 ---
 
@@ -213,7 +231,7 @@ Quantization is implemented in `quantize_onnx.py`. It takes an FP32 ONNX model a
 
 ```
 _user passes --quantize --full-integer --quant-format=qdq_
-_cases.py:_maybe_apply_quantization()
+_runner.py:_maybe_apply_quantization()
     ├── quantize the full model/subgraph once
     ├── import the quantized ONNX into MLIR
     ├── build mapping: original layer op-type → quantized compute-op line
@@ -232,7 +250,7 @@ The C++ `ExecutorAssignmentPass` must receive line numbers from the **final** qu
    - Each surviving compute op keeps its correct quantized MLIR line number.
 4. Stores `node_index` as an index into the compute-only op list.
 
-`pytest_plugin.py:_update_discovery_json_line_numbers()` uses the same compute-only list when resolving `_node_index`, and falls back to op-type matching (or clears stale locations) for fused/skipped layers.
+`_runner.py:_update_discovery_json_line_numbers()` uses the same compute-only list when resolving `_node_index`, and falls back to op-type matching (or clears stale locations) for fused/skipped layers.
 
 ### Quantization options
 
@@ -257,15 +275,16 @@ full quantization design, mapping algorithm, and CLI examples.
 User: torq-gen-config discover --model model.onnx ...
 
 cli.py:cmd_discover()
-    ├── Map CLI flags → pytest extra_args
-    └── subprocess: pytest tests/test_onnx_gen_config.py -k "_layer_"
-
-        pytest loads pytest_plugin.py → registers options, sets up logging
-        discovery.py:pytest_generate_tests() → generates layer × executor matrix
-        For each test:
-            executor_discovery() → compile → run → compare → record_result()
-        save_progress fixture → _save_discovery_results() → writes both JSONs
-        pytest_sessionfinish → _print_final_report() → terminal + log file
+    ├── _validate_model_and_flags() (model exists, ONNX, flag exclusivity)
+    ├── DiscoveryConfig.from_argparse(args)
+    └── _runner.run_discovery(cfg)                     (in-process)
+        ├── _generate_test_cases() → layer × executor matrix
+        │     (BF16/INT32/quantize conversion, subgraph extraction, dedup)
+        ├── for each chip resolved from --torq-hw, for each case:
+        │     skip/dedup checks → compile (torq.lab.ModelPipeline)
+        │     → run → compare vs reference → record into _state
+        │     → _save_discovery_results() after every case (both JSONs)
+        └── _finalize_report() → save + print final report
 ```
 
 ### `run`
@@ -275,15 +294,15 @@ User: torq-gen-config run --model model.onnx ...
 
 cli.py:cmd_run()
     ├── Verify report or compiler JSON exists
-    └── subprocess: pytest tests/test_onnx_gen_config.py -k "_full_model"
-
-        torq_torq_gen_config_json fixture:
-            ├── _find_discovery_json() or _find_compiler_json()
-            ├── _update_discovery_json_line_numbers() (report only)
-            ├── generate_compiler_config()
-            └── Write to versioned_file → passed to C++ via --torq-executor-map
-
-        Full model compiles with executor assignments, runs, compares
+    ├── DiscoveryConfig.from_argparse(args)
+    └── _runner.run_full_model(cfg)                    (in-process)
+        ├── _resolve_executor_assignments():
+        │     ├── _find_discovery_json() or _find_compiler_json()
+        │     ├── _update_discovery_json_line_numbers() (report only)
+        │     ├── generate_compiler_config()
+        │     └── versioned copy → passed to C++ via --torq-executor-map
+        └── full-model compile → run → capture-stdout compare
+            → parse metrics → report
 ```
 
 ### `view`
@@ -323,101 +342,61 @@ cli.py:cmd_edit()
 ## 7. How to Add a New Model Format
 
 > **Note:** This branch focuses on ONNX models. The pattern below shows how a
-> new format could be added by creating a format-specific `_cases_<format>.py`
-> module that reuses the same discovery algorithm.
+> new format could be added by creating format-specific modules that reuse the
+> same discovery algorithm. New formats should put the cores in a
+> `_runner_<format>.py` (or format-specific functions inside `_runner.py`),
+> mirroring how the ONNX flow is split between `_runner.py` and `torq.lab.onnx`.
 
-### Step 1: Create `_cases_<format>.py`
+### Step 1: Create `_<format>.py` extraction/conversion helpers
 
-Copy the structure of `_cases.py` but replace ONNX-specific logic:
+Mirror `torq.lab.onnx` / `torq.lab.convert_onnx`: model loading,
+layer/subgraph extraction, and conversion to MLIR:
 
 ```python
-# _cases_<format>.py
-"""<Format> executor discovery test cases and fixtures."""
+# _<format>.py
+"""<Format> layer/subgraph extraction and model conversion."""
 
-import pytest
-
-from torq.gen_config._state import ExecutorDiscoveryState, _discovery_state
-from torq.gen_config.core import (
-    DEFAULT_TOLERANCE, EXECUTOR_ORDER, _discovery_log,
-    _get_json_path, _load_json, _opt,
-    build_timing_data, get_tolerance, ...
-)
-from torq.gen_config._report import _get_all_critical_failures, _save_detailed_report
-
-# Format-specific model loading
-from torq.testing.<format> import load_<format>_model, generate_<format>_layers
+from torq.lab.types import Case
 
 
-def _discover_model_files(config):
-    """Discover <format> model files from --model-path."""
+def generate_<format>_layers_from_file(...) -> List[Case]:
+    """Extract one Case per layer (layer model + node index)."""
     ...
 
 
-def _build_<format>_to_mlir_mapping(model_path, mlir_file):
-    """Build mapping from <format> ops to MLIR line numbers."""
+def convert_<format>_to_mlir(model_path, out_dir) -> Path:
+    """Convert a (layer) model to MLIR via the toolchain."""
     ...
 
 
-def _generate_layer_cases(f, config):
-    """Generate test cases in <format> layer-extraction mode."""
-    ...
-
-
-def pytest_generate_tests(metafunc):
-    """Generate test cases for each layer."""
-    # Same pattern as _cases.py but with <format>-specific functions
-    ...
-
-
-@pytest.fixture
-def <format>_layer_model(request, layer_executor_case):
-    """Provide the <format> layer model."""
-    ...
-
-
-def executor_discovery(request, torq_results, reference_results,
-                       case_config, layer_executor_case, <format>_mlir_model_file,
-                       discovery_state=_discovery_state):
-    """Core executor discovery — same algorithm, different model format."""
-    # Same algorithm as _cases.py:executor_discovery()
+def build_<format>_to_mlir_mapping(model_path, mlir_file):
+    """Map <format> ops to full-model MLIR line:column locations."""
     ...
 ```
 
-### Step 2: Add re-exports to `discovery.py`
+### Step 2: Add the engine hooks in `_runner.py` (or `_runner_<format>.py`)
 
 ```python
-# discovery.py (add these lines)
-
-# Re-export <format> case generation and fixtures
-from torq.gen_config._cases_<format> import (
-    executor_discovery as executor_discovery_<format>,
-    pytest_generate_tests as pytest_generate_tests_<format>,
-    <format>_layer_model,
+def _generate_test_cases_<format>(cfg, cache):
+    """Generate (case, layer_id, executor, ...) tuples — same matrix as ONNX."""
     ...
-)
 ```
 
-### Step 3: Create the test entry point
+Reuse the shared machinery as-is: skip/dedup, the versioned cache drivers,
+`_compile_model()` / `_make_compare_fn()`, result recording into `_state.py`,
+and the `_report.py` final report — none of it is format-specific beyond the
+case tuple contents.
 
-```python
-# tests/test_<format>_gen_config.py
-"""Thin orchestration — same pattern as test_onnx_gen_config.py."""
+### Step 3: Wire the format into `cli.py`
 
-from torq.gen_config.discovery import pytest_generate_tests_<format> as pytest_generate_tests
-from torq.gen_config.discovery import (
-    executor_discovery_<format> as executor_discovery,
-    <format>_layer_model as onnx_layer_model,
-    reference_results,
-    ...
-)
-```
+Extend `_validate_model_and_flags()` to accept the new extension and dispatch
+to the format's `run_discovery()` / `run_full_model()` cores.
 
 ### Key principle
 
-The discovery algorithm (`executor_discovery()`) is format-agnostic in its
-structure — it compiles a layer, runs it, compares results, records status.
-Only the model loading, MLIR generation, and case parametrization are
-format-specific. These live in `_cases_<format>.py`.
+The discovery algorithm is format-agnostic in its structure — it compiles a
+layer, runs it, compares results, records status. Only the model loading,
+MLIR generation, and case parametrization are format-specific.
 
 ---
 
@@ -466,35 +445,116 @@ def test_compare(self):
 
 | File | What it tests | Runs as |
 |------|--------------|---------|
-| `tests/test_gen_config_cli.py` | All CLI options end-to-end | Subprocess (spawns pytest) |
-| `tests/test_onnx_gen_config.py` | ONNX discovery orchestration | Direct (imports from `discovery.py`) |
+| `tests/test_gen_config_cli.py` | Quantize helpers (module-level unit tests) + standalone CLI workflows (`TestStandaloneCliWorkflows`): one shared host-only discovery through the standalone engine, then `edit`/`view`/`run` against its JSON output | Unit tests run by default; workflows are opt-in via `-m gen_config_standalone` |
 
 ### CLI test pattern
 
-Each CLI test:
+Each CLI workflow test:
 1. Creates a temp directory
-2. Calls `_run_pytest_and_validate()` which spawns `pytest test_onnx_gen_config.py`
+2. Invokes the CLI exactly as users would (`python -m torq.gen_config ...`
+   in a subprocess)
 3. Validates the generated JSON (structure, fields, content)
 4. Cleans up temp directory + any generated JSONs
 
-### Adding tests for a new format
-
-Follow the same pattern as `test_gen_config_cli.py`:
-
-```python
-TEST_MODEL = PROJECT_ROOT / "tests/testdata/torch_models/example_gen_config.pt"
-
-class TestTorchGenConfigIntegration:
-    def test_basic_discovery(self):
-        ...
-```
+`scripts/verify_torq_wheel.sh` complements these as the packaging guard: it
+installs the compiler wheel into a clean venv, exercises the
+`torq-gen-config` console script, and asserts that no packaged
+`torq/gen_config` module imports the test framework (and that importing the
+CLI does not pull it into `sys.modules`).
 
 ### Running tests
 
 ```bash
-# All CLI integration tests
+# Fast unit tests (default)
 pytest tests/test_gen_config_cli.py -v
 
-# Specific test
-pytest tests/test_gen_config_cli.py -k "test_compiler_json" -v
+# Standalone end-to-end CLI workflows (opt-in; runs a real discovery through
+# the standalone engine)
+pytest tests/test_gen_config_cli.py -m gen_config_standalone -v
 ```
+
+---
+
+## 10. Standalone CLI Options
+
+Every discover/run option is a native `torq-gen-config` flag
+(`python3 -m torq.gen_config` is equivalent).
+
+| Option | Description |
+|--------|-------------|
+| `--model` | Path to ONNX model |
+| `--output-dir` | Directory for executor config JSON (default: current directory) |
+| `--skip-mode` | Stop after first success per layer |
+| `--recompute-cache` | Force recompute (ignore cache) |
+| `--debug-ir=DIR` | Dump IR for debugging |
+| `--skip-executors=nss,css` | Skip specific executors |
+| `--skip-ops=MaxPool,Add` | Skip specific ONNX op types |
+| `--auto-convert-bf16` | Convert FP32 to BF16 |
+| `--auto-convert-int32` | Convert INT64 tensors to INT32 |
+| `--save-bf16-model=PATH` | Save converted BF16 model |
+| `--subgraph-from=OP` | Subgraph start |
+| `--subgraph-to=OP` | Subgraph end |
+| `--collect-timing` | Collect compile and runtime timing data |
+| `--timing-runs=N` | Number of runtime runs for timing average (default: 1) |
+| `--recommend-by-timing` | Recommend fastest executor based on timing data |
+| `--log-file=PATH` | Redirect all output to log file |
+| `-v`, `--verbose` | Show detailed logs |
+| `--dedup-layers` | Detect duplicate layers and copy results |
+| `--quantize` | Quantize layers/full model to int8 |
+| `--per-channel` | Per-channel weight quantization |
+| `--full-integer` | Rewrite quantized I/O to int8 |
+| `--quant-format` | ONNX quantization format: `qdq` (default), `qoperator`, or `hybrid` |
+| `--torq-hw TARGET` | Target hardware for `torq-compile --torq-hw`: a target such as SL2610, or a chip name/group from `tests/testdata/chips` (default: `default` = SL2610) |
+| `--torq-hw-type TYPE` | Runtime hardware type passed to `torq-run-module --torq_hw_type` (default: `sim`) |
+| `--compiler-option OPT` | Extra option passed through to `torq-compile` (repeatable) |
+| `--runtime-option OPT` | Extra option passed through to `torq-run-module` (repeatable) |
+
+```bash
+# Layer discovery with skip mode
+torq-gen-config discover --model model.onnx --skip-mode
+
+# Full model with debug output
+torq-gen-config run --model model.onnx --debug-ir=tmp
+
+# Subgraph debugging
+torq-gen-config discover --model model.onnx --subgraph-from=StartOp --subgraph-to=EndOp
+
+# Skip crashing executors
+torq-gen-config discover --model model.onnx --skip-executors=nss
+
+# Timing-based executor recommendation
+torq-gen-config discover --model model.onnx --collect-timing --timing-runs=5 --recommend-by-timing
+
+# Redirect output to log file
+torq-gen-config discover --model model.onnx --log-file=discovery.log
+
+# Skip duplicate layers
+torq-gen-config discover --model model.onnx --dedup-layers --skip-mode
+
+# Re-test a single layer (scope a subgraph to that one op)
+torq-gen-config discover --model model.onnx \
+    --subgraph-from=Conv_0 --subgraph-to=Conv_0 \
+    --recompute-cache
+```
+
+---
+
+## 11. TFLite Discovery (Removed)
+
+TFLite discovery has been removed; `torq-gen-config` is ONNX-only. Passing a
+`.tflite` model to `discover` / `run` is rejected with an error.
+
+| Model extension | Entry point |
+|-----------------|------------------|
+| `.onnx` | `torq-gen-config discover` / `run` |
+| `.tflite` | not supported |
+
+`view` and `edit` still work on previously generated TFLite report JSONs —
+they operate on the generic `ops` format, which is format-agnostic. TFLite
+layers are keyed by operator name and index: `{OP_NAME}_{op_index}` (e.g.
+`CONV_2D_0`, `DEQUANTIZE_1`), and those IDs are used everywhere a layer ID is
+expected (`view`, `edit`).
+
+The FlatBuffer layer extractor (now `torq.lab.tflite`) remains available as a
+utility (TFLite MAC counting, `torq.testing` compatibility shims) but plays
+no role in discovery.

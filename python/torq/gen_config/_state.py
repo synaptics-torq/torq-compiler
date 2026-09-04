@@ -7,8 +7,7 @@
 """Executor discovery state management.
 
 Contains the ``ExecutorDiscoveryState`` class and the global singleton
-``_discovery_state`` used to accumulate results during a pytest discovery
-session.
+``_discovery_state`` used to accumulate results during a discovery run.
 """
 
 from pathlib import Path
@@ -19,6 +18,7 @@ from torq.gen_config.core import (
     EXECUTOR_ORDER,
     TIMING_PRECISION,
     _discovery_log,
+    _discovery_vlog,
 )
 
 
@@ -127,7 +127,7 @@ class ExecutorDiscoveryState:
                 self.mac_counts[layer_id] = mac_count
 
         if loaded_count > 0:
-            _discovery_log(f"Loaded {loaded_count} cached results from existing JSON")
+            _discovery_vlog(f"Loaded {loaded_count} cached results from existing JSON")
 
     def get_summary(self) -> Dict[str, Any]:
         """Get summary statistics."""

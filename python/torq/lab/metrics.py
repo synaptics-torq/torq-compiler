@@ -6,7 +6,7 @@
 
 """Generic measurement helpers: time a block and persist metrics to JSON.
 
-The pytest ``record_property`` adapter is in ``torq.testing.performance``.
+The ``record_property`` adapter is in ``torq.testing.performance``.
 """
 
 import contextlib

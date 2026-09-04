@@ -7,14 +7,16 @@
 """CLI entry point for torq-gen-config.
 
 Provides subcommands to discover, view, edit, and run TORQ executor configurations.
+
+``discover`` and ``run`` execute in-process via
+:mod:`torq.gen_config._runner`; no source checkout needed.
 """
 
 import argparse
 import fnmatch
-import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from torq.gen_config.core import (
     generate_compiler_config,
@@ -26,7 +28,7 @@ from torq.gen_config.core import (
 )
 from torq.gen_config._utils import format_per_layer_status_table
 from torq.gen_config.view import print_layer_details, print_summary
-from torq.testing.quantize_onnx import (
+from torq.lab.quantize_onnx import (
     _parse_quant_dtype,
     _parse_quant_format,
     add_onnx_quantization_args,
@@ -35,176 +37,41 @@ from torq.testing.quantize_onnx import (
 )
 
 
-DEFAULT_TEST_FILE = "tests/test_onnx_gen_config.py"
-TFLITE_TEST_FILE = "tests/test_tflite_gen_config.py"
-
-# CLI → pytest flag mapping.
-# Each entry: (pytest_flag_template, argparse_attr, is_bool).
-# Templates use {v} for the value placeholder; bool flags have no placeholder.
-_DISCOVER_FLAGS = [
-    ("--skip-mode",      "skip_mode",           True),
-    ("--skip-executors={v}",      "skip_executors",      False),
-    ("--skip-ops={v}",            "skip_ops",            False),
-    ("--auto-convert-bf16",       "auto_convert_bf16",   True),
-    ("--auto-convert-int32",      "auto_convert_int32",  True),
-    ("--save-bf16-model={v}",     "save_bf16_model",     False),
-    ("--subgraph-from={v}",       "subgraph_from",       False),
-    ("--subgraph-to={v}",         "subgraph_to",         False),
-    ("--collect-timing",          "collect_timing",      True),
-    ("--timing-runs={v}",         "timing_runs",         False),
-    ("--recommend-by-timing",     "recommend_by_timing", True),
-    ("--dedup-layers",            "dedup_layers",        True),
-    ("--gen-config-log-file={v}", "log_file",            False),
-    ("--recompute-cache",             "recompute_cache",       True),
-    ("--debug-ir={v}",                "debug_ir",              False),
-    ("--quantize",                    "quantize",              True),
-    ("--per-channel",                 "per_channel",           True),
-    ("--full-integer",                "full_integer",          True),
-    ("--quant-format={v}",            "quant_format",          False),
-    ("--quant-dtype={v}",             "quant_dtype",           False),
-]
-
-_RUN_FLAGS = [
-    ("--auto-convert-bf16",       "auto_convert_bf16",   True),
-    ("--auto-convert-int32",      "auto_convert_int32",  True),
-    ("--debug-ir={v}",            "debug_ir",            False),
-    ("--recompute-cache",         "recompute_cache",     True),
-    ("--gen-config-log-file={v}", "log_file",            False),
-    ("--subgraph-from={v}",       "subgraph_from",       False),
-    ("--subgraph-to={v}",         "subgraph_to",         False),
-    ("--quantize",                    "quantize",              True),
-    ("--per-channel",                 "per_channel",           True),
-    ("--full-integer",                "full_integer",          True),
-    ("--quant-format={v}",            "quant_format",          False),
-    ("--quant-dtype={v}",             "quant_dtype",           False),
-]
-
-
-def _build_extra_args(args: argparse.Namespace, flag_defs: list) -> List[str]:
-    """Build pytest extra_args from CLI args using a data-driven flag map."""
-    extra_args: List[str] = []
-    for template, attr, is_bool in flag_defs:
-        val = getattr(args, attr, None)
-        if val is None or val is False:
-            continue
-        extra_args.append(template if is_bool else template.format(v=val))
-    if getattr(args, "extra_options", None):
-        # Users may pass pytest flags either as `-s -v` or as `-- -s -v`.
-        # Strip the argparse separator `--` if it is the first token.
-        extra = list(args.extra_options)
-        if extra and extra[0] == "--":
-            extra = extra[1:]
-        extra_args.extend(extra)
-    return extra_args
-
-
-def _find_project_root() -> Path:
-    """Find the torq-compiler-dev project root by looking for tests/."""
-    cwd = Path.cwd()
-    for path in [cwd] + list(cwd.parents):
-        if (path / "tests" / "test_onnx_gen_config.py").exists():
-            return path
-    return cwd
-
-
-def _default_test_file(project_root: Path, model_path: str) -> str:
-    """Select the discovery test file based on the model file extension."""
-    if str(model_path).lower().endswith(".tflite"):
-        return str(project_root / TFLITE_TEST_FILE)
-    return str(project_root / DEFAULT_TEST_FILE)
-
-
-def _resolve_test_and_model(args: argparse.Namespace) -> Tuple[str, str]:
-    """Resolve test file path and model path from CLI args."""
-    project_root = _find_project_root()
+def _validate_model_and_flags(args: argparse.Namespace) -> Optional[str]:
+    """Shared discover/run validation; returns an error message or None."""
     model_path = args.model
     if not Path(model_path).exists():
-        raise FileNotFoundError(f"Model not found: {model_path}")
-    test_file = args.test_file or _default_test_file(project_root, model_path)
-    return test_file, model_path
-
-
-def _run_pytest(
-    test_file: str,
-    model_path: str,
-    test_filter: str,
-    output_dir: Optional[str],
-    extra_args: List[str],
-) -> int:
-    """Run pytest with the given filter and return its exit code."""
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        test_file,
-        "-v",
-        "-k",
-        test_filter,
-        f"--model-path={model_path}",
-    ]
-    if output_dir:
-        cmd.append(f"--output-dir={output_dir}")
-    cmd.extend(extra_args)
-
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd)
-    return result.returncode
+        return f"Model not found: {model_path}"
+    if str(model_path).lower().endswith(".tflite"):
+        return "standalone discovery/run supports ONNX models only; TFLite discovery was removed"
+    if args.auto_convert_bf16 and args.quantize:
+        return "--auto-convert-bf16 and --quantize are mutually exclusive."
+    if getattr(args, "auto_convert_int32", False) and args.quantize:
+        return "--auto-convert-int32 and --quantize are mutually exclusive."
+    return None
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
-    """Run executor discovery on an ONNX model."""
-    try:
-        test_file, model_path = _resolve_test_and_model(args)
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+    """Run executor discovery on an ONNX model (in-process)."""
+    error = _validate_model_and_flags(args)
+    if error:
+        print(f"Error: {error}", file=sys.stderr)
         return 1
 
-    if args.auto_convert_bf16 and args.quantize:
-        print(
-            "Error: --auto-convert-bf16 and --quantize are mutually exclusive.",
-            file=sys.stderr,
-        )
-        return 1
+    from torq.gen_config._options import DiscoveryConfig
+    from torq.gen_config._runner import run_discovery
 
-    if getattr(args, "auto_convert_int32", False) and args.quantize:
-        print(
-            "Error: --auto-convert-int32 and --quantize are mutually exclusive.",
-            file=sys.stderr,
-        )
-        return 1
-
-    extra_args = _build_extra_args(args, _DISCOVER_FLAGS)
-
-    return _run_pytest(
-        test_file=test_file,
-        model_path=model_path,
-        test_filter="_layer_",
-        output_dir=args.output_dir,
-        extra_args=extra_args,
-    )
+    return run_discovery(DiscoveryConfig.from_argparse(args))
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Run the full model test with discovered executor assignments."""
-    try:
-        test_file, model_path = _resolve_test_and_model(args)
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+    error = _validate_model_and_flags(args)
+    if error:
+        print(f"Error: {error}", file=sys.stderr)
         return 1
 
-    if args.auto_convert_bf16 and args.quantize:
-        print(
-            "Error: --auto-convert-bf16 and --quantize are mutually exclusive.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if getattr(args, "auto_convert_int32", False) and args.quantize:
-        print(
-            "Error: --auto-convert-int32 and --quantize are mutually exclusive.",
-            file=sys.stderr,
-        )
-        return 1
+    model_path = args.model
 
     # Verify config exists (report JSON or compiler JSON)
     model_name = Path(model_path).stem
@@ -228,19 +95,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         return 1
 
-    extra_args = _build_extra_args(args, _RUN_FLAGS)
+    from torq.gen_config._options import DiscoveryConfig
+    from torq.gen_config._runner import run_full_model
 
-    # Use '_full' filter so it matches both full-model (_full_model) and
-    # subgraph-full (_full) test cases.
-    test_filter = "_full"
-
-    return _run_pytest(
-        test_file=test_file,
-        model_path=model_path,
-        test_filter=test_filter,
-        output_dir=args.output_dir,
-        extra_args=extra_args,
-    )
+    return run_full_model(DiscoveryConfig.from_argparse(args))
 
 
 def cmd_quantize(args: argparse.Namespace) -> int:
@@ -559,16 +417,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         p.add_argument(
             "--model",
             required=True,
-            help="Path to the model (ONNX .onnx, TFLite .tflite, Torch .pt/.pth, or .py)",
+            help="Path to the ONNX model (.onnx)",
         )
         p.add_argument(
             "--output-dir",
             help="Directory for executor config JSON (default: current directory)",
         )
         p.add_argument(
-            "--test-file",
-            help="Path to the discovery test file (defaults by model type: "
-            "test_onnx_gen_config.py, test_tflite_gen_config.py, or inferred for Torch)",
+            "--torq-hw",
+            default="default",
+            metavar="TARGET",
+            help="Torq hardware target, e.g. SL2610 or a chip name from "
+            "tests/testdata/chips; default: SL2610 via 'default'",
+        )
+        p.add_argument(
+            "--torq-hw-type",
+            dest="torq_hw_type",
+            default="sim",
+            help="Runtime device type passed to torq-run-module --torq_hw_type "
+            "(default: sim)",
+        )
+        p.add_argument(
+            "--compiler-option",
+            action="append",
+            default=[],
+            metavar="OPT",
+            help="Extra option for torq-compile; repeatable",
+        )
+        p.add_argument(
+            "--runtime-option",
+            action="append",
+            default=[],
+            help="Extra option for torq-run-module; repeatable",
         )
         p.add_argument(
             "--auto-convert-bf16",
@@ -583,9 +463,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         p.add_argument("--log-file", help="Redirect output to log file")
         p.add_argument(
-            "extra_options",
-            nargs=argparse.REMAINDER,
-            help="Extra options passed directly to pytest. May be given as '-- -s -v' or simply '-s -v'",
+            "-v",
+            "--verbose",
+            action="store_true",
+            help="Show detailed logs (JSON cache activity, MLIR conversion, "
+            "comparison metrics, skip reasons)",
         )
 
     # discover

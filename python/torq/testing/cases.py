@@ -1,10 +1,16 @@
+# Copyright 2025-2026 Synaptics Inc.
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import pytest
 
+from typing import List, Dict
 
-from dataclasses import dataclass
-from typing import List, Dict, Any
-from pathlib import Path
+from torq.lab.types import Case, get_test_cases_from_files
+
+__all__ = ["Case", "get_test_cases_from_files", "get_test_cases_from_tf_model"]
 
 """
 
@@ -24,7 +30,7 @@ E.g.:
     def b_param(request):
         return request.param
 
-Pytest will generate 100 test cases (10x10). 
+Pytest will generate 100 test cases (10x10).
 
 However, you may want to only test a subset of these combinations. You can
 use the Case class to define the combinations you want to test.
@@ -48,20 +54,11 @@ E.g.:
 
 Pytest will now only generate the test cases defined in the Case instances.
 
+The plain ``Case`` dataclass and ``get_test_cases_from_files`` live in
+``torq.lab.types`` and are re-exported here; this module adds
+the hook and fixtures.
+
 """
-
-@dataclass
-class Case:
-
-    """
-    Name of the test case that will appear as test parameter in the test name
-    """
-    name: str
-
-    """
-    Data for the test case, typically a dictionary if more than one parameter is needed
-    """
-    data: Any
 
 
 def pytest_make_parametrize_id(config, val, argname):
@@ -84,22 +81,6 @@ def case_config(request) -> Dict:
     """
 
     return {}
-
-
-def get_test_cases_from_files(files: Path) -> List[Case]:
-    """
-    Generates test cases from a list of files, each file becomes a test case.
-
-    These test cases expect that the case_config fixture is overriden in the test module
-    to provide the actual test configuration (by using the file name in the appropriate
-    entry of the case_config dictionary output).
-    """
-    cases = []
-
-    for file_path in files:
-        cases.append(Case(file_path.name, file_path))
-
-    return cases
 
 
 def get_test_cases_from_tf_model(model, model_name, full_model=False) -> List[Case]:

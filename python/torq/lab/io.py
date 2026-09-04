@@ -8,7 +8,7 @@
 
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import ml_dtypes  # support for the bfloat16 dtype
 import numpy as np
@@ -167,20 +167,77 @@ def load_outputs(output_specs, output_paths) -> List[np.ndarray]:
     return outputs
 
 
-def generate_random_inputs(io_spec: MlirIoSpec, seed: int = 1234) -> List[np.ndarray]:
-    """Generate uniform random input arrays for each input tensor spec."""
-    rng = np.random.default_rng(seed)
+def _resolve_input_range(
+    ranges: Dict[str, Tuple[float, float]], index: int, spec: TensorType
+) -> Optional[Tuple[float, float]]:
+    """Return the configured ``(min, max)`` range for one input, if any.
+
+    A key matches either the spec's ``name`` (when it carries one) or the
+    input's decimal index (``"0"``, ``"1"``, ...). The range must be
+    well-formed (two values, min < max).
+    """
+    keys = ([spec.name] if spec.name else []) + [str(index)]
+    for key in keys:
+        if key in ranges:
+            value_range = tuple(ranges[key])
+            if len(value_range) != 2 or value_range[0] >= value_range[1]:
+                raise LabError(
+                    f"Invalid input range {list(value_range)} for input '{key}': "
+                    "expected (min, max) with min < max"
+                )
+            return value_range
+    return None
+
+
+def generate_random_inputs(
+    io_spec: MlirIoSpec,
+    seed: Optional[int] = None,
+    ranges: Optional[Dict[str, Tuple[float, float]]] = None,
+) -> List[np.ndarray]:
+    """Generate uniform random input arrays for each input tensor spec.
+
+    ``seed`` selects the RNG stream (``None`` keeps the historical default of
+    1234). ``ranges`` maps an input name (when the spec carries one) or its
+    decimal index to a ``(min, max)`` range: float inputs draw from
+    ``uniform(min, max)`` and integer inputs from ``integers(min, max)`` with
+    ``max`` exclusive; bool inputs always draw from {0, 1}. Inputs without a
+    matching key use the full dtype range, and ``ranges=None`` reproduces the
+    historical output byte-for-byte. Unknown keys raise :class:`LabError`.
+    """
+    if ranges:
+        ranges = {str(k): tuple(v) for k, v in ranges.items()}
+        valid = {str(i) for i in range(len(io_spec.inputs))}
+        valid |= {spec.name for spec in io_spec.inputs if spec.name}
+        unknown = sorted(set(ranges) - valid)
+        if unknown:
+            raise LabError(
+                f"input_ranges keys {unknown} match no model input; "
+                f"valid keys are input names or decimal indices {sorted(valid)}"
+            )
+
+    rng = np.random.default_rng(1234 if seed is None else seed)
     inputs = []
-    for spec in io_spec.inputs:
+    for index, spec in enumerate(io_spec.inputs):
         dtype = get_dtype(spec.fmt)
+        value_range = _resolve_input_range(ranges, index, spec) if ranges else None
         if is_float_type(dtype):
             finfo = ml_dtypes.finfo if dtype == ml_dtypes.bfloat16 else np.finfo
-            data = rng.uniform(finfo(dtype).min, finfo(dtype).max, spec.shape).astype(dtype)
-        elif np.issubdtype(dtype, np.integer):
-            data = rng.integers(
-                np.iinfo(dtype).min, np.iinfo(dtype).max, size=spec.shape,
-                dtype=dtype, endpoint=True,
+            lo, hi = value_range if value_range is not None else (
+                finfo(dtype).min, finfo(dtype).max
             )
+            data = rng.uniform(lo, hi, spec.shape).astype(dtype)
+        elif np.issubdtype(dtype, np.integer):
+            if value_range is not None:
+                # max exclusive, mirroring tweaked_random_input_data
+                data = rng.integers(
+                    int(value_range[0]), int(value_range[1]), size=spec.shape,
+                    dtype=dtype,
+                )
+            else:
+                data = rng.integers(
+                    np.iinfo(dtype).min, np.iinfo(dtype).max, size=spec.shape,
+                    dtype=dtype, endpoint=True,
+                )
         elif dtype == np.dtype(bool):
             data = rng.integers(0, 2, spec.shape, dtype=dtype)
         else:

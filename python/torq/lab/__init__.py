@@ -8,8 +8,8 @@
 
 This package owns release-facing orchestration around ``torq-compile`` and
 ``torq-run-module``: local and remote execution, artifact layout, input/output
-utilities, and result comparison. It is pytest-independent and must not import
-``pytest`` or ``torq.testing``.
+utilities, and result comparison. It ships in the wheel, so it must not import
+``torq.testing`` or any test framework.
 """
 
 __all__ = ["main"]

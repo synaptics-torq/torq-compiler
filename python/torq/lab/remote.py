@@ -6,11 +6,11 @@
 
 """Remote (SSH/ADB) execution: stage artifacts, rewrite paths, run, pull back.
 
-Builds on the pytest-free transport in ``torq.lab.transport``. The staging,
-path-rewriting, and pullback mechanics are ported from
-``torq.testing.remote_testing.RemoteTestRunner`` with the test-rig coupling
-(board locking, kernel-module update, once-per-session globals, pytest-flavored
-errors, and print side effects) removed.
+Builds on the transport in ``torq.lab.transport``.  The staging,
+path-rewriting, and pullback mechanics are self-contained here (no board
+locking, kernel-module update, once-per-session globals, or print side
+effects); the test-rig runner lives in
+``torq.testing.remote_testing.RemoteTestRunner``.
 """
 
 import logging

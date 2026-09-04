@@ -33,9 +33,9 @@ jobs:
           name: host-compiler-wheel
           path: wheels
 
-      - name: Verify torq.lab is packaged in the wheel
+      - name: Verify wheel packaging (torq.lab + torq.gen_config, testing/utils excluded)
         run: |
-          scripts/verify_torq_lab_wheel.sh "$(find wheels -name 'torq_compiler-*.whl' | head -1)"
+          scripts/verify_torq_wheel.sh "$(find wheels -name 'torq_compiler-*.whl' | head -1)"
 
       - name: Run torq.lab unit tests against the packaged wheel
         run: |
@@ -43,7 +43,9 @@ jobs:
           . .labvenv/bin/activate
           python -m pip install --upgrade pip
           python -m pip install "$(find wheels -name 'torq_compiler-*.whl' | head -1)" pytest
-          # torq.lab (incl. its transport) and iree come from the installed wheel.
+          # torq.lab / torq.gen_config and iree come from the installed wheel.
           # The torq.testing plugin is not part of the wheel, so clear the repo
           # addopts (which loads it) and disable it for this hardware-free run.
+          # gen_config's packaging guarantees (standalone-only, legacy modules
+          # absent) are asserted by verify_torq_wheel.sh above.
           python -m pytest tests/test_lab_*.py -o addopts= -p no:torq.testing -v

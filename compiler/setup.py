@@ -185,19 +185,25 @@ class CMakeBuildPy(_build_py):
         if os.path.isdir(iree_tf_src):
             shutil.copytree(iree_tf_src, os.path.join(iree_tools_dst, "tf"))
 
-        # Copy the torq.lab pure-Python library into the wheel. Its source lives
-        # under python/torq/lab (outside the cmake install tree copied above), so
-        # the build_py override must stage it explicitly.
-        torq_lab_src = os.path.join(TORQ_SOURCE_DIR, "python", "torq", "lab")
-        torq_lab_dst = os.path.join(target_dir, "torq", "lab")
-        if os.path.isdir(torq_lab_src):
-            if os.path.exists(torq_lab_dst):
-                shutil.rmtree(torq_lab_dst)
-            shutil.copytree(
-                torq_lab_src,
-                torq_lab_dst,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-            )
+        # Copy the pure-Python libraries whose sources live under python/torq
+        # (outside the cmake install tree copied above) into the wheel; the
+        # build_py override must stage them explicitly:
+        #   torq.lab        — torq-lab entry point
+        #   torq.gen_config — torq-gen-config entry point
+        # torq.testing and torq.utils are deliberately excluded: they are the
+        # in-tree test framework and board/plot utilities, which the wheel
+        # path never imports.
+        for pkg in ("lab", "gen_config"):
+            pkg_src = os.path.join(TORQ_SOURCE_DIR, "python", "torq", pkg)
+            pkg_dst = os.path.join(target_dir, "torq", pkg)
+            if os.path.isdir(pkg_src):
+                if os.path.exists(pkg_dst):
+                    shutil.rmtree(pkg_dst)
+                shutil.copytree(
+                    pkg_src,
+                    pkg_dst,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                )
 
 
 _MANYLINUX_GLIBC = "2_28"
@@ -246,12 +252,21 @@ torq_packages = find_namespace_packages(
     ],
 )
 
-# torq.lab lives under python/torq/lab (not compiler/bindings/python). Package it
-# into the compiler wheel so it imports without the checkout .pth.
-TORQ_LAB_PYTHON_DIR = os.path.join(TORQ_SOURCE_DIR, "python")
-torq_lab_packages = find_namespace_packages(
-    where=TORQ_LAB_PYTHON_DIR,
-    include=["torq.lab", "torq.lab.*"],
+# torq.lab and torq.gen_config live under python/torq (not
+# compiler/bindings/python). Package them into the compiler wheel so they
+# import without the checkout .pth: gen_config backs the torq-gen-config
+# console script and builds on torq.lab. torq.testing and torq.utils are
+# intentionally left out — they are the in-tree test framework and
+# board/plot utilities, which the standalone gen_config path does not use.
+TORQ_PURE_PYTHON_DIR = os.path.join(TORQ_SOURCE_DIR, "python")
+torq_pure_packages = find_namespace_packages(
+    where=TORQ_PURE_PYTHON_DIR,
+    include=[
+        "torq.lab",
+        "torq.lab.*",
+        "torq.gen_config",
+        "torq.gen_config.*",
+    ],
 )
 
 # iree.tools.tf wrappers
@@ -260,7 +275,7 @@ iree_tools_packages = find_namespace_packages(
     include=["iree.tools.tf*"],
 )
 
-packages = iree_packages + torq_packages + torq_lab_packages + iree_tools_packages
+packages = iree_packages + torq_packages + torq_pure_packages + iree_tools_packages
 
 # ---------------------------------------------------------------------------
 # setup()
@@ -298,8 +313,9 @@ setup(
         # Torq sources are discovered directly so metadata generation does not
         # depend on stale cmake install contents.
         "torq": os.path.join("bindings", "python", "torq"),
-        # torq.lab source lives outside the compiler bindings tree.
+        # Pure-Python torq sources live outside the compiler bindings tree.
         "torq.lab": os.path.join(TORQ_SOURCE_DIR, "python", "torq", "lab"),
+        "torq.gen_config": os.path.join(TORQ_SOURCE_DIR, "python", "torq", "gen_config"),
         # iree.tools.tf from the IREE submodule
         "iree.tools.tf": os.path.join(IREE_TF_PYTHON_DIR, "iree", "tools", "tf"),
     },
@@ -334,11 +350,17 @@ setup(
         "sympy",
         # Required by torq.lab IO helpers for bf16 support (pinned in requirements.txt).
         "ml_dtypes>=0.4.0",
+        # Required by torq.gen_config's versioned artifact cache
+        # (_cache.py / _onnx.py) on the standalone torq-gen-config path.
+        "filelock",
     ],
     # IMPORTANT: dependencies must be synced with ./requirements.txt
     extras_require={
         "onnx": [
             "onnx==1.19.1",
+            # ONNXRuntime: reference outputs (torq.lab.reference) and the
+            # quantize_onnx / QDQ chain used by torq-gen-config.
+            "onnxruntime==1.25.0",
             # torq.lab.decoder_components_extractor uses onnx_graphsurgeon.
             "onnx_graphsurgeon==0.6.1",
         ],

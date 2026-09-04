@@ -69,3 +69,41 @@ def test_has_gelu_detects_node():
     node2 = helper.make_node("Relu", ["x"], ["y"])
     model2 = helper.make_model(helper.make_graph([node2], "g", [x], [y]))
     assert reference._has_gelu(model2) is False
+
+
+# A static-shape graph the llvm-cpu golden runner can compile and execute.
+ADD_MLIR = """
+module {
+  func.func @main(%arg0: tensor<2x2xf32>, %arg1: tensor<2x2xf32>) -> tensor<2x2xf32> {
+    %0 = "tosa.add"(%arg0, %arg1) : (tensor<2x2xf32>, tensor<2x2xf32>) -> tensor<2x2xf32>
+    return %0 : tensor<2x2xf32>
+  }
+}
+"""
+
+
+def test_llvmcpu_reference_outputs(tmp_path):
+    """The llvm-cpu golden runner compiles an MLIR and returns its outputs.
+
+    Requires iree-compile / iree-run-module (the same binaries the pytest
+    flow's llvmcpu_reference_results fixture uses); skips cleanly when they are
+    not installed, like the tool-dependent tests of the pipeline.
+    """
+    from torq.lab import tools
+
+    try:
+        tools.find_iree_compile_tool()
+        tools.find_iree_run_tool()
+    except FileNotFoundError as exc:
+        pytest.skip(f"iree tools not available: {exc}")
+
+    mlir = tmp_path / "add.mlir"
+    mlir.write_text(ADD_MLIR)
+    a = np.arange(4, dtype=np.float32).reshape(2, 2)
+    b = np.ones((2, 2), np.float32)
+
+    outputs = reference.llvmcpu_reference_outputs(mlir, [a, b], tmp_path / "work")
+
+    assert len(outputs) == 1
+    assert outputs[0].dtype == np.float32
+    assert np.array_equal(outputs[0], a + b)

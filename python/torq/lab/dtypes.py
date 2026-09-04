@@ -8,7 +8,7 @@
 
 Mirrors the compiler's ``--torq-convert-dtypes --torq-convert-io-dtype`` path:
 when a model is compiled with narrowed I/O dtypes, the reference path must see
-the same precision. This module is pure (no pytest); the pytest fixtures that
+the same precision. This module is pure; the fixtures that
 build a policy from CLI options live in ``torq.testing.dtype_utils``.
 """
 

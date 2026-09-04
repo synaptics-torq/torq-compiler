@@ -6,6 +6,7 @@
 
 """Discovery of the torq-compile / torq-run-module binaries and a subprocess wrapper."""
 
+import importlib
 import logging
 import os
 import shutil
@@ -70,11 +71,73 @@ def _runtime_packaged_dirs() -> List[str]:
     return dirs
 
 
+def _iree_runtime_packaged_dirs() -> List[str]:
+    dirs: List[str] = _runtime_packaged_dirs()
+    # The iree-runtime wheel ships iree-run-module alongside its native libs.
+    for module_name in ("iree._runtime_libs", "iree.runtime._runtime_libs"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if getattr(module, "__file__", None):
+            dirs.append(os.path.dirname(module.__file__))
+        elif getattr(module, "__path__", None):
+            # Namespace package (build-tree bindings): search the dir itself.
+            dirs.append(module.__path__[0])
+    return dirs
+
+
+def _dev_tree_tool_dirs() -> List[str]:
+    """Tool directories of a sibling IREE build tree (source-checkout layout).
+
+    Mirrors the legacy ``testing/iree.py`` BUILD_DIR fallback so the lab works
+    from a development checkout without any environment variables: honor
+    ``IREE_BUILD_DIR`` when set, otherwise walk up from each ``torq`` package
+    portion looking for a build tree (``.../bindings/python/torq``) or for a
+    source checkout with a sibling ``iree-build`` (``<repo>/python/torq``).
+    Returns nothing for wheel installs, where no such build tree exists.
+    """
+    try:
+        import torq
+
+        path_entries = list(getattr(torq, "__path__", []) or [])
+        torq_file = getattr(torq, "__file__", None)
+        if torq_file:
+            path_entries.append(os.path.dirname(torq_file))
+    except Exception:
+        return []
+    tool_subdirs = ("third_party/iree/tools", "runtime/tools", "compiler/tools")
+    build_roots: List[str] = []
+    env_build_dir = os.getenv("IREE_BUILD_DIR")
+    if env_build_dir:
+        build_roots.append(env_build_dir)
+    for entry in path_entries:
+        current = os.path.abspath(entry)
+        for _ in range(8):
+            current = os.path.dirname(current)
+            candidates = [current, os.path.join(current, "iree-build")]
+            if any(
+                os.path.isdir(os.path.join(base, sub))
+                for base in candidates
+                for sub in tool_subdirs
+            ):
+                build_roots.extend(candidates)
+                break
+    dirs: List[str] = []
+    for base in build_roots:
+        for sub in tool_subdirs:
+            path = os.path.join(base, sub)
+            if os.path.isdir(path) and path not in dirs:
+                dirs.append(path)
+    return dirs
+
+
 def _find_tool(exe_name: str, explicit, env_var: str, packaged_dirs) -> str:
     """Locate a tool binary using the torq.lab discovery precedence.
 
     Order: explicit path, then env var (direct path and TORQ_TOOL_PATH dirs),
-    then packaged compiler/runtime wrappers, then PATH.
+    then packaged compiler/runtime wrappers, then a sibling build tree of a
+    source checkout (IREE_BUILD_DIR or ../iree-build), then PATH.
     """
     # 1. explicit config path
     if explicit:
@@ -102,6 +165,12 @@ def _find_tool(exe_name: str, explicit, env_var: str, packaged_dirs) -> str:
         if _is_executable(candidate):
             return candidate
 
+    # 3b. sibling build tree of a source checkout (dev environment)
+    for directory in _dev_tree_tool_dirs():
+        candidate = os.path.join(directory, exe_name)
+        if _is_executable(candidate):
+            return candidate
+
     # 4. system PATH
     system_path = shutil.which(exe_name)
     if system_path:
@@ -121,6 +190,16 @@ def find_compile_tool(explicit=None) -> str:
 def find_run_tool(explicit=None) -> str:
     """Locate the ``torq-run-module`` binary."""
     return _find_tool("torq-run-module", explicit, "TORQ_RUN_MODULE", _runtime_packaged_dirs)
+
+
+def find_iree_compile_tool(explicit=None) -> str:
+    """Locate the ``iree-compile`` binary (generic IREE compiler, e.g. for llvm-cpu)."""
+    return _find_tool("iree-compile", explicit, "IREE_COMPILE", _compiler_packaged_dirs)
+
+
+def find_iree_run_tool(explicit=None) -> str:
+    """Locate the ``iree-run-module`` binary (generic IREE runtime)."""
+    return _find_tool("iree-run-module", explicit, "IREE_RUN_MODULE", _iree_runtime_packaged_dirs)
 
 
 def run_tool(cmd: Sequence[str], *, timeout=None, cwd=None) -> subprocess.CompletedProcess:

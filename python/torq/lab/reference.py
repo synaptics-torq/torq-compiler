@@ -4,22 +4,28 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Pure numpy/ONNX reference implementations.
+"""Pure numpy/ONNX reference implementations, plus an IREE llvm-cpu golden runner.
 
-These helpers accept plain arrays / ONNX models and return arrays, so they are
-reusable outside pytest.
+The numpy/ONNX helpers accept plain arrays / ONNX models and return arrays, so
+they are reusable outside the test suite. ``llvmcpu_reference_outputs`` covers
+the graphs those helpers cannot execute (e.g. bf16 elementwise/conv graphs):
+it compiles an MLIR model for IREE's ``llvm-cpu`` backend and runs it with
+``iree-run-module``, serving as the golden reference for such models.
 
 Requires the ``onnx`` extra (onnx + onnxruntime) for the ONNX-graph helpers.
 """
 
 import re
 from pathlib import Path
+from typing import List, Optional, Sequence
 
 import ml_dtypes
 import numpy as np
 import onnx
 import onnxruntime
 from onnx import helper, numpy_helper, TensorProto
+
+from torq.lab.logging import is_verbose
 
 
 def torch_tanh_gelu_numpy(x, output_dtype=None):
@@ -242,8 +248,11 @@ def _execute_onnx_model_numpy(model, input_data):
                 for i, output_name in enumerate(node.output):
                     tensor_values[output_name] = outputs[i]
             except Exception as e:
-                # If onnxruntime fails, raise to fall back to llvmcpu
-                print(f"Warning: Could not execute {node.op_type} with onnxruntime: {e}")
+                # If onnxruntime fails, raise to fall back to llvmcpu. The
+                # detail is only interesting when diagnosing the reference
+                # path; the fallback below is the designed behavior.
+                if is_verbose():
+                    print(f"Warning: Could not execute {node.op_type} with onnxruntime: {e}")
                 raise
 
     # Collect output values
@@ -305,3 +314,74 @@ def _numpy_instance_norm(x, scale, bias, eps, output_dtype):
     channel_shape = [1, -1] + [1] * len(spatial_axes)
     out = norm * scale.reshape(channel_shape) + bias.reshape(channel_shape)
     return out.astype(output_dtype)
+
+
+def llvmcpu_reference_outputs(
+    mlir_path,
+    inputs: List[np.ndarray],
+    work_dir,
+    *,
+    function: Optional[str] = None,
+    compile_tool=None,
+    run_tool=None,
+    compiler_options: Sequence[str] = (),
+    runtime_options: Sequence[str] = (),
+    timeout: Optional[int] = 300,
+) -> List[np.ndarray]:
+    """Run an MLIR model on IREE's ``llvm-cpu`` backend and return its outputs.
+
+    This is the golden-reference fallback for graphs the numpy/ORT helpers
+    above cannot execute — notably bf16 graphs whose ops are not MatMul/Einsum/
+    pooling/Gelu (ONNXRuntime has no bf16 kernels for those). It compiles with
+    ``iree-compile --iree-hal-target-backends=llvm-cpu`` (with the TORQ
+    ``torq-attach-x86-cpu-objects`` preprocessing, so the command matches the
+    golden the tests were built against), then runs the VMFB with
+    ``iree-run-module --device=local-task``, feeding ``inputs`` positionally.
+
+    ``work_dir`` receives the staged input bins, the VMFB, and the raw output
+    bins. ``function`` defaults to the entry function parsed from the model.
+    Tools are resolved via :mod:`torq.lab.tools` (``compile_tool``/``run_tool``
+    override, then ``IREE_COMPILE``/``IREE_RUN_MODULE`` env vars, packaged
+    wheels, ``PATH``). Output shapes/dtypes come from the model's IO spec.
+    """
+    from torq.lab import io, tools
+
+    mlir_path = Path(mlir_path)
+    work_dir = Path(work_dir)
+    inputs_dir = work_dir / "inputs"
+    outputs_dir = work_dir / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    spec = io.parse_mlir_io_spec(mlir_path)
+    function = function or io.parse_func_name(mlir_path)
+
+    input_paths = io.write_inputs(list(inputs), inputs_dir)
+    input_args = io.build_input_args(input_paths, list(inputs), spec)
+    output_args = io.create_output_args(outputs_dir, spec.outputs)
+    output_paths = [Path(p) for p in io.create_output_paths(outputs_dir, spec.outputs)]
+
+    vmfb_path = work_dir / "llvmcpu_reference.vmfb"
+    compile_cmd = [
+        tools.find_iree_compile_tool(compile_tool),
+        "--iree-hal-target-backends=llvm-cpu",
+        "--iree-llvmcpu-target-cpu=host",
+        "--iree-hal-preprocess-executables-with=builtin.module(torq-attach-x86-cpu-objects)",
+        str(mlir_path),
+        *compiler_options,
+        "-o",
+        str(vmfb_path),
+    ]
+    tools.run_tool(compile_cmd, timeout=timeout, cwd=work_dir)
+
+    run_cmd = [
+        tools.find_iree_run_tool(run_tool),
+        "--device=local-task",
+        f"--module={vmfb_path}",
+        f"--function={function}",
+        *runtime_options,
+        *output_args,
+        *input_args,
+    ]
+    tools.run_tool(run_cmd, timeout=timeout, cwd=work_dir)
+
+    return io.load_outputs(spec.outputs, output_paths)

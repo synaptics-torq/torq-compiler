@@ -9,7 +9,7 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _s(p):
@@ -56,10 +56,17 @@ class LabError(Exception):
 
 @dataclass
 class TensorType:
-    """The type of a tensor input or output of an MLIR model."""
+    """The type of a tensor input or output of an MLIR model.
+
+    ``name`` is optional: the MLIR IO-spec parser leaves it ``None`` (imported
+    MLIR carries no argument names); callers building a spec programmatically
+    (e.g. from an ONNX model) may set it so that name-keyed ``input_ranges``
+    entries can match.
+    """
 
     shape: List[int]
     fmt: str
+    name: Optional[str] = None
 
     def to_arg(self) -> str:
         return "x".join([str(x) for x in self.shape] + [self.fmt])
@@ -88,6 +95,14 @@ class PipelineConfig:
     (an ``.mlir``) or its sibling ``.mlir`` next to a ``.vmfb``; ``spec_source``
     is a library-level override for the rare case the spec lives elsewhere. It
     has no CLI flag (the CLI relies on the model-path convention).
+
+    ``input_seed`` and ``input_ranges`` steer the ``random_inputs`` generator
+    (:func:`torq.lab.io.generate_random_inputs`): ``input_seed`` selects the RNG
+    stream (``None`` keeps the historical default of 1234), and ``input_ranges``
+    maps an input name (when the spec carries one) or its decimal index
+    (``"0"``, ``"1"``, ...) to a ``(min, max)`` range that input's values are
+    drawn from. Both are ``None`` by default, which reproduces the historical
+    full-range behavior byte-for-byte.
     """
 
     model_path: Path
@@ -110,6 +125,8 @@ class PipelineConfig:
     vmfb_path: Optional[Path] = None
     compile_tool: Optional[str] = None
     run_tool: Optional[str] = None
+    input_seed: Optional[int] = None
+    input_ranges: Optional[Dict[str, Tuple[float, float]]] = None
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-friendly dict (Paths -> str)."""
@@ -134,6 +151,12 @@ class PipelineConfig:
             "vmfb_path": _s(self.vmfb_path),
             "compile_tool": self.compile_tool,
             "run_tool": self.run_tool,
+            "input_seed": self.input_seed,
+            "input_ranges": (
+                None
+                if self.input_ranges is None
+                else {k: [v[0], v[1]] for k, v in self.input_ranges.items()}
+            ),
         }
 
     @classmethod
@@ -169,6 +192,12 @@ class PipelineConfig:
             vmfb_path=_p(d.get("vmfb_path")),
             compile_tool=d.get("compile_tool"),
             run_tool=d.get("run_tool"),
+            input_seed=d.get("input_seed"),
+            input_ranges=(
+                None
+                if d.get("input_ranges") is None
+                else {str(k): tuple(v) for k, v in d["input_ranges"].items()}
+            ),
         )
 
     @classmethod
@@ -271,3 +300,27 @@ class RunResult:
     perfetto_viewer: Optional[Path] = None
     wall_time: Optional[float] = None
     diagnostics: str = ""
+
+
+@dataclass
+class Case:
+    """Named case container: a ``name`` plus an arbitrary ``data`` payload.
+
+    Used to parametrize discovery layers and runs with a non-exhaustive subset
+    of parameter combinations: consumers generate one item per ``Case`` instead
+    of the full cross-product.
+    """
+
+    name: str
+    data: Any
+
+
+def get_test_cases_from_files(files: Path) -> List[Case]:
+    """Generate one :class:`Case` per file, using the file name as case name."""
+
+    cases = []
+
+    for file_path in files:
+        cases.append(Case(file_path.name, file_path))
+
+    return cases
