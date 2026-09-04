@@ -1,6 +1,9 @@
+import json
 import re
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from torq.testing.iree import MODELS_DIR
 
@@ -22,17 +25,29 @@ def _latest_phase_with(phases_dir, needle):
     return max(matches, key=lambda t: t[0])[1]
 
 
+@pytest.mark.ci
 def test_css_program_code_is_shared_across_invocations(request, torq_compiler, tmp_path):
     """A CSS program invoked multiple times must share a single torq_hl.program_code
     op, so its binary is placed in XRAM exactly once instead of once per invocation
     (synaptics-torq/torq-compiler-dev#1615).
 
-    The depthwise-conv1d model, with linalg slicing enabled, invokes one CSS program
-    for several tiles, producing multiple CSS create_invocation ops that should all
-    reference the same program_code value and the same XRAM address.
+    NSS covers every op of the depthwise-conv1d model, so the activation is pinned to
+    CSS with an executor map to get a CSS program at all. Linalg slicing, on by
+    default, then splits it one partition per slice, and those CSS create_invocation
+    ops must all reference the same program_code value and the same XRAM address.
     """
     model = MODELS_DIR / "torch_ops" / "depthwise-conv1d-bf16-c64-w32.mlir"
     phases = tmp_path / "phases"
+
+    # Executor-map keys are the op's `line:column` in the model file, so derive the
+    # onnx.Clip's location from the text instead of hardcoding it.
+    model_lines = model.read_text().splitlines()
+    (clip_line,) = [i for i, ln in enumerate(model_lines, start=1) if '"onnx.Clip"' in ln]
+    clip_col = model_lines[clip_line - 1].index("torch.operator") + 1
+    executor_map = tmp_path / "executor_map.json"
+    executor_map.write_text(
+        json.dumps({"op_assignments": {f"{clip_line}:{clip_col}": {"executor": "css"}}})
+    )
 
     cmd = [
         str(torq_compiler.file_path),
@@ -40,7 +55,7 @@ def test_css_program_code_is_shared_across_invocations(request, torq_compiler, t
         "-o",
         str(tmp_path / "model.vmfb"),
         "--torq-hw=SL2610",
-        "--torq-disable-linalg-slicing=false",
+        f"--torq-executor-map={executor_map}",
         "--torq-target-host-triple=native",
         f"--dump-compilation-phases-to={phases}",
     ]
@@ -75,6 +90,7 @@ def test_css_program_code_is_shared_across_invocations(request, torq_compiler, t
     # invocation that still has a code section (it expects exactly one section).
 
 
+@pytest.mark.ci
 def test_program_code_rejects_non_css_program(torq_compiler, tmp_path):
     """torq_hl.program_code only models CSS programs' position-independent code.
     NSS/Slice bitstreams bake in addresses and are not shareable this way, so the
