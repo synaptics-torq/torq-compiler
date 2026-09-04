@@ -142,41 +142,37 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     output.subviewDim(MatC::M, rowOffset, rowCount);
     matA.subviewDim(MatA::M, rowOffset, rowCount);
 
-    int outRowVectSize = slice.wram.transposeHeight();
-    // int outRowVectSize = std::min(slice.wram.transposeHeight(), output.dim(MatC::M));
-    // The transposable width is bound by the type the weights occupy in WRAM, which is the
-    // expanded type when the in-memory weight is compressed or narrower than the input type.
-    int inputWidth = slice.alu.iWidth(matB.elementType(), matA.elementType());
-    int rowChunks = slice.wram.transposeWidth(slice.wram.weightType());
+    int outRowVectSize = std::min(slice.wram.transposeHeight(), output.dim(MatC::M));
+    int vectSize = slice.alu.iWidth(matB.elementType(), matA.elementType(), outRowVectSize);
+    int rowChunkSize = slice.wram.transposeWidth();
 
-    // Find the largest divisor of K that is less than or equal to rowChunks
-    while (matA.dim(MatA::K) % rowChunks != 0 && rowChunks > 1) {
-        rowChunks--;
+    // Find the largest divisor of K that is less than or equal to rowChunkSize
+    while (matA.dim(MatA::K) % rowChunkSize != 0 && rowChunkSize > 1) {
+        rowChunkSize--;
     }
 
     output.reshapeDim(MatC::M, {-1, outRowVectSize});
 
-    matA.reshapeDim(MatA::K, {-1, rowChunks});      // Split each row in rowChunks
+    matA.reshapeDim(MatA::K, {-1, rowChunkSize});   // Split each row in rowChunkSize
     matA.reshapeDim(MatA::M, {-1, outRowVectSize}); // Split rows in groups of outRowVectSize
 
-    matB.vectorize(inputWidth);
-    matB.reshapeDim(MatB::K, {-1, rowChunks}); // Split rows in rowChunks
+    matB.vectorize(vectSize);
+    matB.reshapeDim(MatB::K, {-1, rowChunkSize}); // Split rows in chunks
 
     BData bdata = slice.bram.load(biasScale);
     For(auto batch = slice.iterate(matA.dim(MatA::Batch))) {
         For(auto im = slice.iterate(output.dim(MatA::RowGroups))) { // row groups in matA
             For(auto in = slice.iterate(matB.dim(MatB::Vectors))) { // col vects in matB: N/vectSize
                 PData pdata;
-                For(auto ik = slice.iterate(matA.dim(MatA::ColGroups))
-                ) { // col groups in matA == row groups in matB
+                For(auto ik = slice.iterate(matA.dim(MatA::ColGroups))) { // == row groups in matB
                     WData wdata = slice.wram.transpose(matA[batch][im][":"][ik]);
-                    For(auto ikk = slice.iterate(wdata.dim(0))
-                    ) { // cols in group in matA == rows in group in matB
+                    For(auto ikk = slice.iterate(wdata.dim(0))) { // A:cols == B:rows in each group
                         IData idata = slice.iram.load(matB[batch][ik][ikk][in]);
                         pdata = slice.alu.outerProductAccumulate(idata, wdata[ikk]);
                     }
                 }
-                For(auto o = slice.iterate(outRowVectSize)) { // Not necessarily all the pdata
+                assert(outRowVectSize == pdata.dim(PData::Outer));
+                For(auto o = slice.iterate(outRowVectSize)) {
                     For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                         QData res = slice.act.rescaleClamp(
                             pdata[o][av], bdata, op.getShift(), op.getOutputZp(), op.getOutputMin(),
@@ -203,10 +199,10 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
     torq_hw::SliceTaskOp hwOp;
 
     if (int peeledRows = outRowCount % outRowVectSize) {
-        // For one single output row (M == 1) fast matmul has no advantage at all,
+        // For one single output row (M == 1) fast matmul works but has no advantage at all,
         // so use normal matmul which may be marginally more efficient loading one weight at a time.
         hwOp =
-            peeledRows > 0
+            peeledRows == 1
                 ? lowerToMatmul(op, rewriter, initValue, outRowCount - peeledRows, peeledRows)
                 : lowerToFastMatmul(op, rewriter, initValue, outRowCount - peeledRows, peeledRows);
         if (!hwOp) {

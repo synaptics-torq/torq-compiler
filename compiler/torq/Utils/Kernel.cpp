@@ -1103,7 +1103,14 @@ struct SlicePrivate {
     );
     int actWidth(DType iType, DType wType, bool biasScalePerItem);
     int wramTransposeHeight() const { return 4; }
-    int wramTransposeWidth(DType type) const { return 8 / sizeofType(toUncompressed(type)); }
+    int wramTransposeWidth(DType type) const {
+        if (type == DType::none) {
+            // If type not specified, iWith() must have been called before to infer the weight type
+            assert(_wram.elementType != DType::none && "Unable to infer weight type");
+            type = _wram.elementType;
+        }
+        return 8 / sizeofType(toUncompressed(type));
+    }
 
     MemNdlData memNdl(NdlType ndlType, const LData &data, bool fuse, int appendBlockSize = -1);
     void dedr(const LData &data);
@@ -1764,6 +1771,7 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
         cewrDims.push_back({DimType::L, RegDimTag::J, sizeofType(_iram.elementType), 0});
     }
 
+    WData wdataAdjusted{wdata};
     if (outer) {
         // Distribute the weights over all the MACs
         // It should be possible to do this by default but for some reason the HWAPI doesn't support
@@ -1771,13 +1779,22 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
         // (ss==0 || ss==g*b)
         // Not clear if this is an HW limitation or API limitation.
         auto repeat = weightBlockSize;
-        // static const int sValidGroupCount[] = {1, 4, 8, 16, 0};  // FIXME
-        // repeat = roundUp(repeat, sValidGroupCount);
+
+        // Alu has a fixed set of outer group sizes (modes) it supports.
+        // If the weightBlockSize is not one of the supported sizes we round it up, this
+        // will produce some extra computation on junk data that will just be thrown away
+        static const int sValidGroupSize[] = {1, 4, 8, 16, 0};
+        repeat = roundUp(repeat, sValidGroupSize);
         cewrDims.push_back({DimType::L, RegDimTag::G, repeat, weightSize});
+        if (repeat != weightBlockSize) {
+            // If the group size has been adjusted we have to also adjust the count in wdata shape
+            // to keep the NDL consistent
+            wdataAdjusted.getShape().back().count = repeat;
+        }
     }
 
     // Now add hdims for each loop deeper the wram load
-    addDims(NdlType::CEWR, cewrDims, wdata, _wram.loadNesting, true, true);
+    addDims(NdlType::CEWR, cewrDims, wdataAdjusted, _wram.loadNesting, true, true);
 
     // Only used in 'SEL' mode: when CEWR's L_size=2, the same weight is sent twice
     // with the value flipped between the 2 cycles.
@@ -1817,15 +1834,16 @@ void SlicePrivate::ceww(const WData &wdata, bool transpose) {
 
     if (loadMultiple) {
         // Add extra HDIM to load multiple blocks
+        const int tHeight = wramTransposeHeight();
         int sn = shape[0].count;
         if (transpose) {
-            assert(sn <= wramTransposeHeight() && "Transpose not supported");
+            assert(sn <= tHeight && "Transpose not supported");
             // Force Sn to the only value performing transpose
-            sn = wramTransposeHeight();
+            sn = tHeight;
         }
         else {
             // This S count is special, will transpose data
-            assert(sn != wramTransposeHeight() && "Transpose will take place for this block count");
+            assert((sn != tHeight || weightBlockSize == 1) && "This block count will transpose");
         }
         regDims.push_back({DimType::H, RegDimTag::S, sn, weightBlockSize});
     }
@@ -3029,8 +3047,6 @@ int WRam::transposeWidth(DType type) const { return d->wramTransposeWidth(type);
 
 int WRam::transposeHeight() const { return d->wramTransposeHeight(); }
 
-DType WRam::weightType() const { return d->_wram.elementType; }
-
 // Determine the weight memory format
 // Asserts if in-memory weight type not compatible with the destination (wbus) weight type
 static WeightFormat getWeightMemoryFormat(DType memType, DType dstType) {
@@ -3096,11 +3112,14 @@ WData WRam::load(const LData &data, DType dstType, bool transpose) {
     auto wdata = WData(data.subShape(), dstType);
     d->ceww(wdata, transpose);
 
-    checkLoadSize(wdata);
     return wdata;
 }
 
-WData WRam::load(const LData &data, DType dstType) { return load(data, dstType, false); }
+WData WRam::load(const LData &data, DType dstType) {
+    auto wdata = load(data, dstType, false);
+    checkLoadSize(wdata);
+    return wdata;
+}
 
 WData WRam::transpose(const LData &data, DType dstType) {
     Shape shape = data.subShape();
@@ -3110,9 +3129,28 @@ WData WRam::transpose(const LData &data, DType dstType) {
     int innerSize = denseElementCount(shape, rank - 1);
     assert(innerSize > 0 && "Transpose not supported for non-dense inner dimension");
 
-    WData wdata = load(data, dstType, true);
-    wdata.setShape({wdata.dim(1), wdata.dim(0)});
+    LData dataAdjusted{data};
+    bool transpose = false;
+    // Shape may contain additional dimensions if ":" syntax has been used
+    int extraDims = shape.size() - (data.shape().size() - data.indexes().size());
+    if (shape[0].count > 1 && shape[1].count > 1) {
+        // We really have to transpose data
+        transpose = true;
+        // Fix the count of the rows dimension to be the only value supprted by transpose.
+        // It means that in some cases we are forced to read more data to be able to transpose them
+        dataAdjusted.getShape()[data.shape().size() - rank - extraDims].count = transposeHeight();
+    }
+    else if (shape[0].count == 3 && shape[1].count == 1 && denseElementCount(shape) < 0) {
+        // No transpose needed, but we still need to adjust row count to a value supprted by CEWW:S
+        dataAdjusted.getShape()[data.shape().size() - rank - extraDims].count = 4;
+    }
+
+    WData wdata = load(dataAdjusted, dstType, transpose);
+    int stride = transpose ? transposeHeight() : shape[0].count;
+    wdata.setShape({{wdata.dim(1), Stride(stride)}, shape[0].count});
+
     assert(innerSize <= transposeWidth(wdata.elementType()) && "Inner dim too big to transpose");
+    checkLoadSize(wdata);
     return wdata;
 }
 

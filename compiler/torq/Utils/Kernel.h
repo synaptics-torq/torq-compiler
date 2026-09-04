@@ -523,20 +523,18 @@ class WRam : public SliceRam {
     // Same as load() but transposes the data tensor
     // Only rank-2 with dense inner dimension supported, asserts otherwise
     // data[0] must <= transposeHeight() and data[1] must be <= transposeWidth()
+    // Optimally efficient only for data[0] == 1 and data[0] == transposeHeight()
     WData transpose(const LData &data, DType type = DType::none);
 
     const char *name() const override;
     int size() const override;
 
     // The maximum width (number of columns) supported by transpose operation for the given type
-    int transposeWidth(DType type) const;
+    // If type not specified it will be assumed to be the type inferred by iWidth()
+    int transposeWidth(DType type = DType::none) const;
 
     // The maximum height (number of rows) supported by transpose operation
     int transposeHeight() const;
-
-    // The type the weights are held in once loaded, which for a compressed weight is the
-    // expanded type deduced from the input type (see load()). DType::none until deduced.
-    DType weightType() const;
 };
 
 // Bias & Scale RAM
@@ -611,7 +609,7 @@ class Alu : SliceComponent {
     );
 
     // Outer product of an input of shape {N} with a weight vector of shape {M} and accumulate
-    // N can be up to iWidth(iType, wType) (A scalar is also accepted for both input and weight)
+    // N can be up to iWidth(iType, wType, M) (A scalar is also accepted for both input and weight)
     // idata: input tensor data in iram
     // wdata: weight tensor data in wram
     // acc: accumulate operation
@@ -635,6 +633,8 @@ class Alu : SliceComponent {
 
     // Max number of input items that can be processed in parallel for the given in and weight type
     // weightWidth if specified indicates the number of weights that will be used in outerProduct
+    // Will automatically deduce the actual weight type to be used for computation
+    // (can be different from wType if the weight is compressed)
     int iWidth(DType iType, DType wType = DType::none, int weightWidth = 0) const;
 
     // Max number of input items that can be processed in parallel for the given in type
