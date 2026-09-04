@@ -59,6 +59,12 @@ enum ByteCopyDirection : int32 {
   PostDispatchWrite = 1
 }
 
+// How a host program uses one of its arguments.
+enum ArgAccess : ubyte (bit_flags) {
+  Read,   // value 1
+  Write   // value 2
+}
+
 // Element types of buffers
 enum ElementType : uint32 {
   I8 = 0,
@@ -136,6 +142,11 @@ table StartHostParams {
   strides: [uint32];
   shapes: [uint32];
   ndims: [uint32];
+  // Per-arg access bits, aligned with args. Read is set when the program reads
+  // the argument, Write when it writes it. 0 means unknown and is treated like
+  // Read|Write. When absent (or sized differently from args) the runtime keeps
+  // its original behaviour: read every argument in, write every one back.
+  arg_accesses: [ArgAccess];
 }
 
 // Action to wait for an host program to complete

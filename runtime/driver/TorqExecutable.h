@@ -6,6 +6,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <unordered_map>
 #include <vector>
 #include <string>
 
@@ -50,6 +52,21 @@ private:
   int nextJobId_{0};
   void *hostCodeLibHandle_{nullptr};
   int nextInvocationId_{0};
+  // false for executables that only move data through XRAM and host programs;
+  // those never need the NPU network started for a dispatch
+  bool needsNpuNetwork_{true};
+
+  // Host entry points already resolved out of hostCodeLibHandle_, by name.
+  // Only touched from executeDispatch(), which holds mutex_.
+  std::unordered_map<std::string, void*> hostFunctions_;
+
+  // Per-argument staging for host program arguments copied out of XRAM, reused
+  // across dispatches. The buffers only grow, so a call that fills less than
+  // the whole buffer must clear what it leaves behind. Safe because
+  // executeDispatch() serializes on mutex_ and host programs run synchronously
+  // inside it.
+  std::vector<std::vector<uint8_t>> hostArgumentBuffers_;
+  std::vector<void*> hostArgumentAddresses_;
 
   // this mutex is used to ensure we only run one dispatch at a time, this is important
   // because there is one XRAM per executable so we can only load one state at a time

@@ -1178,8 +1178,28 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
                 auto shapesRef = createUI32Vector(ArrayRef<int64_t>(allShapes));
                 auto ndimsRef = createUI32Vector(ArrayRef<int64_t>(allNdims));
 
+                // Record how the program uses each argument so the runtime can skip the
+                // copies it does not need. Without access information the vector is left
+                // empty and the runtime falls back to reading and writing every argument.
+                iree_hal_torq_ArgAccess_vec_start(_builder);
+                if (auto argAccesses = startOp.getArgAccessesAttr()) {
+                    for (auto accessAttr : argAccesses) {
+                        auto access = cast<torq_hl::ArgAccessBitfieldAttr>(accessAttr).getValue();
+                        iree_hal_torq_ArgAccess_enum_t bits = 0;
+                        if (bitEnumContainsAny(access, torq_hl::ArgAccessBitfield::Read)) {
+                            bits |= iree_hal_torq_ArgAccess_Read;
+                        }
+                        if (bitEnumContainsAny(access, torq_hl::ArgAccessBitfield::Write)) {
+                            bits |= iree_hal_torq_ArgAccess_Write;
+                        }
+                        iree_hal_torq_ArgAccess_vec_push_create(_builder, bits);
+                    }
+                }
+                auto argAccessesRef = iree_hal_torq_ArgAccess_vec_end(_builder);
+
                 auto startHostParams = iree_hal_torq_StartHostParams_create(
-                    _builder, programName, argsRef, sizesRef, stridesRef, shapesRef, ndimsRef
+                    _builder, programName, argsRef, sizesRef, stridesRef, shapesRef, ndimsRef,
+                    argAccessesRef
                 );
 
                 params = iree_hal_torq_HostActionParams_as_StartHostParams(startHostParams);

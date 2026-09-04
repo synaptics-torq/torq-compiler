@@ -338,6 +338,40 @@ static iree_status_t cleanupZeroCopyBindings(
   return iree_ok_status();
 }
 
+// Only an NSS/CSS job or an LRAM access has to go through the driver, and both
+// need a started network. Everything else an executable can do reaches XRAM
+// through the mapping that open() set up, which does not depend on the network.
+static bool actionsNeedNpuNetwork(ns(ExecutableDef_table_t) executableDef) {
+  auto actions = ns(ExecutableDef_actions_get(executableDef));
+  size_t actionsCount = ns(HostAction_vec_len(actions));
+
+  for (size_t i = 0; i < actionsCount; i++) {
+    auto action = ns(HostAction_vec_at(actions, i));
+
+    switch (ns(HostAction_params_type(action))) {
+      case ns(HostActionParams_StartNSSParams):
+      case ns(HostActionParams_WaitNSSParams):
+        return true;
+
+      case ns(HostActionParams_HostCopyParams): {
+        // BufferType defaults to LRAM, so a copy that leaves the field out is
+        // treated as needing the network.
+        auto params = (ns(HostCopyParams_table_t))ns(HostAction_params_get(action));
+        if (ns(HostCopyParams_input_buffer_type(params)) == ns(BufferType_LRAM) ||
+            ns(HostCopyParams_output_buffer_type(params)) == ns(BufferType_LRAM)) {
+          return true;
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  return false;
+}
+
 void TorqExecutable::clearPersistentInputCopies() {
   for (auto& copy : persistentInputCopies_) {
     if (copy.buffer) {
@@ -671,9 +705,14 @@ iree_status_t TorqExecutable::initialize() {
     eventLog.reset(TorqEventLog::get().startDispatch(executableName(), EventType::INIT));
   }
 
-  TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
   bool is_dmabuf_mode =
     iree_hal_torq_device_is_dmabuf_mode(nativeExecutable_->device);
+
+  // In dmabuf mode the binding ranges are left out of the XRAM footprint and
+  // reach XRAM only through the driver's attach ioctl, which needs the network.
+  needsNpuNetwork_ = is_dmabuf_mode || actionsNeedNpuNetwork(executableDef);
+
+  TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
 
   ret = compute_xram_footprint(
     executableDef, is_dmabuf_mode, &xram_base, &xram_size);
@@ -1060,7 +1099,7 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
   
   if (hasHardware()) {
     // acquire the hardware, this won't start execution on it yet
-    {
+    if (needsNpuNetwork_) {
       TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_ACQUIRE_HW_RESOURCES);
       const bool ressourceAcquired = torq_->acquire();
       TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_ACQUIRE_HW_RESOURCES);
@@ -1082,7 +1121,9 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
     if (!iree_status_is_ok(status)) {
       iree_status_t cleanupStatus =
           cleanupZeroCopyBindings(torq_.get(), executableDef(), state, zeroCopyAttached);
-      torq_->release();
+      if (needsNpuNetwork_) {
+        torq_->release();
+      }
       return iree_status_join(status, cleanupStatus);
     }
 
@@ -1101,9 +1142,11 @@ iree_status_t TorqExecutable::executeDispatch(iree_hal_executable_dispatch_state
         cleanupZeroCopyBindings(torq_.get(), executableDef(), state, zeroCopyAttached);
 
     // release the hardware so that it can be used by another user
-    TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
-    torq_->release();
-    TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
+    if (needsNpuNetwork_) {
+      TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
+      torq_->release();
+      TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::DISPATCH_RELEASE_HW_RESOURCES);
+    }
 
     if (!iree_status_is_ok(status) || !iree_status_is_ok(cleanupStatus)) {
       return iree_status_join(status, cleanupStatus);
@@ -1338,20 +1381,26 @@ static void stridedXramWrite(TorqHw* torq, uint64_t baseAddress,
 
 iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) action, ns(StartHostParams_table_t) params) {
 
-  std::string functionName = ns(StartHostParams_function_name(params));
+  const char* functionName = ns(StartHostParams_function_name(params));
 
   LOGD << "action: Starting host with function " << functionName;
 
   using HostFn = void(*)(iree_hal_executable_environment_v0_t*,
                          iree_hal_executable_dispatch_state_v0_t*,
                          iree_hal_executable_workgroup_state_v0_t*);
-  auto hostFunction = reinterpret_cast<HostFn>(
-      io::resolveSymbol(hostCodeLibHandle_, functionName));
+
+  // dlsym walks the symbol table on every call, so resolve each entry point once
+  // and keep the result, a null one included: the library never changes.
+  auto [cached, inserted] = hostFunctions_.try_emplace(functionName, nullptr);
+  if (inserted) {
+    cached->second = io::resolveSymbol(hostCodeLibHandle_, functionName);
+  }
+  auto hostFunction = reinterpret_cast<HostFn>(cached->second);
 
   if (!hostFunction) {
     return iree_make_status(IREE_STATUS_INTERNAL,
                             "Failed to find host function %s",
-                            functionName.c_str());
+                            functionName);
   }
 
   auto args = ns(StartHostParams_args(params));
@@ -1371,6 +1420,24 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
 
   int numArgs = flatbuffers_uint64_vec_len(args);
 
+  // Read optional per-arg access metadata. Executables built before the field
+  // existed carry none, and a vector that does not cover every argument cannot be
+  // matched to one, so both keep the original behaviour of reading every arg in
+  // and writing every arg back.
+  auto argAccesses_fb = ns(StartHostParams_arg_accesses(params));
+  bool hasArgAccesses =
+      argAccesses_fb && (int)ns(ArgAccess_vec_len(argAccesses_fb)) == numArgs;
+
+  auto argAccessAt = [&](int i) -> ns(ArgAccess_enum_t) {
+    auto access = hasArgAccesses ? ns(ArgAccess_vec_at(argAccesses_fb, i))
+                                 : (ns(ArgAccess_enum_t))0;
+    // no bit set records nothing about the argument, so assume the widest access
+    if (access == 0) {
+      access = (ns(ArgAccess_enum_t))(ns(ArgAccess_Read) | ns(ArgAccess_Write));
+    }
+    return access;
+  };
+
   // Precompute per-arg offsets into the flattened strides/shapes arrays
   std::vector<int> argStrideOffsets(numArgs, 0);
   std::vector<int> argNdims(numArgs, 0);
@@ -1384,13 +1451,19 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
   }
 
   // read the arguments from XRAM (strided copy when strides differ from dense)
-  std::vector<std::vector<uint8_t>> arguments;
-  std::vector<void*> argumentAddresses;
+  if (hostArgumentBuffers_.size() < static_cast<size_t>(numArgs)) {
+    hostArgumentBuffers_.resize(numArgs);
+  }
+  hostArgumentAddresses_.resize(numArgs);
 
   for (int i = 0; i < numArgs; i++) {
     auto xramAddress = flatbuffers_uint64_vec_at(args, i);
     auto size = flatbuffers_uint64_vec_at(sizes, i);
-    std::vector<uint8_t> xramBuffer(size);
+    auto& staging = hostArgumentBuffers_[i];
+    if (staging.size() < size) {
+      staging.resize(size);
+    }
+    uint8_t* xramBuffer = staging.data();
 
     bool strided = false;
     if (hasStrideInfo && argNdims[i] > 0) {
@@ -1398,22 +1471,26 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
       const uint32_t* argShape = shapes_fb + argStrideOffsets[i];
       if (hasNonTrivialStrides(argStrides, argShape, argNdims[i])) {
         strided = true;
-        stridedXramRead(torq_.get(), xramAddress, xramBuffer.data(),
+        // a strided read only fills the referenced bytes, so the gaps between
+        // them must keep looking like the zero-filled buffer they used to be
+        memset(xramBuffer, 0, size);
+        stridedXramRead(torq_.get(), xramAddress, xramBuffer,
                         argStrides, argShape, argNdims[i]);
       }
     }
-    if (!strided) {
-      torq_->readXram(xramAddress, xramBuffer.size(), xramBuffer.data());
+    if (!strided && !torq_->readXram(xramAddress, size, xramBuffer)) {
+      // a failed read used to hand the program a zeroed buffer, keep doing that
+      // rather than exposing what the previous dispatch left in the staging buffer
+      memset(xramBuffer, 0, size);
     }
 
-    arguments.push_back(std::move(xramBuffer));
-    argumentAddresses.push_back(arguments.back().data());
+    hostArgumentAddresses_[i] = xramBuffer;
 
     if (testVectorWriter_) {
 
       // dump the inputs of the host program to the last job so that they can be checked when they are generated
       if (nextJobId_ > 0) {
-        testVectorWriter_->saveXram(nextJobId_ - 1, xramAddress, arguments.back().data(), size, 4, "hex", 
+        testVectorWriter_->saveXram(nextJobId_ - 1, xramAddress, xramBuffer, size, 4, "hex",
           "host_program." + std::to_string(actionIndex_) + ".arg." + std::to_string(i) + ".txt");
       }
 
@@ -1430,8 +1507,8 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
   memset(&dispatch_state, 0, sizeof(dispatch_state));
   memset(&workgroup_state, 0, sizeof(workgroup_state));
 
-  dispatch_state.binding_count = argumentAddresses.size();
-  dispatch_state.binding_ptrs = argumentAddresses.data();
+  dispatch_state.binding_count = numArgs;
+  dispatch_state.binding_ptrs = hostArgumentAddresses_.data();
 
   for (int i = 0; i < dispatch_state.binding_count; i++) {
       LOGD << "Argument " << i << ": 0x" << (uintptr_t)dispatch_state.binding_ptrs[i]
@@ -1443,13 +1520,18 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
   hostFunction(&environment, &dispatch_state, &workgroup_state);
 
   // read back the results to XRAM (strided write when strides differ from dense)
-  for (int i = 0; i < numArgs; i++) {      
+  for (int i = 0; i < numArgs; i++) {
 
     auto xramAddress = flatbuffers_uint64_vec_at(args, i);
-    uint64_t xramWriteSize = arguments[i].size();
+    uint8_t* xramBuffer = hostArgumentBuffers_[i].data();
+    const uint64_t argumentSize = flatbuffers_uint64_vec_at(sizes, i);
+    uint64_t xramWriteSize = argumentSize;
+
+    // an argument the program only reads still holds its original XRAM contents
+    bool readOnly = !(argAccessAt(i) & ns(ArgAccess_Write));
 
     bool strided = false;
-    if (hasStrideInfo && argNdims[i] > 0) {
+    if (!readOnly && hasStrideInfo && argNdims[i] > 0) {
       const uint32_t* argStrides = strides_fb + argStrideOffsets[i];
       const uint32_t* argShape = shapes_fb + argStrideOffsets[i];
       if (hasNonTrivialStrides(argStrides, argShape, argNdims[i])) {
@@ -1457,22 +1539,22 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
         xramWriteSize = computeStridedXramSpanBytes(argStrides, argShape, argNdims[i]);
         invalidatePersistentInputCopiesForXramRange(
             static_cast<uint32_t>(xramAddress), xramWriteSize);
-        stridedXramWrite(torq_.get(), xramAddress, arguments[i].data(),
+        stridedXramWrite(torq_.get(), xramAddress, xramBuffer,
                          argStrides, argShape, argNdims[i]);
       }
     }
-    if (!strided) {
+    if (!readOnly && !strided) {
       invalidatePersistentInputCopiesForXramRange(
           static_cast<uint32_t>(xramAddress), xramWriteSize);
-      torq_->writeXram(xramAddress, arguments[i].size(), arguments[i].data());
+      torq_->writeXram(xramAddress, argumentSize, xramBuffer);
     }
 
     if (testVectorWriter_) {
 
       // make sure the next job will be able to see the results of the host program in XRAM
-      testVectorWriter_->loadXram(nextJobId_, xramAddress, arguments[i].data(), arguments[i].size(), 4, "hex", 
+      testVectorWriter_->loadXram(nextJobId_, xramAddress, xramBuffer, argumentSize, 4, "hex",
         "host_program." + std::to_string(actionIndex_) + ".result." + std::to_string(i) + ".txt");
-    
+
     }
 
   }

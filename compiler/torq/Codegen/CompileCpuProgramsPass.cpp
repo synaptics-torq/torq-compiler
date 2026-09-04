@@ -424,7 +424,8 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
     modulePassManager.addNestedPass<LLVM::LLVMFuncOp>(createAddFastMathFlagsPass());
 
     // FIXME: here we unfuse the FMA ops to keep the code size small but
-    // there may be better ways to do this
+    // there may be better ways to do this. On some soft-float CSS targets like
+    // coral_v1 an fma would pull in the correctly-rounded fmaf library routine.
     pipeline.nest<ModuleOp>().nest<LLVM::LLVMFuncOp>().addPass(createLLVMCPUUnfuseFMAOpsPass());
 }
 
@@ -488,9 +489,6 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
 
         buildLLVMCPUCodegenPassPipeline(pipeline, false);
 
-        // FIXME: here we unfuse the FMA ops to keep the code size small but
-        // there may be better ways to do this
-        pipeline.nest<ModuleOp>().nest<LLVM::LLVMFuncOp>().addPass(createLLVMCPUUnfuseFMAOpsPass());
         return;
     }
 
@@ -511,10 +509,6 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
     modulePassManager.addNestedPass<func::FuncOp>(createConvertTensorPadToLinalgPass());
 
     buildLLVMCPUCodegenPassPipeline(pipeline, false);
-
-    // FIXME: here we unfuse the FMA ops to keep the code size small but
-    // there may be better ways to do this
-    pipeline.nest<ModuleOp>().nest<LLVM::LLVMFuncOp>().addPass(createLLVMCPUUnfuseFMAOpsPass());
 }
 
 FailureOr<std::string> CompileCpuProgramsPass::compile(
