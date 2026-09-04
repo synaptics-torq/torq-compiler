@@ -471,6 +471,19 @@ def runtime_hw_type(request):
 
 
 @versioned_hashable_object_fixture
+def torq_target_host_options(runtime_hw_type):
+    """
+    This fixture returns the --torq-target-host-triple compiler options for the runtime hw type.
+    """
+
+    # when the runtime is sim or aws_fpga, we need to compile host binaries for host
+    if runtime_hw_type.data in ('sim', 'aws_fpga'):
+        return ['--torq-target-host-triple=native']
+
+    return []
+
+
+@versioned_hashable_object_fixture
 def base_torq_compiler_options(request, case_config):
 
     cmds = case_config.get("torq_compiler_options", [])
@@ -602,9 +615,9 @@ def affinities_file(request, versioned_file, affinities):
 
 
 @versioned_generated_directory_fixture
-def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_model_file, torq_compiler, chip_config, 
-                            torq_compiler_timeout, enable_debug_ir, enable_phases_dump, enable_affinities_dump, runtime_hw_type,
-                            affinities):
+def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_model_file, torq_compiler, chip_config,
+                            torq_compiler_timeout, enable_debug_ir, enable_phases_dump, enable_affinities_dump,
+                            torq_target_host_options, enable_profiling, affinities):
         
     clear_measurements(versioned_dir)
 
@@ -652,31 +665,27 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     if enable_phases_dump:
         cmds.append(f'--dump-compilation-phases-to={versioned_dir}/phases')
 
-    # when the runtime is cmodel, we need to compile host binaries for host
-    if runtime_hw_type == 'sim':
-        cmds.extend(["--torq-target-host-triple=native"])
-    elif runtime_hw_type == 'aws_fpga':
-        cmds.extend(["--torq-target-host-triple=native"])
+    cmds += torq_target_host_options
 
     cmds += torq_compiler_options
     
-    # Enable compiler profiling by default. If output dir is not specified, use the vmfb folder.
     compile_time_profiling_output_dir = request.config.getoption("--torq-compile-time-profiling-output-dir")
-    runtime_profiling_output_dir = request.config.getoption("--torq-runtime-profiling-output-dir")
-    
+
     # always write debug info
     debug_info_dir = versioned_dir / 'debug'
     cmds.append(f'--torq-debug-info={debug_info_dir}')
 
     # collect memory usage information
-    
+
     compile_profile_csv = versioned_dir / 'compile_profile.csv'
-    if compile_time_profiling_output_dir:
-        cmds.extend(['--torq-enable-profiling', f'--torq-dump-profiling={compile_profile_csv}'])
-    elif runtime_profiling_output_dir:
+    if enable_profiling:
         # Enable profiling pass to generate cycle-time attributes in MLIRB,
         # needed for combined compile+runtime trace
         cmds.append('--torq-enable-profiling')
+
+        # --torq-dump-profiling only writes a CSV and does not affect the compiled module
+        if compile_time_profiling_output_dir:
+            cmds.append(f'--torq-dump-profiling={compile_profile_csv}')
 
     print("Compiling for TORQ with: " + " ".join(cmds))
 
@@ -781,9 +790,24 @@ def torq_mlir_func_name(mlir_model_file):
 
 
 @versioned_hashable_object_fixture
-def enable_profiling(request):
+def enable_runtime_profiling(request):
     profiling_output_dir = request.config.getoption("--torq-runtime-profiling-output-dir")
     return profiling_output_dir is not None
+
+
+@versioned_hashable_object_fixture
+def enable_compile_time_profiling(request):
+    profiling_output_dir = request.config.getoption("--torq-compile-time-profiling-output-dir")
+    return profiling_output_dir is not None
+
+
+@versioned_hashable_object_fixture
+def enable_profiling(enable_runtime_profiling, enable_compile_time_profiling):
+    """
+    This fixture returns whether the model is compiled with --torq-enable-profiling.
+    """
+
+    return enable_runtime_profiling.data or enable_compile_time_profiling.data
 
 @versioned_hashable_object_fixture
 def skip_profile_annotation(request, case_config):
@@ -799,7 +823,7 @@ def benchmark_output_dir(request):
 def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_data_args, mlir_io_spec,
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
                         enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name,
-                        enable_profiling, skip_profile_annotation, torq_compiled_model_debug_info, 
+                        enable_runtime_profiling, skip_profile_annotation, torq_compiled_model_debug_info,
                         torq_benchmark, benchmark_output_dir):
 
     clear_measurements(versioned_dir)
@@ -816,7 +840,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
     if enable_torq_buffer_tracing:
         extra_runtime_opts.append('--torq_dump_buffers_dir=' + str(buffers_dir))
 
-    if enable_profiling:
+    if enable_runtime_profiling:
         host_profile_path = versioned_dir / 'host_profile.csv'
         extra_runtime_opts.append(f'--torq_profile_host=' + str(host_profile_path))
 
@@ -928,7 +952,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
         print()
     
     # Check if profile annotation should be skipped (can be configured via case_config)
-    if enable_profiling and not skip_profile_annotation and torq_compiled_model_debug_info.exists() and (versioned_dir / 'host_profile.csv').exists():
+    if enable_runtime_profiling and not skip_profile_annotation and torq_compiled_model_debug_info.exists() and (versioned_dir / 'host_profile.csv').exists():
         logger.debug("Starting profile annotation...")        
         measurements = annotate_host_profile_from_files(
             torq_compiled_model_debug_info,
