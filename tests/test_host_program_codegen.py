@@ -37,6 +37,14 @@ def _latest_phase_with(phases_dir, needle):
     return max(matches, key=lambda t: t[0])[1]
 
 
+def _arg_accesses(line):
+    """Parse the `arg_accesses = [1 : i32, ...]` bitfields off a start_program line."""
+    m = re.search(r"arg_accesses = \[([^\]]*)\]", line)
+    if not m:
+        return []
+    return [int(v) for v in re.findall(r"(\d+)\s*:\s*i32", m.group(1))]
+
+
 def _compile(torq_compiler, out, extra_options):
     cmd = [
         str(torq_compiler.file_path),
@@ -111,4 +119,22 @@ def test_host_start_program_carries_arg_accesses(torq_compiler, tmp_path):
     assert not missing, (
         f"{len(missing)} of {len(start_lines)} start_program ops have no "
         f"arg_accesses attribute, e.g.:\n{missing[0]}"
+    )
+
+    accesses = [_arg_accesses(ln) for ln in start_lines]
+
+    unknown = sorted({v for entry in accesses for v in entry} - {1, 2, 3})
+    assert not unknown, (
+        f"start_program arg_accesses entries must be Read(1), Write(2) or "
+        f"Read|Write(3), got {unknown}"
+    )
+
+    # The outliner drops the load of an init the program never reads, and the
+    # host fallback creates a fresh tensor.empty init for every output, so the
+    # first argument of at least one program must come out Write-only.
+    write_only = [entry for entry in accesses if entry and entry[0] == 2]
+    assert write_only, (
+        "no host start_program has a Write-only init; the accesses recorded on "
+        f"torq_hl.program are not reaching start_program:\n"
+        + "\n".join(str(entry) for entry in accesses)
     )

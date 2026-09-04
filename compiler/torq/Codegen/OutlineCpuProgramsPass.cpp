@@ -190,6 +190,26 @@ static Operation *outlineProgram(
         }
     }
 
+    // record how the body uses each argument: the loop above skipped the load of
+    // every init with no uses, so those are written without ever being read and
+    // their previous contents need not be brought in. An init that aliases an
+    // input is used by construction and stays Read|Write.
+    SmallVector<Attribute> argAccesses;
+    for (auto [idx, input] : llvm::enumerate(programArgs)) {
+        torq_hl::ArgAccessBitfield access;
+        if (idx >= (size_t)outputCount) {
+            access = torq_hl::ArgAccessBitfield::Read;
+        }
+        else if (input.use_empty()) {
+            access = torq_hl::ArgAccessBitfield::Write;
+        }
+        else {
+            access = torq_hl::ArgAccessBitfield::Read | torq_hl::ArgAccessBitfield::Write;
+        }
+        argAccesses.push_back(torq_hl::ArgAccessBitfieldAttr::get(rewriter.getContext(), access));
+    }
+    programOp.setArgAccessesAttr(rewriter.getArrayAttr(argAccesses));
+
     // clone all the operations into the task except the return operation
     for (auto &op : programOp.getBody().front()) {
 
@@ -241,7 +261,7 @@ static Operation *outlineProgram(
         rewriter.setInsertionPoint(programOp);
     }
     rewriter.replaceOpWithNewOp<torq_hl::ImportProgramOp>(
-        programOp, programOp.getType(), programOp.getName()
+        programOp, programOp.getType(), programOp.getName(), programOp.getArgAccessesAttr()
     );
 
     return funcOp;

@@ -257,8 +257,9 @@ FailureOr<OutliningResults> outlineProgram(
 
     // create a new program that will contain the outlined operations
     auto programType = torq_hl::ProgramType::get(builder.getContext(), executor);
-    auto programOp =
-        torq_hl::ProgramOp::create(builder, loc, programType, builder.getStringAttr(name), nullptr);
+    auto programOp = torq_hl::ProgramOp::create(
+        builder, loc, programType, builder.getStringAttr(name), nullptr, nullptr
+    );
     programOp.getBody().emplaceBlock();
 
     // copy the operations into the function body

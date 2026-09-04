@@ -785,11 +785,15 @@ def TorqHl_ProgramOp: TorqHL_Op<"program", [IsolatedFromAbove]> {
 
     The operation returns a reference to the program that can be used by
     the torq_hl.bound_program operation to associate some arguments to the program.    
+
+    `arg_accesses` holds, for each block argument, how the program body accesses
+    it. When absent, every argument must be assumed both read and written.
   }];
 
   let arguments = (ins
     StrAttr:$name,
-    OptionalAttr<DenseI32ArrayAttr>:$block_sizes
+    OptionalAttr<DenseI32ArrayAttr>:$block_sizes,
+    OptionalAttr<TorqHL_ArgAccessArrayAttr>:$arg_accesses
   );
 
   let regions = (region
@@ -805,6 +809,8 @@ def TorqHl_ProgramOp: TorqHL_Op<"program", [IsolatedFromAbove]> {
   }];
 
   let hasCanonicalizer = 1;
+
+  let hasVerifier = 1;
 
 }
 
@@ -950,8 +956,16 @@ def TorqHl_WaitProgramOp: TorqHL_Op<"wait_program"> {
 def TorqHl_ImportProgramOp: TorqHL_Op<"import_program", [ConstantLike, Pure]> {
   let summary = "Import externally defined program";
 
+  let description = [{
+    `arg_accesses` carries over the accesses recorded on the torq_hl.program op
+    this import replaced, so call sites can still see how the outlined body uses
+    each argument. When absent, every argument must be assumed both read and
+    written.
+  }];
+
   let arguments = (ins
-    FlatSymbolRefAttr:$name
+    FlatSymbolRefAttr:$name,
+    OptionalAttr<TorqHL_ArgAccessArrayAttr>:$arg_accesses
   );
 
   let results = (outs

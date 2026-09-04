@@ -739,6 +739,20 @@ LogicalResult mlir::syna::torq_hl::NextOp::verify() {
     return success();
 }
 
+LogicalResult mlir::syna::torq_hl::ProgramOp::verify() {
+
+    auto argAccesses = getArgAccessesAttr();
+
+    // the arguments live on the entry block, which is not there yet while the op
+    // is being built
+    if (argAccesses && !getBody().empty() &&
+        argAccesses.size() != getBody().front().getNumArguments()) {
+        return emitOpError("arg_accesses size must match the number of program arguments");
+    }
+
+    return success();
+}
+
 LogicalResult mlir::syna::torq_hl::StartProgramOp::verify() {
 
     if (auto argAccesses = getArgAccessesAttr()) {

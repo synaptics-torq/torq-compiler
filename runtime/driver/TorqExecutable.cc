@@ -1465,23 +1465,35 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
     }
     uint8_t* xramBuffer = staging.data();
 
-    bool strided = false;
-    if (hasStrideInfo && argNdims[i] > 0) {
-      const uint32_t* argStrides = strides_fb + argStrideOffsets[i];
-      const uint32_t* argShape = shapes_fb + argStrideOffsets[i];
-      if (hasNonTrivialStrides(argStrides, argShape, argNdims[i])) {
-        strided = true;
-        // a strided read only fills the referenced bytes, so the gaps between
-        // them must keep looking like the zero-filled buffer they used to be
-        memset(xramBuffer, 0, size);
-        stridedXramRead(torq_.get(), xramAddress, xramBuffer,
-                        argStrides, argShape, argNdims[i]);
-      }
-    }
-    if (!strided && !torq_->readXram(xramAddress, size, xramBuffer)) {
-      // a failed read used to hand the program a zeroed buffer, keep doing that
-      // rather than exposing what the previous dispatch left in the staging buffer
+    // an argument the program never reads needs no copy in. Zero it anyway: the
+    // staging buffers are reused across dispatches, so a program that writes
+    // only part of its output would otherwise send the previous dispatch's bytes
+    // back to XRAM. The test vector dump below records what the program saw in
+    // XRAM, so keep the read while it is active.
+    bool writeOnly = !testVectorWriter_ && !(argAccessAt(i) & ns(ArgAccess_Read));
+
+    if (writeOnly) {
       memset(xramBuffer, 0, size);
+    }
+    else {
+      bool strided = false;
+      if (hasStrideInfo && argNdims[i] > 0) {
+        const uint32_t* argStrides = strides_fb + argStrideOffsets[i];
+        const uint32_t* argShape = shapes_fb + argStrideOffsets[i];
+        if (hasNonTrivialStrides(argStrides, argShape, argNdims[i])) {
+          strided = true;
+          // a strided read only fills the referenced bytes, so the gaps between
+          // them must keep looking like the zero-filled buffer they used to be
+          memset(xramBuffer, 0, size);
+          stridedXramRead(torq_.get(), xramAddress, xramBuffer,
+                          argStrides, argShape, argNdims[i]);
+        }
+      }
+      if (!strided && !torq_->readXram(xramAddress, size, xramBuffer)) {
+        // a failed read used to hand the program a zeroed buffer, keep doing that
+        // rather than exposing what the previous dispatch left in the staging buffer
+        memset(xramBuffer, 0, size);
+      }
     }
 
     hostArgumentAddresses_[i] = xramBuffer;

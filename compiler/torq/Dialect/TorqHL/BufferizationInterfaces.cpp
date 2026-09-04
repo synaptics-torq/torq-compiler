@@ -129,7 +129,7 @@ struct ImportProgramOpBufferizableOpInterface
         auto memrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
 
         auto newProgramOp = torq_hl::ImportProgramOp::create(
-            rewriter, op->getLoc(), memrefType, programOp.getName()
+            rewriter, op->getLoc(), memrefType, programOp.getName(), programOp.getArgAccessesAttr()
         );
 
         rewriter.replaceOpWithNewOp<bufferization::ToTensorOp>(
