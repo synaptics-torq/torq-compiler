@@ -10,8 +10,11 @@
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/DialectConversion.h"
+
+#include <optional>
 
 namespace mlir::syna::torq {
 
@@ -283,6 +286,21 @@ std::pair<int32_t, int32_t> getDTypeRange(Type type);
 ///   3. Rank-1 single-element tensor: arith.constant dense<0.0> : tensor<1xbf16>
 /// Returns true and writes \p out on success; returns false otherwise.
 bool extractBF16ConstantValue(Value v, double &out);
+
+/// Which dense splat constants qualify as a scalar.
+enum class SplatPolicy { Any, SingleElement };
+
+/// Trace a value used in \p op's body to a scalar constant: directly, or
+/// through a block argument to a constant DPS input. \p val must be usable
+/// inside \p op's body. The float variant also looks through
+/// arith.truncf/extf along the way, converting at each cast so the result
+/// equals what the body computes at runtime. The int result is sign-extended.
+std::optional<llvm::APFloat> traceToConstFloat(linalg::GenericOp op, Value val, SplatPolicy policy);
+std::optional<int64_t> traceToConstInt(linalg::GenericOp op, Value val, SplatPolicy policy);
+
+/// Convert \p value to \p type's float semantics; nullopt if \p type is not a
+/// float type.
+std::optional<llvm::APFloat> convertFloatToType(llvm::APFloat value, Type type);
 
 std::vector<int32_t>
 interleave(const std::vector<int32_t> &a, const std::vector<int32_t> &b, bool broadcast_b = true);

@@ -41,46 +41,18 @@ std::optional<double> getQFloatScalar(Value v) {
 }
 
 std::optional<double> getQGenericFloatConstant(Value v, linalg::GenericOp op) {
-    if (auto trunc = v.getDefiningOp<arith::TruncFOp>())
-        return getQGenericFloatConstant(trunc.getIn(), op);
-    if (auto ext = v.getDefiningOp<arith::ExtFOp>())
-        return getQGenericFloatConstant(ext.getIn(), op);
-    if (auto blockArg = dyn_cast<BlockArgument>(v)) {
-        if (!op || blockArg.getOwner() != op.getBody())
-            return std::nullopt;
-        unsigned idx = blockArg.getArgNumber();
-        if (idx >= op.getNumDpsInputs())
-            return std::nullopt;
-        return getQFloatScalar(op.getDpsInputOperand(idx)->get());
-    }
-    return getQFloatScalar(v);
-}
-
-static std::optional<int64_t> getConstIntValue(Value v) {
-    auto cst = v.getDefiningOp<arith::ConstantOp>();
-    if (!cst)
+    if (!op)
         return std::nullopt;
-    if (auto iattr = dyn_cast<IntegerAttr>(cst->getAttr("value")))
-        return iattr.getInt();
-    if (auto dense = dyn_cast<DenseIntElementsAttr>(cst->getAttr("value"))) {
-        if (dense.isSplat())
-            return dense.getSplatValue<int64_t>();
-        if (dense.size() == 1)
-            return *dense.getValues<int64_t>().begin();
-    }
-    return std::nullopt;
+    auto value = traceToConstFloat(op, v, SplatPolicy::Any);
+    if (!value)
+        return std::nullopt;
+    return value->convertToDouble();
 }
 
 static std::optional<int64_t> getQGenericIntConstant(Value v, linalg::GenericOp op) {
-    if (auto blockArg = dyn_cast<BlockArgument>(v)) {
-        if (!op || blockArg.getOwner() != op.getBody())
-            return std::nullopt;
-        unsigned idx = blockArg.getArgNumber();
-        if (idx >= op.getNumDpsInputs())
-            return std::nullopt;
-        return getConstIntValue(op.getDpsInputOperand(idx)->get());
-    }
-    return getConstIntValue(v);
+    if (!op)
+        return std::nullopt;
+    return traceToConstInt(op, v, SplatPolicy::Any);
 }
 
 static bool

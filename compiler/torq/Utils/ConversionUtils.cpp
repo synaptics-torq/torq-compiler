@@ -73,6 +73,98 @@ bool extractBF16ConstantValue(Value v, double &out) {
     return true;
 }
 
+// Reduce a traced arith.constant's attribute to a scalar attribute, unwrapping
+// a qualifying dense splat.
+static TypedAttr getConstScalarAttr(Attribute attr, SplatPolicy policy) {
+    if (auto denseAttr = dyn_cast<DenseElementsAttr>(attr)) {
+        if (policy == SplatPolicy::SingleElement && denseAttr.getNumElements() != 1) {
+            return nullptr;
+        }
+        if (!denseAttr.isSplat()) {
+            return nullptr;
+        }
+        return denseAttr.getSplatValue<TypedAttr>();
+    }
+    return dyn_cast<TypedAttr>(attr);
+}
+
+// If `val` is a block argument of `op`'s body fed by a DPS input, return that
+// input; null otherwise.
+static Value getMatchingDpsInput(linalg::GenericOp op, Value val) {
+    auto blockArg = dyn_cast<BlockArgument>(val);
+    if (!blockArg || blockArg.getOwner() != op.getBody()) {
+        return nullptr;
+    }
+    unsigned argIdx = blockArg.getArgNumber();
+    // Block args: first N are inputs, last M are outputs (inits)
+    auto inputs = op.getDpsInputs();
+    if (argIdx < inputs.size()) {
+        return inputs[argIdx];
+    }
+    return nullptr;
+}
+
+std::optional<llvm::APFloat>
+traceToConstFloat(linalg::GenericOp op, Value val, SplatPolicy policy) {
+    assert(
+        val.getParentRegion()->isAncestor(&op.getRegion()) && "val must be usable inside op's body"
+    );
+    if (auto truncOp = val.getDefiningOp<arith::TruncFOp>()) {
+        auto value = traceToConstFloat(op, truncOp.getIn(), policy);
+        if (!value) {
+            return std::nullopt;
+        }
+        return convertFloatToType(*value, truncOp.getOut().getType());
+    }
+    if (auto extOp = val.getDefiningOp<arith::ExtFOp>()) {
+        auto value = traceToConstFloat(op, extOp.getIn(), policy);
+        if (!value) {
+            return std::nullopt;
+        }
+        return convertFloatToType(*value, extOp.getOut().getType());
+    }
+    if (Value input = getMatchingDpsInput(op, val)) {
+        return traceToConstFloat(op, input, policy);
+    }
+    auto constOp = val.getDefiningOp<arith::ConstantOp>();
+    if (!constOp) {
+        return std::nullopt;
+    }
+    auto scalarAttr = dyn_cast_or_null<FloatAttr>(getConstScalarAttr(constOp.getValue(), policy));
+    if (!scalarAttr) {
+        return std::nullopt;
+    }
+    return scalarAttr.getValue();
+}
+
+std::optional<int64_t> traceToConstInt(linalg::GenericOp op, Value val, SplatPolicy policy) {
+    assert(
+        val.getParentRegion()->isAncestor(&op.getRegion()) && "val must be usable inside op's body"
+    );
+    if (Value input = getMatchingDpsInput(op, val)) {
+        val = input;
+    }
+    auto constOp = val.getDefiningOp<arith::ConstantOp>();
+    if (!constOp) {
+        return std::nullopt;
+    }
+    auto scalarAttr = dyn_cast_or_null<IntegerAttr>(getConstScalarAttr(constOp.getValue(), policy));
+    if (!scalarAttr) {
+        return std::nullopt;
+    }
+    return scalarAttr.getInt();
+}
+
+std::optional<llvm::APFloat> convertFloatToType(llvm::APFloat value, Type type) {
+    auto floatType = dyn_cast<FloatType>(type);
+    if (!floatType) {
+        return std::nullopt;
+    }
+    bool losesInfo = false;
+    value.convert(floatType.getFloatSemantics(), llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+    return value;
+}
+
 Value createZeroConstant(OpBuilder &b, Location loc, Type elemTy) {
     TypedAttr attr;
     if (isa<IndexType>(elemTy)) {

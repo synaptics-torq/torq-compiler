@@ -414,22 +414,6 @@ class ElementwiseUnaryArithOpPattern : public OpRewritePattern<linalg::GenericOp
     }
 };
 
-// Find the shift constant by tracing back through the block argument to the
-// linalg.generic input. Handles both:
-//   case #1: single input, shift is an inline constant in the body (numDpsInputs == 1)
-//   case #2: two inputs, shift comes from a constant tensor input (e.g. tensor<1x1xi32>)
-static arith::ConstantOp traceToShiftConst(linalg::GenericOp linalgOp, Value val) {
-    if (auto constOp = val.getDefiningOp<arith::ConstantOp>())
-        return constOp;
-    if (auto blockArg = dyn_cast<BlockArgument>(val)) {
-        unsigned argIdx = blockArg.getArgNumber();
-        auto inputs = linalgOp.getDpsInputs();
-        if (argIdx < inputs.size())
-            return inputs[argIdx].getDefiningOp<arith::ConstantOp>();
-    }
-    return nullptr;
-}
-
 // rounding right shift
 // y = (x >> 7) + (((x >> 6) & 1) ? 1 : 0)
 
@@ -486,35 +470,17 @@ class RoundingRightShiftPattern : public OpRewritePattern<linalg::GenericOp> {
             input2 = op.getOperand(1);
         }
         else {
-            auto shiftConst = traceToShiftConst(op, shrsiOp1.getRhs());
-            if (!shiftConst) {
+            auto shiftVal = traceToConstInt(op, shrsiOp1.getRhs(), SplatPolicy::Any);
+            if (!shiftVal) {
                 return rewriter.notifyMatchFailure(
-                    op, "RoundingRightShiftPattern: shift is not a constant"
-                );
-            }
-            int64_t shiftVal;
-            Attribute attr = shiftConst.getValue();
-            if (auto denseAttr = dyn_cast<DenseIntElementsAttr>(attr)) {
-                if (!denseAttr.isSplat()) {
-                    return rewriter.notifyMatchFailure(
-                        op, "RoundingRightShiftPattern: shift tensor is not a splat constant"
-                    );
-                }
-                shiftVal = denseAttr.getSplatValue<APInt>().getSExtValue();
-            }
-            else if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
-                shiftVal = intAttr.getInt();
-            }
-            else {
-                return rewriter.notifyMatchFailure(
-                    op, "RoundingRightShiftPattern: unsupported shift attr type"
+                    op, "RoundingRightShiftPattern: shift is not a splat constant"
                 );
             }
 
             auto i32Type = rewriter.getI32Type();
             auto input2Type = RankedTensorType::get(resultType.getShape(), i32Type);
             auto splatAttr =
-                SplatElementsAttr::get(input2Type, IntegerAttr::get(i32Type, shiftVal));
+                SplatElementsAttr::get(input2Type, IntegerAttr::get(i32Type, *shiftVal));
             input2 = arith::ConstantOp::create(rewriter, op.getLoc(), splatAttr).getResult();
         }
 
@@ -562,36 +528,14 @@ class ElementWiseShiftOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto input1 = srcOp.getOperand(0);
         auto input2 = srcOp.getOperand(1);
 
-        auto shiftConst = traceToShiftConst(srcOp, binaryOp->getOperand(1));
-        if (shiftConst) {
+        auto shiftVal = traceToConstInt(srcOp, binaryOp->getOperand(1), SplatPolicy::SingleElement);
+        if (shiftVal) {
             auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
-            auto shiftConstValue = shiftConst.getValue();
-            int64_t shiftVal = 0;
-            bool foundShiftVal = false;
-            if (auto denseAttr = dyn_cast<DenseIntElementsAttr>(shiftConstValue)) {
-                if (llvm::all_of(denseAttr.getType().getShape(), [](int64_t dim) {
-                        return dim == 1;
-                    })) {
-                    shiftVal = (*denseAttr.begin()).getSExtValue();
-                    foundShiftVal = true;
-                }
-            }
-            else if (auto intAttr = dyn_cast<IntegerAttr>(shiftConstValue)) {
-                shiftVal = intAttr.getInt();
-                foundShiftVal = true;
-            }
-            else {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Unsupported shift constant attribute type in ElementWiseShiftOpPattern"
-                );
-            }
-            if (foundShiftVal) {
-                auto value = DenseElementsAttr::get(
-                    input1Type, IntegerAttr::get(input1Type.getElementType(), shiftVal)
-                );
-                input2 = arith::ConstantOp::create(rewriter, srcOp.getLoc(), input1Type, value)
-                             .getResult();
-            }
+            auto value = DenseElementsAttr::get(
+                input1Type, IntegerAttr::get(input1Type.getElementType(), *shiftVal)
+            );
+            input2 =
+                arith::ConstantOp::create(rewriter, srcOp.getLoc(), input1Type, value).getResult();
         }
 
         rewriter.replaceOpWithNewOp<torq_hl::ElementWiseShiftOp>(
