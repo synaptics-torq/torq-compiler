@@ -35,6 +35,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createValidToSamePadPass();
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCheckCssStackSizePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCoalesceElementwiseChainsPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createFuseTransposeIntoGroupPass();
 
 std::unique_ptr<OperationPass<ModuleOp>> createTORQLowerExecutableTargetPass();
 

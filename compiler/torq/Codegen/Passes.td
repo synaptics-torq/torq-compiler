@@ -551,6 +551,19 @@ def CoalesceElementwiseChains :
     ];
 }
 
+def FuseTransposeIntoGroup :
+        InterfacePass<"torq-fuse-transpose-into-group",
+                      "mlir::FunctionOpInterface"> {
+    let summary = "Fuse a producer layout transpose into the group it feeds, before slicing";
+
+    let constructor =
+        "mlir::syna::torq::createFuseTransposeIntoGroupPass()";
+
+    let dependentDialects = [
+        "linalg::LinalgDialect"
+    ];
+}
+
 def LinalgSlicing :
            InterfacePass<"torq-linalg-slicing",
                          "mlir::FunctionOpInterface"> {

@@ -130,6 +130,7 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
         // Group each pure-elementwise chain (erf/tanh/mul) before slicing, so the
         // chain slices as one scf.forall and its middle values stay in LRAM.
         funcPm.addPass(createCoalesceElementwiseChainsPass());
+        funcPm.addPass(createFuseTransposeIntoGroupPass());
         funcPm.addPass(createLinalgSlicingPass(TorqHw::get().getSliceCount()));
     }
 

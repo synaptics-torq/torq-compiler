@@ -3,6 +3,8 @@
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/IR/PatternMatch.h"
 
+#include <optional>
+
 namespace mlir::syna::torq {
 
 // Iteration domain slicing dimension index.
@@ -17,6 +19,11 @@ enum SlicingIterationDomainIndex : size_t {
     PoolingNchwMaxOp = 1,
     PoolingNcwMaxOp = 1,
 };
+
+// The iteration-domain dimension LinalgSlicing slices `op` on, or nullopt when
+// `op` has no slicing pattern. Keep in sync with the pattern registration in
+// LinalgSlicingPass.
+std::optional<size_t> getSlicingIterationDomainIndex(Operation *op);
 
 // Slicing granularity
 constexpr int64_t kGrouping = 4;

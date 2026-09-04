@@ -17,6 +17,7 @@ set(sources
     BufferizePeeledForallInPlacePass.cpp
     CheckCssStackSizePass.cpp
     CoalesceElementwiseChainsPass.cpp
+    FuseTransposeIntoGroupPass.cpp
     CompileCpuProgramsPass.cpp
     ConvertTensorPadToLinalgPass.cpp
     DecomposeTensorConcatPass.cpp

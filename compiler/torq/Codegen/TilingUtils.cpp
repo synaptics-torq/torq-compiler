@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Affine/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/IR/AffineValueMap.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
@@ -22,6 +23,32 @@
 #define DEBUG_TYPE "torq-tiling-utils"
 
 namespace mlir::syna::torq {
+
+std::optional<size_t> getSlicingIterationDomainIndex(Operation *op) {
+    return llvm::TypeSwitch<Operation *, std::optional<size_t>>(op)
+        .Case<linalg::Conv2DNhwcHwcfOp>([](auto) -> std::optional<size_t> {
+            return SlicingIterationDomainIndex::Conv2DNhwcHwcfOp;
+        })
+        .Case<linalg::Conv2DNchwFchwOp>([](auto) -> std::optional<size_t> {
+            return SlicingIterationDomainIndex::Conv2DNchwFchwOp;
+        })
+        .Case<linalg::DepthwiseConv2DNhwcHwcOp>([](auto) -> std::optional<size_t> {
+            return SlicingIterationDomainIndex::DepthwiseConv2DNhwcHwcOp;
+        })
+        .Case<linalg::DepthwiseConv2DNchwChwOp>([](auto) -> std::optional<size_t> {
+            return SlicingIterationDomainIndex::DepthwiseConv2DNchwChwOp;
+        })
+        .Case<linalg::PoolingNhwcMaxOp>([](auto) -> std::optional<size_t> {
+            return SlicingIterationDomainIndex::PoolingNhwcMaxOp;
+        })
+        .Case<linalg::PoolingNchwMaxOp>([](auto) -> std::optional<size_t> {
+            return SlicingIterationDomainIndex::PoolingNchwMaxOp;
+        })
+        .Case<linalg::PoolingNcwMaxOp>([](auto) -> std::optional<size_t> {
+            return SlicingIterationDomainIndex::PoolingNcwMaxOp;
+        })
+        .Default([](auto) -> std::optional<size_t> { return std::nullopt; });
+}
 
 namespace {
 

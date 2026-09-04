@@ -332,6 +332,54 @@ struct BatchMatmulPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
     }
 }; // class BatchMatmulPattern
 
+// Minimum contiguous elements that must remain inside one transpose slice chunk.
+constexpr int64_t kMinTransposeSliceRun = 64;
+
+// Transpose pattern. Slices a standalone linalg.transpose on the outermost
+// dimension that splits evenly and leaves a long contiguous run in each chunk.
+// A transpose adopted by FuseTransposeIntoGroupPass reaches this pattern as a
+// group member, not a principal, and is skipped.
+struct TransposePattern : public OpRewritePattern<linalg::TransposeOp> {
+    int64_t sliceCount_;
+
+    TransposePattern(MLIRContext *context, int64_t sliceCount)
+        : OpRewritePattern<linalg::TransposeOp>(context), sliceCount_(sliceCount) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::TransposeOp transposeOp, PatternRewriter &rewriter) const override {
+        if (getTargetExecutor(transposeOp) == torq_hl::Executor::Host)
+            return rewriter.notifyMatchFailure(transposeOp, "host-executed operation");
+
+        if (isMarkedFuseGroup(transposeOp) && !isFuseGroupPrincipalOp(transposeOp))
+            return rewriter.notifyMatchFailure(transposeOp, "not the principal operation");
+
+        auto shaped = dyn_cast<ShapedType>(transposeOp->getResult(0).getType());
+        if (!shaped || !shaped.hasStaticShape())
+            return rewriter.notifyMatchFailure(transposeOp, "output shape is not static");
+
+        // Take the outermost dimension that splits evenly and still leaves a long
+        // contiguous run inside each chunk.
+        const int64_t chunk = sliceCount_ * kGrouping;
+        ArrayRef<int64_t> shape = shaped.getShape();
+        std::optional<size_t> slicingIter;
+        for (size_t dim = 0; dim < shape.size(); ++dim) {
+            if (shape[dim] < 2 * kGrouping || shape[dim] % chunk != 0)
+                continue;
+            int64_t run = 1;
+            for (size_t inner = dim + 1; inner < shape.size(); ++inner)
+                run *= shape[inner];
+            if (run < kMinTransposeSliceRun)
+                continue;
+            slicingIter = dim;
+            break;
+        }
+        if (!slicingIter)
+            return rewriter.notifyMatchFailure(transposeOp, "no dimension splits into long runs");
+
+        return peelAndSlice(rewriter, transposeOp, *slicingIter, kGrouping, sliceCount_);
+    }
+}; // struct TransposePattern
+
 // Elementwise pattern for linalg.generic ops. Picks the leftmost non-unit
 // dimension to slice on, keeping inner dimensions contiguous in memory.
 struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
@@ -476,6 +524,7 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
 
         // TODO: support matmul too
         // Elementwise generic ops: dynamically slice on leftmost non-unit dim
+        patterns.add<TransposePattern>(context, this->sliceCount);
         patterns.add<ElementwisePattern>(context, this->sliceCount);
 
         FrozenRewritePatternSet frozenPatterns(std::move(patterns));
