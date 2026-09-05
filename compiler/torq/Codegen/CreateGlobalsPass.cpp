@@ -129,6 +129,8 @@ static void replaceDescriptorOpsWithGlobals(
     // and create corresponding memref.global for each of them
     unsigned globalCounter = 0;
 
+    llvm::DenseMap<Attribute, memref::GlobalOp> globalOps;
+
     for (auto descriptorOp : descriptorOps) {
 
         // Setup an insertion guard to ensure that the rewriter insertion point is reset
@@ -136,8 +138,9 @@ static void replaceDescriptorOpsWithGlobals(
         IRRewriter::InsertionGuard ig(rewriter);
 
         auto codeDataRange = descriptorOp.getCodeData().getAsRange<DenseI8ArrayAttr>();
-        auto xramCodeAddressesAttr = descriptorOp.getXramCodeAddresses();
         auto descriptorName = descriptorOp.getName();
+
+        auto xramCodeAddresses = llvm::to_vector(descriptorOp.getXramCodeAddresses());
 
         for (auto [sectionData, codeSection] :
              llvm::zip(codeDataRange, descriptorOp.getCodeSections())) {
@@ -146,40 +149,56 @@ static void replaceDescriptorOpsWithGlobals(
             auto initialValue = convertCodeDataToElementsAttr(rewriter, sectionData, memrefType);
             auto codeSectionOpResult = cast<OpResult>(codeSection);
 
-            // Create a unique name for the global
-            std::string globalName =
-                (llvm::Twine("__const_descriptor_") + llvm::Twine(descriptorName) +
-                 llvm::Twine("_") + llvm::Twine(globalCounter) + llvm::Twine("_") +
-                 llvm::Twine(codeSectionOpResult.getResultNumber()))
-                    .str();
+            // the first result is the invocation, so we need to subtract 1 from the result
+            // number to get the correct index into xramCodeAddresses
+            unsigned sectionIndex = codeSectionOpResult.getResultNumber() - 1;
 
-            // Create memref.global operation
-            auto globalOp = memref::GlobalOp::create(
-                rewriter, descriptorOp.getLoc(),
-                /*sym_name=*/globalName,
-                /*sym_visibility=*/rewriter.getStringAttr("private"),
-                /*type=*/memrefType,
-                /*initial_value=*/initialValue,
-                /*constant=*/true,
-                /*alignment=*/nullptr
-            );
+            if (!globalOps.contains(initialValue)) {
 
-            rewriter.modifyOpInPlace(globalOp, [&]() {
-                // the first result is the invocation, so we need to subtract 1 from the result
-                // number to get the correct index into the xramCodeAddressesAttr
-                setXramAddress(
-                    globalOp, xramCodeAddressesAttr[codeSectionOpResult.getResultNumber() - 1]
+                // Create a unique name for the global
+                std::string globalName =
+                    (llvm::Twine("__const_descriptor_") + llvm::Twine(descriptorName) +
+                     llvm::Twine("_") + llvm::Twine(globalCounter) + llvm::Twine("_") +
+                     llvm::Twine(codeSectionOpResult.getResultNumber()))
+                        .str();
+
+                // Create memref.global operation
+                auto globalOp = memref::GlobalOp::create(
+                    rewriter, descriptorOp.getLoc(),
+                    /*sym_name=*/globalName,
+                    /*sym_visibility=*/rewriter.getStringAttr("private"),
+                    /*type=*/memrefType,
+                    /*initial_value=*/initialValue,
+                    /*constant=*/true,
+                    /*alignment=*/nullptr
                 );
-            });
+
+                rewriter.modifyOpInPlace(globalOp, [&]() {
+                    setXramAddress(globalOp, xramCodeAddresses[sectionIndex]);
+                });
+
+                globalOps[initialValue] = globalOp;
+            }
+
+            memref::GlobalOp globalOp = globalOps.at(initialValue);
+
+            // Point this section (and its address attribute, which
+            // ResolveInvocationArguments copies into InvocationAttrs) at the
+            // content's global.
+            xramCodeAddresses[sectionIndex] = *getXramAddress(globalOp);
 
             rewriter.setInsertionPoint(descriptorOp);
 
             auto getGlobalOp = memref::GetGlobalOp::create(
-                rewriter, descriptorOp.getLoc(), memrefType, globalName
+                rewriter, descriptorOp.getLoc(), memrefType, globalOp.getSymName()
             );
 
             rewriter.replaceAllUsesWith(codeSectionOpResult, getGlobalOp.getResult());
         }
+
+        rewriter.modifyOpInPlace(descriptorOp, [&]() {
+            descriptorOp.setXramCodeAddresses(xramCodeAddresses);
+        });
 
         globalCounter++;
     }
