@@ -161,21 +161,6 @@ static void copyToProgramBody(
     torq_hl::ReturnOp::create(builder, programOp.getLoc(), returnValues);
 }
 
-static int64_t getProgramSize(torq_hl::ProgramOp programOp) {
-
-    // FIXME: we compute this based on the real content of the program
-    if (programOp.getProgram().getType().getExecutor() == torq_hl::Executor::Slice) {
-        // /!\ Note: this has to be kept in sync with the size in outlineOp()
-        return 0xA00 * 2;
-    }
-    else if (programOp.getProgram().getType().getExecutor() == torq_hl::Executor::NSS) {
-        return 0x280;
-    }
-    else {
-        assert(false && "Unsupported executor for program size calculation");
-    }
-}
-
 static DenseMap<Value, Value> getOutputToInput(
     OpBuilder &builder, const SmallVector<Operation *> &targets, const SmallVector<Value> &inputs,
     const SmallVector<Value> &outputs
