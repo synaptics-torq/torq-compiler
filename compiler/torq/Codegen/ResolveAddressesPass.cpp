@@ -43,20 +43,24 @@ template <typename OpT> static LogicalResult resolveDmaCfg(AddressResolver &reso
 
     auto nssInvocation = getNssInvocation(op);
 
-    auto maybeReadAddress = resolver.getDataStartAddress(op.getRead(), nssInvocation);
-
-    if (!maybeReadAddress) {
-        return op.emitError("unable to resolve read address of value of ") << op.getRead();
-    }
-
     auto maybeWriteAddress = resolver.getDataStartAddress(op.getWrite(), nssInvocation);
 
     if (!maybeWriteAddress) {
         return op.emitError("unable to resolve write address of ") << op.getWrite();
     }
 
-    op.setReadAddress(*maybeReadAddress);
     op.setWriteAddress(*maybeWriteAddress);
+
+    // the read_address of a get_block load is assigned later, in AssignNSSProgramsAddresses
+    if (!isGetBlockValue(op.getRead())) {
+        auto maybeReadAddress = resolver.getDataStartAddress(op.getRead(), nssInvocation);
+
+        if (!maybeReadAddress) {
+            return op.emitError("unable to resolve read address of value of ") << op.getRead();
+        }
+
+        op.setReadAddress(*maybeReadAddress);
+    }
 
     return success();
 }

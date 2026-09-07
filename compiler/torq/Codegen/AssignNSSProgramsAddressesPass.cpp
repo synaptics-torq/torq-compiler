@@ -21,6 +21,10 @@ extern llvm::cl::opt<int> clMaxNssProgramsSize;
 
 namespace mlir::syna::torq {
 
+LogicalResult updateCodeSectionSizes(torq_hl::CreateInvocationOp createInvocationOp);
+LogicalResult resolveGetBlockReadAddresses(torq_hl::CreateInvocationOp createInvocationOp);
+LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp createInvocationOp);
+
 namespace {
 
 class AssignNSSProgramsAddressesPass
@@ -54,6 +58,66 @@ FailureOr<SmallVector<torq_hl::CreateInvocationOp>> findNSSInvocations(FunctionO
     return nssInvocations;
 }
 
+// Lay the programs out contiguously in XRAM starting from nssProgramBase, using their block_sizes,
+// and set each invocation's xram_code_addresses. Returns the end of the laid-out range.
+int64_t assignXramCodeAddresses(
+    ArrayRef<torq_hl::CreateInvocationOp> nssInvocations, int64_t nssProgramBase
+) {
+
+    int64_t nextNssProgramAddress = nssProgramBase;
+
+    for (auto invocationOp : nssInvocations) {
+
+        auto programOp = invocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
+
+        auto blockSizes = programOp.getBlockSizes();
+
+        assert(blockSizes && "block_sizes missing: SegmentNSSPrograms must run first");
+
+        nextNssProgramAddress = llvm::alignTo(nextNssProgramAddress, 4);
+
+        SmallVector<int64_t> addresses;
+
+        for (auto blockSize : *blockSizes) {
+            addresses.push_back(nextNssProgramAddress);
+            nextNssProgramAddress += blockSize;
+        }
+
+        invocationOp.setXramCodeAddresses(addresses);
+    }
+
+    return nextNssProgramAddress;
+}
+
+// Rewrite the InvocationAttr entries in the started invocation's invocation_args
+// that refer to NSS invocations.
+void resolveNssInvocationArgs(torq_hl::StartProgramOp startProgramOp) {
+
+    auto targetInvocationOp =
+        startProgramOp.getInvocation().getDefiningOp<torq_hl::CreateInvocationOp>();
+    if (!targetInvocationOp || !targetInvocationOp.getInvocationArgs()) {
+        return;
+    }
+
+    SmallVector<Attribute> argAttrs(targetInvocationOp.getInvocationArgs()->getValue());
+
+    for (auto [argAttr, arg] : llvm::zip_equal(argAttrs, startProgramOp.getArgs())) {
+        auto invocationArg = dyn_cast<TypedValue<torq_hl::InvocationType>>(arg);
+        if (!invocationArg || invocationArg.getType().getExecutor() != torq_hl::Executor::NSS) {
+            continue;
+        }
+        auto argInvocationOp = invocationArg.getDefiningOp<torq_hl::CreateInvocationOp>();
+        assert(argInvocationOp && "NSS invocation argument not defined by create_invocation");
+        auto invocationAttr = cast<torq_hl::InvocationAttr>(argAttr);
+        argAttr = torq_hl::InvocationAttr::get(
+            startProgramOp.getContext(), torq_hl::Executor::NSS, invocationAttr.getExecutorId(),
+            *argInvocationOp.getXramCodeAddresses()
+        );
+    }
+
+    targetInvocationOp.setInvocationArgsAttr(ArrayAttr::get(startProgramOp.getContext(), argAttrs));
+}
+
 void AssignNSSProgramsAddressesPass::runOnOperation() {
 
     auto nssInvocations = findNSSInvocations(getOperation());
@@ -63,48 +127,33 @@ void AssignNSSProgramsAddressesPass::runOnOperation() {
         return;
     }
 
-    Builder builder(getOperation().getContext());
-
     // find the base address for the NSS programs that was reserved in the AssignAddressesPass
     int64_t nssProgramBase =
         getOperation()->getAttrOfType<IntegerAttr>("torq-nss-program-base").getInt();
 
-    int64_t maxNssProgramAddress = nssProgramBase + clMaxNssProgramsSize;
-
-    int64_t nextNssProgramAddress = nssProgramBase;
+    // Assign provisional addresses from the upper-bound block sizes so the programs
+    // can be compiled. The compiled size of each block is address-independent, so
+    // the real addresses can be assigned afterwards.
+    assignXramCodeAddresses(nssInvocations.value(), nssProgramBase);
 
     for (auto invocationOp : nssInvocations.value()) {
-
-        auto programOp = invocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
-
-        auto blockSizesAttr = programOp.getBlockSizes();
-
-        if (!blockSizesAttr) {
-            programOp.emitError("NSS program missing block sizes");
+        if (failed(resolveGetBlockReadAddresses(invocationOp))) {
             signalPassFailure();
             return;
         }
-
-        int programSize = 0;
-
-        for (auto blockSize : *blockSizesAttr) {
-            programSize += blockSize;
-        }
-
-        auto programAddress = llvm::alignTo(nextNssProgramAddress, 4);
-
-        nextNssProgramAddress = programAddress + programSize;
-
-        SmallVector<int64_t> addresses;
-
-        int programOffset = 0;
-        for (auto blockSize : *blockSizesAttr) {
-            addresses.push_back(programAddress + programOffset);
-            programOffset += blockSize;
-        }
-
-        invocationOp.setXramCodeAddresses(addresses);
     }
+
+    for (auto invocationOp : nssInvocations.value()) {
+        if (failed(updateCodeSectionSizes(invocationOp))) {
+            signalPassFailure();
+            return;
+        }
+    }
+
+    // the final assignment, now from the measured sizes
+    int64_t nextNssProgramAddress = assignXramCodeAddresses(nssInvocations.value(), nssProgramBase);
+
+    int64_t maxNssProgramAddress = nssProgramBase + clMaxNssProgramsSize;
 
     if (nextNssProgramAddress > maxNssProgramAddress) {
 
@@ -117,6 +166,19 @@ void AssignNSSProgramsAddressesPass::runOnOperation() {
 
         signalPassFailure();
         return;
+    }
+
+    // NSS invocations appear as arguments only at function level (a program loads
+    // the next program's blocks), so a flat walk covers every placeholder
+    for (auto startProgramOp : getOperation().getFunctionBody().getOps<torq_hl::StartProgramOp>()) {
+        resolveNssInvocationArgs(startProgramOp);
+    }
+
+    for (auto invocationOp : nssInvocations.value()) {
+        if (failed(updateGetBlockOperations(invocationOp))) {
+            signalPassFailure();
+            return;
+        }
     }
 }
 

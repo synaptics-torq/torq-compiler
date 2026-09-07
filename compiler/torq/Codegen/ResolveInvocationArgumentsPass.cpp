@@ -107,9 +107,18 @@ static LogicalResult updateCreateInvocation(
                 auto maybeCodeSectionAddresses = sourceInvocationOp.getXramCodeAddresses();
 
                 if (!maybeCodeSectionAddresses) {
-                    return startProgramOp.emitError()
-                           << "argument #" << idx
-                           << " has no valid code section addresses, see: " << argValue;
+                    // NSS invocations get their XRAM code addresses only later, from
+                    // AssignNSSProgramsAddresses, which also rewrites this attribute
+                    // with the assigned values.
+                    if (executor != torq_hl::Executor::NSS) {
+                        return startProgramOp.emitError()
+                               << "argument #" << idx
+                               << " has no valid code section addresses, see: " << argValue;
+                    }
+                    argAttrs.push_back(torq_hl::InvocationAttr::get(
+                        startProgramOp.getContext(), executor, executorId, ArrayRef<int64_t>{}
+                    ));
+                    continue;
                 }
 
                 argAttrs.push_back(torq_hl::InvocationAttr::get(

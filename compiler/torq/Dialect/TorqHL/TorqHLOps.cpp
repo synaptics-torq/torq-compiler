@@ -760,6 +760,58 @@ LogicalResult mlir::syna::torq_hl::NextOp::verify() {
     return success();
 }
 
+// `code_data` comes in one of two shapes:
+// 1. one entry per code section, each matching its section's size (slice descriptors),
+// 2. a single entry holding the concatenation of all sections (NSS descriptors, whose sections are
+// contiguous in XRAM).
+//
+// A consumer pairing `code_data` with `code_sections` must handle both.
+LogicalResult mlir::syna::torq_hl::DescriptorOp::verify() {
+
+    auto codeData = getCodeData();
+    auto codeSections = getCodeSections();
+
+    if (codeData.size() != codeSections.size() && codeData.size() != 1) {
+        return emitOpError(
+            "code_data must have one entry per code section or a single concatenated entry"
+        );
+    }
+
+    int64_t sectionBytes = 0;
+    for (Type type : codeSections.getTypes()) {
+        auto memrefType = cast<MemRefType>(type);
+        if (!memrefType.getElementType().isInteger(8)) {
+            return emitOpError("code sections must have i8 elements");
+        }
+        sectionBytes += memrefType.getNumElements();
+    }
+
+    int64_t dataBytes = 0;
+    for (Attribute entry : codeData) {
+        auto bytes = dyn_cast<DenseI8ArrayAttr>(entry);
+        if (!bytes) {
+            return emitOpError("code_data entries must be dense i8 arrays");
+        }
+        dataBytes += bytes.size();
+    }
+
+    if (dataBytes != sectionBytes) {
+        return emitOpError("code_data holds ")
+               << dataBytes << " bytes for " << sectionBytes << " bytes of code sections";
+    }
+
+    // in the per-section form every entry must match its own section
+    if (codeData.size() == codeSections.size()) {
+        for (auto [entry, type] : llvm::zip(codeData, codeSections.getTypes())) {
+            if (cast<DenseI8ArrayAttr>(entry).size() != cast<MemRefType>(type).getNumElements()) {
+                return emitOpError("code_data entry size does not match its code section");
+            }
+        }
+    }
+
+    return success();
+}
+
 LogicalResult mlir::syna::torq_hl::ProgramOp::verify() {
 
     auto argAccesses = getArgAccessesAttr();
@@ -769,6 +821,13 @@ LogicalResult mlir::syna::torq_hl::ProgramOp::verify() {
     if (argAccesses && !getBody().empty() &&
         argAccesses.size() != getBody().front().getNumArguments()) {
         return emitOpError("arg_accesses size must match the number of program arguments");
+    }
+
+    if (auto blockSizes = getBlockSizes()) {
+        if (blockSizes->size() != getBody().getBlocks().size()) {
+            return emitOpError("block_sizes has ") << blockSizes->size() << " entries for "
+                                                   << getBody().getBlocks().size() << " blocks";
+        }
     }
 
     return success();
@@ -786,6 +845,29 @@ LogicalResult mlir::syna::torq_hl::StartProgramOp::verify() {
 
     if (!invocation) {
         return success();
+    }
+
+    if (auto invocationArgs = invocation.getInvocationArgs()) {
+
+        if (invocationArgs->size() != getArgs().size()) {
+            return emitOpError(
+                "invocation_args size of the invocation must match the number of arguments"
+            );
+        }
+
+        for (auto [idx, arg] : llvm::enumerate(getArgs())) {
+            Attribute entry = (*invocationArgs)[idx];
+            if (isa<InvocationType>(arg.getType()) && !isa<InvocationAttr>(entry)) {
+                return emitOpError() << "argument #" << idx
+                                     << " is an invocation but its invocation_args entry is not "
+                                        "an InvocationAttr";
+            }
+            if (isa<MemRefType>(arg.getType()) && !isa<BufferAttr>(entry)) {
+                return emitOpError() << "argument #" << idx
+                                     << " is a buffer but its invocation_args entry is not a "
+                                        "BufferAttr";
+            }
+        }
     }
 
     auto invocationProgram = invocation.getProgram().getDefiningOp<ProgramOp>();

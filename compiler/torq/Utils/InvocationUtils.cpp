@@ -292,6 +292,11 @@ static Value simplifyBlockArguments(Value value) {
     return simplifyBlockArguments(nextOp.getArguments()[blockArg.getArgNumber()]);
 }
 
+bool isGetBlockValue(Value value) {
+    Value base = simplifyBlockArguments(getViewBase(value));
+    return base && base.getDefiningOp<torq_hl::GetBlockOp>();
+}
+
 std::optional<int64_t>
 getExecutorId(InvocationValue invocation, InvocationValue contextInvocation) {
 
@@ -423,7 +428,19 @@ getAddressFromGetBlockOp(torq_hl::GetBlockOp getBlockOp, InvocationValue invocat
             return std::nullopt; // argument is not an invocation
         }
 
-        return argInvocation.getBlockAddresses()[getBlockOp.getBlockIndex().getZExtValue()];
+        auto blockAddresses = argInvocation.getBlockAddresses();
+
+        // not assigned yet: AssignNSSProgramsAddresses fills these in later
+        if (blockAddresses.empty()) {
+            return std::nullopt;
+        }
+
+        assert(
+            getBlockOp.getBlockIndex().getZExtValue() < blockAddresses.size() &&
+            "get_block index out of range"
+        );
+
+        return blockAddresses[getBlockOp.getBlockIndex().getZExtValue()];
     }
     // the invocation in the get_block op is value produced by a create_invocation op
     else if (auto blockCreateInvocationOp =

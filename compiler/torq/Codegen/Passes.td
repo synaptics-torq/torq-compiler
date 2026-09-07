@@ -316,12 +316,21 @@ def SegmentNSSPrograms :
 def AssignNSSProgramsAddresses :
     InterfacePass<"torq-assign-nss-programs-addresses",
          "mlir::FunctionOpInterface"> {
-  let summary = "Assign addresses to NSS programs";
+  let summary = "Measure NSS program sizes and assign their XRAM addresses";
+  let description = [{
+    Compiles each NSS program once to measure its real block sizes, shrinks the
+    code sections, packs the programs in XRAM, and updates the code block loads with the assigned addresses.
+
+    The measuring compile serializes the lowered torq_hw tasks, so the pass must
+    run after ConvertNssProgramToTorqHw and ResolveAddresses. It runs immediately
+    before CompileNSSInvocations.
+  }];
   let constructor =
       "mlir::syna::torq::createAssignNSSProgramsAddressesPass()";
 
   let dependentDialects = [
-        "syna::torq_hl::TorqHLDialect"
+        "syna::torq_hl::TorqHLDialect",
+        "syna::torq_hw::TorqHWDialect"
     ];
 
 }

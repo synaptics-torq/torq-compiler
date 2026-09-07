@@ -57,6 +57,8 @@ class CompileNSSInvocationsPass
     void runOnOperation() override;
 };
 
+} // namespace
+
 static void convert(const torq_hw::DmaNdlAttr attr, DmaNdl &ndl) {
     for (auto dim : attr.getDims())
         ndl.addDim(dim.getCount(), dim.getStride());
@@ -375,36 +377,6 @@ static LogicalResult compileInvocation(
     return success();
 }
 
-static torq_hl::CreateInvocationOp rewriteInvocationWithNewSizes(
-    torq_hl::CreateInvocationOp createInvocationOp, ArrayRef<int32_t> newBlockSizes
-) {
-
-    IRRewriter rewriter(createInvocationOp);
-
-    SmallVector<Type> resultTypes;
-    SmallVector<int64_t> updatedXramAddresses;
-
-    int baseXramAddress = createInvocationOp.getXramCodeAddresses().value()[0];
-
-    resultTypes.push_back(createInvocationOp.getInvocation().getType());
-
-    for (auto size : newBlockSizes) {
-        auto codeSectionType = MemRefType::get({static_cast<int64_t>(size)}, rewriter.getI8Type());
-        resultTypes.push_back(codeSectionType);
-        updatedXramAddresses.push_back(baseXramAddress);
-        baseXramAddress += size;
-    }
-
-    auto newCreateInvocation = rewriter.replaceOpWithNewOp<torq_hl::CreateInvocationOp>(
-        createInvocationOp, resultTypes, createInvocationOp->getOperands(),
-        createInvocationOp->getAttrs()
-    );
-
-    newCreateInvocation.setXramCodeAddresses(updatedXramAddresses);
-
-    return newCreateInvocation;
-}
-
 static SmallVector<OpOperand *> appendGetBlockOpsUses(torq_hl::GetBlockOp getBlockOp) {
 
     SmallVector<OpOperand *> getBlockOpsUses;
@@ -503,7 +475,7 @@ findGetBlockOpsUses(torq_hl::CreateInvocationOp createInvocationOp) {
     return getBlockOpsUses;
 }
 
-static LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp createInvocationOp) {
+LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp createInvocationOp) {
 
     // find all places where the invocation is used as input to a get_block op
     auto maybeGetBlockOps = findGetBlockOpsUses(createInvocationOp);
@@ -591,6 +563,38 @@ static LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp create
     return success();
 }
 
+// Resolve only the XRAM read addresses of the DMA configs that load the
+// invocation's code blocks. This is what the size-measuring compile needs to
+// serialize the programs; the full resolution (result types, destination subviews,
+// NDLs) happens exactly once, with the final addresses, in updateGetBlockOperations.
+LogicalResult resolveGetBlockReadAddresses(torq_hl::CreateInvocationOp createInvocationOp) {
+
+    auto maybeGetBlockOps = findGetBlockOpsUses(createInvocationOp);
+
+    if (failed(maybeGetBlockOps)) {
+        return failure();
+    }
+
+    auto xramCodeAddresses = createInvocationOp.getXramCodeAddresses().value();
+
+    for (auto [getBlockOp, uses] : *maybeGetBlockOps) {
+
+        int blockIndex = getBlockOp.getBlockIndex().getSExtValue();
+
+        if (blockIndex < 0 || static_cast<size_t>(blockIndex) >= xramCodeAddresses.size()) {
+            return getBlockOp->emitOpError("Block index out of range");
+        }
+
+        for (auto use : uses) {
+            if (auto dmaInCfg = dyn_cast<torq_hw::DmaInCfgOp>(use->getOwner())) {
+                dmaInCfg.setReadAddress(xramCodeAddresses[blockIndex]);
+            }
+        }
+    }
+
+    return success();
+}
+
 LogicalResult updateCodeSectionSizes(torq_hl::CreateInvocationOp createInvocationOp) {
 
     // find the code size for each block that was kept aside to serialize it (this is the max size
@@ -609,18 +613,19 @@ LogicalResult updateCodeSectionSizes(torq_hl::CreateInvocationOp createInvocatio
     // update the torq_block_size attribute on the program op
     createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>().setBlockSizes(blockSizes);
 
-    // rewrite the createInvocationOp to have the correct code section sizes
-    auto newCreateInvocation = rewriteInvocationWithNewSizes(createInvocationOp, blockSizes);
-
-    // update all get_block operations and all their uses
-    if (failed(updateGetBlockOperations(newCreateInvocation))) {
-        return failure();
+    // the XRAM addresses are assigned afterwards, from these sizes
+    Builder builder(createInvocationOp.getContext());
+    for (auto [codeSection, blockSize] :
+         llvm::zip_equal(createInvocationOp.getCodeSections(), blockSizes)) {
+        auto codeSectionType =
+            MemRefType::get({static_cast<int64_t>(blockSize)}, builder.getI8Type());
+        codeSection.setType(codeSectionType);
     }
 
     return success();
 }
 
-LogicalResult createDescriptors(torq_hl::CreateInvocationOp createInvocationOp) {
+static LogicalResult createDescriptors(torq_hl::CreateInvocationOp createInvocationOp) {
 
     auto programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
 
@@ -658,27 +663,13 @@ LogicalResult createDescriptors(torq_hl::CreateInvocationOp createInvocationOp) 
     return success();
 }
 
+namespace {
+
 void CompileNSSInvocationsPass::runOnOperation() {
     auto funcOp = getOperation();
 
     // find all NSS invocation
     SmallVector<torq_hl::CreateInvocationOp> invocationOps;
-    for (auto createInvocationOp : funcOp.getFunctionBody().getOps<torq_hl::CreateInvocationOp>()) {
-        if (createInvocationOp.getInvocation().getType().getExecutor() == torq_hl::Executor::NSS) {
-            invocationOps.push_back(createInvocationOp);
-        }
-    }
-
-    // fixup all the NSS invocation code blocks to have the smallest possible size
-    for (auto createInvocationOp : invocationOps) {
-        if (failed(updateCodeSectionSizes(createInvocationOp))) {
-            signalPassFailure();
-            return;
-        }
-    }
-
-    // rescan to find all the new invocations
-    invocationOps.clear();
     for (auto createInvocationOp : funcOp.getFunctionBody().getOps<torq_hl::CreateInvocationOp>()) {
         if (createInvocationOp.getInvocation().getType().getExecutor() == torq_hl::Executor::NSS) {
             invocationOps.push_back(createInvocationOp);

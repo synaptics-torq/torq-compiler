@@ -53,6 +53,12 @@ torq_hl::WaitProgramOp getWaitOp(InvocationValue invocation);
 // Returns the executor id for the given invocation when evaluated within the contextInvocation
 std::optional<int64_t> getExecutorId(InvocationValue invocation, InvocationValue contextInvocation);
 
+// Returns true when the value (looking through views and block arguments) is a
+// program code block produced by a torq_hl.get_block op. The XRAM addresses such
+// values read from are assigned and resolved by AssignNSSProgramsAddresses, not by
+// general address resolution.
+bool isGetBlockValue(Value value);
+
 // Resolves static addresses of values. Results and symbol lookups are cached, so a resolver must
 // not be used across changes to the IR it has been queried on.
 class AddressResolver {

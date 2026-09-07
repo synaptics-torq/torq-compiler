@@ -804,6 +804,8 @@ def TorqHl_ProgramOp: TorqHL_Op<"program", [IsolatedFromAbove]> {
     TorqHL_Program:$program
   );
 
+  let hasVerifier = 1;
+
   let assemblyFormat = [{
     $name attr-dict `:` qualified(type($program)) regions
   }];
@@ -862,11 +864,13 @@ def TorqHL_DescriptorOp: TorqHL_Op<"descriptor"> {
     TorqHL_Invocation:$invocation, Variadic<AnyMemRef>:$code_sections
   );
 
+  let hasVerifier = 1;
+
   let assemblyFormat = [{
     $name `on` $executor_id `program` $program `:` type($program) `code` $code_data attr-dict `:` qualified(type($invocation)) (`,` type($code_sections)^)?
   }];
 
-  
+
 }
 
 

@@ -334,9 +334,6 @@ void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
         // segment the NSS programs in small blocks that fit the NSS block size
         funcPm.addPass(createSegmentNSSProgramsPass());
 
-        // assign addresses to all the NSS programs
-        funcPm.addPass(createAssignNSSProgramsAddressesPass());
-
         // annotate all create_invocation/wait_program operations with addresses/values based
         // on the execution flow
         funcPm.addPass(createResolveInvocationArgumentsPass());
@@ -354,6 +351,9 @@ void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
         if (clEnableTorqProfiling) {
             funcPm.addPass(createProfilingPass());
         }
+
+        // measure the actual NSS program sizes and assign their XRAM addresses
+        funcPm.addPass(createAssignNSSProgramsAddressesPass());
 
         // compile NSS programs
         funcPm.addPass(createCompileNSSInvocationsPass());
