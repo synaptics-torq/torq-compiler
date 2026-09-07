@@ -10,11 +10,16 @@ UNFUSE_FMA_MARKER = "IR Dump After LLVMCPUUnfuseFMAOpsPass"
 
 HOST_MODEL = MODELS_DIR / "tosa_ops_host_css" / "softmax-1x1000xi8.mlir"
 
+# SL2610 uses the coral_v1 CSS config (mabi=ilp32, soft float). The custom hw
+# spec is <hw_id>:<lram_size_kb>:<slice_count>:<css_features>:<nss_features>;
+# coral_v2 is the hard-float (mabi=ilp32f) CSS config.
+SOFT_FLOAT_HW = "--torq-hw=SL2610"
+HARD_FLOAT_HW = "--torq-hw=0:512:2:coral_v2:nss_v2"
+
 # Softmax's exp lowering leaves math.fma on the host; slices are off so the whole
 # graph falls back to the CPU programs compiled by CompileCpuProgramsPass.
 BASE_OPTIONS = [
     "--iree-hal-target-backends=torq",
-    "--torq-hw=SL2610",
     "--torq-disable-slices",
     "--torq-target-host-triple=native",
 ]
@@ -45,13 +50,14 @@ def _arg_accesses(line):
     return [int(v) for v in re.findall(r"(\d+)\s*:\s*i32", m.group(1))]
 
 
-def _compile(torq_compiler, out, extra_options):
+def _compile(torq_compiler, out, extra_options, hw=SOFT_FLOAT_HW):
     cmd = [
         str(torq_compiler.file_path),
         str(HOST_MODEL),
         "-o",
         str(out),
         *BASE_OPTIONS,
+        hw,
         *extra_options,
     ]
     print("Compiling with:", " ".join(cmd))
@@ -92,6 +98,37 @@ def test_host_programs_keep_fused_fma(torq_compiler, tmp_path):
         f"{UNFUSE_FMA_PASS} ran {css_runs} time(s) with CSS enabled; the pass "
         "was dropped from the CSS path, or the pass/flag name changed and the "
         "host half of this test proves nothing"
+    )
+
+
+@pytest.mark.ci
+def test_hard_float_css_programs_keep_fused_fma(torq_compiler, tmp_path):
+    """Only soft-float CSS targets need the unfuse-fma pass. coral_v2 is
+    mabi=ilp32f and lowers an fma to a single fmadd, so splitting it there costs
+    an instruction and buys nothing
+    (synaptics-torq/torq-compiler-dev#2317)."""
+    phases = tmp_path / "phases"
+
+    hard_float = _compile(
+        torq_compiler,
+        tmp_path / "hard_float.vmfb",
+        [
+            "--mlir-disable-threading",
+            f"--mlir-print-ir-after={UNFUSE_FMA_PASS}",
+            f"--dump-compilation-phases-to={phases}",
+        ],
+        hw=HARD_FLOAT_HW,
+    )
+
+    assert _latest_phase_with(phases, "program<css>"), (
+        "the hard-float compile produced no CSS program, so the marker count "
+        "below would pass even if the gate were wrong"
+    )
+
+    runs = hard_float.count(UNFUSE_FMA_MARKER)
+    assert runs == 0, (
+        f"{UNFUSE_FMA_PASS} ran {runs} time(s) on a hard-float CSS target; the "
+        "soft-float gate in addCssLoweringPasses is gone or reads the wrong mabi"
     )
 
 

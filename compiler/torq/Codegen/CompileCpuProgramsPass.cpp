@@ -423,10 +423,12 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
     modulePassManager.addPass(createCSEPass());
     modulePassManager.addNestedPass<LLVM::LLVMFuncOp>(createAddFastMathFlagsPass());
 
-    // FIXME: here we unfuse the FMA ops to keep the code size small but
-    // there may be better ways to do this. On some soft-float CSS targets like
-    // coral_v1 an fma would pull in the correctly-rounded fmaf library routine.
-    pipeline.nest<ModuleOp>().nest<LLVM::LLVMFuncOp>().addPass(createLLVMCPUUnfuseFMAOpsPass());
+    // Soft-float CSS targets like coral_v1 would otherwise pull the correctly-rounded fmaf
+    // library routine into ITCM; hard-float targets get a single fmadd. The predicate must stay
+    // in sync with the soft-float branch in CssLinker.
+    if (TorqHw::get().getCssConfig().mabi == "ilp32") {
+        pipeline.nest<ModuleOp>().nest<LLVM::LLVMFuncOp>().addPass(createLLVMCPUUnfuseFMAOpsPass());
+    }
 }
 
 // The torq runtime invokes each host function exactly once with a zeroed
