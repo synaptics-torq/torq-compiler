@@ -98,7 +98,7 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
 ) {
     struct MatA { // Loaded as weights
         enum { Batch, M, K };
-        enum { RowGroups = 1, RowBlock, ColGroups, ColBlock }; // After reshaping
+        enum { RowGroups = 1, RowsInGroup, ColGroups, ColsInGroup }; // After reshaping
     };
     struct MatB : Vectorized { // Loaded as input data
         enum { Batch, K, N };
@@ -121,7 +121,6 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
 
     if (rankB == 1) {
         // Convert dot product and mat-vect-product to mat-product by making B Kx1 and C Mx1.
-        // TODO in some cases dot-prod could be implemented more efficiently with a dedicated kernel
         matB.insertDim(rankB, {1});
         output.insertDim(output.shape().size(), {1});
     }
@@ -138,26 +137,20 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     Slice slice("matmul-fast");
     matA.broadcastAs(output, 1);
     matB.broadcastAs(output, 1);
-    // Get subview of output, weight and biasScale tensors for the given output row offset and count
-    output.subviewDim(MatC::M, rowOffset, rowCount);
+
+    // Get subview of matA and output tensors for the given output row offset and count
     matA.subviewDim(MatA::M, rowOffset, rowCount);
+    output.subviewDim(MatC::M, rowOffset, rowCount);
 
     int outRowVectSize = std::min(slice.wram.transposeHeight(), output.dim(MatC::M));
     int vectSize = slice.alu.iWidth(matB.elementType(), matA.elementType(), outRowVectSize);
-    int rowChunkSize = slice.wram.transposeWidth();
+    int rowChunkSize = maxDivisor(matA.dim(MatA::K), slice.wram.transposeWidth());
 
-    // Find the largest divisor of K that is less than or equal to rowChunkSize
-    while (matA.dim(MatA::K) % rowChunkSize != 0 && rowChunkSize > 1) {
-        rowChunkSize--;
-    }
-
-    output.reshapeDim(MatC::M, {-1, outRowVectSize});
-
-    matA.reshapeDim(MatA::K, {-1, rowChunkSize});   // Split each row in rowChunkSize
+    matA.reshapeDim(MatA::K, {-1, rowChunkSize});   // Split each row in chunks
     matA.reshapeDim(MatA::M, {-1, outRowVectSize}); // Split rows in groups of outRowVectSize
-
     matB.vectorize(vectSize);
     matB.reshapeDim(MatB::K, {-1, rowChunkSize}); // Split rows in chunks
+    output.reshapeDim(MatC::M, {-1, outRowVectSize});
 
     BData bdata = slice.bram.load(biasScale);
     For(auto batch = slice.iterate(matA.dim(MatA::Batch))) {
@@ -171,8 +164,7 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
                         pdata = slice.alu.outerProductAccumulate(idata, wdata[ikk]);
                     }
                 }
-                assert(outRowVectSize == pdata.dim(PData::Outer));
-                For(auto o = slice.iterate(outRowVectSize)) {
+                For(auto o = slice.iterate(pdata.dim(PData::Outer))) {
                     For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                         QData res = slice.act.rescaleClamp(
                             pdata[o][av], bdata, op.getShift(), op.getOutputZp(), op.getOutputMin(),

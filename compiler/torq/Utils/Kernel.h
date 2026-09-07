@@ -930,6 +930,9 @@ int biasScaleWidth(DType type);
 // Total number of elements in the shape TODO: make this a method
 int elementCount(const Shape &shape);
 
+// Return the largest exact divisor of value which is less than or equal to limit
+int maxDivisor(int value, int limit);
+
 } // namespace torq
 
 } // namespace mlir::syna

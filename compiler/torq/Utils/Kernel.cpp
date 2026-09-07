@@ -219,6 +219,16 @@ int elementCount(const Shape &shape) {
     return count;
 }
 
+int maxDivisor(int value, int limit) {
+    if (value <= limit) {
+        return value;
+    }
+    int divisor = limit;
+    for (; value % divisor != 0 && divisor > 1; divisor--) {
+    }
+    return divisor;
+}
+
 // Compute the total number of H iterations in an NDL
 static int iterationCount(const MemNdlDimsData &dims) {
     int count = 1;
