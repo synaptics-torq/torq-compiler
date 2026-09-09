@@ -16,35 +16,30 @@ MLIR itself is part of the {term}`LLVM` ecosystem, it bring important components
 
 ### Distribution Contents
 
-The Torq compiler is delivered in two formats:
+The Torq compiler and runtime are distributed as separate Python wheels in the
+GitHub release assets:
 
-> **Note:** The Docker approach is recommended for most users, as it provides a pre-configured environment with all dependencies.
+#### Compiler Wheel (`torq-compiler`)
+- Provides `torq-compile`, `torq-lab`, and the compiler Python tools
+- Supports optional extras for ONNX, TFLite, TensorFlow, and profiling
+- Currently provided for x86-64 compiler hosts
 
-#### Release Package
-- Pre-compiled Torq Compiler binary
-- Runtime Simulator and supporting libraries
-- Useful scripts for analysis and utility tasks
-- User manual
-- Sample models
+#### Runtime Wheel (`torq-runtime`)
+- Provides `torq-run-module`, the runtime Python API, and the host simulator where supported
+- Available for supported x86-64 hosts and aarch64 boards
 
-#### Docker Image
-- Contains all contents of the Release package, pre-configured in a containerized environment
-- Pre-installed dependencies and tools
-
-#### Python Wheel (`torq-compiler`)
-- Lightweight pip-installable package containing the Torq compiler Python bindings
-- Available from GitHub releases (version 2.0.0 and above)
-- Does not include example models, tests, or runtime simulator
+Install both wheels when compiling and running models on the host. See
+[Getting Started](./getting_started.md) for installation instructions.
 
 ### System Requirements
 
 - Supported operating systems:
-  - For the release package: Ubuntu 24.04
-  - For the Docker image: Any system that supports Docker
+  - x86-64 Linux hosts for compilation
+  - Supported Linux x86-64 hosts and aarch64 boards for runtime execution
 - Supported hardware: Synaptics Torq hardware (SL2610 SoC families)
 
 ### Getting Started
 Refer to the [Getting Started](./getting_started.md) for installation and setup instructions. Ensure your system meets the requirements above before proceeding.
 
 ### Support and Contact
-For technical support, questions, or to report issues, please contact your Synaptics support representative or use the support channels provided with your release package.
+For technical support, questions, or to report issues, please contact your Synaptics support representative or use the available support channels.

@@ -43,26 +43,18 @@ Use `--text` instead of `--bytecode` to produce a human-readable MLIR file:
 $ tosa-converter-for-tflite model.tflite --text -o model.mlir
 ```
 
-#### Using the Release Package
+#### MobileNetV2 TFLite Example
 
 - If not yet done, activate the Python environment as explained in [Getting Started](./getting_started.md) (skip this step if using the Docker container).
 
-- Navigate to the root directory of the {ref}`Release Package <release-package-ubuntu-24-04>`, or run the {ref}`Docker container <docker-image>`.
-  For the Docker container, the release package is located at:  
-  ```
-  $ cd /opt/release
-  ```
 - Convert the model to TOSA using the following command:
-    
-    **Model Source:** This model - MobileNetV2 is generated from tf.keras.applications using [tf_model_generator.py](https://github.com/synaptics-torq/iree-synaptics-synpu/blob/main/tests/model_generator/tf_model_generator.py). The dataset for int8 quantization is done using random data.
+
+    **Model Source:** This MobileNetV2 model is generated from `tf.keras.applications` using [tf_model_generator.py](https://github.com/synaptics-torq/iree-synaptics-synpu/blob/main/tests/model_generator/tf_model_generator.py). The dataset for int8 quantization uses random data. Download the TFLite model from the [Synaptics Hugging Face repository](https://huggingface.co/Synaptics/MobileNetV2) before conversion.
 
     ```{code} shell
-    $ tosa-converter-for-tflite tests/hf/Synaptics_MobileNetV2/MobileNetV2_int8.tflite --text -o mobilenetv2.mlir
+    $ curl -L https://huggingface.co/Synaptics/MobileNetV2/resolve/main/MobileNetV2_int8.tflite?download=true -o MobileNetV2_int8.tflite
+    $ tosa-converter-for-tflite MobileNetV2_int8.tflite --text -o mobilenetv2.mlir
     ```
-
-```{note}
-The `tests/hf/` directory is only included in the {ref}`Release Package <release-package-ubuntu-24-04>` and is not available in the compiler GitHub repository.
-```
 
 (convert-torch-model-to-mlir)=
 ### Convert Torch Model to MLIR

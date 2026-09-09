@@ -13,9 +13,14 @@ Torq profiling helps you understand the performance characteristics of your mode
     By default it is disabled, to enable it add option ``--torq-enable-profiling``
     to the ``torq-compile`` command. By default profiling is written to `timeline.csv`. The profiling details can be written to a different file using ``--torq-dump-profiling=path/to/trace.csv``. Runtime profile annotation also needs debug information from ``--torq-debug-info=path/to/debug_info``.
 
+- Download the MobileNetV2 INT8 MLIR model from the [Synaptics Hugging Face repository](https://huggingface.co/Synaptics/MobileNetV2):
+  ```shell
+  $ curl -L https://huggingface.co/Synaptics/MobileNetV2/resolve/main/MobileNetV2_int8.mlir?download=true -o MobileNetV2_int8.mlir
+  ```
+
 - Compile the model using torq-compile with the profiling flag:
     ```shell
-    $ torq-compile tests/testdata/tosa_ops/add.mlir -o model.vmfb --torq-enable-profiling --torq-dump-profiling=./trace.csv --torq-debug-info=./model_debug_info
+    $ torq-compile MobileNetV2_int8.mlir -o model.vmfb --torq-enable-profiling --torq-dump-profiling=./trace.csv --torq-debug-info=./model_debug_info
     ```
 > **Note:** The `--torq-debug-info` directory is later used to annotate runtime profiling results.
 
@@ -41,13 +46,13 @@ Runtime profiling records timestamped execution events when the model runs with 
 When you plan to annotate the runtime profile, compile with profiling and debug info enabled:
 
 ```shell
-$ torq-compile model.mlir -o model.vmfb --torq-enable-profiling --torq-debug-info=model_debug
+$ torq-compile MobileNetV2_int8.mlir -o model.vmfb --torq-enable-profiling --torq-debug-info=model_debug
 ```
 
 Run the model with runtime profiling enabled:
 
 ```shell
-$ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1" --torq_profile_host=model_profile.csv
+$ torq-run-module --module=model.vmfb --input="1x224x224x3xi8=1" --torq_profile_host=model_profile.csv
 ```
 
 ### Runtime CSV
@@ -71,6 +76,14 @@ $ python scripts/annotate_profiling.py model_debug model_profile.csv model_profi
 ```
 
 The output can be an annotated `.csv`, an `.xlsx` workbook, or a Perfetto `.pb` trace. Annotation enriches the runtime events with hardware-level details such as DMA operations, kernel launch times, slice usage, and source locations.
+
+### Viewing the Perfetto Trace
+
+A Perfetto `.pb` file is a binary trace in the [Perfetto](https://perfetto.dev/) trace format. Perfetto is an open-source (Apache 2.0) performance analysis tool, and its `.pb` traces can be viewed interactively in the browser-based UI at [https://ui.perfetto.dev](https://ui.perfetto.dev) — just drag and drop the `.pb` file onto the page. No installation is required.
+
+The trace shows each annotated event as a timeline slice, so you can visually inspect how DMA transfers, slice (compute) programs, and CSS operations overlap in time, spot idle gaps, and correlate slow regions with the source locations recorded in the `location` column.
+
+![Perfetto UI showing an annotated Torq runtime trace](../images/mbv2_perfetto_trace.png)
 
 **Annotated CSV Columns:**
 

@@ -6,69 +6,29 @@ and the [IREE CPU Deployment Guide](https://iree.dev/guides/deployment-configura
 ```
 ## Setup
 
-- Install compiler and simulator in **one of the following** two ways.
-
-(release-package-ubuntu-24-04)=
-### Release Package Ubuntu 24.04
-
-- Download the [release.tar.gz](https://github.com/synaptics-torq/torq-compiler/releases) from the **Assets** section and uncompress it.
-- There are some prerequisite system packages that need to be installed.
-Please refer to apt-packages.txt for the list.
-- In the root directory of the uncompressed package, run:
-    ```bash
-    $ ./setup.sh <venv-directory>
-    ```
-    This will:
-    - Create a Python virtual environment at `<venv-directory>`.
-    - Install all required Python dependencies, including IREE compiler and runtime.
-    - Set up import tools and other necessary components.
-    > **Note:** The setup process may take some time as it installs all dependencies and tools.
-
-- Once setup is complete, activate the Python environment:
-    ```bash
-    $ source <venv-directory>/bin/activate
-    ```
-    You can now use the compiler and runtime tools from this environment.
-
-(docker-image)=
-### Docker Image
-
-You can use **either** of the following approaches:
-
-**A. Use the prebuilt image:**
-- Log-in to the GitHub docker registry
-
-   ```{code} shell
-   docker login ghcr.io
-   ```
-
-   Use your Github username and a Github personal access token as password.
-   Please refer to [Github documentation for the creation and usage of a
-   personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic).
-
-- Create an ephemeral Docker container that uses the prebuilt image:
-    ```bash
-    $ docker run --rm -it -v $(pwd):$(pwd) -w $(pwd) -u $(id -u):$(id -g) ghcr.io/synaptics-torq/torq-compiler/compiler:main
-    ```
-    The container will have access to the contents of your current directory.
-
-**B. Build your own image (if you don't have access to the Synaptics GitHub repo):**
-- Uncompress the [Release Package Ubuntu 24.04](#release-package-ubuntu-24-04).
-- In the root directory of the uncompressed package, build the Docker image using the provided Dockerfile:
-    ```bash
-    $ docker build -t <image-name> .
-    ```
-- Run the Docker container:
-    ```bash
-    $ docker run --rm -it -v $(pwd):$(pwd) -w $(pwd) -u $(id -u):$(id -g) <image-name>
-    ```
 ### Python Wheel (pip)
 
 ```{note}
-The `torq-compiler` wheel is available from GitHub releases version 2.0.0 and above. It provides a minimal compiler-only installation without example models, tests, or the runtime simulator.
+The compiler and runtime are distributed as separate wheels in the GitHub release assets. Install both when compiling and running models on the host.
 ```
 
-The `torq-compiler` package is included in the GitHub release. Install the compiler wheel directly from any release snapshot.
+Download the matching compiler and runtime wheels from the [GitHub Releases](https://github.com/synaptics-torq/torq-compiler/releases) page. For example, replace `<version>` with the release version and run:
+
+```bash
+$ curl -LO https://github.com/synaptics-torq/torq-compiler/releases/download/<version>/torq_compiler-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
+$ curl -LO https://github.com/synaptics-torq/torq-compiler/releases/download/<version>/torq_runtime-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
+```
+
+Install the downloaded wheels with `pip`:
+
+```bash
+$ pip install torq_compiler-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
+$ pip install torq_runtime-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
+```
+
+Use the `manylinux_2_28_aarch64` `torq-runtime` wheel when installing the runtime on a supported aarch64 board. The compiler wheel is currently provided for x86-64 hosts.
+
+The `torq-compiler` wheel provides `torq-compile` and the compiler Python tools. The `torq-runtime` wheel provides `torq-run-module`, the runtime Python API, and the host simulator where supported.
 
 To enable ONNX model importing, install with the `onnx` extra:
 
@@ -108,24 +68,17 @@ $ tosa-converter-for-tflite model.tflite --bytecode -o model.mlirbc
 
 ## Compile and Run the Model
 
-- Example MLIR models are provided in the `tests/` directory in the package.
-
-    - **[Release Package](#release-package-ubuntu-24-04):**  
-    Navigate to the `tests/` directory is located in the root of the uncompressed package.
-
-    - **[Docker Image](#docker-image):**  
-    The `tests/` directory is located in the `/opt/release` directory.
-    You can navigate there with:
-        ```
-        $ cd /opt/release
-        ```
-
-- Compile an input MLIR file ``tests/testdata/tosa_ops/add.mlir`` to a compiled model ``model.vmfb``:
+- Download the MobileNetV2 INT8 MLIR model from the [Synaptics Hugging Face repository](https://huggingface.co/Synaptics/MobileNetV2):
     ```bash
-    $ torq-compile tests/testdata/tosa_ops/add.mlir -o model.vmfb
+    $ curl -L https://huggingface.co/Synaptics/MobileNetV2/resolve/main/MobileNetV2_int8.mlir?download=true -o MobileNetV2_int8.mlir
+    ```
+
+- Compile the downloaded MLIR model to a Torq runtime executable:
+    ```bash
+    $ torq-compile MobileNetV2_int8.mlir -o mobilenetv2_int8.vmfb
     ```
 
 - Run the generated model with the Torq simulator:
     ```bash
-    $ torq-run-module --module=model.vmfb --input="1x56x56x24xi8=1"
+    $ torq-run-module --module=mobilenetv2_int8.vmfb --input="1x224x224x3xi8=1"
     ```

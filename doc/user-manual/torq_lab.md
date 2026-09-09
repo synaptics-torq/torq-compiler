@@ -53,16 +53,22 @@ $ python -m torq.lab <command> <model> [options]
 
 ### Examples
 
+Download the MobileNetV2 INT8 MLIR model from the [Synaptics Hugging Face repository](https://huggingface.co/Synaptics/MobileNetV2):
+
+```bash
+$ curl -L https://huggingface.co/Synaptics/MobileNetV2/resolve/main/MobileNetV2_int8.mlir?download=true -o MobileNetV2_int8.mlir
+```
+
 Compile an MLIR file to a VMFB:
 
 ```bash
-$ torq-lab compile tests/testdata/tosa_ops/add.mlir -o model.vmfb
+$ torq-lab compile MobileNetV2_int8.mlir -o mobilenetv2_int8.vmfb
 ```
 
 Compile and run against the simulator with random inputs:
 
 ```bash
-$ torq-lab compile-run tests/testdata/tosa_ops/add.mlir --random-inputs
+$ torq-lab compile-run MobileNetV2_int8.mlir --random-inputs
 ```
 
 Run a pre-compiled module with explicit inputs:
