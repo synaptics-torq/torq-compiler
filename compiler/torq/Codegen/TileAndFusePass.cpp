@@ -97,6 +97,23 @@ enum class TileAndFuseProducersFuseMode {
     OnlyPatterns,
 };
 
+// Result of fitTileToMemory.
+//
+// The probe is stricter than the real pipeline. It skips the LRAM-residency
+// recovery on purpose, because the recovery costs DMA and that DMA should not
+// change the tile choice. It also models memory conservatively. So the probe
+// can place less than the real pipeline can.
+//
+// That makes the answer one-way. A tile that fits the probe also fits the real
+// pipeline. The reverse does not hold: a tile the probe rejects may still be
+// fine. NoFit is that case, so callers must not read it as an error.
+enum class TileFit {
+    FitsUnchanged, // the first tile already fits
+    FitsShrunk,    // a smaller tile fits
+    NoFit,         // nothing fits, sizes holds the minimum
+    ProbeFail,     // the probe itself broke, do not use sizes
+};
+
 static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFuseMode(
     "torq-tile-and-fuse-producers-fuse-mode",
     llvm::cl::desc("Selects one of three predefined values"),
@@ -693,7 +710,7 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
         int64_t iterDomainSize, int64_t minFactor, int64_t maxFactor
     );
 
-    FailureOr<bool> fitTileToMemory(
+    TileFit fitTileToMemory(
         Operation *consumerOp, const SetVector<Operation *> &producerOps,
         const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes,
         MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
@@ -911,9 +928,11 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
     return LogicalResult::success();
 }
 
-// Return true iff sizes was changed (made smaller). If the tile is not big
-// enough, use binary search to find the biggest tile that fits in memory.
-llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
+// Find a tile for `consumerOp` that the memory probe accepts, and write it to
+// `sizes`. If the first tile is too big, shrink every domain to its minimum,
+// then grow them back with binary search, as far as they still fit. See TileFit
+// for the return values. NoFit is a normal answer, not an error.
+TileFit TileAndFusePass::fitTileToMemory(
     Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
     ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
     MutableArrayRef<OpFoldResult> sizes
@@ -923,15 +942,15 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
     );
 
     if (failed(tileModuleForMemoryCheck(*moduleOp, tilingInfo, iterDomainSizes.size())))
-        return llvm::failure();
+        return TileFit::ProbeFail;
 
     // First establish that the original tile is not big enough.
     llvm::FailureOr<bool> tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
     if (failed(tileFits))
-        return LogicalResult::failure();
+        return TileFit::ProbeFail;
     if (*tileFits) {
         // fits in memory, no need to change the tile
-        return false;
+        return TileFit::FitsUnchanged;
     }
 
     IRRewriter rewriter(moduleOp->getContext());
@@ -991,17 +1010,22 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
     // enough, we try again with 1's.
     if (shrinkPass(false).failed()) {
         if (fitCheckFailed)
-            return LogicalResult::failure();
+            return TileFit::ProbeFail;
 
         if (shrinkPass(true).failed()) {
             if (fitCheckFailed)
-                return LogicalResult::failure();
+                return TileFit::ProbeFail;
 
-            consumerOp->emitWarning(
-                "tile-and-fuse: operation can't be tiled: no more domains to tile"
-            );
-            LLVM_DEBUG(assert(false));
-            return LogicalResult::failure();
+            // Every domain is at its minimum and still nothing fits. That does
+            // not make the op impossible. The probe is stricter than the real
+            // pipeline (see TileFit), so a block it rejects at every tile size
+            // can still compile.
+            //
+            // Keep the minimum tile in `sizes` and let the caller decide. Return
+            // here: the grow-back loop below needs a tile that fits, and would
+            // read a past-the-end iterator.
+            LLVM_DEBUG(llvm::dbgs() << "  no probe tile fits; keeping the minimum tile\n");
+            return TileFit::NoFit;
         }
     }
 
@@ -1029,7 +1053,7 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
         sizes[domain] = rewriter.getIndexAttr(iterDomainSizes[domain]);
         tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
-            return LogicalResult::failure();
+            return TileFit::ProbeFail;
         if (*tileFits)
             continue;
 
@@ -1041,14 +1065,14 @@ llvm::FailureOr<bool> TileAndFusePass::fitTileToMemory(
                 rewriter, *moduleOp, tilingInfo, offsets, sizes, domain, iterDomainSizes[domain],
                 /*minFactor=*/1, /*maxFactor=*/iterDomainSizes[domain]
             )))
-            return LogicalResult::failure();
+            return TileFit::ProbeFail;
     } while (tilingDomainIter-- != tilingInfo.tilingOrder.begin());
     // NB: the tilingDimIter-- above goes passed the .begin() at the very end,
     // which is not nice, and depending on the implementation of
     // ArrayRef::iterator, could fail. The implementation is just a pointer, so
     // this is ok (as long as we don't try to dereference it, which we don't).
 
-    return true;
+    return TileFit::FitsShrunk;
 }
 
 bool shouldFuseMultiUsersOp(Operation *op) {
@@ -1431,7 +1455,7 @@ void TileAndFusePass::tileAndFuse(
     // Find a tile size that fits tiOp in memory, together with all the
     // candidate producers in MaxProducers mode (pattern-fuse-group members are
     // always included by extractOpsForMemoryCheck).
-    llvm::FailureOr<bool> tileChanged = fitTileToMemory(
+    TileFit tileFit = fitTileToMemory(
         tiOp, producerOps, tilingInfo, *iterDomainConstSizes, tileOffsets, tileSizes
     );
 
@@ -1439,35 +1463,52 @@ void TileAndFusePass::tileAndFuse(
     // can't fit in LRAM even at the smallest tile size, give up on fusing
     // optional producers and retry with OnlyPatterns, which only fuses what
     // pattern-fuse-groups strictly require.
-    if (failed(tileChanged) && fuseMode == TileAndFuseProducersFuseMode::MaxProducers) {
+    //
+    // NoFit comes here too, not only ProbeFail. It is the same case: even
+    // the smallest tile does not fit. Fusing fewer producers may find a tile
+    // that really fits, and OnlyPatterns needs less memory either way. So this
+    // retry either finds a real fit or leaves the recovery more room.
+    if ((tileFit == TileFit::ProbeFail || tileFit == TileFit::NoFit) &&
+        fuseMode == TileAndFuseProducersFuseMode::MaxProducers) {
         LLVM_DEBUG(llvm::dbgs() << "  max-producers does not fit, falling back to only-patterns\n");
         fuseMode = TileAndFuseProducersFuseMode::OnlyPatterns;
         producerOps.clear();
         restrictToProducerOps = std::nullopt;
         tileOffsets.assign(iterDomainOffsets.begin(), iterDomainOffsets.end());
         tileSizes.assign(iterDomainSizes.begin(), iterDomainSizes.end());
-        tileChanged = fitTileToMemory(
+        tileFit = fitTileToMemory(
             tiOp, producerOps, tilingInfo, *iterDomainConstSizes, tileOffsets, tileSizes
         );
     }
 
-    if (failed(tileChanged)) {
+    switch (tileFit) {
+    case TileFit::ProbeFail:
         tiOp->emitWarning("tile-and-fuse: failed to tile an operation, skipping it");
         LLVM_DEBUG(assert(false));
         return;
-    }
 
-    // FIXME: the following assert fails because Conv2dConvert calls
-    // foldBackwardPadding when convertToInterleaved fails, after marking has
-    // already returned. That should be fixed, this assert should be
-    // uncommented, and the follwing if should be removed.
+    // FIXME: this should be an assert. An untiled op that does not fit in memory
+    // cannot fit as a single tile either. It still fires because Conv2dConvert
+    // calls foldBackwardPadding when convertToInterleaved fails, after marking
+    // has already returned. Fix that, then drop this case.
     // $ pytest
     // tests/test_keras_app.py::test_keras_app_tflite_torq[layer_inceptionv3_conv2d_13-sim-xxx-v4]
     // --torq-chips=next.group
-    //  assert(*tileChanged && "untiled op does not fit in memory but tiling
-    // to a single tile does");
-    if (!*tileChanged)
+    case TileFit::FitsUnchanged:
         return;
+
+    case TileFit::NoFit:
+        // Tile to the minimum and let the real pipeline decide (see TileFit).
+        // Leaving the op untiled would be worse: an untiled op is never smaller
+        // than the minimum tile. If the real pipeline also fails, the user gets
+        // the real allocation error, which says more than a failure here.
+        tiOp->emitRemark("tile-and-fuse: no tile fits the memory probe; using the minimum tile "
+                         "and leaving the decision to the real pipeline");
+        break;
+
+    case TileFit::FitsShrunk:
+        break;
+    }
 
     LLVM_DEBUG({
         llvm::dbgs() << "  iteration sizes: ";
