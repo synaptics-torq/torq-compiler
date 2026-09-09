@@ -926,7 +926,7 @@ has been removed); see
 | `--full-integer` | Rewrite quantized I/O to int8 (remove input Q/output DQ) |
 | `--quant-format` | ONNX quantization format: `qdq` (default) or `qoperator` |
 | `--recompute-cache` | Force recompute cached fixtures during discovery |
-| `--log-file` | Redirect discovery output to log file |
+| `--log-file` | Tee discovery output to this log file; full per-layer error diagnostics (e.g. compiler stderr) are written here, keeping the console to one-line summaries |
 | `-v`, `--verbose` | Show detailed logs (JSON cache activity, MLIR conversion, comparison metrics, skip reasons) |
 
 ```bash
@@ -968,7 +968,7 @@ torq-gen-config discover --model model.onnx --collect-timing --timing-runs=5 --r
 | `--quant-format` | ONNX quantization format: `qdq` (default) or `qoperator` |
 | `--debug-ir` | Dump IR directory for debugging (default: `tmp`) |
 | `--recompute-cache` | Force recompute cached fixtures |
-| `--log-file` | Redirect output to log file |
+| `--log-file` | Tee output to this log file; full error diagnostics (e.g. compiler stderr) are written here, keeping the console to one-line summaries |
 | `-v`, `--verbose` | Show detailed logs (JSON cache activity, comparison metrics) |
 
 ```bash

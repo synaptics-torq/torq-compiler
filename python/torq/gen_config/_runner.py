@@ -2073,9 +2073,18 @@ class _Tee:
         return self._streams[0].isatty()
 
 
+_log_detail_stream = None
+
+
 @contextlib.contextmanager
 def _maybe_tee_log(cfg: DiscoveryConfig):
-    """Tee stdout/stderr into ``cfg.log_file``."""
+    """Tee stdout/stderr into ``cfg.log_file``; full error details go to the file.
+
+    The console keeps the concise per-layer lines; multi-line diagnostics
+    (e.g. compiler stderr embedded in tool errors) are routed to the log
+    file via :func:`_log_error_details` instead of being printed whole.
+    """
+    global _log_detail_stream
     if not cfg.log_file:
         yield
         return
@@ -2083,6 +2092,7 @@ def _maybe_tee_log(cfg: DiscoveryConfig):
     if str(log_path.parent) not in ("", "."):
         log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w") as log_file:
+        _log_detail_stream = log_file
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout = _Tee(old_stdout, log_file)
         sys.stderr = _Tee(old_stderr, log_file)
@@ -2091,6 +2101,27 @@ def _maybe_tee_log(cfg: DiscoveryConfig):
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
+            _log_detail_stream = None
+
+
+def _summarize_exception(e: BaseException) -> str:
+    """First line of an exception's message, for concise console output."""
+    message = str(e)
+    return message.splitlines()[0] if message else "(no message)"
+
+
+def _log_error_details(header: str, e: BaseException) -> None:
+    """Route full multi-line error diagnostics away from the normal console path.
+
+    Written to the active log file when one is configured; otherwise only
+    shown on stderr with --verbose.
+    """
+    details = f"{header}\n{type(e).__name__}: {e}"
+    if _log_detail_stream is not None:
+        _log_detail_stream.write(details + "\n")
+        _log_detail_stream.flush()
+    elif is_verbose():
+        print(details, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -2168,7 +2199,11 @@ def _run_one_layer_case(
                 "summary": f"Fixture/setup failed: {str(e)[:200]}",
             },
         )
-        _discovery_log(f"\nLayer {layer_id}: {executor.upper()} = error (setup: {type(e).__name__}: {e})")
+        _discovery_log(
+            f"\nLayer {layer_id}: {executor.upper()} = error "
+            f"(setup: {type(e).__name__}: {_summarize_exception(e)})"
+        )
+        _log_error_details(f"[{label}] setup error details:", e)
         return 1
 
     # Record metadata before running (mirrors executor_discovery; duplicates
@@ -2199,7 +2234,8 @@ def _run_one_layer_case(
     except LayerDifference:
         return 1
     except Exception as e:
-        _discovery_log(f"  ({type(e).__name__}: {e})")
+        _discovery_log(f"  ({type(e).__name__}: {_summarize_exception(e)})")
+        _log_error_details(f"[{label}] run error details:", e)
         return 1
 
 
@@ -2288,7 +2324,10 @@ def _run_one_full_case(
             cfg, cache, mlir_path, mlir_version, "discovered", chip_arg, compiler_options
         )
     except Exception as e:
-        _discovery_log(f"\nFull model setup failed: {type(e).__name__}: {e}")
+        _discovery_log(
+            f"\nFull model setup failed: {type(e).__name__}: {_summarize_exception(e)}"
+        )
+        _log_error_details(f"[full-model {model_name}] setup error details:", e)
         return 1
 
     json_data = _load_json(cfg, model_name, subgraph_suffix) if model_name else {}
@@ -2360,7 +2399,10 @@ def run_full_model(cfg: DiscoveryConfig) -> int:
                     _discovery_log(f"\nFull model comparison failed: {e}")
                     failures += 1
                 except Exception as e:
-                    _discovery_log(f"\nFull model run failed: {type(e).__name__}: {e}")
+                    _discovery_log(
+                        f"\nFull model run failed: {type(e).__name__}: {_summarize_exception(e)}"
+                    )
+                    _log_error_details("[full-model] run error details:", e)
                     failures += 1
 
         _finalize_report(cfg, state)
