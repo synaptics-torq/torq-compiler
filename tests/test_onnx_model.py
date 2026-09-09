@@ -7,7 +7,7 @@ import onnx
 from onnx import shape_inference
 
 from torq.testing.comparison import compare_test_results
-from torq.testing.onnx import generate_onnx_layers_from_file, _has_bf16_matmul, _has_bf16_einsum
+from torq.testing.onnx import generate_onnx_layers_from_file, has_bf16_matmul, has_bf16_einsum
 from torq.testing.iree import llvmcpu_reference_results
 from torq.testing.iree import  list_files
 
@@ -78,7 +78,7 @@ def pytest_generate_tests(metafunc):
 def reference_results(request, onnx_layer_model):
     """Select reference: numpy for bf16 MatMul and Einsum, llvmcpu otherwise."""
 
-    if _has_bf16_einsum(onnx_layer_model.data) or _has_bf16_matmul(onnx_layer_model.data):
+    if has_bf16_einsum(onnx_layer_model.data) or has_bf16_matmul(onnx_layer_model.data):
         numpy_reference_results = request.getfixturevalue("numpy_reference_results")
         return numpy_reference_results
 

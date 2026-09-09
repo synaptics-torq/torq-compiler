@@ -14,14 +14,14 @@ from .versioned_fixtures import versioned_unhashable_object_fixture
 # torq.testing.onnx (and its test consumers) keep importing them from this module.
 from torq.lab.reference import (  # noqa: F401
     torch_tanh_gelu_numpy,
-    _has_bf16_matmul,
-    _has_bf16_einsum,
-    _has_gelu,
-    _numpy_maxpool,
-    _numpy_global_average_pool,
-    _execute_onnx_model_numpy,
-    _parse_instance_norm_params,
-    _numpy_instance_norm,
+    has_bf16_matmul,
+    has_bf16_einsum,
+    has_gelu,
+    numpy_maxpool,
+    numpy_global_average_pool,
+    execute_onnx_model_numpy,
+    parse_instance_norm_params,
+    numpy_instance_norm,
 )
 
 
@@ -99,7 +99,7 @@ def numpy_global_average_pool_reference_results(input_data):
     """
     data = input_data.data if hasattr(input_data, 'data') else input_data
     assert len(data) == 1
-    return [_numpy_global_average_pool(data[0])]
+    return [numpy_global_average_pool(data[0])]
 
 
 @versioned_unhashable_object_fixture
@@ -116,8 +116,8 @@ def numpy_instancenorm_reference_results(input_data, mlir_io_spec, mlir_model_fi
     assert len(data) == 1
     assert len(mlir_io_spec.outputs) == 1
     output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
-    scale, bias, eps = _parse_instance_norm_params(mlir_model_file)
-    return [_numpy_instance_norm(data[0], scale, bias, eps, output_dtype)]
+    scale, bias, eps = parse_instance_norm_params(mlir_model_file)
+    return [numpy_instance_norm(data[0], scale, bias, eps, output_dtype)]
 
 
 @versioned_unhashable_object_fixture
@@ -126,7 +126,7 @@ def numpy_reference_results(request, onnx_model_file, input_data):
     Falls back to llvmcpu if numpy cannot handle an operation."""
     onnx_model = onnx.load(str(onnx_model_file))
 
-    if not _has_bf16_matmul(onnx_model) or not _has_bf16_einsum(onnx_model):
+    if not has_bf16_matmul(onnx_model) or not has_bf16_einsum(onnx_model):
         try:
             ort_session = onnxruntime.InferenceSession(str(onnx_model_file))
             ort_inputs = {inp.name: input_data[i] for i, inp in enumerate(ort_session.get_inputs())}
@@ -134,7 +134,7 @@ def numpy_reference_results(request, onnx_model_file, input_data):
         except Exception:
             pass
     try:
-        return _execute_onnx_model_numpy(onnx_model, input_data)
+        return execute_onnx_model_numpy(onnx_model, input_data)
     except Exception as e:
         # Fall back to llvmcpu if numpy cannot handle the operation
         llvmcpu_reference_results = request.getfixturevalue("llvmcpu_reference_results").data

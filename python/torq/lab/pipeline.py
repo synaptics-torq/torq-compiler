@@ -12,21 +12,20 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from torq.lab import io, tools
+from torq.lab import artifact, io, tools
 from torq.lab.dtypes import ConvertIODTypesPolicy
 from torq.lab.types import (
     CompileResult,
     LabError,
-    MlirIoSpec,
     PipelineConfig,
     RemoteTarget,
     RunResult,
 )
 
 
-def build_compile_command(config, tool, vmfb_path, debug_dir, phases_dir, compile_profile) -> List[str]:
+def build_compile_command(config, tool, source, vmfb_path, debug_dir, phases_dir, compile_profile) -> List[str]:
     """Assemble the ``torq-compile`` command line from a PipelineConfig."""
-    cmds = [str(tool), str(Path(config.model_path).resolve()), "-o", str(vmfb_path)]
+    cmds = [str(tool), str(Path(source).resolve()), "-o", str(vmfb_path)]
     cmds.append(f"--torq-hw={config.chip}")
 
     if config.dump_ir:
@@ -92,30 +91,73 @@ class ModelPipeline:
         self.outputs_dir = self.work_dir / "outputs"
         self.debug_dir = self.work_dir / "debug"
         self.phases_dir = self.work_dir / "phases"
-        self.profiles_dir = self.work_dir / "profiles"
+        self.profiles_dir = Path(config.profiles_dir).resolve() if config.profiles_dir else self.work_dir / "profiles"
         self.remote_dir = self.work_dir / "remote"
 
     # -- helpers ---------------------------------------------------------
 
+    def _ensure_work_dir(self) -> None:
+        """Create the work directory, allocating a run ID if it has run artifacts."""
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.config.reuse_work_dir:
+            return
+
+        has_run_artifacts = any([
+            (self.work_dir / "inputs").exists(),
+            (self.work_dir / "outputs").exists(),
+        ])
+        if not has_run_artifacts:
+            return
+
+        import uuid
+        run_id = uuid.uuid4().hex[:8]
+        original_work_dir = self.work_dir
+        self.work_dir = original_work_dir.parent / f"{original_work_dir.name}_{run_id}"
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+
+        self.inputs_dir = self.work_dir / "inputs"
+        self.outputs_dir = self.work_dir / "outputs"
+        self.debug_dir = self.work_dir / "debug"
+        self.phases_dir = self.work_dir / "phases"
+        self.remote_dir = self.work_dir / "remote"
+        # Preserve a caller-configured (e.g. timestamped) profiles dir across
+        # reallocation; only the work-dir default tracks the new work dir.
+        self.profiles_dir = (
+            Path(self.config.profiles_dir).resolve()
+            if self.config.profiles_dir
+            else self.work_dir / "profiles"
+        )
+
     def _vmfb_path(self) -> Path:
+        """Resolve the VMFB path by precedence: explicit run() argument, config.vmfb_path, a .vmfb model_path, then <model-stem>.vmfb in the work dir."""
         if self.config.vmfb_path:
             return Path(self.config.vmfb_path).resolve()
-        return self.work_dir / "model.vmfb"
+        if Path(self.config.model_path).suffix == ".vmfb":
+            return Path(self.config.model_path).resolve()
+        return self.work_dir / f"{Path(self.config.model_path).stem}.vmfb"
 
-    def _spec_source(self) -> Optional[Path]:
+    def _explicit_source(self) -> Optional[Path]:
+        """The caller-known source hint for ``artifact.describe()``.
+
+        ``config.spec_source`` (set for imported ONNX/TFLite), else
+        ``model_path`` itself when it is already an ``.mlir``, else ``None``.
+        """
         if self.config.spec_source:
             return Path(self.config.spec_source)
         model_path = Path(self.config.model_path)
-        if model_path.suffix == ".mlir":
-            return model_path
-        sibling = model_path.with_suffix(".mlir")
-        return sibling if sibling.exists() else None
+        return model_path if model_path.suffix == ".mlir" else None
 
-    def _io_spec(self) -> Optional[MlirIoSpec]:
-        src = self._spec_source()
-        if src and src.exists():
-            return io.parse_mlir_io_spec(src)
-        return None
+    def _resolve_artifact_info(self, compile_result: Optional[CompileResult] = None) -> artifact.ArtifactInfo:
+        """Resolve this pipeline's own artifact facts for the manifest's ``artifact`` section."""
+        info = artifact.describe(self._vmfb_path(), source=self._explicit_source())
+        info.chip = info.chip or self.config.chip
+        if compile_result is not None:
+            info.debug_dir = info.debug_dir or compile_result.debug_dir
+            info.compile_command = info.compile_command or list(compile_result.command)
+        if self._convert_io_dtypes_policy() and not info.converted_io:
+            info.converted_io = list(self.config.convert_io_dtypes) or ["all"]
+        return info
 
     def _convert_io_dtypes_policy(self) -> ConvertIODTypesPolicy:
         if self.config.convert_io_dtypes:
@@ -126,15 +168,14 @@ class ModelPipeline:
         return ConvertIODTypesPolicy.parse_from_args(["all"], enabled)
 
     def _materialize_inputs(
-        self, spec, convert_io_dtypes_policy: ConvertIODTypesPolicy
+        self, spec, convert_io_dtypes_policy: ConvertIODTypesPolicy, info: artifact.ArtifactInfo = None
     ) -> Tuple[List[np.ndarray], List[Path]]:
         if self.config.input_npy:
             inputs = [np.load(p, allow_pickle=False) for p in self.config.input_npy]
         elif self.config.random_inputs:
             if spec is None:
-                raise LabError(
-                    "--random-inputs requires an MLIR spec source to know input shapes/dtypes"
-                )
+                recovery = self._input_recovery_options(info)
+                raise LabError(f"Cannot generate inputs for {Path(self.config.model_path).name}: no input signature is available.\n\nProvide one of:\n{recovery}")
             inputs = io.generate_random_inputs(
                 spec, seed=self.config.input_seed, ranges=self.config.input_ranges
             )
@@ -147,6 +188,18 @@ class ModelPipeline:
         ]
         paths = io.write_inputs(inputs, self.inputs_dir)
         return inputs, paths
+
+    def _input_recovery_options(self, info: artifact.ArtifactInfo) -> str:
+        """Format recovery command hints from the artifact's provenance."""
+        from torq.lab.cli import PROG
+        model_path = Path(self.config.model_path)
+        hints = []
+        vmfb = model_path if model_path.suffix == ".vmfb" else self._vmfb_path()
+        hints.append(f"  {PROG} run {vmfb} --input-npy input_0.npy")
+        hints.append(f"  {PROG} run {vmfb} --input-spec '1x1x64xbf16' --random-inputs")
+        if info and info.source_path:
+            hints.append(f"  {PROG} run {vmfb} --source {info.source_path}")
+        return "\n".join(hints)
 
     def _collect_profiles(self):
         host = self.profiles_dir / "host_profile.csv"
@@ -204,6 +257,43 @@ class ModelPipeline:
 
     # -- stages ----------------------------------------------------------
 
+    def ensure_mlir(self) -> Path:
+        """Return the ``.mlir`` source to compile, importing ONNX/TFLite if needed.
+
+        ``.mlir`` -> returned unchanged. ``.onnx`` -> imported via
+        ``torq.lab.onnx.convert_onnx_to_mlir``. ``.tflite`` -> imported via
+        ``torq.lab.tflite.convert_tflite_to_mlir``. Both write
+        ``<work-dir>/<model-stem>.mlir`` and return that path; the imported path
+        is recorded as ``spec_source`` so a later run resolves I/O from it.
+        ``.vmfb`` (or any other suffix) -> raises ``LabError`` naming the
+        accepted suffixes: compile needs a source, not a module.
+        """
+        model_path = Path(self.config.model_path)
+        if not model_path.exists():
+            raise LabError(f"no such model file: {model_path}")
+        if model_path.suffix == ".mlir":
+            return model_path.resolve()
+        if model_path.suffix == ".onnx":
+            from torq.lab.onnx import convert_onnx_to_mlir
+
+            return self._import_to_mlir(model_path, convert_onnx_to_mlir, "ONNX")
+        if model_path.suffix == ".tflite":
+            from torq.lab.tflite import convert_tflite_to_mlir
+
+            return self._import_to_mlir(model_path, convert_tflite_to_mlir, "TFLite")
+        raise LabError(f"compile needs an .onnx, .tflite, or .mlir source, got {model_path}")
+
+    def _import_to_mlir(self, model_path: Path, importer, label: str) -> Path:
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        mlir = self.work_dir / f"{model_path.stem}.mlir"
+        try:
+            importer(model_path.resolve(), mlir, timeout=self.config.timeout or 300)
+        except RuntimeError as exc:
+            raise LabError(f"failed to import {label} {model_path}: {exc}")
+        if self.config.spec_source is None:
+            self.config.spec_source = mlir
+        return mlir
+
     def compile(self) -> CompileResult:
         """Compile ``config.model_path`` (an ``.mlir``) to a VMFB.
 
@@ -212,7 +302,8 @@ class ModelPipeline:
         :class:`~torq.lab.types.CompileResult`. Raises
         :class:`~torq.lab.types.LabError` / ``ToolError`` on tool failure.
         """
-        self.work_dir.mkdir(parents=True, exist_ok=True)
+        source = self.ensure_mlir()
+        self._ensure_work_dir()
         self.debug_dir.mkdir(parents=True, exist_ok=True)
         if self.config.dump_ir:
             (self.debug_dir / "ir").mkdir(parents=True, exist_ok=True)
@@ -226,7 +317,7 @@ class ModelPipeline:
         tool = tools.find_compile_tool(self.config.compile_tool)
         vmfb = self._vmfb_path()
         cmds = build_compile_command(
-            self.config, tool, vmfb, self.debug_dir, self.phases_dir, compile_profile
+            self.config, tool, source, vmfb, self.debug_dir, self.phases_dir, compile_profile
         )
         start = time.perf_counter()
         proc = tools.run_tool(cmds, timeout=self.config.timeout, cwd=self.work_dir)
@@ -251,6 +342,27 @@ class ModelPipeline:
             diagnostics=_diagnostics(proc),
         )
 
+    def ensure_vmfb(self) -> Tuple[Optional[CompileResult], Path]:
+        """Return the VMFB to execute, compiling a source first if needed.
+
+        ``.onnx``/``.tflite``/``.mlir`` -> ``self.compile()`` (which imports
+        ONNX/TFLite via ``ensure_mlir``), returning ``(compile_result,
+        compile_result.vmfb_path)``. ``.vmfb`` -> ``(None, self._vmfb_path())``.
+        Any other suffix -> ``LabError`` naming the accepted suffixes and the
+        path given.
+        """
+        model_path = Path(self.config.model_path)
+        if model_path.suffix == ".vmfb":
+            if not model_path.exists():
+                raise LabError(f"no such model file: {model_path}")
+            return None, self._vmfb_path()
+        if model_path.suffix in (".onnx", ".tflite", ".mlir"):
+            compile_result = self.compile()
+            return compile_result, compile_result.vmfb_path
+        raise LabError(
+            f"run/verify/profile need an .onnx, .tflite, .mlir, or .vmfb model, got {model_path}"
+        )
+
     def run(self, vmfb_path=None) -> RunResult:
         """Run a compiled VMFB and collect its outputs.
 
@@ -261,19 +373,20 @@ class ModelPipeline:
         into numpy arrays, and finalizes any profiling artifacts. Returns a
         :class:`~torq.lab.types.RunResult`.
         """
-        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_work_dir()
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         vmfb = Path(vmfb_path) if vmfb_path else self._vmfb_path()
 
-        spec = self._io_spec()
-        spec_src = self._spec_source()
-        func_name = self.config.function or (
-            io.parse_func_name(spec_src) if spec_src and spec_src.exists() else "main"
+        info = artifact.describe(
+            vmfb, source=self._explicit_source(),
+            input_specs=self.config.input_specs, output_specs=self.config.output_specs
         )
+        spec = info.io_spec
+        func_name = self.config.function or info.function
 
         convert_io_dtypes_policy = self._convert_io_dtypes_policy()
         runtime_spec = convert_io_dtypes_policy.convert_io_spec(spec) if spec else None
-        inputs, input_paths = self._materialize_inputs(spec, convert_io_dtypes_policy)
+        inputs, input_paths = self._materialize_inputs(spec, convert_io_dtypes_policy, info)
         input_args = io.build_input_args(input_paths, inputs, runtime_spec) if inputs else []
 
         if runtime_spec is not None:
@@ -349,6 +462,19 @@ class ModelPipeline:
         run_result = self.run(compile_result.vmfb_path)
         return compile_result, run_result
 
+    def profile(self) -> Tuple[Optional[CompileResult], RunResult]:
+        """Compile if needed, run with host profiling on, and finalize the profile.
+
+        Sets ``profile_runtime`` before ``ensure_vmfb()``: a source that needs
+        compiling must compile with ``--torq-enable-profiling`` already on
+        (``build_compile_command`` gates that flag on ``profile_runtime``), so
+        profiling a source has to compile with it on, not just run with it.
+        """
+        self.config.profile_runtime = True
+        compile_result, vmfb = self.ensure_vmfb()
+        run_result = self.run(vmfb)
+        return compile_result, run_result
+
     # -- reporting -------------------------------------------------------
 
     def expected_outputs(self) -> Optional[List[np.ndarray]]:
@@ -372,10 +498,55 @@ class ModelPipeline:
 
         return compare_outputs(run_result.outputs, expected)
 
+    def _loaded_run_inputs(self) -> List[np.ndarray]:
+        """Load the input arrays the most recent run used, from ``self.inputs_dir``, in index order."""
+        paths = sorted(
+            self.inputs_dir.glob("in_rnd_*.bin.npy"),
+            key=lambda p: int(p.name[len("in_rnd_"):-len(".bin.npy")]),
+        )
+        return [np.load(p, allow_pickle=False) for p in paths]
+
+    def reference_outputs(self) -> Optional[List[np.ndarray]]:
+        """Generate expected outputs from ``config.reference``, or None if unset.
+
+        Loads the inputs the run used (from ``self.inputs_dir``) and calls
+        ``reference.onnx_reference_outputs`` on the resolved ONNX path. Uses the
+        same input files the VMFB saw so the only difference is the compute path.
+        """
+        if not self.config.reference:
+            return None
+        provider, _, path = self.config.reference.partition(":")
+        if provider != "onnx":
+            raise LabError(f"unknown --reference provider '{provider}'; only 'onnx' is supported")
+        if path:
+            onnx_path = Path(path)
+        else:
+            model_path = Path(self.config.model_path)
+            if model_path.suffix != ".onnx":
+                raise LabError("--reference onnx needs an .onnx model; give --reference onnx:PATH")
+            onnx_path = model_path
+
+        from torq.lab.reference import onnx_reference_outputs
+
+        return onnx_reference_outputs(onnx_path, self._loaded_run_inputs())
+
+    def verify_outputs(self, run_result: RunResult):
+        """Compare run outputs against goldens if configured, else a generated
+        reference, else None. Prefers explicit goldens over generation."""
+        expected = self.expected_outputs()
+        if expected is None:
+            expected = self.reference_outputs()
+        if expected is None:
+            return None
+        from torq.lab.compare import compare_outputs
+
+        return compare_outputs(run_result.outputs, expected)
+
     def write_manifest(self, **kwargs) -> Path:
-        """Build and write ``manifest.json`` into the work dir."""
+        """Build and write ``manifest.json`` into the work dir, including this pipeline's artifact facts."""
         from torq.lab.manifest import build_manifest
         from torq.lab.manifest import write_manifest as _write
 
-        manifest = build_manifest(config=self.config, remote=self.remote, **kwargs)
+        info = self._resolve_artifact_info(kwargs.get("compile_result"))
+        manifest = build_manifest(config=self.config, remote=self.remote, artifact=info, **kwargs)
         return _write(self.work_dir, manifest)

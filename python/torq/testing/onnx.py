@@ -383,11 +383,11 @@ def onnx_layer_model(request):
 # Re-export numpy executor functions and fixture for backward compatibility
 # These are defined in .numpy to avoid circular dependencies with .torch
 from .numpy import (
-    _has_bf16_matmul,
-    _has_bf16_einsum,
-    _has_gelu,
-    _numpy_maxpool,
-    _execute_onnx_model_numpy,
+    has_bf16_matmul,
+    has_bf16_einsum,
+    has_gelu,
+    numpy_maxpool,
+    execute_onnx_model_numpy,
     numpy_gelu_reference_results,
     numpy_reference_results,
 )
@@ -418,7 +418,7 @@ def composite_reference_results(request, input_data, onnx_quant_config):
         onnx_model = onnx.load(str(onnx_model_file))
 
         # 1. Try ONNXRuntime first
-        if not _has_bf16_matmul(onnx_model) or not _has_bf16_einsum(onnx_model):
+        if not has_bf16_matmul(onnx_model) or not has_bf16_einsum(onnx_model):
             try:
                 ort_session = onnxruntime.InferenceSession(str(onnx_model_file))
                 ort_inputs = {inp.name: input_data[i] for i, inp in enumerate(ort_session.get_inputs())}
@@ -428,7 +428,7 @@ def composite_reference_results(request, input_data, onnx_quant_config):
 
         # 2. Try numpy fallback
         try:
-            return _execute_onnx_model_numpy(onnx_model, input_data)
+            return execute_onnx_model_numpy(onnx_model, input_data)
         except Exception:
             pass
     except Exception:

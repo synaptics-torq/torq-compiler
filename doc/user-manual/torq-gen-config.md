@@ -2,6 +2,10 @@
 
 A guide for finding the best execution configuration (NSS/CSS/Host) for each operation in a model.
 
+```{note}
+Also available as `torq-lab gen_config <discover|run|view|edit>` and `torq-lab quantize` — see [torq.lab](torq_lab.md#gen_config-and-quantize). Every option below works the same way under either form.
+```
+
 ---
 
 ## Table of Contents

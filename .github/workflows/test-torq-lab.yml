@@ -42,7 +42,10 @@ jobs:
           python -m venv .labvenv
           . .labvenv/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install "$(find wheels -name 'torq_compiler-*.whl' | head -1)" pytest
+          # [onnx] is required by tests/test_lab_pipeline.py and
+          # tests/test_lab_reference.py, which exercise the ONNX import and
+          # self-verify reference paths.
+          python -m pip install "$(find wheels -name 'torq_compiler-*.whl' | head -1)[onnx]" pytest
           # torq.lab / torq.gen_config and iree come from the installed wheel.
           # The torq.testing plugin is not part of the wheel, so clear the repo
           # addopts (which loads it) and disable it for this hardware-free run.

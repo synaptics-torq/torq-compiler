@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _s(value):
@@ -25,6 +25,7 @@ def build_manifest(
     run_result=None,
     remote=None,
     comparison=None,
+    artifact=None,
     status: str = "ok",
     diagnostics: str = "",
 ) -> dict:
@@ -34,6 +35,12 @@ def build_manifest(
     round-trippable via ``PipelineConfig.from_manifest`` / ``RemoteTarget``) and
     ``results`` (what the run produced). This lets a pipeline be re-set-up from a
     saved manifest.
+
+    ``artifact`` is an optional ``torq.lab.artifact.ArtifactInfo`` describing
+    what the compiled VMFB is (entry function, I/O signature, source
+    provenance); when given, it is stored verbatim () under the top-level 
+    ``artifact`` key so a later ``artifact.describe()`` on this manifest can 
+    resolve those facts without re-deriving them.
     """
     config_section = config.to_dict()
     if remote is not None:
@@ -73,12 +80,15 @@ def build_manifest(
 
     results["diagnostics"] = diagnostics
 
-    return {
+    manifest = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "config": config_section,
         "results": results,
     }
+    if artifact is not None:
+        manifest["artifact"] = artifact.to_manifest_dict()
+    return manifest
 
 
 def atomic_write_json_file(key_dir, filename: str, data, sort_keys: bool = False) -> None:

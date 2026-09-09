@@ -40,6 +40,8 @@ from torq.lab.quantize_onnx import (
 def _validate_model_and_flags(args: argparse.Namespace) -> Optional[str]:
     """Shared discover/run validation; returns an error message or None."""
     model_path = args.model
+    if not model_path:
+        return "--model is required (or provide it via --config)"
     if not Path(model_path).exists():
         return f"Model not found: {model_path}"
     if str(model_path).lower().endswith(".tflite"):
@@ -53,37 +55,49 @@ def _validate_model_and_flags(args: argparse.Namespace) -> Optional[str]:
 
 def cmd_discover(args: argparse.Namespace) -> int:
     """Run executor discovery on an ONNX model (in-process)."""
-    error = _validate_model_and_flags(args)
+    from torq.gen_config._options import DiscoveryConfig
+
+    # Build config from args + config files
+    cfg = DiscoveryConfig.from_config_and_args(args)
+    error = _validate_model_and_flags(args) if args.model else (
+        "--model is required (or provide it via --config)" if not cfg.model_path else None
+    )
     if error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
 
-    from torq.gen_config._options import DiscoveryConfig
     from torq.gen_config._runner import run_discovery
 
-    return run_discovery(DiscoveryConfig.from_argparse(args))
+    return run_discovery(cfg)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Run the full model test with discovered executor assignments."""
-    error = _validate_model_and_flags(args)
+    from torq.gen_config._options import DiscoveryConfig
+
+    # Build config from args + config files
+    cfg = DiscoveryConfig.from_config_and_args(args)
+    error = _validate_model_and_flags(args) if args.model else (
+        "--model is required (or provide it via --config)" if not cfg.model_path else None
+    )
     if error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
 
-    model_path = args.model
+    model_path = cfg.model_path
+    output_dir = cfg.output_dir
 
     # Verify config exists (report JSON or compiler JSON)
     model_name = Path(model_path).stem
-    subgraph_mode = bool(args.subgraph_from and args.subgraph_to)
+    subgraph_mode = cfg.subgraph_mode
 
     if subgraph_mode:
         # For subgraph runs, accept any torq_gen_config JSON in the output dir
-        search_dir = Path(args.output_dir) if args.output_dir else Path(".")
+        search_dir = Path(output_dir) if output_dir else Path(".")
         has_config = any(search_dir.glob("torq_gen_config_*.json"))
     else:
-        config_path = get_config_path(model_name, args.output_dir)
-        compiler_config_path = get_compiler_config_path(model_name, args.output_dir)
+        config_path = get_config_path(model_name, output_dir)
+        compiler_config_path = get_compiler_config_path(model_name, output_dir)
         has_config = config_path.exists() or compiler_config_path.exists()
 
     if not has_config:
@@ -95,10 +109,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         return 1
 
-    from torq.gen_config._options import DiscoveryConfig
     from torq.gen_config._runner import run_full_model
 
-    return run_full_model(DiscoveryConfig.from_argparse(args))
+    return run_full_model(cfg)
 
 
 def cmd_quantize(args: argparse.Namespace) -> int:
@@ -415,8 +428,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     def _add_common_run_args(p):
         """Add arguments shared by discover and run subcommands."""
         p.add_argument(
+            "--config",
+            action="append",
+            default=[],
+            help="Config JSON file(s) to layer for the discovery config (repeatable, later wins)",
+        )
+        p.add_argument(
             "--model",
-            required=True,
+            required=False,
             help="Path to the ONNX model (.onnx)",
         )
         p.add_argument(
@@ -605,7 +624,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     quantize_parser = subparsers.add_parser(
         "quantize", help="Quantize an FP32 ONNX model to integer QDQ"
     )
-    quantize_parser.add_argument("--model", required=True, help="Path to the FP32 ONNX model")
+    quantize_parser.add_argument(
+        "--config",
+        action="append",
+        default=[],
+        help="Config JSON file(s) to layer for the quantization config (repeatable, later wins)",
+    )
+    quantize_parser.add_argument("--model", required=False, help="Path to the FP32 ONNX model")
     quantize_parser.add_argument(
         "--output", help="Output path for the quantized ONNX model (default: <model>.int8.onnx)"
     )

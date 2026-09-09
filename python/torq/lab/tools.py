@@ -6,7 +6,7 @@
 
 """Discovery of the torq-compile / torq-run-module binaries and a subprocess wrapper."""
 
-import importlib
+import importlib.util
 import logging
 import os
 import shutil
@@ -43,47 +43,48 @@ def _is_executable(path) -> bool:
     return bool(path and os.path.isfile(path) and os.access(path, os.X_OK))
 
 
+def _module_dir(module_name: str) -> Optional[str]:
+    """Resolve a module's on-disk directory without importing it.
+
+    Locating a packaged tool's directory only needs the module's filesystem
+    location, not its code loaded into this process. Some of these modules
+    (notably ``iree.compiler._mlir_libs``) are native extensions that
+    statically link their own copy of LLVM; importing one into a process that
+    already has another LLVM-linked extension loaded (e.g. TensorFlow, pulled
+    in for TFLite import) causes an LLVM commandline registration error. 
+    ``find_spec`` locates the module via its parent package's finders without 
+    executing the module itself, avoiding that collision entirely.
+    """
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except (ImportError, ValueError, AttributeError):
+        return None
+    if spec is None:
+        return None
+    if spec.submodule_search_locations:
+        return spec.submodule_search_locations[0]
+    if spec.origin:
+        return os.path.dirname(spec.origin)
+    return None
+
+
 def _compiler_packaged_dirs() -> List[str]:
-    dirs: List[str] = []
-    try:
-        import iree.compiler._mlir_libs as _mlir_libs
-
-        dirs.append(os.path.dirname(_mlir_libs.__file__))
-    except ImportError:
-        pass
-    try:
-        import torq._compiler_libs as _compiler_libs
-
-        dirs.append(os.path.dirname(_compiler_libs.__file__))
-    except ImportError:
-        pass
-    return dirs
+    return [
+        d for d in (_module_dir(name) for name in ("iree.compiler._mlir_libs", "torq._compiler_libs")) if d
+    ]
 
 
 def _runtime_packaged_dirs() -> List[str]:
-    dirs: List[str] = []
-    try:
-        import torq._runtime_libs as _runtime_libs
-
-        dirs.append(os.path.dirname(_runtime_libs.__file__))
-    except ImportError:
-        pass
-    return dirs
+    return [d for d in (_module_dir("torq._runtime_libs"),) if d]
 
 
 def _iree_runtime_packaged_dirs() -> List[str]:
     dirs: List[str] = _runtime_packaged_dirs()
     # The iree-runtime wheel ships iree-run-module alongside its native libs.
     for module_name in ("iree._runtime_libs", "iree.runtime._runtime_libs"):
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError:
-            continue
-        if getattr(module, "__file__", None):
-            dirs.append(os.path.dirname(module.__file__))
-        elif getattr(module, "__path__", None):
-            # Namespace package (build-tree bindings): search the dir itself.
-            dirs.append(module.__path__[0])
+        directory = _module_dir(module_name)
+        if directory:
+            dirs.append(directory)
     return dirs
 
 

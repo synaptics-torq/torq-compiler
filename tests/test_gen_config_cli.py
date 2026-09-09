@@ -542,3 +542,199 @@ def test_parse_quant_dtype():
 
     with pytest.raises(ValueError):
         _parse_quant_dtype("a16w8")
+
+
+def test_discovery_config_from_config_and_args(tmp_path):
+    """DiscoveryConfig.from_config_and_args layers config file under CLI args."""
+    from argparse import Namespace
+    from torq.gen_config._options import DiscoveryConfig
+
+    # Write a config file with shared keys and gen_config section
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({
+        "model_path": str(TEST_MODEL),
+        "work_dir": str(tmp_path / "work"),
+        "chip": "SL5",
+        "timeout": 30,
+        "gen_config": {
+            "skip_mode": True,
+            "collect_timing": True,
+        }
+    }))
+
+    # Create args with config file but no model (model comes from config)
+    args = Namespace(
+        config=[str(cfg_file)],
+        model=None,
+        output_dir=None,
+        torq_hw=None,
+        torq_hw_type=None,
+        compiler_option=[],
+        runtime_option=[],
+        auto_convert_bf16=False,
+        auto_convert_int32=False,
+        log_file=None,
+        verbose=False,
+        skip_mode=False,
+        skip_executors=None,
+        skip_ops=None,
+        save_bf16_model=None,
+        subgraph_from=None,
+        subgraph_to=None,
+        collect_timing=False,
+        timing_runs=1,
+        recommend_by_timing=False,
+        dedup_layers=False,
+        quantize=False,
+        per_channel=False,
+        full_integer=False,
+        quant_format="qdq",
+        quant_dtype="A8W8",
+        debug_ir=None,
+        trace_buffers=False,
+        debug_torq_compiler=0,
+        compiler_timeout=300,
+        runtime_timeout=240,
+        ignore_binary_mtime=False,
+        convert_io_dtypes=None,
+        recompute_cache=False,
+        debug_cache=False,
+        cache_dir=None,
+    )
+
+    cfg = DiscoveryConfig.from_config_and_args(args)
+
+    # Config file values should be present
+    assert cfg.model_path == str(TEST_MODEL)
+    assert cfg.output_dir == str(tmp_path / "work")
+    assert cfg.torq_hw == "SL5"
+    assert cfg.compiler_timeout == 30
+    assert cfg.runtime_timeout == 30
+
+    # Gen_config section values should be present
+    assert cfg.skip_mode is True
+    assert cfg.collect_timing is True
+
+
+def test_discovery_config_cli_overrides_config_file(tmp_path):
+    """CLI arguments override config file values."""
+    from argparse import Namespace
+    from torq.gen_config._options import DiscoveryConfig
+
+    # Write a config file
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({
+        "model_path": str(TEST_MODEL),
+        "chip": "SL5",
+    }))
+
+    # Create args with config file and explicit CLI values
+    args = Namespace(
+        config=[str(cfg_file)],
+        model=str(TEST_MODEL),
+        output_dir=str(tmp_path / "cli_out"),
+        torq_hw="SL2610",  # Override the config file
+        torq_hw_type=None,
+        compiler_option=[],
+        runtime_option=[],
+        auto_convert_bf16=False,
+        auto_convert_int32=False,
+        log_file=None,
+        verbose=False,
+        skip_mode=False,
+        skip_executors=None,
+        skip_ops=None,
+        save_bf16_model=None,
+        subgraph_from=None,
+        subgraph_to=None,
+        collect_timing=False,
+        timing_runs=1,
+        recommend_by_timing=False,
+        dedup_layers=False,
+        quantize=False,
+        per_channel=False,
+        full_integer=False,
+        quant_format="qdq",
+        quant_dtype="A8W8",
+        debug_ir=None,
+        trace_buffers=False,
+        debug_torq_compiler=0,
+        compiler_timeout=300,
+        runtime_timeout=240,
+        ignore_binary_mtime=False,
+        convert_io_dtypes=None,
+        recompute_cache=False,
+        debug_cache=False,
+        cache_dir=None,
+    )
+
+    cfg = DiscoveryConfig.from_config_and_args(args)
+
+    # CLI values should override config file
+    assert cfg.torq_hw == "SL2610"  # CLI value wins
+    assert cfg.output_dir == str(tmp_path / "cli_out")  # CLI value wins
+    assert cfg.model_path == str(TEST_MODEL)  # Same in both
+
+
+def test_discovery_config_remote_mapping(tmp_path):
+    """Remote section from config file is mapped to torq_* fields."""
+    from argparse import Namespace
+    from torq.gen_config._options import DiscoveryConfig
+
+    # Write a config file with remote section
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({
+        "model_path": str(TEST_MODEL),
+        "remote": {
+            "address": "root@192.168.1.1",
+            "port": 2222,
+            "private_key": "/path/to/key",
+        }
+    }))
+
+    # Create args
+    args = Namespace(
+        config=[str(cfg_file)],
+        model=None,
+        output_dir=None,
+        torq_hw=None,
+        torq_hw_type=None,
+        compiler_option=[],
+        runtime_option=[],
+        auto_convert_bf16=False,
+        auto_convert_int32=False,
+        log_file=None,
+        verbose=False,
+        skip_mode=False,
+        skip_executors=None,
+        skip_ops=None,
+        save_bf16_model=None,
+        subgraph_from=None,
+        subgraph_to=None,
+        collect_timing=False,
+        timing_runs=1,
+        recommend_by_timing=False,
+        dedup_layers=False,
+        quantize=False,
+        per_channel=False,
+        full_integer=False,
+        quant_format="qdq",
+        quant_dtype="A8W8",
+        debug_ir=None,
+        trace_buffers=False,
+        debug_torq_compiler=0,
+        compiler_timeout=300,
+        runtime_timeout=240,
+        ignore_binary_mtime=False,
+        convert_io_dtypes=None,
+        recompute_cache=False,
+        debug_cache=False,
+        cache_dir=None,
+    )
+
+    cfg = DiscoveryConfig.from_config_and_args(args)
+
+    # Remote values should be mapped
+    assert cfg.torq_addr == "root@192.168.1.1"
+    assert cfg.torq_port == 2222
+    assert cfg.torq_private_key == "/path/to/key"

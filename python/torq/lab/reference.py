@@ -26,6 +26,7 @@ import onnxruntime
 from onnx import helper, numpy_helper, TensorProto
 
 from torq.lab.logging import is_verbose
+from torq.lab.types import LabError
 
 
 def torch_tanh_gelu_numpy(x, output_dtype=None):
@@ -45,7 +46,7 @@ def torch_tanh_gelu_numpy(x, output_dtype=None):
     return y
 
 
-def _has_bf16_matmul(model):
+def has_bf16_matmul(model):
     """Check if model contains MatMul with bf16."""
     graph = model.graph
     value_info = {vi.name: vi.type.tensor_type.elem_type
@@ -63,7 +64,7 @@ def _has_bf16_matmul(model):
     return False
 
 
-def _has_bf16_einsum(model):
+def has_bf16_einsum(model):
     """Check if model contains Einsum with bf16."""
     graph = model.graph
     value_info = {vi.name: vi.type.tensor_type.elem_type
@@ -81,12 +82,12 @@ def _has_bf16_einsum(model):
     return False
 
 
-def _has_gelu(model):
+def has_gelu(model):
     """Check if model contains GELU."""
     return any(node.op_type == "Gelu" for node in model.graph.node)
 
 
-def _numpy_maxpool(x, kernel_shape, strides, pads, ceil_mode=0):
+def numpy_maxpool(x, kernel_shape, strides, pads, ceil_mode=0):
     """Execute MaxPool using numpy (NCHW format)."""
     N, C, H, W = x.shape
     kh, kw = kernel_shape
@@ -124,7 +125,7 @@ def _numpy_maxpool(x, kernel_shape, strides, pads, ceil_mode=0):
     return np.max(windows, axis=(4, 5))
 
 
-def _numpy_global_average_pool(x):
+def numpy_global_average_pool(x):
     """Execute GlobalAveragePool using numpy (NCHW format).
 
     Computes mean over spatial dimensions H and W. For bf16 inputs,
@@ -140,7 +141,7 @@ def _numpy_global_average_pool(x):
     return result
 
 
-def _execute_onnx_model_numpy(model, input_data):
+def execute_onnx_model_numpy(model, input_data):
     """
     Execute ONNX model using numpy, with special handling for bf16 MatMul operations.
     NumPy's matmul accepts bf16 arrays directly and handles promotion to float32 internally,
@@ -200,12 +201,12 @@ def _execute_onnx_model_numpy(model, input_data):
             strides = list(next(attr.ints for attr in node.attribute if attr.name == "strides")) if any(attr.name == "strides" for attr in node.attribute) else kernel_shape
             pads = list(next(attr.ints for attr in node.attribute if attr.name == "pads")) if any(attr.name == "pads" for attr in node.attribute) else [0, 0, 0, 0]
             ceil_mode = next((attr.i for attr in node.attribute if attr.name == "ceil_mode"), 0)
-            result = _numpy_maxpool(x, kernel_shape, strides, pads, ceil_mode)
+            result = numpy_maxpool(x, kernel_shape, strides, pads, ceil_mode)
             tensor_values[node.output[0]] = result
 
         elif node.op_type == "GlobalAveragePool":
             x = tensor_values[node.input[0]]
-            result = _numpy_global_average_pool(x)
+            result = numpy_global_average_pool(x)
             tensor_values[node.output[0]] = result
 
         elif node.op_type == "Gelu":
@@ -264,6 +265,68 @@ def _execute_onnx_model_numpy(model, input_data):
     return outputs
 
 
+_OP_TYPE_PATTERNS = (
+    re.compile(r"[Ee]xecute (\w+) with onnxruntime"),
+    re.compile(r"[Uu]nsupported (\w+)"),
+    re.compile(r"op(?:erator)?[\s_]*type?['\"]?\s*[:=]?\s*['\"]?(\w+)"),
+)
+
+
+def _extract_op_type(exc: Exception) -> str:
+    """Best-effort pull an ONNX op type out of an exception message."""
+    text = str(exc)
+    for pattern in _OP_TYPE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return "an unsupported op"
+
+
+def _one_line(exc: Exception, limit: int = 300) -> str:
+    """Collapse an exception message to a single trimmed line for a diagnostic."""
+    text = " ".join(str(exc).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def onnx_reference_outputs(onnx_path, inputs: List[np.ndarray]) -> List[np.ndarray]:
+    """Compute reference outputs for an ONNX model on ``inputs`` (graph order).
+
+    ``inputs`` is the list of input arrays the VMFB was run on (same values,
+    same order). Tier 1: native ``onnxruntime.InferenceSession`` (handles bf16
+    where the host supports it). Tier 2, on ORT failure: the fp32-fake numpy
+    hybrid ``execute_onnx_model_numpy`` (bf16 MatMul promoted to fp32 then cast
+    back). If tier 2 also fails, raise ``LabError`` naming the op it could not
+    execute and telling the user to supply explicit goldens.
+    """
+    onnx_path = Path(onnx_path)
+    try:
+        session = onnxruntime.InferenceSession(str(onnx_path))
+        ort_inputs = {inp.name: inputs[i] for i, inp in enumerate(session.get_inputs())}
+        return session.run(None, ort_inputs)
+    except Exception as ort_exc:
+        try:
+            model = onnx.load(str(onnx_path))
+            return execute_onnx_model_numpy(model, inputs)
+        except Exception as numpy_exc:
+            op = _extract_op_type(numpy_exc)
+            from torq.lab.cli import _hint
+
+            # Surface both tiers' underlying errors: for an fp32 model that ORT
+            # loaded but failed to *run* (e.g. an out-of-range control input),
+            # the onnxruntime error is the actionable one, not a bf16 story.
+            raise LabError(
+                f"Could not compute an ONNX reference for {onnx_path}: neither this "
+                "host's onnxruntime nor the numpy reference could execute it.\n"
+                f"  onnxruntime: {_one_line(ort_exc)}\n"
+                f"  numpy fallback: {_one_line(numpy_exc)}\n"
+                f"(could not execute op '{op}'; bf16 ops without native ORT kernels are "
+                "one common cause, but check the errors above -- an invalid input value or "
+                "shape is another.)\n\n"
+                "Supply goldens explicitly instead:\n"
+                f"  {_hint(f'verify {onnx_path} --golden out_0.npy [out_1.npy ...]')}"
+            ) from numpy_exc
+
+
 def _decode_bf16_resource(hex_str, num_elements):
     """Decode a 1-D bf16 dense_resource hex blob.
 
@@ -274,7 +337,7 @@ def _decode_bf16_resource(hex_str, num_elements):
     return np.frombuffer(raw[-(num_elements * 2):], dtype=ml_dtypes.bfloat16).astype(np.float32)
 
 
-def _parse_instance_norm_params(mlir_model_file):
+def parse_instance_norm_params(mlir_model_file):
     """Extract (scale, bias, eps) for the onnx.InstanceNormalization op from an MLIR model.
 
     scale/bias are per-channel constants stored as dense_resource blobs; eps is an op attribute.
@@ -293,12 +356,12 @@ def _parse_instance_norm_params(mlir_model_file):
         )
         name, count = m.group(1), int(m.group(2))
         blob = re.search(re.escape(name) + r'\s*:\s*"(0x[0-9A-Fa-f]+)"', text).group(1)
-        return _decode_bf16_resource(blob, count)
+        return _decode_bf16_resource(blob, count)  # Internal use only
 
     return const_resource(op.group(2)), const_resource(op.group(3)), eps
 
 
-def _numpy_instance_norm(x, scale, bias, eps, output_dtype):
+def numpy_instance_norm(x, scale, bias, eps, output_dtype):
     """ONNX InstanceNormalization with fp32 accumulation (matches the TORQ NPU).
 
     Normalizes over the spatial dims (all dims after N, C) per (N, C); scale/bias are

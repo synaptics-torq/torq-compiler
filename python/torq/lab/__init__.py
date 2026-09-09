@@ -10,6 +10,11 @@ This package owns release-facing orchestration around ``torq-compile`` and
 ``torq-run-module``: local and remote execution, artifact layout, input/output
 utilities, and result comparison. It ships in the wheel, so it must not import
 ``torq.testing`` or any test framework.
+
+Helper naming convention: a function useful outside its own module carries a
+public name (no underscore); a module-internal helper keeps the underscore.
+This applies to reference implementations, graph predicates, and other utilities
+other modules have a real reason to call.
 """
 
 __all__ = ["main"]

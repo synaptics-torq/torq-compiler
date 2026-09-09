@@ -15,15 +15,28 @@ effects); the test-rig runner lives in
 
 import logging
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import List, Optional
 
 from torq.lab.transport import remote_command_runner_factory
 
-from torq.lab.types import RemoteTarget
+from torq.lab.types import LabError, RemoteTarget
 
 logger = logging.getLogger("torq.lab.remote")
+
+# The named stages a remote run can fail at, in the order they occur.
+_STAGES = ("connect", "stage-runner", "stage-model", "execute", "pull-results")
+
+
+class RemoteStageError(LabError):
+    """A named remote-execution stage failed, wrapping the underlying transport error."""
+
+    def __init__(self, stage: str, detail: str):
+        self.stage = stage
+        self.detail = detail
+        super().__init__(f"remote run failed at stage '{stage}': {detail}")
 
 # Runtime options whose value is a local path that must be staged or pulled back.
 _PATH_OPTIONS = {
@@ -69,6 +82,7 @@ class RemoteExecutor:
         remote_dir_name: Optional[str] = None,
         timeout: Optional[int] = None,
         logger: Optional[logging.Logger] = None,
+        keep_remote_dir: bool = True,
     ):
         self.target = target
         self.vmfb_path = Path(vmfb_path)
@@ -78,8 +92,29 @@ class RemoteExecutor:
         self.runtime_opts = list(runtime_opts)
         self.timeout = timeout
         self._logger = logger or logging.getLogger("torq.lab.remote")
+        self.keep_remote_dir = keep_remote_dir
         name = remote_dir_name or self.vmfb_path.stem
         self.remote_root = PurePosixPath("/tmp") / name
+
+    @contextmanager
+    def _stage(self, name: str):
+        """Wrap a block of remote calls, reporting a transport failure as this named stage."""
+        assert name in _STAGES, f"unknown remote stage {name!r}, expected one of {_STAGES}"
+        try:
+            yield
+        except RemoteStageError:
+            raise
+        except Exception as exc:
+            raise RemoteStageError(name, str(exc)) from exc
+
+    def _preflight_text(self, runner) -> str:
+        runner_source = self.target.stage_runner or self.target.remote_runner_path or "PATH"
+        return (
+            f"preflight: target={self.target.address}:{self.target.port} "
+            f"transport={type(runner).__name__} runner={runner_source} "
+            f"vmfb={self.vmfb_path} inputs={len(self.input_args)} "
+            f"remote_dir={self.remote_root}"
+        )
 
     def _rewrite_arg_with_remote_path(self, arg: str):
         if "@" not in arg:
@@ -132,62 +167,87 @@ class RemoteExecutor:
         ], None
 
     def run(self) -> RemoteRunOutcome:
+        """Run the staged VMFB on the board, reporting a failure by named stage.
+
+        A transport failure at any point is re-raised as a :class:`RemoteStageError`
+        naming which of ``connect``/``stage-runner``/``stage-model``/``execute``/
+        ``pull-results`` it happened at, instead of surfacing the raw
+        scp/ssh/adb command as the primary diagnostic (that command is still in
+        ``.detail`` for follow-up debugging). A compact preflight is logged
+        before anything is transferred.
+        """
         remote_root = str(self.remote_root)
         remote_model = str(self.remote_root / self.vmfb_path.name)
-        runner = remote_command_runner_factory(
-            self.target.address,
-            int(self.timeout or 15),
-            ssh_multiplex=True,
-            ssh_port=self.target.port,
-            ssh_private_key=self.target.private_key,
-        )
+
+        with self._stage("connect"):
+            runner = remote_command_runner_factory(
+                self.target.address,
+                int(self.timeout or 15),
+                ssh_multiplex=True,
+                ssh_port=self.target.port,
+                ssh_private_key=self.target.private_key,
+            )
+
+        self._logger.info(self._preflight_text(runner))
 
         pulled: List[Path] = []
         with runner as r:
-            r.run_cmd(["mkdir", "-p", remote_root])
-            invoke, _ = self._build_invoke(r)
+            with self._stage("connect"):
+                r.run_cmd(["mkdir", "-p", remote_root])
 
-            self._logger.info("Staging model to board: %s -> %s", self.vmfb_path, remote_root)
-            r.copy_files(str(self.vmfb_path), remote_root, board_dst=True)
+            with self._stage("stage-runner"):
+                invoke, _ = self._build_invoke(r)
 
-            remote_input_args: List[str] = []
-            staged = set()
-            for arg in self.input_args:
-                remote_arg, local_path, _ = self._rewrite_arg_with_remote_path(arg)
-                if local_path is not None and local_path not in staged:
-                    r.copy_files(str(local_path), remote_root, board_dst=True)
-                    staged.add(local_path)
-                remote_input_args.append(remote_arg)
+            with self._stage("stage-model"):
+                self._logger.info("Staging model to board: %s -> %s", self.vmfb_path, remote_root)
+                r.copy_files(str(self.vmfb_path), remote_root, board_dst=True)
 
-            remote_opts, output_files, output_dirs = self._rewrite_runtime_opts(r)
-            remote_output_args: List[str] = []
-            for arg in self.output_args:
-                remote_arg, local_path, remote_path = self._rewrite_arg_with_remote_path(arg)
-                if local_path is not None and remote_path is not None:
-                    output_files[str(remote_path)] = local_path
-                remote_output_args.append(remote_arg)
+                remote_input_args: List[str] = []
+                staged = set()
+                for arg in self.input_args:
+                    remote_arg, local_path, _ = self._rewrite_arg_with_remote_path(arg)
+                    if local_path is not None and local_path not in staged:
+                        r.copy_files(str(local_path), remote_root, board_dst=True)
+                        staged.add(local_path)
+                    remote_input_args.append(remote_arg)
 
-            cmd = [
-                *invoke,
-                f"--module={remote_model}",
-                f"--function={self.function_name}",
-                *remote_opts,
-                *remote_output_args,
-                *remote_input_args,
-            ]
-            # Measure wall time on the board itself, excluding SSH transport.
-            timed_cmd = [f"time {{ {' '.join(cmd)} ; }}"]
-            self._logger.info("Running remote: %s", " ".join(cmd))
-            output = r.run_cmd(timed_cmd)
-            wall_time = parse_board_wall_time(output)
+                remote_opts, output_files, output_dirs = self._rewrite_runtime_opts(r)
+                remote_output_args: List[str] = []
+                for arg in self.output_args:
+                    remote_arg, local_path, remote_path = self._rewrite_arg_with_remote_path(arg)
+                    if local_path is not None and remote_path is not None:
+                        output_files[str(remote_path)] = local_path
+                    remote_output_args.append(remote_arg)
 
-            for remote_path, local_path in output_files.items():
-                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                r.copy_files(remote_path, str(local_path), board_dst=False)
-                pulled.append(Path(local_path))
-            for remote_dir, local_dir in output_dirs.items():
-                Path(local_dir).parent.mkdir(parents=True, exist_ok=True)
-                r.copy_files(remote_dir, str(Path(local_dir).parent), recursive=True, board_dst=False)
-                pulled.append(Path(local_dir))
+            with self._stage("execute"):
+                cmd = [
+                    *invoke,
+                    f"--module={remote_model}",
+                    f"--function={self.function_name}",
+                    *remote_opts,
+                    *remote_output_args,
+                    *remote_input_args,
+                ]
+                # Measure wall time on the board itself, excluding SSH transport.
+                timed_cmd = [f"time {{ {' '.join(cmd)} ; }}"]
+                self._logger.info("Running remote: %s", " ".join(cmd))
+                output = r.run_cmd(timed_cmd)
+                wall_time = parse_board_wall_time(output)
+
+            with self._stage("pull-results"):
+                for remote_path, local_path in output_files.items():
+                    Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+                    r.copy_files(remote_path, str(local_path), board_dst=False)
+                    pulled.append(Path(local_path))
+                for remote_dir, local_dir in output_dirs.items():
+                    Path(local_dir).parent.mkdir(parents=True, exist_ok=True)
+                    r.copy_files(remote_dir, str(Path(local_dir).parent), recursive=True, board_dst=False)
+                    pulled.append(Path(local_dir))
+
+            if not self.keep_remote_dir:
+                try:
+                    r.run_cmd(["rm", "-rf", remote_root])
+                except Exception as exc:
+                    self._logger.warning("Could not remove remote scratch dir %s: %s", remote_root, exc)
 
         return RemoteRunOutcome(command=cmd, wall_time=wall_time, output=output or "", pulled_files=pulled)

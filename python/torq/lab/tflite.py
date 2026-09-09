@@ -13,12 +13,33 @@ and all builtin options (strides, padding, etc.) are preserved exactly.
 """
 
 import copy
+import shutil
+import subprocess
 import numpy as np
 import flatbuffers
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
-from tensorflow.lite.python import schema_py_generated as tflite_schema
+
+from torq.lab.logging import is_verbose
+
+_tflite_schema = None
+
+
+def _schema():
+    """Lazily import the TFLite flatbuffer schema module.
+
+    Deferred so that importing torq.lab.tflite  doesn't pull TensorFlow's own 
+    statically-linked LLVM/MLIR into the process. That collides with iree.compiler's 
+    when both end up loaded together (e.g. a .tflite run whose resulting MLIR 
+    then gets parsed via iree.compiler.ir for its IO spec).
+    """
+    global _tflite_schema
+    if _tflite_schema is None:
+        from tensorflow.lite.python import schema_py_generated as module
+
+        _tflite_schema = module
+    return _tflite_schema
 
 
 @dataclass
@@ -82,7 +103,7 @@ class TFLiteModelParser:
         """
         if self._model_obj is None:
             buf = self._load_model_bytes()
-            self._model_obj = tflite_schema.ModelT.InitFromPackedBuf(
+            self._model_obj = _schema().ModelT.InitFromPackedBuf(
                 bytearray(buf), 0
             )
         return self._model_obj
@@ -159,11 +180,19 @@ class TFLiteLayerExtractor:
         16: 'uint16', 17: 'int4', 18: 'bfloat16',
     }
 
-    # Build reverse map from BuiltinOperator enum value to name
-    _BUILTIN_OP_NAMES = {
-        v: k for k, v in vars(tflite_schema.BuiltinOperator).items()
-        if isinstance(v, int) and not k.startswith('_')
-    }
+    # Reverse map from BuiltinOperator enum value to name, built lazily (see
+    # _BUILTIN_OP_NAMES below) since building it eagerly here would import
+    # TensorFlow at class-definition (i.e. module-import) time.
+    _builtin_op_names_cache: Optional[Dict[int, str]] = None
+
+    @property
+    def _BUILTIN_OP_NAMES(self) -> Dict[int, str]:
+        if TFLiteLayerExtractor._builtin_op_names_cache is None:
+            TFLiteLayerExtractor._builtin_op_names_cache = {
+                v: k for k, v in vars(_schema().BuiltinOperator).items()
+                if isinstance(v, int) and not k.startswith('_')
+            }
+        return TFLiteLayerExtractor._builtin_op_names_cache
 
     def __init__(self, model_path: str):
         self.parser = TFLiteModelParser(model_path)
@@ -343,7 +372,7 @@ class TFLiteLayerExtractor:
 
         # -- Collect needed buffers and build buffer remap -------------------
         # Buffer 0 is always an empty sentinel in TFLite models
-        new_buffers = [tflite_schema.BufferT()]  # buffer 0 = empty sentinel
+        new_buffers = [_schema().BufferT()]  # buffer 0 = empty sentinel
         buffer_remap = {0: 0}
 
         for old_tidx in all_tensor_indices:
@@ -353,7 +382,7 @@ class TFLiteLayerExtractor:
                 new_bidx = len(new_buffers)
                 buffer_remap[old_bidx] = new_bidx
                 # Deep copy the buffer (preserves weight/bias data)
-                new_buf = tflite_schema.BufferT()
+                new_buf = _schema().BufferT()
                 src_buf = src_model.buffers[old_bidx]
                 new_buf.data = copy.copy(src_buf.data) if src_buf.data is not None else None
                 new_buf.offset = src_buf.offset
@@ -415,7 +444,7 @@ class TFLiteLayerExtractor:
                 subgraph_inputs = [tensor_remap[first_valid]]
 
         # -- Assemble new subgraph ------------------------------------------
-        new_subgraph = tflite_schema.SubGraphT()
+        new_subgraph = _schema().SubGraphT()
         new_subgraph.tensors = new_tensors
         new_subgraph.operators = [new_op]
         new_subgraph.inputs = np.array(subgraph_inputs, dtype=np.int32)
@@ -423,7 +452,7 @@ class TFLiteLayerExtractor:
         new_subgraph.name = src_subgraph.name
 
         # -- Assemble new model ---------------------------------------------
-        new_model = tflite_schema.ModelT()
+        new_model = _schema().ModelT()
         new_model.version = src_model.version
         new_model.operatorCodes = [new_opcode]
         new_model.subgraphs = [new_subgraph]
@@ -505,14 +534,14 @@ class TFLiteLayerExtractor:
         tensor_remap = {old: new for new, old in enumerate(all_tensor_indices)}
 
         # -- Collect needed buffers and build buffer remap -------------------
-        new_buffers = [tflite_schema.BufferT()]  # buffer 0 = empty sentinel
+        new_buffers = [_schema().BufferT()]  # buffer 0 = empty sentinel
         buffer_remap = {0: 0}
         for old_tidx in all_tensor_indices:
             old_bidx = src_subgraph.tensors[old_tidx].buffer
             if old_bidx not in buffer_remap:
                 buffer_remap[old_bidx] = len(new_buffers)
                 src_buf = src_model.buffers[old_bidx]
-                new_buf = tflite_schema.BufferT()
+                new_buf = _schema().BufferT()
                 new_buf.data = copy.copy(src_buf.data) if src_buf.data is not None else None
                 new_buf.offset = src_buf.offset
                 new_buf.size = src_buf.size
@@ -583,14 +612,14 @@ class TFLiteLayerExtractor:
         subgraph_outputs = [tensor_remap[o] for o in dict.fromkeys(dangling)]
 
         # -- Assemble new subgraph and model --------------------------------
-        new_subgraph = tflite_schema.SubGraphT()
+        new_subgraph = _schema().SubGraphT()
         new_subgraph.tensors = new_tensors
         new_subgraph.operators = new_ops
         new_subgraph.inputs = np.array(subgraph_inputs, dtype=np.int32)
         new_subgraph.outputs = np.array(subgraph_outputs, dtype=np.int32)
         new_subgraph.name = src_subgraph.name
 
-        new_model = tflite_schema.ModelT()
+        new_model = _schema().ModelT()
         new_model.version = src_model.version
         new_model.operatorCodes = new_opcodes
         new_model.subgraphs = [new_subgraph]
@@ -747,6 +776,53 @@ def extract_all_layers(
         extracted += 1
     
     return results
+
+
+# ---- TFLite -> MLIR import ----
+
+def convert_tflite_to_mlir(model_path, output_path, timeout=300):
+    """Convert a TFLite model file to MLIR via ``tosa-converter-for-tflite``.
+
+    Runs the converter in a subprocess with ``--text``. Raises ``RuntimeError``
+    with full diagnostics on failure.
+    """
+    model_path = Path(model_path)
+    output_path = Path(output_path)
+
+    tool = shutil.which("tosa-converter-for-tflite")
+    if tool is None:
+        raise RuntimeError(
+            "tosa-converter-for-tflite not found on PATH; install the [tflite] extra"
+        )
+
+    try:
+        result = subprocess.run(
+            [tool, str(model_path), "--text", "-o", str(output_path)],
+            capture_output=True, text=True, timeout=timeout
+        )
+
+        if result.returncode != 0:
+            # Provide full diagnostic information
+            error_msg = f"tosa-converter-for-tflite failed for {model_path}\n"
+            error_msg += f"Return code: {result.returncode}\n"
+            error_msg += f"stdout:\n{result.stdout or '(empty)'}\n"
+            error_msg += f"stderr:\n{result.stderr or '(empty)'}\n"
+            error_msg += f"Model file size: {model_path.stat().st_size if model_path.exists() else 'N/A'} bytes"
+            raise RuntimeError(error_msg)
+
+        if is_verbose():
+            print(f"[MLIR] Successfully converted {model_path} to {output_path}")
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"tosa-converter-for-tflite timed out for {model_path}\n"
+            "This may indicate the model is too large or complex for the current environment."
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"tosa-converter-for-tflite failed with exception for {model_path}\n"
+            f"Error: {type(e).__name__}: {e}"
+        )
 
 
 # ============================================================================

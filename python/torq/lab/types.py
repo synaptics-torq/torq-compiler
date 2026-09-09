@@ -43,7 +43,18 @@ def load_config(sources) -> dict:
     """
     merged: dict = {}
     for source in sources:
-        data = source if isinstance(source, dict) else json.loads(Path(source).read_text())
+        if isinstance(source, dict):
+            data = source
+        else:
+            path = Path(source)
+            try:
+                text = path.read_text()
+            except OSError as exc:
+                raise LabError(f"could not read config file {path}: {exc}") from exc
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise LabError(f"invalid JSON in config file {path}: {exc}") from exc
         if isinstance(data, dict):
             data = data.get("config", data)
         merged = _deep_merge(merged, data)
@@ -90,8 +101,12 @@ class MlirIoSpec:
 class PipelineConfig:
     """Everything needed to compile and/or run a model.
 
-    ``model_path`` is the ``.mlir`` source for compile/compile-run and the
-    ``.vmfb`` module for run. The IO spec is derived from ``model_path`` itself
+    ``model_path`` may be ``.onnx`` or ``.tflite`` (imported to MLIR at compile
+    time via ``ModelPipeline.ensure_mlir()``), ``.mlir``, or ``.vmfb`` (run
+    only). For compile/compile-run it can be an ``.onnx``, ``.tflite``, or a
+    ``.mlir``. For run, the VMFB is resolved
+    by precedence: explicit run() argument, config.vmfb_path, a .vmfb model_path,
+    then <work-dir>/model.vmfb. The IO spec is derived from ``model_path`` itself
     (an ``.mlir``) or its sibling ``.mlir`` next to a ``.vmfb``; ``spec_source``
     is a library-level override for the rare case the spec lives elsewhere. It
     has no CLI flag (the CLI relies on the model-path convention).
@@ -103,6 +118,12 @@ class PipelineConfig:
     (``"0"``, ``"1"``, ...) to a ``(min, max)`` range that input's values are
     drawn from. Both are ``None`` by default, which reproduces the historical
     full-range behavior byte-for-byte.
+
+    ``input_specs`` and ``output_specs`` are explicit tensor-type strings
+    (e.g., ``["1x1x64xbf16"]``) that supply the I/O signature when neither MLIR
+    nor a manifest is available. They feed the artifact resolver's explicit-specs
+    tier (precedence 5), allowing random input generation and typed output
+    capture for delivered VMFBs with no source.
     """
 
     model_path: Path
@@ -120,6 +141,7 @@ class PipelineConfig:
     random_inputs: bool = False
     input_npy: List[Path] = field(default_factory=list)
     expected_output_npy: List[Path] = field(default_factory=list)
+    reference: Optional[str] = None
     timeout: Optional[int] = None
     spec_source: Optional[Path] = None
     vmfb_path: Optional[Path] = None
@@ -127,6 +149,10 @@ class PipelineConfig:
     run_tool: Optional[str] = None
     input_seed: Optional[int] = None
     input_ranges: Optional[Dict[str, Tuple[float, float]]] = None
+    profiles_dir: Optional[Path] = None
+    input_specs: List[str] = field(default_factory=list)
+    output_specs: List[str] = field(default_factory=list)
+    reuse_work_dir: bool = False
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-friendly dict (Paths -> str)."""
@@ -146,6 +172,7 @@ class PipelineConfig:
             "random_inputs": self.random_inputs,
             "input_npy": [_s(p) for p in self.input_npy],
             "expected_output_npy": [_s(p) for p in self.expected_output_npy],
+            "reference": self.reference,
             "timeout": self.timeout,
             "spec_source": _s(self.spec_source),
             "vmfb_path": _s(self.vmfb_path),
@@ -157,6 +184,10 @@ class PipelineConfig:
                 if self.input_ranges is None
                 else {k: [v[0], v[1]] for k, v in self.input_ranges.items()}
             ),
+            "profiles_dir": _s(self.profiles_dir),
+            "input_specs": list(self.input_specs),
+            "output_specs": list(self.output_specs),
+            "reuse_work_dir": self.reuse_work_dir,
         }
 
     @classmethod
@@ -187,6 +218,7 @@ class PipelineConfig:
             random_inputs=d.get("random_inputs", False),
             input_npy=[_p(p) for p in d.get("input_npy", [])],
             expected_output_npy=[_p(p) for p in d.get("expected_output_npy", [])],
+            reference=d.get("reference"),
             timeout=d.get("timeout"),
             spec_source=_p(d.get("spec_source")),
             vmfb_path=_p(d.get("vmfb_path")),
@@ -198,6 +230,10 @@ class PipelineConfig:
                 if d.get("input_ranges") is None
                 else {str(k): tuple(v) for k, v in d["input_ranges"].items()}
             ),
+            profiles_dir=_p(d.get("profiles_dir")),
+            input_specs=list(d.get("input_specs", [])),
+            output_specs=list(d.get("output_specs", [])),
+            reuse_work_dir=d.get("reuse_work_dir", False),
         )
 
     @classmethod

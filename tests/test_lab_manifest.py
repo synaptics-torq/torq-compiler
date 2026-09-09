@@ -8,12 +8,12 @@
 
 import json
 
+from torq.lab.artifact import ArtifactInfo
 from torq.lab.compare import ComparisonResult
 from torq.lab.manifest import (
     atomic_write_json_file,
     atomic_write_json_manifest,
     build_manifest,
-    write_manifest,
 )
 from torq.lab.types import CompileResult, PipelineConfig, RemoteTarget, RunResult
 
@@ -44,7 +44,7 @@ def test_build_manifest_full(tmp_path):
         remote=remote, comparison=comparison,
     )
 
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert manifest["status"] == "ok"
     # config and results are kept separate
     assert manifest["config"]["model_path"] == str(tmp_path / "model.mlir")
@@ -74,6 +74,7 @@ def test_config_roundtrips_through_manifest(tmp_path):
         runtime_hw_type="aws_fpga",
         compiler_options=["--torq-foo"],
         expected_output_npy=[tmp_path / "exp0.npy"],
+        reference="onnx:/abs/ref.onnx",
     )
     remote = RemoteTarget(address="user@host", port=2222, remote_runner_path="/opt/torq-run-module")
     manifest = build_manifest(config=config, remote=remote)
@@ -83,11 +84,22 @@ def test_config_roundtrips_through_manifest(tmp_path):
     assert RemoteTarget.from_manifest(build_manifest(config=config)) is None
 
 
-def test_write_manifest_roundtrip(tmp_path):
-    manifest = build_manifest(config=_config(tmp_path))
-    path = write_manifest(tmp_path / "out", manifest)
-    assert path == tmp_path / "out" / "manifest.json"
-    assert json.loads(path.read_text()) == manifest
+def test_build_manifest_with_artifact_section(tmp_path):
+    info = ArtifactInfo(
+        source_path=tmp_path / "m.mlir",
+        source_kind="mlir",
+        function="qkv",
+        entry_points=["qkv"],
+        converted_io=["all"],
+        debug_dir=tmp_path / "out" / "debug",
+        chip="SL2610",
+        compile_command=["torq-compile"],
+    )
+    manifest = build_manifest(config=_config(tmp_path), artifact=info)
+    assert manifest["artifact"]["function"] == "qkv"
+    assert manifest["artifact"]["chip"] == "SL2610"
+    assert manifest["artifact"]["source_kind"] == "mlir"
+    assert manifest["artifact"]["compile_command"] == ["torq-compile"]
 
 
 def test_atomic_write_json_roundtrip(tmp_path):

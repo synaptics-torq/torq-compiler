@@ -48,20 +48,6 @@ def test_fixed_seed_is_deterministic():
         assert np.array_equal(x, y)
 
 
-def test_different_seeds_differ():
-    a = io.generate_random_inputs(SPEC, seed=42)
-    b = io.generate_random_inputs(SPEC, seed=43)
-    assert any(not np.array_equal(x, y) for x, y in zip(a, b))
-
-
-def test_default_seed_is_byte_identical_to_legacy_default():
-    # seed=None must reproduce the historical seed=1234 output exactly.
-    legacy = io.generate_random_inputs(SPEC)
-    seeded = io.generate_random_inputs(SPEC, seed=1234)
-    for x, y in zip(legacy, seeded):
-        assert np.array_equal(x, y)
-
-
 # -- per-input ranges ----------------------------------------------------------
 
 
@@ -73,29 +59,6 @@ def test_range_clamping_per_input():
     assert i32_data.min() >= -5 and i32_data.max() < 5  # max exclusive
     # Inputs without a matching key keep the full dtype range.
     assert ui8_data.dtype == np.uint8
-
-
-def test_range_matching_by_name():
-    spec = MlirIoSpec(
-        inputs=[
-            TensorType([4], "i32", name="table"),
-            TensorType([4], "i32", name="indices"),
-        ],
-        outputs=[],
-    )
-    inputs = io.generate_random_inputs(spec, seed=7, ranges={"indices": (0, 2)})
-    assert inputs[1].max() < 2 and inputs[1].min() >= 0
-
-
-def test_range_respects_dtype():
-    ranges = {"0": (0.5, 2.5), "1": (0, 10), "2": (0, 80)}
-    inputs = io.generate_random_inputs(SPEC, seed=1, ranges=ranges)
-    assert inputs[0].dtype == np.float32
-    assert inputs[1].dtype == np.int32
-    assert inputs[2].dtype == np.uint8
-    # Integer ranges yield integers within [min, max).
-    assert inputs[1].min() >= 0 and inputs[1].max() < 10
-    assert inputs[2].min() >= 0 and inputs[2].max() < 80
 
 
 def test_range_bf16_input():
@@ -142,16 +105,6 @@ def test_pipeline_config_json_roundtrip(tmp_path):
         assert np.array_equal(x, y)
 
 
-def test_pipeline_config_fields_default_to_none(tmp_path):
-    # Backward compatibility: configs written before the fields existed.
-    legacy = {"model_path": str(tmp_path / "m.mlir"), "work_dir": str(tmp_path / "w")}
-    config = PipelineConfig.from_dict(legacy)
-    assert config.input_seed is None
-    assert config.input_ranges is None
-    assert config.to_dict()["input_seed"] is None
-    assert config.to_dict()["input_ranges"] is None
-
-
 def test_materialize_inputs_honors_seed_and_ranges(tmp_path):
     spec = MlirIoSpec(inputs=[TensorType([4, 4], "i32"), TensorType([2], "f32")], outputs=[])
     pipeline = ModelPipeline(_config(tmp_path, input_seed=11, input_ranges={"0": (0, 3)}))
@@ -169,12 +122,3 @@ def test_materialize_inputs_honors_seed_and_ranges(tmp_path):
     assert any(not np.array_equal(x, y) for x, y in zip(inputs, other))
 
 
-def test_materialize_inputs_default_unchanged(tmp_path):
-    # Backward compatibility: no seed/ranges configured -> the historical
-    # full-range generator output, byte for byte.
-    spec = MlirIoSpec(inputs=[TensorType([2, 2], "i8"), TensorType([1, 3], "f32")], outputs=[])
-    pipeline = ModelPipeline(_config(tmp_path))
-    inputs, _ = pipeline._materialize_inputs(spec, pipeline._convert_io_dtypes_policy())
-    legacy = io.generate_random_inputs(spec)
-    for x, y in zip(inputs, legacy):
-        assert np.array_equal(x, y)

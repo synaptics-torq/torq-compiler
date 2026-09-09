@@ -180,6 +180,88 @@ class DiscoveryConfig:
             cache_dir=first("cache_dir"),
         )
 
+    @classmethod
+    def from_config_and_args(cls, args: argparse.Namespace) -> "DiscoveryConfig":
+        """Layer any --config files under the explicit CLI args with CLI taking precedence.
+
+        Loads and deep-merges the --config JSON via torq.lab.types.load_config,
+        maps the shared PipelineConfig keys + the gen_config: section into a
+        DiscoveryConfig, then overlays from_argparse(args): a field takes the
+        argparse value when it differs from the dataclass default, else the config
+        value.
+        """
+        from pathlib import Path
+        from torq.lab.types import load_config
+
+        cli_config = cls.from_argparse(args)
+
+        # If no --config files, return the CLI config as-is
+        config_files = getattr(args, "config", [])
+        if not config_files:
+            return cli_config
+
+        # Load and merge config files
+        merged_dict = load_config([Path(c) for c in config_files])
+
+        # Map the shared PipelineConfig keys to DiscoveryConfig fields
+        mapping = {
+            "model_path": "model_path",
+            "work_dir": "output_dir",
+            "chip": "torq_hw",
+            "runtime_hw_type": "runtime_hw_type",
+            "compiler_options": "compiler_options",
+            "runtime_options": "runtime_options",
+            "convert_io_dtypes": "convert_io_dtypes",
+            "dump_ir": "debug_ir",
+        }
+
+        config_data = {}
+        for config_key, dc_field in mapping.items():
+            if config_key in merged_dict:
+                config_data[dc_field] = merged_dict[config_key]
+
+        if "timeout" in merged_dict:
+            config_data["compiler_timeout"] = merged_dict["timeout"]
+            config_data["runtime_timeout"] = merged_dict["timeout"]
+
+        if "remote" in merged_dict:
+            remote = merged_dict["remote"]
+            if "address" in remote:
+                config_data["torq_addr"] = remote["address"]
+            if "port" in remote:
+                config_data["torq_port"] = remote["port"]
+            if "private_key" in remote:
+                config_data["torq_private_key"] = remote["private_key"]
+
+        if "gen_config" in merged_dict:
+            gen_config = merged_dict["gen_config"]
+            # Copy all gen_config fields that exist on DiscoveryConfig
+            for key, value in gen_config.items():
+                if hasattr(cls, key) or key in {f.name for f in cls.__dataclass_fields__.values()}:
+                    config_data[key] = value
+
+        # Build config from merged dict
+        config_from_file = cls(**{
+            k: config_data.get(k, getattr(cls(), k))
+            for k in {f.name for f in cls.__dataclass_fields__.values()}
+        })
+
+        # Overlay CLI values: where they differ from defaults, CLI takes precedence
+        default = cls()
+        result_data = {}
+        for field_name in {f.name for f in cls.__dataclass_fields__.values()}:
+            cli_value = getattr(cli_config, field_name)
+            default_value = getattr(default, field_name)
+            file_value = getattr(config_from_file, field_name)
+
+            # If CLI value differs from default, use CLI; else use file value
+            if cli_value != default_value:
+                result_data[field_name] = cli_value
+            else:
+                result_data[field_name] = file_value
+
+        return cls(**result_data)
+
     def as_dict(self) -> Dict[str, Any]:
         """Return a plain dict of all fields (JSON-friendly values)."""
         return asdict(self)

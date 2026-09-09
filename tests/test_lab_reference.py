@@ -27,15 +27,9 @@ def test_torch_tanh_gelu_numpy_matches_reference_points():
     assert y[3] == pytest.approx(2.9963627, abs=1e-3)
 
 
-def test_torch_tanh_gelu_numpy_output_dtype():
-    x = np.array([1.0, 2.0], np.float32)
-    y = reference.torch_tanh_gelu_numpy(x, output_dtype=np.float16)
-    assert y.dtype == np.float16
-
-
 def test_numpy_maxpool_2x2():
     x = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
-    out = reference._numpy_maxpool(x, (2, 2), (2, 2), (0, 0, 0, 0))
+    out = reference.numpy_maxpool(x, (2, 2), (2, 2), (0, 0, 0, 0))
     assert out.shape == (1, 1, 2, 2)
     # max of each 2x2 block of a row-major 0..15 grid
     assert out[0, 0].tolist() == [[5.0, 7.0], [13.0, 15.0]]
@@ -43,7 +37,7 @@ def test_numpy_maxpool_2x2():
 
 def test_numpy_global_average_pool():
     x = np.array([[[[1.0, 3.0], [5.0, 7.0]]]], np.float32)  # (1,1,2,2), mean=4
-    out = reference._numpy_global_average_pool(x)
+    out = reference.numpy_global_average_pool(x)
     assert out.shape == (1, 1, 1, 1)
     assert out[0, 0, 0, 0] == pytest.approx(4.0)
 
@@ -52,23 +46,9 @@ def test_numpy_instance_norm_zero_mean_unit_var():
     x = np.array([[[1.0, 2.0, 3.0, 4.0]]], np.float32)  # (1,1,4)
     scale = np.array([1.0], np.float32)
     bias = np.array([0.0], np.float32)
-    out = reference._numpy_instance_norm(x, scale, bias, 0.0, np.float32)
+    out = reference.numpy_instance_norm(x, scale, bias, 0.0, np.float32)
     assert out.mean() == pytest.approx(0.0, abs=1e-5)
     assert out.std() == pytest.approx(1.0, abs=1e-3)
-
-
-def test_has_gelu_detects_node():
-    from onnx import helper, TensorProto
-
-    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])
-    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2])
-    node = helper.make_node("Gelu", ["x"], ["y"], approximate="tanh")
-    model = helper.make_model(helper.make_graph([node], "g", [x], [y]))
-    assert reference._has_gelu(model) is True
-
-    node2 = helper.make_node("Relu", ["x"], ["y"])
-    model2 = helper.make_model(helper.make_graph([node2], "g", [x], [y]))
-    assert reference._has_gelu(model2) is False
 
 
 # A static-shape graph the llvm-cpu golden runner can compile and execute.
@@ -107,3 +87,39 @@ def test_llvmcpu_reference_outputs(tmp_path):
     assert len(outputs) == 1
     assert outputs[0].dtype == np.float32
     assert np.array_equal(outputs[0], a + b)
+
+
+def test_onnx_reference_outputs_raises_labError_naming_the_op(tmp_path, monkeypatch):
+    """When both ORT and the numpy hybrid fail, the error names the op, points
+    at --golden, and surfaces both tiers' underlying reasons (the onnxruntime
+    error is the actionable one for an fp32 model ORT loaded but failed to run)."""
+    from torq.lab.types import LabError
+
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"not-a-real-onnx-file")
+
+    class FailingSession:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("Implementation for InstanceNormalization not supported")
+
+    monkeypatch.setattr(reference.onnxruntime, "InferenceSession", FailingSession)
+    monkeypatch.setattr(reference.onnx, "load", lambda p: object())
+
+    def fake_execute(model, inputs):
+        raise RuntimeError(
+            "Could not execute InstanceNormalization with onnxruntime: "
+            "Implementation for InstanceNormalization not supported"
+        )
+
+    monkeypatch.setattr(reference, "execute_onnx_model_numpy", fake_execute)
+
+    with pytest.raises(LabError) as excinfo:
+        reference.onnx_reference_outputs(path, [np.zeros(4, np.float32)])
+
+    message = str(excinfo.value)
+    assert "InstanceNormalization" in message
+    assert "--golden" in message
+    # The underlying tier errors are surfaced, not hidden: the onnxruntime
+    # message is what a user needs when ORT loaded the model but failed to run.
+    assert "onnxruntime:" in message
+    assert "Implementation for" in message

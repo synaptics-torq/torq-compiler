@@ -49,7 +49,7 @@ def test_cli_config_builds_config_and_remote(tmp_path):
         "chip": "SL1620",
         "remote": {"address": "user@host", "port": 2222},
     }))
-    args = _build_parser().parse_args(["compile-run", "--config", str(cfg)])
+    args = _build_parser().parse_args(["run", "--config", str(cfg)])
     config = _config_from_args(args)
     assert config.model_path == tmp_path / "m.mlir"
     assert config.chip == "SL1620"
@@ -63,3 +63,37 @@ def test_cli_positional_model_overrides_config(tmp_path):
     cfg.write_text(json.dumps({"model_path": str(tmp_path / "base.mlir"), "work_dir": str(tmp_path / "out")}))
     args = _build_parser().parse_args(["compile", str(tmp_path / "override.mlir"), "--config", str(cfg)])
     assert _config_from_args(args).model_path == tmp_path / "override.mlir"
+
+
+def test_cli_flags_override_config(tmp_path):
+    # Explicit run-stage flags must win over --config values and fill unset ones
+    # (decision 12); a config-only key the flags don't touch is preserved.
+    cfg = tmp_path / "pipe.json"
+    cfg.write_text(json.dumps({
+        "model_path": str(tmp_path / "m.mlir"),
+        "work_dir": str(tmp_path / "out"),
+        "chip": "SL2610",
+        "random_inputs": False,
+    }))
+    args = _build_parser().parse_args([
+        "run", "--config", str(cfg), "--chip", "SL5", "--random-inputs", "--seed", "99",
+    ])
+    config = _config_from_args(args)
+    assert config.chip == "SL5"          # flag overrides config
+    assert config.random_inputs is True  # store_true flag overrides config
+    assert config.input_seed == 99       # flag fills a key absent from config
+    assert config.runtime_hw_type == "sim"  # unset flag falls back to the default
+
+
+def test_cli_config_only_ignores_unset_flags(tmp_path):
+    # Without the flags, config values stand (no spurious override to a default).
+    cfg = tmp_path / "pipe.json"
+    cfg.write_text(json.dumps({
+        "model_path": str(tmp_path / "m.mlir"), "work_dir": str(tmp_path / "out"),
+        "chip": "SL1620", "random_inputs": True, "input_seed": 7,
+    }))
+    args = _build_parser().parse_args(["run", "--config", str(cfg)])
+    config = _config_from_args(args)
+    assert config.chip == "SL1620"
+    assert config.random_inputs is True
+    assert config.input_seed == 7

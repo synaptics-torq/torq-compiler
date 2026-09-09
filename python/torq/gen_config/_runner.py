@@ -1769,9 +1769,9 @@ def _compute_reference_outputs(
     import onnxruntime
 
     from torq.lab.reference import (
-        _execute_onnx_model_numpy,
-        _has_bf16_einsum,
-        _has_bf16_matmul,
+        execute_onnx_model_numpy,
+        has_bf16_einsum,
+        has_bf16_matmul,
         llvmcpu_reference_outputs,
     )
 
@@ -1779,7 +1779,7 @@ def _compute_reference_outputs(
         onnx_model = onnx.load(str(onnx_path))
 
         # 1. Try ONNXRuntime first (same quirky guard as the legacy fixture)
-        if not _has_bf16_matmul(onnx_model) or not _has_bf16_einsum(onnx_model):
+        if not has_bf16_matmul(onnx_model) or not has_bf16_einsum(onnx_model):
             try:
                 ort_session = onnxruntime.InferenceSession(str(onnx_path))
                 ort_inputs = {inp.name: inputs[i] for i, inp in enumerate(ort_session.get_inputs())}
@@ -1789,7 +1789,7 @@ def _compute_reference_outputs(
 
         # 2. Try numpy fallback
         try:
-            return _execute_onnx_model_numpy(onnx_model, inputs)
+            return execute_onnx_model_numpy(onnx_model, inputs)
         except Exception:
             pass
     except Exception:

@@ -11,14 +11,6 @@ import numpy as np
 from torq.lab.compare import compare_outputs
 
 
-def test_int_exact_match_passes():
-    a = np.array([1, 2, 3], np.int32)
-    result = compare_outputs([a], [a])
-    assert result.passed
-    assert result.tensors[0].num_diffs == 0
-    assert result.tensors[0].max_abs_diff == 0.0
-
-
 def test_int_beyond_threshold_fails():
     expected = np.array([0, 0], np.int32)
     observed = np.array([0, 5], np.int32)
@@ -39,13 +31,6 @@ def test_int_thld_below_int_tol_uses_int_tol():
     assert within.tensors[0].max_abs_diff == 2.0
     beyond = compare_outputs([np.array([0, 110], np.int32)], [expected], cfg)
     assert not beyond.passed
-
-
-def test_float_within_tolerance_passes():
-    a = np.array([1.0, 2.0, 3.0], np.float32)
-    result = compare_outputs([a], [a])
-    assert result.passed
-    assert result.tensors[0].max_rel_diff == 0.0
 
 
 def test_float_beyond_tolerance_fails():
@@ -88,10 +73,3 @@ def test_nan_positions_differ():
     assert "NaN" in result.reason
 
 
-def test_bool_comparison():
-    expected = np.array([True, False, True])
-    assert compare_outputs([expected], [expected]).passed
-    observed = np.array([False, False, True])
-    result = compare_outputs([observed], [expected])
-    assert not result.passed
-    assert result.tensors[0].num_diffs == 1

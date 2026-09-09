@@ -8,8 +8,10 @@
 
 from pathlib import Path
 
+import pytest
+
 from torq.lab.pipeline import ModelPipeline
-from torq.lab.remote import RemoteExecutor, parse_board_wall_time
+from torq.lab.remote import RemoteExecutor, RemoteStageError, parse_board_wall_time
 from torq.lab.types import PipelineConfig, RemoteTarget
 
 TOSA_MLIR = """
@@ -114,6 +116,26 @@ def test_remote_executor_run(tmp_path, monkeypatch):
     # outputs + profile pulled back locally
     assert local_out.exists()
     assert local_prof.exists()
+
+
+def test_stage_model_failure_is_reported_by_stage(tmp_path, monkeypatch):
+    vmfb = tmp_path / "model.vmfb"
+    vmfb.write_bytes(b"x")
+
+    class FailingRunner(FakeRunner):
+        def copy_files(self, src, dst, recursive=False, board_dst=False, verbose=False):
+            if board_dst and str(src) == str(vmfb):
+                raise RuntimeError("scp: connection refused")
+            return super().copy_files(src, dst, recursive=recursive, board_dst=board_dst, verbose=verbose)
+
+    fake = FailingRunner()
+    monkeypatch.setattr("torq.lab.remote.remote_command_runner_factory", lambda *a, **k: fake)
+
+    ex = RemoteExecutor(RemoteTarget(address="user@host"), vmfb, "main", [], [], [])
+    with pytest.raises(RemoteStageError) as excinfo:
+        ex.run()
+    assert excinfo.value.stage == "stage-model"
+    assert "scp: connection refused" in str(excinfo.value)
 
 
 def test_pipeline_run_remote(tmp_path, monkeypatch):

@@ -8,11 +8,12 @@
 
 The happy-path compile/run/manifest plumbing is covered by real usage of the
 pipeline; this file keeps the CLI-specific contracts a green end-to-end run
-would not assert: the compare guard, expected-outputs coming from a config, and
+would not assert: the verify guard, expected-outputs coming from a config, and
 the error exit code / manifest diagnostics on a tool failure.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -46,31 +47,43 @@ def _write_model(directory):
     return model
 
 
-def test_cli_compare_requires_expected_outputs(fake_tools):
-    model = _write_model(fake_tools)
-    rc = cli.main(["compare", str(model), "--work-dir", str(fake_tools / "out"), "--random-inputs"])
-    assert rc == 1
-
-
-def test_cli_compare_expected_from_config(fake_tools):
+def test_cli_verify_passes_on_match(fake_tools):
     import numpy as np
 
     model = _write_model(fake_tools)
     work = fake_tools / "out"
-    expected = fake_tools / "exp0.npy"
-    np.save(expected, np.zeros((1, 4), np.float32))
-    cfg = fake_tools / "cfg.json"
-    cfg.write_text(json.dumps({
-        "model_path": str(model),
-        "work_dir": str(work),
-        "random_inputs": True,
-        "expected_output_npy": [str(expected)],
-    }))
-    # Expected outputs supplied via --config must satisfy the compare guard.
-    rc = cli.main(["compare", "--config", str(cfg)])
+    golden = fake_tools / "g0.npy"
+    np.save(golden, np.zeros((1, 4), np.float32))
+    rc = cli.main(["verify", str(model), "--work-dir", str(work), "--random-inputs", "--golden", str(golden)])
     assert rc == 0
     manifest = json.loads((work / "manifest.json").read_text())
     assert manifest["results"]["comparison"]["passed"] is True
+
+
+def test_cli_verify_fails_on_mismatch(fake_tools):
+    import numpy as np
+
+    model = _write_model(fake_tools)
+    work = fake_tools / "out"
+    golden = fake_tools / "g0.npy"
+    np.save(golden, np.ones((1, 4), np.float32))
+    rc = cli.main(["verify", str(model), "--work-dir", str(work), "--random-inputs", "--golden", str(golden)])
+    assert rc == 2
+
+
+def test_cli_verify_swallowed_positional_reports_fix(fake_tools, caplog):
+    model = _write_model(fake_tools)
+    rc = cli.main(["verify", "--golden", "a.npy", "b.npy", str(model)])
+    assert rc == 1
+    assert f"torq-lab verify {model} --golden a.npy b.npy" in caplog.text
+
+
+def test_cli_verify_vmfb_without_golden_fails(fake_tools, caplog):
+    vmfb = fake_tools / "model.vmfb"
+    vmfb.write_bytes(b"FAKEVMFB")
+    rc = cli.main(["verify", str(vmfb)])
+    assert rc == 1
+    assert "--golden" in caplog.text and "--reference" in caplog.text
 
 
 def test_cli_compile_failure_returns_error(tmp_path, monkeypatch):
@@ -89,17 +102,102 @@ def test_cli_compile_failure_returns_error(tmp_path, monkeypatch):
     assert "oops" in manifest["results"]["diagnostics"]
 
 
-def test_cli_run_rejects_mlir_model(fake_tools, caplog):
+def test_cli_run_uses_the_named_vmfb(fake_tools):
+    art = fake_tools / "art"
+    art.mkdir()
+    (art / "qkv.mlir").write_text(TOSA_MLIR)
+    (art / "qkv.vmfb").write_bytes(b"fake")
+    work = fake_tools / "w"
+    work.mkdir()
+    (work / "model.vmfb").write_bytes(b"stale")   # must not shadow the positional
+    rc = cli.main(["run", str(art / "qkv.vmfb"), "--work-dir", str(work), "--random-inputs"])
+    assert rc == 0
+    argv = (fake_tools / "r_argv.txt").read_text()
+    assert f"--module={art / 'qkv.vmfb'}" in argv
+    # A .vmfb positional must not invoke the compiler.
+    assert not (fake_tools / "c_argv.txt").exists()
+
+
+def test_cli_profile_enables_profiling_and_reports_raw(fake_tools, caplog):
+    caplog.set_level("INFO")
     model = _write_model(fake_tools)
+    work = fake_tools / "out"
+    rc = cli.main(["profile", str(model), "--work-dir", str(work), "--random-inputs"])
+    assert rc == 0
+    assert "--torq-enable-profiling" in (fake_tools / "c_argv.txt").read_text()
+    assert "--torq_profile_host=" in (fake_tools / "r_argv.txt").read_text()
+    assert "raw" in caplog.text
 
-    rc = cli.main(["run", str(model)])
 
-    assert rc == 1
-    assert f"torq-lab run {model.with_suffix('.vmfb')} [options]" in caplog.text
+def test_profile_quality_classifies_annotated_raw_and_neither(tmp_path):
+    from torq.lab.pipeline import ModelPipeline
+    from torq.lab.types import PipelineConfig, RunResult
+
+    pipe = ModelPipeline(PipelineConfig(model_path=tmp_path / "m.mlir", work_dir=tmp_path / "w"))
+
+    annotated = RunResult(command=[], annotated_profile=tmp_path / "a.xlsx", perfetto_viewer=tmp_path / "v.html")
+    assert cli._profile_quality(pipe, annotated) == ("annotated", str(tmp_path / "v.html"))
+
+    raw = RunResult(command=[], host_profile=tmp_path / "h.csv")
+    assert cli._profile_quality(pipe, raw) == ("raw", "no debug info to annotate against")
+
+    neither = RunResult(command=[])
+    assert cli._profile_quality(pipe, neither) == (None, None)
 
 
-@pytest.mark.parametrize("argv", [["--help"], ["compile", "--help"], ["compile-run", "--help"]])
-def test_cli_help(argv):
+_STAGE_FLAGS = {
+    "compile":     (["--chip", "--dump-ir", "--profile-compile", "--output", "--print-plan", "--json"],
+                    ["--remote", "--input-npy", "--random-inputs", "--golden", "--profile-runtime", "--input-spec", "--output-spec", "--seed"]),
+    "verify":      (["--chip", "--input-npy", "--golden", "--remote", "--print-plan", "--json", "--input-spec", "--output-spec", "--seed"], ["--output ", "--profile-runtime"]),
+}
+
+
+@pytest.mark.parametrize("command", sorted(_STAGE_FLAGS))
+def test_cli_help_is_stage_scoped(command, capsys):
+    present, absent = _STAGE_FLAGS[command]
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main([command, "--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    for flag in present:
+        assert flag in out
+    for flag in absent:
+        assert flag not in out
+
+
+@pytest.mark.parametrize("argv", [
+    ["compile", "--remote", "board", "m.mlir"],
+    ["run", "--output", "out.vmfb", "m.vmfb"],
+])
+def test_cli_rejects_foreign_stage_flags(argv):
     with pytest.raises(SystemExit) as excinfo:
         cli.main(argv)
-    assert excinfo.value.code == 0
+    assert excinfo.value.code == 2
+
+
+def test_cli_print_plan_performs_no_side_effects(fake_tools):
+    model = _write_model(fake_tools)
+    work = fake_tools / "out"
+    rc = cli.main(["run", str(model), "--work-dir", str(work), "--random-inputs", "--print-plan"])
+    assert rc == 0
+    assert not (fake_tools / "c_argv.txt").exists()
+    assert not (fake_tools / "r_argv.txt").exists()
+    assert not (work / "manifest.json").exists()
+
+
+def test_cli_run_json_reports_structured_summary(fake_tools, capsys):
+    model = _write_model(fake_tools)
+    work = fake_tools / "out"
+    rc = cli.main(["run", str(model), "--work-dir", str(work), "--random-inputs", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "run"
+    assert payload["status"] == "ok"
+    assert {s["name"] for s in payload["stages"]} == {"compile", "run"}
+
+
+def test_cli_inspect_function_override(fake_tools, capsys):
+    model = _write_model(fake_tools)
+    rc = cli.main(["inspect", str(model), "--function", "custom_fn"])
+    assert rc == 0
+    assert "Function: custom_fn [--function override]" in capsys.readouterr().out
