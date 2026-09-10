@@ -129,10 +129,11 @@ void collectExternallyReadValues(Operation *op, SmallVectorImpl<Value> &values) 
 
 // Drop the levels of `levels` whose IVs `defChain` never reads: each would only add an axis of
 // identical copies to the outlined constant (e.g. a matmul tiled over M and N re-materializes the
-// whole weight per M tile). Chain ops in a dropped level's body get cloned once ahead of the
-// shell nest instead. Bounds cannot re-introduce a dropped IV (collectLoopNest requires constant
-// bounds), and every level may drop -- then the chain hoists whole and needs no nest. Granularity
-// is per level: a multi-IV forall is kept whole if any of its IVs is read.
+// whole weight per M tile). Chain ops in a dropped level's body get cloned at their home shell
+// level instead (ahead of the nest, or the innermost retained level they depend on). Bounds
+// cannot re-introduce a dropped IV (collectLoopNest requires constant bounds), and every level
+// may drop -- then the chain hoists whole and needs no nest. Granularity is per level: a
+// multi-IV forall is kept whole if any of its IVs is read.
 void dropLoopLevelsChainIsInvariantTo(
     const SetVector<Operation *> &defChain, SmallVectorImpl<LoopLikeOpInterface> &levels
 ) {
@@ -150,24 +151,28 @@ void dropLoopLevelsChainIsInvariantTo(
     });
 }
 
-// Whether the chain ops in dropped levels can be rebuilt ahead of the nest. Every value they read
-// (operands and region captures) must dominate the insertion point before the outermost loop:
-// defined outside the nest, a loop-carried destination (remapped there to a tensor.empty), or
-// produced by an op hoisted earlier. A value from a *retained* level does not qualify -- it only
-// exists once its shell loop is built -- so the caller then keeps every level.
-bool canHoistChainOutOfDroppedLevels(
+// Whether the chain ops in dropped levels' bodies can be rebuilt in the shell nest: every
+// value each op reads must have a counterpart at its clone site -- defined outside the nest,
+// a retained level's IV, a loop-carried destination, or another chain op's clone.
+bool canRebuildDroppedLevelChainOps(
     const SetVector<Operation *> &orderedChain, ArrayRef<LoopLikeOpInterface> retainedLevels,
     Operation *outermostLoop
 ) {
     DenseSet<Block *> retainedBodies;
-    for (auto level : retainedLevels)
+    DenseSet<Operation *> retainedLevelOps;
+    for (auto level : retainedLevels) {
         retainedBodies.insert(&level.getLoopRegions()[0]->front());
+        retainedLevelOps.insert(level.getOperation());
+    }
 
-    DenseSet<Operation *> hoisted;
+    // Chain ops whose clones are available to later chain ops (topological order).
+    DenseSet<Operation *> available;
     SmallVector<Value> reads;
     for (Operation *chainOp : orderedChain) {
-        if (retainedBodies.contains(chainOp->getBlock()))
+        if (retainedBodies.contains(chainOp->getBlock())) {
+            available.insert(chainOp);
             continue;
+        }
         reads.clear();
         collectExternallyReadValues(chainOp, reads);
         for (Value operand : reads) {
@@ -176,19 +181,21 @@ bool canHoistChainOutOfDroppedLevels(
                 Operation *argParent = blockArg.getOwner()->getParentOp();
                 if (argParent && !outermostLoop->isAncestor(argParent))
                     continue;
-                // IVs have no counterpart outside the nest; loop-carried destinations do.
                 auto owner = dyn_cast_or_null<LoopLikeOpInterface>(argParent);
-                if (!owner || blockArg.getArgNumber() < owner.getLoopInductionVars()->size())
-                    return false;
-                continue;
+                if (!owner)
+                    return false; // non-loop block arg inside the nest
+                if (blockArg.getArgNumber() < owner.getLoopInductionVars()->size() &&
+                    !retainedLevelOps.contains(owner.getOperation()))
+                    return false; // a dropped level's IV (defensive: the drop set never reads one)
+                continue;         // retained IV or loop-carried destination
             }
             Operation *def = operand.getDefiningOp();
             if (!def || !outermostLoop->isAncestor(def))
                 continue; // defined outside the nest, so it already dominates
-            if (!hoisted.contains(def))
+            if (!available.contains(def))
                 return false;
         }
-        hoisted.insert(chainOp);
+        available.insert(chainOp);
     }
     return true;
 }
@@ -418,13 +425,13 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
         }
 
         // Keep only the levels the chain varies over; back out if what that leaves in dropped
-        // bodies cannot be hoisted ahead of the nest.
+        // bodies cannot be rebuilt in the shell nest.
         SetVector<Operation *> orderedChain = topologicalSort(origDefChain);
         SmallVector<LoopLikeOpInterface> allLoopLevels = loopLevels;
         dropLoopLevelsChainIsInvariantTo(origDefChain, loopLevels);
         if (loopLevels.size() != allLoopLevels.size() &&
-            !canHoistChainOutOfDroppedLevels(orderedChain, loopLevels, outermostLoop)) {
-            LLVM_DEBUG(llvm::dbgs() << "Cannot hoist dropped-level chain, keeping every level\n");
+            !canRebuildDroppedLevelChainOps(orderedChain, loopLevels, outermostLoop)) {
+            LLVM_DEBUG(llvm::dbgs() << "Cannot rebuild dropped-level chain, keeping every level\n");
             loopLevels = allLoopLevels;
         }
 
@@ -486,13 +493,57 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
                 }
             }
 
-            // Chain ops from dropped levels are invariant to them: clone once ahead of the shell
-            // nest. canHoistChainOutOfDroppedLevels already proved their operands dominate here.
+            // Home shell depth per chain op (0 = outermost shell, -1 = ahead of the nest):
+            // the innermost retained level the op transitively depends on. One pass
+            // suffices because orderedChain is topologically sorted.
             DenseSet<Block *> retainedBodies;
-            for (auto level : loopLevels)
-                retainedBodies.insert(&level.getLoopRegions()[0]->front());
+            DenseMap<Block *, int> retainedBodyDepth;
+            DenseMap<Operation *, int> retainedIvDepth;
+            const int numLevels = static_cast<int>(loopLevels.size());
+            for (auto [i, level] : llvm::enumerate(loopLevels)) {
+                int depth = numLevels - 1 - static_cast<int>(i); // loopLevels is innermost-first
+                Block *body = &level.getLoopRegions()[0]->front();
+                retainedBodies.insert(body);
+                retainedBodyDepth[body] = depth;
+                retainedIvDepth[level.getOperation()] = depth;
+            }
+
+            DenseMap<Operation *, int> homeDepth;
+            SmallVector<Value> chainReads;
+            for (Operation *chainOp : orderedChain) {
+                int depth = -1;
+                if (auto it = retainedBodyDepth.find(chainOp->getBlock());
+                    it != retainedBodyDepth.end()) {
+                    depth = it->second;
+                }
+                else {
+                    chainReads.clear();
+                    collectExternallyReadValues(chainOp, chainReads);
+                    for (Value read : chainReads) {
+                        if (auto blockArg = dyn_cast<BlockArgument>(read)) {
+                            Operation *argParent = blockArg.getOwner()->getParentOp();
+                            auto owner = dyn_cast_or_null<LoopLikeOpInterface>(argParent);
+                            if (owner &&
+                                blockArg.getArgNumber() < owner.getLoopInductionVars()->size())
+                                if (auto ivIt = retainedIvDepth.find(owner.getOperation());
+                                    ivIt != retainedIvDepth.end())
+                                    depth = std::max(depth, ivIt->second);
+                            continue;
+                        }
+                        if (Operation *def = read.getDefiningOp())
+                            if (auto defIt = homeDepth.find(def); defIt != homeDepth.end())
+                                depth = std::max(depth, defIt->second);
+                    }
+                }
+                homeDepth[chainOp] = depth;
+            }
+
+            // Chain ops homed ahead of the nest keep the compute-once hoist;
+            // canRebuildDroppedLevelChainOps proved their operands dominate here.
             for (auto *chainOp : orderedChain) {
                 if (retainedBodies.contains(chainOp->getBlock()))
+                    continue;
+                if (homeDepth.lookup(chainOp) != -1)
                     continue;
                 removeCompileTimeConstAttr(rewriter.clone(*chainOp, moveMapping));
             }
@@ -551,25 +602,25 @@ class ConvertOpInsideForOpRewriter : public RewritePattern {
                     moveMapping.map(origBody->getArgument(i), newBody->getArgument(i));
             }
 
-            // Clone original chain ops level-by-level into the new shell loops.
-            for (auto [level, newCI] : llvm::zip_equal(llvm::reverse(loopLevels), newCloneLoops)) {
-                Block *origBody = &level.getLoopRegions()[0]->front();
+            // Clone chain ops into the shell loops by home depth, in topological order
+            // at the start of each shell body, so def-before-use and dominance hold.
+            for (auto [levelDepth, newCI] : llvm::enumerate(newCloneLoops)) {
                 Block &newBody = newCI.getLoopRegions()[0]->front();
 
                 OpBuilder::InsertionGuard gLevel(rewriter);
                 rewriter.setInsertionPointToStart(&newBody);
 
                 for (auto *chainOp : orderedChain) {
-                    if (chainOp->getBlock() != origBody)
+                    if (homeDepth.lookup(chainOp) != static_cast<int>(levelDepth))
                         continue;
                     auto cloneOp = rewriter.clone(*chainOp, moveMapping);
                     removeCompileTimeConstAttr(cloneOp
                     ); // Cloning keeps the original attr, remove it to avoid re-matching.
                 }
             }
-            // Cannot miss: if any level is retained, `op` sits in a retained body -- a chain path
-            // from the retained IV read to an op in a dropped body would have failed the hoist
-            // guard and reverted to the full nest.
+            // `op` transitively reads every retained IV (that is why they were retained),
+            // so its clone landed in the innermost shell, as emitInsertSliceAtInnermost expects.
+            assert(homeDepth.lookup(op) == numLevels - 1 && "outlined op must home innermost");
             Value lastV = moveMapping.lookup(op->getResult(0));
 
             emitInsertSliceAtInnermost(
