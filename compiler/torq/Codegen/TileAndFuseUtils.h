@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -50,6 +51,21 @@ struct TilingInfo {
     llvm::SmallVector<std::function<int64_t(int64_t)>, 4> adjustSize;
 };
 
+// Compose a downward size adjustment onto an existing one, iterating to a
+// fixpoint so neither constraint can undo the other. Both must be shrink-only.
+inline std::function<int64_t(int64_t)>
+composeSizeAdjustments(std::function<int64_t(int64_t)> f1, std::function<int64_t(int64_t)> f2) {
+    return [=](int64_t size) {
+        int64_t newSize = f2(f1(size));
+        while (newSize != size) {
+            assert(newSize <= size && "size adjustments must not grow the tile");
+            size = newSize;
+            newSize = f2(f1(size));
+        }
+        return newSize;
+    };
+}
+
 // The smallest tile size a domain can be cut down to (always > 0).
 int64_t getSmallestTileSize(const TilingInfo &tilingInfo, int64_t domain, int64_t domainSize);
 
@@ -75,5 +91,8 @@ std::optional<llvm::SmallVector<int64_t>> computeShrinkOrderByReduction(
 // expressed in terms of standard SCF tiling utilities. Matmuls that still
 // cannot fit are marked for Host execution.
 void splitOversizedMatmulsAlongK(func::FuncOp funcOp);
+
+// LRAM budget available to a tile: total LRAM minus descriptor headroom.
+int64_t getLramTilingBudget();
 
 } // namespace mlir::syna::torq

@@ -42,6 +42,7 @@ set(sources
     LowerHostCopiesToNpuPass.cpp
     MapBindingsPass.cpp
     MarkHostExecutorPass.cpp
+    MatmulTilingHeuristics.cpp
     OutlineCpuProgramsPass.cpp
     OutlineNSSProgramsPass.cpp
     OutlineSliceProgramsPass.cpp

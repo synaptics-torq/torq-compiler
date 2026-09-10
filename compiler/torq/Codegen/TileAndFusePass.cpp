@@ -4,6 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "MatmulTilingHeuristics.h"
 #include "PassesDetail.h"
 #include "TileAndFuseUtils.h"
 #include "TilingUtils.h"
@@ -400,25 +401,13 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp, int64_t sliceCount) 
     // byte-aligned for any tile size.
     int64_t valuesPerByte = getSubByteValuesPerByte(tilingInterfaceOp);
     if (valuesPerByte > 1 && !tilingInfo.tilingOrder.empty()) {
-        auto getFixpointF = [](std::function<int64_t(int64_t)> f1,
-                               std::function<int64_t(int64_t)> f2) {
-            return [=](int64_t size) {
-                int64_t newSize = f2(f1(size));
-                while (newSize != size) {
-                    size = newSize;
-                    newSize = f2(f1(size));
-                }
-                return newSize;
-            };
-        };
-
         int64_t innerDim = tilingInfo.tilingOrder.back();
         auto domainSize = (*iterDomainConstSizes)[innerDim];
         auto makeByteAligned = [=](int64_t size) {
             return makeByteAlignedTileSize(valuesPerByte, domainSize, size);
         };
         tilingInfo.adjustSize[innerDim] =
-            getFixpointF(makeByteAligned, tilingInfo.adjustSize[innerDim]);
+            composeSizeAdjustments(makeByteAligned, tilingInfo.adjustSize[innerDim]);
 
         // Also raise the *minimum* tile size for this dim, mirroring the conv/pool
         // minSize handling above. The shrink pass in fitTileToMemory seeds each
@@ -937,6 +926,13 @@ TileFit TileAndFusePass::fitTileToMemory(
     ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
     MutableArrayRef<OpFoldResult> sizes
 ) {
+    // The grow-back pass below bounds every domain by iterDomainSizes, so the
+    // caller's candidate must be the full domain (a pre-shrunk candidate would
+    // have its bound lifted).
+    assert(llvm::all_of(llvm::enumerate(iterDomainSizes), [&](auto it) {
+        return getConstantIntValue(sizes[it.index()]) == it.value();
+    }));
+
     OwningOpRef<ModuleOp> moduleOp = extractOpsForMemoryCheck(
         "fit_tile_to_memory", cast<TilingInterface>(consumerOp), tilingInfo, producerOps
     );
@@ -955,10 +951,9 @@ TileFit TileAndFusePass::fitTileToMemory(
 
     IRRewriter rewriter(moduleOp->getContext());
 
-    ArrayRef<int64_t>::iterator tilingDomainIter;
+    size_t growBackEnd = 0;
+    const bool isMatmulTile = findTiledMatmul(consumerOp, producerOps) != nullptr;
 
-    // Domains actually shrunk, in shrink order, for the grow-back bookkeeping.
-    SmallVector<int64_t> shrinkHistory;
     // Set when a shrink pass bailed out because the fit check itself failed
     // (as opposed to sweeping every domain without finding a fit).
     bool fitCheckFailed = false;
@@ -973,8 +968,13 @@ TileFit TileAndFusePass::fitTileToMemory(
     // of a matmul, which sizes the weight tile, rather than the M dim, which
     // does not index the weights); --torq-disable-fit-shrink-reorder restores
     // the legacy tilingOrder.
+    //
+    // The fallback pass continues from the first pass's all-minSize tile rather
+    // than restarting from the full domain: that tile is already known not to
+    // fit, and restarting would replay every first-pass fit check (each a full
+    // LRAM-allocator run) for domains whose minSize equals the smallest size.
     auto shrinkPass = [&](bool fallback) {
-        shrinkHistory.clear();
+        growBackEnd = 0;
         fitCheckFailed = false;
 
         SmallVector<int64_t> order(tilingInfo.tilingOrder.begin(), tilingInfo.tilingOrder.end());
@@ -992,8 +992,11 @@ TileFit TileAndFusePass::fitTileToMemory(
             if (getConstantIntValue(sizes[domain]) == minTileSize)
                 continue;
 
+            auto position = llvm::find(tilingInfo.tilingOrder, domain);
+            growBackEnd = std::max(
+                growBackEnd, size_t(std::distance(tilingInfo.tilingOrder.begin(), position)) + 1
+            );
             sizes[domain] = rewriter.getIndexAttr(minTileSize);
-            shrinkHistory.push_back(domain);
             tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
             if (failed(tileFits)) {
                 fitCheckFailed = true;
@@ -1029,27 +1032,23 @@ TileFit TileAndFusePass::fitTileToMemory(
         }
     }
 
-    // Position the grow-back iterator at the last (in tilingOrder) shrunk
-    // domain, so the reverse walk below covers every shrunk domain regardless
-    // of the order the shrink pass picked them in. When the shrink pass used
-    // the legacy order this is exactly the domain it stopped at.
-    {
-        size_t lastPosition = 0;
-        for (int64_t domain : shrinkHistory) {
-            auto pos = llvm::find(tilingInfo.tilingOrder, domain);
-            lastPosition =
-                std::max(lastPosition, (size_t)std::distance(tilingInfo.tilingOrder.begin(), pos));
-        }
-        tilingDomainIter = tilingInfo.tilingOrder.begin() + lastPosition;
-    }
-
-    // Grow-back pass: inflate domains forced to 1 above back to larger tiles
-    // using binary search. Iterate in reverse from where the shrink pass stopped.
-    do {
-        int64_t domain = *tilingDomainIter;
+    // Grow-back pass: binary-search every shrunk domain up to the largest fitting
+    // tile, walking tilingOrder in reverse. Under desc-size ordering that grows
+    // the smallest domain first, landing near the maximum Tm*Tn (minimum tile
+    // count); sizes only grow here, so a single reverse sweep is a fixpoint.
+    // Preserve the legacy grow-back boundary for non-matmul tiles, particularly
+    // conv/pool fallback: only revisit domains through the last one shrunk in
+    // the successful pass. Matmuls also revisit the first pass's N floor.
+    if (isMatmulTile)
+        growBackEnd = tilingInfo.tilingOrder.size();
+    auto growBackDomains = tilingInfo.tilingOrder.getArrayRef().take_front(growBackEnd);
+    for (int64_t domain : llvm::reverse(growBackDomains)) {
         if (iterDomainSizes[domain] == 1)
             continue;
+        if (getConstantIntValue(sizes[domain]) == iterDomainSizes[domain])
+            continue;
 
+        int64_t maxFactor = div_ceil(iterDomainSizes[domain], *getConstantIntValue(sizes[domain]));
         sizes[domain] = rewriter.getIndexAttr(iterDomainSizes[domain]);
         tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
@@ -1057,20 +1056,14 @@ TileFit TileAndFusePass::fitTileToMemory(
         if (*tileFits)
             continue;
 
-        // We know `iterDomainSizes[domain]` is too big (tested above), hence factor
-        // 1 = iterDomainSizes[domain]/iterDomainSizes[domain] is a good minimum, and we know
-        // sizes[domain] = 1 does fit, hence factor iterDomainSizes[domain] =
-        // iterDomainSizes[domain]/1 is a good maximum.
+        // The full domain failed, while the pre-growth size fits. Bound the
+        // search by that known fitting size instead of starting over at 1.
         if (failed(searchTileSizeForDim(
                 rewriter, *moduleOp, tilingInfo, offsets, sizes, domain, iterDomainSizes[domain],
-                /*minFactor=*/1, /*maxFactor=*/iterDomainSizes[domain]
+                /*minFactor=*/1, maxFactor
             )))
             return TileFit::ProbeFail;
-    } while (tilingDomainIter-- != tilingInfo.tilingOrder.begin());
-    // NB: the tilingDimIter-- above goes passed the .begin() at the very end,
-    // which is not nice, and depending on the implementation of
-    // ArrayRef::iterator, could fail. The implementation is just a pointer, so
-    // this is ok (as long as we don't try to dereference it, which we don't).
+    }
 
     return TileFit::FitsShrunk;
 }
@@ -1319,6 +1312,19 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
     scf::SCFTileAndFuseOptions options{};
     options.tilingOptions.setTileSizes(tileSizes);
 
+    // Visit matmul tiles for(n)for(m) when that streams fewer bytes. Not for the
+    // producer-discovery probe (MaxSizeAllDoms), whose nest is discarded.
+    if (fuseMode != TileAndFuseProducersFuseMode::MaxSizeAllDoms) {
+        static const llvm::SetVector<Operation *> noProducers;
+        SmallVector<int64_t> interchange = chooseMatmulLoopInterchange(
+            tilingInterfaceOp.getOperation(), tileSizes, producerOps ? **producerOps : noProducers
+        );
+        if (!interchange.empty()) {
+            options.tilingOptions.setInterchange(interchange);
+            LLVM_DEBUG(llvm::dbgs() << "  loop order: for(n)for(m) [reversed]\n");
+        }
+    }
+
     scf::SCFTileAndFuseOptions::ControlFnTy fusionControlFn;
     switch (fuseMode) {
     case TileAndFuseProducersFuseMode::MaxSize:
@@ -1450,7 +1456,33 @@ void TileAndFusePass::tileAndFuse(
 
         producerOps = tiledResults->fusedProducers;
         restrictToProducerOps = &producerOps;
+
+        // The probe nest survives only as dead code, but its slice ops keep phantom
+        // uses on the producers' results; erase it so use counts consulted during
+        // the real tiling see the real graph.
+        if (!tiledResults->loops.empty() && tiledResults->loops.front()->use_empty())
+            rewriter.eraseOp(tiledResults->loops.front());
     }
+
+    auto includePatternProducers = [&]() {
+        SmallVector<Operation *> worklist{tiOp.getOperation()};
+        while (!worklist.empty()) {
+            Operation *current = worklist.pop_back_val();
+            for (Value operand : current->getOperands()) {
+                Operation *producer = operand.getDefiningOp();
+                if (producer && checkShareFuseGroup(tiOp, producer) && producerOps.insert(producer))
+                    worklist.push_back(producer);
+            }
+        }
+        // MaxSize and OnlyPatterns ignore the restriction for fusion, but loop
+        // selection still needs the required producers.
+        restrictToProducerOps = &producerOps;
+    };
+    includePatternProducers();
+
+    // The matmul heuristics need to know which producers the tile will fuse,
+    // hence after the probe rather than in getTilingInfo.
+    applyMatmulTilingHeuristics(tilingInfo, tiOp, *iterDomainConstSizes, producerOps);
 
     // Find a tile size that fits tiOp in memory, together with all the
     // candidate producers in MaxProducers mode (pattern-fuse-group members are
@@ -1473,9 +1505,11 @@ void TileAndFusePass::tileAndFuse(
         LLVM_DEBUG(llvm::dbgs() << "  max-producers does not fit, falling back to only-patterns\n");
         fuseMode = TileAndFuseProducersFuseMode::OnlyPatterns;
         producerOps.clear();
-        restrictToProducerOps = std::nullopt;
+        includePatternProducers();
         tileOffsets.assign(iterDomainOffsets.begin(), iterDomainOffsets.end());
         tileSizes.assign(iterDomainSizes.begin(), iterDomainSizes.end());
+        tilingInfo = getTilingInfo(tiOp, this->sliceCount);
+        applyMatmulTilingHeuristics(tilingInfo, tiOp, *iterDomainConstSizes, producerOps);
         tileFit = fitTileToMemory(
             tiOp, producerOps, tilingInfo, *iterDomainConstSizes, tileOffsets, tileSizes
         );

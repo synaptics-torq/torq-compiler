@@ -367,7 +367,7 @@ splitMatmulAlongK(IRRewriter &rewriter, linalg::LinalgOp op, int64_t chunkSize) 
 // LRAM budget for a single non-tileable op: total LRAM minus 14k headroom for
 // descriptors (used to be TorqHw::get().getAvailableLramSize()). Borrowed from
 // OptimizeConv1DPattern.cpp.
-static int64_t getLramTilingBudget() {
+int64_t getLramTilingBudget() {
     return static_cast<int64_t>(TorqHw::get().getLramSize() - 14 * 1024);
 }
 
