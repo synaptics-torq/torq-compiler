@@ -302,7 +302,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         // result [15,1,1,256] whose reshape to [1,15,256] was folded away.  Since
         // the peeled cast never reordered data, restore the consumer's shape with
         // an equivalent reshape (collapse to 1-D, expand to the output shape).
-        if (inTy.hasStaticShape() && outTy.hasStaticShape() && inTy.getRank() >= outTy.getRank() &&
+        if (inTy.hasStaticShape() && outTy.hasStaticShape() &&
             mlir::computeProduct(inTy.getShape()) == mlir::computeProduct(outTy.getShape())) {
             Value flat = input;
             if (inTy.getRank() != 1) {
