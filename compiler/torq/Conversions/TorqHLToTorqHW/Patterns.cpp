@@ -6,6 +6,7 @@
 
 #include "Patterns.h"
 #include "torq/Utils/CodeSizeUtils.h"
+#include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqUtils.h"
@@ -38,6 +39,14 @@ class CopyPattern : public OpRewritePattern<memref::CopyOp> {
             (targetMemSpace == torq_hl::MemorySpace::Lram &&
              (sourceMemSpace == torq_hl::MemorySpace::Dtcm ||
               sourceMemSpace == torq_hl::MemorySpace::Itcm))) {
+
+            // the cDMA transfer below is a plain dense copy: refuse strided
+            // memrefs so they can never be silently copied as if dense
+            if (!isDenseInMemory(op.getSource().getType()) ||
+                !isDenseInMemory(op.getTarget().getType())) {
+                return op.emitError("memref.copy of non-dense (strided) memref "
+                                    "cannot be lowered to a cDMA transfer");
+            }
 
             auto copyTaskOp = torq_hw::NssTaskOp::create(rewriter, op.getLoc());
 

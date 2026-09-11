@@ -302,6 +302,32 @@ LogicalResult createTorqCopy(OpBuilder &builder, Location loc, Value from, Value
         return createLramToLramCopy(builder, loc, from, to);
     }
     else {
+        // memref.copy lowers to a cDMA transfer that cannot express strided
+        // accesses: a non-dense LRAM end must be staged through a dense LRAM
+        // buffer, with the strided leg handled by the NSS convert (same trick
+        // createLoadOp uses for a non-dense destination).
+        if (fromLram && !isDenseInMemory(fromType)) {
+            auto denseType = MemRefType::get(
+                fromType.getShape(), fromType.getElementType(), nullptr,
+                createDenseEncoding(fromType, torq_hl::MemorySpace::Lram)
+            );
+            auto denseFrom = memref::AllocOp::create(builder, loc, denseType, ValueRange{});
+            if (failed(createLramToLramCopy(builder, loc, from, denseFrom))) {
+                return failure();
+            }
+            return createTorqCopy(builder, loc, denseFrom, to);
+        }
+        if (toLram && !isDenseInMemory(toType)) {
+            auto denseType = MemRefType::get(
+                toType.getShape(), toType.getElementType(), nullptr,
+                createDenseEncoding(toType, torq_hl::MemorySpace::Lram)
+            );
+            auto denseTo = memref::AllocOp::create(builder, loc, denseType, ValueRange{});
+            if (failed(createTorqCopy(builder, loc, from, denseTo))) {
+                return failure();
+            }
+            return createLramToLramCopy(builder, loc, denseTo, to);
+        }
         memref::CopyOp::create(builder, loc, from, to);
         return success();
     }
