@@ -55,7 +55,7 @@ static EventType toEventType(ns(HostActionParams_union_type_t) paramsType) {
 
 
 
-static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable_def, bool is_dmabuf_mode,uint32_t* xram_base, uint32_t* xram_size) {
+static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable_def, bool attaches_bindings, uint32_t* xram_base, uint32_t* xram_size) {
 
   int xram_start = UINT32_MAX;
   int xram_end = 0;
@@ -93,7 +93,9 @@ static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable
   
   }
 
-  if (!is_dmabuf_mode) {
+  // Attached bindings reach XRAM through TORQ_IOCTL_ATTACH_BINDING, so they need
+  // no reserved range; every other binding is copied and must be mapped.
+  if (!attaches_bindings) {
     if (iree_hal_torq_ExecutableDef_bindings_is_present(executable_def)) {
       iree_hal_torq_Binding_vec_t bindings =
           ns(ExecutableDef_bindings_get(executable_def));
@@ -712,10 +714,17 @@ iree_status_t TorqExecutable::initialize() {
   // reach XRAM only through the driver's attach ioctl, which needs the network.
   needsNpuNetwork_ = is_dmabuf_mode || actionsNeedNpuNetwork(executableDef);
 
+  // Bindings can be attached only when the device allocator handed us dma-buf
+  // memory and no host program addresses them at their compiler-assigned XRAM
+  // addresses; a host program has no network to attach to.
+  const bool has_host_code =
+      flatbuffers_uint8_vec_len(ns(ExecutableDef_host_code(executableDef))) != 0;
+  attachesBindings_ = is_dmabuf_mode && !has_host_code;
+
   TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
 
   ret = compute_xram_footprint(
-    executableDef, is_dmabuf_mode, &xram_base, &xram_size);
+    executableDef, attachesBindings_, &xram_base, &xram_size);
 
   TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
 
@@ -826,7 +835,9 @@ iree_status_t TorqExecutable::writeInputs(
 
     size_t effectiveOffset = 0;
     const torq_hw_device_buffer_t *deviceBuffer =
-        getZeroCopyDeviceBuffer(torqState, binding, &effectiveOffset);
+        attachesBindings_
+            ? getZeroCopyDeviceBuffer(torqState, binding, &effectiveOffset)
+            : nullptr;
     if (hasHardware() && deviceBuffer) {
       auto bindingAddress = ns(Binding_address(binding));
       auto bindingSize = ns(Binding_size(binding));

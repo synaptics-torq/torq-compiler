@@ -48,6 +48,7 @@ private:
   std::unique_ptr<TestVectorWriter> testVectorWriter_{nullptr};
   iree_hal_torq_native_executable_t* nativeExecutable_;   
   bool pendingHostCopies_{false}; // true if there are host copies pending and therefore bindings are not up to date yet
+  bool attachesBindings_{false}; // true when the bindings reach XRAM through TORQ_IOCTL_ATTACH_BINDING instead of a copy
   int actionIndex_;
   int nextJobId_{0};
   void *hostCodeLibHandle_{nullptr};
