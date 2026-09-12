@@ -163,8 +163,48 @@ def float32_tflite_model_file(request, versioned_file, keras_model):
         f.write(tflite_model)
 
 
+def _model_needs_builtin_kernels(tflite_model_file):
+    """True if the model has an int8 BATCH_MATMUL with an asymmetric rhs.
+
+    XNNPACK's int8 BatchMatMul assumes a symmetric rhs and silently ignores a
+    nonzero rhs zero-point, computing (a - a_zp) . b. The builtin reference
+    kernels honor both zero-points and match the float model (e.g. YOLO26 goes
+    blind on real images under XNNPACK but detects correctly under the builtin
+    kernels). Only such models opt out of the default delegate so every other
+    case keeps the stock interpreter behavior.
+    """
+    from tensorflow.lite.tools import flatbuffer_utils
+
+    BATCH_MATMUL = 126
+    TENSOR_TYPE_INT8 = 9
+
+    model = flatbuffer_utils.read_model_with_mutable_tensors(str(tflite_model_file))
+    for subgraph in model.subgraphs:
+        for op in subgraph.operators:
+            opcode = model.operatorCodes[op.opcodeIndex]
+            code = opcode.builtinCode or opcode.deprecatedBuiltinCode
+            if code != BATCH_MATMUL or len(op.inputs) < 2:
+                continue
+            rhs = subgraph.tensors[op.inputs[1]]
+            q = rhs.quantization
+            if (
+                rhs.type == TENSOR_TYPE_INT8
+                and q is not None
+                and q.zeroPoint is not None
+                and len(q.zeroPoint) == 1
+                and int(q.zeroPoint[0]) != 0
+            ):
+                return True
+    return False
+
+
 def run_with_tflite(tflite_model_file, input_data):
-    interpreter = tf.lite.Interpreter(model_path=str(tflite_model_file))
+    interpreter_args = {}
+    if _model_needs_builtin_kernels(tflite_model_file):
+        interpreter_args["experimental_op_resolver_type"] = (
+            tf.lite.experimental.OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES
+        )
+    interpreter = tf.lite.Interpreter(model_path=str(tflite_model_file), **interpreter_args)
     interpreter.allocate_tensors()
 
     input_details = interpreter.get_input_details()
