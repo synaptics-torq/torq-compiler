@@ -1,9 +1,10 @@
 """
-End-to-end and layer-by-layer testing of YOLOv8 Object Detection (int8 quantized).
+End-to-end and layer-by-layer testing of YOLO Object Detection (int8 quantized).
 
-Downloads yolov8n and yolov8s OD TFLite models from HuggingFace
-(Synaptics/yolo), then tests them both as full models and layer-by-layer,
-reusing the infrastructure from tests/test_tflite_model.py.
+Downloads the yolov8n/yolov8s (Synaptics/yolo) and yolo26n/yolo26s
+(Synaptics/yolov26n_od) OD TFLite models from HuggingFace, then tests them as
+full models and layer-by-layer, reusing the infrastructure from
+tests/test_tflite_model.py.
 
 Usage:
     # See all test cases:
@@ -36,7 +37,20 @@ from torq.testing.tflite_layer_tests import generate_parametrized_tests, TFLiteL
 YOLO_OD_MODELS = [
     "yolov8n_full_integer_quant_320_od.tflite",
     "yolov8s_full_integer_quant_320_od.tflite",
+    "yolo26n_full_integer_quant_320_od.tflite",
+    "yolo26s_full_integer_quant_320_od.tflite",
 ]
+
+# Repo hosting each model; YOLO26 ships from its own repo.
+YOLO_OD_REPOS = {
+    "yolo26n_full_integer_quant_320_od.tflite": "Synaptics/yolov26n_od",
+    "yolo26s_full_integer_quant_320_od.tflite": "Synaptics/yolov26n_od",
+}
+DEFAULT_OD_REPO = "Synaptics/yolo"
+
+# YOLO26's int8 output quantization saturates class probabilities near 0.5,
+# so the YOLOv8 threshold would drop every detection.
+YOLO26_CONF_THRESH = 0.3
 
 # ============================================================================
 # Image preprocessing / post-processing
@@ -161,9 +175,9 @@ def compare_od_results(ref_outs, tst_outs, iou_threshold=0.5):
 # ============================================================================
 
 def download_yolo_od_model(cache, filename="yolov8n_full_integer_quant_320_od.tflite"):
-    """Download a YOLOv8 OD TFLite model from HuggingFace."""
+    """Download a YOLO OD TFLite model from HuggingFace."""
     return Path(get_hf_model_file(
-        cache, "Synaptics/yolo", filename
+        cache, YOLO_OD_REPOS.get(filename, DEFAULT_OD_REPO), filename
     ))
 
 
@@ -181,14 +195,15 @@ def _compare_full_od_pair(left_results, right_results, left_name, right_name, mo
     left_out = _dequantize(left_raw, out_scale, out_zp)
     right_out = _dequantize(right_raw, out_scale, out_zp)
 
-    image_path = get_hf_model_file(cache, "Synaptics/yolo", "bus.jpg")
+    image_path = get_hf_model_file(cache, DEFAULT_OD_REPO, "bus.jpg")
     img = cv2.imread(image_path)
     assert img is not None
     _, pad = _preprocess_image(img)
     original_shape = img.shape[:2]
 
-    left_outs = od_postprocess(left_out, original_shape, pad)
-    right_outs = od_postprocess(right_out, original_shape, pad)
+    kwargs = {"conf_thresh": YOLO26_CONF_THRESH} if "yolo26" in Path(model_path).name else {}
+    left_outs = od_postprocess(left_out, original_shape, pad, **kwargs)
+    right_outs = od_postprocess(right_out, original_shape, pad, **kwargs)
 
     print(f"\n{left_name} detected {len(left_outs)} object(s)")
     for i, (cls_id, score, bbox) in enumerate(left_outs):
@@ -209,6 +224,11 @@ def _compare_full_od_pair(left_results, right_results, left_name, right_name, mo
 def case_config(request, tflite_layer_model):
     """Configure test case settings."""
     torq_compiler_options = []
+
+    # YOLO26 is deployed with slicing off; the sliced path runs out of LRAM on
+    # the attention blocks.
+    if "yolo26" in Path(tflite_layer_model.data.model_path).name:
+        torq_compiler_options.append("--torq-disable-slicing")
 
     return {
         "tflite_model_file": "tflite_model_path",
@@ -235,7 +255,7 @@ def yolo_od_input_data(request, tflite_layer_model: TFLiteLayerCase, tweaked_ran
     in_scale, in_zp, is_int8, _, _ = get_quant_params(model_path)
 
     cache = request.getfixturevalue("cache")
-    image_path = get_hf_model_file(cache, "Synaptics/yolo", "bus.jpg")
+    image_path = get_hf_model_file(cache, DEFAULT_OD_REPO, "bus.jpg")
     img = cv2.imread(image_path)
     assert img is not None, f"Could not read {image_path}"
 
@@ -253,7 +273,7 @@ def yolo_od_input_data(request, tflite_layer_model: TFLiteLayerCase, tweaked_ran
 # ============================================================================
 
 def pytest_generate_tests(metafunc):
-    """Generate test cases for yolov8 od models (nano and small)."""
+    """Generate test cases for the yolov8 and yolo26 od models (nano and small)."""
 
     model_paths = []
 
