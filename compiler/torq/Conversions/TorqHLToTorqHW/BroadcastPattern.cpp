@@ -12,6 +12,7 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
+using namespace std;
 using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
@@ -63,16 +64,45 @@ BroadcastPattern::transform(torq_hl::BroadcastOp op, PatternRewriter &rewriter) 
     // Apply implicit broadcasting
     input.broadcastAs(output);
 
-    // Vectorize input
-    int vectorSize = slice.act.width(input.elementType());
-    input.fuse(std::min(input.denseDims(), output.denseDims())).vectorize(vectorSize);
+    if (!input.broadcastDims()) {
+        // Inner dimension is not a broadcast
+        int vectorSize = slice.act.width(input.elementType());
+        input.fuse(min(input.denseDims(), output.denseDims()));
+        input.vectorize(vectorSize);
 
-    For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
-        For(auto iv = slice.iterate(input.dim(In::Vectors))) {
-            IData idata = slice.iram.load(input[ndd][iv]);
-            PData pdata = slice.alu.load(idata);
-            QData res = slice.act.load(pdata);
-            slice.append(output[ndd], res);
+        For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
+            For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+                IData idata = slice.iram.load(input[ndd][iv]);
+                PData pdata = slice.alu.load(idata);
+                QData res = slice.act.load(pdata);
+                slice.append(output[ndd], res);
+            }
+        }
+    }
+    else {
+        // Inner dimension is a broadcast, use wram which is much more efficient in this case
+        // since the broadcast is materialized automatically by the ALU instead of having to load
+        // the same element multiple times from LRAM.
+        // We could use this implementation in all cases, but the iram-based implementation is
+        // more efficient in some cases allowing a bigger vector size (eg int32).
+        // The same technique could be used for other ops that can have a broadcasted input,
+        // e.g. elementwise ops.
+        if (input.elementType() == DType::fp32) {
+            // WRam load does not support fp32, so we just bit-cast to int32
+            input.bitCast(DType::int32);
+            output.bitCast(DType::int32);
+        }
+        int vectorSize = slice.act.width(DType::none, input.elementType());
+        input.fuse(min(max(input.denseDims(), input.broadcastDims()), output.denseDims()));
+        input.vectorize(vectorSize);
+
+        For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
+            For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+                WData wdata = slice.wram.load(input[ndd][iv]);
+                PData pdata = slice.alu.load(wdata);
+                QData res = slice.act.load(pdata);
+                slice.append(output[ndd], res);
+            }
         }
     }
 

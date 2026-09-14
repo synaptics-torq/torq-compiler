@@ -319,13 +319,17 @@ class LData : public DataT<LData> {
     // Return the number of contiguous dense dimensions at the end of the data shape
     int denseDims() const;
 
+    // Return the number of contiguous broadcast (0-strided) dimensions at the end of the data shape
+    int broadcastDims() const;
+
     // Fuse count dimensions at the end of the data shape into a single dimension.
-    // Asserts if rank < count or some of the dimensions are not dense.
-    // If count is -1 all dense dimensions at the end are fused.
+    // The dimensions must be all dense or all broadcast (0-strided)
+    // Asserts if rank < count or some of the dimensions could not be fused.
+    // If count is -1 all possible dimensions at the end are fused.
     LData &fuse(int count);
 
     // Same as fuse(n) but with explicitly specified dimensions
-    // The dimensions must be the last ones in the shape and dense.
+    // The dimensions must be the last ones in the shape and all dense or all broadcast (0-strided)
     LData &fuse(const std::vector<int> &dims);
 
     // Vectorize the last dimension into vectors of the specified size and stride.
@@ -403,21 +407,20 @@ class IData : public DataT<IData> {
     using DataT::DataT;
     IData(const Shape &shape, DType elementType, int offs) = delete;
 
-  private:
-    int repeatFactor = 1;
-
   public:
     static std::string name() { return "IData"; }
 
-    // Insert a new dimension at the specified index
-    IData &insertDim(int dimIndex, const ShapeItem &item);
-
-    // Repeat the data along the last dimension count times
-    // Only supported for element type of size 1 byte.
+    // Repeat the data along the last dimension count times (similar to numpy.repeat)
+    // Only supported for element type of size 1 byte and count of 1, 2 or 4.
+    // eg: repeat(2) applied to an idata containing [11, 22, 33] produces [11, 11, 22, 22, 33, 33]
+    // For other data types and counts consider using WData::repeat instead, which is more flexible.
     IData &repeat(int count);
 
-    // Get the repeat factor count
-    int getRepeatFactor() const { return repeatFactor; }
+    // Get the repeat count
+    int getRepeat() const { return _repeat; }
+
+  private:
+    int _repeat = 1;
 };
 
 // Data in WRAM
@@ -427,6 +430,17 @@ class WData : public DataT<WData> {
 
   public:
     static std::string name() { return "WData"; }
+
+    // Repeat the data along the last dimension count times
+    // If the last dimension contains one single value count can be any value up to the size of wram
+    // If the last dimension contains multiple values count can only be 1, 2 or 4.
+    WData &repeat(int count);
+
+    // Get the repeat count
+    int getRepeat() const { return _repeat; }
+
+  private:
+    int _repeat = 1;
 };
 
 // Data in BRAM
@@ -518,6 +532,8 @@ class WRam : public SliceRam {
     // If type not specified, compressed data are automatically expanded to be compatible with
     // the input type (eg bf16 if input is bf16, int8 if input is int) or to its default
     // uncompressed type if the input not used.
+    // Innermost dim can be a brodacast (stride-0) dimension, in this case only one item is loaded
+    // from LRAM and the broadcast is materialized later in the ALU.
     WData load(const LData &data, DType type = DType::none);
 
     // Same as load() but transposes the data tensor
@@ -578,6 +594,9 @@ class Alu : SliceComponent {
     // wdata: weight tensor data in wram
     // return: pram data of shape {N}:pType
     // where pType is int32 for integer weight, wType for float weight
+    // If wdata is broadcast (stride is 0), all the items will be materialized in PData,
+    // that is loading a wdata of shape {N:0} will produce a PData of shape {N:1}. This feature
+    // is not available with load(const IData&)
     PData load(const WData &wdata);
 
     // Accumulate an input of shape {N}

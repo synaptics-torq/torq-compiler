@@ -26,6 +26,7 @@ namespace mlir::syna::torq {
 enum class NdlSyncMode { NONE, R = 'R' };
 
 static int denseDims(const LData &);
+static int broadcastDims(const Shape &);
 static void fuse(LData &, int count = -1);
 static void vectorize(LData &, int vectorSize, int vectorStride);
 static void subviewDim(LData &, int dimIndex, int offset, int count);
@@ -878,19 +879,32 @@ LData &LData::insertDim(int pos, const ShapeItem &item) {
     return *this;
 }
 
-IData &IData::insertDim(int pos, const ShapeItem &item) {
-    pos = normalizeIndex(pos, true);
-    auto &shape = getShape();
-    shape.insert(shape.begin() + pos, item);
+IData &IData::repeat(int count) {
+    assert((count == 1 || count == 2 || count == 4) && "Invalid repeat count");
+    assert(sizeofType(elementType()) == 1 && "Only supported for element type of size 1");
+    if (getShape().empty()) {
+        getShape().push_back({count, Stride()});
+    }
+    else {
+        getShape().back().count *= count;
+    }
+    _repeat *= count;
     return *this;
 }
 
-IData &IData::repeat(int count) {
+WData &WData::repeat(int count) {
     assert(count > 0);
-    assert(sizeofType(elementType()) == 1 && "Only supported for element type of size 1");
-    this->repeatFactor = count;
-    if (!this->getShape().empty())
-        this->getShape().back().count *= count;
+    if (backDimCount(shape()) / _repeat > 1) {
+        bool isSupportedRepeat = count == 1 || count == 2 || count == 4;
+        assert(isSupportedRepeat && "Invalid repeat count for multi-items inner dimension");
+    }
+    if (getShape().empty()) {
+        getShape().push_back({count, Stride()});
+    }
+    else {
+        getShape().back().count *= count;
+    }
+    _repeat *= count;
     return *this;
 }
 
@@ -917,6 +931,8 @@ LData &LData::moveDim(int fromDimIndex, int toDimIndex) {
 }
 
 int LData::denseDims() const { return torq::denseDims(*this); }
+
+int LData::broadcastDims() const { return torq::broadcastDims(shape()); }
 
 LData &LData::fuse(int count) {
     torq::fuse(*this, count);
@@ -1012,8 +1028,8 @@ LData &LData::bitCast(DType newType) {
     if (prevSize == newSize) {
         return *this;
     }
-    assert(!shape().empty() && "Bitcast requires same size for scalars");
-    assert(denseDims() > 0 && "Bitcast requires same size for dense last dim");
+    assert(!shape().empty() && "Bitcast requires same element size for scalars");
+    assert(denseDims() > 0 && "Bitcast requires same element size for non-dense inner dim");
     int factor = max(newSize / prevSize, 1);
     assert(shape().back().count % factor == 0 && "Last dim not multiple of new type size");
 
@@ -1531,13 +1547,12 @@ void SlicePrivate::addDims(
     // We only add HDIMs here, LDIMs must have been added by the caller.
     // Generate HDIMs from loops
     // The NDL should have as many H-dims as the nesting of the loop we are in from loadNesting
-    // Mem-based NDLs are not so flexible so we should group nearby repetitions in N or M dims,
+    // Reg-based NDLs are not so flexible so we should group nearby repetitions in N or M dims,
     // and use W or S for loops that have a non-zero stride.
     torq_hw::RegDimTag repeatTags[] = {RegDimTag::M, RegDimTag::N};
     torq_hw::RegDimTag strideTags[] = {RegDimTag::S, RegDimTag::W};
     int repeatTagIx = 0;
     int strideTagIx = 0;
-    bool prevDimIsRepeat = false;
 
     for (int i = _forStack.size() - 1; i >= loadNesting - processLoopContainingLoad; i--) {
         // Check if this loop appears in the list of indexed dimensions,
@@ -1571,25 +1586,24 @@ void SlicePrivate::addDims(
 
         auto strideVal = stride.intVal.value() * elementSize;
         if (strideVal == 0) {
-            if (repeatTagIx >= sizeof(repeatTags) / sizeof(repeatTags[0])) {
-                llvm::errs() << "Error, NDL " << type << " has too many repeats\n";
-                assert(false && "Too many repeats");
+            if (!ndlDims.empty() && ((ndlDims.back().tag == RegDimTag::M && bigM) ||
+                                     ndlDims.back().tag == RegDimTag::N)) {
+                // Cumulate in the previous repeat tag
+                ndlDims.back().count *= loopIterCount;
             }
-            auto repeatCount = loopIterCount;
-            auto tag = repeatTags[repeatTagIx++];
-            if (tag == RegDimTag::M && repeatCount > 256 && !bigM) {
-                // M only support small repeats, use next tag
-                tag = repeatTags[repeatTagIx++];
+            else {
+                // Use next repeat tag
+                if (repeatTagIx >= sizeof(repeatTags) / sizeof(repeatTags[0])) {
+                    llvm::errs() << "Error, NDL " << type << " has too many repeats\n";
+                    assert(false && "Too many repeats");
+                }
+                auto tag = repeatTags[repeatTagIx++];
+                if (tag == RegDimTag::M && loopIterCount > 256 && !bigM) {
+                    // M only support small repeats, use next tag
+                    tag = repeatTags[repeatTagIx++];
+                }
+                ndlDims.push_back({DimType::H, tag, loopIterCount});
             }
-            else if (tag == RegDimTag::N && bigM && prevDimIsRepeat) {
-                // Cumulate all repeats in a single M
-                tag = RegDimTag::M;
-                repeatCount *= ndlDims.back().count;
-                ndlDims.pop_back();
-                repeatTagIx--;
-            }
-            ndlDims.push_back({DimType::H, tag, repeatCount});
-            prevDimIsRepeat = true;
         }
         else if (loopIterCount > 1) {
             // We ignore strided loops with only one iteration since they are useless and strided
@@ -1605,7 +1619,6 @@ void SlicePrivate::addDims(
                 auto tag = strideTags[strideTagIx++];
                 ndlDims.push_back({DimType::H, tag, loopIterCount, strideVal});
             }
-            prevDimIsRepeat = false;
         }
     }
 }
@@ -1681,13 +1694,13 @@ void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose)
     RegNdlDimsData cedrDims;
     if (weightSize > 1 && isInt(idata.elementType())) {
         assert(weightSize == 2 && "Only int8 or int16 weights supported for now");
-        cedrDims.push_back({DimType::L, RegDimTag::I, weightSize * idata.getRepeatFactor()});
+        cedrDims.push_back({DimType::L, RegDimTag::I, weightSize * idata.getRepeat()});
         biCount *= weightSize;
     }
-    else if (idata.getRepeatFactor() > 1) {
-        cedrDims.push_back({DimType::L, RegDimTag::I, idata.getRepeatFactor()});
+    else if (idata.getRepeat() > 1) {
+        cedrDims.push_back({DimType::L, RegDimTag::I, idata.getRepeat()});
     }
-    bi.size /= idata.getRepeatFactor();
+    bi.size /= idata.getRepeat();
     cedrDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
     static const int sValidDataCount[] = {8, 16, 32, 64, 0};
     int dCount = biCount * bi.size;
@@ -1759,6 +1772,13 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
     Shape shape = wdata.subShape();
     const int weightSize = sizeofType(wdata.elementType());
     const int weightBlockSize = backDimCount(shape);
+    int repeatCount = wdata.getRepeat();
+    if (weightBlockSize / repeatCount == 1 && repeatCount > 1) {
+        // If the weight block comes from a single element, we can use the repeatWeight flag
+        // thus avoiding the limitations of repeatCount
+        repeatWeight = true;
+        repeatCount = 1;
+    }
 
     RegNdlDimsData cewrDims;
 
@@ -1778,7 +1798,12 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
     // intermediate results.
     if ((_iram.elementType == DType::int16 || _iram.elementType == DType::int32) &&
         _cfg.alu_op0_mode[0] == torq_hw::ALUOp0Mode::MUL && !repeatWeight) {
-        cewrDims.push_back({DimType::L, RegDimTag::J, sizeofType(_iram.elementType), 0});
+        cewrDims.push_back(
+            {DimType::L, RegDimTag::J, sizeofType(_iram.elementType) * repeatCount, 0}
+        );
+    }
+    else if (repeatCount > 1) {
+        cewrDims.push_back({DimType::L, RegDimTag::J, repeatCount, 0});
     }
 
     WData wdataAdjusted{wdata};
@@ -1821,7 +1846,11 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
 
 void SlicePrivate::ceww(const WData &wdata, bool transpose) {
     Shape shape = wdata.subShape();
-    // assert(shape.size() <= 1 && "WData shape must be up to 1 for now");
+    if (broadcastDims(shape) > 0) {
+        // Inner dim is a broadcast (stride-0), only load one item, will be materialized in the ALU
+        shape.back().stride = 1;
+        shape.back().count = 1;
+    }
     const int weightSize = sizeofType(wdata.elementType());
     // In case of transpose never fuse the 1st dimension even if dense because we need to use S dim
     int weightBlockSize = denseElementCount(shape, shape.size() - transpose);
@@ -2148,7 +2177,14 @@ static void verifyNdlBankAlignment(const MemNdlData *ndl, int64_t bankBytes) {
 void SlicePrivate::dedr(const LData &data) { _ndls.add(memNdl(NdlType::DEDR, data, true)); }
 
 void SlicePrivate::dewr(const LData &data, bool fuse) {
-    MemNdlData ndlData = memNdl(NdlType::DEWR, data, fuse);
+    LData dataAdjusted{data};
+    if (broadcastDims(data.shape()) > 0) {
+        // Inner dim is a broadcast (stride-0), only load one item, will be materialized in the ALU
+        dataAdjusted.getShape().back().stride = 1;
+        dataAdjusted.getShape().back().count = 1;
+    }
+
+    MemNdlData ndlData = memNdl(NdlType::DEWR, dataAdjusted, fuse);
     if (_cfg.stride == 2) {
         // Adjust DEWR
         // In stride 2 mode the ALU automatically select the kernel part (quadrant) to use while
@@ -2338,6 +2374,13 @@ PData SlicePrivate::aluWAccumulate(const WData &wdata) {
 
     // Check the weight data
     auto wShape = wdata.subShape();
+
+    int repeatCount = 1;
+    if (broadcastDims(wShape) > 0) {
+        // Materialize the broadast in the last dimension by replicating the weight data
+        repeatCount = wShape.back().count;
+    }
+
     // TODO: check that wShape[rank - 1] is dense
     const int blockSize = elementCount(wShape) * partialElWidth;
     if (blockSize > HwInfo::wram_seg_width) {
@@ -2352,7 +2395,7 @@ PData SlicePrivate::aluWAccumulate(const WData &wdata) {
     IData idata = IData({}, _iram.elementType);
     _iram.loadNesting = 0;
     cedr(idata, 0, false);
-    cewr(wdata, false, false);
+    cewr(wdata, false, repeatCount > 1);
 
     // Save a copy of current stack, will be needed later to add N and T dimensions
     _stackCopy = _forStack;
@@ -3013,13 +3056,14 @@ int IRam::size() const { return HwInfo::iram_seg_width * HwInfo::iram_seg; }
 
 IData IRam::load(const LData &data) {
     debugTensor("ITensor", data);
+    Shape iramShape = data.subShape();
+    assert(broadcastDims(iramShape) == 0 && "Broadcast dimensions not supported for IRAM load");
     d->dedr(data);
 
     d->_iram.loadNesting = d->_forStack.size();
     d->_iram.elementType = data.elementType();
     d->_iram.values.push_back(data.value());
 
-    Shape iramShape = data.subShape();
     auto idata = IData(iramShape, data.elementType());
     d->cedw(idata);
 
@@ -3525,6 +3569,16 @@ static int denseDims(const LData &data) {
     return denseCnt;
 }
 
+// Return the number of broadcast dimensions at the innermost side of the shape
+static int broadcastDims(const Shape &shape) {
+    int broadcastCnt = 0;
+    while (broadcastCnt < shape.size() &&
+           shape[shape.size() - 1 - broadcastCnt].stride.intVal.value_or(-1) == 0) {
+        broadcastCnt++;
+    }
+    return broadcastCnt;
+}
+
 static void fuse(LData &data, int count) {
     assert(count >= 0);
     if (count == 0) {
@@ -3534,8 +3588,7 @@ static void fuse(LData &data, int count) {
         return;
     }
     int fused = 1;
-    for (; (count < 0 || fused < count) && data.shape().size() > 1 &&
-           denseElementCount(data.shape(), 2) > 0;
+    for (; (count < 0 || fused < count) && (data.denseDims() >= 2 || data.broadcastDims() >= 2);
          fused++) {
         // Merge last two dimensions
         int rank = data.shape().size();
@@ -3548,7 +3601,8 @@ static void fuse(LData &data, int count) {
 
 static void vectorize(LData &data, int vectorSize, int vectorStride) {
     assert(vectorSize > 0 && "Vector size must be positive");
-    if (data.denseDims() == 0) {
+    bool isBroadcast = broadcastDims(data.shape()) > 0;
+    if (data.denseDims() == 0 && !isBroadcast) {
         // This is a scalar tensor or a tensor where even the innermost dimension is not dense
         // Add a placeholder dense dimension of size 1 to be able to vectorize
         data.getShape().push_back(ShapeItem{1});
@@ -3569,14 +3623,16 @@ static void vectorize(LData &data, int vectorSize, int vectorStride) {
     // done if the vectorSize != vectorStride, this is needed for convolution with frame size
     // exactly equal to vectorSize because in that case we have to respect the vectorStride to
     // take into account padding).
+    // If the dimension is broadcasted, we keep stride 0 for both the vector and the item dimensions
     int vectCount = div_ceil(itemCount, vectorStride);
-    shape.push_back(ShapeItem{vectCount, vectorStride, ShapeItem::Tag::Main});
-    shape.push_back(ShapeItem{vectCount > 1 || vectorSize != vectorStride ? vectorSize : itemCount}
-    );
+    shape.push_back(ShapeItem{vectCount, isBroadcast ? 0 : vectorStride, ShapeItem::Tag::Main});
+    shape.push_back(ShapeItem{
+        vectCount > 1 || vectorSize != vectorStride ? vectorSize : itemCount, isBroadcast ? 0 : 1
+    });
 
     // Set the stride of the previous dim (if any) if it doesn't have a stride yet
     if (rank > 1 && !shape[rank - 1].stride.hasVal()) {
-        shape[rank - 1].stride = Stride{itemCount};
+        shape[rank - 1].stride = Stride{isBroadcast ? 1 : itemCount};
     }
 
     data.setShape(shape);
