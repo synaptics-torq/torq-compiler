@@ -74,7 +74,7 @@ class OptimizeLinalgForTorqPass
         // NOTE: Swish pattern optimization should happen in a separate pass
         // after the above castI32MulPatterns have been applied.
         RewritePatternSet SwishPatterns(ctx);
-        populatePreCalcSiluI8Patterns(ctx, SwishPatterns);
+        populatePreCalcI8TablePatterns(ctx, SwishPatterns);
         populateSwishActivationPatterns(ctx, SwishPatterns);
         auto frozenSwishPatterns =
             FrozenRewritePatternSet(std::move(SwishPatterns), disabledPatterns, enabledPatterns);

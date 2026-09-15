@@ -43,6 +43,12 @@ def case_config(request, runtime_hw_type, chip_config):
         # specific input data for the mul test case
         extra_args["tweaked_input_data_range"]  = (-32768, 32767)
 
+    # The precalc-i8-table cases fold a chain of ops into one 256-entry table, so the
+    # comparison is only worth anything if the input sweeps the whole i8 activation
+    # domain. The default (-40, 40) would exercise well under half the table.
+    if request.param.name.startswith("precalc-i8-table-"):
+        extra_args["tweaked_input_data_range"] = (-128, 128)
+
     if any(s in request.param.data.name for s in need_input_type_tc):
         extra_args["torq_compiler_options"].append("--iree-input-type=tosa-torq")
 

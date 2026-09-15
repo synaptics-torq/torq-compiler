@@ -139,14 +139,16 @@ See the [Input Guide](./input_guide.md) for literal inputs, multiple inputs, `.n
 
 ### Advanced Options
 
-#### Precomputing an i8 SiLU
+#### Precomputing an i8 activation into a lookup table
 
-The compiler computes the multiply and the rescales of an i8 SiLU (`x * sigmoid(x)`) at compile time instead of at runtime, storing the results in the sigmoid table the graph already carries as a constant. This is on by default and affects i8 activations only.
+An i8 activation takes 256 values, so any chain of elementwise ops that reads one i8 tensor and produces an i8 tensor has only 256 possible results. The compiler evaluates such a chain at compile time and stores the results in a single 256-entry table, replacing the chain with one lookup. This is on by default and affects i8 activations only.
 
-Pass `--torq-disable-precalc-silu-i8` to keep the multiply and the rescales at runtime:
+Any function of a single i8 value qualifies, whatever ops the frontend used to express it. An op whose other operand varies does not qualify: a multiply by a per-channel weight, for instance, makes the result a function of the activation *and* the channel, and no single table covers it.
+
+Pass `--torq-disable-precalc-i8-table` to keep the chain at runtime:
 
 ```{code} shell
-$ torq-compile model.mlir -o model.vmfb --torq-disable-precalc-silu-i8
+$ torq-compile model.mlir -o model.vmfb --torq-disable-precalc-i8-table
 ```
 
 ```{important}
