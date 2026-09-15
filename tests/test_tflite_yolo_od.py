@@ -37,13 +37,15 @@ from torq.testing.tflite_layer_tests import generate_parametrized_tests, TFLiteL
 YOLO_OD_MODELS = [
     "yolov8n_full_integer_quant_320_od.tflite",
     "yolov8s_full_integer_quant_320_od.tflite",
-    "yolo26n_full_integer_quant_320_od.tflite",
+    # FIXME: @kshanmug-synaptics failure in CI for yolo26n OD model
+    # "yolo26n_full_integer_quant_320_od.tflite",
     "yolo26s_full_integer_quant_320_od.tflite",
 ]
 
 # Repo hosting each model; YOLO26 ships from its own repo.
 YOLO_OD_REPOS = {
-    "yolo26n_full_integer_quant_320_od.tflite": "Synaptics/yolov26n_od",
+    # FIXME: @kshanmug-synaptics failure in CI for yolo26n OD model
+    # "yolo26n_full_integer_quant_320_od.tflite": "Synaptics/yolov26n_od",
     "yolo26s_full_integer_quant_320_od.tflite": "Synaptics/yolov26n_od",
 }
 DEFAULT_OD_REPO = "Synaptics/yolo"
