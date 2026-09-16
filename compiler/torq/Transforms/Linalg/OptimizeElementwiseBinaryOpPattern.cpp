@@ -6,6 +6,7 @@
 
 #include "PassesDetail.h"
 
+#include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/ShapeUtils.h"
 
@@ -272,10 +273,22 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             !isa<arith::MinSIOp>(eleOp) && !isa<arith::MaxSIOp>(eleOp) &&
             !isa<arith::MinUIOp>(eleOp) && !isa<arith::MaxUIOp>(eleOp) &&
             !isa<arith::MinimumFOp>(eleOp) && !isa<arith::MaximumFOp>(eleOp) &&
-            !isa<arith::MinNumFOp>(eleOp) && !isa<arith::MaxNumFOp>(eleOp)) {
+            !isa<arith::MinNumFOp>(eleOp) && !isa<arith::MaxNumFOp>(eleOp) &&
+            !isa<arith::AndIOp>(eleOp) && !isa<arith::OrIOp>(eleOp) && !isa<arith::XOrIOp>(eleOp)) {
             return rewriter.notifyMatchFailure(
                 srcOp, "elementwise binary op pattern only supports add/sub/mul/cmp/min/max ..\n"
             );
+        }
+
+        // Logical-not is a unary XOrIOp against a constant; broadcasting its (single)
+        // tensor operand is pointless and would fight the not lowering.
+        if (eleOp && isa<arith::XOrIOp>(eleOp)) {
+            std::string failReason;
+            if (isLogicNotOp(eleOp, failReason)) {
+                return rewriter.notifyMatchFailure(
+                    srcOp, "unary XOrIOp(logical not) op can't be considered as binary op"
+                );
+            }
         }
 
         // Only add/sub need an explicit rank-0 broadcast (they lower to torq_hl.add, which
