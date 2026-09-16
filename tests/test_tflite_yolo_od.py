@@ -37,15 +37,13 @@ from torq.testing.tflite_layer_tests import generate_parametrized_tests, TFLiteL
 YOLO_OD_MODELS = [
     "yolov8n_full_integer_quant_320_od.tflite",
     "yolov8s_full_integer_quant_320_od.tflite",
-    # FIXME: @kshanmug-synaptics failure in CI for yolo26n OD model
-    # "yolo26n_full_integer_quant_320_od.tflite",
+    "yolo26n_full_integer_quant_320_od.tflite",
     "yolo26s_full_integer_quant_320_od.tflite",
 ]
 
 # Repo hosting each model; YOLO26 ships from its own repo.
 YOLO_OD_REPOS = {
-    # FIXME: @kshanmug-synaptics failure in CI for yolo26n OD model
-    # "yolo26n_full_integer_quant_320_od.tflite": "Synaptics/yolov26n_od",
+    "yolo26n_full_integer_quant_320_od.tflite": "Synaptics/yolov26n_od",
     "yolo26s_full_integer_quant_320_od.tflite": "Synaptics/yolov26n_od",
 }
 DEFAULT_OD_REPO = "Synaptics/yolo"
@@ -53,6 +51,12 @@ DEFAULT_OD_REPO = "Synaptics/yolo"
 # YOLO26's int8 output quantization saturates class probabilities near 0.5,
 # so the YOLOv8 threshold would drop every detection.
 YOLO26_CONF_THRESH = 0.3
+
+
+def _is_yolo26(case: TFLiteLayerCase) -> bool:
+    # Key on the case name (built from YOLO_OD_MODELS), not the model path: the
+    # S3 HF cache hands back etag-named files, so the path carries no model name.
+    return "yolo26" in case.name
 
 # ============================================================================
 # Image preprocessing / post-processing
@@ -187,7 +191,8 @@ def _fixture_data(value):
     return value.data if hasattr(value, "data") else value
 
 
-def _compare_full_od_pair(left_results, right_results, left_name, right_name, model_path, cache):
+def _compare_full_od_pair(left_results, right_results, left_name, right_name, model_path, cache,
+                          conf_thresh=None):
     """Dequantize, post-process, and compare OD detections between two backends."""
     _, _, _, out_scale, out_zp = get_quant_params(model_path)
 
@@ -203,7 +208,7 @@ def _compare_full_od_pair(left_results, right_results, left_name, right_name, mo
     _, pad = _preprocess_image(img)
     original_shape = img.shape[:2]
 
-    kwargs = {"conf_thresh": YOLO26_CONF_THRESH} if "yolo26" in Path(model_path).name else {}
+    kwargs = {"conf_thresh": conf_thresh} if conf_thresh is not None else {}
     left_outs = od_postprocess(left_out, original_shape, pad, **kwargs)
     right_outs = od_postprocess(right_out, original_shape, pad, **kwargs)
 
@@ -229,7 +234,7 @@ def case_config(request, tflite_layer_model):
 
     # YOLO26 is deployed with slicing off; the sliced path runs out of LRAM on
     # the attention blocks.
-    if "yolo26" in Path(tflite_layer_model.data.model_path).name:
+    if _is_yolo26(tflite_layer_model.data):
         torq_compiler_options.append("--torq-disable-slicing")
 
     return {
@@ -318,7 +323,8 @@ def _compare_results(request, left_results, right_results, left_name, right_name
     if not layer_data.is_layer:
         model_path = layer_data.model_path
         cache = request.getfixturevalue("cache")
-        _compare_full_od_pair(left_results, right_results, left_name, right_name, model_path, cache)
+        _compare_full_od_pair(left_results, right_results, left_name, right_name, model_path, cache,
+                              conf_thresh=YOLO26_CONF_THRESH if _is_yolo26(layer_data) else None)
     else:
         compare_test_results(request, right_results, left_results, case_config)
 
