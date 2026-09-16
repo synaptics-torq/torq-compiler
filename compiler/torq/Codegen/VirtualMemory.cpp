@@ -1131,6 +1131,223 @@ static void buildBufferAccessSchedule(
     }
 }
 
+struct OperationMemoryInfo {
+    SmallVector<OpOperand *> operands;
+    SmallVector<OpResult> results;
+    SmallVector<Value> writtenOperands;
+    int resultsSize = 0;
+};
+
+static OperationMemoryInfo
+collectOperationMemoryInfo(Operation *op, torq_hl::MemorySpace memorySpace) {
+    OperationMemoryInfo info;
+    for (auto &operand : op->getOpOperands()) {
+        auto type = dyn_cast<MemRefType>(operand.get().getType());
+        if (type && getEncodingMemorySpace(type) == memorySpace) {
+            info.operands.push_back(&operand);
+        }
+    }
+
+    SmallVector<torq_hl::AsyncAccess> accesses;
+    collectBufferAccesses(op, accesses);
+    for (auto &access : accesses) {
+        if (bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write) &&
+            getEncodingMemorySpace(access.buffer.getType()) == memorySpace) {
+            info.writtenOperands.push_back(access.buffer);
+        }
+    }
+
+    for (auto result : op->getResults()) {
+        auto type = dyn_cast<MemRefType>(result.getType());
+        if (type && getEncodingMemorySpace(type) == memorySpace) {
+            info.results.push_back(result);
+            info.resultsSize += getEncodedTotalSizeBytes(type);
+        }
+    }
+    return info;
+}
+
+static bool processDeallocationOrAlias(
+    Operation *op, VirtualMemory &vm, IRRewriter &rewriter, torq_hl::MemorySpace memorySpace
+) {
+    if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
+        if (getEncodingMemorySpace(deallocOp.getMemref().getType()) == memorySpace) {
+            rewriter.setInsertionPoint(deallocOp);
+            Value physicalValue = vm.deallocate(deallocOp.getMemref(), rewriter);
+            if (physicalValue) {
+                deallocOp.getMemrefMutable().set(physicalValue);
+            }
+            else {
+                rewriter.eraseOp(deallocOp);
+            }
+        }
+        return true;
+    }
+
+    if (isDerivedMemRefOperation(op)) {
+        auto &baseMemRef = getDerivedMemRefBase(op);
+        if (getEncodingMemorySpace(cast<MemRefType>(baseMemRef.get().getType())) == memorySpace) {
+            vm.addAlias(op->getResult(0));
+        }
+        return true;
+    }
+    return false;
+}
+
+static void
+dumpAllocationRequest(Operation *op, VirtualMemory &vm, const OperationMemoryInfo &info) {
+    LLVM_DEBUG({
+        op->dump();
+        llvm::dbgs() << "Operands:\n";
+        for (auto *operand : info.operands) {
+            llvm::dbgs() << "  - size "
+                         << getEncodedTotalSizeBytes(cast<MemRefType>(operand->get().getType()))
+                         << " bytes to swap in " << vm.isSwappedOut(operand->get()) << " ";
+            operand->get().dump();
+        }
+        llvm::dbgs() << "Results sizes:\n";
+        for (auto result : info.results) {
+            llvm::dbgs() << "  - size "
+                         << getEncodedTotalSizeBytes(cast<MemRefType>(result.getType()))
+                         << " bytes";
+            result.dump();
+        }
+    });
+}
+
+static FailureOr<SetVector<Value>> reserveMemoryForOperation(
+    Operation *op, const OperationMemoryInfo &info, VirtualMemory &vm, IRRewriter &rewriter
+) {
+    SetVector<Value> toSwapIn;
+    SmallVector<Value> pinnedValues;
+    SetVector<VirtualBuffer *> distinctRoots;
+    for (auto *operand : info.operands) {
+        Value value = operand->get();
+        if (vm.isSwappedOut(value)) {
+            toSwapIn.insert(value);
+            distinctRoots.insert(&vm.virtualObjects.getVirtualObject(value).root());
+        }
+        else {
+            vm.pin(value);
+            pinnedValues.push_back(value);
+        }
+    }
+
+    int swapInSize = 0;
+    for (auto *root : distinctRoots) {
+        swapInSize += root->size();
+    }
+
+    rewriter.setInsertionPoint(op);
+    int requiredSize = swapInSize + info.resultsSize;
+    if (failed(vm.freeSpace(requiredSize, rewriter, op->getLoc()))) {
+        dumpAllocationRequest(op, vm, info);
+        op->emitError() << "cannot allocate op (pinned " << vm.physicalMemory.totalPinnedSize()
+                        << " B + required " << requiredSize << " B): exceeds "
+                        << vm.physicalMemory.usableSize() << " B usable (capacity)";
+        return failure();
+    }
+
+    for (Value value : pinnedValues) {
+        vm.unpin(value);
+    }
+
+    return toSwapIn;
+}
+
+static LogicalResult swapInOperandsAndAllocateResults(
+    Operation *op, const OperationMemoryInfo &info, const SetVector<Value> &toSwapIn,
+    VirtualMemory &vm, IRRewriter &rewriter
+) {
+    vm.physicalMemory.clearSpillProtect();
+    for (auto *operand : info.operands) {
+        vm.physicalMemory.addSpillProtect(&vm.virtualObjects.getVirtualObject(operand->get()).root()
+        );
+    }
+
+    for (Value value : toSwapIn) {
+        if (failed(vm.swapIn(value, rewriter, op->getLoc()))) {
+            LLVM_DEBUG(value.dump());
+            return emitAllocationFailure(
+                op, vm, "operand", getEncodedTotalSizeBytes(cast<MemRefType>(value.getType()))
+            );
+        }
+    }
+
+    for (auto result : info.results) {
+        if (failed(vm.addAllocation(result))) {
+            vm.physicalMemory.clearSpillProtect();
+            LLVM_DEBUG(result.dump());
+            return emitAllocationFailure(
+                op, vm, "result #" + Twine(result.getResultNumber()),
+                getEncodedTotalSizeBytes(cast<MemRefType>(result.getType()))
+            );
+        }
+    }
+    vm.physicalMemory.clearSpillProtect();
+    return success();
+}
+
+static FailureOr<SmallVector<Value>> rewriteOperandsToPhysicalMemory(
+    Operation *op, ArrayRef<OpOperand *> operands, VirtualMemory &vm, IRRewriter &rewriter
+) {
+    SmallVector<Value> pinnedValues;
+    for (auto *operand : operands) {
+        Value virtualValue = operand->get();
+        if (vm.isSwappedOut(virtualValue)) {
+            assert(
+                isDerivedMemRefOperation(virtualValue.getDefiningOp()) &&
+                "only derived memref operations should lead to swapped out operands here"
+            );
+            if (failed(vm.swapIn(virtualValue, rewriter, op->getLoc()))) {
+                virtualValue.getDefiningOp()->emitError("unable to swap in alias");
+                return failure();
+            }
+        }
+
+        vm.pin(virtualValue);
+        pinnedValues.push_back(virtualValue);
+        operand->set(vm.getPhysicalValue(virtualValue));
+    }
+    return pinnedValues;
+}
+
+static void updateOperandPinLifetimes(
+    Operation *op, ArrayRef<Value> pinnedValues, VirtualMemory &vm,
+    llvm::MapVector<Value, SmallVector<Value>> &invocationToVirtual
+) {
+    if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(op)) {
+        invocationToVirtual[startOp.getInvocation()].assign(
+            pinnedValues.begin(), pinnedValues.end()
+        );
+        return;
+    }
+
+    for (Value value : pinnedValues) {
+        vm.unpin(value);
+    }
+    if (auto waitOp = dyn_cast<torq_hl::WaitProgramOp>(op)) {
+        for (Value value : invocationToVirtual[waitOp.getInvocation()]) {
+            vm.unpin(value);
+        }
+        invocationToVirtual.erase(waitOp.getInvocation());
+    }
+}
+
+static void printStatistics(const VirtualMemory &vm) {
+    if (!clPrintStatistics) {
+        return;
+    }
+    llvm::dbgs() << "Total defragmentations: " << vm.physicalMemory.defragCount() << "\n";
+    llvm::dbgs() << "Total swap outs: " << vm.physicalMemory.swapOutCount() << "\n";
+    llvm::dbgs() << "Total swap-out stores skipped (clean buffers): "
+                 << vm.physicalMemory.skippedSwapOutStoreCount() << "\n";
+    llvm::dbgs() << "Swap outs dropped (contents dead): " << vm.physicalMemory.droppedSwapOutCount()
+                 << " (" << vm.physicalMemory.droppedSwapOutBytes() << " bytes)\n";
+    llvm::dbgs() << "Swap-in loads skipped (dropped contents): "
+                 << vm.physicalMemory.skippedSwapInLoadCount() << "\n";
+}
+
 } // namespace
 
 // go over the full function and replace virtual values with physical values
@@ -1139,281 +1356,65 @@ static void buildBufferAccessSchedule(
 LogicalResult convertVirtualToPhysicalMemRefs(
     FunctionOpInterface funcOp, Pool &pool, torq_hl::MemorySpace memorySpace
 ) {
-
     VirtualMemory vm(pool, memorySpace);
-
     IRRewriter rewriter(funcOp);
 
-    // find all the operations we need to process
+    // Snapshot the original operations because swapping inserts new operations while we walk.
     SmallVector<Operation *> ops;
     for (auto &op : funcOp.getFunctionBody().getOps()) {
         ops.push_back(&op);
     }
 
-    llvm::MapVector<Value, SmallVector<Value>> invocationToVirtual;
-
+    // Future accesses determine whether an evicted buffer must be copied to swap memory.
     buildBufferAccessSchedule(ops, memorySpace, vm.bufferAccessSchedule);
 
-    // process every operation that we found to map any memref operand or result from virtual
-    // to physical value. Use pinning and swap-in to make sure all operands are present before
-    // the operation and there is enough space to allocate the result
+    // Keep StartProgramOp operands pinned until the corresponding WaitProgramOp.
+    llvm::MapVector<Value, SmallVector<Value>> invocationToVirtual;
     for (auto [opIndex, op] : llvm::enumerate(ops)) {
-
         vm.currentOpIndex = opIndex;
-
         LLVM_DEBUG({
             llvm::dbgs() << "------------\n";
             llvm::dbgs() << "Processing operation: ";
             op->dump();
         });
 
-        // special case for memory deallocations
-        if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
-
-            if (getEncodingMemorySpace(deallocOp.getMemref().getType()) != memorySpace) {
-                continue;
-            }
-
-            // update the dealloc to deallocate the current value (it may be swapped out or not)
-            rewriter.setInsertionPoint(deallocOp);
-            auto physicalValue = vm.deallocate(deallocOp.getMemref(), rewriter);
-            if (physicalValue) {
-                deallocOp.getMemrefMutable().set(physicalValue);
-            }
-            else {
-                rewriter.eraseOp(deallocOp);
-            }
-
+        // Deallocations update allocator state; aliases only register their virtual parent.
+        if (processDeallocationOrAlias(op, vm, rewriter, memorySpace)) {
             continue;
         }
 
-        // special case for operation that create an alias of an allocation
-        if (isDerivedMemRefOperation(op)) {
+        // Inspect virtual operands and results before any operand is rewritten.
+        OperationMemoryInfo memoryInfo = collectOperationMemoryInfo(op, memorySpace);
 
-            auto &baseMemRef = getDerivedMemRefBase(op);
-
-            if (getEncodingMemorySpace(cast<MemRefType>(baseMemRef.get().getType())) !=
-                memorySpace) {
-                continue;
-            }
-
-            vm.addAlias(op->getResult(0));
-
-            // we don't need to swap in the contents not touch the buffer since
-            // these operations have no side effects and we may need to use this value much later
-
-            continue;
+        // Pin resident operands, evict LRU buffers, and reserve room for missing operands/results.
+        auto operandsToSwapIn = reserveMemoryForOperation(op, memoryInfo, vm, rewriter);
+        if (failed(operandsToSwapIn)) {
+            return failure();
         }
 
-        // find all the memref operands needed for the operation
-        SmallVector<OpOperand *> memrefOperands;
-        for (auto &opOperand : op->getOpOperands()) {
-            auto operand = opOperand.get();
-            auto resultType = dyn_cast<MemRefType>(operand.getType());
-            if (!resultType || getEncodingMemorySpace(resultType) != memorySpace) {
-                continue;
-            }
-            memrefOperands.push_back(&opOperand);
+        // Protect this op's operands while swapping them in and allocating its results.
+        if (failed(swapInOperandsAndAllocateResults(op, memoryInfo, *operandsToSwapIn, vm, rewriter)
+            )) {
+            return failure();
         }
 
-        // capture the buffers the op may write while the operands still hold the
-        // virtual values (they are replaced with physical values below)
-        SmallVector<torq_hl::AsyncAccess> bufferAccesses;
-        collectBufferAccesses(op, bufferAccesses);
-        SmallVector<Value> writtenOperands;
-        for (auto &access : bufferAccesses) {
-            if (bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write) &&
-                getEncodingMemorySpace(access.buffer.getType()) == memorySpace) {
-                writtenOperands.push_back(access.buffer);
-            }
+        // Keep operands resident during execution and point the op at their physical values.
+        auto pinnedOperands =
+            rewriteOperandsToPhysicalMemory(op, memoryInfo.operands, vm, rewriter);
+        if (failed(pinnedOperands)) {
+            return failure();
         }
 
-        // find all the memref outputs of the operation
-        SmallVector<OpResult> memrefResults;
-        int resultsSize = 0;
-        for (auto result : op->getResults()) {
-            auto resultType = dyn_cast<MemRefType>(result.getType());
-            if (!resultType || getEncodingMemorySpace(resultType) != memorySpace) {
-                continue;
-            }
-            memrefResults.push_back(result);
-            resultsSize += getEncodedTotalSizeBytes(resultType);
-        }
-
-        // find operands that need to be swapped in and compute how much space we need to do so
-        SetVector<Value>
-            toSwapIn; // use a set because multiple opOperands may point to the same value
-        SmallVector<Value> pinnedValues;
-        for (auto &opOperand : memrefOperands) {
-            auto operand = opOperand->get();
-            // if currently swapped out, add it to the list
-            if (vm.isSwappedOut(operand)) {
-                toSwapIn.insert(opOperand->get());
-            }
-            else {
-                // pin the value to prevent it being swapped out when freeing space for the values
-                // we need to swap in
-                vm.pin(operand);
-                pinnedValues.push_back(operand);
-            }
-        }
-
-        // compute the total size of the operands we need to swap in
-        // use root().size() instead of the operand's type size because aliases
-        // (e.g. memref.subview) may have a smaller type than their parent buffer.
-        // collect distinct roots first to avoid double-counting when multiple
-        // subviews alias the same buffer.
-        int swapInSize = 0;
-        SetVector<VirtualBuffer *> distinctRoots;
-        for (auto v : toSwapIn) {
-            distinctRoots.insert(&vm.virtualObjects.getVirtualObject(v).root());
-        }
-        for (auto *root : distinctRoots) {
-            swapInSize += root->size();
-        }
-
-        rewriter.setInsertionPoint(op);
-
-        // make room to swap in operands and allocate results
-        if (failed(vm.freeSpace(swapInSize + resultsSize, rewriter, op->getLoc()))) {
-
-            LLVM_DEBUG({
-                op->dump();
-                llvm::dbgs() << "Operands:\n";
-                for (auto &opOperand : memrefOperands) {
-                    llvm::dbgs(
-                    ) << "  - size "
-                      << getEncodedTotalSizeBytes(cast<MemRefType>(opOperand->get().getType()))
-                      << " bytes";
-                    llvm::dbgs() << " to swap in " << vm.isSwappedOut(opOperand->get()) << " ";
-                    opOperand->get().dump();
-                }
-                llvm::dbgs() << "Results sizes:\n";
-                for (auto result : memrefResults) {
-                    llvm::dbgs() << "  - size "
-                                 << getEncodedTotalSizeBytes(cast<MemRefType>(result.getType()))
-                                 << " bytes";
-                    result.dump();
-                }
-            });
-
-            int pinned = vm.physicalMemory.totalPinnedSize();
-            int required = swapInSize + resultsSize;
-            int usable = vm.physicalMemory.usableSize();
-            return op->emitError()
-                   << "cannot allocate op (pinned " << pinned << " B + required " << required
-                   << " B): exceeds " << usable << " B usable (capacity)";
-        }
-
-        // unpin all the pinned virtual allocations to allow defragmentation
-        for (auto pinnedValue : pinnedValues) {
-            vm.unpin(pinnedValue);
-        }
-
-        // Protect this op's operands from the spill-on-fragmentation path while they
-        // are unpinned (during their own swap-in and the result allocation): they are
-        // needed by the op, so they must not be spilled and left out.
-        vm.physicalMemory.clearSpillProtect();
-        for (auto &opOperand : memrefOperands)
-            vm.physicalMemory.addSpillProtect(
-                &vm.virtualObjects.getVirtualObject(opOperand->get()).root()
-            );
-
-        // swap in all the operands that are currently swapped out (this will cause defragmentation
-        // if necessary)
-        for (auto virtualValue : toSwapIn) {
-            auto maybePhysicalValue = vm.swapIn(virtualValue, rewriter, op->getLoc());
-
-            if (failed(maybePhysicalValue)) {
-                LLVM_DEBUG(virtualValue.dump());
-                return emitAllocationFailure(
-                    op, vm, "operand",
-                    getEncodedTotalSizeBytes(cast<MemRefType>(virtualValue.getType()))
-                );
-            }
-        }
-
-        // allocate all the results (this will cause defragmentation if necessary)
-        for (auto result : memrefResults) {
-            if (failed(vm.addAllocation(result))) {
-                vm.physicalMemory.clearSpillProtect();
-                LLVM_DEBUG(result.dump());
-                return emitAllocationFailure(
-                    op, vm, "result #" + Twine(result.getResultNumber()),
-                    getEncodedTotalSizeBytes(cast<MemRefType>(result.getType()))
-                );
-            }
-        }
-        vm.physicalMemory.clearSpillProtect();
-
-        // pin all the memref operands and replace virtual with physical values
-        pinnedValues.clear();
-        for (auto memRefOperand : memrefOperands) {
-
-            // ensure the value is not swapped out (this may happen if it is an alias
-            // of a buffer that was swapped out during defragmentation that may happend
-            // when allocating / swapping in buffers above)
-            if (vm.isSwappedOut(memRefOperand->get())) {
-
-                assert(
-                    isDerivedMemRefOperation(memRefOperand->get().getDefiningOp()) &&
-                    "only derived memref operations should lead to swapped out operands here"
-                );
-
-                if (failed(vm.swapIn(memRefOperand->get(), rewriter, op->getLoc()))) {
-                    return memRefOperand->get().getDefiningOp()->emitError("unable to swap in alias"
-                    );
-                }
-            }
-
-            vm.pin(memRefOperand->get());
-            pinnedValues.push_back(memRefOperand->get());
-            memRefOperand->set(vm.getPhysicalValue(memRefOperand->get()));
-        }
-
-        // a start_program writes between the start and its wait, but the buffers
-        // stay pinned until the wait, so freeing here is equivalent
-        for (auto writtenOperand : writtenOperands) {
+        // A write makes any retained swap-space copy stale.
+        for (Value writtenOperand : memoryInfo.writtenOperands) {
             vm.freeSwappedOutValue(writtenOperand, rewriter, op->getLoc());
         }
 
-        // special case for start op: save the list of pinned virtual values
-        // so that we don't touch them till the corresponding wait is executed
-        if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(op)) {
-
-            invocationToVirtual[startOp.getInvocation()] = pinnedValues;
-        }
-        else {
-
-            // unpin all the operations we have pinned
-            for (auto pinnedValue : pinnedValues) {
-                vm.unpin(pinnedValue);
-            }
-
-            // special case for wait op: unpin all the arguments that were pinned for the start
-            // operation
-            if (auto waitOp = dyn_cast<torq_hl::WaitProgramOp>(op)) {
-                for (auto arg : invocationToVirtual[waitOp.getInvocation()]) {
-                    vm.unpin(arg);
-                }
-
-                invocationToVirtual.erase(waitOp.getInvocation());
-            }
-        }
+        // Release synchronous operands now; asynchronous operands remain pinned until their wait.
+        updateOperandPinLifetimes(op, *pinnedOperands, vm, invocationToVirtual);
     }
 
-    if (clPrintStatistics) {
-        llvm::dbgs() << "Total defragmentations: " << vm.physicalMemory.defragCount() << "\n";
-        llvm::dbgs() << "Total swap outs: " << vm.physicalMemory.swapOutCount() << "\n";
-        llvm::dbgs() << "Total swap-out stores skipped (clean buffers): "
-                     << vm.physicalMemory.skippedSwapOutStoreCount() << "\n";
-        llvm::dbgs() << "Swap outs dropped (contents dead): "
-                     << vm.physicalMemory.droppedSwapOutCount() << " ("
-                     << vm.physicalMemory.droppedSwapOutBytes() << " bytes)\n";
-        llvm::dbgs() << "Swap-in loads skipped (dropped contents): "
-                     << vm.physicalMemory.skippedSwapInLoadCount() << "\n";
-    }
-
+    printStatistics(vm);
     return success();
 }
 
