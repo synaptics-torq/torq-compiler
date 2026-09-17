@@ -4,14 +4,15 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Unit tests for torq.lab.io and torq.lab.types."""
+"""Unit tests for torq.lab.pipeline.io and its spec types."""
 
 import ml_dtypes
 import numpy as np
 import pytest
 
-from torq.lab import io
-from torq.lab.types import LabError, MlirIoSpec, TensorType
+from torq.lab.pipeline import io
+from torq.lab import LabError
+from torq.lab.pipeline.io import MlirIoSpec, TensorType
 
 
 @pytest.mark.parametrize(
@@ -118,3 +119,75 @@ def test_parse_mlir_io_spec_torch(tmp_path):
         pytest.skip(f"torch dialect not parseable in this environment: {exc}")
     assert spec.inputs == [TensorType([2, 3], "si32")]
     assert spec.outputs == [TensorType([2, 3], "si32")]
+
+
+# -- TensorType.from_string validation (QA M1) -----------------------------
+
+
+@pytest.mark.parametrize(
+    "spec,shape,fmt",
+    [
+        ("1x16xbf16", [1, 16], "bf16"),
+        ("4xf32", [4], "f32"),
+        ("?x16xbf16", [None, 16], "bf16"),
+        ("1x?xf32", [1, None], "f32"),
+        ("?x?xi8", [None, None], "i8"),
+    ],
+)
+def test_tensor_type_from_string(spec, shape, fmt):
+    t = TensorType.from_string(spec)
+    assert t.shape == shape
+    assert t.fmt == fmt
+    assert t.to_arg() == spec
+
+
+@pytest.mark.parametrize("spec", ["1x16xf99", "1x16x", "ax16xbf16", "1x16xbf16x", ""])
+def test_tensor_type_from_string_rejects_invalid(spec):
+    with pytest.raises(LabError):
+        TensorType.from_string(spec)
+
+
+# -- dynamic-shape detection (QA C3) ----------------------------------------
+
+DYNAMIC_MLIR = """
+module {
+  func.func @main(%arg0: tensor<?x16xbf16>) -> tensor<?x16xbf16> {
+    return %arg0 : tensor<?x16xbf16>
+  }
+}
+"""
+
+DYNAMIC_SECOND_MLIR = """
+module {
+  func.func @helper(%arg0: tensor<2xf32>) -> tensor<2xf32> {
+    return %arg0 : tensor<2xf32>
+  }
+  func.func @main(%arg0: tensor<?x4xf32>) -> tensor<?x4xf32> {
+    return %arg0 : tensor<?x4xf32>
+  }
+}
+"""
+
+
+def test_parse_mlir_io_spec_dynamic_dims(tmp_path):
+    path = tmp_path / "dyn.mlir"
+    path.write_text(DYNAMIC_MLIR)
+    spec = io.parse_mlir_io_spec(path)
+    assert spec.inputs == [TensorType([None, 16], "bf16")]
+    assert spec.outputs == [TensorType([None, 16], "bf16")]
+
+
+def test_dynamic_io_types(tmp_path):
+    dyn = tmp_path / "dyn.mlir"
+    dyn.write_text(DYNAMIC_MLIR)
+    static = tmp_path / "static.mlir"
+    static.write_text(TOSA_MLIR)
+
+    assert io.dynamic_io_types(dyn) == ["tensor<?x16xbf16>", "tensor<?x16xbf16>"]
+    assert io.dynamic_io_types(static) == []
+
+    # A dynamic non-entry function is ignored unless selected with --function.
+    second = tmp_path / "second.mlir"
+    second.write_text(DYNAMIC_SECOND_MLIR)
+    assert io.dynamic_io_types(second) == []
+    assert io.dynamic_io_types(second, "main") == ["tensor<?x4xf32>", "tensor<?x4xf32>"]

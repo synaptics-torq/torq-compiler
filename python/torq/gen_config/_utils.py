@@ -139,6 +139,19 @@ def parse_diff_metrics(error_msg: str) -> Dict[str, Any]:
     return metrics
 
 
+def truncate_diagnostic(text: str) -> str:
+    """Bounded diagnostic text for failure reports.
+
+    The cut must never fall mid-line: whole lines are kept up to the limit 
+    and the cut is marked explicitly.
+    """
+    limit = 512
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit)
+    return (text[:cut] if cut > 0 else text[:limit]) + "\n..."
+
+
 def format_per_layer_status_table(
     rows: List[Dict[str, Any]],
     executor_order: List[str] = None,

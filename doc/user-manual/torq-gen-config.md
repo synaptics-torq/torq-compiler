@@ -699,45 +699,29 @@ BF16 is a 16-bit floating point format with:
 
 When `--auto-convert-bf16` is enabled:
 
-1. **Weight Conversion**: All FP32 weights/biases are converted to BF16
-2. **Type Annotation**: Input/output/intermediate tensors are marked as BF16
-3. **Accuracy Validation**: Errors are computed for each tensor
+1. **Graph conversion**: FP32 tensors are converted with ONNX schema-aware handling for operators that require specific input or output dtypes.
+2. **Public I/O conversion**: Model inputs and outputs are converted to BF16 so discovery evaluates the target signature.
+3. **Model validation**: The converted ONNX graph is shape-inferred and checked before discovery continues.
 
-### Accuracy Evaluation Method
+### Conversion Metrics
 
-The conversion accuracy is evaluated using **bit-truncation comparison** (see `scripts/convert_onnx_to_bf16.py` in the source repository):
+For each FP32 constant narrowed to BF16, the converter reports:
 
-```
-FP32 (32 bits) → BF16 (16 bits) → FP32 (for comparison)
-```
+| Metric | Description |
+|--------|-------------|
+| `values` | Number of values in the constant |
+| `max_abs_error` | Largest absolute error after narrowing |
+| `mean_abs_error` | Mean absolute error after narrowing |
+| `rmse` | Root mean square error after narrowing |
+| `max_rel_error` | Largest relative error after narrowing |
 
-**Metrics computed per tensor:**
-- `max_error`: Maximum absolute difference
-- `mean_error`: Mean absolute difference  
-- `rmse`: Root mean square error
-- `max_rel_error`: Maximum relative error
+These metrics describe constant rounding only; validate end-to-end model accuracy separately with representative inputs. When converting INT64 to INT32, the converter also reports any `INT64_MIN/MAX` values clamped to the corresponding INT32 extrema. Other out-of-range integer values remain conversion errors.
 
-**Interpretation guidelines:**
-
-| Max Error | Quality | Usability |
-|-----------|---------|-----------|
-| < 0.01 | Excellent | Typical for BF16, safe for all use cases |
-| < 0.1 | Good | Acceptable for most inference tasks |
-| < 1.0 | Fair | May affect some sensitive layers |
-| >= 1.0 | Poor | Significant accuracy loss, review needed |
-
-### Inference-Level Accuracy Check (Optional)
-
-Beyond weight-level checks, the conversion script (in the source repository) can compare end-to-end inference:
+For a standalone converted ONNX artifact, use the same converter directly:
 
 ```bash
-python scripts/convert_onnx_to_bf16.py model.onnx model_bf16.onnx --compare-inference --num-samples 10
+torq-convert-dtype onnx -i model.onnx -o model_bf16.onnx -d bf16 --convert-io
 ```
-
-This runs both models with random inputs and compares outputs:
-- Runs `num_samples` (default 5) random input comparisons
-- Uses ONNX Runtime for both FP32 and BF16 inference
-- Reports per-sample and aggregate error statistics
 
 ### Using BF16 with torq-gen-config
 
@@ -753,10 +737,10 @@ torq-gen-config discover --model model.onnx --auto-convert-bf16 --skip-mode
 
 ### Batch Dimension Handling
 
-The conversion script automatically fixes dynamic batch dimensions:
+Automatic BF16 conversion fixes dynamic batch dimensions in the converted model:
 - Converts symbolic dimensions (e.g., "batch", "N", "?") to fixed size 1
 - Required for accurate inference comparison
-- Warning is printed for each modified input
+- Reports how many tensor shapes were normalized
 
 ### Saving Converted Models
 

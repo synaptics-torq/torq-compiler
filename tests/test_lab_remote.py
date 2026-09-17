@@ -10,9 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from torq.lab.pipeline import ModelPipeline
-from torq.lab.remote import RemoteExecutor, RemoteStageError, parse_board_wall_time
-from torq.lab.types import PipelineConfig, RemoteTarget
+from torq.lab.pipeline.remote import RemoteExecutor, RemoteStageError, RemoteTarget, parse_board_wall_time
+from torq.lab.pipeline.workflow import ModelPipeline, PipelineConfig
 
 TOSA_MLIR = """
 module {
@@ -92,7 +91,7 @@ def test_remote_executor_run(tmp_path, monkeypatch):
     local_prof = tmp_path / "out" / "profiles" / "host_profile.csv"
 
     fake = FakeRunner()
-    monkeypatch.setattr("torq.lab.remote.remote_command_runner_factory", lambda *a, **k: fake)
+    monkeypatch.setattr("torq.lab.pipeline.remote.remote_command_runner_factory", lambda *a, **k: fake)
 
     ex = RemoteExecutor(
         RemoteTarget(address="user@host", port=2222),
@@ -129,7 +128,7 @@ def test_stage_model_failure_is_reported_by_stage(tmp_path, monkeypatch):
             return super().copy_files(src, dst, recursive=recursive, board_dst=board_dst, verbose=verbose)
 
     fake = FailingRunner()
-    monkeypatch.setattr("torq.lab.remote.remote_command_runner_factory", lambda *a, **k: fake)
+    monkeypatch.setattr("torq.lab.pipeline.remote.remote_command_runner_factory", lambda *a, **k: fake)
 
     ex = RemoteExecutor(RemoteTarget(address="user@host"), vmfb, "main", [], [], [])
     with pytest.raises(RemoteStageError) as excinfo:
@@ -145,7 +144,7 @@ def test_pipeline_run_remote(tmp_path, monkeypatch):
     vmfb.write_bytes(b"x")
 
     fake = FakeRunner()
-    monkeypatch.setattr("torq.lab.remote.remote_command_runner_factory", lambda *a, **k: fake)
+    monkeypatch.setattr("torq.lab.pipeline.remote.remote_command_runner_factory", lambda *a, **k: fake)
 
     config = PipelineConfig(
         model_path=model, work_dir=tmp_path / "out",

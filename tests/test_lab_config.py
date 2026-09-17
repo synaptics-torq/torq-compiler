@@ -8,8 +8,8 @@
 
 import json
 
-from torq.lab.cli import _build_parser, _config_from_args, _remote_from_args
-from torq.lab.types import load_config
+from torq.lab.cli.parser import _build_parser, _config_from_args, _remote_from_args
+from torq.lab.pipeline.workflow import load_config
 
 
 def test_load_config_later_source_wins():

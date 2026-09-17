@@ -13,12 +13,12 @@ plain :class:`~torq.gen_config._options.DiscoveryConfig`.  It builds on:
 
 - :class:`~torq.gen_config._cache.Cache` for the content-versioned artifact
   cache and small-value store (the ``get_or_generate_*`` cache drivers);
-- :class:`torq.lab.pipeline.ModelPipeline` to drive ``torq-compile`` /
+- :class:`torq.lab.pipeline.workflow.ModelPipeline` to drive ``torq-compile`` /
   ``torq-run-module``;
-- :func:`torq.lab.compare.compare_outputs` for the numeric core, keeping
+- :func:`torq.lab.verification.compare.compare_outputs` for the numeric core, keeping
   the exact per-tensor metric printout the report parsing relies on;
 - a reference-output chain (ONNXRuntime -> numpy -> IREE llvm-cpu) built on
-  ``torq.lab.reference``.  There is no torch fallback (torch is a test-only
+  ``torq.lab.verification.reference``.  There is no torch fallback (torch is a test-only
   dependency); if all three references fail, the error propagates.
 
 Behavior notes:
@@ -68,15 +68,16 @@ from torq.gen_config._cache import (
     get_or_generate_directory,
     get_or_generate_file,
 )
-from torq.lab.onnx import (
-    convert_onnx_to_mlir,
-    extract_onnx_subgraph,
+from torq.lab.model_tools.extraction.onnx.layers import (
+    _fix_batch_dimension_to_one,
     generate_onnx_layers_from_file,
     generate_onnx_layers_from_model,
     get_full_model,
     model_signature,
 )
-from torq.lab.types import Case
+from torq.lab.model_tools.extraction.onnx.subgraphs import extract_onnx_subgraph
+from torq.lab.model_tools.importers.onnx import convert_onnx_to_mlir
+from torq.lab import Case
 from torq.gen_config._options import DiscoveryConfig
 from torq.gen_config._report import _print_final_report, _save_detailed_report
 from torq.gen_config._state import ExecutorDiscoveryState, _discovery_state
@@ -84,6 +85,7 @@ from torq.gen_config._utils import (
     _normalize_quantized_op_type,
     extract_line_numbers_from_mlir,
     parse_diff_metrics,
+    truncate_diagnostic,
 )
 from torq.gen_config._utils_mac import compute_model_mac_details
 from torq.gen_config.core import (
@@ -108,9 +110,9 @@ from torq.gen_config.core import (
     set_verbose,
     update_config_with_results,
 )
-from torq.lab.quantize_onnx import (
+from torq.lab.quantization.onnx.static import (
     is_model_quantized,
-    quantize_onnx_model,
+    onnx_static_quantize,
 )
 
 logger = logging.getLogger("torq.gen_config.runner")
@@ -675,12 +677,19 @@ def _maybe_apply_bf16_conversion(model, f: Path, auto_convert: bool, save_path: 
     """
     if not auto_convert:
         return model
-    from torq.lab.convert_onnx import convert_fp32_to_bf16, is_model_bf16
-    if is_model_bf16(model):
-        _discovery_log(f"[BF16] Model {f.name} already in BF16 format")
-        return model
+    from torq.lab.model_tools.dtype_conversion.onnx import convert_onnx_model
     _discovery_log(f"[BF16] Converting {f.name} to BF16...")
-    converted = convert_fp32_to_bf16(model)
+    converted = convert_onnx_model(
+        model,
+        "bf16",
+        convert_io=True,
+        target_opset=22,
+        remove_unused_node_outputs=False,
+        max_float=float("inf"),
+    )
+    batch_fixed = _fix_batch_dimension_to_one(converted)
+    if batch_fixed:
+        _discovery_log(f"[BF16] Fixed {batch_fixed} tensor shape(s) to have batch=1")
     if save_path:
         sp = Path(save_path)
         sp.parent.mkdir(parents=True, exist_ok=True)
@@ -698,12 +707,15 @@ def _maybe_apply_int32_conversion(model, f: Path, auto_convert: bool) -> Any:
     """
     if not auto_convert:
         return model
-    from torq.lab.convert_onnx import convert_int64_to_int32, is_model_int32
-    if is_model_int32(model):
-        _discovery_log(f"[INT32] Model {f.name} has no INT64 tensors")
-        return model
+    from torq.lab.model_tools.dtype_conversion.onnx import convert_onnx_model
     _discovery_log(f"[INT32] Converting INT64 tensors in {f.name} to INT32...")
-    return convert_int64_to_int32(model)
+    return convert_onnx_model(
+        model,
+        "int32",
+        convert_io=True,
+        target_opset=22,
+        remove_unused_node_outputs=False,
+    )
 
 
 def _maybe_apply_quantization(
@@ -738,7 +750,7 @@ def _maybe_apply_quantization(
         f"per_channel={per_channel}, full_integer={full_integer})..."
     )
     try:
-        quantized = quantize_onnx_model(
+        quantized = onnx_static_quantize(
             model_proto,
             per_channel=per_channel,
             full_integer=full_integer,
@@ -1746,7 +1758,7 @@ def _case_inputs(case, mlir_path: Path):
     Gather-indices guard when it fires, else the legacy defaults of (0, 80)
     for uint8 and (-40, 40) for everything else.
     """
-    from torq.lab.io import generate_random_inputs, get_dtype, parse_mlir_io_spec
+    from torq.lab.pipeline.io import generate_random_inputs, get_dtype, parse_mlir_io_spec
 
     spec = parse_mlir_io_spec(mlir_path)
     gather_range = _gather_indices_input_range(case)
@@ -1768,7 +1780,7 @@ def _compute_reference_outputs(
     """Port of the ``composite_reference_results`` fixture chain (minus torch)."""
     import onnxruntime
 
-    from torq.lab.reference import (
+    from torq.lab.verification.reference import (
         execute_onnx_model_numpy,
         has_bf16_einsum,
         has_bf16_matmul,
@@ -1884,8 +1896,7 @@ def _compile_model(
     written under ``<dir>/debug/ir``; a string value additionally copies it
     to the given directory (relative to the CWD).
     """
-    from torq.lab.pipeline import ModelPipeline
-    from torq.lab.types import PipelineConfig
+    from torq.lab.pipeline.workflow import ModelPipeline, PipelineConfig
 
     versions = [
         mlir_version,
@@ -1931,11 +1942,15 @@ def _make_compare_fn(
     reference: list,
     comparison_config: Dict[str, Any],
 ) -> Callable[[], None]:
-    """One fresh model run + output comparison; raises AssertionError on mismatch."""
+    """One fresh model run + output comparison; raises AssertionError on mismatch.
+
+    The VMFB name follows the compile: ``_compile_model`` compiles
+    ``mlir_path`` with ``work_dir=compile_dir``, and the pipeline names the
+    module after the MLIR stem (``<compile_dir>/<mlir-stem>.vmfb``).
+    """
 
     def compare_fn() -> None:
-        from torq.lab.pipeline import ModelPipeline
-        from torq.lab.types import PipelineConfig
+        from torq.lab.pipeline.workflow import ModelPipeline, PipelineConfig
 
         pipe = ModelPipeline(
             PipelineConfig(
@@ -1946,12 +1961,12 @@ def _make_compare_fn(
                 random_inputs=True,
                 input_ranges=ranges,
                 timeout=cfg.runtime_timeout,
-                vmfb_path=Path(compile_dir) / "model.vmfb",
+                vmfb_path=Path(compile_dir) / f"{Path(mlir_path).stem}.vmfb",
             )
         )
         run_result = pipe.run()
 
-        from torq.lab.compare import compare_outputs
+        from torq.lab.verification.compare import compare_outputs
 
         result = compare_outputs(run_result.outputs, reference, config=comparison_config)
 
@@ -2196,7 +2211,7 @@ def _run_one_layer_case(
             DEFAULT_TOLERANCE.copy(),
             failure_report={
                 "type": "error",
-                "summary": f"Fixture/setup failed: {str(e)[:200]}",
+                "summary": f"Fixture/setup failed: {truncate_diagnostic(str(e))}",
             },
         )
         _discovery_log(

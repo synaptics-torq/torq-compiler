@@ -13,13 +13,15 @@ and the compile-run smoke test, not here.
 """
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from torq.lab import profiling
-from torq.lab.pipeline import ModelPipeline
-from torq.lab.types import LabError, PipelineConfig
+from torq.lab import LabError
+from torq.lab.pipeline.workflow import ModelPipeline, PipelineConfig
+from torq.lab.profiling import annotate as profiling
 from _lab_fake_tools import write_fake_compile, write_fake_run
 
 TOSA_MLIR = """
@@ -32,6 +34,17 @@ module {
 
 
 # -- orchestration helpers (faked internals) -----------------------------
+
+
+def test_perfetto_module_help_matches_documented_invocation():
+    pytest.importorskip("google.protobuf")
+    result = subprocess.run(
+        [sys.executable, "-m", "torq.lab.profiling.perfetto", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Convert timeline CSV logs to Perfetto trace" in result.stdout
 
 
 def test_profiling_helpers_require_extra(tmp_path, monkeypatch):

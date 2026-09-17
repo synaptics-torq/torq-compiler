@@ -11,27 +11,42 @@ This package owns release-facing orchestration around ``torq-compile`` and
 utilities, and result comparison. It ships in the wheel, so it must not import
 ``torq.testing`` or any test framework.
 
-Helper naming convention: a function useful outside its own module carries a
-public name (no underscore); a module-internal helper keeps the underscore.
-This applies to reference implementations, graph predicates, and other utilities
-other modules have a real reason to call.
+The ``torq-lab`` CLI entry point is ``torq.lab.cli.commands.main``;
+``python -m torq.lab`` reaches the same function through ``__main__``.
+
+This module also defines the package-wide shared types that no single
+functional owner takes: the base error (:class:`LabError`) and the generic
+named-case container (:class:`Case`).
 """
 
-__all__ = ["main"]
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, List
 
 
-def __getattr__(name):
-    """Expose ``torq.lab.main`` lazily (PEP 562 module-level ``__getattr__``).
+class LabError(Exception):
+    """Base class for torq.lab errors."""
 
-    ``main`` is the ``torq-lab`` CLI entry point. We resolve it on first access
-    rather than importing it at module top so that ``import torq.lab`` and
-    ``from torq.lab import <submodule>`` stay cheap and side-effect-free: they do
-    not pull in ``torq.lab.cli`` (and its whole argparse graph + transitive
-    pipeline imports). ``torq.lab.main`` triggers this hook and returns the CLI
-    ``main``; any other attribute raises ``AttributeError`` as usual.
+
+@dataclass
+class Case:
+    """Named case container: a ``name`` plus an arbitrary ``data`` payload.
+
+    Used to parametrize discovery layers and runs with a non-exhaustive subset
+    of parameter combinations: consumers generate one item per ``Case`` instead
+    of the full cross-product.
     """
-    if name == "main":
-        from torq.lab.cli import main
 
-        return main
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    name: str
+    data: Any
+
+
+def get_test_cases_from_files(files: Path) -> List[Case]:
+    """Generate one :class:`Case` per file, using the file name as case name."""
+
+    cases = []
+
+    for file_path in files:
+        cases.append(Case(file_path.name, file_path))
+
+    return cases

@@ -4,14 +4,14 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Unit tests for torq.lab.tools discovery precedence and the subprocess wrapper."""
+"""Unit tests for torq.lab.pipeline.tools discovery precedence and the subprocess wrapper."""
 
 import stat
 
 import pytest
 
-from torq.lab import tools
-from torq.lab.tools import ToolError
+from torq.lab.pipeline import tools
+from torq.lab.pipeline.tools import ToolError
 
 
 def _make_exe(directory, name="torq-compile", body="#!/bin/sh\nexit 0\n"):

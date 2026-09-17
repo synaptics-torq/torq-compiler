@@ -4,12 +4,12 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Unit tests for torq.lab.summary's Plan/Summary dataclasses and formatters."""
+"""Unit tests for torq.lab.cli.output's Plan/Summary dataclasses and formatters."""
 
 from pathlib import Path
 
-from torq.lab.artifact import ArtifactInfo
-from torq.lab.summary import (
+from torq.lab.pipeline.artifacts import ArtifactInfo
+from torq.lab.cli.output import (
     Plan,
     StageTime,
     Summary,

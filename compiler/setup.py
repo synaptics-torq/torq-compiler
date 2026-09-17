@@ -337,8 +337,11 @@ setup(
     entry_points={
         "console_scripts": [
             "torq-compile = torq.compiler.tools.binaries:main",
+            "torq-convert-dtype = torq.lab.model_tools.dtype_conversion.onnx:main",
+            "torq-convert-static = torq.lab.model_tools.shape_conversion.tflite:main",
             "torq-gen-config = torq.gen_config.cli:main",
-            "torq-lab = torq.lab.cli:main",
+            "torq-quantize-model = torq.lab.quantization.onnx.cli:main",
+            "torq-lab = torq.lab.cli.commands:main",
             "iree-compile = iree.compiler.tools.scripts.iree_compile.__main__:main",
             "iree-opt = iree.compiler.tools.scripts.iree_opt.__main__:main",
             "iree-import-tf = iree.tools.tf.scripts.iree_import_tf.__main__:main [tf]",
@@ -358,25 +361,37 @@ setup(
     extras_require={
         "onnx": [
             "onnx==1.19.1",
-            # ONNXRuntime: reference outputs (torq.lab.reference) and the
-            # quantize_onnx / QDQ chain used by torq-gen-config.
+            # ONNXRuntime: reference outputs (torq.lab.verification.reference) and
+            # the quantization / QDQ chain used by torq-gen-config.
             "onnxruntime==1.25.0",
-            # torq.lab.decoder_components_extractor uses onnx_graphsurgeon.
+            # torq.lab.model_tools.extraction.onnx.decoder_components uses onnx_graphsurgeon.
             "onnx_graphsurgeon==0.6.1",
+            # torq.lab.quantization.onnx.weights._analysis loads tokenizer.json
+            # for the weights sensitivity analysis (--tokenizer).
+            "tokenizers==0.23.2",
         ],
         "tflite": [
             "tosa-converter-for-tflite==2026.2.0",
         ],
+        # Needed by torq-convert-static tflite (the TFLite flatbuffer schema) and
+        # iree-import-tf. Keep the pin in sync with ./requirements.txt.
         "tf": [
-            "tensorflow==2.18.1",
+            "tensorflow==2.21.0",
         ],
-        # Optional profiling path (torq.lab.profiling / torq.lab.model_profiler).
+        # Optional profiling path (torq.lab.profiling).
         # Kept out of install_requires so the base wheel stays lean; the helpers
         # raise a clear LabError when this extra is not installed.
         "profile": [
             "pandas",
             "XlsxWriter",
             "protobuf",
+        ],
+        # Installs all of the individual extras above in one go.
+        "all": [
+            "torq-compiler[onnx]",
+            "torq-compiler[tflite]",
+            "torq-compiler[tf]",
+            "torq-compiler[profile]",
         ],
     },
 )

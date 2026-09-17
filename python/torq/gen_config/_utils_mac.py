@@ -354,7 +354,7 @@ def _tflite_mac_detail(layer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def compute_tflite_model_mac_details(model_path: Path) -> Dict[str, Any]:
     """Compute total MAC count plus per-op metadata for an extracted TFLite model."""
-    from torq.lab.tflite import TFLiteLayerExtractor
+    from torq.lab.model_tools.extraction.tflite.layers import TFLiteLayerExtractor
 
     extractor = TFLiteLayerExtractor(str(model_path))
     nodes: List[Dict[str, Any]] = []

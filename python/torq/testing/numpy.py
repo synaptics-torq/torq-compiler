@@ -9,10 +9,10 @@ from onnx import numpy_helper, TensorProto
 
 from .versioned_fixtures import versioned_unhashable_object_fixture
 
-# The pure numpy/ONNX reference implementations live in torq.lab.reference.
+# The pure numpy/ONNX reference implementations live in torq.lab.verification.reference.
 # They are imported here so the pytest fixtures below can delegate to them and so
 # torq.testing.onnx (and its test consumers) keep importing them from this module.
-from torq.lab.reference import (  # noqa: F401
+from torq.lab.verification.reference import (  # noqa: F401
     torch_tanh_gelu_numpy,
     has_bf16_matmul,
     has_bf16_einsum,

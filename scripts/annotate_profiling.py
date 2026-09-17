@@ -2,7 +2,7 @@
 
 import argparse
 import logging
-from torq.lab.profiling import annotate_host_profile_from_files, logger
+from torq.lab.profiling.annotate import annotate_host_profile_from_files, logger
 
 def main():
     parser = argparse.ArgumentParser(description="Annotate a Torq runtime profiling log.")

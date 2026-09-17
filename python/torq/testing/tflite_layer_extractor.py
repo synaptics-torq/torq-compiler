@@ -4,17 +4,17 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Re-exports the TFLite layer extractor from ``torq.lab.tflite``."""
+"""Re-exports the TFLite layer extractor from ``torq.lab.model_tools.extraction.tflite``."""
 
-from torq.lab.tflite import (
+from torq.lab.model_tools.extraction.tflite.layers import (
     OperatorInfo,
     QuantizationParams,
     TensorInfo,
     TFLiteLayerExtractor,
     TFLiteModelParser,
-    TFLiteTensorOutputExporter,
     extract_all_layers,
 )
+from torq.lab.model_tools.extraction.tflite.tensors import TFLiteTensorOutputExporter
 
 __all__ = [
     "OperatorInfo",

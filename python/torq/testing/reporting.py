@@ -16,7 +16,7 @@ from typing import Dict, Any, List, Optional
 import random
 
 try:
-    from torq.lab.model_profiler.perfetto_logger import get_dashboard_metrics
+    from torq.lab.profiling.perfetto import get_dashboard_metrics
 except ImportError:
 
     # FIXME: we should untagle dashboard metrics from IREE
@@ -770,7 +770,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         return
 
     # FIXME: we now have measurements directly in the report so we don't need to extract them from the pb file anymore
-    from torq.lab.model_profiler.generate_perfetto_combined_report import extract_perfetto_summary, extract_model_name
+    from torq.lab.profiling.report import extract_perfetto_summary, extract_model_name
 
     profiling_output_dir = config.getoption("--torq-runtime-profiling-output-dir", default=None)
     if not profiling_output_dir:

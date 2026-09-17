@@ -2,7 +2,7 @@
 import numpy as np
 from pathlib import Path
 
-from torq.lab.compare import DEFAULT_COMPARISON_CONFIG, compare_outputs
+from torq.lab.verification.compare import DEFAULT_COMPARISON_CONFIG, compare_outputs
 
 """
 
@@ -11,7 +11,7 @@ This module provides utilities to compare test results of inference.
 Comparisons use some criterias to determine if two outputs are equivalent
 tweaked to account for inaccuracies due to floating point and quantization.
 
-The numeric core lives in ``torq.lab.compare.compare_outputs``; this module is
+The numeric core lives in ``torq.lab.verification.compare.compare_outputs``; this module is
 the pytest shell around it: it resolves the per-case config from fixtures, saves
 the tensors under ``tmpdir`` for the diff tooling, prints the per-tensor metrics
 (the gen_config accuracy pipeline parses these stdout lines), and asserts.

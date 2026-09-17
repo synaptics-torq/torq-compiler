@@ -4,9 +4,9 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Tests for the torq.lab.reference numpy/ONNX reference impls.
+"""Tests for the torq.lab.verification.reference numpy/ONNX reference impls.
 
-Skips cleanly when the onnx extra is not installed (torq.lab.reference imports
+Skips cleanly when the onnx extra is not installed (torq.lab.verification.reference imports
 onnx at module scope), so the base-wheel torq-lab CI lane does not error.
 """
 
@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("onnx")
 pytest.importorskip("onnxruntime")
 
-from torq.lab import reference  # noqa: E402
+from torq.lab.verification import reference  # noqa: E402
 
 
 def test_torch_tanh_gelu_numpy_matches_reference_points():
@@ -69,7 +69,7 @@ def test_llvmcpu_reference_outputs(tmp_path):
     flow's llvmcpu_reference_results fixture uses); skips cleanly when they are
     not installed, like the tool-dependent tests of the pipeline.
     """
-    from torq.lab import tools
+    from torq.lab.pipeline import tools
 
     try:
         tools.find_iree_compile_tool()
@@ -93,7 +93,7 @@ def test_onnx_reference_outputs_raises_labError_naming_the_op(tmp_path, monkeypa
     """When both ORT and the numpy hybrid fail, the error names the op, points
     at --golden, and surfaces both tiers' underlying reasons (the onnxruntime
     error is the actionable one for an fp32 model ORT loaded but failed to run)."""
-    from torq.lab.types import LabError
+    from torq.lab import LabError
 
     path = tmp_path / "model.onnx"
     path.write_bytes(b"not-a-real-onnx-file")

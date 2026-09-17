@@ -43,6 +43,17 @@ Use `--text` instead of `--bytecode` to produce a human-readable MLIR file:
 $ tosa-converter-for-tflite model.tflite --text -o model.mlir
 ```
 
+```{note}
+The TORQ compiler currently does not support dynamic shapes. If a TFLite model was exported
+with dynamic dimensions (for example a `None` batch size in Keras), convert it to
+static shapes first:
+
+```{code} shell
+$ pip install "torq_compiler-<version>-<platform>.whl[tf]"   # one-time, for the tensorflow dependency
+$ torq-convert-static tflite -i model.tflite -o model_static.tflite
+```
+```
+
 #### MobileNetV2 TFLite Example
 
 - If not yet done, activate the Python environment as explained in [Getting Started](./getting_started.md) (skip this step if using the Docker container).

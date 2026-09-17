@@ -8,13 +8,7 @@ import onnx
 import onnxruntime
 import pytest
 
-from .convert_onnx import (
-    is_model_bf16,
-    convert_fp32_to_bf16,
-    is_model_int32,
-    convert_int64_to_int32,
-    _fix_batch_dimension_to_one,
-)
+from torq.lab.model_tools.dtype_conversion.onnx import convert_model
 
 from torq.testing.cases import Case
 from torq.testing.hf import get_hf_model_file
@@ -26,36 +20,36 @@ from .versioned_fixtures import (
     versioned_unhashable_object_fixture,
     VersionedUncachedData,
 )
-from torq.lab.quantization import onnx_fake_quantize
+from torq.lab.quantization.onnx.fake import onnx_fake_quantize
 from .quantization import onnx_fake_quantize_config
 
 from torq.testing.quantize_onnx import (
-    add_onnx_quantization_options,
+    add_onnx_static_quantization_options,
     is_model_quantized,
-    quantize_onnx_model,
+    onnx_static_quantize,
 )
 
-# Re-export the helpers from torq.lab.onnx so the
+# Re-export the helpers from torq.lab.model_tools.extraction.onnx so the
 # torq.testing.onnx import surface keeps working.
-from torq.lab.onnx import (
+from torq.lab.model_tools.extraction.onnx.layers import (
     ModelWithMetadata,
     OnnxLayerCase,
     _format_layer_node_name,
     _load_cached_layers,
-    convert_onnx_to_mlir,
-    extract_onnx_subgraph,
     generate_onnx_layers_from_file,
     generate_onnx_layers_from_model,
     get_full_model,
     is_onnx_qdq_wrapper_layer,
     model_signature,
 )
+from torq.lab.model_tools.extraction.onnx.subgraphs import extract_onnx_subgraph
+from torq.lab.model_tools.importers.onnx import convert_onnx_to_mlir
 
 """
 Fixtures and utilities for testing ONNX models.
 
 The layer/subgraph extraction, model-signature, layer-cache, and ONNX->MLIR
-import helpers live in ``torq.lab.onnx`` and are re-exported above;
+import helpers live in ``torq.lab.model_tools.extraction.onnx`` and are re-exported above;
 this module adds the hooks and fixtures.
 """
 
@@ -70,7 +64,7 @@ def pytest_addoption(parser):
         help="Print original ONNX node names for generated ONNX layer tests during setup",
     )
     # Shared ONNX quantization flags (also used by torq-gen-config).
-    add_onnx_quantization_options(parser)
+    add_onnx_static_quantization_options(parser)
 
 
 def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, dedup=True):
@@ -157,21 +151,8 @@ def onnx_bf16_model_file(request, versioned_file, onnx_model_file, onnx_bf16_con
         shutil.copy(str(onnx_model_file), str(versioned_file))
         return versioned_file
 
-    # Load the model
-    model = onnx.load(str(onnx_model_file))
-
-    # Check if already BF16
-    if is_model_bf16(model):
-        print(f"[BF16] Model already in BF16 format, copying to {versioned_file}")
-        shutil.copy(str(onnx_model_file), str(versioned_file))
-        return versioned_file
-
-    # Convert to BF16
     print(f"[BF16] Converting {onnx_model_file.name} to BF16...")
-    converted_model = convert_fp32_to_bf16(model)
-
-    # Save converted model
-    onnx.save(converted_model, str(versioned_file))
+    convert_model(onnx_model_file, versioned_file, "bf16", convert_io=True)
     print(f"[BF16] Saved to: {versioned_file}")
 
     return versioned_file
@@ -208,21 +189,8 @@ def onnx_int32_model_file(request, versioned_file, onnx_bf16_model_file, onnx_in
         shutil.copy(str(onnx_bf16_model_file), str(versioned_file))
         return versioned_file
 
-    # Load the model
-    model = onnx.load(str(onnx_bf16_model_file))
-
-    # Check if there is anything to convert
-    if is_model_int32(model):
-        print(f"[INT32] Model has no INT64 tensors, copying to {versioned_file}")
-        shutil.copy(str(onnx_bf16_model_file), str(versioned_file))
-        return versioned_file
-
-    # Convert INT64 -> INT32
     print(f"[INT32] Converting INT64 tensors in {onnx_bf16_model_file.name} to INT32...")
-    converted_model = convert_int64_to_int32(model)
-
-    # Save converted model
-    onnx.save(converted_model, str(versioned_file))
+    convert_model(onnx_bf16_model_file, versioned_file, "int32", convert_io=True)
     print(f"[INT32] Saved to: {versioned_file}")
 
     return versioned_file
@@ -287,7 +255,7 @@ def onnx_quantized_model_file(
         f"(quant_format={quant_format}, quant_dtype={quant_dtype}, "
         f"per_channel={per_channel}, full_integer={full_integer})..."
     )
-    quantized_model = quantize_onnx_model(
+    quantized_model = onnx_static_quantize(
         model,
         per_channel=per_channel,
         full_integer=full_integer,

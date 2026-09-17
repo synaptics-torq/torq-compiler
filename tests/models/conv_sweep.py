@@ -25,7 +25,8 @@ import tensorflow as tf
 import torch
 import torch.nn as nn
 
-from torq.testing.onnx import convert_fp32_to_bf16, onnx_model_fixture
+from torq.lab.model_tools.dtype_conversion.onnx import convert_onnx_model
+from torq.testing.onnx import onnx_model_fixture
 from torq.testing.versioned_fixtures import (
     versioned_generated_file_fixture,
     versioned_hashable_object_fixture,
@@ -180,7 +181,13 @@ def conv_onnx_model(request, keras_model_params, conv_onnx_dtype):
     model = onnx.load_from_string(buf.getvalue())
 
     if conv_onnx_dtype == "bf16":
-        model = convert_fp32_to_bf16(model)
+        model = convert_onnx_model(
+            model,
+            "bf16",
+            convert_io=True,
+            target_opset=22,
+            remove_unused_node_outputs=False,
+        )
 
     return model
 

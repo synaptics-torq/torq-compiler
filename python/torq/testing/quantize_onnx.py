@@ -4,31 +4,29 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Re-exports the ONNX quantization helpers from ``torq.lab.quantize_onnx``."""
+"""Re-exports the ONNX quantization helpers from ``torq.lab.quantization.onnx.static``."""
 
-from torq.lab.quantize_onnx import (
+from torq.lab.quantization.onnx.static import (
+    ONNX_STATIC_QUANTIZATION_OPTIONS,
     RandomCalibrationDataReader,
-    _ONNX_QUANTIZATION_OPTIONS,
-    _parse_quant_dtype,
-    _parse_quant_format,
-    add_onnx_quantization_args,
-    add_onnx_quantization_options,
+    add_onnx_static_quantization_args,
+    add_onnx_static_quantization_options,
     convert_qdq_to_full_integer,
     get_input_specs,
     is_model_quantized,
-    quantize_onnx_model,
-    quantize_onnx_static,
-    quantize_onnx_static_from_model,
+    onnx_static_quantize,
+    onnx_static_quantize_file,
+    parse_quant_dtype,
+    parse_quant_format,
 )
 
 __all__ = [
     "RandomCalibrationDataReader",
-    "add_onnx_quantization_args",
-    "add_onnx_quantization_options",
+    "add_onnx_static_quantization_args",
+    "add_onnx_static_quantization_options",
     "convert_qdq_to_full_integer",
     "get_input_specs",
     "is_model_quantized",
-    "quantize_onnx_model",
-    "quantize_onnx_static",
-    "quantize_onnx_static_from_model",
+    "onnx_static_quantize",
+    "onnx_static_quantize_file",
 ]

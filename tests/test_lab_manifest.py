@@ -4,18 +4,19 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Unit tests for torq.lab.manifest."""
+"""Unit tests for torq.lab.pipeline.artifacts (manifest building/writing)."""
 
 import json
 
-from torq.lab.artifact import ArtifactInfo
-from torq.lab.compare import ComparisonResult
-from torq.lab.manifest import (
+from torq.lab.pipeline.artifacts import ArtifactInfo
+from torq.lab.pipeline.artifacts import (
     atomic_write_json_file,
     atomic_write_json_manifest,
     build_manifest,
 )
-from torq.lab.types import CompileResult, PipelineConfig, RemoteTarget, RunResult
+from torq.lab.pipeline.remote import RemoteTarget
+from torq.lab.pipeline.workflow import CompileResult, PipelineConfig, RunResult
+from torq.lab.verification.compare import ComparisonResult
 
 
 def _config(tmp_path):

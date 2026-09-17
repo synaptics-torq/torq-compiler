@@ -22,8 +22,9 @@ except ImportError:
 
 # torq.lab owns the generic, pytest-independent compile/run helpers. Re-use them
 # here so pytest and release users exercise one shared implementation.
-from torq.lab.types import TensorType, MlirIoSpec
-from torq.lab.io import (
+from torq.lab.pipeline.io import (
+    MlirIoSpec,
+    TensorType,
     get_dtype,
     is_float_type,
     create_output_args,
@@ -38,10 +39,14 @@ from .dtype_utils import convert_io_dtypes_policy
 from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
-from torq.lab.profiling import annotate_host_profile_from_files
-from torq.lab.metrics import measure_time, append_measurements, clear_measurements
-from torq.testing.performance import record_measurements
-from torq.lab.model_profiler.generate_perfetto_combined_report import generate_html
+from torq.lab.profiling.annotate import annotate_host_profile_from_files
+from torq.lab.profiling.report import generate_html
+from torq.testing.performance import (
+    append_measurements,
+    clear_measurements,
+    measure_time,
+    record_measurements,
+)
 
 logger = logging.getLogger("torq.testing.iree")
 
@@ -708,7 +713,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
             print(f"✓ Copied compile profile CSV: {dest_csv}")
                     
         # Generate Perfetto .pb file from compile time profile            
-        from torq.lab.model_profiler.perfetto_logger import convert_to_perfetto
+        from torq.lab.profiling.perfetto import convert_to_perfetto
         
         # Use a temp directory for pb generation, then move files to parent with _compile suffix
         temp_pb_dir = compile_time_profiling_output_dir / f'{request.node.name}_compile_temp'

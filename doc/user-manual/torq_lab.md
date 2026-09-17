@@ -27,9 +27,16 @@ $ pip install "torq_compiler-<version>-<platform>.whl[onnx]"
 # TFLite import
 $ pip install "torq_compiler-<version>-<platform>.whl[tflite]"
 
+# TFLite dynamic-to-static shape conversion (`torq-convert-static`)
+# Adds the `tensorflow` dependency for TFLite flatbuffer schema
+$ pip install "torq_compiler-<version>-<platform>.whl[tf]"
+
 # Profiling annotation + Perfetto trace rendering
 # Adds `pandas`, `XlsxWriter`, and `protobuf` dependencies
 $ pip install "torq_compiler-<version>-<platform>.whl[profile]"
+
+# Everything (all of the extras above)
+$ pip install "torq_compiler-<version>-<platform>.whl[all]"
 ```
 
 Without an extra, the features that need it raise a clear error naming the missing package.
@@ -235,8 +242,8 @@ Every invocation writes a `manifest.json` into the work dir (see [the work direc
 
 `compile`, `run`, `verify`, `profile`, and interactive mode all accept `.onnx` and `.tflite` sources directly alongside `.mlir` and the model is imported to `<work-dir>/<model-stem>.mlir` automatically before compiling:
 
-- `.onnx` is imported via `torq.lab.onnx.convert_onnx_to_mlir`.
-- `.tflite` is imported via `torq.lab.tflite.convert_tflite_to_mlir`, which delegates to `tosa-converter-for-tflite`.
+- `.onnx` is imported via `torq.lab.model_tools.importers.onnx.convert_onnx_to_mlir`.
+- `.tflite` is imported via `torq.lab.model_tools.importers.tflite.convert_tflite_to_mlir`, which delegates to `tosa-converter-for-tflite`.
 - `.mlir` is used unchanged.
 - `.vmfb` is run directly; it is never a valid input to `compile`.
 
@@ -507,8 +514,8 @@ The same pipeline is importable. The typical flow builds a `PipelineConfig`, dri
 ```python
 from pathlib import Path
 
-from torq.lab.pipeline import ModelPipeline
-from torq.lab.types import PipelineConfig, RemoteTarget
+from torq.lab.pipeline.remote import RemoteTarget
+from torq.lab.pipeline.workflow import ModelPipeline, PipelineConfig
 
 config = PipelineConfig(
     model_path=Path("model.onnx"),
@@ -547,16 +554,16 @@ compile_result, run_result = pipe.profile()
 Describe an artifact without a `ModelPipeline`:
 
 ```python
-from torq.lab import artifact
+from torq.lab.pipeline import artifacts
 
-info = artifact.describe("model-run/model.vmfb")
+info = artifacts.describe("model-run/model.vmfb")
 print(info.function, info.io_spec, info.provenance)
 ```
 
 Reconstruct a config from a saved manifest, or layer config files, without the CLI:
 
 ```python
-from torq.lab.types import PipelineConfig, load_config
+from torq.lab.pipeline.workflow import PipelineConfig, load_config
 
 # From a previous run's manifest:
 config = PipelineConfig.from_file("model-run/manifest.json")
@@ -569,7 +576,7 @@ config = PipelineConfig.from_dict(merged)
 Compare arrays directly, outside a pipeline:
 
 ```python
-from torq.lab.compare import compare_outputs
+from torq.lab.verification.compare import compare_outputs
 
 result = compare_outputs(observed_arrays, expected_arrays)
 print(result.passed, result.reason)
@@ -578,7 +585,7 @@ print(result.passed, result.reason)
 Or generate a reference from an ONNX model directly:
 
 ```python
-from torq.lab.reference import onnx_reference_outputs
+from torq.lab.verification.reference import onnx_reference_outputs
 
 expected = onnx_reference_outputs("model.onnx", input_arrays)
 ```
@@ -587,15 +594,14 @@ expected = onnx_reference_outputs("model.onnx", input_arrays)
 
 | Module                    | Responsibility                                                     |
 |---------------------------|--------------------------------------------------------------------|
-| `torq.lab.types`          | `PipelineConfig`, `RemoteTarget`, `CompileResult`, `RunResult`, `LabError`, `load_config`. |
-| `torq.lab.pipeline`       | `ModelPipeline`: the import / compile / run / verify / profile orchestrator. |
-| `torq.lab.io`             | dtype mapping, MLIR IO-spec parsing, input/output materialization. |
-| `torq.lab.tools`          | discovery of the `torq-compile` / `torq-run-module` binaries.      |
-| `torq.lab.compare`        | pure numeric output comparison (`compare_outputs`, `ComparisonResult`). |
-| `torq.lab.reference`      | ONNX/numpy reference implementations (`onnx_reference_outputs` and friends) used to generate a verification golden. |
-| `torq.lab.artifact`       | resolve a VMFB/model's metadata and provenance (`describe`, `ArtifactInfo`). |
-| `torq.lab.summary`        | `Plan`/`Summary` dataclasses and their human/JSON formatters (`format_plan`, `format_summary`, `format_inspect`). |
-| `torq.lab.remote`         | SSH/ADB staging and remote execution (`RemoteExecutor`).            |
-| `torq.lab.manifest`       | build and atomically write `manifest.json`.                        |
-| `torq.lab.interactive`    | the no-argument interactive session (`run_interactive`).           |
+| `torq.lab`                | `LabError` (base error) and `Case` (named case container) shared across functional owners. |
+| `torq.lab.pipeline.workflow` | `PipelineConfig`, `CompileResult`, `RunResult`, `load_config`, and `ModelPipeline`: the import / compile / run / verify / profile orchestrator. |
+| `torq.lab.pipeline.io`        | MLIR IO-spec parsing, dtype mapping, input/output materialization, and the I/O dtype-conversion policy. |
+| `torq.lab.pipeline.artifacts` | resolve a VMFB/model's metadata and provenance (`describe`, `ArtifactInfo`) and build/atomically write `manifest.json`. |
+| `torq.lab.pipeline.remote`    | `RemoteTarget`, SSH/ADB transport, and remote staging/execution (`RemoteExecutor`). |
+| `torq.lab.pipeline.tools`     | discovery of the `torq-compile` / `torq-run-module` binaries.      |
+| `torq.lab.verification.compare`  | pure numeric output comparison (`compare_outputs`, `ComparisonResult`). |
+| `torq.lab.verification.reference` | ONNX/numpy reference implementations (`onnx_reference_outputs` and friends) used to generate a verification golden. |
+| `torq.lab.cli.output`     | `Plan`/`Summary` dataclasses and their human/JSON formatters (`format_plan`, `format_summary`, `format_inspect`). |
+| `torq.lab.cli.interactive` | the no-argument interactive session (`run_interactive`).           |
 | `torq.lab.profiling`      | host-profile annotation and Perfetto trace helpers (`[profile]` extra). |

@@ -20,8 +20,8 @@ import numpy as np
 import pytest
 
 from _lab_fake_tools import write_fake_compile, write_fake_run
-from torq.lab.pipeline import ModelPipeline
-from torq.lab.types import LabError, PipelineConfig, RunResult
+from torq.lab import LabError
+from torq.lab.pipeline.workflow import ModelPipeline, PipelineConfig, RunResult
 
 TOSA_MLIR = """
 module {
@@ -153,7 +153,7 @@ def test_ensure_mlir_imports_onnx(tmp_path, monkeypatch):
         Path(out).write_text(TOSA_MLIR)
         calls["src"], calls["out"] = Path(src), Path(out)
 
-    monkeypatch.setattr("torq.lab.onnx.convert_onnx_to_mlir", fake_convert)
+    monkeypatch.setattr("torq.lab.model_tools.importers.onnx.convert_onnx_to_mlir", fake_convert)
     cfg = PipelineConfig(model_path=onnx_path, work_dir=tmp_path / "w")
     pipe = ModelPipeline(cfg)
     mlir = pipe.ensure_mlir()
@@ -204,7 +204,7 @@ def test_verify_outputs_prefers_golden_over_reference(tmp_path, monkeypatch):
     def fail_reference(*args, **kwargs):
         raise AssertionError("reference generator must not run when expected_output_npy is set")
 
-    monkeypatch.setattr("torq.lab.reference.onnx_reference_outputs", fail_reference)
+    monkeypatch.setattr("torq.lab.verification.reference.onnx_reference_outputs", fail_reference)
 
     config = PipelineConfig(
         model_path=tmp_path / "model.onnx", work_dir=work_dir,
@@ -217,7 +217,7 @@ def test_verify_outputs_prefers_golden_over_reference(tmp_path, monkeypatch):
 def test_verify_outputs_falls_back_to_reference_and_reports_mismatch(tmp_path, monkeypatch):
     work_dir = tmp_path / "out"
     (work_dir / "inputs").mkdir(parents=True)
-    monkeypatch.setattr("torq.lab.reference.onnx_reference_outputs", lambda p, i: [np.ones(4, np.float32)])
+    monkeypatch.setattr("torq.lab.verification.reference.onnx_reference_outputs", lambda p, i: [np.ones(4, np.float32)])
 
     config = PipelineConfig(model_path=tmp_path / "model.onnx", work_dir=work_dir, reference="onnx")
     result = ModelPipeline(config).verify_outputs(RunResult(command=[], outputs=[np.zeros(4, np.float32)]))

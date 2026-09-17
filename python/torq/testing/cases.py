@@ -8,7 +8,7 @@ import pytest
 
 from typing import List, Dict
 
-from torq.lab.types import Case, get_test_cases_from_files
+from torq.lab import Case, get_test_cases_from_files
 
 __all__ = ["Case", "get_test_cases_from_files", "get_test_cases_from_tf_model"]
 
@@ -55,7 +55,7 @@ E.g.:
 Pytest will now only generate the test cases defined in the Case instances.
 
 The plain ``Case`` dataclass and ``get_test_cases_from_files`` live in
-``torq.lab.types`` and are re-exported here; this module adds
+``torq.lab`` and are re-exported here; this module adds
 the hook and fixtures.
 
 """

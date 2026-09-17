@@ -10,7 +10,7 @@ scripted reader/writer against the fake compile/run tools.
 
 import pytest
 
-from torq.lab import interactive
+from torq.lab.cli import interactive
 from _lab_fake_tools import write_fake_compile, write_fake_run
 
 TOSA_MLIR = """

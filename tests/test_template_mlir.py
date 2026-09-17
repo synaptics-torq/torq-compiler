@@ -9,9 +9,6 @@ import pytest
 from torq.testing.iree import list_mlir_files
 from torq.testing.cases import get_test_cases_from_files
 
-import logging
-from torq.utils.logging import configure_logging
-
 # Shape generation defaults
 DEFAULT_LRAM_SIZE = 500  # KB
 DEFAULT_NUM_SAMPLES = 15

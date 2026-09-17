@@ -8,7 +8,7 @@
 
 import sys
 
-from torq.lab.cli import main
+from torq.lab.cli.commands import main
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from torq.gen_config._utils import build_report_lines, format_per_layer_status_table
+from torq.gen_config._utils import build_report_lines, format_per_layer_status_table, truncate_diagnostic
 from torq.gen_config.core import (
     DEFAULT_TOLERANCE,
     EXECUTOR_ORDER,
@@ -189,7 +189,7 @@ def _print_final_report(config, discovery_state: ExecutorDiscoveryState):
             for executor, details in failure["error_details"].items():
                 status = details["status"]
                 report_summary = details["report"].get("summary", "No details")
-                summary = report_summary[:100]
+                summary = truncate_diagnostic(report_summary)
                 report_lines.append(f"       - {executor.upper()}: {status} - {summary}")
     else:
         report_lines.append("\n--- No Critical Failures ---")

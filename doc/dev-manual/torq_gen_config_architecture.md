@@ -34,7 +34,7 @@ CLI (cli.py) ───(in-process)───► _runner.py ───► torq.lab 
                                       ├── _cache.py     (versioned artifact cache)
                                       ├── _state.py
                                       ├── _report.py
-                                      ├── _onnx.py / _convert_onnx.py
+                                      ├── ONNX helpers in torq.lab
                                       └── core.py
 ```
 
@@ -79,8 +79,10 @@ python/torq/gen_config/
 
     (ONNX layer/subgraph extraction, ONNX dtype conversions, ONNX
      quantization, the TFLite FlatBuffer layer extractor, the Case
-     container and the verbosity flag live in torq.lab: onnx.py,
-     convert_onnx.py, quantize_onnx.py, tflite.py, types.py, logging.py —
+     container and the verbosity flag live in torq.lab: the Case container at
+     the package root, model_tools/extraction/onnx/,
+     model_tools/dtype_conversion/onnx.py, quantization/onnx/,
+     model_tools/extraction/tflite/, logging.py —
      re-exported by torq.testing for the in-tree test framework.)
 ```
 
@@ -96,7 +98,7 @@ python/torq/gen_config/
 | `_options.py` | `DiscoveryConfig` option container | No |
 | `_cache.py` | Versioned artifact cache | No |
 | `_runner.py` | Standalone discovery/run engine | **Yes** (ONNX) |
-| `torq.lab` (`onnx`, `convert_onnx`, `quantize_onnx`, `tflite`, `types`, `logging`) | ONNX extraction/conversion/quantization, TFLite layer extraction, `Case`, verbosity | **Yes** (ONNX) |
+| `torq.lab` (`model_tools.extraction.onnx`, `model_tools.dtype_conversion.onnx`, `quantization.onnx`, `model_tools.extraction.tflite`, `logging`, package-root `Case`) | ONNX extraction/conversion/quantization, TFLite layer extraction, `Case`, verbosity | **Yes** (ONNX) |
 | `cli.py` | argparse, user-facing commands (in-process) | No |
 | `view.py` | Pretty-print report / compiler JSONs | No |
 
@@ -147,20 +149,20 @@ python/torq/gen_config/
    model-format dependencies. One import from `_utils` is deferred (inside a
    function) to avoid a circular dependency.
 2. `_runner.py` holds the discovery/run engine; the ONNX-specific extraction
-   and conversion live in `torq.lab.onnx` / `torq.lab.convert_onnx`,
-   quantization in `torq.lab.quantize_onnx`.
+   and conversion live in `torq.lab.model_tools.extraction.onnx` / `torq.lab.model_tools.dtype_conversion.onnx`,
+   quantization in `torq.lab.quantization.onnx.static`.
 3. No module in the package may import the test framework (`torq.testing`)
    — this is enforced by `scripts/verify_torq_wheel.sh`, which checks the
    packaged modules for test-framework imports and asserts that importing
    the CLI does not pull them into `sys.modules`.
-4. `torq.lab.quantize_onnx` is the quantization helper used by `_runner.py`
+4. `torq.lab.quantization.onnx.static` is the quantization helper used by `_runner.py`
    and `cli.py`.
 5. `view.py` is an internal utility that imports from `_utils`; it is not
    part of the public API (the CLI is the public surface).
 6. `torq.testing` keeps thin compatibility shims (`quantize_onnx.py`,
-   `convert_onnx.py`, `tflite_layer_extractor.py`, `cases.py`) that
+   `tflite_layer_extractor.py`, `cases.py`) that
    re-export from `torq.lab`; nothing imports the other way.
-7. The TFLite FlatBuffer layer extractor lives in `torq.lab.tflite` as a
+7. The TFLite FlatBuffer layer extractor lives in `torq.lab.model_tools.extraction.tflite` as a
    utility (used by the `_utils_mac.py` TFLite MAC helper and the
    `torq.testing` shim); it plays no role in discovery.
 
@@ -225,7 +227,7 @@ python/torq/gen_config/
 
 ## 5. Quantization Support
 
-Quantization is implemented in `quantize_onnx.py`. It takes an FP32 ONNX model and produces either QDQ (Quantize-Dequantize) or QOperator (native int8 ops such as `QLinearConv`) format.
+Quantization is implemented in `torq.lab.quantization.onnx.static`. It takes an FP32 ONNX model and produces either QDQ (Quantize-Dequantize) or QOperator (native int8 ops such as `QLinearConv`) format.
 
 ### Discovery flow with quantization
 
@@ -345,18 +347,18 @@ cli.py:cmd_edit()
 > new format could be added by creating format-specific modules that reuse the
 > same discovery algorithm. New formats should put the cores in a
 > `_runner_<format>.py` (or format-specific functions inside `_runner.py`),
-> mirroring how the ONNX flow is split between `_runner.py` and `torq.lab.onnx`.
+> mirroring how the ONNX flow is split between `_runner.py` and `torq.lab.model_tools.extraction.onnx`.
 
 ### Step 1: Create `_<format>.py` extraction/conversion helpers
 
-Mirror `torq.lab.onnx` / `torq.lab.convert_onnx`: model loading,
+Mirror `torq.lab.model_tools.extraction.onnx` / `torq.lab.model_tools.dtype_conversion.onnx`: model loading,
 layer/subgraph extraction, and conversion to MLIR:
 
 ```python
 # _<format>.py
 """<Format> layer/subgraph extraction and model conversion."""
 
-from torq.lab.types import Case
+from torq.lab import Case
 
 
 def generate_<format>_layers_from_file(...) -> List[Case]:
@@ -555,6 +557,6 @@ layers are keyed by operator name and index: `{OP_NAME}_{op_index}` (e.g.
 `CONV_2D_0`, `DEQUANTIZE_1`), and those IDs are used everywhere a layer ID is
 expected (`view`, `edit`).
 
-The FlatBuffer layer extractor (now `torq.lab.tflite`) remains available as a
+The FlatBuffer layer extractor (now `torq.lab.model_tools.extraction.tflite`) remains available as a
 utility (TFLite MAC counting, `torq.testing` compatibility shims) but plays
 no role in discovery.

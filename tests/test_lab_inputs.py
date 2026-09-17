@@ -12,9 +12,10 @@ import ml_dtypes
 import numpy as np
 import pytest
 
-from torq.lab import io
-from torq.lab.pipeline import ModelPipeline
-from torq.lab.types import LabError, MlirIoSpec, PipelineConfig, TensorType
+from torq.lab import LabError
+from torq.lab.pipeline import io
+from torq.lab.pipeline.io import MlirIoSpec, TensorType
+from torq.lab.pipeline.workflow import ModelPipeline, PipelineConfig
 
 
 SPEC = MlirIoSpec(
@@ -29,10 +30,10 @@ SPEC = MlirIoSpec(
 
 
 def _config(tmp_path, **overrides):
+    overrides.setdefault("random_inputs", True)
     return PipelineConfig(
         model_path=tmp_path / "model.mlir",
         work_dir=tmp_path / "work",
-        random_inputs=True,
         **overrides,
     )
 
@@ -120,5 +121,33 @@ def test_materialize_inputs_honors_seed_and_ranges(tmp_path):
     for x, y in zip(inputs, again):
         assert np.array_equal(x, y)
     assert any(not np.array_equal(x, y) for x, y in zip(inputs, other))
+
+
+# -- input .npy dtype handling (QA M2) ----------------------------------------
+
+
+def test_input_npy_is_cast_to_the_spec_dtype(tmp_path):
+    # An f32 .npy for a bf16-IO model must be cast, not written verbatim:
+    # the runtime arg declares bf16, so the .bin must hold bf16 bytes.
+    spec = MlirIoSpec(inputs=[TensorType([2, 2], "bf16")], outputs=[])
+    npy = tmp_path / "in.npy"
+    np.save(npy, np.arange(4, dtype=np.float32).reshape(2, 2))
+    pipeline = ModelPipeline(_config(tmp_path, input_npy=[npy], random_inputs=False))
+    inputs, paths = pipeline._materialize_inputs(spec, pipeline._convert_io_dtypes_policy())
+    assert inputs[0].dtype == np.dtype(ml_dtypes.bfloat16)
+    assert paths[0].stat().st_size == 2 * 2 * 2  # 4 elements x 2 bytes
+
+
+def test_input_npy_void_bfloat16_is_normalized(tmp_path):
+    # A bf16 .npy (saved via ml_dtypes) loads back as |V2; it must be
+    # normalized so it compares equal to the spec dtype and round-trips.
+    spec = MlirIoSpec(inputs=[TensorType([2], "bf16")], outputs=[])
+    ref = np.array([1.0, -2.5], dtype=ml_dtypes.bfloat16)
+    npy = tmp_path / "in.npy"
+    np.save(npy, ref)
+    pipeline = ModelPipeline(_config(tmp_path, input_npy=[npy], random_inputs=False))
+    inputs, _ = pipeline._materialize_inputs(spec, pipeline._convert_io_dtypes_policy())
+    assert inputs[0].dtype == np.dtype(ml_dtypes.bfloat16)
+    assert np.array_equal(inputs[0], ref)
 
 

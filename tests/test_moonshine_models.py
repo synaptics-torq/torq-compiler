@@ -4,7 +4,7 @@ import pytest
 from torq.testing.comparison import compare_test_results
 from torq.testing.onnx import generate_onnx_layers_from_model, get_full_model, numpy_reference_results, has_bf16_matmul
 from torq.testing.iree import llvmcpu_reference_results
-from torq.lab.io import get_dtype
+from torq.lab.pipeline.io import get_dtype
 from torq.testing.hf import get_hf_model_file
 from torq.testing.cases import Case
 

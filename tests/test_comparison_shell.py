@@ -6,7 +6,7 @@
 
 """Behavior tests for the torq.testing.comparison pytest shell.
 
-The numeric core is delegated to torq.lab.compare; these tests pin the pass/fail
+The numeric core is delegated to torq.lab.verification.compare; these tests pin the pass/fail
 outcomes and the stdout metric lines that the gen_config accuracy pipeline
 parses.
 """
@@ -33,7 +33,7 @@ class _FakeRequest:
 
 
 def _run(tmp_path, observed, expected, **cfg_overrides):
-    from torq.lab.compare import DEFAULT_COMPARISON_CONFIG
+    from torq.lab.verification.compare import DEFAULT_COMPARISON_CONFIG
 
     cfg = dict(DEFAULT_COMPARISON_CONFIG)
     cfg.update(cfg_overrides)

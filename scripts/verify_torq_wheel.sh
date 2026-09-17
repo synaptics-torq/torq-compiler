@@ -48,27 +48,42 @@ echo "Compiler wheel: ${COMPILER_WHEEL}"
 echo "=== wheel contains torq/lab and torq/gen_config modules ==="
 for f in \
     torq/lab/__init__.py \
-    torq/lab/profiling.py \
-    torq/lab/model_profiler/perfetto_logger.py \
-    torq/lab/onnx.py \
-    torq/lab/convert_onnx.py \
+    torq/lab/profiling/annotate.py \
+    torq/lab/profiling/perfetto.py \
+    torq/lab/model_tools/extraction/onnx/layers.py \
+    torq/lab/model_tools/dtype_conversion/onnx.py \
     torq/lab/logging.py \
-    torq/lab/tflite.py \
-    torq/lab/quantize_onnx.py \
+    torq/lab/metrics.py \
+    torq/lab/model_tools/extraction/tflite/layers.py \
+    torq/lab/model_tools/shape_conversion/__init__.py \
+    torq/lab/model_tools/shape_conversion/tflite.py \
+    torq/lab/quantization/onnx/cli.py \
+    torq/lab/quantization/onnx/dynamic/__init__.py \
+    torq/lab/quantization/onnx/dynamic/_analysis.py \
+    torq/lab/quantization/onnx/dynamic/_quantization.py \
+    torq/lab/quantization/onnx/static/__init__.py \
+    torq/lab/quantization/onnx/static/_quantization.py \
+    torq/lab/quantization/onnx/weights/__init__.py \
+    torq/lab/quantization/onnx/weights/_analysis.py \
+    torq/lab/quantization/onnx/weights/_config.py \
+    torq/lab/quantization/onnx/weights/_quantization.py \
+    torq/lab/reporting.py \
+    torq/lab/utils/cli.py \
+    torq/lab/utils/onnxruntime.py \
     torq/gen_config/__init__.py \
     torq/gen_config/cli.py \
     torq/gen_config/_runner.py \
     torq/gen_config/_options.py \
     torq/gen_config/_cache.py \
 ; do
-    if ! unzip -l "${COMPILER_WHEEL}" | grep -q "${f}"; then
+    if ! unzip -Z1 "${COMPILER_WHEEL}" "${f}" >/dev/null 2>&1; then
         echo "Error: ${f} is not in the wheel." >&2
         exit 1
     fi
 done
 
 echo "=== wheel must NOT contain torq/testing or torq/utils ==="
-if unzip -l "${COMPILER_WHEEL}" | grep -qE "torq/(testing|utils)/"; then
+if unzip -Z1 "${COMPILER_WHEEL}" | grep -E "torq/(testing|utils)/" >/dev/null; then
     echo "Error: torq.testing / torq.utils leaked into the wheel:" >&2
     unzip -l "${COMPILER_WHEEL}" | grep -E "torq/(testing|utils)/" >&2
     exit 1
@@ -76,7 +91,7 @@ fi
 
 echo "=== no torq/gen_config module in the wheel imports pytest ==="
 while IFS= read -r f; do
-    if unzip -p "${COMPILER_WHEEL}" "${f}" | grep -qE "^[[:space:]]*(import pytest|from pytest)"; then
+    if unzip -p "${COMPILER_WHEEL}" "${f}" | grep -E "^[[:space:]]*(import pytest|from pytest)" >/dev/null; then
         echo "Error: ${f} in the wheel imports pytest:" >&2
         unzip -p "${COMPILER_WHEEL}" "${f}" | grep -nE "^[[:space:]]*(import pytest|from pytest)" >&2
         exit 1
@@ -95,15 +110,22 @@ python3 -m venv "${VENV}"
 echo "=== torq.lab imports resolve from the installed package, not the checkout ==="
 "${VENV}/bin/python" - <<'PY'
 import torq.lab
-# torq.lab.remote pulls in torq.lab.transport; importing it proves the package is
-# self-contained in the wheel (no dependency on the checkout torq.utils tree).
-import torq.lab.remote  # noqa: F401
+# torq.lab.pipeline.remote pulls in the SSH/ADB transport; importing it proves the
+# package is self-contained in the wheel (no dependency on the checkout torq.utils
+# tree).
+import torq.lab.pipeline.remote  # noqa: F401
 # torq.lab.profiling must import without the optional [profile] extra installed.
 import torq.lab.profiling  # noqa: F401
+import torq.lab.metrics as metrics
+import torq.lab.reporting as reporting
 path = torq.lab.__file__
 print("torq.lab:", path)
 assert "site-packages" in path, f"torq.lab did not import from site-packages: {path}"
 assert "/src/python/" not in path, f"torq.lab imported from the checkout: {path}"
+for mod in (metrics, reporting):
+    assert "site-packages" in mod.__file__, f"{mod.__name__} not from site-packages: {mod.__file__}"
+assert callable(metrics.measure_time)
+assert callable(reporting.ReportGenerator)
 PY
 
 echo "=== python -m torq.lab --help ==="
@@ -138,19 +160,27 @@ PY
 echo "=== torq-gen-config --help (console script) ==="
 "${VENV}/bin/torq-gen-config" --help >/dev/null
 
+echo "=== torq-convert-dtype --help (console script) ==="
+"${VENV}/bin/torq-convert-dtype" --help >/dev/null
+"${VENV}/bin/torq-convert-dtype" onnx --help >/dev/null
+
+echo "=== torq-convert-static --help (console script) ==="
+"${VENV}/bin/torq-convert-static" --help >/dev/null
+"${VENV}/bin/torq-convert-static" tflite --help >/dev/null
+
 echo "=== python -m torq.gen_config --help ==="
 "${VENV}/bin/python" -m torq.gen_config --help >/dev/null
 
 echo "=== [profile] extra: install and import the profiling cluster ==="
 "${VENV}/bin/pip" install -q "${COMPILER_WHEEL}[profile]" "${EXTRA_WHEELS[@]}"
 "${VENV}/bin/python" - <<'PY'
-import torq.lab.profiling as profiling
-import torq.lab.model_profiler.perfetto_logger as pl
-assert profiling.pd is not None, "profiling deps not active after installing [profile]"
-for mod in (profiling, pl):
+import torq.lab.profiling.annotate as annotate
+import torq.lab.profiling.perfetto as pl
+assert annotate.pd is not None, "profiling deps not active after installing [profile]"
+for mod in (annotate, pl):
     assert "site-packages" in mod.__file__, f"{mod.__name__} not from site-packages: {mod.__file__}"
     assert "/src/python/" not in mod.__file__, f"{mod.__name__} imported from the checkout: {mod.__file__}"
-print("torq.lab.profiling + model_profiler.perfetto_logger OK from [profile] extra")
+print("torq.lab.profiling.annotate + profiling.perfetto OK from [profile] extra")
 PY
 
 echo "OK: torq.lab and torq.gen_config are packaged and importable from the wheel; torq.testing/torq.utils are excluded, and no packaged torq/gen_config module imports pytest."

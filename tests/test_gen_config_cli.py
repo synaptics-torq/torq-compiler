@@ -16,17 +16,18 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
-from onnxruntime.quantization import QuantType
+from onnxruntime.quantization import CalibrationDataReader, QuantType
 
 from torq.testing.quantize_onnx import (
-    _parse_quant_dtype,
     convert_qdq_to_full_integer,
-    quantize_onnx_model,
+    onnx_static_quantize,
+    parse_quant_dtype,
 )
 
 # Path to the test model (relative to project root)
@@ -36,7 +37,7 @@ TEST_MODEL = PROJECT_ROOT / "tests/testdata/onnx_models/example_gen_config.onnx"
 
 def _tools_available():
     try:
-        from torq.lab.tools import find_compile_tool, find_iree_run_tool, find_run_tool
+        from torq.lab.pipeline.tools import find_compile_tool, find_iree_run_tool, find_run_tool
 
         find_compile_tool()
         find_run_tool()
@@ -81,6 +82,40 @@ def test_edit_no_args():
     """'edit' with no --model and no config path errors."""
     result = _run_cli("edit", "--layer", "Add_output", "--executor", "host")
     assert result.returncode != 0, "edit with no args should have failed"
+
+
+def test_compare_fn_points_at_the_compiled_vmfb(tmp_path, monkeypatch):
+    import torq.lab.pipeline.workflow as workflow
+    from torq.gen_config import _runner
+
+    compile_dir = tmp_path / "versioned_fixtures" / "torq_compiled_model" / "abc"
+    compile_dir.mkdir(parents=True)
+    mlir = compile_dir / "onnx_mlir.abc123.mlir"
+    mlir.write_text("")
+
+    captured = []
+
+    class FakePipe:
+        def __init__(self, config):
+            captured.append(config)
+
+        def run(self):
+            return workflow.RunResult(command=[], outputs=[np.zeros(2, np.float32)])
+
+    monkeypatch.setattr(workflow, "ModelPipeline", FakePipe)
+    cfg = SimpleNamespace(runtime_hw_type="sim", runtime_options=[], runtime_timeout=60)
+    compare_fn = _runner._make_compare_fn(
+        cfg,
+        mlir,
+        compile_dir,
+        None,
+        [np.zeros(2, np.float32)],
+        _runner._comparison_config_dict({"fp_avg_tol": 0.01, "fp_max_tol": 0.01}),
+    )
+    compare_fn()
+
+    assert len(captured) == 1
+    assert captured[0].vmfb_path == compile_dir / "onnx_mlir.abc123.vmfb"
 
 
 @needs_tools
@@ -431,9 +466,82 @@ def _load_example_model() -> onnx.ModelProto:
     return onnx.load(str(TEST_MODEL))
 
 
-def test_quantize_onnx_model_qdq():
-    """quantize_onnx_model produces a QDQ model with float I/O."""
-    quantized = quantize_onnx_model(_load_example_model())
+class _CalibrationDataReader(CalibrationDataReader):
+    """Yield a fixed sequence of representative model inputs."""
+
+    def __init__(self, samples):
+        self.samples = iter(samples)
+
+    def get_next(self):
+        return next(self.samples, None)
+
+
+def _make_matmul_model() -> onnx.ModelProto:
+    weight = numpy_helper.from_array(np.eye(2, dtype=np.float32), "weight")
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["input", "weight"], ["output"])],
+        "calibration-matmul",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 2])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2])],
+        [weight],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    model.ir_version = 10
+    return model
+
+
+def _initializer_value(model: onnx.ModelProto, name: str) -> np.ndarray:
+    initializer = next(init for init in model.graph.initializer if init.name == name)
+    return numpy_helper.to_array(initializer)
+
+
+def test_onnx_static_quantize_uses_provided_calibration_data():
+    """Representative data controls the activation range used by ORT."""
+    small_range = onnx_static_quantize(
+        _make_matmul_model(),
+        calibration_data_reader=_CalibrationDataReader(
+            [{"input": np.array([[1.0, -0.5]], dtype=np.float32)}]
+        ),
+    )
+    large_range = onnx_static_quantize(
+        _make_matmul_model(),
+        calibration_data_reader=_CalibrationDataReader(
+            [{"input": np.array([[8.0, -4.0]], dtype=np.float32)}]
+        ),
+    )
+
+    assert _initializer_value(small_range, "input_scale") < _initializer_value(
+        large_range, "input_scale"
+    )
+
+
+def test_quantize_cli_hybrid_format(tmp_path):
+    """The quantize CLI resolves the per-layer hybrid strategy for file inputs."""
+    model_path = tmp_path / "model.onnx"
+    output_path = tmp_path / "model.int8.onnx"
+    onnx.save(_load_example_model(), model_path)
+
+    result = _run_cli(
+        "quantize",
+        "--model",
+        str(model_path),
+        "--output",
+        str(output_path),
+        "--quant-format",
+        "hybrid",
+        "--full-integer",
+    )
+
+    assert result.returncode == 0, result.stderr
+    quantized = onnx.load(output_path)
+    op_types = {n.op_type for n in quantized.graph.node}
+    assert "QLinearConv" in op_types
+    assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.INT8
+
+
+def test_onnx_static_quantize_qdq():
+    """onnx_static_quantize produces a QDQ model with float I/O."""
+    quantized = onnx_static_quantize(_load_example_model())
 
     # QDQ format keeps float I/O.
     assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
@@ -445,18 +553,64 @@ def test_quantize_onnx_model_qdq():
     assert "DequantizeLinear" in op_types
 
 
-def test_quantize_onnx_model_full_integer():
-    """quantize_onnx_model with full_integer=True produces int8 I/O."""
-    quantized = quantize_onnx_model(_load_example_model(), full_integer=True)
+def test_onnx_static_quantize_full_integer():
+    """onnx_static_quantize with full_integer=True produces int8 I/O."""
+    quantized = onnx_static_quantize(_load_example_model(), full_integer=True)
 
     # Full-integer rewrite should make I/O int8.
     assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.INT8
     assert quantized.graph.output[0].type.tensor_type.elem_type == TensorProto.INT8
 
 
+def test_auto_bf16_accepts_full_bf16_constant_range():
+    from torq.gen_config._runner import _maybe_apply_bf16_conversion
+
+    constant = numpy_helper.from_array(np.array([1e10], dtype=np.float32), "constant")
+    graph = helper.make_graph(
+        [helper.make_node("Add", ["input", "constant"], ["output"])],
+        "large-bf16-constant",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])],
+        [constant],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+
+    converted = _maybe_apply_bf16_conversion(model, Path("model.onnx"), True, None)
+
+    converted_constant = next(
+        initializer
+        for initializer in converted.graph.initializer
+        if initializer.name == "constant_bf16"
+    )
+    assert converted_constant.data_type == TensorProto.BFLOAT16
+
+
+def test_auto_bf16_fixes_dynamic_batch_in_returned_and_saved_model(tmp_path):
+    from torq.gen_config._runner import _maybe_apply_bf16_conversion
+
+    graph = helper.make_graph(
+        [helper.make_node("Identity", ["input"], ["output"])],
+        "dynamic-batch",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, ["batch", 2])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, ["batch", 2])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    saved_path = tmp_path / "model-bf16.onnx"
+
+    converted = _maybe_apply_bf16_conversion(
+        model, Path("model.onnx"), True, str(saved_path)
+    )
+
+    for converted_model in (converted, onnx.load(saved_path)):
+        input_batch = converted_model.graph.input[0].type.tensor_type.shape.dim[0]
+        output_batch = converted_model.graph.output[0].type.tensor_type.shape.dim[0]
+        assert input_batch.dim_value == 1
+        assert output_batch.dim_value == 1
+
+
 def test_convert_qdq_to_full_integer():
     """Full-integer rewrite removes I/O Q/DQ nodes and changes graph I/O to int8."""
-    qdq_model = quantize_onnx_model(_load_example_model())
+    qdq_model = onnx_static_quantize(_load_example_model())
     converted = convert_qdq_to_full_integer(qdq_model)
 
     # I/O should now be int8.
@@ -469,9 +623,9 @@ def test_convert_qdq_to_full_integer():
     assert "DequantizeLinear" in remaining_ops
 
 
-def test_quantize_onnx_model_qoperator():
-    """quantize_onnx_model with quant_format='qoperator' produces QLinearConv."""
-    quantized = quantize_onnx_model(_load_example_model(), quant_format="qoperator")
+def test_onnx_static_quantize_qoperator():
+    """onnx_static_quantize with quant_format='qoperator' produces QLinearConv."""
+    quantized = onnx_static_quantize(_load_example_model(), quant_format="qoperator")
 
     # QOperator format keeps float I/O unless full_integer is used.
     assert quantized.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
@@ -482,9 +636,9 @@ def test_quantize_onnx_model_qoperator():
     assert "QLinearConv" in op_types
 
 
-def test_quantize_onnx_model_qoperator_full_integer():
+def test_onnx_static_quantize_qoperator_full_integer():
     """qoperator + full-integer produces int8 I/O and QLinearConv."""
-    quantized = quantize_onnx_model(
+    quantized = onnx_static_quantize(
         _load_example_model(), quant_format="qoperator", full_integer=True
     )
 
@@ -498,9 +652,9 @@ def test_quantize_onnx_model_qoperator_full_integer():
 
 
 
-def test_quantize_onnx_model_hybrid_prefers_qoperator_for_conv():
+def test_onnx_static_quantize_hybrid_prefers_qoperator_for_conv():
     """hybrid format picks qoperator for Conv layers (QLinearConv)."""
-    quantized = quantize_onnx_model(
+    quantized = onnx_static_quantize(
         _load_example_model(), quant_format="hybrid", full_integer=True
     )
 
@@ -514,7 +668,7 @@ def test_quantize_onnx_model_hybrid_prefers_qoperator_for_conv():
     assert "QLinearConv" in op_types
 
 
-def test_quantize_onnx_model_hybrid_falls_back_to_qdq_for_reducemean():
+def test_onnx_static_quantize_hybrid_falls_back_to_qdq_for_reducemean():
     """hybrid format falls back to QDQ (or leaves fp32) for unsupported ops."""
     input = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, 4, 4])
     output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 3, 1, 1])
@@ -524,7 +678,7 @@ def test_quantize_onnx_model_hybrid_falls_back_to_qdq_for_reducemean():
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
     model.ir_version = 10
 
-    quantized = quantize_onnx_model(model, quant_format="hybrid", full_integer=True)
+    quantized = onnx_static_quantize(model, quant_format="hybrid", full_integer=True)
 
     # ONNX Runtime does not quantize ReduceMean, so the model is unchanged and
     # QLinearReduceMean does not exist.  This verifies the hybrid picker did not
@@ -536,12 +690,12 @@ def test_quantize_onnx_model_hybrid_falls_back_to_qdq_for_reducemean():
 
 
 def test_parse_quant_dtype():
-    """_parse_quant_dtype returns the expected (activation, weight) QuantType pair."""
-    assert _parse_quant_dtype("a8w8") == (QuantType.QInt8, QuantType.QInt8)
-    assert _parse_quant_dtype("A8W8") == (QuantType.QInt8, QuantType.QInt8)
+    """parse_quant_dtype returns the expected (activation, weight) QuantType pair."""
+    assert parse_quant_dtype("a8w8") == (QuantType.QInt8, QuantType.QInt8)
+    assert parse_quant_dtype("A8W8") == (QuantType.QInt8, QuantType.QInt8)
 
     with pytest.raises(ValueError):
-        _parse_quant_dtype("a16w8")
+        parse_quant_dtype("a16w8")
 
 
 def test_discovery_config_from_config_and_args(tmp_path):

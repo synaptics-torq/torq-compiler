@@ -51,7 +51,7 @@ class DiscoveryConfig:
     # metrics, skip reasons); mirrors the CLI's --verbose flag.
     verbose: bool = False
 
-    # --- Quantization (torq.lab.quantize_onnx._ONNX_QUANTIZATION_OPTIONS) ---
+    # --- Quantization (torq.lab.quantization.onnx.static.ONNX_STATIC_QUANTIZATION_OPTIONS) ---
     quantize: bool = False
     per_channel: bool = False
     full_integer: bool = False
@@ -184,14 +184,14 @@ class DiscoveryConfig:
     def from_config_and_args(cls, args: argparse.Namespace) -> "DiscoveryConfig":
         """Layer any --config files under the explicit CLI args with CLI taking precedence.
 
-        Loads and deep-merges the --config JSON via torq.lab.types.load_config,
+        Loads and deep-merges the --config JSON via torq.lab.pipeline.workflow.load_config,
         maps the shared PipelineConfig keys + the gen_config: section into a
         DiscoveryConfig, then overlays from_argparse(args): a field takes the
         argparse value when it differs from the dataclass default, else the config
         value.
         """
         from pathlib import Path
-        from torq.lab.types import load_config
+        from torq.lab.pipeline.workflow import load_config
 
         cli_config = cls.from_argparse(args)
 

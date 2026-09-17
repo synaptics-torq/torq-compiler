@@ -28,12 +28,10 @@ from torq.gen_config.core import (
 )
 from torq.gen_config._utils import format_per_layer_status_table
 from torq.gen_config.view import print_layer_details, print_summary
-from torq.lab.quantize_onnx import (
-    _parse_quant_dtype,
-    _parse_quant_format,
-    add_onnx_quantization_args,
-    convert_qdq_to_full_integer,
-    quantize_onnx_static,
+from torq.lab.quantization.onnx import quantize_onnx_model
+from torq.lab.quantization.onnx.static import (
+    add_onnx_static_quantization_args,
+    add_static_quant_flags,
 )
 
 
@@ -116,8 +114,6 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_quantize(args: argparse.Namespace) -> int:
     """Quantize an FP32 ONNX model to integer QDQ (optionally full-integer)."""
-    import onnx
-
     model_path = Path(args.model)
     if not model_path.exists():
         print(f"Error: Model not found: {model_path}", file=sys.stderr)
@@ -126,27 +122,18 @@ def cmd_quantize(args: argparse.Namespace) -> int:
     output_path = Path(args.output) if args.output else model_path.with_suffix(".int8.onnx")
 
     try:
-        quant_format = _parse_quant_format(args.quant_format)
-        activation_type, weight_type = _parse_quant_dtype(
-            getattr(args, "quant_dtype", "A8W8")
-        )
-
-        quantize_onnx_static(
-            model_input=model_path,
-            model_output=output_path,
+        quantize_onnx_model(
+            model_path,
+            output_path,
+            method="static",
             num_calib=args.num_calib,
+            dataset=args.dataset,
             per_channel=args.per_channel,
-            quant_format=quant_format,
-            activation_type=activation_type,
-            weight_type=weight_type,
+            full_integer=args.full_integer,
+            quant_format=args.quant_format,
+            quant_dtype=args.quant_dtype,
         )
-
         if args.full_integer:
-            model = onnx.load(str(output_path))
-            model = convert_qdq_to_full_integer(
-                model, io_dtype=activation_type.tensor_type
-            )
-            onnx.save(model, str(output_path))
             print(f"Full-integer quantized model saved to: {output_path}")
         else:
             print(f"Quantized model saved to: {output_path}")
@@ -541,7 +528,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         const="tmp",
         help="Dump IR to directory for debugging (default: tmp)",
     )
-    add_onnx_quantization_args(discover_parser)
+    add_onnx_static_quantization_args(discover_parser)
     discover_parser.set_defaults(func=cmd_discover)
 
     # run (full model)
@@ -567,7 +554,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--subgraph-to",
         help="End op name for subgraph (output tensor name or OpType_outputName)",
     )
-    add_onnx_quantization_args(run_parser)
+    add_onnx_static_quantization_args(run_parser)
     run_parser.set_defaults(func=cmd_run)
 
     # view
@@ -638,37 +625,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--num-calib",
         type=int,
         default=20,
-        help="Number of random calibration samples (default: 20)",
+        help="Number of synthetic calibration samples (default: 20)",
     )
     quantize_parser.add_argument(
-        "--per-channel",
-        action="store_true",
-        help="Use per-channel weight quantization",
+        "--dataset",
+        type=Path,
+        help="Calibration dataset (not implemented yet, check back soon)",
     )
-    quantize_parser.add_argument(
-        "--full-integer",
-        action="store_true",
-        help="Rewrite I/O to integer (remove input Q and output DQ nodes)",
-    )
-    quantize_parser.add_argument(
-        "--quant-format",
-        default="qdq",
-        choices=["qdq", "qoperator", "hybrid"],
-        help=(
-            "ONNX quantization format: qdq (default), qoperator, or hybrid. "
-            "Hybrid picks qoperator for ops with good qoperator support "
-            "(Conv, Add, MatMul, ...) and qdq for the rest, applied per layer."
-        ),
-    )
-    quantize_parser.add_argument(
-        "--quant-dtype",
-        default="A8W8",
-        choices=["A8W8"],
-        help=(
-            "Quantized activation/weight integer dtype combination "
-            "(case-insensitive). Currently only A8W8 is supported."
-        ),
-    )
+    add_static_quant_flags(quantize_parser)
     quantize_parser.set_defaults(func=cmd_quantize)
 
     args = parser.parse_args(argv)

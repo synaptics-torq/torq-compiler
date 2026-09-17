@@ -1,7 +1,7 @@
 import pytest
 
-from torq.lab.dtypes import ConvertIODTypesPolicy
-from torq.lab.types import LabError
+from torq.lab import LabError
+from torq.lab.pipeline.io import ConvertIODTypesPolicy
 
 from .versioned_fixtures import (
     versioned_hashable_object_fixture,

@@ -4,11 +4,11 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Unit tests for torq.lab.compare."""
+"""Unit tests for torq.lab.verification.compare."""
 
 import numpy as np
 
-from torq.lab.compare import compare_outputs
+from torq.lab.verification.compare import compare_outputs
 
 
 def test_int_beyond_threshold_fails():

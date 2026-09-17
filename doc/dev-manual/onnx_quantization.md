@@ -167,6 +167,13 @@ failing on `Gemm` and pure QDQ missing the more compact qoperator form.
 `torq-gen-config discover` and `torq-gen-config run` are the two entry points for
 quantized ONNX models.
 
+The Python static-quantization helpers accept ONNX Runtime's
+`CalibrationDataReader` through `calibration_data_reader`; use it to yield
+representative dictionaries keyed by ONNX input name. This lets applications use
+ONNX Runtime's existing readers or their own dataset adapters without a Torq
+dataset format. Calls without a reader fall back to deterministic synthetic
+random calibration inputs.
+
 ### Supported Quantization Options
 
 | Option | Effect |
@@ -610,4 +617,3 @@ input-zero-point correction. The principle remains:
   - https://arxiv.org/abs/1806.08342
 - Jacob et al., "Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference", CVPR 2018.
   - https://arxiv.org/abs/1712.05877
-

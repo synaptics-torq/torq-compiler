@@ -4,11 +4,11 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Unit tests for torq.lab.artifact.describe()'s precedence resolution."""
+"""Unit tests for torq.lab.pipeline.artifacts.describe()'s precedence resolution."""
 
 import json
 
-from torq.lab.artifact import describe
+from torq.lab.pipeline.artifacts import describe
 
 TOSA_MLIR = """
 module {
