@@ -158,6 +158,24 @@ class SSHCommandRunner(RemoteCommandRunner):
         except OSError:
             pass
 
+    def check_multiplex(self):
+        if self.multiplex:
+            cmd = [
+                "ssh", "-O", "check",
+                "-o", f"ControlPath={self.ssh_socket}",
+                "-p", str(self.port),
+                self.board_addr
+            ]
+            try:
+                out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT, timeout=self.timeout)
+                self._logger.warning("Multiplex connection is active: %s", out.strip())
+            except subprocess.CalledProcessError as e:
+                self._logger.warning("Multiplex connection is not active: %s", (e.output or "").strip())
+            except Exception as e:
+                self._logger.warning("Multiplex check failed: %s", e)
+        else:
+            self._logger.warning("Multiplex connection is not enabled.")
+
     def run_cmd(self, cmd: str | list[str]) -> str | None:
         if isinstance(cmd, str):
             cmd = shlex.split(cmd)
@@ -194,6 +212,7 @@ class SSHCommandRunner(RemoteCommandRunner):
                 self._format_output(e.output, self.timeout),
             ) from e
         except subprocess.CalledProcessError as e:
+            self.check_multiplex()
             raise RemoteCommandError(
                 self._format_cmd(e.cmd),
                 self._format_output(e.stdout),
@@ -233,6 +252,7 @@ class SSHCommandRunner(RemoteCommandRunner):
             if not self.multiplex:
                 self._logger.info("Copied \"%s\" to \"%s\"", src, dst)
         except subprocess.CalledProcessError as e:
+            self.check_multiplex()
             raise RemoteCommandError(
                 self._format_cmd(e.cmd),
                 self._format_output(e.stdout),
