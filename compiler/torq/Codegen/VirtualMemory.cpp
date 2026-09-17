@@ -1220,22 +1220,27 @@ static FailureOr<SetVector<Value>> reserveMemoryForOperation(
 ) {
     SetVector<Value> toSwapIn;
     SmallVector<Value> pinnedValues;
-    SetVector<VirtualBuffer *> distinctRoots;
+    DenseSet<VirtualBuffer *> distinctRoots;
+    int swapInSize = 0;
     for (auto *operand : info.operands) {
         Value value = operand->get();
-        if (vm.isSwappedOut(value)) {
-            toSwapIn.insert(value);
-            distinctRoots.insert(&vm.virtualObjects.getVirtualObject(value).root());
-        }
-        else {
+        if (!vm.isSwappedOut(value)) {
             vm.pin(value);
             pinnedValues.push_back(value);
+            continue;
         }
-    }
-
-    int swapInSize = 0;
-    for (auto *root : distinctRoots) {
-        swapInSize += root->size();
+        toSwapIn.insert(value);
+        VirtualBuffer &root = vm.virtualObjects.getVirtualObject(value).root();
+        if (!distinctRoots.insert(&root).second) {
+            continue;
+        }
+        if (root.isSwappedOut()) {
+            swapInSize += root.size();
+        }
+        else {
+            vm.pin(root.value());
+            pinnedValues.push_back(root.value());
+        }
     }
 
     rewriter.setInsertionPoint(op);
