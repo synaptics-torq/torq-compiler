@@ -19,18 +19,18 @@
 // and the low byte i8 slot 2k all alias).
 //
 // Slot layout (bf16 element index unless noted). The results lead, scratch follows:
-//   [0] inv_scale (result)     [5] neg_min_adj (kept for zp)
+//   [0] inv_scale (result)     [5] neg_min (= -min_x)
 //   [1] zp (result)            [6] expo   = 0x7E80 - x            (i16)
 //   [2] scale (result)         [7] lutVal16 = zext(lutVal8)       (i16, [6]+1)
-//   [3] neg_min (= -min_x)     [8] lutVal8 = LUT[mant8]           (i8 @ byte 16)
+//   [3] neg_min_adj (result)   [8] lutVal8 = LUT[mant8]           (i8 @ byte 16)
 //   [4] max_adj                [9] recip = bitcast(expo+lutVal16) (bf16)
 //                             [10] range_safe (recip in)
 //
 // Tasks (each 1 ALU pass + 1 ACT pass + 1 store):
 //   [4] max_adj     = clamp(max_x, 0, +inf)
-//   [3] neg_min     = -min_x                              (ACT NEG, full range)
-//   [5] neg_min_adj = clamp([3], 0, +inf)
-//  [10] range_safe  = clamp([4] + [5], eps, +inf)         (2-elt accumulate)
+//   [5] neg_min     = -min_x                              (ACT NEG, full range)
+//   [3] neg_min_adj = clamp([5], 0, +inf)
+//  [10] range_safe  = clamp([3] + [4], eps, +inf)         (2-elt accumulate)
 //   reciprocal (full-range exponent+mantissa, bit-identical to the linalg
 //   BfloatReciprocalPattern, DecomposeLinalgOpsPattern.cpp:446):
 //   [6] expo        = 0x7E80 - x   with x = i16 bits of range_safe   (ACT affine)
@@ -58,12 +58,12 @@ namespace {
 
 // Blob slot layout. The op's results occupy the leading slots; the rest is kernel scratch.
 enum Slot {
-    INV_SCALE = 0, // result
-    ZP = 1,        // result
-    SCALE = 2,     // result
-    NEG_MIN = 3,
+    INV_SCALE = 0,   // result
+    ZP = 1,          // result
+    SCALE = 2,       // result
+    NEG_MIN_ADJ = 3, // result (must stay adjacent to MAX_ADJ for the range accumulate)
     MAX_ADJ = 4,
-    NEG_MIN_ADJ = 5,
+    NEG_MIN = 5,
     EXPO = 6,     // i16
     LUTVAL16 = 7, // i16 (contiguous with EXPO for the 2-elt recombine)
     LUTVAL8 = 8,  // i8 (low byte only)
@@ -222,19 +222,19 @@ LogicalResult DeriveQuantParamsPattern::transform(
         rewriter, loc, "dqp_max_adj", op.getMaxX(), 0, D::bf16, blob, MAX_ADJ, D::bf16, zero,
         posInf, M::ACT
     );
-    // [3] neg_min = -min_x  (full-range negate)
+    // [5] neg_min = -min_x  (full-range negate)
     emitScalarClamp(
         rewriter, loc, "dqp_neg_min", op.getMinX(), 0, D::bf16, blob, NEG_MIN, D::bf16, negInf,
         posInf, M::NEG
     );
-    // [5] neg_min_adj = clamp([3], 0, +inf)
+    // [3] neg_min_adj = clamp([5], 0, +inf)
     emitScalarClamp(
         rewriter, loc, "dqp_neg_min_adj", blob, NEG_MIN, D::bf16, blob, NEG_MIN_ADJ, D::bf16, zero,
         posInf, M::ACT
     );
-    // [10] range_safe = clamp([4] + [5], eps, +inf)  (MAX_ADJ, NEG_MIN_ADJ are contiguous)
+    // [10] range_safe = clamp([3] + [4], eps, +inf)  (NEG_MIN_ADJ, MAX_ADJ are contiguous)
     emitScalarSumClamp(
-        rewriter, loc, "dqp_range_safe", blob, MAX_ADJ, D::bf16, RANGE_SAFE, eps, posInf
+        rewriter, loc, "dqp_range_safe", blob, NEG_MIN_ADJ, D::bf16, RANGE_SAFE, eps, posInf
     );
 
     // ---- reciprocal: recip = 1/range_safe, full-range exponent+mantissa ----

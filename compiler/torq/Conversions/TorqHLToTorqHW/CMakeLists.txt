@@ -41,6 +41,7 @@ set(sources
     Conv2DToHw.cpp
     DWToHw.cpp
     TransposeToHw.cpp
+    ZeroPointCorrectPattern.cpp
     ResizeNearestNeighborPattern.cpp
     BroadcastPattern.cpp
     TransposeReshapePattern.cpp

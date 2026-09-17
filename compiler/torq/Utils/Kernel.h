@@ -711,6 +711,8 @@ class Act : SliceComponent {
     // float t0 = pdata + bdata[i % BS][0];
     // float t1 = (t0<clipMin) ? clipMin : (t0>clipMax) ? clipMax : t0;
     // qdata = t1;
+    //
+    // Non-default ACT modes bypass the BRAM bias/scale record; use clamp() for them.
     QData rescaleClamp(
         const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax
     );

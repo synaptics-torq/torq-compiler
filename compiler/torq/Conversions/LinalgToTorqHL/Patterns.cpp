@@ -3080,6 +3080,11 @@ void populateLinalgToTorqHLPatterns(
     if (markFuseGroups)
         return;
 
+    // The raised MatMulInteger's i32 zero-point correction. Also registered in the pre-pass,
+    // which claims it before tiling when the chain is small enough not to be sliced; a sliced
+    // chain re-presents it here, per slice.
+    populateLinalgToTorqHLMatMulIntegerCorrectPatterns(context, patterns, markFuseGroups);
+
     // IMPORTANT: Since sigmoid op contains exp in its body Exp pattern must be called after Sigmoid
     // pattern in order to make sure that exp pattern doesn't match sigmoid op, see:
     // https://mlir.llvm.org/docs/PatternRewriter/#walk-pattern-rewrite-driver

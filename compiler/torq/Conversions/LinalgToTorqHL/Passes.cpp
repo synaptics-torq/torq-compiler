@@ -57,6 +57,9 @@ void populateLinalgToTorqHLPrePatterns(
     // win when the matmul has the Conv1D transpose/expand layout.
     populateLinalgToTorqHLConv1DMatmulPatterns(context, patterns, markFuseGroups);
 
+    // The raised MatMulInteger's i32 zero-point correction plus its int-to-float cast.
+    populateLinalgToTorqHLMatMulIntegerCorrectPatterns(context, patterns, markFuseGroups);
+
     populateLinalgToTorqHLConv2DMatmulPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLPoolingPatterns(context, patterns, markFuseGroups);
 
@@ -136,12 +139,33 @@ static bool isHostOrCssExecutor(Operation *op) {
     return executor == torq_hl::Executor::Host || executor == torq_hl::Executor::CSS;
 }
 
+static LogicalResult validateRaisedMatmulAttributeContract(FunctionOpInterface funcOp) {
+    WalkResult result = funcOp.walk([](linalg::MatmulOp op) {
+        Attribute raisedAttr = op->getAttr(TORQ_RAISED_MATMUL_INTEGER);
+        Attribute unsignedAttr = op->getAttr(TORQ_MATMUL_LHS_UNSIGNED);
+        if (!raisedAttr && !unsignedAttr)
+            return WalkResult::advance();
+        if (isa_and_nonnull<UnitAttr>(raisedAttr) && isa_and_nonnull<UnitAttr>(unsignedAttr))
+            return WalkResult::advance();
+
+        op.emitOpError() << "raised MatMulInteger attribute contract violated: '"
+                         << TORQ_RAISED_MATMUL_INTEGER << "' and '" << TORQ_MATMUL_LHS_UNSIGNED
+                         << "' must both be present as UnitAttr attributes";
+        return WalkResult::interrupt();
+    });
+    return result.wasInterrupted() ? failure() : success();
+}
+
 class LinalgToTorqHLConversionPass
     : public impl::LinalgToTorqHLConversionBase<LinalgToTorqHLConversionPass> {
   public:
     using LinalgToTorqHLConversionBase::LinalgToTorqHLConversionBase;
 
     void runOnOperation() override {
+
+        if (failed(validateRaisedMatmulAttributeContract(getOperation()))) {
+            return signalPassFailure();
+        }
 
         auto *context = &getContext();
 
@@ -220,6 +244,10 @@ class LinalgToTorqHLPreConversionPass
     void runOnOperation() override {
         auto funcOp = getOperation();
         auto *ctx = funcOp.getContext();
+
+        if (failed(validateRaisedMatmulAttributeContract(funcOp))) {
+            return signalPassFailure();
+        }
 
         ConversionTarget target(*ctx);
         target.addLegalDialect<
@@ -335,6 +363,10 @@ class MarkPatternsForTileAndFusePass
     void runOnOperation() override {
         auto funcOp = getOperation();
         auto *ctx = &getContext();
+
+        if (failed(validateRaisedMatmulAttributeContract(funcOp))) {
+            return signalPassFailure();
+        }
 
         // Assign UIDs to TilingInterface operations
         OpBuilder builder(funcOp);

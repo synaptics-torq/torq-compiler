@@ -224,6 +224,10 @@ void registerBufferizationInterfaceExternalModels(DialectRegistry &registry) {
             TorqHLBufferizableOpInterface<syna::torq_hl::MaxPool2dOp>>(*context);
         syna::torq_hl::MatMulOp::attachInterface<
             TorqHLBufferizableOpInterface<syna::torq_hl::MatMulOp>>(*context);
+        syna::torq_hl::ZeroPointBiasTableOp::attachInterface<
+            TorqHLBufferizableOpInterface<syna::torq_hl::ZeroPointBiasTableOp>>(*context);
+        syna::torq_hl::ZeroPointCorrectOp::attachInterface<
+            TorqHLBufferizableOpInterface<syna::torq_hl::ZeroPointCorrectOp>>(*context);
         syna::torq_hl::GatherOp::attachInterface<
             TorqHLBufferizableOpInterface<syna::torq_hl::GatherOp>>(*context);
         syna::torq_hl::Im2ColOp::attachInterface<

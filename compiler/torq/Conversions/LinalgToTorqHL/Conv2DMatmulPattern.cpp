@@ -254,6 +254,14 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
             return rewriter.notifyMatchFailure(srcOp, "Already marked");
         }
 
+        // Raised MatMulInteger matmuls are owned by Conv1DMatmulToTorqHlFCPattern,
+        // which is the only pattern that reads torq-matmul-lhs-unsigned.
+        if (srcOp->hasAttr(TORQ_RAISED_MATMUL_INTEGER)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "raised MatMulInteger handled by Conv1DMatmulToTorqHlFCPattern"
+            );
+        }
+
         Location loc = srcOp.getLoc();
 
         if (srcOp.getInputs().size() != 2 || srcOp.getResults().size() != 1) {

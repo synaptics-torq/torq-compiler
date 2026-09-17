@@ -314,6 +314,17 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
             );
         }
 
+        // A single-element multiplier needs no explicit broadcast even when it is a
+        // runtime value: torq_hl.mul takes it as a WRAM operand and broadcasts it in
+        // the kernel (the runtime-scale quantize passes a <1xbf16> the same way).
+        // Materializing one costs a full pass over the result shape.
+        if (isa_and_nonnull<arith::MulIOp, arith::MulFOp>(eleOp) &&
+            (input1Type.getNumElements() == 1 || input2Type.getNumElements() == 1)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "scalar multiplier is broadcast by the mul kernel\n"
+            );
+        }
+
         // TODO: add more recursive scalar input processing for elementwise binary ops
         // right now we only handle add/sub with recurive scalar input processing
         if (eleOp && (isa<arith::AddIOp>(eleOp) || isa<arith::SubIOp>(eleOp))) {

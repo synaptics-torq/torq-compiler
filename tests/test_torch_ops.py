@@ -129,6 +129,18 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in request.param.data.name for s in no_slicing_tc):
         extra_args["torq_compiler_options"].append("--torq-disable-slicing")
 
+    # The topk cases lower their sort to a Host/CSS software kernel. This is not
+    # a compiler or runtime change: simulating that sort over 2100 elements on
+    # the CModel is inherently slow, so it can exceed the 240s default runtime
+    # timeout on a slower CI runner for the sl2610-v1 sim. The extra budget
+    # applies to sim only, so the strict default still catches a genuinely slow
+    # sort on fpga/hardware.
+    if (
+        runtime_hw_type.data == "sim"
+        and any(s in request.param.data.name for s in ["topk-1x2100-bf16", "topk-1x2100-indices-only-bf16"])
+    ):
+        extra_args["torq_runtime_timeout"] = 600
+
     # Force in-tree torch_ops cases onto the NSS/slice path so we fail loudly
     # if a future change silently routes them to the host/CSS fallback.
     # torch_ops_host_css/ and extras testdata are exempted (parent.name ==
@@ -140,8 +152,9 @@ def case_config(request, runtime_hw_type, chip_config):
         ])
 
     # ONNX DynamicQuantizeLinear tensors are always f32, so DQL is only reachable
-    # in a bf16 pipeline via --torq-convert-dtypes.
-    if 'dynamicquantize' in request.param.data.name:
+    # in a bf16 pipeline via --torq-convert-dtypes. The same holds for the
+    # DQL -> MatMulInteger -> dequant chain.
+    if any(s in request.param.data.name for s in ['dynamicquantize', 'matmulinteger']):
         extra_args["torq_compiler_options"].extend([
             "--torq-convert-dtypes", "--torq-convert-io-dtype",
             "--torq-disable-host", "--torq-disable-css",

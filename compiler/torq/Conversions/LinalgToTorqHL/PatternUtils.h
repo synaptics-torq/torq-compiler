@@ -24,6 +24,20 @@ extern const std::string TORQ_FUSE_GROUP;
 // Marks a generic rewritten from a batch-invariant-weight batch_matmul
 // (replaceBatchMatmulWithBroadcastGeneric): still a matmul to the tiling heuristics.
 extern const std::string TORQ_BROADCAST_MATMUL;
+// Marks the matmul RaiseMatMulInteger emits; see Conv1DMatmulPattern.cpp.
+// Always set together with TORQ_MATMUL_LHS_UNSIGNED. The LinalgToTorqHL pass
+// boundaries hard-fail compilation if either attribute is missing or is not a
+// UnitAttr; a software fallback cannot recover the unsigned semantics after
+// the original zero-extended MatMulInteger chain has been raised.
+// The flag chain is linalg UnitAttr -> torq_hl.matmul input1_unsigned
+// BoolAttr -> toUnsigned() dtype in TorqHLToTorqHW; a typo or a missed
+// set/consume anywhere in it is invisible to the compiler, so keep the two
+// attributes at their declaration and the set/consume sites in sync.
+extern const std::string TORQ_RAISED_MATMUL_INTEGER;
+// Marks a matmul whose LHS holds unsigned 8-bit data (MLIR i8 is signless).
+// A semantic fact, not a hint: if it is dropped between the raise and the
+// materialization, every activation byte >= 128 would multiply as signed.
+extern const std::string TORQ_MATMUL_LHS_UNSIGNED;
 
 // Input Scale Information
 struct ScaleInfo {
@@ -293,6 +307,9 @@ MultiplierShiftInfo getMultiplierAndShift(
 ScaleClampInfo getDefaultScaleClampInfo(Type outElemType, Operation *srcOp);
 
 Operation *getElementwiseTernaryOp(linalg::GenericOp op, bool allowConstants = false);
+
+// Match a float [N] bias, optionally rank-aligned or broadcast over `outShape`.
+Value matchPerChannelFloatBias(Value value, ArrayRef<int64_t> outShape);
 
 Operation *getElementwiseBinaryOp(linalg::GenericOp op, bool allowConstants = false);
 

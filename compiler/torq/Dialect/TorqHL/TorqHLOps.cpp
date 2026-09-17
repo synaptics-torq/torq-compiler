@@ -952,8 +952,58 @@ class FoldNoOpClamp : public OpRewritePattern<ActOp> {
     }
 };
 
+// Sink a widening float conversion into the multiply that produces its input.
+//
+// An act "f2f" from bf16 to f32 is a store format, not arithmetic: the ALU's float
+// partials are fp32 already, and the producer's bf16 result is the rounding its own
+// ACT applied on the way out. A producer whose partials are fp32 can therefore write
+// f32 itself, which costs nothing and removes the conversion's whole pass.
+//
+// Restricted to torq_hl.mul with float operands, where the partials are fp32 by
+// construction. An integer-partial producer would need an i2f conversion, which is
+// arithmetic and not foldable this way.
+class SinkWideningConvertIntoMul : public OpRewritePattern<ActOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(ActOp op, PatternRewriter &rewriter) const override {
+        if (op.getName() != "f2f" || op.getWeights())
+            return failure();
+
+        Value output = op.getOutput();
+        auto inTy = dyn_cast<RankedTensorType>(op.getInput().getType());
+        auto outTy = output ? dyn_cast<RankedTensorType>(output.getType()) : nullptr;
+        if (!inTy || !outTy || inTy.getShape() != outTy.getShape() ||
+            !inTy.getElementType().isBF16() || !outTy.getElementType().isF32())
+            return failure();
+
+        auto mul = op.getInput().getDefiningOp<MulOp>();
+        if (!mul || !mul.getOutput() || !mul.getOutput().hasOneUse())
+            return failure();
+        for (Value in : {mul.getInput1(), mul.getInput2()}) {
+            if (!isa<FloatType>(cast<ShapedType>(in.getType()).getElementType()))
+                return failure();
+        }
+
+        // Reuse the conversion's own init rather than building one: it already has the
+        // wider type, the same shape and whatever encoding the tensor carries at this
+        // point in the pipeline. It only has to be moved above its new user.
+        auto init = op.getInit().getDefiningOp<tensor::EmptyOp>();
+        if (!init || !init.getDynamicSizes().empty())
+            return failure();
+        rewriter.moveOpBefore(init, mul);
+
+        rewriter.modifyOpInPlace(mul, [&]() {
+            mul.getInitMutable().assign(init.getResult());
+            mul.getOutput().setType(outTy);
+        });
+        rewriter.replaceOp(op, mul.getOutput());
+        return success();
+    }
+};
+
 void ActOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context) {
-    results.add<FoldNoOpClamp>(context);
+    results.add<FoldNoOpClamp, SinkWideningConvertIntoMul>(context);
 }
 
 } // namespace mlir::syna::torq_hl

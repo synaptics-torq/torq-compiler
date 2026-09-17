@@ -6,6 +6,7 @@ set(sources
   ClampPattern.cpp
   Conv1DPattern.cpp
   Conv1DMatmulPattern.cpp
+  MatMulIntegerCorrectPattern.cpp
   Conv2DPattern.cpp
   QConv2DPattern.cpp
   QMatmulPattern.cpp

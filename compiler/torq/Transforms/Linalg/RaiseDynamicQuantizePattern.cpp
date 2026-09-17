@@ -16,9 +16,10 @@
 // tileable form: cast x to bf16, take min and max in a single combined 2-output reduce
 // (one streaming pass over x), derive inv_scale via one linalg.reciprocal, and
 // emit the reused runtime-scale quantize (mul + round + clamp -> uint8). We
-// recompute scale/zp ourselves — the unrounded bf16 zero-point
+// recompute scale/zp ourselves. The bf16 zero-point
 //   zp = -min(0, min(x)) * inv_scale   (provably in [0,255], no clip needed)
-// avoids a systematic dequant bias, so the old scalar chain is left to die.
+// is rounded before both quantization and publication, matching ONNX's contract
+// that the integer y_zero_point is added after x/scale is rounded.
 //
 // Raised form:
 //   x_bf16      = truncf(x)                       // only when x is f32
@@ -28,8 +29,9 @@
 //   range       = max_adj - min_adj
 //   range_safe  = max(range, eps)                 // eps guards the all-equal input
 //   inv_scale   = reciprocal(range_safe) * 255    // = 255 / range_safe
-//   zp          = -min_adj * inv_scale            // unrounded, in [0, 255]
-//   y           = fptoui(clamp(roundeven(x_bf16 * inv_scale + zp), 0, 255))
+//   zp          = -min_adj * inv_scale            // bf16, in [0, 255]
+//   zp_i32      = roundeven(zp)
+//   y           = fptoui(clamp(roundeven(x_bf16 * inv_scale + zp_i32), 0, 255))
 
 #include "Patterns.h"
 
@@ -40,6 +42,7 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
 
 namespace mlir::syna::torq {
@@ -70,6 +73,24 @@ static Value dataOperandOfClamp(Operation *binOp, double expected) {
 // Is `user` a single-input reduction linalg.generic over `x` whose body is the
 // given float combine op? Returns true for the DQL min (MinimumFOp) / max
 // (MaximumFOp) reductions we expect to feed the scale.
+// Walk back through scalar casts to the `tensor.extract` that read a rank-0
+// tensor, and return that tensor. The decomposed DQL graph hands its y_scale
+// and y_zero_point to the quantize this way. Null if `v` is not that shape.
+static Value scalarExtractSource(Value v) {
+    while (Operation *def = v.getDefiningOp()) {
+        if (auto extract = dyn_cast<tensor::ExtractOp>(def)) {
+            auto ty = dyn_cast<RankedTensorType>(extract.getTensor().getType());
+            return ty && ty.getRank() == 0 ? extract.getTensor() : nullptr;
+        }
+        if (!isa<
+                arith::ExtUIOp, arith::ExtSIOp, arith::SIToFPOp, arith::UIToFPOp, arith::ExtFOp,
+                arith::TruncFOp>(def))
+            return nullptr;
+        v = def->getOperand(0);
+    }
+    return nullptr;
+}
+
 template <typename CombineOp> static bool isReductionOverX(Operation *user, Value x) {
     auto g = dyn_cast<linalg::GenericOp>(user);
     if (!g || g.getNumReductionLoops() == 0 || g.getInputs().size() != 1)
@@ -125,12 +146,16 @@ class RaiseDynamicQuantize : public OpRewritePattern<linalg::GenericOp> {
         // roundeven is optional (the fptoui epilogue rounds regardless), and
         // either add operand may hold it.
         arith::DivFOp divf;
+        Value graphZpScalar;
         for (Value operand : {addf.getLhs(), addf.getRhs()}) {
             Value v = operand;
             if (auto rnd = v.getDefiningOp<math::RoundEvenOp>())
                 v = rnd.getOperand();
-            if ((divf = v.getDefiningOp<arith::DivFOp>()))
+            if ((divf = v.getDefiningOp<arith::DivFOp>())) {
+                // The add's other operand is the graph's y_zero_point, read in.
+                graphZpScalar = operand == addf.getLhs() ? addf.getRhs() : addf.getLhs();
                 break;
+            }
         }
         if (!divf)
             return rewriter.notifyMatchFailure(op, "not a divide-by-scale quantize");
@@ -298,21 +323,93 @@ class RaiseDynamicQuantize : public OpRewritePattern<linalg::GenericOp> {
         Value invScale = extractScalar(0); // INV_SCALE slot
         Value zp = extractScalar(1);       // ZP slot
 
-        // 5. runtime-scale quantize: y = fptoui(clamp(round(x*inv_scale + zp))).
+        // 4b. Rewire the decomposed graph's y_scale / y_zero_point consumers to
+        // the kernel's slots. Replacing only the quantize leaves the original
+        // scalar chain alive for any other consumer and that chain carries its
+        // own tworeductions over x. So x gets streamed three times for reductions
+        // (the old min, the old max, and our combined one) instead of once.
+        //
+        // Only uses dominated by the new values are rewired: the old chain's
+        // own internal uses sit above the insertion point, and they are exactly
+        // the ones that have to keep pointing at the old chain so it can die
+        // whole rather than turning into a dominance violation.
+        auto toRank0 = [&](Value v) -> Value {
+            auto ty = cast<RankedTensorType>(v.getType());
+            return tensor::CollapseShapeOp::create(
+                       rewriter, loc, RankedTensorType::get({}, ty.getElementType()), v,
+                       ArrayRef<ReassociationIndices>{}
+            )
+                .getResult();
+        };
+        // Elementwise map over a <1xT> slot, kept at rank 1 (not rank 0) for the
+        // same reason the slots themselves are.
+        auto mapSlot = [&](Value in, Type outElemTy,
+                           llvm::function_ref<Value(OpBuilder &, Location, Value)> body) -> Value {
+            auto outTy = RankedTensorType::get({1}, outElemTy);
+            Value init = tensor::EmptyOp::create(rewriter, loc, outTy.getShape(), outElemTy);
+            auto id = AffineMap::getMultiDimIdentityMap(1, rewriter.getContext());
+            return linalg::GenericOp::create(
+                       rewriter, loc, TypeRange{outTy}, ValueRange{in}, ValueRange{init},
+                       ArrayRef<AffineMap>{id, id},
+                       ArrayRef<utils::IteratorType>{utils::IteratorType::parallel},
+                       [&](OpBuilder &b, Location l, ValueRange args) {
+                           linalg::YieldOp::create(b, l, body(b, l, args[0]));
+                       }
+            ).getResult(0);
+        };
+        DominanceInfo dom;
+        auto rewireDominatedUses = [&](Value from, Value to) {
+            rewriter.replaceUsesWithIf(from, to, [&](OpOperand &use) {
+                return dom.properlyDominates(to, use.getOwner());
+            });
+        };
+
+        // ONNX publishes an integer zero point and quantizes with that same integer.
+        // Keeping the private fractional bf16 value in the full-tensor quantize made
+        // q inconsistent with every downstream consumer of y_zero_point.
+        Value zpI32 = mapSlot(zp, i32Ty, [&](OpBuilder &b, Location l, Value v) {
+            Value r = math::RoundEvenOp::create(b, l, v);
+            return arith::FPToSIOp::create(b, l, i32Ty, r).getResult();
+        });
+
+        if (Value graphScale = scalarExtractSource(divf.getRhs())) {
+            // init[2] is range_safe * (1/255), which is ONNX's y_scale.
+            auto elemTy = cast<RankedTensorType>(graphScale.getType()).getElementType();
+            Value s = extractScalar(2); // SCALE slot
+            if (elemTy.isF32())
+                s = mapSlot(s, elemTy, [&](OpBuilder &b, Location l, Value v) {
+                    return arith::ExtFOp::create(b, l, b.getF32Type(), v).getResult();
+                });
+            if (elemTy == cast<RankedTensorType>(s.getType()).getElementType())
+                rewireDominatedUses(graphScale, toRank0(s));
+        }
+        if (Value graphZp = graphZpScalar ? scalarExtractSource(graphZpScalar) : Value()) {
+            // zpI32 is in [0,255], so truncation preserves its uint8 bit pattern.
+            auto elemTy = cast<RankedTensorType>(graphZp.getType()).getElementType();
+            if (elemTy.isInteger(8)) {
+                Value z = mapSlot(zpI32, elemTy, [&](OpBuilder &b, Location l, Value v) {
+                    return arith::TruncIOp::create(b, l, b.getI8Type(), v).getResult();
+                });
+                rewireDominatedUses(graphZp, toRank0(z));
+            }
+        }
+
+        // 5. runtime-scale quantize: y = fptoui(clamp(round(x*inv_scale + zp_i32))).
         // A fresh single-use cast (see step 1) so it fuses into the quantize
         // loop instead of reloading a materialized bf16 copy of x.
         Value xbf16Quant = castToBf16();
         Value outInit =
             tensor::EmptyOp::create(rewriter, loc, outType.getShape(), outType.getElementType());
         Value y = linalg::GenericOp::create(
-                      rewriter, loc, TypeRange{outType}, ValueRange{xbf16Quant, invScale, zp},
+                      rewriter, loc, TypeRange{outType}, ValueRange{xbf16Quant, invScale, zpI32},
                       ValueRange{outInit},
                       ArrayRef<AffineMap>{idMap, scalarBcastMap, scalarBcastMap, idMap}, parallel,
                       [&](OpBuilder &b, Location l, ValueRange args) {
                           Value c0 = arith::ConstantOp::create(b, l, b.getFloatAttr(bf16, 0.0));
                           Value c255 = arith::ConstantOp::create(b, l, b.getFloatAttr(bf16, 255.0));
                           Value m = arith::MulFOp::create(b, l, args[0], args[1]);
-                          Value biased = arith::AddFOp::create(b, l, m, args[2]);
+                          Value zpFloat = arith::SIToFPOp::create(b, l, bf16, args[2]);
+                          Value biased = arith::AddFOp::create(b, l, m, zpFloat);
                           Value r = math::RoundEvenOp::create(b, l, biased);
                           Value lo = arith::MaximumFOp::create(b, l, r, c0);
                           Value hi = arith::MinimumFOp::create(b, l, lo, c255);

@@ -30,6 +30,10 @@ static torq_hw::SliceTaskOp lowerToMatmul(
     };
 
     LData matA(op.getInput1());
+    // matA is the WRAM operand; i8 is signless in MLIR, so an unsigned
+    // activation has to say so or the ALU multiplies it as signed.
+    if (op.getInput1Unsigned())
+        matA.setElementType(toUnsigned(matA.elementType()));
     LData matB(op.getInput2());
     LData output(init);
     LData biasScale(op.getScaleBias());
@@ -108,6 +112,10 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     };
 
     LData matA(op.getInput1());
+    // matA is the WRAM operand; i8 is signless in MLIR, so an unsigned
+    // activation has to say so or the ALU multiplies it as signed.
+    if (op.getInput1Unsigned())
+        matA.setElementType(toUnsigned(matA.elementType()));
     LData matB(op.getInput2());
     LData output(init);
     LData biasScale(op.getScaleBias());

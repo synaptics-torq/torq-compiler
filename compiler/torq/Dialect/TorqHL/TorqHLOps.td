@@ -105,7 +105,43 @@ def TorqHL_MatMulOp: TorqHL_LayerOp<"matmul"> {
     I32Attr:$shift,
     TensorOrMemref:$scale_bias,
     TensorOrMemref:$input1,
-    TensorOrMemref:$input2
+    TensorOrMemref:$input2,
+    DefaultValuedAttr<BoolAttr, "false">:$input1_unsigned
+  ));
+}
+
+def TorqHL_ZeroPointBiasTableOp: TorqHL_LayerOp<"zero_point_bias_table"> {
+  let summary = "Build the runtime {bias, scale} record for the MatMulInteger column correction";
+  let description = [{
+    `init[i] = input[i] * weights[0] + scale_bias[i % 2][0]`, building the `[2*L]` i32 interleaved `{bias, scale}` record `torq_hl.zero_point_correct` reads.
+
+    `input` holds the values in its even entries and 0 in its odd ones, `weights` is the `<1xi8>` factor, and `scale_bias` is the two-entry ACT record `{0, 1, 1, 1}`. The whole record is written in one pass because a strided write of only the bias slots leaves the DEQW without a dense inner dimension.
+
+    The column correction passes `-colsum_W` interleaved with zeros and the runtime activation zero point, read unsigned. The row correction passes the `delta * rowsum_A` matmul's `[M, 2]` result collapsed -- already interleaved -- and a constant `-1`, read signed.
+  }];
+  let arguments = !con(commonArgs, (ins
+    TensorOrMemref:$scale_bias,
+    TensorOrMemref:$weights,
+    TensorOrMemref:$input,
+    DefaultValuedAttr<BoolAttr, "true">:$weights_unsigned
+  ));
+}
+
+def TorqHL_ZeroPointCorrectOp: TorqHL_LayerOp<"zero_point_correct"> {
+  let summary = "MatMulInteger zero-point correction, in i32";
+  let description = [{
+    `init = input[.., m, n] + bias[n]`, or `+ bias[m]` when `per_row` is set, clamped to [`output_min`, `output_max`], all i32.
+
+    `input` is the `[.., M, N]` i32 accumulator of a raised `onnx.MatMulInteger`. `scale_bias` is the `{bias, scale}` record from `torq_hl.zero_point_bias_table`, `[2*N]` for the column correction and `[2*M]` for the row one, holding `-a_zp * colsum_W[n]` and `-delta * rowsum_A[m]` with every scale slot 1.
+
+    The correction rides the ACT's BRAM bias record, a separate NDL stream: a slice task has one data stream and `input` needs it, so an `[N]` or `[M]` operand on the data path would have to be broadcast to `[M, N]` first. There is one record per ACT pass, so a chain needing both corrections uses two of these, and the int-to-float cast that follows stays its own task -- on the board a bias record combined with `ACTMode::I2F` hangs the NPU.
+  }];
+  let arguments = !con(commonArgs, (ins
+    I32Attr:$output_min,
+    I32Attr:$output_max,
+    TensorOrMemref:$scale_bias,
+    TensorOrMemref:$input,
+    DefaultValuedAttr<BoolAttr, "false">:$per_row
   ));
 }
 
@@ -113,7 +149,13 @@ def TorqHL_MulOp: TorqHL_LayerOp<"mul"> {
 
   let summary = "Mul operation";
   let description = [{
-    Elementwise multiply two tensors
+    Elementwise multiply two tensors, computing `input1 * input2 + scale_bias`.
+
+    `scale_bias` is normally an interleaved `[2]xi32` {bias, scale} pair applied to
+    every element. It may instead be an `[N]xf32` vector, where N is the last
+    dimension of the output: then the bias is per-output-channel and the ACT applies
+    it straight out of BRAM, at no cost in ACT width for a float result. A float
+    `scale_bias` carries no scale, so `shift` must be 0.
   }];
 
   let arguments = !con(commonArgs, (ins
@@ -286,8 +328,12 @@ def TorqHL_DeriveQuantParamsOp: TorqHL_LayerOp<"derive_quant_params"> {
       scale       = range_safe * mul_weight[1]        // = range_safe / 255, ONNX's y_scale
       zp          = neg_min_adj * inv_scale           // unrounded, in [0, 255]
 
-    The outputs land in `init[0]` = inv_scale, `init[1]` = zp, `init[2]` = scale.
-    See DeriveQuantParamsPattern.cpp for full slot layout.
+    The outputs land in `init[0]` = inv_scale, `init[1]` = zp, `init[2]` = scale,
+    `init[3]` = neg_min_adj. See DeriveQuantParamsPattern.cpp for full slot layout.
+
+    `neg_min_adj` is the zero point expressed in real units (`zp * scale` without
+    the rounding mismatch below) which is what a consumer subtracting the zero
+    point from a dequantized value wants.
     NOTE:
     `scale` and `inv_scale` are each correctly rounded, but they are rounded *separately*, so
     they are not exact inverses: `scale * inv_scale = 1 + eps` with eps measured over all bf16

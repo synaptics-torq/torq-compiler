@@ -11,6 +11,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
@@ -223,6 +224,129 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
 };
 
 /// ============================================================================
+/// MulPerChannelBiasPattern
+/// ============================================================================
+///
+/// Folds a trailing per-output-channel float add into the multiply:
+///
+///   %scaled = linalg.generic mulf(%a, %b)                    -> [.., N]
+///   %out    = linalg.generic addf(%scaled, bcast(%bias[N]))  -> [.., N]
+///
+/// becomes one `torq_hl.mul` carrying %bias in `scale_bias`.
+/// BRAM holds the bias as fp32, so a bf16->f32 conversion pass is still needed.
+///
+/// Restricted to a mul and add that already share a fuse group, i.e. that were
+/// going to be lowered into one program anyway.
+class MulPerChannelBiasPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    MulPerChannelBiasPattern(MLIRContext *context) : OpRewritePattern(context, /*benefit=*/2) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        Operation *mulOp = getElementwiseBinaryOp(srcOp, /*allowConstants=*/false);
+        if (!mulOp || !isa<arith::MulFOp>(mulOp))
+            return rewriter.notifyMatchFailure(srcOp, "not an elementwise mulf");
+
+        Value scaled = srcOp.getResult(0);
+        auto outType = dyn_cast<RankedTensorType>(scaled.getType());
+        if (!outType || outType.getRank() < 2 || !scaled.hasOneUse())
+            return rewriter.notifyMatchFailure(srcOp, "not a rank>=2 mulf with a single consumer");
+
+        // Same operand restriction as MulOpPattern
+        for (Value input : srcOp.getInputs()) {
+            Type elementType = cast<RankedTensorType>(input.getType()).getElementType();
+            if (elementType.isF32() || elementType.isF64())
+                return rewriter.notifyMatchFailure(srcOp, "mul expects i8, i16, bf16 inputs");
+        }
+
+        auto addOp = dyn_cast<linalg::GenericOp>(*scaled.getUsers().begin());
+        if (!addOp || addOp.getNumDpsInputs() != 2 || addOp.getNumDpsInits() != 1 ||
+            addOp.getResult(0).getType() != outType)
+            return rewriter.notifyMatchFailure(srcOp, "consumer is not a same-shape binary op");
+        Operation *addFOp = getElementwiseBinaryOp(addOp, /*allowConstants=*/false);
+        if (!addFOp || !isa<arith::AddFOp>(addFOp))
+            return rewriter.notifyMatchFailure(srcOp, "consumer is not an addf");
+        if (!checkShareFuseGroup(srcOp, addOp))
+            return rewriter.notifyMatchFailure(srcOp, "mulf and addf are in different fuse groups");
+
+        Value biasOperand =
+            addOp.getInputs()[0] == scaled ? addOp.getInputs()[1] : addOp.getInputs()[0];
+        Value bias = matchPerChannelFloatBias(biasOperand, outType.getShape());
+        if (!bias)
+            return rewriter.notifyMatchFailure(srcOp, "addf rhs is not a per-channel vector");
+
+        Value output = addOp.getResult(0);
+        ScaleClampInfo scInfo = foldForwardScaleClamp(output, 1, 12, 12);
+        SmallVector<Operation *> foldedOps;
+        for (Value current = addOp.getResult(0); current != output;) {
+            Operation *next = getSingleUser(current);
+            if (!next)
+                return rewriter.notifyMatchFailure(
+                    srcOp, "float epilogue is not a single-use chain"
+                );
+            foldedOps.push_back(next);
+            current = next->getResult(0);
+        }
+
+        // Build at the add, not at the multiply: the bias is computed from the
+        // multiply's own scale operand, so it is defined after the multiply and
+        // would not dominate a use placed there.
+        rewriter.setInsertionPoint(addOp);
+
+        // BRam::load only takes fp32 (or an int bias:scale pair), so convert.
+        Location loc = srcOp.getLoc();
+        // Drop whatever leading unit dimensions the rank-align left on the bias, so the
+        // conversion and the BRAM operand below both see the [N] vector they expect.
+        auto biasType = cast<RankedTensorType>(bias.getType());
+        if (biasType.getRank() > 1) {
+            ReassociationIndices allDims;
+            for (int64_t i = 0; i < biasType.getRank(); ++i)
+                allDims.push_back(i);
+            bias =
+                tensor::CollapseShapeOp::create(
+                    rewriter, loc,
+                    RankedTensorType::get({outType.getShape().back()}, biasType.getElementType()),
+                    bias, ArrayRef<ReassociationIndices>{allDims}
+                )
+                    .getResult();
+        }
+        if (!cast<RankedTensorType>(bias.getType()).getElementType().isF32()) {
+            auto f32Type =
+                RankedTensorType::get({outType.getShape().back()}, rewriter.getF32Type());
+            bias = torq_hl::ActOp::create(
+                       rewriter, loc, f32Type, createInitTensor(srcOp, rewriter, f32Type), "f2f",
+                       /*input_zp=*/0, /*output_zp=*/0, /*min_int=*/0, /*max_int=*/0, APFloat(0.0f),
+                       APFloat(0.0f), bias, /*weights=*/Value()
+            )
+                       .getResult(0);
+        }
+
+        auto [outMin, outMax] = getDTypeRange(outType.getElementType());
+        if (!foldedOps.empty()) {
+            outMin = scInfo.min;
+            outMax = scInfo.max;
+        }
+        Value torqOut = torq_hl::MulOp::create(
+                            rewriter, loc, outType, createInitTensor(srcOp, rewriter, outType),
+                            /*output_zp=*/0, outMin, outMax, bias, /*shift=*/0,
+                            srcOp.getInputs().front(), srcOp.getInputs().back()
+        )
+                            .getResult(0);
+        Operation *outputOp = output.getDefiningOp();
+        rewriter.replaceOp(outputOp, torqOut);
+        if (!foldedOps.empty())
+            foldedOps.pop_back();
+        for (Operation *foldedOp : llvm::reverse(foldedOps))
+            if (foldedOp->use_empty())
+                rewriter.eraseOp(foldedOp);
+        if (outputOp != addOp && addOp->use_empty())
+            rewriter.eraseOp(addOp);
+        rewriter.eraseOp(srcOp);
+        return success();
+    }
+};
+
+/// ============================================================================
 /// MulRescaleOpPattern
 /// ============================================================================
 ///
@@ -391,6 +515,10 @@ void populateLinalgToTorqHLMulPatterns(
     patterns.insert<MulOpPattern>(context, markFuseGroups);
     if (markFuseGroups)
         return;
+
+    // Fuse-group marking is driven by whoever owns the chain, so this only folds
+    // during the material conversion.
+    patterns.insert<MulPerChannelBiasPattern>(context);
 
     // FIXME: this pattern should be refactor to take markFuseGroups and have a
     // marking mode.

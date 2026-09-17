@@ -486,6 +486,10 @@ KernelEncoding MulOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding MatMulOp::getKernelEncoding() { return getNoEncoding(); }
 
+KernelEncoding ZeroPointBiasTableOp::getKernelEncoding() { return getNoEncoding(); }
+
+KernelEncoding ZeroPointCorrectOp::getKernelEncoding() { return getNoEncoding(); }
+
 KernelEncoding TransposeReshapeOp::getKernelEncoding() {
 
     auto input_type = llvm::dyn_cast<RankedTensorType>(getInput().getType());

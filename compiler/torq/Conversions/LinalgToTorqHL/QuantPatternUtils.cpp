@@ -738,9 +738,9 @@ static Value getRuntimeScalarOperand(Value v, linalg::GenericOp op) {
 // Unsigned runtime quant (DynamicQuantizeLinear):
 //   mulf(x, %inv_scale) -> addf(%zp) -> (math.roundeven) -> maximumf(min)
 //   -> minimumf(max) -> arith.fptoui
-// where %inv_scale and %zp are scalar tensor operands (not constants). Unlike
-// the constant flavors, scale/zp cannot be folded to doubles, so they are
-// returned as SSA operands.
+// where %inv_scale and %zp are scalar tensor operands (not constants). %zp may
+// be float or an integer converted with sitofp. Unlike the constant flavors,
+// scale/zp cannot be folded to doubles, so they are returned as SSA operands.
 bool matchQuantRuntime(linalg::GenericOp op, Value &invScale, Value &zp, double &min, double &max) {
     if (!op || op.getNumDpsInputs() < 2 || op.getNumDpsInits() != 1)
         return false;
@@ -775,10 +775,15 @@ bool matchQuantRuntime(linalg::GenericOp op, Value &invScale, Value &zp, double 
     auto addf = chain.getDefiningOp<arith::AddFOp>();
     if (!addf)
         return false;
+    auto getRuntimeZp = [&](Value value) {
+        if (auto castOp = value.getDefiningOp<arith::SIToFPOp>())
+            value = castOp.getIn();
+        return getRuntimeScalarOperand(value, op);
+    };
     Value mulVal;
-    if ((zp = getRuntimeScalarOperand(addf.getLhs(), op)))
+    if ((zp = getRuntimeZp(addf.getLhs())))
         mulVal = addf.getRhs();
-    else if ((zp = getRuntimeScalarOperand(addf.getRhs(), op)))
+    else if ((zp = getRuntimeZp(addf.getRhs())))
         mulVal = addf.getLhs();
     else
         return false;

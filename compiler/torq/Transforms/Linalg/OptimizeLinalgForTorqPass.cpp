@@ -28,44 +28,80 @@ class OptimizeLinalgForTorqPass
 
         auto funcOp = getOperation();
         auto *ctx = funcOp.getContext();
-        RewritePatternSet patterns(ctx);
 
-        // Convert linalg ops to more specific linalg ops that are easier to match for torq
-        // patterns.
-        populateCommonStandardizationPatterns(ctx, patterns);
+        auto buildPatterns = [&]() {
+            RewritePatternSet patterns(ctx);
 
-        populateOptimizeConv1DPatterns(ctx, patterns);
+            // Convert linalg ops to more specific linalg ops that are easier to match for
+            // torq patterns.
+            populateCommonStandardizationPatterns(ctx, patterns);
 
-        populateOptimizeMatmuOpPatterns(ctx, patterns);
+            populateOptimizeConv1DPatterns(ctx, patterns);
 
-        populateOptimizeElementwiseBinaryOpPatterns(ctx, patterns);
+            populateOptimizeMatmuOpPatterns(ctx, patterns);
 
-        populateOptimizePowPatterns(ctx, patterns);
+            populateOptimizeElementwiseBinaryOpPatterns(ctx, patterns);
 
-        populateRaiseSoftmaxOpPatterns(ctx, patterns);
+            populateOptimizePowPatterns(ctx, patterns);
 
-        populateRaiseDynamicQuantizeOpPatterns(ctx, patterns);
+            populateRaiseSoftmaxOpPatterns(ctx, patterns);
 
-        populateOptimizeSelectPatterns(ctx, patterns);
+            populateRaiseDynamicQuantizeOpPatterns(ctx, patterns);
 
-        populateDecomposeLinalgOpsPatterns(ctx, patterns);
+            populateOptimizeSelectPatterns(ctx, patterns);
 
-        populateSpecializeTransposeOpPatterns(ctx, patterns);
+            populateDecomposeLinalgOpsPatterns(ctx, patterns);
 
-        linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
+            populateSpecializeTransposeOpPatterns(ctx, patterns);
 
-        populateOptimizeArithElementwiseBinaryOpPatterns(ctx, patterns);
-        // The fused fp32-clamp + truncf->bf16 generic is lowered to a single
-        // torq_hl.act (clamp in f32, emit bf16) by ClampOpConversion::matchFusedClampTruncf.
-        populateFuseReluClampWithTruncfPatterns(ctx, patterns);
-        populateAbsorbDecomposedWzpCorrectionPatterns(ctx, patterns);
+            linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
 
-        // Configure disabled/enabled patterns based on pass options.
-        auto frozenPatterns =
-            FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
+            populateOptimizeArithElementwiseBinaryOpPatterns(ctx, patterns);
+            // The fused fp32-clamp + truncf->bf16 generic is lowered to a single
+            // torq_hl.act (clamp in f32, emit bf16) by ClampOpConversion::matchFusedClampTruncf.
+            populateFuseReluClampWithTruncfPatterns(ctx, patterns);
+            populateAbsorbDecomposedWzpCorrectionPatterns(ctx, patterns);
 
-        if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
+            // Configure disabled/enabled patterns based on pass options.
+            return FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
+        };
+
+        // RaiseMatMulInteger consumes the zero point the DynamicQuantizeLinear raise
+        // emits, and both are linalg.generic patterns the greedy driver orders by
+        // worklist position rather than by dependency: in one set the MatMulInteger
+        // raise can be tried before the DQL raise fires and never retried, so it runs
+        // in its own round, after this set is at fixpoint.
+        if (failed(applyPatternsGreedily(getOperation(), buildPatterns()))) {
             return signalPassFailure();
+        }
+
+        // The raise cannot match without an i32 matmul, so models without one skip the
+        // round entirely. When it runs, it contains only the raise: the other groups
+        // are already at fixpoint, and re-running them could rewrite the freshly
+        // raised correction chain, whose exact shape the LinalgToTorqHL mark and
+        // materialize sides expect verbatim.
+        bool hasI32Matmul = false;
+        funcOp.walk([&](Operation *op) {
+            if (hasI32Matmul)
+                return WalkResult::skip();
+            ShapedType resultTy;
+            if (auto matmul = dyn_cast<linalg::MatmulOp>(op))
+                resultTy = dyn_cast<ShapedType>(matmul.getResult(0).getType());
+            else if (auto batchMatmul = dyn_cast<linalg::BatchMatmulOp>(op))
+                resultTy = dyn_cast<ShapedType>(batchMatmul.getResult(0).getType());
+            if (resultTy && resultTy.getElementType().isInteger(32))
+                hasI32Matmul = true;
+            return WalkResult::advance();
+        });
+        if (hasI32Matmul) {
+            RewritePatternSet raisePatterns(ctx);
+            populateRaiseMatMulIntegerOpPatterns(ctx, raisePatterns);
+            auto frozenRaisePatterns = FrozenRewritePatternSet(
+                std::move(raisePatterns), disabledPatterns, enabledPatterns
+            );
+            if (failed(applyPatternsGreedily(getOperation(), frozenRaisePatterns))) {
+                return signalPassFailure();
+            }
         }
 
         IRRewriter rewriter(ctx);

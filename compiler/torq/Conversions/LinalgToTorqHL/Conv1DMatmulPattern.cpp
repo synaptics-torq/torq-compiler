@@ -10,7 +10,9 @@
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -32,6 +34,145 @@ static bool hasStaticShape(RankedTensorType type, ArrayRef<int64_t> expected) {
         return false;
 
     return type.getShape() == expected;
+}
+
+// True if `op` is an elementwise linalg.generic producing exactly `shape`, or `shape`
+// under a batch dimension.
+static bool isElementwiseOverShape(Operation *op, ArrayRef<int64_t> shape) {
+    auto genericOp = dyn_cast_or_null<linalg::GenericOp>(op);
+    if (!genericOp || genericOp.getNumDpsInits() != 1 || !linalg::isElementwise(genericOp))
+        return false;
+    auto type = dyn_cast<RankedTensorType>(genericOp.getResult(0).getType());
+    if (!type)
+        return false;
+    ArrayRef<int64_t> resultShape = type.getShape();
+    while (resultShape.size() > shape.size() && resultShape.front() == 1)
+        resultShape = resultShape.drop_front();
+    return resultShape == shape;
+}
+
+// A raised MatMulInteger is followed by its dequant block: a chain of
+// elementwise ops over the matmul's own [M,N] shape. Left unmarked,
+// LinalgSlicing slices each of those ops into its own scf.forall.
+// Collecting the whole block into the matmul's fuse group makes the matmul
+// its principal, and since LinalgSlicing has no linalg.matmul pattern the group
+// stays unsliced and every intermediate stays in LRAM.
+static void collectRaisedMatmulEpilogue(
+    linalg::MatmulOp matmulOp, SmallVectorImpl<Operation *> &groupOps, SmallVector<Value> &boundary
+) {
+    auto shape = cast<RankedTensorType>(matmulOp.getResult(0).getType()).getShape();
+    groupOps.push_back(matmulOp);
+    DenseSet<Operation *> inGroup{matmulOp.getOperation()};
+
+    // Forward through the runtime scale, then include a compatible model bias and float clamp.
+    // Do not absorb later consumers: gated MLP projections reconverge after dequant, and marking
+    // that shared consumer from both matmuls creates two principals for one fuse-group output.
+    Value tail = matmulOp.getResult(0);
+    while (tail.hasOneUse()) {
+        Operation *user = *tail.getUsers().begin();
+        if (!isElementwiseOverShape(user, shape))
+            break;
+        groupOps.push_back(user);
+        inGroup.insert(user);
+        tail = user->getResult(0);
+        auto genericOp = cast<linalg::GenericOp>(user);
+        auto yieldOp = cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
+        if (!yieldOp.getOperand(0).getDefiningOp<arith::MulFOp>())
+            continue;
+
+        // A trailing per-channel add is folded by MulPerChannelBiasPattern. The float clamp
+        // matcher supplies the final ACT bounds; collect every op it advances over.
+        if (tail.hasOneUse()) {
+            Value scaled = tail;
+            auto addOp = dyn_cast<linalg::GenericOp>(*tail.getUsers().begin());
+            if (isElementwiseOverShape(addOp, shape) && addOp.getNumDpsInputs() == 2) {
+                Operation *addFOp = getElementwiseBinaryOp(addOp, /*allowConstants=*/false);
+                if (addFOp && isa<arith::AddFOp>(addFOp) &&
+                    (addOp.getInputs()[0] == scaled || addOp.getInputs()[1] == scaled)) {
+                    Value bias = addOp.getInputs()[0] == scaled ? addOp.getInputs()[1]
+                                                                : addOp.getInputs()[0];
+                    if (matchPerChannelFloatBias(bias, shape)) {
+                        groupOps.push_back(addOp);
+                        inGroup.insert(addOp);
+                        tail = addOp.getResult(0);
+                    }
+                }
+            }
+        }
+        Value foldedTail = tail;
+        (void)foldForwardScaleClamp(foldedTail, 1, 12, 12);
+        while (tail != foldedTail && tail.hasOneUse()) {
+            Operation *foldedOp = *tail.getUsers().begin();
+            if (!isElementwiseOverShape(foldedOp, shape))
+                break;
+            groupOps.push_back(foldedOp);
+            inGroup.insert(foldedOp);
+            tail = foldedOp->getResult(0);
+        }
+        if (tail == foldedTail)
+            break;
+    }
+    Operation *outputOp = groupOps.back();
+
+    // Iterate back over the full-shape broadcasts a standardization pass
+    // materialized for the chain's runtime scalar and per-N operands. They are
+    // elementwise over the same shape, so leaving them out would have them
+    // sliced on their own and materialize a full [M,N] copy each.
+    for (size_t i = 0; i < groupOps.size(); ++i)
+        for (Value operand : groupOps[i]->getOperands()) {
+            Operation *def = operand.getDefiningOp();
+            if (!def || inGroup.contains(def) || !operand.hasOneUse())
+                continue;
+            if (!isElementwiseOverShape(def, shape))
+                continue;
+            groupOps.push_back(def);
+            inGroup.insert(def);
+        }
+
+    // The asymmetric path's [M,2] rowsum reaches the row correction through an extract_slice.
+    // Shape ops do not implement TilingInterface, so the backward marker cannot cross that edge;
+    // retain the narrow matmul explicitly as an auxiliary member of the primary matmul's group.
+    for (size_t i = 0; i < groupOps.size(); ++i)
+        for (Value operand : groupOps[i]->getOperands()) {
+            Value source = operand;
+            if (auto sliceOp = source.getDefiningOp<tensor::ExtractSliceOp>())
+                source = sliceOp.getSource();
+            auto auxiliary = source.getDefiningOp<linalg::MatmulOp>();
+            if (!auxiliary || auxiliary == matmulOp ||
+                !auxiliary->hasAttr(TORQ_RAISED_MATMUL_INTEGER) || inGroup.contains(auxiliary))
+                continue;
+            groupOps.push_back(auxiliary);
+            inGroup.insert(auxiliary);
+        }
+
+    for (Operation *op : groupOps)
+        for (Value operand : op->getOperands()) {
+            Operation *def = operand.getDefiningOp();
+            if (!def || !inGroup.contains(def))
+                boundary.push_back(operand);
+        }
+
+    // markFuseGroupBackward walks back from the group's output, so it has to be
+    // last even though the broadcast sweep appended past it.
+    std::swap(groupOps.back(), *llvm::find(groupOps, outputOp));
+}
+
+// True if `matmulOp` is the optional [M,2] rowsum matmul of a raised
+// MatMulInteger: its result reaches the row correction through exactly one
+// rank-reducing extract_slice that drops the unit second column. The primary
+// matmul's result always reaches its correction directly, never through a
+// slice, so this identifies the auxiliary unambiguously.
+static bool isRaisedMatmulRowsumAuxiliary(linalg::MatmulOp matmulOp) {
+    Value result = matmulOp.getResult(0);
+    if (!result.hasOneUse())
+        return false;
+    auto slice = dyn_cast<tensor::ExtractSliceOp>(*result.getUsers().begin());
+    if (!slice)
+        return false;
+    auto srcTy = dyn_cast<RankedTensorType>(slice.getSource().getType());
+    auto resTy = dyn_cast<RankedTensorType>(slice.getResult().getType());
+    return srcTy && resTy && srcTy.getRank() == 2 && resTy.getRank() == 1 &&
+           resTy.getShape()[0] == srcTy.getShape()[0];
 }
 
 static bool hasConv1DExpandReassociation(tensor::ExpandShapeOp expandOp) {
@@ -109,11 +250,18 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
 
         auto matMulOp = torq_hl::MatMulOp::create(
             rewriter, srcOp->getLoc(), outTy, createInitTensor(srcOp, rewriter, outTy), 0, outMin,
-            outMax, 0, biasScale, srcOp.getOperand(0), srcOp.getOperand(1)
+            outMax, 0, biasScale, srcOp.getOperand(0), srcOp.getOperand(1),
+            srcOp->hasAttr(TORQ_MATMUL_LHS_UNSIGNED)
         );
 
         // linalg::MatmulOp is accumulating, but torq_hl::MatmulOp is not, so we do the addition
-        // explicitly.
+        // explicitly. The exception is MatMulInteger: it always inits with a zero splat, so there
+        // is nothing to add back.
+        if (srcOp->hasAttr(TORQ_RAISED_MATMUL_INTEGER)) {
+            rewriter.replaceOp(srcOp, matMulOp.getResult(0));
+            return matMulOp.getResult(0);
+        }
+
         FailureOr<Value> resultVal =
             addInitToResult(srcOp.getOutputs().front(), matMulOp.getResult(0), rewriter);
         assert(succeeded(resultVal) && "failed to add init value");
@@ -130,6 +278,47 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         if (_markFuseGroups && isMarkedFuseGroup(matmulOp)) {
             LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Skipping already-marked fuse group\n");
             return rewriter.notifyMatchFailure(matmulOp, "Already marked");
+        }
+
+        // The epilogue of a MatMulInteger raised by RaiseMatMulInteger is a
+        // runtime-scale dequant to float, not a QDQ requantize, so
+        // QMatmulToFCConvert does not own it -- but isQuantizedMatmulChain
+        // below still claims it (a bare sitofp reads as a scale-one dequant),
+        // which would strand the matmul on the host/CSS fallback. Emit the
+        // bare torq_hl.matmul and let the dequant lower through its own
+        // elementwise patterns.
+        if (matmulOp->hasAttr(TORQ_RAISED_MATMUL_INTEGER)) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "[" DEBUG_TYPE "] Raised MatMulInteger: emitting bare matmul\n"
+            );
+            if (_markFuseGroups) {
+                // The rowsum auxiliary joins the primary matmul's fuse group when the
+                // primary is marked. If it were visited first and marked standalone,
+                // the primary's collector would add a second group id to the same op;
+                // refusing here keeps the group assignment independent of the order
+                // the driver visits the two matmuls.
+                if (isRaisedMatmulRowsumAuxiliary(matmulOp)) {
+                    return rewriter.notifyMatchFailure(
+                        matmulOp, "rowsum auxiliary is marked with its primary matmul"
+                    );
+                }
+                SmallVector<Operation *> groupOps;
+                SmallVector<Value> boundary;
+                collectRaisedMatmulEpilogue(matmulOp, groupOps, boundary);
+                markFuseGroupBackward(
+                    groupOps.back()->getResult(0), boundary, rewriter,
+                    matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                );
+                for (Operation *groupOp : groupOps)
+                    if (isa<linalg::MatmulOp>(groupOp) && groupOp != matmulOp)
+                        markOpFuseGroup(
+                            groupOp, rewriter,
+                            matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                        );
+                return success();
+            }
+            replaceWithTorqMatmul(matmulOp, rewriter);
+            return success();
         }
 
         // QDQ quantized chains are owned by QMatmulToFCConvert. This pattern has

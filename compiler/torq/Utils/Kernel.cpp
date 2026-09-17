@@ -2591,7 +2591,10 @@ QData SlicePrivate::actClamp(
         }
         else if (dataSize == 1 && weightSize == 1) {
             _cfg.act_lsh = {0, 0, 0, 0};
-            resultType = DType::int8;
+            // I2F keeps the fp32 result type selected above.
+            if (actMode != torq_hw::ACTMode::I2F) {
+                resultType = DType::int8;
+            }
         }
         else if (weightSize == 0) {
             // No weight applied, keep original data type
@@ -2628,6 +2631,11 @@ QData SlicePrivate::actClamp(
     acpr(pdata);
     cepr(pdata);
     acpw(dataType, weightSize);
+
+    assert(
+        (actMode != torq_hw::ACTMode::I2F || resultCount <= HwInfo::qram_width) &&
+        "an I2F result retires at most qram_width items per ACT pass"
+    );
 
     QData qdata({resultCount}, resultType);
     debugData(qdata);

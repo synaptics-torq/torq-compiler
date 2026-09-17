@@ -56,6 +56,8 @@ namespace mlir::syna::torq {
 const std::string TORQ_FUSE_GROUP_ID = "torq-fuse-group-id";
 const std::string TORQ_FUSE_GROUP = "torq-fuse-group";
 const std::string TORQ_BROADCAST_MATMUL = "torq-broadcast-matmul";
+const std::string TORQ_RAISED_MATMUL_INTEGER = "torq-raised-matmul-integer";
+const std::string TORQ_MATMUL_LHS_UNSIGNED = "torq-matmul-lhs-unsigned";
 
 bool isI8Type(Value val, PatternRewriter &rewriter) {
     auto shapedType = dyn_cast<ShapedType>(val.getType());
@@ -296,6 +298,31 @@ bool checkShareFuseGroup(Operation *op1, Operation *op2) {
     }
 
     return false;
+}
+
+Value matchPerChannelFloatBias(Value value, ArrayRef<int64_t> outShape) {
+    auto isVector = [&](Value candidate) {
+        auto type = dyn_cast<RankedTensorType>(candidate.getType());
+        return type && type.getRank() >= 1 && type.getShape().back() == outShape.back() &&
+               type.getNumElements() == outShape.back() && isa<FloatType>(type.getElementType());
+    };
+    if (isVector(value))
+        return value;
+    if (auto expandOp = value.getDefiningOp<tensor::ExpandShapeOp>())
+        return isVector(expandOp.getSrc()) ? expandOp.getSrc() : nullptr;
+
+    auto bcastOp = value.getDefiningOp<linalg::GenericOp>();
+    if (!bcastOp || !value.hasOneUse() || bcastOp.getNumDpsInputs() != 1 ||
+        bcastOp.getNumDpsInits() != 1 || !bcastOp.getRegion().hasOneBlock())
+        return nullptr;
+    auto yield = dyn_cast<linalg::YieldOp>(bcastOp.getBody()->getTerminator());
+    if (!yield || yield.getNumOperands() != 1)
+        return nullptr;
+    auto arg = dyn_cast<BlockArgument>(yield.getOperand(0));
+    if (!arg || arg.getOwner() != bcastOp.getBody() || arg.getArgNumber() != 0)
+        return nullptr;
+    Value source = bcastOp.getInputs()[0];
+    return isVector(source) ? source : nullptr;
 }
 
 std::optional<int64_t> isFuseGroupOutput(Operation *op) {

@@ -197,11 +197,12 @@ struct QuantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
         auto outTy = cast<RankedTensorType>(op.getResult(0).getType());
 
         if (isRuntime) {
-            // Convert the bf16 zero-point to the f32 bias the MulOp BRAM path
-            // expects; the reciprocal scale is already bf16 (WRAM multiplier).
+            // Convert the runtime zero-point to the f32 bias the MulOp BRAM path
+            // expects; DQL supplies its ONNX-rounded value as i32.
             auto zpTy = cast<RankedTensorType>(rtZp.getType());
             auto zpF32Ty = RankedTensorType::get(zpTy.getShape(), rewriter.getF32Type());
-            Value zpBias = createActOp(rewriter, *op, "f2f", rtZp, zpF32Ty);
+            StringRef castName = zpTy.getElementType().isInteger() ? "i2f" : "f2f";
+            Value zpBias = createActOp(rewriter, *op, castName, rtZp, zpF32Ty);
             Value fmaOut = emitQuantizeChain(
                 rewriter, op, input, rtInvScale, zpBias, static_cast<int32_t>(std::llround(rtMin)),
                 static_cast<int32_t>(std::llround(rtMax)), outTy
