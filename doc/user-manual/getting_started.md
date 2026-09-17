@@ -6,6 +6,61 @@ and the [IREE CPU Deployment Guide](https://iree.dev/guides/deployment-configura
 ```
 ## Setup
 
+The `torq-compiler` and `torq-runtime` are provided as Python wheels for Linux (x86-64, and aarch64 for the runtime).
+
+- **Linux x86-64 (e.g. Ubuntu, or an aarch64 board)**: skip directly to [Python Wheel (pip)](#python-wheel-pip) below.
+- **macOS**: Native macOS support is planned for a future release. No compatible wheel exists, so first follow [macOS](#macos) to set up a Linux container, then continue with [Python Wheel (pip)](#python-wheel-pip) inside it.
+
+### macOS
+
+[Colima](https://github.com/abiosoft/colima) provides a lightweight Docker environment on macOS.
+
+- Install Docker and Colima:
+    ```bash
+    $ brew install docker colima
+    ```
+
+    ```{note}
+    Requires [Homebrew](https://brew.sh) to be installed. If you don't have it, follow the installation instructions on the official Homebrew page.
+    ```
+
+- Start the lightweight virtual machine that powers your local Docker environment:
+    ```bash
+    $ colima start --cpu 4 --memory 4
+    ```
+
+    ```{note}
+    Adjust `--cpu` and `--memory` to match your available resources and model size; `colima start` alone defaults to 2 CPUs and 2 GiB of memory, which may be too little for compiling larger models.
+    ```
+
+- Launch an Ubuntu container, mounting your current directory so files are shared between the host and the container:
+    ```bash
+    $ docker run --rm -it --platform linux/amd64 -v $(pwd):$(pwd) -w $(pwd) -u root:$(id -g) ubuntu:24.04 bash
+    ```
+
+    ```{note}
+    `--platform linux/amd64` is required because the `torq` wheels are currently only published for x86-64. `-u root:$(id -g)` runs the container as `root` but with your host user's group ID, so files created in the mounted directory keep a group your host user can read/write instead of being owned by an arbitrary container group.
+    ```
+
+- Inside the container, install Python and other required packages:
+    ```bash
+    $ apt-get update && apt-get install -y curl
+    $ apt install -y python3 python3-pip python3-venv
+    $ python3 --version
+    Python 3.12.3
+    ```
+
+- Create and activate a Python virtual environment:
+    ```bash
+    $ python3 -m venv myenv && source myenv/bin/activate
+    ```
+
+    ```{note}
+    A virtual environment isolates the packages installed for this project from the container's system-wide Python packages. Recent Ubuntu/Debian releases mark the system Python as "externally managed" and refuse `pip install` outside of a virtual environment, so creating one with `venv` avoids conflicts and keeps installs reproducible.
+    ```
+
+With the virtual environment active, continue with the [Python Wheel (pip)](#python-wheel-pip) steps below to install and use `torq-compiler` and `torq-runtime` inside the container.
+
 ### Python Wheel (pip)
 
 ```{note}
