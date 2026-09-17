@@ -97,11 +97,14 @@ static irqreturn_t torq_synpu_irq_handler(int irq, void *ptr)
     uint32_t status;
 
     status = readl(torq_dev->reg_map + RA_(NSS,STATUS));
+
     torq_dev->interrupt_status = status;
 
     KLOGD("SYNPU IRQ: status=0x%x", status);
 
     writel(1, torq_dev->reg_map + RA_(NSS,STATUS));
+
+    torq_devfreq_job_complete(torq_dev);
 
     complete(&torq_dev->job_completion);
 
@@ -587,6 +590,7 @@ static int torq_run_network(struct torq_file_inst *inst, struct torq_run_network
 {
     struct torq_module *torq_dev = inst->torq_device;
     struct torq_network *net;
+    int ret;
 
     if (!inst || !req) {
         KLOGE("Invalid parameters: inst=%p, req=%p", inst, req);
@@ -607,7 +611,7 @@ static int torq_run_network(struct torq_file_inst *inst, struct torq_run_network
     KLOGD("Running job on network %d with code entry 0x%x", req->network_id, req->code_entry);
 
     reinit_completion(&torq_dev->job_completion);
-
+    torq_dev->interrupt_status = 0;
     writel(RF_LSH(NSS, CFG_LINK_EN, 1) | RF_BMSK_LSH(NSS, CFG_DESC, req->code_entry),
            torq_dev->reg_map + RA_(NSS,CFG));
 
@@ -617,12 +621,15 @@ static int torq_run_network(struct torq_file_inst *inst, struct torq_run_network
 
     wmb();
 
+    ret = torq_devfreq_job_start(torq_dev);
+    if (ret)
+        return ret;
+
+    torq_dev->inference_start = ktime_get();
+
     writel(RF_LSH(NSS, START_NSS, 1), torq_dev->reg_map + RA_(NSS,START));
 
     wmb();
-
-    /* Record inference start time */
-    torq_dev->inference_start = ktime_get();
 
     return 0;
 }
@@ -1469,6 +1476,7 @@ static void torq_remove(struct platform_device *pdev)
         sysfs_remove_group(&torq_dev->misc_dev.this_device->kobj, &torq_stats_group);
         misc_deregister(&torq_dev->misc_dev);
     }
+
     torq_devfreq_exit(torq_dev);
     platform_set_drvdata(pdev, NULL);
 }
@@ -1517,6 +1525,7 @@ static int torq_probe(struct platform_device *pdev)
 
     torq_dev->pdev = pdev;
     torq_dev->iommu_device = &torq_dev->pdev->dev;
+    platform_set_drvdata(pdev, torq_dev);
 
     ret = torq_devfreq_init(torq_dev);
     if (ret)
@@ -1529,8 +1538,6 @@ static int torq_probe(struct platform_device *pdev)
         ret = -ENODEV;
         goto err_devfreq;
     }
-    platform_set_drvdata(pdev, torq_dev);
-
     init_completion(&torq_dev->job_completion);
     torq_dev->interrupt_status = 0;
     atomic64_set(&torq_dev->total_inference_time_us, 0);
