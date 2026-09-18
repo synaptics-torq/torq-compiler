@@ -61,6 +61,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
+#include "llvm/Support/Threading.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <cassert>
@@ -768,7 +769,18 @@ TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTile
     bool failure = false;
     bool memoryOverflow = false;
 
+    // The handler goes on the MLIRContext, which all worker threads share. But
+    // these two flags belong to this call only. Sibling functions probe at the
+    // same time, so skip diagnostics from other threads. Returning failure() is
+    // safe. The engine tries handlers newest first and stops at the first one
+    // that returns success, so the owner still gets it. This is what
+    // mlir::ParallelDiagnosticHandler does.
+    const uint64_t ownerThreadId = llvm::get_threadid();
+
     auto diagHandler = [&](mlir::Diagnostic &diag) -> LogicalResult {
+        if (llvm::get_threadid() != ownerThreadId)
+            return llvm::failure();
+
         if (memoryOverflow) {
             // If we already saw the OUT_OF_MEMORY_MESSAGE, suppress all messages.
             return llvm::success();
@@ -791,11 +803,16 @@ TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTile
     using DiagHandlerFn = std::function<LogicalResult(mlir::Diagnostic &)>;
 
     mlir::ScopedDiagnosticHandler diagHandlerRAII(
-        moduleOp->getContext(), (optimizeForTileAndFuse ? DiagHandlerFn(diagHandler)
-                                                        : DiagHandlerFn([&](mlir::Diagnostic &) {
-                                                              failure = true;
-                                                              return llvm::failure();
-                                                          }))
+        moduleOp->getContext(),
+        (optimizeForTileAndFuse ? DiagHandlerFn(diagHandler)
+                                : DiagHandlerFn([&](mlir::Diagnostic &) {
+                                      // Not reached today. Both callers pass true.
+                                      // Kept the same so it cannot break the same way later.
+                                      if (llvm::get_threadid() != ownerThreadId)
+                                          return llvm::failure();
+                                      failure = true;
+                                      return llvm::failure();
+                                  }))
     );
 
     if (failed(runAssignAddressesPipeline(moduleOp, optimizeForTileAndFuse))) {
@@ -807,6 +824,12 @@ TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTile
 
         if (failure)
             return llvm::failure();
+
+        // The pipeline failed, but neither flag is set. This is the path the bug
+        // ran through. A stolen diagnostic left the owner here, and falling
+        // through said the tile fits. Return failure instead. Logging showed
+        // this branch never runs today.
+        return llvm::failure();
     }
 
     assert(!memoryOverflow && "this should have been captured above");

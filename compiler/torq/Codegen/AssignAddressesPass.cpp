@@ -28,7 +28,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
+#include "llvm/Support/Threading.h"
 
+#include <cstdint>
 #include <optional>
 
 #define DEBUG_TYPE "torq-assign-addresses"
@@ -769,9 +771,17 @@ static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
     Operation *clone = funcOp->clone();
     bool ok;
     {
-        mlir::ScopedDiagnosticHandler swallow(funcOp->getContext(), [](mlir::Diagnostic &) {
-            return llvm::success();
-        });
+        const uint64_t ownerThreadId = llvm::get_threadid();
+        mlir::ScopedDiagnosticHandler swallow(
+            funcOp->getContext(),
+            [ownerThreadId](mlir::Diagnostic &) -> LogicalResult {
+                // Swallow only the diagnostics from this trial. The handler is on the
+                // shared context. Swallowing everything would hide another thread's error.
+                if (llvm::get_threadid() != ownerThreadId)
+                    return llvm::failure();
+                return llvm::success();
+            }
+        );
         ok = succeeded(allocateLramAddresses(cast<FunctionOpInterface>(clone)));
     }
     clone->erase();
@@ -818,11 +828,17 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
         // them after emitting OUT_OF_MEMORY_MESSAGE.
         llvm::SmallVector<mlir::InFlightDiagnostic> inFlightDiags;
 
+        const uint64_t ownerThreadId = llvm::get_threadid();
+
         { // This scopes delimits diagHandler, so at the end we can actually
           // re-emit the errors without it catching them again.
             mlir::ScopedDiagnosticHandler diagHandler(
                 funcOp->getContext(),
-                [&](mlir::Diagnostic &diag) -> LogicalResult {
+                [&, ownerThreadId](mlir::Diagnostic &diag) -> LogicalResult {
+                    // Re-emit only the diagnostics from this function. The handler is shared.
+                    if (llvm::get_threadid() != ownerThreadId)
+                        return llvm::failure();
+
                     InFlightDiagnostic inFlightDiag =
                         getContext().getDiagEngine().emit(diag.getLocation(), diag.getSeverity());
 
