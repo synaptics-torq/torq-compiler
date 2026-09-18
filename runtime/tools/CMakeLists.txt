@@ -16,3 +16,18 @@ iree_cc_binary(
     iree::vm
   INSTALL_COMPONENT IREETools-Runtime
 )
+
+iree_cc_binary(
+  NAME
+    torq-decode-llm
+  SRCS
+    "torq-decode-llm.cc"
+  DEPS
+    iree::base
+    iree::base::internal::flags
+    iree::hal
+    iree::tooling::context_util
+    iree::vm
+  INSTALL_COMPONENT IREETools-Runtime
+)
+
