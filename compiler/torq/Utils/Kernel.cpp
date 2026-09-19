@@ -2549,7 +2549,19 @@ QData SlicePrivate::actClamp(
     actSetNumberFormat(partialType);
 
     if (isInt(partialType)) {
-        if (weightSize == 2 && dataSize == 1) {
+        if (actMode == torq_hw::ACTMode::I2F) {
+            // The ACT unit converts each int partial to a float, so the integer-only
+            // re-typing and partial shifts below do not apply; keep the fp32 result
+            // type. Known producers: signed casts and PT2E dequant arrive weightless
+            // with 1, 2 or 4-byte data, and unsigned i1/i8 casts (uitofp) arrive as
+            // 1-byte data x 1-byte weight MAC partials. Check this list when adding
+            // a new I2F producer.
+            assert(
+                (weightSize == 0 && (dataSize == 1 || dataSize == 2 || dataSize == 4)) ||
+                (weightSize == 1 && dataSize == 1) && "Unsupported I2F data/weight combination"
+            );
+        }
+        else if (weightSize == 2 && dataSize == 1) {
             // We have 2 partials for each data
             // Each partial is processed with different left shifts
             _cfg.act_lsh = {0, 8, 0, 8};
@@ -2591,10 +2603,7 @@ QData SlicePrivate::actClamp(
         }
         else if (dataSize == 1 && weightSize == 1) {
             _cfg.act_lsh = {0, 0, 0, 0};
-            // I2F keeps the fp32 result type selected above.
-            if (actMode != torq_hw::ACTMode::I2F) {
-                resultType = DType::int8;
-            }
+            resultType = DType::int8;
         }
         else if (weightSize == 0) {
             // No weight applied, keep original data type

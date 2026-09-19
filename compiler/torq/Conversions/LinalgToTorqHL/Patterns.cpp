@@ -117,7 +117,20 @@ bool isTorqCastOp(Operation *op, std::string &opName, std::string &failReason, b
     }
     else if (inputElementType.isInteger() &&
              (outputElementType.isF32() || outputElementType.isBF16())) {
-        castOp = dyn_cast_or_null<arith::SIToFPOp>(castOp);
+        // Unsigned i1/i8 -> float lowers to an ActOp i2f with a 1-weight so the
+        // ALU multiplies instead of sign-extending the source element (see
+        // CastOpPattern and ActPattern). Wider unsigned casts are not supported by
+        // slice HW and require host/CSS fallback.
+        if (isa<arith::UIToFPOp>(castOp) &&
+            (inputElementType.isInteger(1) || inputElementType.isInteger(8))) {
+            castOp = dyn_cast_or_null<arith::UIToFPOp>(castOp);
+            if (isUnsigned) {
+                *isUnsigned = true;
+            }
+        }
+        else {
+            castOp = dyn_cast_or_null<arith::SIToFPOp>(castOp);
+        }
     }
     else if ((inputElementType.isF32() || inputElementType.isBF16()) &&
              outputElementType.isInteger()) {
