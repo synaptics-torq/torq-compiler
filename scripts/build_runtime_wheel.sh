@@ -94,12 +94,6 @@ if [[ -z "${TORQ_WHEEL_VERSION:-}" ]]; then
 fi
 echo "Using version: ${TORQ_WHEEL_VERSION}"
 
-# setup.py shells out to patchelf to bundle the MPACT simulator .so. Because we
-# build with --no-build-isolation, this build-time dep (declared in
-# runtime/pyproject.toml) is not installed by pip and must be present in the
-# active environment.
-pip install "patchelf>=0.17"
-
 pip wheel \
     --no-build-isolation \
     --no-deps \

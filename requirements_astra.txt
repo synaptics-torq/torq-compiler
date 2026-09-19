@@ -10,6 +10,8 @@ wheel>=0.36.2
 sympy==1.13.3
 pybind11>=2.10.1
 PyYAML>=5.4.1
+# wheel build: runtime's setup.py requires patchelf
+patchelf>=0.17
 
 # these are from python/torq/requirements.txt
 packaging>=24.2

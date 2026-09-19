@@ -221,6 +221,132 @@ jobs:
           echo "Release published successfully for tag '$TAG_NAME'"
           echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
   
+  # Publishing is gated on the repo variable PYPI_TARGET:
+  # 'testpypi': run only TestPyPI publishing jobs
+  # 'pypi': run only PyPI publishing jobs
+  # (unset): disable publishing
+  publish_compiler_testpypi:
+    name: Publish compiler wheel to TestPyPI
+    needs: [build, test]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_TARGET == 'testpypi'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: testpypi-compiler
+      url: https://test.pypi.org/p/torq-compiler
+
+    permissions:
+      actions: read        # download the wheel artifacts
+      id-token: write      # required for trusted publishing
+      attestations: write  # PEP 740 attestations (uploaded by the action by default)
+
+    steps:
+      - name: (TestPyPI publish) Download compiler wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: host-compiler-wheel
+          path: dist
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          repository-url: https://test.pypi.org/legacy/
+
+  publish_runtime_testpypi:
+    name: Publish runtime wheels to TestPyPI
+    needs: [build, test]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_TARGET == 'testpypi'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: testpypi-runtime
+      url: https://test.pypi.org/p/torq-runtime
+
+    permissions:
+      actions: read        # download the wheel artifacts
+      id-token: write      # required for trusted publishing
+      attestations: write  # PEP 740 attestations (uploaded by the action by default)
+
+    steps:
+      - name: (TestPyPI publish) Download host runtime wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: host-runtime-wheel
+          path: dist
+
+      - name: (TestPyPI publish) Download Astra SL runtime wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: astra-sl-runtime-wheel
+          path: dist
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          repository-url: https://test.pypi.org/legacy/
+
+  publish_compiler_pypi:
+    name: Publish compiler wheel to PyPI
+    needs: [build, test]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_TARGET == 'pypi'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: pypi-compiler
+      url: https://pypi.org/p/torq-compiler
+
+    permissions:
+      actions: read        # download the wheel artifacts
+      id-token: write      # required for trusted publishing
+      attestations: write  # PEP 740 attestations (uploaded by the action by default)
+
+    steps:
+      - name: (PyPI publish) Download compiler wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: host-compiler-wheel
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish_runtime_pypi:
+    name: Publish runtime wheels to PyPI
+    needs: [build, test]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_TARGET == 'pypi'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: pypi-runtime
+      url: https://pypi.org/p/torq-runtime
+
+    permissions:
+      actions: read        # download the wheel artifacts
+      id-token: write      # required for trusted publishing
+      attestations: write  # PEP 740 attestations (uploaded by the action by default)
+
+    steps:
+      - name: (PyPI publish) Download host runtime wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: host-runtime-wheel
+          path: dist
+
+      - name: (PyPI publish) Download Astra SL runtime wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: astra-sl-runtime-wheel
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
   update_site:
     name: Update website
     runs-on: ubuntu-latest

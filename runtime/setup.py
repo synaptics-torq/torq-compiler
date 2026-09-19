@@ -241,9 +241,12 @@ class CMakeBuildPy(_build_py):
 # ---------------------------------------------------------------------------
 
 # minimum glibc version for the manylinux platform tag
-# we should be using GLIBC 2.39 but there are currently
-# no stable x86 and aarch64 manylinux releases.
-_MANYLINUX_GLIBC = "2_28"
+# Built binaries reference symbols up to GLIBC_2.38 / GLIBCXX_3.4.32
+# (GCC 13), so manylinux_2_39 is the lowest tag auditwheel accepts.
+# pypa/manylinux releases a 2_39 image for aarch64; x86_64 images stop
+# at 2_34, but the PEP 600 tag is valid regardless and pip enforces the
+# glibc floor at install time.
+_MANYLINUX_GLIBC = "2_39"
 
 _RUNTIME_LIBS_DIR = os.path.join(
     CMAKE_INSTALL_DIR_ABS,

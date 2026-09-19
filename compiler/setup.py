@@ -26,12 +26,13 @@ Environment variables:
                                    When set, cmake configure+build are skipped
                                    and only cmake --install is run.
     TORQ_WHEEL_PLAT                Force the wheel platform tag (e.g.
-                                   manylinux_2_28_x86_64).
+                                   manylinux_2_39_x86_64).
     TORQ_WHEEL_VERSION             Wheel version string.
 """
 
 import os
 import shutil
+import subprocess
 import sys
 import sysconfig
 
@@ -176,7 +177,23 @@ class CMakeBuildPy(_build_py):
         if os.path.isfile(torq_compile_src):
             torq_libs_dir = os.path.join(target_dir, "torq", "_compiler_libs")
             os.makedirs(torq_libs_dir, exist_ok=True)
-            shutil.copy2(torq_compile_src, os.path.join(torq_libs_dir, "torq-compile"))
+            fallback_compile = os.path.join(torq_libs_dir, "torq-compile")
+            shutil.copy2(torq_compile_src, fallback_compile)
+            # The build-time RUNPATH is $ORIGIN, which would point at
+            # torq/_compiler_libs/ - a directory without
+            # libIREECompiler.so. Retarget it to the package that owns
+            # the library so the fallback is runnable from any install
+            # prefix and so auditwheel can resolve libIREECompiler.so
+            # within the wheel.
+            subprocess.run(
+                [
+                    "patchelf",
+                    "--set-rpath",
+                    "$ORIGIN/../../iree/compiler/_mlir_libs",
+                    fallback_compile,
+                ],
+                check=True,
+            )
 
         # Copy iree.tools.tf wrappers into the build tree (for SavedModel import).
         iree_tf_src = os.path.join(IREE_TF_PYTHON_DIR, "iree", "tools", "tf")
@@ -206,7 +223,9 @@ class CMakeBuildPy(_build_py):
                 )
 
 
-_MANYLINUX_GLIBC = "2_28"
+# Built binaries reference symbols up to GLIBC_2.38 / GLIBCXX_3.4.32
+# (GCC 13), so manylinux_2_39 is the lowest tag auditwheel accepts.
+_MANYLINUX_GLIBC = "2_39"
 
 PlatOverrideBdistWheel = make_platform_bdist_wheel(
     CMAKE_INSTALL_DIR_ABS,
