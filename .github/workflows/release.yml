@@ -46,7 +46,7 @@ jobs:
   release_assets:
     name: Publish release assets
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     
     permissions:
       contents: write
@@ -131,7 +131,7 @@ jobs:
           cp scripts/Dockerfile.release docker/Dockerfile
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Registry
         uses: docker/login-action@v4
@@ -225,15 +225,15 @@ jobs:
   # 'testpypi': run only TestPyPI publishing jobs
   # 'pypi': run only PyPI publishing jobs
   # (unset): disable publishing
-  publish_compiler_testpypi:
-    name: Publish compiler wheel to TestPyPI
-    needs: [build, test]
-    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_TARGET == 'testpypi'
-    runs-on: ubuntu-latest
+  publish_compiler:
+    name: Publish compiler wheel to ${{ vars.PYPI_TARGET }}
+    needs: build   # we release on build because we don't test on public sites
+    if: github.ref_type == 'tag' && vars.PYPI_TARGET
+    runs-on: ubuntu-24.04
 
     environment:
-      name: testpypi-compiler
-      url: https://test.pypi.org/p/torq-compiler
+      name: ${{ vars.PYPI_TARGET }}-compiler
+      url: ${{ vars.PYPI_TARGET == 'testpypi' && 'https://test.pypi.org/p/torq-compiler' || 'https://pypi.org/project/torq-compiler' }}
 
     permissions:
       actions: read        # download the wheel artifacts
@@ -241,27 +241,27 @@ jobs:
       attestations: write  # PEP 740 attestations (uploaded by the action by default)
 
     steps:
-      - name: (TestPyPI publish) Download compiler wheel
+      - name: Download compiler wheel
         uses: actions/download-artifact@v8
         with:
           name: host-compiler-wheel
           path: dist
 
-      - name: Publish to TestPyPI
+      - name: Publish to ${{ vars.PYPI_TARGET }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-          repository-url: https://test.pypi.org/legacy/
+          repository-url: ${{ vars.PYPI_TARGET == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
 
-  publish_runtime_testpypi:
-    name: Publish runtime wheels to TestPyPI
-    needs: [build, test]
-    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_TARGET == 'testpypi'
-    runs-on: ubuntu-latest
+  publish_runtime:
+    name: Publish runtime wheels to ${{ vars.PYPI_TARGET }}
+    needs: build   # we release on build because we don't test on public sites
+    if: github.ref_type == 'tag' && vars.PYPI_TARGET
+    runs-on: ubuntu-24.04
 
     environment:
-      name: testpypi-runtime
-      url: https://test.pypi.org/p/torq-runtime
+      name: ${{ vars.PYPI_TARGET }}-runtime
+      url: ${{ vars.PYPI_TARGET == 'testpypi' && 'https://test.pypi.org/p/torq-runtime' || 'https://pypi.org/project/torq-runtime' }}
 
     permissions:
       actions: read        # download the wheel artifacts
@@ -269,87 +269,27 @@ jobs:
       attestations: write  # PEP 740 attestations (uploaded by the action by default)
 
     steps:
-      - name: (TestPyPI publish) Download host runtime wheel
+      - name: Download host runtime wheel
         uses: actions/download-artifact@v8
         with:
           name: host-runtime-wheel
           path: dist
 
-      - name: (TestPyPI publish) Download Astra SL runtime wheel
+      - name: Download Astra SL runtime wheel
         uses: actions/download-artifact@v8
         with:
           name: astra-sl-runtime-wheel
           path: dist
 
-      - name: Publish to TestPyPI
+      - name: Publish to ${{ vars.PYPI_TARGET }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-          repository-url: https://test.pypi.org/legacy/
-
-  publish_compiler_pypi:
-    name: Publish compiler wheel to PyPI
-    needs: [build, test]
-    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_TARGET == 'pypi'
-    runs-on: ubuntu-latest
-
-    environment:
-      name: pypi-compiler
-      url: https://pypi.org/p/torq-compiler
-
-    permissions:
-      actions: read        # download the wheel artifacts
-      id-token: write      # required for trusted publishing
-      attestations: write  # PEP 740 attestations (uploaded by the action by default)
-
-    steps:
-      - name: (PyPI publish) Download compiler wheel
-        uses: actions/download-artifact@v8
-        with:
-          name: host-compiler-wheel
-          path: dist
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-
-  publish_runtime_pypi:
-    name: Publish runtime wheels to PyPI
-    needs: [build, test]
-    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_TARGET == 'pypi'
-    runs-on: ubuntu-latest
-
-    environment:
-      name: pypi-runtime
-      url: https://pypi.org/p/torq-runtime
-
-    permissions:
-      actions: read        # download the wheel artifacts
-      id-token: write      # required for trusted publishing
-      attestations: write  # PEP 740 attestations (uploaded by the action by default)
-
-    steps:
-      - name: (PyPI publish) Download host runtime wheel
-        uses: actions/download-artifact@v8
-        with:
-          name: host-runtime-wheel
-          path: dist
-
-      - name: (PyPI publish) Download Astra SL runtime wheel
-        uses: actions/download-artifact@v8
-        with:
-          name: astra-sl-runtime-wheel
-          path: dist
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
+          repository-url: ${{ vars.PYPI_TARGET == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
 
   update_site:
     name: Update website
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: release_assets
 
     environment:

@@ -10,7 +10,7 @@ on:
 jobs:
   push-to-repo:    
     name: Push code to other repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: torq-compiler
     steps:
       - name: Generate GitHub token

@@ -117,7 +117,7 @@ jobs:
   
   run-tests-failure-alert:
     name: Collect results
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [test_cmodel, test_aws_fpga, test_astra_machina_sl, test_torq_lab]
     # this job is used as check to know if the merge queue can be merged. if it doesn't run, GH will consider
     # it as passed, so we run it only when one of the tests jobs above fails or is cancelled to notify GH the

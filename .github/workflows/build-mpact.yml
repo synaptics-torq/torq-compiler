@@ -18,7 +18,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     outputs:
       cache-key: ${{ steps.gen_vars.outputs.cache_key }}
