@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <functional>
 #include <map>
@@ -93,9 +92,15 @@ static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable
   
   }
 
-  // Attached bindings reach XRAM through TORQ_IOCTL_ATTACH_BINDING, so they need
-  // no reserved range; every other binding is copied and must be mapped.
-  if (!attaches_bindings) {
+  // Attached bindings reach XRAM through TORQ_IOCTL_ATTACH_BINDING, so they
+  // need no reserved range on real hardware. The simulator's attachBinding
+  // copies into the same XRAM vector, so bindings must be in the footprint:
+  // otherwise the reserved NSS-program hole is unallocated and writes land
+  // past _xram.size().
+  const bool hw_copies_bindings =
+      !FLAG_torq_hw_type ||
+      iree_string_view_equal(iree_make_cstring_view(FLAG_torq_hw_type), IREE_SVL("sim"));
+  if (!attaches_bindings || hw_copies_bindings) {
     if (iree_hal_torq_ExecutableDef_bindings_is_present(executable_def)) {
       iree_hal_torq_Binding_vec_t bindings =
           ns(ExecutableDef_bindings_get(executable_def));
@@ -717,6 +722,9 @@ iree_status_t TorqExecutable::initialize() {
   // Bindings can be attached only when the device allocator handed us dma-buf
   // memory and no host program addresses them at their compiler-assigned XRAM
   // addresses; a host program has no network to attach to.
+  // Do not gate this on FLAG_torq_hw_type: the simulator still takes the attach
+  // path, but attachBinding copies into the same XRAM vector, so the footprint
+  // (not this flag) includes bindings when hw_type is sim.
   const bool has_host_code =
       flatbuffers_uint8_vec_len(ns(ExecutableDef_host_code(executableDef))) != 0;
   attachesBindings_ = is_dmabuf_mode && !has_host_code;
