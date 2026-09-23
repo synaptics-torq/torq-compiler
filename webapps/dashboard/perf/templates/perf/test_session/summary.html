@@ -31,6 +31,9 @@
                 <div class="card-body">                    
                         {% include "perf/partials/bootstrap_field.html" with field=form.baseline_session only %}                        
                         <button type="submit" class="btn btn-primary">Switch baseline session</button>
+                        {% if latest_main_session and latest_main_session != baseline_session %}
+                        <a href="{% url 'test_session_summary' session.id %}?baseline_session={{ latest_main_session.id }}" class="btn btn-outline-primary ms-2">Compare to last main</a>
+                        {% endif %}
                         {% if baseline_session %}
                         <a href="{% url 'test_session_summary' baseline_session.id %}" class="btn btn-outline-secondary" target="_blank" rel="noopener noreferrer">
                             <i class="bi bi-box-arrow-up-right me-1"></i>Go to baseline session

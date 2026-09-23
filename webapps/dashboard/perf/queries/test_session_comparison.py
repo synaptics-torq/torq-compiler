@@ -124,3 +124,14 @@ def get_default_comparison_session(session):
             return None
     else:
         return main_sessions[0]
+
+
+def get_latest_main_session(session):
+    """Newest refs/heads/main session with the same test plan, other than this session."""
+
+    return (
+        TestSession.objects.filter(git_branch='refs/heads/main', test_plan=session.test_plan)
+        .exclude(id=session.id)
+        .order_by('-timestamp', '-id')
+        .first()
+    )

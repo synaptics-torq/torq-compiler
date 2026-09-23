@@ -193,9 +193,12 @@ def test_session_summary(request, session_id):
     statistics = queries.test_session_statistics.get_session_summary_statistics(session, baseline_session, 
                                                                                 metric_names=SUMMARY_METRICS)
 
+    latest_main_session = queries.test_session_comparison.get_latest_main_session(session)
+
     return render(request, 'perf/test_session/summary.html', 
         {'session': session, 
          'baseline_session': baseline_session, 
+         'latest_main_session': latest_main_session,
          'statistics': statistics, 
          'form': form,
         })
