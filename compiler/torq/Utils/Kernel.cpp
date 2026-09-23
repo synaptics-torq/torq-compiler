@@ -1080,8 +1080,16 @@ struct SlicePrivate {
         DType elementType{DType::none};
         // Loop nesting level at the point the RAM is loaded
         int loadNesting = -1;
+
         // MLIR values used to load (store) this RAM
         SmallVector<Value> values;
+        // MLIR symbols in the strides used to load (store) this RAM
+        SmallVector<Value> symbols;
+
+        void usingData(const LData &data) {
+            values.push_back(data.value());
+            symbols.append(data.symbols().begin(), data.symbols().end());
+        }
     };
 
     // Constructor
@@ -2812,7 +2820,7 @@ void Slice::append(const LData &output, const QData &data) {
     checkTypeCompatibility(output, data);
     d->deqw(output, backDimCount(data.subShape()));
     d->ref(output);
-    d->_pram.values.push_back(output.value());
+    d->_pram.usingData(output);
 }
 
 void Slice::append(const LData &output, int value) {
@@ -2832,7 +2840,7 @@ void Slice::append(const LData &output, int value) {
     d->_cfg.pad_value = extendPadValue(value, output.elementType());
     d->deqw(output, act.width(output.elementType()));
     d->ref(output);
-    d->_pram.values.push_back(output.value());
+    d->_pram.usingData(output);
 }
 
 void Slice::store(const LData &output, const QData &data) {
@@ -2842,7 +2850,7 @@ void Slice::store(const LData &output, const QData &data) {
     checkCompatibility(output, data);
     d->deqw(output);
     d->ref(output);
-    d->_pram.values.push_back(output.value());
+    d->_pram.usingData(output);
 }
 
 void Slice::store(const LData &output, int value) {
@@ -2864,7 +2872,7 @@ void Slice::store(const LData &output, int value) {
     d->_cfg.pad_value = extendPadValue(value, output.elementType());
     d->deqw(output);
     d->ref(output);
-    d->_pram.values.push_back(output.value());
+    d->_pram.usingData(output);
 }
 
 int Slice::scatter() const { return getBusScatterGather(NdlType::DEQW); }
@@ -3037,6 +3045,11 @@ static const ValueRange &checkNonNull(const ValueRange &range) {
 
 torq_hw::SliceTaskOp
 Slice::createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange symbols) const {
+    SmallVector<Value> allSymbols(symbols);
+    for (const auto &syms :
+         {d->_iram.symbols, d->_wram.symbols, d->_bram.symbols, d->_pram.symbols}) {
+        allSymbols.append(syms.begin(), syms.end());
+    }
     auto sliceTaskOp = SliceTaskOp::create(
         builder,
         loc,                              // Operation to replace
@@ -3045,7 +3058,9 @@ Slice::createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange sy
         checkNonNull(d->_wram.values),    // Weights
         checkNonNull(d->_bram.values),    // BiasScale tensor
         checkNonNull(d->_pram.values),    // Output tensor initializer
-        symbols,                          // Symbols used to compute the NDLs
+        ValueRange{},                     // Dx
+        ValueRange{},                     // Bx
+        allSymbols,                       // Symbols used to compute the NDLs
         getCfgAttr(builder.getContext()), // Slice configuration
         getNdls()
     );
@@ -3079,7 +3094,7 @@ IData IRam::load(const LData &data) {
 
     d->_iram.loadNesting = d->_forStack.size();
     d->_iram.elementType = data.elementType();
-    d->_iram.values.push_back(data.value());
+    d->_iram.usingData(data);
 
     auto idata = IData(iramShape, data.elementType());
     d->cedw(idata);
@@ -3176,7 +3191,7 @@ WData WRam::load(const LData &data, DType dstType, bool transpose) {
 
     d->_wram.loadNesting = d->_forStack.size();
     d->_wram.elementType = dstType;
-    d->_wram.values.push_back(data.value());
+    d->_wram.usingData(data);
 
     assert(!isCompressed(dstType) && "Compressed weights must be expanded on load");
 
@@ -3248,7 +3263,7 @@ BData BRam::load(const LData &data) {
 
     d->_bram.loadNesting = d->_forStack.size();
     d->_bram.elementType = elType;
-    d->_bram.values.push_back(data.value());
+    d->_bram.usingData(data);
     auto bdata = BData(data.subShape(), data.elementType());
     d->acbw(bdata);
 
@@ -3520,6 +3535,29 @@ Iterator Iterator::operator%(int modulo) {
     Iterator clone(*this);
     clone._iterVars.back().setModulo(modulo);
     return clone;
+}
+
+//
+// Tensor manipulation utilities
+//
+
+LData LData::stack(OpBuilder *builder, const LData &first, const LData &second, int axis) {
+    assert(first.elementType() == second.elementType() && "Data must have the same element type");
+    assert(first.shape() == second.shape() && "Data must have the same shape");
+    assert(first.offset() == second.offset() && "Data must have the same offset`");
+
+    auto ctx = builder->getContext();
+    auto loc = builder->getUnknownLoc();
+    auto inputDiff = getAffineDimExpr(1, ctx) - getAffineDimExpr(0, ctx);
+    LData stacked(first);
+
+    // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
+    // The difference between the two input addresses is used as offset to fetch the data
+    stacked.insertDim(axis, {2, Stride(inputDiff)});
+
+    stacked._symbols.push_back(GetAddressOp::create(*builder, loc, first.value()).getAddress());
+    stacked._symbols.push_back(GetAddressOp::create(*builder, loc, second.value()).getAddress());
+    return stacked;
 }
 
 //

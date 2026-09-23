@@ -239,11 +239,13 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     const auto zp = op.getOutputZp();
 
     // Define data tensors
-    LData input(params.input1);
+    LData input1(params.input1);
+    LData input2(params.input2);
     LData output(params.init);
     LData weights(op.getWeights());
     LData biasScale(op.getScaleBias());
     assert(weights.dim(0) == 2);
+    assert(biasScale.dim(0) == biasScaleWidth(input1.elementType()));
 
     // A per-channel scale_bias arrives as the 2-D [channels, pairWidth] table. Serving it needs
     // the channel dimension blocked and the BRAM reloaded per block, the way FMAPattern /
@@ -255,7 +257,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
         );
         return failure();
     }
-    if (biasScale.dim(0) != biasScaleWidth(input.elementType())) {
+    if (biasScale.dim(0) != biasScaleWidth(input1.elementType())) {
         LLVM_DEBUG(llvm::dbgs() << "add: unexpected scale_bias width\n");
         return failure();
     }
@@ -268,23 +270,23 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
         };
     };
 
-    // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
-    // The difference between the two input addresses is used as offset to fetch the data
-    auto inputDiff = getAffineDimExpr(1, params.ctx) - getAffineDimExpr(0, params.ctx);
-    input.insertDim(In::InputTensors, {2, Stride(inputDiff)});
-
     // Take care of output segmentation if requested
-    int denseDims = std::min(input.denseDims(), output.denseDims());
+    int denseInDims = std::min(input1.denseDims(), input2.denseDims());
+    int denseOutDims = output.denseDims();
+    int denseDims = std::min(denseInDims, denseOutDims);
     if (op.getSegmentOutput()) {
         // In this case vectorize on H & W dimensions only, so the output can be segmented
+        assert(denseOutDims >= 2 && "Output must have at least 2 dense dims for segmentation");
         denseDims = 2;
         output.partitionByIndexParity2D();
     }
 
-    // Vectorize the input tensor
+    // Vectorize the input tensors and stack them
     Slice slice("add");
-    int vectorSize = slice.alu.iWidth(input.elementType(), weights.elementType());
-    input.fuse(denseDims).vectorize(vectorSize);
+    int vectorSize = slice.alu.iWidth(input1.elementType(), weights.elementType());
+    input1.fuse(denseDims).vectorize(vectorSize);
+    input2.fuse(denseDims).vectorize(vectorSize);
+    LData input = LData::stack(&params.rewriter, input1, input2);
 
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
@@ -302,9 +304,8 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
         }
     }
 
-    auto input1Addr = GetAddressOp::create(params.rewriter, params.loc, params.input1).getAddress();
-    auto input2Addr = GetAddressOp::create(params.rewriter, params.loc, params.input2).getAddress();
-    return slice.createSliceTaskOp(params.rewriter, params.loc, {input1Addr, input2Addr});
+    auto sliceTaskOp = slice.createSliceTaskOp(params.rewriter, params.loc);
+    return sliceTaskOp;
 }
 
 } // namespace mlir::syna::torq

@@ -306,11 +306,13 @@ class LData : public DataT<LData> {
     LData operator[](IterVar index) const {
         LData subData = DataT<LData>::operator[](index);
         subData._value = _value;
+        subData._symbols = _symbols;
         return subData;
     }
     LData operator[](const Indexes &ixs) const {
         LData subData = DataT<LData>::operator[](ixs);
         subData._value = _value;
+        subData._symbols = _symbols;
         return subData;
     }
 
@@ -397,9 +399,21 @@ class LData : public DataT<LData> {
     // Get the MLIR Value associated to this data (if any)
     Value value() const { return _value; }
 
+    // Get the symbols used in the strides of this data (if any)
+    mlir::ValueRange symbols() const { return _symbols; }
+
+    // Join two data tensors along a new axis. Same as numpy.stack
+    // The axis parameter specifies the index of the new axis in the dimensions of the result.
+    // The operation is virtual in the sense that no data is actually moved
+    // The two tensors must have the same data type, offset, dimensions AND strides
+    static LData stack(OpBuilder *, const LData &first, const LData &second, int axis = 0);
+
   private:
     // MLIR Value (if any) associated to this data
     Value _value{};
+
+    // MLIR Values used in expressions associated to this data (if any)
+    std::vector<Value> _symbols;
 };
 
 // Data in IRAM
