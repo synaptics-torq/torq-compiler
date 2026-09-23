@@ -281,7 +281,10 @@ runs:
           CONTROL_PARAMS="--torq-bench-control-file bench-control.json"
         fi
 
-        if pytest $CONTROL_PARAMS --no-phases-dump ${{ inputs.pytest_args }}; then
+        # Keep the total pytest invocation below the GitHub Actions job timeout.
+        # This is separate from pytest-timeout, which limits each individual
+        # test but does not limit the accumulated duration of the test suite.
+        if timeout --signal=INT 2400 pytest $CONTROL_PARAMS --no-phases-dump ${{ inputs.pytest_args }}; then
           echo "pytest passed"
         else
           PYTEST_EXIT_CODE=$?
