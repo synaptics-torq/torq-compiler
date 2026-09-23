@@ -23,8 +23,10 @@
 // torq_hl.store/host_copy outputs, MemoryEffects writes, and — for
 // torq_hl.start_program — by mapping each arg to the target program's block
 // argument and checking whether that argument is written inside the program
-// body. Anything not understood is treated conservatively as a write, so the
-// transform never reuses a buffer whose contents may have changed.
+// body. Writes nested in a region-holding op (an scf.forall storing into a
+// subview of an outer buffer) count as writes of that op. Anything not
+// understood is treated conservatively as a write, so the transform never
+// reuses a buffer whose contents may have changed.
 //
 // LRAM-size guard. Reusing a buffer keeps it resident from its first load
 // to its last reuse instead of streaming it on demand. For a large read-only
@@ -146,6 +148,12 @@ static void appendWrites(
         return;
     }
     collectWrittenValues(op, out);
+    // A region-holding op (scf.forall, scf.for) also writes whatever its body
+    // writes, e.g. a store into a subview of a buffer defined in this block.
+    for (Region &region : op->getRegions())
+        for (Block &body : region)
+            for (Operation &nested : body)
+                appendWrites(&nested, progCache, out);
 }
 
 // Two torq_hl.load ops read identical data only if they read the SAME source
@@ -194,29 +202,46 @@ static int computeLastUseIndex(Value v, const llvm::DenseMap<Operation *, int> &
     return last;
 }
 
-// Peak concurrent bytes across all live intervals (sweep over begin/end events).
-static int64_t computePeakLramUsage(const llvm::DenseMap<Value, LramInterval> &intervals) {
-    SmallVector<std::pair<int, int64_t>> events;
-    events.reserve(intervals.size() * 2);
-    for (auto &kv : intervals) {
-        events.push_back({kv.second.begin, kv.second.size});
-        events.push_back({kv.second.end + 1, -kv.second.size});
+// Range-add / global-max over block op indices [0, n). Models per-index LRAM
+// occupancy, where an interval [begin, end] contributes its size to every index
+// it covers. The root max equals the peak a frees-first event sweep over
+// [begin, +size) / [end+1, -size) computes: a buffer ending at i-1 and one
+// beginning at i never coexist at the same index, so back-to-back buffers are
+// not double-counted, and no sort tie-break is needed.
+struct LramOccupancyTree {
+    int n = 0;
+    SmallVector<int64_t> maxVal; // 4n; node max including its own lazy add
+    SmallVector<int64_t> lazy;   // 4n; uniform add not yet pushed to children
+
+    void init(int n_) {
+        n = n_;
+        maxVal.assign(4 * n, 0);
+        lazy.assign(4 * n, 0);
     }
-    // At equal indices apply the frees (negative deltas) before the allocations:
-    // a buffer whose interval ends at i is gone before one that begins at i+1
-    // exists, so counting them together would double-count back-to-back buffers.
-    // llvm::sort is not stable, so without the tie-break the order is arbitrary
-    // and the transient double-count inflates the peak nondeterministically.
-    llvm::sort(events, [](auto &a, auto &b) {
-        return a.first < b.first || (a.first == b.first && a.second < b.second);
-    });
-    int64_t cur = 0, peak = 0;
-    for (auto &e : events) {
-        cur += e.second;
-        peak = std::max(peak, cur);
+
+    // Add delta to every index in [lo, hi] (inclusive). No-op if lo > hi.
+    void rangeAdd(int lo, int hi, int64_t delta) {
+        if (lo <= hi)
+            rangeAdd(1, 0, n - 1, lo, hi, delta);
     }
-    return peak;
-}
+
+    int64_t peak() const { return maxVal[1]; }
+
+  private:
+    void rangeAdd(int node, int b, int e, int lo, int hi, int64_t delta) {
+        if (hi < b || e < lo)
+            return;
+        if (lo <= b && e <= hi) {
+            maxVal[node] += delta;
+            lazy[node] += delta;
+            return;
+        }
+        int m = (b + e) / 2;
+        rangeAdd(2 * node, b, m, lo, hi, delta);
+        rangeAdd(2 * node + 1, m + 1, e, lo, hi, delta);
+        maxVal[node] = lazy[node] + std::max(maxVal[2 * node], maxVal[2 * node + 1]);
+    }
+};
 
 // From the data-flow-valid `candidates`, drop any reuse that would raise the
 // block's peak LRAM usage above the ceiling max(`lramSize`, baseline peak).
@@ -240,15 +265,21 @@ filterByLramSize(Block &block, ArrayRef<ReuseCandidate> candidates, int64_t lram
                 lramAllocs.push_back(alloc);
     }
 
-    // Baseline live interval of each LRAM buffer.
+    // Baseline live interval of each LRAM buffer, mirrored in the occupancy
+    // tree so each candidate's peak test is O(log n) instead of an
+    // O(intervals log intervals) event re-sort.
     llvm::DenseMap<Value, LramInterval> intervals;
+    LramOccupancyTree occ;
+    occ.init(n);
     for (memref::AllocOp alloc : lramAllocs) {
         int begin = idx[alloc];
         int end = std::max(begin, computeLastUseIndex(alloc.getResult(), idx));
-        intervals[alloc.getResult()] = {begin, end, getEncodedTotalSizeBytes(alloc.getType())};
+        int64_t size = getEncodedTotalSizeBytes(alloc.getType());
+        intervals[alloc.getResult()] = {begin, end, size};
+        occ.rangeAdd(begin, end, size);
     }
 
-    int64_t ceiling = std::max<int64_t>(lramSize, computePeakLramUsage(intervals));
+    int64_t ceiling = std::max<int64_t>(lramSize, occ.peak());
 
     SmallVector<ReuseCandidate> kept;
     for (const ReuseCandidate &c : candidates) {
@@ -258,37 +289,42 @@ filterByLramSize(Block &block, ArrayRef<ReuseCandidate> candidates, int64_t lram
             kept.push_back(c); // not LRAM-tracked: lramSize irrelevant
             continue;
         }
+        LramInterval &keepInterval = keepIt->second;
+        LramInterval dstInterval = dstIt->second;
         // A dst interval contained in keep's interval disappears without
         // extending keep, so the fold can only lower the peak: accept it
         // unconditionally. This is the duplicate-operand case (two loads of the
         // same source feeding one start_program), where refusing the merge
         // leaves an op that needs both copies resident at once.
-        if (dstIt->second.begin >= keepIt->second.begin &&
-            dstIt->second.end <= keepIt->second.end) {
+        if (dstInterval.begin >= keepInterval.begin && dstInterval.end <= keepInterval.end) {
             intervals.erase(c.dst);
+            occ.rangeAdd(dstInterval.begin, dstInterval.end, -dstInterval.size);
             kept.push_back(c);
             continue;
         }
 
         // Tentatively fold dst into keep (keep stays resident until dst's last
         // use, dst's buffer disappears); accept only if the peak stays <= ceiling.
-        int oldEnd = keepIt->second.end;
-        LramInterval dstInterval = dstIt->second;
-        keepIt->second.end = std::max(oldEnd, dstInterval.end);
+        int oldEnd = keepInterval.end;
+        keepInterval.end = std::max(oldEnd, dstInterval.end);
         intervals.erase(c.dst);
+        occ.rangeAdd(oldEnd + 1, keepInterval.end, keepInterval.size);
+        occ.rangeAdd(dstInterval.begin, dstInterval.end, -dstInterval.size);
 
-        if (computePeakLramUsage(intervals) <= ceiling) {
+        if (occ.peak() <= ceiling) {
             kept.push_back(c);
         }
         else {
             LLVM_DEBUG({
                 llvm::dbgs() << "filterByLramSize: REJECT reuse of " << c.keep << " keepInterval=["
-                             << keepIt->second.begin << "," << oldEnd << "] dstInterval=["
+                             << keepInterval.begin << "," << oldEnd << "] dstInterval=["
                              << dstInterval.begin << "," << dstInterval.end
-                             << "] peak=" << computePeakLramUsage(intervals)
-                             << " ceiling=" << ceiling << "\n";
+                             << "] peak=" << occ.peak() << " ceiling=" << ceiling << "\n";
             });
-            keepIt->second.end = oldEnd; // revert: this buffer keeps streaming
+            // Revert: this buffer keeps streaming.
+            occ.rangeAdd(dstInterval.begin, dstInterval.end, dstInterval.size);
+            occ.rangeAdd(oldEnd + 1, keepInterval.end, -keepInterval.size);
+            keepInterval.end = oldEnd;
             intervals[c.dst] = dstInterval;
         }
     }
@@ -352,6 +388,10 @@ static unsigned dedupBlock(
 
     // Phase 1: collect reuse candidates (correctness only, no IR mutation yet).
     llvm::DenseMap<Value, torq_hl::LoadOp> resident; // source value -> its load
+    // Residents indexed by their source's view base so a write to a base drops
+    // its residents directly. A per-write scan of every resident (re-walking
+    // each one's view chain) is quadratic and hangs on heavily-tiled blocks.
+    llvm::DenseMap<Value, SmallVector<Value>> residentsByBase;
     SmallVector<ReuseCandidate> candidates;
     SmallVector<Value> writes;
 
@@ -360,16 +400,13 @@ static unsigned dedupBlock(
         // here (the source data, or an aliasing view of it, has changed).
         writes.clear();
         appendWrites(&op, progCache, writes);
-        if (!writes.empty()) {
-            SmallVector<Value> toDrop;
-            for (Value v : writes) {
-                Value wb = getViewBase(v);
-                for (auto &kv : resident)
-                    if (getViewBase(kv.first) == wb)
-                        toDrop.push_back(kv.first);
-            }
-            for (Value k : toDrop)
+        for (Value v : writes) {
+            auto baseIt = residentsByBase.find(getViewBase(v));
+            if (baseIt == residentsByBase.end())
+                continue;
+            for (Value k : baseIt->second)
                 resident.erase(k);
+            residentsByBase.erase(baseIt);
         }
 
         auto ld = dyn_cast<torq_hl::LoadOp>(&op);
@@ -387,6 +424,7 @@ static unsigned dedupBlock(
         else if (!writtenBases.contains(getViewBase(dst))) {
             // Only anchor on a buffer that is never written.
             resident[src] = ld;
+            residentsByBase[getViewBase(src)].push_back(src);
         }
     }
 
