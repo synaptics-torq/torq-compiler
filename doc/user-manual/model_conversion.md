@@ -28,7 +28,7 @@ A TFLite model must first be converted to TOSA MLIR before compilation. There ar
 
 ```{note}
 Install the `[tflite]` extra to get the `tosa-converter-for-tflite` tool:
-`pip install "torq_compiler-<version>-<platform>.whl[tflite]"`
+`pip install "torq-compiler[tflite]"`
 ```
 
 Convert the model to TOSA bytecode:
@@ -49,7 +49,7 @@ with dynamic dimensions (for example a `None` batch size in Keras), convert it t
 static shapes first:
 
 ```{code} shell
-$ pip install "torq_compiler-<version>-<platform>.whl[tf]"   # one-time, for the tensorflow dependency
+$ pip install "torq-compiler[tf]"   # one-time, for the tensorflow dependency
 $ torq-convert-static tflite -i model.tflite -o model_static.tflite
 ```
 ```
@@ -121,7 +121,7 @@ $ torq-convert-static tflite -i model.tflite -o model_static.tflite
 IREE provides an ONNX importer that converts ONNX models into a text-based MLIR representation. The importer is available in the Torq compiler Python environment.
 
 ```{note}
-**Compiler wheel users:** ONNX importing requires the `onnx` extra. Install with: `pip install "torq_compiler-<version>-<platform>.whl[onnx]"`
+**Compiler wheel users:** ONNX importing requires the `onnx` extra. Install with: `pip install "torq-compiler[onnx]"`
 ```
 
 - If not using the Docker container, activate the Python environment as explained in [Getting Started](./getting_started.md).

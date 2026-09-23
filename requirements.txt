@@ -20,13 +20,13 @@ tosa-converter-for-tflite==2026.2.0
 keras==3.14.1
 
 # onnx
-onnx==1.19.1
-onnxruntime==1.25.0
+onnx==1.21.0
+onnxruntime==1.26.0
 onnxscript==0.6.1
 # for python/torq/testing/decoder_components_extractor.py
 onnx_graphsurgeon==0.6.1
 # for torq.lab.quantization.onnx.weights sensitivity analysis (--tokenizer)
-tokenizers==0.23.2
+tokenizers==0.22.2
 
 # torch (used for bf16 reference execution in testing)
 --extra-index-url https://download.pytorch.org/whl/cpu

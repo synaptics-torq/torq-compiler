@@ -1,5 +1,22 @@
 # Release Notes
 
+## Version 2.2.1
+
+### Torq changes since v2.2.0
+
+#### Highlights
+- `torq-compiler` and `torq-runtime` wheels are now published to PyPI: `pip install torq-compiler` / `pip install torq-runtime`.
+
+#### Fixed
+- Simulator XRAM footprint now includes attached bindings. Fixes writes landing past the end of XRAM.
+- `torq-compiler[onnx]` dependency versions updated to be compatible with torq-tools.
+
+#### Testing, CI and tooling
+- Pinned `ubuntu-latest` image tags, upgraded GitHub actions, removed the unused workflows, and unified the PyPI publishing jobs.
+
+**Full Changelog**: https://github.com/synaptics-torq/torq-compiler/compare/v2.2.0...v2.2.1
+
+
 ## Version 2.2.0 (2026-09-19)
 
 ### Torq changes since v2.1.0

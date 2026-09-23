@@ -306,8 +306,8 @@ setup(
     author="synaptics-astra",
     author_email="zSvcastrateam@synaptics.com",
     description="Torq compiler python bindings",
-    long_description="Torq compiler with IREE compiler Python bindings.",
-    long_description_content_type="text/plain",
+    long_description=open(os.path.join(SETUPPY_DIR, "README.md"), "rt").read(),
+    long_description_content_type="text/markdown",
     license="Apache-2.0 WITH LLVM-exception",
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -379,15 +379,15 @@ setup(
     # IMPORTANT: dependencies must be synced with ./requirements.txt
     extras_require={
         "onnx": [
-            "onnx==1.19.1",
+            "onnx==1.21.0",
             # ONNXRuntime: reference outputs (torq.lab.verification.reference) and
             # the quantization / QDQ chain used by torq-gen-config.
-            "onnxruntime==1.25.0",
+            "onnxruntime==1.26.0",
             # torq.lab.model_tools.extraction.onnx.decoder_components uses onnx_graphsurgeon.
             "onnx_graphsurgeon==0.6.1",
             # torq.lab.quantization.onnx.weights._analysis loads tokenizer.json
             # for the weights sensitivity analysis (--tokenizer).
-            "tokenizers==0.23.2",
+            "tokenizers==0.22.2",
         ],
         "tflite": [
             "tosa-converter-for-tflite==2026.2.0",

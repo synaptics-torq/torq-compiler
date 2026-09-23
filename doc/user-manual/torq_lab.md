@@ -22,21 +22,21 @@ Some optional features pull in extra dependencies:
 
 ```bash
 # ONNX import/self-verify/gen_config/quantize
-$ pip install "torq_compiler-<version>-<platform>.whl[onnx]"
+$ pip install "torq-compiler[onnx]"
 
 # TFLite import
-$ pip install "torq_compiler-<version>-<platform>.whl[tflite]"
+$ pip install "torq-compiler[tflite]"
 
 # TFLite dynamic-to-static shape conversion (`torq-convert-static`)
 # Adds the `tensorflow` dependency for TFLite flatbuffer schema
-$ pip install "torq_compiler-<version>-<platform>.whl[tf]"
+$ pip install "torq-compiler[tf]"
 
 # Profiling annotation + Perfetto trace rendering
 # Adds `pandas`, `XlsxWriter`, and `protobuf` dependencies
-$ pip install "torq_compiler-<version>-<platform>.whl[profile]"
+$ pip install "torq-compiler[profile]"
 
 # Everything (all of the extras above)
-$ pip install "torq_compiler-<version>-<platform>.whl[all]"
+$ pip install "torq-compiler[all]"
 ```
 
 Without an extra, the features that need it raise a clear error naming the missing package.
@@ -53,7 +53,7 @@ $ python -m torq.lab <command> <model> [options]
 $ torq-lab
 ```
 
-`<model>` is a `.onnx`, `.tflite`, or `.mlir` source for `compile`/`run`/`verify`/`profile` (imported/compiled first as needed), or a `.vmfb` module to run/verify/profile/inspect directly. It is optional when `--config` supplies `model_path`.
+`<model>` is a `.onnx`, `.tflite`, or `.mlir` source for `compile`/`run`/`verify`/`profile` (imported/compiled first as needed), or a `.vmfb` module to run/verify/profile/inspect directly. It is optional when `--config` supplies `model_path`. The delegated commands (`gen_config`, `quantize`, `analyze`, `convert_dtype`, `convert_static`) do not take a `<model>` positional; see [Delegated commands](#delegated-commands).
 
 ### Subcommands
 
@@ -64,17 +64,14 @@ $ torq-lab
 | `verify`     | Compile/run if needed, then check outputs against a reference.      |
 | `profile`    | Compile/run if needed with profiling on, and report the profile.    |
 | `inspect`    | Describe a `.vmfb`/`.mlir`/`.onnx`/artifact directory; suggest next commands. |
-| `gen_config` | Per-layer NSS/CSS/Host executor discovery (`discover`/`run`/`view`/`edit`); delegates to `torq-gen-config`. |
-| `quantize`   | Static int8 ONNX quantization; delegates to `torq-gen-config`.       |
+| `gen_config` | Per-layer NSS/CSS/Host executor discovery (`discover`/`run`/`view`/`edit`) and FP32→int8 QDQ quantization (`quantize`); delegates to `torq-gen-config`. |
+| `quantize`   | ONNX quantization: `static` (int8 with calibration), `dynamic` (int8), or `weights` (int4/int8/bf16); delegates to `torq-quantize-model`. |
+| `analyze`    | Quantization sensitivity analysis: `static`/`dynamic` (per-node) or `weights` (per-layer); delegates to `torq-quantize-model analyze`. |
+| `convert_dtype` | Convert an ONNX model to Torq-compatible dtypes (`onnx`); delegates to `torq-convert-dtype`. |
+| `convert_static` | Convert a dynamic TFLite model to static shapes (`tflite`); delegates to `torq-convert-static`. |
 | *(none)*     | Launches [interactive mode](#interactive-mode).                     |
 
 ### Examples
-
-Download the MobileNetV2 INT8 MLIR model from the [Synaptics Hugging Face repository](https://huggingface.co/Synaptics/MobileNetV2):
-
-```bash
-$ curl -L https://huggingface.co/Synaptics/MobileNetV2/resolve/main/MobileNetV2_int8.mlir?download=true -o MobileNetV2_int8.mlir
-```
 
 Download the MobileNetV2 INT8 MLIR model from the [Synaptics Hugging Face repository](https://huggingface.co/Synaptics/MobileNetV2):
 
@@ -294,13 +291,128 @@ On a remote run, a transport failure is reported by named stage: `connect`, `sta
 
 ---
 
-## gen_config and quantize
+## Delegated commands
 
-`torq-lab gen_config <discover|run|view|edit>` and `torq-lab quantize` delegate to the `torq-gen-config` tool. See [torq-gen-config](torq-gen-config.md) for the full command reference.
+Five `torq-lab` commands are thin delegations to standalone tools installed in the compiler wheel. Unlike `compile`/`run`/`verify`/`profile`/`inspect`, they do not take a `<model>` positional: each keeps the option syntax of the tool it wraps (run `torq-lab <command> --help` for the full reference).
+
+| `torq-lab` command  | Delegates to          | Subcommands                                | Purpose                                            |
+|---------------------|-----------------------|--------------------------------------------|----------------------------------------------------|
+| `gen_config`        | `torq-gen-config`     | `discover`, `run`, `view`, `edit`, `quantize` | Per-layer NSS/CSS/Host executor discovery; FP32→int8 QDQ quantization. |
+| `quantize`          | `torq-quantize-model` | `static`, `dynamic`, `weights`, `analyze`  | ONNX quantization.                                 |
+| `analyze`           | `torq-quantize-model` | `static`, `dynamic`, `weights`             | Quantization sensitivity analysis.                 |
+| `convert_dtype`     | `torq-convert-dtype`  | `onnx`                                     | Convert an ONNX model to Torq-compatible dtypes.   |
+| `convert_static`    | `torq-convert-static` | `tflite`                                   | Convert a dynamic TFLite model to static shapes.   |
+
+### gen_config
+
+`torq-lab gen_config <discover|run|view|edit|quantize>` — per-layer executor discovery. See [torq-gen-config](torq-gen-config.md) for the full command reference; every option works the same way under either form. `gen_config quantize` quantizes an FP32 ONNX model to integer QDQ with calibration.
 
 ```bash
 $ torq-lab gen_config discover --model model.onnx --output-dir results/ --skip-mode
-$ torq-lab quantize --model model.onnx --output model.int8.onnx
+$ torq-lab gen_config quantize --model model.onnx --output model.int8.onnx
+```
+
+### quantize
+
+`torq-lab quantize <static|dynamic|weights>` — ONNX quantization. All three take `-i, --input` (FP32 ONNX model, required) and `-o, --output` (quantized ONNX model).
+
+**`static`** — int8 quantization with calibration. `--output` defaults to `<input-stem>.int8.onnx`.
+
+| Option | Description |
+|--------|-------------|
+| `--num-calib N` | Number of synthetic calibration samples (default: 20). |
+| `--per-channel` | Use per-channel weight quantization. |
+| `--full-integer` | Rewrite I/O to integer (remove input Q and output DQ nodes). |
+| `--quant-format {qdq,qoperator,hybrid}` | ONNX quantization format (default: `qdq`); `hybrid` picks `qoperator` for ops with good `qoperator` support (Conv, Add, MatMul, ...) and `qdq` for the rest, applied per layer. |
+| `--quant-dtype {A8W8}` | Quantized activation/weight dtype combination (currently only `A8W8`). |
+| `--quantize-only-ops OPS ...` | Only quantize the given ONNX op types. |
+| `--quantize-only-nodes NODES ...` | Only quantize the given node names. |
+| `--exclude-nodes NODES ...` | Exclude the given nodes from quantization (e.g. an `analyze` exclude list). |
+
+**`dynamic`** — int8 quantization via onnxruntime (no calibration).
+
+| Option | Description |
+|--------|-------------|
+| `--quantize-only-ops OPS ...` | Only quantize the given ONNX op types. |
+| `--quantize-only-nodes NODES ...` | Only quantize the given node names. |
+| `--exclude-nodes NODES ...` | Exclude the given nodes from quantization (e.g. an `analyze` exclude list). |
+| `--skip-preprocess` | Skip onnxruntime pre-processing steps that may improve quantization quality. |
+| `--uint8-weights` | Generate unsigned integer weights. |
+| `--per-tensor` | Quantize weights per tensor instead of per channel. |
+
+**`weights`** — weight-only int4/int8/bf16 quantization of `MatMul` weights (LLM-oriented). Requires `--bits` or `--config`.
+
+| Option | Description |
+|--------|-------------|
+| `--bits {4,8,16}` | Uniform bit-width (4=int4, 8=int8, 16=bf16); ignored with `--config`. |
+| `--block-size N` | Block size for block quantization (default: 32). |
+| `--config PATH` | Per-layer quantization config JSON from `analyze weights` (overrides `--bits` for mixed quantization). |
+| `--dequantize-weights` | Dequantize the weights and emit a single bf16 model ready for IREE compilation (no DQL nodes). |
+| `--skip-layers SUBSTR ...` | Layer-name substrings to skip (e.g. `lm_head`). |
+
+```bash
+$ torq-lab quantize static -i model.onnx -o model_static.onnx
+$ torq-lab quantize dynamic -i model.onnx -o model_dynamic.onnx
+$ torq-lab quantize weights -i model.onnx -o model_weights.onnx --bits 8
+```
+
+### analyze
+
+`torq-lab analyze <static|dynamic|weights>` — quantization sensitivity analysis (also reachable as `torq-lab quantize analyze <method>`). All three take `-i, --input` (FP32 ONNX model) and `-o, --output` (sensitivity report JSON). The reports feed back into `quantize`: `static`/`dynamic` can write an exclude list for `--exclude-nodes`, and `weights` can write the per-layer config for `--config`.
+
+**`static`** and **`dynamic`** rank nodes per node and share these options:
+
+| Option | Description |
+|--------|-------------|
+| `--exclude-output PATH` | Also write nodes at/above `--exclude-class` as a JSON list usable with `quantize <method> --exclude-nodes`. |
+| `--exclude-class {MEDIUM,HIGH,CRITICAL}` | Severity at/above which a node joins the exclude list (default: `HIGH`). |
+| `--op-types OPS ...` | Node op types to test (default: `MatMul Gemm`). |
+| `--skip-nodes SUBSTR ...` | Node-name substrings to skip. |
+| `--calibration-data NPZ` | `.npz` of input feeds (keys = model input names); seeded random inputs when omitted. |
+| `--seed N` | Seed for random calibration inputs (default: 42). |
+
+`static` additionally takes `--num-calib N` (default: 1) and the quantization format flags of `quantize static` (`--per-channel`, `--quant-format`, `--quant-dtype`); `dynamic` takes `--uint8-weights`, `--per-tensor`, and `--skip-preprocess`.
+
+**`weights`** ranks `MatMul` layers per layer for LLM-style weight quantization. `--embeddings NPY` (token embedding table) is required; other notable options: `--tokenizer JSON` (prompt tokenization), `--bits ...` (bit-widths to test, default: `4 8 16`), `--config-output PATH` (per-layer quantization config JSON for `quantize weights --config`), prompt options (`--prompts`, `--prompts-file`, `--pre-tokenized-file`, `--chat-template`, `--system-prompt`, `--num-tokens`), and the KL-divergence thresholds `--bf16-threshold` (default: 0.1) and `--int8-threshold` (default: 0.01).
+
+```bash
+$ torq-lab analyze dynamic -i model.onnx -o report.json
+$ torq-lab analyze weights -i model.onnx -o report.json --embeddings token_embeddings.npy
+```
+
+### convert_dtype
+
+`torq-lab convert_dtype onnx` — convert an ONNX model to Torq-compatible dtypes (the same command is available standalone as `torq-convert-dtype onnx`).
+
+| Option | Description |
+|--------|-------------|
+| `-i, --input` | Input ONNX model path (required). |
+| `-o, --output` | Output ONNX model path (required). |
+| `-d, --dtype` | Export dtype: `bf16`, `fp16`, `int32`, `int16`, or `int8` (required). |
+| `--opset N` | ONNX opset to use; a relatively new opset is required for bf16 support in some ops (default: 22). |
+| `--max-float X` | Maximum FP32 magnitude for constant conversion; initializers above it or the export dtype's range are rejected to avoid an overflowing conversion (default: 1e9). |
+| `--convert-io` | Convert model I/O to the export dtype. |
+| `--modelopt` | Use TensorRT modelopt for dtype conversion. |
+| `--bf16-rounding {nearest,truncate}` | Rounding mode for fp32→bf16 constants (default: `nearest`); `truncate` drops the low 16 mantissa bits. |
+| `--enforce-io-casts` | Insert Cast nodes so ONNX-spec-mandated int64 operator I/O (Reshape shape, Slice params, Shape/Size outputs) stays int64. |
+| `--strip-unused-outputs` | Strip unused node outputs during post-conversion cleanup; may break fixed-output nodes like TopK. |
+| `--torq-onnx-finalize` | Run Torq-oriented ONNX post-processing (ORT symbolic shapes, IR cap, value_info cleanup). |
+
+```bash
+$ torq-lab convert_dtype onnx -i model.onnx -o model_bf16.onnx -d bf16 --convert-io
+```
+
+### convert_static
+
+`torq-lab convert_static tflite` — convert a dynamic TFLite model to static shapes, using the default shapes (the same command is available standalone as `torq-convert-static tflite`). Requires the `[tf]` extra for the TFLite flatbuffer schema.
+
+| Option | Description |
+|--------|-------------|
+| `-i, --input` | Input TFLite model path (required). |
+| `-o, --output` | Output TFLite model path (required). |
+
+```bash
+$ torq-lab convert_static tflite -i model.tflite -o model_static.tflite
 ```
 
 ---
@@ -477,7 +589,7 @@ Menu:
 Choice: quit
 ```
 
-A `.vmfb` model skips the compile-flags prompts entirely. `recompile` re-prompts the compile flags and rebuilds in place; it is a no-op for a `.vmfb`. `gen_config` and `quantize` prompt for their own options and forward to the same delegated commands the batch CLI uses; `quantize` can optionally adopt its int8 output as the new model and recompile it. `Ctrl-D` (or `Ctrl-C`) exits cleanly at any prompt.
+A `.vmfb` model skips the compile-flags prompts entirely. `recompile` re-prompts the compile flags and rebuilds in place; it is a no-op for a `.vmfb`. `gen_config` prompts for the action (`discover`/`run`/`view`/`edit`) and forwards to `torq-gen-config`; `quantize` prompts for the output path, `--num-calib`, `--per-channel`, and `--full-integer`, runs `torq-gen-config quantize` (FP32→int8 QDQ), and can optionally adopt its int8 output as the new model and recompile it. `Ctrl-D` (or `Ctrl-C`) exits cleanly at any prompt.
 
 ---
 

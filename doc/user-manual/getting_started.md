@@ -39,7 +39,7 @@ The `torq-compiler` and `torq-runtime` are provided as Python wheels for Linux (
     ```
 
     ```{note}
-    `--platform linux/amd64` is required because the `torq` wheels are currently only published for x86-64. `-u root:$(id -g)` runs the container as `root` but with your host user's group ID, so files created in the mounted directory keep a group your host user can read/write instead of being owned by an arbitrary container group.
+    `--platform linux/amd64` is required because the `torq-compiler` wheel is currently only published for x86-64. `-u root:$(id -g)` runs the container as `root` but with your host user's group ID, so files created in the mounted directory keep a group your host user can read/write instead of being owned by an arbitrary container group.
     ```
 
 - Inside the container, install Python and other required packages:
@@ -63,50 +63,47 @@ With the virtual environment active, continue with the [Python Wheel (pip)](#pyt
 
 ### Python Wheel (pip)
 
-```{note}
-The compiler and runtime are distributed as separate wheels in the GitHub release assets. Install both when compiling and running models on the host.
+`torq-compiler` and `torq-runtime` are published on [PyPI](https://pypi.org) (release 2.2.1 and above). They are distributed as separate wheels; install both when compiling and running models on the host:
+
+```bash
+$ pip install torq-compiler
+$ pip install torq-runtime
 ```
 
-Download the matching compiler and runtime wheels from the [GitHub Releases](https://github.com/synaptics-torq/torq-compiler/releases) page. For example, replace `<version>` with the release version and run:
+`pip` selects the wheel for your platform: the `torq-runtime` wheel is published for both x86-64 (host simulator) and aarch64 (board) Linux, while the `torq-compiler` wheel is currently published for x86-64 hosts only.
+
+To install a specific release version, download the matching wheels from the [GitHub Releases](https://github.com/synaptics-torq/torq-compiler/releases) page instead. For example, replace `<version>` with the release version and run:
 
 ```bash
 $ curl -LO https://github.com/synaptics-torq/torq-compiler/releases/download/<version>/torq_compiler-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
 $ curl -LO https://github.com/synaptics-torq/torq-compiler/releases/download/<version>/torq_runtime-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
+$ pip install torq_compiler-<version>-cp312-cp312-manylinux_2_28_x86_64.whl torq_runtime-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
 ```
-
-Install the downloaded wheels with `pip`:
-
-```bash
-$ pip install torq_compiler-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
-$ pip install torq_runtime-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
-```
-
-Use the `manylinux_2_28_aarch64` `torq-runtime` wheel when installing the runtime on a supported aarch64 board. The compiler wheel is currently provided for x86-64 hosts.
 
 The `torq-compiler` wheel provides `torq-compile` and the compiler Python tools. The `torq-runtime` wheel provides `torq-run-module`, the runtime Python API, and the host simulator where supported.
 
 To enable ONNX model importing, install with the `onnx` extra:
 
 ```bash
-$ pip install "torq_compiler-<version>-<platform>.whl[onnx]"
+$ pip install "torq-compiler[onnx]"
 ```
 
 To enable TFLite model conversion, install with the `tflite` extra:
 
 ```bash
-$ pip install "torq_compiler-<version>-<platform>.whl[tflite]"
+$ pip install "torq-compiler[tflite]"
 ```
 
 To enable TensorFlow SavedModel importing, install the `tf` extra:
 
 ```bash
-$ pip install "torq_compiler-<version>-<platform>.whl[tf]"
+$ pip install "torq-compiler[tf]"
 ```
 
 Multiple extras can be combined:
 
 ```bash
-$ pip install "torq_compiler-<version>-<platform>.whl[onnx,tflite]"
+$ pip install "torq-compiler[onnx,tflite]"
 ```
 
 For ONNX importing via Python:

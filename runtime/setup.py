@@ -306,9 +306,7 @@ setup(
     author="synaptics-astra",
     author_email="zSvcastrateam@synaptics.com",
     description="Torq runtime python bindings",
-    long_description=open(
-        os.path.join(IREE_PYTHON_DIR, "iree", "runtime", "README.md"), "rt"
-    ).read(),
+    long_description=open(os.path.join(SETUPPY_DIR, "README.md"), "rt").read(),
     long_description_content_type="text/markdown",
     license="Apache-2.0 WITH LLVM-exception",
     classifiers=[

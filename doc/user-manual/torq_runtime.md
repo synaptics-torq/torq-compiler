@@ -1,14 +1,14 @@
-# Torq Runtime Python API (Beta)
+# Torq Runtime Python API
 
 The `torq-runtime` Python package provides bindings for loading and running compiled `.vmfb` models on a Torq device directly from Python.
 
-```{warning}
-`torq-runtime` is currently in beta and is not yet available on PyPI.
-```
-
 ## Installation
 
-The `torq-runtime` package is included in the GitHub release. Install the runtime wheel directly from any release snapshot.
+`torq-runtime` is published on [PyPI](https://pypi.org/project/torq-runtime/):
+
+```bash
+$ pip install torq-runtime
+```
 
 ## Quick Start
 

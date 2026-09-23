@@ -3,7 +3,7 @@
 A guide for finding the best execution configuration (NSS/CSS/Host) for each operation in a model.
 
 ```{note}
-Also available as `torq-lab gen_config <discover|run|view|edit>` and `torq-lab quantize` — see [torq.lab](torq_lab.md#gen_config-and-quantize). Every option below works the same way under either form.
+Also available as `torq-lab gen_config <discover|run|view|edit|quantize>` — see [torq.lab](torq_lab.md#delegated-commands). Every option below works the same way under either form.
 ```
 
 ---
@@ -57,8 +57,8 @@ Install the compiler and runtime wheels with `pip`; the `onnx` extra pulls in
 the ONNX dependencies that discovery needs:
 
 ```bash
-pip install "torq_compiler-<version>-<platform>.whl[onnx]"
-pip install torq_runtime-<version>-<platform>.whl
+pip install "torq-compiler[onnx]"
+pip install torq-runtime
 ```
 
 This puts the `torq-gen-config` command on your `PATH`, ready to use — no
@@ -1028,3 +1028,24 @@ torq-gen-config edit --model model.onnx --layer Conv_0 --tolerance-avg 0.1
 torq-gen-config edit --model model.onnx --list
 torq-gen-config edit --model model.onnx --list conv
 ```
+
+#### `quantize` — Quantize an FP32 ONNX model to integer QDQ
+
+| Option | Description |
+|--------|-------------|
+| `--config` | Config JSON file(s) to layer for the quantization config (repeatable, later wins) |
+| `--model` | Path to the FP32 ONNX model |
+| `--output` | Output path for the quantized ONNX model (default: `<model>.int8.onnx`) |
+| `--num-calib` | Number of synthetic calibration samples (default: 20) |
+| `--dataset` | Calibration dataset (not implemented yet) |
+| `--per-channel` | Use per-channel weight quantization |
+| `--full-integer` | Rewrite I/O to integer (remove input Q and output DQ nodes) |
+| `--quant-format` | ONNX quantization format: `qdq` (default), `qoperator`, or `hybrid` |
+| `--quant-dtype` | Quantized activation/weight dtype combination (currently only `A8W8`) |
+
+```bash
+# Static int8 QDQ quantization with calibration
+torq-gen-config quantize --model model.onnx --output model.int8.onnx
+```
+
+For the `static`/`dynamic`/`weights` quantization methods with sensitivity analysis, use `torq-lab quantize` / `torq-lab analyze` (or `torq-quantize-model`) instead — see [torq.lab](torq_lab.md#delegated-commands).
