@@ -162,9 +162,18 @@ static torq_hw::SliceTaskOp lowerToHwPerChannelFast(
     const auto inType = input.elementType();
     const auto wType = weight.elementType();
     const int weightVectSize = weight.dim(Weight::OCElement);
-    const int actVectSize = std::min(weightVectSize, slice.act.width(wType, inType, true));
+    const int actWidth = slice.act.width(wType, inType, true);
+    const int actVectSize = std::min(weightVectSize, actWidth);
+    // The ACT-group count follows the PRAM shape, not the bias tensor: outerProductAccumulate
+    // densifies the ACT-vector dim to a full aluWidth worth of vectors whenever more than one
+    // drain beat is needed, and the drain below indexes DEBR with that dim. Deriving the count
+    // from weightVectSize instead would come up short for an OC vector narrower than aluWidth
+    // (bf16 OC=16 gives 2 groups against 4 PRAM vectors) and DEBR would index past the record
+    // block. This matches div_ceil(weightVectSize, actVectSize) whenever the OC vector is full;
+    // below that it over-reads the bias tensor, but the extra records only feed padding lanes
+    // whose results are never written back, the same way an OC remainder vector already works.
     biasScale.forceReshapeDim(
-        0, {-1, (int)div_ceil(weightVectSize, actVectSize), actVectSize, biasScaleWidth(inType)}
+        0, {-1, (int)div_ceil(aluWidth, actWidth), actVectSize, biasScaleWidth(inType)}
     );
 
     input.subviewDim(In::N, rowOffset, rowCount);
