@@ -5,6 +5,7 @@
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
@@ -40,8 +41,6 @@ class PhysicalObject {
     PhysicalObject(PhysicalObject &&) = delete;
     PhysicalObject &operator=(PhysicalObject &&) = delete;
 
-    virtual void touch() = 0;
-
     VirtualMemory &vm();
 
     bool isPinned();
@@ -57,21 +56,16 @@ class PhysicalObject {
 
 class PhysicalBuffer : public PhysicalObject {
     VirtualBuffer &virtualBuffer_;
-    int address_;
 
   public:
     VirtualBuffer &virtualBuffer() { return virtualBuffer_; }
-
-    int address() const { return address_; }
 
     virtual VirtualObject &virtualObject() override;
 
     int size();
 
-    virtual void touch() override;
-
-    PhysicalBuffer(Value value, VirtualBuffer &virtualBuffer, int address)
-        : PhysicalObject{value}, virtualBuffer_(virtualBuffer), address_(address) {}
+    PhysicalBuffer(Value value, VirtualBuffer &virtualBuffer)
+        : PhysicalObject{value}, virtualBuffer_(virtualBuffer) {}
 };
 
 class PhysicalAlias : public PhysicalObject {
@@ -84,8 +78,6 @@ class PhysicalAlias : public PhysicalObject {
     VirtualAlias &virtualAlias();
 
     virtual VirtualObject &virtualObject() override;
-
-    virtual void touch() override;
 
     PhysicalAlias(Value value, VirtualAlias &virtualAlias)
         : PhysicalObject{value}, virtualAlias_(virtualAlias) {}
@@ -129,10 +121,7 @@ class VirtualObject {
         pinCount_--;
     }
 
-    virtual FailureOr<PhysicalObject *>
-    swapIn(IRRewriter &rewriter, Location loc, bool allowDefragment) = 0;
-
-    void touch() { physicalObject().touch(); }
+    virtual PhysicalObject *swapIn(IRRewriter &rewriter, Location loc) = 0;
 
     VirtualAlias &addAlias(Value virtualValue) {
         auto &aliasPtr =
@@ -184,12 +173,11 @@ class VirtualBuffer : public VirtualObject {
 
     virtual bool isSwappedOut() override { return !maybePhysicalBuffer_.has_value(); }
 
-    virtual FailureOr<PhysicalObject *>
-    swapIn(IRRewriter &rewriter, Location loc, bool allowDefragment) override;
+    virtual PhysicalObject *swapIn(IRRewriter &rewriter, Location loc) override;
 
     void swapOut(IRRewriter &rewriter, Location loc);
 
-    LogicalResult initialize();
+    void initialize();
 
     void dump() {
         llvm::dbgs() << "Buffer id:" << id() << " size: " << size_ << " value: ";
@@ -260,8 +248,7 @@ class VirtualAlias : public VirtualObject {
         }
     }
 
-    virtual FailureOr<PhysicalObject *>
-    swapIn(IRRewriter &rewriter, Location loc, bool allowDefragment) override {
+    virtual PhysicalObject *swapIn(IRRewriter &rewriter, Location loc) override {
 
         LLVM_DEBUG({
             llvm::dbgs() << "Swapping in virtual alias ";
@@ -269,9 +256,7 @@ class VirtualAlias : public VirtualObject {
         });
 
         if (parent().isSwappedOut()) {
-            if (failed(parent().swapIn(rewriter, loc, allowDefragment))) {
-                return failure();
-            }
+            parent().swapIn(rewriter, loc);
         }
 
         auto opResult = dyn_cast<OpResult>(value());
@@ -313,39 +298,31 @@ class VirtualAlias : public VirtualObject {
 // This class is used to track the currently active physical buffers and theirs state
 class PhysicalMemory {
 
-    VirtualMemory &vm_;
     llvm::MapVector<VirtualBuffer *, std::unique_ptr<PhysicalBuffer>> physicalBuffers_;
-    SetVector<PhysicalBuffer *> lastUsedPhysicalBuffer_;
     llvm::MapVector<PhysicalBuffer *, int> pinnedBuffers_;
     int totalPinnedSize_ = 0;
-    Pool &pool_;
-    int defragCount_ = 0;
+    int capacity_;
+    int residentBytes_ = 0;
     int swapOutCount_ = 0;
     int skippedSwapOutStoreCount_ = 0;
     int droppedSwapOutCount_ = 0;
     int64_t droppedSwapOutBytes_ = 0;
     int skippedSwapInLoadCount_ = 0;
-
-    // Buffers the spill-on-fragmentation path must not swap out: the operands of the
-    // op currently being processed (they are non-pinned during result allocation but
-    // are needed by the op, so spilling them would break it).
-    llvm::DenseSet<VirtualBuffer *> spillProtect_;
+    int64_t swapOutStoredBytes_ = 0;
+    int64_t swapInLoadedBytes_ = 0;
 
   public:
-    PhysicalMemory(VirtualMemory &vm, Pool &pool) : vm_(vm), pool_(pool) {}
-
-    void clearSpillProtect() { spillProtect_.clear(); }
-    void addSpillProtect(VirtualBuffer *buffer) { spillProtect_.insert(buffer); }
+    explicit PhysicalMemory(int capacity) : capacity_(capacity) {}
 
     int totalPinnedSize() const { return totalPinnedSize_; }
 
-    int totalPhysicalBufferSize() const { return pool_.usedSize(); }
+    int totalPhysicalBufferSize() const { return residentBytes_; }
 
-    int usableSize() const { return pool_.usableSize(); }
-
-    int defragCount() const { return defragCount_; }
+    int usableSize() const { return capacity_; }
 
     int swapOutCount() const { return swapOutCount_; }
+
+    void countSwapOut() { swapOutCount_++; }
 
     void noteSkippedSwapOutStore() { skippedSwapOutStoreCount_++; }
 
@@ -363,6 +340,14 @@ class PhysicalMemory {
     void noteSkippedSwapInLoad() { skippedSwapInLoadCount_++; }
 
     int skippedSwapInLoadCount() const { return skippedSwapInLoadCount_; }
+
+    void noteSwapOutStore(int64_t bytes) { swapOutStoredBytes_ += bytes; }
+
+    int64_t swapOutStoredBytes() const { return swapOutStoredBytes_; }
+
+    void noteSwapInLoad(int64_t bytes) { swapInLoadedBytes_ += bytes; }
+
+    int64_t swapInLoadedBytes() const { return swapInLoadedBytes_; }
 
     void pin(PhysicalBuffer &object) {
         auto pinCount = pinnedBuffers_[&object];
@@ -395,198 +380,30 @@ class PhysicalMemory {
         return 0;
     }
 
-    LogicalResult defragment(IRRewriter &rewriter, Location loc) {
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Defragment memory\n";
-            llvm::dbgs() << "Memory before defragmentation:\n";
-            dump();
-        });
-
-        // swap out all the non pinned active values to XRAM
-        SmallVector<VirtualBuffer *> toMove;
-        for (auto &[value, buf] : physicalBuffers_) {
-
-            if (pinnedBuffers_.contains(buf.get())) {
-                continue;
-            }
-
-            toMove.push_back(&(buf->virtualBuffer()));
-        }
-
-        // swap out all the non pinned active values to XRAM
-        for (auto vBuf : toMove) {
-            vBuf->swapOut(rewriter, loc);
-        }
-
-        // swap in all the values, this should make things more compact
-        // (if no buffers are currently pinned it will remove all spaces)
-        for (auto vBuf : toMove) {
-            if (failed(vBuf->swapIn(rewriter, loc, false))) {
-                return failure();
-            };
-        }
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Defragmentation done\n";
-            llvm::dbgs() << "Memory after defragmentation:\n";
-            dump();
-        });
-
-        defragCount_++;
-
-        return success();
-    }
-
-    FailureOr<PhysicalBuffer *> add(VirtualBuffer &obj, Value value, bool allowDefragment) {
+    PhysicalBuffer *add(VirtualBuffer &obj, Value value) {
         assert(!physicalBuffers_.contains(&obj) && "Physical buffer already exists for this value");
+        assert(obj.size() + residentBytes_ <= capacity_ && "resident bytes exceed the capacity");
 
-        if (obj.size() + totalPhysicalBufferSize() > pool_.usableSize()) {
-            LLVM_DEBUG(llvm::dbgs() << "Not enough memory to add physical buffer\n");
-            return failure();
-        }
+        residentBytes_ += obj.size();
 
-        auto maybeAddr = pool_.allocate(value);
-
-        // cannot allocate address, we know there is enough space but it is maybe fragmented
-        if (failed(maybeAddr)) {
-
-            if (!allowDefragment) {
-                LLVM_DEBUG({
-                    llvm::dbgs() << "Allocation failed and cannot defragment, giving up\n";
-                });
-
-                dump();
-                return failure();
-            }
-
-            LLVM_DEBUG({ llvm::dbgs() << "Allocation failed, trying to defragment\n"; });
-
-            IRRewriter rewriter(value.getContext());
-            rewriter.setInsertionPoint(value.getDefiningOp());
-            if (failed(defragment(rewriter, value.getLoc()))) {
-                return failure();
-            }
-
-            maybeAddr = pool_.allocate(value);
-
-            // Still no address after defragment: spill non-pinned buffers (LRU first)
-            // to XRAM and leave them out, retrying after each, until a contiguous block
-            // opens or nothing spillable remains. This is stronger than defragment(),
-            // which swaps non-pinned buffers out and immediately back in and so cannot
-            // free a contiguous region blocked by resident buffers. Protected buffers
-            // (the current op's own operands) are never spilled.
-            if (failed(maybeAddr)) {
-                IRRewriter spillRewriter(value.getContext());
-                spillRewriter.setInsertionPoint(value.getDefiningOp());
-                while (failed(maybeAddr)) {
-                    VirtualBuffer *victim = nullptr;
-                    for (PhysicalBuffer *pb : lastUsedPhysicalBuffer_) {
-                        if (!pinnedBuffers_.contains(pb) &&
-                            !spillProtect_.contains(&pb->virtualBuffer())) {
-                            victim = &pb->virtualBuffer();
-                            break;
-                        }
-                    }
-                    if (!victim)
-                        break; // nothing spillable left
-                    victim->swapOut(spillRewriter, value.getLoc());
-                    maybeAddr = pool_.allocate(value);
-                }
-            }
-
-            // we still fail to find an address, the pinned buffers prevent us from successfully
-            // defragment
-            if (failed(maybeAddr)) {
-                LLVM_DEBUG({
-                    llvm::dbgs() << "Allocation failed after defragmentation, need to give up\n";
-                });
-                dump();
-                return failure();
-            }
-        }
-
-        auto [it, inserted] = physicalBuffers_.try_emplace(
-            &obj, std::make_unique<PhysicalBuffer>(value, obj, *maybeAddr)
-        );
-        auto &physicalBuffer = *it->second;
-        lastUsedPhysicalBuffer_.insert(&physicalBuffer);
-
-        return &physicalBuffer;
+        return physicalBuffers_.try_emplace(&obj, std::make_unique<PhysicalBuffer>(value, obj))
+            .first->second.get();
     }
 
     void remove(VirtualBuffer &obj) {
         assert(physicalBuffers_.contains(&obj) && "Physical buffer not found");
-        auto &physicalBuffer = *physicalBuffers_[&obj];
-        lastUsedPhysicalBuffer_.remove(&physicalBuffer);
-        pool_.free(physicalBuffer.value());
+        residentBytes_ -= physicalBuffers_[&obj]->size();
         physicalBuffers_.erase(&obj);
-    }
-
-    void touch(PhysicalBuffer &object) {
-        lastUsedPhysicalBuffer_.remove(&object);
-        lastUsedPhysicalBuffer_.insert(&object);
-    }
-
-    LogicalResult freeSpace(int space, IRRewriter &rewriter, Location loc) {
-
-        int nextUnpinnedValue = 0;
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Freeing space, need " << space
-                         << " current usage: " << totalPhysicalBufferSize() << "/"
-                         << pool_.usableSize() << "( free "
-                         << (pool_.usableSize() - totalPhysicalBufferSize()) << ")\n";
-        });
-
-        while (totalPhysicalBufferSize() + space > pool_.usableSize()) {
-
-            if (nextUnpinnedValue >= lastUsedPhysicalBuffer_.size()) {
-                return failure();
-            }
-
-            auto physicalBuffer = lastUsedPhysicalBuffer_[nextUnpinnedValue];
-
-            // skip this value because it is pinned
-            if (pinnedBuffers_.contains(physicalBuffer)) {
-
-                LLVM_DEBUG({
-                    llvm::dbgs() << "Skipping pinned buffer ";
-                    physicalBuffer->virtualObject().value().dump();
-                });
-
-                nextUnpinnedValue++;
-                continue;
-            }
-
-            LLVM_DEBUG({
-                llvm::dbgs() << "Swapping out buffer ";
-                physicalBuffer->virtualObject().value().dump();
-            });
-
-            physicalBuffer->virtualBuffer().swapOut(rewriter, loc);
-
-            swapOutCount_++;
-        }
-
-        return success();
     }
 
     void dump() {
 
         llvm::dbgs() << "Current memory usage " << totalPhysicalBufferSize() << "\n";
 
-        llvm::dbgs() << "LRU:\n";
-        for (auto buf : lastUsedPhysicalBuffer_) {
-            llvm::dbgs() << "   - ";
-            buf->virtualObject().value().dump();
-        }
-
         llvm::dbgs() << "Active virtual allocations:\n";
         for (auto &[value, buf] : physicalBuffers_) {
             auto virtualValue = buf->virtualObject().value();
             llvm::dbgs() << "   - size " << buf->size() << " ";
-            llvm::dbgs() << "address " << buf->address() << " ";
             llvm::dbgs() << "pinned " << pinnedBuffers_.contains(buf.get()) << " ";
             virtualValue.dump();
         }
@@ -606,20 +423,12 @@ class VirtualObjects {
   public:
     VirtualObjects(VirtualMemory &vm) : vm_(vm) {}
 
-    LogicalResult addBuffer(Value value) {
+    void addBuffer(Value value) {
         assert(!virtualBuffers_.contains(value) && "Virtual buffer already exists for this value");
 
         virtualBuffers_.try_emplace(value, std::make_unique<VirtualBuffer>(value, vm_));
-
-        auto &virtualBuffer = virtualBuffers_[value];
-        if (failed(virtualBuffer->initialize())) {
-            virtualBuffers_.erase(value);
-            return failure();
-        }
-
+        virtualBuffers_[value]->initialize();
         virtualObjects_.try_emplace(value, virtualBuffers_[value].get());
-
-        return success();
     }
 
     void addAlias(Value value) {
@@ -668,14 +477,14 @@ class VirtualObjects {
 // to be swapped to a new physical buffer (or alias ) to be accessed.
 //
 // Physical objects (and implicitely the virtual objects associated to them) can be
-// pinned. This prevents them from being swapped out during memory compaction (freeing
-// some space to allow the next allocation to happen) and physical memory defragmentation
+// pinned: an op's operands while it is processed, and the buffers a start_program
+// accesses until its wait_program.
 
 class VirtualMemory {
 
   public:
-    VirtualMemory(Pool &pool, torq_hl::MemorySpace memorySpace)
-        : virtualObjects(*this), physicalMemory(*this, pool), memorySpace(memorySpace),
+    VirtualMemory(int capacity, torq_hl::MemorySpace memorySpace)
+        : virtualObjects(*this), physicalMemory(capacity), memorySpace(memorySpace),
           swapMemSpace(
               memorySpace == torq_hl::MemorySpace::Lram ? torq_hl::MemorySpace::Xram
                                                         : torq_hl::MemorySpace::Lram
@@ -725,44 +534,25 @@ class VirtualMemory {
         LLVM_DEBUG({ physicalMemory.miniDump(); });
     }
 
-    LogicalResult addAllocation(Value virtualValue) {
+    void addAllocation(Value virtualValue) {
 
         LLVM_DEBUG({
             llvm::dbgs() << "Allocate for virtual value ";
             virtualValue.dump();
         });
 
-        auto ret = virtualObjects.addBuffer(virtualValue);
-
-        if (failed(ret)) {
-            return failure();
-        }
+        virtualObjects.addBuffer(virtualValue);
 
         LLVM_DEBUG({ physicalMemory.miniDump(); });
-
-        return success();
     }
 
     void freeSwappedOutValue(Value virtualValue, IRRewriter &rewriter, Location loc) {
         virtualObjects.getVirtualObject(virtualValue).root().freeSwappedOutValue(rewriter, loc);
     }
 
-    // updates the last used timestamp of the virtual value
-    void touch(Value virtualValue) {
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Touch virtual value ";
-            virtualValue.dump();
-        });
-
-        virtualObjects.getVirtualObject(virtualValue).touch();
-
-        LLVM_DEBUG({ physicalMemory.miniDump(); });
-    }
-
     // inserts IR to copy the swapped out virtual buffer back to the the memory space into
     // a new physical buffer and updates the virtual memory system internal state
-    FailureOr<Value> swapIn(Value virtualValue, IRRewriter &rewriter, Location loc) {
+    Value swapIn(Value virtualValue, IRRewriter &rewriter, Location loc) {
 
         LLVM_DEBUG({
             llvm::dbgs() << "Swap-in virtual value ";
@@ -770,33 +560,17 @@ class VirtualMemory {
         });
 
         auto &virtualObject = virtualObjects.getVirtualObject(virtualValue);
-
-        auto ret = virtualObject.swapIn(rewriter, loc, true);
-
-        if (failed(ret)) {
-            return failure();
-        }
+        virtualObject.swapIn(rewriter, loc);
 
         LLVM_DEBUG({ physicalMemory.miniDump(); });
 
         return virtualObject.physicalObject().value();
     }
 
-    // swaps out physical buffers from the memory space until the given amount of space is available
-    // physical buffers are swapped out in order of usage (last used is swapped out last).
-    // the function doesn't swap out pinned buffers and fails if it is not possible to free the
-    // requested space
-    LogicalResult freeSpace(int space, IRRewriter &rewriter, Location loc) {
-
-        LLVM_DEBUG({ llvm::dbgs() << "Freeing " << space << " bytes\n"; });
-
-        if (failed(physicalMemory.freeSpace(space, rewriter, loc))) {
-            return failure();
-        }
-
-        LLVM_DEBUG({ physicalMemory.miniDump(); });
-
-        return success();
+    // Swap out a scheduled buffer; VirtualBuffer::swapOut asserts it is resident and unpinned.
+    void swapOut(Value virtualValue, IRRewriter &rewriter, Location loc) {
+        virtualObjects.getVirtualBuffer(virtualValue).swapOut(rewriter, loc);
+        physicalMemory.countSwapOut();
     }
 
     bool isSwappedOut(Value virtualValue) {
@@ -873,11 +647,7 @@ VirtualObject &PhysicalBuffer::virtualObject() { return virtualBuffer(); }
 
 int PhysicalBuffer::size() { return virtualBuffer().size(); }
 
-void PhysicalBuffer::touch() { vm().physicalMemory.touch(*this); }
-
 PhysicalObject &PhysicalAlias::parent() { return virtualAlias_.parent().physicalObject(); }
-
-void PhysicalAlias::touch() { parent().touch(); }
 
 VirtualAlias &PhysicalAlias::virtualAlias() { return virtualAlias_; }
 
@@ -902,8 +672,7 @@ void VirtualBuffer::unpin() {
     }
 }
 
-FailureOr<PhysicalObject *>
-VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, bool allowDefragment) {
+PhysicalObject *VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc) {
     assert(isSwappedOut() && "Cannot swap in a non-swapped out buffer");
 
     LLVM_DEBUG({
@@ -926,20 +695,14 @@ VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, bool allowDefragment) 
             rewriter, loc, physicalValueOp, swappedOutValue_, SmallVector<int64_t>{},
             SmallVector<int64_t>{}, getEncodedTotalSizeBytes(physicalValueOp.getType()), true
         );
+        vm().physicalMemory.noteSwapInLoad(size());
     }
     else {
         // the contents were dropped at swap out: there is nothing to load
         vm().physicalMemory.noteSkippedSwapInLoad();
     }
 
-    // create the physical buffer
-    auto ret = vm().physicalMemory.add(*this, physicalValueOp, allowDefragment);
-
-    if (failed(ret)) {
-        return failure();
-    }
-
-    maybePhysicalBuffer_ = ret.value();
+    maybePhysicalBuffer_ = vm().physicalMemory.add(*this, physicalValueOp);
 
     LLVM_DEBUG({
         llvm::dbgs() << "Swapped in to physical buffer ";
@@ -1009,6 +772,7 @@ void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc) {
             SmallVector<int64_t>{}, SmallVector<int64_t>{},
             getEncodedTotalSizeBytes(swappedOutType), true
         );
+        vm().physicalMemory.noteSwapOutStore(size());
     }
 
     // make sure all the aliases pointing to the physical buffer are invalidated
@@ -1022,28 +786,9 @@ void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc) {
     maybePhysicalBuffer_ = std::nullopt;
 }
 
-LogicalResult VirtualBuffer::initialize() {
-
+void VirtualBuffer::initialize() {
     // initially we use the virtual value as the physical value of this virtual buffer
-    auto ret = vm().physicalMemory.add(*this, value(), true);
-
-    if (failed(ret)) {
-        return failure();
-    }
-
-    maybePhysicalBuffer_ = ret.value();
-
-    return success();
-}
-
-static LogicalResult
-emitAllocationFailure(Operation *op, VirtualMemory &vm, const Twine &what, int64_t sizeBytes) {
-    int64_t freeBytes =
-        vm.physicalMemory.usableSize() - vm.physicalMemory.totalPhysicalBufferSize();
-    return op->emitError() << "cannot allocate " << what << " (" << sizeBytes
-                           << " B): " << freeBytes << " B free. "
-                           << (sizeBytes > freeBytes ? "too large (capacity)"
-                                                     : "not contiguous (fragmentation)");
+    maybePhysicalBuffer_ = vm().physicalMemory.add(*this, value());
 }
 
 // Collect the buffer accesses `op` may perform, normalized to AsyncAccess.
@@ -1134,7 +879,7 @@ static void buildBufferAccessSchedule(
 struct OperationMemoryInfo {
     SmallVector<OpOperand *> operands;
     SmallVector<OpResult> results;
-    SmallVector<Value> writtenOperands;
+    SmallVector<torq_hl::AsyncAccess> accesses;
     int resultsSize = 0;
 };
 
@@ -1151,9 +896,8 @@ collectOperationMemoryInfo(Operation *op, torq_hl::MemorySpace memorySpace) {
     SmallVector<torq_hl::AsyncAccess> accesses;
     collectBufferAccesses(op, accesses);
     for (auto &access : accesses) {
-        if (bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write) &&
-            getEncodingMemorySpace(access.buffer.getType()) == memorySpace) {
-            info.writtenOperands.push_back(access.buffer);
+        if (getEncodingMemorySpace(access.buffer.getType()) == memorySpace) {
+            info.accesses.push_back(access);
         }
     }
 
@@ -1194,122 +938,37 @@ static bool processDeallocationOrAlias(
     return false;
 }
 
-static void
-dumpAllocationRequest(Operation *op, VirtualMemory &vm, const OperationMemoryInfo &info) {
-    LLVM_DEBUG({
-        op->dump();
-        llvm::dbgs() << "Operands:\n";
-        for (auto *operand : info.operands) {
-            llvm::dbgs() << "  - size "
-                         << getEncodedTotalSizeBytes(cast<MemRefType>(operand->get().getType()))
-                         << " bytes to swap in " << vm.isSwappedOut(operand->get()) << " ";
-            operand->get().dump();
-        }
-        llvm::dbgs() << "Results sizes:\n";
-        for (auto result : info.results) {
-            llvm::dbgs() << "  - size "
-                         << getEncodedTotalSizeBytes(cast<MemRefType>(result.getType()))
-                         << " bytes";
-            result.dump();
-        }
-    });
-}
-
-static FailureOr<SetVector<Value>> reserveMemoryForOperation(
-    Operation *op, const OperationMemoryInfo &info, VirtualMemory &vm, IRRewriter &rewriter
-) {
+// The swapped-out operands among `operands`; a set, since several operands may be the
+// same value.
+static SetVector<Value> collectOperandsToSwapIn(ArrayRef<OpOperand *> operands, VirtualMemory &vm) {
     SetVector<Value> toSwapIn;
-    SmallVector<Value> pinnedValues;
-    DenseSet<VirtualBuffer *> distinctRoots;
-    int swapInSize = 0;
-    for (auto *operand : info.operands) {
-        Value value = operand->get();
-        if (!vm.isSwappedOut(value)) {
-            vm.pin(value);
-            pinnedValues.push_back(value);
-            continue;
-        }
-        toSwapIn.insert(value);
-        VirtualBuffer &root = vm.virtualObjects.getVirtualObject(value).root();
-        if (!distinctRoots.insert(&root).second) {
-            continue;
-        }
-        if (root.isSwappedOut()) {
-            swapInSize += root.size();
-        }
-        else {
-            vm.pin(root.value());
-            pinnedValues.push_back(root.value());
+    for (auto *operand : operands) {
+        if (vm.isSwappedOut(operand->get())) {
+            toSwapIn.insert(operand->get());
         }
     }
-
-    rewriter.setInsertionPoint(op);
-    int requiredSize = swapInSize + info.resultsSize;
-    if (failed(vm.freeSpace(requiredSize, rewriter, op->getLoc()))) {
-        dumpAllocationRequest(op, vm, info);
-        op->emitError() << "cannot allocate op (pinned " << vm.physicalMemory.totalPinnedSize()
-                        << " B + required " << requiredSize << " B): exceeds "
-                        << vm.physicalMemory.usableSize() << " B usable (capacity)";
-        return failure();
-    }
-
-    for (Value value : pinnedValues) {
-        vm.unpin(value);
-    }
-
     return toSwapIn;
 }
 
-static LogicalResult swapInOperandsAndAllocateResults(
+static void swapInOperandsAndAllocateResults(
     Operation *op, const OperationMemoryInfo &info, const SetVector<Value> &toSwapIn,
     VirtualMemory &vm, IRRewriter &rewriter
 ) {
-    vm.physicalMemory.clearSpillProtect();
-    for (auto *operand : info.operands) {
-        vm.physicalMemory.addSpillProtect(&vm.virtualObjects.getVirtualObject(operand->get()).root()
-        );
-    }
-
+    rewriter.setInsertionPoint(op);
     for (Value value : toSwapIn) {
-        if (failed(vm.swapIn(value, rewriter, op->getLoc()))) {
-            LLVM_DEBUG(value.dump());
-            return emitAllocationFailure(
-                op, vm, "operand", getEncodedTotalSizeBytes(cast<MemRefType>(value.getType()))
-            );
-        }
+        vm.swapIn(value, rewriter, op->getLoc());
     }
-
     for (auto result : info.results) {
-        if (failed(vm.addAllocation(result))) {
-            vm.physicalMemory.clearSpillProtect();
-            LLVM_DEBUG(result.dump());
-            return emitAllocationFailure(
-                op, vm, "result #" + Twine(result.getResultNumber()),
-                getEncodedTotalSizeBytes(cast<MemRefType>(result.getType()))
-            );
-        }
+        vm.addAllocation(result);
     }
-    vm.physicalMemory.clearSpillProtect();
-    return success();
 }
 
-static FailureOr<SmallVector<Value>> rewriteOperandsToPhysicalMemory(
-    Operation *op, ArrayRef<OpOperand *> operands, VirtualMemory &vm, IRRewriter &rewriter
-) {
+// Pin `operands` and point them at their physical values.
+static SmallVector<Value>
+rewriteOperandsToPhysicalMemory(ArrayRef<OpOperand *> operands, VirtualMemory &vm) {
     SmallVector<Value> pinnedValues;
     for (auto *operand : operands) {
         Value virtualValue = operand->get();
-        if (vm.isSwappedOut(virtualValue)) {
-            assert(
-                isDerivedMemRefOperation(virtualValue.getDefiningOp()) &&
-                "only derived memref operations should lead to swapped out operands here"
-            );
-            if (failed(vm.swapIn(virtualValue, rewriter, op->getLoc()))) {
-                virtualValue.getDefiningOp()->emitError("unable to swap in alias");
-                return failure();
-            }
-        }
-
         vm.pin(virtualValue);
         pinnedValues.push_back(virtualValue);
         operand->set(vm.getPhysicalValue(virtualValue));
@@ -1317,14 +976,25 @@ static FailureOr<SmallVector<Value>> rewriteOperandsToPhysicalMemory(
     return pinnedValues;
 }
 
+// Unpin `op`'s operands, except that a start_program keeps the buffers it accesses pinned
+// until its wait_program (the planner pins the same set), and a wait_program releases them.
 static void updateOperandPinLifetimes(
-    Operation *op, ArrayRef<Value> pinnedValues, VirtualMemory &vm,
-    llvm::MapVector<Value, SmallVector<Value>> &invocationToVirtual
+    Operation *op, ArrayRef<Value> pinnedValues, ArrayRef<torq_hl::AsyncAccess> accesses,
+    VirtualMemory &vm, llvm::MapVector<Value, SmallVector<Value>> &invocationToVirtual
 ) {
     if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(op)) {
-        invocationToVirtual[startOp.getInvocation()].assign(
-            pinnedValues.begin(), pinnedValues.end()
-        );
+        SmallVector<Value> &programPinned = invocationToVirtual[startOp.getInvocation()];
+        for (Value value : pinnedValues) {
+            bool accessed = llvm::any_of(accesses, [value](const torq_hl::AsyncAccess &access) {
+                return access.buffer == value;
+            });
+            if (accessed) {
+                programPinned.push_back(value);
+            }
+            else {
+                vm.unpin(value);
+            }
+        }
         return;
     }
 
@@ -1339,11 +1009,30 @@ static void updateOperandPinLifetimes(
     }
 }
 
+// Perform the swaps scheduled at `op`, in the planner's order.
+static void performScheduledSwaps(
+    Operation *op, ArrayRef<Swap> swaps, VirtualMemory &vm, IRRewriter &rewriter
+) {
+    rewriter.setInsertionPoint(op);
+    for (const Swap &swap : swaps) {
+        for (Value buffer : swap.buffers) {
+            vm.swapOut(buffer, rewriter, op->getLoc());
+        }
+        if (swap.kind == Swap::Kind::Spill) {
+            continue;
+        }
+        // relocated buffers swap back in only once all of them are out, so they land in
+        // the fully freed space in the scheduled order
+        for (Value buffer : swap.buffers) {
+            vm.swapIn(buffer, rewriter, op->getLoc());
+        }
+    }
+}
+
 static void printStatistics(const VirtualMemory &vm) {
     if (!clPrintStatistics) {
         return;
     }
-    llvm::dbgs() << "Total defragmentations: " << vm.physicalMemory.defragCount() << "\n";
     llvm::dbgs() << "Total swap outs: " << vm.physicalMemory.swapOutCount() << "\n";
     llvm::dbgs() << "Total swap-out stores skipped (clean buffers): "
                  << vm.physicalMemory.skippedSwapOutStoreCount() << "\n";
@@ -1351,20 +1040,21 @@ static void printStatistics(const VirtualMemory &vm) {
                  << " (" << vm.physicalMemory.droppedSwapOutBytes() << " bytes)\n";
     llvm::dbgs() << "Swap-in loads skipped (dropped contents): "
                  << vm.physicalMemory.skippedSwapInLoadCount() << "\n";
+    llvm::dbgs() << "Swap-out bytes stored: " << vm.physicalMemory.swapOutStoredBytes() << "\n";
+    llvm::dbgs() << "Swap-in bytes loaded: " << vm.physicalMemory.swapInLoadedBytes() << "\n";
 }
 
 } // namespace
 
-// go over the full function and replace virtual values with physical values
-// ensuring that when too many physical values are active, the least recently
-// used are swapped out. Perform defragmentation of active values if necessary.
 LogicalResult convertVirtualToPhysicalMemRefs(
-    FunctionOpInterface funcOp, Pool &pool, torq_hl::MemorySpace memorySpace
+    FunctionOpInterface funcOp, int capacityBytes, torq_hl::MemorySpace memorySpace,
+    const SwapSchedule &schedule
 ) {
-    VirtualMemory vm(pool, memorySpace);
+    VirtualMemory vm(capacityBytes, memorySpace);
     IRRewriter rewriter(funcOp);
 
-    // Snapshot the original operations because swapping inserts new operations while we walk.
+    // Snapshot the original operations: the schedule's op indices refer to it, and swapping
+    // inserts new operations while we walk.
     SmallVector<Operation *> ops;
     for (auto &op : funcOp.getFunctionBody().getOps()) {
         ops.push_back(&op);
@@ -1376,7 +1066,13 @@ LogicalResult convertVirtualToPhysicalMemRefs(
     // Keep StartProgramOp operands pinned until the corresponding WaitProgramOp.
     llvm::MapVector<Value, SmallVector<Value>> invocationToVirtual;
     for (auto [opIndex, op] : llvm::enumerate(ops)) {
+        // the scheduled swap-outs judge the deadness of a buffer's contents relative to this op
         vm.currentOpIndex = opIndex;
+
+        if (auto it = schedule.find((int)opIndex); it != schedule.end()) {
+            performScheduledSwaps(op, it->second, vm, rewriter);
+        }
+
         LLVM_DEBUG({
             llvm::dbgs() << "------------\n";
             llvm::dbgs() << "Processing operation: ";
@@ -1391,32 +1087,21 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         // Inspect virtual operands and results before any operand is rewritten.
         OperationMemoryInfo memoryInfo = collectOperationMemoryInfo(op, memorySpace);
 
-        // Pin resident operands, evict LRU buffers, and reserve room for missing operands/results.
-        auto operandsToSwapIn = reserveMemoryForOperation(op, memoryInfo, vm, rewriter);
-        if (failed(operandsToSwapIn)) {
-            return failure();
-        }
-
-        // Protect this op's operands while swapping them in and allocating its results.
-        if (failed(swapInOperandsAndAllocateResults(op, memoryInfo, *operandsToSwapIn, vm, rewriter)
-            )) {
-            return failure();
-        }
+        SetVector<Value> operandsToSwapIn = collectOperandsToSwapIn(memoryInfo.operands, vm);
+        swapInOperandsAndAllocateResults(op, memoryInfo, operandsToSwapIn, vm, rewriter);
 
         // Keep operands resident during execution and point the op at their physical values.
-        auto pinnedOperands =
-            rewriteOperandsToPhysicalMemory(op, memoryInfo.operands, vm, rewriter);
-        if (failed(pinnedOperands)) {
-            return failure();
-        }
+        SmallVector<Value> pinnedOperands =
+            rewriteOperandsToPhysicalMemory(memoryInfo.operands, vm);
 
         // A write makes any retained swap-space copy stale.
-        for (Value writtenOperand : memoryInfo.writtenOperands) {
-            vm.freeSwappedOutValue(writtenOperand, rewriter, op->getLoc());
+        for (const torq_hl::AsyncAccess &access : memoryInfo.accesses) {
+            if (bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write)) {
+                vm.freeSwappedOutValue(access.buffer, rewriter, op->getLoc());
+            }
         }
 
-        // Release synchronous operands now; asynchronous operands remain pinned until their wait.
-        updateOperandPinLifetimes(op, *pinnedOperands, vm, invocationToVirtual);
+        updateOperandPinLifetimes(op, pinnedOperands, memoryInfo.accesses, vm, invocationToVirtual);
     }
 
     printStatistics(vm);

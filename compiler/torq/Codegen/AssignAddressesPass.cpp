@@ -25,13 +25,22 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
+#include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/IntervalMap.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/Threading.h"
 
+#include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <optional>
+#include <queue>
+#include <tuple>
 
 #define DEBUG_TYPE "torq-assign-addresses"
 
@@ -66,8 +75,6 @@ using namespace mlir::iree_compiler;
 namespace mlir::syna::torq {
 
 const std::string OUT_OF_MEMORY_MESSAGE = "failed to allocate LRAM addresses";
-
-namespace {
 
 // check if we peak memory usage exceeds the pool size before ever trying to find addresses
 // (we may later fail allocation even if peak usage is below the pool size)
@@ -183,6 +190,490 @@ static LogicalResult setDerivedMemrefAddress(Operation *op) {
     return success();
 }
 
+// op's index in the function body, the time axis of the placement.
+using OpIdx = int;
+// index into the buffer list
+using BufferIdx = int;
+
+namespace {
+
+// The half-open op ranges over which a buffer must be resident.
+class ResidentRanges {
+    // sorted and disjoint, so the range ends ascend as well
+    SmallVector<std::pair<OpIdx, OpIdx>> ranges_;
+
+    const std::pair<OpIdx, OpIdx> *firstPast(OpIdx opIdx) const {
+        return llvm::partition_point(ranges_, [&](const std::pair<OpIdx, OpIdx> &range) {
+            return range.second <= opIdx;
+        });
+    }
+
+  public:
+    // Add [start, end), merging it with the ranges it overlaps or touches.
+    void add(OpIdx start, OpIdx end) {
+        auto *first = llvm::partition_point(ranges_, [&](const std::pair<OpIdx, OpIdx> &range) {
+            return range.second < start;
+        });
+        auto *last = first;
+        for (; last != ranges_.end() && last->first <= end; ++last) {
+            start = std::min(start, last->first);
+            end = std::max(end, last->second);
+        }
+        ranges_.erase(first, last);
+        ranges_.insert(first, {start, end});
+    }
+
+    bool contains(OpIdx opIdx) const {
+        const auto *range = firstPast(opIdx);
+        return range != ranges_.end() && range->first <= opIdx;
+    }
+
+    // The first op strictly after `opIdx` in a range, or INT_MAX.
+    OpIdx nextAfter(OpIdx opIdx) const {
+        const auto *range = firstPast(opIdx + 1);
+        return range == ranges_.end() ? INT_MAX : std::max(range->first, opIdx + 1);
+    }
+};
+
+// One LRAM buffer to place.
+struct LramBuffer {
+    // its alloc receives the address
+    Value value;
+    // byte size, rounded up to a multiple of 8
+    int64_t size = 0;
+    // lifetime [birth, death): the alloc's op and its dealloc's, or the op count
+    // if it is never freed
+    OpIdx birth = 0;
+    OpIdx death = 0;
+    // every op that has the buffer as an operand, and every [start_program, wait_program+1)
+    // of an async program that accesses it
+    ResidentRanges resident;
+};
+
+} // namespace
+
+// Collect one LramBuffer per LRAM allocation in `funcOp`'s body.
+static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
+
+    Block &body = funcOp.getFunctionBody().front();
+    const int opCount = body.getOperations().size();
+
+    llvm::MapVector<Value, LramBuffer> allocToBuffer;
+    // each start_program's op and accessed buffers, until its wait_program
+    llvm::DenseMap<Value, std::pair<OpIdx, SmallVector<Value>>> openPrograms;
+    for (auto [opIdx, op] : llvm::enumerate(body.getOperations())) {
+        if (auto alloc = dyn_cast<memref::AllocOp>(&op)) {
+            if (getEncodingMemorySpace(alloc.getType()) != torq_hl::MemorySpace::Lram) {
+                continue;
+            }
+            LramBuffer buffer{
+                .value = alloc.getResult(),
+                .size = align_ceil((uint32_t)getEncodedTotalSizeBytes(alloc.getType()), 8u),
+                .birth = (OpIdx)opIdx,
+                .death = opCount,
+                .resident = {},
+            };
+            allocToBuffer.insert({buffer.value, std::move(buffer)});
+        }
+        else if (auto dealloc = dyn_cast<memref::DeallocOp>(&op)) {
+            auto it = allocToBuffer.find(dealloc.getMemref());
+            if (it != allocToBuffer.end()) {
+                it->second.death = (OpIdx)opIdx;
+            }
+        }
+        else if (!isDerivedMemRefOperation(&op)) {
+            // a view op does not force residency; the op that consumes the view does
+            for (Value operand : op.getOperands()) {
+                if (!isa<MemRefType>(operand.getType())) {
+                    continue;
+                }
+                auto it = allocToBuffer.find(getViewBase(operand));
+                if (it != allocToBuffer.end()) {
+                    it->second.resident.add((OpIdx)opIdx, (OpIdx)opIdx + 1);
+                }
+            }
+            if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(&op)) {
+                // only the buffers the program accesses stay resident until the wait;
+                // convertVirtualToPhysicalMemRefs pins the same set
+                SmallVector<torq_hl::AsyncAccess> accesses;
+                startOp.getAsyncAccesses(accesses);
+                auto &[startPos, buffers] = openPrograms[startOp.getInvocation()];
+                startPos = (OpIdx)opIdx;
+                for (auto &access : accesses) {
+                    buffers.push_back(access.buffer);
+                }
+            }
+            else if (auto waitOp = dyn_cast<torq_hl::WaitProgramOp>(&op)) {
+                auto it = openPrograms.find(waitOp.getInvocation());
+                assert(it != openPrograms.end() && "wait_program without a matching start_program");
+                for (Value buffer : it->second.second) {
+                    auto ivIt = allocToBuffer.find(getViewBase(buffer));
+                    if (ivIt != allocToBuffer.end()) {
+                        ivIt->second.resident.add(it->second.first, (OpIdx)opIdx + 1);
+                    }
+                }
+                openPrograms.erase(it);
+            }
+        }
+    }
+
+    return llvm::to_vector(allocToBuffer.values());
+}
+
+// A compaction forced by re-planning: the op it applies at, and the failing op whose pinned
+// buffers it places first.
+struct ForcedCompaction {
+    OpIdx opIdx;
+    OpIdx failingOpIdx;
+};
+
+namespace {
+
+// A two-ended address space over [0, usable): blocks smaller than largeBufferBytes place
+// bottom-up and the rest top-down (the Pool allocator's policy), so the small buffers
+// churning between the large ones never fragment the space the large ones need.
+class AddressSpace {
+    static constexpr int64_t largeBufferBytes = 8 * 1024;
+
+    // the free ranges; IntervalMap merges adjacent ones on insert, so release() never has to
+    using FreeRanges = llvm::IntervalMap<int64_t, char, 16, llvm::IntervalMapHalfOpenInfo<int64_t>>;
+    FreeRanges::Allocator allocator_;
+    FreeRanges free_;
+
+    // Remove [offset, offset + size), which lies at one end of `range`, from it.
+    static void claim(FreeRanges::iterator &range, int64_t offset, int64_t size) {
+        if (range.stop() - range.start() == size) {
+            range.erase();
+        }
+        else if (offset == range.start()) {
+            range.setStart(offset + size);
+        }
+        else {
+            range.setStop(offset);
+        }
+    }
+
+  public:
+    explicit AddressSpace(int64_t usable) : free_(allocator_) { free_.insert(0, usable, 0); }
+
+    // Returns the placed offset, or -1 if no free range fits `size`.
+    int64_t allocate(int64_t size) {
+        if (size < largeBufferBytes) {
+            for (auto it = free_.begin(); it != free_.end(); ++it) {
+                if (it.stop() - it.start() >= size) {
+                    int64_t offset = it.start();
+                    claim(it, offset, size);
+                    return offset;
+                }
+            }
+        }
+        else {
+            for (auto it = free_.end(); it != free_.begin();) {
+                --it;
+                if (it.stop() - it.start() >= size) {
+                    int64_t offset = it.stop() - size;
+                    claim(it, offset, size);
+                    return offset;
+                }
+            }
+        }
+        return -1;
+    }
+
+    void release(int64_t offset, int64_t size) { free_.insert(offset, offset + size, 0); }
+};
+
+// The buffers resident in an address space: which ones, at what offset, how many bytes.
+class Occupancy {
+    ArrayRef<LramBuffer> buffers_;
+    const int64_t usable_;
+    AddressSpace space_;
+    llvm::BitVector resident_;
+    SmallVector<int64_t> offsets_;
+    int64_t bytes_ = 0;
+
+  public:
+    Occupancy(ArrayRef<LramBuffer> buffers, int64_t usable)
+        : buffers_(buffers), usable_(usable), space_(usable), resident_(buffers.size()),
+          offsets_(buffers.size()) {}
+
+    int64_t usable() const { return usable_; }
+    int64_t bytes() const { return bytes_; }
+    bool isResident(BufferIdx idx) const { return resident_.test(idx); }
+    auto residents() const { return resident_.set_bits(); }
+    int64_t offset(BufferIdx idx) const { return offsets_[idx]; }
+
+    // Make `idx` resident; when no free range fits it, changes nothing and returns false.
+    bool place(BufferIdx idx) {
+        int64_t offset = space_.allocate(buffers_[idx].size);
+        if (offset < 0) {
+            return false;
+        }
+        resident_.set(idx);
+        offsets_[idx] = offset;
+        bytes_ += buffers_[idx].size;
+        return true;
+    }
+
+    void release(BufferIdx idx) {
+        space_.release(offsets_[idx], buffers_[idx].size);
+        resident_.reset(idx);
+        bytes_ -= buffers_[idx].size;
+    }
+
+    SmallVector<int64_t> takeOffsets() { return std::move(offsets_); }
+};
+
+// Why a placement failed.
+struct PlacementFailure {
+    enum class Cause { BytePressure, Fragmentation };
+    Cause cause = Cause::BytePressure;
+    // the op whose buffer could not be placed
+    OpIdx opIdx = -1;
+    // the buffers pinned there, the only ones left resident
+    SmallVector<BufferIdx> pinned;
+};
+
+// A placement of every buffer: its offset from the LRAM base, and the swaps that make
+// the layout fit.
+struct Placement {
+    SmallVector<int64_t> offsets;
+    SwapSchedule schedule;
+};
+
+// Places each buffer at its birth, frees it at its death and places a spilled one again at
+// its next use; see place() for how a placement failure is resolved.
+class PlacementSimulation {
+    // At an equal op, deaths are processed first, then reloads, then births: space freed
+    // there is available to the buffers placed there.
+    enum class EventKind { Death, Reload, Birth };
+    struct Event {
+        OpIdx opIdx;
+        EventKind kind;
+        BufferIdx buffer;
+    };
+    struct EventLater { // inverted for the min-heap
+        bool operator()(const Event &a, const Event &b) const {
+            return std::tie(b.opIdx, b.kind, b.buffer) < std::tie(a.opIdx, a.kind, a.buffer);
+        }
+    };
+
+    ArrayRef<LramBuffer> buffers_;
+    std::priority_queue<Event, std::vector<Event>, EventLater> events_;
+    Occupancy occupancy_;
+    SwapSchedule schedule_;
+    PlacementFailure failure_;
+
+    PlacementSimulation(ArrayRef<LramBuffer> buffers, int64_t usable)
+        : buffers_(buffers), occupancy_(buffers, usable) {
+        for (auto [i, buffer] : llvm::enumerate(buffers_)) {
+            events_.push({buffer.birth, EventKind::Birth, (BufferIdx)i});
+            events_.push({buffer.death, EventKind::Death, (BufferIdx)i});
+        }
+    }
+
+    // Schedule the spill of the released `idx` at `opIdx`, and its reload at its next use.
+    void scheduleSpill(BufferIdx idx, OpIdx opIdx);
+    void spill(BufferIdx victim, OpIdx opIdx);
+    // Re-place every buffer not pinned at `opIdx`: those pinned at `pinnedFirstAt` first (so
+    // they take the extremes and leave the middle contiguous), then largest first. A buffer
+    // that no longer fits is spilled. False when nothing was movable.
+    bool compact(OpIdx opIdx, OpIdx pinnedFirstAt);
+    // Record that `idx` cannot be placed at `opIdx`: every resident buffer is pinned there.
+    void recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFailure::Cause cause);
+    // Among the resident buffers not pinned at `opIdx`; -1 if there is none.
+    BufferIdx farthestNextUseBuffer(OpIdx opIdx) const;
+    // Spill the buffer needed last to make room for `idx`: any victim costs one reload at
+    // its next use, and this one keeps the freed space available the longest before that
+    // reload comes due. False when every resident buffer is pinned at `opIdx`.
+    bool spillVictim(BufferIdx idx, OpIdx opIdx, PlacementFailure::Cause cause);
+    // Place `idx` at `opIdx`. Spill under byte pressure, compact once, and then
+    // spill under fragmentation. False when nothing more can be spilled.
+    bool place(BufferIdx idx, OpIdx opIdx);
+    // Sweep the events, compacting at each of `forcedCompactions` (ascending) as well.
+    // False when the buffers pinned at some op cannot coexist.
+    bool sweep(ArrayRef<ForcedCompaction> forcedCompactions);
+
+  public:
+    // Place `buffers` in [0, usable), or return nullopt and describe in `failure` why no
+    // placement exists.
+    static std::optional<Placement>
+    run(ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<ForcedCompaction> forcedCompactions,
+        PlacementFailure &failure) {
+        PlacementSimulation simulation(buffers, usable);
+        if (!simulation.sweep(forcedCompactions)) {
+            failure = simulation.failure_;
+            return std::nullopt;
+        }
+        return Placement{simulation.occupancy_.takeOffsets(), std::move(simulation.schedule_)};
+    }
+};
+
+} // namespace
+
+void PlacementSimulation::scheduleSpill(BufferIdx idx, OpIdx opIdx) {
+    schedule_[opIdx].push_back({Swap::Kind::Spill, {buffers_[idx].value}});
+    OpIdx reloadOpIdx = buffers_[idx].resident.nextAfter(opIdx);
+    if (reloadOpIdx != INT_MAX) {
+        events_.push({reloadOpIdx, EventKind::Reload, idx});
+    }
+}
+
+void PlacementSimulation::spill(BufferIdx victim, OpIdx opIdx) {
+    occupancy_.release(victim);
+    scheduleSpill(victim, opIdx);
+}
+
+bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt) {
+    SmallVector<BufferIdx> movable;
+    for (BufferIdx candidate : occupancy_.residents()) {
+        if (!buffers_[candidate].resident.contains(opIdx)) {
+            movable.push_back(candidate);
+        }
+    }
+    if (movable.empty()) {
+        return false;
+    }
+    llvm::sort(movable, [&](BufferIdx a, BufferIdx b) {
+        bool aFirst = buffers_[a].resident.contains(pinnedFirstAt);
+        bool bFirst = buffers_[b].resident.contains(pinnedFirstAt);
+        if (aFirst != bFirst) {
+            return aFirst;
+        }
+        if (buffers_[a].size != buffers_[b].size) {
+            return buffers_[a].size > buffers_[b].size;
+        }
+        return a < b;
+    });
+    for (BufferIdx moved : movable) {
+        occupancy_.release(moved);
+    }
+    SmallVector<Value> relocated;
+    for (BufferIdx moved : movable) {
+        if (!occupancy_.place(moved)) {
+            scheduleSpill(moved, opIdx);
+            continue;
+        }
+        relocated.push_back(buffers_[moved].value);
+    }
+    if (!relocated.empty()) {
+        schedule_[opIdx].push_back({Swap::Kind::Relocate, std::move(relocated)});
+    }
+    return true;
+}
+
+void PlacementSimulation::recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFailure::Cause cause) {
+    failure_.cause = cause;
+    failure_.opIdx = opIdx;
+    auto residents = occupancy_.residents();
+    failure_.pinned.assign(residents.begin(), residents.end());
+    LLVM_DEBUG({
+        llvm::dbgs() << "LRAM plan infeasible ("
+                     << (cause == PlacementFailure::Cause::Fragmentation ? "fragmentation"
+                                                                         : "byte pressure")
+                     << ") at op " << opIdx << ": cannot place buffer " << idx << " ("
+                     << buffers_[idx].size << " bytes), resident " << occupancy_.bytes() << " of "
+                     << occupancy_.usable() << " bytes\n";
+        for (BufferIdx pinned : residents) {
+            llvm::dbgs() << "  pinned buffer " << pinned << " size " << buffers_[pinned].size
+                         << " offset " << occupancy_.offset(pinned) << "\n";
+        }
+    });
+}
+
+BufferIdx PlacementSimulation::farthestNextUseBuffer(OpIdx opIdx) const {
+    BufferIdx result = -1;
+    OpIdx farthest = -1;
+    for (BufferIdx i : occupancy_.residents()) {
+        if (buffers_[i].resident.contains(opIdx)) {
+            continue;
+        }
+        OpIdx nextUse = buffers_[i].resident.nextAfter(opIdx);
+        if (nextUse > farthest) {
+            farthest = nextUse;
+            result = i;
+        }
+    }
+    return result;
+}
+
+bool PlacementSimulation::spillVictim(BufferIdx idx, OpIdx opIdx, PlacementFailure::Cause cause) {
+    BufferIdx victim = farthestNextUseBuffer(opIdx);
+    if (victim < 0) {
+        recordFailure(idx, opIdx, cause);
+        return false;
+    }
+    spill(victim, opIdx);
+    return true;
+}
+
+bool PlacementSimulation::place(BufferIdx idx, OpIdx opIdx) {
+    while (occupancy_.bytes() + buffers_[idx].size > occupancy_.usable()) {
+        if (!spillVictim(idx, opIdx, PlacementFailure::Cause::BytePressure)) {
+            return false;
+        }
+    }
+    bool placed = occupancy_.place(idx);
+    if (!placed && compact(opIdx, opIdx)) {
+        placed = occupancy_.place(idx);
+    }
+    while (!placed) {
+        if (!spillVictim(idx, opIdx, PlacementFailure::Cause::Fragmentation)) {
+            return false;
+        }
+        placed = occupancy_.place(idx);
+    }
+    return true;
+}
+
+bool PlacementSimulation::sweep(ArrayRef<ForcedCompaction> forcedCompactions) {
+    while (!events_.empty()) {
+        Event event = events_.top();
+        events_.pop();
+        // a forced compaction precedes the events of the op it applies at
+        while (!forcedCompactions.empty() && forcedCompactions.front().opIdx <= event.opIdx) {
+            compact(forcedCompactions.front().opIdx, forcedCompactions.front().failingOpIdx);
+            forcedCompactions = forcedCompactions.drop_front();
+        }
+        if (event.kind == EventKind::Death) {
+            // not resident when it was spilled with no reload before dying
+            if (occupancy_.isResident(event.buffer)) {
+                occupancy_.release(event.buffer);
+            }
+        }
+        else if (!place(event.buffer, event.opIdx)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Assign each allocation its address; the views derived from it inherit theirs. Forward
+// order suffices: a view always follows the value it derives from.
+static LogicalResult commitLramLayout(
+    FunctionOpInterface funcOp, int64_t reservedBase, ArrayRef<LramBuffer> buffers,
+    ArrayRef<int64_t> offsets
+) {
+    for (auto [buffer, offset] : llvm::zip_equal(buffers, offsets)) {
+        if (failed(setAddress(buffer.value, reservedBase + offset))) {
+            return buffer.value.getDefiningOp()->emitOpError("failed to set LRAM address");
+        }
+    }
+    for (Operation &op : funcOp.getFunctionBody().front()) {
+        if (!isDerivedMemRefOperation(&op)) {
+            continue;
+        }
+        auto type = dyn_cast<MemRefType>(op.getResult(0).getType());
+        if (!type || getEncodingMemorySpace(type) != torq_hl::MemorySpace::Lram) {
+            continue;
+        }
+        if (failed(setDerivedMemrefAddress(&op))) {
+            return failure();
+        }
+    }
+    return success();
+}
+
 static LogicalResult
 allocateAddresses(FunctionOpInterface funcOp, Pool &pool, torq_hl::MemorySpace memSpace) {
 
@@ -235,36 +726,113 @@ allocateAddresses(FunctionOpInterface funcOp, Pool &pool, torq_hl::MemorySpace m
     return success();
 }
 
-static LogicalResult allocateLramAddresses(FunctionOpInterface funcOp) {
+// Where to force a compaction so that a pinned obstacle of `failure` stops splitting the
+// space: the last op before the failure at which the largest obstacle was still movable
+// (resident but not pinned). Ops already forced are skipped, obstacle by obstacle. Returns
+// nullopt when nothing is left to try.
+static std::optional<OpIdx> lastMovablePosition(
+    ArrayRef<LramBuffer> buffers, const PlacementFailure &failure, ArrayRef<ForcedCompaction> forced
+) {
+    SmallVector<BufferIdx> obstacles(failure.pinned);
+    llvm::sort(obstacles, [&](BufferIdx a, BufferIdx b) {
+        if (buffers[a].size != buffers[b].size) {
+            return buffers[a].size > buffers[b].size;
+        }
+        return a < b;
+    });
+    for (BufferIdx obstacle : obstacles) {
+        for (OpIdx opIdx = failure.opIdx - 1; opIdx >= buffers[obstacle].birth; opIdx--) {
+            if (!buffers[obstacle].resident.contains(opIdx)) {
+                bool tried = llvm::any_of(forced, [&](const ForcedCompaction &compaction) {
+                    return compaction.opIdx == opIdx;
+                });
+                if (!tried) {
+                    return opIdx;
+                }
+                break; // its latest movable op was already tried
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+// The offsets and swaps that place `buffers` in [0, usable), or nullopt when none exist.
+// With `replan`, a fragmentation failure forces a compaction where lastMovablePosition says
+// and the placement is planned again, once per attempt.
+static std::optional<Placement>
+planPlacement(ArrayRef<LramBuffer> buffers, int64_t usable, bool replan) {
+    // each attempt adds one forced compaction
+    constexpr int maxReplans = 8;
+    SmallVector<ForcedCompaction> forcedCompactions;
+    for (int attempt = 0; attempt <= maxReplans; attempt++) {
+        PlacementFailure failure;
+        auto placement = PlacementSimulation::run(buffers, usable, forcedCompactions, failure);
+        if (placement) {
+            return placement;
+        }
+        if (!replan || failure.cause != PlacementFailure::Cause::Fragmentation) {
+            return std::nullopt;
+        }
+        auto compactAt = lastMovablePosition(buffers, failure, forcedCompactions);
+        if (!compactAt) {
+            return std::nullopt;
+        }
+        LLVM_DEBUG(
+            llvm::dbgs() << "re-planning with a forced compaction before op " << *compactAt
+                         << " for op " << failure.opIdx << "\n"
+        );
+        ForcedCompaction compaction{*compactAt, failure.opIdx};
+        forcedCompactions.insert(
+            llvm::upper_bound(
+                forcedCompactions, compaction,
+                [](const ForcedCompaction &a, const ForcedCompaction &b) {
+                    return a.opIdx < b.opIdx;
+                }
+            ),
+            compaction
+        );
+    }
+    return std::nullopt;
+}
+
+// Lay out every LRAM allocation over its whole lifetime; when that does not fit, schedule
+// swaps, perform them with convertVirtualToPhysicalMemRefs and lay out the rewritten IR.
+// Infeasibility (the buffers pinned at some op cannot coexist) fails without a
+// diagnostic, so runOnOperation emits the OUT_OF_MEMORY_MESSAGE tile-and-fuse's probe
+// shrinks the tile on; any other diagnostic aborts the compile.
+static LogicalResult allocateLramAddresses(FunctionOpInterface funcOp, bool replan) {
 
     // we reserve space for two NSS programs at the begininng of LRAM
     // (one block for the currently executing program and one for the
     // next program to be executed that will be loaded by the current one)
-    int nssProgramPoolSize = HwInfo::nss_max_program_size * 2;
+    int64_t reservedBase = HwInfo::nss_max_program_size * 2;
+    const int64_t usable = TorqHw::get().getLramSize() - reservedBase;
 
-    // FIXME: Work-around to get bias with 8 bytes alignment, we need a better solution
-    Pool pool(TorqHw::get().getLramSize(), nssProgramPoolSize, 8, 8 * 1024);
-
-    // rewrite all the memrefs in the function to ensure we can
-    // allocated addresses for all of them
-    auto status = convertVirtualToPhysicalMemRefs(funcOp, pool, torq_hl::MemorySpace::Lram);
-
-    if (failed(status)) {
-        return status;
+    SmallVector<LramBuffer> buffers = collectLramBuffers(funcOp);
+    std::optional<Placement> placement = planPlacement(buffers, usable, replan);
+    if (!placement) {
+        return failure();
+    }
+    if (placement->schedule.empty()) {
+        return commitLramLayout(funcOp, reservedBase, buffers, placement->offsets);
     }
 
-    // clear the pool in case there are some buffers that are never deallocated
-    pool.clear();
-
-    // FIXME: this could be done in the convertVirtualToPhysicalMemRefs call
-    status = allocateAddresses(funcOp, pool, syna::torq_hl::MemorySpace::Lram);
-
-    if (failed(status)) {
-        return status;
+    if (failed(convertVirtualToPhysicalMemRefs(
+            funcOp, usable, torq_hl::MemorySpace::Lram, placement->schedule
+        ))) {
+        return failure();
     }
 
-    return success();
+    // the rewritten IR fits without swaps
+    buffers = collectLramBuffers(funcOp);
+    placement = planPlacement(buffers, usable, /*replan=*/false);
+    if (!placement || !placement->schedule.empty()) {
+        llvm::report_fatal_error("LRAM placement: the rewritten IR does not fit");
+    }
+    return commitLramLayout(funcOp, reservedBase, buffers, placement->offsets);
 }
+
+namespace {
 
 struct AddressAssignment : public llvm::ilist_node<AddressAssignment> {
     int64_t address;
@@ -272,6 +840,8 @@ struct AddressAssignment : public llvm::ilist_node<AddressAssignment> {
 
     AddressAssignment(int64_t address, int64_t size) : address(address), size(size) {}
 };
+
+} // namespace
 
 static std::pair<int64_t, llvm::ilist<AddressAssignment>::iterator> findEmptyRegion(
     llvm::ilist<AddressAssignment> &liveAllocations, int64_t startAddress, int64_t size
@@ -782,11 +1352,15 @@ static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
                 return llvm::success();
             }
         );
-        ok = succeeded(allocateLramAddresses(cast<FunctionOpInterface>(clone)));
+        // without re-planning, so recovery applies whenever the plain plan fails and
+        // re-planning handles what the recovered IR still cannot place
+        ok = succeeded(allocateLramAddresses(cast<FunctionOpInterface>(clone), false));
     }
     clone->erase();
     return ok;
 }
+
+namespace {
 
 // Reduce peak LRAM residency in functions whose address allocation would otherwise
 // fail. Added only to the real pipeline: the tile-fit probe cannot see the DMA this
@@ -811,6 +1385,9 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
   public:
     AssignLramAddressesPass() = default;
     AssignLramAddressesPass(const AssignLramAddressesPass &pass) {}
+    AssignLramAddressesPass(const AssignLramAddressesOptions &options) {
+        this->replan = options.replan;
+    }
 
     // TODO(sflur): except for the emitError below, that tile-and-fuse expects,
     // this pass should not report errors that tile-and-fuse can not suppress.
@@ -853,7 +1430,7 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
                 }
             );
 
-            result = allocateLramAddresses(funcOp);
+            result = allocateLramAddresses(funcOp, replan);
         } // destruct diagHandler;
 
         if (failed(result)) {
@@ -909,8 +1486,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createRecoverLramResidencyPa
     return std::make_unique<RecoverLramResidencyPass>();
 }
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignLramAddressesPass() {
-    return std::make_unique<AssignLramAddressesPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignLramAddressesPass(bool replan) {
+    return std::make_unique<AssignLramAddressesPass>(AssignLramAddressesOptions{replan});
 }
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignDtcmItcmXramAddressesPass() {

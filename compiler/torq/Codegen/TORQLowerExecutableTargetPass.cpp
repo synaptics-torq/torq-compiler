@@ -305,8 +305,9 @@ void addNssUpToAssignLramAddresses(
         funcPm.addPass(createRecoverLramResidencyPass());
     }
 
-    // assign addresses to all allocations
-    funcPm.addPass(createAssignLramAddressesPass());
+    // assign addresses to all allocations; the probe gets no re-planning for the same
+    // reason it gets no recovery
+    funcPm.addPass(createAssignLramAddressesPass(/*replan=*/isRealPipeline));
 }
 
 void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {

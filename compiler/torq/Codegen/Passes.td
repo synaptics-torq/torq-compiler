@@ -375,6 +375,12 @@ def AssignLramAddresses :
   let constructor =
       "mlir::syna::torq::createAssignLramAddressesPass()";
 
+  let options = [
+    Option<"replan", "replan", "bool", /*default=*/"false",
+           "Re-plan with forced compactions when a pinned buffer fragments LRAM. Real "
+           "pipeline only: the tile-fit probe cannot see the relocation traffic">
+  ];
+
   let dependentDialects = [
         "syna::torq_hl::TorqHLDialect",
         "bufferization::BufferizationDialect"

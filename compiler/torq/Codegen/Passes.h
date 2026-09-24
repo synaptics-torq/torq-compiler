@@ -48,7 +48,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerArithConstantsPas
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createRecoverLramResidencyPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignLramAddressesPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>>
+createAssignLramAddressesPass(bool replan = false);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignDtcmItcmXramAddressesPass();
 
