@@ -676,7 +676,7 @@ def TorqHL_LoadOp: TorqHL_Op<"load"> {
   }];
 
   let arguments = (ins
-    Arg<AnyMemRef, "LRAM destination", [MemWrite]>:$output,
+    Arg<AnyMemRef, "LRAM destination", [MemWrite<DefaultResource, 0, FullEffect>]>:$output,
     Arg<AnyMemRef, "XRAM source", [MemRead]>:$input,
     DenseI64ArrayAttr:$input_strides_bytes,
     DenseI64ArrayAttr:$shape,
