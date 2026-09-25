@@ -2907,7 +2907,7 @@ Value makeBitcast(
 
 Value makeRescale16(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t scaleFactor,
-    int shiftFactor, int32_t inputZp, int32_t outputZp
+    int shiftFactor, int32_t inputZp, int32_t outputZp, bool inputUnsigned
 ) {
 
     auto outputType = dyn_cast<RankedTensorType>(input.getType());
@@ -2922,7 +2922,7 @@ Value makeRescale16(
                rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
                outputZp, std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max(),
                shiftFactor, createI8Const(rewriter, srcOp, weights, llvm::ArrayRef<int64_t>{1}),
-               createI32Const(rewriter, srcOp, interleave(bias, scale)), input
+               createI32Const(rewriter, srcOp, interleave(bias, scale)), input, inputUnsigned
     )
         .getResult(0);
 }
@@ -2947,7 +2947,7 @@ Value makeI16LUTFromVals(
 Value makeScaledLut(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t aScaleFactor,
     int aShiftFactor, int32_t aInputZp, int32_t aOutputZp, SmallVector<int32_t> bValues,
-    int32_t cScaleFactor, int cShiftFactor, int32_t cInputZp, int32_t cOutputZp
+    int32_t cScaleFactor, int cShiftFactor, int32_t cInputZp, int32_t cOutputZp, bool cInputUnsigned
 ) {
     auto inputType = cast<RankedTensorType>(input.getType());
     bool bitcast = inputType.getElementType().isBF16();
@@ -2956,8 +2956,9 @@ Value makeScaledLut(
             srcOp, rewriter, RankedTensorType::get(inputType.getShape(), rewriter.getI16Type()),
             input
         );
-    auto scaledInput =
-        makeRescale16(srcOp, rewriter, input, cScaleFactor, cShiftFactor, cInputZp, cOutputZp);
+    auto scaledInput = makeRescale16(
+        srcOp, rewriter, input, cScaleFactor, cShiftFactor, cInputZp, cOutputZp, cInputUnsigned
+    );
     auto lookuped = makeI16LUTFromVals(srcOp, rewriter, scaledInput, bValues);
     auto output =
         makeRescale16(srcOp, rewriter, lookuped, aScaleFactor, aShiftFactor, aInputZp, aOutputZp);

@@ -1061,6 +1061,12 @@ def TorqHL_FMAOp: TorqHL_LayerOp<"fma"> {
   let summary = "Fused Multiply-Add operation";
   let description = [{
     Fused Multiply-Add operation: input * weights + scale_bias
+
+    When `input_unsigned` is set, the (integer) `input` is read unsigned by the ALU:
+    both byte lanes of an i16 input are zero-extended, so the multiply produces the
+    full u16 value instead of the sign-extended i16 value. This is used by the
+    makeScaledLut input rescale for bf16 bit-cast domains that span the sign change
+    (e.g. softmax's x - max), where +0.0 must clip toward -0.0 rather than toward +inf.
   }];
 
   let arguments = !con(commonArgs, (ins
@@ -1070,7 +1076,8 @@ def TorqHL_FMAOp: TorqHL_LayerOp<"fma"> {
     I32Attr:$shift_factor,
     TensorOrMemref:$weights,
     TensorOrMemref:$scale_bias,
-    TensorOrMemref:$input
+    TensorOrMemref:$input,
+    DefaultValuedAttr<BoolAttr, "false">:$input_unsigned
   ));
 }
 

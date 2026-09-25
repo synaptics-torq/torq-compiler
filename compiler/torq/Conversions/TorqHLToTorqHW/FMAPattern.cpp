@@ -26,6 +26,12 @@ LogicalResult FMAPattern::transform(torq_hl::FMAOp op, PatternRewriter &rewriter
     auto zp = op.getOutputZp();
 
     LData input(op.getInput());
+    // i16 is signless in MLIR; an unsigned rescale must say so or the ALU multiplies
+    // the input as signed (zero-extending only the low byte). Reading it unsigned
+    // zero-extends both bytes, so the rescale sees the full u16 value and
+    // out-of-domain values on the low side clip toward the input zero point.
+    if (op.getInputUnsigned())
+        input.setElementType(toUnsigned(input.elementType()));
     LData weights(op.getWeights());
     LData biasScale(op.getScaleBias());
     LData output(op.getInit());

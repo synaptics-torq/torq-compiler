@@ -361,7 +361,7 @@ Value makeBitcast(
 
 Value makeRescale16(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t scaleFactor,
-    int shiftFactor, int32_t inputZp = 0, int32_t outputZp = 0
+    int shiftFactor, int32_t inputZp = 0, int32_t outputZp = 0, bool inputUnsigned = false
 );
 
 Value makeI16LUTFromVals(
@@ -369,10 +369,15 @@ Value makeI16LUTFromVals(
 );
 
 // 'a', 'b', 'c' correspond to those in scripts/bf16luts.py comments/prints
+// cInputUnsigned makes the input (c) rescale read `input` unsigned in the ALU, so that
+// bf16 bit-cast domains spanning the sign change (e.g. softmax's x - max, which is <= 0
+// with +0.0 when x == max) clip +0.0 toward -0.0 instead of toward +inf. When set, the
+// c input zero point must be expressed in the unsigned bit-cast domain.
 Value makeScaledLut(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t aScaleFactor,
     int aShiftFactor, int32_t aInputZp, int32_t aOutputZp, SmallVector<int32_t> bValues,
-    int32_t cScaleFactor, int cShiftFactor, int32_t cInputZp, int32_t cOutputZp
+    int32_t cScaleFactor, int cShiftFactor, int32_t cInputZp, int32_t cOutputZp,
+    bool cInputUnsigned = false
 );
 
 Value makeSelect(

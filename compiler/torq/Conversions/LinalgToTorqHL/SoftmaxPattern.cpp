@@ -102,34 +102,17 @@ class SoftmaxOpPattern : public OpRewritePattern<linalg::SoftmaxOp> {
         );
 
         auto intBiasedX = makeBitcast(biasedX, rewriter, i16TType, biasedX.getResult(0));
-        // auto signBit = arith::ConstantOp::create(rewriter,
-        //     input.getLoc(), RankedTensorType::get(ArrayRef<long>{1}, i16),
-        //     DenseElementsAttr::get(
-        //         RankedTensorType::get(ArrayRef<long>{1}, i16),
-        //         {
-        //             APInt(16, -(1 << 15)),
-        //         }
-        //     )
-        // );
-        // auto signBit = arith::ConstantOp::create(rewriter,
-        //     input.getLoc(), rewriter.getIntegerAttr(i16, -(1 << 15))
-        // );
-        auto signBit =
-            linalg::FillOp::create(
-                rewriter, loc,
-                ValueRange{arith::ConstantOp::create(
-                    rewriter, loc, rewriter.getIntegerAttr(i16, -(1 << 15))
-                )},
-                ValueRange{tensor::EmptyOp::create(rewriter, loc, i16TType, ValueRange{})}
-            )
-                .getResult(0);
-        auto adjustedBiasedX = makeElementWiseBinary(
-            biasedX, rewriter, intBiasedX, signBit, torq_hl::ElementwiseOpEnum::BITWISE_OR
-        );
-        // ^ could be done with ui16->i16 rescale instead (i.e. engineering hours...)
+        // (x_i - x_max) <= 0, so as bf16 it is either a negative value (bitcast i16 with
+        // the sign bit set) or +0.0 (bitcast i16 = 0). The exp LUT below reads this input
+        // unsigned (magnitude, sign bit clear): the negative values map to [0, 32767] with
+        // -0.0 -> 0, and +0.0 also -> 0. The unsigned input rescale therefore clips +0.0
+        // toward -0.0 (exp = 1) instead of toward -inf (exp = 0), so no sign-bit OR is
+        // needed to force +0.0 into the negative domain. The c input zero point (15104)
+        // is the old signed zero point (-17664) shifted into this magnitude space by
+        // +32768, i.e. the magnitude of the start of the interesting exp domain.
 
         auto exp = makeScaledLut(
-            biasedX, rewriter, adjustedBiasedX, 16256, 16, -32768, 0,
+            biasedX, rewriter, intBiasedX, 16256, 16, -32768, 0,
             SmallVector<int32_t>{
                 -294914,   32762,     32762,     32762,     294905,    229369,    229369,
                 163833,    32762,     32762,     32762,     294905,    294905,    229369,
@@ -206,7 +189,7 @@ class SoftmaxOpPattern : public OpRewritePattern<linalg::SoftmaxOp> {
                 -89088443, -93611842, -92040417, -91910792, -92829720, -27819560, -3702718,
                 -360440
             },
-            8482, 8, -17664, -32768
+            8482, 8, 15104, -32768, true
         );
         auto bfExp = makeBitcast(biasedX, rewriter, bf16TType, exp);
         auto denomAlloc =

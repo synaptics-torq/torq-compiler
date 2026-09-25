@@ -2579,7 +2579,10 @@ QData SlicePrivate::actClamp(
         else if (dataSize == 2 && weightSize == 1) {
             // We have 2 partials for each data
             // Each partial is processed with different left shifts
-            _cfg.alu_d_unsigned = 5;
+            // 5 = low byte zero-extended, high byte sign-extended: the signed i16 value.
+            // 0b1111 = both bytes zero-extended: the unsigned u16 value, used when the
+            // input is read unsigned (FMAOp input_unsigned).
+            _cfg.alu_d_unsigned = isUnsigned(dataType) ? 0b1111 : 5;
             _cfg.alu_w_unsigned = weightType == DType::uint8 ? 0b1111 : 0;
             _cfg.act_lsh = {0, 8, 0, 8};
             resultType = DType::int16;
