@@ -77,9 +77,17 @@ llvm::FailureOr<int64_t> computeSizeAtFirstIteration(OpFoldResult sizeFoldResult
     return cast<IntegerAttr>(*result).getInt();
 }
 
-// Compute the order in which fitTileToMemory's shrink pass should cut domains:
-// greedily by the number of operand bytes each shrink removes across the whole
-// fuse group (consumer + producers), ties broken by the legacy tilingOrder.
+// Compute the order in which fitTileToMemory's shrink pass should cut domains.
+// For a weight-bearing principal, compare only its activation (DPS input 0)
+// and weight (DPS input 1) memory. Prioritize domains indexing the larger
+// operand, which naturally selects channel domains when weights dominate and
+// frame domains when activations dominate. Indexing maps make this independent
+// of NCHW/NHWC and applicable to convolutions, contractions, and equivalent
+// generic operations.
+//
+// Otherwise, for a matmul group, order domains greedily by the number of
+// operand bytes each shrink removes across the whole fuse group (consumer +
+// producers), ties broken by the legacy tilingOrder.
 //
 // Rationale: shrinking a domain that does not index the dominant operand buys
 // almost nothing but gets committed anyway, forcing the remaining domains into
@@ -90,13 +98,12 @@ llvm::FailureOr<int64_t> computeSizeAtFirstIteration(OpFoldResult sizeFoldResult
 // DMA for a 4.5MiB matrix, ~18x re-streaming) instead of [M=128, N~160]
 // (~20 tiles, weights read ~once).
 //
-// Correspondence between a group op's iteration domains and the consumer's
-// tileable domains is established by dimension-extent equality. If anything is
-// ambiguous or non-static (duplicate extents among tileable domains, an op
-// domain matching more than one candidate, non-dim map results), we return
-// nullopt and the caller keeps the legacy order. Convs bail out here naturally
-// (their reduction dims share extents with parallel dims), so their tile
-// shapes are unchanged.
+// For the matmul fallback, correspondence between a group op's iteration
+// domains and the consumer's tileable domains is established by
+// dimension-extent equality. If anything is ambiguous or non-static (duplicate
+// extents among tileable domains, an op domain matching more than one
+// candidate, non-dim map results), we return nullopt and the caller keeps the
+// legacy order.
 // Named matmuls plus the generics replaceBatchMatmulWithBroadcastGeneric marks:
 // matmuls to every tiling heuristic, but invisible to isa<>.
 static bool isMatmulLikeOp(Operation *op) {
@@ -104,10 +111,188 @@ static bool isMatmulLikeOp(Operation *op) {
            op->hasAttr(TORQ_BROADCAST_MATMUL);
 }
 
+struct WeightedPrincipal {
+    linalg::LinalgOp op;
+    int64_t inputBytes;
+    int64_t weightBytes;
+};
+
+static std::optional<WeightedPrincipal>
+findWeightedPrincipal(Operation *consumerOp, const SetVector<Operation *> &producerOps) {
+    SmallVector<Operation *> candidates;
+    if (isMarkedFuseGroup(consumerOp))
+        candidates.push_back(getFuseGroupPrincipalOpBackward(consumerOp));
+    else
+        candidates.push_back(consumerOp);
+    for (Operation *producer : producerOps)
+        if (isFuseGroupPrincipalOp(producer))
+            candidates.push_back(producer);
+
+    std::optional<WeightedPrincipal> principal;
+    int64_t largestOperandBytes = -1;
+    for (Operation *candidate : candidates) {
+        auto linalgOp = dyn_cast_if_present<linalg::LinalgOp>(candidate);
+        if (!linalgOp || linalgOp.getNumReductionLoops() == 0 || linalgOp.getNumDpsInputs() < 2)
+            continue;
+
+        auto inputType = dyn_cast<RankedTensorType>(linalgOp.getDpsInputs()[0].getType());
+        auto weightType = dyn_cast<RankedTensorType>(linalgOp.getDpsInputs()[1].getType());
+        if (!inputType || !weightType || !inputType.hasStaticShape() ||
+            !weightType.hasStaticShape())
+            continue;
+
+        auto storageBytes = [](RankedTensorType type) {
+            return type.getNumElements() * llvm::divideCeil(type.getElementTypeBitWidth(), 8);
+        };
+        int64_t inputBytes = storageBytes(inputType);
+        int64_t weightBytes = storageBytes(weightType);
+        if (inputBytes + weightBytes > largestOperandBytes) {
+            principal = WeightedPrincipal{linalgOp, inputBytes, weightBytes};
+            largestOperandBytes = inputBytes + weightBytes;
+        }
+    }
+    return principal;
+}
+
+std::optional<SmallVector<int64_t>> computeChannelFirstShrinkOrder(
+    Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainSizes
+) {
+    std::optional<WeightedPrincipal> principal = findWeightedPrincipal(consumerOp, producerOps);
+    if (!principal)
+        return std::nullopt;
+
+    SmallVector<int64_t> ranges = principal->op.getStaticLoopRanges();
+    SmallVector<utils::IteratorType> iteratorTypes = principal->op.getIteratorTypesArray();
+    AffineMap weightMap = principal->op.getMatchingIndexingMap(principal->op.getDpsInputOperand(1));
+
+    std::optional<int64_t> principalChannel;
+    for (auto [domain, iteratorType] : llvm::enumerate(iteratorTypes)) {
+        if (iteratorType != utils::IteratorType::parallel)
+            continue;
+        int64_t domainIndex = domain;
+        bool indexesWeight = llvm::any_of(weightMap.getResults(), [&](AffineExpr expr) {
+            return expr.isFunctionOfDim(domainIndex);
+        });
+        if (!indexesWeight)
+            continue;
+        if (principalChannel)
+            return std::nullopt;
+        principalChannel = domain;
+    }
+    if (!principalChannel)
+        return std::nullopt;
+
+    std::optional<int64_t> rootChannel;
+    int64_t channelExtent = ranges[*principalChannel];
+    for (int64_t domain : tilingInfo.tilingOrder) {
+        if (iterDomainSizes[domain] != channelExtent)
+            continue;
+        if (rootChannel)
+            return std::nullopt;
+        rootChannel = domain;
+    }
+    if (!rootChannel)
+        return std::nullopt;
+
+    SmallVector<int64_t> order{*rootChannel};
+    for (int64_t domain : tilingInfo.tilingOrder)
+        if (domain != *rootChannel)
+            order.push_back(domain);
+    return order;
+}
+
+static std::optional<SmallVector<int64_t>> computePrincipalInputWeightShrinkOrder(
+    Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainSizes
+) {
+    // The RHS of a broadcast batch matmul remains batch-dependent. Its batch
+    // dimension is therefore weight-only in the generic indexing map, but is
+    // not an output-channel dimension. Do not apply the dominant-weight
+    // ordering: keeping batch whole forces M tiling and re-streams the full
+    // RHS for every M tile.
+    if (consumerOp->hasAttr(TORQ_BROADCAST_MATMUL))
+        return std::nullopt;
+    for (Operation *producer : producerOps)
+        if (producer->hasAttr(TORQ_BROADCAST_MATMUL))
+            return std::nullopt;
+
+    std::optional<WeightedPrincipal> principal = findWeightedPrincipal(consumerOp, producerOps);
+    if (!principal)
+        return std::nullopt;
+
+    linalg::LinalgOp linalgOp = principal->op;
+    int64_t inputBytes = principal->inputBytes;
+    int64_t weightBytes = principal->weightBytes;
+    if (inputBytes == weightBytes)
+        return std::nullopt;
+
+    AffineMap inputMap = linalgOp.getMatchingIndexingMap(linalgOp.getDpsInputOperand(0));
+    AffineMap weightMap = linalgOp.getMatchingIndexingMap(linalgOp.getDpsInputOperand(1));
+    auto indexesDomain = [](AffineMap map, int64_t domain) {
+        return llvm::any_of(map.getResults(), [&](AffineExpr expr) {
+            return expr.isFunctionOfDim(domain);
+        });
+    };
+
+    SmallVector<int64_t> principalRanges = linalgOp.getStaticLoopRanges();
+    if (llvm::is_contained(principalRanges, ShapedType::kDynamic))
+        return std::nullopt;
+
+    // Map the principal's preferred domains onto the tiling root. For an
+    // NCHW-conv -> NHWC-transpose chain this maps conv d1 (C=1536) to transpose
+    // d3 (C=1536), without relying on the two operations having the same layout.
+    const bool prioritizeWeights = weightBytes > inputBytes;
+    SmallVector<int64_t> preferred;
+    SmallVector<int64_t> shared;
+    SmallVector<int64_t> remaining;
+    bool hasDistinctDependency = false;
+    for (int64_t domain : tilingInfo.tilingOrder) {
+        bool inputDepends = false;
+        bool weightDepends = false;
+        for (auto [principalDomain, extent] : llvm::enumerate(principalRanges)) {
+            if (extent != iterDomainSizes[domain])
+                continue;
+            inputDepends |= indexesDomain(inputMap, principalDomain);
+            weightDepends |= indexesDomain(weightMap, principalDomain);
+        }
+        hasDistinctDependency |= inputDepends != weightDepends;
+        bool preferredOnly =
+            prioritizeWeights ? weightDepends && !inputDepends : inputDepends && !weightDepends;
+        if (preferredOnly)
+            preferred.push_back(domain);
+        else if (inputDepends && weightDepends)
+            shared.push_back(domain);
+        else
+            remaining.push_back(domain);
+    }
+    if (!hasDistinctDependency || preferred.empty())
+        return std::nullopt;
+
+    SmallVector<int64_t> order(std::move(preferred));
+    order.append(shared);
+    order.append(remaining);
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "shrink-order: weighted principal=" << linalgOp->getName()
+                     << " input-bytes=" << inputBytes << " weight-bytes=" << weightBytes
+                     << " prioritize=" << (prioritizeWeights ? "weights" : "input") << " order:";
+        for (int64_t domain : order)
+            llvm::dbgs() << " d" << domain;
+        llvm::dbgs() << "\n";
+    });
+    return order;
+}
+
 std::optional<SmallVector<int64_t>> computeShrinkOrderByReduction(
     Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
     ArrayRef<int64_t> iterDomainSizes, ArrayRef<OpFoldResult> sizes, bool fallback
 ) {
+    if (std::optional<SmallVector<int64_t>> order = computePrincipalInputWeightShrinkOrder(
+            consumerOp, producerOps, tilingInfo, iterDomainSizes
+        ))
+        return order;
+
     // Scope the reorder strictly to matmul-family groups — the case it was
     // designed for. For all other ops the extent-matching heuristic is not
     // worth the risk; keep the legacy order.

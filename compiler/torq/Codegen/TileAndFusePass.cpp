@@ -151,7 +151,7 @@ static llvm::cl::opt<unsigned> clTorqTileAndFuseDistanceLimit(
 
 static llvm::cl::opt<bool> clDisableFitShrinkReorder(
     "torq-disable-fit-shrink-reorder",
-    llvm::cl::desc("Disable reduction-aware domain ordering in fitTileToMemory's shrink pass "
+    llvm::cl::desc("Disable memory-aware domain ordering in fitTileToMemory's shrink pass "
                    "(fall back to legacy tilingOrder shrinking)"),
     llvm::cl::init(false) // Default value
 );
@@ -706,6 +706,13 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
         MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
     );
 
+    TileFit fitTileToMemoryWithOrder(
+        Operation *consumerOp, const SetVector<Operation *> &producerOps,
+        const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes,
+        MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes,
+        std::optional<ArrayRef<int64_t>> forcedShrinkOrder
+    );
+
     std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxSize(
         IRRewriter &rewriter, bool allDomains, const DenseSet<TilingInterface> &toTileOps,
         mlir::tensor::ExtractSliceOp candidateSliceOp, OpResult producerOpResult,
@@ -949,6 +956,81 @@ TileFit TileAndFusePass::fitTileToMemory(
     ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
     MutableArrayRef<OpFoldResult> sizes
 ) {
+    if (clDisableFitShrinkReorder)
+        return fitTileToMemoryWithOrder(
+            consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, sizes, std::nullopt
+        );
+
+    std::optional<SmallVector<int64_t>> channelFirstOrder =
+        computeChannelFirstShrinkOrder(consumerOp, producerOps, tilingInfo, iterDomainSizes);
+    if (!channelFirstOrder)
+        return fitTileToMemoryWithOrder(
+            consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, sizes, std::nullopt
+        );
+
+    SmallVector<OpFoldResult> originalOffsets(offsets.begin(), offsets.end());
+    SmallVector<OpFoldResult> originalSizes(sizes.begin(), sizes.end());
+    TileFit heuristicFit = fitTileToMemoryWithOrder(
+        consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, sizes, std::nullopt
+    );
+
+    // Both strategies return the unchanged full tile, so avoid a redundant
+    // module clone and memory probe in the common no-tiling case.
+    if (heuristicFit == TileFit::FitsUnchanged)
+        return heuristicFit;
+
+    SmallVector<OpFoldResult> channelOffsets(std::move(originalOffsets));
+    SmallVector<OpFoldResult> channelSizes(std::move(originalSizes));
+    TileFit channelFit = fitTileToMemoryWithOrder(
+        consumerOp, producerOps, tilingInfo, iterDomainSizes, channelOffsets, channelSizes,
+        ArrayRef<int64_t>(*channelFirstOrder)
+    );
+
+    auto tileCount = [&](TileFit fit, ArrayRef<OpFoldResult> candidateSizes) {
+        if (fit != TileFit::FitsUnchanged && fit != TileFit::FitsShrunk)
+            return std::numeric_limits<int64_t>::max();
+
+        int64_t count = 1;
+        for (int64_t domain : tilingInfo.tilingOrder) {
+            std::optional<int64_t> size = getConstantIntValue(candidateSizes[domain]);
+            if (!size || *size <= 0)
+                return std::numeric_limits<int64_t>::max();
+            int64_t domainCount = div_ceil(iterDomainSizes[domain], *size);
+            if (count > std::numeric_limits<int64_t>::max() / domainCount)
+                return std::numeric_limits<int64_t>::max();
+            count *= domainCount;
+        }
+        return count;
+    };
+
+    int64_t heuristicCount = tileCount(heuristicFit, sizes);
+    int64_t channelCount = tileCount(channelFit, channelSizes);
+    // Prefer channel tiling on equal tile counts. Spatial tiling can introduce
+    // overlapping halo reads and dynamic boundary padding, while channel tiles
+    // are independent. Exclude the max sentinel so two failed probes do not
+    // accidentally select the channel candidate.
+    bool chooseChannel =
+        channelCount != std::numeric_limits<int64_t>::max() && channelCount <= heuristicCount;
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "weighted tile candidates: heuristic=" << heuristicCount
+                     << " channel-first=" << channelCount
+                     << " choose=" << (chooseChannel ? "channel-first" : "heuristic") << "\n";
+    });
+
+    if (chooseChannel) {
+        llvm::copy(channelOffsets, offsets.begin());
+        llvm::copy(channelSizes, sizes.begin());
+        return channelFit;
+    }
+    return heuristicFit;
+}
+
+TileFit TileAndFusePass::fitTileToMemoryWithOrder(
+    Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
+    MutableArrayRef<OpFoldResult> sizes, std::optional<ArrayRef<int64_t>> forcedShrinkOrder
+) {
     // The grow-back pass below bounds every domain by iterDomainSizes, so the
     // caller's candidate must be the full domain (a pre-shrunk candidate would
     // have its bound lifted).
@@ -986,11 +1068,10 @@ TileFit TileAndFusePass::fitTileToMemory(
     // (e.g. i4) dimensions it is one byte's worth of values (2 for i4), because
     // a width-1 sub-byte slice can't be addressed on a byte boundary.
     //
-    // Domain order: by default computeShrinkOrderByReduction() picks the domain
-    // whose shrink removes the most group operand bytes first (e.g. the N dim
-    // of a matmul, which sizes the weight tile, rather than the M dim, which
-    // does not index the weights); --torq-disable-fit-shrink-reorder restores
-    // the legacy tilingOrder.
+    // Domain order: weight-bearing principals prioritize domains indexing the
+    // larger of their activation and weight operands. Other matmul groups pick
+    // the domain whose shrink removes the most group operand bytes first.
+    // --torq-disable-fit-shrink-reorder restores tilingOrder.
     //
     // The fallback pass continues from the first pass's all-minSize tile rather
     // than restarting from the full domain: that tile is already known not to
@@ -1000,8 +1081,14 @@ TileFit TileAndFusePass::fitTileToMemory(
         growBackEnd = 0;
         fitCheckFailed = false;
 
-        SmallVector<int64_t> order(tilingInfo.tilingOrder.begin(), tilingInfo.tilingOrder.end());
-        if (!clDisableFitShrinkReorder) {
+        SmallVector<int64_t> order;
+        if (forcedShrinkOrder) {
+            order.assign(forcedShrinkOrder->begin(), forcedShrinkOrder->end());
+        }
+        else {
+            order.assign(tilingInfo.tilingOrder.begin(), tilingInfo.tilingOrder.end());
+        }
+        if (!forcedShrinkOrder && !clDisableFitShrinkReorder) {
             if (std::optional<SmallVector<int64_t>> reordered = computeShrinkOrderByReduction(
                     consumerOp, producerOps, tilingInfo, iterDomainSizes, sizes, fallback
                 ))
@@ -1068,11 +1155,13 @@ TileFit TileAndFusePass::fitTileToMemory(
     for (int64_t domain : llvm::reverse(growBackDomains)) {
         if (iterDomainSizes[domain] == 1)
             continue;
-        if (getConstantIntValue(sizes[domain]) == iterDomainSizes[domain])
+        int64_t growLimit = iterDomainSizes[domain];
+        if (getConstantIntValue(sizes[domain]) == growLimit)
             continue;
 
-        int64_t maxFactor = div_ceil(iterDomainSizes[domain], *getConstantIntValue(sizes[domain]));
-        sizes[domain] = rewriter.getIndexAttr(iterDomainSizes[domain]);
+        int64_t fittingSize = *getConstantIntValue(sizes[domain]);
+        int64_t maxFactor = div_ceil(iterDomainSizes[domain], fittingSize);
+        sizes[domain] = rewriter.getIndexAttr(growLimit);
         tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
             return TileFit::ProbeFail;

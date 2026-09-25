@@ -73,11 +73,18 @@ int64_t getSmallestTileSize(const TilingInfo &tilingInfo, int64_t domain, int64_
 // evaluate it at the first iteration of the surrounding loops.
 llvm::FailureOr<int64_t> computeSizeAtFirstIteration(mlir::OpFoldResult sizeFoldResult);
 
-// Compute the order in which fitTileToMemory's shrink pass should cut domains:
-// greedily by the number of operand bytes each shrink removes across the whole
-// fuse group, ties broken by the legacy tilingOrder. Returns nullopt when the
-// group is not a matmul family or the extent correspondence is ambiguous, in
-// which case the caller keeps the legacy tilingOrder.
+// Return an order with the weight's unique parallel domain first. The
+// principal domain is mapped to the tiling root by its static extent.
+std::optional<llvm::SmallVector<int64_t>> computeChannelFirstShrinkOrder(
+    mlir::Operation *consumerOp, const llvm::SetVector<mlir::Operation *> &producerOps,
+    const TilingInfo &tilingInfo, llvm::ArrayRef<int64_t> iterDomainSizes
+);
+
+// Compute the order in which fitTileToMemory's shrink pass should cut domains.
+// Weight-bearing operations prioritize domains indexing the larger of the
+// principal op's activation and weight operands. Other matmuls prioritize the
+// domains that remove the most bytes across the fuse group. Returns nullopt
+// when no heuristic applies, in which case the caller keeps tilingOrder.
 std::optional<llvm::SmallVector<int64_t>> computeShrinkOrderByReduction(
     mlir::Operation *consumerOp, const llvm::SetVector<mlir::Operation *> &producerOps,
     const TilingInfo &tilingInfo, llvm::ArrayRef<int64_t> iterDomainSizes,
