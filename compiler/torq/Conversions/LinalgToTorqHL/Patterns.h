@@ -92,6 +92,8 @@ void populateTensorToLinalgPatterns(MLIRContext *context, RewritePatternSet &pat
 
 void populateTrigPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+void populateReciprocalPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 void populateSoftmaxPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateSigmoidPatterns(MLIRContext *context, RewritePatternSet &patterns);

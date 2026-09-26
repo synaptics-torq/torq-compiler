@@ -27,6 +27,7 @@ set(sources
   ExpPattern.cpp
   TanhPattern.cpp
   SoftmaxPattern.cpp
+  ReciprocalPattern.cpp
   TensorToTorqOrLinalgPattern.cpp
   TrigPattern.cpp
   MulPattern.cpp

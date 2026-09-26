@@ -3109,6 +3109,7 @@ void populateLinalgToTorqHLPatterns(
     populateSoftmaxPatterns(context, patterns);
     populateGeluPatterns(context, patterns);
     populateTrigPatterns(context, patterns);
+    populateReciprocalPatterns(context, patterns);
 
     patterns.insert<TransposeOpConversion>(context);
     patterns.insert<DepthToSpaceOpConversion>(context);

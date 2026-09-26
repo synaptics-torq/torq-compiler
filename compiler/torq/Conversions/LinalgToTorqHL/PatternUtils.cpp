@@ -2896,7 +2896,7 @@ Value convertWeights(mlir::Value weights, PatternRewriter &rewriter) {
 }
 
 Value makeBitcast(
-    linalg::GenericOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
+    linalg::LinalgOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
 ) {
     return torq_hl::IdentityOp::create(
                rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
@@ -2928,10 +2928,11 @@ Value makeRescale16(
 }
 
 Value makeI16LUTFromVals(
-    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, SmallVector<int32_t> values
+    linalg::LinalgOp srcOp, PatternRewriter &rewriter, Value input, SmallVector<int32_t> values,
+    int32_t lutBias, int32_t lutScale
 ) {
-    const std::vector<APInt> bias = {APInt(32, 0, /*isSigned=*/true)};
-    const std::vector<APInt> scale = {APInt(32, 1, /*isSigned=*/true)};
+    const std::vector<APInt> bias = {APInt(32, lutBias, /*isSigned=*/true)};
+    const std::vector<APInt> scale = {APInt(32, lutScale, /*isSigned=*/true)};
     Value packedTable = createI32Const(
         rewriter, srcOp, values, llvm::ArrayRef<int64_t>{static_cast<int64_t>(values.size())}
     );
@@ -2941,6 +2942,31 @@ Value makeI16LUTFromVals(
                createIConst(rewriter, srcOp, interleave(bias, scale)), input, packedTable, nullptr
     )
         .getResult(0);
+}
+
+SmallVector<int8_t> getBfloatReciprocalLutData() {
+    // Magic base LUT: recip's mantissa correction, one entry per (i16 bit
+    // pattern) % 128. See scripts/torch/bfloat16_softmax.py to reproduce.
+    static const int8_t base128[128] = {
+        (int8_t)-0x80, 0x7E, 0x7C, 0x7A, 0x78, 0x76, 0x75, 0x73, 0x71, 0x6F, 0x6D, 0x6C, 0x6A,
+        0x68,          0x67, 0x65, 0x64, 0x62, 0x60, 0x5F, 0x5D, 0x5C, 0x5A, 0x59, 0x58, 0x56,
+        0x55,          0x53, 0x52, 0x51, 0x4F, 0x4E, 0x4D, 0x4C, 0x4A, 0x49, 0x48, 0x47, 0x45,
+        0x44,          0x43, 0x42, 0x41, 0x40, 0x3F, 0x3D, 0x3C, 0x3B, 0x3A, 0x39, 0x38, 0x37,
+        0x36,          0x35, 0x34, 0x33, 0x32, 0x31, 0x30, 0x2F, 0x2E, 0x2D, 0x2C, 0x2C, 0x2B,
+        0x2A,          0x29, 0x28, 0x27, 0x26, 0x25, 0x25, 0x24, 0x23, 0x22, 0x21, 0x21, 0x20,
+        0x1F,          0x1E, 0x1E, 0x1D, 0x1C, 0x1B, 0x1B, 0x1A, 0x19, 0x18, 0x18, 0x17, 0x16,
+        0x16,          0x15, 0x14, 0x14, 0x13, 0x12, 0x12, 0x11, 0x10, 0x10, 0x0F, 0x0E, 0x0E,
+        0x0D,          0x0D, 0x0C, 0x0B, 0x0B, 0x0A, 0x0A, 0x09, 0x09, 0x08, 0x07, 0x07, 0x06,
+        0x06,          0x05, 0x05, 0x04, 0x04, 0x03, 0x03, 0x02, 0x02, 0x01, 0x01
+    };
+    // naively, we would subtract the exponent, and compute the mantissa
+    // directly from the base table.  However, to avoid needing to & away the
+    // mantissa bits, leave them in the exponent calculation and subtract that
+    // error from the mantissa LUT: lut[i] += i % 128 (wrapping i8).
+    SmallVector<int8_t> lutData(256);
+    for (int i = 0; i < 256; i++)
+        lutData[i] = static_cast<int8_t>(base128[i % 128] + (i % 128));
+    return lutData;
 }
 
 // 'a', 'b', 'c' correspond to those in scripts/bf16luts.py comments/prints

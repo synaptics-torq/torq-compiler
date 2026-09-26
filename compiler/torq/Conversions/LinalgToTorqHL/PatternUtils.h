@@ -355,8 +355,10 @@ bool foldScalarRescale(
 
 Value convertWeights(mlir::Value weights, PatternRewriter &rewriter);
 
+// `srcOp` is any linalg op (typically the generic being lowered); only its
+// location is used.
 Value makeBitcast(
-    linalg::GenericOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
+    linalg::LinalgOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
 );
 
 Value makeRescale16(
@@ -364,9 +366,30 @@ Value makeRescale16(
     int shiftFactor, int32_t inputZp = 0, int32_t outputZp = 0, bool inputUnsigned = false
 );
 
+// Create a torq_hl.table looking up the i16 `input` in the HW's 512-entry
+// piecewise-linear ACT table. `values` are the packed (slope<<16)|base words as
+// written to the table memory; `lutBias`/`lutScale` are the ACT rescale
+// (tc = s16((x + lutBias) * lutScale)) that maps the i16 input onto table
+// entries. The default (0, 1) rescale interpolates linearly across the full
+// i16 range (512 entries, 128 inputs each). A (0, 256) rescale instead makes
+// tc a multiple of 128, so the 7-bit fraction is always 0 and the lookup is an
+// exact read of the even entries only — the index then depends solely on the
+// low byte of the input (tx = 2*((x & 0xFF) + 128) mod 512).
 Value makeI16LUTFromVals(
-    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, SmallVector<int32_t> values
+    linalg::LinalgOp srcOp, PatternRewriter &rewriter, Value input, SmallVector<int32_t> values,
+    int32_t lutBias = 0, int32_t lutScale = 1
 );
+
+// The bf16 reciprocal (see scripts/torch/bfloat16_softmax.py for the
+// derivation): for the i16 bit pattern x of a bf16 value, the reciprocal's
+// bit pattern is
+//   recip = (kBfloatReciprocalExpoConst - x) + lut[s8(x) + 128]
+// in i16 wrap-around arithmetic, where lut = getBfloatReciprocalLutData().
+constexpr int32_t kBfloatReciprocalExpoConst = 0x7E80;
+
+// The 256-entry adjusted bf16 reciprocal mantissa LUT (i8): the 128-entry
+// magic base duplicated twice, with lut[i] += i % 128 (mod 256) applied.
+SmallVector<int8_t> getBfloatReciprocalLutData();
 
 // 'a', 'b', 'c' correspond to those in scripts/bf16luts.py comments/prints
 // cInputUnsigned makes the input (c) rescale read `input` unsigned in the ALU, so that

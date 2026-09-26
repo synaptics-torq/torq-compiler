@@ -451,6 +451,15 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
     LogicalResult
     matchAndRewrite(linalg::ReciprocalOp op, PatternRewriter &rewriter) const override {
 
+        // The default (non-inf) bf16 reciprocal is lowered directly from
+        // linalg.reciprocal by ReciprocalOpPattern in LinalgToTorqHL; this
+        // decomposition only handles the --torq-enable-reciprocal-inf variant.
+        if (!clEnableTorqReciprocalInf) {
+            return rewriter.notifyMatchFailure(
+                op, "non-inf reciprocal is lowered in LinalgToTorqHL"
+            );
+        }
+
         // checks
         if (op.getInputs().size() != 1) {
             return rewriter.notifyMatchFailure(op, "Expected exactly one result");
@@ -519,72 +528,35 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
             });
         };
 
-        // create variable names that survive the following if block
-        Value rawX, xSign, x, isSubnormal, isNotBig;
-        if (clEnableTorqReciprocalInf) {
-            rawX = tensor::BitcastOp::create(rewriter, loc, tType(i16), op.getInputs()[0]);
+        // Work on the sign-stripped bit pattern: the sign bit is recorded
+        // separately and re-added at the end.
+        auto rawX = tensor::BitcastOp::create(rewriter, loc, tType(i16), op.getInputs()[0]);
 
-            // record sign bit
-            xSign = andi(0b1000000000000000, rawX);
+        // record sign bit
+        auto xSign = andi(0b1000000000000000, rawX);
 
-            // remove sign bit for following logic
-            x = andi(0b0111111111111111, rawX);
+        // remove sign bit for following logic
+        auto x = andi(0b0111111111111111, rawX);
 
-            // subnormal numbers are exactly the ones that map to
-            // infinity.  Check which ones should map there.
-            isSubnormal = cmp(0b0000000010000000, x, arith::CmpIPredicate::ult);
+        // subnormal numbers are exactly the ones that map to
+        // infinity.  Check which ones should map there.
+        auto isSubnormal = cmp(0b0000000010000000, x, arith::CmpIPredicate::ult);
 
-            // "big" means numbers that map to zero (we flush subnormals to zero).
-            isNotBig = cmp(0b0111111010000000, x, arith::CmpIPredicate::ule);
-        }
-        else {
-            // bitcast to i16
-            x = tensor::BitcastOp::create(rewriter, loc, tType(i16), op.getInputs()[0]);
-        }
+        // "big" means numbers that map to zero (we flush subnormals to zero).
+        auto isNotBig = cmp(0b0111111010000000, x, arith::CmpIPredicate::ule);
 
-        // Our magic LUT values!  See
-        // scripts/torch/bfloat16_softmax.py to reproduce.
-        std::vector<int8_t> lutData{
-            // pad zeros for easier lowering
-            -0x80, 0x7E, 0x7C, 0x7A, 0x78, 0x76, 0x75, 0x73, 0x71, 0x6F, 0x6D, 0x6C, 0x6A, 0x68,
-            0x67, 0x65, 0x64, 0x62, 0x60, 0x5F, 0x5D, 0x5C, 0x5A, 0x59, 0x58, 0x56, 0x55, 0x53,
-            0x52, 0x51, 0x4F, 0x4E, 0x4D, 0x4C, 0x4A, 0x49, 0x48, 0x47, 0x45, 0x44, 0x43, 0x42,
-            0x41, 0x40, 0x3F, 0x3D, 0x3C, 0x3B, 0x3A, 0x39, 0x38, 0x37, 0x36, 0x35, 0x34, 0x33,
-            0x32, 0x31, 0x30, 0x2F, 0x2E, 0x2D, 0x2C, 0x2C, 0x2B, 0x2A, 0x29, 0x28, 0x27, 0x26,
-            0x25, 0x25, 0x24, 0x23, 0x22, 0x21, 0x21, 0x20, 0x1F, 0x1E, 0x1E, 0x1D, 0x1C, 0x1B,
-            0x1B, 0x1A, 0x19, 0x18, 0x18, 0x17, 0x16, 0x16, 0x15, 0x14, 0x14, 0x13, 0x12, 0x12,
-            0x11, 0x10, 0x10, 0x0F, 0x0E, 0x0E, 0x0D, 0x0D, 0x0C, 0x0B, 0x0B, 0x0A, 0x0A, 0x09,
-            0x09, 0x08, 0x07, 0x07, 0x06, 0x06, 0x05, 0x05, 0x04, 0x04, 0x03, 0x03, 0x02, 0x02,
-            0x01, 0x01,
-            // actual values
-            -0x80, 0x7E, 0x7C, 0x7A, 0x78, 0x76, 0x75, 0x73, 0x71, 0x6F, 0x6D, 0x6C, 0x6A, 0x68,
-            0x67, 0x65, 0x64, 0x62, 0x60, 0x5F, 0x5D, 0x5C, 0x5A, 0x59, 0x58, 0x56, 0x55, 0x53,
-            0x52, 0x51, 0x4F, 0x4E, 0x4D, 0x4C, 0x4A, 0x49, 0x48, 0x47, 0x45, 0x44, 0x43, 0x42,
-            0x41, 0x40, 0x3F, 0x3D, 0x3C, 0x3B, 0x3A, 0x39, 0x38, 0x37, 0x36, 0x35, 0x34, 0x33,
-            0x32, 0x31, 0x30, 0x2F, 0x2E, 0x2D, 0x2C, 0x2C, 0x2B, 0x2A, 0x29, 0x28, 0x27, 0x26,
-            0x25, 0x25, 0x24, 0x23, 0x22, 0x21, 0x21, 0x20, 0x1F, 0x1E, 0x1E, 0x1D, 0x1C, 0x1B,
-            0x1B, 0x1A, 0x19, 0x18, 0x18, 0x17, 0x16, 0x16, 0x15, 0x14, 0x14, 0x13, 0x12, 0x12,
-            0x11, 0x10, 0x10, 0x0F, 0x0E, 0x0E, 0x0D, 0x0D, 0x0C, 0x0B, 0x0B, 0x0A, 0x0A, 0x09,
-            0x09, 0x08, 0x07, 0x07, 0x06, 0x06, 0x05, 0x05, 0x04, 0x04, 0x03, 0x03, 0x02, 0x02,
-            0x01, 0x01
-        };
-
-        // naively, we would subtract the exponent, and compute the
-        // mantissa directly from the above lookup table.  However, to
-        // avoid needing to & away the mantissa bits, leave them in
-        // the exponent calculation and subtract that error from the
-        // mantissa LUT.
-        for (int i = 0; i < 256; i++) {
-            lutData[i] = lutData[i] + (i % 128);
-        }
+        // magic LUT values (see getBfloatReciprocalLutData for the derivation)
+        auto lutData = getBfloatReciprocalLutData();
         auto computedExpo = sub(0b0111111010000000, x);
 
+        // The original (slow) linalg solution: separate trunci/exti tensor
+        // ops around an i8 table lookup.  Kept for the
+        // --torq-enable-reciprocal-inf fallback, where inf correctness
+        // matters more than the two extra slices.
         // create LUT
         auto lut = arith::ConstantOp::create(
             rewriter, loc,
-            DenseIntElementsAttr::get(
-                RankedTensorType::get(256, rewriter.getI8Type()), ArrayRef<int8_t>(lutData)
-            )
+            DenseIntElementsAttr::get(RankedTensorType::get(256, i8), ArrayRef<int8_t>(lutData))
         );
 
         // use mantissa as index to LUT
@@ -609,28 +581,27 @@ struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
 
         // combine computed exponent and mantissa
         auto computed = arith::AddIOp::create(rewriter, loc, lutVal16, computedExpo);
-        if (clEnableTorqReciprocalInf) {
-            // There are a few possible inputs (big inputs) that must also
-            // be sqashed to zero.
-            auto computed2 = arith::MulIOp::create(rewriter, loc, computed, isNotBig);
 
-            // conversely, we need a way to ensure all subnormals map to
-            // infinity.
-            auto maybeInf = mul(0b0111111110000000, isSubnormal);
+        // There are a few possible inputs (big inputs) that must also
+        // be sqashed to zero.
+        auto computed2 = arith::MulIOp::create(rewriter, loc, computed, isNotBig);
 
-            // We want to combine our computed maybeInf and our current
-            // computed using bfloat addition.  Bitcast it real quick,
-            // add, and bitcast back.
-            auto computedBfloat = tensor::BitcastOp::create(rewriter, loc, bfTensorType, computed2);
-            auto maybeInfBfloat = tensor::BitcastOp::create(rewriter, loc, bfTensorType, maybeInf);
-            auto realComputedBfloat =
-                arith::AddFOp::create(rewriter, loc, computedBfloat, maybeInfBfloat);
-            auto realComputed =
-                tensor::BitcastOp::create(rewriter, loc, tType(i16), realComputedBfloat);
+        // conversely, we need a way to ensure all subnormals map to
+        // infinity.
+        auto maybeInf = mul(0b0111111110000000, isSubnormal);
 
-            // add back our sign bit we saved earlier
-            computed = arith::AddIOp::create(rewriter, loc, xSign, realComputed);
-        }
+        // We want to combine our computed maybeInf and our current
+        // computed using bfloat addition.  Bitcast it real quick,
+        // add, and bitcast back.
+        auto computedBfloat = tensor::BitcastOp::create(rewriter, loc, bfTensorType, computed2);
+        auto maybeInfBfloat = tensor::BitcastOp::create(rewriter, loc, bfTensorType, maybeInf);
+        auto realComputedBfloat =
+            arith::AddFOp::create(rewriter, loc, computedBfloat, maybeInfBfloat);
+        auto realComputed =
+            tensor::BitcastOp::create(rewriter, loc, tType(i16), realComputedBfloat);
+
+        // add back our sign bit we saved earlier
+        computed = arith::AddIOp::create(rewriter, loc, xSign, realComputed);
 
         // bitcast final value back to bfloat16
         auto bfBitcast = tensor::BitcastOp::create(rewriter, loc, bfTensorType, computed);
