@@ -58,7 +58,9 @@ static llvm::cl::opt<std::string> clTorqDescriptorDumpDir(
     llvm::cl::desc("dump Torq API descriptors to the specified directory"), llvm::cl::init("")
 );
 
-static llvm::cl::opt<bool> clDisableAsyncSliceWait(
+// Shared with CompileNSSInvocationsPass, which uses the same flag to decide
+// whether to emit slice wait instructions.
+llvm::cl::opt<bool> clDisableAsyncSliceWait(
     "torq-disable-async-slice-wait", llvm::cl::desc("Disable Asynchronous Slice Wait"),
     llvm::cl::init(false)
 );

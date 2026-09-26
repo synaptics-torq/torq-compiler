@@ -29,10 +29,7 @@ using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
-static llvm::cl::opt<bool> clDisableAsyncSliceWait(
-    "torq-disable-async-slice-wait1", llvm::cl::desc("Disable Asynchronous Slice Wait"),
-    llvm::cl::init(false)
-);
+extern llvm::cl::opt<bool> clDisableAsyncSliceWait;
 
 llvm::cl::opt<unsigned> clDmaInMtu(
     "torq-dma-in-mtu",

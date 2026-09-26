@@ -10,13 +10,7 @@
 
 namespace mlir::syna::torq {
 
-void populateLinalgToActPatterns(MLIRContext *context, RewritePatternSet &patterns);
-void populateLinalgToAluPatterns(MLIRContext *context, RewritePatternSet &patterns);
-
 void populateLinalgToTorqHLPrePatterns(
-    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
-);
-void populateLinalgToTorqHLConv1DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
 void populateLinalgConv2DToTorqHLConv1DPatterns(
@@ -46,9 +40,6 @@ void populateLinalgToTorqHLConv1DMatmulPatterns(
 
 void populateLinalgToTorqHLMatMulIntegerCorrectPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups = false
-);
-void populateLinalgToTorqHLFCPatterns(
-    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
 void populateLinalgToTorqHLMatmulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups

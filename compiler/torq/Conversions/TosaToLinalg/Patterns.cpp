@@ -5,7 +5,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "mlir/IR/Types.h"
-#include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
