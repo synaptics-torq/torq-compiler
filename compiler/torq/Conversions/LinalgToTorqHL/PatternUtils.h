@@ -105,8 +105,6 @@ struct VectorIntOrFloat {
 
 bool isI8Type(Value val);
 bool isI32Type(Value val);
-bool isI8Type(Value val, PatternRewriter &rewriter);  // Deprecated
-bool isI32Type(Value val, PatternRewriter &rewriter); // Deprecated
 
 std::optional<int64_t> getConstIntValue(Value val);
 std::optional<float> getFloatValue(Value val);
@@ -282,11 +280,6 @@ ScaleClampInfo foldForwardScaleClamp(
     Value &value, int scaleValuesCount, int shift8b, int shift16b, bool isElementWiseOp = false
 );
 
-// Deduce per-channel added biases followed by clamp by analyzing value forward
-std::optional<ScaleClampInfo> foldFusedForwardPerChannelAddClamp(
-    Value &value, int channelDim, VectorIntOrFloat &bias, std::string &failReason
-);
-
 // Deduce weights zero-point forward
 // return zero-point if success, 0 if no zero-point found
 int foldForwardWeightZp(Value &value);
@@ -353,8 +346,6 @@ bool foldScalarRescale(
     Value &input, ScaleInfo &scaleInfo, const Type &elementType, PatternRewriter &rewriter
 );
 
-Value convertWeights(mlir::Value weights, PatternRewriter &rewriter);
-
 // `srcOp` is any linalg op (typically the generic being lowered); only its
 // location is used.
 Value makeBitcast(
@@ -417,12 +408,6 @@ Value makeElementWiseBinary(
 // to support tiled operations.
 // value - must have a RankedTensorType
 bool isAllZerosTensor(mlir::Value value);
-
-// Return true if all the elements in `value` are the minimum value of the element type. The
-// function can only recognize simple cases. It does not do any computation. In particular, the
-// function does handles extract_slice, to support tiled operations.
-// value - must have a RankedTensorType
-bool isAllMinimumTensor(Value value);
 
 // If initVal is not all zeros, torq_hl.add it to val.
 // This is useful when lowering a linalg operation that accumulates over init, to a torq_hl

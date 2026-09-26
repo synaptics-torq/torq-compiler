@@ -117,17 +117,6 @@ class OptimizeLinalgForTorqPass
         if (failed(applyPatternsGreedily(getOperation(), frozenSwishPatterns))) {
             return signalPassFailure();
         }
-
-        // NOTE: Mul fusion should happen in a separate pass after the swish
-        // pattern optimization above.
-        // Run mul fusion in a separate round so that the swish pattern
-        // (which needs the mul op to be a separate generic) fires first.
-        RewritePatternSet fusionPatterns(ctx);
-        auto frozenFusionPatterns =
-            FrozenRewritePatternSet(std::move(fusionPatterns), disabledPatterns, enabledPatterns);
-        if (failed(applyPatternsGreedily(getOperation(), frozenFusionPatterns))) {
-            return signalPassFailure();
-        }
     }
 };
 

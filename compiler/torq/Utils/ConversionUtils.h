@@ -398,26 +398,6 @@ std::vector<int32_t> computeCorrectedBiasRoundRobin(
     return corrected_bias;
 }
 
-template <typename T>
-std::vector<T>
-get_weights_OIHW(const std::vector<T> &weights_values, int on, int hn, int wn, int in) {
-    std::vector<T> elements;
-    elements.reserve(on * in * hn * wn);
-
-    for (int o = 0; o < on; o++) {
-        for (int i = 0; i < in; i++) {
-            for (int h = 0; h < hn; h++) {
-                for (int w = 0; w < wn; w++) {
-                    int index = o * hn * wn * in + h * wn * in + w * in + i;
-                    elements.push_back(weights_values[index]);
-                }
-            }
-        }
-    }
-
-    return elements;
-}
-
 // Convert a range of DenseElementsAttr iterators to an std::vector of the same item type
 // eg std::vector<int64_t> vec = denseToVector(denseElementAttr.getValues<int64_t>());
 template <typename T>

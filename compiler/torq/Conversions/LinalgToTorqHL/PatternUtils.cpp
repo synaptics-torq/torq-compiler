@@ -59,29 +59,6 @@ const std::string TORQ_BROADCAST_MATMUL = "torq-broadcast-matmul";
 const std::string TORQ_RAISED_MATMUL_INTEGER = "torq-raised-matmul-integer";
 const std::string TORQ_MATMUL_LHS_UNSIGNED = "torq-matmul-lhs-unsigned";
 
-bool isI8Type(Value val, PatternRewriter &rewriter) {
-    auto shapedType = dyn_cast<ShapedType>(val.getType());
-
-    if (!shapedType) {
-        return val.getType() == rewriter.getI8Type();
-    }
-    else {
-        return shapedType.getElementType() == rewriter.getI8Type();
-    }
-}
-
-bool isI32Type(Value val, PatternRewriter &rewriter) {
-    auto shapedType = dyn_cast<ShapedType>(val.getType());
-
-    if (!shapedType) {
-        return val.getType() == rewriter.getI32Type();
-        ;
-    }
-    else {
-        return shapedType.getElementType() == rewriter.getI32Type();
-    }
-}
-
 bool isI8Type(Value val) {
     auto shapedType = dyn_cast<ShapedType>(val.getType());
     Type elementType = shapedType ? shapedType.getElementType() : val.getType();
@@ -1799,70 +1776,6 @@ template <typename T> bool elementwiseAdd(std::vector<T> &result, const std::vec
     return true;
 }
 
-std::optional<ScaleClampInfo> foldFusedForwardPerChannelAddClamp(
-    Value &value, int channelDim, VectorIntOrFloat &bias, std::string &failReason
-) {
-
-    ScaleClampInfo sci;
-
-    auto genericOp = getSingleUser<linalg::GenericOp>(value);
-
-    if (!genericOp) {
-        failReason = "no single linalg.generic user";
-        return std::nullopt;
-    }
-
-    auto matcher = FuseBiasMatcher::match(genericOp.getOperation(), failReason);
-
-    if (!matcher) {
-        return std::nullopt;
-    }
-
-    auto max = getFloatValue(matcher->clampMax);
-
-    if (!max) {
-        failReason = "no max value";
-        return std::nullopt;
-    }
-
-    auto min = getFloatValue(matcher->clampMin);
-
-    if (!min) {
-        failReason = "no min value";
-        return std::nullopt;
-    }
-
-    sci.max = llvm::bit_cast<uint32_t>(*max);
-    sci.min = llvm::bit_cast<uint32_t>(*min);
-
-    if (!bias.floats.size()) {
-        failReason = "bias floats size is zero";
-        return std::nullopt;
-    }
-
-    matcher->clampMax.dump();
-    matcher->clampMin.dump();
-
-    auto broadcastedBiasConst = computeArithConst(matcher->bias, true);
-
-    if (failed(broadcastedBiasConst)) {
-        failReason = "no broadcasted bias constant attribute";
-        return std::nullopt;
-    }
-
-    const auto &perChannelBiasValues =
-        computePerChannelValuesFloat(broadcastedBiasConst.value(), channelDim);
-
-    if (!elementwiseAdd(bias.floats, perChannelBiasValues)) {
-        failReason = "elementwise add failed";
-        return std::nullopt;
-    }
-
-    value = genericOp.getResults()[0];
-
-    return sci;
-}
-
 bool foldForwardPerChannelAdd(
     Value &value, int channelDim, VectorIntOrFloat &bias, int32_t *input_zp, Value inValue,
     int32_t *w_zp
@@ -2859,40 +2772,6 @@ bool foldScalarRescale(
         return true;
     }
     return false;
-}
-
-// Conv2DMatmulOpConversion weight conversion function
-Value convertWeights(mlir::Value weights, PatternRewriter &rewriter) {
-    // Reorder weights to OIHW
-    auto weightTy = dyn_cast<RankedTensorType>(weights.getType());
-    auto weightElemType = weightTy.getElementType();
-    auto weightShape = weightTy.getShape();
-
-    // Validate expected shape: [OC, IC] for matmul-style
-    assert(weightShape.size() == 2);
-
-    // Assume shape was originally [OC, IC] from matmul-style
-    int on = weightShape[0]; // OC
-    int in = weightShape[1]; // IC
-    int hn = 1;
-    int wn = 1;
-    std::vector<int64_t> weight_shape{on, in, hn, wn};
-
-    auto srcOp = weights.getDefiningOp();
-
-    if (weightElemType.isBF16()) {
-        auto bfVec = attrValuesAsVec<APFloat>(weights);
-        std::vector<APFloat> reordered = get_weights_OIHW<APFloat>(bfVec, on, hn, wn, in);
-        return createFConst(rewriter, *srcOp, reordered, weight_shape);
-    }
-    else if (weightElemType.isInteger(8)) {
-        auto reordered = attrValuesAsVec<int8_t>(weights);
-        reordered = get_weights_OIHW<int8_t>(reordered, on, hn, wn, in);
-        return createI8Const(rewriter, *srcOp, reordered, weight_shape);
-    }
-    else {
-        assert(false && "Unsupported weight type");
-    }
 }
 
 Value makeBitcast(
@@ -4214,20 +4093,6 @@ bool isAllZerosTensor(mlir::Value value) {
         if (auto floatAttr = llvm::dyn_cast<FloatAttr>(attr)) {
             return floatAttr.getValue().isZero();
         }
-    }
-
-    return false;
-}
-
-bool isAllMinimumTensor(Value value) {
-    assert(llvm::isa<mlir::RankedTensorType>(value.getType()) && "expected RankedTensorType");
-
-    if (Attribute constInitAttr = getConstantSplatAttr(value)) {
-        if (auto constInitFloatAttr = llvm::dyn_cast<FloatAttr>(constInitAttr))
-            return constInitFloatAttr.getValue().isSmallest();
-
-        if (auto constInitIntegerAttr = llvm::dyn_cast<IntegerAttr>(constInitAttr))
-            return constInitIntegerAttr.getValue().isMinValue();
     }
 
     return false;
