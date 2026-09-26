@@ -559,25 +559,6 @@ def TorqHL_MaxPool2dOp: TorqHL_LayerOp<"maxpool2d"> {
   ));
 }
 
-def TorqHL_TransposeReshapeOp : TorqHL_LayerOp<"transpose_reshape"> {
-  let summary = "Fused 2D transpose with reshape";
-  let description = [{
-    Combines reshape and transpose kernel for optimization
-    Example:
-      Input: [1, cols] = [op_rows, stride]
-      Reshaped : [op_rows,op_cols]
-      Output: [op_cols, op_rows] 
-  }];
-
-  let arguments = !con(commonArgs, (ins
-    DenseI64ArrayAttr:$stride,
-    DenseI64ArrayAttr:$kernel,
-    DenseI64ArrayAttr:$perm,
-    TensorOrMemref:$input
-  ));
-}
-
-
 def TorqHL_Conv1DOp : TorqHL_LayerOp<"conv1d"> {
   let summary = "1-D Convolution operation";
   let description = [{

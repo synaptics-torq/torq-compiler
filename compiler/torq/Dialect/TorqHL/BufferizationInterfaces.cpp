@@ -254,8 +254,6 @@ void registerBufferizationInterfaceExternalModels(DialectRegistry &registry) {
             TorqHLBufferizableOpInterface<syna::torq_hl::DeriveQuantParamsOp>>(*context);
         syna::torq_hl::ScatterOp::attachInterface<
             TorqHLBufferizableOpInterface<syna::torq_hl::ScatterOp>>(*context);
-        syna::torq_hl::TransposeReshapeOp::attachInterface<
-            TorqHLBufferizableOpInterface<syna::torq_hl::TransposeReshapeOp>>(*context);
         syna::torq_hl::Conv1DOp::attachInterface<
             TorqHLBufferizableOpInterface<syna::torq_hl::Conv1DOp>>(*context);
         syna::torq_hl::ActOp::attachInterface<TorqHLBufferizableOpInterface<syna::torq_hl::ActOp>>(

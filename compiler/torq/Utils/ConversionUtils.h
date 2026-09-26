@@ -490,10 +490,6 @@ void identifyTransposeDim(
     torq_hl::TransposeOp op, llvm::ArrayRef<int64_t> out_shape, int32_t &transposeDim,
     int32_t &leftDim, int32_t &rightDim
 );
-void identifyTransposeDim(
-    torq_hl::TransposeReshapeOp op, llvm::ArrayRef<int64_t> out_shape, int32_t &transposeDim,
-    int32_t &leftDim, int32_t &rightDim
-);
 
 void groupContinuousDim(
     llvm::ArrayRef<int64_t> inputShape, int32_t &leftDim, int32_t &transposeDim, int32_t &rightDim,

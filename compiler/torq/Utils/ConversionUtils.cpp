@@ -632,48 +632,6 @@ void identifyTransposeDim(
     }
 }
 
-void identifyTransposeDim(
-    torq_hl::TransposeReshapeOp op, llvm::ArrayRef<int64_t> out_shape, int32_t &transposeDim,
-    int32_t &leftDim, int32_t &rightDim
-) {
-    ArrayRef<int64_t> perm = op.getPerm();
-
-    int rank = out_shape.size();
-    if (rank < 2) {
-        llvm::report_fatal_error("Transpose rank must be at least 2", true);
-        return;
-    }
-
-    int idx = 0;
-    int i = 0;
-
-    // Splitting the total dimensions into 3 parts
-    // * transpose_dim is either a single dimension or a set of sequential
-    // dimension that is going to be moved to last
-    // * left_dim is that which is left of the tranpose dim and is sequential
-    // * right_dim is that which is the right of the transpose dim and is
-    // sequential
-    while (i < perm.size()) {
-        if (perm[i] != idx) {
-            if (perm[i] == idx + 1) { // perm:(1, 2, 0), (0, 2, 1), (1, 2, 3, 0),
-                // (0, 2, 3, 1), (0, 1, 3, 2) -> the dimension after batch is send
-                // to last. Extended to more dim 0, 1, 3, 4, 2
-                transposeDim = idx + 1;
-            }
-            else { // perm: (2, 0, 1), (3, 0, 1, 2), (0, 3, 1, 2), (0, 1, 3, 2)
-                // -> the dimension is send to first after batch. Extended to more
-                // dim 0, 1, 4, 2, 3
-                transposeDim = perm[i];
-            }
-            leftDim = idx - 1;
-            rightDim = idx;
-            break;
-        }
-        i++;
-        idx++;
-    }
-}
-
 void groupContinuousDim(
     llvm::ArrayRef<int64_t> inputShape, int32_t &leftDim, int32_t &transposeDim, int32_t &rightDim,
     int32_t &leftDimSize, int32_t &transposeDimSize, int32_t &rightDimSize

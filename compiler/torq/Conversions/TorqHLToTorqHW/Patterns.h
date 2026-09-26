@@ -56,7 +56,6 @@ typedef OpPattern<torq_hl::ConvertOp> ConvertPattern;
 typedef OpPattern<torq_hl::MulOp> MulPattern;
 typedef OpPattern<torq_hl::TableOp> TablePattern;
 typedef OpPattern<torq_hl::ArgMaxOp> ArgMaxPattern;
-typedef OpPattern<torq_hl::TransposeReshapeOp> TransposeReshapePattern;
 typedef OpPattern<torq_hl::Conv1DOp> Conv1DPattern;
 
 typedef OpPattern<torq_hl::FMAOp> FMAPattern;

@@ -490,30 +490,6 @@ KernelEncoding ZeroPointBiasTableOp::getKernelEncoding() { return getNoEncoding(
 
 KernelEncoding ZeroPointCorrectOp::getKernelEncoding() { return getNoEncoding(); }
 
-KernelEncoding TransposeReshapeOp::getKernelEncoding() {
-
-    auto input_type = llvm::dyn_cast<RankedTensorType>(getInput().getType());
-    auto inputShape = input_type.getShape();
-
-    // Check for Conv1D shape: [1, 1, W, 1]
-    if (inputShape.size() != 4 || inputShape[0] != 1 || inputShape[1] != 1 || inputShape[3] != 1) {
-        return {{}, {}};
-    }
-
-    auto outputType = cast<RankedTensorType>(getOutput().getType());
-    auto outShape = outputType.getShape();
-    int rank = outShape.size();
-
-    KernelTensorEncoding outEncoding;
-
-    outEncoding.stridesAlign.resize(rank, 0);
-    int align = torq::align_ceil(outShape[3], 32);
-    outEncoding.stridesAlign[2] = align;
-    outEncoding.stridesAlign[1] = align * torq::align_ceil(outShape[2], 32);
-
-    return {{}, outEncoding};
-}
-
 // The NCHW conv, depthwise conv and max pool kernels fuse H and W into one scan, so the H-W
 // plane of the input and of the output must be dense: the rows of a W-cut slice do not sit
 // next to each other in memory
