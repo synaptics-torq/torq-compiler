@@ -6,9 +6,6 @@
 
 #include "PassesDetail.h"
 
-#ifdef ENABLE_TORQ_GENERIC
-#include "torq/Dialect/TorqHL/GenericOp.h"
-#endif
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -49,17 +46,10 @@ class ArithConstPattern : public OpRewritePattern<arith::ConstantOp> {
             return failure();
         }
 
-#ifdef ENABLE_TORQ_GENERIC
-        // don't convert Pvalues
-        if (torq_hl::usedOnlyAsPValue(constOp)) {
-            return failure();
-        }
-#else
         // FIXME@Lorenzo: Is this correct?
         if (constOp->getUses().empty()) {
             return failure();
         }
-#endif // ENABLE_TORQ_GENERIC
 
         // create the type for the torq_hl::ConstOp that matches the shape and
         // element type of the arith::ConstantOp

@@ -8,7 +8,6 @@
 
 #include "DescGen.h"
 
-#include "torq/Utils/CodeSizeUtils.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"

@@ -36,36 +36,9 @@ set(deps
     MLIRFunctionInterfaces
 )
 
-if(TORQ_ENABLE_TORQ_GENERIC)
-  message(STATUS "************************************* Enabling TorqHL GenericOp support")
-  iree_tablegen_library(
-    NAME
-      GenericOpGen
-    TD_FILE
-      "GenericOp.td"
-    OUTS
-      --gen-op-decls GenericOp.h.inc
-      --gen-op-defs GenericOp.cpp.inc
-  )
-
-  list(APPEND deps ::GenericOpGen)
-
-  list(APPEND headers
-    GenericOpBufferizableInterface.h
-    GenericOp.h
-    )
-  list(APPEND sources
-    GenericOp.cpp
-    GenericOpBufferizableInterface.cpp
-  )
-  list(APPEND defines ENABLE_TORQ_GENERIC)
-endif()
-
 iree_cc_library(
   NAME
     Dialect
-  DEFINES
-    ${defines}
   HDRS
     ${headers}
   SRCS

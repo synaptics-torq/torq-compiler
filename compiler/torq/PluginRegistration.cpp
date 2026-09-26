@@ -10,7 +10,6 @@
 #include "torq/Conversions/TosaToTorqHL/Passes.h"
 #include "torq/Dialect/Tensor/IR/TensorTilingInterfaceImpl.h"
 #include "torq/Dialect/TorqHL/BufferizationInterfaces.h"
-#include "torq/Dialect/TorqHL/GenericOpBufferizableInterface.h"
 #include "torq/Dialect/TorqHL/TilingInterfaces.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHW/TorqHWDialect.h"
@@ -67,9 +66,6 @@ struct TORQSession : public PluginSession<
         registry.insert<mlir::syna::torq_hw::TorqHWDialect>();
         torq_hl::registerBufferizationInterfaceExternalModels(registry);
         torq_hl::registerTilingInterfaceExternalModels(registry);
-#ifdef ENABLE_TORQ_GENERIC
-        torq_hl::registerGenericOpBufferizableOpInterfaceExternalModel(registry);
-#endif // ENABLE_TORQ_GENERIC
 
         // These are used for JIT compilation of constant manipulation functions
         mlir::registerBuiltinDialectTranslation(registry);

@@ -24,9 +24,6 @@
 #include "mlir/Interfaces/TilingInterface.h"
 #include <optional>
 
-#ifdef ENABLE_TORQ_GENERIC
-#include "torq/Dialect/TorqHL/GenericOp.h"
-#endif // ENABLE_TORQ_GENERIC
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 
@@ -951,13 +948,5 @@ void mlir::syna::torq_hl::registerTilingInterfaceExternalModels(DialectRegistry 
         torq_hl::MatMulOp::attachInterface<MatMulOpTilingInterface>(*ctx);
         torq_hl::FullyConnectedOp::attachInterface<FullyConnectedOpTilingInterface>(*ctx);
         torq_hl::Conv2DOp::attachInterface<Conv2DOpTilingInterface>(*ctx);
-
-#ifdef ENABLE_TORQ_GENERIC
-        // this matches what is promised in TorqHLDialect::initialize
-        torq_hl::GenericOp::attachInterface<LinalgOpTilingInterface<torq_hl::GenericOp>>(*ctx);
-        torq_hl::GenericOp::attachInterface<LinalgOpPartialReductionInterface<torq_hl::GenericOp>>(
-            *ctx
-        );
-#endif // ENABLE_TORQ_GENERIC
     });
 }

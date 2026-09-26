@@ -52,16 +52,9 @@ set(sources
     InterleavedInsertPattern.cpp
 )
 
-if(TORQ_ENABLE_TORQ_GENERIC)
-  list(APPEND sources GenericOpPattern.cpp)
-  list(APPEND defines ENABLE_TORQ_GENERIC)
-endif()
-
 iree_cc_library(
   NAME
     TorqHLToTorqHW
-  DEFINES
-    ${defines}
   HDRS
     PassesDetail.h
     Passes.h

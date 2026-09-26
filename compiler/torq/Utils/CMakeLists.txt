@@ -11,7 +11,6 @@ iree_cc_library(
     MemoryUtils.cpp
     PassProgressUtils.cpp
     TorqUtils.cpp
-    CodeSizeUtils.cpp
     ConversionUtils.cpp
     Kernel.cpp
     ComputeConstants.cpp
@@ -27,7 +26,6 @@ iree_cc_library(
     MemoryUtils.h
     PassProgressUtils.h
     TorqUtils.h
-    CodeSizeUtils.h
     ConversionUtils.h
     ComputeConstants.h
     Kernel.h

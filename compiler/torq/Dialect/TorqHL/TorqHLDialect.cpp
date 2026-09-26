@@ -5,9 +5,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
-#ifdef ENABLE_TORQ_GENERIC
-#include "torq/Dialect/TorqHL/GenericOp.h"
-#endif // ENABLE_TORQ_GENERIC
 #include "torq/Dialect/TorqHL/KernelInterface.cpp.inc"
 #include "torq/Dialect/TorqHL/TorqHLAttrs.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.cpp.inc"
@@ -45,13 +42,6 @@ void TorqHLDialect::initialize() {
 #define GET_OP_LIST
 #include "torq/Dialect/TorqHL/TorqHLOps.cpp.inc"
         >();
-
-#ifdef ENABLE_TORQ_GENERIC
-    declarePromisedInterface<TilingInterface, torq_hl::GenericOp>();
-    declarePromisedInterface<bufferization::BufferizableOpInterface, torq_hl::GenericOp>();
-
-    declarePromisedInterface<PartialReductionOpInterface, torq_hl::GenericOp>();
-#endif // ENABLE_TORQ_GENERIC
 
     declarePromisedInterfaces<
         bufferization::BufferizableOpInterface, syna::torq_hl::AddOp, syna::torq_hl::Conv2DOp,

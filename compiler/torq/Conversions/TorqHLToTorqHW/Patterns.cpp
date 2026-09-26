@@ -5,7 +5,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "Patterns.h"
-#include "torq/Utils/CodeSizeUtils.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/InvocationUtils.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -321,19 +320,12 @@ class WaitProgramOpPattern : public OpRewritePattern<torq_hl::WaitProgramOp> {
     }
 };
 
-#ifdef TORQHL_GENERIC_OP
-void populateGenericOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
-#endif // TORQHL_GENERIC_OP
-
 void populateNssTaskPatterns(MLIRContext *ctx, RewritePatternSet &patterns) {
     patterns.add<LoadOpPattern>(ctx);
     patterns.add<StoreOpPattern>(ctx);
     patterns.add<StartProgramOpPattern>(ctx);
     patterns.add<WaitProgramOpPattern>(ctx);
     patterns.add<CopyPattern>(ctx);
-#ifdef TORQHL_GENERIC_OP
-    populateGenericOpPatterns(ctx, patterns);
-#endif // TORQHL_GENERIC_OP
 }
 
 } // namespace mlir::syna::torq

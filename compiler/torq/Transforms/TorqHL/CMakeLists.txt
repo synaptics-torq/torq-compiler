@@ -40,22 +40,6 @@ set(deps
     iree::target::torq::Conversions::TorqHLToTorqHW
 )
 
-if(TORQ_ENABLE_TORQ_GENERIC)
-  list(APPEND sources
-    SimplifyGenericPass.cpp
-    MergeBiasScaleTensorsPass.cpp
-  )
-  iree_tablegen_library(
-    NAME
-      GenericOpPassesIncGen
-    TD_FILE
-      GenericOpPasses.td
-    OUTS
-      --gen-pass-decls GenericOpPasses.h.inc
-  )
-  list(APPEND deps ::GenericOpPassesIncGen)
-endif()
-
 iree_tablegen_library(
   NAME
     PassesIncGen
