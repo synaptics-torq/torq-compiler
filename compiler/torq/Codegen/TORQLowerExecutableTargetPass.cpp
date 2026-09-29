@@ -125,7 +125,9 @@ int64_t getLramSizeBasedOnBudget(bool optimizeForTileAndFuse) {
     return lramSize;
 }
 
-void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTileAndFuse) {
+void addPostTileAndFuseLoweringPasses(
+    OpPassManager &funcPm, bool optimizeForTileAndFuse, SliceBufferSharing sliceBufferSharing
+) {
     if (!clDisableSlicing && TorqHw::get().getSliceCount() > 1) {
         // Group each pure-elementwise chain (erf/tanh/mul) before slicing, so the
         // chain slices as one scf.forall and its middle values stay in LRAM.
@@ -184,7 +186,7 @@ void addPostTileAndFuseLoweringPasses(OpPassManager &funcPm, bool optimizeForTil
 
     funcPm.addPass(createEncodeTensorsPass());
     auto lramSize = getLramSizeBasedOnBudget(optimizeForTileAndFuse);
-    funcPm.addPass(createFoldConvertPass(lramSize));
+    funcPm.addPass(createFoldConvertPass(lramSize, sliceBufferSharing));
     funcPm.addPass(createCanonicalizerPass());
 
     // Tile TorqHL ops with large inputs before encoding so the tiled ops receive
@@ -274,8 +276,10 @@ void addNssUpToAssignLramAddresses(
     funcPm.addPass(createOutlineSliceProgramsPass());
     // Reuse LRAM buffers for repeated read-only loads (const/input) within each
     // slice-program region BEFORE the forall body is unrolled per slice, so the
-    // saving replicates onto every slice. Must run pre-unroll: slices have
-    // separate LRAM, so a buffer must not be shared across unrolled slice bodies.
+    // saving replicates onto every slice. Must run pre-unroll: the slices share LRAM,
+    // but this pass would merge loads made inside different slice bodies, which is
+    // known to miscompile. Loads that FoldConvert moved in front of the forall are
+    // already shared by all the slices.
     funcPm.addPass(createEliminateRedundantLramLoadsPass());
     funcPm.addPass(createUnrollForallLoopsPass());
     funcPm.addPass(createScheduleSliceProgramsPass());
@@ -366,7 +370,7 @@ void addNssPasses(OpPassManager &pm) {
     addNssPostAssignLramAddressesPasses(pm);
 }
 
-void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
+void addSlicePassesUpToTileAndFuse(OpPassManager &pm) {
     auto &funcPm = pm.nest<func::FuncOp>();
 
     // optimize linalg ops for torq
@@ -401,10 +405,14 @@ void addSlicePassesWithTileAndFuse(OpPassManager &pm) {
 
     funcPm.addPass(createMarkPatternsForTileAndFusePass());
     funcPm.addPass(createTileAndFusePass(TorqHw::get().getSliceCount()));
+}
 
+void addSlicePassesAfterTileAndFuse(OpPassManager &pm, SliceBufferSharing sliceBufferSharing) {
     // NB: do not add passes after Tile and Fuse here, place them in
     // addPassesPostTileAndFuseUpToAssignLramAddresses, so T&F can use them too.
-    addPassesPostTileAndFuseUpToAssignLramAddresses(pm, false, /*isRealPipeline=*/true);
+    addPassesPostTileAndFuseUpToAssignLramAddresses(
+        pm, false, /*isRealPipeline=*/true, sliceBufferSharing
+    );
     addNssPostAssignLramAddressesPasses(pm);
 }
 
@@ -445,11 +453,15 @@ LogicalResult saveDebugInfo(FunctionOpInterface op, const std::string &outputPat
     return success();
 }
 
+bool usesTileAndFuse() { return !clFromPreBufferizedIR && !clDisableSlices; }
+
+// The whole pipeline, or with tile-and-fuse only up to and including TileAndFuse (see
+// runAfterTileAndFuse).
 void addAllPasses(OpPassManager &pipeline) {
     pipeline.addPass(createAnalyzeTensorSizesPass());
 
-    if (!clFromPreBufferizedIR && !clDisableSlices) {
-        addSlicePassesWithTileAndFuse(pipeline);
+    if (usesTileAndFuse()) {
+        addSlicePassesUpToTileAndFuse(pipeline);
         return;
     }
 
@@ -467,6 +479,60 @@ struct TORQLowerExecutableTargetPass
     : public impl::TORQLowerExecutableTargetBase<TORQLowerExecutableTargetPass> {
     TORQLowerExecutableTargetPass() = default;
     TORQLowerExecutableTargetPass(const TORQLowerExecutableTargetPass &pass) {}
+
+    using RunPipelineFn = function_ref<LogicalResult(function_ref<void(OpPassManager &)>)>;
+
+    // Run the pipeline after TileAndFuse with the slices of each scf.forall sharing their
+    // buffers (see FoldConvert). Sharing keeps a buffer resident across all the slices, and
+    // TileAndFuse picked its tiles without it, so on rare occasions LRAM planning then fails.
+    // Only the real planner can tell, so in that case run again from the same IR with less
+    // sharing. The shared outputs are what add residency, so drop them first and keep the
+    // shared inputs, which save LRAM.
+    LogicalResult runAfterTileAndFuse(RunPipelineFn runPipeline) {
+        ModuleOp moduleOp = getOperation();
+        OwningOpRef<ModuleOp> original = moduleOp.clone();
+
+        auto runWith = [&](SliceBufferSharing sharing) {
+            return runPipeline([sharing](OpPassManager &pm) {
+                addSlicePassesAfterTileAndFuse(pm, sharing);
+            });
+        };
+
+        for (SliceBufferSharing sharing :
+             {SliceBufferSharing::InputsAndOutputs, SliceBufferSharing::Inputs}) {
+            SmallVector<Diagnostic> diagnostics;
+            bool outOfMemory = false;
+            LogicalResult result = failure();
+            {
+                // Hold back this attempt's diagnostics: they are dropped if we try again. The
+                // handler is on the shared context, so leave other threads' diagnostics alone.
+                const uint64_t ownerThreadId = llvm::get_threadid();
+                ScopedDiagnosticHandler holdBack(moduleOp.getContext(), [&](Diagnostic &diag) {
+                    if (llvm::get_threadid() != ownerThreadId)
+                        return failure();
+                    outOfMemory |= diag.str() == OUT_OF_MEMORY_MESSAGE;
+                    diagnostics.push_back(std::move(diag));
+                    return success();
+                });
+                result = runWith(sharing);
+            }
+
+            if (succeeded(result) || !outOfMemory) {
+                for (Diagnostic &diag : diagnostics)
+                    moduleOp.getContext()->getDiagEngine().emit(std::move(diag));
+                return result;
+            }
+
+            LLVM_DEBUG(
+                llvm::dbgs() << "LRAM planning failed with slice buffer sharing "
+                             << static_cast<int>(sharing) << ", retrying with less\n"
+            );
+            OwningOpRef<ModuleOp> copy = original->clone();
+            moduleOp.getBodyRegion().takeBody(copy->getBodyRegion());
+        }
+
+        return runWith(SliceBufferSharing::None);
+    }
 
     void runOnOperation() override {
 
@@ -511,20 +577,29 @@ struct TORQLowerExecutableTargetPass
             return signalPassFailure();
         }
 
-        PassManager pipeline(getOperation().getContext(), getOperation().getOperationName());
-        if (clShowPassProgress) {
-            pipeline.addInstrumentation(std::make_unique<torq::ProgressLogger>(dispatchName));
-        }
-        addAllPasses(pipeline);
-        pipeline.enableTiming(timingScope);
-        if (failed(mlir::applyPassManagerCLOptions(pipeline)))
+        auto runPipeline = [&](function_ref<void(OpPassManager &)> addPasses) {
+            PassManager pipeline(getOperation().getContext(), getOperation().getOperationName());
+            if (clShowPassProgress) {
+                pipeline.addInstrumentation(std::make_unique<torq::ProgressLogger>(dispatchName));
+            }
+            addPasses(pipeline);
+            pipeline.enableTiming(timingScope);
+            if (failed(mlir::applyPassManagerCLOptions(pipeline)))
+                return failure();
+            return pipeline.run(getOperation());
+        };
+
+        if (failed(runPipeline(addAllPasses))) {
             return signalPassFailure();
-        if (failed(pipeline.run(getOperation()))) {
+        }
+
+        if (usesTileAndFuse() && failed(runAfterTileAndFuse(runPipeline))) {
             return signalPassFailure();
         }
 
         if (!clDebugInfo.empty()) {
-            if (failed(saveDebugInfo(*maybeDispatchFuncOp, clDebugInfo))) {
+            // look the function up again: runAfterTileAndFuse may have replaced it
+            if (failed(saveDebugInfo(*getDispatchFunction(getOperation()), clDebugInfo))) {
                 return signalPassFailure();
             }
         }
@@ -534,7 +609,8 @@ struct TORQLowerExecutableTargetPass
 } // namespace
 
 void addPassesPostTileAndFuseUpToAssignLramAddresses(
-    OpPassManager &pipeline, bool optimizeForTileAndFuse, bool isRealPipeline
+    OpPassManager &pipeline, bool optimizeForTileAndFuse, bool isRealPipeline,
+    SliceBufferSharing sliceBufferSharing
 ) {
     // NB: This is the post-tiling pipeline used by TileAndFusePass for its memory-fit
     // simulation. It must match exactly what happens after TileAndFuse in the real
@@ -547,7 +623,7 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
     }
     funcPm.addPass(createPeelTileLoopsPass());
 
-    addPostTileAndFuseLoweringPasses(funcPm, optimizeForTileAndFuse);
+    addPostTileAndFuseLoweringPasses(funcPm, optimizeForTileAndFuse, sliceBufferSharing);
 
     if (!clDisableCSS || !clDisableHost) {
         addCpuPasses(pipeline);

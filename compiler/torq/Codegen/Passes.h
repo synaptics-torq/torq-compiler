@@ -124,7 +124,12 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveInvocationArgum
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignObjectsIdentifiersPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass(int64_t lramSize = 0);
+// Which buffers the slices of an scf.forall share (see FoldConvert). Real pipeline only.
+enum class SliceBufferSharing { None, Inputs, InputsAndOutputs };
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass(
+    int64_t lramSize = 0, SliceBufferSharing sliceBufferSharing = SliceBufferSharing::None
+);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createStripTorqExecutorAttrPass();
 
@@ -159,9 +164,10 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkHostExecutorPass()
 // Builds the tile-fit probe pipeline by default. `isRealPipeline` says the result is
 // kept rather than thrown away, which is what makes failure-driven recovery worth its
 // DMA; a probe that recovered would report a tile as fitting when it only fits because
-// of that DMA.
+// of that DMA. `sliceBufferSharing` is for the real pipeline only, see FoldConvert.
 void addPassesPostTileAndFuseUpToAssignLramAddresses(
-    OpPassManager &pipeline, bool optimizeForTileAndFuse = false, bool isRealPipeline = false
+    OpPassManager &pipeline, bool optimizeForTileAndFuse = false, bool isRealPipeline = false,
+    SliceBufferSharing sliceBufferSharing = SliceBufferSharing::None
 );
 
 //----------------------------------------------------------------------------//

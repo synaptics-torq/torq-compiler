@@ -18,6 +18,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/CommandLine.h"
@@ -911,11 +912,198 @@ class FoldDuplicateConversion : public OpRewritePattern<torq_hl::ConvertOp> {
     }
 };
 
+// Move a load to LRAM whose input does not depend on the slice out of the scf.forall that
+// LinalgSlicing builds. Inside the forall every slice loads its own copy of the same data. The
+// slices share LRAM, so after the move they read one buffer: one DMA instead of one per slice,
+// and one copy's worth of LRAM. It also puts the load next to its producer, where
+// FoldRoundTripConversion can drop an LRAM -> XRAM -> LRAM round trip.
+//
+// Only loads nobody writes to move. A kernel that took the converted value as its init would
+// write the shared buffer from every slice at once.
+//
+// Only a forall whose slices run a single kernel qualifies. In a chain of kernels (a coalesced
+// elementwise chain, say) the per-slice load lives only around the kernel that reads it, while
+// the shared one stays resident across the whole chain, and the extra residency makes the LRAM
+// planner spill.
+class HoistSliceInvariantConvert : public OpRewritePattern<torq_hl::ConvertOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(torq_hl::ConvertOp op, PatternRewriter &rewriter) const override {
+
+        auto forallOp = dyn_cast<scf::ForallOp>(op->getParentOp());
+        if (!forallOp || !op.getOutput()) {
+            return failure();
+        }
+
+        if (getEncodingMemorySpace(op.getOutput().getType()) != torq_hl::MemorySpace::Lram) {
+            return failure();
+        }
+
+        if (!forallOp.isDefinedOutsideOfLoop(op.getInput())) {
+            return failure();
+        }
+
+        auto emptyOp = op.getInit().getDefiningOp<tensor::EmptyOp>();
+        if (!emptyOp || !emptyOp->hasOneUse() || emptyOp->getParentOp() != forallOp ||
+            emptyOp->getNumOperands() != 0) {
+            return failure();
+        }
+
+        for (OpOperand &use : op.getOutput().getUses()) {
+            auto kernel = dyn_cast<torq_hl::KernelInterface>(use.getOwner());
+            if (!kernel || !kernel.isDpsInput(&use)) {
+                return failure();
+            }
+        }
+
+        auto isKernel = [](Operation &bodyOp) {
+            return isa<torq_hl::KernelInterface>(bodyOp) && !isa<torq_hl::ConvertOp>(bodyOp);
+        };
+        if (llvm::count_if(forallOp.getBody()->without_terminator(), isKernel) != 1) {
+            return failure();
+        }
+
+        rewriter.moveOpBefore(emptyOp, forallOp);
+        rewriter.moveOpBefore(op, forallOp);
+
+        return success();
+    }
+};
+
+// The other end of HoistSliceInvariantConvert. Inside the scf.forall that LinalgSlicing builds,
+// every slice stores its LRAM result to XRAM, and the ops after the forall load the whole result
+// back to LRAM. When every user of the forall result is such a load feeding a kernel, collect
+// the slices' results in an LRAM tensor instead and store it once after the forall.
+// FoldRoundTripConversion then drops that store against the loads, so the result stays in LRAM
+// like it does without slicing.
+class SinkSliceOutputConvert : public OpRewritePattern<torq_hl::ConvertOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(torq_hl::ConvertOp op, PatternRewriter &rewriter) const override {
+
+        auto forallOp = dyn_cast<scf::ForallOp>(op->getParentOp());
+        if (!forallOp || !op.getOutput() || !op->hasOneUse()) {
+            return failure();
+        }
+
+        if (getEncodingMemorySpace(op.getInput().getType()) != torq_hl::MemorySpace::Lram ||
+            getEncodingMemorySpace(op.getOutput().getType()) != torq_hl::MemorySpace::Xram) {
+            return failure();
+        }
+
+        auto insertOp = dyn_cast<tensor::ParallelInsertSliceOp>(*op->user_begin());
+        if (!insertOp) {
+            return failure();
+        }
+
+        // the shared output must only collect the slices, not be read inside the forall
+        auto sharedOut = cast<BlockArgument>(insertOp.getDest());
+        if (!sharedOut.hasOneUse()) {
+            return failure();
+        }
+
+        OpResult result = forallOp.getTiedOpResult(forallOp.getTiedOpOperand(sharedOut));
+        if (result.use_empty()) {
+            return failure();
+        }
+        // Each load must feed kernels directly. A load that feeds an insert_slice (a concat
+        // KeepConcatInLram moved to LRAM) would make the slices write into the whole concat,
+        // which then stays pinned in LRAM while they run.
+        for (Operation *user : result.getUsers()) {
+            auto load = dyn_cast<torq_hl::ConvertOp>(user);
+            if (!load || !load.getOutput() ||
+                getEncodingMemorySpace(load.getOutput().getType()) != torq_hl::MemorySpace::Lram) {
+                return failure();
+            }
+            for (OpOperand &use : load.getOutput().getUses()) {
+                auto consumer = dyn_cast<torq_hl::KernelInterface>(use.getOwner());
+                if (!consumer || isa<torq_hl::ConvertOp>(use.getOwner()) ||
+                    !consumer.isDpsInput(&use)) {
+                    return failure();
+                }
+            }
+        }
+
+        auto xramType = cast<RankedTensorType>(result.getType());
+        if (!xramType.hasStaticShape()) {
+            return failure();
+        }
+        auto lramType = createRankedTensorTypeWithEncoding(
+            xramType, createDenseEncoding(xramType, torq_hl::MemorySpace::Lram)
+        );
+
+        // The kernel will write straight into its part of the shared tensor, so the subview
+        // must meet its output encoding. A padded output would spill into the next slice's part.
+        auto kernel = op.getInput().getDefiningOp<torq_hl::KernelInterface>();
+        if (!kernel) {
+            return failure();
+        }
+        torq_hl::KernelTensorEncoding outEncoding = kernel.getKernelEncoding().outputEncoding;
+        if (outEncoding.paddingAlign != 0 ||
+            !checkTypeMatchesEncodingRequirements(
+                lramType, torq_hl::toTensorEncodingRequirementsAttr(outEncoding)
+            )) {
+            return failure();
+        }
+        // The kernel writes its part densely, so the part must be one contiguous block of the
+        // shared tensor: every dim inside the outermost non-unit one taken whole, unit strides.
+        // A cut inner dim (batch matmul slices the innermost one) would interleave the slices.
+        ArrayRef<int64_t> sharedShape = lramType.getShape();
+        ArrayRef<int64_t> sizes = insertOp.getStaticSizes();
+        bool insideBlock = false;
+        for (auto [dim, size] : llvm::enumerate(sizes)) {
+            if (insertOp.getStaticStrides()[dim] != 1 ||
+                (insideBlock && size != sharedShape[dim])) {
+                return failure();
+            }
+            insideBlock |= size != 1;
+        }
+        for (int64_t dim = sharedShape.size() - 1;
+             dim >= 0 && dim >= int64_t(sharedShape.size()) - outEncoding.denseInnerDims; dim--) {
+            if (insertOp.getStaticSizes()[dim] != sharedShape[dim] ||
+                insertOp.getStaticStrides()[dim] != 1) {
+                return failure();
+            }
+        }
+
+        rewriter.setInsertionPoint(forallOp);
+        Value lramInit = tensor::EmptyOp::create(
+            rewriter, forallOp.getLoc(), lramType.getShape(), lramType.getElementType(),
+            lramType.getEncoding()
+        );
+
+        rewriter.modifyOpInPlace(forallOp, [&] {
+            forallOp.getTiedOpOperand(sharedOut)->set(lramInit);
+            sharedOut.setType(lramType);
+            result.setType(lramType);
+        });
+        rewriter.modifyOpInPlace(insertOp, [&] { insertOp.getSourceMutable().set(op.getInput()); });
+        rewriter.eraseOp(op);
+
+        rewriter.setInsertionPointAfter(forallOp);
+        Value stored =
+            convertTensorToType(rewriter, cast<TypedValue<RankedTensorType>>(result), xramType);
+        rewriter.replaceAllUsesExcept(result, stored, stored.getDefiningOp());
+
+        return success();
+    }
+};
+
 class FoldConvertPass : public impl::FoldConvertBase<FoldConvertPass> {
   public:
     using FoldConvertBase<FoldConvertPass>::FoldConvertBase;
-    FoldConvertPass(const FoldConvertOptions &options) { this->lramSize = options.lramSize; }
-    FoldConvertPass(const FoldConvertPass &pass) { this->lramSize = pass.lramSize; }
+    FoldConvertPass(const FoldConvertOptions &options) {
+        this->lramSize = options.lramSize;
+        this->shareSliceInputs = options.shareSliceInputs;
+        this->shareSliceOutputs = options.shareSliceOutputs;
+    }
+    FoldConvertPass(const FoldConvertPass &pass) {
+        this->lramSize = pass.lramSize;
+        this->shareSliceInputs = pass.shareSliceInputs;
+        this->shareSliceOutputs = pass.shareSliceOutputs;
+    }
     void runOnOperation() override;
 };
 
@@ -929,6 +1117,12 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<FoldLramToLramConversionChain>(ctx);
     patterns.add<KeepConcatInLram>(ctx, this->lramSize);
     patterns.add<FoldDuplicateConversion>(ctx);
+    if (this->shareSliceInputs) {
+        patterns.add<HoistSliceInvariantConvert>(ctx);
+    }
+    if (this->shareSliceOutputs) {
+        patterns.add<SinkSliceOutputConvert>(ctx);
+    }
 
     // This pattern used to be disabled here with `#if 0`. The reason given at that time was:
     //
@@ -948,8 +1142,12 @@ void FoldConvertPass::runOnOperation() {
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass(int64_t lramSize) {
-    return std::make_unique<FoldConvertPass>(FoldConvertOptions{lramSize});
+std::unique_ptr<InterfacePass<FunctionOpInterface>>
+createFoldConvertPass(int64_t lramSize, SliceBufferSharing sliceBufferSharing) {
+    return std::make_unique<FoldConvertPass>(FoldConvertOptions{
+        lramSize, sliceBufferSharing != SliceBufferSharing::None,
+        sliceBufferSharing == SliceBufferSharing::InputsAndOutputs
+    });
 }
 
 } // namespace mlir::syna::torq

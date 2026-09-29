@@ -664,7 +664,15 @@ def FoldConvert :
         let options=[
           Option<"lramSize", "lram-size", "int64_t",
                  /*default=*/"0",
-                 "Size of LRAM in bytes. Used to determine whether a copy can be done by the NPU or not">
+                 "Size of LRAM in bytes. Used to determine whether a copy can be done by the NPU or not">,
+          Option<"shareSliceInputs", "share-slice-inputs", "bool",
+                 /*default=*/"false",
+                 "Let the slices of an scf.forall share their slice-invariant input loads. Real "
+                 "pipeline only: the tile-fit probe must keep counting one copy per slice">,
+          Option<"shareSliceOutputs", "share-slice-outputs", "bool",
+                 /*default=*/"false",
+                 "Let the slices of an scf.forall collect their output in one LRAM tensor. Real "
+                 "pipeline only: the tile-fit probe must keep counting one copy per slice">
         ];
 
         let dependentDialects = [

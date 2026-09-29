@@ -232,11 +232,6 @@ def case_config(request, tflite_layer_model):
     """Configure test case settings."""
     torq_compiler_options = []
 
-    # YOLO26 is deployed with slicing off; the sliced path runs out of LRAM on
-    # the attention blocks.
-    if _is_yolo26(tflite_layer_model.data):
-        torq_compiler_options.append("--torq-disable-slicing")
-
     return {
         "tflite_model_file": "tflite_model_path",
         "mlir_model_file": "tflite_mlir_model_file",
