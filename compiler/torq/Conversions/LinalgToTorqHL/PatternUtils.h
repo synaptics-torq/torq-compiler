@@ -359,16 +359,23 @@ Value makeRescale16(
 
 // Create a torq_hl.table looking up the i16 `input` in the HW's 512-entry
 // piecewise-linear ACT table. `values` are the packed (slope<<16)|base words as
-// written to the table memory; `lutBias`/`lutScale` are the ACT rescale
-// (tc = s16((x + lutBias) * lutScale)) that maps the i16 input onto table
-// entries. The default (0, 1) rescale interpolates linearly across the full
-// i16 range (512 entries, 128 inputs each). A (0, 256) rescale instead makes
-// tc a multiple of 128, so the 7-bit fraction is always 0 and the lookup is an
-// exact read of the even entries only — the index then depends solely on the
-// low byte of the input (tx = 2*((x & 0xFF) + 128) mod 512).
+// written to the table memory. The ACT rescales the input before the lookup,
+// tc = s16(clamp((x - inputZp) * scaleFactor >> shiftFactor) + outputZp), with
+// the bias/scale carried in the table's scale_bias operand and
+// shift/output_zp as attributes, so a pre-table rescale is fused into the
+// table. The default (1, 0, 0, 0) rescale is the identity and interpolates
+// linearly across the full i16 range (512 entries, 128 inputs each). A
+// (256, 0, 0, 0) rescale instead makes tc a multiple of 128, so the 7-bit
+// fraction is always 0 and the lookup is an exact read of the even entries
+// only — the index then depends solely on the low byte of the input (tx =
+// 2*((x & 0xFF) + 128) mod 512); that table must leave `saturateI16` unset so
+// the (x * 256) rescale wraps at the s16 index instead of saturating. When
+// `saturateI16` is set, out-of-domain inputs saturate to the table endpoints,
+// matching the torq_hl.fma rescale this table fuses.
 Value makeI16LUTFromVals(
     linalg::LinalgOp srcOp, PatternRewriter &rewriter, Value input, SmallVector<int32_t> values,
-    int32_t lutBias = 0, int32_t lutScale = 1
+    int32_t scaleFactor = 1, int shiftFactor = 0, int32_t inputZp = 0, int32_t outputZp = 0,
+    bool saturateI16 = true
 );
 
 // The bf16 reciprocal (see scripts/torch/bfloat16_softmax.py for the
@@ -383,10 +390,14 @@ constexpr int32_t kBfloatReciprocalExpoConst = 0x7E80;
 SmallVector<int8_t> getBfloatReciprocalLutData();
 
 // 'a', 'b', 'c' correspond to those in scripts/bf16luts.py comments/prints
-// cInputUnsigned makes the input (c) rescale read `input` unsigned in the ALU, so that
-// bf16 bit-cast domains spanning the sign change (e.g. softmax's x - max, which is <= 0
-// with +0.0 when x == max) clip +0.0 toward -0.0 instead of toward +inf. When set, the
-// c input zero point must be expressed in the unsigned bit-cast domain.
+// The input (c) rescale is fused into the table lookup (no separate FMA),
+// unless cInputUnsigned is set: the table's P read path (ALU bypass) always
+// reads the i16 input signed, so an unsigned rescale must stay a FMA.
+// cInputUnsigned makes that FMA read `input` unsigned in the ALU (the
+// magnitude, sign bit clear), so that bf16 bit-cast domains spanning the
+// sign change (e.g. softmax's x - max, which is <= 0 with +0.0 when x ==
+// max) clip +0.0 toward -0.0 instead of toward +inf. When set, the c input
+// zero point must be expressed in that magnitude domain.
 Value makeScaledLut(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t aScaleFactor,
     int aShiftFactor, int32_t aInputZp, int32_t aOutputZp, SmallVector<int32_t> bValues,

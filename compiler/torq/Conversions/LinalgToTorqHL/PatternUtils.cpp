@@ -2808,17 +2808,20 @@ Value makeRescale16(
 
 Value makeI16LUTFromVals(
     linalg::LinalgOp srcOp, PatternRewriter &rewriter, Value input, SmallVector<int32_t> values,
-    int32_t lutBias, int32_t lutScale
+    int32_t scaleFactor, int shiftFactor, int32_t inputZp, int32_t outputZp, bool saturateI16
 ) {
-    const std::vector<APInt> bias = {APInt(32, lutBias, /*isSigned=*/true)};
-    const std::vector<APInt> scale = {APInt(32, lutScale, /*isSigned=*/true)};
+    const std::vector<APInt> bias = {APInt(32, -inputZp, /*isSigned=*/true)};
+    const std::vector<APInt> scale = {APInt(32, scaleFactor, /*isSigned=*/true)};
     Value packedTable = createI32Const(
         rewriter, srcOp, values, llvm::ArrayRef<int64_t>{static_cast<int64_t>(values.size())}
     );
     return syna::torq_hl::TableOp::create(
                rewriter, srcOp.getLoc(), dyn_cast<RankedTensorType>(input.getType()),
                createInitTensor(srcOp, rewriter, dyn_cast<RankedTensorType>(input.getType())),
-               createIConst(rewriter, srcOp, interleave(bias, scale)), input, packedTable, nullptr
+               createIConst(rewriter, srcOp, interleave(bias, scale)), input, packedTable, nullptr,
+               shiftFactor != 0 ? rewriter.getI32IntegerAttr(shiftFactor) : nullptr,
+               outputZp != 0 ? rewriter.getI32IntegerAttr(outputZp) : nullptr,
+               saturateI16 ? rewriter.getBoolAttr(true) : nullptr
     )
         .getResult(0);
 }
@@ -2861,10 +2864,20 @@ Value makeScaledLut(
             srcOp, rewriter, RankedTensorType::get(inputType.getShape(), rewriter.getI16Type()),
             input
         );
-    auto scaledInput = makeRescale16(
-        srcOp, rewriter, input, cScaleFactor, cShiftFactor, cInputZp, cOutputZp, cInputUnsigned
-    );
-    auto lookuped = makeI16LUTFromVals(srcOp, rewriter, scaledInput, bValues);
+    Value lookuped;
+    if (cInputUnsigned) {
+        // The table's P read path (ALU bypass) always reads the i16 input
+        // signed, so the unsigned c rescale stays a separate torq_hl.fma.
+        auto scaledInput = makeRescale16(
+            srcOp, rewriter, input, cScaleFactor, cShiftFactor, cInputZp, cOutputZp, cInputUnsigned
+        );
+        lookuped = makeI16LUTFromVals(srcOp, rewriter, scaledInput, bValues);
+    }
+    else {
+        lookuped = makeI16LUTFromVals(
+            srcOp, rewriter, input, bValues, cScaleFactor, cShiftFactor, cInputZp, cOutputZp
+        );
+    }
     auto output =
         makeRescale16(srcOp, rewriter, lookuped, aScaleFactor, aShiftFactor, aInputZp, aOutputZp);
     if (bitcast)

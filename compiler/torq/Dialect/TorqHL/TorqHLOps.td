@@ -423,13 +423,27 @@ def TorqHL_TableOp : TorqHL_LayerOp<"table"> {
     $packed_table is a tensor<256xi32> where each entry encodes a piecewise-linear
     segment word: (slope << 16) | (base & 0xFFFF). For i8 LUTs the slope is 0 and
     the base is the original value shifted left by 8.
+
+    The ACT rescales the input before the lookup:
+    tc = s16(clamp((x - input_zp) * scale >> shift) + output_zp), where
+    (input_zp, scale) come from the scale_bias operand and shift/output_zp from
+    the attributes (both default to 0). By default the clamp is in the i32
+    domain, so the rescale result wraps at the s16 table index (used e.g. by
+    the reciprocal's (0, 256) rescale, where only x mod 256 is meaningful);
+    tables that fuse a torq_hl.fma input rescale set `saturate_i16` so the
+    rescale saturates to the i16 domain exactly as the pre-fusion FMA did.
+    Note: the table's P read path (ALU bypass) always reads the i16 input
+    signed; an unsigned input rescale must stay a separate torq_hl.fma.
   }];
 
   let arguments = !con(commonArgs, (ins
     TensorOrMemref:$scale_bias,
     TensorOrMemref:$input,
     Optional<TensorOrMemref>:$dynamic_table,
-    OptionalAttr<DenseI32ArrayAttr>:$static_table
+    OptionalAttr<DenseI32ArrayAttr>:$static_table,
+    DefaultValuedOptionalAttr<I32Attr, "0">:$shift,
+    DefaultValuedOptionalAttr<I32Attr, "0">:$output_zp,
+    DefaultValuedAttr<BoolAttr, "false">:$saturate_i16
   ));
 }
 

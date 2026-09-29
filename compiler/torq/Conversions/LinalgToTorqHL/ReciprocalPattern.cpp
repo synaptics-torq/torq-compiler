@@ -96,8 +96,10 @@ class ReciprocalOpPattern : public OpRewritePattern<linalg::ReciprocalOp> {
         for (int i = 0; i < 256; i++) {
             lutWords[2 * i] = static_cast<int32_t>(static_cast<uint8_t>(lutData[i]));
         }
-        auto lutVal16 =
-            makeI16LUTFromVals(op, rewriter, x, lutWords, /*lutBias=*/0, /*lutScale=*/256);
+        auto lutVal16 = makeI16LUTFromVals(
+            op, rewriter, x, lutWords, /*scaleFactor=*/256, /*shiftFactor=*/0, /*inputZp=*/0,
+            /*outputZp=*/0, /*saturateI16=*/false
+        );
 
         // 3) exponent term: 0x7E80 - x (lowered by AddOpPattern to torq_hl.add)
         auto cExpo = arith::ConstantOp::create(

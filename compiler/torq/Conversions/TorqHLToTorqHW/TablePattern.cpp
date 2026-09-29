@@ -58,8 +58,17 @@ LogicalResult TablePattern::transform(torq_hl::TableOp op, PatternRewriter &rewr
         For(auto i = slice.iterate(input.dim(In::Vectors))) {
             IData idata = slice.iram.load(input[ndd][i]);
             PData pdata = slice.alu.load(idata);
+            // The ACT applies the bias/scale/shift/zero-point rescale before the LUT
+            // lookup, so the scale_bias operands and shift/output_zp attributes of the
+            // table op can carry an input rescale (previously a separate torq_hl.fma).
+            // By default the rescale result is clamped in the i32 domain and wraps at
+            // the s16 table index; a fused FMA rescale (saturate_i16) must clamp to the
+            // int16 range instead, so out-of-domain inputs saturate to the table
+            // endpoints exactly as the pre-fusion FMA did.
+            int clipMin = op.getSaturateI16() ? minVal(DType::int16) : minVal(DType::int32);
+            int clipMax = op.getSaturateI16() ? maxVal(DType::int16) : maxVal(DType::int32);
             QData res = slice.act.rescaleClamp(
-                pdata, bdata, 0, 0, minVal(DType::int32), maxVal(DType::int32)
+                pdata, bdata, op.getShift(), op.getOutputZp(), clipMin, clipMax
             );
             slice.append(output[ndd], res);
         }
