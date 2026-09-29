@@ -108,8 +108,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass(int64_
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createPeelTileLoopsPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createUnrollDynamicShapeLoopPass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createReplaceForLoopsWithMidIterationPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileReductionForLramPass();
@@ -130,8 +128,6 @@ enum class SliceBufferSharing { None, Inputs, InputsAndOutputs };
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConvertPass(
     int64_t lramSize = 0, SliceBufferSharing sliceBufferSharing = SliceBufferSharing::None
 );
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createStripTorqExecutorAttrPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createEncodeTensorsPass();
 

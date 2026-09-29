@@ -15,8 +15,6 @@ namespace mlir::syna::torq {
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLPreConversionPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToLinalgPass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkPatternsForTileAndFusePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLConversionPass();

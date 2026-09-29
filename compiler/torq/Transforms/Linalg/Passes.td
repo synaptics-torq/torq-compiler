@@ -85,35 +85,6 @@ def TorqNarrowWeightConst : Pass<"torq-narrow-weight-const", "mlir::ModuleOp"> {
   let dependentDialects = ["arith::ArithDialect", "linalg::LinalgDialect"];
 }
 
-//===---------------------------------------------------------------------===//
-
-def FoldConstants :
-    InterfacePass<"torq-fold-constants",
-                  "mlir::FunctionOpInterface"> {
-
-    let summary = "Computes all operations that are constant";
-
-    let constructor = "mlir::syna::torq::createFoldConstantsPass()";
-
-    let dependentDialects = [
-        "linalg::LinalgDialect"
-    ];
-}
-
-def GeneralizeLinalgNamedOps :
-    InterfacePass<"torq-generalize-linalg-named-ops",
-                  "mlir::FunctionOpInterface"> {
-
-    let summary = "Converts linalg named ops to linalg generic ops";
-
-    let constructor =
-        "mlir::syna::torq::createGeneralizeLinalgNamedOpsPass()";
-
-    let dependentDialects = [
-        "linalg::LinalgDialect"
-    ];
-}
-
 def ConvertNhwcOpToNchw :
     InterfacePass<"torq-convert-nhwc-op-to-nchw",
                   "mlir::FunctionOpInterface"> {

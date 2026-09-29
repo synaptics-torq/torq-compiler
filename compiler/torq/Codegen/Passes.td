@@ -434,19 +434,6 @@ def PeelTileLoops :
 
 }
 
-def UnrollDynamicShapeLoop :
-    InterfacePass<"torq-unroll-dynamic-shape-loop",
-         "mlir::FunctionOpInterface"> {
-  let summary = "Unroll for loops that have dynamic shapes in their body";
-  let constructor =
-      "mlir::syna::torq::createUnrollDynamicShapeLoopPass()";
-
-  let dependentDialects = [
-        "linalg::LinalgDialect",
-    ];
-
-}
-
 def ReplaceForLoopsWithMidIteration :
     InterfacePass<"torq-replace-for-loops-with-mid-iteration",
          "mlir::FunctionOpInterface"> {
@@ -538,18 +525,6 @@ def DtcmTile:
 
     let dependentDialects = [
         "::mlir::linalg::LinalgDialect"
-    ];
-}
-
-def StripTorqExecutorAttr :
-    InterfacePass<"torq-strip-executor-attr",
-                  "mlir::FunctionOpInterface"> {
-    let summary = "Strip torq-executor attributes from torq_hl operations";
-    let constructor =
-        "mlir::syna::torq::createStripTorqExecutorAttrPass()";
-
-    let dependentDialects = [
-        "syna::torq_hl::TorqHLDialect"
     ];
 }
 

@@ -57,7 +57,6 @@ set(sources
     ScalarsToTensorsPass.cpp
     SegmentNSSProgramsPass.cpp
     SplitConstantsPass.cpp
-    StripTorqExecutorAttrPass.cpp
     ScheduleSliceProgramsPass.cpp
     TORQLowerExecutableTargetPass.cpp
     TorqComprehensiveBufferizePass.cpp
@@ -66,7 +65,6 @@ set(sources
     TilingUtils.cpp
     UnrollForallLoopsPass.cpp
     UnrollLoopPass.cpp
-    UnrollDynamicShapeLoopPass.cpp
     ValidPadToSamePadPass.cpp
     VirtualMemory.cpp    
     AssignNSSProgramsAddressesPass.cpp

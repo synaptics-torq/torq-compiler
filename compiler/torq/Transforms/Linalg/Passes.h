@@ -22,10 +22,6 @@ std::unique_ptr<OperationPass<ModuleOp>> createTorqConvertAllDTypesPass();
 std::unique_ptr<OperationPass<ModuleOp>> createTorqNarrowWeightConstPass();
 //===---------------------------------------------------------------------===//
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldConstantsPass();
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createGeneralizeLinalgNamedOpsPass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeLinalgForTorqPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvertNhwcOpToNchwPass();

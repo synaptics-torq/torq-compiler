@@ -50,27 +50,6 @@ def LinalgToTorqHLPreConversion :
     let options = RewritePassUtils.options;
 }
 
-def TensorToLinalg :
-    InterfacePass<"tensor-to-linalg",
-      "mlir::FunctionOpInterface"> {
-
-    let summary = "Convert tensor collapse_shape and expand_shape to linalg.generic";
-
-    let description = [{
-        Convert tensor collapse_shape and expand_shape to linalg.generic so they don't break tile-fusing.
-    }];
-
-    let constructor =
-        "mlir::syna::torq::createTensorToLinalgPass()";
-
-    let dependentDialects = [
-        "::mlir::tensor::TensorDialect",
-        "::mlir::linalg::LinalgDialect"
-    ];
-
-    let options = RewritePassUtils.options;
-}
-
 def MarkPatternsForTileAndFuse :
     InterfacePass<"torq-mark-patterns-for-tile-and-fuse",
       "mlir::FunctionOpInterface"> {

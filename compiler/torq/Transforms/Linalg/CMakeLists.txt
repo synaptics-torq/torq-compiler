@@ -20,9 +20,7 @@ iree_cc_library(
     OutlineTorqDispatchesPass.cpp
     AnnotateTiedOperandsPass.cpp
     TypeConversionPasses.cpp
-    FoldConstantsPass.cpp
     PreCalcI8TablePattern.cpp
-    GeneralizeLinalgNamedOpsPass.cpp
     OptimizeLinalgForTorqPass.cpp
     OptimizeTransposeLayoutPass.cpp
     UnrollStaticScfForLoopsPass.cpp

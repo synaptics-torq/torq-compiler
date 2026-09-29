@@ -329,32 +329,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLPreConve
     return std::make_unique<LinalgToTorqHLPreConversionPass>();
 }
 
-// DEADCODE:
-class TensorToLinalgPass : public impl::TensorToLinalgBase<TensorToLinalgPass> {
-  public:
-    using TensorToLinalgBase::TensorToLinalgBase;
-
-    void runOnOperation() override {
-        auto funcOp = getOperation();
-        auto *ctx = funcOp.getContext();
-
-        RewritePatternSet patterns(ctx);
-        populateTensorToLinalgPatterns(ctx, patterns);
-
-        auto frozenPatterns =
-            FrozenRewritePatternSet(std::move(patterns), disabledPatterns, enabledPatterns);
-
-        if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
-            return signalPassFailure();
-        }
-    }
-};
-
-// DEADCODE:
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToLinalgPass() {
-    return std::make_unique<TensorToLinalgPass>();
-}
-
 class MarkPatternsForTileAndFusePass
     : public impl::MarkPatternsForTileAndFuseBase<MarkPatternsForTileAndFusePass> {
   public:
