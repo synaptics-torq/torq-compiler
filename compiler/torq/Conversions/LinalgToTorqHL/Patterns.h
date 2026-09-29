@@ -79,8 +79,6 @@ void populateLinalgToTorqHLPatterns(
 
 void populateArithToTorqHLPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
-void populateTensorToLinalgPatterns(MLIRContext *context, RewritePatternSet &patterns);
-
 void populateTrigPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateReciprocalPatterns(MLIRContext *context, RewritePatternSet &patterns);

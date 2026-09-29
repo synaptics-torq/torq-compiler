@@ -2623,7 +2623,6 @@ LogicalResult matchI16InterpolatedTable(linalg::GenericOp op, LinalgTableMatchIn
     return success();
 }
 
-// DEADCODE:
 bool isCollapseOrExpandShapeGeneric(Operation *op) {
     if (!isa<linalg::GenericOp>(op))
         return false;

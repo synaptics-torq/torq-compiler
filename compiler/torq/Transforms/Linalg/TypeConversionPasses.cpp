@@ -621,35 +621,9 @@ struct DemoteF32ToBF16Converter : public FloatTypeConverter<Float32Type, BFloat1
     Type getTargetType(Float32Type type) override { return BFloat16Type::get(type.getContext()); }
 };
 
-class TorqDemoteF32ToBF16Pass : public impl::TorqDemoteF32ToBF16Base<TorqDemoteF32ToBF16Pass> {
-  public:
-    using TorqDemoteF32ToBF16Base::TorqDemoteF32ToBF16Base;
-
-    void runOnOperation() override {
-        DemoteF32ToBF16Converter typeConverter;
-
-        if (failed(runFloatConversion(getOperation(), typeConverter))) {
-            return signalPassFailure();
-        }
-    }
-};
-
 /// Converts f16 element types to bf16 element types.
 struct ConvertF16ToBF16Converter : public FloatTypeConverter<Float16Type, BFloat16Type> {
     Type getTargetType(Float16Type type) override { return BFloat16Type::get(type.getContext()); }
-};
-
-class TorqConvertF16ToBF16Pass : public impl::TorqConvertF16ToBF16Base<TorqConvertF16ToBF16Pass> {
-  public:
-    using TorqConvertF16ToBF16Base::TorqConvertF16ToBF16Base;
-
-    void runOnOperation() override {
-        ConvertF16ToBF16Converter typeConverter;
-
-        if (failed(runFloatConversion(getOperation(), typeConverter))) {
-            return signalPassFailure();
-        }
-    }
 };
 
 /// Demotes i64 element types to i32 element types.
@@ -673,22 +647,6 @@ void addIntegerCastPatterns(RewritePatternSet &p, TypeConverter &tc, MLIRContext
         tc, ctx
     );
 }
-
-class TorqDemoteI64ToI32Pass : public impl::TorqDemoteI64ToI32Base<TorqDemoteI64ToI32Pass> {
-  public:
-    using TorqDemoteI64ToI32Base::TorqDemoteI64ToI32Base;
-
-    void runOnOperation() override {
-        DemoteI64ToI32Converter typeConverter;
-
-        LogicalResult res =
-            runTypeConversion(getOperation(), typeConverter, addIntegerCastPatterns);
-
-        if (failed(res)) {
-            return signalPassFailure();
-        }
-    }
-};
 
 class TorqConvertAllDTypesPass : public impl::TorqConvertAllDTypesBase<TorqConvertAllDTypesPass> {
   public:
@@ -854,18 +812,6 @@ class TorqNarrowWeightConstPass
 };
 
 } // namespace
-
-std::unique_ptr<OperationPass<ModuleOp>> createTorqDemoteF32ToBF16Pass() {
-    return std::make_unique<TorqDemoteF32ToBF16Pass>();
-}
-
-std::unique_ptr<OperationPass<ModuleOp>> createTorqConvertF16ToBF16Pass() {
-    return std::make_unique<TorqConvertF16ToBF16Pass>();
-}
-
-std::unique_ptr<OperationPass<ModuleOp>> createTorqDemoteI64ToI32Pass() {
-    return std::make_unique<TorqDemoteI64ToI32Pass>();
-}
 
 std::unique_ptr<OperationPass<ModuleOp>> createTorqConvertAllDTypesPass() {
     return std::make_unique<TorqConvertAllDTypesPass>();
