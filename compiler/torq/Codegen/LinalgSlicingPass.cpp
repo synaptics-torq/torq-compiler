@@ -468,6 +468,39 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
     }
 }; // class ElementwisePattern
 
+// Reciprocal pattern. LinalgToTorqHL lowers linalg.reciprocal directly to a table
+// lookup, so it reaches slicing as a named op that ElementwisePattern (which only sees
+// linalg.generic) would leave on one slice. Slice it the same way: on the leftmost
+// non-unit dimension.
+struct ReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
+    int64_t sliceCount_;
+
+    ReciprocalPattern(MLIRContext *context, int64_t sliceCount)
+        : OpRewritePattern<linalg::ReciprocalOp>(context), sliceCount_(sliceCount) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::ReciprocalOp reciprocalOp, PatternRewriter &rewriter) const override {
+        if (getTargetExecutor(reciprocalOp) == torq_hl::Executor::Host)
+            return rewriter.notifyMatchFailure(reciprocalOp, "host-executed operation");
+
+        if (isMarkedFuseGroup(reciprocalOp) && !isFuseGroupPrincipalOp(reciprocalOp))
+            return rewriter.notifyMatchFailure(reciprocalOp, "not the principal operation");
+
+        std::optional<int64_t> slicingIter;
+        ArrayRef<int64_t> shape = cast<ShapedType>(reciprocalOp->getResultTypes()[0]).getShape();
+        for (auto [i, size] : llvm::enumerate(shape)) {
+            if (size > 1) {
+                slicingIter = i;
+                break;
+            }
+        }
+        if (!slicingIter)
+            return rewriter.notifyMatchFailure(reciprocalOp, "no dimension to slice");
+
+        return peelAndSlice(rewriter, reciprocalOp, *slicingIter, kGrouping, sliceCount_);
+    }
+}; // struct ReciprocalPattern
+
 struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
     mlir::OpPassManager canonicalizer_;
 
@@ -526,6 +559,7 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
         // Elementwise generic ops: dynamically slice on leftmost non-unit dim
         patterns.add<TransposePattern>(context, this->sliceCount);
         patterns.add<ElementwisePattern>(context, this->sliceCount);
+        patterns.add<ReciprocalPattern>(context, this->sliceCount);
 
         FrozenRewritePatternSet frozenPatterns(std::move(patterns));
 
