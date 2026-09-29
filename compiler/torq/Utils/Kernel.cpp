@@ -292,8 +292,8 @@ static int getBusScatterGather(NdlType type) {
 
 // SliceCfg contains the same fields as SliceCFGAttr
 struct SliceCfg {
-    torq_hw::ALUOp0Mode alu_op0_mode[4];
-    torq_hw::ALUOp1Mode alu_op1_mode[4];
+    torq_hw::ALUOp0Mode alu_op0_mode[2]{}; // One mode for each setId
+    torq_hw::ALUOp1Mode alu_op1_mode[2]{}; // One mode for each setId
     uint32_t alu_d_unsigned;
     uint32_t alu_w_unsigned;
     torq_hw::ACTMode act_mode;
@@ -326,21 +326,28 @@ struct SliceCfg {
     uint32_t act_sum_bits;
     ArrayRef<int32_t> table = {};
 
-    SliceCFGAttr toSliceCFGAttr(MLIRContext *ctx) const {
+    SliceCFGAttr toSliceCFGAttr(MLIRContext *ctx, bool usingSet1) const {
         // When using fp32 and bf16 we normally represent values as float32 (see min,max in clamp())
         // For consistency we do the same for the padding value, but HW expects 16 bits here
         // so we have to adjust the value by discarding the lowest 16 bits of mantissa.
         int padValue16b = alu_format == NumberFormat::BF ? pad_value >> 16 : pad_value;
+
+        // If DEDR uses set 1 then extend unsigned config to 8 bits
+        auto alu_d_unsigned_mask = alu_d_unsigned;
+        auto alu_w_unsigned_mask = alu_w_unsigned;
+        assert(alu_d_unsigned_mask <= 0xf && alu_w_unsigned_mask <= 0xf && "Expected 4-bit config");
+        if (usingSet1) {
+            alu_d_unsigned_mask |= alu_d_unsigned_mask << 4;
+            alu_w_unsigned_mask |= alu_w_unsigned_mask << 4;
+        }
+
         return SliceCFGAttr::get(
-            ctx, {alu_op0_mode[0], alu_op0_mode[1], alu_op0_mode[2], alu_op0_mode[3]},
-            {alu_op1_mode[0], alu_op1_mode[1], alu_op1_mode[2], alu_op1_mode[3]}, alu_d_unsigned,
-            alu_w_unsigned, act_mode, act_lsh,                   //
-            act_rsh, act_clip_min, act_clip_max, act_zero_point, //
-            no_p_clear,
-            no_p_output,                                           //
-            kernel.left, kernel.right, kernel.top, kernel.bottom,  //
-            pad.left, pad.right, pad.top, pad.bottom, padValue16b, //
-            stride, stride_offset, act_round_mode, weight_format,  //
+            ctx, alu_op0_mode, alu_op1_mode, alu_d_unsigned_mask, alu_w_unsigned_mask, //
+            act_mode, act_lsh, act_rsh, act_clip_min, act_clip_max, act_zero_point,    //
+            no_p_clear, no_p_output,                                                   //
+            kernel.left, kernel.right, kernel.top, kernel.bottom,                      //
+            pad.left, pad.right, pad.top, pad.bottom, padValue16b,                     //
+            stride, stride_offset, act_round_mode, weight_format,                      //
             alu_disable, act_disable, alu_format, act_format, act_sum_bits, table
         );
     }
@@ -350,6 +357,10 @@ static void debugTensor(const char *name, const LData &data) {
     LLVM_DEBUG(llvm::dbgs() << name << ": ";
                if (data.value()) { llvm::dbgs() << LData(data.value()); } llvm::dbgs()
                << " -> " << LData(data.shape(), data.elementType()) << "\n";);
+}
+
+static void debugTensor(const char *name, const GLData &data) {
+    LLVM_DEBUG(llvm::dbgs() << name << ": " << LData(data.shape(), data.elementType()) << "\n";);
 }
 
 static void debugData(const Data &data) { LLVM_DEBUG(llvm::dbgs() << data << "\n"); }
@@ -695,10 +706,15 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Iterator &iterator) {
 }
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Stride &stride) {
-    os
-        << (stride.hasVal()
-                ? (stride.intVal.has_value() ? std::to_string(stride.intVal.value()) : "expr")
-                : "-");
+    if (stride.intVal.has_value()) {
+        constexpr int composed = std::numeric_limits<int>::max();
+        constexpr int mix = std::numeric_limits<int>::min();
+        int intStride = stride.intVal.value();
+        os << (intStride == composed ? "composed" : intStride == mix ? "*" : to_string(intStride));
+    }
+    else if (stride.exprVal.has_value()) {
+        os << "expr";
+    }
     return os;
 }
 
@@ -779,11 +795,7 @@ Data::Data(
     assert(_ix.size() <= _shape.size());
 }
 
-const Indexes &Data::indexes() const { return _ix; }
-const Shape &Data::shape() const { return _shape; }
-Shape &Data::getShape() { return _shape; }
-int Data::normalizeIndex(int i, bool iCanBeRank) const {
-    int rank = _shape.size();
+static int normalizeIndex(int i, int rank, bool iCanBeRank) {
     int normalizedIndex = i;
     if (i < 0) {
         normalizedIndex = rank + i;
@@ -793,6 +805,13 @@ int Data::normalizeIndex(int i, bool iCanBeRank) const {
         assert(false && "Index out of bounds");
     }
     return normalizedIndex;
+}
+
+const Indexes &Data::indexes() const { return _ix; }
+const Shape &Data::shape() const { return _shape; }
+Shape &Data::getShape() { return _shape; }
+int Data::normalizeIndex(int i, bool iCanBeRank) const {
+    return torq::normalizeIndex(i, _shape.size(), iCanBeRank);
 }
 
 int Data::dim(int i) const { return _shape.at(normalizeIndex(i)).count; }
@@ -807,7 +826,6 @@ std::vector<int> Data::dims(int begin, int end) const {
     begin = normalizeIndex(begin, true);
     end = normalizeIndex(end, true);
     if (begin > end) {
-        llvm::errs() << "Error: begin=" << begin << " > end=" << end << "\n";
         llvm::errs() << "Error: begin=" << begin << ", end=" << end << " invalid for shape "
                      << _shape << " of rank " << _shape.size() << "\n";
         assert(false && "Invalid begin end specified");
@@ -1063,6 +1081,64 @@ LData &LData::partitionByIndexParity2D() {
     return *this;
 }
 
+LData LData::stack(OpBuilder *builder, const LData &first, const LData &second, int axis) {
+    assert(first.elementType() == second.elementType() && "Data must have the same element type");
+    assert(first.shape() == second.shape() && "Data must have the same shape");
+    assert(first.offset() == second.offset() && "Data must have the same offset`");
+
+    auto ctx = builder->getContext();
+    auto loc = builder->getUnknownLoc();
+    auto inputDiff = getAffineDimExpr(1, ctx) - getAffineDimExpr(0, ctx);
+    LData stacked(first);
+
+    // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
+    // The difference between the two input addresses is used as offset to fetch the data
+    stacked.insertDim(axis, {2, Stride(inputDiff)});
+
+    stacked._symbols.push_back(GetAddressOp::create(*builder, loc, first.value()).getAddress());
+    stacked._symbols.push_back(GetAddressOp::create(*builder, loc, second.value()).getAddress());
+    return stacked;
+}
+
+GLData::GLData(const LData &first) : DataT(Shape(first.shape()), first.elementType()) {
+    _ldata.push_back(first);
+}
+
+GLData GLData::stack(const LData &first, const LData &second, int index) {
+    assert(first.elementType() == second.elementType() && "Data must have the same element type");
+    assert(first.dims() == second.dims() && "Data must have the same dimensions");
+    GLData data(first);
+    data._ldata.push_back(second);
+    data._dimIx = index;
+    data._mode = Mode::stack;
+
+    // In the shape stride information is for debugging/visualization only
+    Shape &shape = data.getShape();
+    for (int i = 0; i < shape.size(); i++) {
+        if (!(shape[i].stride == second.shape()[i].stride)) {
+            shape[i].stride = numeric_limits<int>::min();
+        }
+    }
+    shape.insert(shape.begin() + data._dimIx, ShapeItem(2, numeric_limits<int>::max()));
+
+    return data;
+}
+
+GLData GLData::operator[](IterVar index) const {
+    GLData subData = DataT<GLData>::operator[](index);
+    subData._ldata = _ldata;
+    subData._dimIx = _dimIx;
+    subData._mode = _mode;
+    return subData;
+}
+GLData GLData::operator[](const Indexes &ixs) const {
+    GLData subData = DataT<GLData>::operator[](ixs);
+    subData._ldata = _ldata;
+    subData._dimIx = _dimIx;
+    subData._mode = _mode;
+    return subData;
+}
+
 //
 // SlicePrivate class
 //
@@ -1083,11 +1159,15 @@ struct SlicePrivate {
 
         // MLIR values used to load (store) this RAM
         SmallVector<Value> values;
+
+        // MLIR values used to load this RAM with setId = 1
+        SmallVector<Value> valuesSet1;
+
         // MLIR symbols in the strides used to load (store) this RAM
         SmallVector<Value> symbols;
 
-        void usingData(const LData &data) {
-            values.push_back(data.value());
+        void usingData(const LData &data, int setId = 0) {
+            setId == 0 ? values.push_back(data.value()) : valuesSet1.push_back(data.value());
             symbols.append(data.symbols().begin(), data.symbols().end());
         }
     };
@@ -1107,6 +1187,9 @@ struct SlicePrivate {
         NdlType type, torq_hw::RegNdlDimsData &ndlDims, const Data &data, int loadNesting,
         bool bigM = false, bool fuseW = false
     );
+
+    // Compute the total number of H iterations in a mem-NDL of given type and id
+    int getMemNdlIterationCount(NdlType type, int id = 0);
 
     // Compute the total iteration count of all loops inside and including the iv loop
     int innerIterCount(const std::vector<Loop> &forStack, int iv);
@@ -1146,8 +1229,11 @@ struct SlicePrivate {
         return 8 / sizeofType(toUncompressed(type));
     }
 
-    MemNdlData memNdl(NdlType ndlType, const LData &data, bool fuse, int appendBlockSize = -1);
-    void dedr(const LData &data);
+    MemNdlData memNdl(
+        NdlType ndlType, const LData &data, bool fuse, NdlSyncMode syncMode = NdlSyncMode::NONE,
+        int appendBlockSize = -1
+    );
+    void dedr(const LData &data, NdlSyncMode syncMode);
     void dewr(const LData &data, bool fuse);
     void debr(const LData &data);
     void deqw(const LData &output, int appendBlockSize = -1);
@@ -1155,7 +1241,7 @@ struct SlicePrivate {
     void ref(const LData &data);
 
     void cedr(const IData &idata, uint32_t weightSize, bool transpose);
-    void cedw(const IData &idata);
+    void cedw(const IData &idata, int setId);
 
     void cewr(const WData &wdata, bool outer = false, bool repeatWeight = false);
     void ceww(const WData &wdata, bool transpose);
@@ -1200,6 +1286,10 @@ struct SlicePrivate {
 
     // Applying bias,scale per-item in ACT
     bool _biasScalePerItem{false};
+
+    // IterId to be skipped during HDIM generation in DEDR NDL because this is handled explicitly
+    // by having two DEDR (id0 and id1)
+    int _skipDedrIterId{-1};
 };
 
 SlicePrivate::SlicePrivate(const string &name) : _name(name) {
@@ -1241,12 +1331,15 @@ static torq_hw::MemDimTag tagToMemDimTag(ShapeItem::Tag tag, torq_hw::MemDimTag 
     assert(false && "Unknown ShapeItem::Tag");
 }
 
+// Return number of LDIMs
+static int getLdimCount(torq_hw::MemNdlDimsData &ndlDims) {
+    return count_if(ndlDims.begin(), ndlDims.end(), [](auto &d) { return d.type == DimType::L; });
+}
+
 // Ensure the NDL doesn't contain too many (or too few) HDIMs
 // If beyond the max number of HDIMs supported by the HW, try to compact them if possible
 static void compactHDims(NdlType type, torq_hw::MemNdlDimsData &ndlDims) {
-    const int ldimCount =
-        count_if(ndlDims.begin(), ndlDims.end(), [](auto &d) { return d.type == DimType::L; });
-
+    const int ldimCount = getLdimCount(ndlDims);
     int hdimCount = ndlDims.size() - ldimCount;
     if (hdimCount <= HwInfo::hdim_count) {
         if (hdimCount < 1) {
@@ -1258,10 +1351,13 @@ static void compactHDims(NdlType type, torq_hw::MemNdlDimsData &ndlDims) {
     LLVM_DEBUG(llvm::dbgs() << "Warning: " << type << " contains " << hdimCount << " HDIMs");
 
     // Remove dummy dimensions with only 1 iteration
+    // Never remove dims with special stride of -1 since might have been inserted on purpose
     ndlDims.erase(
         remove_if(
             ndlDims.begin(), ndlDims.end(),
-            [](auto &d) { return d.type == DimType::H && d.count == 1; }
+            [](auto &d) {
+                return d.type == DimType::H && d.count == 1 && d.getIntStride().value_or(0) != -1;
+            }
         ),
         ndlDims.end()
     );
@@ -1375,6 +1471,10 @@ int SlicePrivate::addMemNdlDims(
     // Generate additional HDIMs from loops
     // The NDL will have as many extra H-dimensions as the nesting of the loop we are in
     for (int i = _forStack.size() - 1; i >= 0; i--) {
+        if (type == NdlType::DEDR && i == _skipDedrIterId) {
+            // This iterator is handled by switching to NDL set 1, we don't have to add a dimension
+            continue;
+        }
         // Check if this loop appears in the list of indexed dimensions,
         // in this case compute the stride from dataDims.
         // If not, this loop doesn't affect this data load, so this is a repeat with stride 0
@@ -1631,6 +1731,12 @@ void SlicePrivate::addDims(
     }
 }
 
+int SlicePrivate::getMemNdlIterationCount(NdlType type, int id) {
+    auto ndl = _ndls.getMemNdl(type, 0, id);
+    assert(ndl && "NDL not defined");
+    return iterationCount(ndl->dims);
+}
+
 int SlicePrivate::innerIterCount(const std::vector<Loop> &forStack, int iv) {
     int count = 1;
     for (int i = forStack.size() - 1; i >= iv; i--) {
@@ -1648,11 +1754,10 @@ int SlicePrivate::outerIterCount(const std::vector<Loop> &forStack, int iv) {
 }
 
 void SlicePrivate::aluSetMode(torq_hw::ALUOp0Mode op0, torq_hw::ALUOp1Mode op1) {
-    for (auto &mode0 : _cfg.alu_op0_mode) {
-        mode0 = op0;
-    }
-    for (auto &mode1 : _cfg.alu_op1_mode) {
-        mode1 = op1;
+    // If DEDR set1 is used we also configure set1 in the same way as set0
+    for (int i = 0; i < (_ndls.getMemNdl(NdlType::DEDR, 0, 1) ? 2 : 1); i++) {
+        _cfg.alu_op0_mode[i] = op0;
+        _cfg.alu_op1_mode[i] = op1;
     }
 }
 
@@ -1747,9 +1852,14 @@ void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose)
     cedrDims.push_back({DimType::H, RegDimTag::T, 1});
 
     _ndls.add(NdlType::CEDR, cedrDims);
+
+    // If we use DEDR1 also add CEDR1 configured in the same way as CEDR0
+    if (_ndls.getMemNdl(NdlType::DEDR, 0, 1)) {
+        _ndls.add(NdlType::CEDR, cedrDims, 1);
+    }
 }
 
-void SlicePrivate::cedw(const IData &idata) {
+void SlicePrivate::cedw(const IData &idata, int setId) {
     Shape shape = idata.subShape();
     // assert(shape.size() <= 1);
     const int elementSize = sizeofType(idata.elementType());
@@ -1769,11 +1879,9 @@ void SlicePrivate::cedw(const IData &idata) {
     }
 
     // Repeat for as many times as DEDR
-    auto dedr = _ndls.getMemNdl(NdlType::DEDR);
-    assert(dedr && "DEDR NDL not defined");
-    auto ramWrCount = iterationCount(dedr);
+    auto ramWrCount = getMemNdlIterationCount(NdlType::DEDR, setId);
     regDims.push_back({DimType::H, RegDimTag::T, ramWrCount / iterationCount(regDims)});
-    _ndls.add(NdlType::CEDW, regDims);
+    _ndls.add(NdlType::CEDW, regDims, setId);
 }
 
 void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
@@ -1896,9 +2004,7 @@ void SlicePrivate::ceww(const WData &wdata, bool transpose) {
     }
 
     // Repeat for as many times as DEWR
-    auto dewr = _ndls.getMemNdl(NdlType::DEWR);
-    assert(dewr && "DEWR NDL not defined");
-    auto ramWrCount = iterationCount(dewr);
+    auto ramWrCount = getMemNdlIterationCount(NdlType::DEWR);
     regDims.push_back({DimType::H, RegDimTag::T, ramWrCount / iterationCount(regDims)});
 
     _ndls.add(NdlType::CEWW, regDims);
@@ -1919,10 +2025,7 @@ void SlicePrivate::acbr(const BData &bdata) {
     addDims(NdlType::ACBR, acbrDims, bdata, _bram.loadNesting, true);
 
     // Number of read from bram must match the number of writes (overall H iterations in DEBR)
-    // TODO: handle the case with multiple DEBR NDLs
-    auto debr = _ndls.getMemNdl(NdlType::DEBR);
-    assert(debr && "DEBR NDL not defined");
-    auto ramWrCount = iterationCount(debr);
+    auto ramWrCount = getMemNdlIterationCount(NdlType::DEBR);
     acbrDims.push_back({DimType::H, RegDimTag::T, ramWrCount});
 
     _ndls.add(NdlType::ACBR, acbrDims);
@@ -1943,9 +2046,7 @@ void SlicePrivate::acbw(const BData &bdata) {
     regDims.push_back({DimType::L, RegDimTag::G}); // No group
 
     // Repeat for as many times as DEBR
-    auto debr = _ndls.getMemNdl(NdlType::DEBR);
-    assert(debr && "DEBR NDL not defined");
-    auto ramWrCount = iterationCount(debr);
+    auto ramWrCount = getMemNdlIterationCount(NdlType::DEBR);
     regDims.push_back({DimType::H, RegDimTag::T, ramWrCount});
 
     _ndls.add(NdlType::ACBW, regDims);
@@ -2037,26 +2138,42 @@ void SlicePrivate::cepr(const PData &pdata) {
             accumulationCount = kh * kw;
         }
     }
+    int outerCount = outerIterCount(_stackCopy, _pram.loadNesting);
+    bool usingDedr1 = _ndls.getMemNdl(NdlType::DEDR, 0, 1);
+    if (usingDedr1) {
+        // TODO: if the switch is outside accumulation we might have to divide outerCount
+        assert(accumulationCount % 2 == 0 && "Accumulation count must be even with DEDR1");
+        accumulationCount /= 2;
+        assert(accumulationCount > 0 && "Accumulation count < 2 not supported");
+    }
     ceprDims.push_back({DimType::H, RegDimTag::N, accumulationCount});
-    ceprDims.push_back({DimType::H, RegDimTag::T, outerIterCount(_stackCopy, _pram.loadNesting)});
+    ceprDims.push_back({DimType::H, RegDimTag::T, outerCount});
 
     // Update iteration count for CEDR and CEWR to match CEPR
     // These counters are not really used, but we set them to consistent values to avoid confusion
     int ceprCount = iterationCount(ceprDims);
-    if (auto cedr = _ndls.getRegNdl(NdlType::CEDR)) {
+    if (auto cewr = _ndls.getRegNdl(NdlType::CEWR)) {
+        cewr->dims.back().count = div_ceil(ceprCount, iterationCount(cewr->dims));
+    }
+    if (auto cedr = _ndls.getRegNdl(NdlType::CEDR, 0, 0)) {
         int cedrT = div_ceil(ceprCount, iterationCount(cedr->dims));
         // If elementType is none we are in weight-bypass mode, so use a dummy T of 0
         cedr->dims.back().count = _iram.elementType == DType::none ? 0 : cedrT;
     }
-    if (auto cewr = _ndls.getRegNdl(NdlType::CEWR)) {
-        cewr->dims.back().count = div_ceil(ceprCount, iterationCount(cewr->dims));
+    if (auto cedr = _ndls.getRegNdl(NdlType::CEDR, 0, 1)) {
+        cedr->dims.back().count = div_ceil(ceprCount, iterationCount(cedr->dims));
     }
 
     _ndls.add(NdlType::CEPR, ceprDims);
+    if (usingDedr1) {
+        _ndls.add(NdlType::CEPR, ceprDims, 1);
+    }
 }
 
-MemNdlData
-SlicePrivate::memNdl(NdlType ndlType, const LData &data, bool fuse, int appendBlockSize) {
+MemNdlData SlicePrivate::memNdl(
+    NdlType ndlType, const LData &data, bool fuse, NdlSyncMode syncMode, int appendBlockSize
+) {
+    bool first = _ndls.getMemNdl(ndlType, 0, 0) == nullptr;
     MemNdlDimsData ndlDims;
     int offset = addMemNdlDims(ndlType, ndlDims, data, fuse, appendBlockSize);
     if (sizeofTypeBits(data.elementType()) < 8) {
@@ -2079,7 +2196,34 @@ SlicePrivate::memNdl(NdlType ndlType, const LData &data, bool fuse, int appendBl
         }
     }
 
-    return MemNdlData(ndlType, ndlDims, offset);
+    if (_ndls.getMemNdl(ndlType, 0, 1)) {
+        llvm::errs() << "Error: 2 NDLs of type " << ndlType << " already defined\n";
+        assert(false && "Too many NDLs of same type");
+    }
+
+    int64_t ndl_set_id = 0;
+    uint8_t ndl_sync_mode = 0;
+    uint8_t ndl_sync_nhd = 0;
+    if (syncMode != NdlSyncMode::NONE) {
+        ndl_sync_nhd = 0; // TODO: get this from somewhere
+        if (!first) {
+            // This is the second NDL of this type, use set_id = 1 and set sync mode
+            ndl_set_id = 1;
+            ndl_sync_mode = static_cast<int>(syncMode);
+        }
+        if (ndl_sync_nhd == 0) {
+            // We want to switch the entire NDL content, that is switch NDL0 and NDL1 at each cycle
+            // This requires a dummy HDIM with a counter of 1 as the first HDIM
+            // Use a special stride of -1 to ensure this dimension is never removed in compactHDims
+            int ldimCount = getLdimCount(ndlDims);
+            ndlDims.insert(ndlDims.begin() + ldimCount, {DimType::H, MemDimTag::O, 1, -1});
+        }
+        else {
+            ndl_sync_nhd--;
+        }
+    }
+
+    return MemNdlData(ndlType, ndlDims, offset, ndl_set_id, ndl_sync_mode, ndl_sync_nhd);
 }
 
 // Check that no read in `ndl` crosses a `bankBytes`-byte memory-bank boundary.
@@ -2182,7 +2326,9 @@ static void verifyNdlBankAlignment(const MemNdlData *ndl, int64_t bankBytes) {
 #endif
 }
 
-void SlicePrivate::dedr(const LData &data) { _ndls.add(memNdl(NdlType::DEDR, data, true)); }
+void SlicePrivate::dedr(const LData &data, NdlSyncMode syncMode) {
+    _ndls.add(memNdl(NdlType::DEDR, data, true, syncMode));
+}
 
 void SlicePrivate::dewr(const LData &data, bool fuse) {
     LData dataAdjusted{data};
@@ -2228,7 +2374,7 @@ void SlicePrivate::debr(const LData &data) {
 }
 
 void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
-    _ndls.add(memNdl(NdlType::DEQW, output, true, appendBlockSize));
+    _ndls.add(memNdl(NdlType::DEQW, output, true, NdlSyncMode::NONE, appendBlockSize));
 }
 
 void SlicePrivate::ref(const LData &data) {
@@ -2948,16 +3094,17 @@ void Slice::segment(const std::vector<int> &nchw, int channelStride) {
 }
 
 torq_hw::SliceCFGAttr Slice::getCfgAttr(MLIRContext *ctx) const {
-    SliceCFGAttr cfgAttr = d->_cfg.toSliceCFGAttr(ctx);
+    bool usingSet1 = d->_ndls.getMemNdl(NdlType::DEDR, 0, 1) != nullptr;
+    SliceCFGAttr cfgAttr = d->_cfg.toSliceCFGAttr(ctx, usingSet1);
     LLVM_DEBUG(llvm::dbgs() << cfgAttr);
     return cfgAttr;
 }
 
 // Get top-level count from the specified Reg- or Mem- based NDL
 // Return -1 if the specified NDL type not found
-static int getTopCount(NdlType type, const torq_hw::Ndls &ndls) {
-    auto regNdl = ndls.getRegNdl(type);
-    auto memNdl = ndls.getMemNdl(type);
+static int getTopCount(NdlType type, const torq_hw::Ndls &ndls, int setId = 0) {
+    auto regNdl = ndls.getRegNdl(type, 0, setId);
+    auto memNdl = ndls.getMemNdl(type, 0, setId);
     int cnt = regNdl   ? (regNdl->dims.size() > 0 ? regNdl->dims[regNdl->dims.size() - 1].count : 0)
               : memNdl ? (memNdl->dims.size() > 0 ? memNdl->dims[memNdl->dims.size() - 1].count : 0)
                        : -1;
@@ -3024,7 +3171,6 @@ const torq_hw::Ndls &Slice::getNdls() const {
     ok &= checkNdlConsistency(NdlType::CEPR, NdlType::CEDR, d->_ndls, true);
     ok &= checkNdlConsistency(NdlType::CEPR, NdlType::CEWR, d->_ndls, true);
     ok &= checkNdlTopConsistency(NdlType::ACPR, NdlType::CEPR, d->_ndls);
-    ok &= checkNdlTopConsistency(NdlType::ACPR, NdlType::CEPW, d->_ndls);
 
     // Check consistency between Mem- and Reg- based NDLs
     ok &= checkNdlConsistency(NdlType::DEDR, NdlType::CEDW, d->_ndls);
@@ -3055,16 +3201,16 @@ Slice::createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange sy
     }
     auto sliceTaskOp = SliceTaskOp::create(
         builder,
-        loc,                              // Operation to replace
-        name(),                           // Task name
-        checkNonNull(d->_iram.values),    // Input tensor
-        checkNonNull(d->_wram.values),    // Weights
-        checkNonNull(d->_bram.values),    // BiasScale tensor
-        checkNonNull(d->_pram.values),    // Output tensor initializer
-        ValueRange{},                     // Dx
-        ValueRange{},                     // Bx
-        allSymbols,                       // Symbols used to compute the NDLs
-        getCfgAttr(builder.getContext()), // Slice configuration
+        loc,                               // Operation to replace
+        name(),                            // Task name
+        checkNonNull(d->_iram.values),     // Input tensor
+        checkNonNull(d->_wram.values),     // Weights
+        checkNonNull(d->_bram.values),     // BiasScale tensor
+        checkNonNull(d->_pram.values),     // Output tensor initializer
+        checkNonNull(d->_iram.valuesSet1), // Dx
+        ValueRange{},                      // Bx
+        allSymbols,                        // Symbols used to compute the NDLs
+        getCfgAttr(builder.getContext()),  // Slice configuration
         getNdls()
     );
     return sliceTaskOp;
@@ -3074,13 +3220,11 @@ Slice::createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange sy
 // Memory Units
 //
 
-void SliceRam::checkLoadSize(const Data &data) {
-    debugData(data);
-
+static void checkLoadSize(const SliceRam *ram, const Data &data) {
     int dataSize = elementCount(data.shape()) * sizeofType(data.elementType());
-    if (dataSize > size()) {
-        llvm::errs() << name() << " load: " << data << " (" << dataSize
-                     << " bytes) exceeds capacity of " << size() << " bytes\n";
+    if (dataSize > ram->size()) {
+        llvm::errs() << ram->name() << " load: " << data << " (" << dataSize
+                     << " bytes) exceeds capacity of " << ram->size() << " bytes\n";
         assert(false && "Ram width exceeded");
     }
 }
@@ -3089,18 +3233,20 @@ const char *IRam::name() const { return "IRam"; }
 
 int IRam::size() const { return HwInfo::iram_seg_width * HwInfo::iram_seg; }
 
-IData IRam::load(const LData &data) {
+static IData iramLoadImpl(
+    const IRam *iRam, SlicePrivate *d, const LData &data, NdlSyncMode syncMode, int setId
+) {
     debugTensor("ITensor", data);
     Shape iramShape = data.subShape();
     assert(broadcastDims(iramShape) == 0 && "Broadcast dimensions not supported for IRAM load");
-    d->dedr(data);
+    d->dedr(data, syncMode);
 
     d->_iram.loadNesting = d->_forStack.size();
     d->_iram.elementType = data.elementType();
-    d->_iram.usingData(data);
+    d->_iram.usingData(data, setId);
 
     auto idata = IData(iramShape, data.elementType());
-    d->cedw(idata);
+    d->cedw(idata, setId);
 
     // Adjust IRAM shape strides to natural strides, in IRAM data is contiguous
     for (auto &iramShapeItem : iramShape) {
@@ -3119,8 +3265,52 @@ IData IRam::load(const LData &data) {
 
     idata.setShape(iramShape);
 
-    checkLoadSize(idata);
+    checkLoadSize(iRam, idata);
     return idata;
+}
+
+IData IRam::load(const LData &data) {
+    IData idata = iramLoadImpl(this, d, data, NdlSyncMode::NONE, 0);
+    debugData(idata);
+    return idata;
+}
+
+IData IRam::load(const GLData &data) {
+
+    // Get the index which is used to select the DEDR
+    Indexes indexes = data.indexes();
+
+    debugTensor("GITensor", data);
+    IData iData({}, DType::none);
+    switch (data.mode()) {
+    case GLData::Mode::none:
+        // Fall-back to normal load
+        iData = load(data.ldata()[0][indexes]);
+        break;
+    case GLData::Mode::stack: {
+        const IterVar iterVar = indexes.at(data.composedDimIx());
+        assert(iterVar.iterId() >= 0);
+
+        // Remove this index because we are handling it explicitly by switching the DEDRs
+        indexes.erase(indexes.begin() + data.composedDimIx());
+
+        // Get the iteration count
+        int loopIterCount = d->_forStack[iterVar.iterId()].count;
+        assert(loopIterCount == 2);
+        d->_skipDedrIterId = iterVar.iterId();
+
+        // HW starts executions from set1, so load second data tensor first
+        IData iData1 = iramLoadImpl(this, d, data.ldata()[1][indexes], NdlSyncMode::R, 0);
+        IData iData0 = iramLoadImpl(this, d, data.ldata()[0][indexes], NdlSyncMode::R, 1);
+        assert(iData0.shape() == iData1.shape() && "Stacked load data shape mismatch");
+
+        // Do not clear PRAM when switching from set 1 to set 0 (always start set 1 first)
+        d->_cfg.no_p_clear = true;
+        iData = iData0;
+    } break;
+    }
+    debugData(iData);
+    return iData;
 }
 
 int IRam::gather() const { return getBusScatterGather(NdlType::DEDR); }
@@ -3206,7 +3396,8 @@ WData WRam::load(const LData &data, DType dstType, bool transpose) {
 
 WData WRam::load(const LData &data, DType dstType) {
     auto wdata = load(data, dstType, false);
-    checkLoadSize(wdata);
+    checkLoadSize(this, wdata);
+    debugData(wdata);
     return wdata;
 }
 
@@ -3239,7 +3430,8 @@ WData WRam::transpose(const LData &data, DType dstType) {
     wdata.setShape({{wdata.dim(1), Stride(stride)}, shape[0].count});
 
     assert(innerSize <= transposeWidth(wdata.elementType()) && "Inner dim too big to transpose");
-    checkLoadSize(wdata);
+    checkLoadSize(this, wdata);
+    debugData(wdata);
     return wdata;
 }
 
@@ -3270,7 +3462,8 @@ BData BRam::load(const LData &data) {
     auto bdata = BData(data.subShape(), data.elementType());
     d->acbw(bdata);
 
-    checkLoadSize(bdata);
+    checkLoadSize(this, bdata);
+    debugData(bdata);
     return bdata;
 }
 
@@ -3541,29 +3734,6 @@ Iterator Iterator::operator%(int modulo) {
 }
 
 //
-// Tensor manipulation utilities
-//
-
-LData LData::stack(OpBuilder *builder, const LData &first, const LData &second, int axis) {
-    assert(first.elementType() == second.elementType() && "Data must have the same element type");
-    assert(first.shape() == second.shape() && "Data must have the same shape");
-    assert(first.offset() == second.offset() && "Data must have the same offset`");
-
-    auto ctx = builder->getContext();
-    auto loc = builder->getUnknownLoc();
-    auto inputDiff = getAffineDimExpr(1, ctx) - getAffineDimExpr(0, ctx);
-    LData stacked(first);
-
-    // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
-    // The difference between the two input addresses is used as offset to fetch the data
-    stacked.insertDim(axis, {2, Stride(inputDiff)});
-
-    stacked._symbols.push_back(GetAddressOp::create(*builder, loc, first.value()).getAddress());
-    stacked._symbols.push_back(GetAddressOp::create(*builder, loc, second.value()).getAddress());
-    return stacked;
-}
-
-//
 // Dimension manipulation utilities
 //
 
@@ -3774,6 +3944,13 @@ reshapeDim(LData &data, int dimIndex, const std::vector<int> &sizes, bool allowN
     }
 
     data.setShape(shape);
+}
+
+GLData stack(OpBuilder *builder, const LData &first, LData &second, int axis) {
+    if (first.shape() != second.shape() || first.offset() != second.offset()) {
+        return GLData::stack(first, second, axis);
+    }
+    return LData::stack(builder, first, second, axis);
 }
 
 } // namespace mlir::syna::torq

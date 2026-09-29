@@ -425,34 +425,7 @@ template <typename OpT> static KernelEncoding getResizeLikeEncoding(OpT op) {
     return {{{op.getInputMutable().getOperandNumber(), inEnc}}, outEnc};
 }
 
-KernelEncoding AddOp::getKernelEncoding() {
-
-    const uint32_t inIndex1 = getInput1Mutable().getOperandNumber();
-    const uint32_t inIndex2 = getInput2Mutable().getOperandNumber();
-
-    int inRank1 = cast<RankedTensorType>(getOperand(inIndex1).getType()).getRank();
-    int inRank2 = cast<RankedTensorType>(getOperand(inIndex2).getType()).getRank();
-
-    RankedTensorType resultType = dyn_cast<RankedTensorType>(getResult(0).getType());
-
-    auto input1Type = cast<RankedTensorType>(getInput1().getType());
-
-    assert(
-        input1Type.getRank() == resultType.getRank() && "Input and output tensor ranks must match"
-    );
-
-    KernelTensorEncoding emptyEnc = {};
-
-    SmallVector<KernelInputEncoding> inEncoding = {{inIndex1, emptyEnc}, {inIndex2, emptyEnc}};
-
-    SmallVector<std::pair<unsigned, unsigned>> equalEncodingOperands = {{inIndex1, inIndex2}};
-
-    return {
-        inEncoding, emptyEnc,
-        (inRank1 == 1 || inRank2 == 1) ? SmallVector<std::pair<unsigned, unsigned>>{}
-                                       : equalEncodingOperands
-    };
-}
+KernelEncoding AddOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding TableOp::getKernelEncoding() { return getNoEncoding(); }
 

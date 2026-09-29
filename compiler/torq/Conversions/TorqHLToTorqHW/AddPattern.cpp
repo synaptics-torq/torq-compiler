@@ -112,8 +112,7 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
 }
 
 FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
-
-    Slice slice;
+    Slice slice("add");
     // By default consider the entire input as a single channel
     DType elementType = getDType(params.inputElementType);
 
@@ -171,8 +170,7 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
 }
 
 FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
-
-    Slice slice;
+    Slice slice("add");
     DType elementType = getDType(params.inputElementType);
     Shape inputShape;
 
@@ -286,7 +284,9 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     int vectorSize = slice.alu.iWidth(input1.elementType(), weights.elementType());
     input1.fuse(denseDims).vectorize(vectorSize);
     input2.fuse(denseDims).vectorize(vectorSize);
-    LData input = LData::stack(&params.rewriter, input1, input2);
+    // LData input = LData::stack(&params.rewriter, input1, input2);
+    // GLData input = GLData::stack(input1, input2);
+    auto input = stack(&params.rewriter, input1, input2);
 
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
@@ -304,8 +304,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
         }
     }
 
-    auto sliceTaskOp = slice.createSliceTaskOp(params.rewriter, params.loc);
-    return sliceTaskOp;
+    return slice.createSliceTaskOp(params.rewriter, params.loc);
 }
 
 } // namespace mlir::syna::torq

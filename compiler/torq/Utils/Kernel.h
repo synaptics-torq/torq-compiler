@@ -406,6 +406,7 @@ class LData : public DataT<LData> {
     // The axis parameter specifies the index of the new axis in the dimensions of the result.
     // The operation is virtual in the sense that no data is actually moved
     // The two tensors must have the same data type, offset, dimensions AND strides
+    // For more flexibility, consider using the torq::stack() function which returns a GLData.
     static LData stack(OpBuilder *, const LData &first, const LData &second, int axis = 0);
 
   private:
@@ -414,6 +415,58 @@ class LData : public DataT<LData> {
 
     // MLIR Values used in expressions associated to this data (if any)
     std::vector<Value> _symbols;
+};
+
+// A GLData provides a more generalized data representation than a standard LData can support.
+// It can represent a stack of two LData tensors with different strides.
+// There is no manipulation possible, we can only get the tensor dimensions and access the elements.
+// Loading of GLData tensors is only suppported by IRam.
+class GLData : private DataT<GLData> {
+    using DataT::DataT;
+
+  public:
+    // How the two parts are combined
+    enum class Mode { none, stack };
+
+    // Constructors
+    GLData(const LData &first);
+    static std::string name() { return "GLData"; }
+
+    // Operators and methods have the same behaviour as in LData
+    using DataT<GLData>::dim;
+    using DataT<GLData>::dims;
+    using DataT<GLData>::elementType;
+    using DataT<GLData>::indexes;
+    using DataT<GLData>::shape;
+    GLData operator[](IterVar index) const;
+    GLData operator[](const Indexes &ixs) const;
+
+    // Access the individual LData tensors.
+    // It's always guaranteed to contain at least one element.
+    const std::vector<LData> &ldata() const { return _ldata; }
+
+    // Index of the dimension which is composed of multiple parts
+    int composedDimIx() const { return _dimIx; }
+
+    // Get the composition mode
+    Mode mode() const { return _mode; }
+
+    // Join two data tensors along a new axis. Same as numpy.stack
+    // The axis parameter specifies the index of the new axis in the dimensions of the result.
+    // The operation is virtual in the sense that no data is actually moved
+    // The two tensors must have the same data type and dimensions. Offset and strides may differ.
+    static GLData stack(const LData &first, const LData &second, int axis = 0);
+
+  private:
+    // The actual data parts composing the virtual tensor
+    // This is guaranteed to contain at least one element
+    std::vector<LData> _ldata;
+
+    // Index of the dimension which is composed of multiple parts
+    int _dimIx{-1};
+
+    // Composition mode
+    Mode _mode{Mode::none};
 };
 
 // Data in IRAM
@@ -512,9 +565,6 @@ class SliceRam : public SliceComponent {
     virtual const char *name() const = 0;
     virtual int size() const = 0;
     virtual ~SliceRam() = default;
-
-  protected:
-    void checkLoadSize(const Data &data);
 };
 
 // Input RAM
@@ -522,8 +572,14 @@ class IRam : public SliceRam {
     using SliceRam::SliceRam;
 
   public:
-    // Load the IRAM with (input) data
+    // Load the IRAM with (input) data.
     IData load(const LData &data);
+
+    // Load the IRAM with generalized (input) data.
+    // Support has limitations and is only applicable in specific scenarios:
+    // - for stacked data with different strides the stacked dimension can only be used inside
+    //   an accumulation loop
+    IData load(const GLData &data);
 
     // Get max gathering supported in the load() operation
     // Gathering indicates the max number of different addresses that can be generated in parallel.
@@ -556,15 +612,15 @@ class WRam : public SliceRam {
     // Optimally efficient only for data[0] == 1 and data[0] == transposeHeight()
     WData transpose(const LData &data, DType type = DType::none);
 
-    const char *name() const override;
-    int size() const override;
-
     // The maximum width (number of columns) supported by transpose operation for the given type
     // If type not specified it will be assumed to be the type inferred by iWidth()
     int transposeWidth(DType type = DType::none) const;
 
     // The maximum height (number of rows) supported by transpose operation
     int transposeHeight() const;
+
+    const char *name() const override;
+    int size() const override;
 };
 
 // Bias & Scale RAM
@@ -577,11 +633,11 @@ class BRam : public SliceRam {
     // In case of floating point data the last dim must be 1 (bias only, scale not supported)
     BData load(const LData &data);
 
-    const char *name() const override;
-    int size() const override;
-
     // Max number of bias/scale pairs that can fit
     int width() const;
+
+    const char *name() const override;
+    int size() const override;
 };
 
 // Arithmetic Logic Unit
@@ -967,6 +1023,13 @@ int elementCount(const Shape &shape);
 
 // Return the largest exact divisor of value which is less than or equal to limit
 int maxDivisor(int value, int limit);
+
+// Join two data tensors along a new axis. Same as numpy.stack
+// The axis parameter specifies the index of the new axis in the dimensions of the result.
+// The operation is virtual in the sense that no data is actually moved
+// The two tensors must have the same data type and dimensions, possibly with different strides.
+// Uses LData::stack if possible, else falls back to GLData::stack
+GLData stack(OpBuilder *, const LData &first, LData &second, int axis = 0);
 
 } // namespace torq
 

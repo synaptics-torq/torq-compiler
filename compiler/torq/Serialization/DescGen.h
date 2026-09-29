@@ -60,7 +60,8 @@ class RegNdl : public Ndl {
     };
 
     const Type t;
-    RegNdl(Type type) : Ndl(), t(type) {}
+    int setId;
+    RegNdl(Type type, int sid = 0) : t(type), setId(sid) {}
     std::string toLogStr() const;
     void addHdim(torq_hw::RegDimTag tag, int size = 1, int stride = 0);
     void addLdim(torq_hw::RegDimTag tag, int size = 1, int stride = 0);
@@ -240,10 +241,13 @@ class SliceTask : public TorqCfg {
     RegNdl acpw{RegNdl::ACPW};
     RegNdl acpr{RegNdl::ACPR};
     RegNdl cedw{RegNdl::CEDW};
+    RegNdl cedw1{RegNdl::CEDW, 1};
     RegNdl cedr{RegNdl::CEDR};
+    RegNdl cedr1{RegNdl::CEDR, 1};
     RegNdl ceww{RegNdl::CEWW};
     RegNdl cewr{RegNdl::CEWR};
     RegNdl cepr{RegNdl::CEPR};
+    RegNdl cepr1{RegNdl::CEPR, 1};
     RegNdl aldw{RegNdl::ALDW};
     std::vector<int32_t> table; ///< Optional activation table
 
@@ -257,21 +261,10 @@ class SliceTask : public TorqCfg {
 
     std::string toLogStr() const;
 
-    /// Set the ALU Op0 mode
-    void setAluOp0(torq_hw::ALUOp0Mode mode);
-    /// 4 set of ALU settings for { a0c0, a0c1, a1c0, a1c1 }, a0: even ALUs, a1: odd ALUs, c0: even
-    /// cycles, c1: odd cycles
-    void setAluOp0(
-        torq_hw::ALUOp0Mode a0c0, torq_hw::ALUOp0Mode a0c1, torq_hw::ALUOp0Mode a1c0,
-        torq_hw::ALUOp0Mode a1c1
-    );
-    void setAluOp1(torq_hw::ALUOp1Mode mode);
-    /// 4 set of ALU settings for { a0c0, a0c1, a1c0, a1c1 }, a0: even ALUs, a1: odd ALUs, c0: even
-    /// cycles, c1: odd cycles
-    void setAluOp1(
-        torq_hw::ALUOp1Mode a0c0, torq_hw::ALUOp1Mode a0c1, torq_hw::ALUOp1Mode a1c0,
-        torq_hw::ALUOp1Mode a1c1
-    );
+    void
+    setAluOp0(torq_hw::ALUOp0Mode mode, torq_hw::ALUOp0Mode modeSet1 = torq_hw::ALUOp0Mode::UNUSED);
+    void
+    setAluOp1(torq_hw::ALUOp1Mode mode, torq_hw::ALUOp1Mode modeSet1 = torq_hw::ALUOp1Mode::UNUSED);
 
     struct AluOpUnsigned {
         bool a0c0; // even ALUs, even cycles
@@ -297,6 +290,7 @@ class SliceTask : public TorqCfg {
     void setAluNumberFormat(torq_hw::NumberFormat format);
     void setActNumberFormat(torq_hw::NumberFormat format);
     void setActSumBits(uint32_t actSumBits);
+    void setNoPClear(uint32_t noPClear);
 
     /// Write a Torq task
     /// \param xramAddr will be updated with the next available XRAM address

@@ -38,6 +38,7 @@ def TorqHW_ACTModeAttr: I32EnumAttr<"ACTMode",
 def TorqHW_ALUOp0ModeAttr: I32EnumAttr<"ALUOp0Mode",
     "The ALU Op0 mode",
     [
+      I32EnumAttrCaseWithDoc<"UNUSED",0, "Unused">,
       I32EnumAttrCaseWithDoc<"MUL",   1, "x=D*W">,
       I32EnumAttrCaseWithDoc<"DBYP", 12, "x=D">,
     ]> {
@@ -47,6 +48,7 @@ def TorqHW_ALUOp0ModeAttr: I32EnumAttr<"ALUOp0Mode",
 def TorqHW_ALUOp1ModeAttr: I32EnumAttr<"ALUOp1Mode",
     "The ALU Op1 mode",
     [
+      I32EnumAttrCaseWithDoc<"UNUSED",0, "Unused">,
       I32EnumAttrCaseWithDoc<"ACC",  1, "P=P+x">,
       I32EnumAttrCaseWithDoc<"SACC", 2, "P=(P<<8)+x">,
       I32EnumAttrCaseWithDoc<"AMAX",  3, "">,

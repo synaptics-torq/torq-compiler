@@ -168,8 +168,8 @@ llvm::raw_ostream &printNdl(llvm::raw_ostream &os, NdlType type, const torq_hw::
     if (ndl->sync_mode) {
         os << " sync=" << (char)ndl->sync_mode;
     }
-    if (ndl->sync_nhd) {
-        os << " nhdims=" << (int)ndl->sync_nhd;
+    if (ndl->sync_nhd || ndl->sync_mode) {
+        os << " sync_nhd=" << (int)ndl->sync_nhd;
     }
     os << "\n";
     return os;

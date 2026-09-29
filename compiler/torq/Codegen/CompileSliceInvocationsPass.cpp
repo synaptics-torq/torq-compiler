@@ -178,19 +178,29 @@ static SliceTask toSliceTask(syna::torq_hw::SliceTaskOp op, IRMapping &mapping) 
     SliceTask task(AluMode::G64x4);
     auto sliceCfg = op.getSliceCfgAttr();
     auto aluOp0 = sliceCfg.getAluOp0Mode();
-    if (!aluOp0.empty()) {
-        task.setAluOp0(aluOp0[0], aluOp0[1], aluOp0[2], aluOp0[3]);
+    if (aluOp0.size() == 2) {
+        // The vector contain a value for set 0 and a value for set 1
+        task.setAluOp0(aluOp0[0], aluOp0[1]);
+    }
+    else if (aluOp0.size() == 4) {
+        // Legacy: the vector contains 4 values for set 0 (only the first is actually used)
+        task.setAluOp0(aluOp0[0]);
+    }
+    else if (!aluOp0.empty()) {
+        llvm::report_fatal_error("Invalid aluOp0 size");
     }
     auto aluOp1 = sliceCfg.getAluOp1Mode();
-    if (!aluOp1.empty()) {
-        task.setAluOp1(aluOp1[0], aluOp1[1], aluOp1[2], aluOp1[3]);
+    if (aluOp1.size() == 2) {
+        // The vector contain a value for set 0 and a value for set 1
+        task.setAluOp1(aluOp1[0], aluOp1[1]);
     }
-
-    // If all aluOp0[] is DBYP or if aluOp0 is empty, weights are not needed
-    bool weightsBypasssed =
-        aluOp0.empty() || std::all_of(aluOp0.begin(), aluOp0.end(), [](auto op) {
-            return op == torq_hw::ALUOp0Mode::DBYP;
-        });
+    else if (aluOp1.size() == 4) {
+        // Legacy: the vector contains 4 values for set 0 (only the first is actually used)
+        task.setAluOp1(aluOp1[0]);
+    }
+    else if (!aluOp1.empty()) {
+        llvm::report_fatal_error("Invalid aluOp1 size");
+    }
 
     auto act_lsh = sliceCfg.getActLsh();
     task.setActivation(
@@ -227,6 +237,7 @@ static SliceTask toSliceTask(syna::torq_hw::SliceTaskOp op, IRMapping &mapping) 
     task.setAluNumberFormat(sliceCfg.getAluFormat());
     task.setActNumberFormat(sliceCfg.getActFormat());
     task.setActSumBits(sliceCfg.getActSumBits());
+    task.setNoPClear(sliceCfg.getNoPClear());
 
     // find all symbol values used in the ndls
     SmallVector<Attribute> symbolValues;
@@ -261,16 +272,15 @@ static SliceTask toSliceTask(syna::torq_hw::SliceTaskOp op, IRMapping &mapping) 
     convert(op, mapping, memNdls, NdlType::DEBR, 1, task.debr1, symbolValuesAttr, op.getBx());
     convert(op, mapping, memNdls, NdlType::DEQW, 0, task.deqw, symbolValuesAttr, op.getQ());
 
-    if (op.getW().empty() && !weightsBypasssed) {
-        llvm::report_fatal_error("Weights are not bypassed but no weight buffer is provided");
-    }
-
     const auto &regNdls = op.getRegNdls();
     convert(regNdls, NdlType::CEDW, 0, task.cedw);
+    convert(regNdls, NdlType::CEDW, 1, task.cedw1);
     convert(regNdls, NdlType::CEDR, 0, task.cedr);
+    convert(regNdls, NdlType::CEDR, 1, task.cedr1);
     convert(regNdls, NdlType::CEWW, 0, task.ceww);
     convert(regNdls, NdlType::CEWR, 0, task.cewr);
     convert(regNdls, NdlType::CEPR, 0, task.cepr);
+    convert(regNdls, NdlType::CEPR, 1, task.cepr1);
     convert(regNdls, NdlType::ACBW, 0, task.acbw);
     convert(regNdls, NdlType::ACBR, 0, task.acbr);
     convert(regNdls, NdlType::ACPR, 0, task.acpr);

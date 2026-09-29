@@ -566,17 +566,6 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
                 continue;
             }
 
-            // A two-tensor torq_hl.add reads both inputs in one traversal. Its NDL gets an extra
-            // dimension of size 2, and the stride of that dimension is the gap between the two
-            // input addresses. This only works when both inputs have the same strides. If they
-            // differ, AddPattern.cpp stops with "Add input strides must matchh". A scalar rhs is
-            // safe, because that path checks isDenseInMemory() first.
-            if (auto addOp = dyn_cast<torq_hl::AddOp>(consumer)) {
-                if (!addOp.getRhsIsScalar()) {
-                    return Rejection{"add", "consumer is a two-tensor torq_hl.add"};
-                }
-            }
-
             // torq_hl.elementwisebinary and torq_hl.elementwiseshift read their operands the same
             // way, so they need the same thing. Neither of them has the scalar path that add has.
             // Both stop with "Input strides must match" -- see ElementWiseBinaryPattern.cpp and

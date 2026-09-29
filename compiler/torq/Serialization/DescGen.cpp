@@ -216,6 +216,7 @@ int NssTask::compile(TorqHandle h, uint32_t desc_laddr, uint32_t desc_xaddr) con
 
 static uint32_t toChars(torq_hw::ALUOp0Mode hwOp) {
     switch (hwOp) {
+    case torq_hw::ALUOp0Mode::UNUSED:
     case torq_hw::ALUOp0Mode::MUL:
         return 'MUL';
     case torq_hw::ALUOp0Mode::DBYP:
@@ -227,6 +228,7 @@ static uint32_t toChars(torq_hw::ALUOp0Mode hwOp) {
 static uint32_t toChars(torq_hw::ALUOp1Mode hwOp) {
     switch (hwOp) {
     case torq_hw::ALUOp1Mode::ACC:
+    case torq_hw::ALUOp1Mode::UNUSED:
         return 'ACC';
     case torq_hw::ALUOp1Mode::SACC:
         return 'SACC';
@@ -350,36 +352,16 @@ static uint32_t toChars(torq_hw::ACTMode actMode) {
 
 SliceTask::SliceTask(AluMode m) : aluMode(m) { d->cfg.stride = 1; }
 
-void SliceTask::setAluOp0(torq_hw::ALUOp0Mode mode) {
-    // Only the first element is used
+void SliceTask::setAluOp0(torq_hw::ALUOp0Mode mode, torq_hw::ALUOp0Mode modeSet1) {
+    // Only the first and 4th elements are used
     d->cfg.alu_op0_mode[0] = toChars(mode);
+    d->cfg.alu_op0_mode[4] = toChars(modeSet1);
 }
 
-void SliceTask::setAluOp0(
-    torq_hw::ALUOp0Mode a0c0, torq_hw::ALUOp0Mode a0c1, torq_hw::ALUOp0Mode a1c0,
-    torq_hw::ALUOp0Mode a1c1
-) {
-    d->cfg.alu_op0_mode[0] = toChars(a0c0);
-    // alu_op0_mode[1/2/3] are reserved and must be set to 0.
-    // d->cfg.alu_op0_mode[1] = toChars(a0c1);
-    // d->cfg.alu_op0_mode[2] = toChars(a1c0);
-    // d->cfg.alu_op0_mode[3] = toChars(a1c1);
-}
-
-void SliceTask::setAluOp1(torq_hw::ALUOp1Mode mode) {
-    // Only the first element is used
+void SliceTask::setAluOp1(torq_hw::ALUOp1Mode mode, torq_hw::ALUOp1Mode modeSet1) {
+    // Only the first and 4th elements are used
     d->cfg.alu_op1_mode[0] = toChars(mode);
-}
-
-void SliceTask::setAluOp1(
-    torq_hw::ALUOp1Mode a0c0, torq_hw::ALUOp1Mode a0c1, torq_hw::ALUOp1Mode a1c0,
-    torq_hw::ALUOp1Mode a1c1
-) {
-    d->cfg.alu_op1_mode[0] = toChars(a0c0);
-    // alu_op1_mode[1/2/3] are reserved and must be set to 0.
-    // d->cfg.alu_op1_mode[1] = toChars(a0c1);
-    // d->cfg.alu_op1_mode[2] = toChars(a1c0);
-    // d->cfg.alu_op1_mode[3] = toChars(a1c1);
+    d->cfg.alu_op1_mode[4] = toChars(modeSet1);
 }
 
 void SliceTask::setAluDUnsigned(AluOpUnsigned options) {
@@ -478,6 +460,8 @@ void SliceTask::setActNumberFormat(torq_hw::NumberFormat format) {
 
 void SliceTask::setActSumBits(uint32_t actSumBits) { d->cfg.act_sum_bits = actSumBits; }
 
+void SliceTask::setNoPClear(uint32_t noPClear) { d->cfg.no_p_clear = noPClear; }
+
 bool SliceTask::write(
     TorqHandle h, int slcId, uint32_t &lramAddr, uint32_t &xramAddr, uint32_t &totalCfgSize,
     uint32_t &totalNdlSize
@@ -512,8 +496,8 @@ bool SliceTask::write(
             totalNdlSize += ndlSize;
         }
     }
-    const RegNdl *regNdls[10] = {&acbw, &acbr, &acpw, &acpr, &cedw,
-                                 &cedr, &ceww, &cewr, &cepr, &aldw};
+    const RegNdl *regNdls[] = {&acbw,  &acbr, &acpw, &acpr, &cedw,  &cedw1, &cedr,
+                               &cedr1, &ceww, &cewr, &cepr, &cepr1, &aldw};
     for (const auto &ndl : regNdls) {
 
         if (ndl->empty()) {
@@ -572,7 +556,11 @@ void Ndl::setSyncMode(uint8_t sync_mode, uint8_t sync_nhd) {
 
 string MemNdl::toLogStr() const {
     ostringstream os;
-    os << ndlTypeToStr(t) << " " << toStr(d->cmd) << " addr: " << d->cmd.base_addr;
+    os << ndlTypeToStr(t) << (setId ? std::to_string(setId) : "") << " " << toStr(d->cmd)
+       << " addr: " << d->cmd.base_addr;
+    if (d->cmd.sync_mode) {
+        os << " sync_mode: " << d->cmd.sync_mode << " sync_nhd: " << (int)d->cmd.sync_nhd;
+    }
     return os.str();
 }
 
@@ -621,7 +609,7 @@ int MemNdl::write(TorqHandle h, uint32_t lramAddr, uint32_t xramAddr) const {
 
 string RegNdl::toLogStr() const {
     ostringstream os;
-    os << ndlTypeToStr(t) << " " << toStr(d->cmd);
+    os << ndlTypeToStr(t) << (setId ? std::to_string(setId) : "") << " " << toStr(d->cmd);
     return os.str();
 }
 
@@ -673,7 +661,7 @@ void RegNdl::addSdim(torq_hw::RegDimTag tag, int size, int stride) {
 
 bool RegNdl::write(TorqHandle h) const {
     // Register NDL have no size, torq_ndl_desc_write() will return 0 on success
-    return torq_ndl_desc_write(h, static_cast<uint32_t>(t), 0, &d->cmd, 0, 0) == 0;
+    return torq_ndl_desc_write(h, static_cast<uint32_t>(t), setId, &d->cmd, 0, 0) == 0;
 }
 
 bool DmaNdl::write(TorqHandle h) const {
