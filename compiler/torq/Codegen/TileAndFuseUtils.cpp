@@ -111,6 +111,15 @@ static bool isMatmulLikeOp(Operation *op) {
            op->hasAttr(TORQ_BROADCAST_MATMUL);
 }
 
+static bool
+hasBroadcastBatchMatmul(Operation *consumerOp, const SetVector<Operation *> &producerOps) {
+    if (consumerOp->hasAttr(TORQ_BROADCAST_MATMUL))
+        return true;
+    return llvm::any_of(producerOps, [](Operation *producer) {
+        return producer->hasAttr(TORQ_BROADCAST_MATMUL);
+    });
+}
+
 struct WeightedPrincipal {
     linalg::LinalgOp op;
     int64_t inputBytes;
@@ -158,6 +167,12 @@ std::optional<SmallVector<int64_t>> computeChannelFirstShrinkOrder(
     Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
     ArrayRef<int64_t> iterDomainSizes
 ) {
+    // A broadcast batch matmul's RHS batch dimension is weight-only but is not
+    // an output-channel dimension. Keep it on the batch-first path to avoid
+    // re-streaming the full RHS for every M tile.
+    if (hasBroadcastBatchMatmul(consumerOp, producerOps))
+        return std::nullopt;
+
     std::optional<WeightedPrincipal> principal = findWeightedPrincipal(consumerOp, producerOps);
     if (!principal)
         return std::nullopt;
@@ -211,11 +226,8 @@ static std::optional<SmallVector<int64_t>> computePrincipalInputWeightShrinkOrde
     // not an output-channel dimension. Do not apply the dominant-weight
     // ordering: keeping batch whole forces M tiling and re-streams the full
     // RHS for every M tile.
-    if (consumerOp->hasAttr(TORQ_BROADCAST_MATMUL))
+    if (hasBroadcastBatchMatmul(consumerOp, producerOps))
         return std::nullopt;
-    for (Operation *producer : producerOps)
-        if (producer->hasAttr(TORQ_BROADCAST_MATMUL))
-            return std::nullopt;
 
     std::optional<WeightedPrincipal> principal = findWeightedPrincipal(consumerOp, producerOps);
     if (!principal)
