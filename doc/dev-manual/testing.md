@@ -56,10 +56,12 @@ The test framework allows to automatically generate profiling information for ea
 To collect profiling information add the corresponding command line option as follows:
 
 ```
-$ pytest --torq-profiling-output-dir SOME/DIR
+$ pytest --torq-runtime-profiling-output-dir SOME/DIR
 ```
 
-A profile log is going to be generated for each test run in the corresponding directory.
+A profile log is going to be generated for each test run in the corresponding
+directory. To collect compiler (pass) profiling instead, use
+`--torq-compile-time-profiling-output-dir`.
 
 ## Managing XFAIL tests
 
@@ -75,7 +77,7 @@ test_function[test_parameters] owner/repo#issue_id
 Then the corresponding test cases will be automatically marked as XFAIL.
 
 In order to store XFAIL for test configurations that depend on a chip defined in
- ``extras/chips`` it is possible to create a file in ``extras/xfail`` with the same name.
+ ``tests/testdata/chips`` it is possible to create a file in ``extras/xfail`` with the same name.
 
 Once a tests are marked as XFAIL it is possible to force their execution with the following
 command line:

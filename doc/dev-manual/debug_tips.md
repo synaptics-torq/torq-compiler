@@ -15,7 +15,8 @@
 - To debug a torqhw conversion pass use the following parameters:
 
   ```{code} shell
-  $ iree-opt input.mlir -o output.mlir --torq-torqhw-transformation-pipeline \
+  $ iree-opt input.mlir -o output.mlir \
+      --pass-pipeline='builtin.module(func.func(torq_hl.program(torq-convert-nss-program-to-torqhw)))' \
       -debug-only=dialect-conversion
   ```
 
@@ -89,13 +90,13 @@
   you can use the a web based tool:
 
   ```{code} shell
-  $ streamlit run apps/buffer_viewer/buffer_viewer.py PATH/TO/DUMP_DIR
+  $ streamlit run webapps/buffer_viewer/buffer_viewer.py PATH/TO/DUMP_DIR
   ```
 
 - To compare two tensors you can use the following tool:
 
   ```{code} shell
-  $ streamlit run apps/buffer_diff/buffer_diff.py PATH/TO/TENSOR1 PATH/TO/TENSOR2
+  $ streamlit run webapps/buffer_diff/buffer_diff.py PATH/TO/TENSOR1 PATH/TO/TENSOR2
   ```
 
 - To analyze the code size of CSS tasks dump the elf files as specified above and then use the following command:

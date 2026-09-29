@@ -37,7 +37,7 @@ executed in two modes:
 2. A marking mode (performs no rewrites) that places an attribute
    (`torq-fuse-group`) on the operations that make up the pattern.
 
-The `MarkPatternsForSuperTilingPass` pass executes the relevant patterns in the
+The `MarkPatternsForTileAndFusePass` pass executes the relevant patterns in the
 marking mode before the T&F pass.
 
 In most cases a rewrite pattern starts from a principal operation (e.g. a

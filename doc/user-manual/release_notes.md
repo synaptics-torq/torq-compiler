@@ -216,8 +216,9 @@ The changes from v1.5.1 release are too numerous to list here, we will prepare e
 * Better Transformer model support
 * New or improved accelerated bf16 operations (sin, cos, sqrt, etc)
 * New generic linalg-slicing
-  - This is not enabled by default as it needs to be optmized but you can try it by giving these options to torq-compile:
-    > torq-compile <...> --torq-disable-slicing=true --torq-disable-linalg-slicing=false
+  - This was initially not enabled by default and could be tried with
+    `--torq-disable-slicing=true --torq-disable-linalg-slicing=false`. Those
+    opt-in options no longer exist: linalg slicing now runs whenever slicing is enabled.
 
 
 ## Version 1.5.1 (2026-04-20)
@@ -243,13 +244,17 @@ v1.5.0 offers stable and good performances on a number of models including:
 * SmolLM2
 * A big number of confidential customer models
 
-> **WARNING**
+> **NOTE (historical)**
 > v1.5.0 switched to the new generic algorithm for tiling that was formerly named as
 > [Super-Tiling](https://synaptics-torq.github.io/torq-compiler/v/latest/dev-manual/super_tiling.html) and is now named Tile&Fuse or in short T&F.
-> The deprecated torq-hl-tiling algorithm still offers better performances for 
-> models can still be enabled using the `--torq-enable-torq-hl-tiling` option.
+> In v1.5.0 the deprecated torq-hl-tiling algorithm could still be selected with the
+> `--torq-enable-torq-hl-tiling` option. That option (and the old tiling algorithm)
+> has since been removed; Tile&Fuse is the only tiling path in current releases.
 
-For MobilenetV2 and YOLOv8 models we recommend to use `--torq-enable-torq-hl-tiling` for maximum performance; `--torq-enable-transpose-optimization` is also recommended for YOLOv8 performance.
+For MobilenetV2 and YOLOv8 models, v1.5.0 users were recommended to use
+`--torq-enable-torq-hl-tiling` for maximum performance. In current releases that
+option no longer exists; `--torq-enable-transpose-optimization` remains available
+and is still recommended for YOLOv8 performance.
 
 
 ## Version 1.1.0 to 1.4.0
