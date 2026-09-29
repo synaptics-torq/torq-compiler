@@ -27,16 +27,8 @@ SmallVector<mlir::Value> collectDynamicShapes(mlir::Region &region);
 /// shape tensor result.
 bool hasReachableDynamicShape(mlir::Value val, mlir::Operation *scopeOp);
 
-LogicalResult collapseShapeWithDim(Value &input, int dim, PatternRewriter &rewriter);
-
-LogicalResult collapseValue(
-    Value &input, SmallVector<int64_t> &dims, int outputShapeSize, PatternRewriter &rewriter
-);
-
 LogicalResult
 broadcastInputs(linalg::LinalgOp srcOp, SmallVectorImpl<Value> &inputs, PatternRewriter &rewriter);
-
-LogicalResult promoteScalar(linalg::LinalgOp srcOp, Value &input, PatternRewriter &rewriter);
 
 /// Returns true if all indexing maps in op are identity-like
 /// (identity, or broadcast from a size-1 dimension via constant-zero expr).

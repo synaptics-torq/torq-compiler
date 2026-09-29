@@ -206,43 +206,6 @@ struct ProgramExecutor {
 };
 } // namespace
 
-torq_hl::ProgramOp getProgramOp(InvocationValue invocation) {
-    auto createInvocationOp = invocation.getDefiningOp<torq_hl::CreateInvocationOp>();
-
-    if (!createInvocationOp) {
-        return nullptr;
-    }
-
-    auto programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
-
-    if (!programOp) {
-        return nullptr;
-    }
-
-    return programOp;
-}
-
-torq_hl::StartProgramOp getStartOp(InvocationValue invocation) {
-    for (auto user : invocation.getUsers()) {
-        if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(user)) {
-            return startOp;
-        }
-    }
-
-    return nullptr;
-}
-
-torq_hl::WaitProgramOp getWaitOp(InvocationValue invocation) {
-
-    for (auto user : invocation.getUsers()) {
-        if (auto waitOp = dyn_cast<torq_hl::WaitProgramOp>(user)) {
-            return waitOp;
-        }
-    }
-
-    return nullptr;
-}
-
 LogicalResult walkExecution(Operation *op, WalkExecutionOptions options) {
     return ProgramExecutor(op, options).execute();
 }

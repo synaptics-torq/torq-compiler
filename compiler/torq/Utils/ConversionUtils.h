@@ -53,10 +53,6 @@ Value createInitTensor(T &srcOp, R &rewriter, RankedTensorType type) {
 
 Value createZeroConstant(OpBuilder &b, Location loc, Type elemTy);
 
-template <class T> IntegerAttr MakeI32Attr(T &op, int32_t value) {
-    return IntegerAttr::get(IntegerType::get(op.getContext(), 32), value);
-}
-
 inline bool isBF16(const llvm::APFloat &x) { return &x.getSemantics() == &llvm::APFloat::BFloat(); }
 inline bool isF16(const llvm::APFloat &x) {
     return &x.getSemantics() == &llvm::APFloat::IEEEhalf();
@@ -319,8 +315,6 @@ OutputIt interleave_into(ArrayRef<T> a, ArrayRef<T> b, OutputIt out) {
     }
     return out;
 }
-std::vector<int64_t>
-per_channel_sum(const std::vector<int8_t> &weights_values, int on, int in, int hn, int wn);
 
 std::vector<int32_t> compute_scale(
     ::llvm::ArrayRef<int32_t> tosaMultiplier, ::llvm::ArrayRef<int8_t> tosaShift, int32_t shift
@@ -334,69 +328,6 @@ inline double computeScaleDouble(int32_t tosaMultiplier, int8_t tosaShift) {
 
 std::vector<double>
 computeScaleDouble(::llvm::ArrayRef<int32_t> tosaMultiplier, ::llvm::ArrayRef<int8_t> tosaShift);
-
-// TODO: make this a non-template function
-template <class T>
-std::vector<int32_t> compute_bias(
-    const T &biases_values, const std::vector<int64_t> &per_channel_weights_sum, int64_t input_zp
-) {
-    // If > 0 we will only generate partial tensors for weight to simpify debugging
-    constexpr int max_weights_channel_count = 0;
-    size_t num_bias_values = std::distance(biases_values.begin(), biases_values.end());
-    size_t per_channel_weights_sum_size = per_channel_weights_sum.size();
-    if (max_weights_channel_count && num_bias_values > max_weights_channel_count) {
-        per_channel_weights_sum_size = num_bias_values = max_weights_channel_count;
-    }
-
-    if (num_bias_values != 1 && num_bias_values != per_channel_weights_sum_size) {
-        llvm::errs() << "tosa bias and per_channel_weights_sum arrays have "
-                        "different sizes:"
-                     << num_bias_values << " and " << per_channel_weights_sum.size() << "\n";
-        llvm::report_fatal_error("", true);
-    }
-
-    // Here we combine the bias with the per channel weights sum so that we
-    // don't have to apply the zero point to the input as a separate operation
-    std::vector<int32_t> bias_elements;
-    auto bias_iter = biases_values.begin();
-    for (int i = 0; i < per_channel_weights_sum_size; i++) {
-        auto value = num_bias_values == 1 ? *bias_iter : *bias_iter++;
-        int64_t bias = static_cast<int64_t>(value) - per_channel_weights_sum[i] * input_zp;
-        bias_elements.push_back(bias);
-    }
-    return bias_elements;
-}
-
-// Duplicates original biases in round-robin pattern
-template <typename T>
-std::vector<T> duplicateBiasRoundRobin(const std::vector<T> &values, int expanded_size) {
-    std::vector<T> result;
-    int original_size = values.size();
-    for (int i = 0; i < expanded_size; ++i) {
-        result.push_back(values[i % original_size]);
-    }
-    return result;
-}
-
-// Bias correction: duplicated_bias[i] - per_channel_sum[i] * input_zp
-template <typename T>
-std::vector<int32_t> computeCorrectedBiasRoundRobin(
-    const std::vector<T> &duplicated_bias, const std::vector<int64_t> &per_channel_weights_sum,
-    int64_t input_zp
-) {
-    assert(
-        duplicated_bias.size() == per_channel_weights_sum.size() &&
-        "Bias and weight sum must have same number of channels"
-    );
-
-    std::vector<int32_t> corrected_bias;
-    for (size_t i = 0; i < duplicated_bias.size(); ++i) {
-        int64_t corrected =
-            static_cast<int64_t>(duplicated_bias[i]) - per_channel_weights_sum[i] * input_zp;
-        corrected_bias.push_back(static_cast<int32_t>(corrected));
-    }
-    return corrected_bias;
-}
 
 // Convert a range of DenseElementsAttr iterators to an std::vector of the same item type
 // eg std::vector<int64_t> vec = denseToVector(denseElementAttr.getValues<int64_t>());
@@ -437,18 +368,11 @@ Value transposeValue(
     Value input, const SmallVector<int64_t> &permutation, Location loc, OpBuilder &rewriter
 );
 
-// Rescale the input value  by dividing with divFactor factor and adding bias
-Value rescaleValue(Value input, int divFactor, int bias, Location loc, PatternRewriter &rewriter);
-
 RankedTensorType convertTypeNHCtoNCH(Type origType);
 Value convertNHCtoNCH(Value input, Location loc, PatternRewriter &rewriter);
 Value convertNCHtoNHC(Value input, Location loc, PatternRewriter &rewriter);
 Value createInitTensorNCHW(Operation *srcOp, PatternRewriter &rewriter);
 
-void getTransposeDimSize(
-    torq_hl::TransposeOp op, llvm::ArrayRef<int64_t> out_shape, int32_t *transpose_dim,
-    uint32_t *transpose_dim_size, uint32_t *rest_dim_size
-);
 struct Permutation : SmallVector<int64_t> {
     using SmallVector::SmallVector;
 
@@ -544,8 +468,6 @@ template <typename OpTy> LogicalResult prepareParams(BinaryOpParams<OpTy> &P) {
     return success();
 }
 
-Value convertScalarToRankedTensor(Value &input, Location loc, PatternRewriter &rewriter);
-
 bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op);
 bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op);
 bool hasEkLoweringMaxPool(mlir::syna::torq_hl::MaxPool2dOp op);
@@ -566,7 +488,6 @@ struct FusionPlan {
         return neededOps.back()->getResult(0);
     }
     bool isFusable() const { return !neededOps.empty(); }
-    void dump() const;
 };
 
 Value cloneAndReplaceToBody(

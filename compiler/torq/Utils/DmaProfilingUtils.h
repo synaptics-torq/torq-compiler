@@ -78,14 +78,4 @@ uint64_t cdmaTransferBytes(mlir::Value src);
 // Estimated CDMA cycles using the config-dependent throughput factor.
 uint64_t estimateCdmaCycles(uint64_t bytes);
 
-// Copy the async cost tags preserved on srcOp onto dstOp, or compute them as a
-// DMA-in/out fallback when srcOp carries no tag (e.g. DMA ops created after the
-// annotation pass ran, such as NSS program-loader loads created during outlining).
-void setDmaAsyncAttrs(
-    mlir::Operation *srcOp, mlir::Operation *dstOp, uint64_t bytes, double throughputBytesPerCycle
-);
-
-// Same as setDmaAsyncAttrs but for CDMA (LRAM<->DTCM/ITCM) transfers.
-void setCdmaAsyncAttrs(mlir::Operation *srcOp, mlir::Operation *dstOp, mlir::Value src);
-
 } // namespace mlir::syna::torq

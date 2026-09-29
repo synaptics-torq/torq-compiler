@@ -73,35 +73,4 @@ uint64_t estimateCdmaCycles(uint64_t bytes) {
     );
 }
 
-void setDmaAsyncAttrs(
-    mlir::Operation *srcOp, mlir::Operation *dstOp, uint64_t bytes, double throughputBytesPerCycle
-) {
-    mlir::Builder builder(dstOp->getContext());
-    mlir::Attribute durAttr = srcOp->getAttr(kAsyncDurationAttr);
-    mlir::Attribute bytesAttr = srcOp->getAttr(kAsyncBytesAttr);
-    if (!durAttr) {
-        durAttr = builder.getI64IntegerAttr(estimateDmaCycles(bytes, throughputBytesPerCycle));
-    }
-    if (!bytesAttr) {
-        bytesAttr = builder.getI64IntegerAttr(bytes);
-    }
-    dstOp->setAttr(kAsyncDurationAttr, durAttr);
-    dstOp->setAttr(kAsyncBytesAttr, bytesAttr);
-}
-
-void setCdmaAsyncAttrs(mlir::Operation *srcOp, mlir::Operation *dstOp, mlir::Value src) {
-    mlir::Builder builder(dstOp->getContext());
-    mlir::Attribute durAttr = srcOp->getAttr(kAsyncDurationAttr);
-    mlir::Attribute bytesAttr = srcOp->getAttr(kAsyncBytesAttr);
-    uint64_t bytes = cdmaTransferBytes(src);
-    if (!durAttr) {
-        durAttr = builder.getI64IntegerAttr(estimateCdmaCycles(bytes));
-    }
-    if (!bytesAttr) {
-        bytesAttr = builder.getI64IntegerAttr(bytes);
-    }
-    dstOp->setAttr(kAsyncDurationAttr, durAttr);
-    dstOp->setAttr(kAsyncBytesAttr, bytesAttr);
-}
-
 } // namespace mlir::syna::torq

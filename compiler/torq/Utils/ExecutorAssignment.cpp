@@ -36,12 +36,6 @@ torq_hl::Executor getTargetExecutor(Operation *op, torq_hl::Executor defaultExec
     return cast<torq_hl::ExecutorAttr>(executor).getValue();
 }
 
-NamedAttribute getTargetExecutorAttr(MLIRContext *ctx, torq_hl::Executor executor) {
-    return NamedAttribute(
-        StringAttr::get(ctx, EXECUTOR_ATTR_NAME), torq_hl::ExecutorAttr::get(ctx, executor)
-    );
-}
-
 void setTargetExecutorAttr(Operation *op, torq_hl::Executor executor) {
     op->setAttr(EXECUTOR_ATTR_NAME, torq_hl::ExecutorAttr::get(op->getContext(), executor));
 }

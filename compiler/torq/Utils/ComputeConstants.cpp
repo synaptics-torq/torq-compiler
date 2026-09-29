@@ -790,22 +790,6 @@ FailureOr<SmallVector<Attribute>> computeAllConstAttr(
     return attrs;
 }
 
-FailureOr<Attribute>
-computeConstAttr(Value value, bool recursive, llvm::ArrayRef<Value> assumeZero) {
-    SmallVector<Value, 1> values = {value};
-    auto output = computeAllConstAttr(values, recursive, assumeZero);
-    if (failed(output) || output->empty()) {
-        return failure();
-    }
-
-    auto denseAttr = dyn_cast<DenseElementsAttr>(output->front());
-    if (!denseAttr) {
-        return failure();
-    }
-
-    return denseAttr;
-}
-
 // Compute the constant value for the given LinalgOp.
 FailureOr<SmallVector<Value>> computeAllArithConst(
     SmallVectorImpl<Value> &values, bool recursive, llvm::ArrayRef<Value> assumeZero

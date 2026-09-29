@@ -13,11 +13,6 @@
 
 namespace mlir::syna::torq {
 
-// Return a dense elements vector with the recursively computed content of the constant
-// (nullptr if not const)
-FailureOr<Attribute>
-computeConstAttr(Value value, bool recursive = true, llvm::ArrayRef<Value> assumeZero = {});
-
 // Return dense element attributes for all values using one batched compute path.
 FailureOr<SmallVector<Attribute>> computeAllConstAttr(
     llvm::SmallVectorImpl<Value> &values, bool recursive = true,

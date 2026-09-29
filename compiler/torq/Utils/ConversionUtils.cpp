@@ -217,27 +217,6 @@ interleave(const std::vector<APInt> &a, const std::vector<APInt> &b, bool broadc
     return result;
 }
 
-std::vector<int64_t>
-per_channel_sum(const std::vector<int8_t> &weights_values, int on, int in, int hn, int wn) {
-    std::vector<int64_t> per_channel_weights_sum;
-
-    // Let's compute the sum of the items per channel
-    for (int o = 0; o < on; o++) {
-        int64_t sum = 0;
-        for (int i = 0; i < in; i++) {
-            for (int h = 0; h < hn; h++) {
-                for (int w = 0; w < wn; w++) {
-                    int index = o * in * hn * wn + i * hn * wn + h * wn + w;
-                    sum += weights_values[index];
-                }
-            }
-        }
-        per_channel_weights_sum.push_back(sum);
-    }
-
-    return per_channel_weights_sum;
-}
-
 std::vector<double>
 computeScaleDouble(::llvm::ArrayRef<int32_t> tosaMultiplier, ::llvm::ArrayRef<int8_t> tosaShift) {
     if (tosaMultiplier.size() != tosaShift.size()) {
@@ -308,40 +287,6 @@ Value transposeValue(
 
     auto transposeOp = linalg::TransposeOp::create(builder, loc, input, initValue, permutation);
     return transposeOp.getResult()[0];
-}
-
-Value rescaleValue(Value input, int divFactor, int bias, Location loc, PatternRewriter &rewriter) {
-    // Create linalg generic to multiply input by scale factor and add bias
-    auto inputType = mlir::cast<RankedTensorType>(input.getType());
-    auto elementType = inputType.getElementType();
-    auto outputType = RankedTensorType::get(inputType.getShape(), elementType);
-    auto initValue =
-        tensor::EmptyOp::create(rewriter, loc, outputType.getShape(), outputType.getElementType())
-            .getResult();
-    size_t rank = inputType.getRank();
-    SmallVector<AffineMap> maps{2, AffineMap::getMultiDimIdentityMap(rank, rewriter.getContext())};
-    SmallVector<utils::IteratorType> iteratorTypes{rank, utils::IteratorType::parallel};
-
-    auto genericOp = linalg::GenericOp::create(
-        rewriter, loc, TypeRange{outputType}, ValueRange{input}, ValueRange{initValue}, maps,
-        iteratorTypes, /*rewriter.getStringAttr("parallel"),*/
-        /* doc = */ "", /* library_call = */ "",
-        [divFactor, bias](OpBuilder &b, Location loc, ValueRange args) {
-            // args[0] is input value
-            // Multiply by scale factor and add bias
-            auto scaled = arith::DivSIOp::create(
-                b, loc, args[0],
-                arith::ConstantOp::create(b, loc, b.getIntegerAttr(args[0].getType(), divFactor))
-            );
-            auto biased = arith::AddIOp::create(
-                b, loc, scaled,
-                arith::ConstantOp::create(b, loc, b.getIntegerAttr(args[0].getType(), bias))
-            );
-            SmallVector<Value> yieldValues{biased};
-            linalg::YieldOp::create(b, loc, yieldValues);
-        }
-    );
-    return genericOp.getResult(0);
 }
 
 RankedTensorType convertTypeNCHWtoNHWC(Type origType) {
@@ -448,94 +393,6 @@ Value createInitTensorNCHW(Operation *srcOp, PatternRewriter &rewriter) {
                rewriter, srcOp->getLoc(), nchwType.getShape(), nchwType.getElementType()
     )
         .getResult();
-}
-
-void getTransposeDimSize(
-    torq_hl::TransposeOp op, llvm::ArrayRef<int64_t> out_shape, int32_t *transposeDim,
-    uint32_t *transposeDimSize, uint32_t *restDimSize
-) {
-    if (!transposeDimSize || !restDimSize || !transposeDim) {
-        llvm::report_fatal_error("Missing input transposeDimSize/restDimSize", true);
-        return;
-    }
-
-    ArrayRef<int64_t> perm = op.getPerm();
-
-    int rank = out_shape.size();
-    if (rank < 2) {
-        llvm::report_fatal_error("Transpose rank must be at least 2", true);
-        return;
-    }
-
-    // transpose has no batch concept, tensor encoding module handls this specific case
-    // for rank==4 and perm==[0, 2, 3, 1]
-    if (rank == 4 && perm == ArrayRef<int64_t>{0, 2, 3, 1}) {
-        return;
-    }
-
-    // the other rank tensor hw only support transpose two block of with contiguous dimension
-    // for example transpose the first dim [0, 1, 2] -> [1, 2, 0]
-    // or the last dim [0, 1, 2] -> [2, 0, 1],
-    // or contiguous dims [0, 1, 2, 3] -> [2, 3, 0, 1] or -> [3, 0, 1, 2],
-    // for now we only support the first transpose for any rank tensor
-
-    // regarding transpose the last dim to the first, need to group the previous dims together,
-    // and compute the strides based on the group to make memory layout as expection
-    // for now strides computation does not support this case, need consider from the whole
-
-    uint32_t transpose_dim_size = 1;
-    uint32_t rest_dim_size = 1;
-    int32_t transpose_dim = -1;
-
-    if (perm[rank - 1] == 0) { // first dim transpose to the last
-
-        bool contiguous = true;
-        int32_t last_perm = perm[0];
-        for (int i = 1; i < rank - 1; i++) {
-            if (perm[i] != last_perm + 1) {
-                contiguous = false;
-                break;
-            }
-            last_perm = perm[i];
-        }
-
-        if (contiguous) {
-            for (int i = 0; i < rank - 1; i++) {
-                rest_dim_size *= out_shape[i];
-            }
-            transpose_dim_size = out_shape[rank - 1];
-            transpose_dim = 0;
-        }
-    }
-    else if (perm[0] == rank - 1) { // last dim transpose to the first, doesn't support for now
-
-        bool contiguous = true;
-        int32_t last_perm = perm[1];
-        for (int i = 2; i < rank; i++) {
-            if (perm[i] != last_perm + 1) {
-                contiguous = false;
-                break;
-            }
-            last_perm = perm[i];
-        }
-
-        // compute size if everything in place
-        if (contiguous) {
-            for (int i = 1; i < rank; i++) {
-                rest_dim_size *= out_shape[i];
-            }
-            transpose_dim_size = out_shape[0];
-            transpose_dim = rank - 1;
-        }
-    }
-
-    if (transpose_dim_size == 1 && rest_dim_size == 1) {
-        return;
-    }
-
-    *transposeDimSize = align_ceil(transpose_dim_size, 32);
-    *restDimSize = align_ceil(rest_dim_size, 64);
-    *transposeDim = transpose_dim;
 }
 
 Permutation Permutation::reverse() const {
@@ -689,27 +546,6 @@ std::vector<int8_t> genD2SWeights(size_t result_size) {
         }
     }
     return result;
-}
-
-Value convertScalarToRankedTensor(Value &input, Location loc, PatternRewriter &rewriter) {
-    auto constOp = input.getDefiningOp<arith::ConstantOp>();
-    auto value = constOp.getValue();
-    Value input_new;
-    mlir::DenseElementsAttr denseAttr;
-    auto elemType = constOp.getType();
-    auto tensorType = mlir::RankedTensorType::get({1}, elemType);
-
-    if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(value)) {
-        denseAttr = mlir::DenseElementsAttr::get(tensorType, {intAttr.getValue()});
-    }
-    else if (auto floatAttr = mlir::dyn_cast<mlir::FloatAttr>(value)) {
-        denseAttr = mlir::DenseElementsAttr::get(tensorType, {floatAttr.getValue()});
-    }
-    else {
-        assert(false && "Cannot convert Scalar to RankedTensor");
-    }
-    input_new = arith::ConstantOp::create(rewriter, loc, tensorType, denseAttr);
-    return input_new;
 }
 
 llvm::cl::opt<bool> clLowerDWUsingNdlKernel(
@@ -927,25 +763,6 @@ Attribute returnAttr(Value constV) {
         return nullptr;
     }
     return mlir::dyn_cast<Attribute>(op.getValue());
-}
-
-void FusionPlan::dump() const {
-    llvm::dbgs() << "FusionPlan:\n";
-    llvm::dbgs() << "  Anchor: ";
-    anchor->dump();
-    llvm::dbgs() << "\n";
-    llvm::dbgs() << "  Needed Ops:\n";
-    for (auto *op : neededOps) {
-        llvm::dbgs() << "  -  ";
-        op->dump();
-        llvm::dbgs() << "\n";
-    }
-    llvm::dbgs() << "  Ops to Fuse:\n";
-    for (auto *op : opsToFuse) {
-        llvm::dbgs() << "  -  ";
-        op->dump();
-        llvm::dbgs() << "\n";
-    }
 }
 
 Value getDefaultBiasScale(

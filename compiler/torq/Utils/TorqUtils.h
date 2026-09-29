@@ -26,10 +26,6 @@ extern llvm::cl::list<std::string> clExecuteOnCSS;
 
 namespace mlir::syna {
 
-void printOperation(Operation *op);
-void printRegion(Region &region);
-void printBlock(Block &block);
-
 namespace torq {
 
 /// Per-output-channel fp32 bias folded into linalg.reduce_sum (OptimizeConv1DPattern).
@@ -40,14 +36,8 @@ constexpr uint32_t div_ceil(uint32_t dividend, uint32_t divisor) {
     return (dividend + divisor - 1) / divisor;
 }
 
-/// @return dividend / divisor rounded downward
-constexpr uint32_t div_floor(uint32_t dividend, uint32_t divisor) { return dividend / divisor; }
-
 /// @return val rounded upward to alignment a
 constexpr uint32_t align_ceil(uint32_t val, uint32_t a) { return ((val + a - 1) / a) * a; }
-
-/// @return val rounded downward to alignment a
-constexpr uint32_t align_floor(uint32_t val, uint32_t a) { return (val / a) * a; }
 
 // C++20 std::midpoint: computes average without overflow
 inline int64_t midpoint(int64_t min, int64_t max) { return min + ((max - min) / 2); }
@@ -59,15 +49,6 @@ template <typename IntegerT> IntegerT doubleToInt(double value) {
     assert(value >= intMin);
     assert(value <= intMax);
     return static_cast<IntegerT>(value);
-}
-
-/// @return a multiple of @p value which is less than @p max_range.
-constexpr size_t findExactMultiple(size_t value, size_t max_range) {
-    for (size_t i = max_range; i > 1; --i) {
-        if (value % i == 0)
-            return i;
-    }
-    return 1;
 }
 
 std::vector<uint32_t> prepareWeightDims(

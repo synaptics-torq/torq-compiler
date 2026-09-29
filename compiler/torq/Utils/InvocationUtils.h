@@ -41,15 +41,6 @@ LogicalResult walkExecution(Operation *op, WalkExecutionOptions options);
 // Returns the NSS invocation associated with the given operation
 InvocationValue getNssInvocation(Operation *op);
 
-// Returns the program corresponding to the invocation
-torq_hl::ProgramOp getProgramOp(InvocationValue invocation);
-
-// Returns the start operation associated with invocation
-torq_hl::StartProgramOp getStartOp(InvocationValue invocation);
-
-// Returns the wait operation associated with invocation
-torq_hl::WaitProgramOp getWaitOp(InvocationValue invocation);
-
 // Returns the executor id for the given invocation when evaluated within the contextInvocation
 std::optional<int64_t> getExecutorId(InvocationValue invocation, InvocationValue contextInvocation);
 
