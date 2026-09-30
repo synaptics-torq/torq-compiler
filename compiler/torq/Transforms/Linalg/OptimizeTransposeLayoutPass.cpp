@@ -898,6 +898,11 @@ static void insertTransposePairsAroundPropagateOps(
         auto perm4D = lattice->getPermutation(); // always 4D from lattice
 
         int64_t opRank = cast<RankedTensorType>(op->getResult(0).getType()).getRank();
+        // adaptPermToRank encodes a 4D NCHW layout and is only well-defined for
+        // rank >= 3; lower-rank results are degenerate and cannot carry the
+        // transform. Skip such ops instead of asserting in Permutation::reverse().
+        if (opRank < 3)
+            continue;
         auto perm = adaptPermToRank(perm4D, opRank);
         auto inversePerm = Permutation(perm.begin(), perm.end()).reverse();
 
