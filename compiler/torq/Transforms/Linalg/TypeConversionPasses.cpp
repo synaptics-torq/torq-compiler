@@ -796,8 +796,8 @@ class TorqNarrowWeightConstPass
             // matching how the matmul lowering reads the weight. Truncating to the low
             // `width` bits is the correct 2's-complement re-encoding.
             auto narrowElem = IntegerType::get(&getContext(), width);
-            auto narrowCst = builder.create<arith::ConstantOp>(
-                cstOp.getLoc(),
+            auto narrowCst = arith::ConstantOp::create(
+                builder, cstOp.getLoc(),
                 dense.mapValues(narrowElem, [width](const APInt &v) { return v.trunc(width); })
             );
 
