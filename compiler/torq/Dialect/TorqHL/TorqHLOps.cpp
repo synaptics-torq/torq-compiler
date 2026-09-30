@@ -760,53 +760,17 @@ LogicalResult mlir::syna::torq_hl::NextOp::verify() {
     return success();
 }
 
-// `code_data` comes in one of two shapes:
-// 1. one entry per code section, each matching its section's size (slice descriptors),
-// 2. a single entry holding the concatenation of all sections (NSS descriptors, whose sections are
-// contiguous in XRAM).
-//
-// A consumer pairing `code_data` with `code_sections` must handle both.
 LogicalResult mlir::syna::torq_hl::DescriptorOp::verify() {
 
-    auto codeData = getCodeData();
-    auto codeSections = getCodeSections();
+    auto memrefType = cast<MemRefType>(getCodeSection().getType());
 
-    if (codeData.size() != codeSections.size() && codeData.size() != 1) {
-        return emitOpError(
-            "code_data must have one entry per code section or a single concatenated entry"
-        );
+    if (!memrefType.getElementType().isInteger(8)) {
+        return emitOpError("code section must have i8 elements");
     }
 
-    int64_t sectionBytes = 0;
-    for (Type type : codeSections.getTypes()) {
-        auto memrefType = cast<MemRefType>(type);
-        if (!memrefType.getElementType().isInteger(8)) {
-            return emitOpError("code sections must have i8 elements");
-        }
-        sectionBytes += memrefType.getNumElements();
-    }
-
-    int64_t dataBytes = 0;
-    for (Attribute entry : codeData) {
-        auto bytes = dyn_cast<DenseI8ArrayAttr>(entry);
-        if (!bytes) {
-            return emitOpError("code_data entries must be dense i8 arrays");
-        }
-        dataBytes += bytes.size();
-    }
-
-    if (dataBytes != sectionBytes) {
-        return emitOpError("code_data holds ")
-               << dataBytes << " bytes for " << sectionBytes << " bytes of code sections";
-    }
-
-    // in the per-section form every entry must match its own section
-    if (codeData.size() == codeSections.size()) {
-        for (auto [entry, type] : llvm::zip(codeData, codeSections.getTypes())) {
-            if (cast<DenseI8ArrayAttr>(entry).size() != cast<MemRefType>(type).getNumElements()) {
-                return emitOpError("code_data entry size does not match its code section");
-            }
-        }
+    if (getCode().size() != memrefType.getNumElements()) {
+        return emitOpError("code holds ") << getCode().size() << " bytes for a code section of "
+                                          << memrefType.getNumElements() << " bytes";
     }
 
     return success();

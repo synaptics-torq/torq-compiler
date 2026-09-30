@@ -647,15 +647,30 @@ static LogicalResult createDescriptors(torq_hl::CreateInvocationOp createInvocat
 
     auto jobId = createInvocationOp->getAttr("torq-job-id");
 
-    auto descriptorOp = rewriter.replaceOpWithNewOp<torq_hl::DescriptorOp>(
-        createInvocationOp, createInvocationOp->getResultTypes(), createInvocationOp.getNameAttr(),
-        rewriter.getIndexAttr(0), createInvocationOp.getProgram(),
-        createInvocationOp.getExecutorCodeAddressesAttr(),
-        createInvocationOp.getXramCodeAddressesAttr(),
-        rewriter.getArrayAttr({rewriter.getDenseI8ArrayAttr(code)})
+    // The blocks are packed contiguously in XRAM, so the whole program forms a
+    // single code section starting at the first block.
+    auto codeSectionType = MemRefType::get({static_cast<int64_t>(totalSize)}, rewriter.getI8Type());
+
+    int64_t programBase = createInvocationOp.getXramCodeAddresses()->front();
+
+    auto descriptorOp = torq_hl::DescriptorOp::create(
+        rewriter, createInvocationOp.getLoc(),
+        TypeRange{createInvocationOp.getInvocation().getType(), codeSectionType},
+        createInvocationOp.getNameAttr(), rewriter.getIndexAttr(0), createInvocationOp.getProgram(),
+        rewriter.getI64IntegerAttr(createInvocationOp.getExecutorCodeAddresses()->front()),
+        rewriter.getI64IntegerAttr(programBase), rewriter.getDenseI8ArrayAttr(code)
     );
 
     descriptorOp->setAttr("torq-job-id", jobId);
+
+    assert(
+        llvm::all_of(
+            createInvocationOp.getCodeSections(), [](Value section) { return section.use_empty(); }
+        ) &&
+        "NSS create_invocation code sections must be unused"
+    );
+    rewriter.replaceAllUsesWith(createInvocationOp.getInvocation(), descriptorOp.getInvocation());
+    rewriter.eraseOp(createInvocationOp);
 
     return success();
 }

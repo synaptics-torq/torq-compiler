@@ -896,19 +896,19 @@ def TorqHL_DescriptorOp: TorqHL_Op<"descriptor"> {
     StrAttr:$name,
     IndexAttr:$executor_id,
     TorqHL_Program:$program, // keep this for the moment to help with profiling
-    DenseI64ArrayAttr:$executor_code_addresses,
-    DenseI64ArrayAttr:$xram_code_addresses,
-    ArrayAttr:$code_data
+    I64Attr:$executor_code_address,
+    I64Attr:$xram_code_address,
+    DenseI8ArrayAttr:$code
   );
 
   let results = (outs
-    TorqHL_Invocation:$invocation, Variadic<AnyMemRef>:$code_sections
+    TorqHL_Invocation:$invocation, AnyMemRef:$code_section
   );
 
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    $name `on` $executor_id `program` $program `:` type($program) `code` $code_data attr-dict `:` qualified(type($invocation)) (`,` type($code_sections)^)?
+    $name `on` $executor_id `program` $program `:` type($program) `code` $code attr-dict `:` qualified(type($invocation)) `,` type($code_section)
   }];
 
 

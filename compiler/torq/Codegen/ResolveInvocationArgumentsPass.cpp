@@ -133,7 +133,7 @@ static LogicalResult updateCreateInvocation(
 
                 argAttrs.push_back(torq_hl::InvocationAttr::get(
                     startProgramOp.getContext(), executor, executorId,
-                    descriptorOp.getXramCodeAddresses()
+                    ArrayRef<int64_t>{static_cast<int64_t>(descriptorOp.getXramCodeAddress())}
                 ));
             }
             else {

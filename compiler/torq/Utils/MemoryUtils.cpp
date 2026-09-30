@@ -212,14 +212,11 @@ std::optional<int64_t> getLramAddress(Value value, int64_t offset) {
     }
     else if (auto descriptorOp = value.getDefiningOp<torq_hl::DescriptorOp>()) {
 
-        auto sectionAddresses = descriptorOp.getExecutorCodeAddresses();
-        auto sectionIndex = cast<OpResult>(value).getResultNumber() - 1;
-
-        if (sectionAddresses.size() <= sectionIndex) {
+        if (value != descriptorOp.getCodeSection()) {
             return std::nullopt;
         }
 
-        return sectionAddresses[sectionIndex] + offset;
+        return descriptorOp.getExecutorCodeAddress() + offset;
     }
 
     return getValueAddress(value, LRAM_ADDRESS_ATTR_NAME, offset);
@@ -243,14 +240,11 @@ std::optional<int64_t> getXramAddress(Value value, int64_t offset) {
     }
     else if (auto descriptorOp = value.getDefiningOp<torq_hl::DescriptorOp>()) {
 
-        auto sectionAddresses = descriptorOp.getXramCodeAddresses();
-        auto sectionIndex = cast<OpResult>(value).getResultNumber() - 1;
-
-        if (sectionAddresses.size() <= sectionIndex) {
+        if (value != descriptorOp.getCodeSection()) {
             return std::nullopt;
         }
 
-        return sectionAddresses[sectionIndex] + offset;
+        return descriptorOp.getXramCodeAddress() + offset;
     }
 
     return getValueAddress(value, XRAM_ADDRESS_ATTR_NAME, offset);

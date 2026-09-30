@@ -513,8 +513,6 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
 
     IRRewriter rewriter(createInvocationOp);
 
-    auto descriptorCode = rewriter.getDenseI8ArrayAttr(code);
-    auto codeSections = rewriter.getArrayAttr({descriptorCode});
     auto codeSectionType =
         MemRefType::get({static_cast<int64_t>(code.size())}, rewriter.getI8Type());
 
@@ -522,8 +520,8 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
         createInvocationOp,
         TypeRange{createInvocationOp.getInvocation().getType(), codeSectionType},
         createInvocationOp.getNameAttr(), rewriter.getIndexAttr(slc),
-        createInvocationOp.getProgram(), rewriter.getDenseI64ArrayAttr(lramAddress),
-        rewriter.getDenseI64ArrayAttr(xramAddress), codeSections
+        createInvocationOp.getProgram(), rewriter.getI64IntegerAttr(lramAddress),
+        rewriter.getI64IntegerAttr(xramAddress), rewriter.getDenseI8ArrayAttr(code)
     );
 
     // TODO: this is quite brittle, we probably should have an operation
@@ -531,7 +529,7 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
     // directly
 
     // update all the dma load of descriptors to use the correct size
-    for (auto &use : descriptorOp.getCodeSections()[0].getUses()) {
+    for (auto &use : descriptorOp.getCodeSection().getUses()) {
         if (auto loadOp = dyn_cast<torq_hl::LoadOp>(use.getOwner())) {
             rewriter.setInsertionPoint(loadOp);
 

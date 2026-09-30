@@ -626,26 +626,22 @@ LogicalResult Serializer::serializeDescriptor(torq_hl::DescriptorOp descriptorOp
         return success();
     }
 
-    for (auto [codeAddr, codeAttr] :
-         llvm::zip(descriptorOp.getXramCodeAddresses(), descriptorOp.getCodeData())) {
-        auto codeData = cast<DenseI8ArrayAttr>(codeAttr);
+    auto codeAddr = descriptorOp.getXramCodeAddress();
+    auto codeDataRef = descriptorOp.getCode();
 
-        auto codeDataRef = codeData.getRawData();
+    const uint8_t *codePtr = reinterpret_cast<const uint8_t *>(codeDataRef.data());
 
-        const uint8_t *codePtr = reinterpret_cast<const uint8_t *>(codeDataRef.data());
+    auto dataRef = flatbuffers_uint8_vec_create(_builder, codePtr, codeDataRef.size());
 
-        auto dataRef = flatbuffers_uint8_vec_create(_builder, codePtr, codeDataRef.size());
+    _segments.push_back(
+        iree_hal_torq_Segment_create(_builder, codeAddr, codeDataRef.size(), dataRef)
+    );
 
-        _segments.push_back(
-            iree_hal_torq_Segment_create(_builder, codeAddr, codeDataRef.size(), dataRef)
-        );
-
-        if (!_dump_path.empty()) {
-            if (!succeeded(dumpSegmentDescriptor(
-                    0, true, codeAddr, codeDataRef.data(), codeDataRef.size(), true
-                ))) {
-                return failure();
-            }
+    if (!_dump_path.empty()) {
+        if (!succeeded(dumpSegmentDescriptor(
+                0, true, codeAddr, codeDataRef.data(), codeDataRef.size(), true
+            ))) {
+            return failure();
         }
     }
 

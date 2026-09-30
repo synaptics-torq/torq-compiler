@@ -424,13 +424,28 @@ getAddressFromGetBlockOp(torq_hl::GetBlockOp getBlockOp, InvocationValue invocat
     // the invocation in the get_block op is the value produced by a descriptor op
     else if (auto blockDescriptorOp = blockInvocation.getDefiningOp<torq_hl::DescriptorOp>()) {
 
-        auto blockAddresses = blockDescriptorOp.getXramCodeAddresses();
+        // an NSS descriptor carries the whole program as one contiguous code
+        // section, so a block's address is the section base plus the sizes of the
+        // preceding blocks
+        auto programOp = blockDescriptorOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
 
-        if (getBlockOp.getBlockIndex().getZExtValue() >= blockAddresses.size()) {
+        if (!programOp) {
+            return std::nullopt;
+        }
+
+        auto blockSizes = programOp.getBlockSizes();
+        auto blockIndex = getBlockOp.getBlockIndex().getZExtValue();
+
+        if (!blockSizes || blockIndex >= blockSizes->size()) {
             return std::nullopt; // block index out of bounds
         }
 
-        return blockAddresses[getBlockOp.getBlockIndex().getZExtValue()];
+        int64_t offset = 0;
+        for (auto blockSize : blockSizes->take_front(blockIndex)) {
+            offset += blockSize;
+        }
+
+        return blockDescriptorOp.getXramCodeAddress() + offset;
     }
     else {
         return std::nullopt; // we don't support any other case
