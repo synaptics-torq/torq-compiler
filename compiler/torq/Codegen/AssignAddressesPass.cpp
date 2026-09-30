@@ -822,11 +822,16 @@ static LogicalResult allocateLramAddresses(FunctionOpInterface funcOp, bool repl
         return failure();
     }
 
-    // the rewritten IR fits without swaps
+    // TODO: the swap schedule planPlacement returns should always fit once
+    // convertVirtualToPhysicalMemRefs applies it, so reaching this is a bug in one of
+    // them (reproduced by keras_app layer_inceptionresnetv2_conv2d_258 on SL2610).
+    // Until it is fixed, fail as an infeasible plan so tile-and-fuse's probe tries a
+    // smaller tile instead of aborting the compile.
     buffers = collectLramBuffers(funcOp);
     placement = planPlacement(buffers, usable, /*replan=*/false);
     if (!placement || !placement->schedule.empty()) {
-        llvm::report_fatal_error("LRAM placement: the rewritten IR does not fit");
+        LLVM_DEBUG(llvm::dbgs() << "LRAM plan infeasible after swaps\n");
+        return failure();
     }
     return commitLramLayout(funcOp, reservedBase, buffers, placement->offsets);
 }
