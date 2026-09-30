@@ -3,6 +3,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "torq/Dialect/TorqHL/TorqHLAttrs.h"
 #include "torq/Dialect/TorqHW/TorqHWOps.h"
@@ -83,10 +84,12 @@ bool checkValueMatchesEncodingRequirements(
 );
 bool checkValueMatchesEncodingRequirements(Value value, EncodingRequirements requirements);
 
-// return true if the slice keeps the innermost `denseInnerDims` dims of its source dense: a cut
-// of the outermost dim of the block only shortens the block, a cut of any dim inside it leaves
-// the block rows apart in memory
-bool sliceKeepsInnerDimsDense(tensor::ExtractSliceOp extractOp, int64_t denseInnerDims);
+// return true if the slice keeps the innermost `denseInnerDims` dims of the full tensor (the source
+// of an extract, the destination of an insert) dense: a cut of the outermost dim of the block only
+// shortens the block, a cut of any dim inside it leaves the block rows apart in memory
+bool sliceKeepsInnerDimsDense(
+    OffsetSizeAndStrideOpInterface sliceOp, ArrayRef<int64_t> fullShape, int64_t denseInnerDims
+);
 
 // return the default encoding attribute
 torq_hl::TensorEncodingAttr getDefaultEncoding(ShapedType type);

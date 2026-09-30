@@ -367,16 +367,17 @@ bool checkTypeMatchesEncodingRequirements(ShapedType type, EncodingRequirements 
 }
 
 // see EncodingUtils.h
-bool sliceKeepsInnerDimsDense(tensor::ExtractSliceOp extractOp, int64_t denseInnerDims) {
-    ArrayRef<int64_t> sourceShape = extractOp.getSourceType().getShape();
-    SmallVector<OpFoldResult> sizes = extractOp.getMixedSizes();
-    SmallVector<OpFoldResult> strides = extractOp.getMixedStrides();
+bool sliceKeepsInnerDimsDense(
+    OffsetSizeAndStrideOpInterface sliceOp, ArrayRef<int64_t> fullShape, int64_t denseInnerDims
+) {
+    SmallVector<OpFoldResult> sizes = sliceOp.getMixedSizes();
+    SmallVector<OpFoldResult> strides = sliceOp.getMixedStrides();
 
-    for (int64_t i = sourceShape.size() - 1;
-         i >= 0 && i >= int64_t(sourceShape.size()) - (denseInnerDims - 1); i--) {
+    for (int64_t i = fullShape.size() - 1;
+         i >= 0 && i >= int64_t(fullShape.size()) - (denseInnerDims - 1); i--) {
         std::optional<int64_t> size = getConstantIntValue(sizes[i]);
         std::optional<int64_t> stride = getConstantIntValue(strides[i]);
-        if (!size || !stride || *stride != 1 || *size != sourceShape[i]) {
+        if (!size || !stride || *stride != 1 || *size != fullShape[i]) {
             return false;
         }
     }
@@ -400,7 +401,9 @@ bool checkValueMatchesEncodingRequirements(Value value, EncodingRequirements req
     // a slice of a matching tensor still matches unless it cuts inside the dense block
     for (auto extractOp = value.getDefiningOp<tensor::ExtractSliceOp>(); extractOp;
          extractOp = extractOp.getSource().getDefiningOp<tensor::ExtractSliceOp>()) {
-        if (!sliceKeepsInnerDimsDense(extractOp, requirements.denseInnerDims)) {
+        if (!sliceKeepsInnerDimsDense(
+                extractOp, extractOp.getSourceType().getShape(), requirements.denseInnerDims
+            )) {
             return false;
         }
     }

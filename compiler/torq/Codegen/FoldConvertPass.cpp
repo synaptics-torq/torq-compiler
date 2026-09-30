@@ -21,6 +21,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
@@ -600,7 +601,10 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
                 for (auto &input : kernelEncoding.inputEncodings) {
                     denseInnerDims = std::max(denseInnerDims, input.encoding.denseInnerDims);
                 }
-                if (denseInnerDims > 1 && !sliceKeepsInnerDimsDense(extractOp, denseInnerDims)) {
+                if (denseInnerDims > 1 &&
+                    !sliceKeepsInnerDimsDense(
+                        extractOp, extractOp.getSourceType().getShape(), denseInnerDims
+                    )) {
                     return Rejection{
                         "dense inner dims", "consumer kernel needs the sliced dims dense"
                     };
@@ -901,6 +905,26 @@ class FoldDuplicateConversion : public OpRewritePattern<torq_hl::ConvertOp> {
     }
 };
 
+// A load of slice-invariant data that every slice of `forallOp` would make: its input comes from
+// outside the forall, it has a private init and only kernels read it.
+static bool isSliceInvariantLoad(torq_hl::ConvertOp op, scf::ForallOp forallOp) {
+    if (!op.getOutput() ||
+        getEncodingMemorySpace(op.getOutput().getType()) != torq_hl::MemorySpace::Lram ||
+        !forallOp.isDefinedOutsideOfLoop(op.getInput())) {
+        return false;
+    }
+
+    auto emptyOp = op.getInit().getDefiningOp<tensor::EmptyOp>();
+    if (!emptyOp || !emptyOp->hasOneUse() || emptyOp->getNumOperands() != 0) {
+        return false;
+    }
+
+    return llvm::all_of(op.getOutput().getUses(), [](OpOperand &use) {
+        auto kernel = dyn_cast<torq_hl::KernelInterface>(use.getOwner());
+        return kernel && kernel.isDpsInput(&use);
+    });
+}
+
 // Move a load to LRAM whose input does not depend on the slice out of the scf.forall that
 // LinalgSlicing builds. Inside the forall every slice loads its own copy of the same data. The
 // slices share LRAM, so after the move they read one buffer: one DMA instead of one per slice,
@@ -914,53 +938,44 @@ class FoldDuplicateConversion : public OpRewritePattern<torq_hl::ConvertOp> {
 // elementwise chain, say) the per-slice load lives only around the kernel that reads it, while
 // the shared one stays resident across the whole chain, and the extra residency makes the LRAM
 // planner spill.
-class HoistSliceInvariantConvert : public OpRewritePattern<torq_hl::ConvertOp> {
-  public:
-    using OpRewritePattern::OpRewritePattern;
+//
+// The default LICM (moveLoopInvariantCode on the loop interface) would also move every pure op,
+// including the tensor.empty output inits of the kernels, and all slices would then write one
+// buffer. So only these loads and their inits move.
+static size_t hoistSliceInvariantLoads(Operation *root) {
+    size_t numMoved = 0;
+    auto isKernel = [](Operation &op) {
+        return isa<torq_hl::KernelInterface>(op) && !isa<torq_hl::ConvertOp>(op);
+    };
 
-    LogicalResult matchAndRewrite(torq_hl::ConvertOp op, PatternRewriter &rewriter) const override {
-
-        auto forallOp = dyn_cast<scf::ForallOp>(op->getParentOp());
-        if (!forallOp || !op.getOutput()) {
-            return failure();
-        }
-
-        if (getEncodingMemorySpace(op.getOutput().getType()) != torq_hl::MemorySpace::Lram) {
-            return failure();
-        }
-
-        if (!forallOp.isDefinedOutsideOfLoop(op.getInput())) {
-            return failure();
-        }
-
-        auto emptyOp = op.getInit().getDefiningOp<tensor::EmptyOp>();
-        if (!emptyOp || !emptyOp->hasOneUse() || emptyOp->getParentOp() != forallOp ||
-            emptyOp->getNumOperands() != 0) {
-            return failure();
-        }
-
-        for (OpOperand &use : op.getOutput().getUses()) {
-            auto kernel = dyn_cast<torq_hl::KernelInterface>(use.getOwner());
-            if (!kernel || !kernel.isDpsInput(&use)) {
-                return failure();
-            }
-        }
-
-        auto isKernel = [](Operation &bodyOp) {
-            return isa<torq_hl::KernelInterface>(bodyOp) && !isa<torq_hl::ConvertOp>(bodyOp);
-        };
+    root->walk([&](scf::ForallOp forallOp) {
         if (llvm::count_if(forallOp.getBody()->without_terminator(), isKernel) != 1) {
-            return failure();
+            return;
         }
 
-        rewriter.moveOpBefore(emptyOp, forallOp);
-        rewriter.moveOpBefore(op, forallOp);
+        // The init of such a load has no operands, so it moves first, and the load follows.
+        auto shouldMove = [&](Operation *op, Region *) {
+            if (auto load = dyn_cast<torq_hl::ConvertOp>(op)) {
+                return isSliceInvariantLoad(load, forallOp);
+            }
+            auto emptyOp = dyn_cast<tensor::EmptyOp>(op);
+            if (!emptyOp || !emptyOp->hasOneUse()) {
+                return false;
+            }
+            auto load = dyn_cast<torq_hl::ConvertOp>(*emptyOp->user_begin());
+            return load && load.getInit() == emptyOp.getResult() &&
+                   isSliceInvariantLoad(load, forallOp);
+        };
+        numMoved += moveLoopInvariantCode(
+            forallOp.getLoopRegions(),
+            [&](Value value, Region *) { return forallOp.isDefinedOutsideOfLoop(value); },
+            shouldMove, [&](Operation *op, Region *) { forallOp.moveOutOfLoop(op); }
+        );
+    });
+    return numMoved;
+}
 
-        return success();
-    }
-};
-
-// The other end of HoistSliceInvariantConvert. Inside the scf.forall that LinalgSlicing builds,
+// The other end of hoistSliceInvariantLoads. Inside the scf.forall that LinalgSlicing builds,
 // every slice stores its LRAM result to XRAM, and the ops after the forall load the whole result
 // back to LRAM. When every user of the forall result is such a load feeding a kernel, collect
 // the slices' results in an LRAM tensor instead and store it once after the forall.
@@ -1049,12 +1064,8 @@ class SinkSliceOutputConvert : public OpRewritePattern<torq_hl::ConvertOp> {
             }
             insideBlock |= size != 1;
         }
-        for (int64_t dim = sharedShape.size() - 1;
-             dim >= 0 && dim >= int64_t(sharedShape.size()) - outEncoding.denseInnerDims; dim--) {
-            if (insertOp.getStaticSizes()[dim] != sharedShape[dim] ||
-                insertOp.getStaticStrides()[dim] != 1) {
-                return failure();
-            }
+        if (!sliceKeepsInnerDimsDense(insertOp, sharedShape, outEncoding.denseInnerDims)) {
+            return failure();
         }
 
         rewriter.setInsertionPoint(forallOp);
@@ -1106,9 +1117,6 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<FoldLramToLramConversionChain>(ctx);
     patterns.add<KeepConcatInLram>(ctx, this->lramSize);
     patterns.add<FoldDuplicateConversion>(ctx);
-    if (this->shareSliceInputs) {
-        patterns.add<HoistSliceInvariantConvert>(ctx);
-    }
     if (this->shareSliceOutputs) {
         patterns.add<SinkSliceOutputConvert>(ctx);
     }
@@ -1124,7 +1132,17 @@ void FoldConvertPass::runOnOperation() {
     // efficientnetb0. Both guards are inside the pattern, each with its own comment.
     patterns.add<SwapExtractAndConvert>(ctx, this->lramSize);
 
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
+    FrozenRewritePatternSet frozenPatterns(std::move(patterns));
+    if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
+        return signalPassFailure();
+    }
+
+    // Hoist after the patterns, so the LRAM output buffers SinkSliceOutputConvert creates in front
+    // of a forall come before the loads moved there: the LRAM planner is sensitive to that order
+    // (hoisting first makes xception block2_sepconv1 22% slower). Then run the patterns again
+    // for the round trips the hoist exposes.
+    if (this->shareSliceInputs && hoistSliceInvariantLoads(getOperation()) > 0 &&
+        failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
         return signalPassFailure();
     }
 }
