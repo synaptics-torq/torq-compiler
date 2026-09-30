@@ -174,69 +174,6 @@ void setSourcesDistance(Operation *op, std::optional<int64_t> distance) {
     }
 }
 
-// Return true if a length can be represented using the SDIM encoding in
-// Utils/Kernel.cpp without tripping the decomposeIntoTwoFactors() assert.
-// A "SDIM-friendly" length is either:
-//   * <= 0x7fff  – fits in a single SDIM counter, or
-//   * factorizable as a * b with a, b <= 0x7fff – can be encoded as two nested SDIM loops.
-const int64_t kMaxFactor = 0x7fff;
-bool isSdimFriendlyCount(int64_t number) {
-    if (number <= kMaxFactor)
-        return true;
-
-    for (int64_t i = div_ceil(number, kMaxFactor); i <= (int64_t)std::sqrt((double)number) + 1;
-         ++i) {
-        if (number % i == 0) {
-            int64_t j = number / i;
-            if (j <= kMaxFactor) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// Return true if using `tileSize` to 1-D tile `originalSize` is compatible
-// with SDIM handling in Kernel.cpp.
-//
-// We require that both:
-//   * tileSize          – the common tile length, and
-//   * remainder         – the final (possibly smaller) tile where
-//
-//         originalSize = k * tileSize + remainder
-//
-// are SDIM-friendly. This guarantees that addMemNdlDims() can always encode
-// both the main tiles and the tail tile without decomposeIntoTwoFactors()
-// ever returning {-1, -1}.
-bool isSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize) {
-    if (!isSdimFriendlyCount(tileSize))
-        return false;
-
-    int64_t remainder = iterDomainSize % tileSize;
-    return (remainder == 0 || isSdimFriendlyCount(remainder));
-}
-
-int64_t makeSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize) {
-    // A non-positive size is already invalid (e.g. the "too small" sentinel that
-    // makeByteAlignedTileSize returns when composed via getFixpointF below); pass
-    // it through instead of searching (and tripping the assert).
-    if (tileSize <= 0)
-        return tileSize;
-
-    // Adjust tileSize downwards until both the common tile size and the
-    // remainder tile size are SDIM-friendly. This preserves the
-    // memory-fit invariant because we only shrink the tile.
-    for (tileSize = std::min(int64_t(kMaxFactor * kMaxFactor), tileSize); tileSize > 0;
-         --tileSize) {
-        if (isSdimFriendlyTileSize(iterDomainSize, tileSize))
-            break;
-    }
-    // isValidTileSize should always succeed for tileSize == 1
-    assert(tileSize > 0 && "failed to find SDIM-friendly tile size for domain");
-
-    return tileSize;
-}
-
 // The number of sub-byte values that together occupy a whole number of bytes
 // for `type`, i.e. the tile-size granularity that keeps every tile boundary
 // byte-aligned. For widths that divide a byte this is just values-per-byte
@@ -350,10 +287,14 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp, int64_t sliceCount) 
         getConstantIntValues(iterDomainSizes);
     assert(iterDomainConstSizes && "iteration domain sizes are not constants");
 
-    Operation *principalOp = isMarkedFuseGroup(tilingInterfaceOp)
-                                 ? getFuseGroupPrincipalOpBackward(tilingInterfaceOp)
-                                 : tilingInterfaceOp;
-    assert(principalOp != nullptr && "could not find the principal op of the fuse group");
+    // Reduction tiling can move a group's principal generic into a marked loop. For example,
+    // Conv1DPattern can anchor a group on a one-reduction-dimension generic. Its outer group
+    // output can no longer reach that principal through operands. Only conv/pool principals
+    // receive special minSize values below, so use the current op in that case.
+    Operation *principalOp = tilingInterfaceOp;
+    if (isMarkedFuseGroup(tilingInterfaceOp))
+        if (Operation *found = getFuseGroupPrincipalOpBackward(tilingInterfaceOp))
+            principalOp = found;
 
     tilingInfo.minSize.append(loopIteratorTypes.size(), 1);
     if (!clDisableSlicing && sliceCount > 1) {
@@ -1155,13 +1096,12 @@ TileFit TileAndFusePass::fitTileToMemoryWithOrder(
     for (int64_t domain : llvm::reverse(growBackDomains)) {
         if (iterDomainSizes[domain] == 1)
             continue;
-        int64_t growLimit = iterDomainSizes[domain];
-        if (getConstantIntValue(sizes[domain]) == growLimit)
+        if (getConstantIntValue(sizes[domain]) == iterDomainSizes[domain])
             continue;
 
         int64_t fittingSize = *getConstantIntValue(sizes[domain]);
         int64_t maxFactor = div_ceil(iterDomainSizes[domain], fittingSize);
-        sizes[domain] = rewriter.getIndexAttr(growLimit);
+        sizes[domain] = rewriter.getIndexAttr(iterDomainSizes[domain]);
         tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
             return TileFit::ProbeFail;
@@ -1502,11 +1442,15 @@ void TileAndFusePass::tileAndFuse(
             llvm::dbgs() << "  " << TORQ_FUSE_GROUP_ID << ": " << getConstantIntValue(groupId)
                          << "\n";
             if (isMarkedFuseGroup(tiOp)) {
-                Operation *principalOp = getFuseGroupPrincipalOpBackward(tiOp);
-                llvm::dbgs() << "  principal op: " << principalOp->getName() << "\n";
-                Attribute fuseGroup = principalOp->getAttr(TORQ_FUSE_GROUP_ID);
-                llvm::dbgs() << "  " << TORQ_FUSE_GROUP << ": " << getConstantIntValue(fuseGroup)
-                             << "\n";
+                if (Operation *principalOp = getFuseGroupPrincipalOpBackward(tiOp)) {
+                    llvm::dbgs() << "  principal op: " << principalOp->getName() << "\n";
+                    Attribute fuseGroup = principalOp->getAttr(TORQ_FUSE_GROUP_ID);
+                    llvm::dbgs() << "  " << TORQ_FUSE_GROUP << ": "
+                                 << getConstantIntValue(fuseGroup) << "\n";
+                }
+                else {
+                    llvm::dbgs() << "  principal op: <not reachable backwards>\n";
+                }
             }
         }
     });
@@ -1805,6 +1749,8 @@ static linalg::GenericOp createReducedReduction(
     );
 }
 
+} // namespace
+
 // A keepdims reduction (e.g. an SE-block global-average-pool) has constant result positions in its
 // output map, e.g. (d0,d1,d2,d3) -> (d0,d1,0,0). That is not a projected permutation, so upstream's
 // linalg TilingInterface refuses to tile it, and tile-and-fuse then aborts at fuseControlMax*. The
@@ -1812,21 +1758,21 @@ static linalg::GenericOp createReducedReduction(
 // rewrite the op into a non-keepdims reduction (a projected permutation) plus a tensor.expand_shape
 // back to the keepdims shape. Scoped to fuse-group members: a standalone keepdims reduction is
 // never tiled, so leave its accumulation order untouched.
-static LogicalResult rewriteKeepdimsFuseGroupReduction(IRRewriter &rewriter, linalg::GenericOp op) {
+linalg::GenericOp rewriteKeepdimsFuseGroupReduction(IRRewriter &rewriter, linalg::GenericOp op) {
     if (!isMarkedFuseGroup(op))
-        return failure();
+        return nullptr;
     Operation *combine = matchSingleCombineReduction(op);
     if (!combine)
-        return failure();
+        return nullptr;
 
     auto outType = dyn_cast<RankedTensorType>(op.getOutputs()[0].getType());
     if (!outType)
-        return failure();
+        return nullptr;
     AffineMap outMap = op.getIndexingMapsArray().back();
     SmallVector<int64_t> keptPos;
     SmallVector<AffineExpr> keptExprs;
     if (failed(splitKeepdimsOutputMap(outMap, outType, keptPos, keptExprs)))
-        return failure();
+        return nullptr;
 
     Location loc = op.getLoc();
     rewriter.setInsertionPoint(op);
@@ -1882,8 +1828,10 @@ static LogicalResult rewriteKeepdimsFuseGroupReduction(IRRewriter &rewriter, lin
         reduceOp->setAttr(TORQ_FUSE_GROUP_ID, fgId);
 
     rewriter.replaceOp(op, expanded.getResult());
-    return success();
+    return reduceOp;
 }
+
+namespace {
 
 void TileAndFusePass::runOnOperation() {
     LLVM_DEBUG(llvm::dbgs() << "Tile and Fuse - START\n");
@@ -1903,6 +1851,12 @@ void TileAndFusePass::runOnOperation() {
     // walk. We first construct a queue, and than iterate over it.
     SmallVector<TilingInterface> orderTi;
     funcOp.walk<WalkOrder::PostOrder, ReverseIterator>([&](TilingInterface tiOp) {
+        // The reduction pass has already selected these tiles. The fit probe extracts loop-free
+        // IR, so probing them again would also lose values captured from outside the loop.
+        for (Operation *parent = tiOp->getParentOp(); parent; parent = parent->getParentOp())
+            if (parent->hasAttr(TORQ_REDUCTION_TILING_LOOP))
+                return;
+
         // Ops assigned to a non-NPU executor (e.g. Host) don't run on the NPU,
         // so LRAM fit is meaningless for them: skip both the fit check and
         // tiling. Unassigned ops (no attr) default to the NPU path.

@@ -244,7 +244,13 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp) {
         }
 
         for (auto operand : op->getOperands()) {
+            // Operands can be block arguments (a function argument, or the
+            // iter args of a surrounding tile loop when the walked op is a
+            // fused clone); the walk simply does not continue through them.
             auto srcOp = operand.getDefiningOp();
+            if (!srcOp)
+                continue;
+
             if (auto attr = srcOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
                 attr && llvm::is_contained(attr, fuseGroupAttr)) {
                 stack.push_back(srcOp);

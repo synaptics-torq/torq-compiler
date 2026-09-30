@@ -136,9 +136,6 @@ void addPostTileAndFuseLoweringPasses(
         funcPm.addPass(createLinalgSlicingPass(TorqHw::get().getSliceCount()));
     }
 
-    // tile reduction dimensions that exceed LRAM before TorqHL conversion
-    funcPm.addPass(createTileReductionForLramPass());
-
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
 
@@ -404,6 +401,7 @@ void addSlicePassesUpToTileAndFuse(OpPassManager &pm) {
     }
 
     funcPm.addPass(createMarkPatternsForTileAndFusePass());
+    funcPm.addPass(createReductionTilingPass());
     funcPm.addPass(createTileAndFusePass(TorqHw::get().getSliceCount()));
 }
 

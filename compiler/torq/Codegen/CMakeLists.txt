@@ -51,6 +51,7 @@ set(sources
     PeelTileLoopsPass.cpp
     Pool.cpp
     ProfilingPass.cpp
+    ReductionTilingPass.cpp
     ReplaceForLoopsWithMidIterationPass.cpp
     ResolveAddressesPass.cpp
     ResolveInvocationArgumentsPass.cpp

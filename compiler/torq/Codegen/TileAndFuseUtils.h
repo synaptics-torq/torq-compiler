@@ -14,28 +14,35 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/LogicalResult.h"
 
 #include "mlir/IR/OpDefinition.h"
 
-// Helpers specific to the TileAndFuse pass's fit-to-memory logic.
+// Helpers shared by TileAndFuse and its preparatory tiling passes.
 //
 // These deliberately live here rather than in TilingUtils.h: TilingUtils is a
 // shared, multi-consumer file for generic tiling/slicing helpers used by both
 // TileAndFusePass and LinalgSlicingPass (see its commit history), whereas
-// everything below is single-consumer, TileAndFuse-specific machinery -- the
-// memory-fit shrink/grow search and the types that support it. Keeping that
-// boundary explicit avoids widening TilingUtils.h's interface for consumers
-// that never need T&F's fit-to-memory model.
+// everything below is TileAndFuse-specific machinery or prepares IR for that
+// pass. Keeping that boundary explicit avoids widening TilingUtils.h's
+// interface for consumers that do not participate in T&F.
 
 namespace mlir {
+class IRRewriter;
 class Operation;
 namespace func {
 class FuncOp;
 } // namespace func
+namespace linalg {
+class GenericOp;
+class LinalgOp;
+} // namespace linalg
 } // namespace mlir
 
 namespace mlir::syna::torq {
+
+inline constexpr llvm::StringLiteral TORQ_REDUCTION_TILING_LOOP = "torq-reduction-tiling-loop";
 
 // Iteration domains that can be tiled, in the order they should be tiled.
 struct TilingInfo {
@@ -101,5 +108,23 @@ void splitOversizedMatmulsAlongK(func::FuncOp funcOp);
 
 // LRAM budget available to a tile: total LRAM minus descriptor headroom.
 int64_t getLramTilingBudget();
+
+// Estimate the total operand bytes of a linalg op at the given iteration-domain tile sizes.
+llvm::FailureOr<int64_t>
+estimateTiledOperandBytes(linalg::LinalgOp linalgOp, llvm::ArrayRef<int64_t> tileSizes);
+
+// Shrink tileSize down until both the common tile and the final (possibly
+// smaller) tail tile are SDIM-compatible with the encoding in Utils/Kernel.cpp.
+int64_t makeSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize);
+
+// Pick the largest reduction tile at most requestedTileSize that is
+// SDIM-compatible, allowing a (SDIM-friendly) tail when requestedTileSize does
+// not divide reductionSize evenly.
+int64_t largestReductionTileAtMost(int64_t reductionSize, int64_t requestedTileSize);
+
+// Rewrite a marked keepdims reduction into a tileable non-keepdims reduction plus reshape.
+// Return the replacement reduction, or nullptr if the op was not rewritten.
+linalg::GenericOp
+rewriteKeepdimsFuseGroupReduction(mlir::IRRewriter &rewriter, linalg::GenericOp op);
 
 } // namespace mlir::syna::torq

@@ -201,8 +201,9 @@ void applyMatmulTilingHeuristics(
     // Convolution and pooling tiles carry a halo the matmul cost model ignores.
     Operation *principalOp = isMarkedFuseGroup(op) ? getFuseGroupPrincipalOpBackward(op) : op;
     bool isConvOrPool =
-        isa<linalg::ConvolutionOpInterface>(principalOp) ||
-        isa<linalg::PoolingNhwcMaxOp, linalg::PoolingNchwMaxOp, linalg::PoolingNcwMaxOp,
+        isa_and_nonnull<linalg::ConvolutionOpInterface>(principalOp) ||
+        isa_and_nonnull<
+            linalg::PoolingNhwcMaxOp, linalg::PoolingNchwMaxOp, linalg::PoolingNcwMaxOp,
             linalg::PoolingNhwcSumOp, linalg::PoolingNchwSumOp>(principalOp);
     if (hasExtract || isConvOrPool)
         return;

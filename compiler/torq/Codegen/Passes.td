@@ -402,6 +402,21 @@ def AssignDtcmItcmXramAddresses :
 
 }
 
+def ReductionTiling :
+    InterfacePass<"torq-reduction-tiling",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Tile linalg reductions for NSS descriptor and LRAM constraints";
+  let constructor =
+      "mlir::syna::torq::createReductionTilingPass()";
+
+  let dependentDialects = [
+        "arith::ArithDialect",
+        "linalg::LinalgDialect",
+        "scf::SCFDialect",
+        "tensor::TensorDialect"
+    ];
+}
+
 def TileAndFuse :
     InterfacePass<"torq-tile-and-fuse",
          "mlir::FunctionOpInterface"> {
@@ -445,26 +460,6 @@ def ReplaceForLoopsWithMidIteration :
         "linalg::LinalgDialect",
     ];
 
-}
-
-def TileReductionForLram:
-    InterfacePass<"torq-tile-reduction-for-lram",
-         "mlir::FunctionOpInterface"> {
-
-    let summary = "Tile reduction dimensions of linalg ops to fit in LRAM";
-
-    let description = [{
-        Tiles reduction dimensions of linalg.generic ops whose input tensors exceed LRAM capacity.
-        This ensures that downstream TorqHL conversion only sees LRAM-sized inputs.
-    }];
-
-    let constructor =
-        "mlir::syna::torq::createTileReductionForLramPass()";
-
-    let dependentDialects = [
-        "::mlir::linalg::LinalgDialect",
-        "::mlir::scf::SCFDialect"
-    ];
 }
 
 def TorqHLTileLargeInputs:

@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -47,6 +48,31 @@
 #define DEBUG_TYPE "torq-tile-and-fuse-utils"
 
 namespace mlir::syna::torq {
+
+llvm::FailureOr<int64_t>
+estimateTiledOperandBytes(linalg::LinalgOp linalgOp, ArrayRef<int64_t> tileSizes) {
+    if (tileSizes.size() != linalgOp.getNumLoops())
+        return llvm::failure();
+
+    int64_t estimatedBytes = 0;
+    for (OpOperand &operand : linalgOp->getOpOperands()) {
+        auto tensorType = dyn_cast<RankedTensorType>(operand.get().getType());
+        if (!tensorType || !tensorType.hasStaticShape())
+            return llvm::failure();
+
+        AffineMap map = linalgOp.getMatchingIndexingMap(&operand);
+        int64_t numElements = 1;
+        for (auto [resultIndex, expr] : llvm::enumerate(map.getResults())) {
+            int64_t dimSize = tensorType.getDimSize(resultIndex);
+            if (auto dimExpr = dyn_cast<AffineDimExpr>(expr))
+                dimSize = std::min(dimSize, tileSizes[dimExpr.getPosition()]);
+            numElements *= dimSize;
+        }
+        estimatedBytes +=
+            numElements * llvm::divideCeil(tensorType.getElementTypeBitWidth(), int64_t(8));
+    }
+    return estimatedBytes;
+}
 
 int64_t getSmallestTileSize(const TilingInfo &tilingInfo, int64_t domain, int64_t domainSize) {
     for (int64_t size = 1; size < domainSize; ++size) {
@@ -472,6 +498,48 @@ namespace {
 
 constexpr int64_t kMaxReduceTileElements = 1 << 16;
 
+// Return true if a length can be represented using the SDIM encoding in
+// Utils/Kernel.cpp without tripping the decomposeIntoTwoFactors() assert.
+// A "SDIM-friendly" length is either:
+//   * <= 0x7fff  – fits in a single SDIM counter, or
+//   * factorizable as a * b with a, b <= 0x7fff – can be encoded as two nested SDIM loops.
+constexpr int64_t kMaxFactor = 0x7fff;
+bool isSdimFriendlyCount(int64_t number) {
+    if (number <= kMaxFactor)
+        return true;
+
+    for (int64_t i = llvm::divideCeil(number, kMaxFactor);
+         i <= (int64_t)std::sqrt((double)number) + 1; ++i) {
+        if (number % i == 0) {
+            int64_t j = number / i;
+            if (j <= kMaxFactor) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Return true if using `tileSize` to 1-D tile `originalSize` is compatible
+// with SDIM handling in Kernel.cpp.
+//
+// We require that both:
+//   * tileSize          – the common tile length, and
+//   * remainder         – the final (possibly smaller) tile where
+//
+//         originalSize = k * tileSize + remainder
+//
+// are SDIM-friendly. This guarantees that addMemNdlDims() can always encode
+// both the main tiles and the tail tile without decomposeIntoTwoFactors()
+// ever returning {-1, -1}.
+bool isSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize) {
+    if (!isSdimFriendlyCount(tileSize))
+        return false;
+
+    int64_t remainder = iterDomainSize % tileSize;
+    return (remainder == 0 || isSdimFriendlyCount(remainder));
+}
+
 llvm::FailureOr<int64_t>
 estimateTiledOperandBytes(linalg::LinalgOp linalgOp, unsigned reductionDim, int64_t tileSize) {
     int64_t estimatedBytes = 0;
@@ -560,6 +628,32 @@ splitMatmulAlongK(IRRewriter &rewriter, linalg::LinalgOp op, int64_t chunkSize) 
 }
 
 } // namespace
+
+int64_t makeSdimFriendlyTileSize(int64_t iterDomainSize, int64_t tileSize) {
+    // A non-positive size is already invalid (e.g. the "too small" sentinel that
+    // makeByteAlignedTileSize returns when composed via getFixpointF in
+    // TileAndFusePass.cpp); pass it through instead of searching and tripping
+    // the assert.
+    if (tileSize <= 0)
+        return tileSize;
+
+    // Adjust tileSize downwards until both the common tile size and the
+    // remainder tile size are SDIM-friendly. This preserves the
+    // memory-fit invariant because we only shrink the tile.
+    for (tileSize = std::min(int64_t(kMaxFactor * kMaxFactor), tileSize); tileSize > 0;
+         --tileSize) {
+        if (isSdimFriendlyTileSize(iterDomainSize, tileSize))
+            break;
+    }
+    // isValidTileSize should always succeed for tileSize == 1
+    assert(tileSize > 0 && "failed to find SDIM-friendly tile size for domain");
+
+    return tileSize;
+}
+
+int64_t largestReductionTileAtMost(int64_t reductionSize, int64_t requestedTileSize) {
+    return makeSdimFriendlyTileSize(reductionSize, std::min(reductionSize, requestedTileSize));
+}
 
 // LRAM budget for a single non-tileable op: total LRAM minus 14k headroom for
 // descriptors (used to be TorqHw::get().getAvailableLramSize()). Borrowed from

@@ -379,6 +379,12 @@ def numpy_instance_norm(x, scale, bias, eps, output_dtype):
     return out.astype(output_dtype)
 
 
+def numpy_reduce_mean(x, axis, keepdims, output_dtype):
+    inp = x.astype(np.float32)
+    mean = np.mean(inp, axis=axis, keepdims=keepdims, dtype=np.float32)
+    return mean.astype(output_dtype)
+
+
 def llvmcpu_reference_outputs(
     mlir_path,
     inputs: List[np.ndarray],

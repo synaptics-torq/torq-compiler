@@ -104,18 +104,17 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createKernelSelectionPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveAddressesPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createReductionTilingPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass(int64_t sliceCount = 0);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createPeelTileLoopsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createReplaceForLoopsWithMidIterationPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileReductionForLramPass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTorqHLTileLargeInputsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createSwapConvertExtractSlicePass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createDtcmTilePass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveInvocationArgumentsPass();

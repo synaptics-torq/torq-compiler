@@ -22,6 +22,7 @@ from torq.lab.verification.reference import (  # noqa: F401
     execute_onnx_model_numpy,
     parse_instance_norm_params,
     numpy_instance_norm,
+    numpy_reduce_mean,
 )
 
 
@@ -118,6 +119,41 @@ def numpy_instancenorm_reference_results(input_data, mlir_io_spec, mlir_model_fi
     output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
     scale, bias, eps = parse_instance_norm_params(mlir_model_file)
     return [numpy_instance_norm(data[0], scale, bias, eps, output_dtype)]
+
+
+@versioned_unhashable_object_fixture
+def numpy_reducemean_reference_results(input_data, mlir_io_spec, mlir_model_file):
+    """ReduceMean reference computed in numpy with fp32 accumulation.
+
+    Bypasses the llvm-cpu reference, whose bf16-accumulated mean is wildly
+    inaccurate for large spatial reductions (and order-dependent), and for
+    small reductions whose large-amplitude inputs cancel. The TORQ NPU
+    accumulates in fp32, so the numpy reference matches it.
+    """
+    from .iree import get_dtype
+
+    data = input_data.data if hasattr(input_data, 'data') else input_data
+    assert len(data) == 1
+    assert len(mlir_io_spec.outputs) == 1
+    output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
+
+    in_shape = np.shape(data[0])
+    out_shape = tuple(mlir_io_spec.outputs[0].shape)
+    if len(out_shape) == len(in_shape) - 1:
+        # keepdims=0: the reduced axis is dropped from the output shape.
+        keepdims = False
+        candidates = [
+            i for i in range(len(in_shape)) if in_shape[:i] + in_shape[i + 1:] == out_shape
+        ]
+    else:
+        # keepdims=1: the reduced axis becomes 1 in the output shape.
+        keepdims = True
+        candidates = [
+            i for i in range(len(in_shape)) if out_shape[i] == 1 and in_shape[i] != 1
+        ]
+    assert len(candidates) == 1, f"cannot infer reduced axis from {in_shape} -> {out_shape}"
+
+    return [numpy_reduce_mean(data[0], candidates[0], keepdims, output_dtype)]
 
 
 @versioned_unhashable_object_fixture

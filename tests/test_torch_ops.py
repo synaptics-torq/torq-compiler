@@ -267,6 +267,18 @@ def _is_instancenorm_case(case_config):
     return mlir_file is not None and "instancenorm" in mlir_file.name.lower()
 
 
+def _is_numpy_reducemean_case(case_config):
+    # The NPU accumulates reductions in fp32, while the llvm-cpu reference
+    # accumulates in bf16. For these cases (large reductions, or small
+    # reductions over large-amplitude inputs that cancel) the reference is
+    # the inaccurate side, so use the fp32-accumulated numpy reference.
+    mlir_file = case_config.get("static_mlir_model_file")
+    if mlir_file is None:
+        return False
+    name = mlir_file.name.lower()
+    return "reducemean-tiling" in name or "reducemean_wide_kept_dims_bf16" in name
+
+
 def _is_const_weight_matmul_case(case_config):
     mlir_file = case_config.get("static_mlir_model_file")
     return mlir_file is not None and "matmul-1x128x" in mlir_file.name.lower()
@@ -282,6 +294,9 @@ def reference_results(request, case_config):
 
     if _is_instancenorm_case(case_config):
         return request.getfixturevalue("numpy_instancenorm_reference_results")
+
+    if _is_numpy_reducemean_case(case_config):
+        return request.getfixturevalue("numpy_reducemean_reference_results")
 
     if _is_const_weight_matmul_case(case_config):
         return request.getfixturevalue("numpy_matmul_const_weight_reference_results")
