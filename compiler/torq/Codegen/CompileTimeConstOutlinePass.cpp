@@ -41,9 +41,13 @@ namespace mlir::syna::torq {
 
 namespace {
 
+void collectExternallyReadValues(Operation *op, SmallVectorImpl<Value> &values);
+
 // Recursively collect all ops in the def-chain of `op` that live inside
-// `clonedOutermost` (the cloned outermost loop op).  Ops whose defining op is
-// outside `clonedOutermost` are treated as external constants and skipped.
+// `clonedOutermost` (the cloned outermost loop op), including the producers of
+// values `op` reads only inside its regions (e.g. a tiled reduction's scf.for
+// reading a slice of the enclosing tile). Ops whose defining op is outside
+// `clonedOutermost` are treated as external constants and skipped.
 // Returns failure if any operand is defined by a runtime-input op (dispatch
 // tensor load / HAL binding).
 LogicalResult
@@ -51,7 +55,9 @@ collectDefChain(Operation *op, Operation *clonedOutermost, SetVector<Operation *
     if (!visited.insert(op))
         return success();
 
-    for (Value operand : op->getOperands()) {
+    SmallVector<Value> reads;
+    collectExternallyReadValues(op, reads);
+    for (Value operand : reads) {
         if (isa<BlockArgument>(operand))
             continue; // block args (IVs / iter-args) are fine
         Operation *defOp = operand.getDefiningOp();

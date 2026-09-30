@@ -3112,11 +3112,12 @@ LogicalResult findPerChannelBiasDimsFromRescale(Operation *rescaleOp, int64_t &b
         );
         return failure();
     }
-    else if (!scaleType && !isa<arith::ConstantOp>(scale.getDefiningOp())) {
+    else if (!scaleType) {
+        // A scalar multiplier (per-tensor quantization) says nothing about the channel dim.
+        // Reading the indexing map of generic operand 0 would pick the data input's first dim.
         LLVM_DEBUG(
-            llvm::dbgs()
-            << "[findPerChannelBiasDimsFromRescale] scale is not a tensor or constant -> cannot "
-               "infer bias channel dim -> failure\n"
+            llvm::dbgs() << "[findPerChannelBiasDimsFromRescale] scale is a scalar -> cannot "
+                            "infer bias channel dim -> failure\n"
         );
         return failure();
     }
@@ -3527,7 +3528,10 @@ computeBias(FusionPlan &fusionPlan, int biasChDim, std::optional<Value> &optiona
     SmallVector<Operation *, 8> opsToDelete;
 
     OpBuilder::InsertionGuard g(builder);
-    builder.setInsertionPoint(firstOp);
+    // Build the bias right before the fused output rather than at the anchor: the chain can
+    // consume values defined after the anchor (e.g. weight column sums that dispatch formation
+    // clones next to their consumer), and callers create the fused op at the fused output.
+    builder.setInsertionPoint(fusionPlan.getFusedOutput().getDefiningOp());
     auto maybeBias = createNewBias(fusionPlan, builder, opsToDelete, optionalWeightZp);
     if (failed(maybeBias)) {
         return failure();

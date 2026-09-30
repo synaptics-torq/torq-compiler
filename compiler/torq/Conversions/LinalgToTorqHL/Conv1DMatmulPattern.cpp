@@ -425,6 +425,12 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         std::optional<Value> optionalWeightZpV;
         ScaleClampInfo scInfo = getDefaultScaleClampInfo(finalType, output.getDefiningOp());
 
+        // No per-channel evidence in the chain (e.g. a per-tensor requantization): the
+        // bias, which still carries the per-channel zero-point correction, is per
+        // output channel F.
+        if (fusionPlanOr->channelDim.value() < 0)
+            fusionPlanOr->channelDim = 1;
+
         FailureOr<Value> biasV = computeBiasAndRescaleInfo(
             *fusionPlanOr, fusionPlanOr->channelDim.value(), optionalWeightZpV, scInfo
         );

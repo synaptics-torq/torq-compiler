@@ -24,6 +24,7 @@ iree_cc_library(
     OptimizeLinalgForTorqPass.cpp
     OptimizeTransposeLayoutPass.cpp
     UnrollStaticScfForLoopsPass.cpp
+    SinglePixelConvToMatmulPass.cpp
     TorqAnnotateTorqResourcesPass.cpp
     ConvertNhwcOpToNchwPass.cpp
     RaiseResizeNearestNeighborPass.cpp

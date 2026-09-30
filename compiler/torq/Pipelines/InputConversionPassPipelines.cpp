@@ -68,6 +68,10 @@ void buildTosaTransformPassPipeline(OpPassManager &passManager) {
     // use the standard tosa pipeline
     iree_compiler::buildTOSAInputConversionPassPipeline(passManager);
 
+    // TFLite FULLY_CONNECTED arrives as a 1x1 convolution over one pixel;
+    // turn it back into a matmul so it lowers to the fully-connected kernel.
+    passManager.addNestedPass<func::FuncOp>(createSinglePixelConvToMatmulPass());
+
     // apply Torq-specific type conversion
     buildTorqTypeConversionPipeline(passManager);
 

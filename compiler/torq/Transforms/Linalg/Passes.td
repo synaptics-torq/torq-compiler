@@ -227,6 +227,31 @@ def UnrollStaticScfForLoops :
     ];
 }
 
+def SinglePixelConvToMatmul :
+    InterfacePass<"torq-single-pixel-conv-to-matmul",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Rewrite 1x1 convolutions over a single pixel as matmuls";
+
+    let description = [{
+        Rewrites linalg.conv_2d_nhwc_hwcf(_q) with a [N, 1, 1, C] input and a
+        [1, 1, C, F] filter as linalg.(quantized_)matmul on [N, C] x [C, F].
+
+        The TOSA import of TFLite FULLY_CONNECTED produces this convolution.
+        Lowered as a convolution it runs on the conv kernel, which is far
+        slower than the fully-connected kernel the matmul lowers to.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createSinglePixelConvToMatmulPass()";
+
+    let dependentDialects = [
+        "arith::ArithDialect",
+        "linalg::LinalgDialect",
+        "tensor::TensorDialect"
+    ];
+}
+
 def DecomposeConvToSpaceToDepth :
     InterfacePass<"torq-decompose-conv-to-space-to-depth",
                   "mlir::FunctionOpInterface"> {
