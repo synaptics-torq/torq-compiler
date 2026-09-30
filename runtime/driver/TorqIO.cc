@@ -155,10 +155,13 @@ iree_status_t loadLibraryFromMemory(const uint8_t* data, size_t size,
   ssize_t written = write(fd, data, size);
   close(fd);
   if (written < 0 || static_cast<size_t>(written) != size) {
+    unlink(tmp.c_str());
     return iree_make_status(IREE_STATUS_INTERNAL,
                             "failed to write temporary library file");
   }
   void* handle = dlopen(tmp.c_str(), RTLD_NOW | RTLD_LOCAL);
+  // the loaded mapping outlives the file, so remove it now to avoid leaking one per load
+  unlink(tmp.c_str());
   if (!handle) {
     return iree_make_status(IREE_STATUS_INTERNAL, "dlopen failed: %s", dlerror());
   }

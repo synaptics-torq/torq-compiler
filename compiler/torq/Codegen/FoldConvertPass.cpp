@@ -849,7 +849,7 @@ class FoldDuplicateConversion : public OpRewritePattern<torq_hl::ConvertOp> {
         auto inEncoding = getEncoding(op.getInput().getType());
         auto outEncoding = getEncoding(op.getOutput().getType());
 
-        if (inEncoding.getMemSpace() != torq_hl::MemorySpace::Xram &&
+        if (inEncoding.getMemSpace() != torq_hl::MemorySpace::Xram ||
             outEncoding.getMemSpace() != torq_hl::MemorySpace::Lram) {
             return failure();
         }
@@ -877,8 +877,8 @@ class FoldDuplicateConversion : public OpRewritePattern<torq_hl::ConvertOp> {
             // if both lhs and rhs defining Op are convertOp
             // check if two convertOp input is the same tensor
             // if so, we can replace one of the convertOp output with the other
-            auto lhsConvertOp = dyn_cast<torq_hl::ConvertOp>(lhs.getDefiningOp());
-            auto rhsConvertOp = dyn_cast<torq_hl::ConvertOp>(rhs.getDefiningOp());
+            auto lhsConvertOp = lhs.getDefiningOp<torq_hl::ConvertOp>();
+            auto rhsConvertOp = rhs.getDefiningOp<torq_hl::ConvertOp>();
 
             if (lhsConvertOp && rhsConvertOp) {
                 if (lhsConvertOp == rhsConvertOp) {
@@ -888,13 +888,19 @@ class FoldDuplicateConversion : public OpRewritePattern<torq_hl::ConvertOp> {
                 Value lhsInput = lhsConvertOp.getInput();
                 Value rhsInput = rhsConvertOp.getInput();
 
-                if (lhsInput == rhsInput) {
+                // the kept output must be usable in place of the dropped one
+                if (lhsInput == rhsInput &&
+                    lhsConvertOp.getOutput().getType() == rhsConvertOp.getOutput().getType()) {
 
                     if (lhsConvertOp == op) {
-                        rhsConvertOp.getOutput().replaceAllUsesWith(lhsConvertOp.getOutput());
+                        rewriter.replaceAllUsesWith(
+                            rhsConvertOp.getOutput(), lhsConvertOp.getOutput()
+                        );
                     }
                     else {
-                        lhsConvertOp.getOutput().replaceAllUsesWith(rhsConvertOp.getOutput());
+                        rewriter.replaceAllUsesWith(
+                            lhsConvertOp.getOutput(), rhsConvertOp.getOutput()
+                        );
                     }
 
                     return success();
