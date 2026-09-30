@@ -334,6 +334,7 @@ setup(
         "torq": os.path.join("bindings", "python", "torq"),
         # Pure-Python torq sources live outside the compiler bindings tree.
         "torq.lab": os.path.join(TORQ_SOURCE_DIR, "python", "torq", "lab"),
+        "torq.utils": os.path.join(TORQ_SOURCE_DIR, "python", "torq", "utils"),
         "torq.gen_config": os.path.join(TORQ_SOURCE_DIR, "python", "torq", "gen_config"),
         # iree.tools.tf from the IREE submodule
         "iree.tools.tf": os.path.join(IREE_TF_PYTHON_DIR, "iree", "tools", "tf"),
