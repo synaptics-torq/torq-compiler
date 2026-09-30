@@ -1,7 +1,6 @@
 #include <torq/Codegen/VirtualMemory.h>
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "torq/Codegen/BufferizationUtils.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "llvm/ADT/MapVector.h"
@@ -15,140 +14,81 @@ namespace mlir::syna::torq {
 
 namespace {
 
-static llvm::cl::opt<bool> clAnnotateVirtualBufferIds(
-    "torq-vm-annotate-virtual-buffer-ids", llvm::cl::desc("Annotate virtual buffer IDs"),
-    llvm::cl::init(false)
-);
-
 static llvm::cl::opt<bool> clPrintStatistics(
     "torq-vm-print-statistics", llvm::cl::desc("Print virtual memory statistics"),
     llvm::cl::init(false)
 );
 
-static const std::string VIRTUAL_OBJECT_ID_ATTR_NAME = "torq-virtual-buffer-id";
-
-class VirtualBuffer;
 class VirtualAlias;
-class VirtualObject;
+class VirtualBuffer;
 class VirtualMemory;
 
-class PhysicalObject {
-    Value value_;
-
-  public:
-    PhysicalObject(const PhysicalObject &) = delete;
-    PhysicalObject &operator=(const PhysicalObject &) = delete;
-    PhysicalObject(PhysicalObject &&) = delete;
-    PhysicalObject &operator=(PhysicalObject &&) = delete;
-
-    VirtualMemory &vm();
-
-    bool isPinned();
-
-    Value value() const { return value_; }
-
-    virtual VirtualObject &virtualObject() = 0;
-
-    PhysicalObject(Value value) : value_(value) {}
-
-    virtual ~PhysicalObject() = default;
-};
-
-class PhysicalBuffer : public PhysicalObject {
-    VirtualBuffer &virtualBuffer_;
-
-  public:
-    VirtualBuffer &virtualBuffer() { return virtualBuffer_; }
-
-    virtual VirtualObject &virtualObject() override;
-
-    int size();
-
-    PhysicalBuffer(Value value, VirtualBuffer &virtualBuffer)
-        : PhysicalObject{value}, virtualBuffer_(virtualBuffer) {}
-};
-
-class PhysicalAlias : public PhysicalObject {
-
-    VirtualAlias &virtualAlias_;
-
-  public:
-    PhysicalObject &parent();
-
-    VirtualAlias &virtualAlias();
-
-    virtual VirtualObject &virtualObject() override;
-
-    PhysicalAlias(Value value, VirtualAlias &virtualAlias)
-        : PhysicalObject{value}, virtualAlias_(virtualAlias) {}
-};
-
+// A memref of the converted memory space: a buffer, or a view of one.
 class VirtualObject {
-    int id_;
     VirtualMemory &vm_;
+    // the memref in the input IR
     Value value_;
-    int pinCount_{0};
-    SmallVector<std::unique_ptr<VirtualAlias>> aliases_;
+    // the memref holding the object now: value_ until the first swap-out, a fresh alloc
+    // (a fresh view, for an alias) after each swap-in, null while swapped out
+    Value physical_;
+    int pinCount_ = 0;
+    SmallVector<VirtualAlias *> aliases_;
+
+  protected:
+    void setPhysical(Value physical) { physical_ = physical; }
+    void invalidateAliases();
 
   public:
+    VirtualObject(VirtualMemory &vm, Value value, Value physical)
+        : vm_(vm), value_(value), physical_(physical) {}
+    virtual ~VirtualObject() = default;
     VirtualObject(const VirtualObject &) = delete;
     VirtualObject &operator=(const VirtualObject &) = delete;
-    VirtualObject(VirtualObject &&) = delete;
-    VirtualObject &operator=(VirtualObject &&) = delete;
-
-    virtual VirtualBuffer &root() = 0;
-
-    SmallVector<std::unique_ptr<VirtualAlias>> &aliases() { return aliases_; }
-
-    int id() const { return id_; }
 
     VirtualMemory &vm() const { return vm_; }
-
     Value value() const { return value_; }
+    bool isSwappedOut() const { return !physical_; }
+    bool isInPlace() const { return physical_ == value_; }
+    Value physical() const {
+        assert(physical_ && "the object is swapped out");
+        return physical_;
+    }
 
-    virtual PhysicalObject &physicalObject() = 0;
-
-    virtual bool isSwappedOut() = 0;
-
-    int isPinned() const { return pinCount_ > 0; }
-
-    int pinCount() const { return pinCount_; }
-
+    // A pinned object stays resident: an op's operands while it is processed, and the
+    // buffers a start_program accesses until its wait_program.
+    bool isPinned() const { return pinCount_ > 0; }
     virtual void pin() { pinCount_++; }
-
     virtual void unpin() {
-        assert(pinCount_ > 0 && "Unpinning a non-pinned object");
+        assert(pinCount_ > 0 && "unpinning an object that is not pinned");
         pinCount_--;
     }
 
-    virtual PhysicalObject *swapIn(IRRewriter &rewriter, Location loc) = 0;
+    void addAlias(VirtualAlias *alias) { aliases_.push_back(alias); }
 
-    VirtualAlias &addAlias(Value virtualValue) {
-        auto &aliasPtr =
-            aliases_.emplace_back(std::make_unique<VirtualAlias>(virtualValue, *this, vm()));
-        return *aliasPtr;
-    }
+    virtual VirtualBuffer &root() = 0;
 
-    VirtualObject(VirtualMemory &vm, Value value);
-
-    virtual ~VirtualObject() = default;
+    virtual void swapIn(IRRewriter &rewriter, Location loc) = 0;
 };
 
 class VirtualBuffer : public VirtualObject {
-    int size_;
-    std::optional<PhysicalBuffer *> maybePhysicalBuffer_;
+    const int64_t size_;
 
-    // Copy of the buffer data in the swap space. Retained across swap in and
-    // freed when the swapped-in buffer is written. So when non-null, it is up
-    // to date and swapping out can skip the store.
+    // Copy of the contents in the swap space, kept across a swap-in and freed when the
+    // buffer is written: while it exists it is up to date, so a swap-out skips the store.
     Value swappedOutValue_;
 
   public:
-    virtual VirtualBuffer &root() override { return *this; }
+    VirtualBuffer(VirtualMemory &vm, Value value)
+        : VirtualObject(vm, value, /*physical=*/value),
+          size_(getEncodedTotalSizeBytes(cast<MemRefType>(value.getType()))) {}
 
-    // free the retained swapped out buffer; called before the contents change
+    VirtualBuffer &root() override { return *this; }
+
+    int64_t size() const { return size_; }
+
+    // Free the retained swap copy; called before the contents change.
     void freeSwappedOutValue(IRRewriter &rewriter, Location loc) {
-        assert(!isSwappedOut() && "the swapped out buffer holds the only copy");
+        assert(!isSwappedOut() && "the swap copy holds the only contents");
         if (!swappedOutValue_) {
             return;
         }
@@ -156,459 +96,139 @@ class VirtualBuffer : public VirtualObject {
         swappedOutValue_ = nullptr;
     }
 
-    virtual void pin() override;
-
-    virtual void unpin() override;
-
-    int size() const { return size_; }
-
-    Value swappedOutValue() const { return swappedOutValue_; }
-
-    virtual PhysicalObject &physicalObject() override { return physicalBuffer(); }
-
-    PhysicalBuffer &physicalBuffer() {
-        assert(maybePhysicalBuffer_.has_value() && "Physical buffer is not allocated");
-        return *(maybePhysicalBuffer_.value());
-    }
-
-    virtual bool isSwappedOut() override { return !maybePhysicalBuffer_.has_value(); }
-
-    virtual PhysicalObject *swapIn(IRRewriter &rewriter, Location loc) override;
+    void swapIn(IRRewriter &rewriter, Location loc) override;
 
     void swapOut(IRRewriter &rewriter, Location loc);
 
-    void initialize();
-
-    void dump() {
-        llvm::dbgs() << "Buffer id:" << id() << " size: " << size_ << " value: ";
-        value().dump();
-    }
-
-    VirtualBuffer(Value value, VirtualMemory &vm) : VirtualObject{vm, value} {
-
-        size_ = getEncodedTotalSizeBytes(cast<MemRefType>(value.getType()));
-
-        if (clAnnotateVirtualBufferIds) {
-            // set the id attribute on the operation that generated the value
-            auto opResult = dyn_cast<OpResult>(value);
-
-            if (opResult) {
-
-                SmallVector<int64_t> resultIds(opResult.getOwner()->getNumResults());
-
-                // if an operator returns multiple results, the attribute may already be set
-                auto existingAttr =
-                    opResult.getOwner()->getAttrOfType<ArrayAttr>(VIRTUAL_OBJECT_ID_ATTR_NAME);
-                if (existingAttr) {
-                    for (auto prevId : existingAttr.getValue()) {
-                        resultIds.push_back(cast<IntegerAttr>(prevId).getSInt());
-                    }
-                }
-
-                // set the id for the current result
-                resultIds[opResult.getResultNumber()] = id();
-
-                // update the attribute
-                IRRewriter rewriter = IRRewriter(opResult.getContext());
-                opResult.getOwner()->setAttr(
-                    VIRTUAL_OBJECT_ID_ATTR_NAME, rewriter.getIndexArrayAttr(resultIds)
-                );
-            }
-        }
-    }
+    // Rewrite the buffer's dealloc to whatever storage is left, or erase it.
+    void deallocate(memref::DeallocOp deallocOp, IRRewriter &rewriter);
 };
 
+// A view of a virtual object.
 class VirtualAlias : public VirtualObject {
-
-    std::optional<PhysicalAlias> maybePhysicalAlias;
     VirtualObject &parent_;
     OpOperand &parentOperand_;
 
   public:
-    virtual VirtualBuffer &root() override { return parent().root(); }
+    VirtualAlias(VirtualMemory &vm, Value value, VirtualObject &parent)
+        // the view is usable as is while its parent is in place; once the parent has
+        // moved, the view must be cloned onto the parent's physical value
+        : VirtualObject(vm, value, parent.isInPlace() ? value : Value()), parent_(parent),
+          parentOperand_(getDerivedMemRefBase(value.getDefiningOp())) {
+        parent.addAlias(this);
+    }
 
-    VirtualObject &parent() { return parent_; }
+    VirtualBuffer &root() override { return parent_.root(); }
 
-    virtual void pin() override {
+    void pin() override {
         VirtualObject::pin();
         parent_.pin();
     }
 
-    virtual void unpin() override {
+    void unpin() override {
         VirtualObject::unpin();
         parent_.unpin();
     }
 
     void invalidate() {
-        maybePhysicalAlias = std::nullopt;
-
-        // make sure all the aliases pointing to this alias are invalidated
-        for (auto &alias : aliases()) {
-            alias->invalidate();
-        }
+        setPhysical(nullptr);
+        invalidateAliases();
     }
 
-    virtual PhysicalObject *swapIn(IRRewriter &rewriter, Location loc) override {
+    void swapIn(IRRewriter &rewriter, Location loc) override {
+        if (parent_.isSwappedOut()) {
+            parent_.swapIn(rewriter, loc);
+        }
+        Operation *view = rewriter.clone(*value().getDefiningOp());
+        view->getOpOperand(parentOperand_.getOperandNumber()).set(parent_.physical());
+        setPhysical(view->getResult(0));
 
         LLVM_DEBUG({
-            llvm::dbgs() << "Swapping in virtual alias ";
+            llvm::dbgs() << "Swapped in alias ";
             value().dump();
         });
-
-        if (parent().isSwappedOut()) {
-            parent().swapIn(rewriter, loc);
-        }
-
-        auto opResult = dyn_cast<OpResult>(value());
-        auto physicalValueOp = rewriter.clone(*(opResult.getOwner()));
-
-        // create a new copy of the operation with using the right current physical value
-        auto &opOperand = physicalValueOp->getOpOperand(parentOperand_.getOperandNumber());
-        opOperand.set(parent().physicalObject().value());
-
-        maybePhysicalAlias.emplace(physicalValueOp->getResult(0), *this);
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Swapped in to physical alias ";
-            physicalObject().value().dump();
-        });
-
-        return &(maybePhysicalAlias.value());
-    }
-
-    virtual PhysicalObject &physicalObject() override {
-        assert(!isSwappedOut() && "Cannot get physical object of a swapped out alias");
-        return maybePhysicalAlias.value();
-    }
-
-    virtual bool isSwappedOut() override { return !maybePhysicalAlias.has_value(); }
-
-    VirtualAlias(Value value, VirtualObject &parent, VirtualMemory &vm)
-        : VirtualObject{vm, value}, parent_(parent),
-          parentOperand_(getDerivedMemRefBase(value.getDefiningOp())) {
-
-        // initially the virtual alias point to the virtual value if the parent is not
-        // and was never before swapped out
-        if (!parent.isSwappedOut() && parent.physicalObject().value() == parent.value()) {
-            maybePhysicalAlias.emplace(value, *this);
-        }
     }
 };
 
-// This class is used to track the currently active physical buffers and theirs state
-class PhysicalMemory {
-
-    llvm::MapVector<VirtualBuffer *, std::unique_ptr<PhysicalBuffer>> physicalBuffers_;
-    llvm::MapVector<PhysicalBuffer *, int> pinnedBuffers_;
-    int totalPinnedSize_ = 0;
-    int capacity_;
-    int residentBytes_ = 0;
-    int swapOutCount_ = 0;
-    int skippedSwapOutStoreCount_ = 0;
-    int droppedSwapOutCount_ = 0;
-    int64_t droppedSwapOutBytes_ = 0;
-    int skippedSwapInLoadCount_ = 0;
-    int64_t swapOutStoredBytes_ = 0;
-    int64_t swapInLoadedBytes_ = 0;
-
-  public:
-    explicit PhysicalMemory(int capacity) : capacity_(capacity) {}
-
-    int totalPinnedSize() const { return totalPinnedSize_; }
-
-    int totalPhysicalBufferSize() const { return residentBytes_; }
-
-    int usableSize() const { return capacity_; }
-
-    int swapOutCount() const { return swapOutCount_; }
-
-    void countSwapOut() { swapOutCount_++; }
-
-    void noteSkippedSwapOutStore() { skippedSwapOutStoreCount_++; }
-
-    int skippedSwapOutStoreCount() const { return skippedSwapOutStoreCount_; }
-
-    void noteDroppedSwapOut(int64_t bytes) {
-        droppedSwapOutCount_++;
-        droppedSwapOutBytes_ += bytes;
+void VirtualObject::invalidateAliases() {
+    for (VirtualAlias *alias : aliases_) {
+        alias->invalidate();
     }
+}
 
-    int droppedSwapOutCount() const { return droppedSwapOutCount_; }
-
-    int64_t droppedSwapOutBytes() const { return droppedSwapOutBytes_; }
-
-    void noteSkippedSwapInLoad() { skippedSwapInLoadCount_++; }
-
-    int skippedSwapInLoadCount() const { return skippedSwapInLoadCount_; }
-
-    void noteSwapOutStore(int64_t bytes) { swapOutStoredBytes_ += bytes; }
-
-    int64_t swapOutStoredBytes() const { return swapOutStoredBytes_; }
-
-    void noteSwapInLoad(int64_t bytes) { swapInLoadedBytes_ += bytes; }
-
-    int64_t swapInLoadedBytes() const { return swapInLoadedBytes_; }
-
-    void pin(PhysicalBuffer &object) {
-        auto pinCount = pinnedBuffers_[&object];
-
-        if (pinCount == 0) {
-            totalPinnedSize_ += object.size();
-        }
-
-        pinnedBuffers_[&object]++;
-    }
-
-    void unpin(PhysicalBuffer &object) {
-        assert(pinnedBuffers_.contains(&object) && "Buffer not pinned");
-
-        auto pinCount = pinnedBuffers_[&object];
-
-        if (pinCount == 1) {
-            pinnedBuffers_.erase(&object);
-            totalPinnedSize_ -= object.size();
-        }
-        else {
-            pinnedBuffers_[&object] = pinCount - 1;
-        }
-    }
-
-    int pinCount(PhysicalBuffer &object) {
-        if (pinnedBuffers_.contains(&object)) {
-            return pinnedBuffers_[&object];
-        }
-        return 0;
-    }
-
-    PhysicalBuffer *add(VirtualBuffer &obj, Value value) {
-        assert(!physicalBuffers_.contains(&obj) && "Physical buffer already exists for this value");
-        assert(obj.size() + residentBytes_ <= capacity_ && "resident bytes exceed the capacity");
-
-        residentBytes_ += obj.size();
-
-        return physicalBuffers_.try_emplace(&obj, std::make_unique<PhysicalBuffer>(value, obj))
-            .first->second.get();
-    }
-
-    void remove(VirtualBuffer &obj) {
-        assert(physicalBuffers_.contains(&obj) && "Physical buffer not found");
-        residentBytes_ -= physicalBuffers_[&obj]->size();
-        physicalBuffers_.erase(&obj);
-    }
-
-    void dump() {
-
-        llvm::dbgs() << "Current memory usage " << totalPhysicalBufferSize() << "\n";
-
-        llvm::dbgs() << "Active virtual allocations:\n";
-        for (auto &[value, buf] : physicalBuffers_) {
-            auto virtualValue = buf->virtualObject().value();
-            llvm::dbgs() << "   - size " << buf->size() << " ";
-            llvm::dbgs() << "pinned " << pinnedBuffers_.contains(buf.get()) << " ";
-            virtualValue.dump();
-        }
-    }
-
-    void miniDump() {
-        llvm::dbgs() << "Current memory usage " << totalPhysicalBufferSize() << "\n";
-    }
+struct SwapStatistics {
+    int swapOuts = 0;
+    int storesSkipped = 0;
+    int dropped = 0;
+    int64_t droppedBytes = 0;
+    int loadsSkipped = 0;
+    int64_t storedBytes = 0;
+    int64_t loadedBytes = 0;
 };
 
-// This class is used to track the currently active virtual objects
-class VirtualObjects {
-    llvm::MapVector<Value, std::unique_ptr<VirtualBuffer>> virtualBuffers_;
-    llvm::MapVector<Value, VirtualObject *> virtualObjects_;
-    VirtualMemory &vm_;
-
-  public:
-    VirtualObjects(VirtualMemory &vm) : vm_(vm) {}
-
-    void addBuffer(Value value) {
-        assert(!virtualBuffers_.contains(value) && "Virtual buffer already exists for this value");
-
-        virtualBuffers_.try_emplace(value, std::make_unique<VirtualBuffer>(value, vm_));
-        virtualBuffers_[value]->initialize();
-        virtualObjects_.try_emplace(value, virtualBuffers_[value].get());
-    }
-
-    void addAlias(Value value) {
-        auto &baseOpOperand = getDerivedMemRefBase(value.getDefiningOp());
-        auto &parentObject = getVirtualObject(baseOpOperand.get());
-        auto &alias = parentObject.addAlias(value);
-        virtualObjects_.try_emplace(value, &alias);
-    }
-
-    VirtualObject &getVirtualObject(Value virtualValue) {
-        auto it = virtualObjects_.find(virtualValue);
-        assert(it != virtualObjects_.end() && "virtual object not found");
-        return *(it->second);
-    }
-
-    VirtualBuffer &getVirtualBuffer(Value virtualValue) {
-        auto it = virtualBuffers_.find(virtualValue);
-        assert(it != virtualBuffers_.end() && "virtual buffer not found");
-        return *(it->second);
-    }
-
-    Value getPhysicalValue(Value virtualValue) {
-        auto &virtualObject = getVirtualObject(virtualValue);
-        assert(!virtualObject.isSwappedOut() && "virtual object is swapped out");
-        return virtualObject.physicalObject().value();
-    }
-};
-
-// Virtual memory is a class that helps convert all memrefs of a given memory space
-// from a virtual buffers that are allocated as if the memory space is unlimited to
-// physical buffers that are allocated in a memory space of limited size.
-//
-// Memrefs in the virtual space are represented by VirtualObjects and can be
-// either VirtualBuffers (that represent actual memory buffers) or VirtualAliases that
-// are an alias to (part of) a virtual buffer or another virtual alias.
-//
-// Memref in the physical space are represented in a similar way by PhysicalObjects
-// (either PhysicalBuffer and PhysicalAlias).
-//
-// State of virtual and physical objects changes during the execution of a program.
-//
-// At any given point in time VirtualObjects can be in two states: swapped in or
-// swapped out. When they are swapped in they can be accesses in target memory space
-// through the associated physical buffer (resp physical alias). When they are
-// swapped out their data is in a buffer in the swap out memory space and they need
-// to be swapped to a new physical buffer (or alias ) to be accessed.
-//
-// Physical objects (and implicitely the virtual objects associated to them) can be
-// pinned: an op's operands while it is processed, and the buffers a start_program
-// accesses until its wait_program.
-
+// The virtual objects of one memory space and the swap space their buffers spill to.
 class VirtualMemory {
+    llvm::MapVector<Value, std::unique_ptr<VirtualObject>> objects_;
 
   public:
-    VirtualMemory(int capacity, torq_hl::MemorySpace memorySpace)
-        : virtualObjects(*this), physicalMemory(capacity), memorySpace(memorySpace),
+    const int64_t capacity;
+    const torq_hl::MemorySpace memorySpace;
+    const torq_hl::MemorySpace swapMemSpace;
+    SwapStatistics stats;
+
+    // ordered (op index, contents fully overwritten) accesses per buffer
+    DenseMap<Value, SmallVector<std::pair<unsigned, bool>>> bufferAccessSchedule;
+
+    // index (into the processed op list) of the op being processed
+    unsigned currentOpIndex = 0;
+
+    VirtualMemory(int64_t capacity, torq_hl::MemorySpace memorySpace)
+        : capacity(capacity), memorySpace(memorySpace),
           swapMemSpace(
               memorySpace == torq_hl::MemorySpace::Lram ? torq_hl::MemorySpace::Xram
                                                         : torq_hl::MemorySpace::Lram
           ) {}
 
-    int getNextId() { return nextId++; }
+    VirtualObject &object(Value virtualValue) {
+        auto it = objects_.find(virtualValue);
+        assert(it != objects_.end() && "virtual object not found");
+        return *it->second;
+    }
 
-    // deallocates the virtual buffer: updates the internal state of the virtual
-    // memory system and returns the value the existing deallocate operation must
-    // target (a retained swappedOutValue_ gets its own deallocation). A null
-    // return means nothing needs deallocation (the contents were dropped at swap
-    // out) and the deallocate operation must be erased.
-    Value deallocate(Value virtualValue, IRRewriter &rewriter) {
+    VirtualBuffer &buffer(Value virtualValue) {
+        VirtualBuffer &root = object(virtualValue).root();
+        assert(root.value() == virtualValue && "not a buffer");
+        return root;
+    }
 
-        LLVM_DEBUG({
-            llvm::dbgs() << "Deallocate virtual value ";
-            virtualValue.dump();
-        });
-
-        auto &virtualBuffer = virtualObjects.getVirtualBuffer(virtualValue);
-
-        Value physicalValue;
-        if (virtualBuffer.isSwappedOut()) {
-            physicalValue = virtualBuffer.swappedOutValue();
-        }
-        else {
-            virtualBuffer.freeSwappedOutValue(rewriter, virtualValue.getLoc());
-            auto &physicalObject = virtualBuffer.physicalBuffer();
-            physicalValue = physicalObject.value();
-            physicalMemory.remove(virtualBuffer);
-        }
-
-        LLVM_DEBUG({ physicalMemory.miniDump(); });
-
-        return physicalValue;
+    // Register an allocation; it is resident from the start.
+    void addBuffer(Value virtualValue) {
+        assert(!objects_.contains(virtualValue) && "virtual object already registered");
+        objects_.try_emplace(virtualValue, std::make_unique<VirtualBuffer>(*this, virtualValue));
+        assert(residentBytes() <= capacity && "resident bytes exceed the capacity");
     }
 
     void addAlias(Value virtualValue) {
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Allocate alias for virtual value ";
-            virtualValue.dump();
-        });
-
-        virtualObjects.addAlias(virtualValue);
-
-        LLVM_DEBUG({ physicalMemory.miniDump(); });
+        assert(!objects_.contains(virtualValue) && "virtual object already registered");
+        VirtualObject &parent = object(getDerivedMemRefBase(virtualValue.getDefiningOp()).get());
+        objects_.try_emplace(
+            virtualValue, std::make_unique<VirtualAlias>(*this, virtualValue, parent)
+        );
     }
 
-    void addAllocation(Value virtualValue) {
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Allocate for virtual value ";
-            virtualValue.dump();
-        });
-
-        virtualObjects.addBuffer(virtualValue);
-
-        LLVM_DEBUG({ physicalMemory.miniDump(); });
+    int64_t residentBytes() const {
+        int64_t bytes = 0;
+        for (const auto &[value, object] : objects_) {
+            VirtualBuffer &root = object->root();
+            if (&root == object.get() && !root.isSwappedOut()) {
+                bytes += root.size();
+            }
+        }
+        return bytes;
     }
 
-    void freeSwappedOutValue(Value virtualValue, IRRewriter &rewriter, Location loc) {
-        virtualObjects.getVirtualObject(virtualValue).root().freeSwappedOutValue(rewriter, loc);
-    }
-
-    // inserts IR to copy the swapped out virtual buffer back to the the memory space into
-    // a new physical buffer and updates the virtual memory system internal state
-    Value swapIn(Value virtualValue, IRRewriter &rewriter, Location loc) {
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Swap-in virtual value ";
-            virtualValue.dump();
-        });
-
-        auto &virtualObject = virtualObjects.getVirtualObject(virtualValue);
-        virtualObject.swapIn(rewriter, loc);
-
-        LLVM_DEBUG({ physicalMemory.miniDump(); });
-
-        return virtualObject.physicalObject().value();
-    }
-
-    // Swap out a scheduled buffer; VirtualBuffer::swapOut asserts it is resident and unpinned.
-    void swapOut(Value virtualValue, IRRewriter &rewriter, Location loc) {
-        virtualObjects.getVirtualBuffer(virtualValue).swapOut(rewriter, loc);
-        physicalMemory.countSwapOut();
-    }
-
-    bool isSwappedOut(Value virtualValue) {
-        return virtualObjects.getVirtualObject(virtualValue).isSwappedOut();
-    }
-
-    Value getPhysicalValue(Value virtualValue) {
-        return virtualObjects.getVirtualObject(virtualValue).physicalObject().value();
-    }
-
-    // mark a virtual value not to be swappable (in use)
-    void pin(Value virtualValue) {
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Pinning virtual value ";
-            virtualValue.dump();
-        });
-
-        virtualObjects.getVirtualObject(virtualValue).pin();
-
-        LLVM_DEBUG({ physicalMemory.miniDump(); });
-    }
-
-    // unmark a virtual value not to be swappable (in use)
-    void unpin(Value virtualValue) {
-        LLVM_DEBUG({
-            llvm::dbgs() << "Unpinning virtual value ";
-            virtualValue.dump();
-        });
-
-        virtualObjects.getVirtualObject(virtualValue).unpin();
-
-        LLVM_DEBUG({ physicalMemory.miniDump(); });
-    }
-
-    // returns whether the buffer's current contents are dead: no access at or
-    // after the op being processed observes them, either because the next
-    // access fully overwrites them or because no access remains
+    // Whether the buffer's current contents are dead: no access at or after the op being
+    // processed observes them, because the next one overwrites them whole or none remains.
     bool contentsDead(Value rootValue) const {
         auto it = bufferAccessSchedule.find(rootValue);
         if (it == bufferAccessSchedule.end()) {
@@ -622,173 +242,95 @@ class VirtualMemory {
         );
         return access == it->second.end() || access->second;
     }
-
-  public:
-    VirtualObjects virtualObjects;
-    PhysicalMemory physicalMemory;
-    const torq_hl::MemorySpace memorySpace;
-    const torq_hl::MemorySpace swapMemSpace;
-
-    // ordered (op index, previous contents discarded) accesses per allocation
-    DenseMap<Value, SmallVector<std::pair<unsigned, bool>>> bufferAccessSchedule;
-
-    // index (into the processed op list) of the op currently being processed
-    unsigned currentOpIndex = 0;
-
-  private:
-    int nextId = 0;
 };
 
-VirtualMemory &PhysicalObject::vm() { return virtualObject().vm(); }
+void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc) {
+    assert(isSwappedOut() && "the buffer is resident");
 
-bool PhysicalObject::isPinned() { return virtualObject().isPinned(); }
-
-VirtualObject &PhysicalBuffer::virtualObject() { return virtualBuffer(); }
-
-int PhysicalBuffer::size() { return virtualBuffer().size(); }
-
-PhysicalObject &PhysicalAlias::parent() { return virtualAlias_.parent().physicalObject(); }
-
-VirtualAlias &PhysicalAlias::virtualAlias() { return virtualAlias_; }
-
-VirtualObject &PhysicalAlias::virtualObject() { return virtualAlias(); }
-
-VirtualObject::VirtualObject(VirtualMemory &vm, Value value)
-    : id_(vm.getNextId()), vm_(vm), value_(value) {}
-
-void VirtualBuffer::pin() {
-    if (pinCount() == 0) {
-        vm().physicalMemory.pin(physicalBuffer());
-    }
-
-    VirtualObject::pin();
-}
-
-void VirtualBuffer::unpin() {
-    VirtualObject::unpin();
-
-    if (pinCount() == 0) {
-        vm().physicalMemory.unpin(physicalBuffer());
-    }
-}
-
-PhysicalObject *VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc) {
-    assert(isSwappedOut() && "Cannot swap in a non-swapped out buffer");
-
-    LLVM_DEBUG({
-        llvm::dbgs() << "Swapping in virtual buffer ";
-        value().dump();
-    });
-
-    // create a buffer where to swap in the value
-    auto physicalValueOp =
+    auto physicalAlloc =
         memref::AllocOp::create(rewriter, loc, cast<MemRefType>(value().getType()));
 
-    if (clAnnotateVirtualBufferIds) {
-        physicalValueOp->setAttr(VIRTUAL_OBJECT_ID_ATTR_NAME, rewriter.getIndexArrayAttr({id()}));
-    }
-
     if (swappedOutValue_) {
-        // swap in the value by overwriting all the eventual alignment bytes in the newly
-        // allocated physical buffer
+        // overwriting the alignment bytes of the new buffer as well
         torq_hl::LoadOp::create(
-            rewriter, loc, physicalValueOp, swappedOutValue_, SmallVector<int64_t>{},
-            SmallVector<int64_t>{}, getEncodedTotalSizeBytes(physicalValueOp.getType()), true
+            rewriter, loc, physicalAlloc, swappedOutValue_, SmallVector<int64_t>{},
+            SmallVector<int64_t>{}, getEncodedTotalSizeBytes(physicalAlloc.getType()), true
         );
-        vm().physicalMemory.noteSwapInLoad(size());
+        vm().stats.loadedBytes += size();
     }
     else {
-        // the contents were dropped at swap out: there is nothing to load
-        vm().physicalMemory.noteSkippedSwapInLoad();
+        // the contents were dropped at swap-out: nothing to load
+        vm().stats.loadsSkipped++;
     }
 
-    maybePhysicalBuffer_ = vm().physicalMemory.add(*this, physicalValueOp);
+    setPhysical(physicalAlloc);
+    assert(vm().residentBytes() <= vm().capacity && "resident bytes exceed the capacity");
 
     LLVM_DEBUG({
-        llvm::dbgs() << "Swapped in to physical buffer ";
-        physicalBuffer().value().dump();
+        llvm::dbgs() << "Swapped in buffer ";
+        value().dump();
     });
-
-    return *maybePhysicalBuffer_;
 }
 
 void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc) {
-    assert(!isSwappedOut() && "cannot swap out already swapped out buffer");
-    assert(!isPinned() && "cannot swap out pinned buffer");
+    assert(!isSwappedOut() && "the buffer is swapped out");
+    assert(!isPinned() && "the buffer is pinned");
 
     LLVM_DEBUG({
         llvm::dbgs() << "Swapping out buffer ";
         value().dump();
     });
 
-    // the contents are dead: free the retained swapped out buffer, skip the
-    // store, and later swap back in without loading
     if (vm().contentsDead(value())) {
-
-        LLVM_DEBUG(llvm::dbgs() << "Buffer contents are dead, dropping them\n");
-
+        // nothing observes the contents: drop them, and the swap-in loads nothing
         freeSwappedOutValue(rewriter, loc);
-        vm().physicalMemory.noteDroppedSwapOut(size());
+        vm().stats.dropped++;
+        vm().stats.droppedBytes += size();
     }
-    // the retained swapped out buffer is still up to date: skip the store
     else if (swappedOutValue_) {
-
-        LLVM_DEBUG(llvm::dbgs() << "Buffer contents unchanged, skipping the store\n");
-
-        vm().physicalMemory.noteSkippedSwapOutStore();
+        // the swap copy is still up to date
+        vm().stats.storesSkipped++;
     }
     else {
-        auto physicalValueType = cast<MemRefType>(value().getType());
-
-        // allocate a memref where to swap out the value
-        auto physicalValueEncoding = getEncoding(physicalValueType);
-        auto swappedOutEncoding =
-            cloneEncodingWithNewMemorySpace(physicalValueEncoding, vm().swapMemSpace);
-
-        auto swappedOutType = createMemRefTypeWithEncoding(physicalValueType, swappedOutEncoding);
-        auto swappedOutAllocOp = memref::AllocOp::create(rewriter, loc, swappedOutType);
-
-        swappedOutValue_ = swappedOutAllocOp;
-
-        if (clAnnotateVirtualBufferIds) {
-            rewriter.modifyOpInPlace(swappedOutAllocOp, [&]() {
-                swappedOutAllocOp->setAttr("torq-swap-out-buffer", rewriter.getUnitAttr());
-            });
-
-            swappedOutAllocOp->setAttr(
-                VIRTUAL_OBJECT_ID_ATTR_NAME, rewriter.getIndexArrayAttr({id()})
-            );
-        }
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Created swapped out buffer ";
-            swappedOutAllocOp.dump();
-        });
-
-        // swap out the value by overwriting all the eventual alignment bytes in the newly
-        // allocated swap out buffer
-        torq_hl::StoreOp::create(
-            rewriter, loc, swappedOutValue_, (*maybePhysicalBuffer_)->value(),
-            SmallVector<int64_t>{}, SmallVector<int64_t>{},
-            getEncodedTotalSizeBytes(swappedOutType), true
+        auto physicalType = cast<MemRefType>(value().getType());
+        auto swappedOutType = createMemRefTypeWithEncoding(
+            physicalType,
+            cloneEncodingWithNewMemorySpace(getEncoding(physicalType), vm().swapMemSpace)
         );
-        vm().physicalMemory.noteSwapOutStore(size());
+        swappedOutValue_ = memref::AllocOp::create(rewriter, loc, swappedOutType);
+
+        // overwriting the alignment bytes of the swap copy as well
+        torq_hl::StoreOp::create(
+            rewriter, loc, swappedOutValue_, physical(), SmallVector<int64_t>{},
+            SmallVector<int64_t>{}, getEncodedTotalSizeBytes(swappedOutType), true
+        );
+        vm().stats.storedBytes += size();
     }
 
-    // make sure all the aliases pointing to the physical buffer are invalidated
-    for (auto &alias : aliases()) {
-        alias->invalidate();
-    }
-
-    // deallocate the buffer we just swapped out
-    memref::DeallocOp::create(rewriter, loc, (*maybePhysicalBuffer_)->value());
-    vm().physicalMemory.remove(*this);
-    maybePhysicalBuffer_ = std::nullopt;
+    invalidateAliases();
+    memref::DeallocOp::create(rewriter, loc, physical());
+    setPhysical(nullptr);
+    vm().stats.swapOuts++;
 }
 
-void VirtualBuffer::initialize() {
-    // initially we use the virtual value as the physical value of this virtual buffer
-    maybePhysicalBuffer_ = vm().physicalMemory.add(*this, value());
+void VirtualBuffer::deallocate(memref::DeallocOp deallocOp, IRRewriter &rewriter) {
+    rewriter.setInsertionPoint(deallocOp);
+    Value target;
+    if (isSwappedOut()) {
+        target = swappedOutValue_;
+    }
+    else {
+        freeSwappedOutValue(rewriter, deallocOp.getLoc());
+        target = physical();
+    }
+    swappedOutValue_ = nullptr;
+    setPhysical(nullptr);
+    if (target) {
+        deallocOp.getMemrefMutable().set(target);
+    }
+    else {
+        rewriter.eraseOp(deallocOp);
+    }
 }
 
 // Collect the buffer accesses `op` may perform, normalized to AsyncAccess.
@@ -880,7 +422,6 @@ struct OperationMemoryInfo {
     SmallVector<OpOperand *> operands;
     SmallVector<OpResult> results;
     SmallVector<torq_hl::AsyncAccess> accesses;
-    int resultsSize = 0;
 };
 
 static OperationMemoryInfo
@@ -905,7 +446,6 @@ collectOperationMemoryInfo(Operation *op, torq_hl::MemorySpace memorySpace) {
         auto type = dyn_cast<MemRefType>(result.getType());
         if (type && getEncodingMemorySpace(type) == memorySpace) {
             info.results.push_back(result);
-            info.resultsSize += getEncodedTotalSizeBytes(type);
         }
     }
     return info;
@@ -916,14 +456,7 @@ static bool processDeallocationOrAlias(
 ) {
     if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
         if (getEncodingMemorySpace(deallocOp.getMemref().getType()) == memorySpace) {
-            rewriter.setInsertionPoint(deallocOp);
-            Value physicalValue = vm.deallocate(deallocOp.getMemref(), rewriter);
-            if (physicalValue) {
-                deallocOp.getMemrefMutable().set(physicalValue);
-            }
-            else {
-                rewriter.eraseOp(deallocOp);
-            }
+            vm.buffer(deallocOp.getMemref()).deallocate(deallocOp, rewriter);
         }
         return true;
     }
@@ -943,7 +476,7 @@ static bool processDeallocationOrAlias(
 static SetVector<Value> collectOperandsToSwapIn(ArrayRef<OpOperand *> operands, VirtualMemory &vm) {
     SetVector<Value> toSwapIn;
     for (auto *operand : operands) {
-        if (vm.isSwappedOut(operand->get())) {
+        if (vm.object(operand->get()).isSwappedOut()) {
             toSwapIn.insert(operand->get());
         }
     }
@@ -956,10 +489,10 @@ static void swapInOperandsAndAllocateResults(
 ) {
     rewriter.setInsertionPoint(op);
     for (Value value : toSwapIn) {
-        vm.swapIn(value, rewriter, op->getLoc());
+        vm.object(value).swapIn(rewriter, op->getLoc());
     }
     for (auto result : info.results) {
-        vm.addAllocation(result);
+        vm.addBuffer(result);
     }
 }
 
@@ -969,9 +502,10 @@ rewriteOperandsToPhysicalMemory(ArrayRef<OpOperand *> operands, VirtualMemory &v
     SmallVector<Value> pinnedValues;
     for (auto *operand : operands) {
         Value virtualValue = operand->get();
-        vm.pin(virtualValue);
+        VirtualObject &object = vm.object(virtualValue);
+        object.pin();
         pinnedValues.push_back(virtualValue);
-        operand->set(vm.getPhysicalValue(virtualValue));
+        operand->set(object.physical());
     }
     return pinnedValues;
 }
@@ -992,18 +526,18 @@ static void updateOperandPinLifetimes(
                 programPinned.push_back(value);
             }
             else {
-                vm.unpin(value);
+                vm.object(value).unpin();
             }
         }
         return;
     }
 
     for (Value value : pinnedValues) {
-        vm.unpin(value);
+        vm.object(value).unpin();
     }
     if (auto waitOp = dyn_cast<torq_hl::WaitProgramOp>(op)) {
         for (Value value : invocationToVirtual[waitOp.getInvocation()]) {
-            vm.unpin(value);
+            vm.object(value).unpin();
         }
         invocationToVirtual.erase(waitOp.getInvocation());
     }
@@ -1016,7 +550,7 @@ static void performScheduledSwaps(
     rewriter.setInsertionPoint(op);
     for (const Swap &swap : swaps) {
         for (Value buffer : swap.buffers) {
-            vm.swapOut(buffer, rewriter, op->getLoc());
+            vm.buffer(buffer).swapOut(rewriter, op->getLoc());
         }
         if (swap.kind == Swap::Kind::Spill) {
             continue;
@@ -1024,24 +558,23 @@ static void performScheduledSwaps(
         // relocated buffers swap back in only once all of them are out, so they land in
         // the fully freed space in the scheduled order
         for (Value buffer : swap.buffers) {
-            vm.swapIn(buffer, rewriter, op->getLoc());
+            vm.buffer(buffer).swapIn(rewriter, op->getLoc());
         }
     }
 }
 
-static void printStatistics(const VirtualMemory &vm) {
+static void printStatistics(const SwapStatistics &stats) {
     if (!clPrintStatistics) {
         return;
     }
-    llvm::dbgs() << "Total swap outs: " << vm.physicalMemory.swapOutCount() << "\n";
-    llvm::dbgs() << "Total swap-out stores skipped (clean buffers): "
-                 << vm.physicalMemory.skippedSwapOutStoreCount() << "\n";
-    llvm::dbgs() << "Swap outs dropped (contents dead): " << vm.physicalMemory.droppedSwapOutCount()
-                 << " (" << vm.physicalMemory.droppedSwapOutBytes() << " bytes)\n";
-    llvm::dbgs() << "Swap-in loads skipped (dropped contents): "
-                 << vm.physicalMemory.skippedSwapInLoadCount() << "\n";
-    llvm::dbgs() << "Swap-out bytes stored: " << vm.physicalMemory.swapOutStoredBytes() << "\n";
-    llvm::dbgs() << "Swap-in bytes loaded: " << vm.physicalMemory.swapInLoadedBytes() << "\n";
+    llvm::dbgs() << "Total swap outs: " << stats.swapOuts << "\n";
+    llvm::dbgs() << "Total swap-out stores skipped (clean buffers): " << stats.storesSkipped
+                 << "\n";
+    llvm::dbgs() << "Swap outs dropped (contents dead): " << stats.dropped << " ("
+                 << stats.droppedBytes << " bytes)\n";
+    llvm::dbgs() << "Swap-in loads skipped (dropped contents): " << stats.loadsSkipped << "\n";
+    llvm::dbgs() << "Swap-out bytes stored: " << stats.storedBytes << "\n";
+    llvm::dbgs() << "Swap-in bytes loaded: " << stats.loadedBytes << "\n";
 }
 
 } // namespace
@@ -1097,14 +630,14 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         // A write makes any retained swap-space copy stale.
         for (const torq_hl::AsyncAccess &access : memoryInfo.accesses) {
             if (bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write)) {
-                vm.freeSwappedOutValue(access.buffer, rewriter, op->getLoc());
+                vm.object(access.buffer).root().freeSwappedOutValue(rewriter, op->getLoc());
             }
         }
 
         updateOperandPinLifetimes(op, pinnedOperands, memoryInfo.accesses, vm, invocationToVirtual);
     }
 
-    printStatistics(vm);
+    printStatistics(vm.stats);
     return success();
 }
 
