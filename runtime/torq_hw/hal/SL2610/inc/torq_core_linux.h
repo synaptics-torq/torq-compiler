@@ -103,6 +103,7 @@ struct torq_module {
     int job_irq;
     struct completion job_completion;
     unsigned int interrupt_status;
+    atomic_t job_running; /* Non-zero while NPU is actively executing a job */
 
     /* Inference time statistics */
     atomic64_t total_inference_time_us;

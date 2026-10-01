@@ -104,8 +104,10 @@ static irqreturn_t torq_synpu_irq_handler(int irq, void *ptr)
 
     writel(1, torq_dev->reg_map + RA_(NSS,STATUS));
 
-    torq_devfreq_job_complete(torq_dev);
+    if (!atomic_xchg(&torq_dev->job_running, 0))
+        return IRQ_HANDLED;
 
+    torq_devfreq_job_complete(torq_dev);
     complete(&torq_dev->job_completion);
 
     return IRQ_HANDLED;
@@ -197,6 +199,24 @@ static void torq_dump_register_status(struct torq_module *torq_dev)
     }
 }
 
+static void torq_quiesce_hardware(struct torq_module *torq_dev)
+{
+    /* 1. Disable all NPU interrupt generation */
+    writel(0, torq_dev->reg_map + RA_(NSS,CTRL));
+    writel(0, torq_dev->reg_map + RA_(CSS,IEN_HST));
+
+    /* 2. Assert hardware reset to kill in-flight DMA engines and CPU */
+    reset_control_assert(torq_dev->core_rst);
+    udelay(NPU_RESET_INTERVAL);
+    reset_control_deassert(torq_dev->core_rst);
+
+    /* 3. Reconcile devfreq and tracking state if aborted mid-flight */
+    if (atomic_xchg(&torq_dev->job_running, 0)) {
+        torq_devfreq_job_complete(torq_dev);
+        complete_all(&torq_dev->job_completion);
+    }
+}
+
 static int torq_detach_network_domain(struct torq_module *torq_dev, struct torq_network *net)
 {
     int ret;
@@ -207,6 +227,11 @@ static int torq_detach_network_domain(struct torq_module *torq_dev, struct torq_
               torq_dev->active_network ? torq_dev->active_network->network_id : 0);
         return -EPERM;
     }
+
+    if (atomic_read(&torq_dev->job_running)) {
+        KLOGE("Stopping network %d while job in flight, forcing hardware reset", net->network_id);
+    }
+    torq_quiesce_hardware(torq_dev);
 
     /* Detach network domain from hardware and attach dma domain back */
     iommu_detach_device(net->domain, torq_dev->iommu_device);
@@ -608,10 +633,16 @@ static int torq_run_network(struct torq_file_inst *inst, struct torq_run_network
         return -ENODEV;
     }
 
+    if (atomic_read(&torq_dev->job_running)) {
+        KLOGE("Network %d: job already in flight", req->network_id);
+        return -EBUSY;
+    }
+
     KLOGD("Running job on network %d with code entry 0x%x", req->network_id, req->code_entry);
 
     reinit_completion(&torq_dev->job_completion);
     torq_dev->interrupt_status = 0;
+    atomic_set(&torq_dev->job_running, 1);
     writel(RF_LSH(NSS, CFG_LINK_EN, 1) | RF_BMSK_LSH(NSS, CFG_DESC, req->code_entry),
            torq_dev->reg_map + RA_(NSS,CFG));
 
@@ -622,8 +653,10 @@ static int torq_run_network(struct torq_file_inst *inst, struct torq_run_network
     wmb();
 
     ret = torq_devfreq_job_start(torq_dev);
-    if (ret)
+    if (ret) {
+        atomic_set(&torq_dev->job_running, 0);
         return ret;
+    }
 
     torq_dev->inference_start = ktime_get();
 
@@ -666,6 +699,7 @@ static int torq_wait_network(struct torq_file_inst *inst, struct torq_wait_netwo
     if (ret == 0) {
         KLOGE("Job timeout on network %d after %d ms", req->network_id, TORQ_IRQ_TIMEOUT_MS);
         torq_dump_register_status(torq_dev);
+        torq_quiesce_hardware(torq_dev);
         return -ETIMEDOUT;
     }
 
@@ -693,6 +727,7 @@ static int torq_wait_network(struct torq_file_inst *inst, struct torq_wait_netwo
     if (!job_complete) {
         KLOGE("Interrupt triggered, but all expected bits not set..network: %d, status: 0x%x, wait_bits: 0x%x", 
               req->network_id, reg_val, req->wait_bits);
+        torq_quiesce_hardware(torq_dev);
         return -EIO;
     }
 
@@ -1053,6 +1088,10 @@ static int torq_attach_binding(struct torq_file_inst *inst, struct torq_attach_b
     if (torq_dev->active_network != net) {
         return -ENODEV;
     }
+    if (atomic_read(&torq_dev->job_running)) {
+        KLOGE("Cannot attach binding while job is in flight");
+        return -EBUSY;
+    }
 
     map_size = ALIGN(req->binding_size, IOVA_ALIGN);
     if (req->xram_addr < net->xram_start) {
@@ -1163,6 +1202,10 @@ static int torq_detach_binding(struct torq_file_inst *inst, struct torq_detach_b
     }
     if (torq_dev->active_network != net) {
         return -ENODEV;
+    }
+    if (atomic_read(&torq_dev->job_running)) {
+        KLOGE("Cannot detach binding while job is in flight");
+        return -EBUSY;
     }
 
     map_size = ALIGN(req->binding_size, IOVA_ALIGN);
@@ -1540,6 +1583,7 @@ static int torq_probe(struct platform_device *pdev)
     }
     init_completion(&torq_dev->job_completion);
     torq_dev->interrupt_status = 0;
+    atomic_set(&torq_dev->job_running, 0);
     atomic64_set(&torq_dev->total_inference_time_us, 0);
     torq_dev->job_irq = platform_get_irq_byname(pdev, "job");
     if (torq_dev->job_irq < 0) {
