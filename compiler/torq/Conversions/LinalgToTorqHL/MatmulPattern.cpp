@@ -513,6 +513,58 @@ FailureOr<Value> buildReductionDimBias(
     return collapseReductionDimBlockParam(loc, bias, rewriter);
 }
 
+/// Sets splatZp to the value of a splat zero point, or to std::nullopt if it is
+/// not a splat. Fails if the splat is not an exact integer whose negation fits
+/// in i8. The frontend folds a uniform zero point into a float splat.
+LogicalResult getSplatIntegerZeroPoint(
+    Value zeroPoints, linalg::GenericOp anchorOp, std::optional<int64_t> &splatZp
+) {
+    splatZp = std::nullopt;
+    arith::ConstantOp constOp = getConstantLikeTensorOp(zeroPoints);
+    auto denseAttr = constOp ? dyn_cast<DenseElementsAttr>(constOp.getValue()) : nullptr;
+    if (!denseAttr || !denseAttr.isSplat()) {
+        return success();
+    }
+    int64_t zeroPoint;
+    Type elementType = denseAttr.getElementType();
+    if (isa<IntegerType>(elementType)) {
+        APInt value = denseAttr.getSplatValue<APInt>();
+        zeroPoint = usesUnsignedIntegerZeroPoint(anchorOp)
+                        ? static_cast<int64_t>(value.getZExtValue())
+                        : value.getSExtValue();
+    }
+    else if (isa<FloatType>(elementType)) {
+        APFloat value = denseAttr.getSplatValue<APFloat>();
+        APSInt intValue(64, /*isUnsigned=*/false);
+        bool isExact = false;
+        if (value.convertToInteger(intValue, APFloat::rmTowardZero, &isExact) != APFloat::opOK ||
+            !isExact) {
+            return failure();
+        }
+        zeroPoint = intValue.getExtValue();
+    }
+    else {
+        return failure();
+    }
+    // Check zeroPoint, not -zeroPoint, so the negation cannot overflow.
+    if (zeroPoint < -127 || zeroPoint > 128) {
+        return failure();
+    }
+    splatZp = zeroPoint;
+    return success();
+}
+
+/// Returns no bias for a zero splat, else an i8 splat of -zeroPoint.
+Value buildSplatReductionDimBias(
+    linalg::GenericOp anchorOp, int64_t zeroPoint, int64_t groups, int64_t cols,
+    PatternRewriter &rewriter
+) {
+    if (zeroPoint == 0) {
+        return Value{};
+    }
+    return createI8Const(rewriter, anchorOp, {static_cast<int8_t>(-zeroPoint)}, {groups, cols});
+}
+
 /// Matches the simplified block-quantized dequant linalg.generic produced by
 /// rewriteBlockQuantizedMatmulInputSimple in OptimizeMatmulOpPattern.
 ///
@@ -684,29 +736,41 @@ FailureOr<Value> maybeFoldBlockQuantizedMatmulInput(
     Value scales = genericOp.getInputs()[1];
     Value zeroPoints = genericOp.getInputs()[2];
 
+    // Before the scales are collapsed, so a rejected splat builds no more IR.
+    std::optional<int64_t> splatZp;
+    if (failed(getSplatIntegerZeroPoint(zeroPoints, genericOp, splatZp))) {
+        return failure();
+    }
+
     FailureOr<Value> collapsedScales = collapseReductionDimBlockParam(loc, scales, rewriter);
     if (failed(collapsedScales)) {
         return failure();
     }
 
+    int64_t biasCols = llvm::alignTo(cols, 2);
     FailureOr<Value> bias =
-        buildReductionDimBias(loc, scales, zeroPoints, rewriter, genericOp, llvm::alignTo(cols, 2));
+        splatZp ? FailureOr<Value>(buildSplatReductionDimBias(
+                      genericOp, *splatZp,
+                      cast<RankedTensorType>(zeroPoints.getType()).getDimSize(0), biasCols, rewriter
+                  ))
+                : buildReductionDimBias(loc, scales, zeroPoints, rewriter, genericOp, biasCols);
     if (failed(bias)) {
         return failure();
     }
 
     auto [outMin, outMax] = getDTypeRange(outputType.getElementType());
     Value expandedBias = *bias;
-    auto biasType = cast<RankedTensorType>(bias->getType());
 
-    if (!biasType.getElementType().isF32()) {
+    auto biasType =
+        expandedBias ? cast<RankedTensorType>(expandedBias.getType()) : RankedTensorType();
+    if (biasType && !biasType.getElementType().isF32()) {
         auto biasF32Type = RankedTensorType::get(
             biasType.getShape(), rewriter.getF32Type(), biasType.getEncoding()
         );
         Value biasF32 = createInitTensor(genericOp, rewriter, biasF32Type);
 
         auto expandBiasToF32Op = torq_hl::ExpandWeightsOp::create(
-            rewriter, loc, biasF32Type, biasF32, outMin, outMax, *collapsedScales, *bias,
+            rewriter, loc, biasF32Type, biasF32, outMin, outMax, *collapsedScales, expandedBias,
             /*block_size=*/1, Value{}
         );
         expandedBias = expandBiasToF32Op.getOutput();
