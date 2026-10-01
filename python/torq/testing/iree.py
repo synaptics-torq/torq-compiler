@@ -1171,13 +1171,13 @@ def tweaked_random_input_data_ranges(mlir_io_spec, case_config):
 
         if "tweaked_input_data_range" in case_config:
             random_range = case_config["tweaked_input_data_range"]
+        elif dtype in (np.int8, np.uint8):
+            # 8-bit inputs sweep their whole range; the upper bound is exclusive.
+            info = np.iinfo(dtype)
+            random_range = (int(info.min), int(info.max) + 1)
         else:
-            # TODO: there are many issues when we enable the full range
-            # for now we limit the range to avoid issues
-            if dtype == np.uint8:
-                random_range = (0, 80)
-            else:
-                random_range = (-40, 40)
+            # TODO: wider types still use a narrow range
+            random_range = (-40, 40)
 
         random_ranges.append(random_range)
 

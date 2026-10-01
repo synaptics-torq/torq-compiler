@@ -30,10 +30,89 @@
 #include "llvm/Support/Debug.h"
 
 #include <cmath>
+#include <optional>
 
 #define DEBUG_TYPE "linalg-torq-elementwsie-binary-pattern"
 
 namespace mlir::syna::torq {
+
+// Best rational approximation p/q of x in [0, 1] with q <= maxDen, from the continued fraction
+// convergents and the last semiconvergent.
+static std::pair<int64_t, int64_t> bestRational(double x, int64_t maxDen) {
+    int64_t p0 = 0, q0 = 1, p1 = 1, q1 = 0;
+    double v = x;
+    for (int i = 0; i < 64; ++i) {
+        const int64_t a = static_cast<int64_t>(std::floor(v));
+        const int64_t p2 = a * p1 + p0, q2 = a * q1 + q0;
+        if (q2 > maxDen) {
+            const int64_t k = (maxDen - q0) / q1;
+            const int64_t ps = k * p1 + p0, qs = k * q1 + q0;
+            if (std::abs(x - static_cast<double>(ps) / qs) <
+                std::abs(x - static_cast<double>(p1) / q1)) {
+                return {ps, qs};
+            }
+            return {p1, q1};
+        }
+        p0 = p1, q0 = q1, p1 = p2, q1 = q2;
+        const double frac = v - static_cast<double>(a);
+        if (frac < 1e-12) {
+            break;
+        }
+        v = 1.0 / frac;
+    }
+    return {p1, q1};
+}
+
+// Weights and ACT scale/shift for acc = w0 * in0 + w1 * in1, out = (acc + bias) * scale >> shift.
+// The i16 weights only carry the ratio of the two multipliers, as the closest fraction with a
+// denominator that keeps the i32 accumulator in range; the 32-bit ACT scale carries the
+// magnitude. With weights that carry the magnitude too, the shift is capped where the larger
+// weight fills an i16, which leaves an 8-bit add with about 14 bits of precision per operand.
+struct RatioScale {
+    int16_t weight0, weight1;
+    int32_t scale;
+    int shift;
+};
+
+static std::optional<RatioScale>
+fitRatioScale(double multiplier0, double multiplier1, double range0, double range1) {
+    // Right shifts up to this value matched TFLite bit-exactly on SL2610 (cofi_nss_v3 int8).
+    constexpr int maxActShift = 46;
+    const double big = std::max(multiplier0, multiplier1);
+    const double small = std::min(multiplier0, multiplier1);
+    if (!(small > 0.0)) {
+        return std::nullopt;
+    }
+    const bool firstIsBig = multiplier0 >= multiplier1;
+    const double ratio = small / big;
+    const double bigRange = firstIsBig ? range0 : range1;
+    const double smallRange = firstIsBig ? range1 : range0;
+    const double maxDen = std::min<double>(
+        std::numeric_limits<int16_t>::max(),
+        std::floor(std::numeric_limits<int32_t>::max() / (bigRange + ratio * smallRange))
+    );
+    if (maxDen < 1) {
+        return std::nullopt;
+    }
+    auto [p, q] = bestRational(ratio, static_cast<int64_t>(maxDen));
+    if (p <= 0 || q <= 0) {
+        return std::nullopt;
+    }
+    int shift = static_cast<int>(
+        std::floor(std::log2(std::numeric_limits<int32_t>::max() * static_cast<double>(q) / big))
+    );
+    shift = std::min(shift, maxActShift);
+    const double scale = std::round(big * std::ldexp(1.0, shift) / static_cast<double>(q));
+    if (shift < 0 || scale < 1 || scale > std::numeric_limits<int32_t>::max()) {
+        return std::nullopt;
+    }
+    RatioScale fit;
+    fit.weight0 = static_cast<int16_t>(firstIsBig ? q : p);
+    fit.weight1 = static_cast<int16_t>(firstIsBig ? p : q);
+    fit.scale = static_cast<int32_t>(scale);
+    fit.shift = shift;
+    return fit;
+}
 
 // True when alignInputToOutputShape has to materialize `input` at the output shape, which is
 // the cost the caller weighs. Compares shapes rather than element counts so that a reshape is
@@ -443,8 +522,9 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         return true;
     }
 
-    static bool isSixteenBit(Value input) {
-        return cast<RankedTensorType>(input.getType()).getElementTypeBitWidth() == 16;
+    static bool isQuantizedOperand(Value input) {
+        const unsigned bits = cast<RankedTensorType>(input.getType()).getElementTypeBitWidth();
+        return bits == 8 || bits == 16;
     }
 
     EltwiseBinaryConvert(
@@ -545,12 +625,11 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         const double outputScale = scInfo.scaleDouble[0];
         double multiplier0 = outputScale * scaleInput0.scale;
         double multiplier1 = outputScale * scaleInput1.scale;
-        // Growing the shift and rounding the weights below is restricted to 16-bit operands:
-        // that is where a small multiplier lands on an i16 weight with only a handful of
-        // significant bits (0.0197 becomes 80 at the fixed shift of 12, a 0.7% error). 8-bit
-        // multipliers stay well conditioned, so the gain there is marginal and not worth
-        // perturbing the results of an already validated corpus.
-        const bool refineScale = isSixteenBit(input0) && isSixteenBit(input1);
+        // Grow the shift and round the weights so each i16 weight keeps as many significant
+        // bits as it can: at the fixed shift of 12 a multiplier of 0.0197 becomes 80 (a 0.7%
+        // error), and even a well conditioned 8-bit multiplier of 0.7245 becomes 2967 instead
+        // of 2967.4, which flips outputs that sit near a rounding boundary.
+        const bool refineScale = isInt && isQuantizedOperand(input0) && isQuantizedOperand(input1);
         int scaleShift = scInfo.scaleShift;
         if (refineScale) {
             scaleShift = maximizeScaleShift(
@@ -581,23 +660,16 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         alignInputToOutputShape(input1, output, rewriter);
 
         // Rounding to nearest matters because doubleToInt truncates, which throws away up to a
-        // full LSB of the multiplier. 8-bit keeps that truncation, see refineScale above.
+        // full LSB of the multiplier.
         auto toFixedPoint = [refineScale](double value) {
             return refineScale ? std::round(value) : value;
         };
         int16_t weight0 = doubleToInt<int16_t>(toFixedPoint(multiplier0 * scaleFactor));
         int16_t weight1 = doubleToInt<int16_t>(toFixedPoint(multiplier1 * scaleFactor)) * sign;
-        int32_t bias0, bias1;
-        if (refineScale) {
-            // Deriving the bias from the weight cancels the zero point exactly, which rounding
-            // the whole product does not.
-            bias0 = -weight0 * scaleInput0.zp;
-            bias1 = -weight1 * scaleInput1.zp;
-        }
-        else {
-            bias0 = -doubleToInt<int32_t>(multiplier0 * scaleFactor * scaleInput0.zp);
-            bias1 = -doubleToInt<int32_t>(multiplier1 * scaleFactor * scaleInput1.zp) * sign;
-        }
+        // Deriving the bias from the weight cancels the zero point exactly, which rounding the
+        // whole product does not.
+        int32_t bias0 = -weight0 * scaleInput0.zp;
+        int32_t bias1 = -weight1 * scaleInput1.zp;
 
         int32_t scalarValue0 = 0;
         bool input0IsScalar =
@@ -654,6 +726,21 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             input1 = input0;
         }
 
+        int32_t actScale = 1;
+        if (refineScale && !input0IsScalar && !input1IsScalar) {
+            if (auto fit = fitRatioScale(
+                    multiplier0, multiplier1, operandRange(input0, scaleInput0.zp),
+                    operandRange(input1, scaleInput1.zp)
+                )) {
+                weight0 = fit->weight0;
+                weight1 = fit->weight1 * sign;
+                bias0 = -weight0 * scaleInput0.zp;
+                bias1 = -weight1 * scaleInput1.zp;
+                actScale = fit->scale;
+                scaleShift = fit->shift;
+            }
+        }
+
         // concatenate weight0 and weight1
         std::vector<int16_t> weights = {weight0, weight1};
         auto torqWeights = createConst(weights, rewriter, loc);
@@ -661,8 +748,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         VectorIntOrFloat bias(1, isInt);
         bias.ints[0] = bias0 + bias1; // TODO: handle the case of floating point operation
 
-        // Scale is always 1
-        const std::vector<int32_t> scale = {1}; // TODO: handle the case of floating point operation
+        const std::vector<int32_t> scale = {actScale}; // TODO: handle floating point operation
 
         // Prepare bias (and scale for integer ops)
         auto biasScale = isInt ? createConst(interleave(bias.ints, scale), rewriter, loc)
@@ -695,7 +781,7 @@ void populateLinalgToTorqHLEWBinaryPatterns(
     // before the remaining patterns (eg addition)
     // Note: using benefit to control the order of application is not enough since this
     // only works for patterns that are applied to the same op
-    // sh8b is used as is; sh16b is only a floor, maximizeScaleShift grows it per operation.
+    // sh8b and sh16b are only floors, maximizeScaleShift grows them per operation.
     // FIXME the 16b floor is unvalidated: maximizeScaleShift only tests shift + 1, and the
     // caller checks the i16 weight bound but not the accumulator, so with 16-bit operands
     // and both multipliers >= 4 a shift of 12 overflows the i32 accumulator undetected.

@@ -2088,7 +2088,7 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
     LogicalResult emitRescale(
         linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input,
         RankedTensorType outputType, const MultiplierShiftInfo &ms, int scaleValuesCount,
-        int32_t inputZp, int32_t outputZp, int32_t outputMin, int32_t outputMax,
+        int32_t inputZp, int32_t outputZp, int32_t outputMin, int32_t outputMax, bool inputUnsigned,
         tosa::ApplyScaleOp applyScaleOp
     ) const {
         int32_t shiftFactor = *llvm::min_element(ms.shift);
@@ -2184,7 +2184,7 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             Value transposedInit = createInitTensor(srcOp, rewriter, transposedOutputType);
             auto fmaOp = torq_hl::FMAOp::create(
                 rewriter, srcOp.getLoc(), transposedOutputType, transposedInit, outputZp, outputMin,
-                outputMax, shiftFactor, weightConst, scaleBiasConst, transposedInput
+                outputMax, shiftFactor, weightConst, scaleBiasConst, transposedInput, inputUnsigned
             );
             Value output = transposeValue(
                 fmaOp.getOutput(), invertPermutation(perm), srcOp.getLoc(), rewriter
@@ -2195,7 +2195,8 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
         auto fmaOp = torq_hl::FMAOp::create(
             rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
-            outputZp, outputMin, outputMax, shiftFactor, weightConst, scaleBiasConst, input
+            outputZp, outputMin, outputMax, shiftFactor, weightConst, scaleBiasConst, input,
+            inputUnsigned
         );
         rewriter.replaceOp(srcOp, fmaOp.getOutput());
         return success();
@@ -2361,6 +2362,11 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             }
         }
 
+        // An unsigned input reaches the body zero-extended; the FMA must read it unsigned too,
+        // or values with the top bit set are taken as negative.
+        Value extendedInput = subOp ? subOp.getLhs() : applyScaleOp.getValue();
+        const bool inputUnsigned = extendedInput.getDefiningOp<arith::ExtUIOp>() != nullptr;
+
         LLVM_DEBUG({
             llvm::dbgs() << "rescale params : input_zp: " << input_zp << ", outputZp: " << outputZp
                          << ", outputMin: " << outputMin << ", outputMax: " << outputMax
@@ -2369,7 +2375,7 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
         return emitRescale(
             srcOp, rewriter, input, outputType, ms, scaleValuesCount, input_zp, outputZp, outputMin,
-            outputMax, applyScaleOp
+            outputMax, inputUnsigned, applyScaleOp
         );
     }
 };
