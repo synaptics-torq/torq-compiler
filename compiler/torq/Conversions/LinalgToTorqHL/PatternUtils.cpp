@@ -947,6 +947,20 @@ int maximizeScaleShift(
     return shift;
 }
 
+// Largest common shift at which every multiplier * 2^(shift - tosaShift) still fits an int32. A
+// channel whose TOSA shift is above the common one loses its low multiplier bits, which costs a
+// 16-bit multiplier (int16 requantization) a noticeable part of its precision.
+static int maxCommonScaleShift(ArrayRef<int32_t> multiplier, ArrayRef<int8_t> tosaShift) {
+    int shift = *std::max_element(tosaShift.begin(), tosaShift.end());
+    for (auto [mult, chShift] : llvm::zip_equal(multiplier, tosaShift)) {
+        while (shift > chShift && (std::abs(int64_t(mult)) << (shift - chShift)) >
+                                      std::numeric_limits<int32_t>::max()) {
+            --shift;
+        }
+    }
+    return shift;
+}
+
 ScaleClampInfo foldForwardScaleClamp(
     Value &value, int scaleValuesCount, int shift8b, int shift16b, bool isElementWiseOp
 ) {
@@ -1121,9 +1135,8 @@ ScaleClampInfo foldForwardScaleClamp(
             }
         }
         else {
-            // For other operations (convolution), use the smallest TOSA shift value
-            // to minimize overflow risk while preserving original quantization parameters
-            sci.scaleShift = *std::min_element(ms.shift.begin(), ms.shift.end());
+            // For other operations (convolution), keep every per-channel scale within int32
+            sci.scaleShift = maxCommonScaleShift(ms.multiplier, ms.shift);
         }
     }
     else {
@@ -3622,18 +3635,48 @@ modifyMulValue(Value mul, Value biasScale, Operation *lastOp, OpBuilder &builder
     return failure();
 }
 
-static mlir::FailureOr<Value>
-modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuilder &builder) {
-    Value minShiftV;
-    Value origShiftV = shift;
-    while (auto tShiftV = origShiftV.getDefiningOp<tensor::ExtractSliceOp>()) {
-        origShiftV = tShiftV.getSource();
+static Value peelExtractSlices(Value value) {
+    while (auto sliceOp = value.getDefiningOp<tensor::ExtractSliceOp>()) {
+        value = sliceOp.getSource();
     }
+    return value;
+}
+
+// The common shift for per-channel constant multipliers and shifts, see maxCommonScaleShift.
+static std::optional<int8_t> constCommonScaleShift(Value mul, Value shift) {
+    if (!isa<ShapedType>(mul.getType()) || !isa<ShapedType>(shift.getType())) {
+        return std::nullopt;
+    }
+    auto mulConst = computeArithConst(peelExtractSlices(mul), true, {});
+    auto shiftConst = computeArithConst(peelExtractSlices(shift), true, {});
+    if (failed(mulConst) || failed(shiftConst)) {
+        return std::nullopt;
+    }
+    auto multipliers = attrValuesAsVec<int32_t>(*mulConst);
+    auto shifts = attrValuesAsVec<int8_t>(*shiftConst);
+    if (multipliers.size() != shifts.size()) {
+        return std::nullopt;
+    }
+    return maxCommonScaleShift(multipliers, shifts);
+}
+
+// Without a precomputed commonShift, per-channel shifts are normalized to their minimum.
+mlir::FailureOr<Value> modifyShiftValue(
+    Value shift, std::optional<int8_t> commonShift, Operation *lastOp, ScaleClampInfo &scInfo,
+    OpBuilder &builder
+) {
+    Value commonShiftV;
+    Value origShiftV = peelExtractSlices(shift);
     auto shiftTy = origShiftV.getType();
 
     OpBuilder::InsertionGuard g(builder);
     builder.setInsertionPointAfter(origShiftV.getDefiningOp());
-    if (auto shapedTy = mlir::dyn_cast<ShapedType>(shiftTy)) {
+    if (commonShift) {
+        commonShiftV = arith::ConstantOp::create(
+            builder, lastOp->getLoc(), builder.getI8IntegerAttr(*commonShift)
+        );
+    }
+    else if (auto shapedTy = mlir::dyn_cast<ShapedType>(shiftTy)) {
         auto emTensor = createI8Const(
             builder, *lastOp, ArrayRef<int8_t>{std::numeric_limits<int8_t>::max()}, {}
         );
@@ -3645,12 +3688,12 @@ modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuild
             }
         );
 
-        minShiftV =
+        commonShiftV =
             tensor::ExtractOp::create(builder, lastOp->getLoc(), rOp.getResult(0), ValueRange{})
                 .getResult();
     }
     else if (auto intTy = mlir::dyn_cast<IntegerType>(shiftTy)) {
-        minShiftV = shift;
+        commonShiftV = shift;
     }
     else {
         // Unsupported shift type
@@ -3662,7 +3705,7 @@ modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuild
                          builder, lastOp->getLoc(), ArrayRef<int64_t>{1}, builder.getIntegerType(8)
     )
                          .getResult();
-    auto fillOp = linalg::FillOp::create(builder, lastOp->getLoc(), minShiftV, modShiftV);
+    auto fillOp = linalg::FillOp::create(builder, lastOp->getLoc(), commonShiftV, modShiftV);
     // ComputeArithConst works only on tensor so getting the shift value from ReduceOp
     // result
     auto maybeShiftFactor = computeArithConst(fillOp.getResult(0), true, {});
@@ -3876,7 +3919,8 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
     }
 
     // Returns a value with single shift value of type tensor<i32>
-    auto maybeShiftV = modifyShiftValue(shift, lastOp, scInfo, builder);
+    auto maybeShiftV =
+        modifyShiftValue(shift, constCommonScaleShift(mul, shift), lastOp, scInfo, builder);
     if (failed(maybeShiftV)) {
         LLVM_DEBUG({ llvm::dbgs() << "computeRescaleInfo: failed to modify shift value\n"; });
         return failure();
@@ -3936,12 +3980,17 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
         llvm::ArrayRef<Value>{mulV, shift, modShiftV}, llvm::ArrayRef<Value>{newScaleV}, rescaleMap,
         llvm::SmallVector<utils::IteratorType, 4>(1, utils::IteratorType::parallel),
         [&](OpBuilder &b, Location loc, ValueRange args) {
-            // Effective multiplier := multiplier >> (orig_shift - normalized_shift).
+            // Effective multiplier := multiplier * 2^(normalized_shift - orig_shift).
             // This folds shift normalization into scale tensor generation.
             auto arg1I32 = arith::ExtSIOp::create(builder, loc, builder.getI32Type(), args[1]);
             auto arg2I32 = arith::ExtSIOp::create(builder, loc, builder.getI32Type(), args[2]);
             auto shift = arith::SubIOp::create(builder, loc, arg1I32, arg2I32);
-            auto multiplier = arith::ShRSIOp::create(b, loc, args[0], shift);
+            auto zero = arith::ConstantIntOp::create(b, loc, 0, 32);
+            auto rightShift = arith::MaxSIOp::create(b, loc, shift, zero);
+            auto leftShift =
+                arith::MaxSIOp::create(b, loc, arith::SubIOp::create(b, loc, zero, shift), zero);
+            auto widened = arith::ShLIOp::create(b, loc, args[0], leftShift);
+            auto multiplier = arith::ShRSIOp::create(b, loc, widened, rightShift);
             linalg::YieldOp::create(b, loc, ArrayRef<Value>{multiplier});
         }
     );

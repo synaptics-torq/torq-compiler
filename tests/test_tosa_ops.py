@@ -39,9 +39,10 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in request.param.data.name for s in no_slicing_tc):
         extra_args["torq_compiler_options"].append("--torq-disable-slicing=true")
 
-    if "mul-1hwc-in-int16-out-int16" in request.param.name:
-        # specific input data for the mul test case
-        extra_args["tweaked_input_data_range"]  = (-32768, 32767)
+    if "matmul-in-int16" in request.param.name:
+        # Full-range int16 products overflow the 33-bit ACT input over the
+        # 128-long reduction; keep K * max^2 below 2^31.
+        extra_args["tweaked_input_data_range"]  = (-4096, 4096)
 
     if any(s in request.param.data.name for s in need_input_type_tc):
         extra_args["torq_compiler_options"].append("--iree-input-type=tosa-torq")

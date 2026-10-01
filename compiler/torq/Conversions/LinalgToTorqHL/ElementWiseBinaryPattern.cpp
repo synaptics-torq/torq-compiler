@@ -63,6 +63,25 @@ static std::pair<int64_t, int64_t> bestRational(double x, int64_t maxDen) {
     return {p1, q1};
 }
 
+// ACT scale and right shift with scale / 2^shift as close to `multiplier` as a 32-bit scale allows.
+struct ActScale {
+    int32_t scale;
+    int shift;
+};
+
+static std::optional<ActScale> fitActScale(double multiplier) {
+    // Right shifts up to this value matched TFLite bit-exactly on SL2610 (cofi_nss_v3 int8).
+    constexpr int maxActShift = 46;
+    int shift =
+        static_cast<int>(std::floor(std::log2(std::numeric_limits<int32_t>::max() / multiplier)));
+    shift = std::min(shift, maxActShift);
+    const double scale = std::round(std::ldexp(multiplier, shift));
+    if (shift < 0 || scale < 1 || scale > std::numeric_limits<int32_t>::max()) {
+        return std::nullopt;
+    }
+    return ActScale{static_cast<int32_t>(scale), shift};
+}
+
 // Weights and ACT scale/shift for acc = w0 * in0 + w1 * in1, out = (acc + bias) * scale >> shift.
 // The i16 weights only carry the ratio of the two multipliers, as the closest fraction with a
 // denominator that keeps the i32 accumulator in range; the 32-bit ACT scale carries the
@@ -70,14 +89,11 @@ static std::pair<int64_t, int64_t> bestRational(double x, int64_t maxDen) {
 // weight fills an i16, which leaves an 8-bit add with about 14 bits of precision per operand.
 struct RatioScale {
     int16_t weight0, weight1;
-    int32_t scale;
-    int shift;
+    ActScale act;
 };
 
 static std::optional<RatioScale>
 fitRatioScale(double multiplier0, double multiplier1, double range0, double range1) {
-    // Right shifts up to this value matched TFLite bit-exactly on SL2610 (cofi_nss_v3 int8).
-    constexpr int maxActShift = 46;
     const double big = std::max(multiplier0, multiplier1);
     const double small = std::min(multiplier0, multiplier1);
     if (!(small > 0.0)) {
@@ -98,19 +114,47 @@ fitRatioScale(double multiplier0, double multiplier1, double range0, double rang
     if (p <= 0 || q <= 0) {
         return std::nullopt;
     }
-    int shift = static_cast<int>(
-        std::floor(std::log2(std::numeric_limits<int32_t>::max() * static_cast<double>(q) / big))
-    );
-    shift = std::min(shift, maxActShift);
-    const double scale = std::round(big * std::ldexp(1.0, shift) / static_cast<double>(q));
-    if (shift < 0 || scale < 1 || scale > std::numeric_limits<int32_t>::max()) {
+    auto act = fitActScale(big / static_cast<double>(q));
+    if (!act) {
         return std::nullopt;
     }
     RatioScale fit;
     fit.weight0 = static_cast<int16_t>(firstIsBig ? q : p);
     fit.weight1 = static_cast<int16_t>(firstIsBig ? p : q);
-    fit.scale = static_cast<int32_t>(scale);
-    fit.shift = shift;
+    fit.act = *act;
+    return fit;
+}
+
+// Weight, bias and ACT scale/shift for acc = w * in + bias, out = acc * scale >> shift, computing
+// multiplier * in + offset for an add whose other operand is a scalar folded into `offset`. As in
+// fitRatioScale the 32-bit ACT scale carries the magnitude, so the weight only sets the bias
+// resolution and takes the largest value that keeps the i32 accumulator in range.
+struct ScalarScale {
+    int16_t weight;
+    int32_t bias;
+    ActScale act;
+};
+
+static std::optional<ScalarScale> fitScalarScale(double multiplier, double range, double offset) {
+    const double magnitude = std::abs(multiplier);
+    if (!(magnitude > 0.0)) {
+        return std::nullopt;
+    }
+    const double weight = std::min<double>(
+        std::numeric_limits<int16_t>::max(),
+        std::floor(std::numeric_limits<int32_t>::max() / (range + std::abs(offset) / magnitude))
+    );
+    if (weight < 1) {
+        return std::nullopt;
+    }
+    auto act = fitActScale(magnitude / weight);
+    if (!act) {
+        return std::nullopt;
+    }
+    ScalarScale fit;
+    fit.weight = static_cast<int16_t>(multiplier < 0 ? -weight : weight);
+    fit.bias = static_cast<int32_t>(std::round(std::ldexp(offset, act->shift) / act->scale));
+    fit.act = *act;
     return fit;
 }
 
@@ -671,6 +715,8 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         int32_t bias0 = -weight0 * scaleInput0.zp;
         int32_t bias1 = -weight1 * scaleInput1.zp;
 
+        // Scalar operand contribution to the output, before the output zero point.
+        double scalarOffset = 0.0;
         int32_t scalarValue0 = 0;
         bool input0IsScalar =
             foldBackwardScalarConstant(input0, scaleInput0, &scalarValue0, rewriter);
@@ -708,9 +754,8 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             //   actScale = 1
             //   actShift = scaleShift
             //   actZp = outputZp
-            bias0 = doubleToInt<int32_t>(toFixedPoint(
-                (scalarValue0 - scaleInput0.zp) * scaleInput0.scale * scaleFactor * outputScale
-            ));
+            scalarOffset = (scalarValue0 - scaleInput0.zp) * scaleInput0.scale * outputScale;
+            bias0 = doubleToInt<int32_t>(toFixedPoint(scalarOffset * scaleFactor));
 
             input0 = input1;
         }
@@ -719,15 +764,37 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             weight1 = 0;
 
             // Read above comment for the detailed explanation of the formula
-            bias1 = doubleToInt<int32_t>(toFixedPoint(
-                (scalarValue1 - scaleInput1.zp) * scaleInput1.scale * scaleFactor * sign *
-                outputScale
-            ));
+            scalarOffset = (scalarValue1 - scaleInput1.zp) * scaleInput1.scale * sign * outputScale;
+            bias1 = doubleToInt<int32_t>(toFixedPoint(scalarOffset * scaleFactor));
             input1 = input0;
         }
 
+        // Quantized operands move the magnitude into the 32-bit ACT scale; the formula above with
+        // actScale = 1 is the fallback.
         int32_t actScale = 1;
-        if (refineScale && !input0IsScalar && !input1IsScalar) {
+        if (refineScale && input0IsScalar) {
+            if (auto fit = fitScalarScale(
+                    sign * multiplier1, operandRange(input1, scaleInput1.zp), scalarOffset
+                )) {
+                weight1 = fit->weight;
+                bias0 = fit->bias;
+                bias1 = -weight1 * scaleInput1.zp;
+                actScale = fit->act.scale;
+                scaleShift = fit->act.shift;
+            }
+        }
+        else if (refineScale && input1IsScalar) {
+            if (auto fit = fitScalarScale(
+                    multiplier0, operandRange(input0, scaleInput0.zp), scalarOffset
+                )) {
+                weight0 = fit->weight;
+                bias0 = -weight0 * scaleInput0.zp;
+                bias1 = fit->bias;
+                actScale = fit->act.scale;
+                scaleShift = fit->act.shift;
+            }
+        }
+        else if (refineScale) {
             if (auto fit = fitRatioScale(
                     multiplier0, multiplier1, operandRange(input0, scaleInput0.zp),
                     operandRange(input1, scaleInput1.zp)
@@ -736,8 +803,8 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                 weight1 = fit->weight1 * sign;
                 bias0 = -weight0 * scaleInput0.zp;
                 bias1 = -weight1 * scaleInput1.zp;
-                actScale = fit->scale;
-                scaleShift = fit->shift;
+                actScale = fit->act.scale;
+                scaleShift = fit->act.shift;
             }
         }
 

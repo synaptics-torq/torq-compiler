@@ -23,6 +23,13 @@ from torq.testing.cases import Case
 from .keras_known_failures import should_skip
 
 
+@pytest.fixture
+def comparison_config_for_int16_lut(request):
+    """int16 tanh/sigmoid: the TOSA table lowering differs from the TFLite int16 kernel by up to
+    2 LSB across the full input range (llvm-cpu matches Torq bit-exactly)."""
+    return {"int_tol": 2}
+
+
 
 def _add_quantization_and_markers(cases, marker_name, int8_only=False):
     """Helper to add quantization variants with markers to test cases."""
@@ -1181,6 +1188,9 @@ def case_config(request, runtime_hw_type, chip_config):
     # FIXME
     if ('conv2d_test1_int8_inp_242x137x3_k3x3_oc16_s2x2_valid' in tc):
         extra_args['torq_compiler_options'] = ["--torq-disable-slicing"]
+
+    if case.data.get("quantize_to_int16", False) and ('tanh' in tc or 'sigmoid' in tc):
+        extra_args['comparison_config'] = "comparison_config_for_int16_lut"
 
     return {
         "keras_model": case.data['keras_model_name'],

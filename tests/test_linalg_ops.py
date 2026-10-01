@@ -27,9 +27,10 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in request.param.name for s in no_negative_input):
         extra_args["tweaked_input_data_range"]  = (0, 100)
 
-    if "trunci-i16-to-i8" in request.param.name:
-        # increase input range to check out of bound cases
-        extra_args["tweaked_input_data_range"]  = (-1000, 1000)
+    if any(s in request.param.name for s in ["dot-in-int16", "matvec-in-int16"]):
+        # Full-range int16 products overflow the 33-bit ACT input over the
+        # 3669-long reduction; keep K * max^2 below 2^31.
+        extra_args["tweaked_input_data_range"]  = (-512, 512)
 
     # Skip DMA throughput test cases - they require --torq-fake-reduce and are
     # meant to be run only via test_dma_throughput.py.
