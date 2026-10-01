@@ -606,11 +606,8 @@ class JenkinsBoardsControl(BoardsControl):
 
             try:
                 status = self._fetch_build_item_status(data["build_item_url"])
-                
-                result = status.get("result")
 
-                if result is None:
-                    return True
+                return status.get("inProgress", False)
                 
             except Exception as e:                
                 print("Failed to fetch build item status, assuming the build is not active")
