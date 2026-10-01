@@ -87,17 +87,8 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
         // input2 is loaded as a data tensor here, so element types must match.
         if (params.type1.getElementType() != params.type2.getElementType())
             return addOp.emitError("Add input element types must match");
-        // The two tensors must have the same shape and strides.
-        // Skip stride mismatch check for batch dimension (dim 0) if batch size is 1,
-        // since differing strides won't affect computation in that case.
-        for (size_t i = 0; i < params.input1Strides.size(); ++i) {
-            if (params.input1Shape[i] != params.input2Shape[i])
-                return addOp.emitError("Add input shapes must match");
-            if (i == 0 && params.input1Shape[0] == 1)
-                continue;
-            if (params.input1Strides[i] != params.input2Strides[i]) {
-                return addOp.emitError("Add input strides must matchh");
-            }
+        if (params.input1Shape != params.input2Shape) {
+            return addOp.emitError("Add input shapes must match");
         }
 
         sliceTaskOp = buildNonScalarTaskOp(params);
