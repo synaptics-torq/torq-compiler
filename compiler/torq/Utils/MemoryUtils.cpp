@@ -199,14 +199,12 @@ std::optional<int64_t> getLramAddress(Value value) {
             return std::nullopt;
         }
 
-        auto sectionAddresses = createInvocationOp.getExecutorCodeAddresses();
-        auto sectionIndex = cast<OpResult>(value).getResultNumber() - 1;
-
-        if (!sectionAddresses || sectionAddresses->size() <= sectionIndex) {
+        if (value != createInvocationOp.getCodeSection() ||
+            !createInvocationOp.getExecutorCodeAddress()) {
             return std::nullopt;
         }
 
-        return (*sectionAddresses)[sectionIndex];
+        return *createInvocationOp.getExecutorCodeAddress();
     }
     else if (auto descriptorOp = value.getDefiningOp<torq_hl::DescriptorOp>()) {
 
@@ -227,14 +225,12 @@ void setXramAddress(Operation *op, int64_t address) {
 std::optional<int64_t> getXramAddress(Value value) {
 
     if (auto createInvocationOp = value.getDefiningOp<torq_hl::CreateInvocationOp>()) {
-        auto sectionAddresses = createInvocationOp.getXramCodeAddresses();
-        auto sectionIndex = cast<OpResult>(value).getResultNumber() - 1;
-
-        if (!sectionAddresses || sectionAddresses->size() <= sectionIndex) {
+        if (value != createInvocationOp.getCodeSection() ||
+            !createInvocationOp.getXramCodeAddress()) {
             return std::nullopt;
         }
 
-        return (*sectionAddresses)[sectionIndex];
+        return *createInvocationOp.getXramCodeAddress();
     }
     else if (auto descriptorOp = value.getDefiningOp<torq_hl::DescriptorOp>()) {
 

@@ -371,85 +371,27 @@ getAddressFromInvocationArg(BlockArgument blockArg, InvocationValue invocation) 
     return argBuffer.getAddress() - getMemRefTypeOffsetBytes(type);
 }
 
-static std::optional<int64_t>
-getAddressFromGetBlockOp(torq_hl::GetBlockOp getBlockOp, InvocationValue invocation) {
+static std::optional<int64_t> getAddressFromGetBlockOp(torq_hl::GetBlockOp getBlockOp) {
 
+    // get_block results are resolved only once the invocation has been compiled into
+    // a descriptor; the code block loads inside the programs are resolved statically
+    // before that, by AssignNSSProgramsAddresses
     auto blockInvocation = simplifyBlockArguments(getBlockOp.getInvocation());
+    auto descriptorOp = blockInvocation.getDefiningOp<torq_hl::DescriptorOp>();
 
-    // the invocation in the get_block op is an argument of the current invocation
-    if (auto blockArg = dyn_cast<BlockArgument>(blockInvocation)) {
-
-        auto argAttr = getInvocationArgumentAttr(blockArg, invocation);
-
-        if (!argAttr) {
-            return std::nullopt; // no argument attribute found
-        }
-
-        auto argInvocation = dyn_cast<torq_hl::InvocationAttr>(argAttr);
-
-        if (!argInvocation) {
-            return std::nullopt; // argument is not an invocation
-        }
-
-        auto blockAddresses = argInvocation.getBlockAddresses();
-
-        // not assigned yet: AssignNSSProgramsAddresses fills these in later
-        if (blockAddresses.empty()) {
-            return std::nullopt;
-        }
-
-        assert(
-            getBlockOp.getBlockIndex().getZExtValue() < blockAddresses.size() &&
-            "get_block index out of range"
-        );
-
-        return blockAddresses[getBlockOp.getBlockIndex().getZExtValue()];
+    if (!descriptorOp) {
+        return std::nullopt;
     }
-    // the invocation in the get_block op is value produced by a create_invocation op
-    else if (auto blockCreateInvocationOp =
-                 blockInvocation.getDefiningOp<torq_hl::CreateInvocationOp>()) {
 
-        auto xramCodeAddresses = blockCreateInvocationOp.getXramCodeAddresses();
+    auto programOp = descriptorOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
+    auto blockIndex = getBlockOp.getBlockIndex().getZExtValue();
 
-        if (!xramCodeAddresses) {
-            return std::nullopt; // no addresses available
-        }
-
-        if (getBlockOp.getBlockIndex().getZExtValue() >= xramCodeAddresses->size()) {
-            return std::nullopt; // block index out of bounds
-        }
-
-        return (*xramCodeAddresses)[getBlockOp.getBlockIndex().getZExtValue()];
+    if (!programOp || !programOp.getBlockSizes() ||
+        blockIndex >= programOp.getBlockSizes()->size()) {
+        return std::nullopt;
     }
-    // the invocation in the get_block op is the value produced by a descriptor op
-    else if (auto blockDescriptorOp = blockInvocation.getDefiningOp<torq_hl::DescriptorOp>()) {
 
-        // an NSS descriptor carries the whole program as one contiguous code
-        // section, so a block's address is the section base plus the sizes of the
-        // preceding blocks
-        auto programOp = blockDescriptorOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
-
-        if (!programOp) {
-            return std::nullopt;
-        }
-
-        auto blockSizes = programOp.getBlockSizes();
-        auto blockIndex = getBlockOp.getBlockIndex().getZExtValue();
-
-        if (!blockSizes || blockIndex >= blockSizes->size()) {
-            return std::nullopt; // block index out of bounds
-        }
-
-        int64_t offset = 0;
-        for (auto blockSize : blockSizes->take_front(blockIndex)) {
-            offset += blockSize;
-        }
-
-        return blockDescriptorOp.getXramCodeAddress() + offset;
-    }
-    else {
-        return std::nullopt; // we don't support any other case
-    }
+    return descriptorOp.getXramCodeAddress() + programOp.getBlockOffsets()[blockIndex];
 }
 
 // This function returns the address of a global memref that is accessed by a memref.get_global op
@@ -509,7 +451,7 @@ std::optional<int64_t> AddressResolver::getAddress(Value value, InvocationValue 
         result = getAddressFromInvocationArg(blockArg, invocation);
     }
     else if (auto getBlockOp = dyn_cast<torq_hl::GetBlockOp>(value.getDefiningOp())) {
-        result = getAddressFromGetBlockOp(getBlockOp, invocation);
+        result = getAddressFromGetBlockOp(getBlockOp);
     }
     else if (auto getGlobalOp = dyn_cast<memref::GetGlobalOp>(value.getDefiningOp())) {
         result = getAddressFromGetGlobal(getGlobalOp, symbolTables);

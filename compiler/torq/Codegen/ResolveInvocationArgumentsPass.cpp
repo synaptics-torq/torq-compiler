@@ -61,22 +61,19 @@ static LogicalResult updateCreateInvocation(
         return startProgramOp.emitError() << "invocation must be from a CreateInvocationOp";
     }
 
-    // update the address of the code sections
-    SmallVector<int64_t> executorCodeSectionAddresses;
-    for (auto [idx, section] : llvm::enumerate(startProgramOp.getCodeSections())) {
+    // the code executes from the start op's first code section
+    if (!startProgramOp.getCodeSections().empty()) {
 
-        auto sectionValue = mapping.lookup(section);
+        auto sectionValue = mapping.lookup(startProgramOp.getCodeSections()[0]);
 
         auto executorAddress = resolver.getAddress(sectionValue);
 
         if (!executorAddress) {
-            return startProgramOp.emitError() << "code section #" << idx << " must have address";
+            return startProgramOp.emitError() << "code section #0 must have address";
         }
 
-        executorCodeSectionAddresses.push_back(*executorAddress);
+        createInvocationOp.setExecutorCodeAddress(*executorAddress);
     }
-
-    createInvocationOp.setExecutorCodeAddresses(executorCodeSectionAddresses);
 
     auto executor = createInvocationOp.getProgram().getType().getExecutor();
 
@@ -104,26 +101,9 @@ static LogicalResult updateCreateInvocation(
                     executorId = (*maybeExecutorId).getZExtValue();
                 }
 
-                auto maybeCodeSectionAddresses = sourceInvocationOp.getXramCodeAddresses();
-
-                if (!maybeCodeSectionAddresses) {
-                    // NSS invocations get their XRAM code addresses only later, from
-                    // AssignNSSProgramsAddresses, which also rewrites this attribute
-                    // with the assigned values.
-                    if (executor != torq_hl::Executor::NSS) {
-                        return startProgramOp.emitError()
-                               << "argument #" << idx
-                               << " has no valid code section addresses, see: " << argValue;
-                    }
-                    argAttrs.push_back(torq_hl::InvocationAttr::get(
-                        startProgramOp.getContext(), executor, executorId, ArrayRef<int64_t>{}
-                    ));
-                    continue;
-                }
-
-                argAttrs.push_back(torq_hl::InvocationAttr::get(
-                    startProgramOp.getContext(), executor, executorId, *maybeCodeSectionAddresses
-                ));
+                argAttrs.push_back(
+                    torq_hl::InvocationAttr::get(startProgramOp.getContext(), executor, executorId)
+                );
             }
             else if (auto descriptorOp = invocationArg.getDefiningOp<torq_hl::DescriptorOp>()) {
 
@@ -131,10 +111,9 @@ static LogicalResult updateCreateInvocation(
 
                 int executorId = descriptorOp.getExecutorId().getZExtValue();
 
-                argAttrs.push_back(torq_hl::InvocationAttr::get(
-                    startProgramOp.getContext(), executor, executorId,
-                    ArrayRef<int64_t>{static_cast<int64_t>(descriptorOp.getXramCodeAddress())}
-                ));
+                argAttrs.push_back(
+                    torq_hl::InvocationAttr::get(startProgramOp.getContext(), executor, executorId)
+                );
             }
             else {
                 return startProgramOp.emitError()

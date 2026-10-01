@@ -851,6 +851,12 @@ def TorqHl_ProgramOp: TorqHL_Op<"program", [IsolatedFromAbove]> {
     $name attr-dict `:` qualified(type($program)) regions
   }];
 
+  let extraClassDeclaration = [{
+    // Byte offsets of the blocks from the start of the program's packed code, with the
+    // total code size as the last entry
+    ::llvm::SmallVector<int64_t> getBlockOffsets();
+  }];
+
   let hasCanonicalizer = 1;
 
   let hasVerifier = 1;
@@ -872,18 +878,18 @@ def TorqHl_CreateInvocationOp: TorqHL_Op<"create_invocation"> {
     StrAttr:$name,
     TorqHL_Program:$program,
     OptionalAttr<IndexAttr>:$executor_id,
-    OptionalAttr<DenseI64ArrayAttr>:$executor_code_addresses,
-    OptionalAttr<DenseI64ArrayAttr>:$xram_code_addresses,
+    OptionalAttr<I64Attr>:$executor_code_address,
+    OptionalAttr<I64Attr>:$xram_code_address,
     OptionalAttr<ArrayAttr>:$invocation_args
   );
 
   let results = (outs
     TorqHL_Invocation:$invocation,
-    Variadic<AnyMemRef>:$code_sections
+    Optional<AnyMemRef>:$code_section
   );
 
   let assemblyFormat = [{
-    $name `program` `(` $program `:` qualified(type($program)) `)` (`on` $executor_id^ )?  attr-dict `:` qualified(type($invocation)) (`,` type($code_sections)^)?
+    $name `program` `(` $program `:` qualified(type($program)) `)` (`on` $executor_id^ )?  attr-dict `:` qualified(type($invocation)) (`,` type($code_section)^)?
   }];
 
 }

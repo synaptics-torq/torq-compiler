@@ -168,7 +168,7 @@ lowerCallProgramOp(RewriterBase &rewriter, torq_hl::CallProgramOp callOp, Value 
         assert(sharedItcmCode && "CSS call requires staged ITCM code");
         startOpCodeSections.push_back(sharedItcmCode);
 
-        auto argsAddresses = cast<TypedValue<MemRefType>>(createInvocationOp.getCodeSections()[0]);
+        auto argsAddresses = cast<TypedValue<MemRefType>>(createInvocationOp.getCodeSection());
         startOpCodeSections.push_back(
             stageCssArgsAddressesSection(rewriter, callOp.getLoc(), argsAddresses)
         );

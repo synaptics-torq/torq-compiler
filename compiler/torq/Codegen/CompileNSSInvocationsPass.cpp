@@ -254,41 +254,28 @@ static LogicalResult compileInvocation(
         return failure();
     }
 
-    if (!createInvocationOp.getXramCodeAddresses() ||
-        !createInvocationOp.getExecutorCodeAddresses()) {
+    if (!createInvocationOp.getXramCodeAddress() || !createInvocationOp.getExecutorCodeAddress()) {
         return createInvocationOp->emitOpError("NSS program must have XRAM and LRAM code addresses"
         );
     }
 
-    auto xramCodeAddresses = createInvocationOp.getXramCodeAddresses().value();
-    auto lramCodeAddresses = createInvocationOp.getExecutorCodeAddresses().value();
+    int64_t xramCodeAddress = *createInvocationOp.getXramCodeAddress();
+    int64_t lramStartAddress = *createInvocationOp.getExecutorCodeAddress();
 
-    auto blockCount = programOp.getBody().getBlocks().size();
-
-    if (blockCount == 0) {
+    if (programOp.getBody().getBlocks().empty()) {
         return programOp->emitOpError("NSS program must have at least one block");
     }
 
-    if (xramCodeAddresses.size() != blockCount) {
-        return createInvocationOp->emitOpError(
-            "Expected as many XRAM code address for NSS program as blocks in the program"
-        );
+    auto maybeBlockSizes = programOp.getBlockSizes();
+
+    if (!maybeBlockSizes) {
+        return programOp->emitOpError("NSS program must have block sizes");
     }
 
-    if (lramCodeAddresses.size() != 1) {
-        return createInvocationOp->emitOpError("Expected exactly one LRAM code address");
-    }
+    // the sizes the layout was computed with; the compile below shrinks each to what is used
+    blockSizes.assign(maybeBlockSizes->begin(), maybeBlockSizes->end());
 
-    // compute the initial addresses and sizes for memory that will host cfgs
-    auto lramStartAddress = lramCodeAddresses[0];
-
-    // find the code size for each block that was kept aside to serialize it (this is the max size
-    // we can use)
-    blockSizes.clear();
-    for (auto codeSection : createInvocationOp.getCodeSections()) {
-        auto codeType = cast<MemRefType>(codeSection.getType());
-        blockSizes.push_back(getEncodedTotalSizeBytes(codeType));
-    }
+    auto blockOffsets = programOp.getBlockOffsets();
 
     DescGen _npu;
 
@@ -298,7 +285,7 @@ static LogicalResult compileInvocation(
         return createInvocationOp->emitError("Failed to open DescGen for NSS compilation");
     }
 
-    if (!_npu.nssBegin(lramStartAddress, xramCodeAddresses[0])) {
+    if (!_npu.nssBegin(lramStartAddress, xramCodeAddress)) {
         return failure();
     }
 
@@ -349,7 +336,7 @@ static LogicalResult compileInvocation(
             nextLramAddress = maybeLramAddress.value();
 
             // find the next XRAM address
-            nextXramAddress = xramCodeAddresses[idx + 1];
+            nextXramAddress = xramCodeAddress + blockOffsets[idx + 1];
 
             // add the 4 bytes of the NEXT instruction that are not counted above
             remainingBlockSize -= 4;
@@ -364,7 +351,7 @@ static LogicalResult compileInvocation(
     }
 
     if (code) {
-        if (failed(updateCode(_npu, xramCodeAddresses[0], *code))) {
+        if (failed(updateCode(_npu, xramCodeAddress, *code))) {
             return failure();
         }
     }
@@ -483,8 +470,9 @@ LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp createInvocat
 
     OpBuilder builder(createInvocationOp);
 
-    auto blockSizes =
-        createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>().getBlockSizes().value();
+    auto programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
+    auto blockSizes = programOp.getBlockSizes().value();
+    auto blockOffsets = programOp.getBlockOffsets();
 
     for (auto [getBlockOp, uses] : *maybeGetBlockOps) {
 
@@ -548,8 +536,9 @@ LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp createInvocat
                 dmaInCfg.setReadNdlAttr(ndl);
                 dmaInCfg.setWriteNdlAttr(ndl);
 
-                dmaInCfg.setReadAddress(createInvocationOp.getXramCodeAddresses().value(
-                )[blockIndex]);
+                dmaInCfg.setReadAddress(
+                    *createInvocationOp.getXramCodeAddress() + blockOffsets[blockIndex]
+                );
             }
             else {
                 return use->getOwner()->emitOpError("Unsupported usage of get block result");
@@ -572,19 +561,22 @@ LogicalResult resolveGetBlockReadAddresses(torq_hl::CreateInvocationOp createInv
         return failure();
     }
 
-    auto xramCodeAddresses = createInvocationOp.getXramCodeAddresses().value();
+    auto programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
+    int64_t xramCodeAddress = *createInvocationOp.getXramCodeAddress();
+    auto blockOffsets = programOp.getBlockOffsets();
+    auto blockCount = blockOffsets.size() - 1;
 
     for (auto [getBlockOp, uses] : *maybeGetBlockOps) {
 
         int blockIndex = getBlockOp.getBlockIndex().getSExtValue();
 
-        if (blockIndex < 0 || static_cast<size_t>(blockIndex) >= xramCodeAddresses.size()) {
+        if (blockIndex < 0 || static_cast<size_t>(blockIndex) >= blockCount) {
             return getBlockOp->emitOpError("Block index out of range");
         }
 
         for (auto use : uses) {
             if (auto dmaInCfg = dyn_cast<torq_hw::DmaInCfgOp>(use->getOwner())) {
-                dmaInCfg.setReadAddress(xramCodeAddresses[blockIndex]);
+                dmaInCfg.setReadAddress(xramCodeAddress + blockOffsets[blockIndex]);
             }
         }
     }
@@ -592,10 +584,8 @@ LogicalResult resolveGetBlockReadAddresses(torq_hl::CreateInvocationOp createInv
     return success();
 }
 
-LogicalResult updateCodeSectionSizes(torq_hl::CreateInvocationOp createInvocationOp) {
+LogicalResult measureBlockSizes(torq_hl::CreateInvocationOp createInvocationOp) {
 
-    // find the code size for each block that was kept aside to serialize it (this is the max size
-    // we can use)
     SmallVector<int32_t> blockSizes;
 
     // compile the program to determine the actual used sizes (this updates blockSizes)
@@ -607,17 +597,7 @@ LogicalResult updateCodeSectionSizes(torq_hl::CreateInvocationOp createInvocatio
         assert(blockSize % 4 == 0 && "Unexpected non-aligned block size");
     }
 
-    // update the torq_block_size attribute on the program op
     createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>().setBlockSizes(blockSizes);
-
-    // the XRAM addresses are assigned afterwards, from these sizes
-    Builder builder(createInvocationOp.getContext());
-    for (auto [codeSection, blockSize] :
-         llvm::zip_equal(createInvocationOp.getCodeSections(), blockSizes)) {
-        auto codeSectionType =
-            MemRefType::get({static_cast<int64_t>(blockSize)}, builder.getI8Type());
-        codeSection.setType(codeSectionType);
-    }
 
     return success();
 }
@@ -626,14 +606,7 @@ static LogicalResult createDescriptors(torq_hl::CreateInvocationOp createInvocat
 
     auto programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
 
-    // since we call this function after packing the blocks we can use this shortcut to compute
-    // the total code size
-    int totalSize = 0;
-    auto maybeBlockSizes = programOp.getBlockSizes();
-
-    for (auto blockSize : *maybeBlockSizes) {
-        totalSize += blockSize;
-    }
+    int64_t totalSize = programOp.getBlockOffsets().back();
 
     SmallVector<int32_t> blockSizes;
     SmallVector<int8_t> code(totalSize, 0);
@@ -649,26 +622,18 @@ static LogicalResult createDescriptors(torq_hl::CreateInvocationOp createInvocat
 
     // The blocks are packed contiguously in XRAM, so the whole program forms a
     // single code section starting at the first block.
-    auto codeSectionType = MemRefType::get({static_cast<int64_t>(totalSize)}, rewriter.getI8Type());
-
-    int64_t programBase = createInvocationOp.getXramCodeAddresses()->front();
+    auto codeSectionType = MemRefType::get({totalSize}, rewriter.getI8Type());
 
     auto descriptorOp = torq_hl::DescriptorOp::create(
         rewriter, createInvocationOp.getLoc(),
         TypeRange{createInvocationOp.getInvocation().getType(), codeSectionType},
         createInvocationOp.getNameAttr(), rewriter.getIndexAttr(0), createInvocationOp.getProgram(),
-        rewriter.getI64IntegerAttr(createInvocationOp.getExecutorCodeAddresses()->front()),
-        rewriter.getI64IntegerAttr(programBase), rewriter.getDenseI8ArrayAttr(code)
+        createInvocationOp.getExecutorCodeAddressAttr(),
+        createInvocationOp.getXramCodeAddressAttr(), rewriter.getDenseI8ArrayAttr(code)
     );
 
     descriptorOp->setAttr("torq-job-id", jobId);
 
-    assert(
-        llvm::all_of(
-            createInvocationOp.getCodeSections(), [](Value section) { return section.use_empty(); }
-        ) &&
-        "NSS create_invocation code sections must be unused"
-    );
     rewriter.replaceAllUsesWith(createInvocationOp.getInvocation(), descriptorOp.getInvocation());
     rewriter.eraseOp(createInvocationOp);
 

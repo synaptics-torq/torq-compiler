@@ -456,18 +456,18 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
         return createInvocationOp->emitOpError("Missing lram code address");
     }
 
-    auto maybeXramCodeAddresses = createInvocationOp.getXramCodeAddresses();
+    auto maybeXramCodeAddress = createInvocationOp.getXramCodeAddress();
 
-    if (!maybeXramCodeAddresses || maybeXramCodeAddresses->empty()) {
+    if (!maybeXramCodeAddress) {
         return createInvocationOp->emitOpError("Missing xram code address");
     }
 
     // compute the initial addresses and sizes for memory that will host cfgs and ndls
     auto lramAddress = *maybeLramCodeAddress;
-    auto xramAddress = (*maybeXramCodeAddresses)[0];
+    auto xramAddress = *maybeXramCodeAddress;
 
     // find the maximal code size that was kept aside to run this program
-    auto codeType = cast<MemRefType>(createInvocationOp.getCodeSections()[0].getType());
+    auto codeType = cast<MemRefType>(createInvocationOp.getCodeSection().getType());
     uint32_t programSize = getEncodedTotalSizeBytes(codeType);
 
     // Default programs use 0x900 bytes for CFGs, the rest for NDLs. A larger-than-default

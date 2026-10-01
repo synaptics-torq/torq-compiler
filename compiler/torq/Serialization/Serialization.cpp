@@ -542,9 +542,9 @@ LogicalResult Serializer::serializeProgramCode(torq_hl::ProgramCodeOp programCod
 
 LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &createInvocationOp) {
 
-    if (createInvocationOp.getCodeSections().size() != 1) {
+    if (!createInvocationOp.getCodeSection()) {
         return createInvocationOp->emitOpError(
-            "Expected exactly one code section (args-addresses) for CSS program"
+            "Expected a code section (args-addresses) for CSS program"
         );
     }
 
@@ -588,7 +588,7 @@ LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &cr
     auto argsAttr =
         DenseIntElementsAttr::get(argsType, llvm::ArrayRef<uint32_t>(args.data(), args.size()));
 
-    auto argsXramAddress = getXramAddress(createInvocationOp.getCodeSections()[0]);
+    auto argsXramAddress = getXramAddress(createInvocationOp.getCodeSection());
 
     if (!argsXramAddress) {
         return createInvocationOp.emitError() << "Missing xram address for args section";

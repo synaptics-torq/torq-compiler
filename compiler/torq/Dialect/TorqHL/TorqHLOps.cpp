@@ -776,6 +776,20 @@ LogicalResult mlir::syna::torq_hl::DescriptorOp::verify() {
     return success();
 }
 
+SmallVector<int64_t> mlir::syna::torq_hl::ProgramOp::getBlockOffsets() {
+
+    auto blockSizes = *getBlockSizes();
+
+    SmallVector<int64_t> offsets;
+    offsets.reserve(blockSizes.size() + 1);
+    offsets.push_back(0);
+    for (auto blockSize : blockSizes) {
+        offsets.push_back(offsets.back() + blockSize);
+    }
+
+    return offsets;
+}
+
 LogicalResult mlir::syna::torq_hl::ProgramOp::verify() {
 
     auto argAccesses = getArgAccessesAttr();

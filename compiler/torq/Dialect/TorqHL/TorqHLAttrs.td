@@ -298,11 +298,10 @@ def TorqHL_InvocationAttr: AttrDef<TorqHL_Dialect, "Invocation", []>
   let mnemonic = "invocation";
   let parameters = (ins
     "Executor":$executor,
-    "int64_t":$executor_id,
-    ArrayRefParameter<"int64_t">:$block_addresses
+    "int64_t":$executor_id
   );
 
-  let assemblyFormat = "`<` `executor` $executor `(` $executor_id `)` `,` `block_addresses` `=` `[` $block_addresses `]` `>`";
+  let assemblyFormat = "`<` `executor` $executor `(` $executor_id `)` `>`";
   
 }
 

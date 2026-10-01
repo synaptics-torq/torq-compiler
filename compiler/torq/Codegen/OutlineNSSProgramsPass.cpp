@@ -388,8 +388,8 @@ static FailureOr<torq_hl::StartProgramOp> outlineOperations(
 
     // create the invocation
     auto createInvocationOp = torq_hl::CreateInvocationOp::create(
-        builder, loc, TypeRange{invocationType, programBlockType}, programOp.getName(),
-        programOp.getProgram(), nullptr, nullptr, nullptr, nullptr
+        builder, loc, TypeRange{invocationType}, programOp.getName(), programOp.getProgram(),
+        nullptr, nullptr, nullptr, nullptr
     );
 
     // create the load operation that will load the program into the LRAM

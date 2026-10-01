@@ -87,8 +87,7 @@ static void outlineOp(int idx, Operation *op, OpBuilder builder) {
     auto lramCodeSection =
         memref::AllocOp::create(builder, loc, programSectionLramCodeType, nullptr);
 
-    if (failed(
-            createTorqCopy(builder, loc, createInvocationOp.getCodeSections()[0], lramCodeSection)
+    if (failed(createTorqCopy(builder, loc, createInvocationOp.getCodeSection(), lramCodeSection)
         )) {
         llvm::report_fatal_error("failed to create copy to LRAM");
     }

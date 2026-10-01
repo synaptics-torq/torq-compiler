@@ -221,34 +221,6 @@ static LogicalResult splitProgram(torq_hl::ProgramOp programOp) {
     returnOp.setOperand(0, inactiveLramCodeArea);
     returnOp.setOperand(1, activeLramCodeArea);
 
-    // change the output of the create_invocation to return all the sections of the code
-    auto createInvocationOp =
-        dyn_cast<torq_hl::CreateInvocationOp>(programOp.getProgram().getUses().begin()->getOwner());
-
-    // return all the new code sections as result of the create_invocation
-    SmallVector<Type> resultTypes;
-    for (auto type : createInvocationOp.getResultTypes()) {
-        resultTypes.push_back(type);
-    }
-
-    for (int i = 0; i < splitPoints.size(); i++) {
-        resultTypes.push_back(programBlockType);
-    }
-
-    builder.setInsertionPoint(createInvocationOp);
-
-    auto newCreateInvocationOp = torq_hl::CreateInvocationOp::create(
-        builder, createInvocationOp.getLoc(), resultTypes, createInvocationOp->getOperands(),
-        createInvocationOp->getAttrs()
-    );
-
-    for (auto [oldResult, newResult] :
-         llvm::zip(createInvocationOp.getResults(), newCreateInvocationOp.getResults())) {
-        oldResult.replaceAllUsesWith(newResult);
-    }
-
-    createInvocationOp.erase();
-
     return success();
 }
 

@@ -21,7 +21,7 @@ extern llvm::cl::opt<int> clMaxNssProgramsSize;
 
 namespace mlir::syna::torq {
 
-LogicalResult updateCodeSectionSizes(torq_hl::CreateInvocationOp createInvocationOp);
+LogicalResult measureBlockSizes(torq_hl::CreateInvocationOp createInvocationOp);
 LogicalResult resolveGetBlockReadAddresses(torq_hl::CreateInvocationOp createInvocationOp);
 LogicalResult updateGetBlockOperations(torq_hl::CreateInvocationOp createInvocationOp);
 
@@ -59,7 +59,7 @@ FailureOr<SmallVector<torq_hl::CreateInvocationOp>> findNSSInvocations(FunctionO
 }
 
 // Lay the programs out contiguously in XRAM starting from nssProgramBase, using their block_sizes,
-// and set each invocation's xram_code_addresses. Returns the end of the laid-out range.
+// and set each invocation's xram_code_address. Returns the end of the laid-out range.
 int64_t assignXramCodeAddresses(
     ArrayRef<torq_hl::CreateInvocationOp> nssInvocations, int64_t nssProgramBase
 ) {
@@ -70,52 +70,18 @@ int64_t assignXramCodeAddresses(
 
         auto programOp = invocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
 
-        auto blockSizes = programOp.getBlockSizes();
-
-        assert(blockSizes && "block_sizes missing: SegmentNSSPrograms must run first");
+        assert(
+            programOp.getBlockSizes() && "block_sizes missing: SegmentNSSPrograms must run first"
+        );
 
         nextNssProgramAddress = llvm::alignTo(nextNssProgramAddress, 4);
 
-        SmallVector<int64_t> addresses;
+        invocationOp.setXramCodeAddress(nextNssProgramAddress);
 
-        for (auto blockSize : *blockSizes) {
-            addresses.push_back(nextNssProgramAddress);
-            nextNssProgramAddress += blockSize;
-        }
-
-        invocationOp.setXramCodeAddresses(addresses);
+        nextNssProgramAddress += programOp.getBlockOffsets().back();
     }
 
     return nextNssProgramAddress;
-}
-
-// Rewrite the InvocationAttr entries in the started invocation's invocation_args
-// that refer to NSS invocations.
-void resolveNssInvocationArgs(torq_hl::StartProgramOp startProgramOp) {
-
-    auto targetInvocationOp =
-        startProgramOp.getInvocation().getDefiningOp<torq_hl::CreateInvocationOp>();
-    if (!targetInvocationOp || !targetInvocationOp.getInvocationArgs()) {
-        return;
-    }
-
-    SmallVector<Attribute> argAttrs(targetInvocationOp.getInvocationArgs()->getValue());
-
-    for (auto [argAttr, arg] : llvm::zip_equal(argAttrs, startProgramOp.getArgs())) {
-        auto invocationArg = dyn_cast<TypedValue<torq_hl::InvocationType>>(arg);
-        if (!invocationArg || invocationArg.getType().getExecutor() != torq_hl::Executor::NSS) {
-            continue;
-        }
-        auto argInvocationOp = invocationArg.getDefiningOp<torq_hl::CreateInvocationOp>();
-        assert(argInvocationOp && "NSS invocation argument not defined by create_invocation");
-        auto invocationAttr = cast<torq_hl::InvocationAttr>(argAttr);
-        argAttr = torq_hl::InvocationAttr::get(
-            startProgramOp.getContext(), torq_hl::Executor::NSS, invocationAttr.getExecutorId(),
-            *argInvocationOp.getXramCodeAddresses()
-        );
-    }
-
-    targetInvocationOp.setInvocationArgsAttr(ArrayAttr::get(startProgramOp.getContext(), argAttrs));
 }
 
 void AssignNSSProgramsAddressesPass::runOnOperation() {
@@ -144,7 +110,7 @@ void AssignNSSProgramsAddressesPass::runOnOperation() {
     }
 
     for (auto invocationOp : nssInvocations.value()) {
-        if (failed(updateCodeSectionSizes(invocationOp))) {
+        if (failed(measureBlockSizes(invocationOp))) {
             signalPassFailure();
             return;
         }
@@ -166,12 +132,6 @@ void AssignNSSProgramsAddressesPass::runOnOperation() {
 
         signalPassFailure();
         return;
-    }
-
-    // NSS invocations appear as arguments only at function level (a program loads
-    // the next program's blocks), so a flat walk covers every placeholder
-    for (auto startProgramOp : getOperation().getFunctionBody().getOps<torq_hl::StartProgramOp>()) {
-        resolveNssInvocationArgs(startProgramOp);
     }
 
     for (auto invocationOp : nssInvocations.value()) {

@@ -950,26 +950,21 @@ static LogicalResult allocateXramAddresses(FunctionOpInterface funcOp) {
 
         if (auto createInvocationOp = dyn_cast<syna::torq_hl::CreateInvocationOp>(op)) {
 
-            // for invocations we need to assigna an xram address for each code section they
-            // produce
-            SmallVector<int64_t> addresses;
+            auto codeSection = createInvocationOp.getCodeSection();
 
-            for (auto result : createInvocationOp.getCodeSections()) {
-
-                auto type = mlir::cast<MemRefType>(result.getType());
-
-                addresses.push_back(startAddress);
-
-                startAddress = align_ceil(startAddress + getEncodedTotalSizeBytes(type), 4);
-
-                if (startAddress > HwInfo::xram_size) {
-                    return createInvocationOp.emitError(
-                        "XRAM size exceeded while assigning addresses"
-                    );
-                }
+            if (!codeSection) {
+                continue;
             }
 
-            createInvocationOp.setXramCodeAddresses(addresses);
+            auto type = mlir::cast<MemRefType>(codeSection.getType());
+
+            createInvocationOp.setXramCodeAddress(startAddress);
+
+            startAddress = align_ceil(startAddress + getEncodedTotalSizeBytes(type), 4);
+
+            if (startAddress > HwInfo::xram_size) {
+                return createInvocationOp.emitError("XRAM size exceeded while assigning addresses");
+            }
         }
         else if (auto programCodeOp = dyn_cast<syna::torq_hl::ProgramCodeOp>(op)) {
 
