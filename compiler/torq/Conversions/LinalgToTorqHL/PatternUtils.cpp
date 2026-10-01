@@ -4051,6 +4051,11 @@ FailureOr<Value> computeBiasAndRescaleInfo(
 ) {
     auto maybeBias = computeBias(fusionPlan, biasChDim, optionalWeightZp);
     if (failed(maybeBias)) {
+        // No bias to fold (the caller uses a zero bias), but a trailing clamp such as the ReLU
+        // after a bias-free conv is still fused away and must be applied.
+        if (fusionPlan.isFusable())
+            if (auto lastOp = dyn_cast<linalg::GenericOp>(fusionPlan.neededOps.back()))
+                extractF32ClampTruncfInfo(lastOp, scInfo);
         return failure();
     }
     return computeRescaleInfo(fusionPlan, *maybeBias, scInfo);
