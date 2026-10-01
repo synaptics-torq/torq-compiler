@@ -97,6 +97,12 @@ createBlockExpandWithBias(torq_hl::ExpandWeightsOp op, PatternRewriter &rewriter
     weights.vectorize(vectorSize);
     scale.vectorize(vectorSize); // ((H/32xW) /8) x 8
     bias.vectorize(vectorSize);  // ((H/32xW) /8) x 8
+    // DEBR only accepts 4/8/16/32-byte reads, so round a single short bias
+    // vector (e.g. 6 f32 = 24 bytes) up to a power of two items. This is the
+    // same rule as the multi-vector case, which reads a full last vector.
+    int &biasItems = bias.getShape().back().count;
+    if (biasItems < vectorSize && !llvm::isPowerOf2_32(biasItems))
+        biasItems = std::min<int>(vectorSize, llvm::PowerOf2Ceil(biasItems));
 
     weights.reshapeDim(0, {-1, blockSize});
     output.reshapeDim(0, {-1, blockSize});

@@ -504,17 +504,17 @@ struct ReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
 struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
     mlir::OpPassManager canonicalizer_;
 
-    LinalgSlicingPass() { canonicalizer_.addPass(mlir::createCanonicalizerPass()); }
+    LinalgSlicingPass() { canonicalizer_.addPass(createFuseGroupPreservingCanonicalizerPass()); }
 
     explicit LinalgSlicingPass(const LinalgSlicingOptions &options) {
         this->sliceCount = options.sliceCount;
-        canonicalizer_.addPass(mlir::createCanonicalizerPass());
+        canonicalizer_.addPass(createFuseGroupPreservingCanonicalizerPass());
     }
 
     LinalgSlicingPass(const LinalgSlicingPass &pass)
         : impl::LinalgSlicingBase<LinalgSlicingPass>(pass) {
         this->sliceCount = pass.sliceCount;
-        canonicalizer_.addPass(mlir::createCanonicalizerPass());
+        canonicalizer_.addPass(createFuseGroupPreservingCanonicalizerPass());
     }
 
     void runOnOperation() override {

@@ -108,9 +108,6 @@ def case_config(request, runtime_hw_type, chip_config):
         extra_args["tweaked_input_data_range"] = 0, 2
 
     no_slicing_tc = [
-        #  error: failed to allocate LRAM addresses
-        "matmul_dql_q8_0",
-        "matmul_dql_q4_0",
         # assertion for next 2 in function LData, file Kernel.cpp, line 824
         #  (elementType != DType::none && "Invalid elemen= DType::none)
         "topk-1x2100-bf16",

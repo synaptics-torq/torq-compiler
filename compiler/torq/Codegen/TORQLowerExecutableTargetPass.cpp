@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "PassesDetail.h"
+#include "TilingUtils.h"
 
 #include "torq/Codegen/BufferizationUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Passes.h"
@@ -615,7 +616,8 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
     // pipeline, up to and including LRAM address assignment.
     auto &funcPm = pipeline.nest<func::FuncOp>();
 
-    funcPm.addPass(createCanonicalizerPass());
+    // Keep the fuse group on reshapes that canonicalize rebuilds (dynamic -> static).
+    funcPm.addPass(createFuseGroupPreservingCanonicalizerPass());
     if (optimizeForTileAndFuse) {
         funcPm.addPass(createReplaceForLoopsWithMidIterationPass());
     }

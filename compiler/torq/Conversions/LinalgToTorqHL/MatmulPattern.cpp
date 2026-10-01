@@ -318,6 +318,29 @@ collapseReductionDimBlockParam(Location loc, Value value, PatternRewriter &rewri
         .getResult();
 }
 
+/// Recreate `sliceOp` on `value`, with the column (trailing) dim size set to
+/// `cols` when given. The offsets and strides are reused as they are: new
+/// index arithmetic here does not fold and breaks the static offset checks
+/// later.
+static Value replaySliceWithCols(
+    Location loc, Value value, tensor::ExtractSliceOp sliceOp, std::optional<int64_t> cols,
+    PatternRewriter &rewriter
+) {
+    RankedTensorType sliceType = sliceOp.getResultType();
+    int64_t colDim = sliceType.getRank() - 1;
+    SmallVector<int64_t> shape(sliceType.getShape());
+    SmallVector<OpFoldResult> sizes = sliceOp.getMixedSizes();
+    if (cols) {
+        shape[colDim] = *cols;
+        sizes[colDim] = rewriter.getIndexAttr(*cols);
+    }
+    auto type =
+        RankedTensorType::get(shape, cast<RankedTensorType>(value.getType()).getElementType());
+    return tensor::ExtractSliceOp::create(
+        rewriter, loc, type, value, sliceOp.getMixedOffsets(), sizes, sliceOp.getMixedStrides()
+    );
+}
+
 /// If `sliceLikeValue` is produced by a tensor.extract_slice, recreate the
 /// same slice on `value` but override the size of the trailing (column)
 /// dimension to `wantedCols`.
@@ -334,6 +357,9 @@ collapseReductionDimBlockParam(Location loc, Value value, PatternRewriter &rewri
 ///
 ///   tensor.extract_slice %bias[0, 0, %arg0] [20, 1, 206] [1, 1, 1]
 ///
+/// A nested slice such as extract_slice(extract_slice(%zp[.., %i])[.., %j])
+/// is replayed on %bias the same way, one extract_slice per level.
+///
 /// If `sliceLikeValue` is not an extract_slice, `value` is returned unchanged.
 static Value maybeSliceLikeWithCols(
     Location loc, Value value, Value sliceLikeValue, int64_t wantedCols, PatternRewriter &rewriter
@@ -342,24 +368,36 @@ static Value maybeSliceLikeWithCols(
     if (!sliceOp)
         return value;
 
-    auto srcType = cast<RankedTensorType>(value.getType());
-    auto resultType = cast<RankedTensorType>(sliceOp.getResultType());
-
-    int64_t rank = resultType.getRank();
+    int64_t rank = sliceOp.getResultType().getRank();
     int64_t colDim = rank - 1;
 
-    SmallVector<OpFoldResult> offsets = sliceOp.getMixedOffsets();
-    SmallVector<OpFoldResult> sizes = sliceOp.getMixedSizes();
-    SmallVector<OpFoldResult> strides = sliceOp.getMixedStrides();
+    // `value` has the root constant's shape (getConstantLikeTensorOp walks
+    // back through every slice to the root constant). But `sliceLikeValue`
+    // can be a slice of a slice: the tile loop and the slicing forall both
+    // cut the column dim. Replay each enclosing extract_slice on `value`
+    // first (outermost first), so the outer tile offsets are kept.
+    SmallVector<tensor::ExtractSliceOp> parents;
+    for (auto parent = sliceOp.getSource().getDefiningOp<tensor::ExtractSliceOp>(); parent;
+         parent = parent.getSource().getDefiningOp<tensor::ExtractSliceOp>()) {
+        if (parent.getResultType().getRank() != rank || !parent.hasUnitStride())
+            break;
+        parents.push_back(parent);
+    }
+    for (tensor::ExtractSliceOp parent : llvm::reverse(parents)) {
+        // Widen the parent to an even column count when `value` has room, as
+        // the bias itself is padded to an even width.
+        std::optional<int64_t> cols;
+        int64_t parentCols = parent.getResultType().getDimSize(colDim);
+        int64_t valueCols = cast<RankedTensorType>(value.getType()).getDimSize(colDim);
+        if (!ShapedType::isDynamic(parentCols) && !ShapedType::isDynamic(valueCols)) {
+            int64_t padded = llvm::alignTo(parentCols, 2);
+            if (padded <= valueCols)
+                cols = padded;
+        }
+        value = replaySliceWithCols(loc, value, parent, cols, rewriter);
+    }
 
-    sizes[colDim] = rewriter.getIndexAttr(wantedCols);
-
-    SmallVector<int64_t> newShape(resultType.getShape().begin(), resultType.getShape().end());
-    newShape[colDim] = wantedCols;
-
-    auto newType = RankedTensorType::get(newShape, srcType.getElementType());
-
-    return tensor::ExtractSliceOp::create(rewriter, loc, newType, value, offsets, sizes, strides);
+    return replaySliceWithCols(loc, value, sliceOp, wantedCols, rewriter);
 }
 
 /// Build the negated zero-point tensor used to produce the ExpandWeightsOp bias.

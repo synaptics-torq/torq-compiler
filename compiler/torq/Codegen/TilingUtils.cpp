@@ -14,11 +14,15 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Transforms/Passes.h"
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
+
+#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 
 #define DEBUG_TYPE "torq-tiling-utils"
 
@@ -286,6 +290,46 @@ computeValueAtFirstIteration(Value val, llvm::DenseMap<Value, Attribute> &comput
         computedValues[val] = *result;
 
     return result;
+}
+
+namespace {
+
+// Returns the op that defines v, looking through tensor.cast.
+Operation *skipCastsDefiningOp(Value v) {
+    Operation *producer = v.getDefiningOp();
+    while (auto castOp = dyn_cast_or_null<tensor::CastOp>(producer))
+        producer = castOp.getSource().getDefiningOp();
+    return producer;
+}
+
+// Copies torq-fuse-group from a replaced reshape onto the reshape of the same kind that
+// produces its replacement (through tensor.cast), as IREE's ConfigTrackingListener does for
+// lowering configs.
+struct PreserveFuseGroupListener : public RewriterBase::Listener {
+    void notifyOperationReplaced(Operation *op, ValueRange replacement) override {
+        if (!isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp>(op))
+            return;
+        auto groups = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+        if (!groups)
+            return;
+        Operation *producer = skipCastsDefiningOp(replacement.front());
+        if (!producer || producer->getName() != op->getName() || producer->hasAttr(TORQ_FUSE_GROUP))
+            return;
+        producer->setAttr(TORQ_FUSE_GROUP, groups);
+    }
+};
+
+} // namespace
+
+std::unique_ptr<Pass> createFuseGroupPreservingCanonicalizerPass() {
+    static PreserveFuseGroupListener listener;
+    // Same settings as the default canonicalizer pass (top-down, normal region
+    // simplification, 10 iterations), plus the listener.
+    GreedyRewriteConfig config;
+    config.setUseTopDownTraversal()
+        .setRegionSimplificationLevel(GreedySimplifyRegionLevel::Normal)
+        .setListener(&listener);
+    return createCanonicalizerPass(config);
 }
 
 } // namespace mlir::syna::torq

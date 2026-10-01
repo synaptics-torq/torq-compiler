@@ -85,7 +85,7 @@ bool peelLoop(IRRewriter &rewriter, mlir::scf::ForOp forOp) {
 struct PeelTileLoopsPass : public impl::PeelTileLoopsBase<PeelTileLoopsPass> {
     mlir::OpPassManager localPm_;
 
-    PeelTileLoopsPass() { localPm_.addPass(mlir::createCanonicalizerPass()); }
+    PeelTileLoopsPass() { localPm_.addPass(createFuseGroupPreservingCanonicalizerPass()); }
 
     PeelTileLoopsPass(const PeelTileLoopsPass &pass) : localPm_(pass.localPm_) {}
 

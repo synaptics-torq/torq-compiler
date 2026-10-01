@@ -2,6 +2,7 @@
 
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Pass/Pass.h"
 
 #include <optional>
 
@@ -45,5 +46,11 @@ computeValueAtFirstIteration(Value val, llvm::DenseMap<Value, Attribute> &comput
 
 // Simplify each affine min/max op in loopOp, using the loop bounds.
 void rewriteAffineOpInLoop(RewriterBase &rewriter, LoopLikeOpInterface loopOp);
+
+// A canonicalizer pass that keeps the torq-fuse-group attr of tensor.collapse_shape and
+// tensor.expand_shape when a pattern replaces them with new reshapes. Some upstream patterns
+// (FoldCollapseOfCastOp, ConvertToStaticExpandShape) rebuild the reshape and drop this
+// discardable attr. Only reshapes that had the attr pass it on.
+std::unique_ptr<Pass> createFuseGroupPreservingCanonicalizerPass();
 
 } // namespace mlir::syna::torq
