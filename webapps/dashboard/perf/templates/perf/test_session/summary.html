@@ -9,7 +9,7 @@
 <form method="get" class="mb-0">
 <div class="container-fluid px-0">
     <div class="row g-3 align-items-stretch mb-4">
-        <div class="col-12 col-lg-8">
+        <div class="col-12 col-lg-7">
             <div class="card h-100">
                 <div class="card-body">
                     <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
@@ -23,22 +23,24 @@
             </div>
         </div>
 
-        <div class="col-12 col-lg-4">
+        <div class="col-12 col-lg-5">
             <div class="card h-100">
                 <div class="card-header">
                     <h2 class="h6 mb-0">Baseline Session</h2>
                 </div>
-                <div class="card-body">                    
-                        {% include "perf/partials/bootstrap_field.html" with field=form.baseline_session only %}                        
-                        <button type="submit" class="btn btn-primary">Switch baseline session</button>
-                        {% if latest_main_session and latest_main_session != baseline_session %}
-                        <a href="{% url 'test_session_summary' session.id %}?baseline_session={{ latest_main_session.id }}" class="btn btn-outline-primary ms-2">Compare to last main</a>
-                        {% endif %}
-                        {% if baseline_session %}
-                        <a href="{% url 'test_session_summary' baseline_session.id %}" class="btn btn-outline-secondary" target="_blank" rel="noopener noreferrer">
-                            <i class="bi bi-box-arrow-up-right me-1"></i>Go to baseline session
-                        </a>
-                        {% endif %}                    
+                <div class="card-body">
+                        {% include "perf/partials/bootstrap_field.html" with field=form.baseline_session only %}
+                        <div class="d-flex flex-nowrap align-items-center gap-2">
+                            <button type="submit" class="btn btn-primary text-nowrap">Switch baseline session</button>
+                            {% if latest_main_session and latest_main_session != baseline_session %}
+                            <a href="{% url 'test_session_summary' session.id %}?baseline_session={{ latest_main_session.id }}" class="btn btn-outline-primary text-nowrap">Compare to last main</a>
+                            {% endif %}
+                            {% if baseline_session %}
+                            <a href="{% url 'test_session_summary' baseline_session.id %}" class="btn btn-outline-secondary text-nowrap" target="_blank" rel="noopener noreferrer">
+                                <i class="bi bi-box-arrow-up-right me-1"></i>Go to baseline session
+                            </a>
+                            {% endif %}
+                        </div>
                 </div>
             </div>
         </div>

@@ -11,10 +11,17 @@ from . import queries
 import os
 
 DEFAULT_RESULTS_METRIC = "total_duration"
+DEFAULT_TEST_NAME_FILTER = "full_model"
+DEFAULT_RESULTS_SORT = "-change_percent"
 
 
 def _get_default_results_metric():
     return Metric.objects.order_by("priority", "name").first()
+
+
+def _latest_main_baseline_id(session):
+    latest = queries.test_session_comparison.get_latest_main_session(session)
+    return latest.id if latest is not None else None
 
 
 def _sort_control(sort_by, column, label):
@@ -137,12 +144,7 @@ def test_session_metric_details(request, session_id):
         data['number_of_top'] = 10
         
     if 'baseline_session' not in data:
-        default_baseline = queries.test_session_comparison.get_default_comparison_session(session)
-
-        if default_baseline is not None:
-            data['baseline_session'] = default_baseline.id
-        else:
-            data['baseline_session'] = session_id
+        data['baseline_session'] = _latest_main_baseline_id(session) or session_id
 
     # parse the parameters and validate them with the form
     form = forms.TestSessionMetricDetailsOptions(data=data)
@@ -174,13 +176,10 @@ def test_session_summary(request, session_id):
     data = request.GET.copy()
 
     if 'baseline_session' not in data:
-        default_baseline = queries.test_session_comparison.get_default_comparison_session(session)
+        baseline_id = _latest_main_baseline_id(session)
+        if baseline_id is not None:
+            data['baseline_session'] = baseline_id
 
-        if default_baseline is not None:
-            data['baseline_session'] = default_baseline.id
-        else:
-            data['baseline_session'] = None
-    
     form = forms.TestSessionSummaryOptions(data=data)
 
     if not form.is_valid():                
@@ -211,12 +210,23 @@ def test_session_results(request, session_id):
 
     default_metric = _get_default_results_metric()
 
-    options = {'baseline_session': None, 'metric': default_metric, 'nodeid': '', 'status': 'ALL', 'comparison_transition': 'ALL', 'sort_by': 'nodeid', 'page': 1}
+    options = {'baseline_session': None, 'metric': default_metric, 'nodeid': '', 'status': 'ALL', 'comparison_transition': 'ALL', 'sort_by': DEFAULT_RESULTS_SORT, 'page': 1}
 
     if request.GET:
         data = request.GET.copy()
         if not data.get('metric') and default_metric is not None:
             data['metric'] = default_metric.name
+
+        if 'baseline_session' not in data:
+            baseline_id = _latest_main_baseline_id(session)
+            if baseline_id is not None:
+                data['baseline_session'] = baseline_id
+
+        if 'nodeid' not in data:
+            data['nodeid'] = DEFAULT_TEST_NAME_FILTER
+
+        if not data.get('sort_by'):
+            data['sort_by'] = DEFAULT_RESULTS_SORT
 
         form = forms.TestSessionResultsOptions(data=data)
 
@@ -227,11 +237,17 @@ def test_session_results(request, session_id):
         selected_external_engine = form.cleaned_data.get('external_engine', '')
         options.update(form.cleaned_data)
         if not options["sort_by"]:
-            options["sort_by"] = "nodeid"
+            options["sort_by"] = DEFAULT_RESULTS_SORT
     else:
-        baseline_session = queries.test_session_comparison.get_default_comparison_session(session)
+        baseline_session = queries.test_session_comparison.get_latest_main_session(session)
         selected_external_engine = None
-        initial = {'baseline_session': baseline_session}
+        options["nodeid"] = DEFAULT_TEST_NAME_FILTER
+        options["sort_by"] = DEFAULT_RESULTS_SORT
+        initial = {
+            'baseline_session': baseline_session,
+            'nodeid': DEFAULT_TEST_NAME_FILTER,
+            'sort_by': DEFAULT_RESULTS_SORT,
+        }
         if default_metric is not None:
             initial['metric'] = default_metric.name
         form = forms.TestSessionResultsOptions(initial=initial)
@@ -276,10 +292,13 @@ def test_session_results(request, session_id):
     page_obj.object_list = results_page # Attach the actual results to the page object for rendering
     sort_by = options["sort_by"]
 
+    latest_main_session = queries.test_session_comparison.get_latest_main_session(session)
+
     return render(request, 'perf/test_session/results.html',
         {
             'session': session,
             'baseline_session': baseline_session,
+            'latest_main_session': latest_main_session,
             'results': page_obj,
             'form': form,
             'selected_metric': options["metric"],
@@ -306,8 +325,16 @@ def test_run(request, test_run_id):
         id=test_run_id,
     )
 
+    session = test_run.test_run_batch.test_session
+
     if request.GET:
-        form = forms.TestRunOptions(data=request.GET)
+        data = request.GET.copy()
+        if 'baseline_session' not in data:
+            baseline_id = _latest_main_baseline_id(session)
+            if baseline_id is not None:
+                data['baseline_session'] = baseline_id
+
+        form = forms.TestRunOptions(data=data)
 
         if not form.is_valid():
             return redirect('test_run', test_run_id=test_run_id)
@@ -321,8 +348,8 @@ def test_run(request, test_run_id):
         }
 
     else:
-        form = forms.TestRunOptions()
-        baseline_session = None
+        baseline_session = queries.test_session_comparison.get_latest_main_session(session)
+        form = forms.TestRunOptions(initial={'baseline_session': baseline_session})
         baseline_test_run = None
         history_options = {}
 

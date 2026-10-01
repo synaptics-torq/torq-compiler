@@ -10,7 +10,7 @@
     {{ form.page }}
     {{ form.sort_by }}
     <div class="row g-3 align-items-stretch mb-4">
-        <div class="col-12 col-lg-6">
+        <div class="col-12 col-lg-5">
             <div class="card h-100">
                 <div class="card-body">
                     <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
@@ -27,14 +27,19 @@
             </div>
         </div>
 
-        <div class="col-12 col-lg-3">
+        <div class="col-12 col-lg-4">
             <div class="card h-100">
                 <div class="card-header">
                     <h2 class="h6 mb-0">Baseline Session</h2>
                 </div>
                 <div class="card-body">
                         {% include "perf/partials/bootstrap_field.html" with field=form.baseline_session only %}
-                    <button type="submit" name="page" value="1" class="btn btn-primary">Switch baseline session</button>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="submit" name="page" value="1" class="btn btn-primary">Switch baseline session</button>
+                        {% if latest_main_session and latest_main_session != baseline_session %}
+                        <a href="{% url 'test_session_results' session.id %}?baseline_session={{ latest_main_session.id }}{% for key, value in request.GET.items %}{% if key != 'baseline_session' and key != 'page' %}&{{ key }}={{ value|urlencode }}{% endif %}{% endfor %}" class="btn btn-outline-primary">Compare to last main</a>
+                        {% endif %}
+                    </div>
                 </div>
             </div>
         </div>

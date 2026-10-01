@@ -104,34 +104,11 @@ def get_metric_changes_query():
     return query, {}
 
 
-def get_default_comparison_session(session):
-    """
-    Get the default session to compare against for a given session. The logic is as follows:
-    """
-
-    # find the last two session on the main branch
-    main_sessions = TestSession.objects.filter(git_branch=session.git_branch, test_plan=session.test_plan).order_by('git_branch', '-timestamp')[:2]
-
-    # there are no session on the main branch, return None
-    if len(main_sessions) == 0:
-        return None
-
-    # if the current session is the latest on main, return the previous one, otherwise return the latest one
-    if main_sessions[0].id == session.id:
-        if len(main_sessions) > 1:
-            return main_sessions[1]
-        else:
-            return None
-    else:
-        return main_sessions[0]
-
-
 def get_latest_main_session(session):
-    """Newest refs/heads/main session with the same test plan, other than this session."""
+    """Newest refs/heads/main session with the same test plan created before this session."""
 
     return (
-        TestSession.objects.filter(git_branch='refs/heads/main', test_plan=session.test_plan)
-        .exclude(id=session.id)
+        TestSession.objects.filter(git_branch='refs/heads/main', test_plan=session.test_plan, timestamp__lt=session.timestamp)
         .order_by('-timestamp', '-id')
         .first()
     )
