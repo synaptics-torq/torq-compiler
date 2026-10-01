@@ -143,7 +143,7 @@ void convert(
             llvm::report_fatal_error("Buffer is not of MemRefType");
         }
 
-        auto addr = getLramAddress(buffer, getMemRefTypeOffsetBytes(bufferType) + ndl->getOffset());
+        auto addr = getLramAddress(buffer);
 
         if (!addr.has_value()) {
             llvm::errs() << "FATAL: Unable to get base address.\n";
@@ -155,9 +155,10 @@ void convert(
             llvm::report_fatal_error("Unable to get base address");
         }
 
-        memNdl.setBaseAddress(addr.value());
+        int64_t address = *addr + getMemRefTypeOffsetBytes(bufferType) + ndl->getOffset();
+        memNdl.setBaseAddress(address);
 
-        if (byteAlignment && (addr.value() % byteAlignment) != 0) {
+        if (byteAlignment && (address % byteAlignment) != 0) {
             llvm::report_fatal_error("buffer + offset has wrong alignment");
         }
         memNdls.push_back(std::move(memNdl));

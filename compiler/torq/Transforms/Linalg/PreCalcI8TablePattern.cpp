@@ -60,8 +60,7 @@ constantFoldApplyScale32(int64_t value, int32_t multiplier, int32_t shift, bool 
     ));
 }
 
-/// Predicate for the matcher's element-type checks. Not to be confused with PatternUtils'
-/// isI8Type(Value), which peels a shaped type first; the matcher hands over an element type
+/// Predicate for the matcher's element-type checks; the matcher hands over an element type
 /// already.
 static bool isI8Elem(Type type) { return type.isInteger(8); }
 

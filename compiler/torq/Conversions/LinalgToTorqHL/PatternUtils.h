@@ -103,11 +103,7 @@ struct VectorIntOrFloat {
     std::vector<float> floats;
 };
 
-bool isI8Type(Value val);
-bool isI32Type(Value val);
-
 std::optional<int64_t> getConstIntValue(Value val);
-std::optional<float> getFloatValue(Value val);
 
 // If maybeFuseGroupAttr is not std::nullopt and op implements TilingInterface,
 // add maybeFuseGroupAttr to the TORQ_FUSE_GROUP array attribute of op. If op
@@ -210,11 +206,8 @@ bool foldForwardPerChannelAdd(
 // Build a fusion plan rooted at `value` by selecting a terminal fusible result
 // and collecting intermediate operations needed to reconstruct that chain.
 // On success, `fusionPlan.anchor` and `fusionPlan.neededOps` are populated.
-FailureOr<FusionPlan>
-createFusionPlan(Value value, std::optional<int64_t> knownChannelDim = std::nullopt);
-
-// Convenience wrapper for createFusionPlan that also updates the defining op of `value`
-// to the terminal fused result, so that subsequent patterns can match against it.
+// Also updates the defining op of `value` to the terminal fused result, so that
+// subsequent patterns can match against it.
 FailureOr<FusionPlan>
 buildFusionPlanAndRebindOutput(Value &value, std::optional<int64_t> knownChannelDim = std::nullopt);
 
@@ -350,11 +343,6 @@ bool foldScalarRescale(
 // location is used.
 Value makeBitcast(
     linalg::LinalgOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
-);
-
-Value makeRescale16(
-    linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t scaleFactor,
-    int shiftFactor, int32_t inputZp = 0, int32_t outputZp = 0, bool inputUnsigned = false
 );
 
 // Create a torq_hl.table looking up the i16 `input` in the HW's 512-entry

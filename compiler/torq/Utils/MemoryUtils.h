@@ -20,20 +20,20 @@ int64_t getScalarSizeBytes(Type type);
 size_t getShapeTypeDataSize(mlir::ShapedType type);
 
 void setLramAddress(Operation *op, int64_t address);
-std::optional<int64_t> getLramAddress(Value value, int64_t offset = 0);
-std::optional<int64_t> getLramAddress(Operation *op, int64_t offset = 0);
+std::optional<int64_t> getLramAddress(Value value);
+std::optional<int64_t> getLramAddress(Operation *op);
 
 void setXramAddress(Operation *op, int64_t address);
-std::optional<int64_t> getXramAddress(Value value, int64_t offset = 0);
-std::optional<int64_t> getXramAddress(Operation *op, int64_t offset = 0);
+std::optional<int64_t> getXramAddress(Value value);
+std::optional<int64_t> getXramAddress(Operation *op);
 
 void setItcmAddress(Operation *op, int64_t address);
-std::optional<int64_t> getItcmAddress(Value value, int64_t offset = 0);
-std::optional<int64_t> getItcmAddress(Operation *op, int64_t offset = 0);
+std::optional<int64_t> getItcmAddress(Value value);
+std::optional<int64_t> getItcmAddress(Operation *op);
 
 void setDtcmAddress(Operation *op, int64_t address);
-std::optional<int64_t> getDtcmAddress(Value value, int64_t offset = 0);
-std::optional<int64_t> getDtcmAddress(Operation *op, int64_t offset = 0);
+std::optional<int64_t> getDtcmAddress(Value value);
+std::optional<int64_t> getDtcmAddress(Operation *op);
 
 // Reserve an XRAM area of the given size, return the address of the reserved area
 // The returned address is guaranteed not to overlap with any other reserved area

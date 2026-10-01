@@ -59,24 +59,6 @@ const std::string TORQ_BROADCAST_MATMUL = "torq-broadcast-matmul";
 const std::string TORQ_RAISED_MATMUL_INTEGER = "torq-raised-matmul-integer";
 const std::string TORQ_MATMUL_LHS_UNSIGNED = "torq-matmul-lhs-unsigned";
 
-bool isI8Type(Value val) {
-    auto shapedType = dyn_cast<ShapedType>(val.getType());
-    Type elementType = shapedType ? shapedType.getElementType() : val.getType();
-    if (auto intType = dyn_cast<IntegerType>(elementType)) {
-        return intType.getWidth() == 8;
-    }
-    return false;
-}
-
-bool isI32Type(Value val) {
-    auto shapedType = dyn_cast<ShapedType>(val.getType());
-    Type elementType = shapedType ? shapedType.getElementType() : val.getType();
-    if (auto intType = dyn_cast<IntegerType>(elementType)) {
-        return intType.getWidth() == 32;
-    }
-    return false;
-}
-
 std::optional<int64_t> getConstIntValue(Value val) {
     auto constOp = val.getDefiningOp<arith::ConstantOp>();
 
@@ -86,7 +68,7 @@ std::optional<int64_t> getConstIntValue(Value val) {
     return getConstantIntValue(constOp.getValue());
 }
 
-std::optional<float> getFloatValue(Value val) {
+static std::optional<float> getFloatValue(Value val) {
     // Handle truncf/extf operations that convert from constant float
     if (auto truncOp = val.getDefiningOp<arith::TruncFOp>()) {
         return getFloatValue(truncOp.getIn());
@@ -1718,7 +1700,7 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
     return PaddingInfo{{left, right, top, bottom}, maybeFillValue.value()};
 }
 
-std::vector<int32_t> computePerChannelValuesInt(Value constV, int channelDim) {
+static std::vector<int32_t> computePerChannelValuesInt(Value constV, int channelDim) {
     auto constAttr = returnDenseElementAttr(constV);
     auto shape = constAttr.getType().getShape();
     const int64_t numChannels = shape[channelDim];
@@ -1744,7 +1726,7 @@ std::vector<int32_t> computePerChannelValuesInt(Value constV, int channelDim) {
     return perChannelValues;
 }
 
-std::vector<float> computePerChannelValuesFloat(Value constV, int channelDim) {
+static std::vector<float> computePerChannelValuesFloat(Value constV, int channelDim) {
     auto constAttr = returnDenseElementAttr(constV);
     auto shape = constAttr.getType().getShape();
     const int64_t numChannels = shape[channelDim];
@@ -1772,7 +1754,7 @@ std::vector<float> computePerChannelValuesFloat(Value constV, int channelDim) {
     return perChannelValues;
 }
 
-template <typename T> bool elementwiseAdd(std::vector<T> &result, const std::vector<T> &v1) {
+template <typename T> static bool elementwiseAdd(std::vector<T> &result, const std::vector<T> &v1) {
     if (result.size() != v1.size()) {
         return false;
     }
@@ -2789,9 +2771,9 @@ Value makeBitcast(
         .getOutput();
 }
 
-Value makeRescale16(
+static Value makeRescale16(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input, int32_t scaleFactor,
-    int shiftFactor, int32_t inputZp, int32_t outputZp, bool inputUnsigned
+    int shiftFactor, int32_t inputZp = 0, int32_t outputZp = 0, bool inputUnsigned = false
 ) {
 
     auto outputType = dyn_cast<RankedTensorType>(input.getType());
@@ -2916,7 +2898,7 @@ Value makeElementWiseBinary(
         .getOutput();
 }
 
-bool isSingleTensorReductionOp(linalg::LinalgOp linalgOp) {
+static bool isSingleTensorReductionOp(linalg::LinalgOp linalgOp) {
     // Keep only simple reductions that are safe to include in fusion clone:
     // one input, one init/output, projected-permutation indexing.
     if (linalgOp.getNumReductionLoops() == 0) {
@@ -2935,7 +2917,7 @@ bool isSingleTensorReductionOp(linalg::LinalgOp linalgOp) {
     return true;
 }
 
-bool shouldInclude(Operation *op) {
+static bool shouldInclude(Operation *op) {
     // Allow-list of ops that are considered fusible/supporting for bias/scale
     // extraction. Anything else becomes a traversal boundary.
     if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
@@ -2970,7 +2952,7 @@ bool shouldInclude(Operation *op) {
     return false;
 }
 
-FailureOr<Value> pickGroupResultInt8(Value value) {
+static FailureOr<Value> pickGroupResultInt8(Value value) {
     // Follow single-use chain forward until we hit an int rescale/clamp boundary,
     // which defines the terminal value for fusion planning.
     while (true) {
@@ -3004,7 +2986,7 @@ FailureOr<Value> pickGroupResultInt8(Value value) {
     return value;
 }
 
-FailureOr<Value> pickGroupResultFloat(Value value) {
+static FailureOr<Value> pickGroupResultFloat(Value value) {
     // Float path mirrors int path but uses float rescale/clamp markers.
     while (true) {
         if (!value.hasOneUse()) {
@@ -3034,7 +3016,7 @@ FailureOr<Value> pickGroupResultFloat(Value value) {
     return value;
 }
 
-FailureOr<Value> pickGroupResult(Value value) {
+static FailureOr<Value> pickGroupResult(Value value) {
     // Dispatch terminal-value selection by element type family.
     auto valueType = dyn_cast<ShapedType>(value.getType()).getElementType();
     if (valueType.isInteger()) {
@@ -3047,9 +3029,10 @@ FailureOr<Value> pickGroupResult(Value value) {
 }
 
 // Support functions for fusion plan
-LogicalResult computeGroup(Value value, Value groupResult, SmallVector<Operation *> &opsToGroup);
+static LogicalResult
+computeGroup(Value value, Value groupResult, SmallVector<Operation *> &opsToGroup);
 
-bool isRescaleF32(Operation *op) {
+static bool isRescaleF32(Operation *op) {
     if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
         for (auto &op : genericOp.getRegion().getOps()) {
             if (isa<arith::TruncFOp>(op) || isa<arith::MaximumFOp>(op) ||
@@ -3061,7 +3044,7 @@ bool isRescaleF32(Operation *op) {
     return false;
 }
 
-bool isRescaleInt(Operation *op) {
+static bool isRescaleInt(Operation *op) {
     if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
         for (auto &op : genericOp.getRegion().getOps()) {
             if (isa<tosa::ApplyScaleOp>(op) || isa<arith::TruncIOp>(op) ||
@@ -3073,7 +3056,7 @@ bool isRescaleInt(Operation *op) {
     return false;
 }
 
-bool isRescale(Operation *op) {
+static bool isRescale(Operation *op) {
     auto shapedType = dyn_cast<ShapedType>(op->getResult(0).getType());
     if (!shapedType) {
         return false;
@@ -3088,7 +3071,7 @@ bool isRescale(Operation *op) {
     return false;
 }
 
-LogicalResult findPerChannelBiasDimsFromRescale(Operation *rescaleOp, int64_t &biasChDim) {
+static LogicalResult findPerChannelBiasDimsFromRescale(Operation *rescaleOp, int64_t &biasChDim) {
     // Heuristic: Look for tosa.apply_scale op in the rescale body, which may indicate per-channel
     // quantization axis
     auto applyScaleOps = rescaleOp->getRegion(0).getOps<tosa::ApplyScaleOp>();
@@ -3139,7 +3122,8 @@ LogicalResult findPerChannelBiasDimsFromRescale(Operation *rescaleOp, int64_t &b
     return success();
 }
 
-LogicalResult findPerChannelBiasDimsFromBroadcast(FusionPlan &fusionPlan, int64_t &biasChDim) {
+static LogicalResult
+findPerChannelBiasDimsFromBroadcast(FusionPlan &fusionPlan, int64_t &biasChDim) {
 
     // Heuristic: Look for linalg.generic ops which are not in candidates and have broadcast
     // semantics, which may indicate channel bias expanded to the full dimension of the input
@@ -3222,7 +3206,7 @@ LogicalResult findPerChannelBiasDimsFromBroadcast(FusionPlan &fusionPlan, int64_
     return failure();
 }
 
-LogicalResult findPerChannelBiasDims(FusionPlan &fusionPlan, int64_t &biasChDim) {
+static LogicalResult findPerChannelBiasDims(FusionPlan &fusionPlan, int64_t &biasChDim) {
     // Hueristic: Look for evidence of per-channel bias in the fusion plan, either from rescale ops
     // or broadcast patterns, and infer the bias channel dimension if possible. If we find a rescale
     // op, we prioritize the bias channel dim inferred from its apply_scale pattern, as it is more
@@ -3255,18 +3239,7 @@ LogicalResult findPerChannelBiasDims(FusionPlan &fusionPlan, int64_t &biasChDim)
     return failure();
 }
 
-FailureOr<FusionPlan>
-buildFusionPlanAndRebindOutput(Value &value, std::optional<int64_t> knownChannelDim) {
-    auto plan = createFusionPlan(value, knownChannelDim);
-    if (failed(plan)) {
-        return failure();
-    }
-    // Update the output to be the selected group result for downstream use.
-    value = plan->getFusedOutput();
-    return *plan;
-}
-
-FailureOr<FusionPlan> createFusionPlan(Value value, std::optional<int64_t> knownChannelDim) {
+static FailureOr<FusionPlan> createFusionPlan(Value value, std::optional<int64_t> knownChannelDim) {
     // Build a backward fusion plan rooted at `value`.
     // The plan captures operations between `value` (anchor) and a selected terminal
     // result (`groupResult`) that are eligible for cloning/folding later.
@@ -3347,7 +3320,19 @@ FailureOr<FusionPlan> createFusionPlan(Value value, std::optional<int64_t> known
     return fusionPlan;
 }
 
-LogicalResult computeGroup(Value anchor, Value groupResult, SmallVector<Operation *> &opsToGroup) {
+FailureOr<FusionPlan>
+buildFusionPlanAndRebindOutput(Value &value, std::optional<int64_t> knownChannelDim) {
+    auto plan = createFusionPlan(value, knownChannelDim);
+    if (failed(plan)) {
+        return failure();
+    }
+    // Update the output to be the selected group result for downstream use.
+    value = plan->getFusedOutput();
+    return *plan;
+}
+
+static LogicalResult
+computeGroup(Value anchor, Value groupResult, SmallVector<Operation *> &opsToGroup) {
     // Backward traversal from the chosen terminal result to collect the minimal
     // connected subgraph needed to compute bias/scale relative to `anchor`.
     llvm::SmallVector<Value, 8> worklist;
@@ -3411,7 +3396,7 @@ LogicalResult computeGroup(Value anchor, Value groupResult, SmallVector<Operatio
     return success();
 }
 
-FailureOr<Value> getWeightZp(Value bias, OpBuilder &builder) {
+static FailureOr<Value> getWeightZp(Value bias, OpBuilder &builder) {
     auto biasOp = mlir::dyn_cast<linalg::GenericOp>(bias.getDefiningOp());
     if (!biasOp) {
         return failure();
@@ -3447,7 +3432,7 @@ FailureOr<Value> getWeightZp(Value bias, OpBuilder &builder) {
     return weightZpOp->getResult(0);
 }
 
-Value postProcessBias(Value bias, OpBuilder &builder) {
+static Value postProcessBias(Value bias, OpBuilder &builder) {
     // This rewrite targets the specific fused-bias form that carries extra operands.
     // Leave simpler generics unchanged.
     auto biasOp = mlir::dyn_cast<linalg::GenericOp>(bias.getDefiningOp());
@@ -3476,7 +3461,7 @@ Value postProcessBias(Value bias, OpBuilder &builder) {
     return biasOp->getResult(0);
 }
 
-FailureOr<Value> createNewBias(
+static FailureOr<Value> createNewBias(
     FusionPlan &fusionPlan, OpBuilder &builder, llvm::SmallVectorImpl<Operation *> &opsToDelete,
     std::optional<Value> &optionalWeightZp
 ) {
@@ -3598,7 +3583,7 @@ computeBias(FusionPlan &fusionPlan, int biasChDim, std::optional<Value> &optiona
     return bias;
 }
 
-mlir::FailureOr<Value>
+static mlir::FailureOr<Value>
 modifyMulValue(Value mul, Value biasScale, Operation *lastOp, OpBuilder &builder) {
     auto bTy = mlir::dyn_cast<ShapedType>(biasScale.getType());
     auto mulTy = mul.getType();
@@ -3637,7 +3622,7 @@ modifyMulValue(Value mul, Value biasScale, Operation *lastOp, OpBuilder &builder
     return failure();
 }
 
-mlir::FailureOr<Value>
+static mlir::FailureOr<Value>
 modifyShiftValue(Value shift, Operation *lastOp, ScaleClampInfo &scInfo, OpBuilder &builder) {
     Value minShiftV;
     Value origShiftV = shift;

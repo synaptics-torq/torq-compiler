@@ -126,8 +126,7 @@ static void setOperationAddress(Operation *op, const std::string attrName, int64
     return op->setAttr(attrName, builder.getI64IntegerAttr(address));
 }
 
-static std::optional<int64_t>
-getOperationAddress(Operation *op, const std::string attrName, int64_t offset) {
+static std::optional<int64_t> getOperationAddress(Operation *op, const std::string attrName) {
 
     if (!op) {
         // return no address if this is a function argument
@@ -142,17 +141,16 @@ getOperationAddress(Operation *op, const std::string attrName, int64_t offset) {
         }
 
         // return the address of the result
-        return maybeAddress.value()[cast<OpResult>(op->getResult(0)).getResultNumber()] + offset;
+        return maybeAddress.value()[cast<OpResult>(op->getResult(0)).getResultNumber()];
     }
     else if (op->hasAttrOfType<IntegerAttr>(attrName)) {
-        return op->getAttrOfType<IntegerAttr>(attrName).getInt() + offset;
+        return op->getAttrOfType<IntegerAttr>(attrName).getInt();
     }
 
     return std::nullopt;
 }
 
-static std::optional<int64_t>
-getValueAddress(Value value, const std::string attrName, int64_t offset = 0) {
+static std::optional<int64_t> getValueAddress(Value value, const std::string attrName) {
 
     if (!value.getDefiningOp()) {
         return std::nullopt;
@@ -165,17 +163,17 @@ getValueAddress(Value value, const std::string attrName, int64_t offset = 0) {
             return std::nullopt;
         }
 
-        return maybeAddress.value()[cast<OpResult>(value).getResultNumber()] + offset;
+        return maybeAddress.value()[cast<OpResult>(value).getResultNumber()];
     }
 
-    return getOperationAddress(value.getDefiningOp(), attrName, offset);
+    return getOperationAddress(value.getDefiningOp(), attrName);
 }
 
 void setLramAddress(Operation *op, int64_t address) {
     setOperationAddress(op, LRAM_ADDRESS_ATTR_NAME, address);
 }
 
-std::optional<int64_t> getLramAddress(Operation *op, int64_t offset) {
+std::optional<int64_t> getLramAddress(Operation *op) {
 
     // TODO: remove this after confirming that we never accidentally use this method
     assert(
@@ -189,10 +187,10 @@ std::optional<int64_t> getLramAddress(Operation *op, int64_t offset) {
         !isa<torq_hl::WaitProgramOp>(op) && "getLramAddress should not be called on WaitProgramOps"
     );
 
-    return getOperationAddress(op, LRAM_ADDRESS_ATTR_NAME, offset);
+    return getOperationAddress(op, LRAM_ADDRESS_ATTR_NAME);
 }
 
-std::optional<int64_t> getLramAddress(Value value, int64_t offset) {
+std::optional<int64_t> getLramAddress(Value value) {
 
     if (auto createInvocationOp = value.getDefiningOp<torq_hl::CreateInvocationOp>()) {
 
@@ -208,7 +206,7 @@ std::optional<int64_t> getLramAddress(Value value, int64_t offset) {
             return std::nullopt;
         }
 
-        return (*sectionAddresses)[sectionIndex] + offset;
+        return (*sectionAddresses)[sectionIndex];
     }
     else if (auto descriptorOp = value.getDefiningOp<torq_hl::DescriptorOp>()) {
 
@@ -216,17 +214,17 @@ std::optional<int64_t> getLramAddress(Value value, int64_t offset) {
             return std::nullopt;
         }
 
-        return descriptorOp.getExecutorCodeAddress() + offset;
+        return descriptorOp.getExecutorCodeAddress();
     }
 
-    return getValueAddress(value, LRAM_ADDRESS_ATTR_NAME, offset);
+    return getValueAddress(value, LRAM_ADDRESS_ATTR_NAME);
 }
 
 void setXramAddress(Operation *op, int64_t address) {
     return setOperationAddress(op, XRAM_ADDRESS_ATTR_NAME, address);
 }
 
-std::optional<int64_t> getXramAddress(Value value, int64_t offset) {
+std::optional<int64_t> getXramAddress(Value value) {
 
     if (auto createInvocationOp = value.getDefiningOp<torq_hl::CreateInvocationOp>()) {
         auto sectionAddresses = createInvocationOp.getXramCodeAddresses();
@@ -236,7 +234,7 @@ std::optional<int64_t> getXramAddress(Value value, int64_t offset) {
             return std::nullopt;
         }
 
-        return (*sectionAddresses)[sectionIndex] + offset;
+        return (*sectionAddresses)[sectionIndex];
     }
     else if (auto descriptorOp = value.getDefiningOp<torq_hl::DescriptorOp>()) {
 
@@ -244,38 +242,38 @@ std::optional<int64_t> getXramAddress(Value value, int64_t offset) {
             return std::nullopt;
         }
 
-        return descriptorOp.getXramCodeAddress() + offset;
+        return descriptorOp.getXramCodeAddress();
     }
 
-    return getValueAddress(value, XRAM_ADDRESS_ATTR_NAME, offset);
+    return getValueAddress(value, XRAM_ADDRESS_ATTR_NAME);
 }
 
-std::optional<int64_t> getXramAddress(Operation *op, int64_t offset) {
-    return getOperationAddress(op, XRAM_ADDRESS_ATTR_NAME, offset);
+std::optional<int64_t> getXramAddress(Operation *op) {
+    return getOperationAddress(op, XRAM_ADDRESS_ATTR_NAME);
 }
 
 void setItcmAddress(Operation *op, int64_t address) {
     setOperationAddress(op, ITCM_ADDRESS_ATTR_NAME, address);
 }
 
-std::optional<int64_t> getItcmAddress(Operation *op, int64_t offset) {
-    return getOperationAddress(op, ITCM_ADDRESS_ATTR_NAME, offset);
+std::optional<int64_t> getItcmAddress(Operation *op) {
+    return getOperationAddress(op, ITCM_ADDRESS_ATTR_NAME);
 }
 
-std::optional<int64_t> getItcmAddress(Value value, int64_t offset) {
-    return getValueAddress(value, ITCM_ADDRESS_ATTR_NAME, offset);
+std::optional<int64_t> getItcmAddress(Value value) {
+    return getValueAddress(value, ITCM_ADDRESS_ATTR_NAME);
 }
 
 void setDtcmAddress(Operation *op, int64_t address) {
     setOperationAddress(op, DTCM_ADDRESS_ATTR_NAME, address);
 }
 
-std::optional<int64_t> getDtcmAddress(Operation *op, int64_t offset) {
-    return getOperationAddress(op, DTCM_ADDRESS_ATTR_NAME, offset);
+std::optional<int64_t> getDtcmAddress(Operation *op) {
+    return getOperationAddress(op, DTCM_ADDRESS_ATTR_NAME);
 }
 
-std::optional<int64_t> getDtcmAddress(Value value, int64_t offset) {
-    return getValueAddress(value, DTCM_ADDRESS_ATTR_NAME, offset);
+std::optional<int64_t> getDtcmAddress(Value value) {
+    return getValueAddress(value, DTCM_ADDRESS_ATTR_NAME);
 }
 
 int64_t reserveXramArea(Operation *funcOp, int64_t size) {

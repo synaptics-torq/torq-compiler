@@ -508,7 +508,7 @@ LogicalResult Serializer::serializeProgramCode(torq_hl::ProgramCodeOp programCod
                << "Executable binary css_task in " << cssExecutable.getName() << " not found";
     }
 
-    auto xramAddress = getXramAddress(programCodeOp.getCode(), 0);
+    auto xramAddress = getXramAddress(programCodeOp.getCode());
 
     if (!xramAddress) {
         return programCodeOp.emitError() << "Missing xram address for program code";
@@ -588,7 +588,7 @@ LogicalResult Serializer::serializeCssInvocation(torq_hl::CreateInvocationOp &cr
     auto argsAttr =
         DenseIntElementsAttr::get(argsType, llvm::ArrayRef<uint32_t>(args.data(), args.size()));
 
-    auto argsXramAddress = getXramAddress(createInvocationOp.getCodeSections()[0], 0);
+    auto argsXramAddress = getXramAddress(createInvocationOp.getCodeSections()[0]);
 
     if (!argsXramAddress) {
         return createInvocationOp.emitError() << "Missing xram address for args section";
