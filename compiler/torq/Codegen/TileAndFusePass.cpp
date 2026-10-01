@@ -25,6 +25,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
@@ -43,6 +44,7 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Rewrite/FrozenRewritePatternSet.h"
 #include "mlir/Support/LLVM.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -98,6 +100,15 @@ enum class TileAndFuseProducersFuseMode {
     MaxProducers,
     OnlyPatterns,
 };
+
+// Only slices of tensor.empty are folded: slices of loop iter_args must stay so that bufferization
+// can write in place into the loop destination.
+static void
+addTileAndFuseCleanupPatterns(MLIRContext *context, scf::SCFTileAndFuseOptions &options) {
+    RewritePatternSet cleanupPatterns(context);
+    tensor::populateFoldTensorEmptyPatterns(cleanupPatterns);
+    options.cleanupPatterns = FrozenRewritePatternSet(std::move(cleanupPatterns));
+}
 
 // Result of fitTileToMemory.
 //
@@ -577,6 +588,7 @@ tileModuleForMemoryCheck(ModuleOp moduleOp, const TilingInfo &tilingInfo, size_t
 
     scf::SCFTileAndFuseOptions options{};
     options.tilingOptions.setTileSizes(tileSizes);
+    addTileAndFuseCleanupPatterns(moduleOp->getContext(), options);
 
     // Do the tile and fuse.
     IRRewriter rewriter(moduleOp->getContext());
@@ -1423,6 +1435,7 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
     }
 
     options.setFusionControlFn(fusionControlFn);
+    addTileAndFuseCleanupPatterns(&getContext(), options);
 
     if (clTorqTileAndFuseDistanceLimit.getValue() != 0) {
         setSourcesDistance(tilingInterfaceOp, clTorqTileAndFuseDistanceLimit.getValue());

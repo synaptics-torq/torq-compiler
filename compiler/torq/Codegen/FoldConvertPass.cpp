@@ -16,9 +16,11 @@
 
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 
+#include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
@@ -406,6 +408,61 @@ class FoldLramToLramConversionChain : public OpRewritePattern<torq_hl::ConvertOp
         });
 
         rewriter.modifyOpInPlace(op, [&] { op.getInputMutable().set(ancestorInput); });
+
+        return success();
+    }
+};
+
+static bool isSliceOfEmpty(Value value) {
+    while (auto sliceOp = value.getDefiningOp<tensor::ExtractSliceOp>()) {
+        value = sliceOp.getSource();
+    }
+    return isa_and_nonnull<tensor::EmptyOp>(value.getDefiningOp());
+}
+
+// True if every use of `value` is a DPS init that its op writes without reading.
+static bool isOnlyOverwritten(Value value) {
+    bufferization::AnalysisState state{bufferization::BufferizationOptions()};
+    return !value.use_empty() && llvm::all_of(value.getUses(), [&](OpOperand &use) {
+        auto dstOp = dyn_cast<DestinationStyleOpInterface>(use.getOwner());
+        auto bufOp = dyn_cast<bufferization::BufferizableOpInterface>(use.getOwner());
+        return dstOp && bufOp && dstOp.isDpsInit(&use) && !bufOp.bufferizesToMemoryRead(use, state);
+    });
+}
+
+// A convert whose data is never used can be replaced by a tensor.empty of the target type. This is
+// the case when the input is (a slice of) a tensor.empty, or when the result only feeds kernel
+// inits, which kernels overwrite without reading (e.g. a slice of a loop iter_arg), e.g. :
+//
+// %0 = tensor.empty() : tensor<..., xram>        (or a loop iter_arg)
+// %1 = tensor.extract_slice %0 ...
+// %2 = convert(%1) : tensor<..., lram>
+//
+// becomes
+//
+// %2 = tensor.empty() : tensor<..., lram>
+class FoldConvertOfUnusedData : public OpRewritePattern<torq_hl::ConvertOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(torq_hl::ConvertOp op, PatternRewriter &rewriter) const override {
+
+        if (!op.getOutput()) {
+            return failure();
+        }
+
+        auto outType = dyn_cast<RankedTensorType>(op.getOutput().getType());
+        if (!outType || !outType.hasStaticShape()) {
+            return failure();
+        }
+
+        if (!isSliceOfEmpty(op.getInput()) && !isOnlyOverwritten(op.getOutput())) {
+            return failure();
+        }
+
+        rewriter.replaceOpWithNewOp<tensor::EmptyOp>(
+            op, outType.getShape(), outType.getElementType(), outType.getEncoding()
+        );
 
         return success();
     }
@@ -1149,6 +1206,13 @@ void FoldConvertPass::runOnOperation() {
     // for the round trips the hoist exposes.
     if (this->shareSliceInputs && hoistSliceInvariantLoads(getOperation()) > 0 &&
         failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
+        return signalPassFailure();
+    }
+
+    // Run last so the patterns above still see the original memory spaces of the converts.
+    RewritePatternSet unusedDataPatterns(ctx);
+    unusedDataPatterns.add<FoldConvertOfUnusedData>(ctx);
+    if (failed(applyPatternsGreedily(getOperation(), std::move(unusedDataPatterns)))) {
         return signalPassFailure();
     }
 }
