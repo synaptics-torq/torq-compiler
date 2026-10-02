@@ -1,3 +1,4 @@
 {
-    "target": "SL2610"
+    "target": "SL2610",
+    "npu_frequency_mhz": 1000
 }

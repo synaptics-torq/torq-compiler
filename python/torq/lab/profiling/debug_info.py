@@ -17,10 +17,6 @@ import torq.lab.profiling.location as loc_utils
 
 logger = logging.getLogger("torq.lab.debug_info")
 
-# Clock frequency in MHz for cycle-to-time conversion
-CLOCK_FREQ_MHZ = 800
-COMPILE_CLOCK_FREQ_MHZ = 100
-
 def cycles_to_ns(cycles: int, frequency_mhz: int):
     """Convert cycles to nanoseconds given a clock frequency in MHz."""
 
@@ -55,7 +51,7 @@ class InvocationEventData:
     event_data: List[EventData] = field(default_factory=list)
 
 
-def parse_profiling_log(profiling_file: str) -> List[InvocationEventData]:
+def parse_profiling_log(profiling_file: str, time_scale: float = None) -> List[InvocationEventData]:
     """
     Parse the profiling log produced by the runtime (with --torq_profile_host) and return
     a list of InvocationEventData objects representing the events in the log.
@@ -83,7 +79,7 @@ def parse_profiling_log(profiling_file: str) -> List[InvocationEventData]:
         entry = EventData(
             action_id=int(row['action_id']),
             event=row['event'],
-            timestamp_ns=int(row['timestamp_us']) * 1000)
+            timestamp_ns=int(row['timestamp_us'] * 1000 * (time_scale if time_scale is not None else 1)))
 
         invocation_data.event_data.append(entry)
 
@@ -921,8 +917,8 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
                 continue
 
             action = self.actions.get(action_id)
-
             self.operation_times_ns[action.operation] = TimeDebugInfo(start_time_ns=profile_data.start_time_ns, end_time_ns=profile_data.end_time_ns)
+
 
     @staticmethod
     def _read_time_debug_info(operation, frequency_mhz):
@@ -940,19 +936,19 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
 
         return TimeDebugInfo(start_time_ns=start_time_ns, end_time_ns=end_time_ns, async_duration_ns=async_duration_ns)
 
-    def _update_time_ns(self, operation: Operation, frequency_mhz: int = CLOCK_FREQ_MHZ):
+    def _update_time_ns(self, operation: Operation, frequency_mhz: int):
         if operation is None:
             return
         self.operation_times_ns[operation] = self._read_time_debug_info(operation, frequency_mhz)
 
 
-    def infer_runtime_profile_from_cycles(self, frequency_mhz: int = CLOCK_FREQ_MHZ):
+    def infer_runtime_profile_from_cycles(self, frequency_mhz: int):
 
         for workunit in self.workunits:
             self._update_time_ns(workunit.start_operation, frequency_mhz)
             self._update_time_ns(workunit.end_operation, frequency_mhz)
 
-    def load_compile_time_estimates(self, frequency_mhz: int = COMPILE_CLOCK_FREQ_MHZ):
+    def load_compile_time_estimates(self, frequency_mhz: int):
         """Load compile-time cycle estimates from MLIR attributes into compile_operation_times_ns."""
         for workunit in self.workunits:
             operations = [workunit.start_operation, workunit.end_operation]

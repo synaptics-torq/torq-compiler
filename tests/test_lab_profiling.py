@@ -53,7 +53,7 @@ def test_profiling_helpers_require_extra(tmp_path, monkeypatch):
     with pytest.raises(LabError):
         profiling.annotate_run_profile(tmp_path / "d", tmp_path / "h.csv", tmp_path / "p")
     with pytest.raises(LabError):
-        profiling.write_compile_trace(tmp_path / "d", tmp_path / "p")
+        profiling.write_compile_trace(tmp_path / "d", tmp_path / "p", 1000)
     with pytest.raises(LabError):
         profiling.write_perfetto_report([], tmp_path / "v.html")
 
@@ -68,7 +68,7 @@ def test_compile_run_profile_runtime_wires_viewer(tmp_path, monkeypatch):
     compile_tool = write_fake_compile(tmp_path / "tools")
     run_tool = write_fake_run(tmp_path / "tools")
 
-    def fake_annotate(debug, host, out_dir):
+    def fake_annotate(debug, host, out_dir, target_frequency_mhz=None, measured_frequency_mhz=None):
         out_dir = Path(out_dir)
         (out_dir / "annotated_profile.xlsx").write_text("x")
         trace = out_dir / "trace.pb"
@@ -118,7 +118,7 @@ def test_profile_sets_runtime_flag_before_compiling(tmp_path, monkeypatch):
     compile_tool = write_fake_compile(tmp_path / "tools")
     run_tool = write_fake_run(tmp_path / "tools")
 
-    def fake_annotate(debug, host, out_dir):
+    def fake_annotate(debug, host, out_dir, target_frequency_mhz=None, measured_frequency_mhz=None):
         out_dir = Path(out_dir)
         (out_dir / "annotated_profile.xlsx").write_text("x")
         trace = out_dir / "trace.pb"

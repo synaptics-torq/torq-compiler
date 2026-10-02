@@ -9,8 +9,8 @@ try:
     import uwsgi
     from uwsgidecorators import spool
 except ImportError:
-    def spool(pass_arguments):
-        return lambda x: x
+    def spool(func):
+        return func
     
 from perf.models import TestCase, TestRun, TestRunBatch, TestMetadata, Metric, Measurement
 

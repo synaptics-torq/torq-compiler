@@ -33,13 +33,6 @@ import torq.lab.profiling.debug_info as torq_debug_info
 # Toggle to show shortened MLIR locations (filename only) vs full paths
 SHOW_SHORT_LOCATIONS = True
 
-# Clock frequency in MHz for cycle-to-time conversion
-CLOCK_FREQ_MHZ = 800
-
-def cycles_to_ns(cycles):
-    """Convert cycles to nanoseconds assuming 800MHz clock."""
-    return int(cycles * 1000 / CLOCK_FREQ_MHZ)
-
 def format_time_duration(ns):
     """
     Format nanosecond duration into human-readable string with appropriate unit.
@@ -80,10 +73,11 @@ class PerfettoEvent:
 class PerfettoTraceWriter:
     """Manages Perfetto trace creation with processes and threads."""
     
-    def __init__(self, filename):
+    def __init__(self, filename, timestamp_origin_ns=0):
         self.file = open(filename, "wb")
         self.trace = perfetto.Trace()
         self.global_uuid = 0
+        self.timestamp_origin_ns = timestamp_origin_ns
 
     def close(self):
         if not self.file.closed:
@@ -168,7 +162,7 @@ class PerfettoTraceWriter:
         #if event.correlation_id is not None:
         #    track_event.correlation_id = event.correlation_id
 
-        packet.timestamp = time
+        packet.timestamp = int(time - self.timestamp_origin_ns)
         packet.track_event.CopyFrom(track_event)
         packet.trusted_packet_sequence_id = 1
 
@@ -795,6 +789,18 @@ def _get_compile_time_range(dispatch, start_op, end_op):
     return start_ns, end_ns, duration_ns
 
 
+def _get_compile_runtime_scale(compile_duration_ns, runtime_start_ns, runtime_end_ns):
+    """Fit the compile overlay to runtime; this is separate from clock normalization."""
+    if runtime_start_ns is None or runtime_end_ns is None:
+        raise Exception("Missing runtime start or end timestamp")
+
+    runtime_duration_ns = runtime_end_ns - runtime_start_ns
+    if runtime_duration_ns <= 0 or compile_duration_ns <= 0:
+        raise Exception("Zero or negative runtime or compile time duration")
+
+    return runtime_duration_ns / compile_duration_ns
+
+
 def _emit_compile_event(trace_writer, tuuid, details, event_start, event_end, async_duration_ns=None, annotations=None):
     """Emit a compile-time event, splitting into active + WAITING if async duration is shorter."""
     duration = event_end - event_start
@@ -807,7 +813,7 @@ def _emit_compile_event(trace_writer, tuuid, details, event_start, event_end, as
 
 
 def _log_compile_time_traces(trace_writer, dispatch):
-    """Log compile-time estimates aligned to runtime start times as Perfetto traces."""
+    """Log compile-time estimates scaled into measured runtime NSS intervals."""
     if not dispatch.compile_operation_times_ns:
         return
 
@@ -831,18 +837,21 @@ def _log_compile_time_traces(trace_writer, dispatch):
             compile_workunits_tracks.setdefault(workunit_type, []).append(tuuid)
 
     # Pre-index NSS program workunits with their compile time ranges and build child->parent map
-    nss_program_lookup = []  # (workunit, compile_start, compile_end)
-    parent_nss_map = {}  # child_workunit -> (parent_nss_wu, parent_compile_start)
+    nss_program_lookup = []  # (workunit, compile_start, compile_end, scale)
+    parent_nss_map = {}  # child_workunit -> (parent_nss_wu, parent_compile_start, scale)
+    nss_scale_map = {}  # nss_workunit -> scale, reused below to avoid recomputing
 
     for wu in dispatch.workunits:
         if not isinstance(wu, NssProgramWorkUnitDebugInfo):
             continue
         time_range = _get_compile_time_range(dispatch, wu.start_operation, wu.end_operation)
         if time_range is not None and wu.start_time_ns is not None:
-            nss_program_lookup.append((wu, time_range[0], time_range[1]))
+            scale = _get_compile_runtime_scale(time_range[2], wu.start_time_ns, wu.end_time_ns)
+            nss_program_lookup.append((wu, time_range[0], time_range[1], scale))
+            nss_scale_map[wu] = scale
             # Index all related workunits for O(1) parent lookup
             for related_wu in wu.related_workunits:
-                parent_nss_map[related_wu] = (wu, time_range[0])
+                parent_nss_map[related_wu] = (wu, time_range[0], scale)
 
     for workunit in dispatch.workunits:
         # NSS Programs: place directly at runtime start
@@ -859,8 +868,12 @@ def _log_compile_time_traces(trace_writer, dispatch):
             if track_uuids:
                 compile_info = dispatch.get_compile_time_info(workunit.start_operation)
                 async_dur = compile_info.async_duration_ns if compile_info else None
+                scale = nss_scale_map[workunit]
+                if async_dur is not None:
+                    async_dur = round(async_dur * scale)
+                event_end = runtime_start + round(compile_duration * scale)
                 _emit_compile_event(trace_writer, track_uuids[0], workunit.pretty_print,
-                                    runtime_start, runtime_start + compile_duration, async_dur,
+                                    runtime_start, event_end, async_dur,
                                     annotations=workunit.annotations)
             continue
 
@@ -879,7 +892,7 @@ def _log_compile_time_traces(trace_writer, dispatch):
             parent_entry = parent_nss_map.get(workunit)
             if parent_entry is None:
                 continue
-            parent_nss, parent_nss_compile_start = parent_entry
+            parent_nss, parent_nss_compile_start, scale = parent_entry
             if parent_nss.start_time_ns is None:
                 continue
 
@@ -892,10 +905,11 @@ def _log_compile_time_traces(trace_writer, dispatch):
             # Find parent NSS program by compile range containment + dispatch match
             parent_nss = None
             parent_nss_compile_start = None
-            for (nss_wu, nss_cs, nss_ce) in nss_program_lookup:
+            for (nss_wu, nss_cs, nss_ce, nss_scale) in nss_program_lookup:
                 if nss_cs <= compile_start and compile_end <= nss_ce and workunit.dispatch is nss_wu.dispatch:
                     parent_nss = nss_wu
                     parent_nss_compile_start = nss_cs
+                    scale = nss_scale
                     break
 
             if parent_nss is None or parent_nss.start_time_ns is None or parent_nss_compile_start is None:
@@ -903,10 +917,10 @@ def _log_compile_time_traces(trace_writer, dispatch):
         else:
             continue
 
-        # Place at runtime_start + offset within parent's compile timeline
+        # Place at runtime_start plus the scaled offset within the parent interval
         offset_within_nss = compile_start - parent_nss_compile_start
-        event_start = parent_nss.start_time_ns + offset_within_nss
-        event_end = event_start + compile_duration
+        event_start = parent_nss.start_time_ns + round(offset_within_nss * scale)
+        event_end = parent_nss.start_time_ns + round((offset_within_nss + compile_duration) * scale)
 
         track_uuids = compile_workunits_tracks.get(type(workunit))
         if track_uuids is None:
@@ -919,6 +933,8 @@ def _log_compile_time_traces(trace_writer, dispatch):
 
         compile_info = dispatch.get_compile_time_info(workunit.start_operation)
         async_dur = compile_info.async_duration_ns if compile_info else None
+        if async_dur is not None:
+            async_dur = round(async_dur * scale)
         _emit_compile_event(trace_writer, tuuid, workunit.pretty_print, event_start, event_end, async_dur,
                             annotations=workunit.annotations)
 
@@ -1281,7 +1297,7 @@ def get_measurements(overview_data):
 # MAIN CONVERSION LOGIC
 # =============================================================================
 
-def convert_to_perfetto(debug_dir, pb_path, view_name="Compile Profile"):
+def convert_to_perfetto(debug_dir, pb_path, frequency_mhz, view_name="Compile Profile"):
     """
     Convert a single compile profile CSV to Perfetto trace format.
     
@@ -1291,9 +1307,10 @@ def convert_to_perfetto(debug_dir, pb_path, view_name="Compile Profile"):
         overview_data: Optional dict with pre-calculated metrics (contains 'metrics', 'overall_start', 'overall_end')
         original_mlir_file: Optional path to original MLIR file for operator extraction
         view_name: Name for the process in Perfetto (default: "Compile Profile")
+        frequency_mhz: Chip frequency in MHz.
     
     Returns:
-        Path to generated Perfetto trace file
+        Numeric measurements at the target clock; originals and normalized values match.
     """
 
     pb_path = Path(pb_path)
@@ -1310,7 +1327,7 @@ def convert_to_perfetto(debug_dir, pb_path, view_name="Compile Profile"):
         dispatch = debug_info.get_dispatch(dispatch_name)
 
         # compute the timestamps for action and tasks based on the cycle counts and clock frequency
-        dispatch.infer_runtime_profile_from_cycles()
+        dispatch.infer_runtime_profile_from_cycles(frequency_mhz)
 
         try:
             log_runtime_profile_data(trace_writer, dispatch)
@@ -1339,6 +1356,8 @@ def main():
                        help="Path(s) to debug directory for the model")
     parser.add_argument("--pb", type=str, required=True,
                        help="Output path for Perfetto .pb file")
+    parser.add_argument("--frequency-mhz", type=int, default=1000,
+                       help="Chip frequency for compile estimates in MHz (default: 1 GHz)") 
     args = parser.parse_args()
     
     # Build profile dictionaries with filenames as keys
@@ -1373,8 +1392,8 @@ def main():
     # Generate Perfetto trace
     convert_to_perfetto(
         debug_dir=args.debug_dir[0],
-        pb_path=args.pb#,
-        #overview_map=new_overview_map
+        pb_path=args.pb,
+        frequency_mhz=args.frequency_mhz,
     )
     
     print(f"\n✓ Perfetto trace generated: {args.pb}")

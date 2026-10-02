@@ -717,7 +717,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
         
         # Use a temp directory for pb generation, then move files to parent with _compile suffix
         temp_pb_dir = compile_time_profiling_output_dir / f'{request.node.name}_compile_temp'
-        measurements = convert_to_perfetto(str(debug_info_dir), str(temp_pb_dir))
+        measurements = convert_to_perfetto(str(debug_info_dir), str(temp_pb_dir), chip_config.get("npu_frequency_mhz"))
 
         append_measurements(versioned_dir, measurements)
         
@@ -958,11 +958,21 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
     
     # Check if profile annotation should be skipped (can be configured via case_config)
     if enable_runtime_profiling and not skip_profile_annotation and torq_compiled_model_debug_info.exists() and (versioned_dir / 'host_profile.csv').exists():
-        logger.debug("Starting profile annotation...")        
+        logger.debug("Starting profile annotation...")
+
+        target_frequency_mhz = chip_config.get("npu_frequency_mhz")
+
+        if runtime_hw_type == 'aws_fpga':
+            measured_frequency_mhz = chip_config.get("aws_fpga", {}).get("frequency_mhz", target_frequency_mhz)
+        else:
+            measured_frequency_mhz = target_frequency_mhz
+
         measurements = annotate_host_profile_from_files(
             torq_compiled_model_debug_info,
             str(versioned_dir / 'host_profile.csv'),
-            [str(versioned_dir / 'annotated_profile.xlsx'), str(versioned_dir / 'trace.pb')]
+            [str(versioned_dir / 'annotated_profile.xlsx'), str(versioned_dir / 'trace.pb')],
+            target_frequency_mhz=target_frequency_mhz,
+            measured_frequency_mhz=measured_frequency_mhz,
         )
 
         append_measurements(versioned_dir, measurements)

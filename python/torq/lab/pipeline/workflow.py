@@ -131,6 +131,8 @@ class PipelineConfig:
     input_specs: List[str] = field(default_factory=list)
     output_specs: List[str] = field(default_factory=list)
     reuse_work_dir: bool = False
+    target_frequency_mhz: Optional[float] = None
+    measured_frequency_mhz: Optional[float] = None
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-friendly dict (Paths -> str)."""
@@ -166,6 +168,8 @@ class PipelineConfig:
             "input_specs": list(self.input_specs),
             "output_specs": list(self.output_specs),
             "reuse_work_dir": self.reuse_work_dir,
+            "measured_frequency_mhz": self.measured_frequency_mhz,
+            "target_frequency_mhz": self.target_frequency_mhz
         }
 
     @classmethod
@@ -212,6 +216,8 @@ class PipelineConfig:
             input_specs=list(d.get("input_specs", [])),
             output_specs=list(d.get("output_specs", [])),
             reuse_work_dir=d.get("reuse_work_dir", False),
+            measured_frequency_mhz=d.get("measured_frequency_mhz"),
+            target_frequency_mhz=d.get("target_frequency_mhz"),
         )
 
     @classmethod
@@ -506,9 +512,27 @@ class ModelPipeline:
         try:
             host_profile = self.profiles_dir / "host_profile.csv"
             if self.config.profile_runtime and host_profile.exists():
-                annotate.annotate_run_profile(self.debug_dir, host_profile, self.profiles_dir)
+
+                target_frequency_mhz = self.config.target_frequency_mhz
+
+                # rescale only if the hardware is running on FPGA
+                if self.config.runtime_hw_type == 'aws_fpga':
+                    measured_frequency_mhz = self.config.measured_frequency_mhz
+                else:
+                    measured_frequency_mhz = self.config.target_frequency_mhz
+
+                annotate.annotate_run_profile(
+                    self.debug_dir, host_profile, self.profiles_dir,
+                    measured_frequency_mhz=measured_frequency_mhz,
+                    target_frequency_mhz=target_frequency_mhz
+                )
+
             if self.config.profile_compile and not any(self.profiles_dir.glob("*_compile.pb")):
-                annotate.write_compile_trace(self.debug_dir, self.profiles_dir)
+                annotate.write_compile_trace(
+                    self.debug_dir,
+                    self.profiles_dir,
+                    frequency_mhz=self.config.target_frequency_mhz,
+                )
 
             pb_files = sorted(self.profiles_dir.glob("*.pb"))
             if pb_files:

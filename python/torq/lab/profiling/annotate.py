@@ -114,7 +114,10 @@ def _write_perfetto_trace(debug_info: BaseDispatchDebugInfo, perfetto_file: str)
     Writes the annotated profiling data to a Perfetto trace file.
     """
 
-    trace_writer = perfetto.PerfettoTraceWriter(perfetto_file)
+    trace_writer = perfetto.PerfettoTraceWriter(
+        perfetto_file,
+        timestamp_origin_ns=debug_info.start_time_ns or 0,
+    )
     perfetto.log_runtime_profile_data(trace_writer, debug_info)
 
     # Compute Metrics and Render Overview
@@ -170,7 +173,7 @@ def _write_dispatch_outputs(dispatch_debug_info, output_files):
     return measurements
 
 
-def annotate_host_profile_from_files(debug_info, profile_file, output_files):
+def annotate_host_profile_from_files(debug_info, profile_file, output_files, target_frequency_mhz, measured_frequency_mhz):
     """
     Given a debug-info directory generated with --torq-debug-info and a profiling log produced by the runtime with --torq_profile_host,
     generates annotated profiling data that matches the actions in the profiling log with the corresponding operations in the model,
@@ -181,7 +184,15 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files):
 
     logger.debug(f"Annotating host profile from {profile_file}")
 
-    invocation_data = parse_profiling_log(profile_file)
+    scale = None
+
+    # Rescale events if the trace was recorded with a frequency different from the target frequency.
+    # This makes sure the trace has timestamps that match what would have been recorded at the target frequency.
+    # Note: this rescales both npu and host operations
+    if measured_frequency_mhz is not None and measured_frequency_mhz != target_frequency_mhz:
+        scale = measured_frequency_mhz / target_frequency_mhz
+
+    invocation_data = parse_profiling_log(profile_file, scale)
     combined_dispatch_debug_info = CombinedDispatchDebugInfo()
     hal_dispatch_debug_info = HalDispatchDebugInfo()
     has_hal_events = False
@@ -194,8 +205,9 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files):
 
         # Use a fresh DebugInfo so each invocation keeps independent timing data.
         dispatch_debug_info = DebugInfo(debug_info).get_dispatch(invocation.dispatch_name)
-        dispatch_debug_info.load_compile_time_estimates()
+        dispatch_debug_info.load_compile_time_estimates(target_frequency_mhz)
         dispatch_debug_info.load_runtime_events(invocation.event_data)
+
         combined_dispatch_debug_info.add_dispatch(dispatch_debug_info)
 
     if has_hal_events:
@@ -220,7 +232,10 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files):
 # ---------------------------------------------------------------------------
 
 
-def annotate_run_profile(debug_dir, host_profile_csv, out_dir) -> dict:
+def annotate_run_profile(
+    debug_dir, host_profile_csv, out_dir,
+    measured_frequency_mhz=None, target_frequency_mhz=None
+) -> dict:
     """Annotate a runtime host profile against compile-time debug info.
 
     Writes ``annotated_profile.xlsx`` and ``trace.pb`` into ``out_dir`` and
@@ -232,12 +247,16 @@ def annotate_run_profile(debug_dir, host_profile_csv, out_dir) -> dict:
     annotated = out_dir / "annotated_profile.xlsx"
     trace = out_dir / "trace.pb"
     annotate_host_profile_from_files(
-        str(debug_dir), str(host_profile_csv), [str(annotated), str(trace)]
+        str(debug_dir),
+        str(host_profile_csv),
+        [str(annotated), str(trace)],
+        target_frequency_mhz=target_frequency_mhz,
+        measured_frequency_mhz=measured_frequency_mhz
     )
     return {"annotated": annotated, "trace": trace}
 
 
-def write_compile_trace(debug_dir, out_dir) -> list:
+def write_compile_trace(debug_dir, out_dir, frequency_mhz) -> list:
     """Generate compile-time Perfetto trace(s) into ``out_dir``.
 
     ``convert_to_perfetto`` writes one ``<dispatch>.pb`` per dispatch into a
@@ -248,7 +267,7 @@ def write_compile_trace(debug_dir, out_dir) -> list:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     staging = out_dir / "_compile_trace"
-    perfetto.convert_to_perfetto(str(debug_dir), str(staging))
+    perfetto.convert_to_perfetto(str(debug_dir), str(staging), frequency_mhz)
     produced = []
     for pb in sorted(staging.glob("*.pb")):
         dest = out_dir / f"{pb.stem}_compile.pb"
