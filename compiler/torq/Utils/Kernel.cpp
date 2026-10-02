@@ -1081,13 +1081,13 @@ LData &LData::partitionByIndexParity2D() {
     return *this;
 }
 
-LData LData::stack(OpBuilder *builder, const LData &first, const LData &second, int axis) {
+LData LData::stack(OpBuilder &builder, const LData &first, const LData &second, int axis) {
     assert(first.elementType() == second.elementType() && "Data must have the same element type");
     assert(first.shape() == second.shape() && "Data must have the same shape");
     assert(first.offset() == second.offset() && "Data must have the same offset`");
 
-    auto ctx = builder->getContext();
-    auto loc = builder->getUnknownLoc();
+    auto ctx = builder.getContext();
+    auto loc = builder.getUnknownLoc();
     auto inputDiff = getAffineDimExpr(1, ctx) - getAffineDimExpr(0, ctx);
     LData stacked(first);
 
@@ -1095,8 +1095,8 @@ LData LData::stack(OpBuilder *builder, const LData &first, const LData &second, 
     // The difference between the two input addresses is used as offset to fetch the data
     stacked.insertDim(axis, {2, Stride(inputDiff)});
 
-    stacked._symbols.push_back(GetAddressOp::create(*builder, loc, first.value()).getAddress());
-    stacked._symbols.push_back(GetAddressOp::create(*builder, loc, second.value()).getAddress());
+    stacked._symbols.push_back(GetAddressOp::create(builder, loc, first.value()).getAddress());
+    stacked._symbols.push_back(GetAddressOp::create(builder, loc, second.value()).getAddress());
     return stacked;
 }
 
@@ -2440,6 +2440,10 @@ PData SlicePrivate::aluPData(int blockSize, DType dataType, bool isMulAcc) {
     return pdata;
 }
 
+static bool isCompareMode(torq_hw::ALUOp1Mode mode) {
+    return mode == ALUOp1Mode::EQ || mode == ALUOp1Mode::GT || mode == ALUOp1Mode::GE;
+}
+
 PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc, bool transpose) {
     // Configure the ALU in bypass mode with the specified accumulate operation.
     aluSetMode(ALUOp0Mode::DBYP, acc);
@@ -2491,10 +2495,13 @@ PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc, b
     // Save a copy of current stack, will be needed later to add N and T dimensions
     _stackCopy = _forStack;
 
+    // For comparison operations the partial type is always an integer.
+    const DType pDataType = isCompareMode(acc) ? DType::int32 : dataType;
+
     // Transpose actually works on the entire PRam
     // assert(pData.dim(0) == 4 && pData.dim(1) == 16);
-    PData pdata = transpose ? PData({16, 16}, getPackedType(dataType))
-                            : aluPData(blockSize, dataType, isMulAcc);
+    PData pdata = transpose ? PData({16, 16}, getPackedType(pDataType))
+                            : aluPData(blockSize, pDataType, isMulAcc);
 
     // Remember stack nesting level when pram is loaded
     // Will be overwritten if we are inside a for loop
@@ -2653,7 +2660,7 @@ QData SlicePrivate::actClamp(
     const DType weightType = aluGetWeightType();
     const int weightSize = sizeofType(weightType);
     DType partialType = pdata.elementType();
-    DType resultType = dataType;
+    DType resultType = partialType;
     const Shape subShape = pdata.subShape();
     int resultCount = elementCount(subShape);
     if (!(subShape.size() == 1 || (subShape.size() == 2 && subShape[0].count == 1))) {
@@ -2663,10 +2670,11 @@ QData SlicePrivate::actClamp(
     }
     assert(resultCount <= HwInfo::act_width && "pdata size must fit Act width");
 
-    // Check that data, weight and partial types are compatible
+    // Check that data and weight types are compatible
+    // We can't check the partial type for floats because in some cases (eg. compare) it is an int
     assert(
         (isInt(dataType) && isInt(partialType) && !isFloat(weightType)) ||
-        (isFloat(dataType) && isFloat(partialType) && !isInt(weightType)) ||
+        (isFloat(dataType) && !isInt(weightType)) ||
         (isPacked(partialType) && weightType == DType::none)
     );
 
@@ -2690,6 +2698,11 @@ QData SlicePrivate::actClamp(
     else if (actMode == torq_hw::ACTMode::F2I) {
         assert(isFloat(partialType) && "F2I requires float data");
         resultType = DType::int32;
+    }
+
+    // For ALU comparison operations the partials are somehow shifted by 16 bits
+    if (isCompareMode(_cfg.alu_op1_mode[0])) {
+        actShift += 16;
     }
 
     // Configure the ACT unit
@@ -2719,7 +2732,6 @@ QData SlicePrivate::actClamp(
             // We have 2 partials for each data
             // Each partial is processed with different left shifts
             _cfg.act_lsh = {0, 8, 0, 8};
-            resultType = DType::int16;
             resultCount /= 2;
         }
         else if (dataSize == 2 && weightSize == 1) {
@@ -2731,7 +2743,6 @@ QData SlicePrivate::actClamp(
             _cfg.alu_d_unsigned = isUnsigned(dataType) ? 0b1111 : 5;
             _cfg.alu_w_unsigned = weightType == DType::uint8 ? 0b1111 : 0;
             _cfg.act_lsh = {0, 8, 0, 8};
-            resultType = DType::int16;
             resultCount /= 2;
         }
         else if (dataSize == 2 && weightSize == 2) {
@@ -2739,7 +2750,6 @@ QData SlicePrivate::actClamp(
             // Each partial is processed with different left shifts
             _cfg.act_lsh = {0, 8, 8, 16};
             _cfg.act_sum_bits = 32;
-            resultType = DType::int32;
             resultCount /= 4;
         }
         else if (dataSize == 4 && weightSize == 1) {
@@ -2747,7 +2757,6 @@ QData SlicePrivate::actClamp(
             _cfg.alu_w_unsigned = weightType == DType::uint8 ? 0b1111 : 0;
             _cfg.act_lsh = {0, 8, 16, 24};
             _cfg.act_sum_bits = 32;
-            resultType = DType::int32;
             resultCount /= 4;
         }
         else if (dataSize == 1 && weightSize == 4) {
@@ -2755,19 +2764,17 @@ QData SlicePrivate::actClamp(
             _cfg.alu_d_unsigned = dataType == DType::uint8 ? 0b1111 : 0;
             _cfg.act_lsh = {0, 8, 16, 24};
             _cfg.act_sum_bits = 32;
-            resultType = DType::int32;
             resultCount /= 4;
         }
         else if (dataSize == 1 && weightSize == 1) {
             _cfg.act_lsh = {0, 0, 0, 0};
-            resultType = DType::int8;
         }
         else if (weightSize == 0) {
             // No weight applied, keep original data type
         }
         else if (dataSize == 0) {
             // No input (weight-bypass mode), use weight type
-            resultType = weightType;
+            // resultType = weightType;
         }
         else {
             llvm::errs() << "Unsupported data and weight size combination: dataSize=" << dataSize
@@ -2784,11 +2791,11 @@ QData SlicePrivate::actClamp(
         }
         if (dataType == DType::none) {
             // No input (weight-bypass mode), use weight type
-            resultType = weightType;
+            // resultType = weightType;
         }
     }
     else if (isPacked(partialType)) {
-        resultType = partialType;
+        // resultType = partialType;
     }
     else {
         assert(false && "Unsupported partial type");
@@ -3946,7 +3953,7 @@ reshapeDim(LData &data, int dimIndex, const std::vector<int> &sizes, bool allowN
     data.setShape(shape);
 }
 
-GLData stack(OpBuilder *builder, const LData &first, LData &second, int axis) {
+GLData stack(OpBuilder &builder, const LData &first, LData &second, int axis) {
     if (first.shape() != second.shape() || first.offset() != second.offset()) {
         return GLData::stack(first, second, axis);
     }

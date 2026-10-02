@@ -407,7 +407,7 @@ class LData : public DataT<LData> {
     // The operation is virtual in the sense that no data is actually moved
     // The two tensors must have the same data type, offset, dimensions AND strides
     // For more flexibility, consider using the torq::stack() function which returns a GLData.
-    static LData stack(OpBuilder *, const LData &first, const LData &second, int axis = 0);
+    static LData stack(OpBuilder &, const LData &first, const LData &second, int axis = 0);
 
   private:
     // MLIR Value (if any) associated to this data
@@ -1029,7 +1029,7 @@ int maxDivisor(int value, int limit);
 // The operation is virtual in the sense that no data is actually moved
 // The two tensors must have the same data type and dimensions, possibly with different strides.
 // Uses LData::stack if possible, else falls back to GLData::stack
-GLData stack(OpBuilder *, const LData &first, LData &second, int axis = 0);
+GLData stack(OpBuilder &, const LData &first, LData &second, int axis = 0);
 
 } // namespace torq
 

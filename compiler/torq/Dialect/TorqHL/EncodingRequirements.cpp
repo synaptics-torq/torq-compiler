@@ -547,7 +547,7 @@ KernelEncoding InterleavedInsertOp::getKernelEncoding() { return getNoEncoding()
 
 KernelEncoding IdentityOp::getKernelEncoding() { return getNoEncoding(); }
 
-KernelEncoding ElementWiseBinaryOp::getKernelEncoding() { return getDenseTwoInputEncoding(*this); }
+KernelEncoding ElementWiseBinaryOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ArgMaxOp::getKernelEncoding() { return getDenseEncoding(); }
 

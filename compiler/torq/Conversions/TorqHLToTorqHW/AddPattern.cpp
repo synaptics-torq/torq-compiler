@@ -275,9 +275,7 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     int vectorSize = slice.alu.iWidth(input1.elementType(), weights.elementType());
     input1.fuse(denseDims).vectorize(vectorSize);
     input2.fuse(denseDims).vectorize(vectorSize);
-    // LData input = LData::stack(&params.rewriter, input1, input2);
-    // GLData input = GLData::stack(input1, input2);
-    auto input = stack(&params.rewriter, input1, input2);
+    auto input = stack(params.rewriter, input1, input2);
 
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);

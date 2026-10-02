@@ -121,6 +121,12 @@ def main():
         reference_tensor = reference_tensor.astype(np.int64)
 
     # Compute difference between input and reference tensor
+    # convert bool operands to int
+    if reference_tensor.dtype == np.bool_:
+        reference_tensor = reference_tensor.astype(np.int64)
+    if tensor.dtype == np.bool_:
+        tensor = tensor.astype(np.int64)
+
     tensor = tensor - reference_tensor
 
     # Input data is considered NCHW by default is 4D, NCW if 3D

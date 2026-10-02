@@ -624,16 +624,9 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
                 continue;
             }
 
-            // torq_hl.elementwisebinary and torq_hl.elementwiseshift read their operands the same
-            // way, so they need the same thing. Neither of them has the scalar path that add has.
-            // Both stop with "Input strides must match" -- see ElementWiseBinaryPattern.cpp and
-            // ElementWiseShiftPattern.cpp. The binary one also compares the inputs against the
-            // output ("Input and output strides must match"). So slicing both operands the same
-            // way is not enough, because the init is still dense.
-            //
-            // This really happens. An i16 tosa.clamp lowers its min side to elementwisebinary
-            // MAXIMUM and hits it (test_keras_ops.py, model004_conv_3x3_valid_bias_int16).
-            if (isa<torq_hl::ElementWiseBinaryOp, torq_hl::ElementWiseShiftOp>(consumer)) {
+            // torq_hl.elementwiseshift stops with "Input strides must match" --
+            // ElementWiseShiftPattern.cpp
+            if (isa<torq_hl::ElementWiseShiftOp>(consumer)) {
                 return Rejection{"elementwise", "consumer needs its operands to share strides"};
             }
 
