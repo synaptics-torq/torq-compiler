@@ -420,7 +420,7 @@ def TorqHL_TableOp : TorqHL_LayerOp<"table"> {
 
   let description = [{
     Table lookup operation using a precomputed lookup table.
-    $packed_table is a tensor<256xi32> where each entry encodes a piecewise-linear
+    $dynamic_table is a tensor<256xi32> where each entry encodes a piecewise-linear
     segment word: (slope << 16) | (base & 0xFFFF). For i8 LUTs the slope is 0 and
     the base is the original value shifted left by 8.
 
@@ -1101,10 +1101,9 @@ def TorqHL_ExpandWeightsOp: TorqHL_LayerOp<"expand_weights"> {
 def TorqHL_ResizeNearestNeighborOp: TorqHL_LayerOp<"ResizeNearestNeighbor"> {
   let summary = "Resize Nearest Neighbor Operation";
   let description =[{
-    Resize Nearest Neighbor : Scale up the input by a scale factor by copying the nearest pixel by distance
+    Resize Nearest Neighbor : Scale up the input by 2x by copying the nearest pixel by distance
   }];
   let arguments = !con(commonArgs, (ins 
-    I32Attr: $scale_factor,
     TensorOrMemref: $input
   ));
 }

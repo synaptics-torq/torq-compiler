@@ -63,7 +63,7 @@ createExecutable(IRRewriter &rewriter, Location loc, torq_hl::Executor executor,
     return moduleOp;
 }
 
-static Operation *outlineProgram(
+static Operation *outlineCpuProgramIntoExecutable(
     IRRewriter &rewriter, std::string name, torq_hl::ProgramOp programOp, ModuleOp moduleOp
 ) {
 
@@ -299,7 +299,7 @@ void OutlineCpuProgramsPass::runOnOperation() {
             auto moduleOp = createExecutable(
                 rewriter, funcOp.getLoc(), torq_hl::Executor::CSS, programOp.getName().str()
             );
-            outlineProgram(rewriter, "main", programOp, moduleOp);
+            outlineCpuProgramIntoExecutable(rewriter, "main", programOp, moduleOp);
         }
 
         // outline each host program as a function in the same executable (they will be jointly
@@ -309,7 +309,9 @@ void OutlineCpuProgramsPass::runOnOperation() {
             auto hostCode =
                 createExecutable(rewriter, funcOp.getLoc(), torq_hl::Executor::Host, "host_code");
             for (auto programOp : hostProgramOps) {
-                outlineProgram(rewriter, programOp.getName().str(), programOp, hostCode);
+                outlineCpuProgramIntoExecutable(
+                    rewriter, programOp.getName().str(), programOp, hostCode
+                );
             }
         }
     }

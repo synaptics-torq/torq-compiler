@@ -2889,7 +2889,7 @@ struct ResizeNearestNeighborOpConversion : public OpRewritePattern<linalg::Gener
         Value resizeInit =
             createInitTensor(genericOp, rewriter, mlir::cast<RankedTensorType>(resizeType));
         auto resizeOp = syna::torq_hl::ResizeNearestNeighborOp::create(
-            rewriter, genericOp.getLoc(), resizeType, resizeInit, 2, resizeInput
+            rewriter, genericOp.getLoc(), resizeType, resizeInit, resizeInput
         );
 
         rewriter.replaceOp(genericOp, resizeOp.getOutput());

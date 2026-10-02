@@ -269,7 +269,7 @@ class StartProgramOpPattern : public OpRewritePattern<torq_hl::StartProgramOp> {
         else if (programType.getExecutor() == torq_hl::Executor::CSS) {
 
             if (op.getCodeSections().size() != 2) {
-                return op.emitError("CSS executor must have one code section");
+                return op.emitError("CSS executor must have two code sections");
             }
 
             CSSStartOp::create(

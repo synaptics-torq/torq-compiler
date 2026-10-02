@@ -119,11 +119,25 @@ static llvm::cl::opt<IsNanMode> clTorqIsNanMode(
 
 namespace {
 
-int64_t getLramSizeBasedOnBudget(bool optimizeForTileAndFuse) {
+int64_t getLramSizeBasedOnBudget() {
     int64_t lramSize = TorqHw::get().getLramSize();
     int nssProgramPoolSize = HwInfo::nss_max_program_size * 2;
     lramSize -= nssProgramPoolSize;
     return lramSize;
+}
+
+// CompileTimeConst handling depends on whether the tile-and-fuse memory-fit
+// simulation is driving the pipeline: the probe runs stubs (constants stay
+// fake), the real pipeline outlines and computes them.
+void addCompileTimeConstPasses(OpPassManager &funcPm, bool optimizeForTileAndFuse) {
+    if (optimizeForTileAndFuse) {
+        funcPm.addPass(createCompileTimeConstStubsPass());
+    }
+    else {
+        funcPm.addPass(createCompileTimeConstOutlinePass());
+        funcPm.addPass(createCompileTimeConstComputePass());
+    }
+    funcPm.addPass(createCanonicalizerPass());
 }
 
 void addPostTileAndFuseLoweringPasses(
@@ -148,15 +162,7 @@ void addPostTileAndFuseLoweringPasses(
 
     funcPm.addPass(createCanonicalizerPass());
 
-    if (optimizeForTileAndFuse) {
-        funcPm.addPass(createCompileTimeConstStubsPass());
-        funcPm.addPass(createCanonicalizerPass());
-    }
-    else {
-        funcPm.addPass(createCompileTimeConstOutlinePass());
-        funcPm.addPass(createCompileTimeConstComputePass());
-        funcPm.addPass(createCanonicalizerPass());
-    }
+    addCompileTimeConstPasses(funcPm, optimizeForTileAndFuse);
 
     funcPm.addPass(createMarkHostExecutorPass());
 
@@ -172,18 +178,10 @@ void addPostTileAndFuseLoweringPasses(
         funcPm.addPass(torq_hl::createTorqHLOptimizeSegmentationPass());
     }
 
-    if (optimizeForTileAndFuse) {
-        funcPm.addPass(createCompileTimeConstStubsPass());
-        funcPm.addPass(createCanonicalizerPass());
-    }
-    else {
-        funcPm.addPass(createCompileTimeConstOutlinePass());
-        funcPm.addPass(createCompileTimeConstComputePass());
-        funcPm.addPass(createCanonicalizerPass());
-    }
+    addCompileTimeConstPasses(funcPm, optimizeForTileAndFuse);
 
     funcPm.addPass(createEncodeTensorsPass());
-    auto lramSize = getLramSizeBasedOnBudget(optimizeForTileAndFuse);
+    auto lramSize = getLramSizeBasedOnBudget();
     funcPm.addPass(createFoldConvertPass(lramSize, sliceBufferSharing));
     funcPm.addPass(createCanonicalizerPass());
 
@@ -230,7 +228,7 @@ void addCpuPasses(OpPassManager &pm) {
 
     // since to run on CSS we inserted a bunch of copies to LRAM we can
     // now simplify them
-    auto lramSize = getLramSizeBasedOnBudget(false);
+    auto lramSize = getLramSizeBasedOnBudget();
     funcPm.addPass(createFoldConvertPass(lramSize));
 
     funcPm.addPass(createCanonicalizerPass());
@@ -253,7 +251,7 @@ void addNssUpToAssignLramAddresses(
 
         funcPm.addPass(createEraseHALDescriptorTypeFromMemRefPass());
 
-        int64_t lramSize = getLramSizeBasedOnBudget(optimizeForTileAndFuse);
+        int64_t lramSize = getLramSizeBasedOnBudget();
         funcPm.addPass(createLowerHostCopiesToNpuPass(lramSize));
 
         funcPm.addPass(createMapBindingsPass());

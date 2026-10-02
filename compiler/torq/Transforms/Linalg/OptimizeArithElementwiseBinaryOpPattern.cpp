@@ -165,13 +165,13 @@ class ArithElementwiseBinaryOpPattern : public OpRewritePattern<linalg::GenericO
                 else if (auto minf = dyn_cast<arith::MinimumFOp>(op)) {
                     res = arith::MinimumFOp::create(b, innerLoc, args[0], args[1]);
                 }
-                else if (auto maxf = dyn_cast<arith::MinNumFOp>(op)) {
+                else if (auto minnumf = dyn_cast<arith::MinNumFOp>(op)) {
                     res = arith::MinNumFOp::create(b, innerLoc, args[0], args[1]);
                 }
-                else if (auto mini = dyn_cast<arith::MaxNumFOp>(op)) {
+                else if (auto maxnumf = dyn_cast<arith::MaxNumFOp>(op)) {
                     res = arith::MaxNumFOp::create(b, innerLoc, args[0], args[1]);
                 }
-                else if (auto maxi = dyn_cast<arith::MaximumFOp>(op)) {
+                else if (auto maximumf = dyn_cast<arith::MaximumFOp>(op)) {
                     res = arith::MaximumFOp::create(b, innerLoc, args[0], args[1]);
                 }
                 else if (auto minsi = dyn_cast<arith::MinSIOp>(op)) {

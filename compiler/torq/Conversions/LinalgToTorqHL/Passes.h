@@ -19,8 +19,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkPatternsForTileAnd
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgToTorqHLConversionPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createTensorToTorqHLConversionPass();
-
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createArithToTorqHLConversionPass();
 
 void registerLinalgToTorqHLPasses();
