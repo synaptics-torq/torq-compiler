@@ -1,1 +1,2 @@
 test_mlir_files[torch_ops_instancenorm-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1393
+test_mlir_files[torch_ops_instancenorm-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1393

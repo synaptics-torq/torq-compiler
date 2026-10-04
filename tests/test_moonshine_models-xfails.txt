@@ -1,3 +1,9 @@
 test_onnx_model_torq[encoder_float_full_model-astra_machina-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1876
 test_onnx_model_torq[encoder_float_full_model-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1876
 test_onnx_model_torq[encoder_float_full_model-sim-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
+test_onnx_model_torq[encoder_float_full_model-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev/issues/1876
+test_onnx_model_torq[encoder_float_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev/issues/1876
+test_onnx_model_torq[encoder_bf16_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503
+test_onnx_model_torq[encoder_bf16_layer_InstanceNormalization_5-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503
+test_onnx_model_torq[encoder_bf16_layer_InstanceNormalization_5-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2025
+test_onnx_model_torq[encoder_bf16_full_model-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2025

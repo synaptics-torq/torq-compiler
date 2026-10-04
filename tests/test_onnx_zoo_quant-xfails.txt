@@ -1,0 +1,1 @@
+test_onnx_zoo_quant_llvmcpu_torq[resnet18_Opset18_timm_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503

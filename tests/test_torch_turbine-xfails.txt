@@ -1,0 +1,2 @@
+test_torch_turbine_model[simple_linear_fc_Linear-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503
+test_torch_turbine_model[simple_linear_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503

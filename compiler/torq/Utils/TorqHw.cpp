@@ -11,10 +11,16 @@ using namespace std;
 
 namespace mlir::syna::torq {
 
-llvm::SmallVector<TorqHw, 1> hwTypes = {TorqHw(
-    "SL2610", 0x0, "Synaptics SL2610 SoC family", 512 * 1024, 2, "coral_v1", "nss_v1", 8, 0.65,
-    "aarch64-unknown-linux-gnu", "generic", "+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse,+fullfp16"
-)};
+llvm::SmallVector<TorqHw, 2> hwTypes = {
+    TorqHw(
+        "SL2610", 0x0, "Synaptics SL2610 SoC family", 512 * 1024, 2, "coral_v1", "nss_v1", 8, 0.65,
+        "aarch64-unknown-linux-gnu", "generic",
+        "+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse,+fullfp16"
+    ),
+    TorqHw(
+        "SR200", 0x1, "Synaptics SR200 SoC family", 256 * 1024, 1, "coral_v2", "nss_v2", 8, 0.65
+    ),
+};
 
 #define TORQ_CUSTOM_FORMAT                                                                         \
     "<hw_id>:<lram_size_kb>:<slice_count>:<css_features>:<nss_features>"                           \

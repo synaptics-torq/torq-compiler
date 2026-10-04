@@ -1,0 +1,6 @@
+test_torch_model[conv2d_k9_valid_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503
+test_torch_model[depthwise_conv1d_even_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503
+test_torch_model[depthwise_conv1d_large_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503
+test_torch_model[depthwise_conv2d_k9_valid_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503
+test_torch_model[simple_linear_fc_Linear-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503
+test_torch_model[simple_linear_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1503

@@ -34,6 +34,24 @@ This is the default configuration for TorqV1 as found in SL2610 SoC family:
 - CSS features: coral_v1
 - NSS features: nss_v1
 
+Compile with:
+```shell
+$ torq-compile ... --torq-hw=SL2610
+```
+
+**SR200 Configuration**
+
+This is the default configuration for TorqV2 as found in the SR200 SoC family:
+- LRAM: 256
+- Slices: 1
+- CSS features: coral_v2
+- NSS features: nss_v2
+
+Compile with:
+```shell
+$ torq-compile ... --torq-hw=SR200
+```
+
 **Custom configuration 1: enabling only 1 slice**
 - LRAM: 512
 - Slices: 1
