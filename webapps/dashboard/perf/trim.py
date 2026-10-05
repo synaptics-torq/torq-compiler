@@ -1,12 +1,13 @@
 from django import forms
 from django.contrib import admin, messages
-from django.db import transaction
 from django.shortcuts import redirect, render
 from django.utils import timezone
 
 from datetime import timedelta
 
 from .models import TestSession
+from .processing import trim_database
+from .trim_status import TrimStatus, get_trim_status, save_trim_status, timestamp
 
 
 class TrimDatabaseForm(forms.Form):
@@ -36,18 +37,20 @@ def trim_database_view(request):
                 messages.info(request, 'Nothing to trim. No PR sessions are older than the selected age.')
                 return redirect('admin:index')
 
-            try:
-                with transaction.atomic():
-                    deleted_total, _ = sessions_to_trim.delete()
-            except Exception as exc:
-                messages.error(request, f'Trim failed: {exc}')
-            else:
-                messages.warning(
-                    request,
-                    f'Trim completed. Deleted {trim_count} PR sessions older than {retain_days} days '
-                    f'({deleted_total} total rows including related data).',
-                )
-                return redirect('admin:index')
+            # Hand off the deletion to the background spooler so the request doesn't block on it
+            save_trim_status(TrimStatus(
+                in_progress=True,
+                retain_days=retain_days,
+                sessions_total=trim_count,
+                started_at=timestamp(),
+            ))
+            trim_database.spool(retain_days=str(retain_days).encode('utf-8'))
+
+            messages.warning(
+                request,
+                f'Trim queued. Deleting {trim_count} PR sessions older than {retain_days} days in the background.',
+            )
+            return redirect('admin:index')
     else:
         form = TrimDatabaseForm()
 
@@ -55,5 +58,6 @@ def trim_database_view(request):
         **admin.site.each_context(request),
         'form': form,
         'title': 'Trim Database',
+        'trim_status': get_trim_status(),
     }
     return render(request, 'admin/perf/trim_database.html', context)

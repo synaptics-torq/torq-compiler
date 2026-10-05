@@ -4,17 +4,16 @@
 {% block breadcrumbs %}
 <div class="breadcrumbs">
   <a href="{% url 'admin:index' %}">Home</a>
-  &rsaquo; Restore Database
+  &rsaquo; <a href="{% url 'admin_database_backup' %}">Backup Database</a>
+  &rsaquo; Upload
 </div>
 {% endblock %}
 
 {% block content %}
 <div id="content-main">
   <p class="help">
-    Upload a <code>.sql.gz</code> file previously downloaded via the
-    <strong>Backup database</strong> action. This will replace the current contents of the
-    configured database schema before executing the SQL dump. <strong>This operation is irreversible — make a
-    backup first.</strong>
+    Upload a .sql.gz file to add it to the list of backups. It will not be applied automatically &mdash;
+    use the "Restore" action next to it once it is listed.
   </p>
 
   <form method="post" enctype="multipart/form-data">
@@ -34,8 +33,8 @@
       {% endfor %}
     </fieldset>
     <div class="submit-row">
-      <input type="submit" value="Restore Database" class="default">
-      <a href="../" class="closelink">Cancel</a>
+      <input type="submit" value="Upload Backup" class="default">
+      <a href="{% url 'admin_database_backup' %}" class="closelink">Cancel</a>
     </div>
   </form>
 </div>

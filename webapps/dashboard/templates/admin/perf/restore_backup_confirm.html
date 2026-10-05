@@ -1,0 +1,29 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a>
+  &rsaquo; <a href="{% url 'admin_database_backup' %}">Backup Database</a>
+  &rsaquo; Restore
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  <p class="help">
+    Restore the database from the backup created on {{ backup.created_at }}
+    (<code>{{ backup.filename }}</code>).
+    This will run in the background and replace the current contents of the configured database schema with this backup.
+    <strong>This operation is irreversible — make a backup first.</strong>
+  </p>
+
+  <form method="post">
+    {% csrf_token %}
+    <div class="submit-row">
+      <input type="submit" value="Restore Database" class="default">
+      <a href="{% url 'admin_database_backup' %}" class="closelink">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

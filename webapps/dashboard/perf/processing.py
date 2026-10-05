@@ -1,8 +1,11 @@
 import os
 import zipfile
 import json
+from datetime import timedelta
 from tempfile import TemporaryDirectory
 from django.core.files.base import File
+from django.db import transaction
+from django.utils import timezone
 
 # conditionally import uwsgi spool decorator to make sure this module can be imported also in manage.py
 try:
@@ -12,7 +15,8 @@ except ImportError:
     def spool(func):
         return func
     
-from perf.models import TestCase, TestRun, TestRunBatch, TestMetadata, Metric, Measurement
+from perf.models import TestCase, TestRun, TestRunBatch, TestMetadata, Metric, Measurement, TestSession
+from perf.trim_status import get_trim_status, save_trim_status, timestamp
 
 
 def _classify_failure(failed_phase, failure_log):
@@ -242,3 +246,36 @@ def process_uploaded_zip(args):
         # Clean up the uploaded zip file
         if os.path.exists(zip_path):
             os.remove(zip_path)
+
+
+@spool
+def trim_database(args):
+    """
+    Spooled function to delete old PR test sessions in the background.
+
+    This is processed in background thanks to the @spool decorator to avoid having a timeout on the admin request.
+
+    Args:
+        args: Dictionary containing:
+            - retain_days: number of days of PR branch history to keep
+    """
+    retain_days = int(args['retain_days'])
+    cutoff = timezone.now() - timedelta(days=retain_days)
+
+    sessions_to_trim = TestSession.objects.filter(
+        git_branch__startswith='refs/pull/',
+        timestamp__lt=cutoff,
+    )
+
+    status = get_trim_status()
+    try:
+        with transaction.atomic():
+            deleted_total, _ = sessions_to_trim.delete()
+        print(f'Trim completed. Deleted {deleted_total} total rows for PR sessions older than {retain_days} days.')
+    except Exception as e:
+        print(f'Error trimming database: {e}')
+        status.error = str(e)
+    finally:
+        status.in_progress = False
+        status.finished_at = timestamp()
+        save_trim_status(status)

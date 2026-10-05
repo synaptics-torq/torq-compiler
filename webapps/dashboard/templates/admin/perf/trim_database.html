@@ -10,6 +10,12 @@
 
 {% block content %}
 <div id="content-main">
+  {% if trim_status.in_progress %}
+  <p class="help" style="background: #fff3cd; border: 1px solid #ffe69c; padding: 8px 12px;">
+    <strong>A trim is currently in progress</strong> (started {{ trim_status.started_at }}),
+    deleting {{ trim_status.sessions_total }} PR sessions older than {{ trim_status.retain_days }} days.
+  </p>
+  {% endif %}
   <p class="help">
     Remove data for old PRs from database
     <strong>This operation is irreversible — make a backup first.</strong>

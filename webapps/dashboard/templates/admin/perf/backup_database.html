@@ -1,0 +1,92 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a>
+  &rsaquo; Backup Database
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  <p class="help">
+    Backups run in the background and may take a while for large databases. Refresh this page to see updated status.
+  </p>
+
+  <form method="post">
+    {% csrf_token %}
+    <div class="submit-row">
+      <input type="submit" value="Start New Backup" class="default">
+      <a href="{% url 'admin_database_backup_upload' %}">Upload Backup</a>
+      <a href="{% url 'admin:index' %}" class="closelink">Cancel</a>
+    </div>
+  </form>
+
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Created</th>
+        <th scope="col">Status</th>
+        <th scope="col">Size</th>
+        <th scope="col">Download</th>
+        <th scope="col">Restore</th>
+        <th scope="col">Delete</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for backup in backups %}
+      <tr>
+        <td>{{ backup.created_at }}</td>
+        <td>
+          {{ backup.status_display }}
+          {% if backup.status == 'failed' and backup.error_message %}
+          <p class="errornote">{{ backup.error_message }}</p>
+          {% endif %}
+        </td>
+        <td>
+          {% if backup.size is not None %}{{ backup.size|filesizeformat }}{% else %}&mdash;{% endif %}
+        </td>
+        <td>
+          {% if backup.status == 'done' %}
+          <a href="{% url 'admin_database_backup_download' backup.id %}">Download</a>
+          {% else %}
+          &mdash;
+          {% endif %}
+        </td>
+        <td>
+          {% if backup.status == 'done' %}
+          {% if backup.restore_status == 'pending' or backup.restore_status == 'running' %}
+          Restoring&hellip;
+          {% else %}
+          <a href="{% url 'admin_database_backup_restore' backup.id %}">Restore</a>
+          {% if backup.restore_status == 'done' %}
+          <p class="help">Last restore succeeded at {{ backup.restore_finished_at }}</p>
+          {% if backup.restart_requested_at %}
+          <p class="help">Reload requested at {{ backup.restart_requested_at }}</p>
+          {% endif %}
+          {% elif backup.restore_status == 'failed' %}
+          <p class="errornote">Last restore failed: {{ backup.restore_error_message }}</p>
+          {% endif %}
+          {% endif %}
+          {% else %}
+          &mdash;
+          {% endif %}
+        </td>
+        <td>
+          {% if backup.restore_status == 'pending' or backup.restore_status == 'running' %}
+          &mdash;
+          {% else %}
+          <a href="{% url 'admin_database_backup_delete' backup.id %}">Delete</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% empty %}
+      <tr>
+        <td colspan="6">No backups yet.</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
