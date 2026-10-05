@@ -262,15 +262,29 @@ def trim_database(args):
     retain_days = int(args['retain_days'])
     cutoff = timezone.now() - timedelta(days=retain_days)
 
-    sessions_to_trim = TestSession.objects.filter(
-        git_branch__startswith='refs/pull/',
-        timestamp__lt=cutoff,
-    )
+    # Delete in small batches of ids: QuerySet.delete() collects the whole
+    # matching set plus all cascaded rows in memory at once, which OOMs
+    # when there are many old sessions to trim.
+    BATCH_SIZE = 10
 
     status = get_trim_status()
+    deleted_total = 0
     try:
-        with transaction.atomic():
-            deleted_total, _ = sessions_to_trim.delete()
+        while True:
+            batch_ids = list(
+                TestSession.objects.filter(
+                    git_branch__startswith='refs/pull/',
+                    timestamp__lt=cutoff,
+                ).values_list('id', flat=True)[:BATCH_SIZE]
+            )
+
+            if not batch_ids:
+                break
+
+            with transaction.atomic():
+                deleted, _ = TestSession.objects.filter(id__in=batch_ids).delete()
+            deleted_total += deleted
+
         print(f'Trim completed. Deleted {deleted_total} total rows for PR sessions older than {retain_days} days.')
     except Exception as e:
         print(f'Error trimming database: {e}')
