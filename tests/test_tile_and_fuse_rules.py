@@ -97,6 +97,56 @@ def test_shared_zero_init_is_filled_per_slice(torq_compiler, tmp_path):
     )
 
 
+def in_forall(dump, op_name):
+    """For each line of `dump` that contains `op_name`, True when an scf.forall
+    encloses that line."""
+    result = []
+    open_foralls = []
+    for line in dump.splitlines():
+        indent = len(line) - len(line.lstrip())
+        stripped = line.lstrip()
+        if open_foralls and stripped.startswith("}") and indent == open_foralls[-1]:
+            open_foralls.pop()
+        if op_name in line:
+            result.append(bool(open_foralls))
+        if "scf.forall (" in line:
+            open_foralls.append(indent)
+    return result
+
+
+# yolo26s: 3x3 stride-2 conv, 256 -> 512 channels. Its weight is too large to
+# keep one copy per slice, and tile-and-fuse splits its output channels.
+HEAVY_CONV = """
+module {
+  func.func @main(%x: tensor<1x20x20x256xi8>) -> tensor<1x10x10x512xi8> {
+    %w = "tosa.const"() <{values = dense<3> : tensor<512x3x3x256xi8>}> : () -> tensor<512x3x3x256xi8>
+    %b = "tosa.const"() <{values = dense<7> : tensor<512xi32>}> : () -> tensor<512xi32>
+    %zp = "tosa.const"() <{values = dense<0> : tensor<1xi8>}> : () -> tensor<1xi8>
+    %m = "tosa.const"() <{values = dense<1073741824> : tensor<1xi32>}> : () -> tensor<1xi32>
+    %s = "tosa.const"() <{values = dense<38> : tensor<1xi8>}> : () -> tensor<1xi8>
+    %z32 = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
+    %c = tosa.conv2d %x, %w, %b, %zp, %zp {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 1, 0, 1, 0>, stride = array<i64: 2, 2>} : (tensor<1x20x20x256xi8>, tensor<512x3x3x256xi8>, tensor<512xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x10x10x512xi32>
+    %r = tosa.rescale %c, %m, %s, %z32, %zp {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x10x10x512xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x10x10x512xi8>
+    return %r : tensor<1x10x10x512xi8>
+  }
+}
+"""
+
+
+@pytest.mark.ci
+def test_heavy_conv_tiled_on_channels_uses_both_slices(torq_compiler, tmp_path):
+    """Tiles that split only output channels load each weight once, so the conv
+    stays dual-sliced, one 64-channel hardware tile per slice. On one slice,
+    yolo26s was 3.3% slower than main."""
+    dump = dispatch_dump_after(torq_compiler, tmp_path, HEAVY_CONV, "torq-linalg-slicing")
+    assert "torq-single-slice" not in dump, f"the conv was kept on one slice:\n{dump}"
+    assert any(in_forall(dump, "linalg.conv_2d_nchw_fchw")), f"the conv was not sliced:\n{dump}"
+    sizes = re.findall(r"linalg\.conv_2d_nchw_fchw .*?-> tensor<1x(\d+)x10x10xi32>", dump)
+    assert sizes and all(int(size) % 64 == 0 for size in sizes), (
+        f"a slice computes a partial 64-channel hardware tile: {sizes}\n{dump}"
+    )
+
+
 # SiLU as torch lowers it: x * sigmoid(x). Both mul inputs are live, but they
 # are functions of one value, so this is a gate, not a residual add.
 SILU = """

@@ -14,6 +14,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -64,9 +65,22 @@ bool isDualSliceWeightHeavyConv(Operation *op, int64_t sliceCount) {
     if (!filterTy || filterTy.getRank() != 4)
         return false;
     int64_t elementBytes = llvm::divideCeil(filterTy.getElementTypeBitWidth(), 8);
-    int64_t packedWeight = 64 * filterTy.getDimSize(1) * filterTy.getDimSize(2) *
-                           filterTy.getDimSize(3) * elementBytes;
+    int64_t packedWeight = kConvOutputChannelTile * filterTy.getDimSize(1) *
+                           filterTy.getDimSize(2) * filterTy.getDimSize(3) * elementBytes;
     return packedWeight * sliceCount > TorqHw::get().getLramSize() / 2;
+}
+
+bool readsWholeSourceEveryTile(tensor::ExtractSliceOp sliceOp) {
+    RankedTensorType sourceType = sliceOp.getSourceType();
+    return sourceType.hasStaticShape() && llvm::all_of(sliceOp.getMixedOffsets(), isZeroInteger) &&
+           llvm::all_of(
+               sliceOp.getMixedStrides(),
+               [](OpFoldResult stride) { return isConstantIntValue(stride, 1); }
+           ) &&
+           llvm::equal(
+               sliceOp.getMixedSizes(), sourceType.getShape(),
+               [](OpFoldResult size, int64_t dim) { return isConstantIntValue(size, dim); }
+           );
 }
 
 namespace {

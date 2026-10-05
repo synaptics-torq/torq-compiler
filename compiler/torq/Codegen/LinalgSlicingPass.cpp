@@ -11,6 +11,7 @@
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/SlicingThresholds.h"
+#include "torq/Utils/TorqHw.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
@@ -93,6 +94,18 @@ scf::SCFTileAndFuseOptions::ControlFnTy getControlFn(IntegerAttr fuseGroup, size
                mlir::tensor::ExtractSliceOp sliceOp, OpResult producerOpResult,
                bool isDestinationOperand
            ) -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
+        // A producer every slice of a weight-heavy conv reads whole (its input
+        // transpose when the slices split output channels) would run in full on
+        // each slice. Leave it before the forall: it runs once, and FoldConvert
+        // shares the input load across the slices, which is what TileAndFuse's
+        // fit probe assumes for these convs. Elsewhere, outside the forall each
+        // slice would load its own copy of the whole input.
+        if (readsWholeSourceEveryTile(sliceOp) &&
+            llvm::any_of(sliceOp->getUsers(), [](Operation *user) {
+                return isDualSliceWeightHeavyConv(user, TorqHw::get().getSliceCount());
+            }))
+            return std::nullopt;
+
         auto producerGroups =
             producerOpResult.getOwner()->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
         if (producerGroups && llvm::is_contained(producerGroups, fuseGroup)) {
@@ -328,21 +341,16 @@ LogicalResult peelAndSlice(
     return success();
 }
 
-// True when this conv stays on one slice: TileAndFuse marked it (see
-// kSingleSliceAttr), or its weight is heavy and its output channels do not split
-// evenly across the slices, so the peeled remainder would load the weights once
-// more. ConvPattern skips slicing such a conv; ElementwisePattern mirrors it so
-// a rescale that is the conv's sole consumer stays full, preserving the conv's
-// single-use i32 output that lets it fuse to an i8 torq_hl.conv2d.
-static bool convKeptSingleSlice(Operation *op, int64_t sliceCount) {
+// True when TileAndFuse marked this conv to stay on one slice (see
+// kSingleSliceAttr). A conv whose output channels do not split evenly across the
+// slices is still sliced: the peeled remainder loads its weights once more, but
+// that costs less than leaving the other slice idle. ConvPattern skips slicing a
+// marked conv; ElementwisePattern mirrors it so a rescale that is the conv's sole
+// consumer stays full, preserving the conv's single-use i32 output that lets it
+// fuse to an i8 torq_hl.conv2d.
+static bool convKeptSingleSlice(Operation *op) {
     auto conv = dyn_cast_if_present<linalg::Conv2DNchwFchwOp>(op);
-    if (!conv)
-        return false;
-    if (conv->hasAttr(kSingleSliceAttr))
-        return true;
-    int64_t outChannels = cast<ShapedType>(conv->getResult(0).getType()).getDimSize(1);
-    return isDualSliceWeightHeavyConv(conv, sliceCount) &&
-           (ShapedType::isDynamic(outChannels) || outChannels % (sliceCount * kGrouping) != 0);
+    return conv && conv->hasAttr(kSingleSliceAttr);
 }
 
 template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
@@ -358,7 +366,7 @@ template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
             return rewriter.notifyMatchFailure(conv2DOp, "not the principal operation");
         }
 
-        if (convKeptSingleSlice(conv2DOp, sliceCount_))
+        if (convKeptSingleSlice(conv2DOp))
             return rewriter.notifyMatchFailure(conv2DOp, "kept on one slice");
 
         return peelAndSlice(rewriter, conv2DOp, slicingIter_, kGrouping, sliceCount_);
@@ -468,8 +476,7 @@ struct TransposePattern : public OpRewritePattern<linalg::TransposeOp> {
 // ElementwisePattern already skips a rescale that is a non-principal member of
 // the conv's own group, which is how conv marking places it. This covers the
 // other case: a rescale that is the principal of its own group, or in no group.
-static Operation *
-findBlockedConvProducer(Operation *op, IntegerAttr fuseGroup, int64_t sliceCount) {
+static Operation *findBlockedConvProducer(Operation *op, IntegerAttr fuseGroup) {
     SmallVector<Operation *, 8> groupOps;
     if (fuseGroup) {
         // Walk the whole parent: group members are not always adjacent. The marking
@@ -493,7 +500,7 @@ findBlockedConvProducer(Operation *op, IntegerAttr fuseGroup, int64_t sliceCount
                 continue;
             if (!operand.hasOneUse())
                 continue;
-            if (convKeptSingleSlice(def, sliceCount))
+            if (convKeptSingleSlice(def))
                 return def;
         }
     }
@@ -572,12 +579,12 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
                 "standalone op with trunci/truncf not in any fuse group, skipping slicing"
             );
 
-        // A conv kept full by the dual-slice weight guard must not have its
-        // single-use i32 rescale epilogue sliced, or the conv can no longer
-        // fuse to an i8 torq_hl.conv2d and the full i32 activation is pinned.
-        if (findBlockedConvProducer(genericOp, isFuseGroupPrincipalOp(genericOp), sliceCount_)) {
+        // A conv TileAndFuse keeps on one slice must not have its single-use i32
+        // rescale epilogue sliced, or the conv can no longer fuse to an i8
+        // torq_hl.conv2d and the full i32 activation is pinned.
+        if (findBlockedConvProducer(genericOp, isFuseGroupPrincipalOp(genericOp))) {
             return rewriter.notifyMatchFailure(
-                genericOp, "rescale of a non-dual-sliceable conv, keep full so the conv fuses to i8"
+                genericOp, "rescale of a single-slice conv, keep full so the conv fuses to i8"
             );
         }
 

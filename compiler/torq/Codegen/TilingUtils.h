@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 
@@ -29,6 +30,9 @@ std::optional<size_t> getSlicingIterationDomainIndex(Operation *op);
 // Slicing granularity
 constexpr int64_t kGrouping = 4;
 
+// Output channels of a conv that one hardware tile computes on one slice.
+constexpr int64_t kConvOutputChannelTile = 64;
+
 // Set by TileAndFuse on a conv that LinalgSlicing must keep on one slice.
 constexpr llvm::StringLiteral kSingleSliceAttr = "torq-single-slice";
 
@@ -41,6 +45,12 @@ constexpr llvm::StringLiteral kSingleSliceAttr = "torq-single-slice";
 // whole filter. This only selects the convs that get the second probe; one it
 // misses keeps dual slicing, as on main. Depthwise and NHWC convs are not probed.
 bool isDualSliceWeightHeavyConv(Operation *op, int64_t sliceCount);
+
+// True when every tile (or slice) reads the whole source of `sliceOp`. Fusing its
+// producer into the loop would recompute the full result once per tile, so
+// TileAndFuse leaves it before the loop, even when it is a pattern fuse group
+// member. LinalgSlicing does the same for the slices of a weight-heavy conv.
+bool readsWholeSourceEveryTile(tensor::ExtractSliceOp sliceOp);
 
 // Replace the untiled consumer `op` with its tiled version from `tiledResults`,
 // and do the same for any producer that was yielded as well.

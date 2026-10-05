@@ -1234,10 +1234,11 @@ static void narrowReadOnlyWeightLoads(FunctionOpInterface funcOp) {
 // Revert load-CSE reuses (tagged "torq.lram_reuse" by EliminateRedundantLramLoads)
 // that keep a read-only buffer resident and shared across consumers. When slicing
 // is on, such a shared buffer stays pinned by an in-flight start_program while other
-// programs need LRAM, so address assignment runs out of space. Give each consumer
-// its own fresh load of the same source, so each copy is short-lived and swappable
-// (this restores the pre-reuse per-use load for the tagged buffers only). Safe:
-// the reuse was recorded only for buffers never written in-block (read-only).
+// programs need LRAM, so address assignment runs out of space. Give each group of
+// consumers that run at the same time its own fresh load of the same source, so
+// each copy is short-lived and swappable (this restores the pre-reuse per-use load
+// for the tagged buffers only). Safe: the reuse was recorded only for buffers never
+// written in-block (read-only).
 static void revertSharedReadOnlyReuses(FunctionOpInterface funcOp) {
     SmallVector<memref::AllocOp> tagged;
     funcOp->walk([&](memref::AllocOp alloc) {
@@ -1287,27 +1288,58 @@ static void revertSharedReadOnlyReuses(FunctionOpInterface funcOp) {
             if (auto dc = dyn_cast<memref::DeallocOp>(u))
                 srcDealloc = dc;
 
-        // Give each consumer its own fresh load from the same source, and free that
-        // copy as soon as the consumer is done with it, so it is not resident across
-        // the other programs (which is what made the shared buffer overflow LRAM).
-        // The source (load's input) dominates the original load, hence every later
-        // consumer.
+        // A start_program keeps its operands live until the matching wait_program;
+        // any other consumer is done at its own point.
+        auto getDoneOp = [](Operation *consumer) {
+            if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(consumer))
+                for (Operation *u : startOp.getInvocation().getUsers())
+                    if (isa<torq_hl::WaitProgramOp>(u) && u->getBlock() == consumer->getBlock())
+                        return u;
+            return consumer;
+        };
+
+        // Consumers that run at the same time keep sharing one copy: the slices of an
+        // scf.forall, which FoldConvert made read one buffer (see
+        // hoistSliceInvariantLoads), all start before the first of them is waited for.
+        // A private copy per slice needs more LRAM at that point, not less. So a
+        // consumer joins the current group when it starts before the group is done.
+        struct ConsumerGroup {
+            SmallVector<Operation *> members;
+            Operation *done;
+        };
+        SmallVector<ConsumerGroup> groups;
+        Block *block = consumers.front()->getBlock();
+        bool oneBlock =
+            llvm::all_of(consumers, [&](Operation *c) { return c->getBlock() == block; });
+        if (oneBlock) {
+            llvm::sort(consumers, [](Operation *a, Operation *b) { return a->isBeforeInBlock(b); });
+            consumers.erase(llvm::unique(consumers), consumers.end());
+        }
         for (Operation *consumer : consumers) {
-            rewriter.setInsertionPoint(consumer);
+            Operation *done = getDoneOp(consumer);
+            Operation *groupDone = groups.empty() ? nullptr : groups.back().done;
+            if (!oneBlock || !groupDone || !consumer->isBeforeInBlock(groupDone)) {
+                groups.push_back({{consumer}, done});
+                continue;
+            }
+            groups.back().members.push_back(consumer);
+            if (groupDone->isBeforeInBlock(done))
+                groups.back().done = done;
+        }
+
+        // Give each group its own fresh load from the same source, and free that copy
+        // as soon as the group is done with it, so it is not resident across the other
+        // programs (which is what made the shared buffer overflow LRAM). The source
+        // (load's input) dominates the original load, hence every later consumer.
+        for (ConsumerGroup &group : groups) {
+            rewriter.setInsertionPoint(group.members.front());
             auto newAlloc = memref::AllocOp::create(rewriter, load.getLoc(), alloc.getType());
             Operation *newLoad = rewriter.clone(*load.getOperation());
             cast<torq_hl::LoadOp>(newLoad).getOutputMutable().set(newAlloc.getResult());
-            consumer->replaceUsesOfWith(alloc.getResult(), newAlloc.getResult());
+            for (Operation *consumer : group.members)
+                consumer->replaceUsesOfWith(alloc.getResult(), newAlloc.getResult());
 
-            // Deallocate the copy after the consumer finishes with it. A
-            // start_program keeps its operands live until the matching wait_program,
-            // so free after that; any other consumer is done at its own point.
-            Operation *deallocAfter = consumer;
-            if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(consumer))
-                for (Operation *u : startOp.getInvocation().getUsers())
-                    if (isa<torq_hl::WaitProgramOp>(u))
-                        deallocAfter = u;
-            rewriter.setInsertionPointAfter(deallocAfter);
+            rewriter.setInsertionPointAfter(group.done);
             memref::DeallocOp::create(rewriter, load.getLoc(), newAlloc.getResult());
         }
 
