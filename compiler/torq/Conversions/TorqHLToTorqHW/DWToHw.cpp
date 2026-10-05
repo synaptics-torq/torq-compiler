@@ -276,9 +276,9 @@ static torq_hw::SliceTaskOp lowerDwStride2ToHw(
         input.getShape()[In::RowQuadrant].stride = rowQStride;
     }
     else {
+        // rowSize, not output.dim(-1): a segmented output no longer ends in its W dim.
         input.getShape()[In::RowQuadrant].stride =
-            rowQStride * (start_pos_y == 0 ? 1 : -1) +
-            output.dim(-1) * (kernel_top_even - kernel_top_odd);
+            rowQStride * (start_pos_y == 0 ? 1 : -1) + rowSize * (kernel_top_even - kernel_top_odd);
     }
 
     // Main processing loops. Instead of processing one input vector at a time, we load multiple

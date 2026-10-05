@@ -201,8 +201,9 @@ static torq_hw::SliceTaskOp lowerConvStride2ToHw(
     input.setOffset(input.offset() + (2 * start_pos_y + start_pos_x) * colQStride);
     input.getShape()[In::ColQuadrant].stride =
         colQStride * (start_pos_x == 0 ? 1 : -1) + kernel_left_even - kernel_left_odd;
-    input.getShape()[In::RowQuadrant].stride = rowQStride * (start_pos_y == 0 ? 1 : -1) +
-                                               output.dim(-1) * (kernel_top_even - kernel_top_odd);
+    // rowSize, not output.dim(-1): a segmented output no longer ends in its W dim.
+    input.getShape()[In::RowQuadrant].stride =
+        rowQStride * (start_pos_y == 0 ? 1 : -1) + rowSize * (kernel_top_even - kernel_top_odd);
 
     // Main processing loops.
     // Outer loops: batch, output-channel-vector, spatial-pixel-vector.
