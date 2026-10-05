@@ -51,7 +51,15 @@ FailureOr<bool> encodeKernelInputOutputs(
 
     bool changed = false;
 
-    auto outType = cast<RankedTensorType>(op->getResult(0).getType());
+    auto outType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+    if (!outType || !outType.hasStaticShape())
+        return false;
+
+    for (OpOperand &opOperand : op->getOpOperands()) {
+        auto inType = dyn_cast<RankedTensorType>(opOperand.get().getType());
+        if (inType && !inType.hasStaticShape())
+            return false;
+    }
 
     auto outReqs = toTensorEncodingRequirementsAttr(encoding.outputEncoding);
 

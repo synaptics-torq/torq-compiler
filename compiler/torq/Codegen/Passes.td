@@ -432,6 +432,7 @@ def TileAndFuse :
 
   let dependentDialects = [
         "linalg::LinalgDialect",
+        "bufferization::BufferizationDialect",
     ];
 
 }

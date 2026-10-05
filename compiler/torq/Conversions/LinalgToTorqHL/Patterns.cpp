@@ -688,7 +688,8 @@ struct TransposeOpConversionRewrite : public OpRewritePattern<linalg::TransposeO
         }
 
         if (_markFuseGroups) {
-            markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr);
+            if (!markOpFuseGroup(srcOp, rewriter, maybeFuseGroupAttr))
+                return rewriter.notifyMatchFailure(srcOp, "could not mark fuse group");
             return success();
         }
 

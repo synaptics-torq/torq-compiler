@@ -246,7 +246,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
             while (foldScalarRescale(scalarInput, probeScaleInfo, inputElementType, rewriter)) {
             }
-            constOp = dyn_cast<arith::ConstantOp>(scalarInput.getDefiningOp());
+            constOp = dyn_cast_if_present<arith::ConstantOp>(scalarInput.getDefiningOp());
         }
 
         if (constOp && getIntegerConstantValue(constOp, scalarValue)) {
@@ -691,10 +691,11 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         }
 
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                output, {input0, input1}, rewriter,
-                eltOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    output, {input0, input1}, rewriter,
+                    eltOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 

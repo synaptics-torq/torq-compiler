@@ -1027,13 +1027,14 @@ struct BroadcastBatchMatmulGenericRewrite : public OpRewritePattern<linalg::Gene
                     input1, rewriter, srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
                 );
             }
-            markFuseGroupBackward(
-                srcOp.getResult(0),
-                // NB: we intentionally don't include the init operand in the list below. This makes
-                // sure the init is marked, and fused with the matmul.
-                {input1, input2}, rewriter,
-                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    srcOp.getResult(0),
+                    // NB: we intentionally don't include the init operand in the list below. This
+                    // makes sure the init is marked, and fused with the matmul.
+                    {input1, input2}, rewriter,
+                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 
@@ -1059,7 +1060,10 @@ struct BroadcastBatchMatmulGenericRewrite : public OpRewritePattern<linalg::Gene
         // addition explicitly.
         FailureOr<Value> resultVal =
             addInitToResult(srcOp.getOutputs().front(), matMulOp.getResult(0), rewriter);
-        assert(succeeded(resultVal) && "failed to add the init value");
+        if (failed(resultVal)) {
+            rewriter.eraseOp(matMulOp);
+            return rewriter.notifyMatchFailure(srcOp, "failed to add the init value");
+        }
 
         rewriter.replaceOp(srcOp, *resultVal);
 
@@ -1081,12 +1085,28 @@ template <typename OpTy> struct MatmulOpRewrite final : public OpRewritePattern<
         }
 
         std::optional<IntegerAttr> maybeFuseGroupAttr = std::nullopt;
-        if (_markFuseGroups) {
-            maybeFuseGroupAttr = srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
-        }
-
         Value lhs = srcOp.getOperand(0);
         Value rhs = srcOp.getOperand(1);
+
+        if (_markFuseGroups) {
+            // Discovery-only: do not run maybeFold* here; those helpers can
+            // materialize ExpandWeights when marking fails and break greedy convergence.
+            if (peelSiToFpWeightCast(srcOp.getOperand(0))) {
+                markSiToFpWeightCastFuseGroup(
+                    srcOp.getOperand(0), rewriter,
+                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                );
+            }
+            if (!markFuseGroupBackward(
+                    srcOp.getResult(0),
+                    // NB: we intentionally don't include the init operand in the list below. This
+                    // makes sure the init is marked, and fused with the matmul.
+                    {lhs, rhs}, rewriter,
+                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
+            return success();
+        }
 
         if (FailureOr<Value> foldedLhs =
                 maybeFoldBlockQuantizedMatmulInput(lhs, rewriter, maybeFuseGroupAttr);
@@ -1108,25 +1128,6 @@ template <typename OpTy> struct MatmulOpRewrite final : public OpRewritePattern<
                      maybeFoldFp8CastMatmulInput(rhs, rewriter, maybeFuseGroupAttr);
                  succeeded(foldedRhs)) {
             rhs = *foldedRhs;
-        }
-
-        if (_markFuseGroups) {
-            // maybeFold* already marked the upstream fusible ops, except for the init.
-            // A weight-first sitofp cast is not handled by maybeFold*, so mark it here.
-            if (peelSiToFpWeightCast(srcOp.getOperand(0))) {
-                markSiToFpWeightCastFuseGroup(
-                    srcOp.getOperand(0), rewriter,
-                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-                );
-            }
-            markFuseGroupBackward(
-                srcOp.getResult(0),
-                // NB: we intentionally don't include the init operand in the list below. This makes
-                // sure the init is marked, and fused with the matmul.
-                {srcOp.getOperand(0), srcOp.getOperand(1)}, rewriter,
-                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
-            return success();
         }
 
         // Weight-first quant matmul: feed the packed int weight to the matA/WRAM slot
@@ -1154,7 +1155,10 @@ template <typename OpTy> struct MatmulOpRewrite final : public OpRewritePattern<
         // addition explicitly.
         FailureOr<Value> resultVal =
             addInitToResult(srcOp.getOutputs().front(), matMulOp.getResult(0), rewriter);
-        assert(succeeded(resultVal) && "failed to add the init value");
+        if (failed(resultVal)) {
+            rewriter.eraseOp(matMulOp);
+            return rewriter.notifyMatchFailure(srcOp, "failed to add the init value");
+        }
 
         rewriter.replaceOp(srcOp, *resultVal);
 

@@ -12,6 +12,7 @@
 #include "torq/Utils/ExecutorAssignment.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "llvm/ADT/SmallVector.h"
@@ -43,9 +44,12 @@ class CompileTimeConstStubsPass
         for (auto val : valuesToProcess) {
             builder.setInsertionPoint(val.getDefiningOp());
 
-            ShapedType shapeType = cast<mlir::ShapedType>(val.getType());
-
-            auto emptyOp = tensor::EmptyOp::create(builder, val.getLoc(), shapeType, {});
+            // A stub of a dynamic shape has no dominating value to size it from,
+            // so leave such values computed.
+            auto rankedTy = dyn_cast<RankedTensorType>(val.getType());
+            if (!rankedTy || !rankedTy.hasStaticShape())
+                continue;
+            auto emptyOp = tensor::EmptyOp::create(builder, val.getLoc(), rankedTy, {});
             val.replaceAllUsesWith(emptyOp.getResult());
         }
     }

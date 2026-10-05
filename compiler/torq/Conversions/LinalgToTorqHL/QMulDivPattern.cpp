@@ -232,10 +232,11 @@ struct QMulDivConvert : public OpRewritePattern<linalg::GenericOp> {
             auto fuseGroupAttr = mulOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(mulOp, "missing fuse group id");
-            markFuseGroupBackward(
-                chain.quantOp.getResult(0), {source0->quantizedInput, source1->quantizedInput},
-                rewriter, fuseGroupAttr
-            );
+            if (!markFuseGroupBackward(
+                    chain.quantOp.getResult(0), {source0->quantizedInput, source1->quantizedInput},
+                    rewriter, fuseGroupAttr
+                ))
+                return failure();
             return success();
         }
 

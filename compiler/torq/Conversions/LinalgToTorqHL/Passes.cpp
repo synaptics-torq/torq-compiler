@@ -349,13 +349,21 @@ class MarkPatternsForTileAndFusePass
             op->setAttr(mlir::syna::torq::TORQ_FUSE_GROUP_ID, builder.getI64IntegerAttr(nextId++));
         });
 
+        // Large models (e.g. NNNR3) mark many fuse groups; allow more than the
+        // default 10 greedy iterations while still failing on true rewrite loops.
+        constexpr unsigned kMaxMarkIterations = 50;
+        GreedyRewriteConfig config;
+        config.setMaxIterations(kMaxMarkIterations);
+
         RewritePatternSet prePatterns(ctx);
         populateLinalgToTorqHLPrePatterns(ctx, prePatterns, true);
 
         auto preFrozenPatterns =
             FrozenRewritePatternSet(std::move(prePatterns), disabledPatterns, enabledPatterns);
 
-        if (failed(applyPatternsGreedily(getOperation(), preFrozenPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), preFrozenPatterns, config))) {
+            getOperation()->emitError()
+                << "torq-mark-patterns-for-tile-and-fuse: pre-patterns did not converge";
             return signalPassFailure();
         }
 
@@ -366,21 +374,28 @@ class MarkPatternsForTileAndFusePass
             std::move(preLowPrioPatterns), disabledPatterns, enabledPatterns
         );
 
-        if (failed(applyPatternsGreedily(getOperation(), preLowPrioFrozenPatterns))) {
+        if (failed(applyPatternsGreedily(getOperation(), preLowPrioFrozenPatterns, config))) {
+            getOperation()->emitError()
+                << "torq-mark-patterns-for-tile-and-fuse: low-prio patterns did not converge";
             return signalPassFailure();
         }
 
         RewritePatternSet linalgPatterns(ctx);
         populateLinalgToTorqHLPatterns(ctx, linalgPatterns, true);
 
-        if (failed(applyPatternsGreedily(getOperation(), std::move(linalgPatterns)))) {
+        if (failed(applyPatternsGreedily(getOperation(), std::move(linalgPatterns), config))) {
+            getOperation()->emitError()
+                << "torq-mark-patterns-for-tile-and-fuse: linalg patterns did not converge";
             return signalPassFailure();
         }
 
         RewritePatternSet linalgPatternsEpilogue(&getContext());
         populateLinalgToTorqHLClampPatterns(ctx, linalgPatternsEpilogue, true);
 
-        if (failed(applyPatternsGreedily(getOperation(), std::move(linalgPatternsEpilogue)))) {
+        if (failed(applyPatternsGreedily(getOperation(), std::move(linalgPatternsEpilogue), config)
+            )) {
+            getOperation()->emitError()
+                << "torq-mark-patterns-for-tile-and-fuse: clamp patterns did not converge";
             return signalPassFailure();
         }
     }

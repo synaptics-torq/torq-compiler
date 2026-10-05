@@ -117,11 +117,18 @@ bool markOpFuseGroup(
     Operation *op, PatternRewriter &rewriter, const std::optional<IntegerAttr> &maybeFuseGroupAttr
 );
 
+// True if `value` is a constant or a pure reshape/broadcast/transpose/
+// elementwise/reduction pipeline over constants (typical weight/bias
+// preprocessing). Shared producers of this kind stay out of NPU fuse groups;
+// unique ones join the consumer's group.
+bool isConstantLikeProducer(Value value);
+
 // Starting from output, walk upwards until any of the inputs are encountered.
-// Each visited op that implements TilingInterface is passed to markOpFuseGroup
-// to set TORQ_FUSE_GROUP; ops that don't (e.g. tensor.extract_slice) terminate
-// the walk along that path.
-void markFuseGroupBackward(
+// TilingInterface ops are marked; volume-preserving shape ops are walked through.
+// Size-changing extract_slice, residual side-branches, and constant-like
+// weight/bias pipelines are fusion boundaries. Returns true if any new mark
+// was applied (so greedy rewrite can stop when the group is already annotated).
+bool markFuseGroupBackward(
     const Value &output, const llvm::SmallVector<Value> &inputs, PatternRewriter &rewriter,
     const IntegerAttr &fuseGroupAttr
 );
@@ -170,13 +177,44 @@ std::optional<int64_t> isFuseGroupOutput(Operation *op);
 // the bottom most member of the group.
 Operation *getFuseGroupOutputOp(Operation *op, IntegerAttr fuseGroupAttr);
 
+// Walk past tensor.pad and producer linalg.transpose so fuse-group marking
+// includes the NCHW layout transpose. Does not walk expand/collapse
+// (space-to-depth). Weights should not be passed through this helper.
+Value peelPadAndReshapeSource(Value value);
+
+// True if `lrtbPad` {left,right,top,bottom} is representable by conv HW.
+// Stride 1 requires left/right equal to the kernel border. Stride > 2 and 2D
+// k>1 stride 2 are always legal (the stride-2 lowering cannot run the VALID
+// conv an explicit pad would leave). 1D-as-2D stride-2 (exactly one of kH,kW
+// is 1) also accepts SAME [0,1] on the long axis.
+bool isHwLegalConvPad(
+    llvm::ArrayRef<int64_t> lrtbPad, int64_t kH, int64_t kW, int64_t strideH = 1,
+    int64_t strideW = 1
+);
+
+// After foldBackwardPadding: keep `input` if the pad is HW-legal. Otherwise
+// revert to `origInput` and zero pad (explicit tensor.pad, VALID HW pad).
+void selectFoldedOrExplicitConvPad(
+    Value &input, Value origInput, PaddingInfo &padInfo, PatternRewriter &rewriter,
+    llvm::ArrayRef<Operation *> foldOps, int64_t kH, int64_t kW, int64_t strideH, int64_t strideW
+);
+
+// Erase ops a pad fold materialized that are now dead (the fold was reverted
+// or its slice translation fell through). Erase newest first so chained ops
+// become use-empty in order.
+void eraseDeadFoldOps(PatternRewriter &rewriter, llvm::ArrayRef<Operation *> foldOps);
+
 // Deduce Left,Right,Top,Bottom padding info by analyzing value backward
 // - value comes from an tensor.slice_insert into a filled tensor, or from tensor.pad
 // - return padding info if found and update value to the source tensor
 // - return null padding if not found
-// Update value to the input of the folded operations
+// Update value to the input of the folded operations. On a committed fold,
+// `createdOps` (optional) collects the ops the fold materialized (peel
+// reshapes, adjusted extract slices) so a caller that reverts the fold can
+// erase them.
 PaddingInfo foldBackwardPadding(
-    Value &value, PatternRewriter &rewriter, bool nchw = false, Value outputValue = nullptr
+    Value &value, PatternRewriter &rewriter, bool nchw = false, Value outputValue = nullptr,
+    SmallVectorImpl<Operation *> *createdOps = nullptr
 );
 
 // Peel tensor.expand_shape / tensor.collapse_shape when this is the sole user.

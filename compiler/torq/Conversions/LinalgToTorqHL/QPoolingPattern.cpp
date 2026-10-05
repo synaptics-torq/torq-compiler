@@ -190,10 +190,11 @@ struct QGlobalAveragePoolConvert : public OpRewritePattern<linalg::PoolingNchwSu
             auto fuseGroupAttr = poolOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(poolOp, "missing fuse group id");
-            markFuseGroupBackward(
-                chain.quantOp.getResult(0), {chain.inputDequantOp.getInputs()[0]}, rewriter,
-                fuseGroupAttr
-            );
+            if (!markFuseGroupBackward(
+                    chain.quantOp.getResult(0), {chain.inputDequantOp.getInputs()[0]}, rewriter,
+                    fuseGroupAttr
+                ))
+                return failure();
             return success();
         }
 
@@ -371,10 +372,11 @@ struct QLocalAveragePoolConvert : public OpRewritePattern<linalg::PoolingNchwSum
             auto fuseGroupAttr = poolOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(poolOp, "missing fuse group id");
-            markFuseGroupBackward(
-                chain.quantOp.getResult(0), {chain.inputDequantOp.getInputs()[0]}, rewriter,
-                fuseGroupAttr
-            );
+            if (!markFuseGroupBackward(
+                    chain.quantOp.getResult(0), {chain.inputDequantOp.getInputs()[0]}, rewriter,
+                    fuseGroupAttr
+                ))
+                return failure();
             return success();
         }
 
@@ -598,9 +600,10 @@ struct QMaxPoolConvert : public OpRewritePattern<PoolingOpType> {
             auto fuseGroupAttr = poolOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(poolOp, "missing fuse group id");
-            markFuseGroupBackward(
-                chain.quantOp.getResult(0), {dequantInput}, rewriter, fuseGroupAttr
-            );
+            if (!markFuseGroupBackward(
+                    chain.quantOp.getResult(0), {dequantInput}, rewriter, fuseGroupAttr
+                ))
+                return failure();
             return success();
         }
 

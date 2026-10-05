@@ -141,10 +141,11 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
         ScaleClampInfo scInfo = foldForwardScaleClamp(output, outChannelCount, 12, 12, false);
 
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                output, {input1, input2}, rewriter,
-                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    output, {input1, input2}, rewriter,
+                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 

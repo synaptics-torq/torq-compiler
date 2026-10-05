@@ -313,10 +313,11 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
         if (failed(fusionPlanOr) || !fusionPlanOr->isFusable()) {
             if (_markFuseGroups) {
                 // Discovery-only mode: mark the chain and defer material rewrite.
-                markFuseGroupBackward(
-                    output, {lhs, rhs}, rewriter,
-                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-                );
+                if (!markFuseGroupBackward(
+                        output, {lhs, rhs}, rewriter,
+                        srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                    ))
+                    return failure();
                 return success();
             }
             return replaceWithTorqMatmul(srcOp, rhs, rewriter);
@@ -391,10 +392,11 @@ struct Conv2DMatmulOpConversion : public OpRewritePattern<linalg::MatmulOp> {
                 weights = transposeOp.getInput();
             }
 
-            markFuseGroupBackward(
-                output, {input, weights}, rewriter,
-                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    output, {input, weights}, rewriter,
+                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 

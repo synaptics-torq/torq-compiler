@@ -467,10 +467,11 @@ struct QMatmulToFCConvert : public OpRewritePattern<linalg::MatmulOp> {
         }
 
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                qChain.quantOp.getResult(0), {input, rhs}, rewriter,
-                matmulOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    qChain.quantOp.getResult(0), {input, rhs}, rewriter,
+                    matmulOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 

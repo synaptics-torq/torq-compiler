@@ -177,7 +177,7 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
             return failure();
 
         auto input_shape = inputType.getShape();
-        if (input_shape.size() != 4)
+        if (input_shape.size() != 4 || !inputType.hasStaticShape())
             return failure();
 
         int64_t ksize_h, ksize_w;
@@ -213,6 +213,8 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
         }
 
         auto output_type = llvm::dyn_cast<RankedTensorType>(op.getInit().getType());
+        if (!output_type || !output_type.hasStaticShape())
+            return failure();
         auto output_shape = output_type.getShape();
 
         // For stride>=2 only: if VALID padding already produces the correct output size,
@@ -410,7 +412,7 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvP
             return failure();
 
         auto input_shape = inputType.getShape();
-        if (input_shape.size() != 4)
+        if (input_shape.size() != 4 || !inputType.hasStaticShape())
             return failure();
 
         int64_t ksize_h, ksize_w;
@@ -467,6 +469,8 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvP
         }
 
         auto output_type = llvm::dyn_cast<RankedTensorType>(op.getInit().getType());
+        if (!output_type || !output_type.hasStaticShape())
+            return failure();
         auto output_shape = output_type.getShape();
 
         SmallVector<int64_t, 4> new_output_shape = {

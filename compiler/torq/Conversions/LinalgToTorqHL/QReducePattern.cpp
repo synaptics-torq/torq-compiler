@@ -174,9 +174,10 @@ struct QReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
             auto fuseGroupAttr = meanOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(meanOp, "missing fuse group id");
-            markFuseGroupBackward(
-                chain.quantOp.getResult(0), {dequantInput}, rewriter, fuseGroupAttr
-            );
+            if (!markFuseGroupBackward(
+                    chain.quantOp.getResult(0), {dequantInput}, rewriter, fuseGroupAttr
+                ))
+                return failure();
             return success();
         }
 

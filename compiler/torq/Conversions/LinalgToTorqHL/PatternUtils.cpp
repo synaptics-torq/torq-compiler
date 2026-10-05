@@ -30,10 +30,12 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/PassManager.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/Casting.h"
@@ -41,6 +43,7 @@
 #include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/TargetSelect.h"
 
+#include <algorithm>
 #include <cmath>
 #include <deque>
 #include <numeric>
@@ -91,67 +94,678 @@ static std::optional<float> getFloatValue(Value val) {
     return fillValueAPFloat.convertToFloat();
 }
 
-bool markOpFuseGroup(
-    Operation *op, PatternRewriter &rewriter, const std::optional<IntegerAttr> &maybeFuseGroupAttr
-) {
-    if (!maybeFuseGroupAttr) {
-        return false;
-    }
+static bool isExcludedFromFuseGroup(Operation *op) {
+    return isa<arith::ConstantOp, tensor::EmptyOp,
+               mlir::iree_compiler::IREE::TensorExt::DispatchTensorLoadOp,
+               mlir::iree_compiler::IREE::HAL::InterfaceBindingSubspanOp>(op) ||
+           getTargetExecutor(op) == torq_hl::Executor::Host;
+}
 
-    if (isa<arith::ConstantOp, tensor::EmptyOp,
-            mlir::iree_compiler::IREE::TensorExt::DispatchTensorLoadOp,
-            mlir::iree_compiler::IREE::HAL::InterfaceBindingSubspanOp>(op)) {
-        return false;
-    }
-
-    assert(op && "Trying to mark null op!");
-    assert(
-        (isa<TilingInterface>(op) && "Trying to mark an op that does not implement TilingInterface")
-    );
-    assert(*maybeFuseGroupAttr && "op does not have torq-fuse-group-id attribute");
-
+// Returns the TORQ_FUSE_GROUP array with `fuseGroupAttr` appended, or nullopt
+// if the op already has that id.
+static std::optional<ArrayAttr> nextFuseGroupAttr(Operation *op, IntegerAttr fuseGroupAttr) {
     SmallVector<Attribute> newAttr;
     if (ArrayAttr oldAttr = op->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP)) {
-        if (llvm::is_contained(oldAttr, *maybeFuseGroupAttr))
-            return false;
-
+        if (llvm::is_contained(oldAttr, fuseGroupAttr))
+            return std::nullopt;
         llvm::append_range(newAttr, oldAttr);
     }
-    newAttr.push_back(*maybeFuseGroupAttr);
-    ArrayAttr fuseGroupAttr = rewriter.getArrayAttr(newAttr);
+    newAttr.push_back(fuseGroupAttr);
+    return ArrayAttr::get(op->getContext(), newAttr);
+}
 
-    rewriter.modifyOpInPlace(op, [&]() { op->setAttr(TORQ_FUSE_GROUP, fuseGroupAttr); });
-
+// Shared core of the two mark entry points: exclusion and TilingInterface
+// checks, id dedup, and applying the resulting attr. `apply` installs the
+// attribute, either through the rewriter or directly (silent).
+static bool markFuseGroupChecked(
+    Operation *op, IntegerAttr fuseGroupAttr, llvm::function_ref<void(ArrayAttr)> apply
+) {
+    if (!op || isExcludedFromFuseGroup(op) || !isa<TilingInterface>(op))
+        return false;
+    std::optional<ArrayAttr> newAttr = nextFuseGroupAttr(op, fuseGroupAttr);
+    if (!newAttr)
+        return false;
+    apply(*newAttr);
     return true;
 }
 
-void markFuseGroupBackward(
+bool markOpFuseGroup(
+    Operation *op, PatternRewriter &rewriter, const std::optional<IntegerAttr> &maybeFuseGroupAttr
+) {
+    if (!maybeFuseGroupAttr)
+        return false;
+    IntegerAttr fuseGroupAttr = *maybeFuseGroupAttr;
+    return markFuseGroupChecked(op, fuseGroupAttr, [&](ArrayAttr attr) {
+        rewriter.modifyOpInPlace(op, [&]() { op->setAttr(TORQ_FUSE_GROUP, attr); });
+    });
+}
+
+// Sets the fuse-group attribute without going through the rewriter. Used by
+// markFuseGroupBackward so shared producers do not requeue every consumer via
+// modifyOpInPlace (that cascade breaks greedy convergence on large models).
+static bool markOpFuseGroupSilent(Operation *op, IntegerAttr fuseGroupAttr) {
+    return markFuseGroupChecked(op, fuseGroupAttr, [&](ArrayAttr attr) {
+        op->setAttr(TORQ_FUSE_GROUP, attr);
+    });
+}
+
+// True if the reshape only inserts or drops unit dims, as when a 1D conv or
+// pool is lifted to 2D: every reassociation group has at most one non-unit dim
+// on its expanded side. Space-to-depth splits a dim and does not qualify.
+template <typename ReshapeOp> static bool isUnitDimReshape(ReshapeOp op) {
+    RankedTensorType expandedTy;
+    if constexpr (std::is_same_v<ReshapeOp, tensor::ExpandShapeOp>)
+        expandedTy = op.getResultType();
+    else
+        expandedTy = op.getSrcType();
+    return llvm::all_of(op.getReassociationIndices(), [&](const ReassociationIndices &group) {
+        return llvm::count_if(group, [&](int64_t d) { return expandedTy.getDimSize(d) != 1; }) <= 1;
+    });
+}
+
+Value peelPadAndReshapeSource(Value value) {
+    while (value) {
+        if (auto padOp = value.getDefiningOp<tensor::PadOp>()) {
+            value = padOp.getSource();
+            continue;
+        }
+        // ConvertNhwc inserts NHWC→NCHW transpose in front of conv. Stopping at
+        // the NCHW result leaves that transpose unmarked, so a 1x1 that fits
+        // alone is not tiled and the full NCHW dest plus conv overflow LRAM.
+        // Do not peel a space-to-depth expand/collapse: walking it pulls the
+        // full pre-s2d frame into a 1x1 tile that then fits unchanged and
+        // overflows LRAM.
+        if (auto transposeOp = value.getDefiningOp<linalg::TransposeOp>()) {
+            value = transposeOp.getDpsInputs()[0];
+            continue;
+        }
+        // A 1D conv/pool lifted to 2D puts a unit-dim expand between its pad and
+        // the op. Walk it so the pad joins the group. Other reshapes (such as a
+        // single-channel input's layout change) stay group boundaries.
+        if (auto expandOp = value.getDefiningOp<tensor::ExpandShapeOp>();
+            expandOp && isUnitDimReshape(expandOp) &&
+            expandOp.getSrc().getDefiningOp<tensor::PadOp>()) {
+            value = expandOp.getSrc();
+            continue;
+        }
+        break;
+    }
+    return value;
+}
+
+bool isHwLegalConvPad(
+    llvm::ArrayRef<int64_t> lrtbPad, int64_t kH, int64_t kW, int64_t strideH, int64_t strideW
+) {
+    if (lrtbPad.size() != 4 || kH < 1 || kW < 1)
+        return false;
+    if (llvm::all_of(lrtbPad, [](int64_t p) { return p == 0; }))
+        return true;
+    int64_t leftB = (kW - 1) / 2;
+    int64_t rightB = kW - leftB - 1;
+    int64_t topB = (kH - 1) / 2;
+    int64_t bottomB = kH - topB - 1;
+    int64_t stride = std::max(strideH, strideW);
+    // Stride > 2 uses a hand-rolled kernel that takes pad as attributes, same
+    // as always-fold on main. Leaving tensor.pad in front overflows LRAM.
+    if (stride > 2)
+        return true;
+    // 1D-as-2D stride-2 (exactly one kernel dim is 1): integer DW s2 forces
+    // left=right=1, so SAME [0,1] on the long axis must fold, not stay as
+    // tensor.pad (that double-pads).
+    if (stride >= 2 && ((kH == 1) != (kW == 1))) {
+        auto axis01 = [](int64_t a, int64_t b) { return a >= 0 && a <= 1 && b >= 0 && b <= 1; };
+        if (kH == 1)
+            return lrtbPad[2] == 0 && lrtbPad[3] == 0 && axis01(lrtbPad[0], lrtbPad[1]);
+        return lrtbPad[0] == 0 && lrtbPad[1] == 0 && axis01(lrtbPad[2], lrtbPad[3]);
+    }
+    // 2D k>1 stride-2: the stride-2 lowering derives the border from the
+    // kernel and only the alignment phase from the pad, and it computes
+    // in/2 outputs. A pad left as tensor.pad turns the conv into VALID on an
+    // even frame with (in-k)/2+1 outputs, which that lowering cannot
+    // execute, so the pad must fold regardless of how it compares to the
+    // stride-1 border.
+    if (stride == 2 && kH > 1 && kW > 1)
+        return true;
+    // A tile cut along W or H keeps only part of the border, so each side may
+    // be smaller than the kernel border but never larger.
+    return lrtbPad[0] <= leftB && lrtbPad[1] <= rightB && lrtbPad[2] <= topB &&
+           lrtbPad[3] <= bottomB;
+}
+
+void eraseDeadFoldOps(PatternRewriter &rewriter, llvm::ArrayRef<Operation *> foldOps) {
+    for (Operation *op : llvm::reverse(foldOps))
+        if (op && op->use_empty())
+            rewriter.eraseOp(op);
+}
+
+void selectFoldedOrExplicitConvPad(
+    Value &input, Value origInput, PaddingInfo &padInfo, PatternRewriter &rewriter,
+    llvm::ArrayRef<Operation *> foldOps, int64_t kH, int64_t kW, int64_t strideH, int64_t strideW
+) {
+    if (!input.getDefiningOp<tensor::PadOp>() &&
+        isHwLegalConvPad(padInfo.lrtbPad, kH, kW, strideH, strideW))
+        return;
+    input = origInput;
+    padInfo = PaddingInfo{};
+    eraseDeadFoldOps(rewriter, foldOps);
+}
+
+// True if `value` is a constant or a pure reshape/broadcast/transpose/
+// elementwise/reduction pipeline over constants (typical weight/bias
+// preprocessing). Shared producers of this kind stay out of NPU fuse groups
+// (tiling them breaks dominance). Unique ones are marked so they fuse into
+// the consumer tile. Reductions over constants (weight zero-point) are
+// included so residual-vs-bias slicing can treat them as constant-like.
+// Memoized so a producer shared by many consumers is classified once; without
+// it the walk is exponential on large reconverging graphs (NNNR3 GRU chains).
+static bool isConstantLikeProducer(Value value, llvm::DenseMap<Value, bool> &memo) {
+    if (auto it = memo.find(value); it != memo.end())
+        return it->second;
+    auto recurse = [&](Value v) { return isConstantLikeProducer(v, memo); };
+    bool result = [&] {
+        Operation *op = value.getDefiningOp();
+        if (!op)
+            return false;
+        // ConstantLike covers arith.constant and similar leaves. tensor.empty is
+        // not ConstantLike but is a typical DPS init. isMemoryEffectFree is too
+        // broad: elementwise over activations is effect-free but must stay in the
+        // NPU fuse group.
+        if (op->hasTrait<OpTrait::ConstantLike>() || isa<tensor::EmptyOp>(op))
+            return true;
+        // Dest is not payload (often extract_slice of empty with a tile loop IV).
+        if (auto fillOp = dyn_cast<linalg::FillOp>(op))
+            return llvm::all_of(fillOp.getDpsInputs(), recurse);
+        // Offsets/sizes/strides are indices. A slice of a constant (scale, zp,
+        // empty) stays constant-like when those indices are tile loop IVs.
+        if (auto extractOp = dyn_cast<tensor::ExtractSliceOp>(op))
+            return recurse(extractOp.getSource());
+        if (isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp, linalg::TransposeOp,
+                linalg::BroadcastOp>(op)) {
+            return llvm::all_of(op->getOperands(), recurse);
+        }
+        // An init the payload reads (accumulate into a live tensor) is payload
+        // too, not just a destination.
+        if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
+            return llvm::all_of(linalgOp.getDpsInputs(), recurse) &&
+                   llvm::all_of(linalgOp.getDpsInitsMutable(), [&](OpOperand &init) {
+                       return !linalgOp.payloadUsesValueFromOperand(&init) || recurse(init.get());
+                   });
+        }
+        return false;
+    }();
+    memo[value] = result;
+    return result;
+}
+
+bool isConstantLikeProducer(Value value) {
+    llvm::DenseMap<Value, bool> memo;
+    return isConstantLikeProducer(value, memo);
+}
+
+// Unique blocked dequant of binding-loaded weights: one non-constant DPS
+// input (the i8 tensor), constant scale/zp, and a sitofp+mulf body. Integer
+// input-zp subtract and rescale have the same input counts but stay i8/i32
+// and must not join the group (they pin full spatial dests on depthwise).
+static bool isUniqueWeightDequant(Operation *op) {
+    auto genericOp = dyn_cast<linalg::GenericOp>(op);
+    if (!genericOp || genericOp.getNumDpsInputs() < 2)
+        return false;
+    int nonConst = 0;
+    int constIns = 0;
+    for (Value in : genericOp.getDpsInputs()) {
+        if (isConstantLikeProducer(in))
+            ++constIns;
+        else
+            ++nonConst;
+    }
+    if (nonConst != 1 || constIns < 1)
+        return false;
+    bool hasSiToFp = false;
+    bool hasMulF = false;
+    genericOp.getBody()->walk([&](Operation *inner) {
+        hasSiToFp = hasSiToFp || isa<arith::SIToFPOp>(inner);
+        hasMulF = hasMulF || isa<arith::MulFOp>(inner);
+    });
+    return hasSiToFp && hasMulF;
+}
+
+// True if `value` can reach any of `stops` through defining ops (DAG search).
+static bool canReachStop(
+    Value value, const llvm::SmallVector<Value> &stops, llvm::SmallDenseSet<Value> &visited
+) {
+    if (!visited.insert(value).second)
+        return false;
+    if (llvm::is_contained(stops, value))
+        return true;
+    if (isConstantLikeProducer(value))
+        return false;
+    Operation *op = value.getDefiningOp();
+    if (!op)
+        return false;
+    // Follow compute inputs only; shared empty/fill inits would falsely connect
+    // residual branches to the main fuse path.
+    if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
+        for (Value operand : linalgOp.getDpsInputs()) {
+            if (canReachStop(operand, stops, visited))
+                return true;
+        }
+        return false;
+    }
+    for (Value operand : op->getOperands()) {
+        if (canReachStop(operand, stops, visited))
+            return true;
+    }
+    return false;
+}
+
+static bool isVolumePreservingExtractSlice(tensor::ExtractSliceOp extractOp) {
+    auto srcTy = dyn_cast<ShapedType>(extractOp.getSource().getType());
+    auto resTy = dyn_cast<ShapedType>(extractOp.getResult().getType());
+    return srcTy && resTy && srcTy.hasStaticShape() && resTy.hasStaticShape() &&
+           srcTy.getNumElements() == resTy.getNumElements();
+}
+
+// Unique transpose-then-compute user of `value`, if any.
+static Operation *uniqueComputeUser(Value value) {
+    llvm::SmallDenseSet<Value> seen;
+    while (value.hasOneUse() && seen.insert(value).second) {
+        Operation *user = *value.getUsers().begin();
+        if (isa<linalg::TransposeOp>(user) && user->getNumResults() == 1) {
+            value = user->getResult(0);
+            continue;
+        }
+        return user;
+    }
+    return nullptr;
+}
+
+// Low/high pad amounts per dim. TOSA lowers them as arith.constant operands
+// rather than static attributes, so resolve those; nullopt if any is not a
+// compile-time constant.
+static std::optional<std::pair<SmallVector<int64_t>, SmallVector<int64_t>>>
+getConstantPadAmounts(tensor::PadOp padOp) {
+    SmallVector<int64_t> low, high;
+    for (auto [l, h] : llvm::zip_equal(padOp.getMixedLowPad(), padOp.getMixedHighPad())) {
+        std::optional<int64_t> constLow = getConstantIntValue(l);
+        std::optional<int64_t> constHigh = getConstantIntValue(h);
+        if (!constLow || !constHigh)
+            return std::nullopt;
+        low.push_back(*constLow);
+        high.push_back(*constHigh);
+    }
+    return std::make_pair(std::move(low), std::move(high));
+}
+
+// True when the unique conv/pool consumer can fold this pad as HW pad.
+static bool isPadHwLegalForUniqueConsumer(tensor::PadOp padOp) {
+    auto pads = getConstantPadAmounts(padOp);
+    if (!pads)
+        return false;
+    auto &[low, high] = *pads;
+
+    // A 1D conv/pool lifted to 2D has a unit-dim expand between the pad and the
+    // consumer. Move each pad amount onto the expanded dim that carries it.
+    Value padded = padOp.getResult();
+    if (padded.hasOneUse()) {
+        auto expandOp = dyn_cast<tensor::ExpandShapeOp>(*padded.getUsers().begin());
+        if (expandOp && isUnitDimReshape(expandOp)) {
+            RankedTensorType expandedTy = expandOp.getResultType();
+            SmallVector<int64_t> expandedLow(expandedTy.getRank(), 0);
+            SmallVector<int64_t> expandedHigh(expandedTy.getRank(), 0);
+            for (auto [srcDim, group] : llvm::enumerate(expandOp.getReassociationIndices())) {
+                int64_t dstDim = group.front();
+                for (int64_t d : group) {
+                    if (expandedTy.getDimSize(d) != 1)
+                        dstDim = d;
+                }
+                expandedLow[dstDim] = low[srcDim];
+                expandedHigh[dstDim] = high[srcDim];
+            }
+            low = std::move(expandedLow);
+            high = std::move(expandedHigh);
+            padded = expandOp.getResult();
+        }
+    }
+
+    Operation *user = uniqueComputeUser(padded);
+    auto linalgOp = user ? dyn_cast<linalg::LinalgOp>(user) : nullptr;
+    if (!linalgOp || linalgOp.getNumDpsInputs() < 2 || low.size() != 4)
+        return false;
+
+    bool nchw =
+        isa<linalg::Conv2DNchwFchwOp, linalg::DepthwiseConv2DNchwChwOp, linalg::Conv2DNchwFchwQOp,
+            linalg::Conv2DNgchwGfchwQOp, linalg::PoolingNchwMaxOp, linalg::PoolingNchwSumOp>(user);
+    bool nhwc =
+        isa<linalg::Conv2DNhwcHwcfOp, linalg::DepthwiseConv2DNhwcHwcOp, linalg::PoolingNhwcMaxOp,
+            linalg::PoolingNhwcSumOp>(user);
+    if (!nchw && !nhwc)
+        return false;
+
+    int hDim = nchw ? 2 : 1;
+    int wDim = nchw ? 3 : 2;
+    SmallVector<int64_t, 4> lrtb = {low[wDim], high[wDim], low[hDim], high[hDim]};
+
+    auto kernelTy = dyn_cast<ShapedType>(linalgOp.getDpsInputs()[1].getType());
+    if (!kernelTy || !kernelTy.hasStaticShape() || kernelTy.getRank() < 2)
+        return false;
+    int64_t kH, kW;
+    if (nchw || kernelTy.getRank() == 2) {
+        kH = kernelTy.getShape()[kernelTy.getRank() - 2];
+        kW = kernelTy.getShape()[kernelTy.getRank() - 1];
+    }
+    else {
+        kH = kernelTy.getShape()[0];
+        kW = kernelTy.getShape()[1];
+    }
+
+    int64_t strideH = 1, strideW = 1;
+    if (auto strides = user->getAttrOfType<DenseIntElementsAttr>("strides")) {
+        SmallVector<int64_t> st(
+            strides.getValues<int64_t>().begin(), strides.getValues<int64_t>().end()
+        );
+        if (!st.empty()) {
+            strideH = st[0];
+            strideW = st.size() > 1 ? st[1] : st[0];
+        }
+    }
+    return isHwLegalConvPad(lrtb, kH, kW, strideH, strideW);
+}
+
+// True when the unique conv/pool consumer of this pad produces a larger H or W
+// than the unpadded input (k=2 with pad 1 on each side). foldBackwardPadding
+// never folds such a pad, so inside a tiled group it would be rebuilt per tile.
+static bool padGrowsConsumerOutput(tensor::PadOp padOp) {
+    // A 1D conv/pool lifted to 2D has a unit-dim expand between the pad and the
+    // consumer. Compare in the expanded shape, as isPadHwLegalForUniqueConsumer
+    // does for the pad amounts.
+    Value padded = padOp.getResult();
+    SmallVector<int64_t> srcShape(padOp.getSourceType().getShape());
+    if (padded.hasOneUse()) {
+        auto expandOp = dyn_cast<tensor::ExpandShapeOp>(*padded.getUsers().begin());
+        if (expandOp && isUnitDimReshape(expandOp)) {
+            RankedTensorType expandedTy = expandOp.getResultType();
+            SmallVector<int64_t> expandedSrc(expandedTy.getRank(), 1);
+            for (auto [srcDim, group] : llvm::enumerate(expandOp.getReassociationIndices())) {
+                for (int64_t d : group) {
+                    if (expandedTy.getDimSize(d) != 1)
+                        expandedSrc[d] = srcShape[srcDim];
+                }
+            }
+            srcShape = std::move(expandedSrc);
+            padded = expandOp.getResult();
+        }
+    }
+
+    Operation *user = uniqueComputeUser(padded);
+    auto linalgOp = dyn_cast_if_present<linalg::LinalgOp>(user);
+    if (!linalgOp || linalgOp->getNumResults() != 1)
+        return false;
+    auto outTy = dyn_cast<RankedTensorType>(linalgOp->getResult(0).getType());
+    if (!outTy || srcShape.size() != 4 || outTy.getRank() != 4)
+        return false;
+    bool nchw =
+        isa<linalg::Conv2DNchwFchwOp, linalg::DepthwiseConv2DNchwChwOp, linalg::Conv2DNchwFchwQOp,
+            linalg::Conv2DNgchwGfchwQOp, linalg::PoolingNchwMaxOp, linalg::PoolingNchwSumOp>(user);
+    bool nhwc =
+        isa<linalg::Conv2DNhwcHwcfOp, linalg::DepthwiseConv2DNhwcHwcOp, linalg::PoolingNhwcMaxOp,
+            linalg::PoolingNhwcSumOp>(user);
+    if (!nchw && !nhwc)
+        return false;
+    int hDim = nchw ? 2 : 1;
+    int wDim = nchw ? 3 : 2;
+    return outTy.getDimSize(hDim) > srcShape[hDim] || outTy.getDimSize(wDim) > srcShape[wDim];
+}
+
+// True when this pad must stay out of the fuse group: leftover SAME extra
+// pad that HW cannot fold (1x1 [0,1]). Symmetric pad, including 7x7 SAME
+// pad=3, stays in the group. Asymmetric pad that a unique conv/pool
+// consumer can fold (3x3 top-left SAME) is also kept. Space-to-depth pad
+// stays out because peelPadAndReshapeSource only walks unit-dim reshapes.
+static bool shouldSkipPadMark(tensor::PadOp padOp) {
+    auto pads = getConstantPadAmounts(padOp);
+    if (!pads)
+        return true;
+    if (padGrowsConsumerOutput(padOp))
+        return true;
+    for (auto [l, h] : llvm::zip_equal(pads->first, pads->second)) {
+        if (l != h)
+            return !isPadHwLegalForUniqueConsumer(padOp);
+    }
+    return false;
+}
+
+// True if every user of `val` carries `fuseGroupAttr`. Called after the group
+// walk, so a fill or bias broadcast shared by several ops of one group (conv
+// init and bias-add init) counts as local to that group.
+static bool usedOnlyInGroup(Value val, IntegerAttr fuseGroupAttr) {
+    return llvm::all_of(val.getUsers(), [&](Operation *user) {
+        ArrayAttr attr = user->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+        return attr && llvm::is_contained(attr, fuseGroupAttr);
+    });
+}
+
+// True for a fill of a constant into an empty tensor. It has no operand that
+// can break dominance, so every group that reads it can clone it per tile.
+static bool isConstantFill(Value val) {
+    auto fill = val.getDefiningOp<linalg::FillOp>();
+    return fill && fill.getOutputs()[0].getDefiningOp<tensor::EmptyOp>() &&
+           llvm::all_of(fill.getInputs(), [](Value in) { return matchPattern(in, m_Constant()); });
+}
+
+// Mark a constant-like producer (fill, bias broadcast, or weight dequant)
+// used only inside this fuse group so tile-and-fuse clones it per tile.
+// Producers shared with other groups stay unmarked to avoid dominance breaks.
+// A constant fill is the exception: CSE shares one zero init between ops of
+// the same shape, and left unmarked, each tile reads that init from memory.
+static void markGroupLocalConstantOperands(
+    Operation *op, IntegerAttr fuseGroupAttr, bool &anyChanged, Operation *&notifyOp
+) {
+    auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+    if (!linalgOp)
+        return;
+    auto groupLocal = [&](Value val) {
+        return val.hasOneUse() || usedOnlyInGroup(val, fuseGroupAttr) || isConstantFill(val);
+    };
+    auto markIfGroupLocal = [&](Value val) {
+        // Binding-loaded DQL weights are expand/collapse of a dequant generic,
+        // not constant-like. Peel that reshape prefix only when it leads to a
+        // unique dequant; a reshape onto an activation is space-to-depth and
+        // must stay unmarked.
+        SmallVector<Operation *> reshapePrefix;
+        while (val && groupLocal(val)) {
+            Operation *prod = val.getDefiningOp();
+            if (!prod || isConstantLikeProducer(val) || isUniqueWeightDequant(prod))
+                break;
+            if (!isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp, linalg::TransposeOp>(prod))
+                break;
+            reshapePrefix.push_back(prod);
+            val = prod->getOperand(0);
+        }
+        bool markPrefix =
+            isConstantLikeProducer(val) ||
+            (val && val.getDefiningOp() && isUniqueWeightDequant(val.getDefiningOp()));
+        if (markPrefix) {
+            for (Operation *prod : reshapePrefix) {
+                if (markOpFuseGroupSilent(prod, fuseGroupAttr)) {
+                    anyChanged = true;
+                    if (!notifyOp)
+                        notifyOp = prod;
+                }
+            }
+        }
+        else {
+            return;
+        }
+
+        // Walk a group-local reshape/dequant chain so the compute producer
+        // (not only the last expand) joins the fuse group.
+        while (val && groupLocal(val) &&
+               (isConstantLikeProducer(val) ||
+                (val.getDefiningOp() && isUniqueWeightDequant(val.getDefiningOp())))) {
+            Operation *prod = val.getDefiningOp();
+            if (!prod)
+                break;
+            if (markOpFuseGroupSilent(prod, fuseGroupAttr)) {
+                anyChanged = true;
+                if (!notifyOp)
+                    notifyOp = prod;
+            }
+            if (auto linalgOp = dyn_cast<linalg::LinalgOp>(prod)) {
+                if (linalgOp.getNumDpsInputs() == 0)
+                    break;
+                Value next;
+                for (Value in : linalgOp.getDpsInputs()) {
+                    if (!isConstantLikeProducer(in)) {
+                        next = in;
+                        break;
+                    }
+                }
+                val = next ? next : linalgOp.getDpsInputs()[0];
+            }
+            else if (prod->getNumOperands()) {
+                val = prod->getOperand(0);
+            }
+            else {
+                break;
+            }
+        }
+    };
+    for (Value init : linalgOp.getDpsInits())
+        markIfGroupLocal(init);
+    for (Value input : linalgOp.getDpsInputs())
+        markIfGroupLocal(input);
+}
+
+bool markFuseGroupBackward(
     const Value &output, const llvm::SmallVector<Value> &inputs, PatternRewriter &rewriter,
     const IntegerAttr &fuseGroupAttr
 ) {
     std::deque<Value> stack = {output};
+    bool anyChanged = false;
+    // The marks below are silent (see markOpFuseGroupSilent), so tell the
+    // rewriter once, on the first op this walk marks; otherwise greedy would see
+    // a successful pattern that changed nothing and loop. Only TilingInterface
+    // ops are marked. That includes tensor.expand_shape and tensor.collapse_shape,
+    // which get a TilingInterface model from the torq plugin
+    // (TensorTilingInterfaceImpl.cpp).
+    Operation *notifyOp = nullptr;
+    // Ops marked by this walk. Their constant-like operands are marked once
+    // the whole group is known so producers shared inside the group qualify.
+    SmallVector<Operation *> markedOps;
+
     while (!stack.empty()) {
-        auto output = stack.front();
+        Value value = stack.front();
         stack.pop_front();
 
-        if (llvm::find(inputs, output) != inputs.end()) {
+        if (llvm::find(inputs, value) != inputs.end()) {
             continue;
         }
 
-        TilingInterface op = output.getDefiningOp<TilingInterface>();
-        if (!op) {
+        // Constant-like pipelines are not walked; group-local ones are marked
+        // from their consumers via markGroupLocalConstantOperands below.
+        if (isConstantLikeProducer(value)) {
             continue;
         }
 
-        // If we already visited this op, no need to do it again.
-        if (!markOpFuseGroup(op, rewriter, fuseGroupAttr)) {
+        Operation *defOp = value.getDefiningOp();
+        if (!defOp) {
             continue;
         }
 
-        for (auto operand : op->getOperands()) {
-            stack.push_back(operand);
+        // Size-changing extract_slice is a fusion boundary even though it
+        // implements TilingInterface (same rule as shouldInclude). Volume-
+        // preserving slices are walked through without marking.
+        if (auto extractOp = dyn_cast<tensor::ExtractSliceOp>(defOp)) {
+            if (isVolumePreservingExtractSlice(extractOp)) {
+                for (Value operand : defOp->getOperands())
+                    stack.push_back(operand);
+            }
+            continue;
+        }
+
+        // Skip leftover SAME extra pad that HW cannot fold (1x1 [0,1]). Still
+        // walk the source so the NCHW transpose can join the conv group.
+        // Symmetric pad (QDQ pool, 3x3/7x7 SAME) and HW-legal asymmetric
+        // 3x3 SAME stay in the group so conversion folds them.
+        if (auto padOp = dyn_cast<tensor::PadOp>(defOp)) {
+            if (shouldSkipPadMark(padOp)) {
+                stack.push_back(padOp.getSource());
+                continue;
+            }
+        }
+
+        // Shape / metadata ops are not fuse-group roots, but fusion plans often
+        // rebind the mark origin to them. Keep walking producers so we still reach
+        // the linalg compute ops that patterns check with isMarkedFuseGroup.
+        if (!isa<TilingInterface>(defOp)) {
+            if (isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp>(defOp)) {
+                for (Value operand : defOp->getOperands())
+                    stack.push_back(operand);
+            }
+            continue;
+        }
+
+        // Ops with a residual / side-branch DPS input (cannot reach the pattern
+        // stop values) must not join the fuse group: tile-and-fuse would pull them
+        // into the tiled loop while the side input stays outside, breaking dominance.
+        // Still walk the main-path inputs so we reach the matched compute op.
+        bool skipMark = false;
+        if (auto linalgOp = dyn_cast<linalg::LinalgOp>(defOp)) {
+            if (!inputs.empty()) {
+                for (Value input : linalgOp.getDpsInputs()) {
+                    if (isConstantLikeProducer(input))
+                        continue;
+                    llvm::SmallDenseSet<Value> visited;
+                    if (!canReachStop(input, inputs, visited)) {
+                        skipMark = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!skipMark) {
+            // Silent marks on the chain; one rewriter notify below.
+            if (!markOpFuseGroupSilent(defOp, fuseGroupAttr)) {
+                // Already has this fuse-group id: producers were walked on first visit.
+                continue;
+            }
+            anyChanged = true;
+            if (!notifyOp)
+                notifyOp = defOp;
+            markedOps.push_back(defOp);
+        }
+
+        // Follow compute inputs only. Constant-like producers are marked
+        // after the walk and are not walked further.
+        if (auto linalgOp = dyn_cast<linalg::LinalgOp>(defOp)) {
+            for (Value input : linalgOp.getDpsInputs()) {
+                if (llvm::is_contained(inputs, input))
+                    continue;
+                if (isConstantLikeProducer(input))
+                    continue;
+                if (!inputs.empty()) {
+                    llvm::SmallDenseSet<Value> visited;
+                    if (!canReachStop(input, inputs, visited))
+                        continue;
+                }
+                stack.push_back(input);
+            }
+        }
+        else {
+            for (Value operand : defOp->getOperands())
+                stack.push_back(operand);
         }
     }
+
+    for (Operation *op : markedOps)
+        markGroupLocalConstantOperands(op, fuseGroupAttr, anyChanged, notifyOp);
+
+    // Single worklist notification so the rewrite counts as a real change without
+    // cascading requeues from every marked producer.
+    if (notifyOp)
+        rewriter.modifyOpInPlace(notifyOp, []() {});
+    return anyChanged;
 }
 
 void removeFuseGroupMarkingBackwards(Operation *outputOp, int64_t fuseGroup) {
@@ -213,7 +827,14 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp) {
     ArrayAttr fuseGroupArrAttr = outputOp->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
     assert(fuseGroupArrAttr && "outputOp is not part of a fuse-group");
 
-    assert(fuseGroupArrAttr.size() == 1 && "outputOp is part of multiple fuse-groups");
+    // A producer shared by several sibling fuse groups (for instance the dequant
+    // chain feeding two opposite difference ops in a detection head) legitimately
+    // carries one id per group, appended by nextFuseGroupAttr. It is the principal
+    // of none of them, so there is no single canonical principal; walk back from
+    // the first id. Every caller only uses the result to identify the group root
+    // (conv, pooling, matmul) for tiling and memory checks, and the shared producer
+    // is never itself such a root, so the first group's root is a stable
+    // representative.
     IntegerAttr fuseGroupAttr = *fuseGroupArrAttr.getAsRange<IntegerAttr>().begin();
 
     std::deque<Operation *> stack = {outputOp};
@@ -238,6 +859,18 @@ Operation *getFuseGroupPrincipalOpBackward(Operation *outputOp) {
                 stack.push_back(srcOp);
             }
         }
+    }
+
+    if (Operation *parent = outputOp->getParentOp()) {
+        Operation *found = nullptr;
+        parent->walk([&](Operation *candidate) {
+            if (isFuseGroupPrincipalOp(candidate, fuseGroupAttr)) {
+                found = candidate;
+                return WalkResult::interrupt();
+            }
+            return WalkResult::advance();
+        });
+        return found;
     }
 
     return nullptr;
@@ -1460,8 +2093,10 @@ static bool sameFillConstant(Value a, Value b) {
     return false;
 }
 
-PaddingInfo
-foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value outputValue) {
+PaddingInfo foldBackwardPadding(
+    Value &value, PatternRewriter &rewriter, bool nchw, Value outputValue,
+    SmallVectorImpl<Operation *> *createdOps
+) {
     // Process any extract_slice op and check there is no dynamic slice extraction
     Value val = value;
     SmallVector<tensor::ExtractSliceOp> extractSliceOps;
@@ -1653,7 +2288,29 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
     // TODO: see above; this should be removed.
     // If we found extract_slice ops we have to update them.
     // We currently need to support only horizontal slice extraction (used for tiling)
+    SmallVector<Operation *> newExtractOps;
     if (!extractSliceOps.empty()) {
+        int32_t simTop = top, simBottom = bottom;
+        for (tensor::ExtractSliceOp extractOp : llvm::reverse(extractSliceOps)) {
+            SmallVector<int64_t> offsets{extractOp.getStaticOffsets()};
+            SmallVector<int64_t> sizes{extractOp.getStaticSizes()};
+            auto extractSrcShape = cast<RankedTensorType>(extractOp.getSourceType()).getShape();
+            if (offsets[hDim] + sizes[hDim] <= extractSrcShape[hDim] - simBottom) {
+                simBottom = 0;
+            }
+            else if (offsets[hDim] + sizes[hDim] != extractSrcShape[hDim]) {
+                LLVM_DEBUG({ llvm::dbgs() << "[foldBackwardPadding] Unexpected padding bottom\n"; }
+                );
+                return {};
+            }
+            if (offsets[hDim] >= simTop) {
+                simTop = 0;
+            }
+            else if (offsets[hDim] != 0) {
+                LLVM_DEBUG({ llvm::dbgs() << "[foldBackwardPadding] Unexpected padding top\n"; });
+                return {};
+            }
+        }
         for (tensor::ExtractSliceOp extractOp : llvm::reverse(extractSliceOps)) {
             // Adjust the offsets and sizes to account for the padding
             SmallVector<int64_t> offsets{extractOp.getStaticOffsets()};
@@ -1666,13 +2323,10 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
                 // The bottom of the y-tile is above the padded area: disable bottom pad in conv
                 bottom = 0;
             }
-            else if (offsets[hDim] + sizes[hDim] == extractSrcShape[hDim]) {
+            else {
                 // The bottom of the y-tile includes the padded area: remove padding from the tile
                 // since bottom padding will be done by the kernel
                 sizes[hDim] -= bottom;
-            }
-            else {
-                assert(false && "Unexpected padding bottom");
             }
 
             if (offsets[hDim] >= top) {
@@ -1680,13 +2334,10 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
                 offsets[hDim] -= top; // TBV: do we need this?
                 top = 0;
             }
-            else if (offsets[hDim] == 0) {
+            else {
                 // The start of the y-tile includes the padded area: remove padding from the tile
                 // since top padding will be done by the kernel
                 sizes[hDim] -= top;
-            }
-            else {
-                assert(false && "Unexpected padding top");
             }
 
             sizes[wDim] -= left;
@@ -1697,6 +2348,7 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
                 createVector(sizes, rewriter), createVector(strides, rewriter)
             );
 
+            newExtractOps.push_back(newExtractSliceOp);
             val = newExtractSliceOp.getResult();
         }
     }
@@ -1708,7 +2360,13 @@ foldBackwardPadding(Value &value, PatternRewriter &rewriter, bool nchw, Value ou
     // use_empty here since the caller rewires it after we return), but let the
     // scope-exit guard drop any intermediate peels left dead by a chained fold.
     Operation *committed = value.getDefiningOp();
+    bool committedIsPeel = committed && llvm::is_contained(peeledOps, committed);
     llvm::erase_if(peeledOps, [&](Operation *op) { return op == committed; });
+    if (createdOps) {
+        if (committedIsPeel)
+            createdOps->push_back(committed);
+        llvm::append_range(*createdOps, newExtractOps);
+    }
 
     return PaddingInfo{{left, right, top, bottom}, maybeFillValue.value()};
 }
@@ -2949,8 +3607,13 @@ static bool shouldInclude(Operation *op) {
         return false;
     }
 
-    if (isa<tensor::ExtractSliceOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
-            tensor::EmptyOp>(op)) {
+    // Rank-reducing slices that also drop elements (e.g. ConvTranspose 257 -> Slice
+    // 256) must not be fused into the producer: the HW op keeps the full shape and
+    // an unrealized_conversion_cast would be left behind.
+    if (auto extractOp = dyn_cast<tensor::ExtractSliceOp>(op))
+        return isVolumePreservingExtractSlice(extractOp);
+
+    if (isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp, tensor::EmptyOp>(op)) {
         return true;
     }
 
@@ -3410,7 +4073,7 @@ computeGroup(Value anchor, Value groupResult, SmallVector<Operation *> &opsToGro
 }
 
 static FailureOr<Value> getWeightZp(Value bias, OpBuilder &builder) {
-    auto biasOp = mlir::dyn_cast<linalg::GenericOp>(bias.getDefiningOp());
+    auto biasOp = dyn_cast_if_present<linalg::GenericOp>(bias.getDefiningOp());
     if (!biasOp) {
         return failure();
     }
@@ -3448,7 +4111,7 @@ static FailureOr<Value> getWeightZp(Value bias, OpBuilder &builder) {
 static Value postProcessBias(Value bias, OpBuilder &builder) {
     // This rewrite targets the specific fused-bias form that carries extra operands.
     // Leave simpler generics unchanged.
-    auto biasOp = mlir::dyn_cast<linalg::GenericOp>(bias.getDefiningOp());
+    auto biasOp = dyn_cast_if_present<linalg::GenericOp>(bias.getDefiningOp());
     if (!biasOp) {
         // Nothing to normalize when bias is not produced by linalg.generic.
         return bias;
@@ -3532,9 +4195,11 @@ computeBias(FusionPlan &fusionPlan, int biasChDim, std::optional<Value> &optiona
     SmallVector<Operation *, 8> opsToDelete;
 
     OpBuilder::InsertionGuard g(builder);
-    // Build the bias right before the fused output rather than at the anchor: the chain can
-    // consume values defined after the anchor (e.g. weight column sums that dispatch formation
-    // clones next to their consumer), and callers create the fused op at the fused output.
+    // Clone the bias chain right before the group's terminal op. Every chain
+    // member sits before that op, so operands the clones keep from the original
+    // IR (traversal boundaries such as tiled extract_slices) are all defined by
+    // then. Cloning at the anchor breaks dominance when such an operand is
+    // defined between the anchor and the terminal op.
     builder.setInsertionPoint(fusionPlan.getFusedOutput().getDefiningOp());
     auto maybeBias = createNewBias(fusionPlan, builder, opsToDelete, optionalWeightZp);
     if (failed(maybeBias)) {
@@ -3543,6 +4208,8 @@ computeBias(FusionPlan &fusionPlan, int biasChDim, std::optional<Value> &optiona
 
     Value bias = *maybeBias;
     auto biasTy = dyn_cast<ShapedType>(bias.getType());
+    if (!biasTy || biasChDim < 0 || biasChDim >= biasTy.getRank())
+        return failure();
 
     // All non-channel dims will be collapsed to produce a 1D per-channel bias.
     SmallVector<int64_t> outputShape{biasTy.getShape()[biasChDim]};

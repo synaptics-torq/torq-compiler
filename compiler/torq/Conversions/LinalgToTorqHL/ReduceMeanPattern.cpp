@@ -151,10 +151,11 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
         Value input = reducesumOp.getInputs()[0];
 
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                output, {input}, rewriter,
-                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    output, {input}, rewriter,
+                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 
@@ -295,10 +296,11 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         auto resultType = cast<RankedTensorType>(meanOp.getResult(0).getType());
 
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                meanOp.getResult(0), {input}, rewriter,
-                meanOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    meanOp.getResult(0), {input}, rewriter,
+                    meanOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 

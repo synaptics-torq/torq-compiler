@@ -98,7 +98,10 @@ struct QSigmoidConvert : public OpRewritePattern<linalg::GenericOp> {
             auto fuseGroupAttr = sigmoidOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(sigmoidOp, "missing fuse group id");
-            markFuseGroupBackward(chain.quantOp.getResult(0), {input}, rewriter, fuseGroupAttr);
+            if (!markFuseGroupBackward(
+                    chain.quantOp.getResult(0), {input}, rewriter, fuseGroupAttr
+                ))
+                return failure();
             return success();
         }
 

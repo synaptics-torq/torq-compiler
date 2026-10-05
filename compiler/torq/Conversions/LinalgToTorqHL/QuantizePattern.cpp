@@ -189,7 +189,8 @@ struct QuantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
             auto fuseGroupAttr = op->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(op, "missing fuse group id");
-            markOpFuseGroup(op, rewriter, fuseGroupAttr);
+            if (!markOpFuseGroup(op, rewriter, fuseGroupAttr))
+                return rewriter.notifyMatchFailure(op, "could not mark fuse group");
             return success();
         }
 
@@ -255,7 +256,8 @@ struct DequantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
             auto fuseGroupAttr = op->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(op, "missing fuse group id");
-            markOpFuseGroup(op, rewriter, fuseGroupAttr);
+            if (!markOpFuseGroup(op, rewriter, fuseGroupAttr))
+                return rewriter.notifyMatchFailure(op, "could not mark fuse group");
             return success();
         }
 

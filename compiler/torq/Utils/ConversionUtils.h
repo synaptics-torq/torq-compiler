@@ -51,6 +51,11 @@ Value createInitTensor(T &srcOp, R &rewriter, RankedTensorType type) {
         .getResult();
 }
 
+// Unlike the overloads above, keeps the full `type` (its encoding included) and
+// supports dynamic dims, reading their sizes from `shapeSource`, which must have
+// the same shape.
+Value createInitTensor(OpBuilder &builder, Location loc, RankedTensorType type, Value shapeSource);
+
 Value createZeroConstant(OpBuilder &b, Location loc, Type elemTy);
 
 inline bool isBF16(const llvm::APFloat &x) { return &x.getSemantics() == &llvm::APFloat::BFloat(); }

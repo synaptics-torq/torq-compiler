@@ -105,7 +105,7 @@ Value buildQConvScaleBias(
     // CompileTimeConstComputePass.  We do NOT wrap it here
     // to avoid nested CompileInputToConstOp wrappers that cause
     // "not already in an operation block" assertions.
-    if (auto biasGeneric = dyn_cast<linalg::GenericOp>(bias.getDefiningOp()))
+    if (auto biasGeneric = dyn_cast_if_present<linalg::GenericOp>(bias.getDefiningOp()))
         setTargetExecutorAttr(biasGeneric, torq_hl::Executor::Host);
     auto biasTy = dyn_cast<RankedTensorType>(bias.getType());
     if (!biasTy || biasTy.getRank() != 1 || biasTy.getElementType() != rewriter.getI32Type()) {
@@ -245,11 +245,7 @@ struct QConv2DConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
     ) const {
         Location loc = convOp.getLoc();
 
-        if (auto padOp = convOp->getOperand(0).getDefiningOp<tensor::PadOp>()) {
-            if (llvm::all_of(padInfo.lrtbPad, [](int64_t p) { return p == 0; })) {
-                return rewriter.notifyMatchFailure(convOp, "failed to fold padding");
-            }
-        }
+        // Illegal HW pads stay as tensor.pad with VALID HW pad.
         LLVM_DEBUG(
             llvm::dbgs() << "[QConv2DConvert] padding info lrtb=[" << padInfo.lrtbPad[0] << ","
                          << padInfo.lrtbPad[1] << "," << padInfo.lrtbPad[2] << ","
@@ -348,17 +344,27 @@ struct QConv2DConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
         Value weightsValue = convOp->getOperand(1);
         Value output = qChain.quantOp->getResult(0);
 
-        // Fold backward padding so the pad op (if any) is included in the fusion
-        // group and the conv can use hardware padding.
-        PaddingInfo padInfo = foldBackwardPadding(input, rewriter, /*nchw=*/true);
-
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                output, {input, weightsValue}, rewriter,
-                convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    output, {peelPadAndReshapeSource(input), weightsValue}, rewriter,
+                    convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
+
+        Value origInput = input;
+        SmallVector<Operation *> foldOps;
+        PaddingInfo padInfo =
+            foldBackwardPadding(input, rewriter, /*nchw=*/true, nullptr, &foldOps);
+        auto wShape = cast<RankedTensorType>(weightsValue.getType()).getShape();
+        auto strideVec = getQConvStrides(convOp);
+        int64_t strideH = strideVec.empty() ? 1 : strideVec[0];
+        int64_t strideW = strideVec.size() > 1 ? strideVec[1] : strideH;
+        selectFoldedOrExplicitConvPad(
+            input, origInput, padInfo, rewriter, foldOps, wShape[wShape.size() - 2],
+            wShape[wShape.size() - 1], strideH, strideW
+        );
 
         int32_t multiplier, shift;
         if (failed(computeConvMultiplierAndShift(convOp, qChain, rewriter, multiplier, shift)))
@@ -467,13 +473,32 @@ Value prepareDepthwiseInput(
     if (!inputTy || inputTy.getRank() != 5)
         return nullptr;
 
+    auto wTy = dyn_cast<RankedTensorType>(op.getInputs()[1].getType());
+    if (!wTy || wTy.getRank() < 2)
+        return nullptr;
+    auto wShape = wTy.getShape();
+    int64_t kH = wShape[wShape.size() - 2];
+    int64_t kW = wShape[wShape.size() - 1];
+    auto strideVec = getQConvStrides(op);
+    int64_t strideH = strideVec.empty() ? 1 : strideVec[0];
+    int64_t strideW = strideVec.size() > 1 ? strideVec[1] : strideH;
+
+    auto keepFoldedPad = [&](Value orig, Value folded,
+                             llvm::ArrayRef<Operation *> foldOps) -> Value {
+        Value result = folded;
+        selectFoldedOrExplicitConvPad(
+            result, orig, padInfo, rewriter, foldOps, kH, kW, strideH, strideW
+        );
+        return result;
+    };
+
     // Non-tiled path: the conv input is produced directly by an expand_shape.
     if (auto expand = input.getDefiningOp<tensor::ExpandShapeOp>()) {
-        Value input4D = expand.getSrc();
-        padInfo = foldBackwardPadding(input4D, rewriter, /*nchw=*/true, outputValue);
-        if (input4D.getDefiningOp<tensor::PadOp>())
-            return nullptr;
-        return input4D;
+        Value orig4D = expand.getSrc();
+        Value input4D = orig4D;
+        SmallVector<Operation *> foldOps;
+        padInfo = foldBackwardPadding(input4D, rewriter, /*nchw=*/true, outputValue, &foldOps);
+        return keepFoldedPad(orig4D, input4D, foldOps);
     }
 
     // Tiled path: the conv input is an extract_slice of a 5-D expanded tensor.
@@ -484,89 +509,80 @@ Value prepareDepthwiseInput(
     if (auto extractSlice = input.getDefiningOp<tensor::ExtractSliceOp>()) {
         Value expanded = extractSlice.getSource();
         auto expand = expanded.getDefiningOp<tensor::ExpandShapeOp>();
-        if (!expand)
-            return nullptr;
-        Value padded4D = expand.getSrc();
-        auto expandedSrcTy = dyn_cast<RankedTensorType>(expanded.getType());
-        if (!expandedSrcTy || expandedSrcTy.getRank() != 5)
-            return nullptr;
+        SmallVector<Operation *> foldOps;
+        if (expand) {
+            Value padded4D = expand.getSrc();
+            auto expandedSrcTy = dyn_cast<RankedTensorType>(expanded.getType());
+            if (expandedSrcTy && expandedSrcTy.getRank() == 5) {
+                padInfo =
+                    foldBackwardPadding(padded4D, rewriter, /*nchw=*/true, outputValue, &foldOps);
+                if (isHwLegalConvPad(padInfo.lrtbPad, kH, kW, strideH, strideW) &&
+                    !padded4D.getDefiningOp<tensor::PadOp>()) {
+                    auto mixedOffsets = extractSlice.getMixedOffsets();
+                    auto mixedSizes = extractSlice.getMixedSizes();
+                    auto mixedStrides = extractSlice.getMixedStrides();
+                    auto staticOffsets5D = extractSlice.getStaticOffsets();
+                    auto staticSizes5D = extractSlice.getStaticSizes();
+                    if (mixedOffsets.size() == 5 && mixedSizes.size() == 5 &&
+                        mixedStrides.size() == 5 && !ShapedType::isDynamic(staticOffsets5D[3]) &&
+                        !ShapedType::isDynamic(staticOffsets5D[4]) &&
+                        !ShapedType::isDynamic(staticSizes5D[3]) &&
+                        !ShapedType::isDynamic(staticSizes5D[4])) {
+                        int64_t hOff = staticOffsets5D[3];
+                        int64_t wOff = staticOffsets5D[4];
+                        int64_t hSize = staticSizes5D[3];
+                        int64_t wSize = staticSizes5D[4];
+                        int64_t paddedH = expandedSrcTy.getShape()[3];
+                        int64_t paddedW = expandedSrcTy.getShape()[4];
 
-        // Fold padding on the full padded 4-D tensor, not on the tile.
-        padInfo = foldBackwardPadding(padded4D, rewriter, /*nchw=*/true, outputValue);
-        if (padded4D.getDefiningOp<tensor::PadOp>())
-            return nullptr;
+                        int32_t left = padInfo.lrtbPad[0];
+                        int32_t right = padInfo.lrtbPad[1];
+                        int32_t top = padInfo.lrtbPad[2];
+                        int32_t bottom = padInfo.lrtbPad[3];
 
-        auto mixedOffsets = extractSlice.getMixedOffsets();
-        auto mixedSizes = extractSlice.getMixedSizes();
-        auto mixedStrides = extractSlice.getMixedStrides();
-        if (mixedOffsets.size() != 5 || mixedSizes.size() != 5 || mixedStrides.size() != 5)
-            return nullptr;
+                        if (adjustSliceForFoldedPad(hOff, hSize, paddedH, top, bottom, "H") &&
+                            adjustSliceForFoldedPad(wOff, wSize, paddedW, left, right, "W") &&
+                            hSize > 0 && wSize > 0) {
+                            padInfo.lrtbPad[0] = left;
+                            padInfo.lrtbPad[1] = right;
+                            padInfo.lrtbPad[2] = top;
+                            padInfo.lrtbPad[3] = bottom;
 
-        auto staticOffsets5D = extractSlice.getStaticOffsets();
-        auto staticSizes5D = extractSlice.getStaticSizes();
-        // Spatial offsets/sizes must be static; the channel offset/size may be
-        // dynamic when the conv is tiled over the channel dimension.
-        if (ShapedType::isDynamic(staticOffsets5D[3]) ||
-            ShapedType::isDynamic(staticOffsets5D[4]) || ShapedType::isDynamic(staticSizes5D[3]) ||
-            ShapedType::isDynamic(staticSizes5D[4]))
-            return nullptr;
+                            SmallVector<OpFoldResult> offsets4D{
+                                mixedOffsets[0], mixedOffsets[1], rewriter.getIndexAttr(hOff),
+                                rewriter.getIndexAttr(wOff)
+                            };
+                            SmallVector<OpFoldResult> sizes4D{
+                                mixedSizes[0], mixedSizes[1], rewriter.getIndexAttr(hSize),
+                                rewriter.getIndexAttr(wSize)
+                            };
+                            SmallVector<OpFoldResult> strides4D{
+                                mixedStrides[0], mixedStrides[1], mixedStrides[3], mixedStrides[4]
+                            };
 
-        int64_t hOff = staticOffsets5D[3];
-        int64_t wOff = staticOffsets5D[4];
-        int64_t hSize = staticSizes5D[3];
-        int64_t wSize = staticSizes5D[4];
-        int64_t paddedH = expandedSrcTy.getShape()[3];
-        int64_t paddedW = expandedSrcTy.getShape()[4];
-
-        int32_t left = padInfo.lrtbPad[0];
-        int32_t right = padInfo.lrtbPad[1];
-        int32_t top = padInfo.lrtbPad[2];
-        int32_t bottom = padInfo.lrtbPad[3];
-
-        // Translate the slice from padded-tensor coordinates into
-        // unpadded-source coordinates and rewrite the whole-tensor padding
-        // into the per-tile padding this slice actually needs.
-        if (!adjustSliceForFoldedPad(hOff, hSize, paddedH, top, bottom, "H") ||
-            !adjustSliceForFoldedPad(wOff, wSize, paddedW, left, right, "W"))
-            return nullptr;
-
-        if (hSize <= 0 || wSize <= 0) {
-            LLVM_DEBUG(llvm::dbgs() << "[prepareDepthwiseInput] non-positive spatial slice size\n");
-            return nullptr;
+                            SmallVector<int64_t> sliceShape4D{
+                                ShapedType::isDynamic(staticSizes5D[0]) ? ShapedType::kDynamic
+                                                                        : staticSizes5D[0],
+                                ShapedType::isDynamic(staticSizes5D[1]) ? ShapedType::kDynamic
+                                                                        : staticSizes5D[1],
+                                hSize, wSize
+                            };
+                            auto slice4DTy =
+                                RankedTensorType::get(sliceShape4D, inputTy.getElementType());
+                            return tensor::ExtractSliceOp::create(
+                                       rewriter, input.getLoc(), slice4DTy, padded4D, offsets4D,
+                                       sizes4D, strides4D
+                            )
+                                .getResult();
+                        }
+                    }
+                }
+            }
         }
-
-        padInfo.lrtbPad[0] = left;
-        padInfo.lrtbPad[1] = right;
-        padInfo.lrtbPad[2] = top;
-        padInfo.lrtbPad[3] = bottom;
-
-        // 5-D layout: [N, G, 1, H, W] -> 4-D layout: [N, C, H, W] with C == G.
-        SmallVector<OpFoldResult> offsets4D{
-            mixedOffsets[0], mixedOffsets[1], rewriter.getIndexAttr(hOff),
-            rewriter.getIndexAttr(wOff)
-        };
-        SmallVector<OpFoldResult> sizes4D{
-            mixedSizes[0], mixedSizes[1], rewriter.getIndexAttr(hSize), rewriter.getIndexAttr(wSize)
-        };
-        SmallVector<OpFoldResult> strides4D{
-            mixedStrides[0], mixedStrides[1], mixedStrides[3], mixedStrides[4]
-        };
-
-        SmallVector<int64_t> sliceShape4D{
-            ShapedType::isDynamic(staticSizes5D[0]) ? ShapedType::kDynamic : staticSizes5D[0],
-            ShapedType::isDynamic(staticSizes5D[1]) ? ShapedType::kDynamic : staticSizes5D[1],
-            hSize, wSize
-        };
-        auto slice4DTy = RankedTensorType::get(sliceShape4D, inputTy.getElementType());
-        Value input4D =
-            tensor::ExtractSliceOp::create(
-                rewriter, input.getLoc(), slice4DTy, padded4D, offsets4D, sizes4D, strides4D
-            )
-                .getResult();
-
-        if (input4D.getDefiningOp<tensor::PadOp>())
-            return nullptr;
-        return input4D;
+        // The fold peeled the pad but this path does not keep it; drop the ops
+        // it created that are now dead.
+        eraseDeadFoldOps(rewriter, foldOps);
+        padInfo = PaddingInfo{};
     }
 
     // Fallback: collapse a 5-D input that is not produced by expand_shape.
@@ -575,15 +591,15 @@ Value prepareDepthwiseInput(
         inputTy.getShape()[0], inputTy.getShape()[1] * inputTy.getShape()[2], inputTy.getShape()[3],
         inputTy.getShape()[4]
     };
-    Value input4D = tensor::CollapseShapeOp::create(
-                        rewriter, input.getLoc(),
-                        RankedTensorType::get(shape4D, inputTy.getElementType()), input, reassoc
+    Value orig4D = tensor::CollapseShapeOp::create(
+                       rewriter, input.getLoc(),
+                       RankedTensorType::get(shape4D, inputTy.getElementType()), input, reassoc
     )
-                        .getResult();
-    padInfo = foldBackwardPadding(input4D, rewriter, /*nchw=*/true, outputValue);
-    if (input4D.getDefiningOp<tensor::PadOp>())
-        return nullptr;
-    return input4D;
+                       .getResult();
+    Value input4D = orig4D;
+    SmallVector<Operation *> foldOps;
+    padInfo = foldBackwardPadding(input4D, rewriter, /*nchw=*/true, outputValue, &foldOps);
+    return keepFoldedPad(orig4D, input4D, foldOps);
 }
 
 // Collapse the 5-D filter [G,1,1,KH,KW] to the 3-D depthwise form [G,KH,KW].
@@ -640,10 +656,12 @@ struct QDepthwiseConv2DConvert : public OpRewritePattern<linalg::Conv2DNgchwGfch
         }
 
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                qChain.quantOp->getResult(0), {convOp.getInputs()[0], convOp.getInputs()[1]},
-                rewriter, convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    qChain.quantOp->getResult(0),
+                    {peelPadAndReshapeSource(convOp.getInputs()[0]), convOp.getInputs()[1]},
+                    rewriter, convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 

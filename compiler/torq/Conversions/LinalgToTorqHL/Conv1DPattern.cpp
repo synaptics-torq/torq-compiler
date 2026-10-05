@@ -209,6 +209,18 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
         // Get the generic op result
         auto genericResult = genericOp.getResult(0);
 
+        if (_markFuseGroups) {
+            // Discovery mode: annotate only. Creating empty/bias tensors here would
+            // insert new ops every match and prevent greedy convergence.
+            Value outputValue = genericResult;
+            if (!markFuseGroupBackward(
+                    outputValue, {input, filter}, rewriter,
+                    genericOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
+            return success();
+        }
+
         // Determine the output type for torq_hl.conv1d and check for truncf to fuse.
         // Two cases:
         // 1. truncf is inside the generic body (legacy fused pattern) - use bf16 output
@@ -286,15 +298,6 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
         // Create bias tensor
         Value biasValue = isInt ? createConst(interleave(bias.ints, scInfo.scaleNpu), rewriter, loc)
                                 : createConst(bias.floats, rewriter, loc);
-
-        // Mark fuse group if requested
-        if (_markFuseGroups) {
-            markFuseGroupBackward(
-                outputValue, {input, filter}, rewriter,
-                genericOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
-            return success();
-        }
 
         // Mark filter as compile-time constant if applicable
         if (filter.getDefiningOp()) {

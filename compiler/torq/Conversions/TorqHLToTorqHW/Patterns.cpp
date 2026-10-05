@@ -39,10 +39,11 @@ class CopyPattern : public OpRewritePattern<memref::CopyOp> {
              (sourceMemSpace == torq_hl::MemorySpace::Dtcm ||
               sourceMemSpace == torq_hl::MemorySpace::Itcm))) {
 
-            // the cDMA transfer below is a plain dense copy: refuse strided
-            // memrefs so they can never be silently copied as if dense
-            if (!isDenseInMemory(op.getSource().getType()) ||
-                !isDenseInMemory(op.getTarget().getType())) {
+            // cDMA copies a packed byte range from the resolved start address.
+            // Identity layouts and packed row-major subviews (offset only) are
+            // safe. Gapped strided layouts would be packed silently, so refuse.
+            if (!isContiguousInMemory(op.getSource().getType()) ||
+                !isContiguousInMemory(op.getTarget().getType())) {
                 return op.emitError("memref.copy of non-dense (strided) memref "
                                     "cannot be lowered to a cDMA transfer");
             }

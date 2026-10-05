@@ -235,7 +235,7 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         : OpRewritePattern(context, /*benefit=*/2), _shift8b(shift8b), _shift16b(shift16b),
           _markFuseGroups(markFuseGroups) {}
 
-    Value replaceWithTorqMatmul(linalg::MatmulOp srcOp, PatternRewriter &rewriter) const {
+    LogicalResult replaceWithTorqMatmul(linalg::MatmulOp srcOp, PatternRewriter &rewriter) const {
         // Fallback rewrite when no fusible conv/fc chain is present:
         // emit plain torq_hl.matmul with neutral bias/scale parameters.
         LLVM_DEBUG(
@@ -259,16 +259,18 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         // is nothing to add back.
         if (srcOp->hasAttr(TORQ_RAISED_MATMUL_INTEGER)) {
             rewriter.replaceOp(srcOp, matMulOp.getResult(0));
-            return matMulOp.getResult(0);
+            return success();
         }
 
         FailureOr<Value> resultVal =
             addInitToResult(srcOp.getOutputs().front(), matMulOp.getResult(0), rewriter);
-        assert(succeeded(resultVal) && "failed to add init value");
+        if (failed(resultVal)) {
+            rewriter.eraseOp(matMulOp);
+            return rewriter.notifyMatchFailure(srcOp, "failed to add init value");
+        }
 
         rewriter.replaceOp(srcOp, *resultVal);
-
-        return *resultVal;
+        return success();
     }
 
     LogicalResult
@@ -305,10 +307,11 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
                 SmallVector<Operation *> groupOps;
                 SmallVector<Value> boundary;
                 collectRaisedMatmulEpilogue(matmulOp, groupOps, boundary);
-                markFuseGroupBackward(
-                    groupOps.back()->getResult(0), boundary, rewriter,
-                    matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-                );
+                if (!markFuseGroupBackward(
+                        groupOps.back()->getResult(0), boundary, rewriter,
+                        matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                    ))
+                    return failure();
                 for (Operation *groupOp : groupOps)
                     if (isa<linalg::MatmulOp>(groupOp) && groupOp != matmulOp)
                         markOpFuseGroup(
@@ -317,8 +320,7 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
                         );
                 return success();
             }
-            replaceWithTorqMatmul(matmulOp, rewriter);
-            return success();
+            return replaceWithTorqMatmul(matmulOp, rewriter);
         }
 
         // QDQ quantized chains are owned by QMatmulToFCConvert. This pattern has
@@ -388,11 +390,15 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         Value matmulInit = matmulOp.getDpsInits()[0];
         if (!isAllZerosTensor(matmulInit)) {
             auto initType = dyn_cast<RankedTensorType>(matmulInit.getType());
-            if (!initType || !initType.getElementType().isBF16()) {
-                replaceWithTorqMatmul(matmulOp, rewriter);
-                return success();
+            if (initType && initType.getElementType().isBF16()) {
+                preserveInit = true;
             }
-            preserveInit = true;
+            else if (!_markFuseGroups && initType && !initType.getElementType().isFloat()) {
+                // Integer non-zero init: fall back to torq_hl.matmul + add.
+                return replaceWithTorqMatmul(matmulOp, rewriter);
+            }
+            // Non-bf16 float init (typically f32 accumulate): try the fusion
+            // plan so a trailing truncf can still become torq_hl.fully_connected.
         }
 
         // Build fusion plan and compute bias/scale using PatternUtils helpers
@@ -409,16 +415,27 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
                 LLVM_DEBUG(
                     llvm::dbgs() << "[" DEBUG_TYPE "] Marking fuse group (non-fusable path)\n"
                 );
-                markFuseGroupBackward(
-                    output, {im2col, weights}, rewriter,
-                    matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-                );
+                if (!markFuseGroupBackward(
+                        output, {im2col, weights}, rewriter,
+                        matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                    ))
+                    return failure();
                 return success();
             }
-            replaceWithTorqMatmul(matmulOp, rewriter);
-            return success();
+            return replaceWithTorqMatmul(matmulOp, rewriter);
         }
         LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Fusion plan built successfully\n");
+
+        if (_markFuseGroups) {
+            // Discovery-only mode: mark before any bias/scale IR materialization.
+            LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Marking fuse group (fusable path)\n");
+            if (!markFuseGroupBackward(
+                    output, {im2col, weights}, rewriter,
+                    matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
+            return success();
+        }
 
         RankedTensorType finalType = cast<RankedTensorType>(output.getType());
         // Compute per-channel bias value and scale/clamp info from fused chain
@@ -448,15 +465,6 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         );
 
         Type fcElemType = finalType.getElementType();
-
-        if (_markFuseGroups) {
-            LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Marking fuse group (fusable path)\n");
-            markFuseGroupBackward(
-                output, {im2col, weights}, rewriter,
-                matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
-            return success();
-        }
 
         for (auto &op : llvm::reverse(fusionPlanOr->opsToFuse)) {
             if (op->use_empty()) {

@@ -31,6 +31,7 @@
 #include "llvm/Support/LogicalResult.h"
 
 #include <optional>
+#include <type_traits>
 
 #define DEBUG_TYPE "torq-linalg-slicing"
 
@@ -208,6 +209,29 @@ void peelAndSliceToSize(
     }
 }
 
+// Follows `value` back through slices and elementwise ops with a single live
+// input and returns the value the chain starts from.
+static Value elementwiseChainSource(Value value) {
+    while (Operation *def = value.getDefiningOp()) {
+        if (auto sliceOp = dyn_cast<tensor::ExtractSliceOp>(def)) {
+            value = sliceOp.getSource();
+            continue;
+        }
+        auto linalgOp = dyn_cast<linalg::LinalgOp>(def);
+        if (!linalgOp || !linalg::isElementwise(linalgOp))
+            break;
+        SmallVector<Value> liveInputs;
+        for (Value input : linalgOp.getDpsInputs()) {
+            if (!isConstantLikeProducer(input))
+                liveInputs.push_back(input);
+        }
+        if (liveInputs.size() != 1)
+            break;
+        value = liveInputs.front();
+    }
+    return value;
+}
+
 LogicalResult peelAndSlice(
     PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64_t grouping,
     int64_t sliceCount
@@ -219,6 +243,39 @@ LogicalResult peelAndSlice(
     // If fuseGroup is not nullptr, fuse all the members of the pattern fuse group
     // (op is assumed to be the principal op of the group); otherwise, tile op only.
     IntegerAttr fuseGroup = isFuseGroupPrincipalOp(op);
+
+    // Skip slicing fuse groups that contain a residual add (two live activations
+    // from different branches). Bias adds (one live input plus a constant-like
+    // broadcast) are safe to slice once constant pipelines are kept out of the
+    // group, and so are gates like SiLU's x * sigmoid(x), whose live inputs are
+    // elementwise functions of one value. Residual groups still break dominance
+    // if pulled into scf.forall (ConvTranspose skip-connects).
+    if (fuseGroup) {
+        bool hasResidualAdd = false;
+        op->getParentOp()->walk([&](Operation *candidate) {
+            auto groups = candidate->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+            if (!groups || !llvm::is_contained(groups, fuseGroup))
+                return WalkResult::advance();
+            if (auto linalgOp = dyn_cast<linalg::LinalgOp>(candidate)) {
+                if (linalg::isElementwise(linalgOp) && linalgOp.getNumDpsInputs() > 1) {
+                    SmallVector<Value> sources;
+                    for (Value input : linalgOp.getDpsInputs()) {
+                        if (!isConstantLikeProducer(input))
+                            sources.push_back(elementwiseChainSource(input));
+                    }
+                    if (sources.size() > 1 && !llvm::all_equal(sources)) {
+                        hasResidualAdd = true;
+                        return WalkResult::interrupt();
+                    }
+                }
+            }
+            return WalkResult::advance();
+        });
+        if (hasResidualAdd)
+            return rewriter.notifyMatchFailure(
+                op, "skip slicing fuse group that includes a residual add"
+            );
+    }
 
     // If op is a principal op of a pattern fuse group, it is not a member of any
     // other group.
@@ -272,6 +329,23 @@ LogicalResult peelAndSlice(
     return success();
 }
 
+// True when this conv stays on one slice: TileAndFuse marked it (see
+// kSingleSliceAttr), or its weight is heavy and its output channels do not split
+// evenly across the slices, so the peeled remainder would load the weights once
+// more. ConvPattern skips slicing such a conv; ElementwisePattern mirrors it so
+// a rescale that is the conv's sole consumer stays full, preserving the conv's
+// single-use i32 output that lets it fuse to an i8 torq_hl.conv2d.
+static bool convKeptSingleSlice(Operation *op, int64_t sliceCount) {
+    auto conv = dyn_cast_if_present<linalg::Conv2DNchwFchwOp>(op);
+    if (!conv)
+        return false;
+    if (conv->hasAttr(kSingleSliceAttr))
+        return true;
+    int64_t outChannels = cast<ShapedType>(conv->getResult(0).getType()).getDimSize(1);
+    return isDualSliceWeightHeavyConv(conv, sliceCount) &&
+           (ShapedType::isDynamic(outChannels) || outChannels % (sliceCount * kGrouping) != 0);
+}
+
 template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
     size_t slicingIter_;
     int64_t sliceCount_;
@@ -284,6 +358,9 @@ template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
         if (!isFuseGroupPrincipalOp(conv2DOp)) {
             return rewriter.notifyMatchFailure(conv2DOp, "not the principal operation");
         }
+
+        if (convKeptSingleSlice(conv2DOp, sliceCount_))
+            return rewriter.notifyMatchFailure(conv2DOp, "kept on one slice");
 
         return peelAndSlice(rewriter, conv2DOp, slicingIter_, kGrouping, sliceCount_);
     }
@@ -380,6 +457,50 @@ struct TransposePattern : public OpRewritePattern<linalg::TransposeOp> {
     }
 }; // struct TransposePattern
 
+// The producer conv of this rescale group, when it is a Conv2DNchwFchwOp kept
+// full by convKeptSingleSlice and read by the group as its single live
+// entry. Slicing the group would turn that single-use conv output into a
+// per-slice extract_slice fan-out, which stops Conv2dConvert from fusing the
+// epilogue into an i8 torq_hl.conv2d and forces the full i32 conv activation to
+// be pinned in LRAM. A conv that IS dual-sliced is not returned here, so its
+// rescale is sliced with it; the decision depends only on the conv, so it is
+// consistent with ConvPattern regardless of pattern firing order.
+//
+// ElementwisePattern already skips a rescale that is a non-principal member of
+// the conv's own group, which is how conv marking places it. This covers the
+// other case: a rescale that is the principal of its own group, or in no group.
+static Operation *
+findBlockedConvProducer(Operation *op, IntegerAttr fuseGroup, int64_t sliceCount) {
+    SmallVector<Operation *, 8> groupOps;
+    if (fuseGroup) {
+        // Walk the whole parent: group members are not always adjacent. The marking
+        // (markFuseGroupBackward) goes through ops it does not mark, such as a skipped
+        // pad or a compute op with a side-branch input.
+        op->getParentOp()->walk([&](Operation *candidate) {
+            auto groups = candidate->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+            if (groups && llvm::is_contained(groups, fuseGroup))
+                groupOps.push_back(candidate);
+            return WalkResult::advance();
+        });
+    }
+    else {
+        groupOps.push_back(op);
+    }
+
+    for (Operation *member : groupOps) {
+        for (Value operand : member->getOperands()) {
+            Operation *def = operand.getDefiningOp();
+            if (!def || llvm::is_contained(groupOps, def))
+                continue;
+            if (!operand.hasOneUse())
+                continue;
+            if (convKeptSingleSlice(def, sliceCount))
+                return def;
+        }
+    }
+    return nullptr;
+}
+
 // Elementwise pattern for linalg.generic ops. Picks the leftmost non-unit
 // dimension to slice on, keeping inner dimensions contiguous in memory.
 struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
@@ -451,6 +572,15 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
                 genericOp,
                 "standalone op with trunci/truncf not in any fuse group, skipping slicing"
             );
+
+        // A conv kept full by the dual-slice weight guard must not have its
+        // single-use i32 rescale epilogue sliced, or the conv can no longer
+        // fuse to an i8 torq_hl.conv2d and the full i32 activation is pinned.
+        if (findBlockedConvProducer(genericOp, isFuseGroupPrincipalOp(genericOp), sliceCount_)) {
+            return rewriter.notifyMatchFailure(
+                genericOp, "rescale of a non-dual-sliceable conv, keep full so the conv fuses to i8"
+            );
+        }
 
         // Resolve the slicing dimension: leftmost non-unit.
         std::optional<int64_t> slicingIter;

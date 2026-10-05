@@ -197,6 +197,8 @@ void insertSegmentationOp(Stride2Op op, PatternRewriter &rewriter, int h, int w)
     auto segmentationInput = op.getInput();
 
     rewriter.setInsertionPoint(op);
+    if (!inputType.hasStaticShape())
+        return;
     Value initTensor = tensor::EmptyOp::create(rewriter, op.getLoc(), outputType, ValueRange{});
     auto dummy_weights =
         createI8Const(rewriter, op, std::vector<int8_t>{1}, llvm::ArrayRef<int64_t>{1, 1, 1, 1});

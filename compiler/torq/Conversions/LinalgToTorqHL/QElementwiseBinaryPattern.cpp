@@ -165,8 +165,8 @@ struct QElementwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
         Value dequantInput0 = addOp.getInputs()[inputIdx0];
         Value dequantInput1 = addOp.getInputs()[inputIdx1];
-        auto dequant0 = dyn_cast<linalg::GenericOp>(dequantInput0.getDefiningOp());
-        auto dequant1 = dyn_cast<linalg::GenericOp>(dequantInput1.getDefiningOp());
+        auto dequant0 = dyn_cast_if_present<linalg::GenericOp>(dequantInput0.getDefiningOp());
+        auto dequant1 = dyn_cast_if_present<linalg::GenericOp>(dequantInput1.getDefiningOp());
         DequantInfo dInfo0, dInfo1;
         if (!dequant0 || !matchDequantGeneric(dequant0, dInfo0.scale, dInfo0.zp) ||
             !dequant0->getResult(0).hasOneUse())
@@ -186,10 +186,11 @@ struct QElementwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             auto fuseGroupAttr = addOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
             if (!fuseGroupAttr)
                 return rewriter.notifyMatchFailure(addOp, "missing fuse group id");
-            markFuseGroupBackward(
-                chain.quantOp.getResult(0), {dequant0.getInputs()[0], dequant1.getInputs()[0]},
-                rewriter, fuseGroupAttr
-            );
+            if (!markFuseGroupBackward(
+                    chain.quantOp.getResult(0), {dequant0.getInputs()[0], dequant1.getInputs()[0]},
+                    rewriter, fuseGroupAttr
+                ))
+                return failure();
             return success();
         }
 

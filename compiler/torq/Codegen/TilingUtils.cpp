@@ -6,6 +6,8 @@
 
 #include "TilingUtils.h"
 
+#include "torq/Utils/TorqHw.h"
+
 #include "mlir/Dialect/Affine/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/IR/AffineValueMap.h"
@@ -52,6 +54,19 @@ std::optional<size_t> getSlicingIterationDomainIndex(Operation *op) {
             return SlicingIterationDomainIndex::PoolingNcwMaxOp;
         })
         .Default([](auto) -> std::optional<size_t> { return std::nullopt; });
+}
+
+bool isDualSliceWeightHeavyConv(Operation *op, int64_t sliceCount) {
+    auto conv = dyn_cast<linalg::Conv2DNchwFchwOp>(op);
+    if (!conv || sliceCount <= 1)
+        return false;
+    auto filterTy = dyn_cast<RankedTensorType>(conv.getInputs()[1].getType());
+    if (!filterTy || filterTy.getRank() != 4)
+        return false;
+    int64_t elementBytes = llvm::divideCeil(filterTy.getElementTypeBitWidth(), 8);
+    int64_t packedWeight = 64 * filterTy.getDimSize(1) * filterTy.getDimSize(2) *
+                           filterTy.getDimSize(3) * elementBytes;
+    return packedWeight * sliceCount > TorqHw::get().getLramSize() / 2;
 }
 
 namespace {

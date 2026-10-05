@@ -646,6 +646,17 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         }
         auto finalType = cast<RankedTensorType>(output.getType());
 
+        if (_markFuseGroups) {
+            // Discovery mode: annotate only. Do not fold padding / rewrite inputs here;
+            // those mutations requeue the worklist and prevent greedy convergence.
+            if (!markFuseGroupBackward(
+                    output, {peelPadAndReshapeSource(input), weights}, rewriter,
+                    convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
+            return success();
+        }
+
         bool isNchw = _2DNchwChw;
         // Convert strided insert_slice (transpose-conv upsample) to InterleavedInsertOp
         // plus optional tensor border pad (when pads are not HW-legal SAME).
@@ -719,6 +730,20 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
             }
         }
 
+        auto foldOrKeepExplicitPad = [&]() {
+            Value origInput = input;
+            SmallVector<Operation *> foldOps;
+            padInfo = foldBackwardPadding(input, rewriter, isNchw, output, &foldOps);
+            auto wShape = cast<RankedTensorType>(weights.getType()).getShape();
+            auto strideVals = attrValuesAsVec(convOp.getStrides());
+            int64_t strideH = strideVals.empty() ? 1 : strideVals[0];
+            int64_t strideW = strideVals.size() > 1 ? strideVals[1] : strideH;
+            selectFoldedOrExplicitConvPad(
+                input, origInput, padInfo, rewriter, foldOps, wShape[wShape.size() - 2],
+                wShape[wShape.size() - 1], strideH, strideW
+            );
+        };
+
         if (!handledLargeKernelDw && hasStridedInsertSlice && !forceBackwardPad) {
             Operation *oldInsertOp = input.getDefiningOp<tensor::InsertSliceOp>();
             FailureOr<InterleaveConversion> interleaved =
@@ -732,26 +757,11 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                     rewriter.replaceOp(oldInsertOp, input);
             }
             else {
-                padInfo = foldBackwardPadding(input, rewriter, isNchw, output);
+                foldOrKeepExplicitPad();
             }
         }
         else if (!handledLargeKernelDw) {
-            padInfo = foldBackwardPadding(input, rewriter, isNchw, output);
-        }
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Marking fuse group for Conv2DMatmulOpConversion\n";
-            output.print(llvm::dbgs());
-            input.print(llvm::dbgs());
-            convOp->print(llvm::dbgs());
-        });
-        if (_markFuseGroups) {
-            // Discovery mode: only annotate fusible chain; do not rewrite yet.
-            markFuseGroupBackward(
-                output, {input, weights}, rewriter,
-                convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
-            return success();
+            foldOrKeepExplicitPad();
         }
 
         // Fold any per-channel bias

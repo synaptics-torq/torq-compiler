@@ -154,8 +154,6 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
         const std::vector<int32_t> bias = {0};
         const std::vector<int32_t> scale = {1};
 
-        PaddingInfo padInfo = foldBackwardPadding(input, rewriter, IsNCHW, srcOp.getResult(0));
-
         auto kernel = srcOp.getInputs()[1];
         auto kernelsShape = mlir::cast<RankedTensorType>(kernel.getType()).getShape();
         if (kernelsShape.size() != 2) {
@@ -178,12 +176,15 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
         // For 1D pooling, allow larger strides in the pooling dimension
 
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                output, {input, kernel}, rewriter,
-                srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    output, {peelPadAndReshapeSource(input), kernel}, rewriter,
+                    srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
+
+        PaddingInfo padInfo = foldBackwardPadding(input, rewriter, IsNCHW, srcOp.getResult(0));
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
 
@@ -295,10 +296,11 @@ struct PoolingNhwcSumOpConversion : public OpRewritePattern<linalg::PoolingNhwcS
         ScaleInfo scaleInput0;
 
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                output, {input0, kernel}, rewriter,
-                linalgOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    output, {peelPadAndReshapeSource(input0), kernel}, rewriter,
+                    linalgOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 
@@ -389,10 +391,11 @@ struct PoolingNchwSumOpConversion : public OpRewritePattern<linalg::PoolingNchwS
             if (fusedGenericOp) {
                 output = fusedGenericOp.getResult(0);
             }
-            markFuseGroupBackward(
-                output, {input0, kernel}, rewriter,
-                linalgOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    output, {peelPadAndReshapeSource(input0), kernel}, rewriter,
+                    linalgOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 
@@ -515,8 +518,6 @@ struct PoolingNchwSumOpToDW2DConversion : public OpRewritePattern<linalg::Poolin
             return rewriter.notifyMatchFailure(linalgOp, "Only bf16 supported");
         }
 
-        PaddingInfo padInfo = foldBackwardPadding(input0, rewriter, true, linalgOp.getResult(0));
-
         // Look for downstream elementwise mulf/divf generic that applies a scale.
         auto [scaleValue, fusedGenericOp] = tryExtractFusedScale(output);
         if (!fusedGenericOp) {
@@ -532,12 +533,15 @@ struct PoolingNchwSumOpToDW2DConversion : public OpRewritePattern<linalg::Poolin
 
         if (_markFuseGroups) {
             Value fuseOutput = fusedGenericOp ? fusedGenericOp.getResult(0) : output;
-            markFuseGroupBackward(
-                fuseOutput, {input0, kernel}, rewriter,
-                linalgOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    fuseOutput, {peelPadAndReshapeSource(input0), kernel}, rewriter,
+                    linalgOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
+
+        PaddingInfo padInfo = foldBackwardPadding(input0, rewriter, true, linalgOp.getResult(0));
 
         int32_t channelCount = static_cast<int32_t>(in_s[1]);
 

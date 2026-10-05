@@ -47,6 +47,12 @@ bool hasDenseEncoding(ShapedType type);
 // memref it must also have an identity layout
 bool isDenseInMemory(ShapedType type);
 
+// Like isDenseInMemory, but a memref may have a non-identity layout if it is
+// still packed row-major (a static offset is allowed; inner-dim gaps are not).
+// cDMA copies a packed byte range from getMemRefTypeOffsetBytes, so offset-only
+// subviews are safe while gapped layouts would be silently packed.
+bool isContiguousInMemory(ShapedType type);
+
 // return the strides of a given type used to access the elements
 // in the backing memory
 SmallVector<int64_t> getEncodedStridesElements(ShapedType type);

@@ -11,7 +11,9 @@
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLAttrs.h"
+#include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
+#include "torq/Utils/LayoutTransformUtils.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -19,6 +21,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
@@ -77,6 +80,12 @@
 
 #define DEBUG_TYPE "torq-tile-and-fuse"
 
+// Probe-only marker on extracted function args that stand in for a live
+// activation. After symbolic tiling those args are XRAM; checkTileFitsInMemory
+// replaces slices of them with LRAM allocs of the tile type so address
+// assignment charges the same working set as the real pipeline.
+static constexpr llvm::StringLiteral kLramPayloadArgAttr = "torq.lram_payload";
+
 using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
@@ -126,6 +135,10 @@ enum class TileFit {
     NoFit,         // nothing fits, sizes holds the minimum
     ProbeFail,     // the probe itself broke, do not use sizes
 };
+
+static bool isPointwiseNchwConv(Operation *op);
+static bool pointwiseChainNeedsSpatialTile(Operation *op);
+static Operation *peelToPointwiseNchwConv(Operation *op, Operation *consumerOp);
 
 static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFuseMode(
     "torq-tile-and-fuse-producers-fuse-mode",
@@ -443,8 +456,16 @@ void collectOpsForMemoryCheck(
         // mlir/include/mlir/Transforms/RegionUtils.h)?
         currentOp->walk([&](Operation *walkOp) {
             for (Value operand : walkOp->getOperands()) {
-                if (operand.getParentBlock() != currentOp->getBlock())
+                Block *operandBlock = operand.getParentBlock();
+                if (operandBlock != currentOp->getBlock()) {
+                    // Constants / empties hoisted outside scf.forall are inputs of
+                    // the extracted function. Nested-region values (linalg body
+                    // args, pad yields) are not.
+                    if (Operation *parent = operandBlock->getParentOp();
+                        parent && parent->isProperAncestor(currentOp))
+                        inputs.push_back(operand);
                     continue;
+                }
 
                 // BlockArguments are definitely inputs
                 if (isa<BlockArgument>(operand)) {
@@ -460,7 +481,7 @@ void collectOpsForMemoryCheck(
                     continue;
 
                 // Don't collect tiled operations
-                if (llvm::isa<scf::ForOp>(operandOp)) {
+                if (llvm::isa<scf::ForOp, scf::ForallOp>(operandOp)) {
                     maybeInputs.push_back(operand);
                     continue;
                 }
@@ -488,15 +509,30 @@ void collectOpsForMemoryCheck(
     llvm::append_range(ops, visitedOps);
 }
 
+// An elementwise op over a full-size tensor (no broadcast operand) is tiled in its
+// own loop, so its result is loaded per tile like an activation, even when it only
+// computes a constant (a lookup table folded to a fill). Broadcast bias and scale
+// operands fold into the consumer instead.
+static bool isElementwiseOverFullTensor(Operation *op) {
+    auto genericOp = dyn_cast_if_present<linalg::GenericOp>(op);
+    return genericOp && linalg::isElementwise(genericOp) &&
+           llvm::all_of(genericOp.getIndexingMapsArray(), [](AffineMap map) {
+               return map.isIdentity();
+           });
+}
+
 // Construct a module with a single function, that includes tilingInterfaceOp
 // and producerOps, and any other producers needed to keep pattern-fuse-groups
 // intact. In addition, other ops that are not TilingInterface, that drive the
-// included ops are included. The function arguments are, in order, the
-// sizes of the domains that can be tiled as in tilingIterDomsOrder, and values
-// that drive the included ops.
-// The tile size arguments are left unused here as we don't do the tiling yet.
-// This allows the function to be used when we initially check if an untiled op
-// requires tiling at all.
+// included ops are included. The function arguments are, in order, the sizes
+// of the domains that can be tiled as in tilingIterDomsOrder, then live
+// activation tensors (marked kLramPayloadArgAttr), then passthrough
+// non-tensor/dynamic drivers and model block args. Constant-like producers are
+// tensor.empty. Live activations stay as args so tiling can extract_slice them;
+// checkTileFitsInMemory then charges those slices to LRAM. Model block args
+// stay XRAM. The tile size arguments are left unused here as we don't do the
+// tiling yet. This allows the function to be used when we initially check if an
+// untiled op requires tiling at all.
 ModuleOp extractOpsForMemoryCheck(
     const std::string &moduleName, Operation *consumerOp, const TilingInfo &tilingInfo = {},
     const SetVector<Operation *> &producerOps = {}
@@ -513,13 +549,58 @@ ModuleOp extractOpsForMemoryCheck(
     SmallVector<Value> inputs;
     collectOpsForMemoryCheck(consumerOp, producerOps, ops, inputs);
 
+    // Uncloned producers become function arguments. Constant-like stay
+    // tensor.empty so LinalgSlicing still sees a bias add, not a residual.
+    // Live activations (has a defining op) are payload args: still XRAM until
+    // checkTileFitsInMemory replaces their slices with LRAM allocs. A full-size
+    // alloc_tensor here cannot be shrunk by tiling the consumer. Model
+    // BlockArguments have no defining op and stay XRAM, matching the real
+    // pipeline, so matmul tiles are not over-cut.
+    SmallVector<Value> passthroughInputs;
+    SmallVector<Value> payloadTensors;
+    SmallVector<Value> constantLikeInputs;
+    for (Value input : inputs) {
+        auto ty = dyn_cast<RankedTensorType>(input.getType());
+        if (ty && ty.hasStaticShape() && isConstantLikeProducer(input) &&
+            !isElementwiseOverFullTensor(input.getDefiningOp()))
+            constantLikeInputs.push_back(input);
+        else if (ty && ty.hasStaticShape() && input.getDefiningOp()) {
+            Operation *def = input.getDefiningOp();
+            bool otherGroupOutput = isFuseGroupOutput(def) && !checkShareFuseGroup(consumerOp, def);
+            if (otherGroupOutput || peelToPointwiseNchwConv(def, consumerOp) ||
+                isElementwiseOverFullTensor(def))
+                payloadTensors.push_back(input);
+            else
+                passthroughInputs.push_back(input);
+        }
+        else {
+            // Dynamic live activations stay XRAM here, so their tiles are never
+            // charged to LRAM below. The fit check is unsound for them; warn
+            // once so a dynamic-shape model cannot pass silently.
+            if (ty && !ty.hasStaticShape() && input.getDefiningOp()) {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    input.getDefiningOp()->emitWarning(
+                        "tile-and-fuse memory probe: dynamic live activation left "
+                        "uncharged in the LRAM fit check"
+                    );
+                }
+            }
+            passthroughInputs.push_back(input);
+        }
+    }
+
     SmallVector<Type> inputTypes;
-    inputTypes.reserve(tilingInfo.tilingOrder.size() + inputs.size());
+    inputTypes.reserve(
+        tilingInfo.tilingOrder.size() + payloadTensors.size() + passthroughInputs.size()
+    );
 
     for (size_t i = 0; i < tilingInfo.tilingOrder.size(); ++i)
         inputTypes.push_back(builder.getIndexType());
-
-    for (Value input : inputs)
+    for (Value input : payloadTensors)
+        inputTypes.push_back(input.getType());
+    for (Value input : passthroughInputs)
         inputTypes.push_back(input.getType());
 
     FunctionType functionType = builder.getFunctionType(inputTypes, consumerOp->getResultTypes());
@@ -534,14 +615,15 @@ ModuleOp extractOpsForMemoryCheck(
 
     IRMapping extractionMap;
 
-    // Map the inputs to the function args. This will result in the function
-    // args driving the appropriate cloned ops, when we clone them.
-    auto nonDomainArgs = llvm::make_range(
-        funcOp.getFunctionBody().getArguments().begin() + tilingInfo.tilingOrder.size(),
-        funcOp.getFunctionBody().getArguments().end()
-    );
-    for (auto [input, arg] : llvm::zip_equal(inputs, nonDomainArgs))
-        extractionMap.map(input, arg);
+    auto args = funcOp.getFunctionBody().getArguments();
+    unsigned argIdx = tilingInfo.tilingOrder.size();
+    for (Value input : payloadTensors) {
+        funcOp.setArgAttr(argIdx, kLramPayloadArgAttr, builder.getUnitAttr());
+        extractionMap.map(input, args[argIdx++]);
+    }
+    for (Value input : passthroughInputs)
+        extractionMap.map(input, args[argIdx++]);
+    assert(argIdx == args.size() && "payload and passthrough args must match function signature");
 
     // We have to clone `ops` in the order they appear in their parent block.
     llvm::sort(ops, [](auto lhsOp, auto rhsOp) {
@@ -550,6 +632,28 @@ ModuleOp extractOpsForMemoryCheck(
     });
 
     builder.setInsertionPointToStart(&funcOp.getFunctionBody().front());
+
+    for (Value input : constantLikeInputs) {
+        auto ty = cast<RankedTensorType>(input.getType());
+        Value mapped =
+            tensor::EmptyOp::create(builder, loc, ty.getShape(), ty.getElementType()).getResult();
+        // A fill that initializes a matmul's accumulator must stay a fill:
+        // conversion folds a constant init but cannot add an uninitialized one.
+        auto isContractionInit = [&](OpOperand &use) {
+            auto linalgOp = dyn_cast<linalg::LinalgOp>(use.getOwner());
+            return linalgOp && llvm::is_contained(ops, use.getOwner()) &&
+                   linalg::isaContractionOpInterface(linalgOp) && linalgOp.isDpsInit(&use);
+        };
+        auto fillOp = input.getDefiningOp<linalg::FillOp>();
+        if (fillOp && llvm::any_of(input.getUses(), isContractionInit)) {
+            Operation *scalarDef = fillOp.getInputs()[0].getDefiningOp();
+            if (scalarDef && scalarDef->hasTrait<OpTrait::ConstantLike>()) {
+                Value scalar = builder.clone(*scalarDef)->getResult(0);
+                mapped = linalg::FillOp::create(builder, loc, scalar, mapped).getResult(0);
+            }
+        }
+        extractionMap.map(input, mapped);
+    }
 
     for (Operation *op : ops)
         builder.clone(*op, extractionMap);
@@ -785,16 +889,132 @@ TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTile
         if (failure)
             return llvm::failure();
 
-        // The pipeline failed, but neither flag is set. This is the path the bug
-        // ran through. A stolen diagnostic left the owner here, and falling
-        // through said the tile fits. Return failure instead. Logging showed
-        // this branch never runs today.
-        return llvm::failure();
+        // The pipeline failed without OUT_OF_MEMORY_MESSAGE and without another
+        // diagnostic. That is not a fit: grow-back must not grow to this size.
+        // (Main's probe-diag race used to fall through as a false fit here.)
+        return false;
     }
 
     assert(!memoryOverflow && "this should have been captured above");
 
     return true;
+}
+
+// Peel tensor.cast to reach the underlying value.
+static Value peelCasts(Value v) {
+    while (auto castOp = v.getDefiningOp<tensor::CastOp>())
+        v = castOp.getSource();
+    return v;
+}
+
+// The extract_slice ops in `funcOp` that read a payload arg, directly or
+// through other extract_slice ops (looking through tensor.cast). A payload arg
+// is read through a chain such as
+//   arg -> trim extract (full static shape) -> per-tile extract -> consumer
+static llvm::SetVector<tensor::ExtractSliceOp> findPayloadSlices(func::FuncOp funcOp) {
+    Block &body = funcOp.getFunctionBody().front();
+    auto isPayloadArg = [&](Value v) -> bool {
+        if (auto arg = dyn_cast<BlockArgument>(v))
+            return arg.getOwner() == &body &&
+                   funcOp.getArgAttr(arg.getArgNumber(), kLramPayloadArgAttr);
+        return false;
+    };
+
+    SmallVector<tensor::ExtractSliceOp> allExtracts;
+    funcOp.walk([&](tensor::ExtractSliceOp e) { allExtracts.push_back(e); });
+
+    // Iterate to a fixpoint; the chains are short.
+    llvm::SetVector<tensor::ExtractSliceOp> payloadSlices;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto e : allExtracts) {
+            if (payloadSlices.contains(e))
+                continue;
+            Value src = peelCasts(e.getSource());
+            auto srcExtract = src.getDefiningOp<tensor::ExtractSliceOp>();
+            if (isPayloadArg(src) || (srcExtract && payloadSlices.contains(srcExtract))) {
+                payloadSlices.insert(e);
+                changed = true;
+            }
+        }
+    }
+    return payloadSlices;
+}
+
+// The innermost slice of each chain in `payloadSlices`: the ones no other
+// payload slice reads (directly or through a tensor.cast). The real per-tile
+// program reads only this region, not the outer full-shape trim.
+static SmallVector<tensor::ExtractSliceOp>
+keepInnermostSlices(const llvm::SetVector<tensor::ExtractSliceOp> &payloadSlices) {
+    auto isPayloadSlice = [&](Operation *op) {
+        auto extract = dyn_cast<tensor::ExtractSliceOp>(op);
+        return extract && payloadSlices.contains(extract);
+    };
+    auto readByInnerSlice = [&](tensor::ExtractSliceOp e) {
+        return llvm::any_of(e.getResult().getUsers(), [&](Operation *user) {
+            if (auto castOp = dyn_cast<tensor::CastOp>(user))
+                return llvm::any_of(castOp->getResult(0).getUsers(), isPayloadSlice);
+            return isPayloadSlice(user);
+        });
+    };
+
+    SmallVector<tensor::ExtractSliceOp> innermost;
+    for (tensor::ExtractSliceOp e : payloadSlices) {
+        if (!readByInnerSlice(e))
+            innermost.push_back(e);
+    }
+    return innermost;
+}
+
+// Replace `extract` with an LRAM-encoded alloc_tensor of its size at the first
+// iteration, so the LRAM planner charges the slice the real pipeline keeps live.
+// Leaves `extract` in place when its size cannot be resolved.
+static void chargeSliceInLram(OpBuilder &builder, tensor::ExtractSliceOp extract) {
+    auto ty = dyn_cast<RankedTensorType>(extract.getType());
+    if (!ty)
+        return;
+    if (!ty.hasStaticShape()) {
+        SmallVector<int64_t> sizes;
+        sizes.reserve(extract.getMixedSizes().size());
+        for (OpFoldResult size : extract.getMixedSizes()) {
+            llvm::FailureOr<int64_t> maybeSize = computeSizeAtFirstIteration(size);
+            if (failed(maybeSize))
+                break;
+            sizes.push_back(*maybeSize);
+        }
+        if (static_cast<int64_t>(sizes.size()) != ty.getRank()) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                extract.emitWarning("tile-and-fuse memory probe: live activation slice size "
+                                    "unresolvable, LRAM charge skipped");
+            }
+            return;
+        }
+        ty = RankedTensorType::get(sizes, ty.getElementType());
+    }
+    builder.setInsertionPoint(extract);
+    // The alloc carries the LRAM encoding the real pipeline would give the
+    // slice, so the planner charges it. Its users (linalg operands) accept
+    // the encoded, static type; the probe module still verifies.
+    auto encodedTy = RankedTensorType::get(
+        ty.getShape(), ty.getElementType(), createDenseEncoding(ty, torq_hl::MemorySpace::Lram)
+    );
+    Value alloc =
+        bufferization::AllocTensorOp::create(builder, extract.getLoc(), encodedTy, ValueRange{})
+            .getResult();
+    extract.replaceAllUsesWith(alloc);
+    extract.erase();
+}
+
+// Charge the live activation slices of the probe module in LRAM: each tile
+// reads only its slice of a payload arg, and the real pipeline keeps that slice
+// live in LRAM, so the probe must count it too.
+static void chargeLiveActivationSlices(func::FuncOp funcOp) {
+    OpBuilder builder(funcOp.getContext());
+    for (tensor::ExtractSliceOp extract : keepInnermostSlices(findPayloadSlices(funcOp)))
+        chargeSliceInLram(builder, extract);
 }
 
 // Return true iff the tile fits in memory
@@ -839,6 +1059,10 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
 
         arg.replaceAllUsesWith(size);
     }
+
+    // Tile sizes were function args. Charge live-activation slices at the tile
+    // shape; mixed sizes are now constants (or affine of constants).
+    chargeLiveActivationSlices(funcOp);
 
     return checkModuleFitsInMemory(*fixedModuleOp, true);
 }
@@ -900,6 +1124,28 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
     return LogicalResult::success();
 }
 
+// Number of tiles `sizes` splits the iteration domain into, or the int64 max
+// when `fit` is not a fit or the count is unknown.
+static int64_t countTiles(
+    TileFit fit, ArrayRef<OpFoldResult> sizes, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainSizes
+) {
+    if (fit != TileFit::FitsUnchanged && fit != TileFit::FitsShrunk)
+        return std::numeric_limits<int64_t>::max();
+
+    int64_t count = 1;
+    for (int64_t domain : tilingInfo.tilingOrder) {
+        std::optional<int64_t> size = getConstantIntValue(sizes[domain]);
+        if (!size || *size <= 0)
+            return std::numeric_limits<int64_t>::max();
+        int64_t domainCount = div_ceil(iterDomainSizes[domain], *size);
+        if (count > std::numeric_limits<int64_t>::max() / domainCount)
+            return std::numeric_limits<int64_t>::max();
+        count *= domainCount;
+    }
+    return count;
+}
+
 // Find a tile for `consumerOp` that the memory probe accepts, and write it to
 // `sizes`. If the first tile is too big, shrink every domain to its minimum,
 // then grow them back with binary search, as far as they still fit. See TileFit
@@ -939,25 +1185,8 @@ TileFit TileAndFusePass::fitTileToMemory(
         ArrayRef<int64_t>(*channelFirstOrder)
     );
 
-    auto tileCount = [&](TileFit fit, ArrayRef<OpFoldResult> candidateSizes) {
-        if (fit != TileFit::FitsUnchanged && fit != TileFit::FitsShrunk)
-            return std::numeric_limits<int64_t>::max();
-
-        int64_t count = 1;
-        for (int64_t domain : tilingInfo.tilingOrder) {
-            std::optional<int64_t> size = getConstantIntValue(candidateSizes[domain]);
-            if (!size || *size <= 0)
-                return std::numeric_limits<int64_t>::max();
-            int64_t domainCount = div_ceil(iterDomainSizes[domain], *size);
-            if (count > std::numeric_limits<int64_t>::max() / domainCount)
-                return std::numeric_limits<int64_t>::max();
-            count *= domainCount;
-        }
-        return count;
-    };
-
-    int64_t heuristicCount = tileCount(heuristicFit, sizes);
-    int64_t channelCount = tileCount(channelFit, channelSizes);
+    int64_t heuristicCount = countTiles(heuristicFit, sizes, tilingInfo, iterDomainSizes);
+    int64_t channelCount = countTiles(channelFit, channelSizes, tilingInfo, iterDomainSizes);
     // Prefer channel tiling on equal tile counts. Spatial tiling can introduce
     // overlapping halo reads and dynamic boundary padding, while channel tiles
     // are independent. Exclude the max sentinel so two failed probes do not
@@ -1003,8 +1232,11 @@ TileFit TileAndFusePass::fitTileToMemoryWithOrder(
     if (failed(tileFits))
         return TileFit::ProbeFail;
     if (*tileFits) {
-        // fits in memory, no need to change the tile
-        return TileFit::FitsUnchanged;
+        if (!pointwiseChainNeedsSpatialTile(consumerOp))
+            return TileFit::FitsUnchanged;
+        // C-sliced dest still fits, but a live 1x1 producer dest will not
+        // shrink with output-channel tiles. Continue so MaxProducers can
+        // stream both groups in one loop.
     }
 
     IRRewriter rewriter(moduleOp->getContext());
@@ -1146,6 +1378,128 @@ bool shouldFuseMultiUsersOp(Operation *op) {
     return false;
 }
 
+// ConvertNhwc is a singleton NHWC/NCHW transpose group. It may fuse with the
+// adjacent compute group in either direction so the layout convert is sliced
+// with the conv/pool. A second compute group (e.g. a depthwise pulled into a
+// following 1x1's NHWC transpose) stays a fusion boundary.
+//
+// Two 1x1 conv groups are an exception: if they stay separate, T&F materializes
+// a full Cin x H x W dest in LRAM and the consumer cannot shrink it. One tile
+// loop streams the intermediate. 1x1+depthwise stays a boundary.
+static bool isPointwiseNchwConv(Operation *op) {
+    if (!op)
+        return false;
+    Operation *principal = op;
+    if (isMarkedFuseGroup(op)) {
+        if (Operation *p = getFuseGroupPrincipalOpBackward(op))
+            principal = p;
+    }
+    auto convOp = dyn_cast<linalg::Conv2DNchwFchwOp>(principal);
+    if (!convOp)
+        return false;
+    auto filterTy = dyn_cast<RankedTensorType>(convOp.getInputs()[1].getType());
+    return filterTy && filterTy.getRank() == 4 && filterTy.getDimSize(2) == 1 &&
+           filterTy.getDimSize(3) == 1;
+}
+
+// Walk transpose and elementwise (rescale/clamp) to the producing 1x1. YOLO
+// stacks 1x1 groups with ConvertNhwc and QDQ between them; C-slicing the
+// consumer does not shrink that live Cin x H x W dest. Ops in the consumer's
+// own fuse group are layout/epilogue, not a producer 1x1.
+static Operation *peelToPointwiseNchwConv(Operation *op, Operation *consumerOp) {
+    DenseSet<Operation *> seen;
+    while (op && seen.insert(op).second) {
+        bool inConsumerGroup = consumerOp && checkShareFuseGroup(op, consumerOp);
+        if (!inConsumerGroup && isPointwiseNchwConv(op))
+            return op;
+        if (auto transposeOp = dyn_cast<linalg::TransposeOp>(op)) {
+            op = transposeOp.getDpsInputs()[0].getDefiningOp();
+            continue;
+        }
+        if (auto castOp = dyn_cast<tensor::CastOp>(op)) {
+            op = castOp.getSource().getDefiningOp();
+            continue;
+        }
+        auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+        if (!linalgOp)
+            break;
+        if (!inConsumerGroup && !linalg::isElementwise(linalgOp))
+            break;
+        // A residual add (or swish mul) joins two full-size live inputs.
+        // Crossing it pulls the previous block into this loop and recomputes it
+        // per tile (MobileNetV2, EfficientNet on sr200). A broadcast operand
+        // such as a squeeze-excite scale does not count.
+        SmallVector<Value> liveInputs;
+        for (Value in : linalgOp.getDpsInputs())
+            if (!isConstantLikeProducer(in))
+                liveInputs.push_back(in);
+        Type outTy = linalgOp->getResult(0).getType();
+        if (llvm::count_if(liveInputs, [&](Value in) { return in.getType() == outTy; }) > 1)
+            break;
+        // Follow the full-size input: a broadcast operand can be listed first
+        // (a squeeze-excite mul(scale, x)). Compare shapes, since a rescale's
+        // input has a wider element type than its result.
+        ArrayRef<int64_t> outShape = cast<ShapedType>(outTy).getShape();
+        auto fullSize = llvm::find_if(liveInputs, [&](Value in) {
+            return cast<ShapedType>(in.getType()).getShape() == outShape;
+        });
+        Value next = fullSize != liveInputs.end() ? *fullSize
+                     : liveInputs.empty()         ? Value()
+                                                  : liveInputs.front();
+        op = next ? next.getDefiningOp() : nullptr;
+    }
+    return nullptr;
+}
+
+// C-slicing a 1x1 dest does not shrink a live Cin x H x W producer. A concat
+// dest stays at full rank-4 size, so skip FitsUnchanged when the 1x1 reads
+// one larger than LRAM/3. MaxProducers can then stream the producer in one
+// spatial loop. Elementwise producers are left alone: spatially tiling their
+// 1x1 only adds tiles (EfficientNet squeeze-excite on sr200).
+static bool pointwiseChainNeedsSpatialTile(Operation *op) {
+    if (!isPointwiseNchwConv(op))
+        return false;
+    Operation *principal = op;
+    if (isMarkedFuseGroup(op)) {
+        if (Operation *p = getFuseGroupPrincipalOpBackward(op))
+            principal = p;
+    }
+    auto linalgOp = dyn_cast<linalg::LinalgOp>(principal);
+    if (!linalgOp)
+        return false;
+    // Live on-device inputs above LRAM / kLramLiveInputDenom cannot coexist
+    // with the C-sliced dests around them.
+    constexpr int64_t kLramLiveInputDenom = 3;
+    const int64_t threshold = TorqHw::get().getLramSize() / kLramLiveInputDenom;
+    for (Value in : linalgOp.getDpsInputs()) {
+        if (!isa_and_present<tensor::InsertSliceOp, tensor::ConcatOp>(in.getDefiningOp()))
+            continue;
+        auto ty = dyn_cast<RankedTensorType>(in.getType());
+        if (!ty || !ty.hasStaticShape())
+            continue;
+        int64_t bits = ty.getElementTypeBitWidth();
+        if (bits != 0 && ty.getNumElements() * bits / 8 > threshold)
+            return true;
+    }
+    return false;
+}
+
+// True when every tile reads the whole source of `sliceOp`. Fusing its producer
+// into the tile loop would recompute the full result once per tile, so leave
+// it before the loop, even when it is a pattern fuse group member.
+static bool readsWholeSourceEveryTile(tensor::ExtractSliceOp sliceOp) {
+    RankedTensorType sourceType = sliceOp.getSourceType();
+    return sourceType.hasStaticShape() && llvm::all_of(sliceOp.getMixedOffsets(), isZeroInteger) &&
+           llvm::all_of(
+               sliceOp.getMixedStrides(),
+               [](OpFoldResult stride) { return isConstantIntValue(stride, 1); }
+           ) &&
+           llvm::equal(
+               sliceOp.getMixedSizes(), sourceType.getShape(),
+               [](OpFoldResult size, int64_t dim) { return isConstantIntValue(size, dim); }
+           );
+}
+
 // an SCFTileAndFuseOptions::ControlFnTy for the max-size fuse mode.
 std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuseControlMaxSize(
     IRRewriter &rewriter, bool allDomains, const DenseSet<TilingInterface> &toTileOps,
@@ -1157,6 +1511,9 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     // Refuse to fuse across executor boundaries (NSS vs Host etc).
     Operation *consumerOp = *candidateSliceOp->getUsers().begin();
     if (!canFuse(consumerOp, producerOp))
+        return std::nullopt;
+
+    if (readsWholeSourceEveryTile(candidateSliceOp))
         return std::nullopt;
 
     auto doNotFuse = [&]() {
@@ -1211,7 +1568,10 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
 
     TilingInfo tilingInfo = getTilingInfo(producerTi, this->sliceCount);
 
-    if (!toTileOps.contains(producerTi) && !isa<linalg::FillOp>(producerOp)) {
+    // FitsUnchanged 1x1 producers stay out of toTileOps, but C-slicing a
+    // following 1x1 does not shrink that dest. Fuse them into one spatial loop.
+    if (!toTileOps.contains(producerTi) && !isa<linalg::FillOp>(producerOp) &&
+        !(isPointwiseNchwConv(consumerOp) && peelToPointwiseNchwConv(producerOp, consumerOp))) {
         return doNotFuse();
     }
 
@@ -1273,6 +1633,9 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
     // Refuse to fuse across executor boundaries (NSS vs Host etc).
     Operation *consumerOp = *candidateSliceOp->getUsers().begin();
     if (!canFuse(consumerOp, producerOp))
+        return std::nullopt;
+
+    if (readsWholeSourceEveryTile(candidateSliceOp))
         return std::nullopt;
 
     auto doNotFuse = [&]() {
@@ -1423,7 +1786,8 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
         fusionControlFn = [&](mlir::tensor::ExtractSliceOp candidateSliceOp,
                               OpResult producerOpResult, bool isDestinationOperand
                           ) -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
-            bool shouldFuse = checkShareFuseGroup(tilingInterfaceOp, producerOpResult.getOwner());
+            bool shouldFuse = checkShareFuseGroup(tilingInterfaceOp, producerOpResult.getOwner()) &&
+                              !readsWholeSourceEveryTile(candidateSliceOp);
 
             if (!shouldFuse) {
                 return std::nullopt;
@@ -1584,6 +1948,43 @@ void TileAndFusePass::tileAndFuse(
         );
     }
 
+    // The probe above lets LinalgSlicing dual-slice big-weight convs. Each
+    // slice keeps its own weight copy, which can force a smaller tile that
+    // re-streams the weights. Probe again with such convs on one slice, and keep
+    // them there only when that needs fewer tiles.
+    SmallVector<Operation *> heavyConvs;
+    if (isDualSliceWeightHeavyConv(tiOp, this->sliceCount))
+        heavyConvs.push_back(tiOp);
+    for (Operation *producer : producerOps) {
+        if (isDualSliceWeightHeavyConv(producer, this->sliceCount))
+            heavyConvs.push_back(producer);
+    }
+    if (!heavyConvs.empty() && (tileFit == TileFit::FitsShrunk || tileFit == TileFit::NoFit)) {
+        for (Operation *conv : heavyConvs)
+            conv->setAttr(kSingleSliceAttr, rewriter.getUnitAttr());
+
+        SmallVector<OpFoldResult> singleOffsets(iterDomainOffsets), singleSizes(iterDomainSizes);
+        TileFit singleFit = fitTileToMemory(
+            tiOp, producerOps, tilingInfo, *iterDomainConstSizes, singleOffsets, singleSizes
+        );
+        int64_t dualCount = countTiles(tileFit, tileSizes, tilingInfo, *iterDomainConstSizes);
+        int64_t singleCount = countTiles(singleFit, singleSizes, tilingInfo, *iterDomainConstSizes);
+        LLVM_DEBUG(
+            llvm::dbgs() << "  heavy-weight conv tiles: dual-slice=" << dualCount
+                         << " single-slice=" << singleCount << "\n"
+        );
+
+        if (singleCount < dualCount) {
+            tileFit = singleFit;
+            tileOffsets = std::move(singleOffsets);
+            tileSizes = std::move(singleSizes);
+        }
+        else {
+            for (Operation *conv : heavyConvs)
+                conv->removeAttr(kSingleSliceAttr);
+        }
+    }
+
     switch (tileFit) {
     case TileFit::ProbeFail:
         tiOp->emitWarning("tile-and-fuse: failed to tile an operation, skipping it");
@@ -1612,6 +2013,13 @@ void TileAndFusePass::tileAndFuse(
     case TileFit::FitsShrunk:
         break;
     }
+
+    // The fit can settle on the whole iteration domain, when the needs-tiling
+    // check counts more live memory than the tile probe does. Tiling to the full
+    // domain makes nothing smaller and only splits the pattern fuse group, so
+    // keep the op untiled as FitsUnchanged does.
+    if (llvm::equal(tileSizes, iterDomainSizes))
+        return;
 
     LLVM_DEBUG({
         llvm::dbgs() << "  iteration sizes: ";
@@ -1881,6 +2289,11 @@ void TileAndFusePass::runOnOperation() {
         if (isMarkedFuseGroup(tiOp) && !isFuseGroupOutput(tiOp))
             return;
 
+        // tensor.concat cannot be sliced by T&F (getIterationDomainTileFromResultTile
+        // fails). Leave it full-size; KeepConcatInLram pins it only when it fits.
+        if (isa<tensor::ConcatOp>(tiOp.getOperation()))
+            return;
+
         // Check if tiOp already fits in memory.
         OwningOpRef<ModuleOp> moduleOp = extractOpsForMemoryCheck("check_needs_tiling", tiOp);
         llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp, true);
@@ -1892,7 +2305,7 @@ void TileAndFusePass::runOnOperation() {
             return;
         }
 
-        if (*opFitsInMemory)
+        if (*opFitsInMemory && !pointwiseChainNeedsSpatialTile(tiOp))
             return;
 
         orderTi.push_back(tiOp);

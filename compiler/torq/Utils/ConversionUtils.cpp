@@ -36,6 +36,15 @@ Operation *getSingleUser(Value value) {
     return *value.getUsers().begin();
 }
 
+Value createInitTensor(OpBuilder &builder, Location loc, RankedTensorType type, Value shapeSource) {
+    SmallVector<Value> dynamicSizes;
+    for (auto [i, dim] : llvm::enumerate(type.getShape())) {
+        if (ShapedType::isDynamic(dim))
+            dynamicSizes.push_back(tensor::DimOp::create(builder, loc, shapeSource, i));
+    }
+    return tensor::EmptyOp::create(builder, loc, type, dynamicSizes).getResult();
+}
+
 std::pair<int32_t, int32_t> getDTypeRange(Type type) {
     /// Check if type is float
     if (isa<FloatType>(type)) {

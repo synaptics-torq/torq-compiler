@@ -4,6 +4,7 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Dialect/TorqHW/TorqHWOps.h"
+#include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/StorageUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -90,6 +91,31 @@ bool isDenseInMemory(ShapedType type) {
         }
     }
 
+    return true;
+}
+
+bool isContiguousInMemory(ShapedType type) {
+    if (isDenseInMemory(type))
+        return true;
+    if (!hasDenseEncoding(type))
+        return false;
+    auto memRefType = dyn_cast<MemRefType>(type);
+    if (!memRefType || !memRefType.hasStaticShape())
+        return false;
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    if (failed(memRefType.getStridesAndOffset(strides, offset)))
+        return false;
+    if (ShapedType::isDynamic(offset))
+        return false;
+    int64_t expected = 1;
+    ArrayRef<int64_t> shape = memRefType.getShape();
+    for (int d = (int)shape.size() - 1; d >= 0; --d) {
+        // A size-1 dim is never stepped, so its stride does not matter.
+        if (shape[d] != 1 && (ShapedType::isDynamic(strides[d]) || strides[d] != expected))
+            return false;
+        expected *= shape[d];
+    }
     return true;
 }
 
@@ -554,8 +580,7 @@ Value convertTensorToEncoding(
 
     auto dstType = createRankedTensorTypeWithEncoding(value.getType(), encodingAttr);
     Value emptyValue =
-        initValue ? initValue
-                  : tensor::EmptyOp::create(builder, value.getLoc(), dstType, ValueRange{});
+        initValue ? initValue : torq::createInitTensor(builder, value.getLoc(), dstType, value);
 
     if (requirements) {
 
@@ -611,7 +636,7 @@ Value convertTensorToType(
             convertTensorToEncoding(builder, value, intermediateEncoding, std::nullopt, initValue);
     }
 
-    Value emptyValue = tensor::EmptyOp::create(builder, value.getLoc(), targetType, ValueRange{});
+    Value emptyValue = torq::createInitTensor(builder, value.getLoc(), targetType, value);
 
     return torq_hl::ConvertOp::create(
                builder, value.getLoc(), targetType, emptyValue, intermediateValue,

@@ -489,10 +489,11 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
         if (!hasFusionPlan || !fusionPlanOr->isFusable()) {
             if (_markFuseGroups) {
-                markFuseGroupBackward(
-                    markOrigin, {input}, rewriter,
-                    srcOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-                );
+                if (!markFuseGroupBackward(
+                        markOrigin, {input}, rewriter,
+                        srcOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                    ))
+                    return failure();
                 return success();
             }
             auto resultTy = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
@@ -509,9 +510,10 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
         auto finalType = cast<RankedTensorType>(output.getType());
 
         if (_markFuseGroups) {
-            markFuseGroupBackward(
-                output, {input}, rewriter, srcOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
-            );
+            if (!markFuseGroupBackward(
+                    output, {input}, rewriter, srcOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
+                ))
+                return failure();
             return success();
         }
 

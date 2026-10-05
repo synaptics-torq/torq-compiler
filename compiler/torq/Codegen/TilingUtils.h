@@ -29,6 +29,19 @@ std::optional<size_t> getSlicingIterationDomainIndex(Operation *op);
 // Slicing granularity
 constexpr int64_t kGrouping = 4;
 
+// Set by TileAndFuse on a conv that LinalgSlicing must keep on one slice.
+constexpr llvm::StringLiteral kSingleSliceAttr = "torq-single-slice";
+
+// True when `op` is a Conv2DNchwFchwOp whose packed weight is too large to keep
+// `sliceCount` copies live within half of LRAM. Dual slicing such a conv can
+// force smaller tiles that each re-stream the weights, so TileAndFuse probes it
+// both ways and sets kSingleSliceAttr when one slice needs fewer tiles.
+//
+// The weight is sized for one 64-output-channel hardware tile per slice, not the
+// whole filter. This only selects the convs that get the second probe; one it
+// misses keeps dual slicing, as on main. Depthwise and NHWC convs are not probed.
+bool isDualSliceWeightHeavyConv(Operation *op, int64_t sliceCount);
+
 // Replace the untiled consumer `op` with its tiled version from `tiledResults`,
 // and do the same for any producer that was yielded as well.
 void applyTiledResults(

@@ -168,7 +168,9 @@ class FoldConvertChainWithKernel : public OpInterfaceRewritePattern<torq_hl::Ker
                 llvm::dbgs() << "\n";
             });
 
-            assert(!candidates.empty() && "at least the original value must be a candidate");
+            // Dynamic or unencodable operands have no candidate. Skip folding.
+            if (candidates.empty())
+                return failure();
         }
 
         // the code below works only we have at most one equal encoding constraint
