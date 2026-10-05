@@ -415,13 +415,6 @@ class FoldLramToLramConversionChain : public OpRewritePattern<torq_hl::ConvertOp
     }
 };
 
-static bool isSliceOfEmpty(Value value) {
-    while (auto sliceOp = value.getDefiningOp<tensor::ExtractSliceOp>()) {
-        value = sliceOp.getSource();
-    }
-    return isa_and_nonnull<tensor::EmptyOp>(value.getDefiningOp());
-}
-
 // True if every use of `value` is a DPS init that its op writes without reading.
 static bool isOnlyOverwritten(Value value) {
     bufferization::AnalysisState state{bufferization::BufferizationOptions()};
@@ -458,7 +451,7 @@ class FoldConvertOfUnusedData : public OpRewritePattern<torq_hl::ConvertOp> {
             return failure();
         }
 
-        if (!isSliceOfEmpty(op.getInput()) && !isOnlyOverwritten(op.getOutput())) {
+        if (!isOnlyOverwritten(op.getOutput())) {
             return failure();
         }
 
