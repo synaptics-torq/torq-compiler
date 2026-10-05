@@ -181,3 +181,64 @@ def test_silu_gate_is_sliced(torq_compiler, tmp_path):
     layers on one slice, 1.5x main."""
     dump = dispatch_dump_after(torq_compiler, tmp_path, SILU, "torq-linalg-slicing")
     assert "scf.forall" in dump, f"the SiLU group was not sliced:\n{dump}"
+
+
+def depthwise_block(h, cin, c, with_conv):
+    """TOSA i8 block: optional 1x1 conv cin -> c with its rescale, then a 3x3
+    depthwise conv on c channels with its rescale, at h x h."""
+    x = "%r" if with_conv else "%x"
+    conv = f"""
+    %w = "tosa.const"() <{{values = dense<3> : tensor<{c}x1x1x{cin}xi8>}}> : () -> tensor<{c}x1x1x{cin}xi8>
+    %c = tosa.conv2d %x, %w, %b, %zp, %zp {{acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>}} : (tensor<1x{h}x{h}x{cin}xi8>, tensor<{c}x1x1x{cin}xi8>, tensor<{c}xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x{h}x{h}x{c}xi32>
+    %r = tosa.rescale %c, %m, %s, %z32, %zp {{input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true}} : (tensor<1x{h}x{h}x{c}xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x{h}x{h}x{c}xi8>"""
+    return f"""
+module {{
+  func.func @main(%x: tensor<1x{h}x{h}x{cin if with_conv else c}xi8>) -> tensor<1x{h}x{h}x{c}xi8> {{
+    %b = "tosa.const"() <{{values = dense<7> : tensor<{c}xi32>}}> : () -> tensor<{c}xi32>
+    %dw = "tosa.const"() <{{values = dense<2> : tensor<3x3x{c}x1xi8>}}> : () -> tensor<3x3x{c}x1xi8>
+    %zp = "tosa.const"() <{{values = dense<0> : tensor<1xi8>}}> : () -> tensor<1xi8>
+    %m = "tosa.const"() <{{values = dense<1073741824> : tensor<1xi32>}}> : () -> tensor<1xi32>
+    %s = "tosa.const"() <{{values = dense<38> : tensor<1xi8>}}> : () -> tensor<1xi8>
+    %z32 = "tosa.const"() <{{values = dense<0> : tensor<1xi32>}}> : () -> tensor<1xi32>{conv if with_conv else ""}
+    %d = tosa.depthwise_conv2d {x}, %dw, %b, %zp, %zp {{acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 1, 1, 1, 1>, stride = array<i64: 1, 1>}} : (tensor<1x{h}x{h}x{c}xi8>, tensor<3x3x{c}x1xi8>, tensor<{c}xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x{h}x{h}x{c}xi32>
+    %y = tosa.rescale %d, %m, %s, %z32, %zp {{input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true}} : (tensor<1x{h}x{h}x{c}xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x{h}x{h}x{c}xi8>
+    return %y : tensor<1x{h}x{h}x{c}xi8>
+  }}
+}}
+"""
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize(
+    "h,cin,c",
+    [
+        # TileAndFuse puts the conv and the depthwise in one tile loop.
+        (56, 24, 144),
+        # 60 channels: the conv is sliced with a peeled remainder of 4.
+        (28, 64, 60),
+    ],
+)
+def test_depthwise_after_conv_stays_whole(torq_compiler, tmp_path, h, cin, c):
+    """A depthwise conv whose input a conv in the same block computes stays on
+    one slice. Slicing it on channels made MobileNet V2 slower than one slice."""
+    dump = dispatch_dump_after(
+        torq_compiler, tmp_path, depthwise_block(h, cin, c, True), "torq-linalg-slicing"
+    )
+    assert any(in_forall(dump, "linalg.conv_2d_nchw_fchw")), (
+        f"the conv was not sliced, so this test proves nothing:\n{dump}"
+    )
+    dw = in_forall(dump, "linalg.depthwise_conv_2d_nchw_chw")
+    assert dw and not any(dw), f"the depthwise conv was sliced:\n{dump}"
+
+
+@pytest.mark.ci
+def test_depthwise_on_tiled_input_is_sliced(torq_compiler, tmp_path):
+    """A depthwise conv that reads an extract_slice of a value from outside its
+    tile loop is still sliced."""
+    dump = dispatch_dump_after(
+        torq_compiler, tmp_path, depthwise_block(112, 0, 96, False), "torq-linalg-slicing"
+    )
+    assert "scf.for " in dump, f"the depthwise conv was not tiled, so this test proves nothing:\n{dump}"
+    assert any(in_forall(dump, "linalg.depthwise_conv_2d_nchw_chw")), (
+        f"the depthwise conv was not sliced:\n{dump}"
+    )

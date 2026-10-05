@@ -353,6 +353,44 @@ static bool convKeptSingleSlice(Operation *op) {
     return conv && conv->hasAttr(kSingleSliceAttr);
 }
 
+// True when `value` is computed in `block` by a conv, through pads, slices and
+// elementwise ops with one live input. A conv that is already sliced is found
+// through its scf.forall and the insert_slice of its peeled remainder.
+static bool computedByConv(Value value, Block *block) {
+    value = elementwiseChainSource(value);
+    while (auto pad = value.getDefiningOp<tensor::PadOp>())
+        value = elementwiseChainSource(pad.getSource());
+    Operation *def = value.getDefiningOp();
+    if (!def || def->getBlock() != block)
+        return false;
+    if (isa<linalg::Conv2DNchwFchwOp, linalg::Conv2DNhwcHwcfOp>(def))
+        return true;
+    if (auto forall = dyn_cast<scf::ForallOp>(def)) {
+        BlockArgument out = forall.getRegionIterArgs()[cast<OpResult>(value).getResultNumber()];
+        return llvm::any_of(forall.getCombiningOps(out), [](Operation *combining) {
+            auto insert = dyn_cast<tensor::ParallelInsertSliceOp>(combining);
+            return insert &&
+                   computedByConv(insert.getSource(), insert.getSource().getParentBlock());
+        });
+    }
+    // The remainder is inserted into the main part, and the main part into an
+    // empty tensor. Every part must come from a conv.
+    if (auto insert = dyn_cast<tensor::InsertSliceOp>(def))
+        return computedByConv(insert.getSource(), block) &&
+               (insert.getDest().getDefiningOp<tensor::EmptyOp>() ||
+                computedByConv(insert.getDest(), block));
+    return false;
+}
+
+// True when a conv in the same block computes the input of `op`. The same
+// block means TileAndFuse put the conv and `op` in the same tile loop, or
+// tiled neither of them. Slicing a depthwise conv on channels there costs more
+// than the second slice saves on MobileNet V1, V2 and V3. A depthwise conv
+// whose input comes from outside its block is still sliced.
+static bool inputFromConvInBlock(Operation *op) {
+    return computedByConv(op->getOperand(0), op->getBlock());
+}
+
 template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
     size_t slicingIter_;
     int64_t sliceCount_;
@@ -368,6 +406,14 @@ template <class ConvOp> struct ConvPattern : public OpRewritePattern<ConvOp> {
 
         if (convKeptSingleSlice(conv2DOp))
             return rewriter.notifyMatchFailure(conv2DOp, "kept on one slice");
+
+        if constexpr (std::is_same_v<ConvOp, linalg::DepthwiseConv2DNchwChwOp> ||
+                      std::is_same_v<ConvOp, linalg::DepthwiseConv2DNhwcHwcOp>) {
+            if (inputFromConvInBlock(conv2DOp))
+                return rewriter.notifyMatchFailure(
+                    conv2DOp, "depthwise input comes from a conv in its block, kept on one slice"
+                );
+        }
 
         return peelAndSlice(rewriter, conv2DOp, slicingIter_, kGrouping, sliceCount_);
     }
