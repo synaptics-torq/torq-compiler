@@ -10,6 +10,7 @@
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/ExecutorAssignment.h"
+#include "torq/Utils/SlicingThresholds.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
@@ -38,8 +39,6 @@
 namespace mlir::syna::torq {
 
 namespace {
-
-const int64_t kMinElementsForSlicing = 2000;
 
 // Return tile size for peeling.
 int64_t getPeelingTileSize(int64_t domainSize, int64_t grouping, int64_t sliceCount) {

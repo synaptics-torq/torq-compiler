@@ -17,6 +17,7 @@
 #include "torq/Target/TorqTarget.h"
 #include "torq/Transforms/Linalg/Passes.h"
 #include "torq/Transforms/TorqHL/Passes.h"
+#include "torq/Utils/SlicingThresholds.h"
 
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
@@ -85,8 +86,13 @@ struct TORQSession : public PluginSession<
 
         if (typeMnemonic == "torch-torq" || typeMnemonic == "onnx-torq") {
             if (typeMnemonic == "onnx-torq") {
+                // A packed GRU gate matmul with a batch > 1 has strided gate slices. Once
+                // LinalgSlicingPass splits the matmul, each slice goes through XRAM, so one
+                // matmul for each gate is faster.
+                mlir::torch::onnx_c::OnnxConversionOptions onnxOptions;
+                onnxOptions.gruSplitGatesMinElements = kMinElementsForSlicing;
                 passManager.addNestedPass<func::FuncOp>(
-                    mlir::torch::onnx_c::createTorchOnnxToTorchPass()
+                    mlir::torch::onnx_c::createTorchOnnxToTorchPass(onnxOptions)
                 );
             }
             buildTorchToTorqHLOpsInputConversionPassPipeline(passManager);

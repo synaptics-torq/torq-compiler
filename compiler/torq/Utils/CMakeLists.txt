@@ -24,6 +24,7 @@ iree_cc_library(
     DmaProfilingUtils.cpp
   HDRS
     MemoryUtils.h
+    SlicingThresholds.h
     PassProgressUtils.h
     TorqUtils.h
     ConversionUtils.h
