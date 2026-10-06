@@ -98,6 +98,34 @@ static Value collapseInit(PatternRewriter &rewriter, Location loc, Value init) {
     );
 }
 
+// True when `value` [N, 1, 1, F] reaches a collapse to [N, F] through single-use
+// elementwise ops only, so the expand_shape of the rewrite folds away and the ops
+// after the convolution stay 2-D. The fold collapses dims {0, 1, 2} of each op, so
+// every indexing map must keep that sequence whole or leave it out.
+static bool reachesCollapseTo2D(Value value) {
+    while (value.hasOneUse()) {
+        Operation *user = *value.getUsers().begin();
+        if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(user))
+            return collapse.getReassociationIndices() ==
+                   SmallVector<ReassociationIndices>{{0, 1, 2}, {3}};
+        auto generic = dyn_cast<linalg::GenericOp>(user);
+        if (!generic || generic.getNumResults() != 1 ||
+            generic.getNumParallelLoops() != generic.getNumLoops() ||
+            !llvm::all_of(
+                generic.getIndexingMapsArray(),
+                [](AffineMap map) {
+                    return map.isProjectedPermutation() &&
+                           linalg::isDimSequencePreserved(map, {0, 1, 2});
+                }
+            ) ||
+            !generic.getMatchingIndexingMap(&*value.getUses().begin()).isIdentity() ||
+            !generic.getIndexingMapsArray().back().isIdentity())
+            return false;
+        value = generic.getResult(0);
+    }
+    return false;
+}
+
 // Rewrites a 1x1 convolution over a single pixel,
 //   input [N, 1, 1, C] * filter [1, 1, C, F] -> [N, 1, 1, F],
 // as a matmul [N, C] x [C, F]. The TOSA import of TFLite FULLY_CONNECTED
@@ -126,12 +154,17 @@ struct SinglePixelConvToMatmul : public OpRewritePattern<ConvOp> {
         if (in[1] != 1 || in[2] != 1 || f[0] != 1 || f[1] != 1)
             return rewriter.notifyMatchFailure(conv, "not a 1x1 convolution over one pixel");
         // Only FULLY_CONNECTED, whose input is its [N, C] operand expanded to one pixel,
-        // or a graph input. A single-pixel conv inside a 4-D graph (e.g. a squeeze-excite
-        // after global pooling) stays a conv: 2-D ops there break the NHWC layout passes
-        // that follow.
+        // a graph input, or a classifier head whose result is collapsed to [N, F] (the
+        // input then comes from global pooling). A single-pixel conv whose result goes
+        // back into the 4-D graph (e.g. squeeze-excite) stays a conv: 2-D ops there
+        // break the NHWC layout passes that follow.
         auto inputExpand = input.getDefiningOp<tensor::ExpandShapeOp>();
-        if (!isa<BlockArgument>(input) && (!inputExpand || inputExpand.getSrcType().getRank() != 2))
-            return rewriter.notifyMatchFailure(conv, "input is not an [N, C] operand");
+        if (!isa<BlockArgument>(input) &&
+            (!inputExpand || inputExpand.getSrcType().getRank() != 2) &&
+            !reachesCollapseTo2D(conv->getResult(0)))
+            return rewriter.notifyMatchFailure(
+                conv, "input is not an [N, C] operand and result is not collapsed to [N, F]"
+            );
         ArrayRef<int64_t> out = initType.getShape();
         if (out[0] != in[0] || out[1] != 1 || out[2] != 1 || out[3] != f[3])
             return rewriter.notifyMatchFailure(conv, "expects a [N, 1, 1, F] result");
