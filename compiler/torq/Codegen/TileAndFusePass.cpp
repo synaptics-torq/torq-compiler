@@ -511,9 +511,9 @@ void collectOpsForMemoryCheck(
 }
 
 // An elementwise op over a full-size tensor (no broadcast operand) is tiled in its
-// own loop, so its result is loaded per tile like an activation, even when it only
-// computes a constant (a lookup table folded to a fill). Broadcast bias and scale
-// operands fold into the consumer instead.
+// own loop, so its result is loaded per tile like an activation, even when its body
+// only yields a constant (a lookup table that folded to one value). Broadcast bias
+// and scale operands fold into the consumer instead.
 static bool isElementwiseOverFullTensor(Operation *op) {
     auto genericOp = dyn_cast_if_present<linalg::GenericOp>(op);
     return genericOp && linalg::isElementwise(genericOp) &&
@@ -576,17 +576,13 @@ ModuleOp extractOpsForMemoryCheck(
         }
         else {
             // Dynamic live activations stay XRAM here, so their tiles are never
-            // charged to LRAM below. The fit check is unsound for them; warn
-            // once so a dynamic-shape model cannot pass silently.
+            // charged to LRAM below. The fit check is unsound for them; warn so
+            // a dynamic-shape model cannot pass silently.
             if (ty && !ty.hasStaticShape() && input.getDefiningOp()) {
-                static bool warned = false;
-                if (!warned) {
-                    warned = true;
-                    input.getDefiningOp()->emitWarning(
-                        "tile-and-fuse memory probe: dynamic live activation left "
-                        "uncharged in the LRAM fit check"
-                    );
-                }
+                input.getDefiningOp()->emitWarning(
+                    "tile-and-fuse memory probe: dynamic live activation left "
+                    "uncharged in the LRAM fit check"
+                );
             }
             passthroughInputs.push_back(input);
         }
@@ -1004,15 +1000,10 @@ static void chargeSliceInLram(OpBuilder &builder, tensor::ExtractSliceOp extract
                 break;
             sizes.push_back(*maybeSize);
         }
-        if (static_cast<int64_t>(sizes.size()) != ty.getRank()) {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                extract.emitWarning("tile-and-fuse memory probe: live activation slice size "
-                                    "unresolvable, LRAM charge skipped");
-            }
+        // computeSizeAtFirstIteration already warned about the size it could
+        // not resolve.
+        if (static_cast<int64_t>(sizes.size()) != ty.getRank())
             return;
-        }
         ty = RankedTensorType::get(sizes, ty.getElementType());
     }
     builder.setInsertionPoint(extract);
@@ -1206,6 +1197,8 @@ static int64_t countTiles(
         if (!size || *size <= 0)
             return std::numeric_limits<int64_t>::max();
         int64_t domainCount = div_ceil(iterDomainSizes[domain], *size);
+        if (domainCount == 0)
+            return 0;
         if (count > std::numeric_limits<int64_t>::max() / domainCount)
             return std::numeric_limits<int64_t>::max();
         count *= domainCount;
@@ -1495,21 +1488,22 @@ static Operation *peelToPointwiseNchwConv(Operation *op, Operation *consumerOp) 
         // A residual add (or swish mul) joins two full-size live inputs.
         // Crossing it pulls the previous block into this loop and recomputes it
         // per tile (MobileNetV2, EfficientNet on sr200). A broadcast operand
-        // such as a squeeze-excite scale does not count.
+        // such as a squeeze-excite scale does not count. Compare shapes, since
+        // an input can have a wider element type than the result (a rescale).
         SmallVector<Value> liveInputs;
         for (Value in : linalgOp.getDpsInputs())
             if (!isConstantLikeProducer(in))
                 liveInputs.push_back(in);
-        Type outTy = linalgOp->getResult(0).getType();
-        if (llvm::count_if(liveInputs, [&](Value in) { return in.getType() == outTy; }) > 1)
+        ArrayRef<int64_t> outShape = cast<ShapedType>(linalgOp->getResult(0).getType()).getShape();
+        auto isFullSize = [&](Value in) {
+            auto type = dyn_cast<ShapedType>(in.getType());
+            return type && type.getShape() == outShape;
+        };
+        if (llvm::count_if(liveInputs, isFullSize) > 1)
             break;
         // Follow the full-size input: a broadcast operand can be listed first
-        // (a squeeze-excite mul(scale, x)). Compare shapes, since a rescale's
-        // input has a wider element type than its result.
-        ArrayRef<int64_t> outShape = cast<ShapedType>(outTy).getShape();
-        auto fullSize = llvm::find_if(liveInputs, [&](Value in) {
-            return cast<ShapedType>(in.getType()).getShape() == outShape;
-        });
+        // (a squeeze-excite mul(scale, x)).
+        auto fullSize = llvm::find_if(liveInputs, isFullSize);
         Value next = fullSize != liveInputs.end() ? *fullSize
                      : liveInputs.empty()         ? Value()
                                                   : liveInputs.front();
@@ -2029,11 +2023,16 @@ void TileAndFusePass::tileAndFuse(
     // the same sharing as the real pipeline's first attempt: a tile that fits there
     // needs no fallback. The single-slice probe below and all other probes keep the
     // plain pipeline.
-    collectHeavyConvs();
-    probeWithSharedSliceBuffers_ = !heavyConvs.empty();
-    TileFit tileFit = fitTileToMemory(
-        tiOp, producerOps, getDualSliceTilingInfo(), *iterDomainConstSizes, tileOffsets, tileSizes
-    );
+    auto fitDualSliceTile = [&]() {
+        collectHeavyConvs();
+        probeWithSharedSliceBuffers_ = !heavyConvs.empty();
+        llvm::scope_exit stopSharingSliceBuffers([&] { probeWithSharedSliceBuffers_ = false; });
+        return fitTileToMemory(
+            tiOp, producerOps, getDualSliceTilingInfo(), *iterDomainConstSizes, tileOffsets,
+            tileSizes
+        );
+    };
+    TileFit tileFit = fitDualSliceTile();
 
     // MaxProducers fallback: if the consumer tile plus all candidate producers
     // can't fit in LRAM even at the smallest tile size, give up on fusing
@@ -2054,14 +2053,8 @@ void TileAndFusePass::tileAndFuse(
         tileSizes.assign(iterDomainSizes.begin(), iterDomainSizes.end());
         tilingInfo = getTilingInfo(tiOp, this->sliceCount);
         applyMatmulTilingHeuristics(tilingInfo, tiOp, *iterDomainConstSizes, producerOps);
-        collectHeavyConvs();
-        probeWithSharedSliceBuffers_ = !heavyConvs.empty();
-        tileFit = fitTileToMemory(
-            tiOp, producerOps, getDualSliceTilingInfo(), *iterDomainConstSizes, tileOffsets,
-            tileSizes
-        );
+        tileFit = fitDualSliceTile();
     }
-    probeWithSharedSliceBuffers_ = false;
 
     // A loop that tiles only the output channels of the heavy convs loads each
     // weight once, however many tiles it has. One slice saves no weight traffic
@@ -2119,7 +2112,8 @@ void TileAndFusePass::tileAndFuse(
     llvm::SmallPtrSet<Operation *, 8> fusedProducers;
     llvm::scope_exit keepSingleSliceOnlyInLoop([&] {
         for (Operation *conv : heavyConvs) {
-            // fused originals may be erased: test membership before touching conv
+            // Tiling only replaces the uses of the originals. runOnOperation
+            // erases them after this function returns, so every conv is alive.
             if (fusedProducers.contains(conv) || conv == tiOp.getOperation() ||
                 checkShareFuseGroup(tiOp, conv))
                 continue;

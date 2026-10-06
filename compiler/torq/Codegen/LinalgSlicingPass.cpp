@@ -356,7 +356,9 @@ static bool convKeptSingleSlice(Operation *op) {
 // True when `value` is computed in `block` by a conv, through pads, slices and
 // elementwise ops with one live input. A conv that is already sliced is found
 // through its scf.forall and the insert_slice of its peeled remainder.
-static bool computedByConv(Value value, Block *block) {
+static bool computedByConv(Value value, Block *block, int depth = 0) {
+    if (depth > 8)
+        return false;
     value = elementwiseChainSource(value);
     while (auto pad = value.getDefiningOp<tensor::PadOp>())
         value = elementwiseChainSource(pad.getSource());
@@ -367,18 +369,19 @@ static bool computedByConv(Value value, Block *block) {
         return true;
     if (auto forall = dyn_cast<scf::ForallOp>(def)) {
         BlockArgument out = forall.getRegionIterArgs()[cast<OpResult>(value).getResultNumber()];
-        return llvm::any_of(forall.getCombiningOps(out), [](Operation *combining) {
+        return llvm::any_of(forall.getCombiningOps(out), [&](Operation *combining) {
             auto insert = dyn_cast<tensor::ParallelInsertSliceOp>(combining);
-            return insert &&
-                   computedByConv(insert.getSource(), insert.getSource().getParentBlock());
+            return insert && computedByConv(
+                                 insert.getSource(), insert.getSource().getParentBlock(), depth + 1
+                             );
         });
     }
     // The remainder is inserted into the main part, and the main part into an
     // empty tensor. Every part must come from a conv.
     if (auto insert = dyn_cast<tensor::InsertSliceOp>(def))
-        return computedByConv(insert.getSource(), block) &&
+        return computedByConv(insert.getSource(), block, depth + 1) &&
                (insert.getDest().getDefiningOp<tensor::EmptyOp>() ||
-                computedByConv(insert.getDest(), block));
+                computedByConv(insert.getDest(), block, depth + 1));
     return false;
 }
 
