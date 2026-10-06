@@ -14,6 +14,8 @@
   <p class="help" style="background: #fff3cd; border: 1px solid #ffe69c; padding: 8px 12px;">
     <strong>A trim is currently in progress</strong> (started {{ trim_status.started_at }}),
     deleting {{ trim_status.sessions_total }} PR sessions older than {{ trim_status.retain_days }} days.
+    Progress: {{ trim_status.prs_done }}/{{ trim_status.prs_total }} PR branches done
+    ({{ trim_status.sessions_deleted }} sessions deleted so far).
   </p>
   {% endif %}
   <p class="help">

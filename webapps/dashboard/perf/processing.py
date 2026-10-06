@@ -4,6 +4,7 @@ import json
 from datetime import timedelta
 from tempfile import TemporaryDirectory
 from django.core.files.base import File
+from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
@@ -16,7 +17,7 @@ except ImportError:
         return func
     
 from perf.models import TestCase, TestRun, TestRunBatch, TestMetadata, Metric, Measurement, TestSession
-from perf.trim_status import get_trim_status, save_trim_status, timestamp
+from perf.trim_status import TrimStatus, get_trim_status, save_trim_status, timestamp
 
 
 def _classify_failure(failed_phase, failure_log):
@@ -232,7 +233,7 @@ def process_uploaded_zip(args):
                     import traceback
                     traceback.print_exc()
 
-                    print(f'Error processing test run {module}::{name}: {e}')
+                    print(f'Error processing test run: {e}')
 
             # Mark the batch as processed after all test runs have been created
             test_run_batch.processed = True
@@ -246,6 +247,79 @@ def process_uploaded_zip(args):
         # Clean up the uploaded zip file
         if os.path.exists(zip_path):
             os.remove(zip_path)
+
+
+def _delete_test_session(session_id, chunk_size=500):
+    """Delete a TestSession and all its rows bottom-up in bounded chunks.
+
+    A single TestSession can cascade to many thousands of TestRun/Measurement
+    rows; letting QuerySet.delete() cascade through all of them at once pulls
+    the whole set into memory. Deleting TestRun (and its Measurement cascade)
+    in small chunks first keeps each delete's cascade bounded, then
+    TestRunBatch and the TestSession itself are cheap to delete since no
+    children remain.
+    """    
+
+    # we want to use django for the delete here so that the attached files gets wiped too
+    while True:
+        run_ids = []
+        file_names = []
+        for pk, profiling_data, failure_log in TestRun.objects.filter(
+            test_run_batch__test_session_id=session_id
+        ).values_list('pk', 'profiling_data', 'failure_log')[:chunk_size]:
+            run_ids.append(pk)
+            if profiling_data:
+                file_names.append(profiling_data)
+            if failure_log:
+                file_names.append(failure_log)
+
+        if not run_ids:
+            break
+
+        for file_name in file_names:
+            try:
+                default_storage.delete(file_name)
+            except Exception as e:
+                print(f'Warning: Could not delete attached file {file_name}: {e}')
+
+        with transaction.atomic():
+            TestRun.objects.filter(pk__in=run_ids).delete()        
+
+    with transaction.atomic():
+        TestSession.objects.filter(pk=session_id).delete()
+
+
+def start_trim(retain_days):
+    """
+    Queue a background job to delete PR test sessions older than retain_days.
+
+    Returns a tuple (sessions_total, prs_total) if a job was queued, or None if there was
+    nothing to trim.
+    """
+    cutoff = timezone.now() - timedelta(days=retain_days)
+    sessions_to_trim = TestSession.objects.filter(
+        git_branch__startswith='refs/pull/',
+        timestamp__lt=cutoff,
+    )
+
+    sessions_total = sessions_to_trim.count()
+    if sessions_total == 0:
+        return None
+
+    prs_total = sessions_to_trim.values_list('git_branch', flat=True).distinct().count()
+
+    save_trim_status(TrimStatus(
+        in_progress=True,
+        retain_days=retain_days,
+        sessions_total=sessions_total,
+        prs_total=prs_total,
+        prs_done=0,
+        sessions_deleted=0,
+        started_at=timestamp(),
+    ))
+    trim_database.spool(retain_days=str(retain_days).encode('utf-8'))
+
+    return sessions_total, prs_total
 
 
 @spool
@@ -262,31 +336,51 @@ def trim_database(args):
     retain_days = int(args['retain_days'])
     cutoff = timezone.now() - timedelta(days=retain_days)
 
-    # Delete in small batches of ids: QuerySet.delete() collects the whole
-    # matching set plus all cascaded rows in memory at once, which OOMs
-    # when there are many old sessions to trim.
-    BATCH_SIZE = 10
-
     status = get_trim_status()
-    deleted_total = 0
+
+    # we split the work to avoid doing OOM on small servers
+    sessions_deleted = 0
+    prs_done = 0
     try:
         while True:
-            batch_ids = list(
+            branches = list(
                 TestSession.objects.filter(
                     git_branch__startswith='refs/pull/',
                     timestamp__lt=cutoff,
-                ).values_list('id', flat=True)[:BATCH_SIZE]
+                ).order_by('git_branch').values_list('git_branch', flat=True)[:1]
             )
 
-            if not batch_ids:
+            if not branches:
                 break
+            branch = branches[0]
 
-            with transaction.atomic():
-                deleted, _ = TestSession.objects.filter(id__in=batch_ids).delete()
-            deleted_total += deleted
+            while True:
+                session_ids = list(
+                    TestSession.objects.filter(
+                        git_branch=branch,
+                        timestamp__lt=cutoff,
+                    ).order_by('pk').values_list('id', flat=True)[:1]
+                )
 
-        print(f'Trim completed. Deleted {deleted_total} total rows for PR sessions older than {retain_days} days.')
+                if not session_ids:
+                    break
+
+                with transaction.atomic():                    
+                    _delete_test_session(session_ids[0], chunk_size=500)
+
+                sessions_deleted += 1
+
+                status.sessions_deleted = sessions_deleted
+                save_trim_status(status)
+
+            prs_done += 1
+            status.prs_done = prs_done
+            save_trim_status(status)
+
+        print(f'Trim completed. Deleted {sessions_deleted} PR sessions for {prs_done} PR branches older than {retain_days} days.')
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f'Error trimming database: {e}')
         status.error = str(e)
     finally:

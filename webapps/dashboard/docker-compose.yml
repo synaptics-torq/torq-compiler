@@ -49,10 +49,15 @@ services:
 
   torq-bucket:
     image: chrislusf/seaweedfs:4.13
-    command: "server -s3 -s3.iam=false"
+    command: "server -s3 -s3.iam=false -s3.config=/etc/seaweedfs/s3.json"
 
     volumes:
       - torq-bucket-data:/data
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    
+    ports:
+      - "8888:8888"
+      - "9333:9333"
 
 volumes:
   torq-db-data:

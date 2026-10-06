@@ -16,7 +16,7 @@ from rest_framework import serializers
 from .models import TestCase, TestSession, TestRun, TestRunBatch, TestGroup
 from .serializers import TestCaseSerializer, TestSessionSerializer, TestRunSerializer, TestGroupDetailSerializer, TestGroupListSerializer
 from . import queries
-from .processing import process_uploaded_zip
+from .processing import process_uploaded_zip, start_trim
 
 
 class StandardResultsSetPagination(PageNumberPagination):
@@ -245,7 +245,36 @@ class TestSessionViewSet(viewsets.ReadOnlyModelViewSet):
         # Return the serialized test session
         payload = self.get_serializer(test_session).data
         return Response(payload, status=status.HTTP_201_CREATED)
-        
+
+    @extend_schema(
+        request=None,
+        responses={
+            200: inline_serializer(name='TrimDatabaseResponse', fields={'detail': serializers.CharField()}),
+            202: inline_serializer(name='TrimDatabaseQueuedResponse', fields={'detail': serializers.CharField()}),
+        },
+        summary='Trim old PR test sessions',
+        description=(
+            'Queues a background job to delete PR branch (refs/pull/*) test sessions whose '
+            'timestamp is older than 14 days.'
+        ),
+    )
+    @action(detail=False, methods=['post'])
+    def trim(self, request):
+        retain_days = 14
+        result = start_trim(retain_days)
+
+        if result is None:
+            return Response(
+                {'detail': 'Nothing to trim. No PR sessions are older than the selected age.'},
+                status=status.HTTP_200_OK,
+            )
+
+        trim_count, _ = result
+        return Response(
+            {'detail': f'Trim queued. Deleting {trim_count} PR sessions older than {retain_days} days in the background.'},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
 
 class TestRunViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = TestRun.objects.all()

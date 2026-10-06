@@ -1,13 +1,9 @@
 from django import forms
 from django.contrib import admin, messages
 from django.shortcuts import redirect, render
-from django.utils import timezone
 
-from datetime import timedelta
-
-from .models import TestSession
-from .processing import trim_database
-from .trim_status import TrimStatus, get_trim_status, save_trim_status, timestamp
+from .processing import start_trim
+from .trim_status import get_trim_status
 
 
 class TrimDatabaseForm(forms.Form):
@@ -25,27 +21,13 @@ def trim_database_view(request):
 
         if form.is_valid():
             retain_days = form.cleaned_data['retain_days']
-            cutoff = timezone.now() - timedelta(days=retain_days)
+            result = start_trim(retain_days)
 
-            sessions_to_trim = TestSession.objects.filter(
-                git_branch__startswith='refs/pull/',
-                timestamp__lt=cutoff,
-            )
-
-            trim_count = sessions_to_trim.count()
-            if trim_count == 0:
+            if result is None:
                 messages.info(request, 'Nothing to trim. No PR sessions are older than the selected age.')
                 return redirect('admin:index')
 
-            # Hand off the deletion to the background spooler so the request doesn't block on it
-            save_trim_status(TrimStatus(
-                in_progress=True,
-                retain_days=retain_days,
-                sessions_total=trim_count,
-                started_at=timestamp(),
-            ))
-            trim_database.spool(retain_days=str(retain_days).encode('utf-8'))
-
+            trim_count, pr_count = result
             messages.warning(
                 request,
                 f'Trim queued. Deleting {trim_count} PR sessions older than {retain_days} days in the background.',

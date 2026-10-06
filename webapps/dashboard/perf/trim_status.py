@@ -16,6 +16,9 @@ class TrimStatus:
     in_progress: bool = False
     retain_days: Optional[int] = None
     sessions_total: Optional[int] = None
+    prs_total: Optional[int] = None
+    prs_done: Optional[int] = None
+    sessions_deleted: Optional[int] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     error: Optional[str] = None
