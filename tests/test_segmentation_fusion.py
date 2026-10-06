@@ -5,14 +5,16 @@ import pytest
 
 from torq.testing.iree import MODELS_DIR
 
-# One slice keeps the output-channel loop out of the way, so a torq_hl.segmentation lands
-# directly on its producer conv and torq-torqhl-optimize-segmentation can fold it (sr200 layout).
+# On one slice a torq_hl.segmentation lands directly on its producer conv (sr200 layout). On two
+# slices the producer is in an scf.forall over output channels, and
+# torq-torqhl-optimize-segmentation folds the segmentation through that loop.
 ONE_SLICE_HW = "0x1:256:1:coral_v2::8:0.65:native:host:host"
+TWO_SLICE_HW = "SL2610"
 
 CONV_RE = re.compile(r'"torq_hl\.(conv2d|depthwise_conv2d)".*?stride = array<i64: ([0-9, ]+)>')
 
 
-def _segmented_producers(torq_compiler, tmp_path, name):
+def _segmented_producers(torq_compiler, tmp_path, name, hw):
     """Return the stride of every conv that writes segmented output after the segmentation pass."""
     model = MODELS_DIR / "torch_ops" / f"{name}.mlir"
     cmd = [
@@ -20,7 +22,7 @@ def _segmented_producers(torq_compiler, tmp_path, name):
         str(model),
         "-o",
         str(tmp_path / "model.vmfb"),
-        f"--torq-hw={ONE_SLICE_HW}",
+        f"--torq-hw={hw}",
         "--torq-target-host-triple=native",
         "--torq-disable-host",
         "--torq-disable-css",
@@ -37,6 +39,7 @@ def _segmented_producers(torq_compiler, tmp_path, name):
 
 
 @pytest.mark.ci
+@pytest.mark.parametrize("hw", [ONE_SLICE_HW, TWO_SLICE_HW], ids=["one_slice", "two_slices"])
 @pytest.mark.parametrize(
     "name,stride",
     [
@@ -45,7 +48,7 @@ def _segmented_producers(torq_compiler, tmp_path, name):
         ("conv2d_bf16_8x8x3x3_s1_into_s2_segment_output_8x8x40", (1, 1)),
     ],
 )
-def test_producer_writes_segmented_output(torq_compiler, tmp_path, name, stride):
-    """On one-slice targets the consumer's segmentation folds into the producer, so the numeric
+def test_producer_writes_segmented_output(torq_compiler, tmp_path, name, stride, hw):
+    """The consumer's segmentation folds into the producer on one and two slices, so the numeric
     fixtures of the same name exercise the segmented write of stride-1 and stride-2 producers."""
-    assert stride in _segmented_producers(torq_compiler, tmp_path, name)
+    assert stride in _segmented_producers(torq_compiler, tmp_path, name, hw)

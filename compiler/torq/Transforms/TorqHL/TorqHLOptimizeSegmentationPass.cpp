@@ -33,12 +33,10 @@ template <typename T> void setSegmentAttr(T op) {
 }
 
 template <typename T>
-static void
-modifyForSegmentedOutput(T op, torq_hl::SegmentationOp segOp, PatternRewriter &rewriter) {
+static void modifyForSegmentedOutput(T op, RankedTensorType outputType, PatternRewriter &rewriter) {
     setSegmentAttr(op);
     PatternRewriter::InsertionGuard g(rewriter);
     rewriter.setInsertionPoint(op.getOperation());
-    auto outputType = llvm::cast<RankedTensorType>(segOp.getOutput().getType());
     auto newInit = tensor::EmptyOp::create(
         rewriter, op->getLoc(), outputType.getShape(), outputType.getElementType()
     );
@@ -93,6 +91,35 @@ class DeduplicateSegmentationPattern : public OpRewritePattern<torq_hl::Segmenta
     }
 };
 
+// LinalgSlicing slices a producer on channels into an scf.forall. Each
+// iteration inserts whole H x W planes of a channel range. Segmentation
+// reorders each plane on its own, so the producer can write segmented output
+// into its channel range. Returns that producer, or nullptr.
+static Operation *getChannelSlicedProducer(scf::ForallOp forallOp, OpResult result) {
+    if (!forallOp.getOutputs()[result.getResultNumber()].getDefiningOp<tensor::EmptyOp>()) {
+        return nullptr;
+    }
+    BlockArgument out = forallOp.getRegionIterArgs()[result.getResultNumber()];
+    SmallVector<Operation *> combiningOps = forallOp.getCombiningOps(out);
+    if (combiningOps.size() != 1) {
+        return nullptr;
+    }
+    auto insertOp = dyn_cast<tensor::ParallelInsertSliceOp>(combiningOps.front());
+    if (!insertOp || !insertOp.getSource().hasOneUse() || !insertOp.hasUnitStride()) {
+        return nullptr;
+    }
+    ArrayRef<int64_t> destShape = insertOp.getDestType().getShape();
+    SmallVector<OpFoldResult> offsets = insertOp.getMixedOffsets();
+    SmallVector<OpFoldResult> sizes = insertOp.getMixedSizes();
+    for (int64_t dim : {2, 3}) {
+        if (!isConstantIntValue(offsets[dim], 0) ||
+            !isConstantIntValue(sizes[dim], destShape[dim])) {
+            return nullptr;
+        }
+    }
+    return insertOp.getSource().getDefiningOp();
+}
+
 class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -112,11 +139,12 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
         if (inputType.getShape()[3] % 2) {
             return failure();
         }
-        auto op = segOp.getInput().getDefiningOp();
+        Value input = segOp.getInput();
+        auto op = input.getDefiningOp();
         if (!op) {
             return failure();
         }
-        if (!op->getResult(0).hasOneUse()) {
+        if (!input.hasOneUse()) {
             // No need to segment if the output is consumed by only one op
             return failure();
         }
@@ -124,16 +152,25 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
         // If the defining op has any user that is NOT a SegmentationOp,
         // we cannot set segment_output because that user expects
         // non-segmented output.
-        for (auto *user : op->getResult(0).getUsers()) {
+        for (auto *user : input.getUsers()) {
             if (!isa<torq_hl::SegmentationOp>(user)) {
                 return failure();
             }
         }
 
+        auto outputType = llvm::cast<RankedTensorType>(segOp.getOutput().getType());
+        if (auto forallOp = dyn_cast<scf::ForallOp>(op)) {
+            op = getChannelSlicedProducer(forallOp, cast<OpResult>(input));
+            if (!op || outputType != inputType) {
+                return failure();
+            }
+            outputType = llvm::cast<RankedTensorType>(op->getResult(0).getType());
+        }
+
         bool segment_output =
             TypeSwitch<Operation *, bool>(op)
                 .Case<torq_hl::Conv2DOp, torq_hl::DepthwiseConv2DOp, torq_hl::AddOp>([&](auto op) {
-                    modifyForSegmentedOutput(op, segOp, rewriter);
+                    modifyForSegmentedOutput(op, outputType, rewriter);
                     return true;
                 })
                 .Default([&](Operation *op) { return false; });
