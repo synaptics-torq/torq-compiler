@@ -137,11 +137,14 @@ chooseTileSizes(linalg::GenericOp genericOp, unsigned reductionDim, int64_t redu
     return tileSizes;
 }
 
-LogicalResult tileReduction(IRRewriter &rewriter, linalg::GenericOp genericOp) {
+LogicalResult
+tileReduction(IRRewriter &rewriter, linalg::GenericOp genericOp, bool longReductionsOnly) {
     auto reductionDimAndSize = getSupportedReductionDimAndSize(genericOp);
     if (!reductionDimAndSize)
         return success();
     auto [reductionDim, reductionSize] = *reductionDimAndSize;
+    if (longReductionsOnly && reductionSize <= kMaxReduceTileElements)
+        return success();
 
     FailureOr<SmallVector<int64_t>> tileSizes =
         chooseTileSizes(genericOp, reductionDim, reductionSize);
@@ -204,6 +207,8 @@ LogicalResult tileReduction(IRRewriter &rewriter, linalg::GenericOp genericOp) {
 class ReductionTilingPass : public impl::ReductionTilingBase<ReductionTilingPass> {
   public:
     using ReductionTilingBase::ReductionTilingBase;
+    explicit ReductionTilingPass(bool longReductionsOnly)
+        : longReductionsOnly(longReductionsOnly) {}
 
     void runOnOperation() override {
         SmallVector<linalg::GenericOp> reductions;
@@ -215,19 +220,23 @@ class ReductionTilingPass : public impl::ReductionTilingBase<ReductionTilingPass
 
         IRRewriter rewriter(&getContext());
         for (linalg::GenericOp genericOp : reductions) {
-            if (failed(tileReduction(rewriter, genericOp))) {
+            if (failed(tileReduction(rewriter, genericOp, longReductionsOnly))) {
                 genericOp.emitError("failed to tile reduction for NSS constraints");
                 signalPassFailure();
                 return;
             }
         }
     }
+
+  private:
+    bool longReductionsOnly = false;
 };
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createReductionTilingPass() {
-    return std::make_unique<ReductionTilingPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>>
+createReductionTilingPass(bool longReductionsOnly) {
+    return std::make_unique<ReductionTilingPass>(longReductionsOnly);
 }
 
 } // namespace mlir::syna::torq

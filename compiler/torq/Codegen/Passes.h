@@ -104,7 +104,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createKernelSelectionPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveAddressesPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createReductionTilingPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>>
+createReductionTilingPass(bool longReductionsOnly = false);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createTileAndFusePass(int64_t sliceCount = 0);
 

@@ -150,6 +150,7 @@ void addPostTileAndFuseLoweringPasses(
         funcPm.addPass(createFuseTransposeIntoGroupPass());
         funcPm.addPass(createLinalgSlicingPass(TorqHw::get().getSliceCount()));
     }
+    funcPm.addPass(createReductionTilingPass());
 
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
@@ -400,7 +401,7 @@ void addSlicePassesUpToTileAndFuse(OpPassManager &pm) {
     }
 
     funcPm.addPass(createMarkPatternsForTileAndFusePass());
-    funcPm.addPass(createReductionTilingPass());
+    funcPm.addPass(createReductionTilingPass(/*longReductionsOnly=*/true));
     funcPm.addPass(createTileAndFusePass(TorqHw::get().getSliceCount()));
 }
 

@@ -113,14 +113,18 @@ std::optional<unsigned> getBlockArgNumber(Value v, linalg::GenericOp op) {
     return ba.getArgNumber();
 }
 
-// Erase the op producing `v` when it has no remaining users.  Used for the
-// original weight-sum producer (direct reduce or tiled scf.for): it is dead
-// once the zp correction is folded into scale_bias, and scf ops are not legal
-// in the pre-conversion target.
+// Erase the dead weight-sum producer once its correction is folded into scale_bias.
+// A partial-result merge also leaves its source loop dead.
 void eraseIfDead(Value v, PatternRewriter &rewriter) {
     Operation *op = v.getDefiningOp();
-    if (op && op->use_empty())
-        rewriter.eraseOp(op);
+    if (!op || !op->use_empty())
+        return;
+    Value partials;
+    if (auto merge = dyn_cast<linalg::ReduceOp>(op))
+        partials = merge.getInputs()[0];
+    rewriter.eraseOp(op);
+    if (partials)
+        eraseIfDead(partials, rewriter);
 }
 
 // Matches the weight column-sum reduce produced by the quantized-matmul
@@ -153,19 +157,43 @@ bool isWeightSumReduce(linalg::GenericOp op, Value weights) {
 }
 
 // The weight column-sum reduce may have been tiled for LRAM into an scf.for
-// over the K dim (TileReductionForLram):
+// over the K dim:
 //   %r = scf.for ... iter_args(%acc = %zero) {
 //     %slice = tensor.extract_slice %weights[k, 0] [t, O] ...
 //     %sum = linalg.generic ... ins(%slice) ... {extsi, addi}
 //     %ins = tensor.insert_slice %sum into %acc ...
 //     scf.yield %ins }
-// Accept both the direct and the tiled producer form.
+// Independent partials add a final linalg.reduce over [O, chunks]. Accept both tiled forms.
 bool isWeightSumProducer(Value v, Value weights) {
     auto ty = dyn_cast<RankedTensorType>(v.getType());
     if (!ty || ty.getRank() != 1 || !ty.getElementType().isInteger(32))
         return false;
     if (auto genOp = v.getDefiningOp<linalg::GenericOp>())
         return isWeightSumReduce(genOp, weights);
+
+    if (auto merge = v.getDefiningOp<linalg::ReduceOp>()) {
+        if (merge.getInputs().size() != 1 || merge.getDimensions() != ArrayRef<int64_t>{1})
+            return false;
+        auto partialTy = dyn_cast<RankedTensorType>(merge.getInputs()[0].getType());
+        if (!partialTy || partialTy.getRank() != 2 || partialTy.getDimSize(0) != ty.getDimSize(0) ||
+            partialTy.getElementType() != ty.getElementType())
+            return false;
+        auto yield = dyn_cast<linalg::YieldOp>(merge.getBody()->getTerminator());
+        auto add = yield && yield.getNumOperands() == 1
+                       ? yield.getOperand(0).getDefiningOp<arith::AddIOp>()
+                       : nullptr;
+        if (!add)
+            return false;
+        auto isArg = [&](Value operand, unsigned index) {
+            auto arg = dyn_cast<BlockArgument>(operand);
+            return arg && arg.getOwner() == merge.getBody() && arg.getArgNumber() == index;
+        };
+        if (!((isArg(add.getLhs(), 0) && isArg(add.getRhs(), 1)) ||
+              (isArg(add.getLhs(), 1) && isArg(add.getRhs(), 0))))
+            return false;
+        v = merge.getInputs()[0];
+    }
+
     auto forOp = v.getDefiningOp<scf::ForOp>();
     if (!forOp)
         return false;
