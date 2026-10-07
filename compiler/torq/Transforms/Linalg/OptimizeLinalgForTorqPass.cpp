@@ -48,6 +48,8 @@ class OptimizeLinalgForTorqPass
 
             populateRaiseDynamicQuantizeOpPatterns(ctx, patterns);
 
+            populateRaiseIntMeanToPoolingPatterns(ctx, patterns);
+
             populateOptimizeSelectPatterns(ctx, patterns);
 
             populateDecomposeLinalgOpsPatterns(ctx, patterns);

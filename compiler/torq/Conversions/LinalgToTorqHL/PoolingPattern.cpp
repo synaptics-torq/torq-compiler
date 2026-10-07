@@ -385,6 +385,22 @@ struct PoolingNchwSumOpConversion : public OpRewritePattern<linalg::PoolingNchwS
         // Try to fold a downstream elementwise mulf/divf generic op into the avgpool weight.
         auto [scaleValue, fusedGenericOp] = tryExtractFusedScale(output);
 
+        // Integer pooling folds the requantization that follows it, so `output` becomes
+        // the requantized value. A per-tensor requantization (TFLite AVERAGE_POOL_2D, or
+        // MEAN raised to a pool) has one scale, which already includes the 1/(H*W).
+        ScaleClampInfo scInfo;
+        bool perTensorScale = false;
+        if (isInt) {
+            scInfo = foldForwardScaleClamp(output, channelCount, _shift8b, _shift16b, true);
+            if (!scInfo) {
+                scInfo = foldForwardScaleClamp(output, 1, _shift8b, _shift16b, false);
+                perTensorScale = static_cast<bool>(scInfo);
+            }
+            if (!scInfo) {
+                return rewriter.notifyMatchFailure(linalgOp, "Cannot fold forward scale/clamp");
+            }
+        }
+
         if (_markFuseGroups) {
             // If we found a downstream fused generic, update output so that
             // markFuseGroupBackward walks through it and marks it in the same group.
@@ -411,15 +427,12 @@ struct PoolingNchwSumOpConversion : public OpRewritePattern<linalg::PoolingNchwS
         int32_t shiftFactor = 0;
 
         if (isInt) {
-            ScaleClampInfo scInfo =
-                foldForwardScaleClamp(output, channelCount, _shift8b, _shift16b, true);
-            if (!scInfo) {
-                return rewriter.notifyMatchFailure(linalgOp, "Cannot fold forward scale/clamp");
-            }
             ScaleInfo scaleInput0;
             const std::vector<int32_t> scale(
                 channelCount,
-                int32_t(scaleInput0.scale * (1 << scInfo.scaleShift) / itemsPerChannel)
+                perTensorScale
+                    ? scInfo.scaleNpu[0]
+                    : int32_t(scaleInput0.scale * (1 << scInfo.scaleShift) / itemsPerChannel)
             );
             const std::vector<int32_t> bias(channelCount, -scInfo.bias);
             biasScale = createConst(interleave(bias, scale), rewriter, loc);
@@ -454,6 +467,17 @@ struct PoolingNchwSumOpConversion : public OpRewritePattern<linalg::PoolingNchwS
 
         if (fusedGenericOp) {
             rewriter.replaceOp(fusedGenericOp, torqOut);
+            rewriter.eraseOp(linalgOp);
+        }
+        else if (isInt) {
+            // Replace the folded requantization, then erase the ops it consumed.
+            SmallVector<Operation *> folded;
+            for (Operation *op = output.getDefiningOp(); op != linalgOp;
+                 op = op->getOperand(0).getDefiningOp())
+                folded.push_back(op);
+            rewriter.replaceOp(folded.front(), torqOut);
+            for (Operation *op : llvm::drop_begin(folded))
+                rewriter.eraseOp(op);
             rewriter.eraseOp(linalgOp);
         }
         else {

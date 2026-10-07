@@ -31,6 +31,7 @@ iree_cc_library(
     FoldUnitExtentWrapperPass.cpp
     RaiseSoftmaxOpPattern.cpp
     RaiseDynamicQuantizePattern.cpp
+    RaiseIntMeanToPoolingPattern.cpp
     RaiseMatMulIntegerPattern.cpp
     OptimizeElementwiseBinaryOpPattern.cpp
     OptimizeSelectOpPattern.cpp

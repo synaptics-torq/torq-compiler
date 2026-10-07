@@ -369,6 +369,15 @@ bool isSupportedNhwcAnchorOp(Operation *op) {
         }
         return true;
     }
+    // Integer global sum pooling (TFLite AVERAGE_POOL_2D and MEAN) lowers through the
+    // NCHW average pool pattern, which folds the requantization that follows the pool.
+    if (auto sumOp = dyn_cast<linalg::PoolingNhwcSumOp>(op)) {
+        auto inputShape = cast<RankedTensorType>(sumOp.getInputs()[0].getType()).getShape();
+        auto windowShape = cast<RankedTensorType>(sumOp.getInputs()[1].getType()).getShape();
+        auto outType = cast<RankedTensorType>(sumOp.getResultTensors()[0].getType());
+        return outType.getElementType().isInteger() && inputShape.size() == 4 &&
+               windowShape == inputShape.slice(1, 2);
+    }
     return isa<
         linalg::Conv2DNhwcHwcfOp, linalg::PoolingNhwcMaxOp, linalg::DepthwiseConv2DNhwcHwcOp>(op);
 }
@@ -409,6 +418,20 @@ FailureOr<Value> convertAnchorToNchw(
                              << "\n"
             );
             return nchwOp.getResult(0);
+        })
+
+        // ── linalg.pooling_nhwc_sum → linalg.pooling_nchw_sum ─────────────
+        .Case<linalg::PoolingNhwcSumOp>([&](linalg::PoolingNhwcSumOp poolOp) -> FailureOr<Value> {
+            Value kernel = poolOp.getInputs()[1];
+            auto outType = cast<RankedTensorType>(poolOp.getOutputs()[0].getType());
+            Value nchwInit = createZeroFilledTensor(
+                rewriter, loc, nhwcToNchwShape(outType.getShape()), outType.getElementType()
+            );
+            return linalg::PoolingNchwSumOp::create(
+                       rewriter, loc, nchwInit.getType(), ValueRange{inputNchw, kernel},
+                       ValueRange{nchwInit}, poolOp.getStrides(), poolOp.getDilations()
+            )
+                .getResult(0);
         })
 
         // ── linalg.pooling_nhwc_max → linalg.pooling_nchw_max ─────────────
