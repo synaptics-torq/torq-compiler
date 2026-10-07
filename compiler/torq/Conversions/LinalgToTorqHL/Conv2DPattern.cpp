@@ -611,6 +611,10 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         Value input = convOp.image();
         Value weights = convOp.filter();
         Value output = convOp.getResultTensors()[0];
+        // The conv's own result tensor: foldBackwardPadding reasons about the conv's
+        // spatial geometry and must not see the fusion-rebound (possibly rank-reduced)
+        // terminal output.
+        Value convOutput = output;
 
         auto inputType = llvm::cast<RankedTensorType>(input.getType());
         auto shape = inputType.getShape();
@@ -733,7 +737,10 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         auto foldOrKeepExplicitPad = [&]() {
             Value origInput = input;
             SmallVector<Operation *> foldOps;
-            padInfo = foldBackwardPadding(input, rewriter, isNchw, output, &foldOps);
+            // The conv's own result tensor: foldBackwardPadding reasons about the conv's
+            // spatial geometry and must not see the fusion-rebound (possibly rank-reduced)
+            // terminal output.
+            padInfo = foldBackwardPadding(input, rewriter, isNchw, convOutput, &foldOps);
             auto wShape = cast<RankedTensorType>(weights.getType()).getShape();
             auto strideVals = attrValuesAsVec(convOp.getStrides());
             int64_t strideH = strideVals.empty() ? 1 : strideVals[0];

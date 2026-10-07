@@ -14,6 +14,15 @@
 //
 // Block sizes bH and bW are chosen independently per axis as the largest
 // divisor of (kDim, stride, inputDim) such that kDim/b <= 7 and stride/b <= 2.
+//
+// The H axis is left native (bH = 1) only for a fully valid (2,1) conv (stride
+// (2,1), kernel <= 7, no border pad on either spatial axis) — the one
+// stride-2 mix verified to lower correctly on the HW in this tree without a
+// data movement. Every other axis keeps the baseline block search (folding
+// when a valid block exists). Leaving any other stride-2 axis native would be
+// a pure loss: the S2D transpose lowers to a real runtime slice task, and the
+// non-(2,1) stride-2/pad combinations are either mis-computed or rejected by
+// the HW lowering, so those axes must be folded.
 // The pattern fires only when at least one axis requires decomposition.
 //
 // PRECONDITIONS (per axis, independently for H and W):
@@ -61,6 +70,7 @@
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -114,6 +124,98 @@ static int64_t selectBlock(
 //===----------------------------------------------------------------------===//
 // Pattern
 //===----------------------------------------------------------------------===//
+
+/// The static border pad visible on one spatial axis of the conv input.
+///
+/// A stride-2 axis is only kept native (not S2D-folded) for a fully valid
+/// (2,1) conv; see the gate in DecomposeConvWithSpaceToDepthPattern.
+/// Anything that looks like a border on the kept axes forces the baseline
+/// folded decomposition.
+struct AxisPadInfo {
+    enum class Kind {
+        None,     // no border pad on this axis (valid conv)
+        Explicit, // static pad resolved: (before, after)
+        Unknown,  // a border-adding op is present but not statically resolvable
+    } kind = Kind::None;
+    int64_t before = 0, after = 0;
+};
+
+/// Resolves the static border pad on conv-input axis `dim` (2 = H, 3 = W)
+/// for the pad forms that reach this pass:
+///   - a rank-4 tensor.pad feeding the conv (2D conv),
+///   - a tensor.pad under a unit-dim expand_shape (conv1d as conv2d),
+///   - a materialized pad: insert_slice into a zero-filled tensor.
+/// An extract_slice hiding a border, or dynamic pads, yield Unknown.
+static AxisPadInfo inputAxisPad(Value input, int64_t dim) {
+    if (auto padOp = input.getDefiningOp<tensor::PadOp>()) {
+        auto srcType = cast<RankedTensorType>(padOp.getSource().getType());
+        if (srcType.getRank() != 4)
+            return {AxisPadInfo::Kind::Unknown, 0, 0};
+        auto low = getConstantIntValue(padOp.getMixedLowPad()[dim]);
+        auto high = getConstantIntValue(padOp.getMixedHighPad()[dim]);
+        if (!low || !high)
+            return {AxisPadInfo::Kind::Unknown, 0, 0};
+        return {AxisPadInfo::Kind::Explicit, *low, *high};
+    }
+    if (auto expandOp = input.getDefiningOp<tensor::ExpandShapeOp>()) {
+        if (auto padOp = expandOp.getSrc().getDefiningOp<tensor::PadOp>()) {
+            auto resultShape = cast<RankedTensorType>(expandOp.getResult().getType()).getShape();
+            for (auto [srcDim, group] : llvm::enumerate(expandOp.getReassociationIndices())) {
+                if (!llvm::is_contained(group, dim))
+                    continue;
+                // The border of a source dim lands on the single non-unit
+                // result dim of its group; unit result dims carry no pad.
+                int64_t nonUnitDim = -1;
+                for (int64_t d : group) {
+                    if (resultShape[d] == 1)
+                        continue;
+                    if (nonUnitDim != -1)
+                        return {AxisPadInfo::Kind::Unknown, 0, 0};
+                    nonUnitDim = d;
+                }
+                auto low = getConstantIntValue(padOp.getMixedLowPad()[srcDim]);
+                auto high = getConstantIntValue(padOp.getMixedHighPad()[srcDim]);
+                if (!low || !high)
+                    return {AxisPadInfo::Kind::Unknown, 0, 0};
+                if (nonUnitDim == -1 && (*low != 0 || *high != 0))
+                    // A non-zero pad on a source dim that expands to an all-unit
+                    // group is malformed for our purposes; be conservative.
+                    return {AxisPadInfo::Kind::Unknown, 0, 0};
+                return {
+                    AxisPadInfo::Kind::Explicit, nonUnitDim == dim ? *low : 0,
+                    nonUnitDim == dim ? *high : 0
+                };
+            }
+            return {AxisPadInfo::Kind::Unknown, 0, 0};
+        }
+    }
+    if (auto insertOp = input.getDefiningOp<tensor::InsertSliceOp>()) {
+        if (insertOp.getDest().getDefiningOp<linalg::FillOp>()) {
+            auto offsets = insertOp.getStaticOffsets();
+            auto sizes = insertOp.getStaticSizes();
+            auto strides = insertOp.getStaticStrides();
+            auto destShape = cast<RankedTensorType>(insertOp.getDest().getType()).getShape();
+            if (offsets.size() != 4 || sizes.size() != 4 ||
+                llvm::any_of(offsets, ShapedType::isDynamic) ||
+                llvm::any_of(sizes, ShapedType::isDynamic) ||
+                llvm::any_of(strides, [](int64_t s) { return s != 1; }))
+                return {AxisPadInfo::Kind::Unknown, 0, 0};
+            return {
+                AxisPadInfo::Kind::Explicit, offsets[dim],
+                destShape[dim] - sizes[dim] - offsets[dim]
+            };
+        }
+    }
+    if (input.getDefiningOp<tensor::ExtractSliceOp>())
+        return {AxisPadInfo::Kind::Unknown, 0, 0};
+    return {AxisPadInfo::Kind::None, 0, 0};
+}
+
+/// Whether the axis carries a border pad (an unknown border counts as one).
+static bool hasBorderPad(const AxisPadInfo &pad) {
+    return pad.kind == AxisPadInfo::Kind::Unknown ||
+           (pad.kind == AxisPadInfo::Kind::Explicit && (pad.before != 0 || pad.after != 0));
+}
 
 /// Rewrites linalg.conv_2d_nchw_fchw with a large kernel by inserting
 /// SpaceToDepth on the input and reusing the same transform on the filter.
@@ -172,19 +274,36 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
                 convOp, "no S2D decomposition needed (kernel and stride already within HW limit)"
             );
         // Determine per-axis block sizes independently BEFORE mutating IR.
-        // Width axis: absorb sW into bW.
-        bool widthPad = W % sW;
-        bool heightPad = H % sH;
         // Max decompose stride is set to 1
         maxStride = 1;
-        const int64_t pH = (H + sH - 1) / sH * sH;
-        const int64_t pW = (W + sW - 1) / sW * sW;
+        // The H axis may stay at its native stride 2 only when the result is a
+        // fully valid (2,1) conv: the stride-2 quadrant lowering is verified
+        // for that shape, and mis-computes or aborts on every other stride-2
+        // mix — any border pad on a kept axis (the quadrant phase ignores it),
+        // a kept W axis under sH == 1 (the stride-1 path requires the W pad to
+        // equal the W border), or a kept H axis over a padded stride-1 W. A
+        // folded axis absorbs its border pad into data, so only the kept
+        // axes' pads matter. (2,2) in-limits convs never reach here (early
+        // exit above). Everything else keeps the baseline per-axis block
+        // search, so this change only removes the H-axis over-fold.
+        bool hMustFold = kH > HwInfo::nss_max_kernel_height || sH > 2;
+        bool wMustFold = kW > HwInfo::nss_max_kernel_width || sW > 2;
+        AxisPadInfo hPad = inputAxisPad(input, 2);
+        AxisPadInfo wPad = inputAxisPad(input, 3);
+        bool hKeepNative =
+            !hMustFold && sH == 2 && !hasBorderPad(hPad) && (wMustFold || !hasBorderPad(wPad));
+        bool hFold = !hKeepNative;
+        bool wFold = true; // baseline: the block search always ran per axis
+        const int64_t pHs = (H + sH - 1) / sH * sH;
+        const int64_t pWs = (W + sW - 1) / sW * sW;
 
         // Predict padded kernel sizes (same as weights_pad_with_zero) without emitting ops.
         const int64_t paddedKH = align_ceil(kH, sH);
         const int64_t paddedKW = align_ceil(kW, sW);
-        int64_t bW = selectBlock(paddedKW, sW, pW, HwInfo::nss_max_kernel_width, maxStride);
-        int64_t bH = selectBlock(paddedKH, sH, pH, HwInfo::nss_max_kernel_height, maxStride);
+        int64_t bW =
+            wFold ? selectBlock(paddedKW, sW, pWs, HwInfo::nss_max_kernel_width, maxStride) : 1;
+        int64_t bH =
+            hFold ? selectBlock(paddedKH, sH, pHs, HwInfo::nss_max_kernel_height, maxStride) : 1;
 
         if (bH == 1 && bW == 1)
             return rewriter.notifyMatchFailure(
@@ -192,14 +311,25 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
                         "or divisibility conditions not met)"
             );
 
+        // Actual pad targets: multiples of the block, not of the stride, so a
+        // non-folded axis (b == 1) stays completely unpadded. Padding a native
+        // axis to a multiple of the stride would leave a zero-padded kernel
+        // row/column behind, which the HW lowering cannot support.
+        const int64_t pH = (H + bH - 1) / bH * bH;
+        const int64_t pW = (W + bW - 1) / bW * bW;
+        bool widthPad = pW != W;
+        bool heightPad = pH != H;
+
         LLVM_DEBUG(
             llvm::dbgs() << "[S2D] Decomposing conv: kH=" << kH << " kW=" << kW << " sH=" << sH
                          << " sW=" << sW << " -> bH=" << bH << " bW=" << bW << "\n"
         );
 
         // Pad weights only after we know decomposition will proceed.
-        filter = weights_pad_with_zero(rewriter, loc, filter, 2, sH);
-        filter = weights_pad_with_zero(rewriter, loc, filter, 3, sW);
+        // Pad by the block (b == s on a folded axis with maxStride = 1, a no-op
+        // on a non-folded axis) so the pad targets match the input padding.
+        filter = weights_pad_with_zero(rewriter, loc, filter, 2, bH);
+        filter = weights_pad_with_zero(rewriter, loc, filter, 3, bW);
 
         // ------------------------------------------------------------------ //
         // 1. SpaceToDepth on input:  [N, C, H, W] -> [N, C*bH*bW, H/bH, W/bW]
