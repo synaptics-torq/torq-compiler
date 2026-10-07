@@ -19,18 +19,18 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
 
-static void resizeNearestNeighborNHWC(LData &input, LData &output, Slice &slice) {
+static void
+resizeNearestNeighborNHWC(LData &input, LData &output, Slice &slice, int scaleH, int scaleW) {
     struct In : NHWC, Vectorized {};
     int vectorSize = slice.act.width(input.elementType());
     input.vectorize(vectorSize);
-    auto scaleUp = 2;
-    output.reshapeDim(In::H, {-1, scaleUp});
-    output.reshapeDim(In::W, {-1, scaleUp});
+    output.reshapeDim(In::H, {-1, scaleH});
+    output.reshapeDim(In::W, {-1, scaleW});
     For(auto batch = slice.iterate(input.dim(In::N))) {
         For(auto h = slice.iterate(input.dim(In::H))) {
-            For(auto hScale = slice.iterate(scaleUp)) {
+            For(auto hScale = slice.iterate(scaleH)) {
                 For(auto w = slice.iterate(input.dim(In::W))) {
-                    For(auto wScale = slice.iterate(scaleUp)) {
+                    For(auto wScale = slice.iterate(scaleW)) {
                         For(auto iv = slice.iterate(input.dim(In::Vectors))) {
                             IData idata = slice.iram.load(input[batch][h][w][iv]);
                             PData pdata = slice.alu.load(idata);
@@ -44,21 +44,36 @@ static void resizeNearestNeighborNHWC(LData &input, LData &output, Slice &slice)
     }
 }
 
-static void resizeNearestNeighborNCHW(LData &input, LData &output, Slice &slice) {
+static void
+resizeNearestNeighborNCHW(LData &input, LData &output, Slice &slice, int scaleH, int scaleW) {
     struct In : NCHW, Vectorized {};
-    auto scaleUp = 2;
-    int vectorSize = slice.act.width(input.elementType()) / scaleUp;
+    bool canVectorRepeat =
+        ((scaleW == 1 || scaleW == 2 || scaleW == 4) && input.elementType() == DType::int8);
+    int vectorSize = canVectorRepeat ? slice.act.width(input.elementType()) / scaleW : 1;
     input.vectorize(vectorSize);
-    output.reshapeDim(NCHW::H, {-1, scaleUp});
+    if (!canVectorRepeat) {
+        output.reshapeDim(NCHW::W, {-1, scaleW});
+    }
+    output.reshapeDim(NCHW::H, {-1, scaleH});
     For(auto batch = slice.iterate(input.dim(In::N))) {
         For(auto c = slice.iterate(input.dim(In::C))) {
             For(auto h = slice.iterate(input.dim(In::H))) {
-                For(auto hScale = slice.iterate(scaleUp)) {
+                For(auto hScale = slice.iterate(scaleH)) {
                     For(auto iv = slice.iterate(input.dim(In::Vectors))) {
-                        IData idata = slice.iram.load(input[batch][c][h][iv]).repeat(scaleUp);
-                        PData pdata = slice.alu.load(idata);
-                        QData res = slice.act.load(pdata);
-                        slice.append(output[batch][c][h][hScale], res);
+                        if (canVectorRepeat) {
+                            IData idata = slice.iram.load(input[batch][c][h][iv]).repeat(scaleW);
+                            PData pdata = slice.alu.load(idata);
+                            QData res = slice.act.load(pdata);
+                            slice.append(output[batch][c][h][hScale], res);
+                        }
+                        else {
+                            For(auto wScale = slice.iterate(scaleW)) {
+                                IData idata = slice.iram.load(input[batch][c][h][iv]);
+                                PData pdata = slice.alu.load(idata);
+                                QData res = slice.act.load(pdata);
+                                slice.append(output[batch][c][h][hScale][iv][wScale], res);
+                            }
+                        }
                     }
                 }
             }
@@ -74,16 +89,26 @@ LogicalResult ResizeNearestNeighborPattern::transform(
     LData input(op.getInput());
     LData output(op.getInit());
     assert(input.shape().size() == 4 && output.shape().size() == 4);
+    int scaleH = op.getScaleH();
+    int scaleW = op.getScaleW();
+    assert(scaleH > 0 && scaleW > 0 && "Expected positive resize scale factors");
 
     // check the last dim are same
     bool isNHWC = (input.shape().back().count == output.shape().back().count);
+    LLVM_DEBUG({
+        llvm::dbgs() << "ResizeNearestNeighbor: scaleH=" << scaleH << ", scaleW=" << scaleW
+                     << ", layout=" << (isNHWC ? "NHWC" : "NCHW") << "\n";
+        llvm::dbgs() << "  input=" << input << "\n";
+        llvm::dbgs() << "  output=" << output << "\n";
+    });
+
     Slice slice("ResizeNearestNeighbor");
     // All cases will fall to NCHW format
     if (isNHWC) {
-        resizeNearestNeighborNHWC(input, output, slice);
+        resizeNearestNeighborNHWC(input, output, slice, scaleH, scaleW);
     }
     else {
-        resizeNearestNeighborNCHW(input, output, slice);
+        resizeNearestNeighborNCHW(input, output, slice, scaleH, scaleW);
     }
 
     rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(

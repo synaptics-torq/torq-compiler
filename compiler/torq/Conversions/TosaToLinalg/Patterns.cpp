@@ -39,7 +39,6 @@ namespace mlir::syna::torq {
 
 namespace {
 
-// FIXME: This is supported only upscale of 2, Need to support more
 struct ResizeNearestNeighborOpConversion : public OpConversionPattern<tosa::ResizeOp> {
     ResizeNearestNeighborOpConversion(MLIRContext *context) : OpConversionPattern(context) {}
 
@@ -51,12 +50,32 @@ struct ResizeNearestNeighborOpConversion : public OpConversionPattern<tosa::Resi
         if (!tosa::getConstShapeValues(srcOp.getScale().getDefiningOp(), scale)) {
             return failure();
         }
-        auto mode = adaptor.getMode();
-        // the code only supported for scale factor of 2
-        bool isScaleFactor2 = (scale[0] == (scale[1] * 2));
-        if (mode != tosa::ResizeMode::NEAREST_NEIGHBOR || !isScaleFactor2) {
+        if (scale.size() != 4) {
+            return rewriter.notifyMatchFailure(srcOp, "expected four resize scale values");
+        }
+
+        int64_t scaleHNumerator = scale[0];
+        int64_t scaleHDenominator = scale[1];
+        int64_t scaleWNumerator = scale[2];
+        int64_t scaleWDenominator = scale[3];
+        if (scaleHDenominator <= 0 || scaleWDenominator <= 0) {
+            return rewriter.notifyMatchFailure(srcOp, "expected positive scale denominators");
+        }
+        if (scaleHNumerator < scaleHDenominator || scaleWNumerator < scaleWDenominator) {
+            return rewriter.notifyMatchFailure(srcOp, "expected height and width upscale ratios");
+        }
+        if (scaleHNumerator % scaleHDenominator != 0 || scaleWNumerator % scaleWDenominator != 0) {
             return rewriter.notifyMatchFailure(
-                srcOp, "Current support only for NEAREST_NEIGHBOR with scale 2"
+                srcOp, "expected positive integer height and width upscale factors"
+            );
+        }
+
+        int64_t scaleH = scaleHNumerator / scaleHDenominator;
+        int64_t scaleW = scaleWNumerator / scaleWDenominator;
+        auto mode = adaptor.getMode();
+        if (mode != tosa::ResizeMode::NEAREST_NEIGHBOR) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "expected NEAREST_NEIGHBOR mode with integer upscale factors"
             );
         }
 
@@ -64,9 +83,10 @@ struct ResizeNearestNeighborOpConversion : public OpConversionPattern<tosa::Resi
         auto resultTypeNCHW = convertTypeNHWCtoNCHW(srcOp.getResult().getType());
         AffineExpr n, c, h, w;
         bindDims(rewriter.getContext(), n, c, h, w);
-        // NCHW maps: input[n, c, h/2, w/2] -> output[n, c, h, w]
-        auto inputMap =
-            AffineMap::get(4, 0, {n, c, h.floorDiv(2), w.floorDiv(2)}, rewriter.getContext());
+        // NCHW maps: input[n, c, h/scaleH, w/scaleW] -> output[n, c, h, w]
+        auto inputMap = AffineMap::get(
+            4, 0, {n, c, h.floorDiv(scaleH), w.floorDiv(scaleW)}, rewriter.getContext()
+        );
         auto outputMap = AffineMap::get(4, 0, {n, c, h, w}, rewriter.getContext());
         SmallVector<AffineMap, 4> indexingMaps = {inputMap, outputMap};
         SmallVector<mlir::utils::IteratorType, 4> iteratorTypes(

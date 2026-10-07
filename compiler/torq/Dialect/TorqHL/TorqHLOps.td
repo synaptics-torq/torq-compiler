@@ -1124,9 +1124,12 @@ def TorqHL_ExpandWeightsOp: TorqHL_LayerOp<"expand_weights"> {
 def TorqHL_ResizeNearestNeighborOp: TorqHL_LayerOp<"ResizeNearestNeighbor"> {
   let summary = "Resize Nearest Neighbor Operation";
   let description =[{
-    Resize Nearest Neighbor : Scale up the input by 2x by copying the nearest pixel by distance
+    Resize Nearest Neighbor: scale up the spatial dimensions by integer factors by copying the
+    nearest pixel.
   }];
-  let arguments = !con(commonArgs, (ins 
+  let arguments = !con(commonArgs, (ins
+    I64Attr:$scale_h,
+    I64Attr:$scale_w,
     TensorOrMemref: $input
   ));
 }

@@ -9,6 +9,7 @@ from .models.keras_fc import *
 from .models.keras_mean import *
 from .models.keras_pointwise import *
 from .models.keras_pooling import *
+from .models.keras_resize import *
 from .models.keras_sig_tanh_relu import *
 from .models.keras_softmax import *
 from .models.keras_transpose import *
@@ -87,6 +88,7 @@ def get_test_cases():
     test_cases.extend(_add_quantization_and_markers(get_keras_mean_test_cases(), "mean"))
     test_cases.extend(_add_quantization_and_markers(get_keras_pointwise_test_cases(), "pointwise"))
     test_cases.extend(_add_quantization_and_markers(get_keras_pooling_test_cases(), "pooling"))
+    test_cases.extend(_add_quantization_and_markers(get_keras_resize_test_cases(), "resize"))
     test_cases.extend(_add_quantization_and_markers(get_keras_sig_tanh_relu_test_cases(), "activation"))
     test_cases.extend(_add_quantization_and_markers(get_keras_softmax_test_cases(), "softmax"))
     test_cases.extend(_add_quantization_and_markers(get_keras_transpose_test_cases(), "transpose"))
@@ -98,6 +100,17 @@ def get_test_cases():
     test_cases.extend(_add_quantization_and_markers(get_audio_vision_depthwise_test_cases(), "audio_vision_depthwise", int8_only=True))
 
     return test_cases
+
+
+def get_keras_resize_test_cases():
+    return [
+        Case("model_resize_2x3", {"keras_model_name": "model_resize_2x3"}),
+        Case("model_resize_3x2", {"keras_model_name": "model_resize_3x2"}),
+        Case("model_resize_3x3", {"keras_model_name": "model_resize_3x3"}),
+        Case("model_resize_4x4", {"keras_model_name": "model_resize_4x4"}),
+        Case("model_resize_3x4", {"keras_model_name": "model_resize_3x4"}),
+        Case("model_resize_5x5", {"keras_model_name": "model_resize_5x5"}),
+    ]
 
 
 def get_keras_add_mul_sub_test_cases():

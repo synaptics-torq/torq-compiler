@@ -2868,20 +2868,29 @@ struct ResizeNearestNeighborOpConversion : public OpRewritePattern<linalg::Gener
         auto dim1 = dyn_cast<AffineDimExpr>(inputMap.getResult(1));
         auto dim2 = dyn_cast<AffineBinaryOpExpr>(inputMap.getResult(2));
         auto dim3 = dyn_cast<AffineBinaryOpExpr>(inputMap.getResult(3));
-        if (!dim0 || !dim1 || !dim2 || !dim3) {
+        if (!dim0 || !dim1 || !dim2 || !dim3 || dim0.getPosition() != 0 ||
+            dim1.getPosition() != 1) {
             return rewriter.notifyMatchFailure(
-                genericOp, "Expected affine map with dim0, dim1 floordiv 2, dim2 floordiv 2, dim3 "
-                           "for ResizeNearestNeighborOpConversion"
+                genericOp, "expected NCHW nearest-neighbor input indexing"
             );
         }
-        // NCHW
-        auto binaryExpr1 = dim2;
-        auto binaryExpr2 = dim3;
-        if (binaryExpr1.getKind() != AffineExprKind::FloorDiv ||
-            binaryExpr2.getKind() != AffineExprKind::FloorDiv) {
+
+        auto getScale = [](AffineBinaryOpExpr expr, unsigned position) -> std::optional<int64_t> {
+            if (expr.getKind() != AffineExprKind::FloorDiv) {
+                return std::nullopt;
+            }
+            auto dim = dyn_cast<AffineDimExpr>(expr.getLHS());
+            auto scale = dyn_cast<AffineConstantExpr>(expr.getRHS());
+            if (!dim || dim.getPosition() != position || !scale || scale.getValue() < 1) {
+                return std::nullopt;
+            }
+            return scale.getValue();
+        };
+        std::optional<int64_t> scaleH = getScale(dim2, 2);
+        std::optional<int64_t> scaleW = getScale(dim3, 3);
+        if (!scaleH || !scaleW) {
             return rewriter.notifyMatchFailure(
-                genericOp, "Expected affine map with dim1 and dim2 as floordiv for "
-                           "ResizeNearestNeighborOpConversion"
+                genericOp, "expected h floordiv scale_h and w floordiv scale_w indexing"
             );
         }
 
@@ -2890,7 +2899,7 @@ struct ResizeNearestNeighborOpConversion : public OpRewritePattern<linalg::Gener
         Value resizeInit =
             createInitTensor(genericOp, rewriter, mlir::cast<RankedTensorType>(resizeType));
         auto resizeOp = syna::torq_hl::ResizeNearestNeighborOp::create(
-            rewriter, genericOp.getLoc(), resizeType, resizeInit, resizeInput
+            rewriter, genericOp.getLoc(), resizeType, resizeInit, *scaleH, *scaleW, resizeInput
         );
 
         rewriter.replaceOp(genericOp, resizeOp.getOutput());
