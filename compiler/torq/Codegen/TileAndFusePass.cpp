@@ -760,6 +760,26 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
         int64_t iterDomainSize, int64_t minFactor, int64_t maxFactor
     );
 
+    void resetTilingInfoAndProducerOps(
+        TilingInterface tiOp, ArrayRef<int64_t> iterDomainConstSizes,
+        SetVector<Operation *> &producerOps, TilingInfo &tilingInfo
+    );
+
+    TileFit fitDualSliceTile(
+        TilingInterface tiOp, const SetVector<Operation *> &producerOps,
+        const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainConstSizes,
+        SmallVector<Operation *> &heavyConvs, MutableArrayRef<OpFoldResult> tileOffsets,
+        MutableArrayRef<OpFoldResult> tileSizes
+    );
+
+    TileFit probeSingleSliceHeavyConvs(
+        TilingInterface tiOp, ArrayRef<Operation *> heavyConvs,
+        const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+        ArrayRef<int64_t> iterDomainConstSizes, ArrayRef<OpFoldResult> iterDomainOffsets,
+        ArrayRef<OpFoldResult> iterDomainSizes, TileFit tileFit,
+        SmallVector<OpFoldResult> &tileOffsets, SmallVector<OpFoldResult> &tileSizes
+    );
+
     TileFit fitTileToMemory(
         Operation *consumerOp, const SetVector<Operation *> &producerOps,
         const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes,
@@ -1853,6 +1873,174 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
     return scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp, options);
 }
 
+// Add to `producerOps` every producer of `tiOp`, transitively, that shares its
+// pattern fuse group: the producers any fuse mode must fuse with `tiOp`.
+static void updatePatternProducers(TilingInterface tiOp, SetVector<Operation *> &producerOps) {
+    SmallVector<Operation *> worklist{tiOp.getOperation()};
+    while (!worklist.empty()) {
+        Operation *current = worklist.pop_back_val();
+        for (Value operand : current->getOperands()) {
+            Operation *producer = operand.getDefiningOp();
+            if (producer && checkShareFuseGroup(tiOp, producer) && producerOps.insert(producer))
+                worklist.push_back(producer);
+        }
+    }
+}
+
+// Big-weight convs in the tile (`tiOp` and `producerOps`), which LinalgSlicing
+// would dual-slice.
+static SmallVector<Operation *>
+collectHeavyConvs(TilingInterface tiOp, const SetVector<Operation *> &producerOps, int sliceCount) {
+    SmallVector<Operation *> heavyConvs;
+    if (isDualSliceWeightHeavyConv(tiOp, sliceCount))
+        heavyConvs.push_back(tiOp);
+    for (Operation *producer : producerOps) {
+        if (isDualSliceWeightHeavyConv(producer, sliceCount))
+            heavyConvs.push_back(producer);
+    }
+    return heavyConvs;
+}
+
+// The tiling the dual-slice probe uses. LinalgSlicing splits a heavy conv's output
+// channels evenly across the slices when a tile is a multiple of sliceCount *
+// kGrouping; otherwise it peels a remainder that loads the weights once more.
+// So round those channels down to such a multiple, even at the cost of a tile;
+// the single-slice probe (probeSingleSliceHeavyConvs) keeps the unrounded
+// tiling. A tile of at least one hardware tile per slice rounds to whole
+// hardware tiles: with 84 channels per slice, a yolo26s conv moved 2.3x the DMA
+// bytes of 64 per slice.
+static TilingInfo getDualSliceTilingInfo(
+    TilingInterface tiOp, TilingInfo tilingInfo, const SetVector<Operation *> &producerOps,
+    ArrayRef<Operation *> heavyConvs, int sliceCount, ArrayRef<int64_t> iterDomainConstSizes
+) {
+    const int64_t granularity = sliceCount * kGrouping;
+    const int64_t hwGranularity = sliceCount * kConvOutputChannelTile;
+    for (Operation *conv : heavyConvs) {
+        SmallVector<std::optional<int64_t>> domains = getConvOutputDomains(tiOp, conv, producerOps);
+        if (domains.size() != 4 || !domains[1])
+            continue;
+        int64_t domain = *domains[1];
+        int64_t domainSize = iterDomainConstSizes[domain];
+        auto alignToSlices = [=](int64_t size) {
+            if (size >= domainSize || size < granularity)
+                return size;
+            return size - size % (size >= hwGranularity ? hwGranularity : granularity);
+        };
+        tilingInfo.adjustSize[domain] =
+            composeSizeAdjustments(alignToSlices, tilingInfo.adjustSize[domain]);
+    }
+    return tilingInfo;
+}
+
+// MaxProducers fallback: reset `producerOps` to only what pattern-fuse-groups
+// strictly require (as OnlyPatterns fuses), and rebuild `tilingInfo` for that
+// set. The caller resets the tile and probes again.
+void TileAndFusePass::resetTilingInfoAndProducerOps(
+    TilingInterface tiOp, ArrayRef<int64_t> iterDomainConstSizes,
+    SetVector<Operation *> &producerOps, TilingInfo &tilingInfo
+) {
+    LLVM_DEBUG(llvm::dbgs() << "  max-producers does not fit, falling back to only-patterns\n");
+    producerOps.clear();
+    updatePatternProducers(tiOp, producerOps);
+    tilingInfo = getTilingInfo(tiOp, this->sliceCount);
+    applyMatmulTilingHeuristics(tilingInfo, tiOp, iterDomainConstSizes, producerOps);
+}
+
+// Find a tile size that fits `tiOp` and `producerOps` in memory, with the heavy
+// convs dual-sliced as LinalgSlicing would. Sets `heavyConvs` to those convs.
+//
+// Dual-sliced, every slice of a heavy conv reads the whole input tile. The real
+// pipeline first tries loading it once for all the slices (FoldConvert's slice
+// buffer sharing; LinalgSlicing leaves the input producer outside the forall for
+// it). Probing without that charges one input copy per slice and shrinks the
+// dual-slice tile far below what fits, so probe the dual-slice candidate with
+// the same sharing as the real pipeline's first attempt: a tile that fits there
+// needs no fallback. The single-slice probe and all other probes keep the
+// plain pipeline.
+TileFit TileAndFusePass::fitDualSliceTile(
+    TilingInterface tiOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainConstSizes, SmallVector<Operation *> &heavyConvs,
+    MutableArrayRef<OpFoldResult> tileOffsets, MutableArrayRef<OpFoldResult> tileSizes
+) {
+    heavyConvs = collectHeavyConvs(tiOp, producerOps, this->sliceCount);
+    probeWithSharedSliceBuffers_ = !heavyConvs.empty();
+    llvm::scope_exit stopSharingSliceBuffers([&] { probeWithSharedSliceBuffers_ = false; });
+    return fitTileToMemory(
+        tiOp, producerOps,
+        getDualSliceTilingInfo(
+            tiOp, tilingInfo, producerOps, heavyConvs, this->sliceCount, iterDomainConstSizes
+        ),
+        iterDomainConstSizes, tileOffsets, tileSizes
+    );
+}
+
+// A loop that tiles only the output channels of the heavy convs loads each
+// weight once, however many tiles it has. One slice saves no weight traffic
+// there and gives up the compute of the other slice. True for such `tileSizes`.
+static bool tilesOnlyHeavyConvChannels(
+    TilingInterface tiOp, ArrayRef<Operation *> heavyConvs,
+    const SetVector<Operation *> &producerOps, ArrayRef<int64_t> iterDomainConstSizes,
+    ArrayRef<OpFoldResult> tileSizes
+) {
+    for (auto [domain, size] : llvm::enumerate(tileSizes)) {
+        std::optional<int64_t> constSize = getConstantIntValue(size);
+        if (constSize && *constSize >= iterDomainConstSizes[domain])
+            continue;
+        for (Operation *conv : heavyConvs) {
+            SmallVector<std::optional<int64_t>> domains =
+                getConvOutputDomains(tiOp, conv, producerOps);
+            if (domains.size() != 4 || domains[1] != static_cast<int64_t>(domain))
+                return false;
+        }
+    }
+    return true;
+}
+
+// The dual-slice probe (fitDualSliceTile) lets LinalgSlicing dual-slice big-weight
+// convs. Each slice keeps its own weight copy, which can force a smaller tile that
+// re-streams the weights. Probe again with such convs on one slice, and keep
+// them there only when that needs fewer tiles.
+//
+// `tileFit`, `tileOffsets` and `tileSizes` are the dual-slice result. Returns the
+// chosen fit; when single-slice wins, the heavy convs keep kSingleSliceAttr and
+// `tileOffsets`/`tileSizes` hold the single-slice tile.
+TileFit TileAndFusePass::probeSingleSliceHeavyConvs(
+    TilingInterface tiOp, ArrayRef<Operation *> heavyConvs,
+    const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainConstSizes, ArrayRef<OpFoldResult> iterDomainOffsets,
+    ArrayRef<OpFoldResult> iterDomainSizes, TileFit tileFit, SmallVector<OpFoldResult> &tileOffsets,
+    SmallVector<OpFoldResult> &tileSizes
+) {
+    if (heavyConvs.empty() || (tileFit != TileFit::FitsShrunk && tileFit != TileFit::NoFit) ||
+        tilesOnlyHeavyConvChannels(tiOp, heavyConvs, producerOps, iterDomainConstSizes, tileSizes))
+        return tileFit;
+
+    MLIRContext *context = tiOp->getContext();
+    for (Operation *conv : heavyConvs)
+        conv->setAttr(kSingleSliceAttr, UnitAttr::get(context));
+
+    SmallVector<OpFoldResult> singleOffsets(iterDomainOffsets), singleSizes(iterDomainSizes);
+    TileFit singleFit = fitTileToMemory(
+        tiOp, producerOps, tilingInfo, iterDomainConstSizes, singleOffsets, singleSizes
+    );
+    int64_t dualCount = countTiles(tileFit, tileSizes, tilingInfo, iterDomainConstSizes);
+    int64_t singleCount = countTiles(singleFit, singleSizes, tilingInfo, iterDomainConstSizes);
+    LLVM_DEBUG(
+        llvm::dbgs() << "  heavy-weight conv tiles: dual-slice=" << dualCount
+                     << " single-slice=" << singleCount << "\n"
+    );
+
+    if (singleCount < dualCount) {
+        tileOffsets = std::move(singleOffsets);
+        tileSizes = std::move(singleSizes);
+        return singleFit;
+    }
+
+    for (Operation *conv : heavyConvs)
+        conv->removeAttr(kSingleSliceAttr);
+    return tileFit;
+}
+
 void TileAndFusePass::tileAndFuse(
     TilingInterface tiOp, const DenseSet<TilingInterface> &toTileOps
 ) {
@@ -1942,21 +2130,10 @@ void TileAndFusePass::tileAndFuse(
             rewriter.eraseOp(tiledResults->loops.front());
     }
 
-    auto includePatternProducers = [&]() {
-        SmallVector<Operation *> worklist{tiOp.getOperation()};
-        while (!worklist.empty()) {
-            Operation *current = worklist.pop_back_val();
-            for (Value operand : current->getOperands()) {
-                Operation *producer = operand.getDefiningOp();
-                if (producer && checkShareFuseGroup(tiOp, producer) && producerOps.insert(producer))
-                    worklist.push_back(producer);
-            }
-        }
-        // MaxSize and OnlyPatterns ignore the restriction for fusion, but loop
-        // selection still needs the required producers.
-        restrictToProducerOps = &producerOps;
-    };
-    includePatternProducers();
+    // MaxSize and OnlyPatterns ignore the restriction for fusion, but loop
+    // selection still needs the required producers.
+    updatePatternProducers(tiOp, producerOps);
+    restrictToProducerOps = &producerOps;
 
     // A conv is a candidate producer of its consumers' tiles before its own group
     // is tiled, so it can still carry kSingleSliceAttr from one of those
@@ -1970,69 +2147,14 @@ void TileAndFusePass::tileAndFuse(
     // hence after the probe rather than in getTilingInfo.
     applyMatmulTilingHeuristics(tilingInfo, tiOp, *iterDomainConstSizes, producerOps);
 
-    // Big-weight convs in the tile, which LinalgSlicing would dual-slice.
-    SmallVector<Operation *> heavyConvs;
-    auto collectHeavyConvs = [&]() {
-        heavyConvs.clear();
-        if (isDualSliceWeightHeavyConv(tiOp, this->sliceCount))
-            heavyConvs.push_back(tiOp);
-        for (Operation *producer : producerOps) {
-            if (isDualSliceWeightHeavyConv(producer, this->sliceCount))
-                heavyConvs.push_back(producer);
-        }
-    };
-
-    // The tiling the dual-slice probe uses. LinalgSlicing splits a heavy conv's output
-    // channels evenly across the slices when a tile is a multiple of sliceCount *
-    // kGrouping; otherwise it peels a remainder that loads the weights once more.
-    // So round those channels down to such a multiple, even at the cost of a tile;
-    // the single-slice probe below keeps the unrounded tiling. A tile of at least
-    // one hardware tile per slice rounds to whole hardware tiles: with 84 channels
-    // per slice, a yolo26s conv moved 2.3x the DMA bytes of 64 per slice.
-    auto getDualSliceTilingInfo = [&]() {
-        TilingInfo info = tilingInfo;
-        const int64_t granularity = this->sliceCount * kGrouping;
-        const int64_t hwGranularity = this->sliceCount * kConvOutputChannelTile;
-        for (Operation *conv : heavyConvs) {
-            SmallVector<std::optional<int64_t>> domains =
-                getConvOutputDomains(tiOp, conv, producerOps);
-            if (domains.size() != 4 || !domains[1])
-                continue;
-            int64_t domain = *domains[1];
-            int64_t domainSize = (*iterDomainConstSizes)[domain];
-            auto alignToSlices = [=](int64_t size) {
-                if (size >= domainSize || size < granularity)
-                    return size;
-                return size - size % (size >= hwGranularity ? hwGranularity : granularity);
-            };
-            info.adjustSize[domain] =
-                composeSizeAdjustments(alignToSlices, info.adjustSize[domain]);
-        }
-        return info;
-    };
-
     // Find a tile size that fits tiOp in memory, together with all the
     // candidate producers in MaxProducers mode (pattern-fuse-group members are
-    // always included by extractOpsForMemoryCheck).
-    //
-    // Dual-sliced, every slice of a heavy conv reads the whole input tile. The real
-    // pipeline first tries loading it once for all the slices (FoldConvert's slice
-    // buffer sharing; LinalgSlicing leaves the input producer outside the forall for
-    // it). Probing without that charges one input copy per slice and shrinks the
-    // dual-slice tile far below what fits, so probe the dual-slice candidate with
-    // the same sharing as the real pipeline's first attempt: a tile that fits there
-    // needs no fallback. The single-slice probe below and all other probes keep the
-    // plain pipeline.
-    auto fitDualSliceTile = [&]() {
-        collectHeavyConvs();
-        probeWithSharedSliceBuffers_ = !heavyConvs.empty();
-        llvm::scope_exit stopSharingSliceBuffers([&] { probeWithSharedSliceBuffers_ = false; });
-        return fitTileToMemory(
-            tiOp, producerOps, getDualSliceTilingInfo(), *iterDomainConstSizes, tileOffsets,
-            tileSizes
-        );
-    };
-    TileFit tileFit = fitDualSliceTile();
+    // always included by extractOpsForMemoryCheck). Heavy convs are probed
+    // dual-sliced first, see fitDualSliceTile.
+    SmallVector<Operation *> heavyConvs;
+    TileFit tileFit = fitDualSliceTile(
+        tiOp, producerOps, tilingInfo, *iterDomainConstSizes, heavyConvs, tileOffsets, tileSizes
+    );
 
     // MaxProducers fallback: if the consumer tile plus all candidate producers
     // can't fit in LRAM even at the smallest tile size, give up on fusing
@@ -2045,65 +2167,22 @@ void TileAndFusePass::tileAndFuse(
     // retry either finds a real fit or leaves the recovery more room.
     if ((tileFit == TileFit::ProbeFail || tileFit == TileFit::NoFit) &&
         fuseMode == TileAndFuseProducersFuseMode::MaxProducers) {
-        LLVM_DEBUG(llvm::dbgs() << "  max-producers does not fit, falling back to only-patterns\n");
         fuseMode = TileAndFuseProducersFuseMode::OnlyPatterns;
-        producerOps.clear();
-        includePatternProducers();
+        resetTilingInfoAndProducerOps(tiOp, *iterDomainConstSizes, producerOps, tilingInfo);
+        // fitTileToMemory expects the full iteration domain as the starting tile.
         tileOffsets.assign(iterDomainOffsets.begin(), iterDomainOffsets.end());
         tileSizes.assign(iterDomainSizes.begin(), iterDomainSizes.end());
-        tilingInfo = getTilingInfo(tiOp, this->sliceCount);
-        applyMatmulTilingHeuristics(tilingInfo, tiOp, *iterDomainConstSizes, producerOps);
-        tileFit = fitDualSliceTile();
+        tileFit = fitDualSliceTile(
+            tiOp, producerOps, tilingInfo, *iterDomainConstSizes, heavyConvs, tileOffsets, tileSizes
+        );
     }
 
-    // A loop that tiles only the output channels of the heavy convs loads each
-    // weight once, however many tiles it has. One slice saves no weight traffic
-    // there and gives up the compute of the other slice.
-    auto tilesOnlyHeavyConvChannels = [&]() {
-        for (auto [domain, size] : llvm::enumerate(tileSizes)) {
-            std::optional<int64_t> constSize = getConstantIntValue(size);
-            if (constSize && *constSize >= (*iterDomainConstSizes)[domain])
-                continue;
-            for (Operation *conv : heavyConvs) {
-                SmallVector<std::optional<int64_t>> domains =
-                    getConvOutputDomains(tiOp, conv, producerOps);
-                if (domains.size() != 4 || domains[1] != static_cast<int64_t>(domain))
-                    return false;
-            }
-        }
-        return true;
-    };
-
-    // The probe above lets LinalgSlicing dual-slice big-weight convs. Each
-    // slice keeps its own weight copy, which can force a smaller tile that
-    // re-streams the weights. Probe again with such convs on one slice, and keep
-    // them there only when that needs fewer tiles.
-    if (!heavyConvs.empty() && (tileFit == TileFit::FitsShrunk || tileFit == TileFit::NoFit) &&
-        !tilesOnlyHeavyConvChannels()) {
-        for (Operation *conv : heavyConvs)
-            conv->setAttr(kSingleSliceAttr, rewriter.getUnitAttr());
-
-        SmallVector<OpFoldResult> singleOffsets(iterDomainOffsets), singleSizes(iterDomainSizes);
-        TileFit singleFit = fitTileToMemory(
-            tiOp, producerOps, tilingInfo, *iterDomainConstSizes, singleOffsets, singleSizes
-        );
-        int64_t dualCount = countTiles(tileFit, tileSizes, tilingInfo, *iterDomainConstSizes);
-        int64_t singleCount = countTiles(singleFit, singleSizes, tilingInfo, *iterDomainConstSizes);
-        LLVM_DEBUG(
-            llvm::dbgs() << "  heavy-weight conv tiles: dual-slice=" << dualCount
-                         << " single-slice=" << singleCount << "\n"
-        );
-
-        if (singleCount < dualCount) {
-            tileFit = singleFit;
-            tileOffsets = std::move(singleOffsets);
-            tileSizes = std::move(singleSizes);
-        }
-        else {
-            for (Operation *conv : heavyConvs)
-                conv->removeAttr(kSingleSliceAttr);
-        }
-    }
+    // Dual-sliced heavy convs keep a weight copy per slice; keep them on one
+    // slice instead when that needs fewer tiles.
+    tileFit = probeSingleSliceHeavyConvs(
+        tiOp, heavyConvs, producerOps, tilingInfo, *iterDomainConstSizes, iterDomainOffsets,
+        iterDomainSizes, tileFit, tileOffsets, tileSizes
+    );
 
     // The decision holds only for convs that end up in this tile loop: tiOp, its
     // pattern group, and the producers the tiling fuses. A candidate producer left
@@ -2390,6 +2469,28 @@ linalg::GenericOp rewriteKeepdimsFuseGroupReduction(IRRewriter &rewriter, linalg
     return reduceOp;
 }
 
+// Only groups that don't fit (their output op landed in orderTi) are about to be tiled, so only
+// those need their keepdims reductions rewritten; groups that fit keep their accumulation
+// order.
+static void rewriteKeepdimsReductionsOfTiledGroups(
+    ArrayRef<TilingInterface> orderTi, FunctionOpInterface funcOp
+) {
+    IRRewriter rewriter(funcOp.getContext());
+    for (TilingInterface tiOp : orderTi) {
+        Operation *outputOp = tiOp.getOperation();
+        if (!isMarkedFuseGroup(outputOp))
+            continue;
+        // Re-walk per group: a previous rewrite may have replaced members.
+        SmallVector<linalg::GenericOp> members;
+        funcOp.walk([&](linalg::GenericOp genericOp) {
+            if (genericOp.getOperation() != outputOp && checkShareFuseGroup(genericOp, outputOp))
+                members.push_back(genericOp);
+        });
+        for (linalg::GenericOp genericOp : members)
+            (void)rewriteKeepdimsFuseGroupReduction(rewriter, genericOp);
+    }
+}
+
 namespace {
 
 void TileAndFusePass::runOnOperation() {
@@ -2449,27 +2550,15 @@ void TileAndFusePass::runOnOperation() {
         orderTi.push_back(tiOp);
     });
 
+    LLVM_DEBUG({
+        llvm::dbgs() << "Order of TI ops to be tiled:\n";
+        for (TilingInterface tiOp : orderTi)
+            llvm::dbgs() << "  " << tiOp.getOperation()->getName() << "\n";
+    });
     DenseSet<TilingInterface> toTileOps(orderTi.begin(), orderTi.end());
 
-    // Only groups that don't fit (their output op landed in orderTi) are about to be tiled, so only
-    // those need their keepdims reductions rewritten; groups that fit keep their accumulation
-    // order.
-    {
-        IRRewriter rewriter(funcOp.getContext());
-        for (TilingInterface tiOp : orderTi) {
-            Operation *outputOp = tiOp.getOperation();
-            if (!isMarkedFuseGroup(outputOp))
-                continue;
-            SmallVector<linalg::GenericOp> members;
-            funcOp.walk([&](linalg::GenericOp genericOp) {
-                if (genericOp.getOperation() != outputOp &&
-                    checkShareFuseGroup(genericOp, outputOp))
-                    members.push_back(genericOp);
-            });
-            for (linalg::GenericOp genericOp : members)
-                (void)rewriteKeepdimsFuseGroupReduction(rewriter, genericOp);
-        }
-    }
+    // Rewrite keepdims reductions for fuse groups that are about to be tiled.
+    rewriteKeepdimsReductionsOfTiledGroups(orderTi, funcOp);
 
     untiledTiledOps_.reserve(orderTi.size());
 
