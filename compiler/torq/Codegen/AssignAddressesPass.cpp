@@ -389,12 +389,13 @@ class Occupancy {
     AddressSpace space_;
     llvm::BitVector resident_;
     SmallVector<int64_t> offsets_;
+    SmallVector<int64_t> birthOffsets_;
     int64_t bytes_ = 0;
 
   public:
     Occupancy(ArrayRef<LramBuffer> buffers, int64_t usable)
         : buffers_(buffers), usable_(usable), space_(usable), resident_(buffers.size()),
-          offsets_(buffers.size()) {}
+          offsets_(buffers.size()), birthOffsets_(buffers.size(), -1) {}
 
     int64_t usable() const { return usable_; }
     int64_t bytes() const { return bytes_; }
@@ -410,6 +411,9 @@ class Occupancy {
         }
         resident_.set(idx);
         offsets_[idx] = offset;
+        if (birthOffsets_[idx] < 0) {
+            birthOffsets_[idx] = offset;
+        }
         bytes_ += buffers_[idx].size;
         return true;
     }
@@ -420,7 +424,7 @@ class Occupancy {
         bytes_ -= buffers_[idx].size;
     }
 
-    SmallVector<int64_t> takeOffsets() { return std::move(offsets_); }
+    SmallVector<int64_t> takeBirthOffsets() { return std::move(birthOffsets_); }
 };
 
 // Why a placement failed.
@@ -433,10 +437,10 @@ struct PlacementFailure {
     SmallVector<BufferIdx> pinned;
 };
 
-// A placement of every buffer: its offset from the LRAM base, and the swaps that make
-// the layout fit.
+// A placement of every buffer: its offset from the LRAM base at its birth, and the swaps
+// that make the layout fit, each with the offsets its reloads land at.
 struct Placement {
-    SmallVector<int64_t> offsets;
+    SmallVector<int64_t> birthOffsets;
     SwapSchedule schedule;
 };
 
@@ -504,14 +508,14 @@ class PlacementSimulation {
             failure = simulation.failure_;
             return std::nullopt;
         }
-        return Placement{simulation.occupancy_.takeOffsets(), std::move(simulation.schedule_)};
+        return Placement{simulation.occupancy_.takeBirthOffsets(), std::move(simulation.schedule_)};
     }
 };
 
 } // namespace
 
 void PlacementSimulation::scheduleSpill(BufferIdx idx, OpIdx opIdx) {
-    schedule_[opIdx].push_back({Swap::Kind::Spill, {buffers_[idx].value}});
+    schedule_[opIdx].push_back({Swap::Kind::Spill, {buffers_[idx].value}, {}});
     OpIdx reloadOpIdx = buffers_[idx].resident.nextAfter(opIdx);
     if (reloadOpIdx != INT_MAX) {
         events_.push({reloadOpIdx, EventKind::Reload, idx});
@@ -548,15 +552,18 @@ bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt) {
         occupancy_.release(moved);
     }
     SmallVector<Value> relocated;
+    SmallVector<int64_t> offsets;
     for (BufferIdx moved : movable) {
         if (!occupancy_.place(moved)) {
             scheduleSpill(moved, opIdx);
             continue;
         }
         relocated.push_back(buffers_[moved].value);
+        offsets.push_back(occupancy_.offset(moved));
     }
     if (!relocated.empty()) {
-        schedule_[opIdx].push_back({Swap::Kind::Relocate, std::move(relocated)});
+        schedule_[opIdx].push_back({Swap::Kind::Relocate, std::move(relocated), std::move(offsets)}
+        );
     }
     return true;
 }
@@ -640,8 +647,19 @@ bool PlacementSimulation::sweep(ArrayRef<ForcedCompaction> forcedCompactions) {
                 occupancy_.release(event.buffer);
             }
         }
-        else if (!place(event.buffer, event.opIdx)) {
-            return false;
+        else {
+            if (!place(event.buffer, event.opIdx)) {
+                return false;
+            }
+            // the spills and relocations place() scheduled at this op come first, so the
+            // walk frees the space before it reloads into it
+            if (event.kind == EventKind::Reload) {
+                schedule_[event.opIdx].push_back(
+                    {Swap::Kind::Reload,
+                     {buffers_[event.buffer].value},
+                     {occupancy_.offset(event.buffer)}}
+                );
+            }
         }
     }
     return true;
@@ -651,9 +669,9 @@ bool PlacementSimulation::sweep(ArrayRef<ForcedCompaction> forcedCompactions) {
 // order suffices: a view always follows the value it derives from.
 static LogicalResult commitLramLayout(
     FunctionOpInterface funcOp, int64_t reservedBase, ArrayRef<LramBuffer> buffers,
-    ArrayRef<int64_t> offsets
+    ArrayRef<int64_t> birthOffsets
 ) {
-    for (auto [buffer, offset] : llvm::zip_equal(buffers, offsets)) {
+    for (auto [buffer, offset] : llvm::zip_equal(buffers, birthOffsets)) {
         if (failed(setAddress(buffer.value, reservedBase + offset))) {
             return buffer.value.getDefiningOp()->emitOpError("failed to set LRAM address");
         }
@@ -795,10 +813,10 @@ planPlacement(ArrayRef<LramBuffer> buffers, int64_t usable, bool replan) {
 }
 
 // Lay out every LRAM allocation over its whole lifetime; when that does not fit, schedule
-// swaps, perform them with convertVirtualToPhysicalMemRefs and lay out the rewritten IR.
-// Infeasibility (the buffers pinned at some op cannot coexist) fails without a
-// diagnostic, so runOnOperation emits the OUT_OF_MEMORY_MESSAGE tile-and-fuse's probe
-// shrinks the tile on; any other diagnostic aborts the compile.
+// swaps and perform them with convertVirtualToPhysicalMemRefs, which places the buffers it
+// swaps in where the plan put them. Infeasibility (the buffers pinned at some op cannot
+// coexist) fails without a diagnostic, so runOnOperation emits the OUT_OF_MEMORY_MESSAGE
+// tile-and-fuse's probe shrinks the tile on; any other diagnostic aborts the compile.
 static LogicalResult allocateLramAddresses(FunctionOpInterface funcOp, bool replan) {
 
     // we reserve space for two NSS programs at the begininng of LRAM
@@ -813,27 +831,17 @@ static LogicalResult allocateLramAddresses(FunctionOpInterface funcOp, bool repl
         return failure();
     }
     if (placement->schedule.empty()) {
-        return commitLramLayout(funcOp, reservedBase, buffers, placement->offsets);
+        return commitLramLayout(funcOp, reservedBase, buffers, placement->birthOffsets);
     }
 
     if (failed(convertVirtualToPhysicalMemRefs(
-            funcOp, usable, torq_hl::MemorySpace::Lram, placement->schedule
+            funcOp, usable, torq_hl::MemorySpace::Lram, placement->schedule, reservedBase
         ))) {
         return failure();
     }
-
-    // TODO: the swap schedule planPlacement returns should always fit once
-    // convertVirtualToPhysicalMemRefs applies it, so reaching this is a bug in one of
-    // them (reproduced by keras_app layer_inceptionresnetv2_conv2d_258 on SL2610).
-    // Until it is fixed, fail as an infeasible plan so tile-and-fuse's probe tries a
-    // smaller tile instead of aborting the compile.
-    buffers = collectLramBuffers(funcOp);
-    placement = planPlacement(buffers, usable, /*replan=*/false);
-    if (!placement || !placement->schedule.empty()) {
-        LLVM_DEBUG(llvm::dbgs() << "LRAM plan infeasible after swaps\n");
-        return failure();
-    }
-    return commitLramLayout(funcOp, reservedBase, buffers, placement->offsets);
+    // the swapped-in buffers have their addresses; the allocations the plan started from
+    // get theirs here, with every view
+    return commitLramLayout(funcOp, reservedBase, buffers, placement->birthOffsets);
 }
 
 namespace {

@@ -7,6 +7,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #define DEBUG_TYPE "torq-virtual-memory"
 
@@ -66,8 +67,6 @@ class VirtualObject {
     void addAlias(VirtualAlias *alias) { aliases_.push_back(alias); }
 
     virtual VirtualBuffer &root() = 0;
-
-    virtual void swapIn(IRRewriter &rewriter, Location loc) = 0;
 };
 
 class VirtualBuffer : public VirtualObject {
@@ -96,7 +95,7 @@ class VirtualBuffer : public VirtualObject {
         swappedOutValue_ = nullptr;
     }
 
-    void swapIn(IRRewriter &rewriter, Location loc) override;
+    void swapIn(IRRewriter &rewriter, Location loc, int64_t address);
 
     void swapOut(IRRewriter &rewriter, Location loc);
 
@@ -135,9 +134,9 @@ class VirtualAlias : public VirtualObject {
         invalidateAliases();
     }
 
-    void swapIn(IRRewriter &rewriter, Location loc) override {
+    void swapIn(IRRewriter &rewriter) {
         if (parent_.isSwappedOut()) {
-            parent_.swapIn(rewriter, loc);
+            llvm::report_fatal_error("LRAM plan: a view is used while its buffer is swapped out");
         }
         Operation *view = rewriter.clone(*value().getDefiningOp());
         view->getOpOperand(parentOperand_.getOperandNumber()).set(parent_.physical());
@@ -174,6 +173,7 @@ class VirtualMemory {
     const int64_t capacity;
     const torq_hl::MemorySpace memorySpace;
     const torq_hl::MemorySpace swapMemSpace;
+    const int64_t addressBase;
     SwapStatistics stats;
 
     // ordered (op index, contents fully overwritten) accesses per buffer
@@ -182,12 +182,13 @@ class VirtualMemory {
     // index (into the processed op list) of the op being processed
     unsigned currentOpIndex = 0;
 
-    VirtualMemory(int64_t capacity, torq_hl::MemorySpace memorySpace)
+    VirtualMemory(int64_t capacity, torq_hl::MemorySpace memorySpace, int64_t addressBase)
         : capacity(capacity), memorySpace(memorySpace),
           swapMemSpace(
               memorySpace == torq_hl::MemorySpace::Lram ? torq_hl::MemorySpace::Xram
                                                         : torq_hl::MemorySpace::Lram
-          ) {}
+          ),
+          addressBase(addressBase) {}
 
     VirtualObject &object(Value virtualValue) {
         auto it = objects_.find(virtualValue);
@@ -244,11 +245,14 @@ class VirtualMemory {
     }
 };
 
-void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc) {
+void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, int64_t address) {
     assert(isSwappedOut() && "the buffer is resident");
 
     auto physicalAlloc =
         memref::AllocOp::create(rewriter, loc, cast<MemRefType>(value().getType()));
+    if (failed(setAddress(physicalAlloc.getOperation(), address))) {
+        llvm::report_fatal_error("LRAM plan: a swapped-in buffer cannot carry an address");
+    }
 
     if (swappedOutValue_) {
         // overwriting the alignment bytes of the new buffer as well
@@ -471,25 +475,21 @@ static bool processDeallocationOrAlias(
     return false;
 }
 
-// The swapped-out operands among `operands`; a set, since several operands may be the
-// same value.
-static SetVector<Value> collectOperandsToSwapIn(ArrayRef<OpOperand *> operands, VirtualMemory &vm) {
-    SetVector<Value> toSwapIn;
-    for (auto *operand : operands) {
-        if (vm.object(operand->get()).isSwappedOut()) {
-            toSwapIn.insert(operand->get());
-        }
-    }
-    return toSwapIn;
-}
-
-static void swapInOperandsAndAllocateResults(
-    Operation *op, const OperationMemoryInfo &info, const SetVector<Value> &toSwapIn,
-    VirtualMemory &vm, IRRewriter &rewriter
+static void materializeOperandsAndAllocateResults(
+    Operation *op, const OperationMemoryInfo &info, VirtualMemory &vm, IRRewriter &rewriter
 ) {
     rewriter.setInsertionPoint(op);
-    for (Value value : toSwapIn) {
-        vm.object(value).swapIn(rewriter, op->getLoc());
+    for (auto *operand : info.operands) {
+        VirtualObject &object = vm.object(operand->get());
+        if (!object.isSwappedOut()) {
+            continue;
+        }
+        // the plan reloads a buffer before the op that uses it; only a view can still be
+        // swapped out here, when its buffer moved, and it is re-created on the new value
+        if (&object == &object.root()) {
+            llvm::report_fatal_error("LRAM plan: a buffer is used while it is swapped out");
+        }
+        static_cast<VirtualAlias &>(object).swapIn(rewriter);
     }
     for (auto result : info.results) {
         vm.addBuffer(result);
@@ -549,16 +549,17 @@ static void performScheduledSwaps(
 ) {
     rewriter.setInsertionPoint(op);
     for (const Swap &swap : swaps) {
-        for (Value buffer : swap.buffers) {
-            vm.buffer(buffer).swapOut(rewriter, op->getLoc());
+        if (swap.kind != Swap::Kind::Reload) {
+            for (Value buffer : swap.buffers) {
+                vm.buffer(buffer).swapOut(rewriter, op->getLoc());
+            }
         }
         if (swap.kind == Swap::Kind::Spill) {
             continue;
         }
-        // relocated buffers swap back in only once all of them are out, so they land in
-        // the fully freed space in the scheduled order
-        for (Value buffer : swap.buffers) {
-            vm.buffer(buffer).swapIn(rewriter, op->getLoc());
+        // relocated buffers swap back in only once all of them are out
+        for (auto [buffer, offset] : llvm::zip_equal(swap.buffers, swap.offsets)) {
+            vm.buffer(buffer).swapIn(rewriter, op->getLoc(), vm.addressBase + offset);
         }
     }
 }
@@ -581,9 +582,9 @@ static void printStatistics(const SwapStatistics &stats) {
 
 LogicalResult convertVirtualToPhysicalMemRefs(
     FunctionOpInterface funcOp, int capacityBytes, torq_hl::MemorySpace memorySpace,
-    const SwapSchedule &schedule
+    const SwapSchedule &schedule, int64_t addressBase
 ) {
-    VirtualMemory vm(capacityBytes, memorySpace);
+    VirtualMemory vm(capacityBytes, memorySpace, addressBase);
     IRRewriter rewriter(funcOp);
 
     // Snapshot the original operations: the schedule's op indices refer to it, and swapping
@@ -620,8 +621,7 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         // Inspect virtual operands and results before any operand is rewritten.
         OperationMemoryInfo memoryInfo = collectOperationMemoryInfo(op, memorySpace);
 
-        SetVector<Value> operandsToSwapIn = collectOperandsToSwapIn(memoryInfo.operands, vm);
-        swapInOperandsAndAllocateResults(op, memoryInfo, operandsToSwapIn, vm, rewriter);
+        materializeOperandsAndAllocateResults(op, memoryInfo, vm, rewriter);
 
         // Keep operands resident during execution and point the op at their physical values.
         SmallVector<Value> pinnedOperands =
